@@ -7,7 +7,7 @@
 - 分支：`rf/agent-capability-platform-v2`。
 - 初始工作区干净；`git fetch origin`、`git pull --ff-only origin rf/agent-capability-platform-v2` 成功。
 - 同步基线：`2ff02951266b12008cf1f7ea63c3b27cff9a192a`，包含 `c619d8a9a`、`739b5e431`；初始本地/远端差异为 `0 0`。
-- 本轮修复将在本地提交后重建，以满足 release-lock 的干净源码认证；未 push、未发布 Release 或更新。初始基线不代表最终制品源码，最终以制品 release-lock 的 source_commit 为准。
+- 本轮修复已本地提交：`f7e97669f`（开发/双 Engine 修复）、`973bbe206`（Command-Q 清理）。最终制品源码为 `973bbe206fc92c0a2032eeaaa31e659994dc8fa5`，从干净工作区构建并由 release-lock 认证。未 push、未发布 Release 或更新；本报告的最终更新为后续文档提交。
 - 仅官方 Nomi/Coding 源码编译注册；未恢复 Wrapper、未运行独立社区 Engine 示例、未更改历史 SQL 或持久化编码。
 - 首轮按模块分工，Cargo 串行；用户要求减少并发后，由主代理串行收尾，不再新增代理。
 
@@ -152,15 +152,18 @@ PID 均退出，日志含 channel/terminal 清理；runner 的 130 是 SIGINT �
 - `ui/.../engineRevision.integration.test.tsx`、中英文 `agentSettings.json`：官方模板保存覆盖和准确能力提示。
 - `crates/backend/nomifun-app/tests/nomi_core_live_provider_smoke.rs`：官方 Engine 平台/真实模型证据及安全诊断。
 
-构建前已冻结上述 19 个非文档变更文件的完整覆盖包 `source-overlay.tar.gz`，SHA-256：
+首次打包前冻结了 19 个非文档变更文件的完整覆盖包 `source-overlay.tar.gz`，SHA-256：
 
 ```text
 9393b60e9c5775806b3a202c1c26a10eb0cf7854909913a961e8a5c812e48579
 ```
 
 覆盖包、逐文件 `source-manifest.json` 和 tracked diff `source.patch` 均位于本机证据根。
-制品的完整源码描述为基线 commit **加该覆盖包**；release-lock 中的基线 commit 不能独自
-代表未提交工作区。文档更新不包含在代码覆盖包中，避免报告摘要自引用。
+该初始覆盖包只对应 `f7e97669f` 的业务修复，不包含随后 Command-Q 修复。
+最终源码直接对应 `973bbe206fc92c0a2032eeaaa31e659994dc8fa5`；另保留 `source-overlay-final.tar.gz`
+及 `source-manifest-final.json`（仍为 19 个非文档文件），最终覆盖包 SHA-256 为
+`1d7245418a8139f37e10aa9ed0ac7f8dbc9d5e11e2b2ffb453ca8cf1df0cd6eb`。
+覆盖包以 `2ff029512` 为基线；最终以 release-lock 的实际源码提交为准。
 
 ## 首次打包检查失败与收敛
 
@@ -169,11 +172,71 @@ PID 均退出，日志含 channel/terminal 清理；runner 的 130 是 SIGINT �
 没有跳过或降低门禁。将本轮代码和当前检查记录做本地提交，再从干净源码重建；
 最终制品和认证以重建结果为准。首次日志为 `package-build.log`。
 
-## 待完成的本轮记录
+## 最终原生包与窗口验收
 
-以下仍由主代理执行，完成后更新实际结果：WebView 隔离启动、
-真实模型八阶段、原生 app/DMG、包内窗口交互与退出、制品 SHA-256、最终源码补丁摘要。
-未完成的项目不会据编译成功推定通过。
+- 最终命令：`bun run build:mac arm`，从干净 `973bbe206fc92c0a2032eeaaa31e659994dc8fa5` 构建，退出码 **0**；Release 编译 **5m56s**。日志 `package-build-menu.log`。
+- app：`target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app`。
+- DMG：`dist/desktop/NomiFun_0.7.6_aarch64.dmg`，**87,526,992 字节**。
+- release-lock v2 创建和文件摘要验证通过；source_commit 与实际干净构建一致。
+- `hdiutil verify` 通过；从 DMG 只读挂载目录核对包内主程序与构建 app 一致。
+- 主程序 Mach-O 仅有 **arm64**，可执行权限存在；无 Rosetta（`sysctl.proc_translated=0`）。
+- **401 个前端文件**的路径和 SHA-256 全部一致；LICENSE/NOTICE 一致；Resources 无旧 Runtime/hello 制品。
 
-Windows 需回归共享 Conversation Skills、Fork、迁移认证；Linux 运行验收继续 TODO。
-Developer ID 签名、公证、发布、更新均未执行。
+| 最终制品 | SHA-256 |
+| --- | --- |
+| DMG | `857a4270b5de09bd698df71b41db792dc3718314aa7f2fb654b38630855e25c4` |
+| app 主程序（178,232,624 字节） | `724ce22da1addaacba31466c9134e7b5cdcec0e27b4466830b26c9a37da37d2d` |
+| release-lock | `e10fed8f052e9456411766d46013ac5bf7d51c953a9db9b8306002f9e9210a9d` |
+
+签名状态：主程序只有 `adhoc,linker-signed`，无 Developer ID、无 TeamIdentifier、无 sealed resources。
+**严格 bundle 验签失败**：`codesign --verify --deep --strict` 退出码 1，
+`code has no resources but signature indicates they must be present`。
+因此 `check-macos-arm64-native.mjs` 总结果仍为 fail：12 pass、1 fail、3 not_required；
+未把可启动的本地测试包称为正式签名交付包。Developer ID 签名、公证均未执行。
+验证 helper 未启用其 CLI Host startup/remote lifecycle；下面是独立完成的真实桌面测试。
+
+### 原生窗口、保存和退出
+
+1. 从 DMG 包内 `Contents/MacOS/nomifun-desktop` 直接启动，指定隔离数据根；最终 fresh 启动
+   backend/renderer 请求正常，原生窗口可交互。没有覆盖 `/Applications` 中已有安装。
+2. 在菜单修复前的 `f7e97669f` 包中，原生工作台发现 Coding loop92 / Nomi host61；
+   官方最简模板选择 Coding 后保存为 `macOS Coding 验证`，随后个人 Agent 改为 Nomi 并保存。
+   SQLite 独立读取确认 revision 1/2 分别持久保存两种 exact family/build/digest/profile。
+   证据 `native-agent-revisions.json`；本轮没有在该 UI 使用默认显示的其他模型发消息。
+   新会话绑定、保存后仅新会话变更和 Fork 不改绑由前述真实平台路由 fixture 验证；
+   原生 UI 点击发送到新会话的全链没有另行验收。
+3. 最初 Command-Q 使 app/shell/sleep 消失，但数据库仍留 running 终端，且无正常清理日志。
+   Tauri 默认 macOS Quit 走 AppKit `terminate:`，未经过平台 ExitCoordinator。
+   修复只将 macOS Quit/Cmd-Q 改为已有 `app.exit(0)` 协调路径，保留其他菜单和 Windows/Linux 行为。
+4. 最终 `973bbe206` 包中，在隔离 `package-workspace` 用原生 UI 启动
+   `/bin/sh -c 'sleep 120 & wait'`；确认终端为 running，app/watchdog/shell/sleep 四个 PID 存在。
+   按 **Command-Q** 后应用退出码 **0**，有 channel/plugins 清理及
+   `terminal shutdown cleanup: all sessions killed and removed deleted=1` 日志，四个 PID 全部消失，
+   对应终端数据库记录为 **0 行**。这次同时验证了物理进程回收和平台记录清理。
+   证据 `package-final-processes.json`、`package-launch-final-fresh.log`。
+   关闭后普通 read-only SQLite 探测返回 CANTOPEN；确认所有 writer 已退出且 WAL/SHM 不存在后，
+   用 immutable read-only 读取已 checkpoint 的数据库完成行数核对，未更改数据库。
+5. 菜单修复后一次复用此前异常退出目录的启动/CUA 连接没有得到 ready 证据，CLI 退出 0、
+   CUA 超时；保留 `package-launch-final.log` 和 `menu-startup-sample.txt`，清理了该测试实例。
+   未将旧异常退出目录恢复记为通过。最终使用 fresh 隔离根，并等待后端 ready 后连接 UI，
+   启动与上述 Command-Q 测试通过。旧异常退出数据库已备份为 `package-data-before-menu/`。
+
+6. 完成正常退出后，从与 DMG 内主程序逐字节一致的构建 app 重新启动，复用
+   `package-final-data`：health **200**，随后 SIGTERM 经过正常清理并退出 **0**。
+   证据 `package-restart-health.json`、`package-restart-health.log`。这证明正常关闭后的应用数据根
+   可以重开，不等于运行中 Engine 的跨重启恢复。
+
+`973bbe206` 相对 `f7e97669f` 仅改原生菜单退出接线，Agent UI 与两个 Engine 业务源码未变；
+没有谎称在最终包中重新跑过全部真实模型或官方模板操作。DMG 挂载在检查结束后卸载。
+
+## 剩余阻塞和未验证项
+
+- **Coding 真实第二轮 patch：UNKNOWN_UPSTREAM_ERROR**，尚未定位；后续 exec/continue 未执行。
+  复现：安全提供 `NOMIFUN_LIVE_STEPFUN_API_KEY`，运行
+  `bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --engine-smoke`；模型严格固定 `step-3.7-flash`。
+- 综合检查仍有 **109 处旧术语失败**；未全局替换历史/持久化编码，未关闭门禁。
+- 严格 bundle 签名检查失败；Developer ID 签名、公证、Gatekeeper 分发、安装/升级/卸载未验收。
+- 开发裸二进制窗口 CUA 不可识别，开发窗口人工操作未验收；包内原生窗口已有真实操作证据。
+- 真实模型取消、上下文压缩、真实 Provider Fork、跨重启恢复，以及异常退出旧数据根恢复未完成。
+- Windows 需回归共享 Skills 选择、Fork UUID、Coding 幂等键和迁移认证；Linux 原生运行继续 TODO。
+- 未发布 Release、更新或推送源码；当前结果是可复现的 macOS 开发/本地包基线，**完整双 Engine 产品验收未通过**。
