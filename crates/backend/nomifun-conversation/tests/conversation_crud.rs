@@ -1089,6 +1089,9 @@ async fn session_capability_selection_updates_runtime_snapshot_without_rewriting
         .await
         .unwrap();
     assert!(!changed_again, "equivalent selections must not rebuild an idle runtime");
+    let (mcp_updated, _) = svc.replace_session_mcp_selection(USER_ID, &conv.conversation_id, &[]).await.unwrap();
+    assert_eq!(mcp_updated.extra["skills"], json!(["pdf", "skill-creator"]), "MCP-only changes must preserve the Skill snapshot");
+    assert_eq!(mcp_updated.agent_snapshot, conv.agent_snapshot);
 }
 
 #[tokio::test]

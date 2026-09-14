@@ -751,6 +751,7 @@ impl CompanionThreads {
         // Single-session ensure: list (which prunes threads whose backing
         // conversation was deleted out-of-band) and reuse the survivor.
         if let Some(existing) = self.list(companion_id).await?.into_iter().next() {
+            self.sessions.refresh_product_agent(self.authoritative_user_id.as_ref(), &existing.conversation_id).await?;
             // 收敛工作区：首次补建 / 改名跟随（best-effort）。
             // 外来 temp cwd 仍留置不动（见 plan_workspace_reconcile 的 Leave 分支：
             // 移动 live cwd 会孤立已写文件）。新伙伴走下面的 create 分支直接落 pretty 名。
@@ -811,6 +812,7 @@ impl CompanionThreads {
                 let extra = serde_json::json!({
                 "companion_session": true,
                 "companion_id": companion_id,
+                "selected_mcp_server_ids": [],
                 "system_prompt": system_prompt,
                 // The conversation service freezes this into `extra.skills`.
                 // Supplying the configured set also filters configured names that

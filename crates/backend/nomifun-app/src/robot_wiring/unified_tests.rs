@@ -9,6 +9,51 @@ use nomifun_robot::wiring::RobotConversationBackend;
 
 const TRUST: &str = "isolated-companion-test";
 
+struct ExternalMcp;
+impl Respond for ExternalMcp {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        let Some(id) = body.get("id") else { return ResponseTemplate::new(202); };
+        let result = match body["method"].as_str().unwrap_or_default() {
+            "initialize" => serde_json::json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"companion-external","version":"1"}}),
+            "tools/list" => serde_json::json!({"tools":[{"name":"echo","description":"Echo companion data","inputSchema":{"type":"object","properties":{}}}]}),
+            "tools/call" => serde_json::json!({"content":[{"type":"text","text":"EXTERNAL_TOOL_OK"}]}),
+            "resources/read" => serde_json::json!({"contents":[{"uri":"test://shared","mimeType":"text/plain","text":"EXTERNAL_RESOURCE_OK"}]}),
+            "resources/list" => serde_json::json!({"resources":[{"uri":"test://shared","name":"shared"}]}),
+            _ => serde_json::json!({}),
+        };
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({"jsonrpc":"2.0","id":id,"result":result}))
+    }
+}
+
+#[tokio::test]
+async fn companion_mcp_selection_preserves_skills_and_serves_desktop_and_robot() {
+    let harness = Harness::new().await;
+    let external = MockServer::start().await;
+    Mock::given(wiremock::matchers::method("POST")).respond_with(ExternalMcp).mount(&external).await;
+    let before = harness.api("GET", &format!("/api/conversations/{}", harness.conversation_id), Value::Null, None).await;
+    assert_eq!(before["data"]["extra"]["mcp_server_ids"], serde_json::json!([]));
+    let server = harness.api("POST", "/api/mcp/servers", serde_json::json!({"name":"companion-external","transport":{"type":"http","url":format!("{}/mcp",external.uri())}}), None).await;
+    let id = server["data"]["mcp_server_id"].as_str().unwrap();
+    harness.api("POST", &format!("/api/mcp/servers/{id}/toggle"), serde_json::json!({}), None).await;
+    let selected = harness.api("PUT", &format!("/api/agent-sessions/{}/mcp-selection", harness.conversation_id), serde_json::json!({"mcp_server_ids":[id]}), None).await;
+    assert_eq!(selected["data"]["extra"]["skills"], before["data"]["extra"]["skills"]);
+    harness.api("POST", &format!("/api/conversations/{}/warmup", harness.conversation_id), serde_json::json!({}), None).await;
+    assert!(external.received_requests().await.unwrap().is_empty(), "MCP must not connect before a model tool call");
+    harness.desktop("EXTERNAL_MCP desktop", "external-mcp-desktop").await;
+    let mcp_calls = || async { external.received_requests().await.unwrap().into_iter().filter_map(|r| serde_json::from_slice::<Value>(&r.body).ok()).collect::<Vec<_>>() };
+    let calls = mcp_calls().await;
+    assert!(calls.iter().any(|r| r["method"] == "tools/call"), "desktop must reach the selected MCP tool");
+    assert!(calls.iter().any(|r| r["method"] == "resources/read"));
+    harness.device("robot-mcp").await;
+    harness.robot("robot-mcp", "EXTERNAL_MCP robot").await;
+    assert_eq!(mcp_calls().await.iter().filter(|r| r["method"] == "tools/call").count(), 2);
+    harness.api("PUT", &format!("/api/agent-sessions/{}/mcp-selection", harness.conversation_id), serde_json::json!({"mcp_server_ids":[]}), None).await;
+    harness.desktop("after MCP removal", "external-mcp-removed").await;
+    assert_eq!(mcp_calls().await.iter().filter(|r| r["method"] == "tools/call").count(), 2);
+    harness.shutdown().await;
+}
+
 struct Model { requests: Arc<Mutex<Vec<Value>>> }
 impl Respond for Model {
     fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
@@ -34,10 +79,27 @@ impl Respond for Model {
             .find(|name| name.contains(tool_name));
         let arguments = if last_user.contains("SAVE_MEMORY") { r#"{"kind":"preference","content":"用户喜欢乌龙茶。","tags":["drink"]}"# }
             else if last_user.contains("RECALL_MEMORY") { r#"{"query":"乌龙茶"}"# } else { r#"{"direction":"left"}"# };
-        let (mut delta, finish) = if needs_tool && tool.is_some() {
+        let (mut delta, mut finish) = if needs_tool && tool.is_some() {
             (serde_json::json!({"role":"assistant","tool_calls":[{"index":0,"id":"call_move","type":"function",
                 "function":{"name":tool.unwrap(),"arguments":arguments}}]}), "tool_calls")
         } else { (serde_json::json!({"role":"assistant","content":text}), "stop") };
+        if last_user.contains("EXTERNAL_MCP") {
+            let start = messages.iter().rposition(|m| m["role"] == "user").unwrap();
+            let called = messages[start..].iter().flat_map(|m| m["tool_calls"].as_array().into_iter().flatten())
+                .filter_map(|call| call["function"]["name"].as_str()).collect::<Vec<_>>();
+            if let Some(next) = ["mcp_connect", "mcp_tool_proxy", "mcp_resource_read"].into_iter().find(|name| !called.contains(name)) {
+                let visible = messages[start..].iter().flat_map(|m| m["tool_calls"].as_array().into_iter().flatten())
+                    .any(|call| call["function"]["name"] == "ToolSearch" && call["function"]["arguments"].as_str()
+                        .and_then(|args| serde_json::from_str::<Value>(args).ok()).is_some_and(|args| args["query"] == next));
+                let name = if visible { next } else { "ToolSearch" };
+                let args = if !visible { serde_json::json!({"query":next}) }
+                    else if next == "mcp_connect" { serde_json::json!({}) }
+                    else if next == "mcp_tool_proxy" { serde_json::json!({"server":"companion-external","tool":"echo","arguments":{}}) }
+                    else { serde_json::json!({"server":"companion-external","uri":"test://shared"}) };
+                delta = serde_json::json!({"role":"assistant","tool_calls":[{"index":0,"id":format!("call_{}", called.len()),"type":"function","function":{"name":name,"arguments":args.to_string()}}]});
+                finish = "tool_calls";
+            }
+        }
         if needs_tool && last_user.contains("PREAMBLE") { delta["content"] = serde_json::json!("I will check the device first."); }
         let event = serde_json::json!({"id":"test","object":"chat.completion.chunk","created":1,
             "model":"step-3.7-flash","choices":[{"index":0,"delta":delta,"finish_reason":null}]});

@@ -21,6 +21,11 @@ type SessionCapabilityPickerProps = {
   loadFailed?: boolean;
   onRetry?: () => void;
   applyMode: 'create' | 'next-send';
+  /** Product-owned settings use the same rail and popup with their own scope. */
+  applyNote?: string | ((kind: PickerKind) => string);
+  readOnlyKinds?: readonly PickerKind[];
+  visibleKinds?: readonly PickerKind[];
+  onManage?: (kind: PickerKind) => void;
   disabled?: boolean;
   lockedMcpServerIds?: ReadonlySet<string>;
   children?: React.ReactNode;
@@ -72,6 +77,10 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
   loadFailed = false,
   onRetry,
   applyMode,
+  applyNote: customApplyNote,
+  readOnlyKinds = [],
+  visibleKinds = ['skills', 'mcp'],
+  onManage,
   disabled = false,
   lockedMcpServerIds = EMPTY_LOCKED_MCP_SERVER_IDS,
   children,
@@ -115,7 +124,7 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
   const { getReferenceProps, getFloatingProps } = useInteractions([dismiss, role]);
   const selectedSkills = useMemo(() => new Set(draft.skillNames), [draft.skillNames]);
   const selectedMcp = useMemo(() => new Set(draft.mcpServerIds), [draft.mcpServerIds]);
-  const applyNote = applyMode === 'create'
+  const defaultApplyNote = applyMode === 'create'
     ? t('conversation.capabilityPicker.createApplyNote', { defaultValue: '新会话 · 创建时应用' })
     : t('conversation.capabilityPicker.nextSendApplyNote', { defaultValue: '本会话 · 下次发送时应用' });
 
@@ -137,6 +146,7 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
   };
 
   const panel = (kind: PickerKind) => {
+    const applyNote = typeof customApplyNote === 'function' ? customApplyNote(kind) : customApplyNote ?? defaultApplyNote;
     const isSkills = kind === 'skills';
     const selectedCount = isSkills ? draft.skillNames.length : draft.mcpServerIds.length;
     const rows = isSkills ? catalog.skills : catalog.mcpServers;
@@ -202,7 +212,7 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
               const checked = selectedMcp.has(server.mcp_server_id);
               const status = mcpStatus(server);
               const locked = lockedMcpServerIds.has(server.mcp_server_id);
-              const rowDisabled = disabled || locked || (!server.enabled && !checked);
+              const rowDisabled = disabled || readOnlyKinds.includes('mcp') || locked || (!server.enabled && !checked);
               return (
                 <div
                   key={server.mcp_server_id}
@@ -245,7 +255,8 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
             size='mini'
             onClick={() => {
               setOpen(undefined);
-              void navigate(isSkills ? '/skills' : '/mcp');
+              if (onManage) onManage(kind);
+              else void navigate(isSkills ? '/skills' : '/mcp');
             }}
           >
             {isSkills
@@ -290,8 +301,7 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
 
   return (
     <aside ref={railRef} className={styles.rail} data-composer-tools aria-label={t('conversation.capabilityPicker.ariaLabel', { defaultValue: '会话能力' })}>
-      {trigger('skills')}
-      {trigger('mcp')}
+      {visibleKinds.map((kind) => <React.Fragment key={kind}>{trigger(kind)}</React.Fragment>)}
       {children}
       {capabilityOpen && (
         <FloatingPortal>

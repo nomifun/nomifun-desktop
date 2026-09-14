@@ -26,6 +26,10 @@ use crate::evolution::TranscriptSource;
 /// Narrow command/query surface used by Companion thread management.
 #[async_trait]
 pub trait CompanionSessionPort: Send + Sync {
+    /// Resolve the current product-owned Agent without creating another Session.
+    async fn refresh_product_agent(&self, owner_id: &str, session_id: &str) -> Result<ConversationResponse, AppError> {
+        self.get(owner_id, session_id).await
+    }
     async fn get(
         &self,
         owner_id: &str,
@@ -134,6 +138,9 @@ fn project_archive_message(
 #[cfg(test)]
 #[async_trait]
 impl CompanionSessionPort for ConversationCompanionSessionPort {
+    async fn refresh_product_agent(&self, owner_id: &str, session_id: &str) -> Result<ConversationResponse, AppError> {
+        self.service.refresh_product_agent_for_existing(owner_id, session_id).await
+    }
     async fn get(
         &self,
         owner_id: &str,
