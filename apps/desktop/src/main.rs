@@ -2477,10 +2477,32 @@ fn should_show_main_window_for_macos_reopen(_has_visible_windows: bool) -> bool 
     true
 }
 
-/// Terminal termination must enter the same verified shutdown path as Quit.
-/// Register before starting the embedded backend, including packaged binaries
-/// launched from a shell. Windows/Linux retain their existing host behavior.
+/// Replace AppKit's immediate terminate action with a coordinated quit request.
 #[cfg(target_os = "macos")]
+fn macos_menu_with_verified_quit(
+    app: &tauri::AppHandle,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem};
+
+    let menu = Menu::default(app)?;
+    let roots = menu.items()?;
+    let app_menu = roots.first().and_then(|item| item.as_submenu())
+        .ok_or_else(|| anyhow::anyhow!("default macOS application menu is missing"))?;
+    let items = app_menu.items()?;
+    // Tauri's default macOS application submenu ends with the native Quit
+    // item. Its terminate: action can bypass ExitRequested and our cleanup.
+    // Keep the other standard items and the existing label, but route Cmd-Q
+    // through the same app.exit request as the tray and terminal signals.
+    let native_quit = items.last().and_then(|item| item.as_predefined_menuitem())
+        .ok_or_else(|| anyhow::anyhow!("default macOS Quit item is missing"))?;
+    let label = native_quit.text()?;
+    app_menu.remove(native_quit)?;
+    app_menu.append(&MenuItem::with_id(app, "nomifun-verified-quit", label, true, Some("CmdOrCtrl+Q"))?)?;
+    Ok(menu)
+}
+
+#[cfg(target_os = "macos")]
+/// Register terminal and development-parent shutdown before backend startup.
 fn install_macos_exit_observers(app: &tauri::AppHandle) -> anyhow::Result<()> {
     use tokio::signal::unix::{signal, SignalKind};
 
@@ -2844,7 +2866,14 @@ fn main() -> std::process::ExitCode {
         }
     }
 
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(macos_menu_with_verified_quit).on_menu_event(|app, event| {
+        if event.id().as_ref() == "nomifun-verified-quit" {
+            app.exit(0);
+        }
+    });
+    let app = builder
         // single-instance MUST be the first plugin. With its `deep-link` feature
         // enabled (see Cargo.toml), it forwards a second instance's argv into the
         // deep-link plugin BEFORE invoking this callback, so `on_open_url` (wired
