@@ -1,7 +1,8 @@
 # CAR 阶段状态
 
-> 2026-09-14 macOS 接手补充：基线 `2ff029512` 已同步，本轮修复将本地提交后重建、未 push。
-> arm64 原生开发启动及 runner/CLI 退出已验证；Nomi 真实四阶段通过，Coding 创建通过、
+> 2026-09-14 macOS 接手补充：基线 `2ff029512` 已同步，本轮修复已本地提交、未 push。
+> arm64 开发启动、隔离 WebView、app/DMG 与包内 Command-Q 活动终端回收已验证；严格 bundle 签名仍失败。
+> Nomi 真实四阶段通过，Coding 创建通过、
 > 第二轮修改报 `UNKNOWN_UPSTREAM_ERROR`，不能宣布完整执行链或发布验收完成。
 > 本轮修复、检查、制品状态与未验证项见 [MACOS-DELIVERY-2026-09-14.zh.md](MACOS-DELIVERY-2026-09-14.zh.md)。
 > 下方 Windows 阶段描述保留为历史记录；当前交付范围见 TASK-MANIFEST.json。
