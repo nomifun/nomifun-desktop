@@ -12,6 +12,8 @@ Cargo.lock.bak
 
 # Packaging / runtime artifacts
 /dist/
+# Local Compose credentials and overrides — never commit secrets.
+/.env
 # Legacy dev data dirs from before all hosts shared one per-user default
 # (%LOCALAPPDATA%\NomiFun\Nomi etc.) — kept so stale checkouts don't commit them.
 /data/

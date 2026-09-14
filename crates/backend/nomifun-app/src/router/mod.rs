@@ -11,6 +11,7 @@ mod health;
 mod knowledge_registration;
 mod model_failover;
 mod routes;
+mod sales_tenant;
 mod state;
 mod trace;
 

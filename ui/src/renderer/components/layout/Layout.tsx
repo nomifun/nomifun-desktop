@@ -26,6 +26,7 @@ import { useDirectorySelection } from '@renderer/hooks/file/useDirectorySelectio
 import { cleanupSiderTooltips } from '@renderer/utils/ui/siderTooltip';
 import { useConversationShortcuts } from '@renderer/hooks/ui/useConversationShortcuts';
 import { isDesktopShell } from '@renderer/utils/platform';
+import { isSalesProductMode } from '@renderer/productMode';
 import '@renderer/styles/layout.css';
 
 const SidebarIcon: React.FC<{ size?: number; strokeWidth?: number }> = ({ size = 18, strokeWidth = 4 }) => (
@@ -420,7 +421,7 @@ const Layout: React.FC<{
                   </svg>
                 </div>
                 <div className='min-w-0 flex-1 truncate text-16px text-t-primary collapsed-hidden font-semibold'>
-                  NomiFun
+                  {isSalesProductMode ? '销售联络工作台' : 'NomiFun'}
                 </div>
                 {updateAvailability.available && !collapsed && (
                   <InstantHoverTooltip content={updateButtonLabel} position='right' className='ml-auto'>

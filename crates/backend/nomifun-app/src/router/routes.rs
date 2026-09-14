@@ -53,6 +53,9 @@ use super::health::{
     unregister_knowledge_global_handler,
 };
 use super::model_failover::{ModelFailoverRouterState, model_failover_routes};
+use super::sales_tenant::{
+    SalesTenantRouterState, sales_tenant_owner_routes, sales_tenant_user_routes,
+};
 use super::state::{ModuleStates, build_module_states, build_ws_state};
 use super::trace::with_access_log;
 
@@ -704,6 +707,18 @@ pub fn create_router_with_all_state(
     let instance_owner_state =
         InstanceOwnerState::new(services.authoritative_user_id.clone());
 
+    let sales_tenant_state = SalesTenantRouterState::new(
+        services.database.pool().clone(),
+        services.user_repo.clone(),
+        services.authoritative_user_id.clone(),
+    );
+    let sales_tenant_user_authenticated = sales_tenant_user_routes(sales_tenant_state.clone())
+        .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
+    let sales_tenant_owner_authenticated = protect_instance_owner(
+        sales_tenant_owner_routes(sales_tenant_state),
+        &auth_mw_state,
+        &instance_owner_state,
+    );
     // LAN robot gateway. Assembled here because this is where the
     // `ConversationService` the robot sessions dispatch through exists; the two
     // faces are mounted separately below because they belong in different
@@ -1096,6 +1111,8 @@ pub fn create_router_with_all_state(
         .route("/health", get(health_check))
         .merge(auth_routes(auth_state))
         .merge(crate::router::instance_token_routes::instance_token_routes(instance_token_state))
+        .merge(sales_tenant_user_authenticated)
+        .merge(sales_tenant_owner_authenticated)
         .merge(system_authenticated)
         .merge(computer_permissions_authenticated)
         .merge(knowledge_registration_read_authenticated)

@@ -16,6 +16,8 @@ import { seedConversationCache } from '@/renderer/pages/conversation/utils/conve
 import { getConversationCreateErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
 import { useGuidModelSelection } from '@/renderer/pages/guid/hooks/useGuidModelSelection';
 import { conversationTarget } from '@/common/types/ids';
+import type { ConversationId } from '@/common/types/ids';
+import type { PresetOverrides, PresetReference } from '@/common/types/agent/presetTypes';
 import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { uuidv7 } from '@/common/utils/uuidv7';
 
@@ -41,8 +43,14 @@ export interface NomiQuickStartOptions {
    * model the user picked in the caller's picker).
    */
   model?: TProviderWithModel;
+  /** Optional reusable Agent preset resolved authoritatively by the backend. */
+  presetId?: PresetReference;
+  /** Per-launch overrides for the selected preset. */
+  presetOverrides?: PresetOverrides;
   /** Merged onto `extra`, overriding the workspace defaults below. */
   extra?: NomiQuickStartExtra;
+  /** Called after the backend creates the conversation and before navigation. */
+  onCreated?: (conversationId: ConversationId) => void;
 }
 
 /**
@@ -58,7 +66,16 @@ export const useNomiQuickStart = () => {
   const { current_model } = useGuidModelSelection('nomi');
 
   const start = useCallback(
-    async ({ name, prompt, send = true, model, extra }: NomiQuickStartOptions): Promise<boolean> => {
+    async ({
+      name,
+      prompt,
+      send = true,
+      model,
+      presetId,
+      presetOverrides,
+      extra,
+      onCreated,
+    }: NomiQuickStartOptions): Promise<boolean> => {
       const effectiveModel = model ?? current_model;
       if (!effectiveModel) {
         Message.warning(t('conversation.noModelConfigured'));
@@ -69,6 +86,8 @@ export const useNomiQuickStart = () => {
           type: 'nomi',
           name,
           model: effectiveModel,
+          preset_id: presetId,
+          preset_overrides: presetOverrides,
           extra: {
             workspace: '',
             custom_workspace: false,
@@ -98,6 +117,7 @@ export const useNomiQuickStart = () => {
           )
         );
         seedConversationCache(conversation);
+        onCreated?.(conversation.id);
         await navigate(`/conversation/${conversation.id}`);
         return true;
       } catch (error) {

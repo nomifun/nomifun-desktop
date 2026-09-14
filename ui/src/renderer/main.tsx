@@ -61,9 +61,17 @@ import Layout from './components/layout/Layout';
 import RouteErrorBoundary from './components/layout/RouteErrorBoundary';
 import Router from './components/layout/Router';
 import Sider from './components/layout/Sider';
+import SalesProductSider from './components/layout/Sider/SalesProductSider';
 import { useAuth } from './hooks/context/AuthContext';
 import { ConversationHistoryProvider } from './hooks/context/ConversationHistoryContext';
+import { isSalesProductMode } from './productMode';
 import HOC from './utils/ui/HOC';
+
+const AppSider = isSalesProductMode ? SalesProductSider : Sider;
+
+if (isSalesProductMode) {
+  document.title = '销售联络工作台';
+}
 
 const arcoLocales: Record<string, typeof enUS> = {
   'zh-CN': zhCN,
@@ -151,7 +159,7 @@ const Main = () => {
     <Router
       layout={
         <ConversationHistoryProvider>
-          <Layout sider={<Sider />} />
+          <Layout sider={<AppSider />} />
         </ConversationHistoryProvider>
       }
     />

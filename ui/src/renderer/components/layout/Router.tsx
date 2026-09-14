@@ -4,6 +4,7 @@ import AppLoader from '@renderer/components/layout/AppLoader';
 import ProtectedAppRuntime from '@renderer/components/layout/ProtectedAppRuntime';
 import RouteErrorBoundary from '@renderer/components/layout/RouteErrorBoundary';
 import { useAuth } from '@renderer/hooks/context/AuthContext';
+import { authenticatedHomePath, isSalesProductMode } from '@renderer/productMode';
 import {
   CREATIVE_STUDIO_CANVASES_PATH,
   CREATIVE_STUDIO_ROOT_PATH,
@@ -120,6 +121,14 @@ const MiniAppsListPage = React.lazy(() => import('@renderer/pages/miniApps'));
 const MiniAppRunnerPage = React.lazy(() => import('@renderer/pages/miniApps/RunnerPage'));
 const CompanionPage = React.lazy(() => import('@renderer/pages/companion'));
 const ConversationShell = React.lazy(() => import('@renderer/pages/conversation/components/ConversationShell'));
+const SalesShell = React.lazy(() => import('@renderer/pages/sales/SalesShell'));
+const SalesDashboardPage = React.lazy(() => import('@renderer/pages/sales/SalesDashboardPage'));
+const SalesCompanyPage = React.lazy(() => import('@renderer/pages/sales/SalesCompanyPage'));
+const SalesTasksPage = React.lazy(() => import('@renderer/pages/sales/SalesTasksPage'));
+const SalesCompaniesPage = React.lazy(() => import('@renderer/pages/sales/SalesCompaniesPage'));
+const SalesExecutionPage = React.lazy(() => import('@renderer/pages/sales/SalesExecutionPage'));
+const SalesResultsPage = React.lazy(() => import('@renderer/pages/sales/SalesResultsPage'));
+const SalesUsersPage = React.lazy(() => import('@renderer/pages/sales/SalesUsersPage'));
 
 const RouteFallback: React.FC<{ Component: React.LazyExoticComponent<React.ComponentType> }> = ({ Component }) => {
   const location = useLocation();
@@ -218,13 +227,25 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
       <Routes>
         <Route
           path='/login'
-          element={status === 'authenticated' ? <Navigate to='/guid' replace /> : withRouteFallback(LoginPage)}
+          element={status === 'authenticated' ? <Navigate to={authenticatedHomePath} replace /> : withRouteFallback(LoginPage)}
         />
         {/* The desktop-companion window route: fullscreen transparent, no app layout/sidebar. */}
         <Route path='/companion' element={withRouteFallback(CompanionPage)} />
         <Route element={<ProtectedAppRuntime />}>
           <Route element={layout}>
-            <Route index element={<Navigate to='/guid' replace />} />
+            <Route index element={<Navigate to={authenticatedHomePath} replace />} />
+            {isSalesProductMode && (
+              <Route path='/sales' element={withRouteFallback(SalesShell)}>
+                <Route index element={withRouteFallback(SalesDashboardPage)} />
+                <Route path='company' element={withRouteFallback(SalesCompanyPage)} />
+                <Route path='tasks' element={withRouteFallback(SalesTasksPage)} />
+                <Route path='companies' element={withRouteFallback(SalesCompaniesPage)} />
+                <Route path='approvals' element={withRouteFallback(SalesExecutionPage)} />
+                <Route path='results' element={withRouteFallback(SalesResultsPage)} />
+                <Route path='users' element={withRouteFallback(SalesUsersPage)} />
+              </Route>
+            )}
+            {isSalesProductMode && <Route path='/admin' element={<Navigate to='/guid' replace />} />}
             {/* Creative Studio reuses the application titlebar and swaps the primary rail like Settings. */}
             <Route path={CREATIVE_STUDIO_ROOT_PATH} element={withRouteFallback(CreativeStudioFocusShell)}>
               <Route index element={<CreativeStudioCanvasesRedirect />} />
@@ -299,7 +320,7 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/mini-apps/:id' element={withRouteFallback(MiniAppRunnerPage)} />
           </Route>
         </Route>
-        <Route path='*' element={<Navigate to={status === 'authenticated' ? '/guid' : '/login'} replace />} />
+        <Route path='*' element={<Navigate to={status === 'authenticated' ? authenticatedHomePath : '/login'} replace />} />
       </Routes>
     </HashRouter>
   );

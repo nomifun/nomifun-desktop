@@ -31,6 +31,8 @@ WORKDIR /app
 COPY package.json bun.lock ./
 COPY ui/package.json ui/package.json
 ARG BUN_REGISTRY=""
+ARG NOMIFUN_PRODUCT_MODE=""
+ENV VITE_NOMIFUN_PRODUCT_MODE=$NOMIFUN_PRODUCT_MODE
 RUN if [ -n "$BUN_REGISTRY" ]; then \
       bun install --frozen-lockfile --registry "$BUN_REGISTRY"; \
     else \
@@ -77,17 +79,25 @@ RUN if [ -n "$CARGO_REGISTRY_MIRROR" ]; then \
 COPY . .
 # Pair the Rust host build with the exact UI artifact produced by the UI stage.
 COPY --from=ui /app/ui/dist/nomifun-build.json /src/ui/dist/nomifun-build.json
+# Extra web-crate features are opt-in so the ordinary headless image keeps its
+# existing size and capability surface. The local sales stack passes
+# `sales-runtime`, which forwards nomifun-app's browser-use feature.
+ARG NOMIFUN_WEB_FEATURES=""
 # BuildKit cache mounts persist the cargo registry + compiled artifacts across
 # rebuilds, so a one-line source change recompiles in seconds, not minutes. The
 # binary is copied OUT of the (ephemeral) target cache mount into a real layer.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p nomifun-web \
+    if [ -n "$NOMIFUN_WEB_FEATURES" ]; then \
+      cargo build --release --locked -p nomifun-web --features "$NOMIFUN_WEB_FEATURES"; \
+    else \
+      cargo build --release --locked -p nomifun-web; \
+    fi \
     && cp target/release/nomifun-web /usr/local/bin/nomifun-web
 # -> /usr/local/bin/nomifun-web
 
 # ---- Stage 3: slim runtime --------------------------------------------------
-FROM ${RUNTIME_IMAGE}
+FROM ${RUNTIME_IMAGE} AS runtime-base
 # Reuse the same optional Debian mirror as stage 2 (http:// so it works before
 # ca-certificates is installed just below).
 ARG APT_MIRROR=""
@@ -126,7 +136,6 @@ ENV NOMIFUN_WEB_HOST=0.0.0.0 \
 # Set NOMIFUN_ADMIN_PASSWORD (+ NOMIFUN_ADMIN_USERNAME) to pre-seed the admin
 # and skip the interactive first-run setup.
 
-VOLUME /data
 EXPOSE 8787
 # Liveness: once the server is up it answers an unauthenticated GET / with the
 # SPA (200). bun is already in the image, so no extra curl/wget is needed. The
@@ -137,3 +146,30 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
 # Tini also forwards shutdown signals to the server before collecting orphans.
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["nomifun-web"]
+
+# Browser-enabled local validation target. This is deliberately opt-in: the
+# default `runtime` target below remains Chromium-free and root-compatible for
+# existing deployments.
+FROM runtime-base AS sales-runtime
+ARG APT_MIRROR=""
+RUN if [ -n "$APT_MIRROR" ]; then \
+      for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
+        [ -f "$f" ] && sed -i -E "s|https?://deb.debian.org|$APT_MIRROR|g; s|https?://security.debian.org|$APT_MIRROR|g" "$f" || true; \
+      done; \
+    fi \
+    && apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+        chromium fonts-liberation fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
+RUN groupadd --gid 10001 nomifun \
+    && useradd --uid 10001 --gid nomifun --create-home --shell /usr/sbin/nologin nomifun \
+    && mkdir -p /data \
+    && chown -R nomifun:nomifun /data /home/nomifun
+ENV HOME=/home/nomifun \
+    NOMIFUN_CHROME_BINARY=/usr/lib/chromium/chromium
+VOLUME /data
+USER nomifun
+
+# Preserve the historical final image when no explicit target is selected.
+FROM runtime-base AS runtime
+VOLUME /data
