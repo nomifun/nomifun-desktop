@@ -7,7 +7,7 @@ import { agentPlatform, companion } from '@/common/adapter/ipcBridge';
 import { Message } from '@arco-design/web-react';
 import ProductAgentBindingSelect from './ProductAgentBindingSelect';
 import type { ProductAgentOptions } from '@/common/types/agentPlatform';
-import { parseProviderId } from '@/common/types/ids';
+import { parseConversationId, parseProviderId } from '@/common/types/ids';
 import { BackendHttpError } from '@/common/adapter/httpBridge';
 
 const i18n = createInstance();
@@ -32,6 +32,35 @@ const initial: ProductAgentOptions = {
     { selection: { kind: 'template', template_key: 'assistant.general' }, display_name: '', available: false, reason: 'web_search' },
   ],
 };
+
+test('composer Agent selector updates the companion binding and existing session together', async () => {
+  let state = { ...structuredClone(initial), needs_model: false };
+  const options = spyOn(agentPlatform.productBindingOptions, 'invoke').mockImplementation(async () => state);
+  const save = spyOn(agentPlatform.selectProductBinding, 'invoke').mockImplementation(async ({ request }) => {
+    state = { ...state, selection: request.selection };
+    return { selection: request.selection, needs_model: false };
+  });
+  const active = spyOn(companion.getCompanionSession, 'invoke');
+  const success = spyOn(Message, 'success').mockImplementation(() => () => {});
+  for (const spy of [options, save, active, success]) restores.push(() => spy.mockRestore());
+  const conversationId = parseConversationId('019b0000-0000-7000-8000-000000000002');
+  const providerId = parseProviderId('019b0000-0000-7000-8000-000000000003');
+  const view = render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><I18nextProvider i18n={i18n}>
+    <ProductAgentBindingSelect compact targetKind='companion'
+      targetId='019b0000-0000-7000-8000-000000000001' defaultTemplateKey='companion.default'
+      conversationId={conversationId} model={{ id: providerId, use_model: 'model-a' }} />
+  </I18nextProvider></SWRConfig>);
+  fireEvent.click(await view.findByRole('button', { name: 'Agent setup: Companion' }));
+  fireEvent.click(await view.findByText('Minimal'));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(save.mock.calls[0][0]).toEqual({
+    target_kind: 'companion', target_id: '019b0000-0000-7000-8000-000000000001',
+    request: { selection: { kind: 'template', template_key: 'chat.minimal' },
+      model: { provider_id: providerId, model: 'model-a' }, conversation_id: conversationId },
+  });
+  expect(active).not.toHaveBeenCalled();
+  await waitFor(() => expect(view.getByRole('button', { name: 'Agent setup: Minimal' })).toBeTruthy());
+});
 test('allows Agent selection before model setup and prevents selecting incompatible options', async () => {
   let state = structuredClone(initial);
   const options = spyOn(agentPlatform.productBindingOptions, 'invoke').mockImplementation(async () => state);
@@ -88,7 +117,7 @@ test('rechecks options when the model changes and displays fetch failures instea
   expect(view.getByRole('button', { name: 'Retry' })).toBeTruthy();
 });
 
-test('a stale selection failure preserves the selected Agent and shows readable feedback', async () => {
+test.each([false, true])('a stale selection failure preserves the selected Agent (compact=%s)', async (compact) => {
   const options = spyOn(agentPlatform.productBindingOptions, 'invoke').mockResolvedValue(initial);
   const save = spyOn(agentPlatform.selectProductBinding, 'invoke').mockRejectedValue(new BackendHttpError({
     method: 'PUT', path: '/api/product-agent-bindings/customer/private', status: 422,
@@ -97,12 +126,15 @@ test('a stale selection failure preserves the selected Agent and shows readable 
   const toast = spyOn(Message, 'error').mockImplementation(() => () => {});
   for (const spy of [options, save, toast]) restores.push(() => spy.mockRestore());
   const view = render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><I18nextProvider i18n={i18n}>
-    <ProductAgentBindingSelect targetKind='customer' targetId='019b0000-0000-7000-8000-000000000001' defaultTemplateKey='customer-service.default' />
+    <ProductAgentBindingSelect compact={compact} targetKind='customer' targetId='019b0000-0000-7000-8000-000000000001' defaultTemplateKey='customer-service.default' />
   </I18nextProvider></SWRConfig>);
-  await waitFor(() => expect(view.container.querySelector('.arco-select')).toBeTruthy());
-  fireEvent.click(view.container.querySelector('.arco-select')!);
+  const trigger = compact
+    ? await view.findByRole('button', { name: 'Agent setup: Companion' })
+    : await waitFor(() => { const node = view.container.querySelector('.arco-select'); expect(node).toBeTruthy(); return node!; });
+  fireEvent.click(trigger);
   fireEvent.click(await view.findByText('Minimal'));
   await waitFor(() => expect(toast).toHaveBeenCalledWith('Model compatibility changed. Please choose again.'));
-  expect(view.container.querySelector('.arco-select-view')?.textContent).toContain('Companion');
+  if (compact) expect(view.getByRole('button', { name: 'Agent setup: Companion' })).toBeTruthy();
+  else expect(view.container.querySelector('.arco-select-view')?.textContent).toContain('Companion');
   expect(view.baseElement.textContent).not.toContain('private raw protocol envelope');
 });

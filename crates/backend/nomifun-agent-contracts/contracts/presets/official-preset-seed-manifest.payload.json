@@ -324,6 +324,18 @@
         {
           "id": "robot.device_tools",
           "version": "1.0.0"
+        },
+        {
+          "id": "mcp.connect",
+          "version": "1.0.0"
+        },
+        {
+          "id": "mcp.tool_proxy",
+          "version": "1.0.0"
+        },
+        {
+          "id": "mcp.resource",
+          "version": "1.0.0"
         }
       ],
       "skill_bindings": [],
@@ -332,6 +344,7 @@
         "companion",
         "companion_memory",
         "knowledge_base",
+        "mcp_server",
         "robot"
       ],
       "required_runtime_features": []
@@ -572,6 +585,7 @@
         "im_channel",
         "knowledge",
         "learning_evolution",
+        "mcp",
         "persona"
       ],
       "required_capability_ids": [
@@ -586,6 +600,9 @@
         "companion.roster",
         "knowledge.read",
         "knowledge.search",
+        "mcp.connect",
+        "mcp.resource",
+        "mcp.tool_proxy",
         "memory.companion.evolve",
         "memory.companion.merge",
         "memory.companion.recall",
@@ -597,6 +614,7 @@
         "companion",
         "companion_memory",
         "knowledge_base",
+        "mcp_server",
         "robot"
       ]
     },

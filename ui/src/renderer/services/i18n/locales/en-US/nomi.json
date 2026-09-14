@@ -361,6 +361,11 @@
     "model": "Learning model"
   },
   "chat": {
+    "modelSaveFailed": "Could not save the conversation model. Please retry.",
+    "skillsScopeHint": "Manage this companion's skills, shared across desktop and robot conversations",
+    "mcpScopeHint": "Connection, tool calls and resource reading are included. Selected servers are shared across this companion's inputs and apply next turn.",
+    "mcpAgentRequired": "This Agent does not allow MCP connections. Choose the Companion preset or configure the Agent in the workbench.",
+    "mcpBusy": "Wait for the current reply to finish before changing MCP servers.",
     "modelConfig": "Chat model",
     "modelConfigHint": "This companion's chat model. Applies everywhere (local chat and remote connections); switching updates all its sessions.",
     "modelProvider": "Provider",

@@ -759,6 +759,10 @@ export const agentPlatform = {
         `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/preset`,
       (params) => params.request
     ),
+    updateMcpSelection: httpPut<unknown, { agent_session_id: ConversationId; mcp_server_ids: McpServerId[] }>(
+      (params) => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/mcp-selection`,
+      (params) => ({ mcp_server_ids: params.mcp_server_ids })
+    ),
     updateCapabilitySelection: httpPut<
       UpdateAgentSessionCapabilitySelectionResponse,
       {

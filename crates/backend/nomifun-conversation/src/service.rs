@@ -5595,6 +5595,26 @@ impl ConversationService {
         excluded_auto_skills: &[String],
         mcp_server_ids: &[String],
     ) -> Result<(ConversationResponse, bool), AppError> {
+        self.replace_session_extensions(user_id, id, Some((enabled_skills, excluded_auto_skills)), mcp_server_ids).await
+    }
+
+    /// Change MCP bindings without replacing product-owned Skill snapshots.
+    pub async fn replace_session_mcp_selection(
+        &self,
+        user_id: &str,
+        id: &str,
+        mcp_server_ids: &[String],
+    ) -> Result<(ConversationResponse, bool), AppError> {
+        self.replace_session_extensions(user_id, id, None, mcp_server_ids).await
+    }
+
+    async fn replace_session_extensions(
+        &self,
+        user_id: &str,
+        id: &str,
+        skill_selection: Option<(&[String], &[String])>,
+        mcp_server_ids: &[String],
+    ) -> Result<(ConversationResponse, bool), AppError> {
         if !self.execution_authority(user_id).controls_host() {
             return Err(AppError::Forbidden(
                 "AgentSession capability selection requires the installation owner".to_owned(),
@@ -5648,11 +5668,13 @@ impl ConversationService {
         } else {
             self.skill_resolver.auto_inject_names().await
         };
-        let mut desired_skills = compute_initial_skills(
-            &auto_inject_names,
-            enabled_skills,
-            excluded_auto_skills,
-        );
+        let mut desired_skills = match skill_selection {
+            Some((enabled_skills, excluded_auto_skills)) => compute_initial_skills(
+                &auto_inject_names, enabled_skills, excluded_auto_skills,
+            ),
+            None => serde_json::from_value::<Vec<String>>(existing_extra.get("skills").cloned().unwrap_or_else(|| serde_json::json!([])))
+                .map_err(|error| AppError::Internal(format!("Invalid Skill snapshot: {error}")))?,
+        };
         desired_skills.sort();
         desired_skills.dedup();
         let mut desired_mcp_ids = Vec::with_capacity(mcp_server_ids.len());
