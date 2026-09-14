@@ -321,6 +321,27 @@ impl AgentRuntimeHandle {
         }
     }
 
+    pub fn supports_steering_context(&self) -> bool {
+        match self {
+            Self::Registered(runtime) => runtime.supports_steering_context(),
+            _ => false,
+        }
+    }
+
+    pub async fn steer_with_receipt(&self, delivery: crate::RuntimeSteerDelivery) -> Result<bool, AppError> {
+        if (!delivery.files.is_empty() || !delivery.inject_skills.is_empty())
+            && !self.supports_steering_context()
+        {
+            return Err(AppError::BadRequest(
+                "steer_unsupported: this engine cannot append attachments or Skill hints to a running turn".into(),
+            ));
+        }
+        match self {
+            Self::Registered(runtime) => runtime.steer_with_receipt(delivery).await,
+            _ => self.steer(delivery.text),
+        }
+    }
+
     /// Queue trusted host resource state without creating a turn or pretending
     /// the event came from the user.
     ///
@@ -340,6 +361,15 @@ impl AgentRuntimeHandle {
             Self::Registered(m) => m.notify_system_resource(notice),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.notify_system_resource(notice),
+        }
+    }
+
+    pub async fn ensure_can_retry_turn(&self, source_message_id: &str) -> Result<(), AppError> {
+        match self {
+            Self::Registered(runtime) => runtime.ensure_can_retry_turn(source_message_id).await,
+            Self::Nomi(runtime) => runtime.ensure_can_retry_turn(source_message_id).await,
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Mock(_) => Ok(()),
         }
     }
 

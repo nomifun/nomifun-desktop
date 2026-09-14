@@ -22,23 +22,21 @@ function fixtureTree() {
   const root = mkdtempSync(join(tmpdir(), 'nomifun-release-lock-'));
   const paths = {
     host: join(root, 'NomiFun.app', 'Contents', 'MacOS', 'nomifun-desktop'),
-    sidecar: join(
+    helper: join(
       root,
       'NomiFun.app',
       'Contents',
       'Resources',
-      'runtime',
-      'macos',
-      'arm64',
-      'nomifun-codex-runtime',
+      'helpers',
+      'native-helper',
     ),
     package: join(root, 'dist', 'NomiFun.dmg'),
-    fixture: join(root, 'contracts', 'runtime-release-fixture.json'),
+    fixture: join(root, 'contracts', 'schema-fixture.json'),
     lock: join(root, 'dist', 'NomiFun.release-lock.json'),
   };
   for (const path of Object.values(paths)) mkdirSync(dirname(path), { recursive: true });
   writeFileSync(paths.host, 'real host');
-  writeFileSync(paths.sidecar, 'real sidecar');
+  writeFileSync(paths.helper, 'real helper');
   writeFileSync(paths.package, 'real package');
   writeFileSync(paths.fixture, '{"fixture":true}\n');
   return { root, paths };
@@ -53,11 +51,11 @@ describe('release lock', () => {
         sourceCommit: SOURCE_COMMIT,
         platform: 'x86_64-pc-windows-msvc',
         host: paths.host,
-        sidecars: {},
         packagePath: paths.package,
       });
 
-      expect(lock.sidecars).toEqual({});
+      expect(lock.schema_version).toBe('2.0.0');
+      expect(Object.hasOwn(lock, 'sidecars')).toBe(false);
       expect(verifyReleaseLock(lock, { root })).toEqual(
         expect.objectContaining({
           status: 'pass',
@@ -83,7 +81,7 @@ describe('release lock', () => {
         sourceCommit: SOURCE_COMMIT,
         platform: 'aarch64-apple-darwin',
         host: paths.host,
-        sidecars: { macos_desktop_arm64: paths.sidecar },
+        helpers: [paths.helper],
         packagePath: paths.package,
       });
       expect(Object.keys(lock)).toEqual([
@@ -91,12 +89,11 @@ describe('release lock', () => {
         'source_commit',
         'platform',
         'host',
-        'sidecars',
         'helpers',
         'package',
         'legal',
       ]);
-      expect(lock.helpers).toEqual([]);
+      expect(lock.helpers).toHaveLength(1);
       expect(lock.legal).toEqual([]);
       writeReleaseLock(paths.lock, lock);
 
@@ -105,12 +102,12 @@ describe('release lock', () => {
       writeFileSync(paths.fixture, '{"fixture":"changed but irrelevant"}\n');
       expect(readAndVerifyReleaseLock(paths.lock, { root }).status).toBe('pass');
 
-      writeFileSync(paths.sidecar, 'mutated sidecar');
+      writeFileSync(paths.helper, 'mutated helper');
       const mismatch = readAndVerifyReleaseLock(paths.lock, { root });
       expect(mismatch.status).toBe('fail');
       expect(mismatch.checks).toContainEqual(
         expect.objectContaining({
-          id: 'sidecars.macos_desktop_arm64',
+          id: 'helpers[0]',
           status: 'fail',
           reason: 'digest_mismatch',
         }),
@@ -128,7 +125,6 @@ describe('release lock', () => {
         sourceCommit: SOURCE_COMMIT,
         platform: 'aarch64-apple-darwin',
         host: paths.host,
-        sidecars: { macos_desktop_arm64: paths.sidecar },
         packagePath: paths.package,
       });
       unlinkSync(paths.package);
@@ -140,6 +136,31 @@ describe('release lock', () => {
           status: 'blocked',
           reason: 'artifact_missing',
         }),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('does not silently convert retired sidecar inputs or locks', () => {
+    const { root, paths } = fixtureTree();
+    try {
+      const input = {
+        root,
+        sourceCommit: SOURCE_COMMIT,
+        platform: 'aarch64-apple-darwin',
+        host: paths.host,
+        packagePath: paths.package,
+      };
+      expect(() => createReleaseLock({ ...input, sidecars: {} }))
+        .toThrow('unsupported release-lock inputs');
+      const current = createReleaseLock(input);
+      const legacy = { ...current, schema_version: '1.0.0', sidecars: {} };
+      expect(verifyReleaseLock(legacy, { root })).toEqual(expect.objectContaining({
+        status: 'fail', reason: 'invalid_release_lock',
+      }));
+      expect(verifyReleaseLock({ ...current, sidecars: {} }, { root })).toEqual(
+        expect.objectContaining({ status: 'fail', reason: 'invalid_release_lock' }),
       );
     } finally {
       rmSync(root, { recursive: true, force: true });

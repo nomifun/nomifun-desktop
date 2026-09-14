@@ -225,12 +225,15 @@ if (renderedArg) {
       '!define INSTALLWEBVIEW2MODE "downloadBootstrapper"',
       'rendered installer lost the configured WebView2 mode',
     );
-    for (const target of [
-      'webui-dist',
-      'third_party\\infinite-canvas\\LICENSE',
-      'third_party\\infinite-canvas\\SOURCE.md',
-    ]) {
-      checkIncludes(rendered, target, 'rendered installer lost bundled resource: ' + target);
+    // Validate the same resource mapping as the source-config check above.
+    // Retired creative-studio files are no longer declared bundle resources;
+    // LICENSE and NOTICE remain mandatory and must be actual File entries.
+    for (const target of Object.values(requiredResources)) {
+      const path = target.replace(/[\\/]$/, '').replaceAll('/', '\\');
+      const entry = /[\\/]$/.test(target)
+        ? `CreateDirectory "$INSTDIR\\${path}"`
+        : `File /a "/oname=${path}"`;
+      checkIncludes(rendered, entry, 'rendered installer lost bundled resource: ' + target);
     }
     for (const forbidden of ['DeleteAppDataCheckbox', '$(deleteAppData)', 'RmDir /r "$LOCALAPPDATA']) {
       check(!rendered.includes(forbidden), 'rendered installer contains forbidden delete-data text: ' + forbidden);

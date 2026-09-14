@@ -160,7 +160,6 @@ function stageArtifacts(sourceCommit, hostInput, packageInput) {
       sourceCommit,
       platform: TARGET_TRIPLE,
       host,
-      sidecars: {},
       packagePath,
       legal: [license, notice],
     });

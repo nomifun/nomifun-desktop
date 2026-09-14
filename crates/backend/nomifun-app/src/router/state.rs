@@ -16,7 +16,7 @@ use nomifun_ai_agent::{
     NomiPlatformBuiltinToolAdmission,
 };
 use nomifun_agent_contracts::{
-    CapabilityConsumer, CanonicalErrorCode, CodingRuntimeFeatureInventoryPayload,
+    CapabilityConsumer, CanonicalErrorCode, platform_feature_inventory_payload,
     PluginSourceKind, RuntimeProfileKind, RuntimeTarget, VersionString,
     digest_payload,
     fresh_v4_schema_manifest_payload, official_preset_seed_manifest_payload,
@@ -29,7 +29,7 @@ use nomifun_agent_kernel::{
     CompilerEnvironment, InMemoryPluginStatePersistence, KernelRegistry,
     MaterializationPolicy,
 };
-use nomifun_agent_platform::{
+use nomifun_agent_control_plane::{
     KernelCatalogProvider,
 };
 use nomifun_api_types::{AgentResolvedSnapshot, TerminalExitEvent};
@@ -430,9 +430,14 @@ async fn reconcile_unsettled_conversation_turns_before_background_work(
     match snapshot_boot_frozen_orphan_generations(&services.conversation_repo).await {
         Ok(frozen) => {
             conversation_service.with_terminal_proof_provider(
-                crate::router::boot_terminal_proof::BootTerminalProofProvider::new(
+                crate::router::boot_terminal_proof::BootTerminalProofProvider::with_registered(
                     frozen,
                     reap_report,
+                    services.runtime_engines.restart_recovery_hooks().unwrap_or_else(|error| {
+                        tracing::error!(%error, "engine restart hooks unavailable; registered engines remain quarantined");
+                        Default::default()
+                    }),
+                    services.database.pool().clone(),
                 ),
             );
         }
@@ -505,7 +510,19 @@ async fn reconcile_unsettled_conversation_turns_before_background_work(
 }
 
 /// Build all default `ModuleStates` from application services.
+/// Compatibility entry point; production composition must use the fallible
+/// builder so its resource owner can perform startup-failure cleanup.
 pub async fn build_module_states(services: &AppServices) -> (ModuleStates, ChannelMessageLoopComponents) {
+    try_build_module_states(services).await.unwrap_or_else(|error| {
+        panic!("application module-state assembly failed: {error:#}")
+    })
+}
+
+/// Does not publish a router or consume AppServices on failure. The caller
+/// must retain and clean the partially assembled service graph before exit.
+pub(crate) async fn try_build_module_states(
+    services: &AppServices,
+) -> anyhow::Result<(ModuleStates, ChannelMessageLoopComponents)> {
     let boot = Instant::now();
     tracing::info!("startup: module state build started");
 
@@ -526,15 +543,14 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
             services.data_dir.clone(),
         )
         .await
-        .unwrap_or_else(|error| {
-            panic!("JavaScript Runtime foundation composition failed: {error:#}")
-        });
+        .map_err(|error| anyhow::anyhow!("JavaScript Runtime foundation composition failed: {error:#}"))?;
     let runtime_authority = javascript_runtime_foundation.authority();
     let (
         nomi_core_agent_api,
         plugin_state,
         plugin_runtime_participant,
         nomi_core_wave4_owners,
+        mcp_catalog_publisher,
     ) =
         build_nomi_core_agent_api_state(
             services,
@@ -542,9 +558,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
             runtime_authority.clone(),
         )
         .await
-        .unwrap_or_else(|error| {
-            panic!("Nomi-core Agent/Plugin platform composition failed: {error:#}")
-        });
+        .map_err(|error| anyhow::anyhow!("Nomi-core Agent/Plugin platform composition failed: {error:#}"))?;
     let javascript_runtime =
         super::javascript_runtime::build_javascript_runtime_state(
             javascript_runtime_foundation,
@@ -553,25 +567,19 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
             services.plugin_runtime.clone(),
         )
         .await
-        .unwrap_or_else(|error| {
-            panic!("JavaScript Runtime Manager composition failed: {error:#}")
-        });
+        .map_err(|error| anyhow::anyhow!("JavaScript Runtime Manager composition failed: {error:#}"))?;
     let service_registry = Arc::new(
         nomifun_plugin_platform::runtime::PluginRuntimeServiceModuleRegistry::new(
             services.data_dir.join("plugin-m1").join("release"),
         )
-        .unwrap_or_else(|error| {
-            panic!("Plugin Service module registry composition failed: {error}")
-        }),
+        .map_err(|error| anyhow::anyhow!("Plugin Service module registry composition failed: {error}"))?,
     );
     let service_storage = Arc::new(
         nomifun_plugin_platform::runtime::SqlitePluginRuntimeManagedStorage::new(
             services.data_dir.join("plugin-m1").join("managed"),
             services.database.pool().clone(),
         )
-        .unwrap_or_else(|error| {
-            panic!("Plugin Service managed storage composition failed: {error}")
-        }),
+        .map_err(|error| anyhow::anyhow!("Plugin Service managed storage composition failed: {error}"))?,
     );
     let service_runtime = Arc::new(
         nomifun_plugin_platform::runtime::ProductionPluginRuntimeServiceRuntimeBinding::new_with_storage(
@@ -580,9 +588,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
             Some(service_storage),
             nomifun_plugin_platform::runtime::DEFAULT_MAX_ACTIVE_SERVICE_HOSTS,
         )
-        .unwrap_or_else(|error| {
-            panic!("Plugin Service runtime composition failed: {error}")
-        }),
+        .map_err(|error| anyhow::anyhow!("Plugin Service runtime composition failed: {error}"))?,
     );
     services
         .plugin_runtime
@@ -592,9 +598,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         .plugin_runtime
         .reconcile_source_mutations()
         .await
-        .unwrap_or_else(|error| {
-            panic!("Plugin Source mutation startup reconciliation failed: {error}")
-        });
+        .map_err(|error| anyhow::anyhow!("Plugin Source mutation startup reconciliation failed: {error}"))?;
     if let Err(error) = services
         .plugin_runtime
         .reconcile_pending_deletions(services.authoritative_user_id.as_ref())
@@ -683,14 +687,10 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
             Arc::clone(&channel_components.repository),
             Arc::clone(&services.customer_service_service),
         )
-        .unwrap_or_else(|error| {
-            panic!("Nomi-core Wave 4 Channel owner installation failed: {error}")
-        });
+        .map_err(|error| anyhow::anyhow!("Nomi-core Wave 4 Channel owner installation failed: {error}"))?;
     nomi_core_wave4_owners
         .install_channel_ingress(Arc::clone(&channel_components.message_service))
-        .unwrap_or_else(|error| {
-            panic!("Nomi-core Wave 4 Channel ingress installation failed: {error}")
-        });
+        .map_err(|error| anyhow::anyhow!("Nomi-core Wave 4 Channel ingress installation failed: {error}"))?;
     tracing::info!(elapsed_ms = boot.elapsed().as_millis(), "startup: channel state built");
 
     let agent_service = AgentService::new(
@@ -734,7 +734,11 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         },
         connection_test: build_connection_test_state(),
         file: build_file_state(services),
-        mcp: build_mcp_state(services),
+        mcp: {
+            let mut state = build_mcp_state(services);
+            state.config_service = state.config_service.with_catalog_publisher(mcp_catalog_publisher);
+            state
+        },
         skill: skill_state,
         channel: channel_state,
         cron,
@@ -771,7 +775,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         "startup: module state build completed"
     );
 
-    (states, channel_components)
+    Ok((states, channel_components))
 }
 
 /// Build the persistent Agent Settings control plane used by the current
@@ -791,13 +795,10 @@ async fn build_nomi_core_agent_api_state(
     nomifun_plugin_platform::application::PluginRouterState,
     Arc<super::plugin_platform::NomiCorePluginRuntimeParticipant>,
     Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
+    Arc<dyn nomifun_mcp::service::McpCatalogPublisher>,
 )> {
     const CONTRACT_VERSION: &str = "1.0.0";
-    const RUNTIME_FEATURE_INVENTORY_JSON: &str = include_str!(
-        "../../../nomifun-agent-contracts/contracts/runtime/coding-runtime-feature-inventory.payload.json"
-    );
-
-    let builtin_plan = super::nomi_core_builtins::build(services)?;
+    let builtin_plan = super::nomi_core_builtins::build(services).await?;
     let wave4_owners = Arc::clone(&builtin_plan.wave4_owners);
     let robot_owner = builtin_plan.robot_owner.clone();
     wave4_owners
@@ -805,10 +806,7 @@ async fn build_nomi_core_agent_api_state(
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let registrations = builtin_plan.registrations;
-    let feature_inventory: CodingRuntimeFeatureInventoryPayload =
-        serde_json::from_str(RUNTIME_FEATURE_INVENTORY_JSON)?;
-    feature_inventory
-        .validate()
+    let feature_inventory = platform_feature_inventory_payload()
         .map_err(|error| anyhow::anyhow!(error.message))?;
     let feature_digest = digest_payload(&feature_inventory)?;
 
@@ -917,7 +915,7 @@ async fn build_nomi_core_agent_api_state(
     let catalog = Arc::new(
         KernelCatalogProvider::new(Arc::clone(&kernel))
             .with_unavailable_capabilities(unavailable_capabilities)
-            .with_plugin_product_publication_source(plugin_catalog),
+            .with_miniapp_publication_source(plugin_catalog),
     );
     let plugin = super::plugin_platform::build_nomi_core_plugin_state(
         services.database.pool().clone(),
@@ -932,6 +930,10 @@ async fn build_nomi_core_agent_api_state(
     )
     .await?;
     let plugin_state = plugin.router.clone();
+    let mcp_catalog_publisher = plugin.mcp_catalog_publisher(
+        Arc::new(nomifun_db::SqliteMcpServerRepository::new(services.database.pool().clone())),
+        Arc::clone(&builtin_plan.wave2_owner),
+    );
     let plugin_runtime_participant =
         Arc::clone(&plugin.runtime_participant);
 
@@ -959,13 +961,14 @@ async fn build_nomi_core_agent_api_state(
     let compiler = PresetRevisionCompiler::new(templates.clone())
         .with_canonical_registry(Arc::clone(&kernel), environment.clone())
         .with_runtime_validator(move |payload, snapshot| {
-            if payload.runtime_engine.is_none() { return Ok(()); }
+            if payload.runtime_engine.is_none() {
+                return super::runtime_engines::validate_nomi_snapshot(snapshot).map_err(|error| error.to_string());
+            }
             runtime_engines.validate_agent(payload, snapshot)
                 .map(|_| ()).map_err(|error| error.to_string())
         });
-    // The Nomi engine exposes its existing session-scoped ToolSearch activation
-    // boundary. AgentPreset on-demand capabilities are projected onto that
-    // deferred tool set instead of being rejected by the control plane.
+    // Both official engines consume the same frozen enabled-capability ceiling.
+    // Saving a new revision, not an in-turn activation, changes that selection.
     let store = Arc::new(NomiCoreControlPlaneStore::new(
         services.database.pool().clone(),
     ));
@@ -999,10 +1002,25 @@ async fn build_nomi_core_agent_api_state(
         .map_err(|error| {
             anyhow::anyhow!("{}: {}", error.code(), error.message())
         })?;
+    services.runtime_engines.register_restart_recovery(&super::coding_runtime_host::descriptor(),
+        Arc::new(super::coding_runtime_recovery::CodingRestartRecovery::new(services.database.pool().clone())))?;
+    let engine_sessions = Arc::new(super::engine_session_host::EngineSessionHost::new(
+        &conversation_owner, Arc::clone(&control_plane), &services.runtime_engines, services.database.pool().clone(), services.encryption_key,
+        super::engine_kernel_session::EngineKernelAssembly {
+            kernel: Arc::clone(&kernel), environment: environment.clone(), wave2: Arc::clone(&builtin_plan.wave2_owner),
+            miniapp: super::engine_miniapp_tools::MiniAppOwner {
+                application: Arc::clone(&services.plugin_runtime),
+                receipts: super::hosted_effect_receipts::HostedEffectReceipts::new(services.database.pool().clone()),
+            },
+            robot: robot_owner.clone(),
+        },
+        Arc::clone(&plugin.skill_artifacts),
+    ));
+    services.runtime_engines.install_session_host(Arc::clone(&engine_sessions))?;
     services.runtime_engines.install(super::coding_runtime_host::factory(
-        Arc::clone(&conversation_owner), Arc::clone(&control_plane),
-        Arc::clone(&kernel), environment.clone(),
-        services.database.pool().clone(), services.encryption_key,
+        engine_sessions,
+        services.database.pool().clone(),
+        Arc::clone(&plugin.schema_resolver),
     ))?;
     conversation_owner.install_runtime_engines(Arc::clone(&services.runtime_engines), Arc::downgrade(&control_plane))?;
     services
@@ -1021,6 +1039,9 @@ async fn build_nomi_core_agent_api_state(
                 resource_bindings.clone(),
                 robot_owner,
                 Arc::clone(&services.plugin_runtime),
+                Arc::clone(&builtin_plan.wave2_owner),
+                Arc::clone(&plugin.skill_artifacts),
+                services.database.pool().clone(),
             ),
         ))?;
     let remote_repository: Arc<dyn IRemoteBindingRepository> = Arc::new(
@@ -1040,6 +1061,7 @@ async fn build_nomi_core_agent_api_state(
         plugin_state,
         plugin_runtime_participant,
         wave4_owners,
+        mcp_catalog_publisher,
     ))
 }
 
@@ -2867,7 +2889,7 @@ mod tests {
     fn boot_orphan_sweep_is_a_structural_barrier_before_every_work_producer() {
         let source = include_str!("state.rs");
         let build = source
-            .split_once("pub async fn build_module_states")
+            .split_once("pub(crate) async fn try_build_module_states")
             .expect("module-state builder must exist")
             .1
             .split_once("/// Build the process-wide preset catalog")
@@ -2904,7 +2926,7 @@ mod tests {
 
         let routes = include_str!("routes.rs");
         let module_build = routes
-            .find("build_module_states(services).await")
+            .find("try_build_module_states(services).await")
             .expect("router must await module-state construction");
         let channel_loop = routes
             .find(".message_loop")

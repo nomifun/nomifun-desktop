@@ -13,7 +13,7 @@ use nomifun_common::AppError;
 
 use crate::runtime_registry::AgentRuntimeFactory;
 use crate::types::AgentRuntimeBuildOptions;
-use crate::{AgentRuntimeHandle, RegisteredAgentRuntime};
+use crate::{AgentRuntimeHandle, RegisteredAgentRuntime, RuntimeEngineAdmission};
 
 /// A host-installed implementation, not a client-supplied executable path.
 pub type RuntimeEngineFactory = Arc<
@@ -46,14 +46,16 @@ fn invalid(message: &str) -> AppError {
     AppError::BadRequest(format!("Runtime engine contract: {message}"))
 }
 
+#[derive(Clone)]
 struct Registration {
     descriptor: RuntimeEngineDescriptor,
     factory: RuntimeEngineFactory,
+    admission: Arc<dyn RuntimeEngineAdmission>,
 }
 
 /// Mutated during trusted host composition, then shared immutably using Arc.
 /// Registration does not grant any model, workspace, tool or process authority.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct RuntimeEngineCatalog {
     builds: BTreeMap<(String, String), Registration>,
     channels: BTreeMap<(String, String), String>,
@@ -64,6 +66,7 @@ impl RuntimeEngineCatalog {
         &mut self,
         descriptor: RuntimeEngineDescriptor,
         factory: RuntimeEngineFactory,
+        admission: Arc<dyn RuntimeEngineAdmission>,
     ) -> Result<(), AppError> {
         descriptor.validate()?;
         let key = (descriptor.family_id.clone(), descriptor.build_id.clone());
@@ -78,9 +81,29 @@ impl RuntimeEngineCatalog {
             Registration {
                 descriptor,
                 factory,
+                admission,
             },
         );
         Ok(())
+    }
+
+    /// Declare an alias once during composition. Unlike `set_channel`, this
+    /// rejects duplicate declarations, including an identical target.
+    pub fn register_channel(
+        &mut self,
+        family_id: &str,
+        channel: &str,
+        build_id: &str,
+    ) -> Result<(), AppError> {
+        if self
+            .channels
+            .contains_key(&(family_id.to_owned(), channel.to_owned()))
+        {
+            return Err(AppError::Conflict(
+                "Runtime engine channel is already registered".into(),
+            ));
+        }
+        self.set_channel(family_id, channel, build_id)
     }
 
     pub fn set_channel(
@@ -168,7 +191,7 @@ impl RuntimeEngineCatalog {
             .builds
             .get(&(binding.family_id.clone(), binding.build_id.clone()))
             .ok_or_else(|| {
-                invalid("bound build is unavailable; install it or explicitly fork the Session")
+                invalid("bound build is not bundled; use an application build containing it (Fork preserves the exact binding)")
             })?;
         let descriptor = &registration.descriptor;
         if binding.build_digest != descriptor.build_digest
@@ -179,12 +202,51 @@ impl RuntimeEngineCatalog {
         if !descriptor.supported_profiles.contains(&binding.profile) {
             return Err(invalid("bound profile is unsupported"));
         }
+        if registration.admission.uses_platform_history_context(binding)
+            && registration.admission.uses_nomi_session(binding) {
+            return Err(invalid("private Nomi and platform-only context policies conflict"));
+        }
         Ok(registration)
     }
 
     /// Validate a restored binding without constructing or executing a runtime.
     pub fn validate_binding(&self, binding: &RuntimeEngineBinding) -> Result<(), AppError> {
         self.registration(binding).map(|_| ())
+    }
+
+    /// Private codec eligibility is an exact, source-registered policy. A
+    /// missing/drifted build has no Nomi authority; boot recovery may still
+    /// consult its separately registered exact-build recovery hook. This is
+    /// not runnable-build admission: `open` continues to reject such bindings.
+    pub fn uses_nomi_session(&self, binding: &RuntimeEngineBinding) -> Result<bool, AppError> {
+        binding.validate()?;
+        Ok(match self.registration(binding) {
+            Ok(registration) => registration.admission.uses_nomi_session(binding),
+            Err(_) => false,
+        })
+    }
+
+    /// Unlike private-codec routing this is runnable-build maintenance: a
+    /// missing build must fail, not claim that a historical codec was cleared.
+    pub fn uses_platform_history_context(&self, binding: &RuntimeEngineBinding) -> Result<bool, AppError> {
+        let registration = self.registration(binding)?;
+        Ok(registration.admission.uses_platform_history_context(binding))
+    }
+
+    pub fn validate_snapshot(
+        &self,
+        binding: &RuntimeEngineBinding,
+        snapshot: &nomifun_agent_contracts::ResolvedSnapshotEnvelope,
+    ) -> Result<(), AppError> {
+        self.registration(binding)?.admission.validate_snapshot(binding, snapshot)
+    }
+
+    pub fn validate_session_extra(
+        &self,
+        binding: &RuntimeEngineBinding,
+        extra: &serde_json::Value,
+    ) -> Result<(), AppError> {
+        self.registration(binding)?.admission.validate_session_extra(binding, extra)
     }
 
     /// Called inside the existing runtime registry's guarded factory future.
@@ -195,6 +257,7 @@ impl RuntimeEngineCatalog {
         options: AgentRuntimeBuildOptions,
     ) -> Result<AgentRuntimeHandle, AppError> {
         let registration = self.registration(binding)?;
+        registration.admission.validate_session_extra(binding, &options.extra)?;
         (registration.factory)(options, binding.clone())
             .await
             .map(AgentRuntimeHandle::Registered)
@@ -236,6 +299,10 @@ mod tests {
         Arc::new(|_, _| Box::pin(async { panic!("resolution must not construct a runtime") }))
     }
 
+    fn admission() -> Arc<dyn RuntimeEngineAdmission> {
+        Arc::new(crate::RuntimeEngineSupport::platform())
+    }
+
     fn channel(family: &str) -> RuntimeEngineSelector {
         RuntimeEngineSelector::Channel {
             family_id: family.to_owned(),
@@ -248,7 +315,7 @@ mod tests {
         let mut catalog = RuntimeEngineCatalog::default();
         for family in ["example.local", "example.remote", "example.workflow"] {
             catalog
-                .register(descriptor(family, "build-1"), never_open())
+                .register(descriptor(family, "build-1"), never_open(), admission())
                 .unwrap();
             catalog
                 .set_channel(family, "user.preview", "build-1")
@@ -266,7 +333,7 @@ mod tests {
         let mut catalog = RuntimeEngineCatalog::default();
         for build in ["one", "two"] {
             catalog
-                .register(descriptor("custom", build), never_open())
+                .register(descriptor("custom", build), never_open(), admission())
                 .unwrap();
         }
         catalog
@@ -293,14 +360,14 @@ mod tests {
     fn registration_is_immutable_and_rejects_incompatible_contracts() {
         let mut catalog = RuntimeEngineCatalog::default();
         let original = descriptor("custom", "one");
-        catalog.register(original.clone(), never_open()).unwrap();
-        assert!(catalog.register(original.clone(), never_open()).is_err());
+        catalog.register(original.clone(), never_open(), admission()).unwrap();
+        assert!(catalog.register(original.clone(), never_open(), admission()).is_err());
         let mut changed = original.clone();
         changed.build_digest = "b".repeat(64);
-        assert!(catalog.register(changed, never_open()).is_err());
+        assert!(catalog.register(changed, never_open(), admission()).is_err());
         let mut incompatible = descriptor("other", "one");
         incompatible.host_contract_version += 1;
-        assert!(catalog.register(incompatible, never_open()).is_err());
+        assert!(catalog.register(incompatible, never_open(), admission()).is_err());
         assert_eq!(catalog.list(), vec![original]);
     }
 
@@ -308,7 +375,7 @@ mod tests {
     fn restored_bindings_fail_closed_on_missing_build_drift_or_profile() {
         let mut catalog = RuntimeEngineCatalog::default();
         catalog
-            .register(descriptor("custom", "one"), never_open())
+            .register(descriptor("custom", "one"), never_open(), admission())
             .unwrap();
         let selector = RuntimeEngineSelector::Exact {
             family_id: "custom".to_owned(),
@@ -353,5 +420,27 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn unsupported_session_overlay_is_rejected_before_factory_execution() {
+        let mut catalog = RuntimeEngineCatalog::default();
+        catalog.register(descriptor("community.planner", "one"), never_open(),
+            Arc::new(crate::RuntimeEngineSupport::enabled_only([]))).unwrap();
+        let binding = catalog.resolve(&RuntimeEngineSelector::Exact {
+            family_id: "community.planner".into(), build_id: "one".into(), build_digest: "a".repeat(64),
+        }, "custom.workflow").unwrap();
+        let options = AgentRuntimeBuildOptions {
+            user_id: nomifun_common::generate_id(),
+            conversation_id: nomifun_common::generate_id(),
+            agent_type: nomifun_common::AgentType::Nomi,
+            workspace: "workspace".into(), model: None,
+            delegation_policy: Default::default(),
+            extra: serde_json::json!({"skills":["pdf"]}),
+            conversation_created_at: None, workspace_binding_lease: None,
+        };
+        let error = catalog.open(&binding, options).await.err().expect("admission must reject before opening");
+        assert!(error.to_string().contains("community.planner"));
+        assert!(error.to_string().contains("session Skills"));
     }
 }

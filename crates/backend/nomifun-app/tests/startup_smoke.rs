@@ -87,37 +87,6 @@ async fn ready_v4_startup_fails_closed_without_legacy_database_or_shell_assets()
     assert!(tmp.path().join(FRESH_V4_DATABASE_FILE).is_file());
 }
 
-#[tokio::test]
-async fn embedded_server_selects_fresh_v4_host_before_any_legacy_data_layer() {
-    let tmp = TempDir::new().unwrap();
-    let cli = nomifun_app::cli::Cli::parse_from([
-        "nomicore-startup-test",
-        "--data-dir",
-        tmp.path().to_str().unwrap(),
-    ]);
-
-    let env = bootstrap::init_environment(&cli, "").unwrap();
-    let host = env.canonical_host().unwrap();
-    let application = host.compose(&env.config).await.unwrap();
-    let actual_capabilities = application
-        .platform()
-        .materialized_registry()
-        .unwrap()
-        .capabilities
-        .keys()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    let expected_capabilities = nomifun_agent_domain_support::c7_package_specs()
-        .into_iter()
-        .flat_map(|package| package.capabilities)
-        .map(|capability| nomifun_agent_contracts::CapabilityId::from(capability.id))
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(actual_capabilities, expected_capabilities);
-    application.close().await.unwrap();
-    assert!(tmp.path().join(FRESH_V4_DATABASE_FILE).is_file());
-    assert!(!tmp.path().join("nomifun-backend.db").exists());
-    assert!(!tmp.path().join("builtin-skills").exists());
-}
 
 #[tokio::test]
 async fn desktop_startup_uses_the_original_nomi_core() {

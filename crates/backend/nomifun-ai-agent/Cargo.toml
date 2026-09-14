@@ -19,6 +19,7 @@ nomifun-agent-contracts.workspace = true
 nomifun-agent-kernel.workspace = true
 nomifun-model-invoke.workspace = true
 nomifun-coding-engine.workspace = true
+nomifun-engine-core.workspace = true
 nomifun-chat-model-broker.workspace = true
 nomifun-net.workspace = true
 reqwest.workspace = true

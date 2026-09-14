@@ -89,7 +89,7 @@ pub struct CapabilityInvocationContext {
 
 /// Host-owned admission for a role member.
 ///
-/// Agent calls carry the session Snapshot/activation facts. Non-Agent
+/// Agent calls carry the session Snapshot/frozen enabled-set facts. Non-Agent
 /// operations carry an independently transferable exact Provider lock and the
 /// typed resources admitted for that operation. The latter is deliberately
 /// self-contained so an operation does not need a fabricated AgentSession or

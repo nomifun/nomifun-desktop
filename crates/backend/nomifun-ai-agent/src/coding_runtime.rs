@@ -1,20 +1,13 @@
 //! Coding implementation of the same open runtime contract used by Nomi.
 //!
-//! This adapter owns tasks and event projection, not Session persistence or
-//! tool authority. The composition root must supply admitted host ports. It is
-//! not installed on product routes until those ports are wired to their owner.
+//! This adapter supplies Coding strategy/event projection to the shared engine
+//! lifecycle SDK. Production composition supplies admitted Session/Broker/Kernel
+//! ports; neither adapter nor SDK creates a second persistence/authority owner.
 
 use std::collections::BTreeMap;
-use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use futures_util::{
-    FutureExt,
-    future::{BoxFuture, Shared},
-};
-use nomifun_chat_model_broker::ChatFinishReason;
 use nomifun_coding_engine::{
     CodingEngine, CodingEngineBuild, CodingEngineError, CodingEngineEvent, CodingEventSink,
     CodingModelPort, CodingToolInvoker, CodingTurnRequest, CodingTurnTerminal, EngineBinding,
@@ -24,11 +17,10 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::protocol::events::{
-    AgentStreamEvent, StartEventData, TextEventData, ThinkingEventData, ToolCallEventData,
-    ToolCallStatus, TurnStopReason,
+    AgentStreamEvent, TextEventData, ThinkingEventData, ToolCallEventData, ToolCallStatus,
 };
 use crate::protocol::send_error::AgentSendError;
-use crate::runtime_state::{AgentRuntimeState, AgentRuntimeTurn};
+use crate::engine_sdk::{EngineProgress, EngineSessionDriver, EngineTurnOutcome, EngineTurnOutput, EngineTurnTerminal, HostedAgentRuntime};
 use crate::types::{AgentRuntimeBuildOptions, SendMessageData};
 use crate::{
     AgentRuntimeControl, RegisteredAgentRuntime, RuntimeEngineDescriptor, RuntimeTeardown,
@@ -39,6 +31,15 @@ use crate::{
 /// Session owner. They must not infer authority from user/model JSON.
 #[async_trait]
 pub trait CodingRuntimeHost: Send + Sync {
+    async fn queue_steer(&self, _delivery: crate::RuntimeSteerDelivery) -> Result<bool, AppError> {
+        Err(AppError::BadRequest("Coding host does not support receipt-bound steering".into()))
+    }
+    /// Return the same canonical active set used by tool admission. A host
+    /// without a materialized Snapshot must explicitly return None.
+    fn capability_activation_snapshot(
+        &self,
+    ) -> Result<Option<crate::AgentCapabilityActivationSnapshot>, AppError>;
+
     /// Assemble canonical history/context and claim the exact turn. The token
     /// fences all preparation, model and tool work for this logical turn.
     async fn prepare_turn(
@@ -54,6 +55,20 @@ pub trait CodingRuntimeHost: Send + Sync {
         message: &SendMessageData,
         event: &CodingEngineEvent,
     ) -> Result<(), AppError>;
+
+    /// Hosts accepting concurrent steering must override this and atomically
+    /// check the inbox and persist admission. False must record no ToolStarted.
+    async fn admit_tool(
+        &self,
+        message: &SendMessageData,
+        event: &CodingEngineEvent,
+    ) -> Result<bool, AppError> {
+        if !matches!(event, CodingEngineEvent::ToolStarted { .. }) {
+            return Err(AppError::BadRequest("tool admission requires ToolStarted".into()));
+        }
+        self.record_event(message, event).await?;
+        Ok(true)
+    }
 
     /// Required on every exit, including preparation failure and cancellation.
     /// Success proves turn-scoped tools/processes are quiescent.
@@ -84,41 +99,22 @@ fn contract_error(error: CodingEngineError) -> AppError {
     AppError::Conflict(format!("Coding runtime: {error}"))
 }
 
-type TurnCompletion = Shared<BoxFuture<'static, Result<(), String>>>;
-
-struct ActiveTurn {
-    cancellation: CancellationToken,
-    done: Arc<AtomicBool>,
-    completion: TurnCompletion,
-}
-
-struct CompletionGuard(Arc<AtomicBool>);
-impl Drop for CompletionGuard {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
-    }
-}
-
-struct SharedRuntime {
-    owner_id: String,
-    state: AgentRuntimeState,
-    closed: CancellationToken,
-    active: Mutex<Option<ActiveTurn>>,
-    cleanup: tokio::sync::Mutex<bool>,
-    host: Arc<dyn CodingRuntimeHost>,
-}
-
 pub struct CodingAgentRuntime {
-    shared: Arc<SharedRuntime>,
+    runtime: HostedAgentRuntime,
+}
+
+struct CodingSessionDriver {
+    owner_id: String,
     engine: Arc<CodingEngine>,
     binding: EngineBinding,
     model: Arc<dyn CodingModelPort>,
     tools: Arc<dyn CodingToolInvoker>,
+    host: Arc<dyn CodingRuntimeHost>,
 }
 
 impl CodingAgentRuntime {
-    /// Called by a registered factory only after it has admitted the exact
-    /// generic catalog binding and resolved these Session-specific ports.
+    /// The Coding loop plugs into the same lifecycle SDK as source-integrated
+    /// engines; only its execution/context policy and semantic codec differ.
     pub fn new(
         options: &AgentRuntimeBuildOptions,
         engine: Arc<CodingEngine>,
@@ -127,48 +123,22 @@ impl CodingAgentRuntime {
         tools: Arc<dyn CodingToolInvoker>,
         host: Arc<dyn CodingRuntimeHost>,
     ) -> Result<Self, AppError> {
-        nomifun_common::UserId::parse(&options.user_id).map_err(|_| {
-            AppError::BadRequest("Coding runtime owner must be canonical".to_owned())
-        })?;
-        nomifun_common::ConversationId::parse(&options.conversation_id).map_err(|_| {
-            AppError::BadRequest("Coding runtime Session must be canonical".to_owned())
-        })?;
-        if options.workspace.trim().is_empty()
-            || binding.agent_session_id().as_ref() != options.conversation_id
-        {
-            return Err(AppError::Conflict(
-                "Coding runtime Session/workspace binding mismatch".to_owned(),
-            ));
+        if binding.agent_session_id().as_ref() != options.conversation_id {
+            return Err(AppError::Conflict("Coding runtime Session binding mismatch".into()));
         }
-        // Validate build/profile/snapshot before any tasks or tools are started.
-        engine
-            .open_session(binding.clone(), model.clone(), tools.clone(), None)
+        engine.open_session(binding.clone(), model.clone(), tools.clone(), None)
             .map_err(contract_error)?;
-        Ok(Self {
-            shared: Arc::new(SharedRuntime {
-                owner_id: options.user_id.clone(),
-                state: AgentRuntimeState::new(
-                    options.conversation_id.clone(),
-                    options.workspace.clone(),
-                    2048,
-                ),
-                closed: CancellationToken::new(),
-                active: Mutex::new(None),
-                cleanup: tokio::sync::Mutex::new(false),
-                host,
-            }),
-            engine,
-            binding,
-            model,
-            tools,
-        })
+        let driver = Arc::new(CodingSessionDriver {
+            owner_id: options.user_id.clone(), engine, binding, model, tools, host,
+        });
+        Ok(Self { runtime: HostedAgentRuntime::new(options, driver)? })
     }
 }
 
 struct TurnProjection {
-    shared: Arc<SharedRuntime>,
+    host: Arc<dyn CodingRuntimeHost>,
     message: SendMessageData,
-    turn: AgentRuntimeTurn,
+    output: EngineTurnOutput,
     calls: Mutex<BTreeMap<String, ToolCallEventData>>,
     terminal: Mutex<Option<CodingEngineEvent>>,
 }
@@ -186,22 +156,30 @@ impl CodingEventSink for TurnProjection {
             *self.terminal.lock().unwrap_or_else(|e| e.into_inner()) = Some(event);
             return Ok(());
         }
-        self.shared
-            .host
+        self.host
             .record_event(&self.message, &event)
             .await
             .map_err(|error| CodingEngineError::InvalidContract(error.to_string()))?;
+        self.project(event)
+    }
+
+    async fn admit_tool(&self, event: CodingEngineEvent) -> Result<bool, CodingEngineError> {
+        let admitted = self.host.admit_tool(&self.message, &event).await
+            .map_err(|error| CodingEngineError::InvalidContract(error.to_string()))?;
+        if admitted { self.project(event)?; }
+        Ok(admitted)
+    }
+}
+
+impl TurnProjection {
+    fn project(&self, event: CodingEngineEvent) -> Result<(), CodingEngineError> {
         let projected = match event {
-            CodingEngineEvent::TurnStarted { .. } => {
-                Some(AgentStreamEvent::Start(StartEventData {
-                    session_id: Some(self.shared.state.conversation_id().to_owned()),
-                }))
-            }
+            CodingEngineEvent::TurnStarted { .. } => Some(EngineProgress::Started),
             CodingEngineEvent::OutputTextDelta { text, .. } => {
-                Some(AgentStreamEvent::Text(TextEventData { content: text }))
+                Some(EngineProgress::Text(TextEventData { content: text }))
             }
             CodingEngineEvent::ReasoningDelta { text, .. } => {
-                Some(AgentStreamEvent::Thinking(ThinkingEventData {
+                Some(EngineProgress::Thinking(ThinkingEventData {
                     content: text,
                     subject: None,
                     duration: None,
@@ -225,13 +203,18 @@ impl CodingEventSink for TurnProjection {
                 );
                 None
             }
+            CodingEngineEvent::ModelOutputTruncated { discarded_tool_call_ids, .. } => {
+                let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
+                for id in discarded_tool_call_ids { calls.remove(id.as_ref()); }
+                None
+            }
             CodingEngineEvent::ToolStarted { call_id, .. } => self
                 .calls
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .get(call_id.as_ref())
                 .cloned()
-                .map(AgentStreamEvent::ToolCall),
+                .map(EngineProgress::ToolCall),
             CodingEngineEvent::ToolCompleted { result, .. } => {
                 let mut call = self
                     .calls
@@ -248,271 +231,134 @@ impl CodingEventSink for TurnProjection {
                 } else {
                     ToolCallStatus::Completed
                 };
-                call.output = Some(result.output_text());
-                Some(AgentStreamEvent::ToolCall(call))
+                let instruction_read = call.call_id.starts_with("coding-instructions:")
+                    || (call.name == "read_file" && call.args.get("path").and_then(|v| v.as_str())
+                        .is_some_and(|path| path.rsplit(['/', '\\']).next().is_some_and(|name|
+                            name.eq_ignore_ascii_case("AGENTS.md") || name.eq_ignore_ascii_case("AGENTS.override.md"))));
+                call.output = Some(if instruction_read {
+                    "Repository instruction body is turn-local and omitted from the stored tool display. Re-read the current file when needed.".into()
+                } else { result.output_text() });
+                Some(EngineProgress::ToolCall(call))
             }
             // Semantics are recorded above even when there is no UI projection.
             _ => None,
         };
         if let Some(event) = projected {
-            self.shared.state.bump_activity();
-            self.shared.state.emit_for_turn(self.turn, event);
+            self.output.publish(event);
         }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl EngineSessionDriver for CodingSessionDriver {
+    async fn run_turn(
+        &self,
+        message: &SendMessageData,
+        cancellation: CancellationToken,
+        output: EngineTurnOutput,
+    ) -> Result<EngineTurnOutcome, AppError> {
+        let projection = Arc::new(TurnProjection {
+            host: self.host.clone(), message: message.clone(), output,
+            calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
+        });
+        let session = self.engine.open_session(self.binding.clone(), self.model.clone(),
+            self.tools.clone(), Some(projection.clone())).map_err(contract_error)?;
+        let request = self.host.prepare_turn(message, cancellation.clone()).await?;
+        if request.principal.principal_kind != "user" || request.principal.principal_id != self.owner_id {
+            return Err(AppError::Conflict("Coding turn principal differs from its Session owner".into()));
+        }
+        let execution = session.run_turn_cancellable(request, cancellation).await;
+        let pending = projection.terminal.lock().unwrap_or_else(|e| e.into_inner()).take();
+        match execution {
+            Ok(result) => {
+                let outcome = EngineTurnOutcome {
+                    model_steps: result.model_steps,
+                    terminal: match result.terminal {
+                        CodingTurnTerminal::Completed { finish_reason } => EngineTurnTerminal::Completed { finish_reason },
+                        CodingTurnTerminal::Cancelled => EngineTurnTerminal::Cancelled,
+                        CodingTurnTerminal::Failed { message } => EngineTurnTerminal::Failed { message },
+                    },
+                };
+                if pending.as_ref() != Some(&coding_terminal(&outcome)) {
+                    return Err(AppError::Conflict("Coding result and terminal event disagree or terminal is absent".into()));
+                }
+                Ok(outcome)
+            }
+            Err(CodingEngineError::Cancelled) => Ok(EngineTurnOutcome::cancelled(
+                match pending { Some(CodingEngineEvent::TurnCancelled { model_steps }) => model_steps, _ => 0 })),
+            Err(CodingEngineError::TurnFailed(message)) => {
+                let model_steps = match pending {
+                    Some(CodingEngineEvent::TurnFailed { model_steps, message: recorded }) if recorded == message => model_steps,
+                    _ => return Err(AppError::Conflict("Coding failure has no matching terminal record".into())),
+                };
+                Ok(EngineTurnOutcome { model_steps, terminal: EngineTurnTerminal::Failed { message } })
+            }
+            Err(error) => Err(contract_error(error)),
+        }
+    }
+
+    fn capability_activation_snapshot(&self) -> Result<Option<crate::AgentCapabilityActivationSnapshot>, AppError> {
+        self.host.capability_activation_snapshot()
+    }
+    fn supports_steering_context(&self) -> bool { true }
+    async fn queue_steer(&self, delivery: crate::RuntimeSteerDelivery) -> Result<bool, AppError> {
+        self.host.queue_steer(delivery).await
+    }
+    async fn cleanup_turn(&self, message: &SendMessageData) -> Result<(), AppError> {
+        self.host.cleanup_turn(message).await
+    }
+    async fn record_terminal(&self, message: &SendMessageData, outcome: &EngineTurnOutcome) -> Result<(), AppError> {
+        self.host.record_event(message, &coding_terminal(outcome)).await
+    }
+    async fn cleanup_session(&self) -> Result<(), AppError> { self.host.cleanup_session().await }
+}
+
+fn coding_terminal(outcome: &EngineTurnOutcome) -> CodingEngineEvent {
+    match &outcome.terminal {
+        EngineTurnTerminal::Completed { finish_reason } => CodingEngineEvent::TurnCompleted {
+            model_steps: outcome.model_steps, finish_reason: finish_reason.clone(),
+        },
+        EngineTurnTerminal::Cancelled => CodingEngineEvent::TurnCancelled { model_steps: outcome.model_steps },
+        EngineTurnTerminal::Failed { message } => CodingEngineEvent::TurnFailed {
+            model_steps: outcome.model_steps, message: message.clone(),
+        },
     }
 }
 
 #[async_trait]
 impl AgentRuntimeControl for CodingAgentRuntime {
-    fn agent_type(&self) -> AgentType {
-        AgentType::Nomi
+    fn agent_type(&self) -> AgentType { self.runtime.agent_type() }
+    fn conversation_id(&self) -> &str { self.runtime.conversation_id() }
+    fn workspace(&self) -> &str { self.runtime.workspace() }
+    fn status(&self) -> Option<ConversationStatus> { self.runtime.status() }
+    fn is_transport_healthy(&self) -> bool { self.runtime.is_transport_healthy() }
+    fn last_activity_at(&self) -> TimestampMs { self.runtime.last_activity_at() }
+    fn touch_activity(&self) { self.runtime.touch_activity(); }
+    fn capability_activation_snapshot(&self) -> Result<Option<crate::AgentCapabilityActivationSnapshot>, AppError> {
+        self.runtime.capability_activation_snapshot()
     }
-    fn conversation_id(&self) -> &str {
-        self.shared.state.conversation_id()
-    }
-    fn workspace(&self) -> &str {
-        self.shared.state.workspace()
-    }
-    fn status(&self) -> Option<ConversationStatus> {
-        self.shared.state.status()
-    }
-    fn is_transport_healthy(&self) -> bool {
-        !self.shared.closed.is_cancelled() && self.shared.state.is_transport_healthy()
-    }
-    fn last_activity_at(&self) -> TimestampMs {
-        self.shared.state.last_activity_at()
-    }
-    fn touch_activity(&self) {
-        self.shared.state.bump_activity();
-    }
-    fn subscribe(&self) -> broadcast::Receiver<AgentStreamEvent> {
-        self.shared.state.subscribe()
-    }
-
-    async fn send_message(&self, message: SendMessageData) -> Result<(), AgentSendError> {
-        let mut active = self.shared.active.lock().unwrap_or_else(|e| e.into_inner());
-        if !self.is_transport_healthy() {
-            return Err(AgentSendError::stream_broken(
-                "Coding runtime has been closed or quarantined",
-            ));
-        }
-        if active
-            .as_ref()
-            .is_some_and(|turn| !turn.done.load(Ordering::Acquire))
-        {
-            return Err(AgentSendError::from_app_error(AppError::Conflict(
-                "Coding runtime turn is already running".to_owned(),
-            )));
-        }
-        let cancellation = self.shared.closed.child_token();
-        let requested_cancellation = cancellation.clone();
-        let task_cancellation = cancellation.child_token();
-        let done = Arc::new(AtomicBool::new(false));
-        let guard = CompletionGuard(done.clone());
-        let shared = self.shared.clone();
-        let turn = shared.state.reset_for_new_turn(ConversationStatus::Running);
-        shared.state.bump_activity();
-        let projection = Arc::new(TurnProjection {
-            shared: shared.clone(),
-            message: message.clone(),
-            turn,
-            calls: Mutex::new(BTreeMap::new()),
-            terminal: Mutex::new(None),
-        });
-        let session = self
-            .engine
-            .open_session(
-                self.binding.clone(),
-                self.model.clone(),
-                self.tools.clone(),
-                Some(projection.clone()),
-            )
-            .map_err(|error| AgentSendError::from_app_error(contract_error(error)))?;
-        let task = tokio::spawn(async move {
-            let _guard = guard;
-            let execution = AssertUnwindSafe(async {
-                let request = tokio::select! {
-                    biased;
-                    _ = task_cancellation.cancelled() => return Err(CodingEngineError::Cancelled),
-                    request = shared.host.prepare_turn(&message, task_cancellation.clone()) => {
-                        request.map_err(|error| CodingEngineError::InvalidContract(error.to_string()))?
-                    }
-                };
-                if request.principal.principal_kind != "user"
-                    || request.principal.principal_id != shared.owner_id
-                {
-                    return Err(CodingEngineError::InvalidContract("Coding turn principal differs from its Session owner".to_owned()));
-                }
-                session.run_turn_cancellable(request, task_cancellation.clone()).await
-            }).catch_unwind().await.unwrap_or(Err(CodingEngineError::TurnPanicked));
-            task_cancellation.cancel();
-            let cleanup = AssertUnwindSafe(shared.host.cleanup_turn(&message))
-                .catch_unwind()
-                .await;
-            let cleanup = cleanup.unwrap_or_else(|_| {
-                Err(AppError::Internal(
-                    "Coding turn cleanup panicked".to_owned(),
-                ))
-            });
-            if let Err(error) = cleanup {
-                shared.state.mark_transport_broken();
-                shared.state.emit_error_data_for_turn(
-                    turn,
-                    AgentSendError::stream_broken(error.to_string()).into_stream_error(),
-                );
-                return;
-            }
-            let pending_terminal = projection
-                .terminal
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take();
-            let execution = if pending_terminal.is_none() && execution.is_ok() {
-                Err(CodingEngineError::InvalidContract(
-                    "Coding turn omitted its terminal event".to_owned(),
-                ))
-            } else {
-                execution
-            };
-            let was_cancelled = requested_cancellation.is_cancelled();
-            let terminal = if was_cancelled {
-                CodingEngineEvent::TurnCancelled {
-                    model_steps: execution.as_ref().map_or(0, |result| result.model_steps),
-                }
-            } else {
-                pending_terminal.unwrap_or_else(|| match &execution {
-                    Err(CodingEngineError::Cancelled) => {
-                        CodingEngineEvent::TurnCancelled { model_steps: 0 }
-                    }
-                    Err(error) => CodingEngineEvent::TurnFailed {
-                        model_steps: 0,
-                        message: error.to_string(),
-                    },
-                    Ok(result) => CodingEngineEvent::TurnFailed {
-                        model_steps: result.model_steps,
-                        message: "Coding turn omitted its terminal event".to_owned(),
-                    },
-                })
-            };
-            let record = AssertUnwindSafe(shared.host.record_event(&message, &terminal))
-                .catch_unwind()
-                .await;
-            if !matches!(record, Ok(Ok(()))) {
-                shared.state.mark_transport_broken();
-                shared.state.emit_error_data_for_turn(
-                    turn,
-                    AgentSendError::stream_broken(
-                        "Coding terminal could not be recorded by its Session owner",
-                    )
-                    .into_stream_error(),
-                );
-                return;
-            }
-            let terminal = if was_cancelled {
-                CodingTurnTerminal::Cancelled
-            } else {
-                match execution {
-                    Ok(result) => result.terminal,
-                    Err(CodingEngineError::Cancelled) => CodingTurnTerminal::Cancelled,
-                    Err(error) => CodingTurnTerminal::Failed {
-                        message: error.to_string(),
-                    },
-                }
-            };
-            let reason = match terminal {
-                CodingTurnTerminal::Completed { finish_reason } => match finish_reason {
-                    ChatFinishReason::Completed => TurnStopReason::EndTurn,
-                    ChatFinishReason::MaxOutputTokens => TurnStopReason::MaxTokens,
-                    ChatFinishReason::Refusal => TurnStopReason::Refusal,
-                    ChatFinishReason::Cancelled => TurnStopReason::Cancelled,
-                    ChatFinishReason::ToolCalls => TurnStopReason::MaxTurnRequests,
-                },
-                CodingTurnTerminal::Cancelled => TurnStopReason::Cancelled,
-                CodingTurnTerminal::Failed { message } => {
-                    shared.state.emit_error_data_for_turn(
-                        turn,
-                        AgentSendError::from_app_error(AppError::Conflict(message))
-                            .into_stream_error(),
-                    );
-                    return;
-                }
-            };
-            shared.state.emit_finish_for_turn(
-                turn,
-                Some(shared.state.conversation_id().to_owned()),
-                Some(reason),
-            );
-        });
-        let completion = async move { task.await.map_err(|error| error.to_string()) }
-            .boxed()
-            .shared();
-        *active = Some(ActiveTurn {
-            cancellation,
-            done,
-            completion,
-        });
-        Ok(())
-    }
-
-    async fn cancel(&self) -> Result<(), AppError> {
-        let completion = {
-            let active = self.shared.active.lock().unwrap_or_else(|e| e.into_inner());
-            active.as_ref().map(|turn| {
-                turn.cancellation.cancel();
-                turn.completion.clone()
-            })
-        };
-        if let Some(completion) = completion {
-            completion.await.map_err(AppError::Internal)?;
-        }
-        if !self.shared.state.is_transport_healthy() {
-            return Err(AppError::Conflict(
-                "Coding turn cleanup or event recording failed".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn kill(&self, _reason: Option<AgentKillReason>) -> Result<(), AppError> {
-        self.shared.closed.cancel();
-        Ok(())
-    }
+    fn subscribe(&self) -> broadcast::Receiver<AgentStreamEvent> { self.runtime.subscribe() }
+    async fn send_message(&self, message: SendMessageData) -> Result<(), AgentSendError> { self.runtime.send_message(message).await }
+    async fn cancel(&self) -> Result<(), AppError> { self.runtime.cancel().await }
+    fn kill(&self, reason: Option<AgentKillReason>) -> Result<(), AppError> { self.runtime.kill(reason) }
 }
 
 #[async_trait]
 impl RegisteredAgentRuntime for CodingAgentRuntime {
-    fn kill_and_wait(&self, _reason: Option<AgentKillReason>) -> RuntimeTeardown {
-        self.shared.closed.cancel();
-        let shared = self.shared.clone();
-        Box::pin(async move {
-            let mut cleaned = shared.cleanup.lock().await;
-            if *cleaned {
-                return Ok(());
-            }
-            let completion = shared
-                .active
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .as_ref()
-                .map(|turn| turn.completion.clone());
-            let joined = match completion {
-                Some(completion) => completion.await,
-                None => Ok(()),
-            };
-            AssertUnwindSafe(shared.host.cleanup_session())
-                .catch_unwind()
-                .await
-                .map_err(|_| AppError::Internal("Coding Session cleanup panicked".to_owned()))??;
-            joined.map_err(AppError::Internal)?;
-            *cleaned = true;
-            Ok(())
-        })
+    fn supports_steering_context(&self) -> bool { self.runtime.supports_steering_context() }
+    async fn steer_with_receipt(&self, delivery: crate::RuntimeSteerDelivery) -> Result<bool, AppError> {
+        self.runtime.steer_with_receipt(delivery).await
     }
+    fn kill_and_wait(&self, reason: Option<AgentKillReason>) -> RuntimeTeardown { self.runtime.kill_and_wait(reason) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime_state::AgentRuntimeState;
+    use crate::protocol::events::TurnStopReason;
+    use nomifun_chat_model_broker::ChatFinishReason;
     use crate::runtime_registry::AgentRuntimeFactory;
     use crate::{
         AgentRuntimeHandle, AgentRuntimeRegistry, InMemoryAgentRuntimeRegistry,
@@ -532,7 +378,7 @@ mod tests {
         CodingToolResult, EngineBuildId, EngineFamilyId,
     };
     use std::collections::BTreeSet;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     const OWNER: &str = "0190f5fe-7c00-7a00-8000-000000000001";
@@ -627,6 +473,12 @@ mod tests {
 
     #[async_trait]
     impl CodingRuntimeHost for Host {
+        fn capability_activation_snapshot(
+            &self,
+        ) -> Result<Option<crate::AgentCapabilityActivationSnapshot>, AppError> {
+            Ok(None)
+        }
+
         async fn prepare_turn(
             &self,
             message: &SendMessageData,
@@ -805,18 +657,16 @@ mod tests {
 
         let host = Host::new();
         let runtime = runtime(host.clone(), model(false, false));
-        let turn = runtime
-            .shared
-            .state
-            .reset_for_new_turn(ConversationStatus::Running);
+        let state = AgentRuntimeState::new(SESSION, "projection-workspace", 32);
+        let turn = state.reset_for_new_turn(ConversationStatus::Running);
         let projection = TurnProjection {
-            shared: runtime.shared.clone(),
+            host: host.clone(),
             message: message(),
-            turn,
+            output: EngineTurnOutput::new(state.clone(), turn),
             calls: Mutex::new(BTreeMap::new()),
             terminal: Mutex::new(None),
         };
-        let mut events = runtime.subscribe();
+        let mut events = state.subscribe();
         let call_id = ToolCallId::from("tool-call");
         projection
             .emit(CodingEngineEvent::ToolCallCompleted {
@@ -1054,6 +904,7 @@ mod tests {
                         Ok(Arc::new(runtime) as Arc<dyn RegisteredAgentRuntime>)
                     })
                 }),
+                Arc::new(crate::RuntimeEngineSupport::enabled_only([])),
             )
             .unwrap();
         let exact = catalog.resolve(&selector, "coding").unwrap();

@@ -1,5 +1,16 @@
 //! File system operations: read/write, path safety, file watching, snapshots, and zip.
 pub mod browse;
+mod agent_instruction_scope;
+mod agent_patch_lines;
+mod agent_patch_outcome;
+mod agent_patch_source;
+pub use agent_patch_source::AgentSessionPatchSource;
+pub use agent_patch_outcome::{AgentPatchFailureObservation, AgentSessionPatchFailure};
+pub use agent_instruction_scope::{AgentInstructionScope, AgentInstructionScopeRequest};
+mod agent_text_read;
+pub use agent_text_read::{AgentTextReadRequest, AgentTextPage};
+mod agent_text_search;
+pub use agent_text_search::{AgentTextMatch, AgentTextSearchRequest, AgentTextSearchResult};
 pub mod path_safety;
 pub mod resource;
 pub mod routes;

@@ -44,9 +44,7 @@ pub fn tool_capability(device_name: &str) -> RobotToolCapability {
         .next()
         .unwrap_or_default();
     match namespace {
-        "display" | "screen" | "oled" | "emoji" | "face" | "led" => {
-            RobotToolCapability::Display
-        }
+        "display" | "screen" | "oled" | "emoji" | "face" | "led" => RobotToolCapability::Display,
         "head" | "gimbal" | "motion" | "servo" => RobotToolCapability::Motion,
         "camera" | "vision" => RobotToolCapability::Vision,
         _ => RobotToolCapability::DeviceTools,
@@ -168,6 +166,30 @@ impl RobotToolRegistry {
         expected_device_name: Option<&str>,
         args: Value,
     ) -> Result<String, ToolCallError> {
+        self.call_frozen_for_capability(
+            robot_id,
+            capability,
+            exposed_name,
+            expected_device_name,
+            None,
+            args,
+        )
+        .await
+    }
+
+    /// Session adapters freeze raw device schemas before provider hardening.
+    /// Check identity and schema under the same lock that selects the client;
+    /// a firmware reconnect cannot silently reinterpret a frozen invocation.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn call_frozen_for_capability(
+        &self,
+        robot_id: &str,
+        capability: RobotToolCapability,
+        exposed_name: &str,
+        expected_device_name: Option<&str>,
+        expected_input_schema: Option<&Value>,
+        args: Value,
+    ) -> Result<String, ToolCallError> {
         let (client, device_name) = {
             let map = self.inner.read().await;
             let attached = map.get(robot_id).ok_or(ToolCallError::Offline)?;
@@ -190,6 +212,11 @@ impl RobotToolRegistry {
                         "tool {exposed_name} no longer resolves to the device tool frozen into this AgentSession"
                     )));
                 }
+            }
+            if expected_input_schema.is_some_and(|schema| schema != &tool.input_schema) {
+                return Err(ToolCallError::Rejected(format!(
+                    "tool {exposed_name} schema differs from the frozen AgentSession contract"
+                )));
             }
             (attached.client.clone(), tool.device_name.clone())
         };
@@ -259,7 +286,11 @@ mod tests {
             "self.face.set",
             "self.led.set",
         ] {
-            assert_eq!(tool_capability(name), RobotToolCapability::Display, "{name}");
+            assert_eq!(
+                tool_capability(name),
+                RobotToolCapability::Display,
+                "{name}"
+            );
         }
         for name in [
             "self.head.look",

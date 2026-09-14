@@ -4,7 +4,7 @@
 //! configured here. Unsupported families fail closed instead of delegating to
 //! the legacy Gateway or manufacturing an acknowledgement.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
@@ -40,8 +40,6 @@ use super::agent_wave2_mcp::{
     McpOwnerAdapter, McpOwnerInvocationInput, McpRuntimeBindingSource,
 };
 
-const MAX_SEARCH_QUERY_CHARS: usize = 1024;
-const MAX_SEARCH_LINE_CHARS: usize = 4096;
 const MAX_DIFF_BYTES: usize = 1024 * 1024;
 const MAX_SNAPSHOT_CHANGES: usize = 512;
 const MAX_SNAPSHOT_BASELINE_BYTES: usize = 1024 * 1024;
@@ -63,10 +61,10 @@ const MAX_VCS_STAGE_ENTRIES: usize = 100_000;
 #[derive(Clone)]
 pub(crate) struct Wave2ApplicationHost {
     files: Arc<FileService>,
-    snapshots: Arc<SnapshotService>,
-    snapshot_sessions: Arc<tokio::sync::Mutex<BTreeSet<(String, String)>>>,
+    snapshots: Arc<tokio::sync::Mutex<BTreeMap<(String, String), SnapshotService>>>,
     workspace_write_lock: Arc<tokio::sync::Mutex<()>>,
     vcs_push_owner: Arc<OnceLock<Result<VcsPushOwner, VcsPushError>>>,
+    git_receipts: Option<super::hosted_effect_receipts::HostedEffectReceipts>,
     configured_workspace_root: PathBuf,
     mcp_owner: Option<Arc<McpOwnerAdapter>>,
     mcp_binding_source: Option<Arc<dyn McpRuntimeBindingSource>>,
@@ -92,9 +90,49 @@ enum Wave2EffectCompletion<'a> {
     Failed(&'a Wave2HostPortError),
 }
 
+/// Compact structured observations survive the generic Kernel error channel
+/// and its 2 KiB durable error projection. Never truncate the index groups.
+fn patch_failure_error(
+    code: &str,
+    cause: &str,
+    observation: &nomifun_file::AgentPatchFailureObservation,
+    journal_settled: bool,
+) -> Wave2HostPortError {
+    let mut report = json!({
+        "kind": "workspace_patch_failed", "version": 1,
+        "journal_settlement": if journal_settled { "settled" } else { "unconfirmed" },
+        "observation": observation,
+        "cause": cause.chars().take(128).collect::<String>(),
+        "recovery": "Indices refer to request.files (zero-based). Observations are historical, not current state. Re-read every target and replan; do not retry unchanged. Retained creations were not deleted."
+    });
+    if report.to_string().len() > 1536 {
+        report["cause"] = json!("diagnostic omitted to preserve complete publication observations");
+    }
+    Wave2HostPortError::new(code, report.to_string())
+}
+
 impl Wave2ApplicationHost {
+    pub(crate) fn with_git_receipts(mut self, receipts: super::hosted_effect_receipts::HostedEffectReceipts) -> Self {
+        self.git_receipts = Some(receipts);
+        self
+    }
+
     pub(crate) fn new() -> Self {
         Self::for_workspace_root(std::env::temp_dir())
+    }
+
+    pub(crate) fn ensure_git_ready(&self) -> Result<(), AppError> {
+        if let Some(Ok(owner)) = self.vcs_push_owner.get() {
+            owner.ensure_idle().map_err(|error| AppError::Conflict(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn settle_git(&self) -> Result<(), AppError> {
+        if let Some(Ok(owner)) = self.vcs_push_owner.get() {
+            owner.ensure_settled().await.map_err(|error| AppError::Conflict(error.to_string()))?;
+        }
+        Ok(())
     }
 
     pub(crate) fn for_workspace_root(workspace_root: impl Into<PathBuf>) -> Self {
@@ -104,10 +142,10 @@ impl Wave2ApplicationHost {
                 Arc::new(NullUserEvents),
                 vec![workspace_root.clone()],
             )),
-            snapshots: Arc::new(SnapshotService::new()),
-            snapshot_sessions: Arc::new(tokio::sync::Mutex::new(BTreeSet::new())),
+            snapshots: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
             workspace_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             vcs_push_owner: Arc::new(OnceLock::new()),
+            git_receipts: None,
             configured_workspace_root: workspace_root,
             mcp_owner: None,
             mcp_binding_source: None,
@@ -655,6 +693,7 @@ impl Wave2HostPort for Wave2ApplicationHost {
             }
             match request.operation {
                 Wave2CapabilityOperation::WorkspaceExecution { input } => {
+                    self.ensure_git_ready().map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?;
                     self.invoke_workspace(&request.context, &capability_id, input)
                         .await
                 }
@@ -764,6 +803,7 @@ impl Wave2ApplicationHost {
                 arguments: input,
             })
             .await
+            .and_then(super::agent_wave2_mcp::project_mcp_tool_result)
     }
 
     async fn invoke_workspace(
@@ -779,25 +819,24 @@ impl Wave2ApplicationHost {
         let scope = self.workspace_scope(context)?;
         match capability_id {
             "fs.read" => {
-                let params: PathParams = decode(input)?;
-                let content = self
-                    .files
-                    .read_file_for_agent_session(&scope, &params.path)
+                let result = super::workspace_file_read::read(&self.files, &scope, input)
                     .await
                     .map_err(|error| operation_error(capability_id, error))?
                     .ok_or_else(|| {
                         Wave2HostPortError::new(
                             "RESOURCE_NOT_FOUND",
-                            format!("workspace file '{}' was not found", params.path),
+                            "workspace file was not found",
                         )
                     })?;
-                Ok(StrictJsonValue(json!({
-                    "path": params.path,
-                    "content": content
-                })))
+                Ok(result)
             }
             "fs.write" => {
                 let params: WriteParams = decode(input)?;
+                if params.content.len() > 8 * 1024 * 1024 {
+                    return Err(Wave2HostPortError::invalid_payload(
+                        "fs.write content exceeds the 8 MiB UTF-8 byte limit",
+                    ));
+                }
                 let binding = workspace_typed_binding(context)?;
                 let effect_input = StrictJsonValue(serde_json::to_value(&params).map_err(
                     |error| {
@@ -857,11 +896,13 @@ impl Wave2ApplicationHost {
                         )
                     })?,
                 );
-                match begin_wave2_effect(context, binding, &effect_input).await? {
+                // A lost settlement must also fence a new idempotency key;
+                // otherwise re-submitting could duplicate a published patch.
+                match begin_wave2_effect_with_policy(context, binding, &effect_input, true).await? {
                     Wave2EffectAdmission::Replay(output) => Ok(output),
                     Wave2EffectAdmission::Reserved(reservation) => {
                         let _write_guard = self.workspace_write_lock.lock().await;
-                        let result = self.files.apply_patch_for_agent_session(&scope, request).await;
+                        let result = self.files.apply_patch_with_observation_for_agent_session(&scope, request).await;
                         match result {
                             Ok(result) => {
                                 let output = StrictJsonValue(
@@ -874,20 +915,27 @@ impl Wave2ApplicationHost {
                                         )
                                     })?,
                                 );
-                                finish_wave2_effect(
+                                if finish_wave2_effect(
                                     &reservation,
                                     Wave2EffectCompletion::Succeeded(&output),
                                 )
-                                .await?;
+                                .await.is_err() {
+                                    return Err(Wave2HostPortError::unavailable(
+                                        "fs.patch published all request files, but journal settlement is unconfirmed. No automatic retry; re-read every target. Publication is not a current-state lock or task success."
+                                    ));
+                                }
                                 Ok(output)
                             }
-                            Err(error) => {
-                                let owner_error = operation_error(capability_id, error);
-                                let _ = finish_wave2_effect(
+                            Err(failure) => {
+                                let cause = operation_error(capability_id, failure.error);
+                                let owner_error = patch_failure_error(&cause.code, &cause.message, &failure.observation, true);
+                                if finish_wave2_effect(
                                     &reservation,
                                     Wave2EffectCompletion::Failed(&owner_error),
                                 )
-                                .await;
+                                .await.is_err() {
+                                    return Err(patch_failure_error(&cause.code, &cause.message, &failure.observation, false));
+                                }
                                 Err(owner_error)
                             }
                         }
@@ -940,97 +988,14 @@ impl Wave2ApplicationHost {
                 }
             }
             "fs.search" => {
-                let params: SearchParams = decode(input)?;
-                let query = params.query.trim();
-                if query.is_empty() {
-                    return Err(Wave2HostPortError::invalid_payload(
-                        "fs.search query must not be empty",
-                    ));
-                }
-                if query.chars().count() > MAX_SEARCH_QUERY_CHARS {
-                    return Err(Wave2HostPortError::invalid_payload(format!(
-                        "fs.search query must not exceed {MAX_SEARCH_QUERY_CHARS} characters"
-                    )));
-                }
-                let limit = params.limit.unwrap_or(100);
-                if !(1..=200).contains(&limit) {
-                    return Err(Wave2HostPortError::invalid_payload(
-                        "fs.search limit must be between 1 and 200",
-                    ));
-                }
-                let prefix = params
-                    .path
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|path| !path.is_empty())
-                    .map(|path| {
-                        scope
-                            .resolve_relative_path(path)
-                            .and_then(|resolved| {
-                                resolved
-                                    .strip_prefix(scope.workspace_root())
-                                    .map(|relative| relative.to_string_lossy().replace('\\', "/"))
-                                    .map_err(|_| {
-                                        AppError::BadRequest(
-                                            "fs.search path is outside the workspace".to_owned(),
-                                        )
-                                    })
-                            })
-                    })
-                    .transpose()
-                    .map_err(|error| operation_error(capability_id, error))?;
-                let files = self
+                let params: nomifun_file::AgentTextSearchRequest = decode(input)?;
+                let result = self
                     .files
-                    .list_workspace_files_for_agent_session(&scope)
+                    .search_text_for_agent_session(&scope, params)
                     .await
                     .map_err(|error| operation_error(capability_id, error))?;
-                let mut matches = Vec::new();
-                let mut truncated = false;
-                for file in files {
-                    let relative_path = file.relative_path.replace('\\', "/");
-                    if prefix
-                        .as_deref()
-                        .is_some_and(|prefix| {
-                            !relative_path
-                                .strip_prefix(prefix)
-                                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-                        })
-                    {
-                        continue;
-                    }
-                    let Some(content) = self
-                        .files
-                        .read_file_for_agent_session(&scope, &relative_path)
-                        .await
-                        .map_err(|error| operation_error(capability_id, error))?
-                    else {
-                        continue;
-                    };
-                    for (line_index, line) in content.lines().enumerate() {
-                        if !line.contains(query) {
-                            continue;
-                        }
-                        if matches.len() == limit {
-                            truncated = true;
-                            break;
-                        }
-                        let text = line.chars().take(MAX_SEARCH_LINE_CHARS).collect::<String>();
-                        matches.push(json!({
-                            "path": &relative_path,
-                            "line": line_index + 1,
-                            "text": text,
-                            "truncated": line.chars().count() > MAX_SEARCH_LINE_CHARS
-                        }));
-                    }
-                    if truncated {
-                        break;
-                    }
-                }
-                Ok(StrictJsonValue(json!({
-                    "query": query,
-                    "matches": matches,
-                    "truncated": truncated
-                })))
+                Ok(StrictJsonValue(serde_json::to_value(result)
+                    .map_err(|error| operation_error(capability_id, AppError::Internal(error.to_string())))?))
             }
             "fs.snapshot" => {
                 scope
@@ -1155,9 +1120,36 @@ impl Wave2ApplicationHost {
                         )
                     })?,
                 );
-                match begin_wave2_exclusive_effect(context, &binding, &effect_input).await? {
-                    Wave2EffectAdmission::Replay(output) => Ok(output),
+                // Conversation hosts always install this port. The independent
+                // non-Conversation Wave2 owner retains its resource journal.
+                // Persist BEFORE either replay or fresh push admission; an
+                // already-used operation cannot execute a second time.
+                let hosted = match &self.git_receipts {
+                    Some(receipts) => Some(receipts.begin_git(context, &self.configured_workspace_root, &effect_input.0)
+                        .await.map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?),
+                    None => None,
+                };
+                let admission = match begin_wave2_exclusive_effect(context, &binding, &effect_input).await {
+                    Ok(admission) => admission,
+                    Err(error) => {
+                        if let (Some(receipts), Some(hosted)) = (&self.git_receipts, hosted) {
+                            // The owner has not been called by THIS operation.
+                            receipts.rejected(hosted, "GIT_JOURNAL_REJECTED_BEFORE_DISPATCH").await
+                                .map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?;
+                        }
+                        return Err(error);
+                    }
+                };
+                match admission {
+                    Wave2EffectAdmission::Replay(output) => {
+                        if let (Some(receipts), Some(hosted)) = (&self.git_receipts, hosted) {
+                            receipts.returned(hosted, &json!({"resource_journal_replay":true,"result":output.0})).await
+                                .map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?;
+                        }
+                        Ok(output)
+                    }
                     Wave2EffectAdmission::Reserved(reservation) => {
+                        let mut settlement = owner.settlement_guard();
                         let request = VcsPushRequest::from_action_input(
                             context.principal.principal_id.clone(),
                             scope.workspace_root().to_path_buf(),
@@ -1181,6 +1173,11 @@ impl Wave2ApplicationHost {
                                     Wave2EffectCompletion::Succeeded(&output),
                                 )
                                 .await?;
+                                if let (Some(receipts), Some(hosted)) = (&self.git_receipts, hosted) {
+                                    receipts.returned(hosted, &output.0).await
+                                        .map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?;
+                                }
+                                settlement.confirm();
                                 Ok(output)
                             }
                             Err(error)
@@ -1192,12 +1189,22 @@ impl Wave2ApplicationHost {
                                 Err(vcs_push_error(error))
                             }
                             Err(error) => {
+                                // NotApplied concerns the destination ref, not
+                                // absence of protocol/object transfer. Never
+                                // label this as rejected-before-dispatch.
+                                let observation = json!({"acknowledged_error":error.code,
+                                    "destination_update":"not_applied","safe_to_repeat":false});
                                 let owner_error = vcs_push_error(error);
-                                let _ = finish_wave2_effect(
+                                finish_wave2_effect(
                                     &reservation,
                                     Wave2EffectCompletion::Failed(&owner_error),
                                 )
-                                .await;
+                                .await?;
+                                if let (Some(receipts), Some(hosted)) = (&self.git_receipts, hosted) {
+                                    receipts.returned(hosted, &observation).await
+                                        .map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?;
+                                }
+                                settlement.confirm();
                                 Err(owner_error)
                             }
                         }
@@ -1383,35 +1390,35 @@ impl Wave2ApplicationHost {
     ) -> Result<StrictJsonValue, Wave2HostPortError> {
         let workspace = scope.workspace_root().to_string_lossy().into_owned();
         let session_key = snapshot_session_key(context, scope);
+        // Serialize snapshot lifetime operations and retain one independent
+        // owner per Session/root. A dispose can never remove another baseline.
+        let mut sessions = self.snapshots.lock().await;
         match params.operation {
             SnapshotOperation::Init => {
-                let mut sessions = self.snapshot_sessions.lock().await;
-                let info = if sessions.contains(&session_key) && self.snapshots.is_tracked(&workspace) {
-                    self.snapshots
+                if sessions.len() >= 128 && !sessions.contains_key(&session_key) {
+                    return Err(Wave2HostPortError::unavailable("snapshot owner limit reached"));
+                }
+                let snapshots = sessions.entry(session_key).or_insert_with(|| SnapshotService::for_owner(uuid::Uuid::now_v7().to_string()));
+                let info = if snapshots.is_tracked(&workspace) {
+                    snapshots
                         .info(&workspace)
                         .await
                         .map_err(|error| operation_error(capability_id, error))?
                 } else {
-                    let info = self
-                        .snapshots
+                    let info = snapshots
                         .init(&workspace)
                         .await
                         .map_err(|error| operation_error(capability_id, error))?;
-                    sessions.insert(session_key);
                     info
                 };
                 Ok(StrictJsonValue(snapshot_info_value(info)))
             }
             SnapshotOperation::Compare => {
-                let owned = self.snapshot_sessions.lock().await.contains(&session_key);
-                if !owned || !self.snapshots.is_tracked(&workspace) {
-                    return Err(Wave2HostPortError::new(
+                let snapshots = sessions.get(&session_key).filter(|owner| owner.is_tracked(&workspace)).ok_or_else(|| Wave2HostPortError::new(
                         "CAPABILITY_UNAVAILABLE",
                         "fs.snapshot compare requires a snapshot initialized by this AgentSession",
-                    ));
-                }
-                let compare = self
-                    .snapshots
+                    ))?;
+                let compare = snapshots
                     .compare(&workspace)
                     .await
                     .map_err(|error| operation_error(capability_id, error))?;
@@ -1443,15 +1450,11 @@ impl Wave2ApplicationHost {
                             })
                     })
                     .map_err(|error| operation_error(capability_id, error))?;
-                let owned = self.snapshot_sessions.lock().await.contains(&session_key);
-                if !owned || !self.snapshots.is_tracked(&workspace) {
-                    return Err(Wave2HostPortError::new(
+                let snapshots = sessions.get(&session_key).filter(|owner| owner.is_tracked(&workspace)).ok_or_else(|| Wave2HostPortError::new(
                         "CAPABILITY_UNAVAILABLE",
                         "fs.snapshot baseline requires a snapshot initialized by this AgentSession",
-                    ));
-                }
-                let content = self
-                    .snapshots
+                    ))?;
+                let content = snapshots
                     .get_baseline_content(&workspace, &path)
                     .await
                     .map_err(|error| operation_error(capability_id, error))?;
@@ -1475,16 +1478,26 @@ impl Wave2ApplicationHost {
                 })))
             }
             SnapshotOperation::Dispose => {
-                let mut sessions = self.snapshot_sessions.lock().await;
-                if sessions.remove(&session_key) {
-                    self.snapshots
+                if let Some(snapshots) = sessions.get(&session_key) {
+                    snapshots
                         .dispose(&workspace)
                         .await
                         .map_err(|error| operation_error(capability_id, error))?;
                 }
+                sessions.remove(&session_key);
                 Ok(StrictJsonValue(json!({"disposed": true})))
             }
         }
+    }
+
+    pub(crate) async fn dispose_session_snapshots(&self, session: &str) -> Result<(), AppError> {
+        let mut owners = self.snapshots.lock().await;
+        let keys = owners.keys().filter(|(id, _)| id == session).cloned().collect::<Vec<_>>();
+        for key in keys {
+            if let Some(owner) = owners.get(&key) { owner.dispose(&key.1).await?; }
+            owners.remove(&key);
+        }
+        Ok(())
     }
 
     async fn invoke_vcs_diff(
@@ -2186,16 +2199,6 @@ struct PathParams {
 struct WriteParams {
     path: String,
     content: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SearchParams {
-    query: String,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    limit: Option<usize>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -3412,11 +3415,12 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.0["mode"], "snapshot");
         assert_eq!(snapshot.0["branch"], Value::Null);
-        assert!(host.snapshots.is_tracked(&directory.path().to_string_lossy()));
+        assert!(host.snapshots.lock().await.values().next().unwrap().is_tracked(&directory.path().to_string_lossy()));
 
         std::fs::write(directory.path().join("tracked.txt"), "changed\n").unwrap();
         let comparison = host
             .snapshots
+            .lock().await.values().next().unwrap()
             .compare(&directory.path().to_string_lossy())
             .await
             .unwrap();
@@ -3427,6 +3431,7 @@ mod tests {
                 .any(|change| change.relative_path == "tracked.txt")
         );
         host.snapshots
+            .lock().await.values().next().unwrap()
             .dispose(&directory.path().to_string_lossy())
             .await
             .unwrap();
@@ -3679,7 +3684,7 @@ mod tests {
         .unwrap();
         assert_eq!(initialized.0["mode"], "git-repo");
         assert!(initialized.0["branch"].is_string());
-        assert_eq!(host.snapshots.workspace_count(), 1);
+        assert_eq!(host.snapshots.lock().await.len(), 1);
 
         let initialized_again = invoke(
             &host,
@@ -3691,7 +3696,7 @@ mod tests {
         .unwrap();
         assert_eq!(initialized_again, initialized);
         assert_eq!(
-            host.snapshots.workspace_count(),
+            host.snapshots.lock().await.len(),
             1,
             "same AgentSession init must not leak a second snapshot reference"
         );
@@ -3740,7 +3745,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(disposed.0["disposed"], true);
-        assert_eq!(host.snapshots.workspace_count(), 0);
+        assert_eq!(host.snapshots.lock().await.len(), 0);
 
         let compare_after_dispose = invoke(
             &host,
@@ -3770,7 +3775,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(initialized.0["mode"], "snapshot");
-        let snapshot_repo = host.snapshots.repo_path_for(
+        let snapshot_repo = host.snapshots.lock().await.values().next().unwrap().repo_path_for(
             directory.path().to_str().unwrap(),
         ).unwrap();
         assert!(snapshot_repo.exists());

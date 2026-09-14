@@ -4,6 +4,7 @@
 pub mod constants;
 pub mod error;
 pub mod external_paths;
+pub mod frozen;
 pub mod market;
 pub mod skill_routes;
 pub mod skill_service;

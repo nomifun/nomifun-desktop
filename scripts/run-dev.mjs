@@ -336,10 +336,35 @@ export function loadWindowsToolchainEnvironment(
   return initialized;
 }
 
+// The Plugin clean-start refactor intentionally replaced historical MiniApp
+// migrations. Reusing NomiFun-dev[-nomi-core] cannot upgrade that database.
+// Give Windows dev a stable generation-specific root without deleting or
+// rewriting old data. Explicit data roots remain the caller's responsibility.
+// TODO(platform): validate the same clean-start dev policy on macOS/Linux.
+export function developmentEnvironment(environment, platform = process.platform) {
+  const result = { ...environment, NOMI_CHANNEL: 'dev' };
+  if (platform !== 'win32') return result;
+  const explicitKey = Object.keys(environment).find(
+    (key) => key.toUpperCase() === 'NOMIFUN_DATA_DIR',
+  );
+  if (explicitKey) {
+    if (!environment[explicitKey]?.trim()) {
+      throw new Error('NOMIFUN_DATA_DIR must not be empty; unset it to use the isolated development data directory');
+    }
+    return result;
+  }
+  const localAppData = getEnvironmentValue(environment, 'LOCALAPPDATA');
+  if (!localAppData) {
+    throw new Error('LOCALAPPDATA is unavailable; set NOMIFUN_DATA_DIR to an explicit development data directory');
+  }
+  result.NOMIFUN_DATA_DIR = join(localAppData, 'NomiFun-dev-plugin-v1');
+  return result;
+}
+
 async function main() {
   let environment;
   try {
-    environment = loadWindowsToolchainEnvironment(process.env);
+    environment = developmentEnvironment(loadWindowsToolchainEnvironment(process.env));
   } catch (error) {
     console.error(`[dev] ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
@@ -358,6 +383,10 @@ async function main() {
     return;
   }
 
+  if (process.platform === 'win32') {
+    console.log(`[dev] data directory: ${getEnvironmentValue(environment, 'NOMIFUN_DATA_DIR')} (existing historical directories are preserved)`);
+  }
+
   const child = spawn(
     tauri,
     [
@@ -370,7 +399,7 @@ async function main() {
     ],
     {
       cwd: ROOT,
-      env: { ...environment, NOMI_CHANNEL: 'dev' },
+      env: environment,
       stdio: 'inherit',
       windowsHide: false,
     },

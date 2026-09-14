@@ -8,7 +8,7 @@ use nomifun_agent_contracts::{
     AgentPresetRevisionPayload, AgentSessionAggregate, ArtifactEnvelope,
     CandidateTestReceipt,
     CanonicalApiInventoryPayload, CanonicalErrorRegistryPayload, CanonicalV4SchemaManifestPayload,
-    CapabilityCatalogEntry, CodexRuntimeReleaseManifestPayload, CodingRuntimeFeatureInventoryPayload,
+    CapabilityCatalogEntry, PlatformFeatureInventoryPayload,
     ContractClosurePayload, ContractDigestLedgerPayload, ContributionLock,
     CredentialSlotBinding,
     D025FixtureContractReferencePayload, D025FixtureEnvelopeReference, D026OrderingOutcomeMatrix,
@@ -28,7 +28,7 @@ use nomifun_agent_contracts::{
     PluginProjectRecord, PluginReadyCandidate, PluginRegistrationMetadata,
     PluginRestorePreviousRequest, PluginRestorePreviousResult, PluginShareBundleManifest,
     ProductOperationRecord, RemoteBinding, ResolvedPluginServiceSpec,
-    ResolvedSnapshotEnvelope, RuntimeCommand, RuntimeHelloPayload, RuntimeSelectionRecord,
+    ResolvedSnapshotEnvelope, RuntimeSelectionRecord,
     RuntimeSwitchValidationResult, SessionEventRegistryPayload, TargetPackageInventoryPayload,
     VersionString, digest_bytes, digest_payload,
 };
@@ -58,7 +58,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let inventory_path =
         contracts.join("target-packages/target-first-party-contributions.v1.json");
     let feature_path =
-        contracts.join("runtime/coding-runtime-feature-inventory.payload.json");
+        contracts.join("engine/platform-feature-inventory.payload.json");
     let seed_path =
         contracts.join("presets/official-preset-seed-manifest.payload.json");
     let api_path = contracts.join("presets/canonical-api-inventory.payload.json");
@@ -66,8 +66,6 @@ fn run() -> Result<(), Box<dyn Error>> {
         contracts.join("catalog/platform-capability-catalog-entry.v1.json");
     let event_path = contracts.join("events/session-event-registry.json");
     let error_path = contracts.join("events/error-registry.json");
-    let runtime_release_path =
-        contracts.join("runtime/runtime-release-fixture.json");
     let d026_path = contracts.join("validation/d026-ordering-outcomes.matrix.json");
     let d027_path = contracts.join("validation/d027-terminal-sequences.matrix.json");
     let d028_path = contracts.join("validation/d028-platform-matrix.json");
@@ -105,7 +103,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     validate_target_inventory(&inventory)?;
     let inventory_digest = digest_payload(&inventory)?;
 
-    let feature_inventory: CodingRuntimeFeatureInventoryPayload = read_json(&feature_path)?;
+    let feature_inventory: PlatformFeatureInventoryPayload = read_json(&feature_path)?;
     feature_inventory.validate().map_err(|error| error.message)?;
     let feature_digest = digest_payload(&feature_inventory)?;
 
@@ -139,7 +137,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     error_registry.validate()?;
     let error_digest = digest_payload(&error_registry)?;
 
-    let deletion_digests = validate_deletion_manifests(&contracts.join("deletion"))?;
+    // Immutable historical D-014 input, not a CAR deletion instruction. In
+    // particular, Nomi and Conversation are current owners, not deletion targets.
+    // Retain the historical digest field for stored manifest compatibility.
+    let deletion_digests = validate_deletion_manifests(
+        &contracts.join("historical/agent-v2/deletion"),
+    )?;
     let deletion_set_digest = digest_payload(&deletion_digests)?;
 
     let d026: D026OrderingOutcomeMatrix = read_json(&d026_path)?;
@@ -181,11 +184,12 @@ fn run() -> Result<(), Box<dyn Error>> {
             "target_package_inventory",
         ],
     ))?;
+    // Historical manifest key, now covering the shared in-process snapshot and
+    // feature vocabulary. It no longer certifies any external RPC protocol.
     let runtime_protocol_digest = digest_payload(&schema_subset(
         &schemas,
         &[
-            "runtime_command",
-            "runtime_hello",
+            "agent_snapshot",
             "runtime_feature_inventory",
         ],
     ))?;
@@ -250,8 +254,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     let coding_contract_digest = digest_payload(&json!({
         "seed": coding_seed,
         "runtime_features": feature_inventory.runtime_features,
-        "native_actions": feature_inventory.native_actions,
-        "responses_semantics": feature_inventory.responses_semantics,
     }))?;
 
     let database_schema_digest = digest_bytes(FRESH_V4_BASELINE_SQL.as_bytes());
@@ -275,17 +277,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     let canonical_manifest = ArtifactEnvelope::new(canonical_manifest_payload)?;
     let canonical_manifest_digest = canonical_manifest.payload_digest.clone();
 
-    let mut runtime_release: CodexRuntimeReleaseManifestPayload =
-        read_json(&runtime_release_path)?;
-    normalize_runtime_fixture_digests(&mut runtime_release);
-    runtime_release.cargo_lock_digest = cargo_lock_digest.clone();
-    runtime_release.protocol_schema_digest = runtime_protocol_digest.clone();
-    runtime_release.runtime_profile_contract_digest = rust_contract_schema_digest.clone();
-    runtime_release.coding_capability_pack_digest = coding_contract_digest.clone();
-    runtime_release.native_feature_contract_digest = feature_digest.clone();
-    runtime_release.native_action_contract_digest =
-        digest_payload(&feature_inventory.native_actions)?;
-    runtime_release.validate().map_err(|error| error.message)?;
     let mut platform: PlatformValidationManifestPayload = read_json(&platform_path)?;
     platform.confirmed_decision_contract_digest.0 = closure_digest.clone();
     platform.canonical_schema_manifest_digest = canonical_manifest_digest.clone();
@@ -306,8 +297,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     platform.decision_fixture_refs.d028_platform_matrix.digest = availability_digest.clone();
     platform.validate_contract()?;
     let platform_fixture_digest = digest_payload(&platform)?;
-    let runtime_release_envelope = ArtifactEnvelope::new(runtime_release.clone())?;
-    let runtime_release_fixture_digest = runtime_release_envelope.payload_digest.clone();
     let platform_envelope = ArtifactEnvelope::new(platform.clone())?;
 
     let mut digest_map = BTreeMap::new();
@@ -357,10 +346,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     );
     digest_map.insert("runtime_feature_inventory".to_owned(), feature_digest);
     digest_map.insert("runtime_protocol".to_owned(), runtime_protocol_digest);
-    digest_map.insert(
-        "runtime_release_fixture".to_owned(),
-        runtime_release_fixture_digest,
-    );
     digest_map.insert("rust_contract_schema".to_owned(), rust_contract_schema_digest);
     digest_map.insert("session_event_registry".to_owned(), event_digest);
     digest_map.insert("target_first_party_inventory".to_owned(), inventory_digest);
@@ -420,10 +405,6 @@ fn run() -> Result<(), Box<dyn Error>> {
             pretty_json(&ArtifactEnvelope::new(deletion_digests)?)?,
         ),
         (
-            "runtime-release-fixture.envelope.json".to_owned(),
-            pretty_json(&runtime_release_envelope)?,
-        ),
-        (
             "platform-validation-fixture.envelope.json".to_owned(),
             pretty_json(&platform_envelope)?,
         ),
@@ -440,7 +421,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     if mode == "write" {
         fs::create_dir_all(&generated)?;
         write_json(&seed_path, &seed)?;
-        write_json(&runtime_release_path, &runtime_release)?;
         write_json(&platform_path, &platform)?;
         write_json(&d025_payload_path, &d025_payload)?;
         write_json(&d025_reference_path, &d025_reference)?;
@@ -452,7 +432,6 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
     } else {
         check_json(&seed_path, &seed)?;
-        check_json(&runtime_release_path, &runtime_release)?;
         check_json(&platform_path, &platform)?;
         check_json(&d025_payload_path, &d025_payload)?;
         check_json(&d025_reference_path, &d025_reference)?;
@@ -480,46 +459,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
-}
-
-fn normalize_runtime_fixture_digests(
-    runtime_release: &mut CodexRuntimeReleaseManifestPayload,
-) {
-    runtime_release.patch_series_digest = fixture_digest("codex-patch-series");
-    runtime_release.license_artifact.digest = fixture_digest("license");
-    runtime_release.notice_artifact.digest = fixture_digest("notice");
-    runtime_release.sbom_artifact.digest = fixture_digest("sbom");
-
-    for (cell_id, target) in &mut runtime_release.target_matrix {
-        match target {
-            nomifun_agent_contracts::RuntimeReleaseTargetPayload::Required {
-                host_artifact,
-                sidecar_artifact,
-                helper_artifacts,
-                package_content_digest,
-                capability_availability_digest,
-                ..
-            } => {
-                host_artifact.digest = fixture_digest(&format!("{cell_id}:host"));
-                sidecar_artifact.digest = fixture_digest(&format!("{cell_id}:sidecar"));
-                for (index, helper) in helper_artifacts.iter_mut().enumerate() {
-                    helper.digest = fixture_digest(&format!("{cell_id}:helper:{index}"));
-                }
-                *package_content_digest = fixture_digest(&format!("{cell_id}:package"));
-                *capability_availability_digest =
-                    fixture_digest(&format!("{cell_id}:availability"));
-            }
-            nomifun_agent_contracts::RuntimeReleaseTargetPayload::Unsupported {
-                capability_availability_digest,
-            }
-            | nomifun_agent_contracts::RuntimeReleaseTargetPayload::RemoteOnly {
-                capability_availability_digest,
-            } => {
-                *capability_availability_digest =
-                    fixture_digest(&format!("{cell_id}:availability"));
-            }
-        }
-    }
 }
 
 fn normalize_api_inventory(api_inventory: &mut CanonicalApiInventoryPayload) {
@@ -613,10 +552,6 @@ fn validate_api_inventory(
         return Err("legacy preset route must remain explicitly forbidden".into());
     }
     Ok(())
-}
-
-fn fixture_digest(label: &str) -> DigestHex {
-    digest_bytes(format!("agent-v2-contract-fixture:{label}").as_bytes())
 }
 
 fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, Box<dyn Error>> {
@@ -743,9 +678,7 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
     add_schema::<AgentSessionAggregate>(&mut schemas, "agent_session")?;
     add_schema::<SessionEventRegistryPayload>(&mut schemas, "session_event_registry")?;
     add_schema::<CanonicalErrorRegistryPayload>(&mut schemas, "canonical_error_registry")?;
-    add_schema::<RuntimeCommand>(&mut schemas, "runtime_command")?;
-    add_schema::<RuntimeHelloPayload>(&mut schemas, "runtime_hello")?;
-    add_schema::<CodingRuntimeFeatureInventoryPayload>(
+    add_schema::<PlatformFeatureInventoryPayload>(
         &mut schemas,
         "runtime_feature_inventory",
     )?;

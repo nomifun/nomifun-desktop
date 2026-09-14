@@ -12,6 +12,11 @@ path = "tests/coding_runtime_production.rs"
 name = "nomicore"
 path = "src/main.rs"
 
+# Opt-in source-integrated reference, never registered by the product default.
+[[example]]
+name = "evidence-engine"
+path = "examples/evidence_engine/main.rs"
+
 # Content E2E tests have been verified together and share one linked binary.
 # All other integration tests stay in separate processes because several use
 # shared filesystem state. The content suite includes a coverage guard so a new
@@ -53,16 +58,8 @@ name = "agent_provider_health_e2e"
 path = "tests/agent_provider_health_e2e.rs"
 
 [[test]]
-name = "agent_platform_e2e"
-path = "tests/agent_platform_e2e.rs"
-
-[[test]]
 name = "official_preset_catalog_integrity"
 path = "tests/official_preset_catalog_integrity.rs"
-
-[[test]]
-name = "remote_rest_e2e"
-path = "tests/remote_rest_e2e.rs"
 
 [[test]]
 name = "connection_test_e2e"
@@ -196,7 +193,6 @@ nomifun-common.workspace = true
 nomifun-v4-root.workspace = true
 nomifun-agent-contracts.workspace = true
 nomifun-agent-control-plane.workspace = true
-nomifun-agent-platform.workspace = true
 nomifun-agent-domain-support.workspace = true
 nomifun-agent-domain-wave1.workspace = true
 nomifun-agent-domain-wave2.workspace = true
@@ -210,7 +206,6 @@ nomifun-js-kernel-adapter.workspace = true
 nomifun-js-runtime.workspace = true
 nomifun-plugin-platform.workspace = true
 nomifun-chat-model-broker.workspace = true
-nomifun-codex-runtime.workspace = true
 nomifun-agent-session.workspace = true
 nomifun-assets.workspace = true
 nomifun-db.workspace = true
@@ -226,6 +221,7 @@ nomifun-shell.workspace = true
 nomifun-model-invoke.workspace = true
 nomifun-ai-agent.workspace = true
 nomifun-coding-engine.workspace = true
+nomifun-engine-core.workspace = true
 nomifun-ssh.workspace = true
 nomifun-mcp.workspace = true
 nomifun-conversation.workspace = true
@@ -262,6 +258,7 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+jsonschema.workspace = true
 zip.workspace = true
 zeroize.workspace = true
 base64.workspace = true

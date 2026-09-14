@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Target-specific C8-MA preflight.
+ * Target-specific macOS arm64 engineering preflight (not full CAR acceptance).
  *
  * This helper is deliberately independent from scripts/gate-agent-v2.mjs.  It
  * only produces engineering evidence from the current host and supplied
@@ -16,9 +16,8 @@
  *   --host-binary /abs/nomicore --run-startup
  *   --endpoint http://127.0.0.1:25808 --binding-id <id> --run-lifecycle
  *
- * Optional legacy Sidecar checks, used only when the release lock contains
- * sidecars.macos_desktop_arm64:
- *   --credential-file /abs/credential --run-sidecar-rpc
+ * Engines are compiled into the host. External executor and credential-file
+ * probe options are retired and rejected before reading artifacts or running tools.
  */
 
 import { spawn, spawnSync } from 'node:child_process';
@@ -48,22 +47,22 @@ export const TARGET_ID = 'macos_desktop_arm64';
 export const EXPECTED_TARGET = 'aarch64-apple-darwin';
 export const CANONICAL_CAPABILITY_INVENTORY_RELATIVE_PATH =
   'crates/backend/nomifun-agent-contracts/contracts/generated/target-first-party-contributions.envelope.json';
-export const EXPECTED_PROFILES = ['coding_native', 'managed_minimal'];
-export const EXPECTED_RPC_METHODS = [
-  'create',
-  'resume',
-  'fork',
-  'start_turn',
-  'steer',
-  'follow_up',
-  'cancel',
-  'session_dispose',
-];
-export const EXPECTED_FORK_COMMIT = 'dc2ccc6843abb09c9d297862dc10b6bd12a3935d';
-export const EXPECTED_PROTOCOL_VERSION = '1.0.0';
-export const EXPECTED_PROTOCOL_SCHEMA_DIGEST =
-  'f1c0422f04c9de923e18c7df40d814d3c9f5b2db5f1c5fef2745e77e6d62590f';
-const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+
+const RETIRED_EXECUTOR_OPTIONS = Object.freeze({
+  sidecar: '--sidecar',
+  hello: '--hello',
+  sidecarDir: '--sidecar-dir',
+  credentialFile: '--credential-file',
+  runSidecarRpc: '--run-sidecar-rpc',
+});
+
+function rejectRetiredOptions(options) {
+  for (const [key, flag] of Object.entries(RETIRED_EXECUTOR_OPTIONS)) {
+    if (Object.hasOwn(options, key)) {
+      throw new Error(`${flag} was retired; Engines are compiled into the host`);
+    }
+  }
+}
 
 export function parseArgs(argv) {
   const options = {
@@ -72,25 +71,24 @@ export function parseArgs(argv) {
     capabilityInventory:
       process.env.NOMIFUN_CAPABILITY_INVENTORY_PATH ||
       join(REPO_ROOT, CANONICAL_CAPABILITY_INVENTORY_RELATIVE_PATH),
-    sidecar: null,
-    hello: null,
-    sidecarDir: null,
     app: null,
     dmg: null,
     hostBinary: null,
     endpoint: null,
     bindingId: null,
     token: process.env.NOMIFUN_ACCESS_TOKEN || null,
-    credentialFile: null,
     report: null,
     logs: [],
     runStartup: false,
     runLifecycle: false,
-    runSidecarRpc: false,
     selfTest: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
+    const flag = token.split('=', 1)[0];
+    if (Object.values(RETIRED_EXECUTOR_OPTIONS).includes(flag)) {
+      throw new Error(`${flag} was retired; Engines are compiled into the host`);
+    }
     if (token === '--self-test') {
       options.selfTest = true;
       continue;
@@ -103,10 +101,6 @@ export function parseArgs(argv) {
       options.runLifecycle = true;
       continue;
     }
-    if (token === '--run-sidecar-rpc') {
-      options.runSidecarRpc = true;
-      continue;
-    }
     const match = token.match(/^--([^=]+)(?:=(.*))?$/);
     if (!match) throw new Error(`unknown argument: ${token}`);
     const key = match[1].replaceAll('-', '');
@@ -116,16 +110,12 @@ export function parseArgs(argv) {
       if (!value || value.startsWith('--')) throw new Error(`${token} requires a value`);
     }
     const mapping = {
-      sidecar: 'sidecar',
-      hello: 'hello',
-      sidecardir: 'sidecarDir',
       app: 'app',
       dmg: 'dmg',
       hostbinary: 'hostBinary',
       endpoint: 'endpoint',
       bindingid: 'bindingId',
       token: 'token',
-      credentialfile: 'credentialFile',
       report: 'report',
       releaselock: 'releaseLock',
       artifactroot: 'artifactRoot',
@@ -283,53 +273,6 @@ function check(report, id, status, details = {}) {
   if (status === 'fail' || status === 'blocked') report.failures.push({ id, ...details });
 }
 
-const OPTIONAL_SIDECAR_CHECK_IDS = [
-  'sidecar:credential',
-  'sidecar:artifact-target-permissions',
-  'sidecar:release-lock-sha256',
-  'sidecar:native-arm64',
-  'sidecar:hello-profile-rpc-contract',
-  'sidecar:live-hello-rpc',
-  'sidecar:process-cleanup',
-];
-
-function suppliedOptionalSidecarInputs(options = {}) {
-  return [
-    options.sidecar ? '--sidecar' : null,
-    options.hello ? '--hello' : null,
-    options.sidecarDir ? '--sidecar-dir' : null,
-    options.credentialFile ? '--credential-file' : null,
-    options.runSidecarRpc ? '--run-sidecar-rpc' : null,
-  ].filter(Boolean);
-}
-
-export function applyMacosSidecarReleasePolicy(report, lock, options = {}) {
-  const sidecars =
-    lock?.sidecars && typeof lock.sidecars === 'object' && !Array.isArray(lock.sidecars)
-      ? lock.sidecars
-      : {};
-  const artifact = sidecars[TARGET_ID] || null;
-  if (artifact) {
-    check(report, 'release-lock:arm64-sidecar', 'pass', {
-      target: TARGET_ID,
-      path: artifact.path,
-      sha256: artifact.sha256,
-    });
-    return { status: 'required', artifact };
-  }
-
-  const details = {
-    reason: 'current Nomi-core release lock does not include a macOS arm64 Sidecar',
-    target: TARGET_ID,
-    available_targets: Object.keys(sidecars).sort(),
-    ignored_optional_inputs: suppliedOptionalSidecarInputs(options),
-  };
-  check(report, 'release-lock:arm64-sidecar', 'not_required', details);
-  for (const id of OPTIONAL_SIDECAR_CHECK_IDS) {
-    check(report, id, 'not_required', details);
-  }
-  return { status: 'not_required', artifact: null };
-}
 
 function finishReport(report, options) {
   report.suite.checks = report.checks.map((entry) => entry.id);
@@ -634,74 +577,6 @@ async function remoteLifecycle(options, report) {
   });
 }
 
-async function sidecarRpc(options, sidecar, report, hello) {
-  const credential = readFileSync(options.credentialFile);
-  if (credential.length === 0) {
-    check(report, 'sidecar:credential', 'fail', { reason: 'credential file is empty' });
-    return;
-  }
-  const child = spawn(sidecar, ['app-server', '--listen', 'stdio://'], {
-    cwd: dirname(sidecar),
-    stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
-  });
-  let stdout = '';
-  let stderr = '';
-  child.stdout.on('data', (chunk) => {
-    stdout += String(chunk);
-  });
-  child.stderr.on('data', (chunk) => {
-    stderr += String(chunk);
-  });
-  try {
-    child.stdio[3].write(Buffer.from('NOMIFUN-CODEX-CREDENTIAL-V1\0'));
-    const frame = Buffer.alloc(4);
-    frame.writeUInt32BE(credential.length);
-    child.stdio[3].write(frame);
-    child.stdio[3].write(credential);
-    child.stdio[3].end();
-    child.stdin.write(`${JSON.stringify({
-      id: 1,
-      method: 'runtime/hello',
-      params: {
-        credential_protocol: 'nomifun-inherited-handle-v1',
-        credential_handle: { kind: 'unix_fd', fd: 3 },
-      },
-    })}\n`);
-    child.stdin.end();
-    const deadline = Date.now() + 10_000;
-    while (!stdout.includes('\n') && Date.now() < deadline) {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
-    }
-    const line = stdout.split(/\r?\n/).find(Boolean);
-    const actual = line ? JSON.parse(line) : null;
-    const payload = actual?.result;
-    const matches =
-      actual?.id === 1 &&
-      payload &&
-      payload.runtime_release_digest === hello.runtime_release_digest &&
-      payload.fork_commit === EXPECTED_FORK_COMMIT &&
-      payload.tracked_upstream_commit === EXPECTED_FORK_COMMIT &&
-      payload.protocol_version === EXPECTED_PROTOCOL_VERSION &&
-      JSON.stringify(payload.rpc_allowlist?.methods || []) === JSON.stringify(EXPECTED_RPC_METHODS) &&
-      Array.isArray(payload.rpc_allowlist?.experimental_methods) &&
-      payload.rpc_allowlist.experimental_methods.length === 0;
-    check(report, 'sidecar:live-hello-rpc', matches ? 'pass' : 'fail', {
-      observed_id: actual?.id ?? null,
-      observed_hello: payload || null,
-      stderr_tail: stderr.slice(-2_000),
-    });
-  } catch (error) {
-    check(report, 'sidecar:live-hello-rpc', 'fail', { reason: error.message, stderr_tail: stderr.slice(-2_000) });
-  } finally {
-    await stopChild(child);
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
-    const remaining = descendantsOf(child.pid);
-    check(report, 'sidecar:process-cleanup', remaining.pids.length === 0 ? 'pass' : 'fail', {
-      root_pid: child.pid,
-      remaining_pids: remaining.pids,
-    });
-  }
-}
 
 export function validatePathShape(path, { kind = 'file', requireExecutable = false } = {}) {
   const metadata = existingFile(path);
@@ -719,33 +594,12 @@ export function validatePathShape(path, { kind = 'file', requireExecutable = fal
   return { status: 'pass', path, mode: metadata.mode.toString(8) };
 }
 
-export function validateHelloPayload(hello) {
-  const mismatches = [];
-  if (!SHA256_PATTERN.test(hello?.runtime_release_digest || '')) {
-    mismatches.push('runtime_release_digest');
-  }
-  if (!SHA256_PATTERN.test(hello?.runtime_build_digest || '')) {
-    mismatches.push('runtime_build_digest');
-  }
-  if (hello?.fork_commit !== EXPECTED_FORK_COMMIT) mismatches.push('fork_commit');
-  if (hello?.tracked_upstream_commit !== EXPECTED_FORK_COMMIT) mismatches.push('tracked_upstream_commit');
-  if (hello?.protocol_version !== EXPECTED_PROTOCOL_VERSION) mismatches.push('protocol_version');
-  if (hello?.protocol_schema_digest !== EXPECTED_PROTOCOL_SCHEMA_DIGEST) mismatches.push('protocol_schema_digest');
-  if (hello?.runtime_target !== EXPECTED_TARGET) mismatches.push('runtime_target');
-  if (JSON.stringify(hello?.supported_profiles || []) !== JSON.stringify(EXPECTED_PROFILES)) mismatches.push('supported_profiles');
-  if (hello?.full_auto?.ask_for_approval !== 'never') mismatches.push('full_auto.ask_for_approval');
-  if (hello?.full_auto?.sandbox_policy !== 'danger-full-access') mismatches.push('full_auto.sandbox_policy');
-  if (JSON.stringify(hello?.rpc_allowlist?.methods || []) !== JSON.stringify(EXPECTED_RPC_METHODS)) mismatches.push('rpc_allowlist.methods');
-  if (!Array.isArray(hello?.rpc_allowlist?.experimental_methods) || hello.rpc_allowlist.experimental_methods.length !== 0) {
-    mismatches.push('rpc_allowlist.experimental_methods');
-  }
-  return { status: mismatches.length === 0 ? 'pass' : 'fail', mismatches };
-}
 
 export async function runValidation(
   options = parseArgs(process.argv.slice(2)),
   execution = {},
 ) {
+  rejectRetiredOptions(options);
   const hostPlatform = execution.platform || process.platform;
   const hostArch = execution.arch || process.arch;
   const runCommand = execution.command || command;
@@ -762,7 +616,7 @@ export async function runValidation(
     status: 'blocked',
     release_lock: null,
     logs: [{ kind: 'embedded_checks', reference: '#/checks' }],
-    gate_name: 'c8-ma-macos-arm64-helper',
+    gate_name: 'macos-arm64-host-preflight',
     execution_kind: 'native',
     target_cell: TARGET_ID,
     execution_host: {
@@ -854,18 +708,11 @@ export async function runValidation(
     },
   );
 
-  const sidecarPolicy = applyMacosSidecarReleasePolicy(report, lock, options);
-  const lockedSidecar = sidecarPolicy.artifact;
-
   let lockedHostPath;
   let lockedPackagePath;
-  let lockedSidecarPath = null;
   try {
     lockedHostPath = resolveReleaseArtifactPath(artifactRoot, lock.host.path);
     lockedPackagePath = resolveReleaseArtifactPath(artifactRoot, lock.package.path);
-    if (lockedSidecar) {
-      lockedSidecarPath = resolveReleaseArtifactPath(artifactRoot, lockedSidecar.path);
-    }
   } catch (error) {
     check(report, 'release-lock:artifact-paths', 'fail', { reason: error.message });
     return finish();
@@ -874,17 +721,6 @@ export async function runValidation(
   const lockedAppPath = appFromHostBinary(lockedHostPath);
   checkOptionalArtifactOverride(report, 'override:app', options.app, lockedAppPath);
   checkOptionalArtifactOverride(report, 'override:dmg', options.dmg, lockedPackagePath);
-  if (lockedSidecarPath) {
-    checkOptionalArtifactOverride(report, 'override:sidecar', options.sidecar, lockedSidecarPath);
-  }
-  if (lockedSidecarPath && options.sidecarDir) {
-    checkOptionalArtifactOverride(
-      report,
-      'override:sidecar-dir',
-      join(resolve(options.sidecarDir), 'runtime/macos/arm64/nomifun-codex-runtime'),
-      lockedSidecarPath,
-    );
-  }
 
   const appPath = lockedAppPath;
   report.artifacts.app = appPath;
@@ -944,58 +780,6 @@ export async function runValidation(
     });
   }
 
-  if (lockedSidecarPath) {
-    report.artifacts.sidecar = lockedSidecarPath;
-    const sidecarShape = inspectPath(lockedSidecarPath, { requireExecutable: true });
-    check(report, 'sidecar:artifact-target-permissions', sidecarShape.status, sidecarShape);
-    if (sidecarShape.status === 'pass') {
-      const observedSha = sha256File(lockedSidecarPath);
-      check(report, 'sidecar:release-lock-sha256', observedSha === lockedSidecar.sha256 ? 'pass' : 'fail', {
-        expected: lockedSidecar.sha256,
-        observed: observedSha,
-        path: lockedSidecarPath,
-      });
-      const fileType = runCommand('file', [lockedSidecarPath]);
-      const archs = runCommand('lipo', ['-archs', lockedSidecarPath]);
-      check(report, 'sidecar:native-arm64', fileType.stdout.includes('arm64') && archs.stdout.trim() === 'arm64' ? 'pass' : 'fail', {
-        file: fileType.stdout.trim(),
-        lipo_archs: archs.stdout.trim(),
-      });
-
-      const helloPath = options.hello || `${lockedSidecarPath}.hello.json`;
-      report.artifacts.hello = helloPath;
-      try {
-        const helloShape = inspectPath(helloPath);
-        if (helloShape.status !== 'pass') {
-          throw new Error(`hello metadata path rejected: ${JSON.stringify(helloShape)}`);
-        }
-        const hello = readJson(helloPath);
-        const helloResult = validateHelloPayload(hello);
-        check(report, 'sidecar:hello-profile-rpc-contract', helloResult.status, {
-          mismatches: helloResult.mismatches,
-          path: helloPath,
-        });
-        if (!options.runSidecarRpc) {
-          check(report, 'sidecar:live-hello-rpc', 'blocked', {
-            reason: 'live hello/RPC probe not run; rerun with --run-sidecar-rpc --credential-file <path>',
-          });
-        } else if (!options.credentialFile) {
-          check(report, 'sidecar:live-hello-rpc', 'blocked', {
-            reason: '--run-sidecar-rpc requires --credential-file when the release lock contains a macOS arm64 Sidecar',
-          });
-          report.blockers.push('missing credential file for required macOS arm64 Sidecar RPC probe');
-        } else {
-          await sidecarRpc(options, lockedSidecarPath, report, hello);
-        }
-      } catch (error) {
-        check(report, 'sidecar:hello-profile-rpc-contract', 'blocked', {
-          reason: `hello metadata unavailable or invalid: ${error.message}`,
-          path: helloPath,
-        });
-        report.blockers.push(`missing/invalid hello metadata: ${helloPath}`);
-      }
-    }
-  }
 
   const hostBinary = options.hostBinary ? resolve(options.hostBinary) : null;
   let canonicalInventory = null;
@@ -1100,19 +884,6 @@ export function assertSelfTest() {
     symlinkSync(linkTarget, link, process.platform === 'win32' ? 'junction' : 'dir');
     const symlink = validatePathShape(link, { kind: 'directory' });
     if (symlink.reason !== 'symlink_not_allowed') throw new Error('symlink must fail closed');
-    const hello = validateHelloPayload({
-      runtime_release_digest: 'a'.repeat(64),
-      runtime_build_digest: 'b'.repeat(64),
-      fork_commit: EXPECTED_FORK_COMMIT,
-      tracked_upstream_commit: EXPECTED_FORK_COMMIT,
-      protocol_version: EXPECTED_PROTOCOL_VERSION,
-      protocol_schema_digest: EXPECTED_PROTOCOL_SCHEMA_DIGEST,
-      runtime_target: EXPECTED_TARGET,
-      supported_profiles: EXPECTED_PROFILES,
-      full_auto: { ask_for_approval: 'never', sandbox_policy: 'danger-full-access' },
-      rpc_allowlist: { methods: EXPECTED_RPC_METHODS, experimental_methods: [] },
-    });
-    if (hello.status !== 'pass') throw new Error(`hello fixture should pass: ${JSON.stringify(hello)}`);
     return { status: 'pass' };
   } finally {
     rmSync(temporary, { recursive: true, force: true });

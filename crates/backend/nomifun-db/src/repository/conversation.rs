@@ -77,6 +77,7 @@ pub(crate) fn strip_runtime_resume_extra(extra: &str) -> Result<String, DbError>
         "acp_session_updated_at",
         "acpSessionUpdatedAt",
         "_edit_resubmit_fence",
+        crate::conversation_context::ENGINE_CONTEXT_AFTER_MESSAGE_ID,
     ] {
         object.remove(key);
     }
@@ -448,6 +449,21 @@ pub trait IConversationRepository: Send + Sync {
             "Conversation repository does not implement atomic terminal transcript clear"
                 .to_owned(),
         ))
+    }
+
+    /// Advance the model-history floor without deleting visible history or
+    /// recovery receipts. Caller must hold maintenance fences and prove live
+    /// runtime teardown; exact extra protects its source-policy decision.
+    async fn clear_terminal_engine_context(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        expected_extra: &str,
+        created_at: TimestampMs,
+        updated_at: TimestampMs,
+    ) -> Result<TurnLifecycleTransition, DbError> {
+        let _ = (user_id, conversation_id, expected_extra, created_at, updated_at);
+        Err(DbError::Init("Conversation repository does not implement Engine context clear".into()))
     }
 
     /// Atomically register or load a receiver-side idempotency receipt.

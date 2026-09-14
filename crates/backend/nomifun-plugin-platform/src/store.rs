@@ -189,6 +189,32 @@ impl PluginArtifactStore {
         &self.managed_root
     }
 
+    /// Publish already captured bytes through the same scanner, manifest
+    /// verifier and content-addressed store as directory/ZIP imports.
+    pub fn import_files(
+        &self,
+        files: &BTreeMap<String, Vec<u8>>,
+        cancellation: &dyn ImportCancellation,
+    ) -> Result<ArtifactImportResult, PluginArtifactStoreError> {
+        check_canceled(cancellation)?;
+        let mut staging = self.create_staging()?;
+        let mut scanner = PackageScanner::new(self.limits, staging.path(), cancellation);
+        for (path, bytes) in files {
+            check_canceled(cancellation)?;
+            let normalized = normalize_relative_path(Path::new(path))?;
+            if &normalized != path { return Err(PluginArtifactStoreError::UnsafePackagePath { path: path.clone(), reason: "captured path must already be normalized".into() }); }
+            validate_allowed_file(&normalized)?;
+            scanner.register_file(&normalized)?;
+            scanner.check_declared_size(&normalized, bytes.len() as u64)?;
+            scanner.consume_file(&normalized, bytes.as_slice())?;
+        }
+        let artifact = self.finish_staging(scanner.finish()?, staging.path())?;
+        check_canceled(cancellation)?;
+        let result = self.publish_or_reuse(&artifact, staging.path())?;
+        if !result.already_present { staging.disarm(); }
+        Ok(result)
+    }
+
     pub fn import_directory(
         &self,
         source: impl AsRef<Path>,

@@ -32,6 +32,27 @@ const SESSION_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_ARGUMENT_BYTES: usize = 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_OPERATION_ID_BYTES: usize = 128;
+const MAX_CATALOG_PAGES: u64 = 32;
+const MAX_CATALOG_TOOLS: usize = 1024;
+const MAX_CURSOR_BYTES: usize = 4096;
+
+#[path = "owner_stream.rs"]
+mod stream;
+#[path = "owner_legacy_sse.rs"]
+mod legacy_sse;
+#[path = "owner_stdio.rs"]
+mod stdio;
+#[path = "owner_discovery.rs"]
+mod discovery;
+#[path = "owner_resources.rs"]
+mod resources;
+#[path = "owner_resource_template.rs"]
+mod resource_template;
+
+pub use resources::{McpResourceFailure, McpResourceOperation, McpResourceRequest, McpResourceResult};
+
+pub(crate) use discovery::discover_network;
+pub(crate) use stdio::discover as discover_stdio;
 
 /// A typed error emitted by the MCP owner.
 ///
@@ -41,6 +62,7 @@ const MAX_OPERATION_ID_BYTES: usize = 128;
 pub struct McpOwnerError {
     code: String,
     message: String,
+    authentication_challenge: Option<String>,
 }
 
 impl McpOwnerError {
@@ -49,6 +71,7 @@ impl McpOwnerError {
         Self {
             code: code.into(),
             message: sanitize_diagnostic(&message),
+            authentication_challenge: None,
         }
     }
 
@@ -58,6 +81,19 @@ impl McpOwnerError {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    pub(crate) fn authentication_challenge(&self) -> Option<&str> {
+        self.authentication_challenge.as_deref()
+    }
+
+    fn credential_required(headers: &reqwest::header::HeaderMap) -> Self {
+        let mut error = Self::new("MCP_CREDENTIAL_REQUIRED", "MCP server rejected the canonical credential authority");
+        error.authentication_challenge = headers.get("www-authenticate")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| value.len() <= 4096 && !value.chars().any(char::is_control))
+            .map(sanitize_diagnostic);
+        error
     }
 
     fn invalid_binding(message: impl Into<String>) -> Self {
@@ -338,25 +374,27 @@ impl McpOwner {
 
     /// Execute one exact MCP tool binding.
     ///
-    /// Only Streamable HTTP is implemented in this owner lane. Stdio and SSE
-    /// return an explicit typed unsupported error rather than reaching the
-    /// legacy Nomi client or Gateway.
+    /// All three transports share frozen tool admission. Local stdio processes
+    /// use the platform tree owner, never a legacy Nomi/Gateway fallback.
     pub async fn invoke(
         &self,
         request: McpToolInvocationRequest,
     ) -> Result<McpToolInvocationResult, McpOwnerError> {
         validate_invocation(&request)?;
-        let (url, static_headers) = match &request.server.transport {
-            McpServerTransport::Http { url, headers } => (url.clone(), headers.clone()),
-            McpServerTransport::Stdio { .. } | McpServerTransport::Sse { .. } => {
-                return Err(McpOwnerError::new(
-                    "MCP_TRANSPORT_UNSUPPORTED",
-                    "the canonical MCP owner currently supports Streamable HTTP only",
-                ));
+        let (url, static_headers, legacy) = match &request.server.transport {
+            McpServerTransport::Http { url, headers } => (url.clone(), headers.clone(), false),
+            McpServerTransport::Sse { url, headers } => (url.clone(), headers.clone(), true),
+            McpServerTransport::Stdio { command, args, env } => {
+                let deadline = Instant::now() + self.timeout;
+                let transport = stdio::StdioTransport::launch(command, args, env, deadline).await?;
+                return self.invoke_session(&request, McpSession::from_stdio(transport), deadline).await;
             }
         };
-        let endpoint = validate_http_endpoint(&url)?.to_string();
-        self.invoke_http(&request, endpoint, static_headers).await
+        validate_http_endpoint(&url)?;
+        // OAuth storage keys use the exact configured endpoint. URL parsing
+        // may add a slash/remove a default port; do not silently look up a
+        // different credential key after validating the bound URL.
+        self.invoke_http(&request, url, static_headers, legacy).await
     }
 
     async fn invoke_http(
@@ -364,6 +402,7 @@ impl McpOwner {
         request: &McpToolInvocationRequest,
         endpoint: String,
         static_headers: HashMap<String, String>,
+        legacy: bool,
     ) -> Result<McpToolInvocationResult, McpOwnerError> {
         let http_client = match &self.http_client {
             Ok(client) => client.clone(),
@@ -382,66 +421,52 @@ impl McpOwner {
         .await
         .map_err(|_| owner_timeout_error(self.timeout))??;
         let headers = build_headers(&static_headers, credential.as_ref())?;
-        let mut session = HttpMcpSession::new(http_client, endpoint, headers);
+        let mut session = McpSession::new(http_client, endpoint, headers);
+        session.legacy_mode = legacy;
+        self.invoke_session(request, session, deadline).await
+    }
 
+    async fn invoke_session(
+        &self,
+        request: &McpToolInvocationRequest,
+        mut session: McpSession,
+        deadline: Instant,
+    ) -> Result<McpToolInvocationResult, McpOwnerError> {
+        // Launching a configured local program can itself mutate external
+        // state before tools/call. Tree cleanup is not rollback.
+        let local_process_started = session.stdio.is_some();
+        let mut call_started = false;
         let transaction = async {
-            let initialize = session.request(initialize_request()).await?;
-            ensure_response_id(&initialize, 1)?;
-            ensure_no_rpc_error("initialize", &initialize)?;
-            if initialize.result.is_none() {
-                return Err(McpOwnerError::protocol_failed(
-                    "initialize response has no result",
-                ));
-            }
-            validate_initialize_result(
-                initialize
-                    .result
-                    .as_ref()
-                    .expect("initialize result was checked"),
-            )?;
+            session.initialize().await?;
 
-            session.notify(initialized_notification()).await?;
+            let call_id = session.require_exact_tool(&request.tool).await?;
 
-            let tools = session.request(tools_list_request()).await?;
-            ensure_response_id(&tools, 2)?;
-            ensure_no_rpc_error("tools/list", &tools)?;
-            let remote_tools = parse_tools(tools.result.as_ref().ok_or_else(|| {
-                McpOwnerError::protocol_failed("tools/list response has no result")
-            })?)?;
-            let remote_tool = remote_tools
-                .into_iter()
-                .find(|tool| tool.name == request.tool.remote_tool_name)
-                .ok_or_else(|| {
-                    McpOwnerError::new(
-                        "MCP_TOOL_NOT_FOUND",
-                        format!(
-                            "the bound MCP server did not advertise tool '{}'",
-                            request.tool.remote_tool_name
-                        ),
-                    )
-                })?;
-            if remote_tool.input_schema != request.tool.input_schema {
-                return Err(McpOwnerError::new(
-                    "MCP_SCHEMA_MISMATCH",
-                    format!(
-                        "advertised schema does not match frozen schema digest {}",
-                        request.tool.schema_digest
-                    ),
-                ));
-            }
-
+            // A failed request from this point can already have applied an
+            // effect. Do not replay it as though execution never started.
+            call_started = true;
             let call = session
                 .request(tool_call_request(
+                    call_id,
                     &request.tool.remote_tool_name,
                     &request.arguments,
                     &request.operation_id,
                 ))
                 .await?;
-            ensure_response_id(&call, 3)?;
-            ensure_no_rpc_error("tools/call", &call)?;
-            let result = call.result.ok_or_else(|| {
-                McpOwnerError::protocol_failed("tools/call response has no result")
-            })?;
+            ensure_response_id(&call, call_id)?;
+            if call.jsonrpc != "2.0" || call.result.is_some() == call.error.is_some() {
+                return Err(McpOwnerError::protocol_failed("tools/call must return exactly one JSON-RPC result or error"));
+            }
+            let result = if let Some(error) = call.error {
+                // A correlated RPC rejection is an observed failed call, not
+                // a lost response. Do not echo untrusted RPC message/data.
+                // Publication still waits for the independent cleanup below.
+                json!({"isError":true,"content":[{"type":"text","text":format!(
+                    "The bound MCP tool returned JSON-RPC error {}. This is a returned failure, not proof of no effects or rollback. Do not automatically replay it.", error.code)}]})
+            } else {
+                call.result.ok_or_else(|| {
+                    McpOwnerError::protocol_failed("tools/call response has no result")
+                })?
+            };
             validate_tool_result(&result)?;
 
             Ok(McpToolInvocationResult {
@@ -455,7 +480,8 @@ impl McpOwner {
         let outcome = timeout_at(deadline, transaction)
             .await
             .unwrap_or_else(|_| Err(owner_timeout_error(self.timeout)));
-        let cleanup = timeout(SESSION_CLEANUP_TIMEOUT, session.close())
+        let cleanup_budget = if session.stdio.is_some() { stdio::CLEANUP_TIMEOUT } else { SESSION_CLEANUP_TIMEOUT };
+        let cleanup = timeout(cleanup_budget, session.close())
             .await
             .unwrap_or_else(|_| {
                 Err(McpOwnerError::new(
@@ -466,8 +492,16 @@ impl McpOwner {
 
         match (outcome, cleanup) {
             (Ok(result), Ok(_)) => Ok(result),
-            (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
-            (Err(operation_error), _) => Err(operation_error),
+            // An earlier protocol failure cannot hide cleanup uncertainty.
+            (_, Err(cleanup_error)) => Err(McpOwnerError::new(
+                "MCP_SESSION_CLEANUP_FAILED",
+                format!("MCP transaction cleanup is unproven ({})", cleanup_error.code()),
+            )),
+            (Err(operation_error), Ok(_)) if call_started || local_process_started => Err(McpOwnerError::new(
+                "MCP_OUTCOME_UNKNOWN",
+                format!("MCP tool or local server may have applied effects; do not replay ({})", operation_error.code()),
+            )),
+            (Err(operation_error), Ok(_)) => Err(operation_error),
         }
     }
 }
@@ -533,17 +567,41 @@ fn validate_http_endpoint(raw_url: &str) -> Result<reqwest::Url, McpOwnerError> 
 fn validate_invocation(
     request: &McpToolInvocationRequest,
 ) -> Result<(), McpOwnerError> {
-    if request.principal_kind.trim().is_empty()
-        || request.principal_id.trim().is_empty()
+    validate_connection_authority(&request.principal_kind, &request.principal_id,
+        &request.operation_id, &request.server, MCP_INVOKE_OPERATION)?;
+    validate_tool_binding(&request.tool)?;
+    if request.server.server_id != request.tool.server_id {
+        return Err(McpOwnerError::new("MCP_SERVER_IDENTITY_MISMATCH",
+            "server binding and MCP tool mapping refer to different servers"));
+    }
+    if !request.arguments.is_object() {
+        return Err(McpOwnerError::new("MCP_INVALID_ARGUMENTS", "MCP tools/call arguments must be a JSON object"));
+    }
+    let argument_bytes = serde_json::to_vec(&request.arguments).map_err(|_| {
+        McpOwnerError::new("MCP_INVALID_ARGUMENTS", "MCP arguments could not be serialized")
+    })?;
+    if argument_bytes.len() > MAX_ARGUMENT_BYTES {
+        return Err(McpOwnerError::new("MCP_INVALID_ARGUMENTS", "MCP arguments exceed the byte limit"));
+    }
+    Ok(())
+}
+
+/// Tool invoke and resource read use the same exact connection/owner checks,
+/// but neither operation grant implies the other.
+fn validate_connection_authority(
+    principal_kind: &str, principal_id: &str, operation_id: &str,
+    server: &McpServerBinding, required_operation: &str,
+) -> Result<(), McpOwnerError> {
+    if principal_kind.trim().is_empty()
+        || principal_id.trim().is_empty()
     {
         return Err(McpOwnerError::invalid_binding(
             "MCP invocation requires a non-empty principal",
         ));
     }
-    if request.operation_id.is_empty()
-        || request.operation_id.len() > MAX_OPERATION_ID_BYTES
-        || !request
-            .operation_id
+    if operation_id.is_empty()
+        || operation_id.len() > MAX_OPERATION_ID_BYTES
+        || !operation_id
             .bytes()
             .all(|byte| byte.is_ascii_graphic())
     {
@@ -554,20 +612,12 @@ fn validate_invocation(
             ),
         ));
     }
-    validate_tool_binding(&request.tool)?;
-    let server = &request.server;
     if server.server_id.trim().is_empty()
         || server.server_owner_id.trim().is_empty()
         || server.connection_config_ref.trim().is_empty()
     {
         return Err(McpOwnerError::invalid_binding(
             "MCP server binding contains an empty identity or connection reference",
-        ));
-    }
-    if server.server_id != request.tool.server_id {
-        return Err(McpOwnerError::new(
-            "MCP_SERVER_IDENTITY_MISMATCH",
-            "server binding and MCP tool mapping refer to different servers",
         ));
     }
     if !server.enabled {
@@ -577,7 +627,7 @@ fn validate_invocation(
         ));
     }
     if server.server_owner_id != "system"
-        && server.server_owner_id != request.principal_id
+        && server.server_owner_id != principal_id
     {
         return Err(McpOwnerError::new(
             "MCP_SERVER_OWNER_MISMATCH",
@@ -601,13 +651,13 @@ fn validate_invocation(
             "resource binding does not identify the exact MCP server",
         ));
     }
-    if server.resource_owner_id != request.principal_id {
+    if server.resource_owner_id != principal_id {
         return Err(McpOwnerError::new(
             "MCP_RESOURCE_OWNER_MISMATCH",
             "MCP resource binding belongs to a different principal",
         ));
     }
-    for operation in [MCP_CONNECT_OPERATION, MCP_INVOKE_OPERATION] {
+    for operation in [MCP_CONNECT_OPERATION, required_operation] {
         if !server.granted_operations.contains(operation) {
             return Err(McpOwnerError::new(
                 "MCP_RESOURCE_OPERATION_DENIED",
@@ -621,27 +671,6 @@ fn validate_invocation(
         return Err(McpOwnerError::new(
             "MCP_CONNECTION_CONFIG_MISMATCH",
             "resource and server bindings use different connection references",
-        ));
-    }
-    if !request.arguments.is_object() {
-        return Err(McpOwnerError::new(
-            "MCP_INVALID_ARGUMENTS",
-            "MCP tools/call arguments must be a JSON object",
-        ));
-    }
-    let argument_bytes = serde_json::to_vec(&request.arguments).map_err(|error| {
-        McpOwnerError::new(
-            "MCP_INVALID_ARGUMENTS",
-            format!("MCP arguments could not be serialized: {error}"),
-        )
-    })?;
-    if argument_bytes.len() > MAX_ARGUMENT_BYTES {
-        return Err(McpOwnerError::new(
-            "MCP_INVALID_ARGUMENTS",
-            format!(
-                "MCP arguments exceed the {} byte limit",
-                MAX_ARGUMENT_BYTES
-            ),
         ));
     }
     Ok(())
@@ -706,8 +735,18 @@ fn build_headers(
                 | "api-key"
                 | "x-auth-token"
                 | "mcp-session-id"
+                | "mcp-protocol-version"
                 | "content-type"
                 | "accept"
+                | "host"
+                | "content-length"
+                | "transfer-encoding"
+                | "connection"
+                | "upgrade"
+                | "trailer"
+                | "te"
+                | "proxy-connection"
+                | "last-event-id"
         ) {
             return Err(McpOwnerError::new(
                 "MCP_CREDENTIAL_AUTHORITY_REQUIRED",
@@ -730,12 +769,13 @@ fn build_headers(
             )
         })?;
         let authorization = format!("{} {}", credential.token_type, secret);
-        let value = reqwest::header::HeaderValue::from_str(&authorization).map_err(|_| {
+        let mut value = reqwest::header::HeaderValue::from_str(&authorization).map_err(|_| {
             McpOwnerError::new(
                 "MCP_CREDENTIAL_INVALID",
                 "credential authority returned an invalid authorization value",
             )
         })?;
+        value.set_sensitive(true);
         headers.insert(reqwest::header::AUTHORIZATION, value);
     }
     headers.insert(
@@ -752,6 +792,7 @@ fn build_headers(
 #[derive(Debug, Serialize)]
 struct JsonRpcRequest {
     jsonrpc: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<u64>,
     method: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -759,6 +800,7 @@ struct JsonRpcRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JsonRpcResponse {
     #[allow(dead_code)]
     jsonrpc: String,
@@ -780,91 +822,274 @@ struct RemoteTool {
     input_schema: Value,
 }
 
-struct HttpMcpSession {
-    client: reqwest::Client,
+struct McpSession {
+    // Private constructors choose exactly one transport. HTTP fields are never
+    // used for stdio, which does not require constructing a network client.
+    client: Option<reqwest::Client>,
     endpoint: String,
     headers: reqwest::header::HeaderMap,
     session_id: Option<String>,
+    // One bounded request namespace across initialize, catalog pages and call.
+    server_request_ids: BTreeSet<String>,
+    legacy_mode: bool,
+    legacy: Option<legacy_sse::LegacyStream>,
+    stdio: Option<stdio::StdioTransport>,
+    resources_supported: bool,
 }
 
-impl HttpMcpSession {
+impl McpSession {
+    async fn initialize(&mut self) -> Result<(), McpOwnerError> {
+        if self.legacy_mode {
+            let (stream, endpoint) = legacy_sse::LegacyStream::connect(self.http_client()?, &self.endpoint, &self.headers).await?;
+            self.endpoint = endpoint;
+            self.legacy = Some(stream);
+        }
+        let mut initialization = initialize_request();
+        if self.legacy_mode {
+            if let Some(params) = initialization.params.as_mut() {
+                params["protocolVersion"] = json!(legacy_sse::PROTOCOL_VERSION);
+            }
+        }
+        let response = self.request(initialization).await?;
+        ensure_no_rpc_error("initialize", &response)?;
+        let result = response.result.as_ref().ok_or_else(|| McpOwnerError::protocol_failed("initialize response has no result"))?;
+        if self.legacy_mode {
+            validate_initialize_result_for(result, legacy_sse::PROTOCOL_VERSION)?;
+        } else {
+            validate_initialize_result(result)?;
+        }
+        self.resources_supported = match result.get("capabilities").and_then(|value| value.get("resources")) {
+            None => false,
+            Some(Value::Object(_)) => true,
+            Some(_) => return Err(McpOwnerError::protocol_failed("initialize resources capability is malformed")),
+        };
+        self.notify(initialized_notification()).await
+    }
+
+    /// Validate every bounded page, including pages after a match, so an
+    /// incomplete catalog or duplicate name cannot silently select a tool.
+    /// All pages share the invocation's outer deadline; none resets it.
+    async fn require_exact_tool(&mut self, expected: &McpToolBinding) -> Result<u64, McpOwnerError> {
+        self.read_catalog(Some(expected)).await.map(|(id, _)| id)
+    }
+
+    // Discovery and frozen execution validate the same complete catalog.
+    // Execution does not retain raw descriptions or other discovery metadata.
+    async fn read_catalog(&mut self, expected: Option<&McpToolBinding>) -> Result<(u64, Vec<Value>), McpOwnerError> {
+        let mut cursor = None;
+        let mut cursors = BTreeSet::new();
+        let mut names = BTreeSet::new();
+        let mut total_bytes = 0usize;
+        let mut found = false;
+        let mut catalog = Vec::new();
+        for page in 0..MAX_CATALOG_PAGES {
+            let id = 2 + page;
+            let response = self.request(tools_list_request(id, cursor.as_deref())).await?;
+            ensure_response_id(&response, id)?;
+            ensure_no_rpc_error("tools/list", &response)?;
+            let value = response.result.ok_or_else(|| McpOwnerError::protocol_failed("tools/list response has no result"))?;
+            total_bytes = total_bytes.saturating_add(serde_json::to_vec(&value)
+                .map_err(|_| McpOwnerError::protocol_failed("tools/list catalog is not serializable"))?.len());
+            if total_bytes > MAX_RESPONSE_BYTES {
+                return Err(McpOwnerError::protocol_failed("tools/list catalog exceeds the aggregate byte limit"));
+            }
+            for tool in parse_tools(&value)? {
+                if names.len() >= MAX_CATALOG_TOOLS || !names.insert(tool.name.clone()) {
+                    return Err(McpOwnerError::protocol_failed("tools/list catalog is oversized or contains duplicate names"));
+                }
+                if let Some(expected) = expected.filter(|expected| tool.name == expected.remote_tool_name) {
+                    if tool.input_schema != expected.input_schema {
+                        return Err(McpOwnerError::new("MCP_SCHEMA_MISMATCH", "advertised schema differs from the frozen tool schema"));
+                    }
+                    found = true;
+                }
+            }
+            if expected.is_none() {
+                catalog.extend(value.get("tools").and_then(Value::as_array)
+                    .ok_or_else(|| McpOwnerError::protocol_failed("tools/list has no tools array"))?.iter().cloned());
+            }
+            match value.get("nextCursor") {
+                None | Some(Value::Null) => {
+                    return if found || expected.is_none() { Ok((id + 1, catalog)) } else {
+                        Err(McpOwnerError::new("MCP_TOOL_NOT_FOUND", "the complete MCP catalog does not advertise the frozen tool"))
+                    };
+                }
+                Some(Value::String(next)) if !next.is_empty() && next.len() <= MAX_CURSOR_BYTES => {
+                    if !cursors.insert(next.clone()) {
+                        return Err(McpOwnerError::protocol_failed("tools/list returned a repeated pagination cursor"));
+                    }
+                    cursor = Some(next.clone());
+                }
+                _ => return Err(McpOwnerError::protocol_failed("tools/list returned an invalid pagination cursor")),
+            }
+        }
+        Err(McpOwnerError::protocol_failed("tools/list exceeded the pagination limit"))
+    }
+
     fn new(
         client: reqwest::Client,
         endpoint: String,
         headers: reqwest::header::HeaderMap,
     ) -> Self {
         Self {
-            client,
+            client: Some(client),
             endpoint,
             headers,
             session_id: None,
+            server_request_ids: BTreeSet::new(),
+            legacy_mode: false,
+            legacy: None,
+            stdio: None,
+            resources_supported: false,
         }
+    }
+
+    fn from_stdio(transport: stdio::StdioTransport) -> Self {
+        Self {
+            client: None,
+            endpoint: String::new(),
+            headers: reqwest::header::HeaderMap::new(),
+            session_id: None,
+            server_request_ids: BTreeSet::new(),
+            legacy_mode: false,
+            legacy: None,
+            stdio: Some(transport),
+            resources_supported: false,
+        }
+    }
+
+    fn http_client(&self) -> Result<&reqwest::Client, McpOwnerError> {
+        self.client.as_ref().ok_or_else(|| McpOwnerError::protocol_failed("MCP transaction has no HTTP transport"))
     }
 
     async fn request(
         &mut self,
         request: JsonRpcRequest,
     ) -> Result<JsonRpcResponse, McpOwnerError> {
-        let response = self.send(request).await?;
-        if let Some(session_id) = response
-            .headers()
-            .get("mcp-session-id")
-            .and_then(|value| value.to_str().ok())
-        {
-            if session_id.trim().is_empty() {
-                return Err(McpOwnerError::protocol_failed(
-                    "MCP server returned an empty session ID",
-                ));
-            }
-            self.session_id = Some(session_id.to_owned());
+        let initializing = request.method == "initialize";
+        let expected = request.id.ok_or_else(|| McpOwnerError::protocol_failed("MCP request has no correlation ID"))?;
+        if let Some(transport) = &self.stdio {
+            let writer = transport.writer();
+            let frame = stdio::encode(&request)?;
+            let (_, result) = tokio::try_join!(stdio::write_frame(writer, frame), stdio::read_response(self, expected))?;
+            return Ok(result);
         }
-        parse_response(response).await
+        if self.legacy_mode {
+            // Read the event stream while waiting for POST acknowledgment.
+            // Otherwise a large response can backpressure the server before
+            // it sends its 202, deadlocking the two HTTP connections.
+            let post = self.post_payload(&request, initializing)?.send();
+            let ack = async {
+                let response = post.await.map_err(|error| map_request_error(error, "MCP legacy request failed"))?;
+                legacy_sse::accept_ack(response).await
+            };
+            let (_, result) = tokio::try_join!(ack, legacy_sse::read_response(self, expected))?;
+            return Ok(result);
+        }
+        let response = self.send(request).await?;
+        self.capture_session_id(response.headers(), initializing)?;
+        let result = parse_response(response, expected, self).await?;
+        if result.jsonrpc != "2.0" || result.result.is_some() == result.error.is_some() {
+            return Err(McpOwnerError::protocol_failed("MCP response must contain exactly one JSON-RPC 2.0 result or error"));
+        }
+        ensure_response_id(&result, expected)?;
+        Ok(result)
     }
 
     async fn notify(&mut self, request: JsonRpcRequest) -> Result<(), McpOwnerError> {
+        if let Some(transport) = &self.stdio {
+            return stdio::write_frame(transport.writer(), stdio::encode(&request)?).await;
+        }
         let response = self.send(request).await?;
+        self.accept_empty_ack(response).await
+    }
+
+    // Replies never recurse into the SSE parser. Streamable HTTP requires an
+    // empty 202; legacy SSE also permits a bounded uninterpreted textual body.
+    async fn accept_empty_ack(&mut self, mut response: reqwest::Response) -> Result<(), McpOwnerError> {
+        if self.legacy_mode { return legacy_sse::accept_ack(response).await; }
         let status = response.status();
-        let session_id = response
-            .headers()
-            .get("mcp-session-id")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        let session_id_error = match session_id {
-            Some(session_id) if session_id.trim().is_empty() => {
-                Some(McpOwnerError::protocol_failed(
-                    "MCP server returned an empty session ID",
-                ))
-            }
-            Some(session_id) => {
-                self.session_id = Some(session_id);
-                None
-            }
-            None => None,
-        };
-        let body_result = drain_response_body(response).await;
+        let session_id_error = self.capture_session_id(response.headers(), false).err();
         if let Some(error) = session_id_error {
             return Err(error);
         }
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(McpOwnerError::new(
-                "MCP_CREDENTIAL_REQUIRED",
-                "MCP server rejected the canonical credential authority",
-            ));
+            return Err(McpOwnerError::credential_required(response.headers()));
         }
-        if !status.is_success() {
+        if status != reqwest::StatusCode::ACCEPTED {
             return Err(McpOwnerError::new(
                 "MCP_HTTP_ERROR",
                 format!(
-                    "MCP server returned HTTP {} for initialized notification",
+                    "MCP server returned HTTP {} instead of an empty 202 acknowledgment",
                     status.as_u16()
                 ),
             ));
         }
-        body_result?;
+        while let Some(chunk) = response.chunk().await.map_err(|_| {
+            McpOwnerError::connection_failed("MCP acknowledgment could not be read")
+        })? {
+            if !chunk.is_empty() {
+                return Err(McpOwnerError::protocol_failed("MCP acknowledgment must have an empty body"));
+            }
+        }
+        Ok(())
+    }
+
+    async fn reply_to_server(&mut self, request: &Value) -> Result<(), McpOwnerError> {
+        let id = request.get("id").filter(|id| match id {
+            Value::String(value) => !value.is_empty() && value.len() <= 1024,
+            Value::Number(value) => value.is_i64() || value.is_u64(),
+            _ => false,
+        }).ok_or_else(|| McpOwnerError::protocol_failed("MCP server request has an invalid ID"))?;
+        let key = serde_json::to_string(id).map_err(|_| McpOwnerError::protocol_failed("MCP server request ID is not serializable"))?;
+        if self.server_request_ids.len() >= 64 || !self.server_request_ids.insert(key) {
+            return Err(McpOwnerError::protocol_failed("MCP server requests exceed the bound or reuse an ID"));
+        }
+        let method = request.get("method").and_then(Value::as_str)
+            .ok_or_else(|| McpOwnerError::protocol_failed("MCP server request has no method"))?;
+        let valid_params = request.get("params").is_none_or(Value::is_object);
+        let reply = if !valid_params {
+            serde_json::json!({"jsonrpc":"2.0", "id":id, "error":{"code":-32602,"message":"Invalid params"}})
+        } else if method == "ping" {
+            serde_json::json!({"jsonrpc":"2.0", "id":id, "result":{}})
+        } else {
+            // No sampling, elicitation, roots or custom client capability is
+            // advertised. A remote method is never a new authority grant.
+            serde_json::json!({"jsonrpc":"2.0", "id":id, "error":{"code":-32601,"message":"Client method not supported"}})
+        };
+        if let Some(transport) = &self.stdio {
+            return stdio::write_frame(transport.writer(), stdio::encode(&reply)?).await;
+        }
+        let response = self.send_payload(&reply, false).await?;
+        self.accept_empty_ack(response).await
+    }
+
+    fn capture_session_id(&mut self, headers: &reqwest::header::HeaderMap, initializing: bool) -> Result<(), McpOwnerError> {
+        let Some(value) = headers.get("mcp-session-id") else { return Ok(()); };
+        let id = value.to_str().ok().filter(|id| !id.is_empty() && id.len() <= 1024
+            && id.bytes().all(|byte| byte.is_ascii_graphic()))
+            .ok_or_else(|| McpOwnerError::new("MCP_SESSION_CLEANUP_FAILED", "MCP server returned an unusable session identity"))?;
+        if initializing && self.session_id.is_none() {
+            self.session_id = Some(id.to_owned());
+        } else if self.session_id.as_deref() != Some(id) {
+            // Keep the original identity for cleanup; never redirect later
+            // calls or DELETE to a newly supplied session header.
+            return Err(McpOwnerError::new("MCP_SESSION_CLEANUP_FAILED", "MCP server changed its initialized session identity"));
+        }
         Ok(())
     }
 
     async fn close(&mut self) -> Result<(), McpOwnerError> {
+        if let Some(transport) = &mut self.stdio {
+            return transport.close().await;
+        }
+        if self.legacy_mode {
+            // Legacy SSE defines no DELETE/session-termination protocol.
+            // Release this transaction's stream; this proves neither remote
+            // service shutdown nor reversal of the acknowledged tool effect.
+            self.legacy.take();
+            return Ok(());
+        }
         let Some(session_id) = self.session_id.take() else {
             return Ok(());
         };
@@ -876,8 +1101,9 @@ impl HttpMcpSession {
             )
         })?;
         headers.insert("mcp-session-id", value);
+        headers.insert("mcp-protocol-version", reqwest::header::HeaderValue::from_static(MCP_PROTOCOL_VERSION));
         let response = self
-            .client
+            .http_client()?
             .delete(&self.endpoint)
             .headers(headers)
             .send()
@@ -912,20 +1138,34 @@ impl HttpMcpSession {
         &self,
         request: JsonRpcRequest,
     ) -> Result<reqwest::Response, McpOwnerError> {
+        let initializing = request.method == "initialize";
+        self.send_payload(&request, initializing).await
+    }
+
+    async fn send_payload<T: Serialize + Sync>(
+        &self,
+        payload: &T,
+        initializing: bool,
+    ) -> Result<reqwest::Response, McpOwnerError> {
+        self.post_payload(payload, initializing)?
+            .send().await.map_err(|error| map_request_error(error, "MCP request failed"))
+    }
+
+    fn post_payload<T: Serialize + Sync>(&self, payload: &T, initializing: bool) -> Result<reqwest::RequestBuilder, McpOwnerError> {
         let mut headers = self.headers.clone();
+        if !initializing && !self.legacy_mode {
+            headers.insert("mcp-protocol-version", reqwest::header::HeaderValue::from_static(MCP_PROTOCOL_VERSION));
+        }
         if let Some(session_id) = &self.session_id {
             let value = reqwest::header::HeaderValue::from_str(session_id).map_err(|_| {
                 McpOwnerError::protocol_failed("MCP session ID cannot be represented as a header")
             })?;
             headers.insert("mcp-session-id", value);
         }
-        self.client
+        Ok(self.http_client()?
             .post(&self.endpoint)
             .headers(headers)
-            .json(&request)
-            .send()
-            .await
-            .map_err(|error| map_request_error(error, "MCP request failed"))
+            .json(payload))
     }
 }
 
@@ -965,14 +1205,14 @@ async fn drain_response_body(
 
 async fn parse_response(
     mut response: reqwest::Response,
+    expected: u64,
+    session: &mut McpSession,
 ) -> Result<JsonRpcResponse, McpOwnerError> {
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        let _ = drain_response_body(response).await;
-        return Err(McpOwnerError::new(
-            "MCP_CREDENTIAL_REQUIRED",
-            "MCP server rejected the canonical credential authority",
-        ));
+        // Keep the bounded challenge even if an error body would never end.
+        // Dropping that body closes it; the known session is cleaned separately.
+        return Err(McpOwnerError::credential_required(response.headers()));
     }
     if !status.is_success() {
         let _ = drain_response_body(response).await;
@@ -995,6 +1235,12 @@ async fn parse_response(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .to_owned();
+    if content_type.split(';').next().is_some_and(|kind| kind.trim().eq_ignore_ascii_case("text/event-stream")) {
+        return stream::read_response(response, expected, session).await;
+    }
+    if !content_type.split(';').next().is_some_and(|kind| kind.trim().eq_ignore_ascii_case("application/json")) {
+        return Err(McpOwnerError::protocol_failed("MCP response has an unsupported content type"));
+    }
     let mut body = Vec::with_capacity(
         response
             .content_length()
@@ -1011,16 +1257,31 @@ async fn parse_response(
         }
         body.extend_from_slice(&chunk);
     }
-    if content_type.contains("text/event-stream") {
-        parse_sse_response(&String::from_utf8_lossy(&body))
-    } else {
-        serde_json::from_slice(&body).map_err(|error| {
-            McpOwnerError::protocol_failed(format!("MCP response is not valid JSON-RPC: {error}"))
-        })
+    let value = serde_json::from_slice(&body).map_err(|_| {
+        McpOwnerError::protocol_failed("MCP response is not valid JSON-RPC")
+    })?;
+    decode_rpc_response(value)
+}
+
+fn decode_rpc_response(value: Value) -> Result<JsonRpcResponse, McpOwnerError> {
+    // Presence, not Option deserialization, decides the envelope: error:null
+    // alongside result is still an illegal second outcome field.
+    let result = value.get("result").cloned();
+    let error = value.get("error");
+    if result.is_some() == error.is_some() || error.is_some_and(Value::is_null) {
+        return Err(McpOwnerError::protocol_failed("MCP response must contain exactly one result or error"));
     }
+    let mut response: JsonRpcResponse = serde_json::from_value(value)
+        .map_err(|_| McpOwnerError::protocol_failed("MCP response envelope is malformed"))?;
+    response.result = result;
+    Ok(response)
 }
 
 fn validate_initialize_result(value: &Value) -> Result<(), McpOwnerError> {
+    validate_initialize_result_for(value, MCP_PROTOCOL_VERSION)
+}
+
+fn validate_initialize_result_for(value: &Value, expected: &str) -> Result<(), McpOwnerError> {
     let protocol_version = value
         .as_object()
         .and_then(|object| object.get("protocolVersion"))
@@ -1028,38 +1289,15 @@ fn validate_initialize_result(value: &Value) -> Result<(), McpOwnerError> {
         .ok_or_else(|| {
             McpOwnerError::protocol_failed("initialize result has no protocolVersion")
         })?;
-    if protocol_version != MCP_PROTOCOL_VERSION {
+    if protocol_version != expected {
         return Err(McpOwnerError::new(
             "MCP_PROTOCOL_VERSION_MISMATCH",
             format!(
-                "MCP server selected protocol {protocol_version}; expected {MCP_PROTOCOL_VERSION}"
+                "MCP server selected an unsupported protocol; expected {expected}"
             ),
         ));
     }
     Ok(())
-}
-
-fn parse_sse_response(body: &str) -> Result<JsonRpcResponse, McpOwnerError> {
-    let normalized = body.replace("\r\n", "\n");
-    for event in normalized.split("\n\n") {
-        let data = event
-            .lines()
-            .filter_map(|line| line.strip_prefix("data:"))
-            .map(|line| line.strip_prefix(' ').unwrap_or(line))
-            .collect::<Vec<_>>()
-            .join("\n");
-        if data.trim().is_empty() {
-            continue;
-        }
-        if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&data)
-            && response.id.is_some()
-        {
-            return Ok(response);
-        }
-    }
-    Err(McpOwnerError::protocol_failed(
-        "MCP SSE response contained no correlated JSON-RPC result",
-    ))
 }
 
 fn ensure_response_id(
@@ -1068,7 +1306,7 @@ fn ensure_response_id(
 ) -> Result<(), McpOwnerError> {
     let matches = response.id.as_ref().is_some_and(|id| match id {
         Value::Number(number) => number.as_u64() == Some(expected),
-        Value::String(value) => value == &expected.to_string(),
+        // IDs are typed: the string 2 cannot acknowledge numeric request 2.
         _ => false,
     });
     if matches {
@@ -1099,6 +1337,9 @@ fn parse_tools(value: &Value) -> Result<Vec<RemoteTool>, McpOwnerError> {
         .and_then(|object| object.get("tools"))
         .and_then(Value::as_array)
         .ok_or_else(|| McpOwnerError::protocol_failed("tools/list result has no tools array"))?;
+    if tools.len() > MAX_CATALOG_TOOLS {
+        return Err(McpOwnerError::protocol_failed("tools/list page exceeds the tool count bound"));
+    }
     let mut names = BTreeSet::new();
     let mut parsed = Vec::with_capacity(tools.len());
     for (index, tool) in tools.iter().enumerate() {
@@ -1108,7 +1349,8 @@ fn parse_tools(value: &Value) -> Result<Vec<RemoteTool>, McpOwnerError> {
         let name = object
             .get("name")
             .and_then(Value::as_str)
-            .filter(|name| !name.trim().is_empty() && name.trim() == *name)
+            .filter(|name| !name.trim().is_empty() && name.trim() == *name
+                && name.len() <= 256 && !name.chars().any(char::is_control))
             .ok_or_else(|| {
                 McpOwnerError::protocol_failed(format!(
                     "tools/list entry {index} has an invalid name"
@@ -1152,12 +1394,9 @@ fn validate_tool_result(value: &Value) -> Result<(), McpOwnerError> {
                 "tools/call result isError is not boolean",
             ));
         }
-        if is_error.as_bool() == Some(true) {
-            return Err(McpOwnerError::new(
-                "MCP_TOOL_FAILED",
-                "the bound MCP tool reported an execution error",
-            ));
-        }
+        // isError describes execution failure, not malformed protocol or
+        // missing completion. Validate the content even for a failed result;
+        // the host settles the observation before projecting it as failure.
     }
     for (index, item) in content.iter().enumerate() {
         if !item.is_object() {
@@ -1194,23 +1433,24 @@ fn initialized_notification() -> JsonRpcRequest {
     }
 }
 
-fn tools_list_request() -> JsonRpcRequest {
+fn tools_list_request(id: u64, cursor: Option<&str>) -> JsonRpcRequest {
     JsonRpcRequest {
         jsonrpc: "2.0",
-        id: Some(2),
+        id: Some(id),
         method: "tools/list",
-        params: None,
+        params: cursor.map(|cursor| json!({"cursor": cursor})),
     }
 }
 
 fn tool_call_request(
+    id: u64,
     tool_name: &str,
     arguments: &Value,
     operation_id: &str,
 ) -> JsonRpcRequest {
     JsonRpcRequest {
         jsonrpc: "2.0",
-        id: Some(3),
+        id: Some(id),
         method: "tools/call",
         params: Some(json!({
             "name": tool_name,
@@ -1349,7 +1589,7 @@ mod tests {
     }
 
     #[test]
-    fn rpc_response_ids_accept_numeric_and_string_protocol_ids() {
+    fn rpc_response_ids_preserve_the_request_id_type() {
         let numeric = JsonRpcResponse {
             jsonrpc: "2.0".to_owned(),
             id: Some(json!(2)),
@@ -1363,19 +1603,18 @@ mod tests {
             error: None,
         };
         ensure_response_id(&numeric, 2).unwrap();
-        ensure_response_id(&string, 2).unwrap();
+        assert!(ensure_response_id(&string, 2).is_err());
     }
 
     #[test]
-    fn tool_result_requires_real_content_and_rejects_tool_error() {
+    fn tool_result_requires_content_and_accepts_reported_failure() {
         let missing = validate_tool_result(&json!({})).unwrap_err();
         assert_eq!(missing.code(), "MCP_PROTOCOL_ERROR");
-        let failed = validate_tool_result(&json!({
+        validate_tool_result(&json!({
             "content": [{"type": "text", "text": "remote failure"}],
             "isError": true
         }))
-        .unwrap_err();
-        assert_eq!(failed.code(), "MCP_TOOL_FAILED");
+        .expect("a structured tool failure is a valid observed result");
     }
 
     #[test]
@@ -1399,7 +1638,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_transport_is_explicitly_not_a_fallback() {
+    fn stdio_configuration_is_an_explicit_transport() {
         let transport = McpServerTransport::Stdio {
             command: "legacy-client".to_owned(),
             args: Vec::new(),
@@ -1453,7 +1692,7 @@ mod tests {
             .push((method.clone(), request.clone(), authorization));
 
         if method == "notifications/initialized" {
-            return StatusCode::NO_CONTENT.into_response();
+            return StatusCode::ACCEPTED.into_response();
         }
 
         let id = request.get("id").cloned().unwrap_or(Value::Null);
@@ -1733,7 +1972,7 @@ mod tests {
         });
 
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        let mut session = HttpMcpSession::new(
+        let mut session = McpSession::new(
             client,
             endpoint,
             reqwest::header::HeaderMap::new(),

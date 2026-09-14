@@ -18,6 +18,18 @@ use crate::{AgentRuntimeControl, SystemResourceNoticeDelivery};
 
 pub type RuntimeTeardown = Pin<Box<dyn Future<Output = Result<(), AppError>> + Send>>;
 
+/// Internal delivery from the Conversation owner after receipt admission.
+/// This is not a public request DTO or a substitute for host-side validation.
+#[derive(Clone, Debug)]
+pub struct RuntimeSteerDelivery {
+    pub receipt_operation_id: String,
+    pub wire_turn_id: String,
+    pub turn_generation: u64,
+    pub text: String,
+    pub files: Vec<String>,
+    pub inject_skills: Vec<String>,
+}
+
 /// Object-safe production extension surface. Adding an engine does not require
 /// adding an enum variant or changing Conversation/Remote/Automation callers.
 ///
@@ -27,6 +39,8 @@ pub type RuntimeTeardown = Pin<Box<dyn Future<Output = Result<(), AppError>> + S
 #[async_trait]
 pub trait RegisteredAgentRuntime: AgentRuntimeControl {
     /// Nomi's private recovery log must never be applied to another engine.
+    /// Bound builds must agree with RuntimeEngineAdmission::uses_nomi_session;
+    /// the production registry rejects and tears down mismatched factories.
     fn uses_nomi_recovery(&self) -> bool { false }
     fn kill_and_wait(&self, reason: Option<AgentKillReason>) -> RuntimeTeardown;
 
@@ -42,6 +56,19 @@ pub trait RegisteredAgentRuntime: AgentRuntimeControl {
         Err(unsupported("steer"))
     }
 
+    /// Supports receipt-backed attachments and hints for already-selected
+    /// Skills. This declares transport support, never an additional grant.
+    fn supports_steering_context(&self) -> bool { false }
+
+    /// True means queued, not model-consumed or task-completed. Legacy engines
+    /// retain their existing transport; receipt-aware engines validate first.
+    async fn steer_with_receipt(&self, delivery: RuntimeSteerDelivery) -> Result<bool, AppError> {
+        if !delivery.files.is_empty() || !delivery.inject_skills.is_empty() {
+            return Err(unsupported("steering attachments or Skill hints"));
+        }
+        self.steer(delivery.text)
+    }
+
     fn notify_system_resource(
         &self,
         _notice: String,
@@ -51,6 +78,12 @@ pub trait RegisteredAgentRuntime: AgentRuntimeControl {
 
     async fn ensure_can_rewind_last_turn(&self, _source_message_id: &str) -> Result<(), AppError> {
         Err(unsupported("rewind"))
+    }
+
+    /// Automatic resend of an accepted source needs an engine/owner proof.
+    /// A completed cleanup or empty assistant output is not a replay permit.
+    async fn ensure_can_retry_turn(&self, _source_message_id: &str) -> Result<(), AppError> {
+        Err(unsupported("automatic turn replay"))
     }
 
     async fn rewind_last_turn(&self, _source_message_id: &str) -> Result<(), AppError> {
@@ -91,6 +124,10 @@ impl RegisteredAgentRuntime for crate::manager::nomi::NomiAgentManager {
     fn uses_nomi_recovery(&self) -> bool { true }
     fn kill_and_wait(&self, reason: Option<AgentKillReason>) -> RuntimeTeardown {
         Self::kill_and_wait(self, reason)
+    }
+
+    async fn ensure_can_retry_turn(&self, source_message_id: &str) -> Result<(), AppError> {
+        Self::ensure_can_retry_turn(self, source_message_id).await
     }
 
     async fn clear_context(&self) -> Result<(), AppError> {

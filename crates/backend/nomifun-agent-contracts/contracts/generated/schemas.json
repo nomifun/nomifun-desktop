@@ -144,6 +144,17 @@
           "persona": {
             "type": "string"
           },
+          "runtime_engine": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AgentRuntimeEngineSelection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Execution implementation belongs to the Agent revision, not the chat composer.\nOmission preserves the default Nomi behavior of older revisions and their digests."
+          },
           "schema_version": {
             "type": "string"
           },
@@ -175,6 +186,72 @@
           "instructions"
         ],
         "type": "object"
+      },
+      "AgentRuntimeEngineSelection": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "type": "string"
+          },
+          "selector": {
+            "$ref": "#/$defs/AgentRuntimeEngineSelector"
+          }
+        },
+        "required": [
+          "selector",
+          "profile"
+        ],
+        "type": "object"
+      },
+      "AgentRuntimeEngineSelector": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "build_digest": {
+                "type": "string"
+              },
+              "build_id": {
+                "type": "string"
+              },
+              "family_id": {
+                "type": "string"
+              },
+              "selection": {
+                "const": "exact",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "family_id",
+              "build_id",
+              "build_digest"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "channel": {
+                "type": "string"
+              },
+              "family_id": {
+                "type": "string"
+              },
+              "selection": {
+                "const": "channel",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "family_id",
+              "channel"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "CapabilitySelection": {
         "additionalProperties": false,
@@ -528,6 +605,17 @@
           "persona": {
             "type": "string"
           },
+          "runtime_engine": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AgentRuntimeEngineSelection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Execution implementation belongs to the Agent revision, not the chat composer.\nOmission preserves the default Nomi behavior of older revisions and their digests."
+          },
           "schema_version": {
             "type": "string"
           },
@@ -559,6 +647,72 @@
           "instructions"
         ],
         "type": "object"
+      },
+      "AgentRuntimeEngineSelection": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "type": "string"
+          },
+          "selector": {
+            "$ref": "#/$defs/AgentRuntimeEngineSelector"
+          }
+        },
+        "required": [
+          "selector",
+          "profile"
+        ],
+        "type": "object"
+      },
+      "AgentRuntimeEngineSelector": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "build_digest": {
+                "type": "string"
+              },
+              "build_id": {
+                "type": "string"
+              },
+              "family_id": {
+                "type": "string"
+              },
+              "selection": {
+                "const": "exact",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "family_id",
+              "build_id",
+              "build_digest"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "channel": {
+                "type": "string"
+              },
+              "family_id": {
+                "type": "string"
+              },
+              "selection": {
+                "const": "channel",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "family_id",
+              "channel"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "CapabilitySelection": {
         "additionalProperties": false,
@@ -843,6 +997,72 @@
   },
   "agent_preset_revision_payload": {
     "$defs": {
+      "AgentRuntimeEngineSelection": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "type": "string"
+          },
+          "selector": {
+            "$ref": "#/$defs/AgentRuntimeEngineSelector"
+          }
+        },
+        "required": [
+          "selector",
+          "profile"
+        ],
+        "type": "object"
+      },
+      "AgentRuntimeEngineSelector": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "build_digest": {
+                "type": "string"
+              },
+              "build_id": {
+                "type": "string"
+              },
+              "family_id": {
+                "type": "string"
+              },
+              "selection": {
+                "const": "exact",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "family_id",
+              "build_id",
+              "build_digest"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "channel": {
+                "type": "string"
+              },
+              "family_id": {
+                "type": "string"
+              },
+              "selection": {
+                "const": "channel",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "family_id",
+              "channel"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "CapabilitySelection": {
         "additionalProperties": false,
         "properties": {
@@ -1080,6 +1300,17 @@
       },
       "persona": {
         "type": "string"
+      },
+      "runtime_engine": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/AgentRuntimeEngineSelection"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Execution implementation belongs to the Agent revision, not the chat composer.\nOmission preserves the default Nomi behavior of older revisions and their digests."
       },
       "schema_version": {
         "type": "string"
@@ -16153,629 +16384,10 @@
     "title": "RemoteBinding",
     "type": "object"
   },
-  "runtime_command": {
-    "$defs": {
-      "FullAutoAskForApproval": {
-        "enum": [
-          "never"
-        ],
-        "type": "string"
-      },
-      "FullAutoExecutionWire": {
-        "additionalProperties": false,
-        "properties": {
-          "ask_for_approval": {
-            "$ref": "#/$defs/FullAutoAskForApproval"
-          },
-          "sandbox_policy": {
-            "$ref": "#/$defs/FullAutoSandboxPolicy"
-          }
-        },
-        "required": [
-          "ask_for_approval",
-          "sandbox_policy"
-        ],
-        "type": "object"
-      },
-      "FullAutoSandboxPolicy": {
-        "enum": [
-          "danger-full-access"
-        ],
-        "type": "string"
-      },
-      "LogicalArtifactRef": {
-        "additionalProperties": false,
-        "properties": {
-          "artifact_id": {
-            "type": "string"
-          },
-          "digest": {
-            "type": "string"
-          },
-          "normalized_relative_path": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "artifact_id",
-          "normalized_relative_path",
-          "digest"
-        ],
-        "type": "object"
-      },
-      "ResolvedSnapshotRef": {
-        "additionalProperties": false,
-        "properties": {
-          "snapshot_digest": {
-            "type": "string"
-          },
-          "snapshot_id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "snapshot_id",
-          "snapshot_digest"
-        ],
-        "type": "object"
-      },
-      "RuntimeCancelParams": {
-        "additionalProperties": false,
-        "properties": {
-          "context": {
-            "$ref": "#/$defs/RuntimeCommandContext"
-          },
-          "target_operation_id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "context",
-          "target_operation_id"
-        ],
-        "type": "object"
-      },
-      "RuntimeCheckpointBinding": {
-        "additionalProperties": false,
-        "properties": {
-          "locator": {
-            "$ref": "#/$defs/LogicalArtifactRef"
-          },
-          "protocol_version": {
-            "type": "string"
-          },
-          "resolved_snapshot_ref": {
-            "$ref": "#/$defs/ResolvedSnapshotRef"
-          },
-          "runtime_binding_id": {
-            "type": "string"
-          },
-          "runtime_bound_event_id": {
-            "type": "string"
-          },
-          "through_seq": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "runtime_binding_id",
-          "locator",
-          "runtime_bound_event_id",
-          "protocol_version",
-          "resolved_snapshot_ref",
-          "through_seq"
-        ],
-        "type": "object"
-      },
-      "RuntimeCommandContext": {
-        "additionalProperties": false,
-        "properties": {
-          "active_set_generation": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "agent_session_id": {
-            "type": "string"
-          },
-          "operation_id": {
-            "type": "string"
-          },
-          "resolved_snapshot_ref": {
-            "$ref": "#/$defs/ResolvedSnapshotRef"
-          },
-          "runtime_binding_id": {
-            "type": "string"
-          },
-          "runtime_profile_digest": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "agent_session_id",
-          "runtime_binding_id",
-          "operation_id",
-          "resolved_snapshot_ref",
-          "runtime_profile_digest",
-          "active_set_generation"
-        ],
-        "type": "object"
-      },
-      "RuntimeCreateParams": {
-        "additionalProperties": false,
-        "properties": {
-          "context": {
-            "$ref": "#/$defs/RuntimeCommandContext"
-          },
-          "enabled_capabilities": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "full_auto": {
-            "$ref": "#/$defs/FullAutoExecutionWire"
-          },
-          "profile_kind": {
-            "$ref": "#/$defs/RuntimeProfileKind"
-          },
-          "typed_resource_bindings": {
-            "items": {
-              "$ref": "#/$defs/TypedResourceBinding"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "context",
-          "profile_kind",
-          "full_auto",
-          "enabled_capabilities",
-          "typed_resource_bindings"
-        ],
-        "type": "object"
-      },
-      "RuntimeFollowUpParams": {
-        "additionalProperties": false,
-        "properties": {
-          "context": {
-            "$ref": "#/$defs/RuntimeCommandContext"
-          },
-          "idempotency_key": {
-            "type": "string"
-          },
-          "input_event_id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "context",
-          "idempotency_key",
-          "input_event_id"
-        ],
-        "type": "object"
-      },
-      "RuntimeForkParams": {
-        "additionalProperties": false,
-        "properties": {
-          "child_context": {
-            "$ref": "#/$defs/RuntimeCommandContext"
-          },
-          "self_contained_fork_base_digest": {
-            "type": "string"
-          },
-          "source_agent_session_id": {
-            "type": "string"
-          },
-          "source_through_seq": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "source_agent_session_id",
-          "child_context",
-          "source_through_seq",
-          "self_contained_fork_base_digest"
-        ],
-        "type": "object"
-      },
-      "RuntimeProfileKind": {
-        "enum": [
-          "coding_native",
-          "managed_minimal"
-        ],
-        "type": "string"
-      },
-      "RuntimeResumeParams": {
-        "additionalProperties": false,
-        "properties": {
-          "checkpoint": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/RuntimeCheckpointBinding"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "compatibility_admission_input_digest": {
-            "type": "string"
-          },
-          "context": {
-            "$ref": "#/$defs/RuntimeCommandContext"
-          }
-        },
-        "required": [
-          "context",
-          "compatibility_admission_input_digest"
-        ],
-        "type": "object"
-      },
-      "RuntimeSessionDisposeParams": {
-        "additionalProperties": false,
-        "properties": {
-          "agent_session_id": {
-            "type": "string"
-          },
-          "operation_id": {
-            "type": "string"
-          },
-          "reason": {
-            "type": "string"
-          },
-          "runtime_binding_id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "agent_session_id",
-          "runtime_binding_id",
-          "operation_id",
-          "reason"
-        ],
-        "type": "object"
-      },
-      "RuntimeStartTurnParams": {
-        "additionalProperties": false,
-        "properties": {
-          "context": {
-            "$ref": "#/$defs/RuntimeCommandContext"
-          },
-          "idempotency_key": {
-            "type": "string"
-          },
-          "input_event_id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "context",
-          "idempotency_key",
-          "input_event_id"
-        ],
-        "type": "object"
-      },
-      "RuntimeSteerParams": {
-        "additionalProperties": false,
-        "properties": {
-          "context": {
-            "$ref": "#/$defs/RuntimeCommandContext"
-          },
-          "input_event_id": {
-            "type": "string"
-          },
-          "target_turn_operation_id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "context",
-          "target_turn_operation_id",
-          "input_event_id"
-        ],
-        "type": "object"
-      },
-      "TypedResourceBinding": {
-        "additionalProperties": false,
-        "properties": {
-          "binding_id": {
-            "type": "string"
-          },
-          "connection_config_ref": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "operations": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "owner_id": {
-            "type": "string"
-          },
-          "resource_id": {
-            "type": "string"
-          },
-          "resource_kind": {
-            "type": "string"
-          },
-          "typed_parameters": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "type": "object"
-          }
-        },
-        "required": [
-          "binding_id",
-          "resource_kind",
-          "resource_id",
-          "owner_id",
-          "operations"
-        ],
-        "type": "object"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "oneOf": [
-      {
-        "properties": {
-          "method": {
-            "const": "create",
-            "type": "string"
-          },
-          "params": {
-            "$ref": "#/$defs/RuntimeCreateParams"
-          }
-        },
-        "required": [
-          "method",
-          "params"
-        ],
-        "type": "object"
-      },
-      {
-        "properties": {
-          "method": {
-            "const": "resume",
-            "type": "string"
-          },
-          "params": {
-            "$ref": "#/$defs/RuntimeResumeParams"
-          }
-        },
-        "required": [
-          "method",
-          "params"
-        ],
-        "type": "object"
-      },
-      {
-        "properties": {
-          "method": {
-            "const": "fork",
-            "type": "string"
-          },
-          "params": {
-            "$ref": "#/$defs/RuntimeForkParams"
-          }
-        },
-        "required": [
-          "method",
-          "params"
-        ],
-        "type": "object"
-      },
-      {
-        "properties": {
-          "method": {
-            "const": "start_turn",
-            "type": "string"
-          },
-          "params": {
-            "$ref": "#/$defs/RuntimeStartTurnParams"
-          }
-        },
-        "required": [
-          "method",
-          "params"
-        ],
-        "type": "object"
-      },
-      {
-        "properties": {
-          "method": {
-            "const": "steer",
-            "type": "string"
-          },
-          "params": {
-            "$ref": "#/$defs/RuntimeSteerParams"
-          }
-        },
-        "required": [
-          "method",
-          "params"
-        ],
-        "type": "object"
-      },
-      {
-        "properties": {
-          "method": {
-            "const": "follow_up",
-            "type": "string"
-          },
-          "params": {
-            "$ref": "#/$defs/RuntimeFollowUpParams"
-          }
-        },
-        "required": [
-          "method",
-          "params"
-        ],
-        "type": "object"
-      },
-      {
-        "properties": {
-          "method": {
-            "const": "cancel",
-            "type": "string"
-          },
-          "params": {
-            "$ref": "#/$defs/RuntimeCancelParams"
-          }
-        },
-        "required": [
-          "method",
-          "params"
-        ],
-        "type": "object"
-      },
-      {
-        "properties": {
-          "method": {
-            "const": "session_dispose",
-            "type": "string"
-          },
-          "params": {
-            "$ref": "#/$defs/RuntimeSessionDisposeParams"
-          }
-        },
-        "required": [
-          "method",
-          "params"
-        ],
-        "type": "object"
-      }
-    ],
-    "title": "RuntimeCommand"
-  },
   "runtime_feature_inventory": {
-    "$defs": {
-      "CodexPinnedSource": {
-        "additionalProperties": false,
-        "properties": {
-          "pinned_commit": {
-            "type": "string"
-          },
-          "repository_alias": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "repository_alias",
-          "pinned_commit"
-        ],
-        "type": "object"
-      },
-      "FullAutoAskForApproval": {
-        "enum": [
-          "never"
-        ],
-        "type": "string"
-      },
-      "FullAutoExecutionWire": {
-        "additionalProperties": false,
-        "properties": {
-          "ask_for_approval": {
-            "$ref": "#/$defs/FullAutoAskForApproval"
-          },
-          "sandbox_policy": {
-            "$ref": "#/$defs/FullAutoSandboxPolicy"
-          }
-        },
-        "required": [
-          "ask_for_approval",
-          "sandbox_policy"
-        ],
-        "type": "object"
-      },
-      "FullAutoSandboxPolicy": {
-        "enum": [
-          "danger-full-access"
-        ],
-        "type": "string"
-      },
-      "RuntimeProfileKind": {
-        "enum": [
-          "coding_native",
-          "managed_minimal"
-        ],
-        "type": "string"
-      },
-      "RuntimeRpcAllowlist": {
-        "additionalProperties": false,
-        "properties": {
-          "experimental_methods": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "methods": {
-            "items": {
-              "$ref": "#/$defs/RuntimeRpcMethod"
-            },
-            "type": "array",
-            "uniqueItems": true
-          }
-        },
-        "required": [
-          "methods",
-          "experimental_methods"
-        ],
-        "type": "object"
-      },
-      "RuntimeRpcMethod": {
-        "enum": [
-          "create",
-          "resume",
-          "fork",
-          "start_turn",
-          "steer",
-          "follow_up",
-          "cancel",
-          "session_dispose"
-        ],
-        "type": "string"
-      }
-    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
     "properties": {
-      "full_auto": {
-        "$ref": "#/$defs/FullAutoExecutionWire"
-      },
-      "native_actions": {
-        "items": {
-          "type": "string"
-        },
-        "type": "array",
-        "uniqueItems": true
-      },
-      "pinned_source": {
-        "$ref": "#/$defs/CodexPinnedSource"
-      },
-      "responses_semantics": {
-        "items": {
-          "type": "string"
-        },
-        "type": "array",
-        "uniqueItems": true
-      },
-      "rpc_allowlist": {
-        "$ref": "#/$defs/RuntimeRpcAllowlist"
-      },
       "runtime_features": {
         "items": {
           "type": "string"
@@ -16785,170 +16397,13 @@
       },
       "schema_version": {
         "type": "string"
-      },
-      "supported_profiles": {
-        "items": {
-          "$ref": "#/$defs/RuntimeProfileKind"
-        },
-        "type": "array",
-        "uniqueItems": true
       }
     },
     "required": [
       "schema_version",
-      "pinned_source",
-      "supported_profiles",
-      "runtime_features",
-      "native_actions",
-      "responses_semantics",
-      "rpc_allowlist",
-      "full_auto"
+      "runtime_features"
     ],
-    "title": "CodingRuntimeFeatureInventoryPayload",
-    "type": "object"
-  },
-  "runtime_hello": {
-    "$defs": {
-      "FullAutoAskForApproval": {
-        "enum": [
-          "never"
-        ],
-        "type": "string"
-      },
-      "FullAutoExecutionWire": {
-        "additionalProperties": false,
-        "properties": {
-          "ask_for_approval": {
-            "$ref": "#/$defs/FullAutoAskForApproval"
-          },
-          "sandbox_policy": {
-            "$ref": "#/$defs/FullAutoSandboxPolicy"
-          }
-        },
-        "required": [
-          "ask_for_approval",
-          "sandbox_policy"
-        ],
-        "type": "object"
-      },
-      "FullAutoSandboxPolicy": {
-        "enum": [
-          "danger-full-access"
-        ],
-        "type": "string"
-      },
-      "RuntimeProfileKind": {
-        "enum": [
-          "coding_native",
-          "managed_minimal"
-        ],
-        "type": "string"
-      },
-      "RuntimeRpcAllowlist": {
-        "additionalProperties": false,
-        "properties": {
-          "experimental_methods": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "methods": {
-            "items": {
-              "$ref": "#/$defs/RuntimeRpcMethod"
-            },
-            "type": "array",
-            "uniqueItems": true
-          }
-        },
-        "required": [
-          "methods",
-          "experimental_methods"
-        ],
-        "type": "object"
-      },
-      "RuntimeRpcMethod": {
-        "enum": [
-          "create",
-          "resume",
-          "fork",
-          "start_turn",
-          "steer",
-          "follow_up",
-          "cancel",
-          "session_dispose"
-        ],
-        "type": "string"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "properties": {
-      "fork_commit": {
-        "type": "string"
-      },
-      "full_auto": {
-        "$ref": "#/$defs/FullAutoExecutionWire"
-      },
-      "native_actions": {
-        "items": {
-          "type": "string"
-        },
-        "type": "array",
-        "uniqueItems": true
-      },
-      "native_features": {
-        "items": {
-          "type": "string"
-        },
-        "type": "array",
-        "uniqueItems": true
-      },
-      "protocol_schema_digest": {
-        "type": "string"
-      },
-      "protocol_version": {
-        "type": "string"
-      },
-      "rpc_allowlist": {
-        "$ref": "#/$defs/RuntimeRpcAllowlist"
-      },
-      "runtime_build_digest": {
-        "type": "string"
-      },
-      "runtime_release_digest": {
-        "type": "string"
-      },
-      "runtime_target": {
-        "type": "string"
-      },
-      "supported_profiles": {
-        "items": {
-          "$ref": "#/$defs/RuntimeProfileKind"
-        },
-        "type": "array",
-        "uniqueItems": true
-      },
-      "tracked_upstream_commit": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "runtime_release_digest",
-      "runtime_build_digest",
-      "fork_commit",
-      "tracked_upstream_commit",
-      "protocol_version",
-      "protocol_schema_digest",
-      "runtime_target",
-      "supported_profiles",
-      "native_features",
-      "native_actions",
-      "full_auto",
-      "rpc_allowlist"
-    ],
-    "title": "RuntimeHelloPayload",
+    "title": "PlatformFeatureInventoryPayload",
     "type": "object"
   },
   "runtime_selection_record": {

@@ -1,12 +1,47 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  developmentEnvironment,
   formatWindowsLinkEnvironmentError,
   hasWindowsLinkEnvironmentShape,
   loadWindowsToolchainEnvironment,
   parseCommandEnvironment,
   validateWindowsLinkEnvironment,
 } from './run-dev.mjs';
+import { join } from 'node:path';
+
+describe('Windows development data generation', () => {
+  test('uses a stable clean-start root without altering the input environment', () => {
+    const input = { LOCALAPPDATA: 'C:\\Users\\developer\\AppData\\Local', NOMI_CHANNEL: 'stable' };
+    const first = developmentEnvironment(input, 'win32');
+    expect(first.NOMIFUN_DATA_DIR).toBe(join(input.LOCALAPPDATA, 'NomiFun-dev-plugin-v1'));
+    expect(first.NOMI_CHANNEL).toBe('dev');
+    expect(developmentEnvironment(input, 'win32')).toEqual(first);
+    expect(input.NOMIFUN_DATA_DIR).toBeUndefined();
+    expect(input.NOMI_CHANNEL).toBe('stable');
+  });
+
+  test('honors explicit data roots including Windows case-insensitive env names', () => {
+    for (const key of ['NOMIFUN_DATA_DIR', 'nomifun_data_dir']) {
+      const input = { [key]: 'D:\\existing-dev-data' };
+      expect(developmentEnvironment(input, 'win32')).toEqual({ ...input, NOMI_CHANNEL: 'dev' });
+    }
+  });
+
+  test('rejects empty explicit roots or unavailable LOCALAPPDATA instead of silently falling back', () => {
+    expect(() => developmentEnvironment({ NOMIFUN_DATA_DIR: ' ' }, 'win32')).toThrow('must not be empty');
+    expect(() => developmentEnvironment({}, 'win32')).toThrow('LOCALAPPDATA');
+    expect(developmentEnvironment({ localappdata: 'C:\\local' }, 'win32').NOMIFUN_DATA_DIR)
+      .toBe(join('C:\\local', 'NomiFun-dev-plugin-v1'));
+  });
+
+  test('leaves other platforms data selection unchanged', () => {
+    expect(developmentEnvironment({ HOME: '/home/dev' }, 'linux'))
+      .toEqual({ HOME: '/home/dev', NOMI_CHANNEL: 'dev' });
+    expect(developmentEnvironment({ NOMIFUN_DATA_DIR: '/tmp/dev' }, 'darwin'))
+      .toEqual({ NOMIFUN_DATA_DIR: '/tmp/dev', NOMI_CHANNEL: 'dev' });
+  });
+});
 
 const VALID_X64_ENVIRONMENT = {
   WindowsSDKVersion: '10.0.26100.0\\',

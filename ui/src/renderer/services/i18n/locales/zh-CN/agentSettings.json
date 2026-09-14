@@ -5,7 +5,7 @@
     "default": "默认引擎（Nomi）",
     "hint": "此引擎负责执行该 Agent。保存后用于新建会话，不影响已有会话；日常对话只需选择 Agent。",
     "unavailable": "引擎目录或所选构建不可用，请重试或为该 Agent 选择其他引擎。不会自动回退到其他引擎。",
-    "codingLimit": "此 Coding 构建仅支持初始加载的文件和 Git 工具。该 Agent 暂不能配置 Skills、MCP、进程执行或按需能力，也不支持附件。"
+    "codingLimit": "此 Coding 构建支持文件/Git 工具、会话隔离快照、授权命令/交互进程、Agent 锁定的插件工具和制品内 Skills、冻结选择范围内的按需发现与激活，以及有回执的执行中追加文字指令。追加指令在执行边界处理，不会打断已在执行的副作用。图片需已激活的视觉能力及兼容模型。暂不支持 MCP、MiniApps 或 Git 推送。新增能力尚未完成验证。"
   },
   "subtitle": "配置和管理你的 Agent，让能力更贴合工作。",
   "loading": "正在加载 Agent 工作台…",
@@ -172,6 +172,7 @@
     "selectAria": "选择{{resource}}",
     "dependencyHint": "选择{{resource}}后将显示匹配的资源。",
     "selectionHint": "启动时使用所选资源，可在下次启动前更换。",
+    "mcpSelectionHint": "包含 Agent 已授权工具所属的全部 MCP 服务器；已选择 MCP 资源能力时可另选资源服务器（合计最多 16 个）。多选不会增加工具权限，资源读取须指定已绑定服务器。",
     "emptyOptions": "没有可用资源，请先完成配置。",
     "loadFailed": "资源列表加载失败，请前往配置页检查。",
     "configure": "去配置",

@@ -189,6 +189,8 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "conversation_delivery_notify",
     "conversation_delivery_receipts",
     "conversation_execution_links",
+    "conversation_hosted_effects",
+    "conversation_mcp_effects",
     "conversation_mcp_servers",
     "conversation_runtime_events",
     "conversations",

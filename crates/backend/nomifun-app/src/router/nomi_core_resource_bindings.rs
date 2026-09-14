@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    ConnectionConfigRef, ResourceBindingId, ResourceId, ResourceKind, TypedResourceBinding,
+    ConnectionConfigRef, ResolvedMcpToolLock, ResourceBindingId, ResourceId, ResourceKind, TypedResourceBinding,
 };
 use nomifun_api_types::{
     AgentBindingValueDto, AgentResourceSelectionDto, TypedResourceBindingDto,
@@ -123,9 +123,8 @@ trait NomiCoreResourceAuthority: Send + Sync {
 
 /// Typed registry used by Nomi-core create/switch admission.
 ///
-/// One resolver owns one canonical resource kind. More than one selection for
-/// the same kind is rejected because Kernel target bindings intentionally have
-/// cardinality one per kind.
+/// One resolver owns one canonical resource kind. Only frozen per-tool MCP
+/// mappings permit multiple resources of one kind; all others remain singular.
 #[derive(Clone, Default)]
 pub(crate) struct NomiCoreResourceBindingResolverRegistry {
     authorities: Arc<BTreeMap<String, Arc<dyn NomiCoreResourceAuthority>>>,
@@ -184,11 +183,23 @@ impl NomiCoreResourceBindingResolverRegistry {
         }))
     }
 
+    /// Legacy single-resource resolution. Multi-server admission additionally
+    /// requires the saved Snapshot locks, supplied by resolve_for_saved_binding.
     pub(crate) async fn resolve(
         &self,
         owner_id: &str,
         selections: &[AgentResourceSelectionDto],
         selected_capability_ids: &BTreeSet<String>,
+    ) -> Result<Vec<TypedResourceBinding>, ResourceSelectionResolutionError> {
+        self.resolve_selected(owner_id, selections, selected_capability_ids, &[]).await
+    }
+
+    async fn resolve_selected(
+        &self,
+        owner_id: &str,
+        selections: &[AgentResourceSelectionDto],
+        selected_capability_ids: &BTreeSet<String>,
+        mcp_locks: &[ResolvedMcpToolLock],
     ) -> Result<Vec<TypedResourceBinding>, ResourceSelectionResolutionError> {
         if selections.len() > MAX_RESOURCE_SELECTIONS {
             return Err(ResourceSelectionResolutionError::invalid(format!(
@@ -197,16 +208,21 @@ impl NomiCoreResourceBindingResolverRegistry {
         }
 
         let required = required_operations(selected_capability_ids);
+        let resource_provider = selected_capability_ids.contains("mcp.resource");
         let mut selections_by_kind = BTreeMap::new();
+        let mut selected_pairs = BTreeSet::new();
         for selection in selections {
             validate_selection_field("resource_kind", &selection.resource_kind)?;
             validate_selection_field("resource_id", &selection.resource_id)?;
+            if !selected_pairs.insert((selection.resource_kind.clone(), selection.resource_id.clone())) {
+                return Err(ResourceSelectionResolutionError::invalid("duplicate resource selection"));
+            }
             if selections_by_kind
                 .insert(
                     selection.resource_kind.clone(),
                     selection.resource_id.clone(),
                 )
-                .is_some()
+                .is_some() && !(selection.resource_kind == "mcp_server" && (!mcp_locks.is_empty() || resource_provider))
             {
                 return Err(ResourceSelectionResolutionError::invalid(format!(
                     "resource kind {} was selected more than once",
@@ -220,6 +236,27 @@ impl NomiCoreResourceBindingResolverRegistry {
                     json!({ "resource_kind": selection.resource_kind }),
                 ));
             }
+        }
+        if !mcp_locks.is_empty() || resource_provider {
+            let expected = mcp_locks.iter().map(|lock| lock.server_id.as_ref()).collect::<BTreeSet<_>>();
+            let actual = selections.iter().filter(|selection| selection.resource_kind == "mcp_server")
+                .map(|selection| selection.resource_id.as_str()).collect::<BTreeSet<_>>();
+            if (!resource_provider && actual != expected)
+                || !expected.is_subset(&actual)
+                || actual.len() > super::nomi_core_mcp_catalog::MAX_SESSION_SERVERS {
+                return Err(ResourceSelectionResolutionError::new("MCP_RESOURCE_SELECTION_MISMATCH",
+                    "MCP selection must contain every frozen tool server; extra servers require mcp.resource and the total is bounded to 16", Value::Null));
+            }
+            if actual.len() > 1 && selected_capability_ids.iter().any(|id|
+                !super::nomi_core_mcp_catalog::is_product_tool(id)
+                && !(resource_provider && matches!(id.as_str(), "mcp.resource" | "mcp.connect" | "mcp.oauth"))
+                && required_operations(&BTreeSet::from([id.clone()])).contains_key("mcp_server")) {
+                return Err(ResourceSelectionResolutionError::invalid(
+                    "multiple MCP servers cannot be mixed with an unmapped resource consumer"));
+            }
+            // This map is only for cross-kind relationship checks. Never
+            // expose an arbitrary last MCP server as the singular selection.
+            selections_by_kind.remove("mcp_server");
         }
         if let (Some(companion_id), Some(memory_id)) = (
             selections_by_kind.get("companion"),
@@ -239,7 +276,7 @@ impl NomiCoreResourceBindingResolverRegistry {
         let missing = required
             .keys()
             .filter(|kind| {
-                !selections_by_kind.contains_key(*kind)
+                !selections.iter().any(|selection| &selection.resource_kind == *kind)
                     && !OPTIONAL_UNBOUND_RESOURCE_KINDS.contains(&kind.as_str())
             })
             .cloned()
@@ -253,7 +290,7 @@ impl NomiCoreResourceBindingResolverRegistry {
         }
 
         let mut bindings = Vec::with_capacity(selections.len());
-        for (kind, resource_id) in &selections_by_kind {
+        for (kind, resource_id) in &selected_pairs {
             let authority = self.authorities.get(kind).ok_or_else(|| {
                 ResourceSelectionResolutionError::new(
                     "RESOURCE_SELECTION_KIND_UNSUPPORTED",
@@ -261,13 +298,21 @@ impl NomiCoreResourceBindingResolverRegistry {
                     json!({ "resource_kind": kind }),
                 )
             })?;
-            let operations = required.get(kind).cloned().unwrap_or_default();
+            let resource_capabilities = selected_capability_ids.iter().filter(|id|
+                kind != "mcp_server" || mcp_locks.is_empty()
+                || !super::nomi_core_mcp_catalog::is_product_tool(id)
+                || mcp_locks.iter().any(|lock| lock.capability_id.as_ref() == id.as_str()
+                    && lock.server_id.as_ref() == resource_id.as_str())).cloned().collect::<BTreeSet<_>>();
+            // Resource-only members must not inherit invoke from tools frozen
+            // to another server, even though per-tool policy also filters it.
+            let operations = required_operations(&resource_capabilities)
+                .get(kind).cloned().unwrap_or_default();
             let resolved = authority
                 .resolve(ResourceAuthorityRequest {
                     owner_id: owner_id.to_owned(),
                     resource_id: resource_id.clone(),
                     required_operations: operations.clone(),
-                    selected_capability_ids: selected_capability_ids.clone(),
+                    selected_capability_ids: resource_capabilities,
                     selections_by_kind: selections_by_kind.clone(),
                 })
                 .await?;
@@ -348,7 +393,7 @@ impl NomiCoreResourceBindingResolverRegistry {
             ));
         }
         binding.typed_resource_bindings = self
-            .resolve(owner.as_ref(), selections, &capability_ids)
+            .resolve_selected(owner.as_ref(), selections, &capability_ids, &snapshot.content.mcp_tool_locks)
             .await?
             .into_iter()
             .map(|binding| TypedResourceBindingDto {
@@ -435,11 +480,15 @@ fn required_operations(
             "memory.companion.recall" => grant("companion_memory", "read"),
             "memory.companion.write" | "memory.companion.merge" | "memory.companion.evolve"
             | "companion.learn" | "companion.evolve" => grant("companion_memory", "write"),
-            "mcp.tool_proxy" => {
+            id if id == "mcp.tool_proxy" || super::nomi_core_mcp_catalog::is_product_tool(id) => {
                 grant("mcp_server", "connect");
                 grant("mcp_server", "invoke");
             }
-            "mcp.resource" | "connector.data.read" => grant("mcp_server", "read"),
+            "mcp.resource" => {
+                grant("mcp_server", "connect");
+                grant("mcp_server", "read");
+            }
+            "connector.data.read" => grant("mcp_server", "read"),
             "connector.data.write" => grant("mcp_server", "invoke"),
             "companion.persona" | "companion.roster" => grant("companion", "read"),
             "channel.receive" => grant("channel", "receive"),
@@ -788,6 +837,17 @@ impl ProductResourceAuthority {
                 &request.resource_id,
                 "the selected MCP server is disabled",
             ));
+        }
+        let selected_tools = request.selected_capability_ids.iter()
+            .filter(|id| super::nomi_core_mcp_catalog::is_product_tool(id)).collect::<BTreeSet<_>>();
+        if !selected_tools.is_empty() {
+            let tools = super::nomi_core_mcp_catalog::server_tools(server.clone()).map_err(|_| {
+                ResourceSelectionResolutionError::unavailable(self.kind, &request.resource_id, "the selected MCP catalog cannot materialize exact tool contracts")
+            })?;
+            let current = tools.into_iter().map(|tool| tool.lock.capability_id.as_ref().to_owned()).collect::<BTreeSet<_>>();
+            if selected_tools.iter().any(|id| !current.contains(id.as_str())) {
+                return Err(ResourceSelectionResolutionError::unavailable(self.kind, &request.resource_id, "selected MCP tools belong to another server or are no longer available"));
+            }
         }
         Ok(ServerResolvedResource {
             resource_id: server.mcp_server_id.clone(),

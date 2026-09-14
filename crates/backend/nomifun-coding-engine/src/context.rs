@@ -5,7 +5,7 @@
 //! contract; it does not persist or invent a second conversation aggregate.
 
 use nomifun_chat_model_broker::{
-    ChatMessage, ChatModelInput, ChatToolChoice, ChatToolDefinition,
+    ChatMessage, ChatModelInput, ChatRole, ChatToolChoice, ChatToolDefinition,
 };
 use serde::{Deserialize, Serialize};
 
@@ -71,10 +71,23 @@ impl CodingContextAssembler {
         diagnostics.warnings.extend(agents.warnings.clone());
 
         let mut bounded_history = history;
+        let orphan_prefix = bounded_history.iter().position(|message| message.role == ChatRole::User)
+            .unwrap_or(bounded_history.len());
+        if orphan_prefix > 0 {
+            bounded_history.drain(..orphan_prefix);
+            diagnostics.dropped_history_messages = orphan_prefix;
+            diagnostics.warnings.push("incomplete leading historical turn was omitted".into());
+        }
         if bounded_history.len() > budget.max_history_messages {
-            let drop_count = bounded_history.len() - budget.max_history_messages;
+            let mut drop_count = bounded_history.len() - budget.max_history_messages;
+            // Never retain a tool result/assistant fragment whose user turn
+            // was removed by truncation. Drop complete historical turns.
+            while drop_count < bounded_history.len()
+                && bounded_history[drop_count].role != ChatRole::User {
+                drop_count += 1;
+            }
             bounded_history.drain(..drop_count);
-            diagnostics.dropped_history_messages = drop_count;
+            diagnostics.dropped_history_messages += drop_count;
             diagnostics
                 .warnings
                 .push("old history messages were dropped by the message-count limit".to_owned());
@@ -131,9 +144,13 @@ fn shrink_to_budget(
                 actual: encoded.len(),
             });
         }
-        input.messages.remove(0);
+        let drop_count = input.messages.iter().enumerate().skip(1)
+            .find(|(_, message)| message.role == ChatRole::User)
+            .map(|(index, _)| index)
+            .unwrap_or(input.messages.len() - 1);
+        input.messages.drain(..drop_count);
         diagnostics.dropped_history_messages =
-            diagnostics.dropped_history_messages.saturating_add(1);
+            diagnostics.dropped_history_messages.saturating_add(drop_count);
         diagnostics
             .warnings
             .push("old history messages were dropped by the byte budget".to_owned());
@@ -227,5 +244,19 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, CodingEngineError::ContextTooLarge { .. }));
+    }
+
+    #[test]
+    fn count_budget_drops_complete_turn_instead_of_orphaning_assistant_output() {
+        let mut assistant = user("old answer");
+        assistant.role = ChatRole::Assistant;
+        let current = user("current");
+        let (input, diagnostics) = CodingContextAssembler::assemble(
+            base_input(), vec![user("old question"), assistant, user("recent question")],
+            current.clone(), &AgentsMdContext::default(),
+            CodingContextBudget { max_context_bytes: 4096, max_history_messages: 2 },
+        ).unwrap();
+        assert_eq!(input.messages, vec![user("recent question"), current]);
+        assert_eq!(diagnostics.dropped_history_messages, 2);
     }
 }

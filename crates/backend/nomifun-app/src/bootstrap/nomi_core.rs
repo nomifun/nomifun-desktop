@@ -6,10 +6,11 @@ use axum::Router;
 use nomifun_auth::{AuthPolicy, hash_password, validate_password, validate_username};
 
 use crate::lan_endpoint::RobotAdvertiseAddr;
-use crate::router::create_router;
+use crate::router::try_create_router;
 use crate::services::AppServices;
 
 use super::{ServerEnvironment, finalize_data_layer, init_data_layer};
+use super::composition_cleanup::cleanup_failed_composition;
 
 #[cfg(test)]
 mod registry_probe {
@@ -50,12 +51,15 @@ impl NomiCoreApplication {
         Self::compose_with_config(environment, &environment.config).await
     }
 
-    /// Register trusted user-developed runtimes before product router assembly.
+    /// Register trusted engines compiled into this application before router assembly.
     /// Factories implement the same lifecycle/teardown contract as the built-ins;
-    /// this is not an untrusted executable upload API.
+    /// No executable mounting or registration is allowed after assembly. Adding
+    /// an engine requires rebuilding and repackaging the application.
+    /// Keep the Arc in the callback so register_session_hosted can capture a
+    /// weak host reference without exposing services or a second Session owner.
     pub async fn compose_with_runtime_engines(
         environment: &ServerEnvironment,
-        register: impl FnOnce(&crate::RuntimeEngineHost) -> Result<(), nomifun_common::AppError>,
+        register: impl FnOnce(&Arc<crate::RuntimeEngineHost>) -> Result<(), nomifun_common::AppError>,
     ) -> Result<Self> {
         Self::compose_with_config_and_engines(environment, &environment.config, register).await
     }
@@ -75,7 +79,7 @@ impl NomiCoreApplication {
     async fn compose_with_config_and_engines(
         environment: &ServerEnvironment,
         config: &crate::AppConfig,
-        register: impl FnOnce(&crate::RuntimeEngineHost) -> Result<(), nomifun_common::AppError>,
+        register: impl FnOnce(&Arc<crate::RuntimeEngineHost>) -> Result<(), nomifun_common::AppError>,
     ) -> Result<Self> {
         let database = init_data_layer(config).await?;
         let services = AppServices::from_config(database, config)
@@ -86,12 +90,15 @@ impl NomiCoreApplication {
             )
             .await?;
         if let Err(error) = register(&services.runtime_engines) {
-            return Err(services.cleanup_after_startup_failure(error.into()).await);
+            return Err(cleanup_failed_composition(services, error.into()).await);
         }
         if let Err(error) = finalize_data_layer(config) {
-            return Err(services.cleanup_after_startup_failure(error).await);
+            return Err(cleanup_failed_composition(services, error).await);
         }
-        let router = create_router(&services).await;
+        let router = match try_create_router(&services).await {
+            Ok(router) => router,
+            Err(error) => return Err(cleanup_failed_composition(services, error).await),
+        };
         Ok(Self::from_parts(services, router))
     }
 

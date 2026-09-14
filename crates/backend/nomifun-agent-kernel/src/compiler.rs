@@ -140,11 +140,34 @@ impl CompiledSnapshot {
         for ids in by_kind.values_mut() {
             ids.sort();
         }
-        for policy in self.authority_policies.values_mut() {
+        for (capability_id, policy) in &mut self.authority_policies {
             policy.resource_binding_ids.clear();
             for resource_kind in &policy.required_resource_kinds {
-                let matches = by_kind.get(resource_kind).cloned().unwrap_or_default();
-                if matches.len() > 1 {
+                let mut matches = by_kind.get(resource_kind).cloned().unwrap_or_default();
+                // MCP mappings already freeze the server identity. A tool
+                // receives only that server, never the Session's entire set.
+                // The bundled resource provider explicitly selects one member
+                // at dispatch. Its connect/OAuth dependencies share that set;
+                // other unmapped/native consumers remain cardinality one.
+                if resource_kind.as_ref() == "mcp_server"
+                    && let Some(lock) = self.envelope.content.mcp_tool_locks.iter()
+                        .find(|lock| &lock.capability_id == capability_id)
+                {
+                    matches.retain(|id| by_id.get(id).is_some_and(|binding|
+                        binding.resource_id.as_ref() == lock.server_id.as_ref()));
+                    if matches.len() != 1 {
+                        return Err(KernelError::InvalidPresetRevision {
+                            reason: format!("MCP capability {} requires one exact frozen server binding", capability_id.as_ref()),
+                        });
+                    }
+                }
+                let resource_provider_set = resource_kind.as_ref() == "mcp_server"
+                    && matches!(capability_id.as_ref(), "mcp.resource" | "mcp.connect" | "mcp.oauth")
+                    && self.envelope.content.enabled_capabilities.iter()
+                        .any(|entry| entry.capability.id.as_ref() == "mcp.resource"
+                            && entry.contribution_lock.source_kind == nomifun_agent_contracts::ContributionSourceKind::PlatformBuiltin
+                            && entry.resolved_source.source_kind == nomifun_agent_contracts::PluginSourceKind::Bundled);
+                if matches.len() > 1 && !resource_provider_set {
                     return Err(KernelError::InvalidPresetRevision {
                         reason: format!(
                             "target has multiple bindings for resource kind {}",

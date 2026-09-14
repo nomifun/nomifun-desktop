@@ -22,6 +22,7 @@ pub use owner::{
     AnonymousMcpCredentialAuthority, McpCredential, McpCredentialAuthority, McpCredentialLookup,
     McpOwner, McpOwnerError, McpServerBinding, McpToolBinding, McpToolInvocationRequest,
     McpToolInvocationResult, OAuthMcpCredentialAuthority, MCP_CONNECT_OPERATION,
+    McpResourceFailure, McpResourceOperation, McpResourceRequest, McpResourceResult,
     MCP_INVOKE_OPERATION, MCP_READ_OPERATION, MCP_SERVER_RESOURCE_KIND,
 };
 pub use routes::{McpRouterState, mcp_routes};

@@ -1,5 +1,6 @@
 //! SQLite database layer: init, migrations, repository traits, and implementations.
 pub mod backup_bundle;
+pub mod conversation_context;
 mod database;
 mod error;
 mod id_schema_contract;

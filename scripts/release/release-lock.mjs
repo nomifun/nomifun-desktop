@@ -14,7 +14,9 @@ import {
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const RELEASE_LOCK_SCHEMA_VERSION = '1.0.0';
+// Engines are linked into the Host. Retired external Runtime fields are
+// deliberately not accepted in newly issued release locks.
+export const RELEASE_LOCK_SCHEMA_VERSION = '2.0.0';
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const SOURCE_COMMIT_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
@@ -25,7 +27,6 @@ const TOP_LEVEL_KEYS = [
   'package',
   'platform',
   'schema_version',
-  'sidecars',
   'source_commit',
 ];
 const ARTIFACT_KEYS = ['path', 'sha256'];
@@ -165,39 +166,25 @@ export function createReleaseLock({
   sourceCommit,
   platform,
   host,
-  sidecars,
   helpers = [],
   packagePath,
   legal = [],
+  ...unsupported
 }) {
+  if (Object.keys(unsupported).length > 0) {
+    throw new ReleaseLockError(
+      'fail',
+      `unsupported release-lock inputs: ${Object.keys(unsupported).join(', ')}; Engines must be compiled into the Host`,
+    );
+  }
   const artifactRoot = resolve(root);
   validateSourceCommit(sourceCommit);
   validatePlatform(platform);
-  if (!sidecars || typeof sidecars !== 'object' || Array.isArray(sidecars)) {
-    throw new ReleaseLockError('fail', 'sidecars must be a target-id keyed object');
-  }
-  const sidecarEntries = Object.entries(sidecars).sort(([left], [right]) =>
-    left.localeCompare(right),
-  );
-
-  const lockedSidecars = {};
-  for (const [targetId, path] of sidecarEntries) {
-    if (typeof targetId !== 'string' || targetId.length === 0) {
-      throw new ReleaseLockError('fail', 'sidecar target id must be a non-empty string');
-    }
-    lockedSidecars[targetId] = createArtifactEntry(
-      artifactRoot,
-      path,
-      `sidecar ${targetId}`,
-    );
-  }
-
   const lock = {
     schema_version: RELEASE_LOCK_SCHEMA_VERSION,
     source_commit: sourceCommit,
     platform,
     host: createArtifactEntry(artifactRoot, host, 'host'),
-    sidecars: lockedSidecars,
     helpers: helpers
       .map((path) => createArtifactEntry(artifactRoot, path, 'helper'))
       .sort((left, right) => left.path.localeCompare(right.path)),
@@ -223,33 +210,22 @@ function validateArtifactShape(value, label) {
 }
 
 export function validateReleaseLockShape(lock) {
+  if (lock?.schema_version !== RELEASE_LOCK_SCHEMA_VERSION) {
+    throw new ReleaseLockError(
+      'fail',
+      `unsupported release lock schema_version: ${lock?.schema_version}; regenerate a v2 Host release lock from real artifacts, without external Runtime fields`,
+    );
+  }
   if (!sameKeys(lock, TOP_LEVEL_KEYS)) {
     throw new ReleaseLockError(
       'fail',
       `release lock must contain exactly: ${TOP_LEVEL_KEYS.join(', ')}`,
     );
   }
-  if (lock.schema_version !== RELEASE_LOCK_SCHEMA_VERSION) {
-    throw new ReleaseLockError(
-      'fail',
-      `unsupported release lock schema_version: ${lock.schema_version}`,
-    );
-  }
   validateSourceCommit(lock.source_commit);
   validatePlatform(lock.platform);
   validateArtifactShape(lock.host, 'host');
   validateArtifactShape(lock.package, 'package');
-  if (
-    !lock.sidecars ||
-    typeof lock.sidecars !== 'object' ||
-    Array.isArray(lock.sidecars)
-  ) {
-    throw new ReleaseLockError('fail', 'sidecars must be a target-id keyed object');
-  }
-  for (const [targetId, artifact] of Object.entries(lock.sidecars)) {
-    if (!targetId) throw new ReleaseLockError('fail', 'sidecar target id must not be empty');
-    validateArtifactShape(artifact, `sidecars.${targetId}`);
-  }
   for (const [field, entries] of [
     ['helpers', lock.helpers],
     ['legal', lock.legal],
@@ -267,10 +243,6 @@ export function validateReleaseLockShape(lock) {
 function lockedArtifacts(lock) {
   return [
     ['host', lock.host],
-    ...Object.entries(lock.sidecars).map(([targetId, artifact]) => [
-      `sidecars.${targetId}`,
-      artifact,
-    ]),
     ...lock.helpers.map((artifact, index) => [`helpers[${index}]`, artifact]),
     ['package', lock.package],
     ...lock.legal.map((artifact, index) => [`legal[${index}]`, artifact]),
@@ -417,7 +389,7 @@ function parseCli(argv) {
     );
   }
   const single = {};
-  const repeated = { sidecar: [], helper: [], legal: [] };
+  const repeated = { helper: [], legal: [] };
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     const match = token.match(/^--([^=]+)(?:=(.*))?$/);
@@ -448,22 +420,6 @@ function required(value, name) {
   return value;
 }
 
-function parseSidecars(values) {
-  const sidecars = {};
-  for (const value of values) {
-    const separator = value.indexOf('=');
-    if (separator <= 0 || separator === value.length - 1) {
-      throw new ReleaseLockError('fail', '--sidecar must use <target_id>=<path>');
-    }
-    const targetId = value.slice(0, separator);
-    if (sidecars[targetId]) {
-      throw new ReleaseLockError('fail', `duplicate sidecar target id: ${targetId}`);
-    }
-    sidecars[targetId] = value.slice(separator + 1);
-  }
-  return sidecars;
-}
-
 function runCli(argv) {
   const { command, single, repeated } = parseCli(argv);
   const root = resolve(single.root || process.cwd());
@@ -473,7 +429,6 @@ function runCli(argv) {
       sourceCommit: single['source-commit'] || gitSourceCommit(root),
       platform: required(single.platform, 'platform'),
       host: required(single.host, 'host'),
-      sidecars: parseSidecars(repeated.sidecar),
       helpers: repeated.helper,
       packagePath: required(single.package, 'package'),
       legal: repeated.legal,

@@ -74,6 +74,12 @@ pub enum ChatProtocol {
 }
 
 impl ChatProtocol {
+    /// Messages wire semantics, not permission to reuse signed state across
+    /// providers. Opaque continuation is separately bound to an exact route.
+    pub const fn uses_anthropic_messages(self) -> bool {
+        matches!(self, Self::Anthropic | Self::Bedrock | Self::Vertex)
+    }
+
     pub const ALL: [Self; 6] = [
         Self::Anthropic,
         Self::OpenaiChat,
@@ -267,6 +273,10 @@ pub enum ChatToolResultPart {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ChatContentPart {
+    /// Complete provider-typed block, retained only for exact-producing-route replay.
+    ProviderReasoning {
+        block: crate::ChatProviderReasoning,
+    },
     Text {
         text: String,
     },
@@ -437,6 +447,10 @@ impl ChatModelInput {
                             required.insert(ChatModelFeature::ReasoningSignature);
                         }
                     }
+                    ChatContentPart::ProviderReasoning { .. } => {
+                        required.insert(ChatModelFeature::Reasoning);
+                        required.insert(ChatModelFeature::ReasoningSignature);
+                    }
                     ChatContentPart::Text { .. } => {}
                 }
             }
@@ -564,9 +578,21 @@ impl ChatModelInput {
             }
             for part in &message.content {
                 match part {
-                    ChatContentPart::Text { text }
-                    | ChatContentPart::Reasoning { text, .. } => {
+                    ChatContentPart::ProviderReasoning { block } => {
+                        if message.role != ChatRole::Assistant || block.validate().is_err() {
+                            return Err(ChatContractError::InvalidProviderReasoning);
+                        }
+                    }
+                    ChatContentPart::Text { text } => {
                         if text.is_empty() {
+                            return Err(ChatContractError::EmptyTextPart);
+                        }
+                    }
+                    ChatContentPart::Reasoning { text, signature, encrypted_content } => {
+                        if signature.as_ref().is_some_and(String::is_empty)
+                            || encrypted_content.as_ref().is_some_and(String::is_empty)
+                            || (text.is_empty() && encrypted_content.is_none())
+                        {
                             return Err(ChatContractError::EmptyTextPart);
                         }
                     }
@@ -753,6 +779,19 @@ pub enum ChatModelEvent {
     ReasoningSignature {
         signature: String,
     },
+    /// An atomic completed block, not a duplicate of ReasoningDelta. Opaque
+    /// continuation may exist without a user-visible summary. Consumers must
+    /// retain boundaries and must not merge it with adjacent signed blocks.
+    ReasoningBlock {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<String>,
+    },
+    /// Atomic complete native block, not duplicated as ReasoningDelta. The
+    /// receiving engine must retain block order, even when no text is visible.
+    ProviderReasoningBlock {
+        block: crate::ChatProviderReasoning,
+    },
     ToolCallDelta {
         call_id: ToolCallId,
         name: String,
@@ -916,6 +955,8 @@ pub enum ChatContractError {
     EmptyTextPart,
     #[error("tool result content must not be empty")]
     EmptyToolResult,
+    #[error("provider reasoning must be a bounded valid assistant block")]
+    InvalidProviderReasoning,
     #[error("media type and base64 payload must both be non-empty")]
     InvalidMedia,
     #[error("output token ceiling must be greater than zero")]

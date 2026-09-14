@@ -510,11 +510,19 @@ pub(crate) struct McpOwnerAdapter {
 }
 
 impl McpOwnerAdapter {
+    pub(crate) async fn resource(&self, request: nomifun_mcp::McpResourceRequest) -> Result<StrictJsonValue, Wave2HostPortError> {
+        let result = self.owner.resource(request).await.map_err(map_mcp_owner_error)?;
+        serde_json::to_value(result).map(StrictJsonValue)
+            .map_err(|_| Wave2HostPortError::unavailable("MCP resource result cannot be encoded"))
+    }
+
     pub(crate) fn new(owner: Arc<McpOwner>) -> Self {
         Self { owner }
     }
 
     /// Invoke the exact frozen mapping and return the validated MCP result.
+    /// Ok may contain isError=true: persist that observed result first, then
+    /// use project_mcp_tool_result for the canonical execution-error channel.
     ///
     /// The lock, server facts, resource binding, remote tool facts, principal,
     /// operation ID, and model arguments are all explicit fields of
@@ -531,6 +539,16 @@ impl McpOwnerAdapter {
             .map_err(map_mcp_owner_error)?;
         Ok(StrictJsonValue(result.result))
     }
+}
+
+/// Project only an already validated owner result, AFTER recording any required
+/// durable settlement. A returned failure is not an unknown owner transaction.
+pub(crate) fn project_mcp_tool_result(result: StrictJsonValue) -> Result<StrictJsonValue, Wave2HostPortError> {
+    if result.0.get("isError").and_then(Value::as_bool) == Some(true) {
+        return Err(Wave2HostPortError::new("MCP_TOOL_RETURNED_FAILURE",
+            "The bound MCP tool returned failure and completed protocol cleanup. Inspect its recorded observation; do not infer no effects, rollback, or permission to automatically replay it."));
+    }
+    Ok(result)
 }
 
 fn validate_principal(principal: &PrincipalRef) -> Result<(), Wave2HostPortError> {

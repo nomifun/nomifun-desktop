@@ -5,12 +5,15 @@
  * its credential to Cargo, build scripts, argv, files, logs, or tool children.
  *
  * The smoke is intentionally pinned to StepFun Coding Plan
- * (`stepfun-plan` / `step-3.7-flash`) in the Rust fixture. The only local
- * secret input is the Credential Manager value.
+ * (`stepfun-plan` / `step-3.7-flash`) in the Rust fixture.
+ * NOMIFUN_LIVE_STEPFUN_MODEL is a non-secret, explicitly selected model;
+ * it never enables fallback or changes the official endpoint. The only
+ * secret input is NOMIFUN_LIVE_STEPFUN_API_KEY from the environment.
  *
  * Usage:
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --compile-only
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --engine-smoke
  *
  * Cargo always runs first with a credential-free environment and emits JSON
  * metadata. The runner resolves the freshly-built test executable from that
@@ -28,9 +31,15 @@ const WINDOWS_TOOLCHAIN_MODULE_URL = pathToFileURL(
   resolve(ROOT, 'scripts/run-dev.mjs'),
 ).href;
 const API_KEY_ENVIRONMENT_NAME = 'NOMIFUN_LIVE_STEPFUN_API_KEY';
+const MODEL_ENVIRONMENT_NAME = 'NOMIFUN_LIVE_STEPFUN_MODEL';
+const DEFAULT_MODEL = 'step-3.7-flash';
+const ALLOWED_MODELS = new Set([DEFAULT_MODEL]);
 const TEST_TARGET = 'nomi_core_live_provider_smoke';
-const TEST_NAME =
-  'nomi_core_product_chain_reaches_live_stepfun_and_remote_binding';
+const ENGINE_TEST_NAME = 'nomi_core_official_engines_reach_live_stepfun';
+const ENGINE_STAGE_PHASES = ['nomi', 'coding'].flatMap((engine) =>
+  ['create', 'patch', 'exec', 'continue'].map((stage) => `engine.${engine}.${stage}`),
+);
+const PRODUCT_TEST_NAME = 'nomi_core_product_chain_reaches_live_stepfun_and_remote_binding';
 const GLOBAL_TIMEOUT_MS = 30 * 60 * 1000;
 const CARGO_OUTPUT_LIMIT_BYTES = 32 * 1024 * 1024;
 const TEST_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024;
@@ -38,6 +47,7 @@ const FAILURE_SENTINEL =
   /^NOMIFUN_LIVE_SMOKE_FAILURE phase=([a-z0-9_.-]+) code=([A-Z0-9_]+) status=([0-9]{3})$/;
 const compileOnly = process.argv.includes('--compile-only');
 const selfTest = process.argv.includes('--self-test');
+const engineSmoke = process.argv.includes('--engine-smoke');
 const globalDeadline = Date.now() + GLOBAL_TIMEOUT_MS;
 
 function isCredentialEnvironmentName(name) {
@@ -209,6 +219,19 @@ function typedFailureFromOutput(output) {
   return null;
 }
 
+function selectedTestPassed(stdout, selected) {
+  return stdout.split(/\r?\n/).some((line) => line === `test ${selected} ... ok`);
+}
+
+function engineStagesFromOutput(stdout) {
+  const stages = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = line.match(/^NOMIFUN_LIVE_SMOKE_STAGE phase=(engine\.(?:nomi|coding)\.(?:create|patch|exec|continue)) status=pass$/);
+    if (match) stages.push(match[1]);
+  }
+  return stages;
+}
+
 async function resolveToolchainEnvironment() {
   const credentialFreeInput = environmentWithoutCredential(process.env);
   if (process.platform !== 'win32') {
@@ -249,6 +272,17 @@ async function resolveToolchainEnvironment() {
 }
 
 async function main() {
+  if (process.argv.slice(2).some((arg) => !['--compile-only', '--self-test', '--engine-smoke'].includes(arg))) {
+    emitFailure('live_smoke_status=not_run', 'RUNNER_ARGUMENT_INVALID', 400);
+    process.exitCode = 2;
+    return;
+  }
+  const model = process.env[MODEL_ENVIRONMENT_NAME] ?? DEFAULT_MODEL;
+  if (!ALLOWED_MODELS.has(model)) {
+    emitFailure('live_smoke_status=not_run', 'LIVE_MODEL_INVALID', 400);
+    process.exitCode = 2;
+    return;
+  }
   const toolchain = await resolveToolchainEnvironment();
   if (!toolchain.environment) {
     emitFailure(
@@ -260,10 +294,12 @@ async function main() {
     return;
   }
   const environment = toolchain.environment;
+  environment[MODEL_ENVIRONMENT_NAME] = model;
 
   environment.CARGO_TERM_COLOR = 'never';
   environment.RUST_BACKTRACE = '0';
   const cargo = process.platform === 'win32' ? 'cargo.exe' : 'cargo';
+  console.log('live_smoke_phase=compile');
   const compile = await runCaptured(
     cargo,
     [
@@ -334,6 +370,7 @@ async function main() {
     process.exitCode = 0;
     return;
   }
+  console.log('live_smoke_compile_status=pass code=OK status=200');
 
   // Deliberately read the credential only after Cargo and every build script
   // have exited. Remove it from this runner's environment before launching any
@@ -364,10 +401,11 @@ async function main() {
 
   let test;
   try {
+    console.log(`live_smoke_phase=execute mode=${engineSmoke ? 'official_engines' : 'product_chain'} model=${model}`);
     test = await runCaptured(
       executable,
       [
-        TEST_NAME,
+        engineSmoke ? ENGINE_TEST_NAME : PRODUCT_TEST_NAME,
         '--exact',
         '--ignored',
         '--test-threads=1',
@@ -398,7 +436,30 @@ async function main() {
     process.exitCode = 2;
     return;
   }
+  const stages = engineSmoke ? engineStagesFromOutput(test.stderr) : [];
+  for (const phase of stages) console.log(`live_smoke_stage=${phase} status=pass`);
+  for (const line of test.stderr.split(/\r?\n/)) {
+    const failure = typedFailureFromOutput(line.replace(/^NOMIFUN_LIVE_SMOKE_ENGINE_FAILURE /, 'NOMIFUN_LIVE_SMOKE_FAILURE '));
+    if (failure && line.startsWith('NOMIFUN_LIVE_SMOKE_ENGINE_FAILURE ')) {
+      console.log(`live_smoke_engine_failure phase=${failure.phase} code=${failure.code} status=${failure.status}`);
+    }
+  }
   if (test.status === 0) {
+    // libtest exits successfully even when an exact filter matches zero tests.
+    const selected = engineSmoke ? ENGINE_TEST_NAME : PRODUCT_TEST_NAME;
+    if (!selectedTestPassed(test.stdout, selected)) {
+      emitFailure('live_smoke_status=not_run', 'SELECTED_TEST_DID_NOT_PASS', 503);
+      process.exitCode = 2;
+      return;
+    }
+    if (engineSmoke && (stages.length !== ENGINE_STAGE_PHASES.length ||
+        ENGINE_STAGE_PHASES.some((phase, index) => stages[index] !== phase))) {
+      emitFailure('live_smoke_status=fail', 'ENGINE_STAGE_EVIDENCE_INCOMPLETE', 503);
+      process.exitCode = 2;
+      return;
+    }
+    console.log(`live_smoke_mode=${engineSmoke ? 'official_engines' : 'product_chain'} model=${model}`);
+    if (engineSmoke) console.log('live_smoke_engines=nomifun.nomi,nomifun.coding');
     console.log('live_smoke_status=pass code=OK status=200');
     process.exitCode = 0;
     return;
@@ -420,6 +481,21 @@ async function main() {
 }
 
 function runSelfTest() {
+  const stageLines = ENGINE_STAGE_PHASES.map((phase) => `NOMIFUN_LIVE_SMOKE_STAGE phase=${phase} status=pass`).join('\n');
+  if (JSON.stringify(engineStagesFromOutput(stageLines)) !== JSON.stringify(ENGINE_STAGE_PHASES) ||
+      engineStagesFromOutput('NOMIFUN_LIVE_SMOKE_STAGE phase=secret status=pass').length !== 0 ||
+      engineStagesFromOutput('NOMIFUN_LIVE_SMOKE_STAGE phase=engine.nomi.create status=pass extra').length !== 0) {
+    throw new Error('safe stage evidence self-test failed');
+  }
+  if (!selectedTestPassed(`test ${ENGINE_TEST_NAME} ... ok\r\n`, ENGINE_TEST_NAME) ||
+      selectedTestPassed('running 0 tests\ntest result: ok. 0 passed;', ENGINE_TEST_NAME) ||
+      selectedTestPassed(`test ${PRODUCT_TEST_NAME} ... ok`, ENGINE_TEST_NAME)) {
+    throw new Error('exact test execution proof self-test failed');
+  }
+  if (!ALLOWED_MODELS.has('step-3.7-flash') ||
+      ['step-3.77-flash', 'step-3.7-flash\n', 'step-3.7-flash ', '', 'https://example.invalid/v1', 'arbitrary-model'].some((model) => ALLOWED_MODELS.has(model))) {
+    throw new Error('model allowlist self-test failed');
+  }
   const scrubbed = environmentWithoutCredential({
     PATH: 'safe',
     [API_KEY_ENVIRONMENT_NAME.toLowerCase()]: 'must-not-copy',

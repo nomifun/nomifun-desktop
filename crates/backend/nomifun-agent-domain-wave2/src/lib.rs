@@ -1837,8 +1837,40 @@ fn build_capability(
     })
 }
 
+mod process_schema;
+mod workspace_schema;
+pub use process_schema::process_exec_input_schema;
+
 fn action_input_schema(capability_id: &str) -> StrictJsonValue {
+    if let Some(schema) = workspace_schema::input(capability_id) {
+        return schema;
+    }
     let schema = match capability_id {
+        "fs.read" => StrictJsonValue(serde_json::json!({
+            "type": "object", "additionalProperties": false, "required": ["path"],
+            "properties": {
+                "format": {"type":"string", "enum":["text", "image", "instruction_scope"], "default":"text"},
+                "recursive": {"type":"boolean", "default":false},
+                "missing_ok": {"type":"boolean", "default":false},
+                "path": {"type":"string", "minLength":1, "maxLength":4096, "pattern":"\\S"},
+                "offset": {"type":"integer", "minimum":0, "maximum":8388608, "default":0},
+                "limit": {"type":"integer", "minimum":4, "maximum":16384, "default":16384},
+                "expected_sha256": {"type":"string", "pattern":"^[0-9a-f]{64}$"}
+            },
+            "allOf": [{"if":{"properties":{"offset":{"minimum":1}},"required":["offset"]},
+                       "then":{"required":["expected_sha256"]}},
+                      {"if":{"properties":{"format":{"const":"image"}},"required":["format"]},
+                       "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]},{"required":["missing_ok"]}]}}},
+                      {"if":{"properties":{"format":{"const":"instruction_scope"}},"required":["format"]},
+                       "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]},{"required":["expected_sha256"]},{"required":["missing_ok"]}]}},
+                       "else":{"not":{"required":["recursive"]}}}]
+        })),
+        "process.exec" => process_exec_input_schema(),
+        "fs.search" => strict_object_schema(serde_json::json!({
+            "query":{"type":"string", "minLength":1, "maxLength":1024, "pattern":"\\S"},
+            "path":{"type":"string", "maxLength":4096},
+            "limit":{"type":"integer", "minimum":1, "maximum":200, "default":100}
+        }), &["query"]),
         "fs.delete" => strict_object_schema(
             serde_json::json!({
                 "path": {
@@ -2007,7 +2039,9 @@ impl CapabilityHandler for Wave2CapabilityHandler {
                     action_id: context.action_id,
                 });
             }
-            if matches!(self.capability_id.as_ref(), "fs.delete" | "fs.snapshot" | "vcs.push") {
+            if matches!(self.capability_id.as_ref(),
+                "fs.read" | "fs.search" | "fs.write" | "fs.patch" | "fs.delete" | "fs.snapshot"
+                | "vcs.status" | "vcs.diff" | "vcs.stage" | "vcs.commit" | "vcs.push" | "process.exec") {
                 // These actions publish strict schemas; every Kernel host must
                 // enforce them before dispatch, not only the Nomi wrapper.
                 validate_action_input(self.capability_id.as_ref(), &input).map_err(|reason| {

@@ -3,6 +3,10 @@
 分支：`rf/agent-capability-platform-v2`。仅本地开发，不 push。
 本记录延续 CAR-D-019；不是迁移到隔离 Fresh-v4 的另一套 Session 权威。
 
+> 后续新增实现见 [CODING-LOOP-2026-09-13.zh.md](CODING-LOOP-2026-09-13.zh.md)：
+> process.exec、根仓库指令、自动压缩、执行反馈与关闭轮次重放已继续接线，但按用户
+> 要求未验证。下文是首批接入的历史记录，其“尚未接入”描述与验证结果仅对应当时切片。
+
 ## 接线结果
 
 默认链路为 Conversation-backed Session owner → 现有 Runtime Registry →
@@ -33,8 +37,9 @@ Agent 的 `draft.document` / 不可变 Revision payload 可保存：
 `runtime_engine` 字段。修改 Agent 只影响新会话，旧会话／其 Fork 保留原绑定；
 会话内切换到使用不同引擎的 Agent 会报错，须从该 Agent 新建会话。
 
-可复用 `NomiCoreApplication::compose_with_runtime_engines` 注册受信任的 Rust
-工厂；不提供 HTTP 上传可执行代码或动态库 ABI。注册在 router 组装后关闭。
+可复用 `NomiCoreApplication::compose_with_runtime_engines` 注册随应用编译的 Rust
+工厂及必需的兼容性策略；按 CAR-D-021 不允许打包后挂载，不提供 HTTP 上传可执行
+代码或动态库 ABI。注册在 router 组装后关闭，二次开发须重新构建打包。
 
 ## 当前 Coding 能力
 
@@ -55,8 +60,17 @@ receipt 所属校验进入 schema 注册表。记录当前随 receipt 保留，�
 cleanup 等待真实退出并记录结果后才发布终态；等待者超时不会丢掉证明，
 任务 panic 保留隔离。进程执行尚未启用，不声称具备进程退出证明。
 
-恢复上下文来自现有 Conversation 的有界消息（最多 4096 条/1 MiB），
-工具历史仅作为不可信数据，不重放工具。当前隐藏的自动化输入也被纳入。
+宿主从现有 Conversation 提供最近的有界历史候选（最多 4096 条历史，文本总量
+含当前输入最多 8 MiB），并始终附加经过持久凭据校验的当前用户输入，包含隐藏的
+自动化输入。工具历史仅作为不可信数据，不重放工具。
+
+Coding 自身选择初始模型上下文（默认最多 128 条历史、序列化输入 2 MiB），
+按完整历史回合截断并记录 `context_prepared`。每次模型调用前重新检查字节预算；
+执行中工具链不能因裁剪而丢失因果关系，超限明确失败，尚无自动摘要压缩。
+这些 Engine 算法预算与宿主历史候选窗口是不同层次，不声称已提供完整历史分页 SDK。
+
+兼容性现在通过注册的 `RuntimeEngineAdmission` 校验，不再在 Session 路由中特判
+Coding family。Coding 能力查询读取实际工具准入使用的 `SessionCapabilityState`。
 
 ## 明确未完成
 
@@ -67,7 +81,8 @@ cleanup 等待真实退出并记录结果后才发布终态；等待者超时不
 - Remote/Automation 在共享 owner 的创建入口继承 Agent 配置，不另设引擎选择 DTO；
   所有生态消费者的完整端到端覆盖尚未完成。
 - 未删除旧 Wrapper/未切换默认引擎；未做付费模型、桌面视觉、macOS/Linux 或发布验收。
-- 内置 build digest 是开发期源码/依赖指纹，并非已签名发布制品证明；正式多版本
-  分发、旧构建保留和升级迁移策略仍属发布工作。既有 exact binding 不自动升级。
+- 内置 build digest 是开发期源码/依赖指纹，并非发布制品证明；应用升级时的旧构建
+  兼容、保留和迁移策略仍待实现。既有 exact binding 不自动升级；不建设独立 Engine
+  动态分发/安装器。通用模型/工具/历史/状态宿主 SDK 仍待抽取。
 
 验证命令与最终结果见 `STATUS.zh.md`、`TASK-MANIFEST.json`，不将本切片标成整个 CAR 完成。

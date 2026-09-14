@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use dashmap::DashMap;
@@ -51,6 +51,8 @@ const MAX_DEVICE_TOOL_DESCRIPTION_BYTES: usize = 4 * 1024;
 struct FrozenRobotDeviceTool {
     capability: RobotToolCapability,
     device_name: String,
+    raw_input_schema: serde_json::Value,
+    validator: Arc<jsonschema::Validator>,
 }
 
 struct BoundRobotSessionToolInvoker {
@@ -115,6 +117,7 @@ pub(crate) struct NomiCoreRobotWave4Owner {
     effects: Arc<RobotEffectLedger>,
     observations: Arc<RobotVisionObservationRegistry>,
     lifecycle_activations: Arc<DashMap<String, RobotLifecycleActivation>>,
+    lifecycle_leases: Mutex<BTreeMap<String, Weak<RobotLifecycleLease>>>,
 }
 
 impl NomiCoreRobotWave4Owner {
@@ -130,6 +133,7 @@ impl NomiCoreRobotWave4Owner {
             effects: Arc::clone(&robot.effect_ledger),
             observations: Arc::clone(&robot.vision_observations),
             lifecycle_activations: Arc::new(DashMap::new()),
+            lifecycle_leases: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -150,6 +154,7 @@ impl NomiCoreRobotWave4Owner {
             effects,
             observations,
             lifecycle_activations: Arc::new(DashMap::new()),
+            lifecycle_leases: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -210,7 +215,12 @@ impl NomiCoreRobotWave4Owner {
                 .await
             {
                 validate_provider_tool_name(&tool.exposed_name)?;
-                let input_schema = strict_device_input_schema(tool.input_schema)?;
+                if descriptors.len() >= 128 {
+                    return Err("Robot Session tool surface exceeds 128 actions".to_owned());
+                }
+                let input_schema = strict_device_input_schema(tool.input_schema.clone())?;
+                let validator = Arc::new(jsonschema::options().with_retriever(NoExternalDeviceSchema).build(&input_schema.0)
+                    .map_err(|_| "Robot device schema is invalid".to_owned())?);
                 let description = bounded_description(&tool.description);
                 let key = (capability_ref.clone(), tool.exposed_name.clone());
                 if frozen
@@ -219,6 +229,8 @@ impl NomiCoreRobotWave4Owner {
                         FrozenRobotDeviceTool {
                             capability,
                             device_name: tool.device_name,
+                            raw_input_schema: tool.input_schema,
+                            validator,
                         },
                     )
                     .is_some()
@@ -287,6 +299,26 @@ impl NomiCoreRobotWave4Owner {
         agent_session_id: &AgentSessionId,
         resource_bindings: &[TypedResourceBinding],
     ) -> Result<StrictJsonValue, Wave4HostPortError> {
+        // Readiness only: authority is installed atomically with its owning
+        // lease below. Cancellation between bootstrap phases cannot leak a grant.
+        let activation = self.prepare_lifecycle(
+            capability_id, principal_id, agent_session_id, resource_bindings,
+        ).await?;
+        Ok(StrictJsonValue(serde_json::json!({
+            "kind": capability_id.as_ref(),
+            "robot_id": activation.robot_id,
+            "companion_id": activation.companion_id,
+            "state": "active",
+        })))
+    }
+
+    async fn prepare_lifecycle(
+        &self,
+        capability_id: &CapabilityId,
+        principal_id: &str,
+        agent_session_id: &AgentSessionId,
+        resource_bindings: &[TypedResourceBinding],
+    ) -> Result<RobotLifecycleActivation, Wave4HostPortError> {
         if !lifecycle_capability_ids().contains(capability_id) {
             return Err(Wave4HostPortError::action_operation_mismatch(format!(
                 "WAVE4_ACTION_OPERATION_MISMATCH: {} is not a Robot lifecycle capability",
@@ -295,6 +327,12 @@ impl NomiCoreRobotWave4Owner {
         }
         self.ensure_installation_owner(principal_id)?;
         let binding = exact_robot_binding(resource_bindings, principal_id)?;
+        let operation = if capability_id.as_ref() == ROBOT_LINK { "link" } else { "audio" };
+        if !binding.operations.contains(operation) {
+            return Err(Wave4HostPortError::resource_owner_mismatch(
+                "Robot lifecycle operation is outside the resource grant",
+            ));
+        }
         let robot = self.load_bound_robot(binding).await?;
         let online = self
             .status
@@ -312,8 +350,7 @@ impl NomiCoreRobotWave4Owner {
             .companion_id
             .clone()
             .expect("load_bound_robot requires a paired Companion");
-        let key = lifecycle_key(principal_id, agent_session_id, capability_id);
-        let activation = RobotLifecycleActivation {
+        Ok(RobotLifecycleActivation {
             principal_id: principal_id.to_owned(),
             agent_session_id: agent_session_id.clone(),
             capability_id: capability_id.clone(),
@@ -321,30 +358,11 @@ impl NomiCoreRobotWave4Owner {
             robot_id: robot.robot_id.clone(),
             companion_id,
             cancelled: Arc::new(AtomicBool::new(false)),
-        };
-        if let Some(existing) = self.lifecycle_activations.get(&key) {
-            if existing.binding_id != activation.binding_id
-                || existing.robot_id != activation.robot_id
-                || existing.companion_id != activation.companion_id
-                || existing.cancelled.load(Ordering::Acquire)
-            {
-                return Err(Wave4HostPortError::resource_owner_mismatch(
-                    "Robot lifecycle activation no longer matches this Session binding",
-                ));
-            }
-        } else {
-            self.lifecycle_activations.insert(key, activation);
-        }
-        Ok(StrictJsonValue(serde_json::json!({
-            "kind": capability_id.as_ref(),
-            "robot_id": robot.robot_id,
-            "companion_id": robot.companion_id,
-            "state": "active",
-        })))
+        })
     }
 
-    /// Return the Session-retained lease for an already activated Robot
-    /// lifecycle capability. The central Nomi lifecycle assembly stores this
+    /// Acquire the Session-retained lease for a Robot lifecycle capability.
+    /// This also supports deferred preparation before activation. Nomi stores it
     /// as a context contributor so `Drop` is the runtime disposal boundary.
     pub(crate) async fn lifecycle_context_contributor(
         &self,
@@ -359,7 +377,7 @@ impl NomiCoreRobotWave4Owner {
         .await
     }
 
-    async fn lifecycle_context_contributor_for(
+    pub(crate) async fn lifecycle_context_contributor_for(
         &self,
         capability_id: &CapabilityId,
         principal: &PrincipalRef,
@@ -369,12 +387,8 @@ impl NomiCoreRobotWave4Owner {
         if !lifecycle_capability_ids().contains(capability_id) {
             return Ok(None);
         }
-        self.ensure_installation_owner(&principal.principal_id)
-            .map_err(|error| error.to_string())?;
-        let binding = exact_robot_binding(resource_bindings, &principal.principal_id)
-            .map_err(|error| error.to_string())?;
-        let robot = self
-            .load_bound_robot(binding)
+        let activation = self
+            .prepare_lifecycle(capability_id, &principal.principal_id, agent_session_id, resource_bindings)
             .await
             .map_err(|error| error.to_string())?;
         let key = lifecycle_key(
@@ -382,33 +396,31 @@ impl NomiCoreRobotWave4Owner {
             agent_session_id,
             capability_id,
         );
-        let activation = self
-            .lifecycle_activations
-            .get(&key)
-            .map(|entry| entry.clone())
-            .ok_or_else(|| {
-                format!(
-                    "Robot lifecycle {} must be activated before its Session lease is retained",
-                    capability_id.as_ref()
-                )
-            })?;
-        if activation.binding_id != binding.binding_id.as_ref()
-            || activation.robot_id != robot.robot_id
-            || activation.companion_id != robot.companion_id.as_deref().unwrap_or_default()
-            || activation.cancelled.load(Ordering::Acquire)
-        {
-            return Err(
-                "Robot lifecycle activation does not match the current owner/binding relationship"
-                    .to_owned(),
-            );
+        // No await between grant installation and returning its owner. Weak
+        // caching shares one Drop boundary without retaining sessions forever.
+        let mut leases = self.lifecycle_leases.lock()
+            .map_err(|_| "Robot lifecycle lease lock poisoned".to_owned())?;
+        leases.retain(|_, lease| lease.strong_count() != 0);
+        if let Some(existing) = leases.get(&key).and_then(Weak::upgrade) {
+            if existing.activation.binding_id != activation.binding_id
+                || existing.activation.robot_id != activation.robot_id
+                || existing.activation.companion_id != activation.companion_id
+                || existing.activation.cancelled.load(Ordering::Acquire)
+            {
+                return Err("Robot lifecycle lease differs from current Session binding".to_owned());
+            }
+            return Ok(Some(existing));
         }
-        Ok(Some(Arc::new(RobotLifecycleLease {
-            key,
-            activation,
+        let lease = Arc::new(RobotLifecycleLease {
+            key: key.clone(),
+            activation: activation.clone(),
             activations: Arc::clone(&self.lifecycle_activations),
             registry: Arc::clone(&self.registry),
             status: Arc::clone(&self.status),
-        })))
+        });
+        self.lifecycle_activations.insert(key.clone(), activation);
+        leases.insert(key, Arc::downgrade(&lease));
+        Ok(Some(lease))
     }
 
     async fn ensure_lifecycle_active(
@@ -520,6 +532,7 @@ impl NomiCoreRobotWave4Owner {
             capability,
             &parsed.tool_name,
             None,
+            None,
             parsed.arguments,
         )
         .await
@@ -537,6 +550,7 @@ impl NomiCoreRobotWave4Owner {
         capability: RobotToolCapability,
         exposed_name: &str,
         expected_device_name: Option<&str>,
+        expected_input_schema: Option<&serde_json::Value>,
         arguments: serde_json::Value,
     ) -> Result<StrictJsonValue, Wave4HostPortError> {
         if !arguments.is_object() {
@@ -593,11 +607,12 @@ impl NomiCoreRobotWave4Owner {
 
         let result = self
             .tools
-            .call_exact_for_capability(
+            .call_frozen_for_capability(
                 &robot.robot_id,
                 capability,
                 exposed_name,
                 expected_device_name,
+                expected_input_schema,
                 canonical_input.0["arguments"].clone(),
             )
             .await;
@@ -679,10 +694,10 @@ impl NomiHostDynamicToolInvoker for BoundRobotSessionToolInvoker {
                 false,
             )
         })?;
-        if !request.arguments.0.is_object() {
+        if !request.arguments.0.is_object() || !frozen.validator.is_valid(&request.arguments.0) {
             return Err(NomiHostDynamicToolError::new(
                 "INVALID_PAYLOAD",
-                "Robot Session tool arguments must be an object",
+                "Robot Session arguments do not match the frozen device schema",
                 false,
             ));
         }
@@ -721,6 +736,7 @@ impl NomiHostDynamicToolInvoker for BoundRobotSessionToolInvoker {
                 frozen.capability,
                 &request.provider_name,
                 Some(&frozen.device_name),
+                Some(&frozen.raw_input_schema),
                 request.arguments.0,
             )
             .await
@@ -776,16 +792,9 @@ impl nomifun_ai_agent::ContextContributor for RobotLifecycleLease {
 impl Drop for RobotLifecycleLease {
     fn drop(&mut self) {
         self.activation.cancelled.store(true, Ordering::Release);
-        if let Some(current) = self.activations.get(&self.key) {
-            let same_activation = Arc::ptr_eq(
-                &current.cancelled,
-                &self.activation.cancelled,
-            );
-            drop(current);
-            if same_activation {
-                self.activations.remove(&self.key);
-            }
-        }
+        self.activations.remove_if(&self.key, |_, current| {
+            Arc::ptr_eq(&current.cancelled, &self.activation.cancelled)
+        });
     }
 }
 
@@ -861,6 +870,15 @@ fn strict_device_input_schema(mut schema: serde_json::Value) -> Result<StrictJso
         _ => return Err("Robot tool input schema properties must be an object".to_owned()),
     }
     Ok(StrictJsonValue(schema))
+}
+
+struct NoExternalDeviceSchema;
+impl jsonschema::Retrieve for NoExternalDeviceSchema {
+    fn retrieve(&self, _: &jsonschema::Uri<String>)
+        -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>>
+    {
+        Err("Robot schemas cannot retrieve external resources".into())
+    }
 }
 
 /// Preserve the device-declared argument fields and types while ensuring no

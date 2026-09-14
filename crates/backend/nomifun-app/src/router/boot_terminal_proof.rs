@@ -39,9 +39,13 @@ pub(crate) struct BootTerminalProofProvider {
     /// producer started. Only these generations may ever prove.
     frozen: HashMap<String, FrozenOrphanGeneration>,
     reap_report: AgentProcessReapReport,
+    registered: nomifun_conversation::terminal_proof::RegisteredEngineRecoveryMap,
+    mcp_receipts: Option<super::mcp_effect_receipts::McpEffectReceipts>,
+    hosted_receipts: Option<super::hosted_effect_receipts::HostedEffectReceipts>,
 }
 
 impl BootTerminalProofProvider {
+    #[cfg(test)]
     pub(crate) fn new(
         frozen: HashMap<String, FrozenOrphanGeneration>,
         reap_report: AgentProcessReapReport,
@@ -49,12 +53,83 @@ impl BootTerminalProofProvider {
         Arc::new(Self {
             frozen,
             reap_report,
+            registered: Default::default(),
+            mcp_receipts: None,
+            hosted_receipts: None,
         })
+    }
+    pub(crate) fn with_registered(
+        frozen: HashMap<String, FrozenOrphanGeneration>,
+        reap_report: AgentProcessReapReport,
+        registered: nomifun_conversation::terminal_proof::RegisteredEngineRecoveryMap,
+        pool: nomifun_db::SqlitePool,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            frozen,
+            reap_report,
+            registered,
+            mcp_receipts: Some(super::mcp_effect_receipts::McpEffectReceipts::new(pool.clone())),
+            hosted_receipts: Some(super::hosted_effect_receipts::HostedEffectReceipts::new(pool)),
+        })
+    }
+
+    async fn remote_effects_settled(&self, user: &str, conversation: &str) -> Result<(), String> {
+        if let Some(receipts) = &self.hosted_receipts {
+            receipts.ensure_settled(user, conversation).await.map_err(|error| error.to_string())?;
+        }
+        if let Some(receipts) = &self.mcp_receipts {
+            receipts
+                .ensure_settled(user, conversation)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 }
 
 #[async_trait]
 impl TurnTerminalProofProvider for BootTerminalProofProvider {
+    async fn prepare_registered_engine_recovery(
+        &self,
+        binding: &nomifun_api_types::RuntimeEngineBinding,
+        user_id: &str,
+        conversation_id: &str,
+        admission_epoch: i64,
+        operation_id: &str,
+    ) -> TerminalProofDecision {
+        if !self.frozen.get(conversation_id).is_some_and(|frozen| {
+            frozen.user_id == user_id
+                && frozen.admission_epoch == admission_epoch
+                && frozen.active_operation_id.as_deref() == Some(operation_id)
+        }) {
+            return TerminalProofDecision::Unproven {
+                reason: "engine generation is not the exact boot-frozen orphan".into(),
+            };
+        }
+        if let Err(reason) = self.remote_effects_settled(user_id, conversation_id).await {
+            return TerminalProofDecision::Unproven { reason };
+        }
+        let key = (
+            binding.family_id.clone(),
+            binding.build_id.clone(),
+            binding.build_digest.clone(),
+        );
+        let Some(recovery) = self.registered.get(&key) else {
+            return TerminalProofDecision::Unproven {
+                reason: "exact engine build has no compiled restart recovery extension".into(),
+            };
+        };
+        recovery
+            .prepare_interrupted_turn(
+                binding,
+                user_id,
+                conversation_id,
+                admission_epoch,
+                operation_id,
+            )
+            .await
+    }
+
     async fn prove_orphan_generation_terminal(
         &self,
         user_id: &str,
@@ -77,6 +152,9 @@ impl TurnTerminalProofProvider for BootTerminalProofProvider {
                 reason: "generation no longer matches the boot-frozen unsettled snapshot"
                     .to_owned(),
             };
+        }
+        if let Err(reason) = self.remote_effects_settled(user_id, conversation_id).await {
+            return TerminalProofDecision::Unproven { reason };
         }
         if !self.reap_report.registry_fully_processed() {
             return TerminalProofDecision::Unproven {
@@ -157,11 +235,7 @@ mod tests {
     async fn generation_outside_the_frozen_snapshot_never_proves() {
         let provider =
             BootTerminalProofProvider::new(frozen_map(3, Some("op-a")), empty_reap_report().await);
-        for (epoch, operation) in [
-            (4, Some("op-a")),
-            (3, Some("op-b")),
-            (3, None),
-        ] {
+        for (epoch, operation) in [(4, Some("op-a")), (3, Some("op-b")), (3, None)] {
             let decision = provider
                 .prove_orphan_generation_terminal(
                     USER,

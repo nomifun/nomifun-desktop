@@ -705,18 +705,6 @@ fn load_and_publish_storage_generation(data_dir: &Path) -> Result<String> {
 }
 
 impl ServerEnvironment {
-    pub fn canonical_host(&self) -> Result<super::canonical_host::CanonicalHost> {
-        let outcome = self
-            .fresh_v4_bootstrap
-            .clone()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "production startup did not select a Fresh-v4 root; \
-                     refusing to infer a legacy v3 host"
-                )
-            })?;
-        Ok(super::canonical_host::CanonicalHost::from_bootstrap(outcome))
-    }
 
     pub(crate) fn require_fresh_v4(&self, operation: &str) -> Result<()> {
         if self.fresh_v4_bootstrap.is_none() {

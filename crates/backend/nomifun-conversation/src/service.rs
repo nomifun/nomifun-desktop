@@ -1921,6 +1921,32 @@ impl ConversationService {
         })
     }
 
+    fn validate_steer_input(req: &SendMessageRequest) -> Result<(), AppError> {
+        if req.content.trim().is_empty() && req.files.is_empty() && req.inject_skills.is_empty() {
+            return Err(AppError::BadRequest("Steering input must not be empty".into()));
+        }
+        if req.content.len() > 16 * 1024 || req.files.len() > 64 || req.inject_skills.len() > 16
+            || req.files.iter().any(|path| path.is_empty() || path.len() > 4096 || path.contains('\0'))
+            || req.inject_skills.iter().any(|id| id.trim().is_empty() || id.len() > 1024 || id.contains('\0'))
+            || Self::steer_delivery_request_fields(req).to_string().len() > 60 * 1024
+        {
+            return Err(AppError::BadRequest("Steering input exceeds bounded text/context limits".into()));
+        }
+        Ok(())
+    }
+
+    fn ensure_steer_context_supported(
+        req: &SendMessageRequest,
+        runtime: &AgentRuntimeHandle,
+    ) -> Result<(), AppError> {
+        if (!req.files.is_empty() || !req.inject_skills.is_empty()) && !runtime.supports_steering_context() {
+            return Err(AppError::BadRequest(
+                "steer_unsupported: this engine cannot append attachments or Skill hints to a running turn".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn steer_delivery_request_payload(
         req: &SendMessageRequest,
         scope: &IdmmTurnScope,
@@ -3375,10 +3401,7 @@ impl ConversationService {
         admission: &ConversationTurnAdmissionState,
         runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<bool, AppError> {
-        // Nomi's persisted recovery proof does not cover a user runtime or
-        // Coding. Such orphans remain quarantined until that engine supplies
-        // its own exact restart proof; never inspect another engine's log.
-        if !row_uses_nomi_engine(row)? { return Ok(false); }
+        let uses_nomi = row_uses_nomi_engine(row, runtime_registry.as_ref())?;
         let conversation_id = row.conversation_id.as_str();
         let Some(provider) = self.terminal_proof_provider() else {
             return Ok(false);
@@ -3388,7 +3411,7 @@ impl ConversationService {
                 OrphanProofRequirement::LocalContainedAuthority
             }
         };
-        let decision = provider
+        let decision = if uses_nomi { provider
             .prove_orphan_generation_terminal(
                 user_id,
                 conversation_id,
@@ -3396,7 +3419,15 @@ impl ConversationService {
                 admission.epoch,
                 admission.active_operation_id.as_deref(),
             )
-            .await;
+            .await } else {
+                let extra: serde_json::Value = serde_json::from_str(&row.extra).map_err(|error| AppError::Conflict(error.to_string()))?;
+                let binding: nomifun_api_types::RuntimeEngineBinding = serde_json::from_value(extra.get(nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY)
+                    .cloned().ok_or_else(|| AppError::Conflict("registered engine orphan has no binding".into()))?)
+                    .map_err(|error| AppError::Conflict(error.to_string()))?;
+                binding.validate()?;
+                let Some(operation) = admission.active_operation_id.as_deref() else { return Ok(false) };
+                provider.prepare_registered_engine_recovery(&binding, user_id, conversation_id, admission.epoch, operation).await
+            };
         let evidence = match decision {
             TerminalProofDecision::Proven { evidence } => evidence,
             TerminalProofDecision::Unproven { reason } => {
@@ -3441,13 +3472,13 @@ impl ConversationService {
                 "restart-orphan Nomi receipt identity or state is invalid".to_owned(),
             ));
         }
-        runtime_registry
+        if uses_nomi { runtime_registry
             .rewind_persisted_nomi_live_recovery(
                 conversation_id,
                 row.created_at,
                 &receipt.message_id,
             )
-            .await?;
+            .await?; }
 
         // The prior generation is provably terminal, so its detached
         // knowledge write-back workers are gone too: settle their durable
@@ -4219,7 +4250,7 @@ impl ConversationService {
         let trusted_metadata = if trusted_snapshot.is_some() {
             let object = req.extra.as_object_mut();
             object.map(|object| {
-                ["runtime_engine_binding", "nomi_core_session"]
+                ["runtime_engine_binding", "nomi_core_session", "execution_constraints"]
                     .into_iter()
                     .filter_map(|key| object.remove(key).map(|value| (key, value)))
                     .collect::<Vec<_>>()
@@ -4228,6 +4259,26 @@ impl ConversationService {
             Vec::new()
         };
         reject_backend_owned_lifecycle_extra_keys(&req.extra)?;
+        if let Some((_, value)) = trusted_metadata.iter().find(|(key, _)| *key == "execution_constraints") {
+            nomifun_api_types::ExecutionConstraints::from_extra(&serde_json::json!({ "execution_constraints": value }))?;
+            if !trusted_snapshot.as_ref().is_some_and(|snapshot| snapshot.canonical_binding.is_some()) {
+                return Err(AppError::Conflict("Execution constraints require an admitted canonical Agent snapshot".into()));
+            }
+        }
+        if let Some(canonical) = trusted_snapshot.as_ref().and_then(|snapshot| snapshot.canonical_binding.as_ref()) {
+            // A frozen capability-platform snapshot cannot silently fall back
+            // to legacy Nomi when a consumer bypasses the application Session
+            // host. The host must supply both admitted metadata and exact Engine.
+            let metadata = trusted_metadata.iter().find(|(key, _)| *key == "nomi_core_session")
+                .map(|(_, value)| value);
+            let projected_binding = metadata.and_then(|value| value.get("binding")).cloned()
+                .and_then(|value| serde_json::from_value::<nomifun_api_types::AgentBindingValueDto>(value).ok());
+            if projected_binding.as_ref() != Some(canonical)
+                || !trusted_metadata.iter().any(|(key, _)| *key == "runtime_engine_binding")
+            {
+                return Err(AppError::Conflict("Canonical Agent snapshots must be admitted by the Engine-aware Session host".into()));
+            }
+        }
         if let Some((_, value)) = trusted_metadata.iter().find(|(key, _)| *key == "runtime_engine_binding") {
             let binding: nomifun_api_types::RuntimeEngineBinding = serde_json::from_value(value.clone())
                 .map_err(|error| AppError::BadRequest(format!("Invalid runtime binding: {error}")))?;
@@ -4759,6 +4810,14 @@ impl ConversationService {
                 .map_err(|error| AppError::Internal(error.to_string()))?;
             if extra.get("runtime_engine_binding") != existing_extra.get("runtime_engine_binding") {
                 return Err(AppError::Conflict("Creation key is already bound to a different runtime engine".into()));
+            }
+            if extra.get("execution_constraints") != existing_extra.get("execution_constraints") {
+                return Err(AppError::Conflict("Creation key is already bound to different execution constraints".into()));
+            }
+            if extra.get("nomi_core_session") != existing_extra.get("nomi_core_session") {
+                // The earlier host lookup can race another creator. Engine
+                // equality alone does not imply the same Agent or resources.
+                return Err(AppError::Conflict("Creation key is already bound to different immutable Agent Session metadata".into()));
             }
             let mut existing = existing;
             rebase_managed_workspace_in_row(&mut existing, &self.workspace_root)?;
@@ -6198,7 +6257,7 @@ impl ConversationService {
         self.runtime_registry
             .terminate_and_wait_result(id, Some(AgentKillReason::UserCancelled))
             .await?;
-        if row_uses_nomi_engine(&reset_row)? {
+        if row_uses_nomi_engine(&reset_row, self.runtime_registry.as_ref())? {
             self.runtime_registry
                 .reset_persisted_nomi_session(id, reset_row.created_at)
                 .await?;
@@ -9739,7 +9798,18 @@ impl ConversationService {
                 // wrapped in the cancellable post-terminal side-effect budget:
                 // dropping it after quarantine would let the durable Running
                 // turn finalize while the old process might still execute.
-                let failover_switch = if let Some(failed_turn_authority) =
+                let replay_safe = if agent.uses_nomi_recovery() && outcome.terminal.is_error() {
+                    let source = resend_payload.source_message_id.as_deref().unwrap_or(&resend_payload.msg_id);
+                    match agent.ensure_can_retry_turn(source).await {
+                        Ok(()) => true,
+                        Err(error) => {
+                            warn!(conversation_id = %conv_id, error = %error,
+                                "Automatic resend withheld: prior source effects are not replay-safe");
+                            false
+                        }
+                    }
+                } else { false };
+                let failover_switch = if replay_safe && let Some(failed_turn_authority) =
                     failover_authority.as_ref()
                 {
                     service
@@ -9830,6 +9900,7 @@ impl ConversationService {
                 // 未触发(已重跑过 / 非 nomi / 有响应 / 码不符 / 重建失败)则落到下方
                 // re-surface,把原始错误显示给用户。
                 if image_strip_retries_done == 0
+                    && replay_safe
                     && agent.uses_nomi_recovery()
                     && outcome.terminal.is_error()
                     && !outcome.emitted_response
@@ -9995,7 +10066,8 @@ impl ConversationService {
                 // this should be unreachable today. It is kept so that any future
                 // path producing system responses on an incomplete terminal
                 // cannot silently resurrect the overwrite.
-                if relay_error_code::incomplete_stop_code(outcome.stop_reason).is_some() {
+                if !matches!(outcome.terminal, RelayTerminal::Finish)
+                    || relay_error_code::incomplete_stop_code(outcome.stop_reason).is_some() {
                     break;
                 }
                 continuation_count += 1;
@@ -10252,14 +10324,6 @@ impl ConversationService {
         req: SendMessageRequest,
         runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<String, AppError> {
-        if req.content.trim().is_empty() {
-            return Err(AppError::BadRequest("Message content must not be empty".into()));
-        }
-        if !req.files.is_empty() {
-            return Err(AppError::BadRequest(
-                "steer_unsupported: attachments must be sent as a new turn".into(),
-            ));
-        }
         let operation_id = operation_id.trim();
         if operation_id.is_empty() {
             return Err(AppError::BadRequest(
@@ -10323,6 +10387,7 @@ impl ConversationService {
             return Ok(receipt.message_id);
         }
 
+        Self::validate_steer_input(&req)?;
         self.ensure_no_ambiguous_edit_resubmit(user_id, conv_id)
             .await?;
         let authority = self
@@ -10334,6 +10399,7 @@ impl ConversationService {
                 runtime_registry,
             )
             .await?;
+        Self::ensure_steer_context_supported(&req, &authority.runtime)?;
         let request_payload =
             Self::steer_delivery_request_payload(&req, &authority.scope);
         let claim = self
@@ -10371,7 +10437,11 @@ impl ConversationService {
                 "the Agent turn ended before the steer was delivered".to_owned(),
             ));
         }
-        match runtime.steer(req.content.clone()) {
+        match runtime.steer_with_receipt(nomifun_ai_agent::RuntimeSteerDelivery {
+            receipt_operation_id: operation_id.to_owned(), wire_turn_id: authority.scope.wire_turn_id.clone(),
+            turn_generation: authority.scope.generation, text: req.content.clone(),
+            files: req.files.clone(), inject_skills: req.inject_skills.clone(),
+        }).await {
             Ok(true) => {}
             Ok(false) => {
                 return Err(AppError::Conflict(
@@ -10387,7 +10457,8 @@ impl ConversationService {
             conversation_id: conv_id.to_owned(),
             msg_id: Some(message_id.clone()),
             r#type: "text".into(),
-            content: serde_json::json!({ "content": &req.content }).to_string(),
+            content: serde_json::json!({ "content": &req.content, "files": &req.files,
+                "inject_skills": &req.inject_skills }).to_string(),
             position: Some("right".into()),
             status: Some("finish".into()),
             hidden: req.hidden,
@@ -10425,6 +10496,8 @@ impl ConversationService {
                 "position": "right",
                 "status": "finish",
                 "hidden": req.hidden,
+                "files": &req.files,
+                "inject_skills": &req.inject_skills,
                 "origin": req.origin,
                 "companion": companion,
                 "companion_id": companion_id,
@@ -10720,6 +10793,7 @@ impl ConversationService {
         req: SendMessageRequest,
         runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<String, AppError> {
+        Self::validate_steer_input(&req)?;
         if req.content.trim().is_empty() {
             return Err(AppError::BadRequest(
                 "IDMM continuation content must not be empty".to_owned(),
@@ -10745,9 +10819,21 @@ impl ConversationService {
                 runtime_registry,
             )
             .await?;
-        match authority.runtime.steer(req.content.clone()) {
+        let steer_operation_id = format!("idmm-steer:{}", Self::mint_msg_id());
+        Self::ensure_steer_context_supported(&req, &authority.runtime)?;
+        let claim = self.conversation_repo.claim_delivery_receipt_once(user_id, conversation_id, &steer_operation_id,
+            "steer", &Self::steer_delivery_request_payload(&req, &authority.scope), now_ms()).await?;
+        if !claim.claimed_new { return Err(AppError::Conflict("IDMM steer receipt identity already exists".into())); }
+        let steer_message_id = claim.receipt.message_id;
+        match authority.runtime.steer_with_receipt(nomifun_ai_agent::RuntimeSteerDelivery {
+            receipt_operation_id: steer_operation_id.clone(), wire_turn_id: authority.scope.wire_turn_id.clone(),
+            turn_generation: authority.scope.generation, text: req.content.clone(),
+            files: req.files.clone(), inject_skills: req.inject_skills.clone(),
+        }).await {
             Ok(true) => {}
             Ok(false) => {
+                let _ = self.conversation_repo.complete_delivery_receipt(user_id, conversation_id, &steer_operation_id,
+                    false, None, Some("The active turn ended before IDMM continuation delivery"), None, None, now_ms()).await?;
                 return Err(AppError::Conflict(
                     "The active turn ended before IDMM continuation delivery"
                         .to_owned(),
@@ -10762,20 +10848,26 @@ impl ConversationService {
             authority._lease.ensure_active()?;
         }
 
-        let message_id = Self::mint_msg_id();
+        let message_id = steer_message_id;
         let message = MessageRow {
             id: 0,
             message_id: message_id.clone(),
             conversation_id: conversation_id.to_owned(),
             msg_id: Some(message_id.clone()),
             r#type: "text".to_owned(),
-            content: serde_json::json!({ "content": &req.content }).to_string(),
+            content: serde_json::json!({ "content": &req.content, "files": &req.files,
+                "inject_skills": &req.inject_skills }).to_string(),
             position: Some("right".to_owned()),
             status: Some("finish".to_owned()),
             hidden: true,
             created_at: now_ms(),
         };
         self.conversation_repo.insert_message(&message).await?;
+
+        if !self.conversation_repo.complete_delivery_receipt(user_id, conversation_id, &steer_operation_id,
+            true, None, None, None, None, now_ms()).await? {
+            return Err(AppError::Internal("failed to acknowledge IDMM steer receipt".into()));
+        }
 
         let (companion, companion_id, extra_channel_platform) =
             companion_context_from_extra(&authority.row.extra)?;
@@ -10789,8 +10881,10 @@ impl ConversationService {
                     "content": &req.content,
                     "position": "right",
                     "status": "finish",
-                    "hidden": true,
-                    "origin": "idmm",
+                "hidden": true,
+                "files": &req.files,
+                "inject_skills": &req.inject_skills,
+                "origin": "idmm",
                     "companion": companion,
                     "companion_id": companion_id,
                     "channel_platform": req.channel_platform.or(extra_channel_platform),
@@ -10818,14 +10912,6 @@ impl ConversationService {
         runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<IdempotentMessageDelivery, AppError> {
         validate_public_idempotency_key(idempotency_key)?;
-        if req.content.trim().is_empty() {
-            return Err(AppError::BadRequest("Message content must not be empty".into()));
-        }
-        if !req.files.is_empty() {
-            return Err(AppError::BadRequest(
-                "steer_unsupported: attachments must be sent as a new turn".into(),
-            ));
-        }
 
         let conv_id = parse_conv_id(conversation_id)?;
         let operation_id =
@@ -10872,6 +10958,7 @@ impl ConversationService {
         }
         let steer_fence_prefix =
             Self::public_steer_operation_prefix(user_id, conv_id);
+        Self::validate_steer_input(&req)?;
         if self
             .conversation_repo
             .has_accepted_delivery_receipt_operation_prefix(
@@ -10896,6 +10983,7 @@ impl ConversationService {
                 runtime_registry,
             )
             .await?;
+        Self::ensure_steer_context_supported(&req, &authority.runtime)?;
         let request_payload =
             Self::steer_delivery_request_payload(&req, &authority.scope);
         let claim = self
@@ -10930,7 +11018,11 @@ impl ConversationService {
                 "the Agent turn ended before the steer was delivered".to_owned(),
             ));
         }
-        match authority.runtime.steer(req.content.clone()) {
+        match authority.runtime.steer_with_receipt(nomifun_ai_agent::RuntimeSteerDelivery {
+            receipt_operation_id: operation_id.clone(), wire_turn_id: authority.scope.wire_turn_id.clone(),
+            turn_generation: authority.scope.generation, text: req.content.clone(),
+            files: req.files.clone(), inject_skills: req.inject_skills.clone(),
+        }).await {
             Ok(true) => {}
             Ok(false) => {
                 let _ = self
@@ -10980,7 +11072,8 @@ impl ConversationService {
             conversation_id: conv_id.to_owned(),
             msg_id: Some(message_id.clone()),
             r#type: "text".into(),
-            content: serde_json::json!({ "content": &req.content }).to_string(),
+            content: serde_json::json!({ "content": &req.content, "files": &req.files,
+                "inject_skills": &req.inject_skills }).to_string(),
             position: Some("right".into()),
             status: Some("finish".into()),
             hidden: req.hidden,
@@ -11020,6 +11113,8 @@ impl ConversationService {
                 "position": "right",
                 "status": "finish",
                 "hidden": req.hidden,
+                "files": &req.files,
+                "inject_skills": &req.inject_skills,
                 "origin": req.origin,
                 "companion": companion,
                 "companion_id": companion_id,
@@ -12162,14 +12257,10 @@ impl ConversationService {
     /// Clear a conversation's agent context ("release model context") while
     /// **keeping** the persisted message history.
     ///
-    /// Unlike [`Self::reset`] (which also deletes DB messages), this:
-    ///  1. resets the live agent's in-memory/session context if one is running
-    ///     (ACP rotates to a fresh `session/new`, Nomi empties its engine,
-    ///     OpenClaw/Remote forget their gateway session) — see
-    ///     [`AgentRuntimeHandle::clear_context`]; and
-    ///  2. without constructing a cold runtime, clears the persisted ACP resume
-    ///     identity and the exact `conversation_id + created_at` Nomi session
-    ///     generation so a later explicit send cannot resume archived context.
+    /// Platform-history engines retire any live runtime, then atomically move
+    /// the owner's model-history floor without deleting messages or recovery
+    /// receipts. Nomi retains its private Session reset; other engines retain
+    /// their explicit live control and deny unsupported cold resets.
     ///
     /// The preparation/reset fences serialize this maintenance operation with
     /// send, warmup, stop, completion, and destructive reset. Message rows and
@@ -12242,6 +12333,39 @@ impl ConversationService {
         self.runtime_state
             .forget_cancelled_runtime_builds(conversation_id, &cancelled_build_ids);
 
+        let extra: serde_json::Value = serde_json::from_str(&row.extra)
+            .map_err(|error| AppError::Conflict(error.to_string()))?;
+        let owner_history = match extra.get(nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY) {
+            Some(value) => {
+                let binding: nomifun_api_types::RuntimeEngineBinding = serde_json::from_value(value.clone())
+                    .map_err(|error| AppError::Conflict(error.to_string()))?;
+                self.runtime_registry.binding_uses_platform_history_context(&binding)?
+            }
+            None => false,
+        };
+        if owner_history {
+            self.cancel_and_wait_for_turn_writebacks(conv_id).await?;
+            // Drop neither the maintenance fences nor exact teardown proof
+            // before committing the boundary. No cold factory is constructed.
+            self.runtime_registry.terminate_and_wait_result(
+                conversation_id, Some(AgentKillReason::UserCancelled),
+            ).await?;
+            match self.conversation_repo.clear_terminal_engine_context(
+                user_id, conv_id, &row.extra, row.created_at, now_ms(),
+            ).await? {
+                TurnLifecycleTransition::Committed | TurnLifecycleTransition::AlreadyApplied => {}
+                TurnLifecycleTransition::Stale => return Err(AppError::Conflict(
+                    "Conversation changed while clearing Engine context".into(),
+                )),
+            }
+            self.runtime_state.clear_knowledge_signature(conversation_id);
+            self.runtime_state.clear_turn_tokens(conversation_id);
+            drop(reset_guard);
+            drop(preparation_guard);
+            info!(conversation_id, "Platform Engine context cleared; transcript and recovery evidence retained");
+            return Ok(());
+        }
+
         // Reset an existing idle runtime in place. A cold Nomi conversation
         // instead uses the registry's factory-admission barrier and exact
         // created_at owner token; manufacturing a runtime just to erase the
@@ -12254,10 +12378,10 @@ impl ConversationService {
             false
         };
 
-        if !had_runtime && !row_uses_nomi_engine(&row)? {
-            return Err(AppError::Conflict("Cold context reset is not provided by the bound runtime; fork explicitly".into()));
-        }
-        if row_uses_nomi_engine(&row)? && !had_runtime {
+        if !had_runtime {
+            if !row_uses_nomi_engine(&row, self.runtime_registry.as_ref())? {
+                return Err(AppError::Conflict("Cold context reset is not provided by the bound runtime; fork explicitly".into()));
+            }
             self.runtime_registry
                 .reset_persisted_nomi_session(conversation_id, row.created_at)
                 .await?;
@@ -12342,7 +12466,7 @@ impl ConversationService {
                 Some(AgentKillReason::UserCancelled),
             )
             .await?;
-        if row_uses_nomi_engine(&clear_row)? {
+        if row_uses_nomi_engine(&clear_row, self.runtime_registry.as_ref())? {
             self.runtime_registry
                 .reset_persisted_nomi_session(conversation_id, clear_row.created_at)
                 .await?;
@@ -13986,13 +14110,9 @@ fn reject_execution_policy_extra_keys(extra: &serde_json::Value) -> Result<(), A
     }
 }
 
-/// Backend lifecycle authority never comes from the open `extra` bag.
-///
-/// These names mirror persisted columns/receipts or private recovery markers.
-/// Reject instead of silently stripping them so every caller gets an explicit
-/// failure and no partial PATCH can make an injected fence indistinguishable
-/// from a backend reservation after restart.
-fn row_uses_nomi_engine(row: &ConversationRow) -> Result<bool, AppError> {
+/// Bound engines need an exact source policy for Nomi's private codec. Only
+/// unbound legacy Nomi rows retain the old compatibility-kind discriminator.
+fn row_uses_nomi_engine(row: &ConversationRow, registry: &dyn AgentRuntimeRegistry) -> Result<bool, AppError> {
     let extra: serde_json::Value = serde_json::from_str(&row.extra)
         .map_err(|error| AppError::Internal(error.to_string()))?;
     match extra.get(nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY) {
@@ -14000,13 +14120,18 @@ fn row_uses_nomi_engine(row: &ConversationRow) -> Result<bool, AppError> {
             let binding: nomifun_api_types::RuntimeEngineBinding = serde_json::from_value(value.clone())
                 .map_err(|error| AppError::Conflict(format!("Invalid runtime binding: {error}")))?;
             binding.validate()?;
-            Ok(binding.family_id == "nomifun.nomi")
+            registry.binding_uses_nomi_session(&binding)
         }
         None => Ok(row.r#type == AgentType::Nomi.serde_name()),
     }
 }
 
-pub(crate) const BACKEND_OWNED_LIFECYCLE_EXTRA_KEYS: [&str; 12] = [
+/// Backend lifecycle authority never comes from the open `extra` bag.
+/// Reject these keys instead of making an injected fence indistinguishable
+/// from a backend reservation after restart.
+pub(crate) const BACKEND_OWNED_LIFECYCLE_EXTRA_KEYS: [&str; 14] = [
+    nomifun_db::conversation_context::ENGINE_CONTEXT_AFTER_MESSAGE_ID,
+    "execution_constraints",
     "runtime_engine_binding",
     "nomi_core_session",
     "_edit_resubmit_fence",
@@ -14339,6 +14464,7 @@ mod tests {
 
     fn runtime_agent_snapshot() -> AgentResolvedSnapshot {
         AgentResolvedSnapshot {
+            canonical_binding: None,
             preset_id: RUNTIME_PRESET_ID.to_owned(),
             preset_revision: 4,
             preset_name: "文案版".to_owned(),

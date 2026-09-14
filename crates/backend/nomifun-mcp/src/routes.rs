@@ -44,6 +44,7 @@ pub fn mcp_routes(state: McpRouterState) -> Router {
     Router::new()
         .route("/api/mcp/servers", get(list_servers).post(add_server))
         .route("/api/mcp/servers/import", post(batch_import))
+        .route("/api/mcp/catalog/refresh", post(refresh_catalog))
         .route(
             "/api/mcp/servers/{mcp_server_id}",
             get(get_server).put(edit_server).delete(delete_server),
@@ -67,6 +68,13 @@ pub fn mcp_routes(state: McpRouterState) -> Router {
 // ---------------------------------------------------------------------------
 // CRUD Handlers
 // ---------------------------------------------------------------------------
+
+async fn refresh_catalog(
+    State(state): State<McpRouterState>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    state.config_service.refresh_catalog().await?;
+    Ok(Json(ApiResponse::success()))
+}
 
 /// `GET /api/mcp/servers` — list all MCP servers.
 async fn list_servers(
@@ -150,12 +158,16 @@ async fn test_connection(
 ) -> Result<Response, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     let transport = McpServerTransport::from(req.transport);
+    let probe = match req.mcp_server_id.as_ref() {
+        Some(id) => state.config_service.begin_probe(id, &req.name, &transport).await?,
+        None => None,
+    };
     let result = state
         .connection_test_service
         .test_connection(&req.name, &transport)
         .await;
-    if let Some(server_id) = req.mcp_server_id {
-        state.config_service.persist_test_result(&server_id, &result).await?;
+    if let Some(probe) = probe {
+        state.config_service.finish_probe(probe, &result).await?;
     }
     if result.success || result.needs_auth == Some(true) {
         return Ok(Json(ApiResponse::ok(result)).into_response());

@@ -3,7 +3,7 @@
   "payload": {
     "manifest_version": "1.0.0",
     "target_first_party_contribution_digest": "cd85680e160f852a069bbeb8e58db3fe8b6e912b2585c792c9e4ba988b22b2bf",
-    "target_runtime_feature_inventory_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
+    "target_runtime_feature_inventory_digest": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
     "templates": {
       "chat.minimal": {
         "enabled_capabilities": [],
@@ -741,5 +741,5 @@
       "research.web"
     ]
   },
-  "payload_digest": "2319c767aadbbbcadba78f80e32b627e7fe8567baeee109fe047b4cd5e4c22a6"
+  "payload_digest": "cd5eda0d13790871ff6a137bbe060fd6743056843666d10df4fdd072386d1da0"
 }

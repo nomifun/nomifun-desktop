@@ -26,7 +26,11 @@ pub struct RobotVisionObservationRegistry {
 }
 
 impl RobotVisionObservationRegistry {
-    pub async fn record(&self, observation: RobotVisionObservation) {
+    pub async fn record(&self, mut observation: RobotVisionObservation) {
+        // Bound the retained source, not just its eventual prompt projection.
+        // Visible markers prevent a partial observation being read as complete.
+        truncate_observation(&mut observation.question, 1024);
+        truncate_observation(&mut observation.answer, 8192);
         self.inner
             .write()
             .await
@@ -51,6 +55,19 @@ impl RobotVisionObservationRegistry {
     pub async fn remove(&self, robot_id: &str) {
         self.inner.write().await.remove(robot_id);
     }
+}
+
+fn truncate_observation(text: &mut String, max_bytes: usize) {
+    if text.len() <= max_bytes {
+        return;
+    }
+    const MARKER: &str = " [observation truncated]";
+    let mut end = max_bytes.saturating_sub(MARKER.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text.push_str(MARKER);
 }
 
 #[cfg(test)]

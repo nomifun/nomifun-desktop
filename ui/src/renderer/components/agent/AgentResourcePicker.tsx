@@ -9,6 +9,8 @@ import { useNavigate } from 'react-router-dom';
 import {
   requiredAgentResourcePickerKinds,
   resolveAgentResourceSelections,
+  selectedMcpResourceIds,
+  allowsMultipleMcpServers,
   type AgentResourceSelectionValue,
   type UserAgentResourceKind,
 } from '@/renderer/hooks/agent/agentResourceSelection';
@@ -180,11 +182,12 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, capabilityIds, va
   const capabilityKey = [...capabilityIds].sort().join('\u0000');
   const required = useMemo(() => new Set(requiredKey ? requiredKey.split('\u0000') : []), [requiredKey]);
   const capabilities = useMemo(() => new Set(capabilityKey ? capabilityKey.split('\u0000') : []), [capabilityKey]);
+  const multipleMcp = allowsMultipleMcpServers(capabilities);
   const fields = useMemo(() => requiredAgentResourcePickerKinds(required), [required]);
   const [inventory, setInventory] = useState<AgentResourceInventory>(emptyInventory);
   const [loading, setLoading] = useState(fields.length > 0);
   const resolution = useMemo(() => resolveAgentResourceSelections(required, value), [required, value]);
-  const missingChoiceCount = fields.filter((kind) => !value[kind]).length;
+  const missingChoiceCount = fields.filter((kind) => kind === 'mcp_server' ? !selectedMcpResourceIds(value).length : !value[kind]).length;
 
   useEffect(() => {
     let cancelled = false;
@@ -206,12 +209,29 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, capabilityIds, va
     const next = { ...value };
     let changed = false;
     for (const kind of fields) {
+      if (kind === 'mcp_server' && multipleMcp) {
+        const selected = selectedMcpResourceIds(next);
+        const available = new Set(optionsForAgentResourceField(kind, inventory, value, required).map((option) => option.value));
+        const retained = selected.filter((id) => available.has(id)).slice(0, 16);
+        if (retained.length !== selected.length) {
+          next.mcp_servers = retained; delete next.mcp_server; changed = true;
+        }
+        continue;
+      }
+      if (kind === 'mcp_server' && next.mcp_servers !== undefined) {
+        const selected = selectedMcpResourceIds(next);
+        // Preserve a singular choice when switching to a single-server consumer.
+        // Never silently choose one server from an ambiguous multi-selection.
+        if (selected.length === 1) next.mcp_server = selected[0];
+        else delete next.mcp_server;
+        delete next.mcp_servers; changed = true;
+      }
       if (next[kind] && !optionsForAgentResourceField(kind, inventory, value, required).some((option) => option.value === next[kind])) {
         delete next[kind]; changed = true;
       }
     }
     if (changed) onChange(next);
-  }, [fields, inventory, loading, onChange, required, value]);
+  }, [fields, inventory, loading, multipleMcp, onChange, required, value]);
 
   if (!fields.length) return null;
   const kindName = (kind: UserAgentResourceKind) => t(`agentSettings.resources.kinds.${kind === 'mcp_server' ? 'mcpConnection' : kind.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase())}`);
@@ -225,11 +245,17 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, capabilityIds, va
       const dependsOn = kind === 'channel' || kind === 'robot' ? (required.has('customer') ? 'customer' : required.has('companion') || required.has('companion_memory') ? 'companion' : undefined) : kind === 'knowledge_base' && required.has('customer') ? 'customer' : undefined;
       const waitingDependency = Boolean(dependsOn && !value[dependsOn as UserAgentResourceKind]);
       return <label className={styles.field} key={kind}><span className={styles.fieldLabel}>{kindName(kind)}</span><span className={styles.fieldControl}>
-        <Select value={value[kind]} disabled={disabled || loading || waitingDependency || options.length === 0} placeholder={t(waitingDependency ? 'agentSettings.resources.selectDependency' : 'agentSettings.resources.selectPlaceholder', { resource: dependsOn ? kindName(dependsOn as UserAgentResourceKind) : kindName(kind) })} aria-label={t('agentSettings.resources.selectAria', { resource: kindName(kind) })} onChange={(resourceId: string) => onChange({ ...value, [kind]: resourceId })}>
+        <Select mode={kind === 'mcp_server' && multipleMcp ? 'multiple' : undefined} value={kind === 'mcp_server' && multipleMcp ? selectedMcpResourceIds(value) : value[kind]} disabled={disabled || loading || waitingDependency || options.length === 0} placeholder={t(waitingDependency ? 'agentSettings.resources.selectDependency' : 'agentSettings.resources.selectPlaceholder', { resource: dependsOn ? kindName(dependsOn as UserAgentResourceKind) : kindName(kind) })} aria-label={t('agentSettings.resources.selectAria', { resource: kindName(kind) })} onChange={(resourceId: string | string[]) => {
+          if (kind === 'mcp_server' && multipleMcp) {
+            const ids = Array.isArray(resourceId) ? resourceId : [resourceId];
+            if (ids.length > 16) return;
+            const next = { ...value, mcp_servers: ids }; delete next.mcp_server; onChange(next);
+          } else if (typeof resourceId === 'string') onChange({ ...value, [kind]: resourceId });
+        }}>
           {options.map((option) => <Select.Option key={option.value} value={option.value}><span className={styles.option}><strong>{option.label}</strong>{option.description && <small>{option.description}</small>}</span></Select.Option>)}
         </Select>
         {!loading && !waitingDependency && options.length === 0 && <Button className={styles.emptyButton} size='mini' type='text' icon={<LinkOne theme='outline' size={13} />} onClick={(event) => { event.preventDefault(); const route = routeForKind(kind, value); if (onNavigateToResource) onNavigateToResource(route); else void navigate(route); }}>{t('agentSettings.resources.configure')}</Button>}
-      </span><span className={`${styles.fieldHint} ${error ? styles.fieldError : ''}`}>{loading ? <Spin size={10} /> : error ? t('agentSettings.resources.loadFailed') : waitingDependency ? t('agentSettings.resources.dependencyHint', { resource: kindName(dependsOn as UserAgentResourceKind) }) : options.length === 0 ? t('agentSettings.resources.emptyOptions') : t('agentSettings.resources.selectionHint')}</span></label>;
+      </span><span className={`${styles.fieldHint} ${error ? styles.fieldError : ''}`}>{loading ? <Spin size={10} /> : error ? t('agentSettings.resources.loadFailed') : waitingDependency ? t('agentSettings.resources.dependencyHint', { resource: kindName(dependsOn as UserAgentResourceKind) }) : options.length === 0 ? t('agentSettings.resources.emptyOptions') : t(kind === 'mcp_server' && multipleMcp ? 'agentSettings.resources.mcpSelectionHint' : 'agentSettings.resources.selectionHint')}</span></label>;
     })}</div>
   </section>;
 };

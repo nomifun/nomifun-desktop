@@ -925,6 +925,13 @@ impl ChildProcessBuilder {
         self
     }
 
+    /// Disable ambient environment inheritance. The adapter must explicitly
+    /// supply every variable its child needs; process-tree ownership is unchanged.
+    pub fn env_clear(&mut self) -> &mut Self {
+        self.inner.env_clear();
+        self
+    }
+
     pub fn current_dir<P: AsRef<Path>>(&mut self, dir: P) -> &mut Self {
         self.inner.current_dir(dir);
         self

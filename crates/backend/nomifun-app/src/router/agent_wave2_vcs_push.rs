@@ -1,7 +1,8 @@
 //! Standalone, fail-closed `vcs.push` production owner.
 //!
-//! The central Wave 2 host deliberately does not wire this module yet. The
-//! owner only pushes to an already configured local/file remote. The workspace
+//! The Wave 2 host routes explicitly admitted push calls here; Conversation
+//! engines additionally require source-attributed receipts. The owner only pushes to an already configured
+//! local/file remote. The workspace
 //! build disables git2's SSH/HTTPS features and no application-owned Git
 //! credential authority exists, so authenticated transports remain explicitly
 //! unavailable instead of reading process credentials or accepting secrets in
@@ -9,15 +10,17 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use futures_util::{
+    FutureExt,
+    future::{BoxFuture, Shared},
+};
 use git2::{ErrorCode, Oid, PushOptions, RemoteCallbacks, Repository};
 use nomifun_agent_contracts::TypedResourceBinding;
-use nomifun_file::{
-    WORKSPACE_RESOURCE_KIND, WORKSPACE_ROOT_PARAMETER, WORKSPACE_WRITE_OPERATION,
-};
+use nomifun_file::{WORKSPACE_RESOURCE_KIND, WORKSPACE_ROOT_PARAMETER, WORKSPACE_WRITE_OPERATION};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_PUSH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -30,6 +33,45 @@ pub(crate) struct VcsPushOwner {
     authority: Arc<VcsPushAuthority>,
     push_lock: Arc<tokio::sync::Mutex<()>>,
     outcome_unknown: Arc<AtomicBool>,
+    flight: Arc<Mutex<Option<PushCompletion>>>,
+    settlements: Arc<AtomicUsize>,
+}
+
+type PushCompletion = Shared<BoxFuture<'static, Result<VcsPushReceipt, VcsPushError>>>;
+
+pub(crate) struct VcsPushSettlement {
+    unknown: Arc<AtomicBool>,
+    pending: Arc<AtomicUsize>,
+    confirmed: bool,
+}
+impl VcsPushSettlement {
+    pub(crate) fn confirm(&mut self) {
+        self.confirmed = true;
+    }
+}
+impl Drop for VcsPushSettlement {
+    fn drop(&mut self) {
+        if !self.confirmed {
+            self.unknown.store(true, Ordering::Release);
+        }
+        self.pending.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Neither dropping a caller nor unwinding a worker proves that a push did not
+/// happen. This guard survives inside the blocking worker as well as its waiter.
+struct UnobservedPush {
+    cancellation: Arc<AtomicBool>,
+    unknown: Arc<AtomicBool>,
+    armed: bool,
+}
+impl Drop for UnobservedPush {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancellation.store(true, Ordering::Release);
+            self.unknown.store(true, Ordering::Release);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -125,11 +167,7 @@ pub(crate) struct VcsPushError {
 }
 
 impl VcsPushError {
-    fn not_applied(
-        kind: VcsPushErrorKind,
-        code: &'static str,
-        message: impl Into<String>,
-    ) -> Self {
+    fn not_applied(kind: VcsPushErrorKind, code: &'static str, message: impl Into<String>) -> Self {
         Self {
             kind,
             disposition: VcsPushEffectDisposition::NotApplied,
@@ -180,6 +218,8 @@ impl VcsPushOwner {
             }),
             push_lock: Arc::new(tokio::sync::Mutex::new(())),
             outcome_unknown: Arc::new(AtomicBool::new(false)),
+            flight: Arc::new(Mutex::new(None)),
+            settlements: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -187,48 +227,116 @@ impl VcsPushOwner {
         &self,
         request: VcsPushRequest,
     ) -> Result<VcsPushReceipt, VcsPushError> {
-        let _guard = self.push_lock.lock().await;
-        if self.outcome_unknown.load(Ordering::Acquire) {
-            return Err(VcsPushError::outcome_unknown(
-                "vcs.push is blocked because a previous push has an unresolved outcome",
-            ));
-        }
-
-        let validated = validate_request(&self.authority, request)?;
+        let lock = self.push_lock.clone().lock_owned().await;
+        self.ensure_ready()?;
         let timeout = self.authority.timeout;
+        let deadline = Instant::now() + timeout;
         let cancellation = Arc::new(AtomicBool::new(false));
-        let worker_cancellation = Arc::clone(&cancellation);
-        let mut worker = tokio::task::spawn_blocking(move || {
-            push_blocking(
-                validated,
-                worker_cancellation,
-                Instant::now() + timeout,
-            )
-        });
-
-        match tokio::time::timeout(timeout, &mut worker).await {
-            Ok(Ok(Ok(receipt))) => Ok(receipt),
-            Ok(Ok(Err(error))) => {
-                if error.disposition == VcsPushEffectDisposition::OutcomeUnknown {
-                    self.outcome_unknown.store(true, Ordering::Release);
+        let mut waiter = UnobservedPush {
+            cancellation: cancellation.clone(),
+            unknown: self.outcome_unknown.clone(),
+            armed: true,
+        };
+        // Register the retained completion before the next await. Poisoning
+        // therefore rejects before spawning rather than losing a running worker.
+        let done = {
+            let mut flight = self.flight.lock().map_err(|_| {
+                VcsPushError::outcome_unknown("vcs.push task ownership is poisoned")
+            })?;
+            let authority = self.authority.clone();
+            let worker_guard = UnobservedPush {
+                cancellation: cancellation.clone(),
+                unknown: self.outcome_unknown.clone(),
+                armed: true,
+            };
+            let worker = tokio::task::spawn_blocking(move || {
+                // The repository's exclusive push lease lasts until real worker
+                // exit, even when its async caller times out or disappears.
+                let _lock = lock;
+                let mut worker_guard = worker_guard;
+                let result = validate_request(&authority, request).and_then(|request| {
+                    push_blocking(request, worker_guard.cancellation.clone(), deadline)
+                });
+                if result.as_ref().is_err_and(|error| {
+                    error.disposition == VcsPushEffectDisposition::OutcomeUnknown
+                }) {
+                    worker_guard.unknown.store(true, Ordering::Release);
                 }
-                Err(error)
+                worker_guard.armed = false;
+                result
+            });
+            let done = async move {
+                worker.await.unwrap_or_else(|_| {
+                    Err(VcsPushError::outcome_unknown(
+                        "vcs.push worker terminated without a proven remote outcome",
+                    ))
+                })
             }
-            Ok(Err(_join_error)) => {
-                self.outcome_unknown.store(true, Ordering::Release);
-                Err(VcsPushError::outcome_unknown(
-                    "vcs.push worker terminated without a proven remote outcome",
-                ))
-            }
+            .boxed()
+            .shared();
+            *flight = Some(done.clone());
+            done
+        };
+        let result = match tokio::time::timeout(timeout, done.clone()).await {
+            Ok(result) => result,
             Err(_) => {
                 cancellation.store(true, Ordering::Release);
                 self.outcome_unknown.store(true, Ordering::Release);
+                // The deadline is a cancellation request, not thread-exit
+                // evidence. Outer task/Session timeouts may quarantine a waiter;
+                // this owner retains and joins the worker independently.
+                let _ = done.await;
                 Err(VcsPushError::outcome_unknown(format!(
-                    "vcs.push exceeded its {} ms deadline; the remote outcome requires reconciliation",
+                    "vcs.push exceeded its {} ms deadline; worker exited but the outcome still requires reconciliation",
                     timeout.as_millis()
                 )))
             }
+        };
+        waiter.armed = false;
+        result
+    }
+
+    pub(crate) fn ensure_ready(&self) -> Result<(), VcsPushError> {
+        if self.outcome_unknown.load(Ordering::Acquire) {
+            return Err(VcsPushError::outcome_unknown(
+                "vcs.push has an unresolved outcome; no automatic replay or workspace continuation",
+            ));
         }
+        Ok(())
+    }
+
+    /// Extend uncertainty protection through the platform's durable settlement,
+    /// not just until the Git worker returns its result.
+    pub(crate) fn settlement_guard(&self) -> VcsPushSettlement {
+        self.settlements.fetch_add(1, Ordering::AcqRel);
+        VcsPushSettlement {
+            unknown: self.outcome_unknown.clone(),
+            pending: self.settlements.clone(),
+            confirmed: false,
+        }
+    }
+
+    pub(crate) fn ensure_idle(&self) -> Result<(), VcsPushError> {
+        self.ensure_ready()?;
+        if self.settlements.load(Ordering::Acquire) != 0 {
+            return Err(VcsPushError::outcome_unknown(
+                "vcs.push durable settlement is still pending",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Joining proves local exit only. It never clears unknown remote effects.
+    pub(crate) async fn ensure_settled(&self) -> Result<(), VcsPushError> {
+        let done = self
+            .flight
+            .lock()
+            .map_err(|_| VcsPushError::outcome_unknown("vcs.push task ownership is poisoned"))?
+            .clone();
+        if let Some(done) = done {
+            let _ = done.await;
+        }
+        self.ensure_idle()
     }
 }
 
@@ -250,8 +358,7 @@ fn validate_request(
     authority: &VcsPushAuthority,
     request: VcsPushRequest,
 ) -> Result<ValidatedPush, VcsPushError> {
-    if request.principal_id.trim().is_empty()
-        || request.principal_id.chars().any(char::is_control)
+    if request.principal_id.trim().is_empty() || request.principal_id.chars().any(char::is_control)
     {
         return Err(VcsPushError::not_applied(
             VcsPushErrorKind::InvalidPayload,
@@ -317,9 +424,7 @@ fn validate_request(
             )
         }
     })?;
-    let push_url = remote
-        .pushurl_bytes()
-        .unwrap_or_else(|| remote.url_bytes());
+    let push_url = remote.pushurl_bytes().unwrap_or_else(|| remote.url_bytes());
     let push_url = std::str::from_utf8(push_url).map_err(|_| {
         VcsPushError::not_applied(
             VcsPushErrorKind::CapabilityUnavailable,
@@ -427,8 +532,7 @@ fn parse_refspec(value: &str) -> Result<ParsedRefspec, VcsPushError> {
         || source.contains('*')
         || destination.contains('*')
         || (source != "HEAD"
-            && (!source.starts_with("refs/heads/")
-                || !git2::Reference::is_valid_name(source)))
+            && (!source.starts_with("refs/heads/") || !git2::Reference::is_valid_name(source)))
         || !destination.starts_with("refs/heads/")
         || !git2::Reference::is_valid_name(destination)
     {
@@ -450,10 +554,8 @@ fn invalid_refspec() -> VcsPushError {
 }
 
 fn exact_repository_identity(root: &Path) -> Result<RepositoryIdentity, VcsPushError> {
-    let worktree_root = canonical_absolute_directory(
-        root,
-        "vcs.push workspace repository is unavailable",
-    )?;
+    let worktree_root =
+        canonical_absolute_directory(root, "vcs.push workspace repository is unavailable")?;
     let repository = Repository::discover(&worktree_root).map_err(|error| {
         repository_error(
             VcsPushErrorKind::ResourceNotFound,
@@ -481,10 +583,8 @@ fn repository_identity(repository: &Repository) -> Result<RepositoryIdentity, Vc
             "vcs.push requires a non-bare bound workspace repository",
         )
     })?;
-    let worktree_root = canonical_absolute_directory(
-        worktree,
-        "vcs.push repository worktree is unavailable",
-    )?;
+    let worktree_root =
+        canonical_absolute_directory(worktree, "vcs.push repository worktree is unavailable")?;
     let git_dir = canonical_absolute_directory(
         repository.path(),
         "vcs.push repository metadata directory is unavailable",
@@ -708,23 +808,44 @@ fn push_blocking(
 
     let mut options = PushOptions::new();
     options.remote_callbacks(callbacks);
-    let mut remote = repository.find_remote(&request.remote).map_err(|error| {
-        if error.code() == ErrorCode::NotFound {
-            VcsPushError::not_applied(
-                VcsPushErrorKind::ResourceNotFound,
-                "RESOURCE_NOT_FOUND",
-                "vcs.push remote disappeared before execution",
-            )
-        } else {
-            repository_error(
-                VcsPushErrorKind::CapabilityUnavailable,
-                "CAPABILITY_UNAVAILABLE",
-                "vcs.push could not reopen the configured remote",
-                &error,
-            )
-        }
+    // Freeze both destination and source. Re-reading the named remote or HEAD
+    // here could send to a changed URL or publish a different commit than the
+    // one authorized/observed above. libgit2 can still apply URL rewrite rules
+    // to anonymous remotes, so check its effective push URL before dispatch.
+    let remote_path = request.remote_repository_root.to_str().ok_or_else(|| {
+        VcsPushError::not_applied(
+            VcsPushErrorKind::InvalidPayload,
+            "INVALID_PAYLOAD",
+            "vcs.push local remote path must be UTF-8",
+        )
     })?;
-    if let Err(error) = remote.push(&[request.refspec.canonical.as_str()], Some(&mut options)) {
+    let mut remote = repository.remote_anonymous(remote_path).map_err(|error| {
+        repository_error(
+            VcsPushErrorKind::CapabilityUnavailable,
+            "CAPABILITY_UNAVAILABLE",
+            "vcs.push could not open the admitted local remote",
+            &error,
+        )
+    })?;
+    let effective_url = std::str::from_utf8(
+        remote.pushurl_bytes().unwrap_or_else(|| remote.url_bytes()),
+    )
+    .map_err(|_| {
+        VcsPushError::not_applied(
+            VcsPushErrorKind::InvalidPayload,
+            "INVALID_PAYLOAD",
+            "vcs.push effective URL must be UTF-8",
+        )
+    })?;
+    if configured_local_remote(effective_url)? != request.remote_repository_root {
+        return Err(VcsPushError::not_applied(
+            VcsPushErrorKind::InvalidPayload,
+            "INVALID_PAYLOAD",
+            "vcs.push URL rewrite changed the admitted destination",
+        ));
+    }
+    let pinned_refspec = format!("{}:{}", source_commit, request.refspec.destination);
+    if let Err(error) = remote.push(&[pinned_refspec.as_str()], Some(&mut options)) {
         if error.code() == ErrorCode::NotFastForward {
             return Err(non_fast_forward());
         }
@@ -943,10 +1064,7 @@ mod tests {
             resource_kind: ResourceKind::from(WORKSPACE_RESOURCE_KIND),
             resource_id: ResourceId::from("workspace-resource"),
             owner_id: "owner-1".to_owned(),
-            operations: BTreeSet::from([
-                "read".to_owned(),
-                WORKSPACE_WRITE_OPERATION.to_owned(),
-            ]),
+            operations: BTreeSet::from(["read".to_owned(), WORKSPACE_WRITE_OPERATION.to_owned()]),
             connection_config_ref: None,
             typed_parameters: BTreeMap::from([(
                 WORKSPACE_ROOT_PARAMETER.to_owned(),
@@ -955,12 +1073,7 @@ mod tests {
         }
     }
 
-    fn commit(
-        repository: &Repository,
-        parent: Option<Oid>,
-        message: &str,
-        content: &str,
-    ) -> Oid {
+    fn commit(repository: &Repository, parent: Option<Oid>, message: &str, content: &str) -> Oid {
         let worktree = repository.workdir().expect("worktree");
         std::fs::write(worktree.join("tracked.txt"), content).expect("write fixture file");
         let mut index = repository.index().expect("index");
@@ -998,10 +1111,7 @@ mod tests {
 
         assert_eq!(fixture.remote_main(), Some(fixture.initial_commit));
         assert_eq!(receipt.remote, "origin");
-        assert_eq!(
-            receipt.refspec,
-            "refs/heads/main:refs/heads/main"
-        );
+        assert_eq!(receipt.refspec, "refs/heads/main:refs/heads/main");
         assert_eq!(receipt.source_commit, fixture.initial_commit.to_string());
         assert_eq!(receipt.remote_commit_before, None);
         assert_eq!(
@@ -1065,10 +1175,7 @@ mod tests {
     async fn rejects_a_real_non_fast_forward_update() {
         let fixture = PushFixture::new(true);
         let owner = fixture.owner();
-        owner
-            .push(fixture.request())
-            .await
-            .expect("initial push");
+        owner.push(fixture.request()).await.expect("initial push");
 
         let remote_head = commit(
             &fixture.repository,
@@ -1136,10 +1243,7 @@ mod tests {
             .await
             .expect_err("credential authority is not wired");
 
-        assert_eq!(
-            error.kind,
-            VcsPushErrorKind::CredentialAuthorityUnavailable
-        );
+        assert_eq!(error.kind, VcsPushErrorKind::CredentialAuthorityUnavailable);
         assert_eq!(error.disposition, VcsPushEffectDisposition::NotApplied);
         assert_eq!(fixture.remote_main(), None);
     }
@@ -1168,7 +1272,10 @@ mod tests {
         let fixture = PushFixture::new(false);
         fixture
             .repository
-            .remote("origin", "https://user:secret@example.invalid/repository.git")
+            .remote(
+                "origin",
+                "https://user:secret@example.invalid/repository.git",
+            )
             .expect("configure network remote");
 
         let error = fixture
@@ -1177,10 +1284,7 @@ mod tests {
             .await
             .expect_err("network credentials are unavailable");
 
-        assert_eq!(
-            error.kind,
-            VcsPushErrorKind::CredentialAuthorityUnavailable
-        );
+        assert_eq!(error.kind, VcsPushErrorKind::CredentialAuthorityUnavailable);
         assert_eq!(error.disposition, VcsPushEffectDisposition::NotApplied);
         assert!(!error.message.contains("user"));
         assert!(!error.message.contains("secret"));

@@ -120,6 +120,8 @@ export interface AgentBindingValue {
  * editable catalog record.
  */
 export interface AgentResolvedSnapshot {
+  /** Frozen provenance, re-admitted by the host; not a client permission grant. */
+  canonical_binding?: AgentBindingValue;
   preset_id: AgentPresetId;
   preset_revision: number;
   preset_name: string;
