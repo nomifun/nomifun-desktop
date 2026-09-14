@@ -18,7 +18,7 @@ import {
 import { agentUiErrorMessage } from './model';
 import { AGENT_PRESET_LIBRARY_SWR_KEY } from '@/renderer/hooks/agent/useAgentPresets';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { mutate } from 'swr';
+import { useSWRConfig } from 'swr';
 import { useTranslation } from 'react-i18next';
 
 type Selection =
@@ -36,6 +36,7 @@ const emptyCatalog: AgentCatalogResponse = {
 
 export function useAgentSettingsController() {
   const { t } = useTranslation();
+  const { mutate } = useSWRConfig();
   const [library, setLibrary] = useState<AgentPresetLibraryResponse | null>(null);
   const [catalog, setCatalog] = useState<AgentCatalogResponse>(emptyCatalog);
   const [selection, setSelection] = useState<Selection>(null);
@@ -67,6 +68,10 @@ export function useAgentSettingsController() {
         ]);
       const nextCatalog = { capabilities, skills, mcp_tools: mcpTools };
       setLibrary(nextLibrary);
+      // A selector on another route may be unmounted. Revalidation alone
+      // does not refresh that cache, so publish this authoritative response
+      // before enabling "Use Agent" and navigating to the new session.
+      await mutate(AGENT_PRESET_LIBRARY_SWR_KEY, nextLibrary, { revalidate: false });
       setCatalog(nextCatalog);
       setSelection((current) => {
         if (current?.kind === 'template') {
@@ -89,7 +94,7 @@ export function useAgentSettingsController() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [mutate]);
 
   useEffect(() => {
     void load();
@@ -97,10 +102,7 @@ export function useAgentSettingsController() {
 
   const refreshPresetLibraries = useCallback(
     async () => {
-      await Promise.all([
-        load(),
-        mutate(AGENT_PRESET_LIBRARY_SWR_KEY),
-      ]);
+      await load();
     },
     [load]
   );

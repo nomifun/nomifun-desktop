@@ -382,6 +382,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_still_rejects_text_over_its_independent_byte_limit() {
+        let binding = binding();
+        let request = CodingCompactionRequest::new(
+            model_request(&binding), 1, "workspace", vec![], "retain work", vec![],
+        ).with_max_summary_bytes(5);
+        assert!(matches!(run_compaction(&binding, Arc::new(CompactionModel), request,
+            CancellationToken::new()).await,
+            Err(CodingEngineError::ContextTooLarge { limit: 5, .. })));
+    }
+
+    #[tokio::test]
     async fn compaction_uses_the_model_port_without_tools_or_private_history() {
         let binding = binding();
         let summary = run_compaction(

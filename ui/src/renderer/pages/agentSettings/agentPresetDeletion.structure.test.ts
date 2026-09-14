@@ -34,7 +34,8 @@ describe('Agent Workbench user preset deletion', () => {
     expect(controller.includes('const clearEditorState = useCallback')).toBe(true);
     expect(deleteBlock.includes('clearEditorState()')).toBe(true);
     expect(deleteBlock.includes('await refreshPresetLibraries()')).toBe(true);
-    expect(controller.includes('mutate(AGENT_PRESET_LIBRARY_SWR_KEY)')).toBe(true);
+    expect(controller.includes('useSWRConfig()')).toBe(true);
+    expect(controller.includes('mutate(AGENT_PRESET_LIBRARY_SWR_KEY, nextLibrary, { revalidate: false })')).toBe(true);
   });
 
   test('does not preserve a selection that disappeared from the reloaded library', () => {

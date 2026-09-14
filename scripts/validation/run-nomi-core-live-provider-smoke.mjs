@@ -14,6 +14,9 @@
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --compile-only
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --engine-smoke
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --engine-smoke --engine-family=coding
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --compaction-smoke
+ * The optional family filter is focused diagnostic evidence, never a full dual-engine pass.
  *
  * Cargo always runs first with a credential-free environment and emits JSON
  * metadata. The runner resolves the freshly-built test executable from that
@@ -36,6 +39,7 @@ const DEFAULT_MODEL = 'step-3.7-flash';
 const ALLOWED_MODELS = new Set([DEFAULT_MODEL]);
 const TEST_TARGET = 'nomi_core_live_provider_smoke';
 const ENGINE_TEST_NAME = 'nomi_core_official_engines_reach_live_stepfun';
+const COMPACTION_TEST_NAME = 'coding_compaction_reaches_live_stepfun_without_discarding_history';
 const ENGINE_STAGE_PHASES = ['nomi', 'coding'].flatMap((engine) =>
   ['create', 'patch', 'exec', 'continue'].map((stage) => `engine.${engine}.${stage}`),
 );
@@ -48,7 +52,12 @@ const FAILURE_SENTINEL =
 const compileOnly = process.argv.includes('--compile-only');
 const selfTest = process.argv.includes('--self-test');
 const engineSmoke = process.argv.includes('--engine-smoke');
+const compactionSmoke = process.argv.includes('--compaction-smoke');
 const globalDeadline = Date.now() + GLOBAL_TIMEOUT_MS;
+const familyArgs = process.argv.slice(2).filter((arg) => arg.startsWith('--engine-family='));
+const engineFamily = familyArgs[0]?.slice('--engine-family='.length) ?? 'all';
+const selectedEnginePhases = ENGINE_STAGE_PHASES.filter((phase) =>
+  engineFamily === 'all' || phase.startsWith(`engine.${engineFamily}.`));
 
 function isCredentialEnvironmentName(name) {
   return name.toUpperCase() === API_KEY_ENVIRONMENT_NAME;
@@ -272,8 +281,13 @@ async function resolveToolchainEnvironment() {
 }
 
 async function main() {
-  if (process.argv.slice(2).some((arg) => !['--compile-only', '--self-test', '--engine-smoke'].includes(arg))) {
+  if (process.argv.slice(2).some((arg) => !['--compile-only', '--self-test', '--engine-smoke', '--compaction-smoke', '--engine-family=all', '--engine-family=nomi', '--engine-family=coding'].includes(arg))) {
     emitFailure('live_smoke_status=not_run', 'RUNNER_ARGUMENT_INVALID', 400);
+    process.exitCode = 2;
+    return;
+  }
+  if ((engineSmoke && compactionSmoke) || familyArgs.length > 1 || (familyArgs.length && !engineSmoke)) {
+    emitFailure('live_smoke_status=not_run', 'RUNNER_ENGINE_SELECTION_INVALID', 400);
     process.exitCode = 2;
     return;
   }
@@ -295,10 +309,12 @@ async function main() {
   }
   const environment = toolchain.environment;
   environment[MODEL_ENVIRONMENT_NAME] = model;
+  environment.NOMIFUN_LIVE_ENGINE_FAMILY = engineFamily;
 
   environment.CARGO_TERM_COLOR = 'never';
   environment.RUST_BACKTRACE = '0';
   const cargo = process.platform === 'win32' ? 'cargo.exe' : 'cargo';
+  if (engineSmoke) console.log(`live_smoke_engine_scope=${engineFamily}`);
   console.log('live_smoke_phase=compile');
   const compile = await runCaptured(
     cargo,
@@ -401,11 +417,11 @@ async function main() {
 
   let test;
   try {
-    console.log(`live_smoke_phase=execute mode=${engineSmoke ? 'official_engines' : 'product_chain'} model=${model}`);
+    console.log(`live_smoke_phase=execute mode=${compactionSmoke ? 'coding_compaction' : engineSmoke ? 'official_engines' : 'product_chain'} model=${model}`);
     test = await runCaptured(
       executable,
       [
-        engineSmoke ? ENGINE_TEST_NAME : PRODUCT_TEST_NAME,
+        compactionSmoke ? COMPACTION_TEST_NAME : engineSmoke ? ENGINE_TEST_NAME : PRODUCT_TEST_NAME,
         '--exact',
         '--ignored',
         '--test-threads=1',
@@ -439,6 +455,12 @@ async function main() {
   const stages = engineSmoke ? engineStagesFromOutput(test.stderr) : [];
   for (const phase of stages) console.log(`live_smoke_stage=${phase} status=pass`);
   for (const line of test.stderr.split(/\r?\n/)) {
+    const compact = line.match(/^NOMIFUN_LIVE_SMOKE_COMPACTION summaries=([0-9]{1,4}) replacements=([0-9]{1,4})$/);
+    if (compact) console.log(`live_smoke_compaction summaries=${compact[1]} replacements=${compact[2]}`);
+    const recovery = line.match(/^NOMIFUN_LIVE_SMOKE_RECOVERY phase=(engine\.(?:nomi|coding)\.(?:create|patch|exec|continue)) controls=([0-9]{1,4}) pre_execution=([0-9]{1,4})$/);
+    if (recovery) console.log(`live_smoke_recovery phase=${recovery[1]} controls=${recovery[2]} pre_execution=${recovery[3]}`);
+  }
+  for (const line of test.stderr.split(/\r?\n/)) {
     const failure = typedFailureFromOutput(line.replace(/^NOMIFUN_LIVE_SMOKE_ENGINE_FAILURE /, 'NOMIFUN_LIVE_SMOKE_FAILURE '));
     if (failure && line.startsWith('NOMIFUN_LIVE_SMOKE_ENGINE_FAILURE ')) {
       console.log(`live_smoke_engine_failure phase=${failure.phase} code=${failure.code} status=${failure.status}`);
@@ -446,20 +468,20 @@ async function main() {
   }
   if (test.status === 0) {
     // libtest exits successfully even when an exact filter matches zero tests.
-    const selected = engineSmoke ? ENGINE_TEST_NAME : PRODUCT_TEST_NAME;
+    const selected = compactionSmoke ? COMPACTION_TEST_NAME : engineSmoke ? ENGINE_TEST_NAME : PRODUCT_TEST_NAME;
     if (!selectedTestPassed(test.stdout, selected)) {
       emitFailure('live_smoke_status=not_run', 'SELECTED_TEST_DID_NOT_PASS', 503);
       process.exitCode = 2;
       return;
     }
-    if (engineSmoke && (stages.length !== ENGINE_STAGE_PHASES.length ||
-        ENGINE_STAGE_PHASES.some((phase, index) => stages[index] !== phase))) {
+    if (engineSmoke && (stages.length !== selectedEnginePhases.length ||
+        selectedEnginePhases.some((phase, index) => stages[index] !== phase))) {
       emitFailure('live_smoke_status=fail', 'ENGINE_STAGE_EVIDENCE_INCOMPLETE', 503);
       process.exitCode = 2;
       return;
     }
-    console.log(`live_smoke_mode=${engineSmoke ? 'official_engines' : 'product_chain'} model=${model}`);
-    if (engineSmoke) console.log('live_smoke_engines=nomifun.nomi,nomifun.coding');
+    console.log(`live_smoke_mode=${compactionSmoke ? 'coding_compaction' : engineSmoke ? 'official_engines' : 'product_chain'} model=${model}`);
+    if (engineSmoke) console.log(`live_smoke_engines=${engineFamily === 'all' ? 'nomifun.nomi,nomifun.coding' : `nomifun.${engineFamily}`} scope=${engineFamily === 'all' ? 'full' : 'focused'}`);
     console.log('live_smoke_status=pass code=OK status=200');
     process.exitCode = 0;
     return;

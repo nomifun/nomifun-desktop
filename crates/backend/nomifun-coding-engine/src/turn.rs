@@ -2115,9 +2115,11 @@ mod tests {
 
     #[tokio::test]
     async fn engine_bounds_initial_history_before_calling_the_model() {
+        let mut summary = text_step("Earlier user inputs: history-0 through history-7. Current request: inspect.");
+        summary.insert(0, Ok(ChatModelEvent::ReasoningDelta { text: "private summarization reasoning".repeat(100) }));
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(vec![
-                text_step("Earlier user inputs: history-0 through history-7. Current request: inspect."),
+                summary,
                 text_step("done"),
             ]),
             requests: std::sync::Mutex::new(Vec::new()),
@@ -2128,6 +2130,7 @@ mod tests {
         let session = open_session_with_budget(model.clone(), Arc::new(EchoTool),
             budget);
         let mut request = request();
+        request.input.max_output_tokens = Some(3000);
         let current = request.input.messages[0].clone();
         request.input.messages = (0..8).map(|index| ChatMessage {
             role: ChatRole::User,
@@ -2138,6 +2141,10 @@ mod tests {
         assert!(matches!(result.terminal, CodingTurnTerminal::Completed { .. }));
         let requests = model.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].input.max_output_tokens, Some(3000),
+            "compaction uses the frozen total generation budget, not a visible-text byte/token guess");
+        assert_eq!(requests[1].input.max_output_tokens, Some(3000));
+        assert!(!serde_json::to_string(&requests[1].input).unwrap().contains("private summarization reasoning"));
         assert!(requests[0].input.tools.is_empty(), "history is summarized without tool authority");
         assert_eq!(requests[0].input.metadata.get("nomifun_task").map(String::as_str), Some("agent_compaction"));
         let source = serde_json::to_string(&requests[0].input.messages).unwrap();

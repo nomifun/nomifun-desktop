@@ -2979,7 +2979,7 @@ mod tests {
         let captured = Arc::new(Mutex::new(None));
         invoke_workspace_action(
             "fs.read",
-            empty_object(),
+            StrictJsonValue(serde_json::json!({"path":"fixture.txt"})),
             Arc::new(StateCaptureHostPort { captured: Arc::clone(&captured) }),
         )
         .expect("state projection invocation");

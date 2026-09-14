@@ -271,11 +271,11 @@ impl ContextLifecycle {
             compact.input.tools.clear();
             compact.input.tool_choice = nomifun_chat_model_broker::ChatToolChoice::None;
             compact.input.provider_round_parent = None;
-            compact.input.max_output_tokens = Some(
-                self.budget
-                    .max_output_tokens
-                    .min((summary_limit / 4).max(1) as u32),
-            );
+            // Generation tokens can include private reasoning before visible
+            // summary text. Its UTF-8 byte ceiling is not a total-token budget.
+            // This envelope was already frozen (including caller overrides)
+            // and reserved in input_tokens(); keep the separate text-byte cap.
+            compact.input.max_output_tokens = Some(self.budget.max_output_tokens);
             let compact_bytes = encoded_size(&compact.input)?;
             if compact_bytes > self.resource.max_context_bytes
                 || compact_bytes.div_ceil(3) >= input_limit

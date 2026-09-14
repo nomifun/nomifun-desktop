@@ -7,6 +7,9 @@ import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import { SWRConfig } from 'swr';
+import { useState } from 'react';
+import { AGENT_PRESET_LIBRARY_SWR_KEY } from '@/renderer/hooks/agent/useAgentPresets';
+import { useGuidAgentSelection } from '../guid/hooks/useGuidAgentSelection';
 import {
   asAgentPresetId, asCapabilityId, asDigestHex, asPackageId,
   createEmptyAgentPresetDocument,
@@ -61,18 +64,25 @@ for (const family of ['nomi', 'coding']) {
         };
         data = editor;
       } else if (path === `/api/agent-presets/${presetId}/editor`) data = editor;
+      else if (path === '/api/settings/client') data = {};
       else throw new Error(`Unexpected test request: ${path}`);
       return new Response(JSON.stringify({ success: true, data }), { headers: { 'Content-Type': 'application/json' } });
     }) as typeof fetch;
 
     let controller!: ReturnType<typeof useAgentSettingsController>;
+    const GuidProbe = () => {
+      const target = useGuidAgentSelection({ selectedAgentPresetId: presetId, locationKey: `launch-${family}` });
+      return <output data-testid='guid-selected-preset'>{target.selectedPreset?.preset_id ?? target.selection.kind}</output>;
+    };
     const Harness = () => {
       controller = useAgentSettingsController();
+      const [launched, setLaunched] = useState(false);
+      if (launched) return <GuidProbe />;
       if (controller.editor && controller.draft) return <AgentPresetEditor
         editor={controller.editor} draft={controller.draft} catalog={controller.catalog}
         busyAction={controller.busyAction} dirty={controller.dirty}
         onDraftChange={controller.setDraft} onSave={() => { void controller.saveRevision(); }}
-        onDiscard={controller.discardChanges} onStartConversation={(preset) => { launches.push(preset.preset_id); }}
+        onDiscard={controller.discardChanges} onStartConversation={(preset) => { launches.push(preset.preset_id); setLaunched(true); }}
       />;
       return <OfficialTemplateOverview template={template} busy={controller.busyAction !== null} catalog={controller.catalog}
         onSave={(name, document, description) => { void controller.createConfiguredPreset(name, document, description); }}
@@ -80,7 +90,8 @@ for (const family of ['nomi', 'coding']) {
     };
     const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><SWRConfig value={{
       provider: () => new Map(), revalidateOnMount: false,
-      fallback: { 'runtime-engines': [descriptor], providers: [] },
+      fallback: { 'runtime-engines': [descriptor], providers: [],
+        [AGENT_PRESET_LIBRARY_SWR_KEY]: { official_templates: [template], user_presets: [], active_bindings: [] } },
     }}><Harness /></SWRConfig></MemoryRouter></I18nextProvider>);
     await waitFor(() => expect(controller.loading).toBe(false));
     fireEvent.click(screen.getByRole('tab', { name: en.workbench.settingsTab }));
@@ -100,6 +111,7 @@ for (const family of ['nomi', 'coding']) {
     expect(controller.draft?.current_revision).toEqual(reference);
     fireEvent.click(screen.getByRole('button', { name: en.actions.startConversation }));
     expect(launches).toEqual([presetId]);
+    await waitFor(() => expect(screen.getByTestId('guid-selected-preset').textContent).toBe(presetId));
     expect(requests).toHaveLength(1);
   });
 }

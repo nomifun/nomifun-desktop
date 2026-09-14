@@ -680,7 +680,7 @@ async fn create_agent_preset(
     document.insert(
         "instructions".to_owned(),
         Value::String(
-            "Use the exact requested native tools. Never replace a dedicated filesystem or VCS tool with shell commands. Stop immediately on the first tool error."
+            "Use the exact requested native tools. Never replace a dedicated filesystem or VCS tool with shell commands. Correct rejected planning or pre-execution validation proposals using the engine's feedback. Stop on external execution failures or unknown outcomes; never replay an operation whose effects may already have happened."
                 .to_owned(),
         ),
     );
@@ -706,7 +706,7 @@ async fn create_agent_preset(
         || saved
             .pointer("/revision/document/enabled_capabilities")
             .and_then(Value::as_array)
-            .is_none_or(|items| items.is_empty())
+            .is_none()
     {
         return Err(SmokeFailure::new(
             "agent_settings.save",
@@ -1120,18 +1120,50 @@ fn first_durable_error_code(messages: &[Value]) -> Option<String> {
             continue;
         }
         if let Some(code) = find_typed_code(projection) {
-            if code == "CONFLICT" {
+            if code == "CONFLICT" || code == "UNKNOWN_UPSTREAM_ERROR" {
                 if let Some(diagnostic) = admission_conflict_code(projection) {
                     return Some(diagnostic.to_owned());
+                }
+                if let Some(location) = trusted_error_source_location(projection) {
+                    return Some(location);
                 }
             }
             return Some(code);
         }
         let output = projection.get("output").and_then(Value::as_str).unwrap_or_default();
-        let diagnostic = if output.contains("Source quote does not occur") {
+        if projection["name"] == "exec_command"
+            && output.contains("Capability Kernel rejected Coding Tool (INVALID_PAYLOAD)")
+        {
+            let args = &projection["args"];
+            let code = if args.get("env").is_some_and(Value::is_null) {
+                "CODING_EXEC_NULL_ENV"
+            } else if args.get("args").is_some_and(Value::is_null) {
+                "CODING_EXEC_NULL_ARGS"
+            } else if args["command"] != "git" || args["args"] != json!(["--version"]) {
+                "CODING_EXEC_COMMAND_SHAPE_MISMATCH"
+            } else if !object_has_only_keys(args, &["operation", "command", "args", "timeout_ms"]) {
+                "CODING_EXEC_EXTRA_FIELDS_REJECTED"
+            } else {
+                "CODING_EXEC_CANONICAL_ARGS_REJECTED"
+            };
+            return Some(code.to_owned());
+        }
+        let diagnostic = if output.contains("Capability Kernel rejected Coding Tool (INVALID_PAYLOAD)") {
+            "CODING_KERNEL_INVALID_PAYLOAD"
+        } else if output.contains("Capability Kernel rejected Coding Tool (PRESET_RESOURCE_NOT_BOUND)") {
+            "CODING_KERNEL_RESOURCE_NOT_BOUND"
+        } else if output.contains("Capability Kernel rejected Coding Tool (CAPABILITY_UNAVAILABLE)") {
+            "CODING_KERNEL_UNAVAILABLE"
+        } else if output.contains("No tools executed: submit update_plan alone") {
+            "CODING_PLAN_BATCH_REJECTED"
+        } else if output.contains("Operation not executed:") || output.contains("Requested calls deferred:") {
+            "CODING_INSTRUCTION_SCOPE_DEFERRED"
+        } else if output.contains("Source quote does not occur") {
             "CODING_REQUIREMENT_SOURCE_MISMATCH"
         } else if output.contains("source quote exceeds") {
             "CODING_REQUIREMENT_QUOTE_TOO_LONG"
+        } else if output.contains("The plan needs reconsideration after") {
+            "CODING_REPLAN_REQUIRED"
         } else if output.contains("Call update_plan with an in_progress step") {
             "CODING_PLAN_REQUIRED"
         } else if output.contains("Evidence call is unknown") {
@@ -1161,12 +1193,142 @@ fn first_durable_error_code(messages: &[Value]) -> Option<String> {
     None
 }
 
+// Emit only a source location for a matching, compiled-in diagnostic prefix.
+// No provider text, paths, arguments or credentials leave this helper.
+fn trusted_error_source_location(value: &Value) -> Option<String> {
+    const SOURCES: &[(&str, &str)] = &[
+        ("CODING_DRIVER", include_str!("../../nomifun-ai-agent/src/coding_runtime.rs")),
+        ("CODING_ERROR", include_str!("../../nomifun-coding-engine/src/error.rs")),
+        ("COMPACTION", include_str!("../../nomifun-coding-engine/src/compaction.rs")),
+        ("CONTEXT_LIFECYCLE", include_str!("../../nomifun-coding-engine/src/context_lifecycle.rs")),
+        ("COMPACTION_SOURCE", include_str!("../../nomifun-coding-engine/src/compaction_source.rs")),
+        ("CODING_HOST", include_str!("../src/router/coding_runtime_host.rs")),
+        ("CODING_HISTORY", include_str!("../src/router/coding_runtime_history.rs")),
+        ("SESSION_HOST", include_str!("../src/router/engine_session_host.rs")),
+        ("KERNEL_SESSION", include_str!("../src/router/engine_kernel_session.rs")),
+        ("TOOL_HOST", include_str!("../src/router/engine_tool_host.rs")),
+        ("PROCESS_HOST", include_str!("../src/router/engine_process_host.rs")),
+        ("WAVE2_HOST", include_str!("../src/router/agent_wave2_host.rs")),
+        ("CODING_TURN", include_str!("../../nomifun-coding-engine/src/turn.rs")),
+        ("CODING_CHECKPOINT", include_str!("../../nomifun-coding-engine/src/checkpoint.rs")),
+        ("CODING_REPLAY", include_str!("../../nomifun-coding-engine/src/history.rs")),
+        ("BROKER", include_str!("../../nomifun-chat-model-broker/src/broker.rs")),
+        ("MODEL_ADAPTER", include_str!("../../nomifun-chat-model-broker/src/adapter.rs")),
+    ];
+    fn strings<'a>(value: &'a Value, output: &mut Vec<&'a str>) {
+        match value {
+            Value::String(text) => output.push(text),
+            Value::Object(items) => for item in items.values() { strings(item, output); },
+            Value::Array(items) => for item in items { strings(item, output); },
+            _ => {}
+        }
+    }
+    let mut messages = Vec::new(); strings(value, &mut messages);
+    let mut best = None;
+    for (name, source) in SOURCES {
+        for (line, text) in source.lines().enumerate() {
+            let Some(quoted) = text.split('"').nth(1) else { continue; };
+            let prefix = quoted.split(['{', '\\']).next().unwrap_or_default();
+            if prefix.len() >= 16 && messages.iter().any(|message| message.contains(prefix))
+                && best.as_ref().is_none_or(|(length, _)| prefix.len() > *length)
+            {
+                best = Some((prefix.len(), format!("DIAG_{name}_L{}", line + 1)));
+            }
+        }
+    }
+    best.map(|(_, location)| location)
+}
+
+// These failures have no external effect: Coding controls execute locally,
+// and the exact canonical process schema is checked before owner dispatch.
+// Unknown owner failures or failed filesystem effects are never recoverable
+// evidence. A corrected proposal still needs a later successful observation.
+fn coding_pre_execution_rejection(message: &Value) -> bool {
+    let projection = &message["projection"];
+    if projection["status"] != "error" { return false; }
+    if matches!(projection["name"].as_str(), Some("write_file" | "apply_patch" | "exec_command"))
+        && matches!(projection["output"].as_str(),
+            Some("The plan needs reconsideration after a failed tool, newly accepted user input, or changed repository instructions. Call update_plan with an explanation of the changed approach before further effects."
+                | "Call update_plan with an in_progress step before executing workspace mutations or commands."))
+    {
+        // Coding's effect_gate returns these before invoking any owner.
+        return true;
+    }
+    match projection["name"].as_str() {
+        Some("update_plan" | "report_completion") => true,
+        Some("exec_command") => projection["output"].as_str().is_some_and(|output|
+            output.contains("Capability Kernel rejected Coding Tool (INVALID_PAYLOAD)"))
+            && nomifun_agent_domain_wave2::validate_action_input("process.exec",
+                &nomifun_agent_contracts::StrictJsonValue(projection["args"].clone())).is_err(),
+        _ => false,
+    }
+}
+
+fn coding_rejection_corrected(messages: &[Value], index: usize) -> bool {
+    coding_pre_execution_rejection(&messages[index]) && messages[index + 1..].iter().any(|later|
+        later["projection"]["name"] == messages[index]["projection"]["name"]
+            && later["projection"]["status"] == "completed")
+}
+
 // Classify locally generated admission failures without emitting arbitrary
 // error messages, provider responses, workspace paths or credential material.
 // This is diagnostic evidence only: every classified conflict still fails.
 fn admission_conflict_code(value: &Value) -> Option<&'static str> {
     match value {
         Value::String(message) => [
+            ("compaction ended with MaxOutputTokens", "CODING_COMPACTION_OUTPUT_LIMIT"),
+            ("Mandatory instructions/task state/accepted inputs and pending images exceed", "CODING_COMPACTION_MANDATORY_BUDGET"),
+            ("summary request exceeds its input budget", "CODING_COMPACTION_INPUT_BUDGET"),
+            ("compaction cannot fit the retained request/instructions/tools", "CODING_COMPACTION_RETAINED_BUDGET"),
+            ("compaction route attempted a Tool Call", "CODING_COMPACTION_TOOL_CALL"),
+            ("coding turn exceeded the model-step limit", "CODING_MODEL_STEP_LIMIT"),
+            ("Coding context is", "CODING_CONTEXT_TOO_LARGE"),
+            ("coding model stream ended without a terminal event", "CODING_MODEL_TERMINAL_MISSING"),
+            ("coding turn panicked", "CODING_TURN_PANICKED"),
+            ("provider_http_status=400;", "CODING_PROVIDER_HTTP_400"),
+            ("provider_http_status=401;", "CODING_PROVIDER_HTTP_401"),
+            ("provider_http_status=402;", "CODING_PROVIDER_HTTP_402"),
+            ("provider_http_status=403;", "CODING_PROVIDER_HTTP_403"),
+            ("provider_http_status=404;", "CODING_PROVIDER_HTTP_404"),
+            ("provider_http_status=408;", "CODING_PROVIDER_HTTP_408"),
+            ("provider_http_status=409;", "CODING_PROVIDER_HTTP_409"),
+            ("provider_http_status=422;", "CODING_PROVIDER_HTTP_422"),
+            ("provider_http_status=429;", "CODING_PROVIDER_HTTP_429"),
+            ("provider_http_status=500;", "CODING_PROVIDER_HTTP_500"),
+            ("provider_http_status=502;", "CODING_PROVIDER_HTTP_502"),
+            ("provider_http_status=503;", "CODING_PROVIDER_HTTP_503"),
+            ("provider_http_status=504;", "CODING_PROVIDER_HTTP_504"),
+            ("model reused a prior tool-call identity in history", "CODING_HISTORY_CALL_REUSED"),
+            ("model stream event follows tool admission or results in the same step", "CODING_HISTORY_STREAM_AFTER_TOOL"),
+            ("tool event differs from the active replay model step", "CODING_HISTORY_TOOL_STEP_MISMATCH"),
+            ("model event differs from the active replay model step", "CODING_HISTORY_MODEL_STEP_MISMATCH"),
+            ("unfinished tool batch before a continuation boundary", "CODING_HISTORY_UNFINISHED_BATCH"),
+            ("persisted tool result has no call", "CODING_HISTORY_RESULT_WITHOUT_CALL"),
+            ("duplicate persisted tool call", "CODING_HISTORY_DUPLICATE_CALL"),
+            ("Coding history:", "CODING_HISTORY_REJECTED"),
+            ("coding model stream failed (InvalidRequest)", "CODING_MODEL_INVALID_REQUEST"),
+            ("coding model stream failed (ProtocolViolation)", "CODING_MODEL_PROTOCOL_VIOLATION"),
+            ("coding model stream failed (CausalityRejected)", "CODING_MODEL_CAUSALITY_REJECTED"),
+            ("coding model stream failed (PromptTooLong)", "CODING_MODEL_PROMPT_TOO_LONG"),
+            ("coding model stream failed (RateLimited)", "CODING_MODEL_RATE_LIMITED"),
+            ("coding model stream failed (AuthenticationFailed)", "CODING_MODEL_AUTHENTICATION_FAILED"),
+            ("coding model stream failed (DuplicateOperation)", "CODING_MODEL_DUPLICATE_OPERATION"),
+            ("coding model stream failed (ShadowNotPrimary)", "CODING_MODEL_SHADOW_NOT_PRIMARY"),
+            ("coding model stream failed (SessionTerminal)", "CODING_MODEL_SESSION_TERMINAL"),
+            ("coding model stream failed (RouteNotFound)", "CODING_MODEL_ROUTE_NOT_FOUND"),
+            ("coding model stream failed (RouteRevisionMismatch)", "CODING_MODEL_ROUTE_REVISION_MISMATCH"),
+            ("coding model stream failed (AdapterUnavailable)", "CODING_MODEL_ADAPTER_UNAVAILABLE"),
+            ("coding model stream failed (CredentialReferenceMissing)", "CODING_MODEL_CREDENTIAL_REFERENCE_MISSING"),
+            ("coding model stream failed (CredentialTargetMismatch)", "CODING_MODEL_CREDENTIAL_TARGET_MISMATCH"),
+            ("coding model stream failed (UnsupportedFeature)", "CODING_MODEL_UNSUPPORTED_FEATURE"),
+            ("coding model stream failed (ProviderUnavailable)", "CODING_MODEL_PROVIDER_UNAVAILABLE"),
+            ("coding model stream failed (StreamInterrupted)", "CODING_MODEL_STREAM_INTERRUPTED"),
+            ("coding model stream failed (Cancelled)", "CODING_MODEL_CANCELLED"),
+            ("coding model stream failed (Internal)", "CODING_MODEL_INTERNAL"),
+            ("coding model stream failed", "CODING_MODEL_FAILED"),
+            ("Coding checkpoint is invalid:", "CODING_CHECKPOINT_REJECTED"),
+            ("Coding context assembly failed:", "CODING_CONTEXT_REJECTED"),
+            ("coding model emitted an invalid event:", "CODING_MODEL_EVENT_INVALID"),
             ("Agent Skills: requested Skill is not in the Agent's immutable selected Skill locks", "CONFLICT_SKILL_LOCK_SELECTION"),
             ("current Kernel compilation differs from the persisted Nomi resolved Snapshot", "CONFLICT_KERNEL_SNAPSHOT_MISMATCH"),
             ("Nomi Plugin Tool Kernel admission failed:", "CONFLICT_KERNEL_ADMISSION"),
@@ -1574,7 +1736,10 @@ async fn wait_for_coding_stage(
         // permanently would miss the terminal update even though pagination is
         // otherwise exclusive.
         let (messages, _) = session_messages_after(router, phase, session_id, after_seq).await?;
-        if let Some(code) = first_durable_error_code(&messages) {
+        let fatal_messages = if coding_engine {
+            messages.iter().filter(|message| !coding_pre_execution_rejection(message)).cloned().collect::<Vec<_>>()
+        } else { messages.clone() };
+        if let Some(code) = first_durable_error_code(&fatal_messages) {
             return Err(SmokeFailure::new(
                 phase,
                 code,
@@ -1607,6 +1772,13 @@ async fn wait_for_coding_stage(
                     && message["projection"]["status"] == "completed")
                 {
                     return Err(SmokeFailure::new(phase, "ENGINE_COMPLETION_EVIDENCE_MISSING", 422));
+                }
+                let controls = raw.iter().enumerate().filter(|(index, message)|
+                    coding_rejection_corrected(&raw, *index) && matches!(message["projection"]["name"].as_str(), Some("update_plan" | "report_completion"))).count();
+                let schemas = raw.iter().enumerate().filter(|(index, message)|
+                    coding_rejection_corrected(&raw, *index) && !matches!(message["projection"]["name"].as_str(), Some("update_plan" | "report_completion"))).count();
+                if controls + schemas > 0 {
+                    eprintln!("NOMIFUN_LIVE_SMOKE_RECOVERY phase={phase} controls={controls} pre_execution={schemas}");
                 }
             }
             return Ok(());
@@ -3435,7 +3607,8 @@ async fn assert_session_engine(router: &Router, session: &str, selection: &Value
 // never count as the model's requested filesystem evidence.
 fn coding_engine_evidence_messages(messages: &[Value]) -> Result<Vec<Value>, SmokeFailure> {
     let mut result = Vec::new();
-    for message in messages {
+    for (index, message) in messages.iter().enumerate() {
+        if coding_rejection_corrected(messages, index) { continue; }
         let projection = &message["projection"];
         // These are Coding's mandatory planning/completion controls, not
         // platform file/command executions. Only successful controls are
@@ -3565,7 +3738,12 @@ async fn run_engine_chain(router: &Router, api_key: &str, model: &str, root: &Pa
     let catalog = successful_json(router, "engine.catalog", Method::GET, "/api/runtime-engines",
         None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
     let catalog = envelope_data("engine.catalog", catalog)?;
+    let selected_family = std::env::var("NOMIFUN_LIVE_ENGINE_FAMILY").unwrap_or_else(|_| "all".into());
+    if !matches!(selected_family.as_str(), "all" | "nomi" | "coding") {
+        return Err(SmokeFailure::new("engine.scope", "LIVE_ENGINE_SELECTION_INVALID", 400));
+    }
     for (family, profile, coding) in [("nomifun.nomi", "default", false), ("nomifun.coding", "coding", true)] {
+        if selected_family != "all" && family != format!("nomifun.{selected_family}") { continue; }
         // Each official engine gets its own Session/workspace even if the other fails.
         let result: Result<(), SmokeFailure> = async {
         let selection = engine_selection(&catalog, family, profile)?;
@@ -3596,7 +3774,7 @@ async fn run_engine_chain(router: &Router, api_key: &str, model: &str, root: &Pa
         let mut prior_messages = Vec::new();
         for (stage, marker, prompt, tools) in stages {
             let prompt = if coding {
-                format!("Follow the Coding Engine lifecycle. First call update_plan alone: use one step named stage with status in_progress and one requirement id task describing the stage and its constraints, with source.input=0 and a SHORT exact quote from this request (for example live-coding.txt). After the requested external tools succeed, call update_plan alone to set stage completed, omitting unchanged requirements. Then call report_completion alone with one criterion for step stage, requirement_ids=[task], disposition=supported, the actual successful external observation call IDs as evidence_call_ids, and an accurate rationale without claiming unrequested tests. Only then give the final answer. These engine-local controls, bounded tool-history inspection, and read_file(format=instruction_scope) for live-coding.txt or the workspace root are permitted; tool restrictions below apply to task file/command operations. This is a new task in the same conversation, not a request to resume unfinished historical work. {prompt}")
+                format!("Follow the Coding Engine lifecycle. First call update_plan alone: use one step named stage with status in_progress and one requirement id task describing the stage and its constraints, with source.input=0 and a SHORT exact quote from this request (for example live-coding.txt). After the requested external tools succeed, call update_plan alone to set stage completed, omitting unchanged requirements. Then call report_completion alone with one criterion for step stage, requirement_ids=[task], disposition=supported, only CURRENT usable external observation call IDs as evidence_call_ids, and an accurate rationale without claiming unrequested tests. A read before a mutation belongs to an older workspace epoch and must not be cited as current evidence; for a mutation stage cite the successful final mutation result, and for a read-only stage cite its successful read or command. Do not cite planning, instruction-scope or history-control calls as execution evidence. Only then give the final answer. These engine-local controls, bounded tool-history inspection, and read_file(format=instruction_scope) for live-coding.txt or the workspace root are permitted; tool restrictions below apply to task file/command operations. This is a new task in the same conversation, not a request to resume unfinished historical work. {prompt}")
             } else { prompt };
             // Static phases are safe to print even if a provider echoes secrets.
             let phase = match (coding, stage) {
@@ -3629,7 +3807,54 @@ async fn run_engine_chain(router: &Router, api_key: &str, model: &str, root: &Pa
     failures.first().cloned().map_or(Ok(()), Err)
 }
 
-async fn run_live_provider_smoke(engine_smoke: bool) -> Result<(), SmokeFailure> {
+#[derive(Clone, Copy)]
+enum LiveSmokeMode { Product, Engines, Compaction }
+
+async fn run_live_compaction_chain(router: &Router, key: &str, model: &str, root: &Path) -> Result<(), SmokeFailure> {
+    use nomifun_db::sqlx::{Connection, sqlite::SqliteConnectOptions, SqliteConnection};
+    const PHASE: &str = "engine.compaction";
+    const MARKER: &str = "NOMIFUN_LIVE_COMPACTION_OK";
+    let provider = configure_stepfun(router, key, STEPFUN_PLAN_BASE_URL, model).await?;
+    let catalog = successful_json(router, PHASE, Method::GET, "/api/runtime-engines", None,
+        LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    let selection = engine_selection(&envelope_data(PHASE, catalog)?, "nomifun.coding", "coding")?;
+    let (preset, _) = create_agent_preset(router, &provider, model, Some(&selection), &[]).await?;
+    let (session, _) = create_session(router, &preset, &provider, model, Some(&selection), json!([])).await?;
+    let count = nomifun_coding_engine::CodingContextBudget::default().max_history_messages + 32;
+    if count > 512 { return Err(SmokeFailure::new(PHASE, "COMPACTION_FIXTURE_TOO_LARGE", 500)); }
+    let options = SqliteConnectOptions::new().filename(root.join("data/nomifun-backend.db")).create_if_missing(false);
+    let mut connection = SqliteConnection::connect_with(&options).await
+        .map_err(|_| SmokeFailure::new(PHASE, "COMPACTION_FIXTURE_OPEN_FAILED", 500))?;
+    // Synthetic imported history in this disposable Session only. These rows
+    // are test inputs, never presented as model output or execution evidence.
+    let mut transaction = connection.begin().await
+        .map_err(|_| SmokeFailure::new(PHASE, "COMPACTION_FIXTURE_TRANSACTION_FAILED", 500))?;
+    for index in 0..count {
+        nomifun_db::sqlx::query("INSERT INTO messages (message_id,conversation_id,type,content,position,status,hidden,created_at) VALUES (?,?,'text',?,'right','finish',0,?)")
+            .bind(uuid::Uuid::now_v7().to_string()).bind(&session)
+            .bind(json!({"content":format!("Synthetic archived input {index}: retain this as test history data."),"fixture":"compaction-history"}).to_string())
+            .bind(index as i64).execute(&mut *transaction).await
+            .map_err(|_| SmokeFailure::new(PHASE, "COMPACTION_FIXTURE_INSERT_FAILED", 500))?;
+    }
+    transaction.commit().await.map_err(|_| SmokeFailure::new(PHASE, "COMPACTION_FIXTURE_COMMIT_FAILED", 500))?;
+    let cursor = session_message_cursor(router, PHASE, &session).await?;
+    start_session_turn(router, PHASE, &session, &uuid::Uuid::now_v7().to_string(),
+        format!("The earlier entries are synthetic history data. This new request requires no tools. Reply with exactly {MARKER}.")).await?;
+    wait_for_session_marker(router, PHASE, &session, cursor, MARKER, CODING_STAGE_DEADLINE).await?;
+    let (summaries, replacements) = read_compaction_evidence(root).await?;
+    if summaries < 1 || replacements < 1 {
+        return Err(SmokeFailure::new(PHASE, "REAL_COMPACTION_EVIDENCE_MISSING", 422));
+    }
+    let retained: i64 = nomifun_db::sqlx::query_scalar("SELECT count(*) FROM messages WHERE conversation_id=? AND json_extract(content,'$.fixture')='compaction-history'")
+        .bind(&session).fetch_one(&mut connection).await
+        .map_err(|_| SmokeFailure::new(PHASE, "COMPACTION_HISTORY_READ_FAILED", 500))?;
+    connection.close().await.map_err(|_| SmokeFailure::new(PHASE, "COMPACTION_FIXTURE_CLOSE_FAILED", 500))?;
+    if retained != count as i64 { return Err(SmokeFailure::new(PHASE, "COMPACTION_CHANGED_CANONICAL_HISTORY", 409)); }
+    assert_session_engine(router, &session, &selection, &provider, model).await
+}
+
+async fn run_live_provider_smoke(mode: LiveSmokeMode) -> Result<(), SmokeFailure> {
+    let engine_smoke = matches!(mode, LiveSmokeMode::Engines);
     let model = live_model()?;
     let api_key = required_secret_from_stdin()?;
     let root = tempfile::tempdir().map_err(|_| {
@@ -3640,7 +3865,7 @@ async fn run_live_provider_smoke(engine_smoke: bool) -> Result<(), SmokeFailure>
         )
     })?;
     let workspace = root.path().join("coding-workspace");
-    if !engine_smoke {
+    if matches!(mode, LiveSmokeMode::Product) {
         initialize_git_workspace(&workspace).await?;
     }
     let fixture = build_fixture(&root).await?;
@@ -3656,6 +3881,9 @@ async fn run_live_provider_smoke(engine_smoke: bool) -> Result<(), SmokeFailure>
             run_engine_chain(&router, api_key.as_str(), &model, root.path(), &mut stages_passed, &mut engine_failures),
         )
         .await
+    } else if matches!(mode, LiveSmokeMode::Compaction) {
+        hard_deadline("engine.compaction", "LIVE_COMPACTION_DEADLINE_EXCEEDED", ENGINE_SMOKE_DEADLINE,
+            run_live_compaction_chain(&router, api_key.as_str(), &model, root.path())).await
     } else {
         run_product_chain(
             &router,
@@ -3666,6 +3894,11 @@ async fn run_live_provider_smoke(engine_smoke: bool) -> Result<(), SmokeFailure>
         )
         .await
     };
+    // Read only aggregate semantic event counts while the database is open.
+    // Keep any probe failure until after normal shutdown and credential audit.
+    let compaction_evidence = if !matches!(mode, LiveSmokeMode::Product) {
+        Some(read_compaction_evidence(root.path()).await)
+    } else { None };
     drop(router);
     let LiveFixture {
         _environment: environment,
@@ -3699,15 +3932,35 @@ async fn run_live_provider_smoke(engine_smoke: bool) -> Result<(), SmokeFailure>
     .await;
 
     audit_result?;
+    if let Some(evidence) = compaction_evidence {
+        let (summaries, replacements) = evidence?;
+        eprintln!("NOMIFUN_LIVE_SMOKE_COMPACTION summaries={summaries} replacements={replacements}");
+    }
     for phase in stages_passed { emit_engine_stage_pass(phase)?; }
     for failure in engine_failures { eprintln!("NOMIFUN_LIVE_SMOKE_ENGINE_FAILURE {failure}"); }
     result
 }
 
+async fn read_compaction_evidence(root: &Path) -> Result<(i64, i64), SmokeFailure> {
+    use nomifun_db::sqlx::{Connection, sqlite::SqliteConnectOptions, SqliteConnection};
+    let failure = |_| SmokeFailure::new("engine.compaction_evidence", "COMPACTION_EVIDENCE_READ_FAILED", 500);
+    let options = SqliteConnectOptions::new().filename(root.join("data/nomifun-backend.db"))
+        .read_only(true).create_if_missing(false);
+    let mut connection = SqliteConnection::connect_with(&options).await.map_err(failure)?;
+    let counts = nomifun_db::sqlx::query_as::<_, (i64, i64)>(
+        "SELECT COALESCE(SUM(json_extract(e.event_json,'$.event')='compaction_started'),0), \
+         COALESCE(SUM(json_extract(e.event_json,'$.event')='context_compacted'),0) \
+         FROM conversation_runtime_events e JOIN conversations c ON c.conversation_id=e.conversation_id \
+         WHERE json_extract(c.extra,'$.runtime_engine_binding.family_id')='nomifun.coding'"
+    ).fetch_one(&mut connection).await.map_err(failure)?;
+    connection.close().await.map_err(failure)?;
+    Ok(counts)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires a live credential on stdin; run with the credential-isolating runner"]
 async fn nomi_core_product_chain_reaches_live_stepfun_and_remote_binding() {
-    if let Err(failure) = run_live_provider_smoke(false).await {
+    if let Err(failure) = run_live_provider_smoke(LiveSmokeMode::Product).await {
         eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
         panic!("NOMIFUN_LIVE_SMOKE_FAILED");
     }
@@ -3716,7 +3969,16 @@ async fn nomi_core_product_chain_reaches_live_stepfun_and_remote_binding() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires a live credential on stdin; use the runner --engine-smoke"]
 async fn nomi_core_official_engines_reach_live_stepfun() {
-    if let Err(failure) = run_live_provider_smoke(true).await {
+    if let Err(failure) = run_live_provider_smoke(LiveSmokeMode::Engines).await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
+        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a live credential on stdin; use the runner --compaction-smoke"]
+async fn coding_compaction_reaches_live_stepfun_without_discarding_history() {
+    if let Err(failure) = run_live_provider_smoke(LiveSmokeMode::Compaction).await {
         eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
         panic!("NOMIFUN_LIVE_SMOKE_FAILED");
     }
@@ -3725,6 +3987,79 @@ async fn nomi_core_official_engines_reach_live_stepfun() {
 #[cfg(test)]
 mod evidence_tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn official_engines_cancel_active_native_process_trees() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let root = tempfile::tempdir().unwrap();
+        let fixture = build_fixture(&root).await.unwrap();
+        let router = fixture.application.router();
+        let catalog = envelope_data("engine.cancel", successful_json(&router, "engine.cancel", Method::GET,
+            "/api/runtime-engines", None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await.unwrap()).unwrap();
+        for (family, profile, coding) in [("nomifun.coding", "coding", true), ("nomifun.nomi", "default", false)] {
+            let workspace = root.path().join(format!("cancel-{profile}"));
+            std::fs::create_dir(&workspace).unwrap();
+            let parent_file = workspace.join("parent.pid");
+            let child_file = workspace.join("child.pid");
+            let script = "echo $$ > \"$1\"; sleep 120 & echo $! > \"$2\"; wait";
+            let args = vec!["-c".to_owned(), script.to_owned(), "cancel-fixture".to_owned(),
+                parent_file.to_string_lossy().into_owned(), child_file.to_string_lossy().into_owned()];
+            let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+            let command = std::iter::once("/bin/sh").chain(args.iter().map(String::as_str)).map(quote).collect::<Vec<_>>().join(" ");
+            let upstream = wiremock::MockServer::start().await;
+            let calls = Arc::new(AtomicUsize::new(0));
+            let counter = calls.clone();
+            wiremock::Mock::given(wiremock::matchers::method("POST")).respond_with(move |_: &wiremock::Request| {
+                let step = counter.fetch_add(1, Ordering::SeqCst);
+                let (id,name,input) = if coding && step == 0 {
+                    ("cancel-plan", "update_plan", json!({"explanation":"Start the cancellable test command.",
+                        "plan":[{"step":"wait for cancellation","status":"in_progress"}],
+                        "requirements":[{"id":"cancel","description":"Start the long command for host cancellation.","source":{"input":0,"quote":"Start this long command"}}]}))
+                } else if step == usize::from(coding) {
+                    ("cancel-command", "exec_command", if coding {
+                        json!({"operation":"exec","command":"/bin/sh","args":args,"timeout_ms":120000})
+                    } else { json!({"cmd":command,"yield_time_ms":1000}) })
+                } else {
+                    return wiremock::ResponseTemplate::new(200).insert_header("content-type","text/event-stream")
+                        .set_body_string(LOCAL_REPLY_SSE).set_delay(Duration::from_secs(60));
+                };
+                let frame = json!({"id":"cancel","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":name,"arguments":input.to_string()}}]},"finish_reason":null}]});
+                let done = json!({"id":"cancel","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]});
+                wiremock::ResponseTemplate::new(200).insert_header("content-type","text/event-stream")
+                    .set_body_string(format!("data: {frame}\n\ndata: {done}\n\ndata: [DONE]\n\n"))
+            }).mount(&upstream).await;
+            let provider = configure_stepfun(&router, "local-cancel-fixture", &format!("{}/v1",upstream.uri()), STEPFUN_PLAN_MODEL).await.unwrap();
+            let selection = engine_selection(&catalog, family, profile).unwrap();
+            let (preset,_) = create_agent_preset(&router, &provider, STEPFUN_PLAN_MODEL, Some(&selection), ENGINE_CAPABILITIES).await.unwrap();
+            let (session,_) = create_session(&router, &preset, &provider, STEPFUN_PLAN_MODEL, Some(&selection), coding_resource_selections()).await.unwrap();
+            bind_session_workspace(&router, &session, &workspace).await.unwrap();
+            start_session_turn(&router, "engine.cancel", &session, &uuid::Uuid::now_v7().to_string(),
+                "Start this long command in the isolated workspace; the test host will cancel it.".into()).await.unwrap();
+            let pids = tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if let (Ok(parent),Ok(child)) = (std::fs::read_to_string(&parent_file),std::fs::read_to_string(&child_file)) {
+                        if let (Ok(parent),Ok(child)) = (parent.trim().parse::<u32>(),child.trim().parse::<u32>()) { break [parent,child]; }
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            }).await.expect("both native process generations must actually start before cancellation");
+            for pid in pids { assert!(nomi_process_runtime::probe_process_identity(pid).unwrap().is_some()); }
+            successful_json(&router, "engine.cancel", Method::POST, format!("/api/conversations/{session}/cancel"),
+                Some(json!({})), Duration::from_secs(20), &[StatusCode::OK]).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    let state = successful_json(&router, "engine.cancel", Method::GET, format!("/api/conversations/{session}"),
+                        None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await.unwrap();
+                    if state["data"]["status"] == "finished"
+                        && pids.iter().all(|pid| nomi_process_runtime::probe_process_identity(*pid).unwrap().is_none()) { break; }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            }).await.expect("terminal publication and complete child-tree reclamation must both finish");
+            assert_session_engine(&router, &session, &selection, &provider, STEPFUN_PLAN_MODEL).await.unwrap();
+        }
+        tokio::time::timeout(SHUTDOWN_DEADLINE, fixture.application.close()).await.unwrap().unwrap();
+    }
 
     const LOCAL_REPLY_SSE: &str = "data: {\"id\":\"mock\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"LOCAL_ADMISSION_OK\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"mock\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
 
@@ -3797,22 +4132,38 @@ mod evidence_tests {
         // Same product routes and Agent capabilities as the live chain. The
         // only credential and provider here are test-owned and loopback-only.
         let upstream = wiremock::MockServer::start().await;
-        const REQUEST: &str = "Create live-coding.txt with alpha followed by one newline and reply LOCAL_ADMISSION_OK.";
+        const REQUEST: &str = "Create live-coding.txt with alpha followed by one newline, run git --version, and reply LOCAL_ADMISSION_OK.";
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .respond_with(|request: &wiremock::Request| {
                 let body: Value = serde_json::from_slice(&request.body).unwrap();
                 if body["messages"].as_array().unwrap().iter().any(|message|
                     message["role"] == "user" && message["content"].to_string().contains("LOCAL_CONTINUATION_OK"))
                 {
-                    return wiremock::ResponseTemplate::new(200)
-                        .insert_header("content-type", "text/event-stream")
-                        .set_body_string(LOCAL_REPLY_SSE.replace("LOCAL_ADMISSION_OK", "LOCAL_CONTINUATION_OK"));
+                    let coding = body["tools"].as_array().unwrap().iter().any(|tool| tool["function"]["name"] == "write_file");
+                    let observed = |id: &str| body["messages"].as_array().unwrap().iter().any(|message| message["role"] == "tool" && message["tool_call_id"] == id);
+                    let call = if coding && !observed("next-plan") {
+                        Some(("next-plan", "update_plan", json!({"explanation":"Run the requested version command.",
+                            "plan":[{"step":"version","status":"in_progress"}],
+                            "requirements":[{"id":"version","description":"Run git --version and reply LOCAL_CONTINUATION_OK.","source":{"input":0,"quote":"Run git --version"}}]})))
+                    } else if !observed("next-exec") {
+                        Some(("next-exec", "exec_command", if coding { json!({"operation":"exec","command":"git","args":["--version"],"timeout_ms":10000}) } else { json!({"cmd":"git --version","yield_time_ms":1000}) }))
+                    } else if coding && !observed("next-close") {
+                        Some(("next-close", "update_plan", json!({"explanation":"Version command returned.","plan":[{"step":"version","status":"completed"}]})))
+                    } else if coding && !observed("next-report") {
+                        Some(("next-report", "report_completion", json!({"summary":"Version observed.","criteria":[{"step":"version","requirement_ids":["version"],"disposition":"supported","evidence_call_ids":["next-exec"],"rationale":"The git version command succeeded."}]})))
+                    } else { None };
+                    let output = if let Some((id,name,args)) = call {
+                        let frame = json!({"id":"next","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}}]},"finish_reason":null}]});
+                        let terminal = json!({"id":"next","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]});
+                        format!("data: {frame}\n\ndata: {terminal}\n\ndata: [DONE]\n\n")
+                    } else { LOCAL_REPLY_SSE.replace("LOCAL_ADMISSION_OK", "LOCAL_CONTINUATION_OK") };
+                    return wiremock::ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string(output);
                 }
                 let observed = |id: &str| body["messages"].as_array().unwrap().iter()
                     .any(|message| message["role"] == "tool" && message["tool_call_id"] == id);
                 let coding = body["tools"].as_array().unwrap().iter()
                     .any(|tool| tool["function"]["name"] == "write_file");
-                if (coding && observed("local-report")) || (!coding && observed("local-write")) {
+                if (coding && observed("local-report")) || (!coding && observed("local-exec")) {
                     return wiremock::ResponseTemplate::new(200)
                         .insert_header("content-type", "text/event-stream")
                         .set_body_string(LOCAL_REPLY_SSE);
@@ -3821,13 +4172,17 @@ mod evidence_tests {
                     ("local-plan", "update_plan", json!({"explanation":"Perform the requested file creation.",
                         "plan":[{"step":"create file","status":"in_progress"}],
                         "requirements":[{"id":"request","description":REQUEST,"source":{"input":0,"quote":REQUEST}}]}))
-                } else if coding && observed("local-write") && !observed("local-plan-close") {
+                } else if observed("local-write") && !observed("local-exec") {
+                    ("local-exec", "exec_command", if coding {
+                        json!({"operation":"exec","command":"git","args":["--version"],"timeout_ms":10000})
+                    } else { json!({"cmd":"git --version","yield_time_ms":1000}) })
+                } else if coding && observed("local-exec") && !observed("local-plan-close") {
                     ("local-plan-close", "update_plan", json!({"explanation":"The requested file write returned.",
                         "plan":[{"step":"create file","status":"completed"}]}))
                 } else if coding && observed("local-plan-close") {
                     ("local-report", "report_completion", json!({"summary":"The requested write returned successfully.",
                         "criteria":[{"step":"create file","requirement_ids":["request"],"disposition":"supported",
-                            "evidence_call_ids":["local-write"],"rationale":"The requested file write returned; no claim of test execution."}]}))
+                            "evidence_call_ids":["local-exec"],"rationale":"The write returned and git version command succeeded; no claim of tests."}]}))
                 } else if coding {
                     ("local-write", "write_file", json!({"path":CODING_FILE,"content":"alpha\n"}))
                 } else {
@@ -3850,7 +4205,7 @@ mod evidence_tests {
             None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await.unwrap();
         let catalog = envelope_data("engine.catalog", catalog).unwrap();
         let mut errors = Vec::new();
-        for (family, profile) in [("nomifun.nomi", "default"), ("nomifun.coding", "coding")] {
+        for (family, profile) in [("nomifun.coding", "coding"), ("nomifun.nomi", "default")] {
             let selection = engine_selection(&catalog, family, profile).unwrap();
             let (preset, _) = create_agent_preset(&router, &provider, STEPFUN_PLAN_MODEL, Some(&selection), ENGINE_CAPABILITIES).await.unwrap();
             let (session, binding) = create_session(&router, &preset, &provider, STEPFUN_PLAN_MODEL, Some(&selection), coding_resource_selections()).await.unwrap();
@@ -3901,7 +4256,7 @@ mod evidence_tests {
             assert_eq!(std::fs::read_to_string(workspace.join(CODING_FILE)).unwrap(), "alpha\n");
             let cursor = session_message_cursor(&router, "engine.mock.continuation", &session).await.unwrap();
             start_session_turn(&router, "engine.mock.continuation", &session,
-                &uuid::Uuid::now_v7().to_string(), "Reply LOCAL_CONTINUATION_OK without tools.".into()).await.unwrap();
+                &uuid::Uuid::now_v7().to_string(), "Run git --version and reply LOCAL_CONTINUATION_OK.".into()).await.unwrap();
             let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
             let mut continued = false;
             loop {
@@ -3919,6 +4274,12 @@ mod evidence_tests {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
             if !continued { continue; }
+            let (actual_messages, _) = session_messages_after(&router, "engine.mock.exec", &session, 0).await.unwrap();
+            let commands = actual_messages.iter().filter(|message| message["projection"]["name"] == "exec_command").collect::<Vec<_>>();
+            assert_eq!(commands.len(), 2, "{family}: both turns must execute their command");
+            assert!(commands.iter().all(|message| message["projection"]["status"] == "completed"
+                && message["projection"]["output"].as_str().is_some_and(|output| output.contains("git version"))),
+                "{family}: command success must come from real owner output: {commands:?}");
             let (_, through_seq) = session_messages_after(&router, "engine.mock.fork", &session, 0).await.unwrap();
             let child = successful_json(&router, "engine.mock.fork", Method::POST,
                 format!("/api/agent-sessions/{session}/forks"),
@@ -3945,11 +4306,18 @@ mod evidence_tests {
         }
         fixture.application.close().await.unwrap();
         assert!(errors.is_empty(), "local-only admission failures: {errors:#?}");
-        assert_eq!(upstream.received_requests().await.unwrap().len(), 9);
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 16);
     }
 
     #[test]
     fn admission_diagnostics_emit_only_static_codes_and_preserve_failure() {
+        let location = trusted_error_source_location(&json!({"detail":"process controls cannot change launch parameters; NEVER_PRINT_ME"})).unwrap();
+        assert!(location.starts_with("DIAG_PROCESS_HOST_L"));
+        assert!(!location.contains("NEVER_PRINT_ME"));
+        assert!(trusted_error_source_location(&json!("NEVER_PRINT_ME")).is_none());
+        let unknown_upstream = json!({"projection":{"type":"error","code":"UNKNOWN_UPSTREAM_ERROR",
+            "error":{"detail":"Coding history: Coding checkpoint is invalid: model reused a prior tool-call identity in history; NEVER_PRINT_ME"}}});
+        assert_eq!(first_durable_error_code(&[unknown_upstream]).as_deref(), Some("CODING_HISTORY_CALL_REUSED"));
         let message = json!({"projection": {"status":"error", "code":"CONFLICT",
             "error":{"message":"current Kernel compilation differs from the persisted Nomi resolved Snapshot; secret=NEVER_PRINT_ME"}}});
         assert_eq!(first_durable_error_code(&[message]).as_deref(), Some("CONFLICT_KERNEL_SNAPSHOT_MISMATCH"));
@@ -3988,6 +4356,29 @@ mod evidence_tests {
         assert!(coding_engine_evidence_messages(&[outside]).is_err());
         let ordinary_read = json!({"projection":{"name":"read_file","status":"completed","args":{"path":CODING_FILE}}});
         assert_eq!(coding_engine_evidence_messages(&[ordinary_read]).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn coding_recovery_requires_proven_pre_execution_rejection_and_later_success() {
+        let failed_plan = json!({"projection":{"name":"update_plan","status":"error"}});
+        let successful_plan = json!({"projection":{"name":"update_plan","status":"completed"}});
+        assert!(coding_rejection_corrected(&[failed_plan.clone(), successful_plan.clone()], 0));
+        assert!(!coding_rejection_corrected(&[successful_plan, failed_plan.clone()], 1));
+        assert!(!coding_engine_evidence_messages(&[failed_plan]).unwrap().is_empty());
+        let invalid_process = json!({"projection":{"name":"exec_command","status":"error",
+            "args":{"command":"git","args":["--version"],"env":null},
+            "output":"Capability Kernel rejected Coding Tool (INVALID_PAYLOAD): hidden owner detail"}});
+        assert!(coding_pre_execution_rejection(&invalid_process));
+        let mut owner_failure = invalid_process.clone();
+        owner_failure["projection"]["args"].as_object_mut().unwrap().remove("env");
+        assert!(!coding_pre_execution_rejection(&owner_failure), "schema-valid owner failures remain fatal");
+        owner_failure["projection"]["name"] = json!("write_file");
+        assert!(!coding_pre_execution_rejection(&owner_failure), "filesystem failures never become successful evidence");
+        owner_failure["projection"]["output"] = json!("Call update_plan with an in_progress step before executing workspace mutations or commands.");
+        assert!(coding_pre_execution_rejection(&owner_failure), "the engine plan gate has not invoked the filesystem owner");
+        let successful_process = json!({"projection":{"name":"exec_command","status":"completed",
+            "args":{"command":"git","args":["--version"]}}});
+        assert_eq!(coding_engine_evidence_messages(&[invalid_process, successful_process]).unwrap().len(), 1);
     }
 
     #[test]
