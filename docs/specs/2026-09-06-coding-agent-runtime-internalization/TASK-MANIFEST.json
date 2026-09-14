@@ -15,7 +15,7 @@
     "validation_policy": "Isolated native dev and app/DMG validation; StepFun step-3.7-flash only; no Release, updater publication or push",
     "source_baseline": "2ff02951266b12008cf1f7ea63c3b27cff9a192a",
     "handoff": "MACOS-CONTINUATION-2026-09-15.zh.md",
-    "status": "official-live-chain-compaction-cancel-passed; current-arm64-package-verified-noninteractively; native-ui-send-awaiting-mac-unlock",
+    "status": "blocked-on-manual-mac-unlock; native-ui-send-and-binding-verification-incomplete",
     "engine_builds": {
       "nomifun.nomi": "0.7.6-host62",
       "nomifun.coding": "0.7.6-host2-coding-loop95"
@@ -92,7 +92,13 @@
         "latest_source": "rebuild required; previous 973bbe206 artifacts remain historical evidence"
       }
     },
-    "source_commit": "2ede9aaf73eff787abd2315130a04b7dd68a4265"
+    "source_commit": "2ede9aaf73eff787abd2315130a04b7dd68a4265",
+    "blocker_audit": {
+      "condition": "Mac locked; CUA automatic unlock failed",
+      "consecutive_goal_turns": 3,
+      "test_processes": "stopped; data preserved",
+      "resume_evidence": ".git/macos-engine-20260914/paused-state.json"
+    }
   },
   "previous_windows_delivery_scope": {
     "platform": "windows-local",
