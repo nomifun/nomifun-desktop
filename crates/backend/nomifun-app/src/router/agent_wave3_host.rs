@@ -116,7 +116,7 @@ mod tests {
         assert!(approved.iter().all(|id| {
             id.as_ref().starts_with("creation.")
                 || id.as_ref().starts_with("workshop.")
-                || id.as_ref().starts_with("plugin.product.")
+                || matches!(id.as_ref(), "plugin.read" | "plugin.edit" | "plugin.publish" | "plugin.serve")
         }));
     }
 }

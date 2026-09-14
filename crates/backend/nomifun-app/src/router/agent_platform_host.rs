@@ -3586,13 +3586,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let v4_dir = tempfile::tempdir().expect("v4 temp root");
+        let v4_parent = tempfile::tempdir().expect("v4 temp parent");
+        let v4_dir = v4_parent.path().join("root");
         nomifun_v4_root::FreshV4Coordinator::default()
-            .bootstrap(v4_dir.path(), APPLICATION_BUILD_IDENTITY, &[])
+            .bootstrap(&v4_dir, APPLICATION_BUILD_IDENTITY, &[])
             .await
             .expect("v4 root");
         let v4_pool = super::open_validated_pool(
-            &v4_dir.path().join(FRESH_V4_DATABASE_FILE),
+            &v4_dir.join(FRESH_V4_DATABASE_FILE),
         )
         .await
         .expect("v4 pool");

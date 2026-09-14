@@ -32,7 +32,7 @@
     "coding_native",
     "managed_minimal"
   ],
-  "runtime_profile_contract_digest": "7ea83632cddcf803ac1ec86c1a5fb0dffe1f482b39577faffbcee21b478535e3",
+  "runtime_profile_contract_digest": "6e6f3ab5897f244f38037679c17a917173c4e1918dc752cd3a1e5f048b4323c0",
   "coding_capability_pack_digest": "baea06819d3d6e8bab3336ac1a4f0882745a35ad34c04546411165498bfc7bfa",
   "native_feature_contract_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
   "native_action_contract_digest": "ae08f636e6c349505d95281e93279427641399e7fff498c30b85760b2c415665",

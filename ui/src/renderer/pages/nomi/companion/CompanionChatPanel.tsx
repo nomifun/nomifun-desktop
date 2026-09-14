@@ -13,6 +13,7 @@ import ExecutionConversationLayout from '@/renderer/pages/conversation/execution
 import { useCompanion } from '../useNomi';
 import CompanionConversation from './CompanionConversation';
 import CompanionModelControl from '../CompanionModelControl';
+import CompanionDevicesControl from './CompanionDevicesControl';
 import type { WorkspaceExtraTab } from '@/renderer/pages/conversation/Workspace/types';
 
 type NomiConversation = Extract<TChatConversation, { type: 'nomi' }>;
@@ -56,7 +57,10 @@ const CompanionChatPanel: React.FC<Props> = ({ conversation, extraTabs }) => {
       sider={<ChatSlider conversation={conversation} extraTabs={extraTabs} />}
       siderTitle={<span className='text-16px font-bold text-t-primary'>{t('conversation.workspace.title')}</span>}
       workspaceExtraTabs={extraTabs}
-      headerExtra={showModelControl ? <CompanionModelControl companion={companion} /> : undefined}
+      headerExtra={showModelControl ? <div className='flex items-center gap-8px'>
+        {companionId && <CompanionDevicesControl companion={companion} conversationId={conversation.id} />}
+        <CompanionModelControl companion={companion} />
+      </div> : undefined}
     >
       {content}
     </ExecutionConversationLayout>

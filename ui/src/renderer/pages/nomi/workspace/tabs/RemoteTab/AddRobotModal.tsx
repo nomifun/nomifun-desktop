@@ -13,20 +13,17 @@ import { webui, type IApiRobotEndpoints } from '@/common/adapter/ipcBridge';
 import type { CompanionId } from '@/common/types/ids';
 import CopyIconButton from '@/renderer/components/base/CopyIconButton';
 import NomiModal from '@/renderer/components/base/NomiModal';
-import ProductAgentBindingSelect from '@/renderer/components/agent/ProductAgentBindingSelect';
-import type { TProviderWithModel } from '@/common/config/storage';
 
 interface AddRobotModalProps {
   visible: boolean;
   companionId: CompanionId;
   companionName: string;
-  model?: Pick<TProviderWithModel, 'id' | 'use_model'>;
   onCancel: () => void;
   onClaimed: () => void;
 }
 
 /**
- * Pair the device, then expose its own Agent settings before completing setup.
+ * Pair a physical endpoint with its Companion; identity and Agent are inherited.
  *
  * Every non-loopback NIC is listed because the machine the robot can reach is
  * not necessarily the one the user thinks of as "the" address. The LAN listener
@@ -37,7 +34,6 @@ const AddRobotModal: React.FC<AddRobotModalProps> = ({
   visible,
   companionId,
   companionName,
-  model,
   onCancel,
   onClaimed,
 }) => {
@@ -45,8 +41,6 @@ const AddRobotModal: React.FC<AddRobotModalProps> = ({
   const [endpoints, setEndpoints] = useState<IApiRobotEndpoints | null>(null);
   const [code, setCode] = useState('');
   const [claiming, setClaiming] = useState(false);
-  const [claimedRobotId, setClaimedRobotId] = useState<string | null>(null);
-  const [savingAgent, setSavingAgent] = useState(false);
   const [enablingLan, setEnablingLan] = useState(false);
 
   const refreshEndpoints = useCallback(async () => {
@@ -61,7 +55,6 @@ const AddRobotModal: React.FC<AddRobotModalProps> = ({
   useEffect(() => {
     if (!visible) return;
     setCode('');
-    setClaimedRobotId(null);
     void refreshEndpoints();
   }, [visible, refreshEndpoints]);
 
@@ -83,10 +76,10 @@ const AddRobotModal: React.FC<AddRobotModalProps> = ({
   const claim = useCallback(async () => {
     setClaiming(true);
     try {
-      const robot = await ipcBridge.robot.claim.invoke({ code: code.trim(), companion_id: companionId });
-      setClaimedRobotId(robot.robot_id);
+      await ipcBridge.robot.claim.invoke({ code: code.trim(), companion_id: companionId });
       Message.success(t('nomi.robot.claimOk', { companionName }));
       onClaimed();
+      onCancel();
     } catch (error) {
       console.error('[RobotConnect] Failed to claim a robot:', error);
       const status = isBackendHttpError(error) ? error.status : 0;
@@ -100,7 +93,7 @@ const AddRobotModal: React.FC<AddRobotModalProps> = ({
     } finally {
       setClaiming(false);
     }
-  }, [code, companionId, companionName, onClaimed, t]);
+  }, [code, companionId, companionName, onClaimed, onCancel, t]);
 
   const lanOff = endpoints != null && !endpoints.lan_enabled;
 
@@ -108,7 +101,7 @@ const AddRobotModal: React.FC<AddRobotModalProps> = ({
     <NomiModal
       visible={visible}
       onCancel={() => {
-        if (!claiming && !savingAgent) onCancel();
+        if (!claiming) onCancel();
       }}
       header={{ title: t('nomi.robot.addTitle'), showClose: true }}
       footer={null}
@@ -116,26 +109,10 @@ const AddRobotModal: React.FC<AddRobotModalProps> = ({
     >
       <div className='flex flex-col gap-14px py-4px'>
         <div className='flex flex-col gap-6px'>
-          <span className='text-14px font-medium text-t-primary'>{t('nomi.robot.agentLabel')}</span>
           <span className='text-12px leading-18px text-t-secondary'>
-            {t(claimedRobotId ? 'nomi.robot.agentHint' : 'nomi.robot.agentBeforeClaim')}
+            {t('nomi.robot.inheritHint', { companionName })}
           </span>
         </div>
-        {claimedRobotId ? (
-          <>
-            <span className='text-12px text-t-secondary'>{t('nomi.robot.claimOk', { companionName })}</span>
-            <ProductAgentBindingSelect
-              targetKind='robot'
-              targetId={claimedRobotId}
-              defaultTemplateKey='robot.default'
-              model={model}
-              onSavingChange={setSavingAgent}
-            />
-            <Button type='primary' disabled={savingAgent} onClick={onCancel}>
-              {t('nomi.robot.finishSetup')}
-            </Button>
-          </>
-        ) : (
           <>
             {lanOff && (
               <div className='flex flex-wrap items-center gap-8px rd-8px border border-solid border-[rgba(var(--warning-6),0.32)] bg-[rgba(var(--warning-6),0.08)] px-12px py-8px'>
@@ -197,7 +174,6 @@ const AddRobotModal: React.FC<AddRobotModalProps> = ({
               </div>
             </div>
           </>
-        )}
       </div>
     </NomiModal>
   );

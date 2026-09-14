@@ -5,6 +5,7 @@
 //! images or introducing a second vision-model path.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, Weak};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -12,7 +13,43 @@ use tokio::sync::RwLock;
 pub const VISION_OBSERVATION_MAX_AGE_MS: i64 = 5 * 60 * 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RobotVisionSource {
+    pub companion_id: String,
+    pub conversation_id: String,
+    pub connection_id: String,
+    pub request_id: String,
+}
+
+#[async_trait::async_trait]
+pub trait RobotVisionRecorder: Send + Sync {
+    fn robot_id(&self) -> &str;
+    fn source(&self) -> RobotVisionSource;
+    async fn authorize(&self) -> Result<(), String>;
+    async fn record(&self, question: &str, answer: &str, jpeg: &[u8]) -> Result<(), String>;
+}
+
+type ActiveVisionTurns = Mutex<BTreeMap<String, Arc<dyn RobotVisionRecorder>>>;
+
+pub struct RobotVisionTurnLease {
+    active: Weak<ActiveVisionTurns>,
+    robot_id: String,
+    recorder: Arc<dyn RobotVisionRecorder>,
+}
+
+impl Drop for RobotVisionTurnLease {
+    fn drop(&mut self) {
+        if let Some(active) = self.active.upgrade() {
+            let mut turns = active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if turns.get(&self.robot_id).is_some_and(|turn| Arc::ptr_eq(turn, &self.recorder)) {
+                turns.remove(&self.robot_id);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RobotVisionObservation {
+    pub source: RobotVisionSource,
     pub robot_id: String,
     pub companion_id: String,
     pub question: String,
@@ -23,9 +60,23 @@ pub struct RobotVisionObservation {
 #[derive(Default)]
 pub struct RobotVisionObservationRegistry {
     inner: RwLock<BTreeMap<String, RobotVisionObservation>>,
+    active: Arc<ActiveVisionTurns>,
 }
 
 impl RobotVisionObservationRegistry {
+    pub fn register_turn(&self, recorder: Arc<dyn RobotVisionRecorder>) -> RobotVisionTurnLease {
+        let lease = RobotVisionTurnLease {
+            active: Arc::downgrade(&self.active), robot_id: recorder.robot_id().to_owned(), recorder: recorder.clone(),
+        };
+        self.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(lease.robot_id.clone(), recorder);
+        lease
+    }
+
+    pub fn active_turn(&self, robot_id: &str, companion_id: &str) -> Option<Arc<dyn RobotVisionRecorder>> {
+        self.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(robot_id).filter(|turn| turn.source().companion_id == companion_id).cloned()
+    }
     pub async fn record(&self, observation: RobotVisionObservation) {
         self.inner
             .write()
@@ -57,8 +108,31 @@ impl RobotVisionObservationRegistry {
 mod tests {
     use super::*;
 
+    struct Recorder;
+    #[async_trait::async_trait]
+    impl RobotVisionRecorder for Recorder {
+        fn robot_id(&self) -> &str { "robot-1" }
+        fn source(&self) -> RobotVisionSource { observation("companion-1", 1).source }
+        async fn authorize(&self) -> Result<(), String> { Ok(()) }
+        async fn record(&self, _: &str, _: &str, _: &[u8]) -> Result<(), String> { Ok(()) }
+    }
+
+    #[test]
+    fn an_old_lease_cannot_remove_a_replacement_with_the_same_source_ids() {
+        let registry = RobotVisionObservationRegistry::default();
+        let old = registry.register_turn(Arc::new(Recorder));
+        let current = registry.register_turn(Arc::new(Recorder));
+        drop(old);
+        assert!(registry.active_turn("robot-1", "companion-1").is_some());
+        assert!(registry.active_turn("robot-1", "other").is_none());
+        drop(current);
+        assert!(registry.active_turn("robot-1", "companion-1").is_none());
+    }
+
     fn observation(companion_id: &str, observed_at_ms: i64) -> RobotVisionObservation {
         RobotVisionObservation {
+            source: RobotVisionSource { companion_id: companion_id.to_owned(),
+                conversation_id: "conversation-1".to_owned(), connection_id: "socket-1".to_owned(), request_id: "turn-1".to_owned() },
             robot_id: "robot-1".to_owned(),
             companion_id: companion_id.to_owned(),
             question: "桌上是什么？".to_owned(),

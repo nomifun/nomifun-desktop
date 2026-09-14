@@ -93,8 +93,6 @@ pub enum OfficialPresetKeyDto {
     CodingCodex,
     #[serde(rename = "companion.default")]
     CompanionDefault,
-    #[serde(rename = "robot.default")]
-    RobotDefault,
     #[serde(rename = "customer-service.default")]
     CustomerServiceDefault,
     #[serde(rename = "creative-studio.default")]

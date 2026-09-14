@@ -1511,6 +1511,7 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
                 &self.runtime_registry,
                 build_lease,
                 BackgroundTurnRuntimePreparation {
+                    companion_device_turn: None,
                     runtime_options,
                     clear_context,
                     pre_send_hook: None,
@@ -1966,6 +1967,7 @@ impl nomifun_requirement::AutoWorkSessionPort for NomiCoreSessionOwner {
                 &self.runtime_registry,
                 build_lease,
                 BackgroundTurnRuntimePreparation {
+                    companion_device_turn: None,
                     runtime_options,
                     clear_context: runtime_overlay.clear_context,
                     pre_send_hook: runtime_overlay.pre_send_hook.map(|hook| {
@@ -2712,6 +2714,7 @@ fn runtime_options_from_session(
             delegation_policy,
             extra: Value::Object(session_extra).into(),
             conversation_created_at: Some(created_at),
+            device_mcp_servers: Vec::new(),
             workspace_binding_lease: None,
         },
         workspace,
@@ -3429,7 +3432,6 @@ async fn product_agent_options(
 fn product_default_template(target_kind: &str) -> Option<&'static str> {
     match target_kind {
         "companion" => Some("companion.default"),
-        "robot" => Some("robot.default"),
         "customer" => Some("customer-service.default"),
         "creative_studio_canvas" => Some("creative-studio.default"),
         _ => None,
@@ -3453,8 +3455,7 @@ async fn select_product_agent_binding(
     if let Some(id) = request.conversation_id.as_deref() {
         let current = state.session_owner.get_session(owner.as_ref(), id).await?;
         let belongs = (current.extra["product_agent_target_kind"] == target_kind && current.extra["product_agent_target_id"] == target_id)
-            || (target_kind == "companion" && current.extra["companion_id"] == target_id && current.extra["robot_session"] != true)
-            || (target_kind == "robot" && current.extra["robot_id"] == target_id);
+            || (target_kind == "companion" && current.extra["companion_id"] == target_id);
         if !belongs { return Err(NomiCoreApiError::new(StatusCode::FORBIDDEN, "RESOURCE_OWNER_MISMATCH", "conversation belongs to another product target")); }
         if current.status == nomifun_common::ConversationStatus::Running {
             return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "REMOTE_SESSION_BUSY", "wait for the current reply"));

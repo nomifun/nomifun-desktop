@@ -973,6 +973,16 @@ fn sync_auth_metadata_parent(_parent: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    // The coordinator owns a marker in the root's parent. Giving each test a
+    // dedicated parent prevents parallel fixtures from sharing /tmp's marker.
+    struct IsolatedDirectory { _parent: tempfile::TempDir, root: std::path::PathBuf }
+    impl IsolatedDirectory { fn path(&self) -> &std::path::Path { &self.root } }
+    fn isolated_directory() -> IsolatedDirectory {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        IsolatedDirectory { _parent: parent, root }
+    }
     use super::*;
     use async_trait::async_trait;
     use clap::Parser;
@@ -1051,7 +1061,7 @@ mod tests {
 
     #[test]
     fn auth_metadata_update_roundtrips_without_leaving_a_temp_file() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = isolated_directory();
         let path = directory.path().join(V4_AUTH_METADATA_FILE);
         let metadata = FreshV4AuthMetadata {
             username: "admin".to_owned(),
@@ -1077,7 +1087,8 @@ mod tests {
 
     #[tokio::test]
     async fn auth_metadata_persist_failure_does_not_change_repository_memory() {
-        let directory = tempfile::tempdir().unwrap();
+        let _environment = super::super::environment::test_environment_guard().await;
+        let directory = isolated_directory();
         let outcome = nomifun_v4_root::FreshV4Coordinator::default()
             .bootstrap(
                 directory.path(),
@@ -1120,7 +1131,8 @@ mod tests {
 
     #[tokio::test]
     async fn canonical_host_composes_without_opening_the_legacy_database() {
-        let directory = tempfile::tempdir().unwrap();
+        let _environment = super::super::environment::test_environment_guard().await;
+        let directory = isolated_directory();
         let outcome = nomifun_v4_root::FreshV4Coordinator::default()
             .bootstrap(
                 directory.path(),
@@ -1172,7 +1184,8 @@ mod tests {
 
     #[tokio::test]
     async fn canonical_host_can_restart_after_platform_materialization() {
-        let directory = tempfile::tempdir().unwrap();
+        let _environment = super::super::environment::test_environment_guard().await;
+        let directory = isolated_directory();
         let config = crate::AppConfig {
             data_dir: directory.path().to_path_buf(),
             work_dir: directory.path().to_path_buf(),
@@ -1206,7 +1219,8 @@ mod tests {
 
     #[tokio::test]
     async fn canonical_host_retains_coordinator_identity_and_fails_closed_explicitly() {
-        let directory = tempfile::tempdir().unwrap();
+        let _environment = super::super::environment::test_environment_guard().await;
+        let directory = isolated_directory();
         let outcome = nomifun_v4_root::FreshV4Coordinator::default()
             .bootstrap(
                 directory.path(),
@@ -1236,11 +1250,12 @@ mod tests {
 
     #[tokio::test]
     async fn canonical_auth_setup_and_login_use_the_v4_installation_row() {
+        let _environment = super::super::environment::test_environment_guard().await;
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
 
-        let directory = tempfile::tempdir().unwrap();
+        let directory = isolated_directory();
         let outcome = nomifun_v4_root::FreshV4Coordinator::default()
             .bootstrap(
                 directory.path(),
@@ -1343,11 +1358,12 @@ mod tests {
 
     #[tokio::test]
     async fn canonical_system_and_installation_token_routes_use_the_v4_pool() {
+        let _environment = super::super::environment::test_environment_guard().await;
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
 
-        let directory = tempfile::tempdir().unwrap();
+        let directory = isolated_directory();
         let outcome = nomifun_v4_root::FreshV4Coordinator::default()
             .bootstrap(
                 directory.path(),
@@ -1480,6 +1496,7 @@ mod tests {
 
     #[tokio::test]
     async fn canonical_remote_rest_freezes_binding_and_auth_fence() {
+        let _environment = super::super::environment::test_environment_guard().await;
         tokio::time::timeout(
             std::time::Duration::from_secs(60),
             canonical_remote_rest_freezes_binding_and_auth_fence_body(),
@@ -1499,7 +1516,7 @@ mod tests {
         };
         use tower::ServiceExt;
 
-        let directory = tempfile::tempdir().unwrap();
+        let directory = isolated_directory();
         let outcome = nomifun_v4_root::FreshV4Coordinator::default()
             .bootstrap(
                 directory.path(),

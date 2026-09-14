@@ -84,12 +84,6 @@
         "description": "为日常陪伴配置角色、记忆与沟通能力。"
       }
     },
-    "robot": {
-      "default": {
-        "name": "机器人",
-        "description": "为设备交互选择感知、沟通与动作能力。"
-      }
-    },
     "customerService": {
       "default": {
         "name": "客户服务",

@@ -84,12 +84,6 @@
         "description": "Choose the role, memory and communication abilities for a companion."
       }
     },
-    "robot": {
-      "default": {
-        "name": "Robot",
-        "description": "Choose perception, communication and action capabilities for device interactions."
-      }
-    },
     "customerService": {
       "default": {
         "name": "Customer Service",

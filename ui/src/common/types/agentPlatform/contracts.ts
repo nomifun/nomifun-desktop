@@ -28,7 +28,6 @@ export const OFFICIAL_PRESET_KEYS = [
   'assistant.general',
   'coding.codex',
   'companion.default',
-  'robot.default',
   'customer-service.default',
   'creative-studio.default',
 ] as const;

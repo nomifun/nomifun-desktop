@@ -558,6 +558,16 @@ pub(super) async fn build(
             &ctx.conversation_id,
         );
     }
+    // Device transports come from a live, revocable host grant rather than
+    // the public/persisted MCP config bag. They coexist with on-demand MCP
+    // without changing the user's declared MCP connection policy.
+    if is_instance_owner && !options.device_mcp_servers.is_empty() {
+        merge_session_snapshot_mcp_servers(
+            &mut extra_mcp_servers,
+            &options.device_mcp_servers,
+            &ctx.conversation_id,
+        );
+    }
     if lazy_mcp_runtime.is_none() {
         apply_mcp_oauth_credentials(
             &mut extra_mcp_servers,

@@ -1,5 +1,11 @@
 //! Bootstrap layers shared by non-MCP subcommands.
 
+#[cfg(test)]
+pub(crate) async fn test_environment_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    LOCK.lock().await
+}
+
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -912,8 +918,7 @@ mod tests {
     /// which is why they passed when filtered down and failed only in the full
     /// workspace run, where the whole binary's tests share the process.
     async fn env_guard() -> tokio::sync::MutexGuard<'static, ()> {
-        static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-        LOCK.lock().await
+        super::test_environment_guard().await
     }
 
     fn finalize_test_dataset(data: &Path, generation: &str, retired_before: bool) {
@@ -942,7 +947,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn published_059_boots_and_upgrades_without_reusing_automatic_retirement() {
+    async fn removed_robot_history_baseline_is_rejected_without_migration_or_retirement() {
         let _env = env_guard().await;
         let data = tempfile::tempdir().unwrap();
         let config = test_config(data.path(), data.path());
@@ -963,6 +968,10 @@ mod tests {
         {
             connection.apply(migration).await.unwrap();
         }
+        // Only the historical ledger fingerprint is a fixture. The retired
+        // robot backfill itself must not return to the executable migrations.
+        sqlx::query("INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) VALUES (27, 'retired robot history', 1, X'737dd2c0c2c35b029f11fdaf65ef16b19f7eb1def49b2561767131724c01a6cb5a2aa568900e72903a97470881ac7a54', 0)")
+            .execute(&mut *connection).await.unwrap();
         // Main shipped this exact SQL at 059; the refactor carries it at 073.
         let mut published = TEST_MIGRATOR.iter().find(|migration| migration.version == 73).unwrap().clone();
         published.version = 59;
@@ -1004,32 +1013,23 @@ mod tests {
         let marker = retired.join("automatic-legacy-retirement.completed.json");
         let marker_before = std::fs::read(&marker).unwrap();
 
-        assert_eq!(
-            prepare_v3_data_layer(&config).await.unwrap(),
-            V3DataLayerState::FinalizedCurrent
-        );
-        let db = nomifun_db::init_database(&config.database_path())
-            .await
-            .unwrap();
-        nomifun_db::validate_id_schema_contract(db.pool())
-            .await
-            .unwrap();
+        let error = prepare_v3_data_layer(&config).await.unwrap_err();
+        assert!(error.to_string().contains("migration"), "{error}");
+        let pool = PoolOptions::<Sqlite>::new().max_connections(1)
+            .connect_with(SqliteConnectOptions::new().filename(config.database_path()).read_only(true))
+            .await.unwrap();
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT MAX(version) FROM _sqlx_migrations")
-                .fetch_one(db.pool())
+                .fetch_one(&pool)
                 .await
                 .unwrap(),
-            TEST_MIGRATOR
-                .iter()
-                .last()
-                .expect("the database must have at least one migration")
-                .version
+            59
         );
         assert_eq!(
             sqlx::query_scalar::<_, Vec<u8>>(
-                "SELECT checksum FROM _sqlx_migrations WHERE version = 73"
+                "SELECT checksum FROM _sqlx_migrations WHERE version = 59"
             )
-            .fetch_one(db.pool())
+            .fetch_one(&pool)
             .await
             .unwrap(),
             checksum
@@ -1039,16 +1039,13 @@ mod tests {
                 "SELECT text_content FROM workshop_assets WHERE asset_id = ?"
             )
             .bind(asset.as_str())
-            .fetch_one(db.pool())
+            .fetch_one(&pool)
             .await
             .unwrap(),
             "original content"
         );
-        db.close().await;
-        assert_eq!(
-            prepare_v3_data_layer(&config).await.unwrap(),
-            V3DataLayerState::FinalizedCurrent
-        );
+        pool.close().await;
+        assert!(prepare_v3_data_layer(&config).await.is_err());
         assert_eq!(std::fs::read(receipt).unwrap(), receipt_before);
         assert_eq!(std::fs::read(marker).unwrap(), marker_before);
         assert_eq!(std::fs::read_dir(retired).unwrap().count(), 1);

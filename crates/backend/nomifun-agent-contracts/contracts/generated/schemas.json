@@ -4218,9 +4218,6 @@
           },
           "customer-service.default": {
             "$ref": "#/$defs/OfficialPresetRoleCoverage"
-          },
-          "robot.default": {
-            "$ref": "#/$defs/OfficialPresetRoleCoverage"
           }
         },
         "type": "object"
@@ -4250,9 +4247,6 @@
             "$ref": "#/$defs/OfficialPresetSeed"
           },
           "customer-service.default": {
-            "$ref": "#/$defs/OfficialPresetSeed"
-          },
-          "robot.default": {
             "$ref": "#/$defs/OfficialPresetSeed"
           }
         },

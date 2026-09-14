@@ -37,6 +37,18 @@ pub struct RobotStatusRegistry {
 }
 
 impl RobotStatusRegistry {
+    pub async fn publish_for_connection(&self, registry: &crate::registry::RobotRegistry,
+        robot_id: &str, connection_id: Option<&str>, companion_id: Option<&str>, phase: RobotPhase, now_ms: i64)
+    {
+        let Some(connection_id) = connection_id else { return; };
+        let Some(_lease) = registry.hold_connection(robot_id, Some(connection_id)).await else { return; };
+        self.publish(robot_id, companion_id, phase, now_ms).await;
+    }
+
+    pub async fn mark_offline_if_disconnected(&self, registry: &crate::registry::RobotRegistry, robot_id: &str, now_ms: i64) {
+        let Some(_lease) = registry.hold_connection(robot_id, None).await else { return; };
+        self.mark_offline(robot_id, now_ms).await;
+    }
     pub fn new(emitter: RobotEventEmitter, owner_id: String) -> Self {
         Self {
             emitter,
@@ -58,6 +70,7 @@ impl RobotStatusRegistry {
             let mut map = self.inner.write().await;
             if let Some(existing) = map.get(robot_id)
                 && existing.phase == phase.as_wire()
+                && (companion_id.is_none() || existing.companion_id.as_deref() == companion_id)
             {
                 return;
             }
@@ -116,6 +129,30 @@ mod tests {
         assert_eq!(RobotPhase::Idle.as_wire(), "idle");
         assert_eq!(RobotPhase::Listening.as_wire(), "listening");
         assert_eq!(RobotPhase::Speaking.as_wire(), "speaking");
+    }
+
+    #[tokio::test]
+    async fn old_connection_status_and_cleanup_cannot_override_a_reconnected_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let devices = crate::registry::RobotRegistry::load(dir.path()).await.unwrap();
+        let (device, _) = devices.upsert_on_report(crate::registry::RobotReport {
+            robot_id: "robot-1".to_owned(), client_id: "client".to_owned(), board: "test".to_owned(), firmware_version: "test".to_owned(),
+        }, 1).await.unwrap();
+        devices.claim(device.activation_code.as_deref().unwrap(), "companion-1").await.unwrap();
+        let status = registry(Arc::new(Recording::default()));
+        devices.connect("robot-1", "companion-1", "socket-1").await.unwrap();
+        status.publish_for_connection(&devices, "robot-1", Some("socket-1"), Some("companion-1"), RobotPhase::Idle, 1).await;
+        devices.connect("robot-1", "companion-1", "socket-2").await.unwrap();
+        status.publish_for_connection(&devices, "robot-1", Some("socket-1"), Some("companion-1"), RobotPhase::Speaking, 2).await;
+        status.mark_offline_if_disconnected(&devices, "robot-1", 3).await;
+        assert_eq!(status.snapshot().await[0].phase, "idle");
+        devices.patch("robot-1", None, Some(Some("companion-2".to_owned()))).await.unwrap();
+        devices.connect("robot-1", "companion-2", "socket-3").await.unwrap();
+        status.publish_for_connection(&devices, "robot-1", Some("socket-3"), Some("companion-2"), RobotPhase::Idle, 4).await;
+        assert_eq!(status.snapshot().await[0].companion_id.as_deref(), Some("companion-2"));
+        devices.disconnect("robot-1", "socket-3").await;
+        status.mark_offline_if_disconnected(&devices, "robot-1", 5).await;
+        assert_eq!(status.snapshot().await[0].phase, "offline");
     }
 
     #[tokio::test]

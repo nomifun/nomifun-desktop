@@ -302,19 +302,7 @@
           {
             "id": "channel.group_policy",
             "version": "1.0.0"
-          }
-        ],
-        "skill_bindings": [],
-        "required_resource_kinds": [
-          "channel",
-          "companion",
-          "companion_memory",
-          "knowledge_base"
-        ],
-        "required_runtime_features": []
-      },
-      "robot.default": {
-        "enabled_capabilities": [
+          },
           {
             "id": "robot.link",
             "version": "1.0.0"
@@ -328,22 +316,6 @@
             "version": "1.0.0"
           },
           {
-            "id": "companion.persona",
-            "version": "1.0.0"
-          },
-          {
-            "id": "memory.companion.recall",
-            "version": "1.0.0"
-          },
-          {
-            "id": "knowledge.search",
-            "version": "1.0.0"
-          },
-          {
-            "id": "knowledge.read",
-            "version": "1.0.0"
-          },
-          {
             "id": "robot.vision",
             "version": "1.0.0"
           },
@@ -353,18 +325,6 @@
           },
           {
             "id": "robot.device_tools",
-            "version": "1.0.0"
-          },
-          {
-            "id": "memory.companion.write",
-            "version": "1.0.0"
-          },
-          {
-            "id": "channel.receive",
-            "version": "1.0.0"
-          },
-          {
-            "id": "channel.reply",
             "version": "1.0.0"
           }
         ],
@@ -638,36 +598,6 @@
           "channel",
           "companion",
           "companion_memory",
-          "knowledge_base"
-        ]
-      },
-      "robot.default": {
-        "required_capability_categories": [
-          "audio_display",
-          "device_link",
-          "persona_memory_knowledge",
-          "vision_motion"
-        ],
-        "required_capability_ids": [
-          "channel.receive",
-          "channel.reply",
-          "companion.persona",
-          "knowledge.read",
-          "knowledge.search",
-          "memory.companion.recall",
-          "memory.companion.write",
-          "robot.audio",
-          "robot.device_tools",
-          "robot.display",
-          "robot.link",
-          "robot.motion",
-          "robot.vision"
-        ],
-        "required_runtime_features": [],
-        "required_resource_kinds": [
-          "channel",
-          "companion",
-          "companion_memory",
           "knowledge_base",
           "robot"
         ]
@@ -741,5 +671,5 @@
       "research.web"
     ]
   },
-  "payload_digest": "2319c767aadbbbcadba78f80e32b627e7fe8567baeee109fe047b4cd5e4c22a6"
+  "payload_digest": "cf6ed688194a4e60d15fc8e25195937950cce498ed06b7b6735ad2e104255aa0"
 }

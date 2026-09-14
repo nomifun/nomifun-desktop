@@ -136,6 +136,9 @@ pub struct ConversationRuntimeStateService {
     /// (cleared on restart), which is intentional: after a restart the runtime registry
     /// is empty too, so the first build naturally carries the current mounts.
     knowledge_signatures: Mutex<HashMap<String, String>>,
+    /// Cached runtimes with an ephemeral device prompt/model/tool context.
+    /// The next desktop turn must recycle them before restoring its own context.
+    companion_device_runtimes: Mutex<std::collections::HashSet<String>>,
     /// Per-conversation CUMULATIVE token usage (`input + output`) for the turns
     /// run on that conversation, accumulated from the per-turn `TurnCompleted`
     /// metrics event the stream relay sees. Keyed by conversation id string.
@@ -261,6 +264,22 @@ pub struct TurnWireContext {
 }
 
 impl ConversationRuntimeStateService {
+    /// Called only by the admitted turn owner, before runtime construction.
+    /// No device context survives into the next ordinary desktop/IM turn.
+    pub fn replace_companion_device_runtime_context(
+        &self,
+        conversation_id: &str,
+        device_turn: bool,
+    ) -> bool {
+        let mut runtimes = self.companion_device_runtimes.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = runtimes.remove(conversation_id);
+        if device_turn {
+            runtimes.insert(conversation_id.to_owned());
+        }
+        previous || device_turn
+    }
+
     /// Acquire the per-conversation preparation/reconciliation gate.
     ///
     /// A page warmup and an explicit send must never independently observe an
@@ -875,25 +894,45 @@ impl ConversationRuntimeStateService {
         self: &Arc<Self>,
         conversation_id: &str,
     ) -> Result<Option<ConversationStopGuard>, AppError> {
-        self.begin_conversation_stop_inner(conversation_id, false)
+        self.begin_conversation_stop_inner(conversation_id, false, None)
     }
 
     pub fn begin_conversation_stop_for_deletion(
         self: &Arc<Self>,
         conversation_id: &str,
     ) -> Result<Option<ConversationStopGuard>, AppError> {
-        self.begin_conversation_stop_inner(conversation_id, true)
+        self.begin_conversation_stop_inner(conversation_id, true, None)
+    }
+
+    /// Compare the exact durable operation and establish the stop fence under
+    /// the same lock as turn admission/completion. A late device abort is a no-op.
+    pub fn begin_device_turn_stop(
+        self: &Arc<Self>, conversation_id: &str, owner_id: &str, operation_id: &str,
+    ) -> Result<Option<ConversationStopGuard>, AppError> {
+        self.begin_conversation_stop_inner(conversation_id, false, Some((owner_id, operation_id)))
     }
 
     fn begin_conversation_stop_inner(
         self: &Arc<Self>,
         conversation_id: &str,
         deletion_owned: bool,
+        expected_operation: Option<(&str, &str)>,
     ) -> Result<Option<ConversationStopGuard>, AppError> {
         let _linearization = self
             .cleanup_linearization
             .lock()
             .map_err(|_| AppError::Internal("cleanup linearization lock poisoned".into()))?;
+        if let Some((owner_id, operation_id)) = expected_operation {
+            let turns = self.active_turns.lock()
+                .map_err(|_| AppError::Internal("active turn lock poisoned".into()))?;
+            if !turns.get(conversation_id).is_some_and(|turn| {
+                turn.owner_user_id.as_deref() == Some(owner_id)
+                    && turn.persistent_operation_id.as_deref() == Some(operation_id)
+                    && turn.public_cancellable
+            }) {
+                return Ok(None);
+            }
+        }
         let deletion_tombstones = self.deletion_tombstones.lock().map_err(|_| {
             AppError::Internal("conversation deletion admission lock poisoned".into())
         })?;
@@ -2037,6 +2076,41 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn companion_device_context_recycles_entering_switching_and_leaving_devices() {
+        let state = ConversationRuntimeStateService::default();
+        assert!(!state.replace_companion_device_runtime_context("companion", false));
+        assert!(state.replace_companion_device_runtime_context("companion", true));
+        assert!(!state.replace_companion_device_runtime_context("other", false));
+        assert!(state.replace_companion_device_runtime_context("companion", true));
+        assert!(state.replace_companion_device_runtime_context("companion", false));
+        assert!(!state.replace_companion_device_runtime_context("companion", false));
+    }
+
+    #[test]
+    fn late_device_abort_cannot_cancel_a_successor_or_another_owner() {
+        let state = Arc::new(ConversationRuntimeStateService::default());
+        let acquire = |operation: &str| state
+            .try_acquire_turn_with_wire_context_at_epoch_and_owner_with_persistent_generation(
+                "companion", Some("wire-1".to_owned()), TurnWireContext::default(), None,
+                Some("owner".to_owned()), true, None, Some((1, operation.to_owned())),
+            ).unwrap();
+        let first = acquire("device-1");
+        let before = state.cancellation_epoch("companion");
+        assert!(state.begin_device_turn_stop("companion", "other", "device-1").unwrap().is_none());
+        assert!(state.begin_device_turn_stop("companion", "owner", "different").unwrap().is_none());
+        assert_eq!(state.cancellation_epoch("companion"), before);
+        let stop = state.begin_device_turn_stop("companion", "owner", "device-1").unwrap().unwrap();
+        assert!(state.cancellation_epoch("companion") > before);
+        drop(first);
+        drop(stop);
+        let _successor = acquire("desktop-2");
+        let before = state.cancellation_epoch("companion");
+        assert!(state.begin_device_turn_stop("companion", "owner", "device-1").unwrap().is_none());
+        assert_eq!(state.cancellation_epoch("companion"), before);
+        assert!(state.has_active_turn("companion"));
+    }
 
     #[test]
     fn turn_handle_rejects_second_active_turn() {

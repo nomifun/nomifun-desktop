@@ -35,7 +35,7 @@ const templateIcon = (key: OfficialPresetKey) => {
     : key === 'chat.minimal' ? MessageOne
       : key === 'customer-service.default' ? Customer
         : key === 'creative-studio.default' ? Magic
-          : key === 'robot.default' ? Robot : User;
+          : User;
   return <Icon theme='outline' size={20} fill='currentColor' />;
 };
 
