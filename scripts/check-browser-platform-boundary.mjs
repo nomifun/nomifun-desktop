@@ -24,11 +24,10 @@ const GATEWAY_REGISTRY = 'crates/backend/nomifun-gateway/src/browser_registry.rs
 const HUB_COMPOSITION = 'crates/backend/nomifun-app/src/services.rs';
 const KNOWLEDGE_BROWSER_COMPOSITION =
   'crates/backend/nomifun-app/src/services.rs';
-const FRESH_V4_HUB_COMPOSITION =
-  'crates/backend/nomifun-app/src/router/agent_platform_host.rs';
+// The external Wrapper/Fresh-v4 host has been removed. Desktop and server
+// compose the same Services-owned hub; an engine must never create its own.
 const HUB_COMPOSITION_ROOTS = new Set([
   HUB_COMPOSITION,
-  FRESH_V4_HUB_COMPOSITION,
 ]);
 
 const OWNERSHIP_BOUNDARY_PREFIXES = [
@@ -1098,10 +1097,6 @@ function selfTest() {
       path: HUB_COMPOSITION,
       source: 'fn service() { BrowserSessionHub::new(); }',
     },
-    {
-      path: FRESH_V4_HUB_COMPOSITION,
-      source: 'fn fresh_v4() { BrowserSessionHub::new(); }',
-    },
   ];
   assertNoViolation(baseline, 'baseline unexpectedly violates the Browser Platform boundary');
 
@@ -1225,7 +1220,7 @@ function selfTest() {
   );
   assertViolation(
     baseline.concat({
-      path: FRESH_V4_HUB_COMPOSITION,
+      path: HUB_COMPOSITION,
       source: `
         fn fresh_v4() {
           BrowserSessionHub::new();
@@ -1234,7 +1229,15 @@ function selfTest() {
       `,
     }),
     'hub-composition-contract',
-    'failed to reject a second Fresh-v4 BrowserSessionHub constructor',
+    'failed to reject duplicate Services BrowserSessionHub constructors',
+  );
+  assertViolation(
+    baseline.concat({
+      path: 'crates/backend/nomifun-app/src/router/agent_platform_host.rs',
+      source: 'fn retired_host() { BrowserSessionHub::new(); }',
+    }),
+    'hub-composition-contract',
+    'failed to reject a revived retired Wrapper composition root',
   );
   assertViolation(
     baseline.map((entry) =>
