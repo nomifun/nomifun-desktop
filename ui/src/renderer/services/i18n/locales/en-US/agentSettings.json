@@ -44,7 +44,7 @@
     },
     "label": "Agent setup",
     "saved": "Agent updated",
-    "companionHint": "Controls capabilities for local and IM Companion conversations. The official Companion is used by default."
+    "companionHint": "Changes apply to this companion's desktop, robot and IM conversations. The official Companion is used by default."
   },
   "library": {
     "ariaLabel": "Agent library",
@@ -89,12 +89,6 @@
       "default": {
         "name": "Companion",
         "description": "Choose the role, memory and communication abilities for a companion."
-      }
-    },
-    "robot": {
-      "default": {
-        "name": "Robot",
-        "description": "Choose perception, communication and action capabilities for device interactions."
       }
     },
     "customerService": {

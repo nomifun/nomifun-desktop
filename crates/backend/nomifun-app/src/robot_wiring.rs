@@ -10,18 +10,14 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
-use nomifun_api_types::{
-    AgentErrorOwnership, CreateConversationRequest, SendMessageRequest, SessionMcpServer,
-    SessionMcpTransport, UpdateConversationRequest,
-};
-use nomifun_common::{AgentType, ProviderWithModel};
+use nomifun_api_types::{AgentErrorOwnership, SendMessageRequest};
 use nomifun_ai_agent::AgentRuntimeRegistry;
 use nomifun_ai_agent::protocol::events::{AgentStreamEvent, TurnStopReason};
 use nomifun_conversation::ConversationService;
 use nomifun_db::IClientPreferenceRepository;
 use nomifun_robot::endpoint::{EndpointAdvertiser, LanAdvertiser, LanEndpointSnapshot};
 use nomifun_robot::effect_ledger::RobotEffectLedger;
-use nomifun_robot::mcp_proxy::{MCP_PROXY_SERVER_NAME, RobotMcpProxyServer};
+use nomifun_robot::mcp_proxy::RobotMcpProxyServer;
 use nomifun_robot::registry::RobotRegistry;
 use nomifun_robot::services::{SpeechServices, TurnEvent};
 use nomifun_robot::status::RobotStatusRegistry;
@@ -32,9 +28,10 @@ use nomifun_robot::wiring::{
     CompanionSlotReader, PreferenceReader, RobotSpeech, VisionCompletionExecutor,
     VisionCompletionRequest,
 };
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use tokio::sync::{broadcast, mpsc, watch};
+use serde_json::Value;
+use tokio::sync::{mpsc, watch};
+#[cfg(test)]
+use tokio::sync::broadcast;
 
 const ROBOT_VISION_MAX_TOKENS: u32 = 512;
 
@@ -97,6 +94,8 @@ impl VisionCompletionExecutor for AgentRobotVisionExecutor {
 /// listener comes up, while the gateway itself needs a `ConversationService`
 /// that only exists during router assembly.
 pub struct RobotServices {
+    #[cfg(test)]
+    backend: std::sync::OnceLock<Arc<AppRobotBackend>>,
     pub registry: Arc<RobotRegistry>,
     pub status: Arc<RobotStatusRegistry>,
     pub tools: Arc<RobotToolRegistry>,
@@ -162,6 +161,8 @@ impl RobotServices {
         ));
 
         Ok(Self {
+            #[cfg(test)]
+            backend: std::sync::OnceLock::new(),
             registry,
             status,
             tools,
@@ -322,7 +323,7 @@ impl PreferenceReader for AppPreferences {
 /// A prohibition is still not a guarantee, so both readers of the model's text
 /// strip stage directions as a backstop, syntax-agnostically
 /// (`nomifun_common::stage_direction`): the desktop relay
-/// (`stream_relay.rs`'s `robot_session` gate, which owns the live stream, the
+/// (`stream_relay.rs`'s `spoken_output` turn policy, which owns the live stream, the
 /// persisted `messages` row, search and the knowledge writeback) and the device
 /// path (`nomifun-robot`'s `sanitize_for_speech` / `sanitize_for_display`, which
 /// own TTS and the OLED). Those two are NOT duplicates and neither may be
@@ -338,425 +339,418 @@ impl PreferenceReader for AppPreferences {
 /// asides — none of which a TTS engine can voice, and some of which make it fail
 /// outright.
 fn robot_body_prompt() -> &'static str {
-    "你现在通过一台物理机器人和用户说话。它有一块 OLED 表情屏、一个可以转动的头（云台）、扬声器和麦克风。\n\
-     - 你写的每一个字都会被语音合成念出声，同时显示在一块 128x64 的小屏上。所以只写能读出来的自然口语。\n\
+    "你现在通过用户绑定的物理机器人和用户说话。摄像头、屏幕和动作以本轮实际提供的设备工具为准，不假设每台机器人都有相同硬件。\n\
+     - 你的回复会被语音合成念出声。所以只写能读出来的自然口语。\n\
      - 回复必须简短口语化：每句不超过 40 字，整体不超过 3 句，除非用户明确要求详细内容。\n\
      - 只输出要说出来的那句话本身。不要写任何方括号或【】里的标注（例如 [winking]、[开心]、【笑】），不要写动作描写或舞台提示，不要写旁白和括号里的补充说明。\n\
      - 不要输出 emoji、颜文字、markdown 记号（星号、井号、反引号），以及任何念不出声的符号。需要停顿就用逗号和句号。\n\
      - 需要转头、看某个方向或调音量时，用 robot_ 开头的工具。"
 }
 
-/// A stable, valid UUIDv7 naming this robot's session MCP registration.
-///
-/// `McpServerId` accepts nothing but a UUIDv7, and a fresh id on every boot
-/// would rewrite the conversation's `extra` for no reason, so the id is derived:
-/// a fixed timestamp plus ten bytes of the robot id's digest. Hashing (rather
-/// than slicing the MAC) matters because every MAC on one board shares a prefix.
-fn robot_mcp_server_id(robot_id: &str) -> String {
-    let digest = Sha256::digest(robot_id.as_bytes());
-    let mut random_bytes = [0u8; 10];
-    random_bytes.copy_from_slice(&digest[..10]);
-    uuid::Builder::from_unix_timestamp_millis(0, &random_bytes)
-        .into_uuid()
-        .to_string()
-}
-
-/// Backfill a robot thread created before its companion had a chat model.
-///
-/// An existing selection may be the fallback chosen after a provider failure,
-/// so only a genuinely empty conversation inherits the companion model.
-fn missing_robot_thread_model(
-    current: Option<&ProviderWithModel>,
-    configured: Option<&ProviderWithModel>,
-) -> Option<ProviderWithModel> {
-    current.is_none().then(|| configured.cloned()).flatten()
-}
-
-/// Real conversation access for one installation.
+/// Production device ingress shares the Companion's authoritative Conversation.
+#[derive(Clone)]
 pub struct AppRobotBackend {
     pub conversations: ConversationService,
     pub runtime_registry: Arc<dyn AgentRuntimeRegistry>,
     pub companions: Arc<nomifun_companion::CompanionService>,
     pub owner_user_id: Arc<str>,
-    pub data_dir: PathBuf,
-    /// Live robot MCP proxy URL + headers, so a reused thread is refreshed
-    /// instead of pointing at last boot's port.
+    pub registry: Arc<RobotRegistry>,
+    pub vision_observations: Arc<RobotVisionObservationRegistry>,
     pub mcp_proxy: Option<Arc<RobotMcpProxyServer>>,
+    pending: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
+    queues: Arc<Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>>,
+}
+
+#[derive(Clone)]
+struct DeviceTurnAuthority {
+    from_desktop: bool,
+    registry: Arc<RobotRegistry>,
+    request: nomifun_robot::services::RobotTurnRequest,
+    revision: u64,
+    capabilities: std::collections::BTreeSet<String>,
+    cancelled: tokio_util::sync::CancellationToken,
+    conversations: ConversationService,
+    owner_user_id: Arc<str>,
+    agent_revision: Option<(String, i64)>,
+}
+
+#[async_trait::async_trait]
+impl nomifun_robot::vision::RobotVisionRecorder for DeviceTurnAuthority {
+    fn robot_id(&self) -> &str { &self.request.robot_id }
+    fn source(&self) -> nomifun_robot::vision::RobotVisionSource {
+        nomifun_robot::vision::RobotVisionSource {
+            companion_id: self.request.companion_id.clone(), conversation_id: self.request.conversation_id.clone(),
+            connection_id: self.request.connection_id.clone(), request_id: self.request.request_id.clone(),
+        }
+    }
+    async fn authorize(&self) -> Result<(), String> {
+        nomifun_robot::mcp_proxy::RobotToolAuthority::validate(self, "robot.vision").await?;
+        let mut context = device_turn_context(&self.request);
+        context.from_desktop = self.from_desktop;
+        context.agent_revision = self.agent_revision.clone();
+        if !self.conversations.companion_device_turn_is_active(&self.owner_user_id, &self.request.conversation_id, &context) {
+            return Err("camera upload does not belong to the active Companion turn".to_owned());
+        }
+        Ok(())
+    }
+    async fn record(&self, question: &str, answer: &str, jpeg: &[u8]) -> Result<(), String> {
+        self.authorize().await?;
+        let mut context = device_turn_context(&self.request);
+        context.from_desktop = self.from_desktop;
+        context.agent_revision = self.agent_revision.clone();
+        self.conversations.record_companion_device_observation(&self.owner_user_id,
+            &self.request.conversation_id, &context, question, answer,
+            &base64::engine::general_purpose::STANDARD.encode(jpeg),
+        ).await.map_err(|error| error.to_string())
+    }
+}
+
+impl DeviceTurnAuthority {
+    async fn validate_connection(&self) -> Result<nomifun_robot::registry::RobotRecord, String> {
+        if self.cancelled.is_cancelled() { return Err("device utterance was cancelled".to_owned()); }
+        let record = self.registry.get(&self.request.robot_id).await.ok_or("robot was removed")?;
+        if record.companion_id.as_deref() != Some(self.request.companion_id.as_str())
+            || record.authorization_revision != self.revision
+            || !self.registry.connection_matches(&self.request.robot_id, &self.request.connection_id).await
+        { return Err("robot binding, permissions or connection changed".to_owned()); }
+        Ok(record)
+    }
+}
+
+#[async_trait::async_trait]
+impl nomifun_conversation::service::BackgroundTurnPreSendHook for DeviceTurnAuthority {
+    async fn prepare(&self) -> Result<(), nomifun_common::AppError> {
+        self.validate_connection().await.map(|_| ()).map_err(nomifun_common::AppError::Forbidden)
+    }
+}
+
+#[async_trait::async_trait]
+impl nomifun_robot::mcp_proxy::RobotToolAuthority for DeviceTurnAuthority {
+    fn robot_id(&self) -> &str { &self.request.robot_id }
+    fn connection_id(&self) -> &str { &self.request.connection_id }
+    async fn validate(&self, capability: &str) -> Result<(), String> {
+        let record = self.validate_connection().await?;
+        if !self.capabilities.contains(capability) || !record.permissions.allows(capability) {
+            return Err(format!("{capability} is outside the Companion and device capability ceiling"));
+        }
+        Ok(())
+    }
+    async fn validate_tool(&self, device_name: &str) -> Result<(), String> {
+        self.validate(nomifun_robot::tool_registry::tool_capability(device_name).capability_id()).await?;
+        if device_name.starts_with("self.audio") || device_name.starts_with("audio") {
+            self.validate("robot.audio").await?;
+        }
+        let record = self.validate_connection().await?;
+        if !record.permissions.allows_tool(device_name) { return Err("continuous observation is not allowed".to_owned()); }
+        let mut context = device_turn_context(&self.request);
+        context.from_desktop = self.from_desktop;
+        if !self.conversations.companion_device_turn_is_active(&self.owner_user_id, &self.request.conversation_id, &context) {
+            return Err("device tool no longer belongs to an active turn".to_owned());
+        }
+        Ok(())
+    }
+}
+
+fn device_turn_context(request: &nomifun_robot::services::RobotTurnRequest)
+    -> nomifun_conversation::companion_interaction::CompanionDeviceTurn
+{
+    nomifun_conversation::companion_interaction::CompanionDeviceTurn {
+        from_desktop: false, resources: None,
+        companion_id: request.companion_id.clone(), robot_id: request.robot_id.clone(),
+        connection_id: request.connection_id.clone(), request_id: request.request_id.clone(),
+        agent_revision: None,
+        model: None, fallback_model: None, mcp_servers: vec![], system_prompt: String::new(),
+    }
 }
 
 impl AppRobotBackend {
-    /// The session MCP registration for this robot's toolset, or `None` when the
-    /// loopback proxy is not running (the thread then simply has no robot tools).
-    fn session_mcp_servers(
-        &self,
-        robot_id: &str,
-        capabilities: Option<&[String]>,
-    ) -> Option<Vec<SessionMcpServer>> {
-        let proxy = self.mcp_proxy.as_ref()?;
-        let mut url = proxy.url_for(robot_id);
-        if let Some(capabilities) = capabilities {
-            let allowed = capabilities
-                .iter()
-                .filter(|capability| capability.starts_with("robot."))
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(",");
-            url.push_str(&format!("?capabilities={allowed}"));
-        }
-        let mcp_server_id = nomifun_api_types::McpServerId::parse(robot_mcp_server_id(robot_id))
-            .expect("a derived v7 uuid is a valid McpServerId");
-        Some(vec![SessionMcpServer {
-            mcp_server_id,
-            name: MCP_PROXY_SERVER_NAME.to_owned(),
-            transport: SessionMcpTransport::StreamableHttp {
-                url,
-                headers: proxy
-                    .headers()
-                    .into_iter()
-                    .collect::<HashMap<String, String>>(),
-            },
-        }])
-    }
-
-    /// The companion's own persona with the robot body section appended.
-    ///
-    /// Built here rather than left to the agent factory because the factory only
-    /// builds a persona when `extra.system_prompt` is absent, and the body
-    /// section must sit on top of the persona — the same companion has to sound
-    /// like itself on the desktop and in the room.
-    async fn robot_system_prompt(&self, companion_id: &str) -> String {
-        let persona = nomifun_ai_agent::CompanionPromptProvider::build_system_prompt(
-            &*self.companions,
-            Some(companion_id),
-            None,
-        )
-        .await
-        .unwrap_or_default();
-        if persona.trim().is_empty() {
-            robot_body_prompt().to_owned()
-        } else {
-            format!("{persona}\n\n{}", robot_body_prompt())
-        }
-    }
-
-    /// `{data_dir}/robot/threads.json` — `"{robot_id}|{companion_id}" -> conversation_id`.
-    ///
-    /// A separate file from `robots.json` on purpose: rebinding a robot must not
-    /// be able to corrupt the device registry, and a lost thread map costs one
-    /// new conversation, not a re-pairing.
-    fn threads_path(&self) -> PathBuf {
-        self.data_dir
-            .join(nomifun_robot::registry::ROBOT_REL_DIR)
-            .join("threads.json")
-    }
-
-    async fn read_threads(&self) -> std::collections::BTreeMap<String, String> {
-        match tokio::fs::read(self.threads_path()).await {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-            Err(_) => Default::default(),
-        }
-    }
-
-    async fn lookup_thread(
-        &self,
-        robot_id: &str,
-        companion_id: &str,
-    ) -> anyhow::Result<Option<String>> {
-        let key = format!("{robot_id}|{companion_id}");
-        let Some(conversation_id) = self.read_threads().await.get(&key).cloned() else {
-            return Ok(None);
-        };
-        // A conversation the user deleted must not be resurrected as a ghost id.
-        match self
-            .conversations
-            .get(&self.owner_user_id, &conversation_id)
-            .await
-        {
-            Ok(_) => Ok(Some(conversation_id)),
-            Err(_) => Ok(None),
-        }
-    }
-
-    async fn record_thread(
-        &self,
-        robot_id: &str,
-        companion_id: &str,
-        conversation_id: &str,
+    async fn run_device_turn(
+        &self, request: &nomifun_robot::services::RobotTurnRequest,
+        cancelled: tokio_util::sync::CancellationToken, tx: mpsc::Sender<TurnEvent>,
     ) -> anyhow::Result<()> {
-        let mut threads = self.read_threads().await;
-        threads.insert(
-            format!("{robot_id}|{companion_id}"),
-            conversation_id.to_owned(),
-        );
-        let path = self.threads_path();
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        tokio::fs::write(&tmp, serde_json::to_vec_pretty(&threads)?).await?;
-        tokio::fs::rename(&tmp, &path).await?;
-        Ok(())
-    }
-
-    /// Point the conversation at the companion's fallback chat model for the
-    /// retry. Changing the model kills and rebuilds the runtime, which is
-    /// exactly what a retry after a provider outage wants: a fresh client
-    /// against a different provider. The model is deliberately **left** on the
-    /// fallback — silently flipping back would send the next turn straight into
-    /// the same outage, and the UI shows the robot thread's model, so the state
-    /// stays visible.
-    async fn apply_fallback_model(&self, conversation_id: &str) -> anyhow::Result<()> {
-        let companion_id = self
-            .companion_of(conversation_id)
-            .await
-            .ok_or_else(|| anyhow::anyhow!("conversation is not a robot thread"))?;
-        let profile = self.companions.get_companion(&companion_id).await?;
-        let fallback = profile
-            .fallback_model
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("no fallback model configured"))?;
-        tracing::warn!(
-            conversation_id,
-            provider_id = %fallback.provider_id,
-            model = %fallback.model,
-            "robot: switching this thread to the fallback model after a provider fault"
-        );
-        let request = UpdateConversationRequest {
-            name: None,
-            pinned: None,
-            model: Some(fallback),
-            delegation_policy: None,
-            execution_model_pool: None,
-            decision_policy: None,
-            execution_template_id: None,
-            extra: None,
+        let queue = {
+            let mut queues = self.queues.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            queues.retain(|_, queue| queue.strong_count() > 0);
+            if let Some(queue) = queues.get(&request.conversation_id).and_then(std::sync::Weak::upgrade) { queue }
+            else {
+                let queue = Arc::new(tokio::sync::Mutex::new(()));
+                queues.insert(request.conversation_id.clone(), Arc::downgrade(&queue));
+                queue
+            }
         };
-        self.conversations
-            .update(
-                &self.owner_user_id,
-                conversation_id,
-                request,
-                &self.runtime_registry,
-            )
-            .await?;
-        Ok(())
-    }
-
-    /// The companion this robot thread belongs to, read from the conversation's
-    /// own `extra` so it survives a restart with no in-memory state.
-    async fn companion_of(&self, conversation_id: &str) -> Option<String> {
-        let conversation = self
-            .conversations
-            .get(&self.owner_user_id, conversation_id)
-            .await
-            .ok()?;
-        conversation
-            .extra
-            .get("companion_id")?
-            .as_str()
-            .map(str::to_owned)
-    }
-
-    /// A robot can connect before the user finishes configuring its companion.
-    /// The thread is durable, so creation-time model copying alone leaves that
-    /// thread permanently unconfigured. Heal it from the live companion profile
-    /// while preserving any existing selection (including a fallback model).
-    async fn backfill_companion_model_if_missing(
-        &self,
-        conversation_id: &str,
-    ) -> anyhow::Result<()> {
-        let conversation = self
-            .conversations
-            .get(&self.owner_user_id, conversation_id)
-            .await?;
-        if conversation.model.is_some() {
-            return Ok(());
-        }
-
-        let companion_id = conversation
-            .extra
-            .get("companion_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("conversation is not a robot thread"))?;
-        let profile = self.companions.get_companion(companion_id).await?;
-        let Some(model) = missing_robot_thread_model(None, profile.model.as_ref()) else {
-            return Ok(());
+        let _queue_guard = tokio::select! {
+            guard = queue.lock_owned() => guard,
+            _ = cancelled.cancelled() => return Ok(()),
         };
+        let queued_at = tokio::time::Instant::now();
+        loop {
+            if cancelled.is_cancelled() { return Ok(()); }
+            if queued_at.elapsed() > std::time::Duration::from_secs(300) {
+                anyhow::bail!("伙伴仍在处理其他消息，本次排队已超时，请重试");
+            }
+            if !self.registry.connection_matches(&request.robot_id, &request.connection_id).await {
+                anyhow::bail!("robot connection is no longer active");
+            }
+            if self.conversations.runtime_summary_for(&request.conversation_id).await.is_processing {
+                tokio::select! {
+                    _ = cancelled.cancelled() => return Ok(()),
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {},
+                }
+                continue;
+            }
+            let profile = self.companions.get_companion(&request.companion_id).await?;
+            let record = self.registry.get(&request.robot_id).await.ok_or_else(|| anyhow::anyhow!("robot was removed"))?;
+            let conversation = match self.conversations.refresh_product_agent_for_existing(
+                &self.owner_user_id, &request.conversation_id).await {
+                Ok(conversation) => conversation,
+                Err(nomifun_common::AppError::Conflict(_)) if self.conversations
+                    .runtime_summary_for(&request.conversation_id).await.is_processing => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let capabilities = conversation.agent_snapshot.as_ref()
+                .map(|snapshot| snapshot.enabled_capabilities.iter().cloned().collect())
+                .unwrap_or_default();
+            let authority = Arc::new(DeviceTurnAuthority {
+                from_desktop: false,
+                registry: self.registry.clone(), request: request.clone(),
+                revision: record.authorization_revision, capabilities, cancelled: cancelled.clone(),
+                conversations: self.conversations.clone(), owner_user_id: self.owner_user_id.clone(),
+                agent_revision: conversation.preset_id.clone().zip(conversation.preset_revision),
+            });
+            authority.validate_connection().await.map_err(anyhow::Error::msg)?;
+            let mut context = device_turn_context(request);
+            context.agent_revision = conversation.preset_id.clone().zip(conversation.preset_revision);
+            context.model = profile.model;
+            context.fallback_model = profile.fallback_model;
+            context.system_prompt = nomifun_ai_agent::CompanionPromptProvider::build_system_prompt(
+                &*self.companions, Some(&request.companion_id), None).await.unwrap_or_default();
+            context.system_prompt.push_str("\n\n");
+            context.system_prompt.push_str(robot_body_prompt());
+            let tool_lease = if authority.capabilities.contains("robot.link") {
+                match &self.mcp_proxy { Some(proxy) => Some(proxy.issue(authority.clone()).await?), None => None }
+            } else { None };
+            if let Some(lease) = tool_lease.as_ref() { context.mcp_servers.push(lease.registration()); }
+            let resources = Arc::new(DeviceTurnResources { _tool_lease: tool_lease, vision_lease: Mutex::new(None) });
+            context.resources = Some(resources.clone());
+            let prepare_hook = Arc::new(DeviceTurnPreparation { authority, resources, observations: self.vision_observations.clone() });
+            let message = SendMessageRequest {
+                content: request.text.clone(), files: vec![], inject_skills: vec![],
+                hidden: false, origin: None, channel_platform: Some("robot".to_owned()),
+            };
+            let observed = tokio::select! {
+                result = self.conversations.send_companion_device_message(
+                    &self.owner_user_id, &request.conversation_id, message, context.clone(), prepare_hook, &self.runtime_registry,
+                ) => result,
+                _ = cancelled.cancelled() => {
+                    self.conversations.cancel_companion_device_message(&self.owner_user_id,
+                        &request.conversation_id, &context, &self.runtime_registry).await?;
+                    return Ok(());
+                }
+            };
+            let mut stream = match observed {
+                Ok(observed) => observed.events,
+                Err(error) => {
+                let receipt = self.conversations.companion_device_delivery_result(
+                    &self.owner_user_id, &request.conversation_id, &context).await?;
+                if receipt.is_none() {
+                    if matches!(error, nomifun_common::AppError::Conflict(_))
+                        && self.conversations.runtime_summary_for(&request.conversation_id).await.is_processing {
+                        continue;
+                    }
+                    return Err(error.into());
+                }
+                None
+                }
+            };
+            let mut reducer = SpokenReplyReducer::default();
+            let mut spoken_answer: Option<String> = None;
+            // The durable result includes automatic continuations and final
+            // persistence. Never subscribe to whichever cached runtime happens
+            // to be current, and never speak an intermediate tool-pass Finish.
+            loop {
+                if let Some(mut receipt) = self.conversations.companion_device_delivery_result(
+                    &self.owner_user_id, &request.conversation_id, &context).await?
+                    && receipt.completed {
+                    // A fast producer can commit its receipt while this
+                    // observer still has buffered tool/text events. Drain
+                    // those before selecting the final spoken segment.
+                    if let Some(receiver) = stream.as_mut() {
+                        'drain: while let Ok(event) = receiver.try_recv() {
+                            for reduced in reducer.push(event) {
+                                match reduced {
+                                    TurnEvent::Text(text) => spoken_answer = Some(text),
+                                    TurnEvent::Done => break 'drain,
+                                    TurnEvent::Failed { .. } => spoken_answer = None,
+                                }
+                            }
+                        }
+                    }
+                    if receipt.result_ok == Some(true) && let Some(answer) = spoken_answer.take() {
+                        receipt.result_text = Some(answer);
+                    }
+                    for event in completed_robot_delivery_events(&receipt) {
+                        if tx.send(event).await.is_err() { break; }
+                    }
+                    return Ok(());
+                }
+                tokio::select! {
+                    event = async {
+                        match stream.as_mut() {
+                            Some(receiver) => receiver.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        match event {
+                            Ok(event) => {
+                                for reduced in reducer.push(event) {
+                                    match reduced {
+                                        TurnEvent::Text(text) => { spoken_answer = Some(text); }
+                                        TurnEvent::Done => { stream = None; }
+                                        TurnEvent::Failed { .. } => { spoken_answer = None; }
+                                    }
+                                }
+                            }
+                            Err(_) => { stream = None; spoken_answer = None; }
+                        }
+                    }
+                    _ = cancelled.cancelled() => {
+                        self.conversations.cancel_companion_device_message(&self.owner_user_id,
+                            &request.conversation_id, &context, &self.runtime_registry).await?;
+                        return Ok(());
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(30)) => {},
+                }
+            }
+        }
+    }
+}
 
-        tracing::info!(
-            conversation_id,
-            companion_id,
-            provider_id = %model.provider_id,
-            model = %model.model,
-            "robot: backfilling the companion chat model onto an unconfigured thread"
-        );
-        self.conversations
-            .update(
-                &self.owner_user_id,
-                conversation_id,
-                UpdateConversationRequest {
-                    name: None,
-                    pinned: None,
-                    model: Some(model),
-                    delegation_policy: None,
-                    execution_model_pool: None,
-                    decision_policy: None,
-                    execution_template_id: None,
-                    extra: None,
-                },
-                &self.runtime_registry,
-            )
-            .await?;
+struct DeviceTurnResources {
+    _tool_lease: Option<Arc<nomifun_robot::mcp_proxy::RobotMcpLease>>,
+    vision_lease: Mutex<Option<nomifun_robot::vision::RobotVisionTurnLease>>,
+}
+
+struct DeviceTurnPreparation {
+    authority: Arc<DeviceTurnAuthority>,
+    resources: Arc<DeviceTurnResources>,
+    observations: Arc<RobotVisionObservationRegistry>,
+}
+
+#[async_trait::async_trait]
+impl nomifun_conversation::service::BackgroundTurnPreSendHook for DeviceTurnPreparation {
+    async fn prepare(&self) -> Result<(), nomifun_common::AppError> {
+        self.authority.validate_connection().await.map_err(nomifun_common::AppError::Forbidden)?;
+        *self.resources.vision_lease.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(self.observations.register_turn(self.authority.clone()));
         Ok(())
     }
 }
 
 #[async_trait::async_trait]
-impl nomifun_robot::wiring::RobotConversationBackend for AppRobotBackend {
-    async fn ensure_thread(&self, robot_id: &str, companion_id: &str) -> anyhow::Result<String> {
-        let session_mcp = self.session_mcp_servers(robot_id, None);
-        let system_prompt = self.robot_system_prompt(companion_id).await;
-
-        // Reuse the thread recorded for this pair, refreshing both per-boot
-        // facts: the proxy URL (the port is per-boot) and the persona (its
-        // embedded memory snapshot would otherwise be frozen at creation).
-        // `update_extra` merges, and it writes the already-resolved
-        // `session_mcp_servers` key that the agent build reads.
-        if let Some(existing) = self.lookup_thread(robot_id, companion_id).await? {
-            self.conversations
-                .refresh_product_agent_for_existing(self.owner_user_id.as_ref(), &existing)
-                .await?;
-            let existing_session = self
-                .conversations
-                .get(self.owner_user_id.as_ref(), &existing)
-                .await?;
-            let session_mcp = self.session_mcp_servers(
-                robot_id,
-                existing_session
-                    .agent_snapshot
-                    .as_ref()
-                    .map(|snapshot| snapshot.enabled_capabilities.as_slice()),
-            );
-            let mut patch = json!({ "system_prompt": system_prompt });
-            if let Some(servers) = &session_mcp {
-                patch["session_mcp_servers"] = serde_json::to_value(servers)?;
-            }
-            self.conversations.update_extra(&existing, patch).await?;
-            self.backfill_companion_model_if_missing(&existing).await?;
-            return Ok(existing);
+impl nomifun_robot::services::RobotPlaybackSource for AppRobotBackend {
+    async fn response_text(&self, robot_id: &str, conversation_id: &str) -> Result<String, String> {
+        let device = self.registry.get(robot_id).await.ok_or("device not found")?;
+        let conversation = self.conversations.get(&self.owner_user_id, conversation_id).await.map_err(|e| e.to_string())?;
+        if device.companion_id.is_none() || conversation.extra.get("companion_id").and_then(Value::as_str) != device.companion_id.as_deref() {
+            return Err("conversation belongs to another Companion".to_owned());
         }
-
-        // `companion_session` + `companion_id` mark this as a companion-owned
-        // thread (memory tools, gateway authority). The persona is supplied
-        // explicitly rather than left to the factory, because the robot body
-        // section has to sit on top of it and the factory only builds a persona
-        // when `system_prompt` is absent.
-        let mut extra = json!({
-            "robot_session": true,
-            "robot_id": robot_id,
-            "companion_session": true,
-            "companion_id": companion_id,
-            "system_prompt": system_prompt,
-            // The companion persona already carries the frozen preset
-            // instructions; without this the generic path appends them twice.
-            "preset_instructions_embedded": true,
-        });
-        if let Some(servers) = &session_mcp {
-            extra["selected_session_mcp_servers"] = serde_json::to_value(servers)?;
+        if self.conversations.runtime_summary_for(conversation_id).await.is_processing {
+            return Err("wait for the current reply to finish".to_owned());
         }
+        let messages = self.conversations.list_messages(&self.owner_user_id, conversation_id,
+            serde_json::from_value(serde_json::json!({"page":1,"page_size":50,"order":"desc"})).map_err(|e| e.to_string())?,
+        ).await.map_err(|e| e.to_string())?;
+        messages.items.iter().filter(|message| !message.hidden
+            && message.position == Some(nomifun_common::MessagePosition::Left)
+            && message.r#type == nomifun_common::MessageType::Text)
+            .filter_map(|message| message.content.get("content").and_then(Value::as_str))
+            .find(|text| !text.trim().is_empty()).map(str::to_owned)
+            .ok_or_else(|| "no reply is available to play".to_owned())
+    }
+}
 
-        let model = self
-            .companions
-            .get_companion(companion_id)
-            .await
-            .ok()
-            .and_then(|profile| profile.model);
-        let request = CreateConversationRequest {
-            r#type: AgentType::Nomi,
-            name: Some(format!("机器人 · {robot_id}")),
-            model,
-            source: None,
-            channel_chat_id: None,
-            preset_id: None,
-            delegation_policy: Default::default(),
-            execution_model_pool: None,
-            decision_policy: Default::default(),
-            execution_template_id: None,
-            extra,
+#[async_trait::async_trait]
+impl nomifun_conversation::companion_interaction::CompanionDesktopTurnProvider for AppRobotBackend {
+    async fn prepare(&self, owner_id: &str, conversation_id: &str, request_id: &str)
+        -> Result<Option<nomifun_conversation::companion_interaction::PreparedDesktopDeviceTurn>, nomifun_common::AppError>
+    {
+        use nomifun_common::AppError;
+        if owner_id != self.owner_user_id.as_ref() { return Ok(None); }
+        let conversation = self.conversations.get(owner_id, conversation_id).await?;
+        let Some(companion_id) = conversation.extra.get("companion_id").and_then(Value::as_str) else { return Ok(None); };
+        if conversation.extra.get("companion_session").and_then(Value::as_bool) != Some(true) { return Ok(None); }
+        let profile = self.companions.get_companion(companion_id).await?;
+        let devices = self.registry.list().await.into_iter()
+            .filter(|device| device.companion_id.as_deref() == Some(companion_id)).collect::<Vec<_>>();
+        let selected = match profile.control_robot_id.as_deref() {
+            Some(id) => devices.iter().find(|device| device.robot_id == id),
+            None if devices.len() == 1 => devices.first(),
+            None => None,
         };
-        // Keyed create: a crash between `create` and `record_thread` must not
-        // leave a second thread behind on the next handshake.
-        let creation_key = format!("robot-thread:v1:{robot_id}|{companion_id}");
-        let conversation = self
-            .conversations
-            .create_idempotent(&self.owner_user_id, request, &creation_key)
-            .await?;
-        self.record_thread(robot_id, companion_id, &conversation.conversation_id)
-            .await?;
-        Ok(conversation.conversation_id)
+        let Some(device) = selected else { return Ok(None); };
+        let Some(connection_id) = self.registry.current_connection(&device.robot_id).await else { return Ok(None); };
+        let capabilities: std::collections::BTreeSet<String> = conversation.agent_snapshot.as_ref()
+            .map(|snapshot| snapshot.enabled_capabilities.iter().cloned().collect()).unwrap_or_default();
+        if !capabilities.contains("robot.link") { return Ok(None); }
+        let Some(proxy) = self.mcp_proxy.as_ref() else { return Ok(None); };
+        let request = nomifun_robot::services::RobotTurnRequest {
+            robot_id: device.robot_id.clone(), companion_id: companion_id.to_owned(),
+            conversation_id: conversation_id.to_owned(), connection_id, request_id: request_id.to_owned(), text: String::new(),
+        };
+        let authority = Arc::new(DeviceTurnAuthority {
+            from_desktop: true, registry: self.registry.clone(), request: request.clone(),
+            revision: device.authorization_revision, capabilities,
+            cancelled: tokio_util::sync::CancellationToken::new(), conversations: self.conversations.clone(),
+            owner_user_id: self.owner_user_id.clone(), agent_revision: conversation.preset_id.zip(conversation.preset_revision),
+        });
+        let tool_lease = proxy.issue(authority.clone()).await.map_err(|error| AppError::Forbidden(error.to_string()))?;
+        let mut context = device_turn_context(&request);
+        context.from_desktop = true;
+        context.agent_revision = authority.agent_revision.clone();
+        context.model = profile.model;
+        context.fallback_model = profile.fallback_model;
+        context.system_prompt = nomifun_ai_agent::CompanionPromptProvider::build_system_prompt(
+            &*self.companions, Some(companion_id), None).await.unwrap_or_default();
+        context.system_prompt.push_str("\n当前输入来自桌面，正常使用完整文字、Markdown 等形式回答；回复不会自动播报。已连接的物理机器人可通过本轮提供的 robot_ 工具操作，只操作用户当前选定的设备。\n");
+        context.mcp_servers.push(tool_lease.registration());
+        let resources = Arc::new(DeviceTurnResources { _tool_lease: Some(tool_lease), vision_lease: Mutex::new(None) });
+        context.resources = Some(resources.clone());
+        let hook = Arc::new(DeviceTurnPreparation { authority, resources, observations: self.vision_observations.clone() });
+        Ok(Some(nomifun_conversation::companion_interaction::PreparedDesktopDeviceTurn { context, pre_send_hook: hook }))
+    }
+}
+
+#[async_trait::async_trait]
+impl nomifun_robot::wiring::RobotConversationBackend for AppRobotBackend {
+    async fn ensure_companion_session(&self, companion_id: &str) -> anyhow::Result<String> {
+        Ok(self.companions.create_companion_thread(companion_id, None).await?.conversation_id)
     }
 
-    async fn dispatch(
-        &self,
-        conversation_id: &str,
-        text: &str,
-        use_fallback_model: bool,
-    ) -> anyhow::Result<mpsc::Receiver<TurnEvent>> {
-        if use_fallback_model {
-            self.apply_fallback_model(conversation_id).await?;
-        } else {
-            // The companion may have been configured after this durable robot
-            // thread was first created. Resolve that race on the next utterance,
-            // even when the device stayed connected and never re-ran handshake.
-            self.backfill_companion_model_if_missing(conversation_id)
-                .await?;
+    async fn dispatch(&self, request: nomifun_robot::services::RobotTurnRequest) -> anyhow::Result<mpsc::Receiver<TurnEvent>> {
+        let key = device_turn_context(&request).idempotency_key();
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        {
+            let mut pending = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if pending.len() >= 64 { anyhow::bail!("device utterance queue is full"); }
+            if pending.contains_key(&key) { anyhow::bail!("this device utterance is already queued"); }
+            pending.insert(key.clone(), cancelled.clone());
         }
-        let request = SendMessageRequest {
-            content: text.to_owned(),
-            files: vec![],
-            inject_skills: vec![],
-            hidden: false,
-            origin: None,
-            channel_platform: Some("robot".to_owned()),
-        };
-        let delivery = self
-            .conversations
-            .send_message_with_idempotency_key(
-                &self.owner_user_id,
-                conversation_id,
-                &uuid::Uuid::now_v7().to_string(),
-                request,
-                &self.runtime_registry,
-            )
-            .await?;
-
         let (tx, rx) = mpsc::channel(64);
-        // The keyed send admits synchronously but builds a cold runtime in its
-        // own background task, so the stream is attached after admission.
-        if delivery.completed {
-            let events = completed_robot_delivery_events(&delivery);
-            tokio::spawn(async move {
-                for event in events {
-                    if tx.send(event).await.is_err() {
-                        break;
-                    }
-                }
-            });
-            return Ok(rx);
-        }
-        let stream = wait_for_runtime_subscription(&self.runtime_registry, conversation_id).await;
+        let backend = self.clone();
         tokio::spawn(async move {
-            relay_optional_robot_turn_stream(stream, tx).await;
+            if let Err(error) = backend.run_device_turn(&request, cancelled, tx.clone()).await {
+                let _ = tx.send(robot_stream_failure(error.to_string())).await;
+            }
+            backend.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&key);
         });
         Ok(rx)
     }
 
-    async fn cancel(&self, conversation_id: &str) -> anyhow::Result<()> {
-        // Public `cancel` only: `cancel_with_origin` is crate-private, and
-        // `runtime_registry.terminate` would kill the runtime, not the turn.
-        self.conversations
-            .cancel(&self.owner_user_id, conversation_id, &self.runtime_registry)
-            .await?;
+    async fn cancel(&self, request: &nomifun_robot::services::RobotTurnRequest) -> anyhow::Result<()> {
+        let key = device_turn_context(request).idempotency_key();
+        if let Some(token) = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
+            token.cancel();
+        }
         Ok(())
     }
 
@@ -780,41 +774,8 @@ impl nomifun_robot::wiring::RobotConversationBackend for AppRobotBackend {
         }
     }
 
-    async fn has_fallback_model(&self, companion_id: &str) -> bool {
-        self.companions
-            .get_companion(companion_id)
-            .await
-            .map(|profile| profile.fallback_model.is_some())
-            .unwrap_or(false)
-    }
 }
 
-/// Attach to a conversation's runtime stream once the registry publishes it.
-///
-/// A copy of the channel domain's own helper (`nomifun-channel`'s
-/// `wait_for_runtime_subscription`, which is private to that crate): registration
-/// happens before prompt dispatch, so polling until it appears is what makes a
-/// cold-start turn observable. A timeout is reported as an ambiguous failure
-/// and never retries the possibly side-effecting model turn.
-async fn wait_for_runtime_subscription(
-    runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
-    conversation_id: &str,
-) -> Option<tokio::sync::broadcast::Receiver<AgentStreamEvent>> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        if let Some(handle) = runtime_registry.get_runtime(conversation_id) {
-            return Some(handle.subscribe());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            tracing::warn!(
-                conversation_id,
-                "robot: runtime did not register before the subscription timeout"
-            );
-            return None;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-}
 
 fn completed_robot_delivery_events(
     delivery: &nomifun_conversation::IdempotentMessageDelivery,
@@ -853,6 +814,7 @@ fn robot_stream_failure(message: impl Into<String>) -> TurnEvent {
     }
 }
 
+#[cfg(test)]
 async fn relay_optional_robot_turn_stream(
     stream: Option<broadcast::Receiver<AgentStreamEvent>>,
     tx: mpsc::Sender<TurnEvent>,
@@ -868,6 +830,7 @@ async fn relay_optional_robot_turn_stream(
     relay_robot_turn_stream(stream, tx).await;
 }
 
+#[cfg(test)]
 async fn relay_robot_turn_stream(
     mut stream: broadcast::Receiver<AgentStreamEvent>,
     tx: mpsc::Sender<TurnEvent>,
@@ -1054,17 +1017,23 @@ pub fn mount(
     runtime_registry: Arc<dyn AgentRuntimeRegistry>,
     companions: Arc<nomifun_companion::CompanionService>,
     owner_user_id: Arc<str>,
-    data_dir: PathBuf,
+    _data_dir: PathBuf,
 ) -> RobotFaces {
     let backend = Arc::new(AppRobotBackend {
         conversations,
         runtime_registry,
         companions,
         owner_user_id,
-        data_dir,
+        registry: robot.registry.clone(),
+        vision_observations: robot.vision_observations.clone(),
+        pending: Arc::new(Mutex::new(HashMap::new())),
+        queues: Arc::new(Mutex::new(HashMap::new())),
         mcp_proxy: robot.proxy.clone(),
     });
-    let dispatcher = Arc::new(nomifun_robot::wiring::RobotDispatcher::new(backend));
+    backend.conversations.with_companion_desktop_provider(backend.clone());
+    #[cfg(test)]
+    let _ = robot.backend.set(backend.clone());
+    let dispatcher = Arc::new(nomifun_robot::wiring::RobotDispatcher::new(backend.clone()));
     let (source, acceptor) = nomifun_robot::lan_source::LanWsSource::new();
 
     let gateway = Arc::new(nomifun_robot::RobotGateway::new(
@@ -1087,6 +1056,8 @@ pub fn mount(
             vision_observations: robot.vision_observations.clone(),
         }),
         admin: nomifun_robot::routes::admin_router(nomifun_robot::routes::RobotAdminState {
+            playback_source: Some(backend),
+            tools: robot.tools.clone(),
             registry: robot.registry.clone(),
             status: robot.status.clone(),
             advertiser: robot.advertiser.clone(),
@@ -1098,13 +1069,6 @@ pub fn mount(
 mod tests {
     use super::*;
 
-    fn model(provider_id: &str, name: &str) -> ProviderWithModel {
-        ProviderWithModel {
-            provider_id: provider_id.to_owned(),
-            model: name.to_owned(),
-            use_model: None,
-        }
-    }
 
     fn running_tool_call() -> AgentStreamEvent {
         use nomifun_ai_agent::protocol::events::tool_call::{
@@ -1124,30 +1088,8 @@ mod tests {
         })
     }
 
-    #[test]
-    fn a_missing_robot_thread_model_inherits_the_companion_model() {
-        let configured = model("provider-a", "chat-primary");
-        assert_eq!(
-            missing_robot_thread_model(None, Some(&configured)),
-            Some(configured)
-        );
-    }
 
-    #[test]
-    fn an_existing_robot_thread_model_is_never_overwritten() {
-        let fallback = model("provider-b", "chat-fallback");
-        let configured = model("provider-a", "chat-primary");
-        assert_eq!(
-            missing_robot_thread_model(Some(&fallback), Some(&configured)),
-            None,
-            "the current selection may be a deliberately persistent fallback"
-        );
-    }
 
-    #[test]
-    fn an_unconfigured_companion_cannot_backfill_a_robot_thread() {
-        assert_eq!(missing_robot_thread_model(None, None), None);
-    }
 
     /// The prompt must PROHIBIT, not specify. It once specified a marker syntax
     /// (`[emotion:名]` plus a 21-name vocabulary) and the model emitted
@@ -1198,20 +1140,6 @@ mod tests {
         assert!(prompt.contains("robot_"), "the tool guidance is still needed");
     }
 
-    #[test]
-    fn a_robots_mcp_server_id_is_a_stable_uuidv7() {
-        let first = robot_mcp_server_id("aa:bb:cc:dd:ee:ff");
-        assert_eq!(first, robot_mcp_server_id("aa:bb:cc:dd:ee:ff"));
-        assert!(
-            nomifun_api_types::McpServerId::parse(first.clone()).is_ok(),
-            "{first} must satisfy the McpServerId contract"
-        );
-        assert_ne!(
-            first,
-            robot_mcp_server_id("aa:bb:cc:dd:ee:f0"),
-            "two robots on one board differ only in the last byte"
-        );
-    }
 
     #[test]
     fn only_explicitly_retryable_upstream_faults_are_worth_a_fallback_retry() {
@@ -1493,3 +1421,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "robot_wiring/unified_tests.rs"]
+mod unified_tests;

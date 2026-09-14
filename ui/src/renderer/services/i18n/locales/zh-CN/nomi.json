@@ -361,6 +361,11 @@
     "model": "学习模型"
   },
   "chat": {
+    "modelSaveFailed": "对话模型保存失败，请重试",
+    "skillsScopeHint": "管理这位伙伴的技能，桌面与机器人共同使用",
+    "mcpScopeHint": "已预置连接、工具调用与资源读取能力。选择的服务由这位伙伴的所有入口共用，下一轮生效。",
+    "mcpAgentRequired": "当前 Agent 未启用 MCP 连接能力，请切换为伙伴预设或在 Agent 工作台配置。",
+    "mcpBusy": "请等待当前回复结束后再修改 MCP 服务。",
     "modelConfig": "对话模型",
     "modelConfigHint": "该伙伴的对话模型，全局生效（本地对话与远程连接），切换后所有会话跟随",
     "modelProvider": "服务商",
@@ -389,6 +394,13 @@
     "retry": "重试"
   },
   "robot": {
+    "controlTarget": "桌面会话控制的设备",
+    "chooseDevice": "选择设备",
+    "playLastReply": "在此设备播报最近回复",
+    "playbackFailed": "播报失败",
+    "playbackPermissionHint": "请在设备设置中允许桌面播报。文字回复默认不会播放。",
+    "speechSource": "机器人语音",
+    "visualObservation": "视觉观察",
     "title": "机器人连接",
     "hint": "把实体机器人接到 {{companionName}}：它会用这只伙伴的人格、模型和记忆跟你说话。",
     "add": "添加机器人",
@@ -399,10 +411,6 @@
     "codePlaceholder": "6 位数字",
     "claim": "绑定到本伙伴",
     "claimOk": "机器人已绑定到 {{companionName}}",
-    "agentLabel": "机器人 Agent",
-    "agentBeforeClaim": "新设备默认使用官方「机器人」Agent。完成设备绑定后，可切换为最简问答或自定义 Agent；不会改变伙伴聊天的 Agent。",
-    "agentHint": "此设置仅用于这台实体机器人，与伙伴聊天的 Agent 分开保存。模型沿用伙伴配置，修改后自动保存，也可稍后在设备列表中调整。",
-    "finishSetup": "完成配置",
     "claimNotFound": "激活码不存在或已失效，请再看一眼机器人屏幕上的号码。",
     "claimTaken": "这台机器人已经绑定到别的伙伴了，先在那只伙伴那里解绑。",
     "claimFailed": "绑定失败",
@@ -426,18 +434,24 @@
     "removeConfirm": "删除后设备令牌立刻失效，机器人需要重新报到并重新绑定。",
     "removeFailed": "删除失败",
     "loadFailed": "读取机器人列表失败，请确认后台的机器人服务已启动。",
-    "sessionGroup": "机器人会话",
-    "group": {
-      "deviceUnknown": "未知机器人",
-      "deviceMissing": "已移除的机器人",
-      "deviceTooltip": "机器人：{{robot}}"
-    },
     "status": {
       "offline": "离线",
       "idle": "在线",
       "listening": "聆听中",
       "speaking": "说话中"
-    }
+    },
+    "inheritHint": "连接后直接延续 {{companionName}} 的会话、设定、记忆和知识库。",
+    "permissionSaveFailed": "设备权限保存失败",
+    "permissions": {
+      "vision": "允许按需拍照",
+      "motion": "允许控制动作",
+      "display": "允许控制屏幕",
+      "device_tools": "允许设备扩展工具",
+      "proactive_speech": "允许桌面播报",
+      "continuous_vision": "允许持续观察"
+    },
+    "devices": "已连接设备",
+    "manageDevices": "管理设备"
   },
   "settings": {
     "name": "名字",

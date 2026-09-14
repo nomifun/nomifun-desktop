@@ -27,9 +27,11 @@ use crate::status::RobotStatusRegistry;
 /// Shared state of the management face.
 #[derive(Clone)]
 pub struct RobotAdminState {
+    pub tools: Arc<crate::tool_registry::RobotToolRegistry>,
     pub registry: Arc<RobotRegistry>,
     pub status: Arc<RobotStatusRegistry>,
     pub advertiser: Arc<dyn EndpointAdvertiser>,
+    pub playback_source: Option<Arc<dyn crate::services::RobotPlaybackSource>>,
 }
 
 #[derive(Deserialize)]
@@ -62,6 +64,8 @@ pub fn admin_router(state: RobotAdminState) -> Router {
         .route("/api/robots/claim", post(claim))
         .route("/api/robots/statuses", get(statuses))
         .route("/api/robots/endpoints", get(endpoints))
+        .route("/api/robots/{robot_id}/permissions", patch(set_permissions))
+        .route("/api/robots/{robot_id}/speak", post(speak_response))
         .route(
             "/api/robots/{robot_id}",
             patch(patch_robot).delete(delete_robot),
@@ -70,14 +74,61 @@ pub fn admin_router(state: RobotAdminState) -> Router {
 }
 
 async fn list(State(state): State<RobotAdminState>) -> Response {
-    let robots: Vec<RobotDto> = state
-        .registry
-        .list()
-        .await
-        .iter()
-        .map(RobotDto::from)
-        .collect();
+    let mut robots = Vec::new();
+    for record in state.registry.list().await {
+        let mut robot = RobotDto::from(&record);
+        for tool in state.tools.tools(&record.robot_id).await {
+            let permission = match crate::tool_registry::tool_capability(&tool.device_name) {
+                crate::tool_registry::RobotToolCapability::Display => "display",
+                crate::tool_registry::RobotToolCapability::Motion => "motion",
+                crate::tool_registry::RobotToolCapability::Vision => "vision",
+                crate::tool_registry::RobotToolCapability::DeviceTools => "device_tools",
+            };
+            if !robot.supported_permissions.iter().any(|value| value == permission) { robot.supported_permissions.push(permission.to_owned()); }
+            if crate::tool_registry::requires_continuous_vision(&tool.device_name)
+                && !robot.supported_permissions.iter().any(|value| value == "continuous_vision") {
+                robot.supported_permissions.push("continuous_vision".to_owned());
+            }
+        }
+        robots.push(robot);
+    }
     Json(json!({ "robots": robots })).into_response()
+}
+
+async fn set_permissions(
+    State(state): State<RobotAdminState>, Path(robot_id): Path<String>,
+    Json(permissions): Json<crate::registry::RobotPermissions>,
+) -> Response {
+    if state.registry.get(&robot_id).await.is_none() { return StatusCode::NOT_FOUND.into_response(); }
+    match state.registry.set_permissions(&robot_id, permissions).await {
+        Ok(record) => Json(RobotDto::from(&record)).into_response(),
+        Err(error) => {
+            tracing::error!(%error, "robot permission update failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "robot permission update failed").into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpeakBody { conversation_id: String }
+
+async fn speak_response(State(state): State<RobotAdminState>, Path(robot_id): Path<String>, Json(body): Json<SpeakBody>) -> Response {
+    let Some(source) = state.playback_source.as_ref() else { return StatusCode::SERVICE_UNAVAILABLE.into_response(); };
+    let Some(record) = state.registry.get(&robot_id).await else { return StatusCode::NOT_FOUND.into_response(); };
+    if !record.permissions.proactive_speech {
+        return (StatusCode::FORBIDDEN, Json(json!({"message":"请先允许桌面播报"}))).into_response();
+    }
+    let Some(connection_id) = state.registry.current_connection(&robot_id).await else {
+        return (StatusCode::CONFLICT, Json(json!({"message":"设备离线"}))).into_response();
+    };
+    match source.response_text(&robot_id, &body.conversation_id).await {
+        Ok(text) => match state.registry.speak(&robot_id, &connection_id, text).await {
+            Ok(()) => Json(json!({"accepted":true})).into_response(),
+            Err(error) => (StatusCode::CONFLICT, Json(json!({"message":error}))).into_response(),
+        },
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"message":error}))).into_response(),
+    }
 }
 
 async fn claim(State(state): State<RobotAdminState>, Json(body): Json<ClaimBody>) -> Response {
@@ -101,12 +152,19 @@ async fn patch_robot(
     Path(robot_id): Path<String>,
     Json(body): Json<PatchBody>,
 ) -> Response {
+    let binding_changed = body.companion_id.is_some();
     match state
         .registry
         .patch(&robot_id, body.name, body.companion_id)
         .await
     {
-        Ok(record) => Json(RobotDto::from(&record)).into_response(),
+        Ok(record) => {
+            if binding_changed {
+                state.tools.detach_if_disconnected(&state.registry, &robot_id).await;
+                state.status.mark_offline_if_disconnected(&state.registry, &robot_id, chrono::Utc::now().timestamp_millis()).await;
+            }
+            Json(RobotDto::from(&record)).into_response()
+        },
         Err(ClaimError::NotFound) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "message": "机器人不存在" })),
@@ -125,7 +183,11 @@ async fn delete_robot(
     Path(robot_id): Path<String>,
 ) -> Response {
     match state.registry.remove(&robot_id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            state.tools.detach_if_disconnected(&state.registry, &robot_id).await;
+            state.status.mark_offline_if_disconnected(&state.registry, &robot_id, chrono::Utc::now().timestamp_millis()).await;
+            StatusCode::NO_CONTENT.into_response()
+        },
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "message": "机器人不存在" })),
@@ -207,6 +269,8 @@ mod tests {
             "owner-1".to_owned(),
         ));
         let state = RobotAdminState {
+            tools: Arc::new(crate::tool_registry::RobotToolRegistry::default()),
+            playback_source: None,
             registry,
             status,
             advertiser: Arc::new(crate::endpoint::LanAdvertiser::new(rx)),

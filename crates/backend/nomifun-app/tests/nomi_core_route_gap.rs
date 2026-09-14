@@ -595,7 +595,7 @@ async fn product_agent_selection_precedes_models_and_preflights_incompatible_cho
     let companion_id = created["data"]["companion_id"].as_str().unwrap();
     let chosen = json!({ "kind": "template", "template_key": "chat.minimal" });
     let mut paths = Vec::new();
-    for kind in ["companion", "robot", "customer", "creative_studio_canvas"] {
+    for kind in ["companion", "customer", "creative_studio_canvas"] {
         let path = format!("/api/product-agent-bindings/{kind}/{companion_id}");
         let (status, saved) = call(router.clone(), "PUT", &path, json!({ "selection": chosen })).await;
         assert_eq!(status, StatusCode::OK, "{saved}");

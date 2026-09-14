@@ -4,7 +4,8 @@ import type { TProviderWithModel } from '@/common/config/storage';
 import type { OfficialPresetKey, ProductAgentOptions, ProductAgentSelection } from '@/common/types/agentPlatform';
 import { parseCompanionId } from '@/common/types/ids';
 import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
-import { Button, Message, Select, Spin } from '@arco-design/web-react';
+import { Button, Dropdown, Menu, Message, Select, Spin, Tooltip } from '@arco-design/web-react';
+import { Down, Robot } from '@icon-park/react';
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import useSWR from 'swr';
@@ -16,6 +17,7 @@ type Props = {
   model?: Pick<TProviderWithModel, 'id' | 'use_model'>;
   conversationId?: string | null;
   disabled?: boolean;
+  compact?: boolean;
   onChanged?: () => void;
   onSavingChange?: (saving: boolean) => void;
 };
@@ -32,7 +34,7 @@ export function productAgentErrorReason(error: unknown): 'modelChanged' | 'busy'
   return 'saveFailed';
 }
 
-const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, model, conversationId, disabled = false, onChanged, onSavingChange }) => {
+const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, model, conversationId, disabled = false, compact = false, onChanged, onSavingChange }) => {
   const { t } = useTranslation();
   const selectedModel = model?.id && model.use_model ? { provider_id: model.id, model: model.use_model } : undefined;
   const key = ['product-agent-options', targetKind, targetId, selectedModel?.provider_id ?? '', selectedModel?.model ?? ''];
@@ -100,6 +102,36 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
   </div>;
   if (isLoading || !data) return <Spin size={14} />;
   const selected = data.options.find((option) => productSelectionValue(option.selection) === productSelectionValue(data.selection));
+  if (compact) return (
+    <Tooltip content={t('agentSettings.productBinding.companionHint')}>
+      <span className='inline-flex min-w-0'>
+      <Dropdown trigger='click' disabled={disabled || saving} droplist={
+        <Menu>
+          {data.options.map((option) => <Menu.Item
+            key={productSelectionValue(option.selection)}
+            disabled={!option.available}
+            onClick={() => void change(productSelectionValue(option.selection))}
+          >
+            <span className='flex flex-col'>
+              <span>{nameFor(option)}</span>
+              {!option.available && <small>{t(`agentSettings.productBinding.reasons.${option.reason ?? 'capability'}`)}</small>}
+            </span>
+          </Menu.Item>)}
+        </Menu>
+      }>
+        <Button size='small' shape='round' loading={saving} disabled={disabled || saving}
+          className='sendbox-model-btn header-model-btn nomi-sendbox-agent-btn min-w-0'
+          aria-label={`${t('agentSettings.productBinding.label')}: ${selected ? nameFor(selected) : t('agentSettings.productBinding.unavailableAgent')}`}>
+          <span className='flex items-center gap-6px min-w-0'>
+            <Robot theme='outline' size={14} />
+            <span className='sendbox-responsive-label truncate'>{selected ? nameFor(selected) : t('agentSettings.productBinding.unavailableAgent')}</span>
+            <Down theme='outline' size={12} className='sendbox-responsive-chevron' />
+          </span>
+        </Button>
+      </Dropdown>
+      </span>
+    </Tooltip>
+  );
   return <div className='flex flex-col gap-6px' style={{ maxWidth: 300 }}>
     <Select value={productSelectionValue(data.selection)} loading={saving} disabled={disabled || saving}
       onChange={(next: string) => void change(next)} style={{ width: 230, maxWidth: '100%' }}

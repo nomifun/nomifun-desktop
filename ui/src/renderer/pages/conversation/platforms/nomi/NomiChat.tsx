@@ -36,8 +36,10 @@ const NomiChat: React.FC<{
   loadedMcpStatuses?: IConversationMcpStatus[];
   agent_name?: string;
   isProcessing?: boolean;
-  /** Hide model and other editable controls on locked surfaces. */
-  hideAdvancedControls?: boolean;
+  /** Override session-owned capability editing with product-owned controls. */
+  capabilityControls?: React.ReactNode;
+  modelSelectionHint?: string;
+  modelSelectionDisabled?: boolean;
   /** Conversation collaborator-model control rendered after the main model. */
   collaboratorSelectorNode?: React.ReactNode;
   /** Extra right-side tools used by projected task transcripts. */
@@ -55,7 +57,9 @@ const NomiChat: React.FC<{
   loadedMcpStatuses,
   agent_name,
   isProcessing,
-  hideAdvancedControls,
+  capabilityControls,
+  modelSelectionHint,
+  modelSelectionDisabled,
   collaboratorSelectorNode,
   extraRightTools,
 }) => {
@@ -116,7 +120,9 @@ const NomiChat: React.FC<{
               modelSelection={modelSelection}
               agentSelectorNode={agentSelectorNode}
               agent_name={agent_name}
-              hideAdvancedControls={hideAdvancedControls}
+              capabilityControls={capabilityControls}
+              modelSelectionHint={modelSelectionHint}
+              modelSelectionDisabled={modelSelectionDisabled}
               collaboratorSelectorNode={collaboratorSelectorNode}
               extraRightTools={extraRightTools}
               turnActivity={turnActivity}

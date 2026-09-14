@@ -252,28 +252,29 @@ impl SessionMcpConnector for RepositorySessionMcpConnector {
     }
 }
 
-fn build_lazy_mcp_runtime(
+async fn build_lazy_mcp_runtime(
     plugin_session: Option<&crate::NomiPluginToolSession>,
     repository: Option<&Arc<dyn IMcpServerRepository>>,
     oauth_service: Option<&Arc<nomifun_mcp::McpOAuthService>>,
     policy: Option<nomifun_api_types::NomiMcpCapabilityPolicy>,
     deferred_tools: &[String],
+    selected_ids: &[McpServerId],
+    is_instance_owner: bool,
 ) -> Result<Option<LazyMcpRuntime>, AppError> {
     let Some(policy) = policy.filter(|policy| policy.connect) else {
         return Ok(None);
     };
-    if !deferred_tools
+    if plugin_session.is_none() && selected_ids.is_empty() { return Ok(None); }
+    if plugin_session.is_some() && !deferred_tools
         .iter()
         .any(|name| name == nomi_agent::lazy_mcp::MCP_CONNECT_TOOL_NAME)
     {
         return Ok(None);
     }
-    let session = plugin_session.ok_or_else(|| {
-        AppError::UnprocessableEntity(
-            "on-demand MCP requires a canonical server-materialized AgentSession".to_owned(),
-        )
+    let repository = repository.cloned().ok_or_else(|| {
+        AppError::UnprocessableEntity("on-demand MCP requires the host MCP repository".to_owned())
     })?;
-    let bindings = session
+    let bindings = if let Some(session) = plugin_session { session
         .target_resource_bindings()
         .iter()
         .filter(|binding| binding.resource_kind.as_ref() == "mcp_server")
@@ -289,12 +290,24 @@ fn build_lazy_mcp_runtime(
             )
             .map_err(AppError::Conflict)
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    let repository = repository.cloned().ok_or_else(|| {
-        AppError::UnprocessableEntity(
-            "on-demand MCP requires the host MCP repository".to_owned(),
-        )
-    })?;
+        .collect::<Result<Vec<_>, _>>()?
+    } else {
+        // Product conversations have one server-owned selection rather than
+        // Plugin Session metadata. Freeze exact local-owner business IDs here;
+        // the connector revalidates config revisions before any network IO.
+        if !is_instance_owner { return Ok(None); }
+        let mut bindings = Vec::new();
+        for id in selected_ids {
+            let row = repository.find_by_id(id.as_str()).await
+                .map_err(|error| AppError::Internal(error.to_string()))?
+                .filter(|row| row.enabled && !row.builtin)
+                .ok_or_else(|| AppError::Conflict(format!("selected MCP server '{id}' is unavailable")))?;
+            bindings.push(SessionMcpBindingRef::new(&row.mcp_server_id,
+                format!("mcp-server:{}@{}", row.mcp_server_id, row.updated_at))
+                .map_err(AppError::Conflict)?);
+        }
+        bindings
+    };
     LazyMcpRuntime::new(
         bindings,
         Arc::new(RepositorySessionMcpConnector {
@@ -501,7 +514,9 @@ pub(super) async fn build(
         deps.mcp_oauth_service.as_ref(),
         overrides.mcp_capabilities,
         &overrides.deferred_tools,
-    )?;
+        overrides.mcp_server_ids.as_deref().unwrap_or_default(),
+        is_instance_owner,
+    ).await?;
 
     // Merge reusable preset instructions into `system_prompt` (used as
     // `custom_prompt` in Nomi's prompt builder).
@@ -606,6 +621,16 @@ pub(super) async fn build(
         merge_session_snapshot_mcp_servers(
             &mut extra_mcp_servers,
             &overrides.session_mcp_servers,
+            &ctx.conversation_id,
+        );
+    }
+    // Device transports come from a live, revocable host grant rather than
+    // the public/persisted MCP config bag. They coexist with on-demand MCP
+    // without changing the user's declared MCP connection policy.
+    if is_instance_owner && !options.device_mcp_servers.is_empty() {
+        merge_session_snapshot_mcp_servers(
+            &mut extra_mcp_servers,
+            &options.device_mcp_servers,
             &ctx.conversation_id,
         );
     }

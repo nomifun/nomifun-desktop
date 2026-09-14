@@ -44,7 +44,7 @@
     },
     "label": "Agent 设定",
     "saved": "Agent 已更新",
-    "companionHint": "决定伙伴本地与 IM 对话可使用的能力；未选择时使用官方“伙伴”。"
+    "companionHint": "修改后统一应用于这位伙伴的桌面、机器人与 IM 对话；未选择时使用官方“伙伴”。"
   },
   "library": {
     "ariaLabel": "Agent 列表",
@@ -89,12 +89,6 @@
       "default": {
         "name": "伙伴",
         "description": "为日常陪伴配置角色、记忆与沟通能力。"
-      }
-    },
-    "robot": {
-      "default": {
-        "name": "机器人",
-        "description": "为设备交互选择感知、沟通与动作能力。"
       }
     },
     "customerService": {

@@ -143,6 +143,8 @@ impl Drop for PendingRequestGuard<'_> {
 }
 
 impl RobotMcpClient {
+    pub fn connection_id(&self) -> &str { &self.session_id }
+
     pub fn new(out: mpsc::Sender<Frame>, session_id: String) -> Self {
         Self {
             out,

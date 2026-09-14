@@ -1925,13 +1925,14 @@ mod tests {
     }
 
     #[test]
-    fn official_key_parser_is_exactly_the_frozen_seven() {
+    fn official_key_parser_rejects_retired_robot_and_workflow_templates() {
         assert_eq!(
             parse_official_key("coding.codex"),
             Some(OfficialPresetKey::CodingCodex)
         );
         assert!(parse_official_key("research").is_none());
         assert!(parse_official_key("autowork.executor").is_none());
+        assert!(parse_official_key("robot.default").is_none());
     }
 
     #[test]

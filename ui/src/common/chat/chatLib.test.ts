@@ -15,6 +15,7 @@ import {
   composeMessage,
   joinPath,
   mergeTextMessageContent,
+  preferTextMessageVersion,
   transformKnowledgeWritebackEvent,
   transformMessage,
   transformUserCreatedEvent,
@@ -23,6 +24,20 @@ import {
 const MESSAGE_ID = parseMessageId('019b0000-0000-7000-8000-000000000001');
 const SECOND_MESSAGE_ID = parseMessageId('019b0000-0000-7000-8000-000000000002');
 const COMPANION_ID = parseCompanionId('019b0000-0000-7000-8000-000000000001');
+
+test('late user-message acknowledgements retain persisted camera observations and device provenance', () => {
+  const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000001');
+  const live = transformUserCreatedEvent({ conversation_id: conversationId, msg_id: MESSAGE_ID,
+    content: 'Look here', position: 'right', status: 'finish', created_at: 1,
+    interaction: { kind: 'robot', robot_id: 'robot-1', connection_id: 'socket-1', request_id: 'turn-1', input_modality: 'speech', output_mode: 'spoken' },
+  }, conversationId)!;
+  const saved = { ...live, content: { ...live.content, observations: [{ question: 'What is here?', answer: 'A cup', observed_at: 2,
+    image: { id: 'photo-1', path: '/companion/cup.jpg', mime_type: 'image/jpeg', sha256: 'a'.repeat(64) } }] } };
+  const merged = preferTextMessageVersion(live, saved);
+  expect(merged.content.content).toBe('Look here');
+  expect(merged.content.interaction?.robot_id).toBe('robot-1');
+  expect(merged.content.observations?.[0].image.id).toBe('photo-1');
+});
 
 const baseWire = (overrides: Record<string, unknown>) =>
   ({

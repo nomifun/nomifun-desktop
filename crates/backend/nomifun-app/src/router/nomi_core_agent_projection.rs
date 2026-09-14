@@ -490,6 +490,11 @@ pub(crate) fn nomi_capability_projection(
         "knowledge.search" => NomiCapabilityProjection::Tools(&["knowledge_search"]),
         "knowledge.read" => NomiCapabilityProjection::Tools(&["knowledge_read"]),
         "knowledge.write" => NomiCapabilityProjection::Tools(&["knowledge_write"]),
+        // Companion product conversations use the same bound native memory
+        // sink on desktop and device turns. Preserve the atomic read/write
+        // ceiling instead of silently rejecting their registered tool names.
+        "memory.companion.recall" => NomiCapabilityProjection::Tools(&["recall_memories"]),
+        "memory.companion.write" => NomiCapabilityProjection::Tools(&["save_memory"]),
         "skill.invoke" => NomiCapabilityProjection::Tools(&["Skill"]),
 
         // Image understanding is not a callable tool. It authorizes Nomi to
@@ -703,6 +708,8 @@ fn is_native_nomi_capability(capability_id: &str) -> bool {
             | "knowledge.search"
             | "knowledge.read"
             | "knowledge.write"
+            | "memory.companion.recall"
+            | "memory.companion.write"
             | "skill.invoke"
             | "chat.basic"
             | "chat.minimal"

@@ -192,7 +192,15 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
             )
             .await
             .map_err(control_plane_error_to_app)?;
-        let selection = self.selection(&owner, &target.target_kind, &target.target_id).await?;
+        let mut selection = self.selection(&owner, &target.target_kind, &target.target_id).await?;
+        if selection.is_none() && let Some(record) = existing.as_ref() {
+            // An implicit official choice follows its current seed just like
+            // an explicit template choice. User-authored presets stay pinned.
+            if let Some(key) = self.control_plane.internal_official_template(&owner,
+                &record.agent_binding.preset_revision_ref.preset_id).await.map_err(control_plane_error_to_app)? {
+                selection = Some(ProductAgentSelection::Template { template_key: key.as_str().to_owned() });
+            }
+        }
         let binding = if let Some(selection) = selection {
             let model = requested_model.map(|model| AgentChatModelSelectionDto { provider_id: model.provider_id.clone(), model: model.model.clone() });
             let mut binding = self.materialize(&owner, &selection, model.as_ref()).await?;
@@ -1661,6 +1669,7 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
                 &self.runtime_registry,
                 build_lease,
                 BackgroundTurnRuntimePreparation {
+                    companion_device_turn: None,
                     runtime_options,
                     clear_context,
                     pre_send_hook: None,
@@ -2114,6 +2123,7 @@ impl nomifun_requirement::AutoWorkSessionPort for NomiCoreSessionOwner {
                 &self.runtime_registry,
                 build_lease,
                 BackgroundTurnRuntimePreparation {
+                    companion_device_turn: None,
                     runtime_options,
                     clear_context: runtime_overlay.clear_context,
                     pre_send_hook: runtime_overlay.pre_send_hook.map(|hook| {
@@ -2180,6 +2190,9 @@ impl nomifun_requirement::AutoWorkSessionPort for NomiCoreSessionOwner {
 
 #[async_trait]
 impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
+    async fn refresh_product_agent(&self, owner_id: &str, session_id: &str) -> Result<ConversationResponse, AppError> {
+        self.service.refresh_product_agent_for_existing(owner_id, session_id).await
+    }
     async fn get(
         &self,
         owner_id: &str,
@@ -2856,6 +2869,7 @@ fn runtime_options_from_session(
             delegation_policy,
             extra: Value::Object(session_extra).into(),
             conversation_created_at: Some(created_at),
+            device_mcp_servers: Vec::new(),
             workspace_binding_lease: None,
         },
         workspace,
@@ -3448,6 +3462,10 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
             put(update_nomi_core_agent_session_capability_selection),
         )
         .route(
+            "/api/agent-sessions/{agent_session_id}/mcp-selection",
+            put(update_nomi_core_agent_session_mcp_selection),
+        )
+        .route(
             "/api/agent-sessions/{agent_session_id}/turns",
             post(start_nomi_core_agent_session_turn),
         )
@@ -3574,7 +3592,6 @@ async fn product_agent_options(
 fn product_default_template(target_kind: &str) -> Option<&'static str> {
     match target_kind {
         "companion" => Some("companion.default"),
-        "robot" => Some("robot.default"),
         "customer" => Some("customer-service.default"),
         "creative_studio_canvas" => Some("creative-studio.default"),
         _ => None,
@@ -3598,8 +3615,7 @@ async fn select_product_agent_binding(
     if let Some(id) = request.conversation_id.as_deref() {
         let current = state.session_owner.get_session(owner.as_ref(), id).await?;
         let belongs = (current.extra["product_agent_target_kind"] == target_kind && current.extra["product_agent_target_id"] == target_id)
-            || (target_kind == "companion" && current.extra["companion_id"] == target_id && current.extra["robot_session"] != true)
-            || (target_kind == "robot" && current.extra["robot_id"] == target_id);
+            || (target_kind == "companion" && current.extra["companion_id"] == target_id);
         if !belongs { return Err(NomiCoreApiError::new(StatusCode::FORBIDDEN, "RESOURCE_OWNER_MISMATCH", "conversation belongs to another product target")); }
         if current.status == nomifun_common::ConversationStatus::Running {
             return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "REMOTE_SESSION_BUSY", "wait for the current reply"));
@@ -5553,6 +5569,37 @@ async fn create_nomi_core_agent_session(
         state: projected_session_status(&response),
         cursor,
     })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionMcpSelectionRequest {
+    mcp_server_ids: Vec<String>,
+}
+
+async fn update_nomi_core_agent_session_mcp_selection(
+    State(state): State<NomiCoreAgentApiState>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path(agent_session_id): Path<String>,
+    Json(request): Json<SessionMcpSelectionRequest>,
+) -> Result<Json<ApiResponse<ConversationResponse>>, NomiCoreApiError> {
+    let session_id = parse_agent_session_id(&agent_session_id)?;
+    let response = load_owned_nomi_core_session(&state, &owner, &session_id).await?;
+    if response.extra.get(NOMI_CORE_SESSION_METADATA_KEY).is_some()
+        && session_metadata(&response, &owner)?.remote.is_some() {
+        return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "NOMI_CORE_REMOTE_CAPABILITY_SELECTION_UNSUPPORTED", "Remote AgentSessions cannot change MCP bindings through the local UI"));
+    }
+    let selection = normalize_session_capability_selection(&AgentSessionCapabilitySelectionDto {
+        enabled_skills: vec![], excluded_auto_skills: vec![], mcp_server_ids: request.mcp_server_ids,
+    })?;
+    if !selection.mcp_server_ids.is_empty() && !response.agent_snapshot.as_ref().is_some_and(|snapshot|
+        snapshot.enabled_capabilities.iter().any(|id| id == "mcp.connect")) {
+        return Err(NomiCoreApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "MCP_CAPABILITY_REQUIRED", "the current Agent does not allow MCP connections"));
+    }
+    explicit_session_mcp_selection(&state.mcp_server_repository, &selection.mcp_server_ids).await?;
+    let (response, _) = state.session_owner.service()
+        .replace_session_mcp_selection(owner.as_ref(), session_id.as_ref(), &selection.mcp_server_ids).await?;
+    Ok(Json(ApiResponse::ok(response)))
 }
 
 async fn update_nomi_core_agent_session_capability_selection(

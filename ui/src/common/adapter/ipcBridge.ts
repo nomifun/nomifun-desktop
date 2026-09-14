@@ -763,6 +763,10 @@ export const agentPlatform = {
         `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/preset`,
       (params) => params.request
     ),
+    updateMcpSelection: httpPut<unknown, { agent_session_id: ConversationId; mcp_server_ids: McpServerId[] }>(
+      (params) => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/mcp-selection`,
+      (params) => ({ mcp_server_ids: params.mcp_server_ids })
+    ),
     updateCapabilitySelection: httpPut<
       UpdateAgentSessionCapabilitySelectionResponse,
       {
@@ -1201,6 +1205,12 @@ export const conversation = {
    *  IUserMessageCreatedEvent). */
   userCreated: wsMappedEmitter<IUserMessageCreatedEvent>('message.userCreated', (raw) =>
     fromApiUserMessageCreatedEvent(raw as IUserMessageCreatedEvent)
+  ),
+  messageAnnotated: wsMappedEmitter<{ conversation_id: ConversationId; message_id: MessageId }>(
+    'message.annotationUpdated', (raw) => {
+      const event = raw as { conversation_id: string; message_id: string };
+      return { conversation_id: parseConversationId(event.conversation_id), message_id: parseMessageId(event.message_id) };
+    },
   ),
   artifactStream: wsMappedEmitter<IConversationArtifact, ConversationArtifactResponse>(
     'conversation.artifact',
@@ -2470,8 +2480,19 @@ export const pluginRuntimes = {
 /** Live phase of one robot. `offline` = no WS session right now. */
 export type IApiRobotPhase = 'offline' | 'idle' | 'listening' | 'speaking';
 
+export interface IApiRobotPermissions {
+  vision: boolean;
+  motion: boolean;
+  display: boolean;
+  device_tools: boolean;
+  proactive_speech: boolean;
+  continuous_vision: boolean;
+}
+
 /** One registered robot. `companion_id === null` = paired with nobody yet. */
 export interface IApiRobot {
+  permissions: IApiRobotPermissions;
+  supported_permissions: Array<keyof IApiRobotPermissions>;
   robot_id: string;
   name: string;
   companion_id: CompanionId | null;
@@ -2520,6 +2541,14 @@ const fromApiRobotStatus = (value: IApiRobotStatus): IApiRobotStatus => ({
 });
 
 export const robot = {
+  speak: httpPost<{ accepted: boolean }, { robot_id: string; conversation_id: ConversationId }>(
+    (p) => `/api/robots/${p.robot_id}/speak`, (p) => ({ conversation_id: p.conversation_id }),
+  ),
+  setPermissions: withResponseMap(
+    httpPatch<IApiRobot, { robot_id: string; permissions: IApiRobotPermissions }>(
+      (p) => `/api/robots/${p.robot_id}/permissions`, (p) => p.permissions,
+    ), fromApiRobot,
+  ),
   list: withResponseMap(httpGet<{ robots: IApiRobot[] }, void>('/api/robots'), (payload) =>
     (payload.robots ?? []).map(fromApiRobot)
   ),
@@ -3599,6 +3628,7 @@ export interface IKnowledgeWritebackEvent {
  *  channel inbound messages — the companion window renders those as incoming
  *  bubble headers). Same companion wire markers as IResponseMessage. */
 export interface IUserMessageCreatedEvent {
+  interaction?: import('../chat/chatLib').IMessageText['content']['interaction'];
   conversation_id: ConversationId;
   msg_id: MessageId;
   content: string;
@@ -5191,6 +5221,7 @@ export interface ICompanionSkillConfig {
 
 export interface ICompanionProfile {
   companion_id: CompanionId;
+  control_robot_id?: string | null;
   /** Positive dataset-local display ordinal. */
   seq: number;
   name: string;
@@ -5287,6 +5318,7 @@ export type ICompanionWithStatus = ICompanionProfile & {
 
 /// RFC 7396 merge patch over ICompanionProfile — nested partial objects merge.
 export type ICompanionProfilePatch = {
+  control_robot_id?: string | null;
   name?: string;
   character?: string;
   persona?: Partial<ICompanionPersona>;

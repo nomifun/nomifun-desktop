@@ -2121,15 +2121,11 @@ pub fn build_companion_state(
     let conv_service = conversation_owner.service().clone();
 
     let conv_service = Arc::new(conv_service);
-    let robot_model_sync = Arc::new(CompanionRobotModelSync {
-        conversations: conv_service.clone(),
-        runtime_registry: services.agent_runtime_registry.clone(),
-        owner_user_id: services.authoritative_user_id.clone(),
-    });
 
     // Deleting a companion must also drop its ('companion', id) knowledge-binding row so
     // bindings don't orphan (T3.3). Switching a companion's chat model (single source
-    // of truth) clears bound IM sessions and retargets durable robot threads.
+    // of truth) clears bound IM sessions. Physical endpoints share the same
+    // Companion conversation and require no model propagation or boot repair.
     // Deleting a companion likewise clears its channel bindings. All are
     // best-effort cleanup hooks.
     services.companion_service.set_cleanup_hooks(vec![
@@ -2139,29 +2135,9 @@ pub fn build_companion_state(
         Arc::new(CompanionChannelModelSync {
             manager: channel_manager,
         }),
-        robot_model_sync.clone(),
+        Arc::new(CompanionRobotCleanup { robot: services.robot.clone() }),
     ]);
 
-    // Repair robot threads created while their companion had no chat model.
-    // This boot pass is deliberately missing-only: a fallback selected after a
-    // provider fault remains sticky across restart. Explicit settings changes
-    // use the hook above and intentionally retarget every robot thread.
-    let companion_service = services.companion_service.clone();
-    let shutdown = services.background_shutdown.clone();
-    let repair_task = tokio::spawn(async move {
-        for profile in companion_service.list_companions().await {
-            if shutdown.is_cancelled() {
-                break;
-            }
-            let Some(model) = profile.model.as_ref() else {
-                continue;
-            };
-            robot_model_sync
-                .sync(&profile.companion_id, model, true)
-                .await;
-        }
-    });
-    services.register_background_task(repair_task);
 
     let transcript: Arc<dyn nomifun_companion::evolution::TranscriptSource> =
         Arc::new(nomifun_companion::evolution::ConversationTranscriptSource::new(
@@ -2496,63 +2472,23 @@ impl nomifun_companion::service::CompanionCleanupHook for CompanionChannelModelS
     }
 }
 
-/// Companion model-switch / boot repair -> durable robot conversation sync.
-///
-/// Robot threads are intentionally not part of the companion chat registry,
-/// but they carry the same backend-owned `extra.companion_id` identity and use
-/// the companion chat model as their source of truth.
-struct CompanionRobotModelSync {
-    conversations: Arc<ConversationService>,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
-    owner_user_id: Arc<str>,
-}
-
-impl CompanionRobotModelSync {
-    async fn sync(
-        &self,
-        companion_id: &str,
-        model: &nomifun_common::ProviderWithModel,
-        only_missing: bool,
-    ) {
-        match self
-            .conversations
-            .sync_robot_thread_models_for_companion(
-                self.owner_user_id.as_ref(),
-                companion_id,
-                model,
-                only_missing,
-                &self.runtime_registry,
-            )
-            .await
-        {
-            Ok(0) => {}
-            Ok(updated) => tracing::info!(
-                companion_id,
-                updated,
-                only_missing,
-                "synchronized companion chat model to robot conversations"
-            ),
-            Err(error) => tracing::warn!(
-                companion_id,
-                %error,
-                only_missing,
-                "failed to synchronize companion chat model to robot conversations"
-            ),
-        }
-    }
+/// Deleting a Companion revokes every physical endpoint bound to it.
+struct CompanionRobotCleanup {
+    robot: Option<Arc<crate::robot_wiring::RobotServices>>,
 }
 
 #[async_trait::async_trait]
-impl nomifun_companion::service::CompanionCleanupHook for CompanionRobotModelSync {
-    async fn on_companion_deleted(&self, _companion_id: &str) {}
-
-    async fn on_companion_model_changed(
-        &self,
-        companion_id: &str,
-        model: Option<&nomifun_common::ProviderWithModel>,
-    ) {
-        if let Some(model) = model {
-            self.sync(companion_id, model, false).await;
+impl nomifun_companion::service::CompanionCleanupHook for CompanionRobotCleanup {
+    async fn on_companion_deleted(&self, companion_id: &str) {
+        let Some(robot) = self.robot.as_ref() else { return; };
+        for record in robot.registry.list().await {
+            if record.companion_id.as_deref() == Some(companion_id) {
+                if let Err(error) = robot.registry.patch(&record.robot_id, None, Some(None)).await {
+                    tracing::warn!(%error, "could not unbind deleted Companion device");
+                }
+                robot.tools.detach_if_disconnected(&robot.registry, &record.robot_id).await;
+                robot.status.mark_offline_if_disconnected(&robot.registry, &record.robot_id, nomifun_common::now_ms()).await;
+            }
         }
     }
 }

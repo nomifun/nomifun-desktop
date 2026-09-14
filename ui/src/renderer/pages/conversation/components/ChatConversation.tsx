@@ -766,9 +766,8 @@ const ChatConversation: React.FC<{
   }
 
   if (conversation && conversation.type === 'nomi') {
-    // Companion sessions use a fixed workspace and restricted controls.
-    // Configuration controls remain limited for companion sessions, while
-    // linked execution progress and lifecycle state stay visible.
+    // Use the shared shell and composer with companion-owned configuration
+    // callbacks; model/Agent edits must update the companion across all inputs.
     if (conversation.extra?.companion_session) {
       return (
         <ExecutionProvider conversation={conversation}>

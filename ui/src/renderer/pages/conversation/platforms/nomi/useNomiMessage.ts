@@ -774,6 +774,17 @@ export const useNomiMessage = (
   }, [conversation_id, addOrUpdateMessage]);
 
   useEffect(() => {
+    let disposed = false;
+    const off = ipcBridge.conversation.messageAnnotated.on((event) => {
+      if (event.conversation_id !== conversation_id) return;
+      void ipcBridge.database.getConversationMessage.invoke(event).then((message) => {
+        if (!disposed) addOrUpdateMessage(message);
+      }).catch((error) => console.error('[Companion] Failed to refresh observation:', error));
+    });
+    return () => { disposed = true; off(); };
+  }, [conversation_id, addOrUpdateMessage]);
+
+  useEffect(() => {
     return ipcBridge.conversation.responseStream.on((message) => {
       if (conversation_id !== message.conversation_id) {
         return;

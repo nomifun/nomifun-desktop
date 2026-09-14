@@ -423,6 +423,10 @@ pub struct CompanionProfileConfig {
     /// error.
     #[serde(deserialize_with = "deserialize_companion_profile_id")]
     pub companion_id: String,
+    /// Physical control target for desktop turns. None selects only when
+    /// exactly one robot belongs to this Companion; never guess among devices.
+    #[serde(default)]
+    pub control_robot_id: Option<String>,
     /// Display-only short number (`#1`, `#2`, …) for companion lists. Monotonic
     /// within this machine, allocated by the registry from its private
     /// high-watermark state file (`companion/shared/companion_seq.json`) so a
@@ -489,6 +493,7 @@ impl CompanionProfileConfig {
         let character = if character.is_empty() { DEFAULT_CHARACTER } else { character };
         Self {
             companion_id: CompanionId::new().into_string(),
+            control_robot_id: None,
             seq,
             name: name.to_owned(),
             character: character.to_owned(),

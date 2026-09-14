@@ -8,6 +8,7 @@
  * 会被改写成 `Left as LeftArrow as _Left as LeftArrow` 这类非法语法,
  * 模块在 dev/build 阶段 500,而 tsc 完全无法发现(源码本身合法)。
  * 命名空间导入(`import * as Icons`)同理禁止。
+ * 同一模块的具名导入必须合并，否则插件会重复声明 IconParkHOC。
  *
  * 扫描范围:ui/src 下全部 .ts/.tsx。
  * 用法 / Usage:
@@ -45,7 +46,16 @@ function lineOf(source, index) {
 /** 返回违规清单 [{line, snippet, kind}] */
 function scanSource(source) {
   const violations = [];
+  let namedImportCount = 0;
   for (const m of source.matchAll(NAMED_IMPORT_RE)) {
+    namedImportCount += 1;
+    if (namedImportCount > 1) {
+      violations.push({
+        line: lineOf(source, m.index),
+        snippet: m[0].replace(/\s+/g, ' ').slice(0, 120),
+        kind: 'duplicate-import',
+      });
+    }
     const braces = m[1];
     if (ALIAS_RE.test(braces)) {
       violations.push({
@@ -68,6 +78,7 @@ function scanSource(source) {
 function selfTest() {
   const cases = [
     { src: "import { Left } from '@icon-park/react';", bad: 0 },
+    { src: "import { Left } from '@icon-park/react';\nimport { Robot } from '@icon-park/react';", bad: 1 },
     { src: "import { DeleteFour, Info, Left, PreviewOpen } from '@icon-park/react';", bad: 0 },
     { src: "import { Left as LeftArrow } from '@icon-park/react';", bad: 1 },
     { src: "import {\n  Cycle,\n  Play as Run,\n} from '@icon-park/react';", bad: 1 },
@@ -108,7 +119,7 @@ for (const file of walk(SCAN_DIR)) {
 }
 
 if (problems.length > 0) {
-  console.error('❌ @icon-park/react 导入违规(禁别名/禁命名空间导入,详见 scripts/check-icon-imports.mjs 头注):');
+  console.error('❌ @icon-park/react 导入违规(禁别名/禁命名空间/需合并导入,详见 scripts/check-icon-imports.mjs 头注):');
   for (const p of problems) {
     console.error(`  ${p.file}:${p.line} [${p.kind}] ${p.snippet}`);
   }
