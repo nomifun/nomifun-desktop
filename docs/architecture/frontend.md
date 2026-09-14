@@ -5,6 +5,12 @@ shell and the `nomifun-web` host load the same Vite build from `ui/dist`; the
 renderer talks to the backend through HTTP and WebSocket, with a small Tauri
 adapter only for desktop shell operations.
 
+The shared renderer targets desktop-class surfaces only: the Tauri window and
+desktop WebUI browsers, with a minimum supported viewport of 880x600. Phone and
+tablet layouts, touch-only fallbacks, safe-area handling, and sub-880px viewport
+breakpoints are outside this repository's UI contract. Narrow content panes
+within a supported desktop window should adapt with container-aware layout.
+
 ## Stack
 
 | Concern | Current choice |
@@ -74,8 +80,10 @@ The source of truth is
 | `/workshop/canvas/:canvasId` | Canvas infinite editor. |
 | `/workshop/image`, `/workshop/video` | Independent Image and Video Workbenches; both work with zero Canvases. |
 | `/workshop/prompts`, `/workshop/assets`, `/workshop/templates` | Prompt and asset libraries plus the private Template Studio. |
-| `/mini-apps` | Mini-app library — the published single-file web tools, as a card grid. |
-| `/mini-apps/:id` | Mini-app runner — a single column: the PUBLISHED snapshot in a sandboxed iframe served straight from the backend, plus a toolbar (publish / 「继续迭代」 / refresh / open in browser / rename / delete). No conversation UI is mounted here; 「继续迭代」 provisions the working copy and navigates to an ordinary `/conversation/:id`, so the `pages/conversation/**` module graph never enters this route. |
+| `/plugins` | Plugin Library for installed and locally authored Plugin Products. |
+| `/plugins/new` | Start Plugin creation or import. |
+| `/plugins/create/:draftId` | Create a Plugin project from a validated draft. |
+| `/plugins/run/:id` | Plugin Workshop and runtime surface for source, tests, Releases, lifecycle, transfer, and UI/Service operation. |
 | `/settings/system` and related settings subroutes | System settings page and sub-sections. |
 
 Legacy settings paths such as `/settings/model`, `/settings/agent`,

@@ -2,6 +2,10 @@
 
 前端是位于 [`ui/`](../../ui/) 的一个 React 19 SPA。两个宿主 —— Tauri 桌面外壳与 `nomifun-web` —— 都加载同一份 Vite 构建产物（`ui/dist`）。渲染进程从不使用 Electron IPC；在两个宿主中它都通过普通的 HTTP 与 WebSocket 与后端通信。
 
+共享 Renderer 只面向桌面级界面：Tauri 桌面窗口与桌面浏览器 WebUI，最小支持视口为
+880x600。手机/平板布局、触摸专用降级、安全区处理和低于 880px 的视口断点不属于本仓库
+UI 契约。桌面窗口内的窄内容面板需要收缩时，应使用基于容器宽度的布局。
+
 ## 技术栈
 
 | 关注点 | 选择 |
@@ -104,7 +108,7 @@ export function getBaseUrl(): string {
 1. Tauri 外壳通过 `tauri://` / `file://` 协议加载 SPA；`BrowserRouter` 在该协议下经历的页面重新加载（如深链接或应用内导航）后无法保留状态。
 2. Web 宿主通过 `tower_http::services::ServeDir` 提供 SPA，并启用 `append_index_html_on_directories(true)`。Hash 路由意味着浏览器访问的任何路径都返回 `index.html`，由 SPA 完成其余工作 —— 静态服务器无需自定义 catch-all。
 
-路由表的顶层条目涵盖会话运行时（`/guid`、`/conversation/:id`）、模型（`/models`）、设定（`/presets`）、技能（`/skills`）、MCP（`/mcp`）、开放能力（`/open-capabilities`）、终端（`/terminal-new`、`/terminal/:id`）、需求/AutoWork（`/requirements/*`、`/autowork` redirect）、定时任务（`/scheduled`、`/scheduled/:job_id`）、桌面伙伴（`/nomi` 配置页、`/companion` 桌面窗口）、知识库（`/knowledge`、`/knowledge/:id`）、小程序（`/mini-apps` 库页面、`/mini-apps/:id` 单栏运行页：`MiniAppFrame` 直出已发布快照 + 工具栏，「继续迭代」置备工作副本后落地普通 `/conversation/:id`，页面本身不挂载任何会话 UI）以及认证（`/login`）。旧 settings 路径只作为重定向保留。Agent 协作不建立独立路由或单独页面；AgentExecution 投影直接显示在所属 Conversation 内，避免导航层再产生一个产品对象。
+路由表的顶层条目涵盖会话运行时（`/guid`、`/conversation/:id`）、模型（`/models`）、设定（`/presets`）、技能（`/skills`）、MCP（`/mcp`）、开放能力（`/open-capabilities`）、终端（`/terminal-new`、`/terminal/:id`）、需求/AutoWork（`/requirements/*`、`/autowork` redirect）、定时任务（`/scheduled`、`/scheduled/:job_id`）、桌面伙伴（`/nomi` 配置页、`/companion` 桌面窗口）、知识库（`/knowledge`、`/knowledge/:id`）、Plugin 产品（`/plugins` 产品库、`/plugins/new` 创建或导入、`/plugins/create/:draftId` 从草稿创建、`/plugins/run/:id` Workshop 与运行 Surface）以及认证（`/login`）。旧 settings 路径只作为重定向保留。Agent 协作不建立独立路由或单独页面；AgentExecution 投影直接显示在所属 Conversation 内，避免导航层再产生一个产品对象。
 
 创意工坊位于普通应用布局内，复用默认标题栏的回退、前进、侧栏开关与系统窗口控制；
 进入产品后，左侧主侧栏会像“设置”一样切换为创意工坊内部导航，并把“返回工作台”

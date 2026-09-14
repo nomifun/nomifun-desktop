@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Development preflight in the actual WebKitGTK WebView, NOT native RC evidence.
 // Start an isolated Desktop with WEBKIT_INSPECTOR_HTTP_SERVER=127.0.0.1:9232.
-// This creates two MiniApps in the explicitly supplied data root. No credentials
+// This creates two Plugins in the explicitly supplied data root. No credentials
 // leave the WebView and no external model, browser or computer input is used.
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -15,7 +15,7 @@ const { values } = parseArgs({ options: {
   quit: { type: 'boolean', default: false },
 } });
 if (process.platform !== 'linux' || !values.inspector || !values['data-root'] || !values.output) {
-  throw new Error('Linux only: --inspector http://127.0.0.1:9232 --data-root <isolated root> --output <evidence dir>; creates test MiniApps');
+  throw new Error('Linux only: --inspector http://127.0.0.1:9232 --data-root <isolated root> --output <evidence dir>; creates test Plugins');
 }
 const endpoint = new URL(values.inspector);
 if (endpoint.protocol !== 'http:' || endpoint.hostname !== '127.0.0.1') {
@@ -88,7 +88,7 @@ async function waitFor(expression, description) {
 
 // Self-contained page function: fetch uses the product's initialization script
 // and local-trust admission. Return summaries, never Surface capabilities.
-async function exerciseMiniApps() {
+async function exercisePlugins() {
   const results = [];
   const base = `http://127.0.0.1:${window.__backendPort}`;
   async function api(path, body) {
@@ -111,12 +111,13 @@ async function exerciseMiniApps() {
     let current = await api('/api/plugins/runtimes/projects', {
       expected_library_revision: library.library_revision,
       display_name: `Linux WebKit ${kind} ${Date.now()}`,
-      description: 'Isolated Linux development smoke', kind,
+      description: 'Isolated Linux development smoke',
+      ...(kind === 'service' ? { service_source: 'export async function start() { return { async invoke({payload}) { return payload; }, async dispose() {} }; }' } : {}),
     });
-    const id = current.miniapp.miniapp_id;
+    const id = current.plugin.plugin_id;
     const path = `/api/plugins/runtimes/${encodeURIComponent(id)}`;
     current = await api(`${path}/build`, {
-      miniapp_id: id, expected_product_revision: current.miniapp.product_revision,
+      plugin_id: id, expected_product_revision: current.plugin.product_revision,
       project_id: current.project_id, expected_project_revision: current.project_revision,
       expected_build_generation: current.build_generation,
       expected_source_snapshot_digest: current.source_snapshot_digest,
@@ -125,8 +126,8 @@ async function exerciseMiniApps() {
     if (!current.ready?.release) throw new Error(`${kind}: Build produced no Ready Release`);
     if (kind === 'service') {
       current = await api(`${path}/test`, {
-        miniapp_id: id, expected_product_revision: current.miniapp.product_revision,
-        expected_pointer_revision: current.miniapp.releases.pointer_revision,
+        plugin_id: id, expected_product_revision: current.plugin.product_revision,
+        expected_pointer_revision: current.plugin.releases.pointer_revision,
         project_id: current.project_id, expected_project_revision: current.project_revision,
         expected_build_generation: current.build_generation,
         release_id: current.ready.release.release_id,
@@ -138,43 +139,43 @@ async function exerciseMiniApps() {
       if (current.ready.test?.status !== 'passed') throw new Error(`Service Test: ${current.ready.test?.error_code}`);
     }
     current = await api(`${path}/publish`, {
-      miniapp_id: id, expected_product_revision: current.miniapp.product_revision,
-      expected_pointer_revision: current.miniapp.releases.pointer_revision,
-      expected_active_release_epoch: current.miniapp.releases.active_release_epoch,
+      plugin_id: id, expected_product_revision: current.plugin.product_revision,
+      expected_pointer_revision: current.plugin.releases.pointer_revision,
+      expected_active_release_epoch: current.plugin.releases.active_release_epoch,
       ready_release_id: current.ready.release.release_id,
       expected_ready_release_digest: current.ready.release.release_digest,
       ...(kind === 'service' ? { expected_service_test_receipt_id: current.ready.test.receipt_id } : {}),
       acknowledge_test_warning: false,
     });
-    if (current.miniapp.lifecycle === 'disabled') {
+    if (current.plugin.lifecycle === 'disabled') {
       current = await api(`${path}/enabled`, {
-        miniapp_id: id, expected_product_revision: current.miniapp.product_revision,
-        expected_pointer_revision: current.miniapp.releases.pointer_revision,
-        expected_active_release_digest: current.miniapp.releases.active.release_digest,
+        plugin_id: id, expected_product_revision: current.plugin.product_revision,
+        expected_pointer_revision: current.plugin.releases.pointer_revision,
+        expected_active_release_digest: current.plugin.releases.active.release_digest,
         enabled: true,
       });
     }
-    const surface = await api(`${path}/surface/open`, { miniapp_id: id });
-    if (surface.release_id !== current.miniapp.releases.active.release_id) throw new Error('Surface Release mismatch');
+    const surface = await api(`${path}/surface/open`, { plugin_id: id });
+    if (surface.release_id !== current.plugin.releases.active.release_id) throw new Error('Surface Release mismatch');
     const assetPath = `${path}/surface/assets/${encodeURIComponent(surface.surface_capability)}/${surface.active_release_epoch}/${encodeURIComponent(surface.expected_release_digest)}/${surface.ui_entrypoint.split('/').map(encodeURIComponent).join('/')}`;
     const asset = await fetch(base + assetPath);
     if (!asset.ok || !(await asset.text()).includes('Linux WebKit')) throw new Error(`${kind}: Surface HTML missing`);
     const closed = await api(`${path}/surface/close`, {
-      miniapp_id: id, surface_session_id: surface.surface_session_id,
+      plugin_id: id, surface_session_id: surface.surface_session_id,
       surface_capability: surface.surface_capability,
     });
     if (closed !== true || (await fetch(base + assetPath)).status !== 404) throw new Error(`${kind}: Surface capability was not revoked`);
     if (kind === 'service') {
       for (const running of [true, false]) {
         current = await api(`${path}/service/running`, {
-          miniapp_id: id, expected_product_revision: current.miniapp.product_revision,
-          expected_pointer_revision: current.miniapp.releases.pointer_revision,
-          expected_active_release_epoch: current.miniapp.releases.active_release_epoch,
-          expected_active_release_digest: current.miniapp.releases.active.release_digest, running,
+          plugin_id: id, expected_product_revision: current.plugin.product_revision,
+          expected_pointer_revision: current.plugin.releases.pointer_revision,
+          expected_active_release_epoch: current.plugin.releases.active_release_epoch,
+          expected_active_release_digest: current.plugin.releases.active.release_digest, running,
         });
       }
     }
-    results.push({ kind, miniapp_id: id, display_name: current.miniapp.display_name,
+    results.push({ kind, plugin_id: id, display_name: current.plugin.display_name,
       build: 'ready', publish: 'active', surface: 'opened-and-closed',
       ...(kind === 'service' ? { test: 'passed', service: 'started-and-stopped' } : {}) });
   }
@@ -190,38 +191,38 @@ try {
   clearTimeout(readyTimer);
   if (await evaluate('window.__backendPort') !== announcement.port) throw new Error('Inspector is not the Desktop serving the supplied isolated data root');
   report.webview_origin = await evaluate('location.origin');
-  for (const route of ['/agent', '/plugins', '/plugins']) {
+  for (const route of ['/agent', '/plugins', '/plugins/new']) {
     await evaluate(`location.hash = ${JSON.stringify(route)}`);
     await pause(1500);
     const page = await evaluate('({hash:location.hash,text:document.body.innerText})');
     if (page.hash !== `#${route}` || page.text.length < 100 || /unexpected application error/i.test(page.text)) throw new Error(`Page failed: ${route}`);
     report.checks.push({ route, hash: page.hash, rendered_text_length: page.text.length });
   }
-  await evaluate(`window.__linuxPreflight = null; (${exerciseMiniApps.toString()})().then(value => { window.__linuxPreflight = {ok:true,value}; }, error => { window.__linuxPreflight = {ok:false,error:error.message}; }); void 0`);
+  await evaluate(`window.__linuxPreflight = null; (${exercisePlugins.toString()})().then(value => { window.__linuxPreflight = {ok:true,value}; }, error => { window.__linuxPreflight = {ok:false,error:error.message}; }); void 0`);
   const deadline = Date.now() + 180_000;
   let result;
   while (!(result = await evaluate('window.__linuxPreflight'))) {
-    if (Date.now() > deadline) throw new Error('MiniApp product preflight deadline exceeded');
+    if (Date.now() > deadline) throw new Error('Plugin product preflight deadline exceeded');
     await pause(250);
   }
   await evaluate('delete window.__linuxPreflight');
   if (!result.ok) throw new Error(result.error);
-  report.miniapps = result.value;
-  for (const miniapp of report.miniapps) {
-    await evaluate(`location.hash = ${JSON.stringify(`/plugins/run/${miniapp.miniapp_id}`)}`);
-    const openButton = `Array.from(document.querySelectorAll('button')).find(button => /^(Open Surface|打开 Surface):/.test(button.getAttribute('aria-label') || '') && button.getAttribute('aria-label').endsWith(${JSON.stringify(`: ${miniapp.display_name}`)}) && !button.disabled)`;
-    await waitFor(`Boolean(${openButton})`, 'MiniApp Open Surface button (en-US/zh-CN)');
-    await evaluate(`(${openButton}).click(); void 0`);
+  report.plugins = result.value;
+  for (const plugin of report.plugins) {
+    await evaluate(`location.hash = ${JSON.stringify(`/plugins/run/${plugin.plugin_id}`)}`);
     await waitFor(`(() => {
-      const section = document.querySelector('section[aria-labelledby="miniapp-surface-title"]');
+      const section = Array.from(document.querySelectorAll('section[aria-label]'))
+        .find(candidate => candidate.getAttribute('aria-label') === ${JSON.stringify(plugin.display_name)});
       const frame = section?.querySelector('iframe');
       return frame?.getAttribute('sandbox') === 'allow-scripts allow-forms' &&
         section.getAttribute('aria-busy') !== 'true' && !section.querySelector('[role="alert"]');
     })()`, 'sandboxed Surface iframe load');
-    const closeButton = `Array.from(document.querySelectorAll('button')).find(button => /^(Close Surface|关闭 Surface):/.test(button.getAttribute('aria-label') || '') && !button.disabled)`;
-    await evaluate(`(${closeButton}).click(); void 0`);
-    await waitFor(`!document.querySelector('section[aria-labelledby="miniapp-surface-title"] iframe')`, 'Surface iframe unmount');
-    miniapp.webview_surface = 'loaded-and-closed-via-ui';
+    await evaluate('location.hash = "/plugins"; void 0');
+    await waitFor(
+      `!document.querySelector('section[aria-label] iframe[sandbox="allow-scripts allow-forms"]')`,
+      'Surface iframe unmount after leaving the run route',
+    );
+    plugin.webview_surface = 'loaded-and-closed-via-route';
   }
   await evaluate('location.hash = "/plugins"; void 0');
   report.status = 'preflight-pass';

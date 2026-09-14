@@ -40,7 +40,7 @@ export interface PluginRuntimeWorkflowState {
   surface: PluginRuntimeWorkflowStepState;
 }
 
-export const EMPTY_MINIAPP_TEST_INPUT_DIGEST =
+export const EMPTY_PLUGIN_TEST_INPUT_DIGEST =
   'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
 export function pluginRuntimeReleaseStage(
@@ -95,8 +95,6 @@ export function pluginRuntimeBuildRequest(
   serviceLifecycle: PluginRuntimeServiceLifecycle = 'on_demand'
 ): BuildPluginRuntimeRequest | null {
   if (
-    workshop.plugin.kind !== 'ui_only' &&
-    workshop.plugin.kind !== 'service' ||
     workshop.source_state !== 'editable' ||
     workshop.active_operation?.state === 'running' ||
     !workshop.source_snapshot_digest ||
@@ -113,7 +111,7 @@ export function pluginRuntimeBuildRequest(
     expected_build_generation: workshop.build_generation,
     expected_source_snapshot_digest: workshop.source_snapshot_digest,
     expected_dependency_lock_digest: workshop.dependency_lock_digest,
-    ...(workshop.plugin.kind === 'service'
+    ...(workshop.service_lifecycle
       ? { service_lifecycle: serviceLifecycle }
       : {}),
   };
@@ -124,7 +122,6 @@ export function pluginRuntimeTestRequest(
 ): TestPluginRuntimeReleaseRequest | null {
   const { plugin, ready } = workshop;
   if (
-    plugin.kind !== 'service' ||
     (plugin.lifecycle !== 'enabled' && plugin.lifecycle !== 'disabled') ||
     !ready?.service ||
     workshop.active_operation?.state === 'running'
@@ -143,7 +140,7 @@ export function pluginRuntimeTestRequest(
     expected_config_revision: workshop.config.config_revision,
     expected_credential_bindings_revision:
       workshop.credential_bindings_revision,
-    resolved_test_input_digest: EMPTY_MINIAPP_TEST_INPUT_DIGEST,
+    resolved_test_input_digest: EMPTY_PLUGIN_TEST_INPUT_DIGEST,
   };
 }
 
@@ -201,8 +198,6 @@ function releaseRefsMatch(
 
 function pluginRuntimeAllowsReleaseMutation(workshop: PluginRuntimeWorkshop): boolean {
   return (
-    (workshop.plugin.kind === 'ui_only' ||
-      workshop.plugin.kind === 'service') &&
     (workshop.plugin.lifecycle === 'enabled' ||
       workshop.plugin.lifecycle === 'disabled') &&
     workshop.active_operation?.state !== 'running'
@@ -219,7 +214,7 @@ export function pluginRuntimePublishRequest(
     !ready ||
     !readyPointer ||
     !ready.can_publish ||
-    (ready.kind === 'ui_only' && ready.test.status !== 'not_required') ||
+    (!ready.service && ready.test.status !== 'not_required') ||
     ready.test.release_id !== ready.release.release_id ||
     ready.test.expected_release_digest !== ready.release.release_digest ||
     !releaseRefsMatch(readyPointer, ready.release)
@@ -240,13 +235,13 @@ export function pluginRuntimePublishRequest(
             plugin.releases.active.release_digest,
         }
       : {}),
-    ...(ready.kind === 'service' &&
+    ...(ready.service &&
     ready.test.status !== 'stale' &&
     ready.test.receipt_id
       ? { expected_service_test_receipt_id: ready.test.receipt_id }
       : {}),
     acknowledge_test_warning:
-      ready.kind === 'service' && ready.test.status !== 'passed',
+      Boolean(ready.service) && ready.test.status !== 'passed',
   };
 }
 
@@ -282,7 +277,6 @@ export function pluginRuntimeSetEnabledRequest(
 ): SetPluginRuntimeEnabledRequest | null {
   const { plugin } = workshop;
   if (
-    plugin.kind !== 'ui_only' && plugin.kind !== 'service' ||
     workshop.active_operation?.state === 'running' ||
     (plugin.lifecycle !== 'enabled' && plugin.lifecycle !== 'disabled') ||
     (enabled && !plugin.releases.active) ||
@@ -319,7 +313,7 @@ export function pluginRuntimeSetPublishModeRequest(
     workshop.publish_mode === 'auto_ui_only' &&
     mode === 'manual';
   if (
-    plugin.kind !== 'ui_only' ||
+    (mode === 'auto_ui_only' && Boolean(workshop.active_service)) ||
     (buildRunning && !revokingDuringBuild) ||
     (plugin.lifecycle !== 'enabled' && plugin.lifecycle !== 'disabled') ||
     workshop.publish_mode === mode ||
@@ -343,7 +337,7 @@ export function pluginRuntimeSetServiceRunningRequest(
   const { plugin } = workshop;
   const active = plugin.releases.active;
   if (
-    plugin.kind !== 'service' ||
+    !workshop.active_service ||
     plugin.lifecycle !== 'enabled' ||
     !active ||
     plugin.releases.active_release_epoch < 1
@@ -446,9 +440,7 @@ export function pluginRuntimeRetryDeleteRequest(
 
 export function pluginRuntimeCanOpenSurface(workshop: PluginRuntimeWorkshop): boolean {
   return Boolean(
-    (workshop.plugin.kind === 'ui_only' ||
-      workshop.plugin.kind === 'service') &&
-      workshop.plugin.lifecycle === 'enabled' &&
+    workshop.plugin.lifecycle === 'enabled' &&
       workshop.plugin.surface_available &&
       workshop.plugin.releases.active &&
       workshop.plugin.releases.active_release_epoch > 0

@@ -29,6 +29,10 @@
       "group": "check",
       "desc": "Enforce the single BrowserSessionHub ownership boundary and reject private browser launch paths."
     },
+    "check:desktop-ui-boundary": {
+      "group": "check",
+      "desc": "校验 Renderer 仅支持 880x600 及以上桌面窗口，阻止手机分支、低宽度断点和移动浏览器兼容代码回流"
+    },
     "check:automation-session-boundary": {
       "group": "check",
       "desc": "审计 Cron、AutoWork、AgentExecution、Channel、Companion、IDMM 的旧 Session/runtime 依赖与迁移边界"
@@ -55,7 +59,7 @@
     "release:mac":   { "group": "build", "desc": "一键 macOS 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检" },
     "release:win":   { "group": "build", "desc": "一键 Windows 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检" },
     "release:win:signed-rc": { "group": "build", "desc": "串行构建并验收 Windows x64 签名 RC，绑定 immutable cohort 与 release lock" },
-    "release:cohort": { "group": "build", "desc": "校验 Plugin N1 / MiniApp M1 各平台原生记录并生成冻结 cohort lock" },
+    "release:cohort": { "group": "build", "desc": "校验 Plugin N1 / Plugin M1 各平台原生记录并生成冻结 cohort lock" },
     "release:linux": { "group": "build", "desc": "一键 Linux 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检" },
     "release:cloud": { "group": "build", "desc": "管理 CrabNebula Cloud 发布草稿、分平台上传、发布与更新端点验证" },
     "build:ui":      { "group": "build", "desc": "前端生产构建 → ui/dist" },
@@ -69,14 +73,14 @@
     "test:browser":  { "group": "test",  "desc": "运行 browser-use 门控的 Rust 测试（browser-platform 全量 + gateway/ai-agent/nomi-agent/app 开启 --features browser-use；crate/core 车道会静默跳过这些）" },
     "test:ui":       { "group": "test",  "desc": "运行前端单元测试（bun test，收集 ui/src 下全部 *.test.ts/tsx）" },
     "test:nomi-core-live-provider": { "group": "test", "desc": "Run the credential-isolated Nomi-core Coding, Cron, and Remote product smoke against a configured live Provider." },
-    "check":         { "group": "check", "desc": "聚合静态检查：typecheck + i18n + 主题/图标/dead-CSS + Windows 安装器 + 创意工坊退役 + 进程/浏览器边界 + Agent 词汇 + 脚本登记" },
+    "check":         { "group": "check", "desc": "聚合静态检查：typecheck + 桌面 UI 边界 + i18n + 主题/图标/dead-CSS + Windows 安装器 + 创意工坊退役 + 进程/浏览器边界 + Agent 词汇 + 脚本登记" },
     "typecheck":     { "group": "check", "desc": "前端 TypeScript 类型检查（tsc --noEmit）" },
     "check:i18n":    { "group": "check", "desc": "校验 i18n 类型与 locale 键是否一致" },
     "check:theme":   { "group": "check", "desc": "校验预设 CSS 主题契约" },
     "check:icons":   { "group": "check", "desc": "校验 @icon-park/react 导入禁别名/禁命名空间（别名会被图标包装插件改写成非法代码，tsc 抓不到）" },
     "check:dead-css": { "group": "check", "desc": "死 CSS 工具类禁令：拦住 <任意颜色前缀>-[rgb(var(--RAMP-N))] / border-border-* / border-b-base / border-b-light / {bg,text,border}-RAMP-N/NN（存量已清零，无基线，出现一处即失败）" },
     "gate:agent-v2": { "group": "check", "desc": "运行 Agent Capability Platform v2 的合同、域切片、Windows/native、合流和 C9 门禁" },
-    "gate:plugin-n1": { "group": "check", "desc": "运行 Plugin N1 / MiniApp M1 合同与 Windows candidate/signed RC 门禁" },
+    "gate:plugin-n1": { "group": "check", "desc": "运行 Plugin N1 / Plugin M1 canonical 合同与 Windows candidate/signed RC 门禁" },
     "gen:i18n":      { "group": "gen",   "desc": "由 locale 重新生成 i18n 类型声明" },
     "clean":         { "group": "maint", "desc": "深度回收构建空间（debug 产物 + flycheck + 旧安装包）" },
     "seed:dev":      { "group": "maint", "desc": "用生产数据目录播种 dev 数据目录" },

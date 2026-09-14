@@ -89,7 +89,6 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
       "data-compact='true'",
       '@media (max-width: 1180px)',
       '@media (max-width: 880px)',
-      '@media (max-width: 640px)',
       '@media (prefers-reduced-motion: reduce)',
     ]) {
       expect(css.includes(token)).toBe(true);

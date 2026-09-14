@@ -17,7 +17,7 @@ use crate::package::{
 };
 use crate::{
     ArtifactEnvelope, CapabilityRef, ContributionId, ContributionLock,
-    ContributionSourceKind, DigestHex, McpBindingId, MiniAppId, MiniAppReleaseRef,
+    ContributionSourceKind, DigestHex, McpBindingId, PluginProductId, PluginReleaseRef,
     PluginMountId, ResourceKind, RuntimeFeatureId, StableSourceIdentity,
     UserId,
 };
@@ -38,7 +38,7 @@ pub struct CapabilityProvenance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount_id: Option<PluginMountId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub miniapp_id: Option<MiniAppId>,
+    pub plugin_product_id: Option<PluginProductId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_binding_id: Option<McpBindingId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -67,19 +67,19 @@ impl CapabilityProvenance {
         let valid_source_identity = match self.source_kind {
             ContributionSourceKind::PlatformBuiltin => {
                 self.mount_id.is_none()
-                    && self.miniapp_id.is_none()
+                    && self.plugin_product_id.is_none()
                     && self.mcp_binding_id.is_none()
             }
             ContributionSourceKind::PluginMount => {
                 self.mount_id.is_some()
-                    && self.miniapp_id.is_none()
+                    && self.plugin_product_id.is_none()
                     && self.mcp_binding_id.is_none()
             }
-            ContributionSourceKind::MiniAppActiveRelease => {
-                self.miniapp_id.is_some() && self.mcp_binding_id.is_none()
+            ContributionSourceKind::PluginProductActiveRelease => {
+                self.plugin_product_id.is_some() && self.mcp_binding_id.is_none()
             }
             ContributionSourceKind::McpBinding => {
-                self.mcp_binding_id.is_some() && self.miniapp_id.is_none()
+                self.mcp_binding_id.is_some() && self.plugin_product_id.is_none()
             }
         };
         if !valid_source_identity {
@@ -291,27 +291,27 @@ impl CapabilityCatalogPublication {
     }
 }
 
-/// The complete shared-Catalog publication for one enabled MiniApp Active
-/// Release. It is swapped as one value so consumers cannot observe a mixture
-/// of two Release identities.
+/// The complete shared-Catalog publication for one enabled Plugin Product
+/// Active Release. It is swapped as one value so consumers cannot observe a
+/// mixture of two Release identities.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppCapabilityCatalogPublication {
-    pub miniapp_id: MiniAppId,
-    pub active_release: MiniAppReleaseRef,
+pub struct PluginProductCapabilityCatalogPublication {
+    pub plugin_product_id: PluginProductId,
+    pub active_release: PluginReleaseRef,
     pub active_release_epoch: u64,
     pub catalog_digest: DigestHex,
     pub capabilities: Vec<CapabilityCatalogPublication>,
 }
 
 #[derive(Serialize)]
-struct MiniAppCapabilityCatalogDigestInput<'a> {
-    miniapp_id: &'a MiniAppId,
-    active_release: &'a MiniAppReleaseRef,
+struct PluginProductCapabilityCatalogDigestInput<'a> {
+    plugin_product_id: &'a PluginProductId,
+    active_release: &'a PluginReleaseRef,
     capabilities: &'a [CapabilityCatalogPublication],
 }
 
-impl MiniAppCapabilityCatalogPublication {
+impl PluginProductCapabilityCatalogPublication {
     pub fn computed_catalog_digest(
         &self,
     ) -> Result<DigestHex, CapabilityCatalogContractError> {
@@ -322,8 +322,8 @@ impl MiniAppCapabilityCatalogPublication {
                 .cmp(&right.entry.capability)
                 .then_with(|| left.entry.contribution_id.cmp(&right.entry.contribution_id))
         });
-        digest_payload(&MiniAppCapabilityCatalogDigestInput {
-            miniapp_id: &self.miniapp_id,
+        digest_payload(&PluginProductCapabilityCatalogDigestInput {
+            plugin_product_id: &self.plugin_product_id,
             active_release: &self.active_release,
             capabilities: &capabilities,
         })
@@ -334,7 +334,7 @@ impl MiniAppCapabilityCatalogPublication {
     }
 
     pub fn validate(&self) -> Result<(), CapabilityCatalogContractError> {
-        validate_non_empty(self.miniapp_id.as_ref(), "miniapp_id")?;
+        validate_non_empty(self.plugin_product_id.as_ref(), "plugin_product_id")?;
         self.active_release
             .validate()
             .map_err(|error| CapabilityCatalogContractError::InvalidField {
@@ -355,8 +355,8 @@ impl MiniAppCapabilityCatalogPublication {
             publication.validate()?;
             let entry = &publication.entry;
             if entry.provenance.source_kind
-                != ContributionSourceKind::MiniAppActiveRelease
-                || entry.provenance.miniapp_id.as_ref() != Some(&self.miniapp_id)
+                != ContributionSourceKind::PluginProductActiveRelease
+                || entry.provenance.plugin_product_id.as_ref() != Some(&self.plugin_product_id)
                 || entry.provenance.mount_id.is_some()
                 || entry.provenance.mcp_binding_id.is_some()
                 || entry.provenance.artifact_digest.as_ref()
@@ -365,7 +365,8 @@ impl MiniAppCapabilityCatalogPublication {
             {
                 return Err(CapabilityCatalogContractError::InvalidField {
                     field: "capabilities.provenance",
-                    reason: "MiniApp publication must bind the exact Active Release".into(),
+                        reason: "Plugin Product publication must bind the exact Active Release"
+                            .into(),
                 });
             }
             if !references.insert(entry.capability.clone()) {
@@ -383,33 +384,33 @@ impl MiniAppCapabilityCatalogPublication {
         if self.catalog_digest != expected_catalog_digest {
             return Err(CapabilityCatalogContractError::InvalidField {
                 field: "catalog_digest",
-                reason: "does not match the canonical MiniApp publication".into(),
+                reason: "does not match the canonical Plugin Product publication".into(),
             });
         }
         Ok(())
     }
 }
 
-/// A versioned read-side update for one owner-scoped MiniApp publication.
+/// A versioned read-side update for one owner-scoped Plugin Product publication.
 ///
 /// `publication = None` is a tombstone. Tombstones are retained by the
 /// in-process store so a late post-commit callback cannot resurrect an older
 /// Active Release after Disable, Trash, or Delete.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppCapabilityCatalogPublicationUpdate {
+pub struct PluginProductCapabilityCatalogPublicationUpdate {
     pub owner_user_id: UserId,
-    pub miniapp_id: MiniAppId,
+    pub plugin_product_id: PluginProductId,
     pub product_revision: u64,
     pub pointer_revision: u64,
     pub active_release_epoch: u64,
-    pub publication: Option<MiniAppCapabilityCatalogPublication>,
+    pub publication: Option<PluginProductCapabilityCatalogPublication>,
 }
 
-impl MiniAppCapabilityCatalogPublicationUpdate {
+impl PluginProductCapabilityCatalogPublicationUpdate {
     pub fn validate(&self) -> Result<(), CapabilityCatalogContractError> {
         validate_non_empty(self.owner_user_id.as_ref(), "owner_user_id")?;
-        validate_non_empty(self.miniapp_id.as_ref(), "miniapp_id")?;
+        validate_non_empty(self.plugin_product_id.as_ref(), "plugin_product_id")?;
         if self.product_revision == 0 || self.pointer_revision == 0 {
             return Err(CapabilityCatalogContractError::InvalidField {
                 field: "publication_version",
@@ -418,7 +419,7 @@ impl MiniAppCapabilityCatalogPublicationUpdate {
             });
         }
         if let Some(publication) = &self.publication {
-            if publication.miniapp_id != self.miniapp_id
+            if publication.plugin_product_id != self.plugin_product_id
                 || publication.active_release_epoch != self.active_release_epoch
             {
                 return Err(CapabilityCatalogContractError::InvalidField {
@@ -433,12 +434,12 @@ impl MiniAppCapabilityCatalogPublicationUpdate {
     }
 }
 
-/// Synchronous update port used by the MiniApp application service to publish
-/// its durable Active Release into the platform's single shared Catalog.
-pub trait MiniAppCapabilityCatalogSink: Send + Sync {
-    fn replace_miniapp_publication(
+/// Synchronous update port used by the Plugin Product application service to
+/// publish its durable Active Release into the platform's shared Catalog.
+pub trait PluginProductCapabilityCatalogSink: Send + Sync {
+    fn replace_plugin_product_publication(
         &self,
-        update: MiniAppCapabilityCatalogPublicationUpdate,
+        update: PluginProductCapabilityCatalogPublicationUpdate,
     ) -> Result<(), String>;
 }
 
@@ -550,7 +551,7 @@ impl CapabilityCatalogEntry {
                 source_kind: self.provenance.source_kind,
                 source_identity: self.provenance.source_identity.clone(),
                 mount_id: self.provenance.mount_id.clone(),
-                miniapp_id: self.provenance.miniapp_id.clone(),
+                plugin_product_id: self.provenance.plugin_product_id.clone(),
                 mcp_binding_id: self.provenance.mcp_binding_id.clone(),
                 contribution_id: self.contribution_id.clone(),
                 contract_digest: self.contract_digest.clone(),

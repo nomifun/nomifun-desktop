@@ -2013,7 +2013,7 @@ async fn published_baseline_database_upgrades_in_place_without_checksum_rewrite(
     legacy_migrator.run(&pool).await.unwrap();
     let conversation_id = nomifun_common::ConversationId::new();
     let legacy_owner = nomifun_common::UserId::new();
-    let legacy_plugin_id = nomifun_common::ChannelPluginId::new();
+    let legacy_plugin_product_id = nomifun_common::ChannelPluginId::new();
     let legacy_channel_user_id = nomifun_common::ChannelUserId::new();
     let legacy_session_a = nomifun_common::ChannelSessionId::new();
     let legacy_session_b = nomifun_common::ChannelSessionId::new();
@@ -2086,7 +2086,7 @@ async fn published_baseline_database_upgrades_in_place_without_checksum_rewrite(
          (channel_plugin_id, type, name, enabled, config, created_at, updated_at) \
          VALUES (?, 'telegram', 'legacy-plugin', 1, '{}', 1, 1)",
     )
-    .bind(legacy_plugin_id.as_str())
+    .bind(legacy_plugin_product_id.as_str())
     .execute(&pool)
     .await
     .unwrap();
@@ -2096,7 +2096,7 @@ async fn published_baseline_database_upgrades_in_place_without_checksum_rewrite(
          VALUES (?, 'legacy-user', 'telegram', ?, 1)",
     )
     .bind(legacy_channel_user_id.as_str())
-    .bind(legacy_plugin_id.as_str())
+    .bind(legacy_plugin_product_id.as_str())
     .execute(&pool)
     .await
     .unwrap();
@@ -2109,7 +2109,7 @@ async fn published_baseline_database_upgrades_in_place_without_checksum_rewrite(
         )
         .bind(session_id.as_str())
         .bind(legacy_channel_user_id.as_str())
-        .bind(legacy_plugin_id.as_str())
+        .bind(legacy_plugin_product_id.as_str())
         .bind(created_at)
         .bind(created_at)
         .execute(&pool)
@@ -2245,7 +2245,7 @@ async fn published_baseline_database_upgrades_in_place_without_checksum_rewrite(
         "SELECT COUNT(*) FROM channel_sessions \
          WHERE channel_plugin_id = ? AND channel_user_id = ? AND chat_id = 'legacy-chat'",
     )
-    .bind(legacy_plugin_id.as_str())
+    .bind(legacy_plugin_product_id.as_str())
     .bind(legacy_channel_user_id.as_str())
     .fetch_one(upgraded.pool())
     .await
@@ -2258,7 +2258,7 @@ async fn published_baseline_database_upgrades_in_place_without_checksum_rewrite(
         "SELECT channel_session_id FROM channel_session_bindings \
          WHERE channel_plugin_id = ? AND channel_user_id = ? AND chat_id = 'legacy-chat'",
     )
-    .bind(legacy_plugin_id.as_str())
+    .bind(legacy_plugin_product_id.as_str())
     .bind(legacy_channel_user_id.as_str())
     .fetch_one(upgraded.pool())
     .await
@@ -2276,7 +2276,7 @@ async fn retained_channel_receipt_survives_projection_deletes_and_database_reope
     let path = dir.path().join("channel-receipt.db");
     let db = init_database(&path).await.unwrap();
     let owner = owner_id(db.pool()).await;
-    let plugin_id = nomifun_common::ChannelPluginId::new();
+    let plugin_product_id = nomifun_common::ChannelPluginId::new();
     let conversation_id = nomifun_common::ConversationId::new();
     let message_id = nomifun_common::MessageId::new();
     let operation_key = format!("channel-inbound:v1:{}", "a".repeat(64));
@@ -2287,7 +2287,7 @@ async fn retained_channel_receipt_survives_projection_deletes_and_database_reope
          (channel_plugin_id, type, name, enabled, config, created_at, updated_at) \
          VALUES (?, 'telegram', 'temporary', 1, '{}', 1, 1)",
     )
-    .bind(plugin_id.as_str())
+    .bind(plugin_product_id.as_str())
     .execute(db.pool())
     .await
     .unwrap();
@@ -2325,8 +2325,8 @@ async fn retained_channel_receipt_survives_projection_deletes_and_database_reope
     .bind(&operation_key)
     .bind(&owner)
     .bind(&owner)
-    .bind(plugin_id.as_str())
-    .bind(plugin_id.as_str())
+    .bind(plugin_product_id.as_str())
+    .bind(plugin_product_id.as_str())
     .bind(&payload_hash)
     .bind(conversation_id.as_str())
     .bind(message_id.as_str())
@@ -2338,7 +2338,7 @@ async fn retained_channel_receipt_survives_projection_deletes_and_database_reope
 
     let channel_repo = SqliteChannelRepository::new(db.pool().clone());
     let conversation_repo = SqliteConversationRepository::new(db.pool().clone());
-    channel_repo.delete_plugin(plugin_id.as_str()).await.unwrap();
+    channel_repo.delete_plugin(plugin_product_id.as_str()).await.unwrap();
     conversation_repo
         .delete(conversation_id.as_str())
         .await
@@ -2362,7 +2362,7 @@ async fn retained_channel_receipt_survives_projection_deletes_and_database_reope
         .claim_inbound_receipt(&nomifun_db::models::NewChannelInboundReceiptRow {
             operation_key,
             user_id: owner,
-            channel_plugin_id: plugin_id.into_string(),
+            channel_plugin_id: plugin_product_id.into_string(),
             platform: "telegram".into(),
             chat_id: "chat-a".into(),
             provider_event_id: "provider-event".into(),

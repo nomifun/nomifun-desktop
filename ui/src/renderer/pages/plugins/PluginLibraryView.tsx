@@ -100,7 +100,7 @@ const consumerLabel = (
     remote: t('pluginWorkbench.consumer.remote'),
     automation: t('pluginWorkbench.consumer.automation'),
     ui: t('pluginWorkbench.consumer.ui'),
-    miniapp_service: t('pluginWorkbench.consumer.miniappService'),
+    plugin_service: t('pluginWorkbench.consumer.pluginService'),
   };
   return labels[surface];
 };

@@ -2995,14 +2995,14 @@ mod tests {
             schema_version: VersionString::from(CONTRACT_VERSION),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
-            initial_capabilities: vec![CapabilitySelection {
+            enabled_capabilities: vec![CapabilitySelection {
                 capability: CapabilityRef {
                     id: CapabilityId::from(capability_id),
                     version: VersionString::from(CONTRACT_VERSION),
                 },
                 action_allowlist: BTreeSet::from([action.clone()]),
             }],
-            on_demand_capabilities: Vec::new(),
+
             skill_bindings: Vec::new(),
             system_role_provider_overrides: BTreeMap::new(),
             persona: "Wave 2 state test".to_owned(),
@@ -3044,7 +3044,7 @@ mod tests {
                 availability_evidence_revision: "wave2-state-test".to_owned(),
             },
             CompileRequest {
-                miniapp_capabilities: Vec::new(),
+                plugin_product_capabilities: Vec::new(),
                 revision,
                 principal: principal.clone(),
                 scene: "wave2-state-test".to_owned(),
@@ -3411,7 +3411,7 @@ mod tests {
                 schema_version: VersionString::from(CONTRACT_VERSION),
                 model_route_refs: BTreeMap::new(),
                 chat_route_records: BTreeMap::new(),
-                initial_capabilities: vec![
+                enabled_capabilities: vec![
                     CapabilitySelection {
                         capability: CapabilityRef {
                             id: CapabilityId::from("browser.navigate"),
@@ -3436,7 +3436,7 @@ mod tests {
                         action_allowlist: BTreeSet::new(),
                     },
                 ],
-                on_demand_capabilities: Vec::new(),
+
                 skill_bindings: Vec::new(),
                 system_role_provider_overrides: overrides,
                 persona: "Browser provider fixture".to_owned(),
@@ -3444,7 +3444,7 @@ mod tests {
                 starter_prompts: Vec::new(),
             };
             let contribution_locks = payload
-                .initial_capabilities
+                .enabled_capabilities
                 .iter()
                 .map(|selection| {
                     materialized
@@ -3488,7 +3488,7 @@ mod tests {
                 &materialized,
                 &environment,
                 CompileRequest {
-                    miniapp_capabilities: Vec::new(),
+                    plugin_product_capabilities: Vec::new(),
                     revision: revision(BTreeMap::new()),
                     principal: principal.clone(),
                     scene: "test".to_owned(),
@@ -3512,7 +3512,7 @@ mod tests {
             &materialized,
             &environment,
             CompileRequest {
-                miniapp_capabilities: Vec::new(),
+                plugin_product_capabilities: Vec::new(),
                 revision: revision(BTreeMap::from([(role_id.clone(), selected)])),
                 principal: principal.clone(),
                 scene: "test".to_owned(),

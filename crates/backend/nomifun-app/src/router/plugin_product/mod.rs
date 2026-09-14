@@ -1,4 +1,4 @@
-//! User-facing MiniApp workflow. Authoring stays in recoverable draft documents;
+//! User-facing Plugin workflow. Authoring stays in recoverable draft documents;
 //! only the explicit save command commits a production release.
 mod authoring;
 #[cfg(test)]
@@ -12,23 +12,22 @@ use axum::{
     routing::{get, post},
 };
 use nomifun_api_types::{
-    ApiResponse, BuildPluginRuntimeRequest, CreatePluginRuntimeProjectRequest, PluginRuntimeKindDto,
-    PluginRuntimeWorkshopDto, PublishPluginRuntimeRequest, ReplacePluginRuntimeSourceFileRequest,
+    ApiResponse, BuildPluginRuntimeRequest, CreatePluginRuntimeProjectRequest, PluginRuntimeWorkshopDto, PublishPluginRuntimeRequest, ReplacePluginRuntimeSourceFileRequest,
     SetPluginRuntimeEnabledRequest,
 };
 use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
 use nomifun_db::PluginProductDocuments;
-use nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService;
+use nomifun_plugin_platform::runtime::PluginRuntimeApplicationService;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
-pub(crate) struct PluginRuntimeProductService {
+pub(crate) struct PluginProductService {
     documents: PluginProductDocuments,
-    application: Arc<PluginRuntimeM1ApplicationService>,
+    application: Arc<PluginRuntimeApplicationService>,
     model: Arc<nomifun_model_invoke::ModelInvokeService>,
     root: PathBuf,
     mutations: Arc<Mutex<()>>,
@@ -88,7 +87,7 @@ pub(super) struct Draft {
     pub status: String,
     pub error: Option<String>,
     #[serde(rename = "plugin_id")]
-    pub miniapp_id: Option<String>,
+    pub plugin_id: Option<String>,
     pub base_release_digest: Option<String>,
     #[serde(default)]
     pub base_source_digest: Option<String>,
@@ -103,11 +102,11 @@ pub(super) struct ExpectedRevision {
     pub expected_revision: i64,
 }
 
-impl PluginRuntimeProductService {
-    pub(super) async fn cancel_app_jobs(&self, owner: &str, miniapp_id: &str) {
+impl PluginProductService {
+    pub(super) async fn cancel_plugin_jobs(&self, owner: &str, plugin_id: &str) {
         let prefix = format!("{owner}:");
         self.jobs.lock().await.retain(|key, (token, app)| {
-            if key.starts_with(&prefix) && app.as_deref() == Some(miniapp_id) {
+            if key.starts_with(&prefix) && app.as_deref() == Some(plugin_id) {
                 token.cancel();
                 false
             } else {
@@ -117,7 +116,7 @@ impl PluginRuntimeProductService {
     }
     pub(crate) fn new(
         documents: PluginProductDocuments,
-        application: Arc<PluginRuntimeM1ApplicationService>,
+        application: Arc<PluginRuntimeApplicationService>,
         model: Arc<nomifun_model_invoke::ModelInvokeService>,
         root: PathBuf,
     ) -> Self {
@@ -188,12 +187,12 @@ pub(crate) fn write_routes() -> Router<PluginRuntimeM1RouterState> {
         .route("/api/plugins/drafts/{draft_id}/discard", post(discard))
         .route("/api/plugins/runtimes/import/inspect", post(transfer::inspect))
         .route(
-            "/api/plugins/runtimes/{miniapp_id}/export-file",
+            "/api/plugins/runtimes/{plugin_id}/export-file",
             post(transfer::export_file),
         )
 }
 
-fn service(state: &PluginRuntimeM1RouterState) -> Result<Arc<PluginRuntimeProductService>, AppError> {
+fn service(state: &PluginRuntimeM1RouterState) -> Result<Arc<PluginProductService>, AppError> {
     state
         .product
         .clone()
@@ -414,7 +413,7 @@ async fn save(
             draft.status = "saved".into();
             draft.error = None;
             draft.base_release_digest = workshop
-                .miniapp
+                .plugin
                 .releases
                 .active
                 .as_ref()
@@ -434,13 +433,13 @@ async fn save(
     }
 }
 
-impl PluginRuntimeProductService {
+impl PluginProductService {
     async fn save_draft(
         &self,
         owner: &str,
         draft: &mut Draft,
     ) -> Result<PluginRuntimeWorkshopDto, AppError> {
-        let mut current = if let Some(id) = &draft.miniapp_id {
+        let mut current = if let Some(id) = &draft.plugin_id {
             self.application
                 .workshop(owner, id)
                 .await
@@ -448,12 +447,12 @@ impl PluginRuntimeProductService {
         } else if draft.import.is_some() {
             let workshop = self.commit_import(owner, draft).await?;
             draft.base_release_digest = workshop
-                .miniapp
+                .plugin
                 .releases
                 .active
                 .as_ref()
                 .map(|r| r.release_digest.clone());
-            draft.miniapp_id = Some(workshop.miniapp.miniapp_id.clone());
+            draft.plugin_id = Some(workshop.plugin.plugin_id.clone());
             self.put_draft(owner, draft).await?;
             workshop
         } else {
@@ -471,21 +470,17 @@ impl PluginRuntimeProductService {
                         expected_library_revision: library.library_revision,
                         display_name: draft.name.clone(),
                         description: Some(draft.description.clone()),
-                        kind: if draft.service_source.is_some() {
-                            PluginRuntimeKindDto::Service
-                        } else {
-                            PluginRuntimeKindDto::UiOnly
-                        },
+                        service_source: draft.service_source.clone(),
                     },
                 )
                 .await
                 .map_err(application_error)?;
-            draft.miniapp_id = Some(workshop.miniapp.miniapp_id.clone());
+            draft.plugin_id = Some(workshop.plugin.plugin_id.clone());
             self.put_draft(owner, draft).await?;
             workshop
         };
         let active = current
-            .miniapp
+            .plugin
             .releases
             .active
             .as_ref()
@@ -504,9 +499,14 @@ impl PluginRuntimeProductService {
                 ));
             }
             let mut changed = false;
-            let mut files = vec![("ui/index.html", draft.html.clone())];
+            let mut files = Vec::new();
             if let Some(source) = &draft.service_source {
                 files.push(("service/main.mjs", source.clone()));
+            }
+            files.push(("ui/index.html", draft.html.clone()));
+            if draft.service_source.is_none() {
+                // Restore the UI before removing a headless Service entrypoint.
+                files.push(("service/main.mjs", String::new()));
             }
             if let Some(manifest) = &draft.source_manifest {
                 files.push(("nomifun.plugin.json", serde_json::to_string(manifest).map_err(internal)?));
@@ -514,11 +514,11 @@ impl PluginRuntimeProductService {
             for (path, content) in files {
                 let existing = self
                     .application
-                    .source_file(owner, &current.miniapp.miniapp_id, path)
+                    .source_file(owner, &current.plugin.plugin_id, path)
                     .await;
                 let existing = match existing {
                     Ok(file) => Some(file),
-                    Err(nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationError::NotFound) if path == "nomifun.plugin.json" || (path == "ui/index.html" && content.is_empty()) => None,
+                    Err(nomifun_plugin_platform::runtime::PluginRuntimeApplicationError::NotFound) => None,
                     Err(error) => return Err(application_error(error)),
                 };
                 if existing.as_ref().is_some_and(|file| file.content == content) {
@@ -531,8 +531,8 @@ impl PluginRuntimeProductService {
                     .replace_source_file(
                         owner,
                         ReplacePluginRuntimeSourceFileRequest {
-                            miniapp_id: current.miniapp.miniapp_id.clone(),
-                            expected_product_revision: current.miniapp.product_revision,
+                            plugin_id: current.plugin.plugin_id.clone(),
+                            expected_product_revision: current.plugin.product_revision,
                             project_id: current.project_id.clone(),
                             expected_project_revision: current.project_revision,
                             expected_build_generation: current.build_generation,
@@ -546,14 +546,14 @@ impl PluginRuntimeProductService {
                 draft.base_source_digest = current.source_snapshot_digest.clone();
                 self.put_draft(owner, draft).await?;
             }
-            if changed || current.miniapp.releases.active.is_none() || current.ready.is_some() {
+            if changed || current.plugin.releases.active.is_none() || current.ready.is_some() {
                 current = self
                     .application
                     .build(
                         owner,
                         BuildPluginRuntimeRequest {
-                            miniapp_id: current.miniapp.miniapp_id.clone(),
-                            expected_product_revision: current.miniapp.product_revision,
+                            plugin_id: current.plugin.plugin_id.clone(),
+                            expected_product_revision: current.plugin.product_revision,
                             project_id: current.project_id.clone(),
                             expected_project_revision: current.project_revision,
                             expected_build_generation: current.build_generation,
@@ -574,9 +574,9 @@ impl PluginRuntimeProductService {
         }
         if let Some(ready) = current.ready.as_ref().filter(|ready| ready.service.is_some()) {
             current = self.application.test_ready_service(owner, nomifun_api_types::TestPluginRuntimeReleaseRequest {
-                miniapp_id: current.miniapp.miniapp_id.clone(),
-                expected_product_revision: current.miniapp.product_revision,
-                expected_pointer_revision: current.miniapp.releases.pointer_revision,
+                plugin_id: current.plugin.plugin_id.clone(),
+                expected_product_revision: current.plugin.product_revision,
+                expected_pointer_revision: current.plugin.releases.pointer_revision,
                 project_id: current.project_id.clone(), expected_project_revision: current.project_revision,
                 expected_build_generation: current.build_generation,
                 release_id: ready.release.release_id.clone(), expected_release_digest: ready.release.release_digest.clone(),
@@ -597,17 +597,17 @@ impl PluginRuntimeProductService {
                 .publish(
                     owner,
                     PublishPluginRuntimeRequest {
-                        miniapp_id: current.miniapp.miniapp_id.clone(),
-                        expected_product_revision: current.miniapp.product_revision,
-                        expected_pointer_revision: current.miniapp.releases.pointer_revision,
+                        plugin_id: current.plugin.plugin_id.clone(),
+                        expected_product_revision: current.plugin.product_revision,
+                        expected_pointer_revision: current.plugin.releases.pointer_revision,
                         expected_active_release_epoch: current
-                            .miniapp
+                            .plugin
                             .releases
                             .active_release_epoch,
                         ready_release_id: ready.release.release_id.clone(),
                         expected_ready_release_digest: ready.release.release_digest.clone(),
                         expected_active_release_digest: current
-                            .miniapp
+                            .plugin
                             .releases
                             .active
                             .as_ref()
@@ -620,7 +620,7 @@ impl PluginRuntimeProductService {
                 .map_err(application_error)?;
             // Persist the exact saved release before enable; retry never republishes an old draft.
             draft.base_release_digest = current
-                .miniapp
+                .plugin
                 .releases
                 .active
                 .as_ref()
@@ -628,7 +628,7 @@ impl PluginRuntimeProductService {
             self.put_draft(owner, draft).await?;
         }
         if !matches!(
-            current.miniapp.lifecycle,
+            current.plugin.lifecycle,
             nomifun_api_types::PluginRuntimeLifecycleDto::Enabled
         ) {
             current = self
@@ -636,11 +636,11 @@ impl PluginRuntimeProductService {
                 .set_enabled(
                     owner,
                     SetPluginRuntimeEnabledRequest {
-                        miniapp_id: current.miniapp.miniapp_id.clone(),
-                        expected_product_revision: current.miniapp.product_revision,
-                        expected_pointer_revision: current.miniapp.releases.pointer_revision,
+                        plugin_id: current.plugin.plugin_id.clone(),
+                        expected_product_revision: current.plugin.product_revision,
+                        expected_pointer_revision: current.plugin.releases.pointer_revision,
                         expected_active_release_digest: current
-                            .miniapp
+                            .plugin
                             .releases
                             .active
                             .as_ref()

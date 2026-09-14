@@ -98,41 +98,40 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "mcp_servers",
     "message_correlations",
     "messages",
-    "miniapp_build_operation_lineage",
-    "miniapp_catalog_publications",
-    "miniapp_credential_bindings",
-    "miniapp_deletion_intents",
-    "miniapp_kv",
-    "miniapp_library_state",
-    "miniapp_products",
-    "miniapp_projects",
-    "miniapp_publish_authorizations",
-    "miniapp_release_artifacts",
-    "miniapp_releases",
-    "miniapp_service_test_receipts",
-    "miniapp_source_mutation_commits",
-    "miniapp_source_mutation_intents",
-    "miniapp_surface_sessions",
-    "miniapps",
+    "plugin_build_operation_lineage",
+    "plugin_catalog_publications",
+    "plugin_credential_bindings",
+    "plugin_deletion_intents",
+    "plugin_kv",
+    "plugin_library_state",
+    "plugin_products",
+    "plugin_projects",
+    "plugin_publish_authorizations",
+    "plugin_release_artifacts",
+    "plugin_releases",
+    "plugin_service_test_receipts",
+    "plugin_source_mutation_commits",
+    "plugin_source_mutation_intents",
+    "plugin_surface_sessions",
     "nomi_remote_events",
     "nomi_remote_sessions",
     "nomi_wave1_memory_action_receipts",
     "nomi_wave4_action_receipts",
     "nomi_agent_bindings",
+    "product_agent_selections",
     "nomi_agent_preset_revisions",
     "nomi_agent_presets",
     "oauth_tokens",
     "plugin_artifacts",
     "plugin_candidate_test_receipts",
     "plugin_credential_binding_mutations",
-    "plugin_credential_bindings",
     "plugin_dependency_mutation_commits",
     "plugin_dependency_mutation_intents",
-    "plugin_kv",
+    "plugin_mount_credential_bindings",
+    "plugin_mount_kv",
     "plugin_mount_revisions",
     "plugin_mounts",
     "plugin_product_documents",
-    "plugin_projects",
     "plugin_ready_candidates",
     "product_operations",
     "provider_connections",
@@ -202,16 +201,15 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("knowledge_tree_operations", "operation_id"),
     ("mcp_servers", "mcp_server_id"),
     ("messages", "message_id"),
-    ("miniapp_build_operation_lineage", "operation_id"),
-    ("miniapp_products", "miniapp_id"),
-    ("miniapp_projects", "project_id"),
-    ("miniapp_publish_authorizations", "authorization_id"),
-    ("miniapp_release_artifacts", "artifact_id"),
-    ("miniapp_releases", "release_id"),
-    ("miniapp_service_test_receipts", "receipt_id"),
-    ("miniapp_source_mutation_intents", "intent_id"),
-    ("miniapp_surface_sessions", "surface_session_id"),
-    ("miniapps", "miniapp_id"),
+    ("plugin_build_operation_lineage", "operation_id"),
+    ("plugin_products", "plugin_product_id"),
+    ("plugin_projects", "project_id"),
+    ("plugin_publish_authorizations", "authorization_id"),
+    ("plugin_release_artifacts", "artifact_id"),
+    ("plugin_releases", "release_id"),
+    ("plugin_service_test_receipts", "receipt_id"),
+    ("plugin_source_mutation_intents", "intent_id"),
+    ("plugin_surface_sessions", "surface_session_id"),
     ("nomi_remote_events", "event_id"),
     ("nomi_remote_sessions", "agent_session_id"),
     ("nomi_agent_presets", "preset_id"),
@@ -220,7 +218,6 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("plugin_dependency_mutation_intents", "intent_id"),
     ("plugin_mount_revisions", "mount_revision_id"),
     ("plugin_mounts", "mount_id"),
-    ("plugin_projects", "project_id"),
     ("plugin_ready_candidates", "candidate_id"),
     ("product_operations", "operation_id"),
     ("remote_bindings", "remote_binding_id"),
@@ -323,21 +320,21 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("knowledge_tree_operations", "request_id"),
     ("mcp_servers", "mcp_server_id"),
     ("messages", "message_id"),
-    ("miniapp_build_operation_lineage", "operation_id"),
-    ("miniapp_products", "miniapp_id"),
-    ("miniapp_projects", "project_id"),
-    ("miniapp_publish_authorizations", "authorization_id"),
-    ("miniapp_release_artifacts", "artifact_id"),
-    ("miniapp_releases", "release_id"),
-    ("miniapp_service_test_receipts", "receipt_id"),
-    ("miniapp_source_mutation_intents", "intent_id"),
-    ("miniapp_surface_sessions", "surface_session_id"),
-    ("miniapps", "miniapp_id"),
+    ("plugin_build_operation_lineage", "operation_id"),
+    ("plugin_products", "plugin_product_id"),
+    ("plugin_projects", "project_id"),
+    ("plugin_publish_authorizations", "authorization_id"),
+    ("plugin_release_artifacts", "artifact_id"),
+    ("plugin_releases", "release_id"),
+    ("plugin_service_test_receipts", "receipt_id"),
+    ("plugin_source_mutation_intents", "intent_id"),
+    ("plugin_surface_sessions", "surface_session_id"),
     ("nomi_wave1_memory_action_receipts", "capability_id"),
     ("nomi_wave1_memory_action_receipts", "process_lease_id"),
     ("nomi_wave4_action_receipts", "capability_id"),
     ("nomi_wave4_action_receipts", "process_lease_id"),
     ("nomi_agent_bindings", "target_id"),
+    ("product_agent_selections", "target_id"),
     ("nomi_remote_events", "event_id"),
     ("nomi_agent_preset_revisions", "revision_id"),
     ("nomi_agent_presets", "preset_id"),
@@ -349,7 +346,6 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("plugin_mounts", "mount_id"),
     ("plugin_mounts", "package_id"),
     ("plugin_projects", "package_id"),
-    ("plugin_projects", "project_id"),
     ("plugin_ready_candidates", "candidate_id"),
     ("product_operations", "operation_id"),
     ("remote_bindings", "remote_binding_id"),
@@ -723,75 +719,75 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
         .with_aggregate_scope("parent.conversation_id = child.conversation_id"),
     text_ref!("terminal_sessions", "user_id" => "users", "user_id", false, "idx_terminal_sessions_user_id", Cascade),
     text_ref!("ssh_hosts", "user_id" => "users", "user_id", false, "idx_ssh_hosts_user_id", Cascade),
-    text_ref!("miniapps", "user_id" => "users", "user_id", false, "idx_miniapps_user_id", Cascade),
-    // The retired store is immutable historical data. Its provenance token
-    // remains verbatim after Conversation deletion and is never resolved by a
-    // production repository.
-    text_ref!("miniapps", "source_conversation_id" => "conversations", "conversation_id", true, "idx_miniapps_source_conversation_id", KeepHistory),
     text_ref!("plugin_product_documents", "owner_user_id" => "users", "user_id", false, "idx_plugin_product_documents_owner", Cascade),
-    text_ref!("miniapp_library_state", "owner_user_id" => "users", "user_id", false, "idx_miniapp_library_state_owner_user_id", Cascade),
-    text_ref!("miniapp_products", "owner_user_id" => "users", "user_id", false, "idx_miniapp_products_owner_user_id", Cascade),
-    text_ref!("miniapp_products", "icon_asset_id" => "workshop_assets", "asset_id", true, "idx_miniapp_products_icon_asset_id", SetNull),
-    text_ref!("miniapp_products", "ready_release_id" => "miniapp_releases", "release_id", true, "idx_miniapp_products_ready_release_id", Restrict),
-    text_ref!("miniapp_products", "active_release_id" => "miniapp_releases", "release_id", true, "idx_miniapp_products_active_release_id", Restrict),
-    text_ref!("miniapp_products", "previous_release_id" => "miniapp_releases", "release_id", true, "idx_miniapp_products_previous_release_id", Restrict),
-    text_ref!("miniapp_projects", "owner_user_id" => "users", "user_id", false, "idx_miniapp_projects_owner_user_id", Cascade),
-    text_ref!("miniapp_projects", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_projects_miniapp_id", Cascade)
+    text_ref!("plugin_library_state", "owner_user_id" => "users", "user_id", false, "idx_plugin_library_state_owner_user_id", Cascade),
+    text_ref!("plugin_products", "owner_user_id" => "users", "user_id", false, "idx_plugin_products_owner_user_id", Cascade),
+    text_ref!("plugin_products", "icon_asset_id" => "workshop_assets", "asset_id", true, "idx_plugin_products_icon_asset_id", SetNull),
+    text_ref!("plugin_products", "ready_release_id" => "plugin_releases", "release_id", true, "idx_plugin_products_ready_release_id", Restrict),
+    text_ref!("plugin_products", "active_release_id" => "plugin_releases", "release_id", true, "idx_plugin_products_active_release_id", Restrict),
+    text_ref!("plugin_products", "previous_release_id" => "plugin_releases", "release_id", true, "idx_plugin_products_previous_release_id", Restrict),
+    text_ref!("plugin_projects", "owner_user_id" => "users", "user_id", false, "idx_plugin_projects_owner_user_id", Cascade),
+    text_ref!("plugin_projects", "plugin_product_id" => "plugin_products", "plugin_product_id", true, "idx_plugin_projects_plugin_product_id", Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("miniapp_source_mutation_intents", "owner_user_id" => "users", "user_id", false, "idx_miniapp_source_mutation_intents_owner_user_id", Cascade),
-    text_ref!("miniapp_source_mutation_intents", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_source_mutation_intents_miniapp_id", Restrict)
+    text_ref!("plugin_source_mutation_intents", "owner_user_id" => "users", "user_id", false, "idx_plugin_source_mutation_intents_owner_user_id", Cascade),
+    text_ref!("plugin_source_mutation_intents", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_source_mutation_intents_plugin_product_id", Restrict)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("miniapp_source_mutation_intents", "project_id" => "miniapp_projects", "project_id", false, "idx_miniapp_source_mutation_intents_project_id", Restrict)
-        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id AND parent.miniapp_id = child.miniapp_id"),
-    text_ref!("miniapp_source_mutation_commits", "project_id" => "miniapp_projects", "project_id", false, "idx_miniapp_source_mutation_commits_project_id", Restrict),
-    text_ref!("miniapp_source_mutation_commits", "intent_id" => "miniapp_source_mutation_intents", "intent_id", false, "idx_miniapp_source_mutation_commits_intent_id", Cascade),
-    text_ref!("miniapp_release_artifacts", "owner_user_id" => "users", "user_id", false, "idx_miniapp_release_artifacts_owner_user_id", Cascade),
-    text_ref!("miniapp_releases", "owner_user_id" => "users", "user_id", false, "idx_miniapp_releases_owner_user_id", Cascade),
-    text_ref!("miniapp_releases", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_releases_miniapp_id", Restrict),
-    text_ref!("miniapp_releases", "artifact_id" => "miniapp_release_artifacts", "artifact_id", false, "idx_miniapp_releases_artifact_id", Restrict),
-    text_ref!("miniapp_releases", "project_id" => "miniapp_projects", "project_id", true, "idx_miniapp_releases_project_id", Restrict),
-    text_ref!("miniapp_releases", "origin_operation_id" => "product_operations", "operation_id", false, "idx_miniapp_releases_origin_operation_id", KeepHistory),
-    text_ref!("miniapp_service_test_receipts", "owner_user_id" => "users", "user_id", false, "idx_miniapp_service_test_receipts_owner_user_id", Cascade),
-    text_ref!("miniapp_service_test_receipts", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_service_test_receipts_miniapp_id", Cascade)
+    text_ref!("plugin_source_mutation_intents", "project_id" => "plugin_projects", "project_id", false, "idx_plugin_source_mutation_intents_project_id", Restrict)
+        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id AND parent.plugin_product_id = child.plugin_product_id"),
+    text_ref!("plugin_source_mutation_commits", "project_id" => "plugin_projects", "project_id", false, "idx_plugin_source_mutation_commits_project_id", Restrict),
+    text_ref!("plugin_source_mutation_commits", "intent_id" => "plugin_source_mutation_intents", "intent_id", false, "idx_plugin_source_mutation_commits_intent_id", Cascade),
+    text_ref!("plugin_release_artifacts", "owner_user_id" => "users", "user_id", false, "idx_plugin_release_artifacts_owner_user_id", Cascade),
+    text_ref!("plugin_releases", "owner_user_id" => "users", "user_id", false, "idx_plugin_releases_owner_user_id", Cascade),
+    text_ref!("plugin_releases", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_releases_plugin_product_id", Restrict)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("miniapp_service_test_receipts", "release_id" => "miniapp_releases", "release_id", false, "idx_miniapp_service_test_receipts_release_id", Restrict)
+    text_ref!("plugin_releases", "artifact_id" => "plugin_release_artifacts", "artifact_id", false, "idx_plugin_releases_artifact_id", Restrict),
+    text_ref!("plugin_releases", "project_id" => "plugin_projects", "project_id", true, "idx_plugin_releases_project_id", Restrict)
+        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id AND parent.plugin_product_id = child.plugin_product_id"),
+    text_ref!("plugin_releases", "origin_operation_id" => "product_operations", "operation_id", false, "idx_plugin_releases_origin_operation_id", KeepHistory),
+    text_ref!("plugin_service_test_receipts", "owner_user_id" => "users", "user_id", false, "idx_plugin_service_test_receipts_owner_user_id", Cascade),
+    text_ref!("plugin_service_test_receipts", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_service_test_receipts_plugin_product_id", Cascade)
+        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
+    text_ref!("plugin_service_test_receipts", "release_id" => "plugin_releases", "release_id", false, "idx_plugin_service_test_receipts_release_id", Restrict)
         .with_aggregate_scope(
             "parent.owner_user_id = child.owner_user_id \
-             AND parent.miniapp_id = child.miniapp_id",
+             AND parent.plugin_product_id = child.plugin_product_id",
         ),
-    text_ref!("miniapp_credential_bindings", "owner_user_id" => "users", "user_id", false, "idx_miniapp_credential_bindings_owner_user_id", Cascade),
-    text_ref!("miniapp_credential_bindings", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_credential_bindings_miniapp_id", Cascade),
-    external_ref!("miniapp_credential_bindings", "credential_id", Text, false, Opaque, "idx_miniapp_credential_bindings_credential_id", KeepHistory),
-    text_ref!("miniapp_deletion_intents", "owner_user_id" => "users", "user_id", false, "idx_miniapp_deletion_intents_owner_user_id", Cascade),
-    text_ref!("miniapp_deletion_intents", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_deletion_intents_miniapp_id", Cascade)
+    text_ref!("plugin_credential_bindings", "owner_user_id" => "users", "user_id", false, "idx_plugin_credential_bindings_owner_user_id", Cascade),
+    text_ref!("plugin_credential_bindings", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_credential_bindings_plugin_product_id", Cascade)
+        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
+    external_ref!("plugin_credential_bindings", "credential_id", Text, false, Opaque, "idx_plugin_credential_bindings_credential_id", KeepHistory),
+    text_ref!("plugin_deletion_intents", "owner_user_id" => "users", "user_id", false, "idx_plugin_deletion_intents_owner_user_id", Cascade),
+    text_ref!("plugin_deletion_intents", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_deletion_intents_plugin_product_id", Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id AND parent.lifecycle = 'deleting'"),
-    text_ref!("miniapp_deletion_intents", "operation_id" => "product_operations", "operation_id", false, "idx_miniapp_deletion_intents_operation_id", Restrict)
-        .with_aggregate_scope("parent.owner_kind = 'miniapp' AND parent.owner_id = child.miniapp_id AND parent.kind = 'miniapp_permanent_delete'"),
-    text_ref!("miniapp_kv", "owner_user_id" => "users", "user_id", false, "idx_miniapp_kv_owner_user_id", Cascade),
-    text_ref!("miniapp_kv", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_kv_miniapp_id", Cascade)
+    text_ref!("plugin_deletion_intents", "operation_id" => "product_operations", "operation_id", false, "idx_plugin_deletion_intents_operation_id", Restrict)
+        .with_aggregate_scope("parent.owner_kind = 'plugin' AND parent.owner_id = child.plugin_product_id AND parent.kind = 'plugin_permanent_delete'"),
+    text_ref!("plugin_kv", "owner_user_id" => "users", "user_id", false, "idx_plugin_kv_owner_user_id", Cascade),
+    text_ref!("plugin_kv", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_kv_plugin_product_id", Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("miniapp_build_operation_lineage", "owner_user_id" => "users", "user_id", false, "idx_miniapp_build_operation_lineage_owner", KeepHistory),
-    text_ref!("miniapp_build_operation_lineage", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_build_operation_lineage_miniapp_id", KeepHistory),
-    text_ref!("miniapp_build_operation_lineage", "project_id" => "miniapp_projects", "project_id", false, "idx_miniapp_build_operation_lineage_project", KeepHistory),
-    text_ref!("miniapp_build_operation_lineage", "operation_id" => "product_operations", "operation_id", false, "idx_miniapp_build_operation_lineage_operation_id", KeepHistory),
-    text_ref!("miniapp_publish_authorizations", "owner_user_id" => "users", "user_id", false, "idx_miniapp_publish_authorizations_owner_user_id", Cascade),
-    text_ref!("miniapp_publish_authorizations", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_publish_authorizations_miniapp_id", Cascade)
+    text_ref!("plugin_build_operation_lineage", "owner_user_id" => "users", "user_id", false, "idx_plugin_build_operation_lineage_owner", KeepHistory),
+    text_ref!("plugin_build_operation_lineage", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_build_operation_lineage_plugin_product_id", KeepHistory)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("miniapp_catalog_publications", "owner_user_id" => "users", "user_id", false, "idx_miniapp_catalog_publications_owner_user_id", Cascade),
-    text_ref!("miniapp_catalog_publications", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_catalog_publications_miniapp_id", Cascade)
+    text_ref!("plugin_build_operation_lineage", "project_id" => "plugin_projects", "project_id", false, "idx_plugin_build_operation_lineage_project", KeepHistory)
+        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id AND parent.plugin_product_id = child.plugin_product_id"),
+    text_ref!("plugin_build_operation_lineage", "operation_id" => "product_operations", "operation_id", false, "idx_plugin_build_operation_lineage_operation_id", KeepHistory),
+    text_ref!("plugin_publish_authorizations", "owner_user_id" => "users", "user_id", false, "idx_plugin_publish_authorizations_owner_user_id", Cascade),
+    text_ref!("plugin_publish_authorizations", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_publish_authorizations_plugin_product_id", Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("miniapp_catalog_publications", "active_release_id" => "miniapp_releases", "release_id", false, "idx_miniapp_catalog_publications_active_release_id", Restrict)
+    text_ref!("plugin_catalog_publications", "owner_user_id" => "users", "user_id", false, "idx_plugin_catalog_publications_owner_user_id", Cascade),
+    text_ref!("plugin_catalog_publications", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_catalog_publications_plugin_product_id", Cascade)
+        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
+    text_ref!("plugin_catalog_publications", "active_release_id" => "plugin_releases", "release_id", false, "idx_plugin_catalog_publications_active_release_id", Restrict)
         .with_aggregate_scope(
             "parent.owner_user_id = child.owner_user_id \
-             AND parent.miniapp_id = child.miniapp_id",
+             AND parent.plugin_product_id = child.plugin_product_id",
         ),
-    text_ref!("miniapp_surface_sessions", "owner_user_id" => "users", "user_id", false, "idx_miniapp_surface_sessions_owner_user_id", Cascade),
-    text_ref!("miniapp_surface_sessions", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_surface_sessions_miniapp_id", Cascade)
+    text_ref!("plugin_surface_sessions", "owner_user_id" => "users", "user_id", false, "idx_plugin_surface_sessions_owner_user_id", Cascade),
+    text_ref!("plugin_surface_sessions", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_surface_sessions_plugin_product_id", Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("miniapp_surface_sessions", "active_release_id" => "miniapp_releases", "release_id", false, "idx_miniapp_surface_sessions_active_release_id", Restrict)
+    text_ref!("plugin_surface_sessions", "active_release_id" => "plugin_releases", "release_id", false, "idx_plugin_surface_sessions_active_release_id", Restrict)
         .with_aggregate_scope(
             "parent.owner_user_id = child.owner_user_id \
-             AND parent.miniapp_id = child.miniapp_id",
+             AND parent.plugin_product_id = child.plugin_product_id",
         ),
     // Delivery receipts intentionally survive Terminal/Requirement deletion so
     // a replay can never regain PTY write authority.
@@ -1027,7 +1023,6 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("requirement_tags", "paused_requirement_id" => "requirements", "requirement_id", true, "idx_requirement_tags_paused_requirement_id", SetNull),
     text_ref!("tag_settings", "webhook_id" => "webhooks", "webhook_id", true, "idx_tag_settings_webhook_id", SetNull),
     text_ref!("installation_identity", "owner_user_id" => "users", "user_id", false, "idx_installation_identity_owner_user_id", Restrict),
-    text_ref!("plugin_projects", "owner_user_id" => "users", "user_id", false, "idx_plugin_projects_owner_user_id", Cascade),
     text_ref!("plugin_projects", "linked_mount_id" => "plugin_mounts", "mount_id", true, "idx_plugin_projects_linked_mount_id", SetNull),
     text_ref!("plugin_projects", "auto_apply_mount_id" => "plugin_mounts", "mount_id", true, "idx_plugin_projects_auto_apply_mount_id", SetNull),
     text_ref!("plugin_projects", "ready_candidate_id" => "plugin_ready_candidates", "candidate_id", true, "idx_plugin_projects_ready_candidate_id", SetNull),
@@ -1048,15 +1043,15 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("plugin_mounts", "current_revision_id" => "plugin_mount_revisions", "mount_revision_id", true, "idx_plugin_mounts_current_revision_id", Restrict),
     text_ref!("plugin_mounts", "previous_revision_id" => "plugin_mount_revisions", "mount_revision_id", true, "idx_plugin_mounts_previous_revision_id", Restrict),
     text_ref!("plugin_credential_binding_mutations", "mount_id" => "plugin_mounts", "mount_id", false, "idx_plugin_credential_binding_mutations_mount_id", Cascade),
-    text_ref!("plugin_credential_bindings", "mount_id" => "plugin_mounts", "mount_id", false, "idx_plugin_credential_bindings_mount_id", Cascade),
-    external_ref!("plugin_credential_bindings", "credential_id", Text, false, Opaque, "idx_plugin_credential_bindings_credential_id", KeepHistory),
-    text_ref!("plugin_kv", "mount_id" => "plugin_mounts", "mount_id", false, "idx_plugin_kv_mount_id", Cascade),
+    text_ref!("plugin_mount_credential_bindings", "mount_id" => "plugin_mounts", "mount_id", false, "idx_plugin_mount_credential_bindings_mount_id", Cascade),
+    external_ref!("plugin_mount_credential_bindings", "credential_id", Text, false, Opaque, "idx_plugin_mount_credential_bindings_credential_id", KeepHistory),
+    text_ref!("plugin_mount_kv", "mount_id" => "plugin_mounts", "mount_id", false, "idx_plugin_mount_kv_mount_id", Cascade),
     text_ref!("product_operations", "owner_id" => "plugin_projects", "project_id", false, "idx_product_operations_plugin_project_owner_id", KeepHistory)
         .with_child_predicate("child.owner_kind = 'plugin_project'"),
     text_ref!("product_operations", "owner_id" => "plugin_mounts", "mount_id", false, "idx_product_operations_plugin_mount_owner_id", KeepHistory)
         .with_child_predicate("child.owner_kind = 'plugin_mount'"),
-    text_ref!("product_operations", "owner_id" => "miniapp_products", "miniapp_id", false, "idx_product_operations_miniapp_owner_id", KeepHistory)
-        .with_child_predicate("child.owner_kind = 'miniapp'"),
+    text_ref!("product_operations", "owner_id" => "plugin_products", "plugin_product_id", false, "idx_product_operations_plugin_owner_id", KeepHistory)
+        .with_child_predicate("child.owner_kind = 'plugin'"),
     text_ref!("terminal_scrollback", "terminal_id" => "terminal_sessions", "terminal_id", false, "idx_terminal_scrollback_terminal_id", Cascade),
     text_ref!("remote_bindings", "owner_user_id" => "users", "user_id", false, "idx_remote_bindings_owner_user_id", Cascade),
     text_ref!("nomi_remote_sessions", "owner_user_id" => "users", "user_id", false, "idx_nomi_remote_sessions_owner_user_id", Cascade),
@@ -1079,6 +1074,7 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("nomi_agent_preset_revisions", "preset_id" => "nomi_agent_presets", "preset_id", false, "idx_nomi_agent_preset_revisions_preset_id", Restrict),
     text_ref!("nomi_agent_preset_revisions", "created_by" => "users", "user_id", false, "idx_nomi_agent_preset_revisions_created_by", KeepHistory),
     text_ref!("nomi_agent_bindings", "owner_user_id" => "users", "user_id", false, "idx_nomi_agent_bindings_owner_user_id", Cascade),
+    text_ref!("product_agent_selections", "owner_user_id" => "users", "user_id", false, "idx_product_agent_selections_owner_user_id", Cascade),
 ];
 
 /// Stable JSON paths that carry Provider or business identifiers. The SQL for
@@ -1370,7 +1366,7 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
     validate_logical_reference_registry(pool).await?;
     validate_logical_reference_coverage(pool).await?;
     validate_json_logical_reference_registry(pool).await?;
-    require_miniapp_kv_tombstone_schema(pool).await?;
+    require_plugin_kv_tombstone_schema(pool).await?;
     require_workshop_asset_origin_id_contract(pool).await?;
     require_prompt_library_asset_identity_contract(pool).await?;
     require_column(pool, "workshop_assets", "deleted_at", "INTEGER", false).await?;
@@ -1417,7 +1413,7 @@ pub(crate) async fn validate_id_value_contract(pool: &SqlitePool) -> Result<(), 
 /// the dataset rather than rewrite IDs.
 pub async fn validate_id_data_contract(pool: &SqlitePool) -> Result<(), DbError> {
     validate_id_value_contract(pool).await?;
-    validate_miniapp_kv_tombstone_values(pool).await?;
+    validate_plugin_kv_tombstone_values(pool).await?;
     validate_workshop_asset_origin_values(pool).await?;
     validate_creation_task_result_asset_ids(pool).await?;
     let findings = audit_logical_reference_orphans(pool).await?;
@@ -1443,14 +1439,14 @@ pub async fn validate_id_data_contract(pool: &SqlitePool) -> Result<(), DbError>
     )))
 }
 
-async fn require_miniapp_kv_tombstone_schema(pool: &SqlitePool) -> Result<(), DbError> {
+async fn require_plugin_kv_tombstone_schema(pool: &SqlitePool) -> Result<(), DbError> {
     for (column, expected_default) in [
         ("key_generation", "1"),
         ("is_tombstone", "0"),
     ] {
-        require_column(pool, "miniapp_kv", column, "INTEGER", true).await?;
+        require_column(pool, "plugin_kv", column, "INTEGER", true).await?;
         let actual_default: Option<String> = sqlx::query_scalar(&format!(
-            "SELECT dflt_value FROM pragma_table_info('miniapp_kv') WHERE name = ?"
+            "SELECT dflt_value FROM pragma_table_info('plugin_kv') WHERE name = ?"
         ))
         .bind(column)
         .fetch_optional(pool)
@@ -1458,16 +1454,16 @@ async fn require_miniapp_kv_tombstone_schema(pool: &SqlitePool) -> Result<(), Db
         .flatten();
         if actual_default.as_deref() != Some(expected_default) {
             return Err(DbError::Init(format!(
-                "v3 schema miniapp_kv.{column} must default to {expected_default}"
+                "v3 schema plugin_kv.{column} must default to {expected_default}"
             )));
         }
     }
     Ok(())
 }
 
-async fn validate_miniapp_kv_tombstone_values(pool: &SqlitePool) -> Result<(), DbError> {
+async fn validate_plugin_kv_tombstone_values(pool: &SqlitePool) -> Result<(), DbError> {
     let invalid: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM miniapp_kv
+        "SELECT COUNT(*) FROM plugin_kv
          WHERE key_generation < 1
             OR revision < 1
             OR key_generation > revision
@@ -1478,7 +1474,7 @@ async fn validate_miniapp_kv_tombstone_values(pool: &SqlitePool) -> Result<(), D
     .await?;
     if invalid != 0 {
         return Err(DbError::Init(format!(
-            "MiniApp KV tombstone contract rejected {invalid} row(s)"
+            "Plugin KV tombstone contract rejected {invalid} row(s)"
         )));
     }
     Ok(())
@@ -1938,75 +1934,75 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             ],
         ),
         (
-            "trg_miniapp_source_build_start_guard",
+            "trg_plugin_source_build_start_guard",
             &[
                 "BEFORE INSERT ON PRODUCT_OPERATIONS",
-                "NEW.OWNER_KIND = 'MINIAPP'",
+                "NEW.OWNER_KIND = 'PLUGIN'",
                 "NEW.KIND = 'BUILD'",
-                "FROM MINIAPP_SOURCE_MUTATION_INTENTS INTENT",
-                "RAISE(ABORT, 'MINIAPP BUILD IS FENCED BY A SOURCE MUTATION INTENT')",
+                "FROM PLUGIN_SOURCE_MUTATION_INTENTS INTENT",
+                "RAISE(ABORT, 'PLUGIN BUILD IS FENCED BY A SOURCE MUTATION INTENT')",
             ],
         ),
         (
-            "trg_miniapp_source_commit_cleanup",
+            "trg_plugin_source_commit_cleanup",
             &[
-                "AFTER UPDATE ON MINIAPP_PROJECTS",
-                "FROM MINIAPP_SOURCE_MUTATION_COMMITS COMMIT_MARKER",
-                "DELETE FROM MINIAPP_SOURCE_MUTATION_COMMITS",
+                "AFTER UPDATE ON PLUGIN_PROJECTS",
+                "FROM PLUGIN_SOURCE_MUTATION_COMMITS COMMIT_MARKER",
+                "DELETE FROM PLUGIN_SOURCE_MUTATION_COMMITS",
             ],
         ),
         (
-            "trg_miniapp_source_commit_insert_guard",
+            "trg_plugin_source_commit_insert_guard",
             &[
-                "BEFORE INSERT ON MINIAPP_SOURCE_MUTATION_COMMITS",
-                "FROM MINIAPP_SOURCE_MUTATION_INTENTS INTENT",
-                "RAISE(ABORT, 'MINIAPP SOURCE COMMIT MARKER MUST BIND A DURABLE INTENT')",
+                "BEFORE INSERT ON PLUGIN_SOURCE_MUTATION_COMMITS",
+                "FROM PLUGIN_SOURCE_MUTATION_INTENTS INTENT",
+                "RAISE(ABORT, 'PLUGIN SOURCE COMMIT MARKER MUST BIND A DURABLE INTENT')",
             ],
         ),
         (
-            "trg_miniapp_source_intent_insert_guard",
+            "trg_plugin_source_intent_insert_guard",
             &[
-                "BEFORE INSERT ON MINIAPP_SOURCE_MUTATION_INTENTS",
-                "FROM MINIAPP_PRODUCTS PRODUCT",
-                "JOIN MINIAPP_PROJECTS PROJECT",
+                "BEFORE INSERT ON PLUGIN_SOURCE_MUTATION_INTENTS",
+                "FROM PLUGIN_PRODUCTS PRODUCT",
+                "JOIN PLUGIN_PROJECTS PROJECT",
                 "PRODUCT.PRODUCT_REVISION = NEW.EXPECTED_PRODUCT_REVISION",
                 "PROJECT.PROJECT_REVISION = NEW.EXPECTED_PROJECT_REVISION",
-                "RAISE(ABORT, 'MINIAPP SOURCE INTENT MUST BIND THE EXACT EDITABLE PROJECT HEAD')",
+                "RAISE(ABORT, 'PLUGIN SOURCE INTENT MUST BIND THE EXACT EDITABLE PROJECT HEAD')",
             ],
         ),
         (
-            "trg_miniapp_source_product_delete_guard",
+            "trg_plugin_source_product_delete_guard",
             &[
-                "BEFORE DELETE ON MINIAPP_PRODUCTS",
-                "FROM MINIAPP_SOURCE_MUTATION_INTENTS INTENT",
-                "RAISE(ABORT, 'MINIAPP DELETE IS FENCED BY A SOURCE MUTATION INTENT')",
+                "BEFORE DELETE ON PLUGIN_PRODUCTS",
+                "FROM PLUGIN_SOURCE_MUTATION_INTENTS INTENT",
+                "RAISE(ABORT, 'PLUGIN DELETE IS FENCED BY A SOURCE MUTATION INTENT')",
             ],
         ),
         (
-            "trg_miniapp_source_product_update_guard",
+            "trg_plugin_source_product_update_guard",
             &[
-                "BEFORE UPDATE ON MINIAPP_PRODUCTS",
-                "FROM MINIAPP_SOURCE_MUTATION_INTENTS INTENT",
-                "RAISE(ABORT, 'MINIAPP PRODUCT IS FENCED BY A SOURCE MUTATION INTENT')",
+                "BEFORE UPDATE ON PLUGIN_PRODUCTS",
+                "FROM PLUGIN_SOURCE_MUTATION_INTENTS INTENT",
+                "RAISE(ABORT, 'PLUGIN PRODUCT IS FENCED BY A SOURCE MUTATION INTENT')",
             ],
         ),
         (
-            "trg_miniapp_source_project_delete_guard",
+            "trg_plugin_source_project_delete_guard",
             &[
-                "BEFORE DELETE ON MINIAPP_PROJECTS",
-                "FROM MINIAPP_SOURCE_MUTATION_INTENTS INTENT",
-                "RAISE(ABORT, 'MINIAPP PROJECT DELETE IS FENCED BY A SOURCE MUTATION INTENT')",
+                "BEFORE DELETE ON PLUGIN_PROJECTS",
+                "FROM PLUGIN_SOURCE_MUTATION_INTENTS INTENT",
+                "RAISE(ABORT, 'PLUGIN PROJECT DELETE IS FENCED BY A SOURCE MUTATION INTENT')",
             ],
         ),
         (
-            "trg_miniapp_source_project_update_guard",
+            "trg_plugin_source_project_update_guard",
             &[
-                "BEFORE UPDATE ON MINIAPP_PROJECTS",
-                "FROM MINIAPP_SOURCE_MUTATION_INTENTS INTENT",
-                "FROM MINIAPP_SOURCE_MUTATION_COMMITS COMMIT_MARKER",
+                "BEFORE UPDATE ON PLUGIN_PROJECTS",
+                "FROM PLUGIN_SOURCE_MUTATION_INTENTS INTENT",
+                "FROM PLUGIN_SOURCE_MUTATION_COMMITS COMMIT_MARKER",
                 "NEW.PROJECT_REVISION = OLD.PROJECT_REVISION + 1",
                 "NEW.SOURCE_HEAD_DIGEST = INTENT.NEXT_SOURCE_DIGEST",
-                "RAISE(ABORT, 'MINIAPP PROJECT IS FENCED BY A SOURCE MUTATION INTENT')",
+                "RAISE(ABORT, 'PLUGIN PROJECT IS FENCED BY A SOURCE MUTATION INTENT')",
             ],
         ),
         (
@@ -2083,36 +2079,36 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             ],
         ),
         (
-            "trg_plugin_credential_binding_delete_guard",
+            "trg_plugin_mount_credential_binding_delete_guard",
             &[
-                "BEFORE DELETE ON PLUGIN_CREDENTIAL_BINDINGS",
+                "BEFORE DELETE ON PLUGIN_MOUNT_CREDENTIAL_BINDINGS",
                 "LEFT JOIN PLUGIN_CREDENTIAL_BINDING_MUTATIONS MUTATION",
                 "MUTATION.EXPECTED_CURRENT_ARTIFACT_DIGEST IS MOUNT.CURRENT_ARTIFACT_DIGEST",
                 "RAISE(ABORT, 'PLUGIN CREDENTIAL BINDING DELETE REQUIRES A WHOLE-GROUP CAS')",
             ],
         ),
         (
-            "trg_plugin_credential_binding_insert_guard",
+            "trg_plugin_mount_credential_binding_insert_guard",
             &[
-                "BEFORE INSERT ON PLUGIN_CREDENTIAL_BINDINGS",
+                "BEFORE INSERT ON PLUGIN_MOUNT_CREDENTIAL_BINDINGS",
                 "LEFT JOIN PLUGIN_CREDENTIAL_BINDING_MUTATIONS MUTATION",
                 "MUTATION.TARGET_BINDINGS_REVISION = MOUNT.CREDENTIAL_BINDINGS_REVISION + 1",
                 "RAISE(ABORT, 'PLUGIN CREDENTIAL BINDING INSERT REQUIRES A WHOLE-GROUP CAS')",
             ],
         ),
         (
-            "trg_plugin_credential_binding_update_guard",
+            "trg_plugin_mount_credential_binding_update_guard",
             &[
-                "BEFORE UPDATE ON PLUGIN_CREDENTIAL_BINDINGS",
+                "BEFORE UPDATE ON PLUGIN_MOUNT_CREDENTIAL_BINDINGS",
                 "LEFT JOIN PLUGIN_CREDENTIAL_BINDING_MUTATIONS MUTATION",
                 "MUTATION.EXPECTED_BINDINGS_REVISION = MOUNT.CREDENTIAL_BINDINGS_REVISION",
                 "RAISE(ABORT, 'PLUGIN CREDENTIAL BINDING UPDATE REQUIRES A WHOLE-GROUP CAS')",
             ],
         ),
         (
-            "trg_plugin_credential_binding_updated_at_monotonic",
+            "trg_plugin_mount_credential_binding_updated_at_monotonic",
             &[
-                "BEFORE UPDATE OF UPDATED_AT ON PLUGIN_CREDENTIAL_BINDINGS",
+                "BEFORE UPDATE OF UPDATED_AT ON PLUGIN_MOUNT_CREDENTIAL_BINDINGS",
                 "NEW.UPDATED_AT < OLD.UPDATED_AT",
                 "RAISE(ABORT, 'PLUGIN CREDENTIAL BINDING UPDATED_AT CANNOT MOVE BACKWARDS')",
             ],
@@ -2160,9 +2156,9 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             ],
         ),
         (
-            "trg_plugin_kv_updated_at_monotonic",
+            "trg_plugin_mount_kv_updated_at_monotonic",
             &[
-                "BEFORE UPDATE OF UPDATED_AT ON PLUGIN_KV",
+                "BEFORE UPDATE OF UPDATED_AT ON PLUGIN_MOUNT_KV",
                 "NEW.UPDATED_AT < OLD.UPDATED_AT",
                 "RAISE(ABORT, 'PLUGIN KV UPDATED_AT CANNOT MOVE BACKWARDS')",
             ],
@@ -2311,7 +2307,7 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             "trg_plugin_project_metadata_insert_guard",
             &[
                 "BEFORE INSERT ON PLUGIN_PROJECTS",
-                "NEW.DISPLAY_NAME = '__NOMIFUN_PLUGIN_PROJECT_MIGRATION__'",
+                "NEW.DISPLAY_NAME = 'PLUGIN RUNTIME PROJECT'",
                 "RAISE(ABORT, 'PLUGIN PROJECT DISPLAY METADATA MUST BE EXPLICIT')",
             ],
         ),
@@ -2319,7 +2315,7 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             "trg_plugin_project_metadata_update_guard",
             &[
                 "BEFORE UPDATE OF DISPLAY_NAME, DESCRIPTION ON PLUGIN_PROJECTS",
-                "NEW.DISPLAY_NAME = '__NOMIFUN_PLUGIN_PROJECT_MIGRATION__'",
+                "NEW.DISPLAY_NAME = 'PLUGIN RUNTIME PROJECT'",
                 "RAISE(ABORT, 'PLUGIN PROJECT DISPLAY METADATA MUST BE EXPLICIT')",
             ],
         ),
@@ -2653,7 +2649,9 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
         .iter()
         .map(|row| row.try_get("name").map_err(DbError::Query))
         .collect::<Result<_, _>>()?;
-    let expected: Vec<String> = TRIGGER_CONTRACTS
+    let mut trigger_contracts = TRIGGER_CONTRACTS.to_vec();
+    trigger_contracts.sort_by_key(|(name, _)| *name);
+    let expected: Vec<String> = trigger_contracts
         .iter()
         .map(|(name, _)| (*name).to_owned())
         .collect();
@@ -2662,10 +2660,10 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             "v3 schema permits only registered guard triggers; expected {expected:?}, found {triggers:?}"
         )));
     }
-    for (row, (name, required_fragments)) in trigger_rows.iter().zip(TRIGGER_CONTRACTS) {
+    for (row, (name, required_fragments)) in trigger_rows.iter().zip(trigger_contracts) {
         let create_sql: String = row.try_get("sql").map_err(DbError::Query)?;
         let normalized = normalize_sql(&create_sql);
-        for fragment in *required_fragments {
+        for fragment in required_fragments {
             if !normalized.contains(fragment) {
                 return Err(DbError::Init(format!(
                     "v3 schema trigger {name} is missing required invariant fragment {fragment}"

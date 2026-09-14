@@ -60,7 +60,7 @@ pub struct CompatibilityCapabilityHost {
     pub authoritative_user_id: Arc<str>,
     /// Shared platform Catalog/resolver admission. Gateway only knows the
     /// consumer port and the canonical capability identity, never a concrete
-    /// Plugin/MiniApp implementation.
+    /// Plugin product implementation.
     pub capability_admission: Arc<dyn CapabilityAdmissionPort>,
     pub conversation: Arc<dyn ConversationCapabilityPort>,
     pub cron_service: Arc<CronService>,

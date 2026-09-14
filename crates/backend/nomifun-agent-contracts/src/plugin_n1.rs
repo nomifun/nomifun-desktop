@@ -15,7 +15,7 @@ use crate::{
     ActionId, ArtifactEnvelope, ArtifactId, CandidateTestReceiptId,
     CanonicalErrorCode, CanonicalSchemaRef, CapabilityRef,
     ContributionId, CorrelationId, CredentialId, CredentialSlotKey, DigestHex,
-    LogicalArtifactRef, MiniAppId, OperationId,
+    LogicalArtifactRef, PluginProductId, OperationId,
     PackageContributions, PackageEntrypointMetadata, PackageManifest, PackageRef,
     PluginCandidateId, PluginMountId, PluginProjectId,
     PluginStateCompareAndSwapOutcome,
@@ -53,7 +53,7 @@ pub type PluginN1ContractArtifact = ArtifactEnvelope<PluginN1ContractManifest>;
 #[serde(rename_all = "snake_case")]
 pub enum JavaScriptBuildProfile {
     PluginPackageV1,
-    MiniAppReleaseV1,
+    PluginReleaseV1,
 }
 
 #[derive(
@@ -150,7 +150,7 @@ pub enum ProductOperationKind {
     Build,
     Import,
     Export,
-    MiniappPermanentDelete,
+    PluginProductPermanentDelete,
 }
 
 impl ProductOperationKind {
@@ -158,7 +158,7 @@ impl ProductOperationKind {
         Self::Build,
         Self::Import,
         Self::Export,
-        Self::MiniappPermanentDelete,
+        Self::PluginProductPermanentDelete,
     ];
 }
 
@@ -457,7 +457,7 @@ impl NodeRuntimeProbeResult {
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeSwitchParticipantKind {
     PluginMount,
-    MiniappService,
+    PluginService,
     BuildFoundation,
 }
 
@@ -1568,7 +1568,7 @@ pub enum AffectedConsumerKind {
     RemoteOperation,
     AutomationOperation,
     UiOperation,
-    MiniappServiceOperation,
+    PluginServiceOperation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2462,7 +2462,7 @@ impl PluginShareBundleManifest {
 pub enum ProductOperationOwner {
     PluginProject { project_id: PluginProjectId },
     PluginMount { mount_id: PluginMountId },
-    Miniapp { miniapp_id: MiniAppId },
+    PluginProduct { plugin_product_id: PluginProductId },
 }
 
 impl ProductOperationOwner {
@@ -2474,8 +2474,8 @@ impl ProductOperationOwner {
             Self::PluginMount { mount_id } => {
                 validate_nonempty(mount_id.as_ref(), "mount_id")
             }
-            Self::Miniapp { miniapp_id } => {
-                validate_nonempty(miniapp_id.as_ref(), "miniapp_id")
+            Self::PluginProduct { plugin_product_id } => {
+                validate_nonempty(plugin_product_id.as_ref(), "plugin_product_id")
             }
         }
     }
@@ -2506,11 +2506,11 @@ impl ProductOperationRecord {
             ProductOperationKind::Build => matches!(
                 self.owner,
                 ProductOperationOwner::PluginProject { .. }
-                    | ProductOperationOwner::Miniapp { .. }
+                    | ProductOperationOwner::PluginProduct { .. }
             ),
             ProductOperationKind::Import | ProductOperationKind::Export => true,
-            ProductOperationKind::MiniappPermanentDelete => {
-                matches!(self.owner, ProductOperationOwner::Miniapp { .. })
+            ProductOperationKind::PluginProductPermanentDelete => {
+                matches!(self.owner, ProductOperationOwner::PluginProduct { .. })
             }
         };
         if !owner_allowed {
@@ -2529,12 +2529,12 @@ impl ProductOperationRecord {
                 reason: "progress must be 0..=100 and started_at_ms positive".into(),
             });
         }
-        if self.kind == ProductOperationKind::MiniappPermanentDelete
+        if self.kind == ProductOperationKind::PluginProductPermanentDelete
             && self.progress_percent.is_some()
         {
             return Err(PluginN1ContractError::InvalidField {
                 field: "progress_percent",
-                reason: "MiniApp permanent delete does not persist phase progress".into(),
+                reason: "Plugin Product permanent delete does not persist phase progress".into(),
             });
         }
         if self.state.is_terminal() != self.finished_at_ms.is_some() {
@@ -2559,7 +2559,7 @@ impl ProductOperationRecord {
             });
         }
         if self.state == ProductOperationState::Succeeded
-            && self.kind != ProductOperationKind::MiniappPermanentDelete
+            && self.kind != ProductOperationKind::PluginProductPermanentDelete
             && self.progress_percent != Some(100)
         {
             return Err(PluginN1ContractError::InvalidField {
@@ -2567,12 +2567,12 @@ impl ProductOperationRecord {
                 reason: "successful progress-reporting operations finish at 100".into(),
             });
         }
-        if self.kind == ProductOperationKind::MiniappPermanentDelete
+        if self.kind == ProductOperationKind::PluginProductPermanentDelete
             && self.state == ProductOperationState::Canceled
         {
             return Err(PluginN1ContractError::InvalidField {
                 field: "state",
-                reason: "MiniApp permanent delete is not cancelable after admission".into(),
+                reason: "Plugin Product permanent delete is not cancelable after admission".into(),
             });
         }
         if self.bounded_log_tail.len() > 200 {
@@ -3815,9 +3815,9 @@ mod tests {
     fn permanent_delete_cannot_persist_a_canceled_state() {
         let operation = ProductOperationRecord {
             operation_id: OperationId::from("delete-1"),
-            kind: ProductOperationKind::MiniappPermanentDelete,
-            owner: ProductOperationOwner::Miniapp {
-                miniapp_id: MiniAppId::from("miniapp-1"),
+            kind: ProductOperationKind::PluginProductPermanentDelete,
+            owner: ProductOperationOwner::PluginProduct {
+                plugin_product_id: PluginProductId::from("plugin-1"),
             },
             state: ProductOperationState::Canceled,
             progress_percent: None,

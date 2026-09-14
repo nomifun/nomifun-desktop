@@ -1,6 +1,6 @@
 use super::*;
 use nomifun_db::{
-    SqliteMiniAppM1Repository, SqliteProviderConnectionRepository,
+    SqlitePluginRuntimeRepository, SqliteProviderConnectionRepository,
     SqliteProviderModelCapabilityRepository, SqliteProviderModelRepository,
     SqliteProviderRepository, init_database_memory, installation_owner_id,
 };
@@ -10,16 +10,16 @@ const HTML: &str = "<!doctype html><html><head><title>Tasks</title></head><body>
 async fn fixture() -> (
     nomifun_db::Database,
     tempfile::TempDir,
-    PluginRuntimeProductService,
+    PluginProductService,
     String,
 ) {
     let db = init_database_memory().await.unwrap();
     let owner = installation_owner_id(db.pool()).await.unwrap();
     let root = tempfile::tempdir().unwrap();
     let application = Arc::new(
-        PluginRuntimeM1ApplicationService::new_with_root(
-            Arc::new(SqliteMiniAppM1Repository::new(db.pool().clone())),
-            root.path().join("apps"),
+        PluginRuntimeApplicationService::new_with_root(
+            Arc::new(SqlitePluginRuntimeRepository::new(db.pool().clone())),
+            root.path().join("plugins"),
         )
         .unwrap(),
     );
@@ -34,7 +34,7 @@ async fn fixture() -> (
         nomifun_net::http_client(),
         nomifun_model_invoke::AdapterRegistry::new(nomifun_model_invoke::default_adapters()),
     ));
-    let service = PluginRuntimeProductService::new(
+    let service = PluginProductService::new(
         PluginProductDocuments::new(db.pool().clone()),
         application,
         model,
@@ -58,7 +58,7 @@ fn draft() -> Draft {
         }],
         status: "ready".into(),
         error: None,
-        miniapp_id: None,
+        plugin_id: None,
         base_release_digest: None,
         base_source_digest: None,
         updated_at: 1,
@@ -67,7 +67,7 @@ fn draft() -> Draft {
 }
 
 #[tokio::test]
-async fn draft_is_durable_owner_scoped_and_not_a_published_app() {
+async fn draft_is_durable_owner_scoped_and_not_a_published_plugin() {
     let (_db, _root, service, owner) = fixture().await;
     let mut value = draft();
     service.put_draft(&owner, &mut value).await.unwrap();
@@ -86,7 +86,7 @@ async fn draft_is_durable_owner_scoped_and_not_a_published_app() {
             .library(&owner)
             .await
             .unwrap()
-            .miniapps
+            .plugins
             .is_empty()
     );
     let mut stale = value.clone();
@@ -102,43 +102,43 @@ async fn save_creates_builds_publishes_and_enables_without_extra_user_steps() {
     service.put_draft(&owner, &mut value).await.unwrap();
     let saved = service.save_draft(&owner, &mut value).await.unwrap();
     assert!(matches!(
-        saved.miniapp.lifecycle,
+        saved.plugin.lifecycle,
         nomifun_api_types::PluginRuntimeLifecycleDto::Enabled
     ));
-    assert!(saved.miniapp.releases.active.is_some());
+    assert!(saved.plugin.releases.active.is_some());
     assert_eq!(
         service
             .application
             .library(&owner)
             .await
             .unwrap()
-            .miniapps
+            .plugins
             .len(),
         1
     );
     let source = service
         .application
-        .source_file(&owner, &saved.miniapp.miniapp_id, "ui/index.html")
+        .source_file(&owner, &saved.plugin.plugin_id, "ui/index.html")
         .await
         .unwrap();
     assert_eq!(source.content, HTML);
     let opened = service
         .application
-        .open_surface(&owner, &saved.miniapp.miniapp_id)
+        .open_surface(&owner, &saved.plugin.plugin_id)
         .await
         .unwrap();
-    assert_eq!(opened.miniapp_id, saved.miniapp.miniapp_id);
-    let active = saved.miniapp.releases.active.unwrap().release_digest;
+    assert_eq!(opened.plugin_id, saved.plugin.plugin_id);
+    let active = saved.plugin.releases.active.unwrap().release_digest;
     value.html = HTML.replace("Add task", "Add another task");
     value.base_release_digest = Some("0".repeat(64));
     assert!(service.save_draft(&owner, &mut value).await.is_err());
     assert_eq!(
         service
             .application
-            .workshop(&owner, &opened.miniapp_id)
+            .workshop(&owner, &opened.plugin_id)
             .await
             .unwrap()
-            .miniapp
+            .plugin
             .releases
             .active
             .unwrap()
@@ -200,8 +200,8 @@ async fn saving_a_draft_does_not_overwrite_source_edited_elsewhere() {
         .replace_source_file(
             &owner,
             ReplacePluginRuntimeSourceFileRequest {
-                miniapp_id: saved.miniapp.miniapp_id.clone(),
-                expected_product_revision: saved.miniapp.product_revision,
+                plugin_id: saved.plugin.plugin_id.clone(),
+                expected_product_revision: saved.plugin.product_revision,
                 project_id: saved.project_id,
                 expected_project_revision: saved.project_revision,
                 expected_build_generation: saved.build_generation,
@@ -220,7 +220,7 @@ async fn saving_a_draft_does_not_overwrite_source_edited_elsewhere() {
     assert_eq!(
         service
             .application
-            .source_file(&owner, &saved.miniapp.miniapp_id, "ui/index.html")
+            .source_file(&owner, &saved.plugin.plugin_id, "ui/index.html")
             .await
             .unwrap()
             .content,
@@ -234,7 +234,7 @@ async fn storage_survives_surface_close_and_reopen() {
     let mut value = draft();
     service.put_draft(&owner, &mut value).await.unwrap();
     let saved = service.save_draft(&owner, &mut value).await.unwrap();
-    let id = &saved.miniapp.miniapp_id;
+    let id = &saved.plugin.plugin_id;
     let first = service.application.open_surface(&owner, id).await.unwrap();
     let request=serde_json::from_value(serde_json::json!({"call_id":"write-task","target":{"target":"host_kv","request":{"operation":"set","key":"tasks","value":[{"title":"Remember this","done":false}]}}})).unwrap();
     service
@@ -286,7 +286,7 @@ async fn cancel_retains_the_previous_preview_and_revokes_the_job() {
     let token = CancellationToken::new();
     service.jobs.lock().await.insert(
         format!("{owner}:{}", value.id),
-        (token.clone(), value.miniapp_id.clone()),
+        (token.clone(), value.plugin_id.clone()),
     );
     let state =
         PluginRuntimeM1RouterState::new(service.application.clone()).with_product(service.clone());
@@ -341,7 +341,7 @@ async fn sharing_and_backup_are_single_file_importable_and_do_not_replace_the_or
         let response = transfer::export_file(
             State(state.clone()),
             Extension(user()),
-            Path(saved.miniapp.miniapp_id.clone()),
+            Path(saved.plugin.plugin_id.clone()),
             Json(request),
         )
         .await
@@ -355,9 +355,9 @@ async fn sharing_and_backup_are_single_file_importable_and_do_not_replace_the_or
         let mut imported = response.0.data.unwrap();
         assert_eq!(imported.import.as_ref().unwrap().includes_data, backup);
         let copied = service.save_draft(&owner, &mut imported).await.unwrap();
-        assert_ne!(copied.miniapp.miniapp_id, saved.miniapp.miniapp_id);
+        assert_ne!(copied.plugin.plugin_id, saved.plugin.plugin_id);
         assert!(matches!(
-            copied.miniapp.lifecycle,
+            copied.plugin.lifecycle,
             nomifun_api_types::PluginRuntimeLifecycleDto::Enabled
         ));
     }
@@ -367,7 +367,7 @@ async fn sharing_and_backup_are_single_file_importable_and_do_not_replace_the_or
             .library(&owner)
             .await
             .unwrap()
-            .miniapps
+            .plugins
             .len(),
         3
     );
@@ -398,7 +398,7 @@ async fn rejected_import_removes_only_its_temporary_copy() {
     );
     assert!(source.is_file());
     assert_eq!(
-        std::fs::read_dir(root.path().join("miniapp-imports"))
+        std::fs::read_dir(root.path().join("plugin-imports"))
             .unwrap()
             .count(),
         0
@@ -424,7 +424,7 @@ async fn permanent_delete_removes_linked_drafts_membership_and_running_authoring
     let mut value = draft();
     service.put_draft(&owner, &mut value).await.unwrap();
     let saved = service.save_draft(&owner, &mut value).await.unwrap();
-    let id = saved.miniapp.miniapp_id.clone();
+    let id = saved.plugin.plugin_id.clone();
     let workspace = Workspace {
         revision: 1,
         collections: vec![],
@@ -456,11 +456,11 @@ async fn permanent_delete_removes_linked_drafts_membership_and_running_authoring
         .trash(
             &owner,
             nomifun_api_types::TrashPluginRuntimeRequest {
-                miniapp_id: id.clone(),
-                expected_product_revision: saved.miniapp.product_revision,
-                expected_pointer_revision: saved.miniapp.releases.pointer_revision,
+                plugin_id: id.clone(),
+                expected_product_revision: saved.plugin.product_revision,
+                expected_pointer_revision: saved.plugin.releases.pointer_revision,
                 expected_active_release_digest: saved
-                    .miniapp
+                    .plugin
                     .releases
                     .active
                     .map(|r| r.release_digest),
@@ -469,16 +469,16 @@ async fn permanent_delete_removes_linked_drafts_membership_and_running_authoring
         .await
         .unwrap();
     let request = nomifun_api_types::DeletePluginRuntimeRequest {
-        miniapp_id: id.clone(),
-        expected_product_revision: trashed.miniapp.product_revision,
+        plugin_id: id.clone(),
+        expected_product_revision: trashed.plugin.product_revision,
         expected_lifecycle: nomifun_api_types::PluginRuntimeLifecycleDto::Trashed,
-        expected_pointer_revision: trashed.miniapp.releases.pointer_revision,
-        expected_active_release_digest: trashed.miniapp.releases.active.map(|r| r.release_digest),
+        expected_pointer_revision: trashed.plugin.releases.pointer_revision,
+        expected_active_release_digest: trashed.plugin.releases.active.map(|r| r.release_digest),
     };
     let state =
         PluginRuntimeM1RouterState::new(service.application.clone()).with_product(service.clone());
     let router =
-        crate::router::plugin_runtime::miniapp_m1_write_routes(state).layer(Extension(CurrentUser {
+        crate::router::plugin_runtime::plugin_m1_write_routes(state).layer(Extension(CurrentUser {
             id: nomifun_common::UserId::parse(owner.clone()).unwrap(),
             username: "Owner".into(),
         }));

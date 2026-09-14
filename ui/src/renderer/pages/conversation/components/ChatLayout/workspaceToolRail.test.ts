@@ -67,13 +67,6 @@ describe('workspace tool rail dimensions', () => {
     expect(title.includes('color: var(--text-primary);')).toBe(true);
   });
 
-  test('does not change the mobile workspace trigger dimensions', () => {
-    const trigger = rule('\\.workspace-tool-rail-mobile-trigger');
-
-    expect(trigger.includes('width: 24px;')).toBe(true);
-    expect(trigger.includes('height: 70px;')).toBe(true);
-  });
-
   test('keeps labels accessible but visually hidden beneath icon-only controls', () => {
     const label = rule('\\.workspace-tool-rail__label');
 

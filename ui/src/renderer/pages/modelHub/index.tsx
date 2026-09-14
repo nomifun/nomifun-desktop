@@ -22,8 +22,6 @@ import {
   Voice,
 } from '@icon-park/react';
 import ContentSider from '@/renderer/components/layout/ContentSider';
-import SegmentedTabs, { type SegmentedTabItem } from '@/renderer/components/base/SegmentedTabs';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
 import type { I18nKey } from '@/renderer/services/i18n/i18n-keys';
@@ -211,16 +209,13 @@ const FLAT_SECTIONS: SectionDef[] = SECTION_GROUPS.flatMap((group) => group.sect
  *
  * One sidebar entry = one model capability, so nothing hides behind a page-level
  * filter or a second row of tabs. The sidebar width is drag-resizable and
- * persisted. On mobile the sidebar collapses to a horizontal segmented bar above
- * the content (flat — the groups are a desktop affordance).
+ * persisted.
  *
  * The level syncs to `?section=`; the retired keys (`speech`, `creation`,
  * `global`) still resolve so old bookmarks work.
  */
 const ModelHubPage: React.FC = () => {
   const { t } = useTranslation();
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [section, setSection] = useState<Section>(
@@ -287,25 +282,6 @@ const ModelHubPage: React.FC = () => {
   // now, so every legacy sub-tab resolves to it.
   if (searchParams.get('section') === 'agents') {
     return <Navigate to='/settings/execution-engines' replace />;
-  }
-
-  // Mobile: horizontal segmented nav above the content (no left sidebar).
-  if (isMobile) {
-    const segmentedItems: SegmentedTabItem[] = FLAT_SECTIONS.map((s) => ({
-      key: s.key,
-      label: t(s.labelKey),
-      icon: s.icon,
-    }));
-    return (
-      <div className='w-full min-h-full box-border overflow-y-auto px-16px py-16px'>
-        <div className='text-20px font-600 text-t-primary leading-tight'>{t('settings.modelHub.title')}</div>
-        <div className='mt-4px mb-14px text-12px leading-18px text-t-secondary'>{t('settings.modelHub.subtitle')}</div>
-        <div className='mb-16px'>
-          <SegmentedTabs items={segmentedItems} activeKey={section} onChange={handleSectionChange} size='sm' />
-        </div>
-        {content}
-      </div>
-    );
   }
 
   const siderHeader = (

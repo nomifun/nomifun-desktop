@@ -10,7 +10,7 @@ pub(crate) mod agent_wave2_mcp;
 pub(crate) mod agent_wave2_vcs_push;
 pub(crate) mod agent_wave3_creation_host;
 pub(crate) mod agent_wave3_host;
-pub(crate) mod agent_wave3_miniapp_host;
+pub(crate) mod agent_wave3_plugin_host;
 pub(crate) mod agent_wave3_template_runner;
 pub(crate) mod agent_wave3_workshop_host;
 pub(crate) mod agent_wave4_host;

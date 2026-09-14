@@ -2,52 +2,15 @@ use nomifun_agent_contracts::{
     AgentBindingValue, AgentSessionId, SnapshotCompatibilityAdmissionResult,
 };
 use nomifun_api_types::{
-    AgentBindingValueDto, AgentPresetDraftDto, AgentPresetEditorTestPlanDto,
-    AgentSessionContinuationViewDto, EditorDraftStateDto, EditorRevisionActionDto,
+    AgentBindingValueDto, AgentSessionContinuationViewDto,
     ForkAgentSessionRequestDto, InstallationTokenStateResponseDto, InstallationTokenStatusDto,
-    RemoteCredentialContinuationDto, ResolveAgentPresetPreviewResponse,
+    RemoteCredentialContinuationDto,
     RevokeInstallationTokenResponseDto, RotateInstallationTokenResponseDto,
-    SaveAgentPresetRevisionRequest, SnapshotCompatibilityViewDto,
+    SnapshotCompatibilityViewDto,
 };
 
 use crate::ControlPlaneError;
 use crate::wire::wire_cast;
-
-pub const AGENT_SESSION_CREATE_PATH: &str = "/api/agent-sessions";
-
-pub fn editor_test_plan(
-    draft_state: EditorDraftStateDto,
-    preview: ResolveAgentPresetPreviewResponse,
-    draft: AgentPresetDraftDto,
-    reason: Option<String>,
-) -> Result<AgentPresetEditorTestPlanDto, ControlPlaneError> {
-    if !preview.can_create_session {
-        return Err(ControlPlaneError::canonical(
-            "PRESET_REVISION_SAVE_FAILED",
-            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-            "Preview must resolve successfully before Test creates a Session",
-        ));
-    }
-    let dirty = draft_state == EditorDraftStateDto::Dirty;
-    Ok(AgentPresetEditorTestPlanDto {
-        draft_state,
-        revision_action: if dirty {
-            EditorRevisionActionDto::SaveOrdinaryVisibleRevision
-        } else {
-            EditorRevisionActionDto::ReuseCurrentRevision
-        },
-        preview: preview.clone(),
-        save_request: dirty.then_some(SaveAgentPresetRevisionRequest {
-            expected_current_revision: draft.current_revision.clone(),
-            preview_digest: preview.preview_digest.clone(),
-            draft,
-            reason,
-        }),
-        session_create_path: AGENT_SESSION_CREATE_PATH.into(),
-        uses_real_typed_resources: true,
-        uses_full_auto: true,
-    })
-}
 
 pub fn continuation_view(
     agent_session_id: &AgentSessionId,

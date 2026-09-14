@@ -4,10 +4,10 @@ use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use nomifun_agent_contracts::{
-    DigestHex, MiniAppBackupId, MiniAppBackupSourceState, MiniAppId,
-    MiniAppReleaseArtifactV1, MiniAppSourceBundle, MiniAppWholeAppBackupMetadataV1,
-    MINIAPP_M1_SCHEMA_VERSION, MINIAPP_RELEASE_PROFILE_VERSION,
-    MINIAPP_WHOLE_APP_BACKUP_VERSION, canonical_json_bytes, digest_bytes,
+    DigestHex, PluginBackupId, PluginBackupSourceState, PluginProductId,
+    PluginReleaseArtifactV1, PluginSourceBundle, PluginProductBackupMetadataV1,
+    PLUGIN_RUNTIME_SCHEMA_VERSION, PLUGIN_RELEASE_PROFILE_VERSION,
+    PLUGIN_PRODUCT_BACKUP_VERSION, canonical_json_bytes, digest_bytes,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,7 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::runtime::{MINIAPP_SOURCE_STORE_FORMAT_VERSION, PluginRuntimeMigrationLedger};
+use crate::runtime::{PLUGIN_SOURCE_STORE_FORMAT_VERSION, PluginRuntimeMigrationLedger};
 
 const METADATA_FILE: &str = "metadata.json";
 const PRODUCT_FILE: &str = "product.json";
@@ -33,7 +33,7 @@ const KV_FILE: &str = "kv.json";
 const FILES_DIRECTORY: &str = "files";
 const PRIVATE_DATABASE_FILE: &str = "private.sqlite";
 const MIGRATION_LEDGER_FILE: &str = "migration-ledger.json";
-const STAGING_PREFIX: &str = ".nomifun-miniapp-backup-staging-";
+const STAGING_PREFIX: &str = ".nomifun-plugin-backup-staging-";
 
 const MAX_PATH_BYTES: usize = 1_024;
 const MAX_COMPONENT_BYTES: usize = 255;
@@ -68,14 +68,14 @@ impl PluginRuntimeBackupFile {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PluginRuntimeBackupRelease {
-    pub artifact: MiniAppReleaseArtifactV1,
+    pub artifact: PluginReleaseArtifactV1,
     pub manifest_bytes: Vec<u8>,
     pub files: Vec<PluginRuntimeBackupFile>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginRuntimeBackupSource {
-    pub source: MiniAppSourceBundle,
+    pub source: PluginSourceBundle,
     pub dependency_lock: Vec<u8>,
     pub files: Vec<PluginRuntimeBackupFile>,
 }
@@ -89,8 +89,8 @@ pub struct PluginRuntimeBackupStorage {
 }
 
 pub struct PluginRuntimeWholeAppBackupExport<'a> {
-    pub backup_id: MiniAppBackupId,
-    pub source_miniapp_id: MiniAppId,
+    pub backup_id: PluginBackupId,
+    pub source_plugin_product_id: PluginProductId,
     pub owner_quiescent: bool,
     pub created_at_ms: i64,
     pub product: &'a Value,
@@ -104,7 +104,7 @@ pub struct PluginRuntimeWholeAppBackupExport<'a> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PluginRuntimeWholeAppBackupImport {
-    pub metadata: MiniAppWholeAppBackupMetadataV1,
+    pub metadata: PluginProductBackupMetadataV1,
     pub product: Value,
     pub project: Value,
     pub config: Value,
@@ -150,7 +150,7 @@ impl PluginRuntimeWholeAppBackupFilesystem {
         &self,
         request: PluginRuntimeWholeAppBackupExport<'_>,
         destination: impl AsRef<Path>,
-    ) -> Result<MiniAppWholeAppBackupMetadataV1, PluginRuntimeWholeAppBackupError> {
+    ) -> Result<PluginProductBackupMetadataV1, PluginRuntimeWholeAppBackupError> {
         let prepared = prepare_export(request)?;
         let destination = destination.as_ref();
         ensure_normal_destination(destination)?;
@@ -217,7 +217,7 @@ struct BackupFileRecord {
 #[serde(deny_unknown_fields)]
 struct BackupSourceSnapshotRecord {
     format_version: String,
-    source: MiniAppSourceBundle,
+    source: PluginSourceBundle,
     files: Vec<BackupFileRecord>,
 }
 
@@ -237,11 +237,11 @@ struct ProductMetadataDigestInput<'a> {
 #[derive(Serialize)]
 struct ReleaseInventoryEntry<'a> {
     slot: &'a str,
-    artifact: &'a MiniAppReleaseArtifactV1,
+    artifact: &'a PluginReleaseArtifactV1,
 }
 
 struct PreparedBackup {
-    metadata: MiniAppWholeAppBackupMetadataV1,
+    metadata: PluginProductBackupMetadataV1,
     product: Value,
     project: Value,
     config: Value,
@@ -292,10 +292,10 @@ fn prepare_export(
         releases.insert(slot.clone(), prepare_release(release.clone())?);
     }
     let source = request.source.cloned().map(prepare_source).transpose()?;
-    let storage = prepare_storage(request.storage.clone(), &request.source_miniapp_id)?;
+    let storage = prepare_storage(request.storage.clone(), &request.source_plugin_product_id)?;
     let metadata = calculate_metadata(
         request.backup_id,
-        request.source_miniapp_id,
+        request.source_plugin_product_id,
         request.owner_quiescent,
         request.created_at_ms,
         request.product,
@@ -402,7 +402,7 @@ fn prepare_source(
 
 fn prepare_storage(
     storage: PluginRuntimeBackupStorage,
-    source_miniapp_id: &MiniAppId,
+    source_plugin_product_id: &PluginProductId,
 ) -> Result<PluginRuntimeBackupStorage, PluginRuntimeWholeAppBackupError> {
     enforce_canonical_size(&storage.kv, "storage/kv.json", MAX_KV_BYTES)?;
     let files = prepare_files(
@@ -434,7 +434,7 @@ fn prepare_storage(
         ledger
             .validate()
             .map_err(|error| PluginRuntimeWholeAppBackupError::InvalidInput(error.to_string()))?;
-        if &ledger.miniapp_id != source_miniapp_id {
+        if &ledger.plugin_product_id != source_plugin_product_id {
             return Err(PluginRuntimeWholeAppBackupError::InvalidInput(
                 "migration ledger belongs to another Plugin".into(),
             ));
@@ -455,8 +455,8 @@ fn prepare_storage(
 
 #[allow(clippy::too_many_arguments)]
 fn calculate_metadata(
-    backup_id: MiniAppBackupId,
-    source_miniapp_id: MiniAppId,
+    backup_id: PluginBackupId,
+    source_plugin_product_id: PluginProductId,
     owner_quiescent: bool,
     created_at_ms: i64,
     product: &Value,
@@ -467,7 +467,7 @@ fn calculate_metadata(
     releases: &BTreeMap<String, PluginRuntimeBackupRelease>,
     source: Option<&PluginRuntimeBackupSource>,
     storage: &PluginRuntimeBackupStorage,
-) -> Result<MiniAppWholeAppBackupMetadataV1, PluginRuntimeWholeAppBackupError> {
+) -> Result<PluginProductBackupMetadataV1, PluginRuntimeWholeAppBackupError> {
     let product_metadata_digest = digest_canonical(&ProductMetadataDigestInput {
         product,
         project,
@@ -497,12 +497,12 @@ fn calculate_metadata(
         Some(ledger) => digest_canonical(ledger)?,
         None => digest_bytes(&[]),
     };
-    let metadata = MiniAppWholeAppBackupMetadataV1 {
-        schema_version: MINIAPP_M1_SCHEMA_VERSION.into(),
-        backup_version: MINIAPP_WHOLE_APP_BACKUP_VERSION.into(),
+    let metadata = PluginProductBackupMetadataV1 {
+        schema_version: PLUGIN_RUNTIME_SCHEMA_VERSION.into(),
+        backup_version: PLUGIN_PRODUCT_BACKUP_VERSION.into(),
         backup_id,
-        source_miniapp_id,
-        source_state: MiniAppBackupSourceState::Disabled,
+        source_plugin_product_id,
+        source_state: PluginBackupSourceState::Disabled,
         owner_quiescent,
         product_metadata_digest,
         source_archive_digest,
@@ -615,7 +615,7 @@ fn import_backup(root: &Path) -> Result<PluginRuntimeWholeAppBackupImport, Plugi
     ensure_regular_directory(root)?;
     ensure_regular_directory_chain(root)?;
     let observed = scan_tree(root)?;
-    let metadata: MiniAppWholeAppBackupMetadataV1 =
+    let metadata: PluginProductBackupMetadataV1 =
         read_canonical(&root.join(METADATA_FILE), MAX_JSON_BYTES)?;
     metadata
         .validate()
@@ -634,7 +634,7 @@ fn import_backup(root: &Path) -> Result<PluginRuntimeWholeAppBackupImport, Plugi
     let mut releases = BTreeMap::new();
     for slot in discover_release_slots(&observed)? {
         let release_root = root.join(RELEASES_DIRECTORY).join(&slot);
-        let artifact: MiniAppReleaseArtifactV1 =
+        let artifact: PluginReleaseArtifactV1 =
             read_canonical(&release_root.join(ARTIFACT_FILE), MAX_JSON_BYTES)?;
         let manifest_bytes =
             read_regular_bounded(&release_root.join(MANIFEST_FILE), MAX_JSON_BYTES)?;
@@ -702,12 +702,12 @@ fn import_backup(root: &Path) -> Result<PluginRuntimeWholeAppBackupImport, Plugi
             private_database,
             migration_ledger,
         },
-        &metadata.source_miniapp_id,
+        &metadata.source_plugin_product_id,
     )?;
 
     let calculated = calculate_metadata(
         metadata.backup_id.clone(),
-        metadata.source_miniapp_id.clone(),
+        metadata.source_plugin_product_id.clone(),
         metadata.owner_quiescent,
         metadata.created_at_ms,
         &product,
@@ -762,7 +762,7 @@ fn import_source(
     let source_root = root.join(SOURCE_DIRECTORY);
     let snapshot: BackupSourceSnapshotRecord =
         read_canonical(&source_root.join(SOURCE_SNAPSHOT_FILE), MAX_JSON_BYTES)?;
-    if snapshot.format_version != MINIAPP_SOURCE_STORE_FORMAT_VERSION {
+    if snapshot.format_version != PLUGIN_SOURCE_STORE_FORMAT_VERSION {
         return Err(PluginRuntimeWholeAppBackupError::InvalidInput(
             "Source snapshot format version is unsupported".into(),
         ));
@@ -859,7 +859,7 @@ fn source_snapshot_record(
     source: &PluginRuntimeBackupSource,
 ) -> Result<BackupSourceSnapshotRecord, PluginRuntimeWholeAppBackupError> {
     let record = BackupSourceSnapshotRecord {
-        format_version: MINIAPP_SOURCE_STORE_FORMAT_VERSION.into(),
+        format_version: PLUGIN_SOURCE_STORE_FORMAT_VERSION.into(),
         source: source.source.clone(),
         files: file_records(&source.files),
     };
@@ -875,7 +875,7 @@ fn source_snapshot_digest(
     files: &[BackupFileRecord],
 ) -> Result<DigestHex, PluginRuntimeWholeAppBackupError> {
     digest_canonical(&SourceSnapshotDigestInput {
-        format_version: MINIAPP_SOURCE_STORE_FORMAT_VERSION,
+        format_version: PLUGIN_SOURCE_STORE_FORMAT_VERSION,
         files,
     })
 }
@@ -999,7 +999,7 @@ fn validate_file_records(
 }
 
 fn validate_source_contract(
-    source: &MiniAppSourceBundle,
+    source: &PluginSourceBundle,
 ) -> Result<(), PluginRuntimeWholeAppBackupError> {
     validate_nonempty(source.project_id.as_ref(), "source.project_id")?;
     validate_nonempty(
@@ -1018,9 +1018,9 @@ fn validate_source_contract(
         source.dependency_lock_digest.as_ref(),
         "source.dependency_lock_digest",
     )?;
-    if source.build_profile_version.as_ref() != MINIAPP_RELEASE_PROFILE_VERSION {
+    if source.build_profile_version.as_ref() != PLUGIN_RELEASE_PROFILE_VERSION {
         return Err(PluginRuntimeWholeAppBackupError::InvalidInput(format!(
-            "source.build_profile_version must be {MINIAPP_RELEASE_PROFILE_VERSION}"
+            "source.build_profile_version must be {PLUGIN_RELEASE_PROFILE_VERSION}"
         )));
     }
     Ok(())
@@ -1814,7 +1814,7 @@ mod tests {
                 product: json!({
                     "display_name": "Backup fixture",
                     "lifecycle": "disabled",
-                    "miniapp_id": "miniapp-source"
+                    "plugin_product_id": "plugin-source"
                 }),
                 project: json!({
                     "project_id": "project-source",
@@ -1849,8 +1849,8 @@ mod tests {
 
         fn request(&self) -> PluginRuntimeWholeAppBackupExport<'_> {
             PluginRuntimeWholeAppBackupExport {
-                backup_id: MiniAppBackupId::from("backup-1"),
-                source_miniapp_id: MiniAppId::from("miniapp-source"),
+                backup_id: PluginBackupId::from("backup-1"),
+                source_plugin_product_id: PluginProductId::from("plugin-source"),
                 owner_quiescent: true,
                 created_at_ms: 1,
                 product: &self.product,
@@ -1863,7 +1863,7 @@ mod tests {
             }
         }
 
-        fn export(&self, destination: &Path) -> MiniAppWholeAppBackupMetadataV1 {
+        fn export(&self, destination: &Path) -> PluginProductBackupMetadataV1 {
             PluginRuntimeWholeAppBackupFilesystem::new()
                 .export(self.request(), destination)
                 .unwrap()

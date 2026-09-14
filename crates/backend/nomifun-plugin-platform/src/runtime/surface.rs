@@ -2,14 +2,14 @@ use getrandom::getrandom;
 use nomifun_agent_contracts::digest_bytes;
 use nomifun_api_types::is_preview_capability;
 
-use crate::runtime::{PluginRuntimeM1ApplicationError, PluginRuntimeSurfaceAsset};
+use crate::runtime::{PluginRuntimeApplicationError, PluginRuntimeSurfaceAsset};
 
 const SURFACE_CAPABILITY_BYTES: usize = 32;
 
-pub fn issue_surface_capability() -> Result<String, PluginRuntimeM1ApplicationError> {
+pub fn issue_surface_capability() -> Result<String, PluginRuntimeApplicationError> {
     let mut bytes = [0u8; SURFACE_CAPABILITY_BYTES];
     getrandom(&mut bytes).map_err(|error| {
-        PluginRuntimeM1ApplicationError::Invalid(format!(
+        PluginRuntimeApplicationError::Invalid(format!(
             "failed to generate Surface capability: {error}"
         ))
     })?;
@@ -18,9 +18,9 @@ pub fn issue_surface_capability() -> Result<String, PluginRuntimeM1ApplicationEr
 
 pub fn surface_capability_digest(
     capability: &str,
-) -> Result<String, PluginRuntimeM1ApplicationError> {
+) -> Result<String, PluginRuntimeApplicationError> {
     if !is_preview_capability(capability) {
-        return Err(PluginRuntimeM1ApplicationError::NotFound);
+        return Err(PluginRuntimeApplicationError::NotFound);
     }
     Ok(digest_bytes(capability.as_bytes()).0)
 }
@@ -67,7 +67,7 @@ mod tests {
         );
         assert!(matches!(
             surface_capability_digest("not-a-capability"),
-            Err(PluginRuntimeM1ApplicationError::NotFound)
+            Err(PluginRuntimeApplicationError::NotFound)
         ));
     }
 

@@ -2,26 +2,26 @@ use std::sync::Arc;
 
 use nomifun_api_types::{
     BuildPluginRuntimeRequest, CreatePluginRuntimeProjectRequest, ExportPluginRuntimeBackupRequest,
-    ImportPluginRuntimeBackupRequest, PluginRuntimeKindDto, PluginRuntimeLifecycleDto,
+    ImportPluginRuntimeBackupRequest, PluginRuntimeLifecycleDto,
 };
 use nomifun_agent_contracts::{
-    MiniAppReleaseArtifactV1, MiniAppReleaseRef,
+    PluginReleaseArtifactV1, PluginReleaseRef,
 };
 use nomifun_db::{
-    IMiniAppM1Repository, SqliteMiniAppM1Repository, init_database_memory,
+    IPluginRuntimeRepository, SqlitePluginRuntimeRepository, init_database_memory,
     installation_owner_id,
 };
-use nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService;
+use nomifun_plugin_platform::runtime::PluginRuntimeApplicationService;
 
 #[tokio::test]
 async fn whole_app_backup_roundtrips_disabled_ui_only_product_as_new_identity() {
     let database = init_database_memory().await.unwrap();
     let owner = installation_owner_id(database.pool()).await.unwrap();
-    let repository: Arc<dyn IMiniAppM1Repository> =
-        Arc::new(SqliteMiniAppM1Repository::new(database.pool().clone()));
+    let repository: Arc<dyn IPluginRuntimeRepository> =
+        Arc::new(SqlitePluginRuntimeRepository::new(database.pool().clone()));
     let root = tempfile::tempdir().unwrap();
     let application =
-        PluginRuntimeM1ApplicationService::new_with_root(repository.clone(), root.path()).unwrap();
+        PluginRuntimeApplicationService::new_with_root(repository.clone(), root.path()).unwrap();
 
     let created = application
         .create(
@@ -30,7 +30,7 @@ async fn whole_app_backup_roundtrips_disabled_ui_only_product_as_new_identity() 
                 expected_library_revision: 0,
                 display_name: "Backup source".into(),
                 description: Some("Backup test".into()),
-                kind: PluginRuntimeKindDto::UiOnly,
+                service_source: None,
             },
         )
         .await
@@ -39,8 +39,8 @@ async fn whole_app_backup_roundtrips_disabled_ui_only_product_as_new_identity() 
         .build(
             &owner,
             BuildPluginRuntimeRequest {
-                miniapp_id: built_id(&created),
-                expected_product_revision: created.miniapp.product_revision,
+                plugin_id: built_id(&created),
+                expected_product_revision: created.plugin.product_revision,
                 project_id: created.project_id.clone(),
                 expected_project_revision: created.project_revision,
                 expected_build_generation: created.build_generation,
@@ -52,7 +52,7 @@ async fn whole_app_backup_roundtrips_disabled_ui_only_product_as_new_identity() 
         .await
         .unwrap();
 
-    let source_id = built.miniapp.miniapp_id.clone();
+    let source_id = built.plugin.plugin_id.clone();
     let source_snapshot = repository
         .get(&owner, source_id.as_ref())
         .await
@@ -79,10 +79,10 @@ async fn whole_app_backup_roundtrips_disabled_ui_only_product_as_new_identity() 
         .export_backup(
             &owner,
             ExportPluginRuntimeBackupRequest {
-                miniapp_id: source_id.clone(),
-                expected_product_revision: disabled.miniapp.product_revision,
+                plugin_id: source_id.clone(),
+                expected_product_revision: disabled.plugin.product_revision,
                 expected_lifecycle: PluginRuntimeLifecycleDto::Disabled,
-                expected_pointer_revision: disabled.miniapp.releases.pointer_revision,
+                expected_pointer_revision: disabled.plugin.releases.pointer_revision,
                 expected_config_revision: disabled.config.config_revision,
                 expected_credential_bindings_revision: disabled
                     .credential_bindings_revision,
@@ -109,17 +109,17 @@ async fn whole_app_backup_roundtrips_disabled_ui_only_product_as_new_identity() 
         )
         .await
         .unwrap();
-    assert_ne!(imported.miniapp.miniapp_id, source_id);
-    assert_eq!(imported.miniapp.lifecycle, PluginRuntimeLifecycleDto::Disabled);
+    assert_ne!(imported.plugin.plugin_id, source_id);
+    assert_eq!(imported.plugin.lifecycle, PluginRuntimeLifecycleDto::Disabled);
     assert_eq!(
-        imported.miniapp.releases.ready.as_ref().map(|release| {
+        imported.plugin.releases.ready.as_ref().map(|release| {
             (
                 release.artifact_id.clone(),
                 release.release_digest.clone(),
                 release.manifest_digest.clone(),
             )
         }),
-        disabled.miniapp.releases.ready.as_ref().map(|release| {
+        disabled.plugin.releases.ready.as_ref().map(|release| {
             (
                 release.artifact_id.clone(),
                 release.release_digest.clone(),
@@ -130,14 +130,14 @@ async fn whole_app_backup_roundtrips_disabled_ui_only_product_as_new_identity() 
     assert!(imported.credential_slots.is_empty());
 
     let imported_row = repository
-        .get(&owner, imported.miniapp.miniapp_id.as_ref())
+        .get(&owner, imported.plugin.plugin_id.as_ref())
         .await
         .unwrap()
         .unwrap();
     let kv = repository
         .get_kv(
             &owner,
-            imported.miniapp.miniapp_id.as_ref(),
+            imported.plugin.plugin_id.as_ref(),
             "surface",
             "theme",
         )
@@ -152,11 +152,11 @@ async fn whole_app_backup_roundtrips_disabled_ui_only_product_as_new_identity() 
 async fn whole_app_backup_import_recomputes_catalog_digest_for_new_identity() {
     let database = init_database_memory().await.unwrap();
     let owner = installation_owner_id(database.pool()).await.unwrap();
-    let repository: Arc<dyn IMiniAppM1Repository> =
-        Arc::new(SqliteMiniAppM1Repository::new(database.pool().clone()));
+    let repository: Arc<dyn IPluginRuntimeRepository> =
+        Arc::new(SqlitePluginRuntimeRepository::new(database.pool().clone()));
     let root = tempfile::tempdir().unwrap();
     let application =
-        PluginRuntimeM1ApplicationService::new_with_root(repository.clone(), root.path()).unwrap();
+        PluginRuntimeApplicationService::new_with_root(repository.clone(), root.path()).unwrap();
 
     let created = application
         .create(
@@ -165,7 +165,7 @@ async fn whole_app_backup_import_recomputes_catalog_digest_for_new_identity() {
                 expected_library_revision: 0,
                 display_name: "Catalog source".into(),
                 description: None,
-                kind: PluginRuntimeKindDto::UiOnly,
+                service_source: None,
             },
         )
         .await
@@ -174,8 +174,8 @@ async fn whole_app_backup_import_recomputes_catalog_digest_for_new_identity() {
         .build(
             &owner,
             BuildPluginRuntimeRequest {
-                miniapp_id: created.miniapp.miniapp_id.clone(),
-                expected_product_revision: created.miniapp.product_revision,
+                plugin_id: created.plugin.plugin_id.clone(),
+                expected_product_revision: created.plugin.product_revision,
                 project_id: created.project_id.clone(),
                 expected_project_revision: created.project_revision,
                 expected_build_generation: created.build_generation,
@@ -191,10 +191,10 @@ async fn whole_app_backup_import_recomputes_catalog_digest_for_new_identity() {
         .publish(
             &owner,
             nomifun_api_types::PublishPluginRuntimeRequest {
-                miniapp_id: created.miniapp.miniapp_id.clone(),
-                expected_product_revision: built.miniapp.product_revision,
-                expected_pointer_revision: built.miniapp.releases.pointer_revision,
-                expected_active_release_epoch: built.miniapp.releases.active_release_epoch,
+                plugin_id: created.plugin.plugin_id.clone(),
+                expected_product_revision: built.plugin.product_revision,
+                expected_pointer_revision: built.plugin.releases.pointer_revision,
+                expected_active_release_epoch: built.plugin.releases.active_release_epoch,
                 ready_release_id: ready.release.release_id.clone(),
                 expected_ready_release_digest: ready.release.release_digest.clone(),
                 expected_active_release_digest: None,
@@ -209,10 +209,10 @@ async fn whole_app_backup_import_recomputes_catalog_digest_for_new_identity() {
         .export_backup(
             &owner,
             ExportPluginRuntimeBackupRequest {
-                miniapp_id: created.miniapp.miniapp_id.clone(),
-                expected_product_revision: published.miniapp.product_revision,
+                plugin_id: created.plugin.plugin_id.clone(),
+                expected_product_revision: published.plugin.product_revision,
                 expected_lifecycle: PluginRuntimeLifecycleDto::Disabled,
-                expected_pointer_revision: published.miniapp.releases.pointer_revision,
+                expected_pointer_revision: published.plugin.releases.pointer_revision,
                 expected_config_revision: published.config.config_revision,
                 expected_credential_bindings_revision: published
                     .credential_bindings_revision,
@@ -233,24 +233,24 @@ async fn whole_app_backup_import_recomputes_catalog_digest_for_new_identity() {
         )
         .await
         .unwrap();
-    let active = imported.miniapp.releases.active.as_ref().unwrap();
-    let artifact: MiniAppReleaseArtifactV1 =
+    let active = imported.plugin.releases.active.as_ref().unwrap();
+    let artifact: PluginReleaseArtifactV1 =
         serde_json::from_slice(&std::fs::read(destination.join("releases/active/artifact.json")).unwrap())
             .unwrap();
-    let active_ref = MiniAppReleaseRef {
+    let active_ref = PluginReleaseRef {
         release_id: active.release_id.clone().into(),
         artifact_id: active.artifact_id.clone().into(),
         release_digest: active.release_digest.clone().into(),
         manifest_digest: active.manifest_digest.clone().into(),
     };
-    let expected = nomifun_plugin_platform::runtime::miniapp_catalog_digest(
-        &imported.miniapp.miniapp_id,
+    let expected = nomifun_plugin_platform::runtime::plugin_catalog_digest(
+        &imported.plugin.plugin_id,
         &active_ref,
         &artifact.manifest.payload.contributions,
     )
     .unwrap();
     let imported_row = repository
-        .get(&owner, &imported.miniapp.miniapp_id)
+        .get(&owner, &imported.plugin.plugin_id)
         .await
         .unwrap()
         .unwrap();
@@ -261,12 +261,12 @@ async fn whole_app_backup_import_recomputes_catalog_digest_for_new_identity() {
 }
 
 fn built_id(workshop: &nomifun_api_types::PluginRuntimeWorkshopDto) -> String {
-    workshop.miniapp.miniapp_id.clone()
+    workshop.plugin.plugin_id.clone()
 }
 
 fn read_metadata_digest(root: &std::path::Path) -> String {
     let bytes = std::fs::read(root.join("metadata.json")).unwrap();
-    let metadata: nomifun_agent_contracts::MiniAppWholeAppBackupMetadataV1 =
+    let metadata: nomifun_agent_contracts::PluginProductBackupMetadataV1 =
         serde_json::from_slice(&bytes).unwrap();
     metadata.metadata_digest().unwrap().as_ref().to_owned()
 }

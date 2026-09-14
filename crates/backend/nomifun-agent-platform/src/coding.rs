@@ -16,7 +16,7 @@ use nomifun_agent_session::{
 };
 use nomifun_api_types::{
     AgentPresetEditorResponse, AgentPresetSourceDto, OfficialPresetKeyDto,
-    OfficialPresetTemplateDto, PreviewStatusDto, ResolveAgentPresetPreviewResponse,
+    OfficialPresetTemplateDto,
 };
 use nomifun_codex_runtime::{
     CheckpointDisposition, DisposeRpcOutcome, PinnedRuntimeProfile, RuntimeDisposeReport,
@@ -25,7 +25,7 @@ use nomifun_codex_runtime::{
 use thiserror::Error;
 
 use crate::{
-    ActivateCapabilityRequest, AgentPlatform, AgentPlatformError, AgentSessionCommandPort,
+    AgentPlatform, AgentPlatformError, AgentSessionCommandPort,
     AgentSessionDeletePort, AgentSessionQueryPort, AgentTurnDispatch, OpenAgentSessionRequest,
     InvokeCapabilityCommand, StartAgentTurnRequest, TriadHarness,
 };
@@ -80,8 +80,7 @@ impl CodingSurface {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodingCodexContract {
-    pub initial_capabilities: Vec<CapabilityRef>,
-    pub on_demand_capabilities: Vec<CapabilityRef>,
+    pub enabled_capabilities: Vec<CapabilityRef>,
     pub required_runtime_features: BTreeSet<RuntimeFeatureId>,
     pub native_actions: BTreeSet<ActionId>,
     pub responses_semantics: BTreeSet<String>,
@@ -133,8 +132,6 @@ pub enum CodingCodexError {
     Template(String),
     #[error("coding ordinary Revision mismatch: {0}")]
     Revision(String),
-    #[error("coding Preview mismatch: {0}")]
-    Preview(String),
     #[error("coding RuntimeProfile mismatch: {0}")]
     RuntimeProfile(String),
     #[error("coding workspace preservation mismatch: {0}")]
@@ -186,16 +183,8 @@ impl CodingCodexContract {
                     .to_owned(),
             ));
         }
-        let initial_ids = capability_ids(&seed.initial_capabilities);
-        let on_demand_ids = capability_ids(&seed.on_demand_capabilities);
-        if !initial_ids.is_disjoint(&on_demand_ids) {
-            return Err(CodingCodexError::FrozenContract(
-                "coding.codex initial and on-demand sets overlap".to_owned(),
-            ));
-        }
         Ok(Self {
-            initial_capabilities: seed.initial_capabilities.clone(),
-            on_demand_capabilities: seed.on_demand_capabilities.clone(),
+            enabled_capabilities: seed.enabled_capabilities.clone(),
             required_runtime_features: seed.required_runtime_features.clone(),
             native_actions: runtime.native_actions,
             responses_semantics: runtime.responses_semantics,
@@ -207,20 +196,11 @@ impl CodingCodexContract {
         })
     }
 
-    pub fn initial_ids(&self) -> BTreeSet<CapabilityId> {
-        capability_ids(&self.initial_capabilities)
+    pub fn enabled_ids(&self) -> BTreeSet<CapabilityId> {
+        capability_ids(&self.enabled_capabilities)
     }
 
-    pub fn on_demand_ids(&self) -> BTreeSet<CapabilityId> {
-        capability_ids(&self.on_demand_capabilities)
-    }
-
-    pub fn ceiling_ids(&self) -> BTreeSet<CapabilityId> {
-        self.initial_ids()
-            .union(&self.on_demand_ids())
-            .cloned()
-            .collect()
-    }
+    pub fn ceiling_ids(&self) -> BTreeSet<CapabilityId> { self.enabled_ids() }
 
     pub fn validate_template(
         &self,
@@ -236,13 +216,7 @@ impl CodingCodexContract {
         }
         let initial = template
             .seed
-            .initial_capabilities
-            .iter()
-            .map(|reference| CapabilityId::from(reference.id.clone()))
-            .collect::<BTreeSet<_>>();
-        let on_demand = template
-            .seed
-            .on_demand_capabilities
+            .enabled_capabilities
             .iter()
             .map(|reference| CapabilityId::from(reference.id.clone()))
             .collect::<BTreeSet<_>>();
@@ -252,8 +226,8 @@ impl CodingCodexContract {
             .iter()
             .map(|feature| RuntimeFeatureId::from(feature.clone()))
             .collect::<BTreeSet<_>>();
-        if initial != self.initial_ids()
-            || on_demand != self.on_demand_ids()
+        if initial != self.enabled_ids()
+
             || runtime_features != self.required_runtime_features
             || template.role_coverage.required_capability_ids
                 != self
@@ -292,93 +266,17 @@ impl CodingCodexContract {
         }
         let document = &revision.document;
         let initial = document
-            .initial_capabilities
+            .enabled_capabilities
             .iter()
             .map(|selection| CapabilityId::from(selection.capability.id.clone()))
             .collect::<BTreeSet<_>>();
-        let on_demand = document
-            .on_demand_capabilities
-            .iter()
-            .map(|selection| CapabilityId::from(selection.capability.id.clone()))
-            .collect::<BTreeSet<_>>();
-        if initial != self.initial_ids()
-            || on_demand != self.on_demand_ids()
+        if initial != self.enabled_ids()
+
             || document.model_route_refs.len() != 1
         {
             return Err(CodingCodexError::Revision(
                 "ordinary Revision changed the frozen capability partition or model route"
                     .to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn validate_preview(
-        &self,
-        preview: &ResolveAgentPresetPreviewResponse,
-    ) -> Result<(), CodingCodexError> {
-        if preview.status != PreviewStatusDto::Ready
-            || !preview.can_save_revision
-            || !preview.can_create_session
-            || !preview.diagnostics.is_empty()
-            || preview.resolved_snapshot_ref.is_none()
-        {
-            return Err(CodingCodexError::Preview(
-                "coding.codex Preview is not ready and executable".to_owned(),
-            ));
-        }
-        let summary = &preview.summary;
-        if summary.initial_count != self.initial_capabilities.len() as u32
-            || summary.on_demand_count != self.on_demand_capabilities.len() as u32
-            || summary.active_at_start_count != self.initial_capabilities.len() as u32
-            || summary.on_demand_index_count != self.on_demand_capabilities.len() as u32
-            || summary.model_tool_count == 0
-            || summary.required_resource_kind_count == 0
-            || summary.provider_initialization_count != 1
-        {
-            return Err(CodingCodexError::Preview(
-                "Preview summary differs from the frozen Coding shape".to_owned(),
-            ));
-        }
-        let inspector = &preview.inspector;
-        let initial = inspector
-            .initial_capabilities
-            .iter()
-            .map(|capability| CapabilityId::from(capability.capability.id.clone()))
-            .collect::<BTreeSet<_>>();
-        let on_demand = inspector
-            .on_demand_capabilities
-            .iter()
-            .map(|capability| CapabilityId::from(capability.capability.id.clone()))
-            .collect::<BTreeSet<_>>();
-        let index = inspector
-            .compact_on_demand_index
-            .iter()
-            .cloned()
-            .map(CapabilityId::from)
-            .collect::<BTreeSet<_>>();
-        let runtime_features = inspector
-            .required_runtime_features
-            .iter()
-            .cloned()
-            .map(RuntimeFeatureId::from)
-            .collect::<BTreeSet<_>>();
-        if inspector.runtime_profile.as_deref() != Some("coding_native")
-            || initial != self.initial_ids()
-            || on_demand != self.on_demand_ids()
-            || index != self.on_demand_ids()
-            || runtime_features != self.required_runtime_features
-            || inspector.tool_schema_refs.is_empty()
-            || !inspector.service_key_diagnostics.is_empty()
-        {
-            return Err(CodingCodexError::Preview(
-                "Preview inspector lost Coding capabilities, features, tools, or clean wiring"
-                    .to_owned(),
-            ));
-        }
-        if !inspector.required_resource_kinds.contains("workspace") {
-            return Err(CodingCodexError::Preview(
-                "Preview inspector lost the Coding workspace requirement".to_owned(),
             ));
         }
         Ok(())
@@ -394,27 +292,15 @@ impl CodingCodexContract {
             ));
         }
         let actual_initial = snapshot
-            .initial_capabilities
+            .enabled_capabilities
             .iter()
             .map(|capability| capability.capability.id.clone())
             .collect::<BTreeSet<_>>();
-        let actual_on_demand = snapshot
-            .on_demand_capabilities
-            .iter()
-            .map(|capability| capability.capability.id.clone())
-            .collect::<BTreeSet<_>>();
-        if actual_initial != self.initial_ids() {
+        if actual_initial != self.enabled_ids() {
             return Err(CodingCodexError::Snapshot(format!(
                 "initial capability partition differs: expected {:?}, actual {:?}",
-                self.initial_ids(),
+                self.enabled_ids(),
                 actual_initial
-            )));
-        }
-        if actual_on_demand != self.on_demand_ids() {
-            return Err(CodingCodexError::Snapshot(format!(
-                "on-demand capability partition differs: expected {:?}, actual {:?}",
-                self.on_demand_ids(),
-                actual_on_demand
             )));
         }
         if snapshot.capability_allowlist != self.ceiling_ids() {
@@ -441,32 +327,6 @@ impl CodingCodexContract {
                 "target contribution manifest digest differs".to_owned(),
             ));
         }
-        let plan_ids = snapshot
-            .on_demand_activation_plans
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let index_ids = snapshot
-            .compact_on_demand_index
-            .iter()
-            .map(|entry| entry.capability_id.clone())
-            .collect::<BTreeSet<_>>();
-        if plan_ids != self.on_demand_ids() || index_ids != self.on_demand_ids() {
-            return Err(CodingCodexError::Snapshot(
-                "activation plans and compact index must exactly match on-demand roots"
-                    .to_owned(),
-            ));
-        }
-        for (root, plan) in &snapshot.on_demand_activation_plans {
-            if &plan.root_capability_id != root
-                || !plan.capability_bundle.contains(root)
-            {
-                return Err(CodingCodexError::Snapshot(format!(
-                    "activation plan for {} is not rooted in its selected capability",
-                    root.as_ref()
-                )));
-            }
-        }
         validate_resource_defaults(snapshot, self)?;
         Ok(())
     }
@@ -477,8 +337,8 @@ impl CodingCodexContract {
     ) -> Result<(), CodingCodexError> {
         if profile.kind != RuntimeProfileKind::CodingNative
             || profile.full_auto() != self.full_auto
-            || profile.initial_capabilities != self.initial_ids()
-            || profile.on_demand_capabilities != self.on_demand_ids()
+            || profile.enabled_capabilities != self.enabled_ids()
+
             || profile.enabled_runtime_features != self.required_runtime_features
         {
             return Err(CodingCodexError::RuntimeProfile(
@@ -618,12 +478,6 @@ impl CodingCodexContract {
             }
         }
         let active_generation = expected_active_generation(&observation.events)?;
-        if !self.on_demand_capabilities.is_empty() && active_generation == 0 {
-            return Err(CodingCodexError::Evidence(
-                "coding.codex on-demand partition was never activated at a turn boundary"
-                    .to_owned(),
-            ));
-        }
         if observation.head.status != "ready"
             || observation.head.active_turn_id.is_some()
             || observation.head.active_set_generation != active_generation
@@ -913,26 +767,6 @@ where
             .await
     }
 
-    pub async fn activate_at_boundary(
-        &self,
-        agent_session_id: AgentSessionId,
-        capability_id: CapabilityId,
-        expected_generation: u64,
-        completed_turn_operation_id: OperationId,
-        idempotency_key: impl Into<IdempotencyKey>,
-    ) -> Result<nomifun_agent_kernel::ActivationOutcome, AgentPlatformError> {
-        self.platform
-            .activate_capability(ActivateCapabilityRequest {
-                agent_session_id,
-                principal: coding_principal(&self.owner),
-                capability_id,
-                expected_generation,
-                completed_turn_operation_id,
-                idempotency_key: idempotency_key.into(),
-            })
-            .await
-    }
-
     pub async fn invoke_capability(
         &self,
         agent_session_id: &AgentSessionId,
@@ -1068,7 +902,7 @@ fn validate_resource_defaults(
             "coding.codex must declare a target-scoped workspace requirement".to_owned(),
         ));
     }
-    if contract.initial_capabilities.is_empty() {
+    if contract.enabled_capabilities.is_empty() {
         return Err(CodingCodexError::FrozenContract(
             "coding.codex initial partition must not be empty".to_owned(),
         ));

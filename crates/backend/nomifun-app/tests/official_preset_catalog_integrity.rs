@@ -29,10 +29,8 @@ use nomifun_api_types::{
     AgentPresetEditorResponse, AgentPresetLibraryResponse, ApiResponse,
     ApplyPluginCandidateRequest, ApplyPluginTargetDto, CapabilityCatalogItemDto,
     AgentChatModelSelectionDto, CatalogMaterializationStateDto,
-    CreateAgentPresetFromTemplateRequest,
-    ExactCatalogRefDto, ImportPluginRequest, PluginImportKindDto, PreviewStatusDto,
-    ResolveAgentPresetPreviewRequest, ResolveAgentPresetPreviewResponse,
-    SkillCatalogItemDto,
+    CreateAgentPresetFromTemplateRequest, ExactCatalogRefDto, ImportPluginRequest,
+    PluginImportKindDto, SkillCatalogItemDto,
 };
 use nomifun_app::compatibility::{
     AppServices, build_module_states, create_router_with_states,
@@ -257,9 +255,8 @@ async fn assert_official_preset_catalog_integrity(
         let template_key = format!("{:?}", template.template_key);
         let direct_capabilities = template
             .seed
-            .initial_capabilities
-            .iter()
-            .chain(&template.seed.on_demand_capabilities);
+            .enabled_capabilities
+            .iter();
         for reference in direct_capabilities {
             require_available_exact_capability(
                 phase,
@@ -342,34 +339,7 @@ async fn assert_official_preset_catalog_integrity(
             .revision
             .as_ref()
             .unwrap_or_else(|| panic!("{phase}: {template_key} creation did not persist revision 1"));
-        let preview: ResolveAgentPresetPreviewResponse = post_data(
-            router,
-            &format!(
-                "/api/agent-presets/{}/resolve-preview",
-                editor.preset.preset_id
-            ),
-            &ResolveAgentPresetPreviewRequest {
-                expected_current_revision: Some(revision.reference.clone()),
-                draft: editor.draft,
-                scene: "agent_settings".to_owned(),
-                surface: "desktop".to_owned(),
-                audience: "owner".to_owned(),
-            },
-        )
-        .await;
-        assert_eq!(
-            preview.status,
-            PreviewStatusDto::Ready,
-            "{phase}: {template_key} must preview as ready; diagnostics={:#?}",
-            preview.diagnostics
-        );
-        assert!(
-            preview.can_save_revision && preview.can_create_session,
-            "{phase}: {template_key} must allow save/session creation; can_save_revision={}, can_create_session={}, diagnostics={:#?}",
-            preview.can_save_revision,
-            preview.can_create_session,
-            preview.diagnostics
-        );
+        assert_eq!(revision.reference.revision, 1);
     }
 }
 

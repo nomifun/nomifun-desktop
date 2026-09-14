@@ -17,7 +17,7 @@ export const USER_AGENT_RESOURCE_KINDS = [
   'mcp_server',
   'canvas',
   'generation_provider',
-  'miniapp',
+  'plugin',
 ] as const;
 
 export type UserAgentResourceKind = (typeof USER_AGENT_RESOURCE_KINDS)[number];
@@ -72,6 +72,5 @@ export const resolveAgentResourceSelections = (
 };
 
 export const selectedCapabilityIds = (
-  initial: readonly { capability: { id: string } }[],
-  onDemand: readonly { capability: { id: string } }[]
-): Set<string> => new Set([...initial, ...onDemand].map((entry) => entry.capability.id));
+  enabled: readonly { capability: { id: string } }[]
+): Set<string> => new Set(enabled.map((entry) => entry.capability.id));

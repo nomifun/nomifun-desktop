@@ -1,26 +1,26 @@
 use std::sync::Arc;
 
-use nomifun_agent_contracts::MiniAppShareBundleV1;
+use nomifun_agent_contracts::PluginShareBundleV1;
 use nomifun_api_types::{
     BuildPluginRuntimeRequest, CreatePluginRuntimeProjectRequest, ImportPluginRuntimeArtifactRequest,
-    ImportPluginRuntimeShareRequest, PluginRuntimeKindDto, PluginRuntimeProjectSourceStateDto,
+    ImportPluginRuntimeShareRequest, PluginRuntimeProjectSourceStateDto,
     PluginRuntimeShareContentDto, SharePluginRuntimeRequest,
 };
 use nomifun_db::{
-    IMiniAppM1Repository, SqliteMiniAppM1Repository, init_database_memory,
+    IPluginRuntimeRepository, SqlitePluginRuntimeRepository, init_database_memory,
     installation_owner_id,
 };
-use nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService;
+use nomifun_plugin_platform::runtime::PluginRuntimeApplicationService;
 
 #[tokio::test]
 async fn share_and_prebuilt_import_create_distinct_disabled_ready_products() {
     let database = init_database_memory().await.unwrap();
     let owner = installation_owner_id(database.pool()).await.unwrap();
-    let repository: Arc<dyn IMiniAppM1Repository> =
-        Arc::new(SqliteMiniAppM1Repository::new(database.pool().clone()));
+    let repository: Arc<dyn IPluginRuntimeRepository> =
+        Arc::new(SqlitePluginRuntimeRepository::new(database.pool().clone()));
     let root = tempfile::tempdir().unwrap();
     let application =
-        PluginRuntimeM1ApplicationService::new_with_root(repository, root.path()).unwrap();
+        PluginRuntimeApplicationService::new_with_root(repository, root.path()).unwrap();
     let created = application
         .create(
             &owner,
@@ -28,7 +28,7 @@ async fn share_and_prebuilt_import_create_distinct_disabled_ready_products() {
                 expected_library_revision: 0,
                 display_name: "Share source".into(),
                 description: None,
-                kind: PluginRuntimeKindDto::UiOnly,
+                service_source: None,
             },
         )
         .await
@@ -37,8 +37,8 @@ async fn share_and_prebuilt_import_create_distinct_disabled_ready_products() {
         .build(
             &owner,
             BuildPluginRuntimeRequest {
-                miniapp_id: created.miniapp.miniapp_id.clone(),
-                expected_product_revision: created.miniapp.product_revision,
+                plugin_id: created.plugin.plugin_id.clone(),
+                expected_product_revision: created.plugin.product_revision,
                 project_id: created.project_id.clone(),
                 expected_project_revision: created.project_revision,
                 expected_build_generation: created.build_generation,
@@ -50,14 +50,14 @@ async fn share_and_prebuilt_import_create_distinct_disabled_ready_products() {
         .await
         .unwrap();
     let ready = built.ready.as_ref().unwrap();
-    let destination = root.path().join("shared-miniapp");
+    let destination = root.path().join("shared-plugin");
     let exported = application
         .export_share(
             &owner,
             SharePluginRuntimeRequest {
-                miniapp_id: built.miniapp.miniapp_id.clone(),
-                expected_product_revision: built.miniapp.product_revision,
-                expected_pointer_revision: built.miniapp.releases.pointer_revision,
+                plugin_id: built.plugin.plugin_id.clone(),
+                expected_product_revision: built.plugin.product_revision,
+                expected_pointer_revision: built.plugin.releases.pointer_revision,
                 content: PluginRuntimeShareContentDto::ReadyRelease,
                 release_id: ready.release.release_id.clone(),
                 expected_release_digest: ready.release.release_digest.clone(),
@@ -68,7 +68,7 @@ async fn share_and_prebuilt_import_create_distinct_disabled_ready_products() {
         .await
         .unwrap();
     assert_eq!(exported.state, nomifun_api_types::DurableOperationStateDto::Succeeded);
-    let bundle: MiniAppShareBundleV1 =
+    let bundle: PluginShareBundleV1 =
         serde_json::from_slice(&std::fs::read(destination.join("bundle.json")).unwrap()).unwrap();
 
     let imported = application
@@ -84,11 +84,11 @@ async fn share_and_prebuilt_import_create_distinct_disabled_ready_products() {
         )
         .await
         .unwrap();
-    assert_ne!(imported.miniapp.miniapp_id, built.miniapp.miniapp_id);
-    assert_eq!(imported.miniapp.lifecycle, nomifun_api_types::PluginRuntimeLifecycleDto::Disabled);
+    assert_ne!(imported.plugin.plugin_id, built.plugin.plugin_id);
+    assert_eq!(imported.plugin.lifecycle, nomifun_api_types::PluginRuntimeLifecycleDto::Disabled);
     assert_eq!(imported.source_state, PluginRuntimeProjectSourceStateDto::Editable);
     assert!(imported.ready.is_some());
-    assert!(imported.miniapp.releases.active.is_none());
+    assert!(imported.plugin.releases.active.is_none());
 
     let prebuilt = application
         .import_prebuilt(
@@ -102,8 +102,8 @@ async fn share_and_prebuilt_import_create_distinct_disabled_ready_products() {
         )
         .await
         .unwrap();
-    assert_ne!(prebuilt.miniapp.miniapp_id, imported.miniapp.miniapp_id);
+    assert_ne!(prebuilt.plugin.plugin_id, imported.plugin.plugin_id);
     assert_eq!(prebuilt.source_state, PluginRuntimeProjectSourceStateDto::RuntimeOnly);
     assert!(prebuilt.ready.is_some());
-    assert!(prebuilt.miniapp.releases.active.is_none());
+    assert!(prebuilt.plugin.releases.active.is_none());
 }

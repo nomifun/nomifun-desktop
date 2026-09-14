@@ -49,7 +49,7 @@
       "build",
       "import",
       "export",
-      "miniapp_permanent_delete"
+      "plugin_product_permanent_delete"
     ],
     "durable_operation_states": [
       "running",
@@ -67,5 +67,5 @@
       "linux_headless_x64"
     ]
   },
-  "payload_digest": "96a1f080717010b8feeea91f38a68b1949f5aa3ef6860f82673744ceb17da36a"
+  "payload_digest": "7a610569dbd2b89a0f6725d7fe1ac0e97962d205ec2c8d1b6d497e7aea7e8424"
 }

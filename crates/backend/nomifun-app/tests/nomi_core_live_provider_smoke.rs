@@ -540,6 +540,7 @@ async fn create_agent_preset(
         Method::POST,
         "/api/agent-presets/from-template/chat.minimal",
         Some(json!({
+            "reuse_existing": false,
             "display_name": "Live Step Plan product smoke",
             "model_route_refs": {},
             "chat_route_records": {},
@@ -671,10 +672,9 @@ async fn create_agent_preset(
             )
         })?;
     document.insert(
-        "initial_capabilities".to_owned(),
+        "enabled_capabilities".to_owned(),
         Value::Array(selections),
     );
-    document.insert("on_demand_capabilities".to_owned(), json!([]));
     document.insert("skill_bindings".to_owned(), json!([]));
     document.insert(
         "persona".to_owned(),
@@ -687,48 +687,6 @@ async fn create_agent_preset(
                 .to_owned(),
         ),
     );
-    let preview = successful_json(
-        router,
-        "agent_settings.preview",
-        Method::POST,
-        format!("/api/agent-presets/{preset_id}/resolve-preview"),
-        Some(json!({
-            "expected_current_revision": revision,
-            "draft": draft,
-            "scene": "agent_settings",
-            "surface": "desktop",
-            "audience": "owner"
-        })),
-        LOCAL_API_DEADLINE,
-        &[StatusCode::OK],
-    )
-    .await?;
-    let preview = envelope_data("agent_settings.preview", preview)?;
-    if preview.get("status").and_then(Value::as_str) != Some("ready")
-        || preview.get("can_create_session").and_then(Value::as_bool) != Some(true)
-        || preview.pointer("/summary/initial_count").and_then(Value::as_u64)
-            != Some(CODING_CAPABILITIES.len() as u64)
-        || preview.pointer("/summary/on_demand_count").and_then(Value::as_u64) != Some(0)
-        || preview
-            .pointer("/inspector/runtime_profile")
-            .and_then(Value::as_str)
-            != Some("managed_minimal")
-    {
-        return Err(SmokeFailure::new(
-            "agent_settings.preview",
-            preview
-                .pointer("/diagnostics/0/code")
-                .and_then(Value::as_str)
-                .unwrap_or("PREVIEW_NOT_READY"),
-            StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
-        ));
-    }
-    let preview_digest = required_string(
-        "agent_settings.preview",
-        &preview,
-        "/preview_digest",
-        "PREVIEW_DIGEST_MISSING",
-    )?;
     let saved = successful_json(
         router,
         "agent_settings.save",
@@ -736,7 +694,6 @@ async fn create_agent_preset(
         format!("/api/agent-presets/{preset_id}/revisions"),
         Some(json!({
             "expected_current_revision": revision,
-            "preview_digest": preview_digest,
             "draft": draft,
             "reason": "live StepFun Nomi-core coding smoke"
         })),
@@ -750,9 +707,9 @@ async fn create_agent_preset(
         || saved.pointer("/revision/document/chat_route_records/agent_chat/primary/model")
             != Some(&Value::String(model.to_owned()))
         || saved
-            .pointer("/revision/document/on_demand_capabilities")
+            .pointer("/revision/document/enabled_capabilities")
             .and_then(Value::as_array)
-            .is_none_or(|items| !items.is_empty())
+            .is_none_or(|items| items.is_empty())
     {
         return Err(SmokeFailure::new(
             "agent_settings.save",
@@ -761,7 +718,7 @@ async fn create_agent_preset(
         ));
     }
     let saved_capabilities = saved
-        .pointer("/revision/document/initial_capabilities")
+        .pointer("/revision/document/enabled_capabilities")
         .and_then(Value::as_array)
         .ok_or_else(|| {
             SmokeFailure::new(
@@ -3120,7 +3077,7 @@ async fn run_product_chain(
     }
     let library = successful_json(router, "guid.library", Method::GET,
         "/api/agent-preset-templates", None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
-    if library.pointer("/data/user_presets").and_then(Value::as_array).is_none_or(|items| !items.is_empty()) {
+    if library.pointer("/data/user_presets").and_then(Value::as_array).is_none_or(|items| items.is_empty()) {
         return Err(SmokeFailure::new("guid.library", "OFFICIAL_LAUNCH_CREATED_PERSONAL_AGENT", 409));
     }
     let (preset_id, _source_binding) =

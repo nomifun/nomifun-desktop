@@ -4852,7 +4852,7 @@ impl IConversationRepository for SqliteConversationRepository {
         .bind(conversation_id)
         .execute(&mut *tx)
         .await?;
-        // Retired MiniApp provenance is inert KeepHistory data. Conversation
+        // Retired Plugin provenance is inert KeepHistory data. Conversation
         // deletion deliberately performs no read or write against that store.
         let requirement_delete_detail = format!(
             "Conversation {conversation_id} was deleted while this requirement could be executing; the outcome is ambiguous and automatic execution was not restarted."

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 /**
- * Validate Plugin N1 / MiniApp M1 platform records and build one cohort lock.
+ * Validate Plugin N1 / Plugin M1 platform records and build one cohort lock.
  *
  * This tool never executes a platform check and cannot turn a failed or
  * missing required cell into PASS. It only validates already-produced native

@@ -5,7 +5,6 @@
  */
 
 import { ipcBridge } from '@/common';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { getCleanFileNames, FileService } from '@/renderer/services/FileService';
 import { iconColors } from '@/renderer/styles/colors';
 import { isDesktopShell } from '@/renderer/utils/platform';
@@ -45,8 +44,6 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
   autoWorkMode = false,
 }) => {
   const { t } = useTranslation();
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
   const [isPlusDropdownOpen, setIsPlusDropdownOpen] = useState(false);
 
   // Browser file picker ref (WebUI only)
@@ -136,6 +133,7 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
                 loading={uploading}
                 disabled={uploading}
                 data-testid='file-upload-btn'
+                data-composer-action='attach'
               />
               {files.length > 0 && (
                 <Tooltip
@@ -158,10 +156,9 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
           )}
         </div>
       </div>
-      <div className={`${styles.actionSubmit} ${!isMobile ? styles.actionSubmitResponsive : ''}`}>
+      <div className={`${styles.actionSubmit} ${styles.actionSubmitResponsive}`}>
         <div
-          className={`${styles.actionConfigGroup} ${!isMobile ? styles.actionConfigGroupResponsive : ''}`}
-          data-mobile={isMobile ? 'true' : undefined}
+          className={`${styles.actionConfigGroup} ${styles.actionConfigGroupResponsive}`}
         >
           {modelSelectorNode}
         </div>
@@ -182,13 +179,14 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
             }}
             icon={
               autoWorkMode ? (
-                <Robot theme='filled' size='14' fill='white' strokeWidth={5} />
+                <Robot theme='filled' size='14' fill='currentColor' strokeWidth={5} />
               ) : (
-                <ArrowUp theme='filled' size='14' fill='white' strokeWidth={5} />
+                <ArrowUp theme='filled' size='14' fill='currentColor' strokeWidth={5} />
               )
             }
             onClick={onSend}
             data-testid='guid-send-btn'
+            data-composer-action='send'
           />
         </Tooltip>
       </div>

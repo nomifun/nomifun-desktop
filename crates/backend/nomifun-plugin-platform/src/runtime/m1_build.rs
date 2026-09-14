@@ -3,28 +3,28 @@ use std::collections::{BTreeMap, BTreeSet};
 use nomifun_agent_contracts::{
     canonical_ui_tree_digest, digest_bytes, digest_payload, ArtifactId,
     CanonicalDigestError, CanonicalSchemaRef, CredentialSlotDeclaration, DigestHex,
-    JavaScriptBuildProfile, LocalizedMetadata, MiniAppM1ContractError,
-    MiniAppReleaseArtifactV1, MiniAppReleaseFile, MiniAppReleaseV1Manifest,
-    MiniAppResourceContract, MiniAppServiceLifecycle,
-    MiniAppServiceReleaseDescriptor, MiniAppUiReleaseDescriptor, PackageContributions,
-    PackageRef, StrictJsonValue, VersionString, MINIAPP_M1_SCHEMA_VERSION,
-    MINIAPP_RELEASE_PROFILE_VERSION, MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
-    MINIAPP_SERVICE_SDK_CONTRACT_VERSION,
+    JavaScriptBuildProfile, LocalizedMetadata, PluginRuntimeContractError,
+    PluginReleaseArtifactV1, PluginReleaseFile, PluginReleaseV1Manifest,
+    PluginResourceContract, PluginServiceLifecycle,
+    PluginServiceReleaseDescriptor, PluginUiReleaseDescriptor, PackageContributions,
+    PackageRef, StrictJsonValue, VersionString, PLUGIN_RUNTIME_SCHEMA_VERSION,
+    PLUGIN_RELEASE_PROFILE_VERSION, PLUGIN_SERVICE_HOST_PROTOCOL_VERSION,
+    PLUGIN_SERVICE_SDK_CONTRACT_VERSION,
 };
 use serde_json::Value;
 use thiserror::Error;
 
-pub const MINIAPP_SURFACE_BRIDGE_BOOTSTRAP_MARKER: &str =
-    "nomifun-miniapp-bridge-bootstrap-v1";
-pub const MINIAPP_SERVICE_ENTRYPOINT: &str = "service/main.mjs";
+pub const PLUGIN_SURFACE_BRIDGE_BOOTSTRAP_MARKER: &str =
+    "nomifun-plugin-bridge-bootstrap-v1";
+pub const PLUGIN_SERVICE_ENTRYPOINT: &str = "service/main.mjs";
 
-const MINIAPP_SURFACE_BRIDGE_BOOTSTRAP: &str =
-    r#"<script data-nomifun-miniapp-bridge="nomifun-miniapp-bridge-bootstrap-v1">
+const PLUGIN_SURFACE_BRIDGE_BOOTSTRAP: &str =
+    r#"<script data-nomifun-plugin-bridge="nomifun-plugin-bridge-bootstrap-v1">
 (() => {
   const VERSION = '1.0.0';
-  const CHALLENGE = 'nomifun-miniapp-bridge-challenge-v1';
-  const HANDSHAKE = 'nomifun-miniapp-bridge-handshake-v1';
-  const CONNECT = 'nomifun-miniapp-bridge-connect-v1';
+  const CHALLENGE = 'nomifun-plugin-bridge-challenge-v1';
+  const HANDSHAKE = 'nomifun-plugin-bridge-handshake-v1';
+  const CONNECT = 'nomifun-plugin-bridge-connect-v1';
   let pendingNonce = null;
   window.addEventListener('message', (event) => {
     if (event.source !== window.parent) return;
@@ -50,8 +50,8 @@ const MINIAPP_SURFACE_BRIDGE_BOOTSTRAP: &str =
     ) return;
     const port = event.ports[0];
     pendingNonce = null;
-    if (!Object.prototype.hasOwnProperty.call(window, '__nomifunMiniAppBridge')) {
-      Object.defineProperty(window, '__nomifunMiniAppBridge', {
+    if (!Object.prototype.hasOwnProperty.call(window, '__nomifunPluginBridge')) {
+      Object.defineProperty(window, '__nomifunPluginBridge', {
         value: port,
         configurable: false,
         enumerable: false,
@@ -59,7 +59,7 @@ const MINIAPP_SURFACE_BRIDGE_BOOTSTRAP: &str =
       });
     }
     port.start();
-    window.dispatchEvent(new Event('nomifun-miniapp-bridge-ready'));
+    window.dispatchEvent(new Event('nomifun-plugin-bridge-ready'));
   });
 })();
 </script>
@@ -86,7 +86,7 @@ impl PluginRuntimeStaticBundleFile {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginRuntimeStaticServiceInput {
     pub main_mjs: Vec<u8>,
-    pub lifecycle: MiniAppServiceLifecycle,
+    pub lifecycle: PluginServiceLifecycle,
     pub uses_files: bool,
     pub uses_private_database: bool,
     pub service_contract_digest: DigestHex,
@@ -95,7 +95,7 @@ pub struct PluginRuntimeStaticServiceInput {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginRuntimeStaticServiceMaterialization {
-    pub descriptor: MiniAppServiceReleaseDescriptor,
+    pub descriptor: PluginServiceReleaseDescriptor,
     pub file: PluginRuntimeStaticBundleFile,
 }
 
@@ -111,12 +111,12 @@ pub struct PluginRuntimeStaticBundleInput {
     pub dependency_graph_digest: DigestHex,
     pub config_schema: StrictJsonValue,
     pub credential_slots: Vec<CredentialSlotDeclaration>,
-    pub resource_contract: MiniAppResourceContract,
+    pub resource_contract: PluginResourceContract,
     pub schemas: BTreeMap<CanonicalSchemaRef, StrictJsonValue>,
     pub bridge_contract_digest: DigestHex,
     pub contribution_package: PackageRef,
     pub contributions: PackageContributions,
-    pub migrations: Vec<nomifun_agent_contracts::MiniAppMigration>,
+    pub migrations: Vec<nomifun_agent_contracts::PluginMigration>,
 }
 
 #[derive(Debug, Error)]
@@ -144,7 +144,7 @@ pub enum PluginRuntimeStaticBundleBuildError {
     #[error(transparent)]
     CanonicalDigest(#[from] CanonicalDigestError),
     #[error(transparent)]
-    Contract(#[from] MiniAppM1ContractError),
+    Contract(#[from] PluginRuntimeContractError),
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -158,18 +158,18 @@ impl PluginRuntimeStaticBundleBuilder {
     pub fn build(
         &self,
         input: PluginRuntimeStaticBundleInput,
-    ) -> Result<MiniAppReleaseArtifactV1, PluginRuntimeStaticBundleBuildError> {
-        build_miniapp_static_bundle(input)
+    ) -> Result<PluginReleaseArtifactV1, PluginRuntimeStaticBundleBuildError> {
+        build_plugin_static_bundle(input)
     }
 
     pub fn build_ui_only(
         &self,
         input: PluginRuntimeStaticBundleInput,
-    ) -> Result<MiniAppReleaseArtifactV1, PluginRuntimeStaticBundleBuildError> {
+    ) -> Result<PluginReleaseArtifactV1, PluginRuntimeStaticBundleBuildError> {
         if input.service.is_some() {
             return Err(PluginRuntimeStaticBundleBuildError::UiOnlyServiceSource);
         }
-        build_miniapp_static_bundle(input)
+        build_plugin_static_bundle(input)
     }
 
     pub const fn ui_only_requires_node() -> bool {
@@ -177,13 +177,13 @@ impl PluginRuntimeStaticBundleBuilder {
     }
 
     pub const fn build_profile() -> JavaScriptBuildProfile {
-        JavaScriptBuildProfile::MiniAppReleaseV1
+        JavaScriptBuildProfile::PluginReleaseV1
     }
 }
 
-pub fn build_miniapp_static_bundle(
+pub fn build_plugin_static_bundle(
     input: PluginRuntimeStaticBundleInput,
-) -> Result<MiniAppReleaseArtifactV1, PluginRuntimeStaticBundleBuildError> {
+) -> Result<PluginReleaseArtifactV1, PluginRuntimeStaticBundleBuildError> {
     validate_no_custom_scripts(input.package_json.as_deref())?;
 
     let PluginRuntimeStaticBundleInput {
@@ -252,7 +252,7 @@ pub fn build_miniapp_static_bundle(
         .iter()
         .find(|file| file.normalized_relative_path == "ui/index.html")
         .map(|file| -> Result<_, PluginRuntimeStaticBundleBuildError> {
-            Ok(MiniAppUiReleaseDescriptor {
+            Ok(PluginUiReleaseDescriptor {
                 entrypoint: "ui/index.html".to_owned(),
                 entrypoint_digest: file.digest.clone(),
                 ui_tree_digest: canonical_ui_tree_digest(&files)?,
@@ -262,11 +262,11 @@ pub fn build_miniapp_static_bundle(
     let credential_slots_digest = digest_payload(&credential_slots)?;
     let resource_contract_digest = digest_payload(&resource_contract)?;
 
-    let manifest = MiniAppReleaseV1Manifest {
-        schema_version: VersionString::from(MINIAPP_M1_SCHEMA_VERSION),
-        build_profile: JavaScriptBuildProfile::MiniAppReleaseV1,
+    let manifest = PluginReleaseV1Manifest {
+        schema_version: VersionString::from(PLUGIN_RUNTIME_SCHEMA_VERSION),
+        build_profile: JavaScriptBuildProfile::PluginReleaseV1,
         build_profile_version: VersionString::from(
-            MINIAPP_RELEASE_PROFILE_VERSION,
+            PLUGIN_RELEASE_PROFILE_VERSION,
         ),
         display,
         ui,
@@ -286,7 +286,7 @@ pub fn build_miniapp_static_bundle(
         migrations,
     };
 
-    Ok(MiniAppReleaseArtifactV1::new(
+    Ok(PluginReleaseArtifactV1::new(
         artifact_id,
         manifest,
         files,
@@ -305,12 +305,12 @@ pub fn materialize_surface_entrypoint(
     }
     let source = std::str::from_utf8(source)
         .map_err(|_| PluginRuntimeStaticBundleBuildError::InvalidUiEntrypointEncoding)?;
-    if source.contains(MINIAPP_SURFACE_BRIDGE_BOOTSTRAP_MARKER) {
+    if source.contains(PLUGIN_SURFACE_BRIDGE_BOOTSTRAP_MARKER) {
         return Ok(source.as_bytes().to_vec());
     }
     let mut materialized =
-        Vec::with_capacity(MINIAPP_SURFACE_BRIDGE_BOOTSTRAP.len() + source.len());
-    materialized.extend_from_slice(MINIAPP_SURFACE_BRIDGE_BOOTSTRAP.as_bytes());
+        Vec::with_capacity(PLUGIN_SURFACE_BRIDGE_BOOTSTRAP.len() + source.len());
+    materialized.extend_from_slice(PLUGIN_SURFACE_BRIDGE_BOOTSTRAP.as_bytes());
     materialized.extend_from_slice(b"<script data-nomifun-product-sdk=\"1\">");
     materialized.extend_from_slice(include_bytes!("../assets/product-sdk.js"));
     materialized.extend_from_slice(b"</script>");
@@ -326,7 +326,7 @@ pub fn validate_service_source(
 ) -> Result<(), PluginRuntimeStaticBundleBuildError> {
     if source.is_empty() {
         return Err(PluginRuntimeStaticBundleBuildError::EmptyFile {
-            path: MINIAPP_SERVICE_ENTRYPOINT.to_owned(),
+            path: PLUGIN_SERVICE_ENTRYPOINT.to_owned(),
         });
     }
     std::str::from_utf8(source)
@@ -353,23 +353,23 @@ pub fn materialize_service_release(
     } = input;
     let module_digest = digest_bytes(&main_mjs);
     Ok(PluginRuntimeStaticServiceMaterialization {
-        descriptor: MiniAppServiceReleaseDescriptor {
-            entrypoint: MINIAPP_SERVICE_ENTRYPOINT.to_owned(),
+        descriptor: PluginServiceReleaseDescriptor {
+            entrypoint: PLUGIN_SERVICE_ENTRYPOINT.to_owned(),
             module_digest,
             lifecycle,
             uses_files,
             uses_private_database,
             service_contract_digest,
             host_protocol_version: VersionString::from(
-                MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
+                PLUGIN_SERVICE_HOST_PROTOCOL_VERSION,
             ),
             sdk_contract_version: VersionString::from(
-                MINIAPP_SERVICE_SDK_CONTRACT_VERSION,
+                PLUGIN_SERVICE_SDK_CONTRACT_VERSION,
             ),
             runtime_requirements_digest,
         },
         file: PluginRuntimeStaticBundleFile::new(
-            MINIAPP_SERVICE_ENTRYPOINT,
+            PLUGIN_SERVICE_ENTRYPOINT,
             main_mjs,
         ),
     })
@@ -387,7 +387,7 @@ pub fn validate_static_bundle_path(
     } else {
         Err(PluginRuntimeStaticBundleBuildError::InvalidPath {
             path: path.to_owned(),
-            reason: "miniapp-release-v1 permits ui/** and service/main.mjs only"
+            reason: "plugin-release-v1 permits ui/** and service/main.mjs only"
                 .to_owned(),
         })
     }
@@ -470,7 +470,7 @@ fn validate_normalized_relative_path(
 }
 
 fn push_file(
-    files: &mut Vec<MiniAppReleaseFile>,
+    files: &mut Vec<PluginReleaseFile>,
     collision_keys: &mut BTreeSet<String>,
     path: String,
     bytes: Vec<u8>,
@@ -488,7 +488,7 @@ fn push_file(
             path: path.clone(),
         }
     })?;
-    files.push(MiniAppReleaseFile {
+    files.push(PluginReleaseFile {
         normalized_relative_path: path,
         digest: digest_bytes(&bytes),
         size_bytes,

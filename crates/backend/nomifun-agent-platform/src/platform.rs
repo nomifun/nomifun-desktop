@@ -19,7 +19,7 @@ use nomifun_agent_contracts::{
     CapabilityConsumer, CapabilityId, CapabilityKind, CapabilityOwner,
     CapabilityProvenance, CapabilityReleaseState, CatalogAvailability,
     ChatRouteIdentity, ChatRouteLookupError, ChatRouteLookupKey, ChatRouteRecord,
-    ChatRouteRecordRow, CompactOnDemandCapabilityEntry, ContributionLock,
+    ChatRouteRecordRow, ContributionLock,
     CorrelationId, DeleteAgentSessionCommand, DigestHex,
     EventId, EventProducerId,
     ExactRoleContractRef, ExecutionRoleId, FullAutoExecutionWire, IdempotencyKey,
@@ -36,15 +36,15 @@ use nomifun_agent_contracts::{
     resolve_exact_chat_route_record,
 };
 use nomifun_agent_control_plane::{
-    AgentBindingTarget, AgentControlPlane, CatalogProvider, CatalogSnapshot, CompilerReleaseInputs,
-    ControlPlaneError, ControlPlaneStore, MiniAppCatalogPublicationSource,
-    OfficialTemplateCatalog, PresetPreviewCompiler,
+    AgentBindingTarget, AgentControlPlane, CatalogProvider, CatalogSnapshot,
+    ControlPlaneError, ControlPlaneStore, PluginProductCatalogPublicationSource,
+    OfficialTemplateCatalog, PresetRevisionCompiler,
     StoredAgentBinding, StoredPreset,
 };
 use nomifun_agent_kernel::{
-    ActivationOutcome, ActiveCapabilitySetSnapshot, AgentPresetCompiler,
+    ActiveCapabilitySetSnapshot, AgentPresetCompiler,
     CapabilityAccessRequest, CapabilityInvocationRequest, CompileRequest,
-    CompiledSnapshot, CompilerEnvironment, CompletedTurnBoundary, KernelError,
+    CompiledSnapshot, CompilerEnvironment, KernelError,
     KernelRegistry, MaterializationPolicy, PluginRegistration, PluginStateError,
     PluginStatePersistence, PluginStateSnapshot, RoleMemberAdmission,
     RoleMemberInvocationRequest, RoleToolOperationRequest, SessionCapabilityState,
@@ -212,7 +212,6 @@ impl CodexRuntimePort for SupervisedCodexRuntimePort {
 pub struct AgentPlatformConfig {
     pub pool: SqlitePool,
     pub materialization_policy: MaterializationPolicy,
-    pub control_plane_release: CompilerReleaseInputs,
     pub kernel_environment: CompilerEnvironment,
     pub runtime: Arc<dyn CodexRuntimePort>,
     pub broker: Arc<dyn ChatBrokerPort>,
@@ -223,7 +222,6 @@ impl AgentPlatformConfig {
     pub fn with_runtime(
         pool: SqlitePool,
         materialization_policy: MaterializationPolicy,
-        control_plane_release: CompilerReleaseInputs,
         kernel_environment: CompilerEnvironment,
         runtime: Arc<dyn CodexRuntimePort>,
         broker: Arc<dyn ChatBrokerPort>,
@@ -231,7 +229,6 @@ impl AgentPlatformConfig {
         Self {
             pool,
             materialization_policy,
-            control_plane_release,
             kernel_environment,
             runtime,
             broker,
@@ -242,7 +239,6 @@ impl AgentPlatformConfig {
     pub fn with_supervisor(
         pool: SqlitePool,
         materialization_policy: MaterializationPolicy,
-        control_plane_release: CompilerReleaseInputs,
         kernel_environment: CompilerEnvironment,
         supervisor: Arc<CodexRuntimeSupervisor>,
         broker: Arc<dyn ChatBrokerPort>,
@@ -250,7 +246,6 @@ impl AgentPlatformConfig {
         Self::with_runtime(
             pool,
             materialization_policy,
-            control_plane_release,
             kernel_environment,
             Arc::new(SupervisedCodexRuntimePort::new(supervisor)),
             broker,
@@ -369,21 +364,9 @@ pub struct SessionCapabilityCatalog {
     pub owner_ref: PrincipalRef,
     pub resolved_snapshot_ref: ResolvedSnapshotRef,
     pub generation: u64,
-    pub initial_capabilities: Vec<CapabilityId>,
-    pub on_demand_capabilities: Vec<CapabilityId>,
+    pub enabled_capabilities: Vec<CapabilityId>,
     pub active_capabilities: BTreeSet<CapabilityId>,
-    pub compact_on_demand_index: Vec<CompactOnDemandCapabilityEntry>,
     pub typed_resource_bindings: TypedResourceBindings,
-}
-
-#[derive(Clone, Debug)]
-pub struct ActivateCapabilityRequest {
-    pub agent_session_id: AgentSessionId,
-    pub principal: PrincipalRef,
-    pub capability_id: CapabilityId,
-    pub expected_generation: u64,
-    pub completed_turn_operation_id: OperationId,
-    pub idempotency_key: IdempotencyKey,
 }
 
 #[derive(Clone, Debug)]
@@ -411,11 +394,6 @@ pub trait AgentSessionCommandPort: Send + Sync {
         &self,
         request: StartAgentTurnRequest,
     ) -> Result<AgentTurnDispatch, AgentPlatformError>;
-
-    async fn activate_capability(
-        &self,
-        request: ActivateCapabilityRequest,
-    ) -> Result<nomifun_agent_kernel::ActivationOutcome, AgentPlatformError>;
 
     async fn invoke_capability(
         &self,
@@ -2040,7 +2018,7 @@ pub fn materialize_capability_catalog_entries(
             source_kind: lock.source_kind,
             source_identity: lock.source_identity.clone(),
             mount_id: lock.mount_id.clone(),
-            miniapp_id: lock.miniapp_id.clone(),
+            plugin_product_id: lock.plugin_product_id.clone(),
             mcp_binding_id: lock.mcp_binding_id.clone(),
             artifact_digest: Some(capability.target_artifact_digest.clone()),
         };
@@ -2088,21 +2066,21 @@ pub fn materialize_catalog_snapshot(
         nomifun_agent_contracts::CanonicalErrorCode,
     >,
 ) -> Result<CatalogSnapshot, AgentPlatformError> {
-    materialize_catalog_snapshot_with_miniapps(
+    materialize_catalog_snapshot_with_plugin_products(
         registry,
         unavailable_capabilities,
         Vec::new(),
     )
 }
 
-pub fn materialize_catalog_snapshot_with_miniapps(
+pub fn materialize_catalog_snapshot_with_plugin_products(
     registry: &nomifun_agent_kernel::MaterializedRegistry,
     unavailable_capabilities: &BTreeMap<
         CapabilityId,
         nomifun_agent_contracts::CanonicalErrorCode,
     >,
-    miniapp_publications: Vec<
-        nomifun_agent_contracts::MiniAppCapabilityCatalogPublication,
+    plugin_product_publications: Vec<
+        nomifun_agent_contracts::PluginProductCapabilityCatalogPublication,
     >,
 ) -> Result<CatalogSnapshot, AgentPlatformError> {
     let mut formal_capability_entries =
@@ -2113,17 +2091,17 @@ pub fn materialize_catalog_snapshot_with_miniapps(
         .into_iter()
         .map(|entry| (entry.capability.clone(), entry))
         .collect::<BTreeMap<_, _>>();
-    let mut miniapp_publication_map = BTreeMap::new();
-    for publication in miniapp_publications {
+    let mut plugin_product_publication_map = BTreeMap::new();
+    for publication in plugin_product_publications {
         publication
             .validate()
             .map_err(|error| AgentPlatformError::Contract(error.to_string()))?;
-        if miniapp_publication_map
-            .insert(publication.miniapp_id.clone(), publication.clone())
+        if plugin_product_publication_map
+            .insert(publication.plugin_product_id.clone(), publication.clone())
             .is_some()
         {
             return Err(AgentPlatformError::Contract(
-                "duplicate MiniApp Catalog publication".to_owned(),
+                "duplicate Plugin Product Catalog publication".to_owned(),
             ));
         }
         for capability in publication.capabilities {
@@ -2132,7 +2110,7 @@ pub fn materialize_catalog_snapshot_with_miniapps(
                 .is_some()
             {
                 return Err(AgentPlatformError::Contract(
-                    "MiniApp capability conflicts with an existing Catalog entry"
+                    "Plugin Product capability conflicts with an existing Catalog entry"
                         .to_owned(),
                 ));
             }
@@ -2168,7 +2146,7 @@ pub fn materialize_catalog_snapshot_with_miniapps(
     let snapshot = CatalogSnapshot {
         capabilities: registry.capabilities.values().cloned().collect(),
         formal_capability_entries,
-        miniapp_publications: miniapp_publication_map,
+        plugin_product_publications: plugin_product_publication_map,
         skills: registry.skills.values().cloned().collect(),
         mcp_tools: registry.mcp_tools.values().cloned().collect(),
         unavailable_capabilities: derived_unavailable_capabilities,
@@ -2182,7 +2160,7 @@ pub struct KernelCatalogProvider {
     registry: Arc<KernelRegistry>,
     unavailable_capabilities:
         StdRwLock<BTreeMap<CapabilityId, nomifun_agent_contracts::CanonicalErrorCode>>,
-    miniapp_publications: Option<Arc<dyn MiniAppCatalogPublicationSource>>,
+    plugin_product_publications: Option<Arc<dyn PluginProductCatalogPublicationSource>>,
 }
 
 impl KernelCatalogProvider {
@@ -2190,15 +2168,15 @@ impl KernelCatalogProvider {
         Self {
             registry,
             unavailable_capabilities: StdRwLock::new(BTreeMap::new()),
-            miniapp_publications: None,
+            plugin_product_publications: None,
         }
     }
 
-    pub fn with_miniapp_publication_source(
+    pub fn with_plugin_product_publication_source(
         mut self,
-        source: Arc<dyn MiniAppCatalogPublicationSource>,
+        source: Arc<dyn PluginProductCatalogPublicationSource>,
     ) -> Self {
-        self.miniapp_publications = Some(source);
+        self.plugin_product_publications = Some(source);
         self
     }
 
@@ -2250,16 +2228,16 @@ impl CatalogProvider for KernelCatalogProvider {
                 )
             })?
             .clone();
-        let miniapp_publications = self
-            .miniapp_publications
+        let plugin_product_publications = self
+            .plugin_product_publications
             .as_ref()
             .map(|source| source.publications())
             .transpose()?
             .unwrap_or_default();
-        materialize_catalog_snapshot_with_miniapps(
+        materialize_catalog_snapshot_with_plugin_products(
             &registry,
             &unavailable_capabilities,
-            miniapp_publications,
+            plugin_product_publications,
         )
             .map(Arc::new)
             .map_err(|error| ControlPlaneError::Wire(error.to_string()))
@@ -2277,14 +2255,14 @@ mod catalog_materialization_tests {
         CapabilityRef, ContributionId, ContributionSourceKind,
         LocalizedMetadata, McpBindingId, McpServerId,
         McpToolCapabilityMapping, McpToolKey,
-        MiniAppCapabilityCatalogPublication, MiniAppId,
-        MiniAppReleaseId, MiniAppReleaseRef, PackageId, PackageRef,
+        PluginProductCapabilityCatalogPublication, PluginProductId,
+        PluginReleaseId, PluginReleaseRef, PackageId, PackageRef,
         PlatformConstraint, PluginSourceKind, PluginSourceMetadata,
-        StableSourceIdentity, MiniAppCapabilityCatalogSink,
+        StableSourceIdentity, PluginProductCapabilityCatalogSink,
         capability_surface_declarations,
         digest_bytes,
     };
-    use nomifun_agent_control_plane::SharedMiniAppCatalogPublications;
+    use nomifun_agent_control_plane::SharedPluginProductCatalogPublications;
     use nomifun_agent_kernel::{
         InMemoryPluginStatePersistence, MaterializedCapability,
         MaterializedMcpTool,
@@ -2339,7 +2317,7 @@ mod catalog_materialization_tests {
                 "mcp:managed.catalog.server",
             ),
             mount_id: Some(mount_id.clone()),
-            miniapp_id: None,
+            plugin_product_id: None,
             mcp_binding_id: Some(binding_id.clone()),
             contribution_id: manifest.contribution_id.clone(),
             contract_digest: contract_digest.clone(),
@@ -2428,22 +2406,22 @@ mod catalog_materialization_tests {
     }
 
     #[test]
-    fn miniapp_publication_enters_the_same_shared_catalog_provider() {
+    fn plugin_product_publication_enters_the_same_shared_catalog_provider() {
         let package = PackageRef {
-            id: PackageId::from("miniapp.catalog"),
+            id: PackageId::from("plugin.catalog"),
             version: VersionString::from("1.0.0"),
         };
-        let miniapp_id = MiniAppId::from("miniapp-catalog");
-        let artifact_digest = digest_bytes(b"miniapp-artifact");
+        let plugin_product_id = PluginProductId::from("plugin-catalog");
+        let artifact_digest = digest_bytes(b"plugin-artifact");
         let manifest = CapabilityManifest {
-            id: CapabilityId::from("miniapp.catalog.search"),
-            contribution_id: ContributionId::from("capability:miniapp.catalog.search"),
+            id: CapabilityId::from("plugin.catalog.search"),
+            contribution_id: ContributionId::from("capability:plugin.catalog.search"),
             version: VersionString::from("1.0.0"),
             kind: CapabilityKind::Tool,
             package: package.clone(),
             display: LocalizedMetadata {
-                name: "MiniApp Search".to_owned(),
-                description: "Search from an Active MiniApp Release".to_owned(),
+                name: "Plugin Search".to_owned(),
+                description: "Search from an Active Plugin Product Release".to_owned(),
                 localized_names: BTreeMap::new(),
                 localized_descriptions: BTreeMap::new(),
             },
@@ -2458,11 +2436,11 @@ mod catalog_materialization_tests {
             config_schema: StrictJsonValue(json!({"type": "object"})),
             contributions: CapabilityContributions::default(),
         };
-        let active_release = MiniAppReleaseRef {
-            release_id: MiniAppReleaseId::from("release-miniapp-search"),
-            artifact_id: ArtifactId::from("artifact-miniapp-search"),
+        let active_release = PluginReleaseRef {
+            release_id: PluginReleaseId::from("release-plugin-search"),
+            artifact_id: ArtifactId::from("artifact-plugin-search"),
             release_digest: artifact_digest.clone(),
-            manifest_digest: digest_bytes(b"miniapp-manifest"),
+            manifest_digest: digest_bytes(b"plugin-manifest"),
         };
         let entry = CapabilityCatalogMaterializer::materialize(
             CapabilityCatalogMaterialization {
@@ -2471,12 +2449,12 @@ mod catalog_materialization_tests {
                     owner: CapabilityOwner::Package {
                         package: package.clone(),
                     },
-                    source_kind: ContributionSourceKind::MiniAppActiveRelease,
+                    source_kind: ContributionSourceKind::PluginProductActiveRelease,
                     source_identity: StableSourceIdentity::from(
-                        "miniapp:miniapp-catalog",
+                        "plugin-product:plugin-catalog",
                     ),
                     mount_id: None,
-                    miniapp_id: Some(miniapp_id.clone()),
+                    plugin_product_id: Some(plugin_product_id.clone()),
                     mcp_binding_id: None,
                     artifact_digest: Some(artifact_digest),
                 },
@@ -2488,8 +2466,8 @@ mod catalog_materialization_tests {
             },
         )
         .unwrap();
-        let mut publication = MiniAppCapabilityCatalogPublication {
-            miniapp_id: miniapp_id.clone(),
+        let mut publication = PluginProductCapabilityCatalogPublication {
+            plugin_product_id: plugin_product_id.clone(),
             active_release,
             active_release_epoch: 1,
             catalog_digest: digest_bytes(b"uncomputed"),
@@ -2501,12 +2479,12 @@ mod catalog_materialization_tests {
         tampered.catalog_digest = digest_bytes(b"tampered-publication");
         assert!(tampered.validate().is_err());
 
-        let store = Arc::new(SharedMiniAppCatalogPublications::new());
+        let store = Arc::new(SharedPluginProductCatalogPublications::new());
         store
-            .replace_miniapp_publication(
-                nomifun_agent_contracts::MiniAppCapabilityCatalogPublicationUpdate {
+            .replace_plugin_product_publication(
+                nomifun_agent_contracts::PluginProductCapabilityCatalogPublicationUpdate {
                     owner_user_id: "00000000-0000-7000-8000-000000000001".into(),
-                    miniapp_id: miniapp_id.clone(),
+                    plugin_product_id: plugin_product_id.clone(),
                     product_revision: 1,
                     pointer_revision: 1,
                     active_release_epoch: 1,
@@ -2522,10 +2500,10 @@ mod catalog_materialization_tests {
             .unwrap(),
         );
         let provider = KernelCatalogProvider::new(kernel)
-            .with_miniapp_publication_source(store.clone());
+            .with_plugin_product_publication_source(store.clone());
         let snapshot = provider.snapshot().unwrap();
         let reference = CapabilityRef {
-            id: CapabilityId::from("miniapp.catalog.search"),
+            id: CapabilityId::from("plugin.catalog.search"),
             version: VersionString::from("1.0.0"),
         };
         assert_eq!(
@@ -2535,7 +2513,7 @@ mod catalog_materialization_tests {
                 .unwrap()
                 .provenance
                 .source_kind,
-            ContributionSourceKind::MiniAppActiveRelease
+            ContributionSourceKind::PluginProductActiveRelease
         );
         assert_eq!(
             snapshot
@@ -2545,15 +2523,15 @@ mod catalog_materialization_tests {
             package
         );
         assert!(snapshot.as_api().unwrap().capabilities.iter().any(|item| {
-            item.capability.id == "miniapp.catalog.search"
-                && item.source_kind == "miniapp_active_release"
+            item.capability.id == "plugin.catalog.search"
+                && item.source_kind == "plugin_product_active_release"
         }));
 
         store
-            .replace_miniapp_publication(
-                nomifun_agent_contracts::MiniAppCapabilityCatalogPublicationUpdate {
+            .replace_plugin_product_publication(
+                nomifun_agent_contracts::PluginProductCapabilityCatalogPublicationUpdate {
                     owner_user_id: "00000000-0000-7000-8000-000000000001".into(),
-                    miniapp_id: miniapp_id.clone(),
+                    plugin_product_id: plugin_product_id.clone(),
                     product_revision: 2,
                     pointer_revision: 2,
                     active_release_epoch: 1,
@@ -2562,10 +2540,10 @@ mod catalog_materialization_tests {
             )
             .unwrap();
         store
-            .replace_miniapp_publication(
-                nomifun_agent_contracts::MiniAppCapabilityCatalogPublicationUpdate {
+            .replace_plugin_product_publication(
+                nomifun_agent_contracts::PluginProductCapabilityCatalogPublicationUpdate {
                     owner_user_id: "00000000-0000-7000-8000-000000000001".into(),
-                    miniapp_id: miniapp_id.clone(),
+                    plugin_product_id: plugin_product_id.clone(),
                     product_revision: 1,
                     pointer_revision: 1,
                     active_release_epoch: 1,
@@ -2610,7 +2588,7 @@ impl AgentPlatform {
         let control_store = Arc::new(SqliteControlPlaneStore::new(config.pool.clone()));
         let templates = OfficialTemplateCatalog::load()?;
         let catalog = Arc::new(KernelCatalogProvider::new(Arc::clone(&kernel)));
-        let compiler = PresetPreviewCompiler::new(config.control_plane_release, templates.clone())
+        let compiler = PresetRevisionCompiler::new(templates.clone())
             .with_canonical_registry(Arc::clone(&kernel), config.kernel_environment.clone());
         let control_plane = Arc::new(AgentControlPlane::new(
             Arc::clone(&control_store) as Arc<dyn ControlPlaneStore>,
@@ -2747,15 +2725,9 @@ impl AgentPlatform {
                 .compiled_runtime_profile_digest
                 .clone(),
             enabled_runtime_features: compiled.content().required_runtime_features.clone(),
-            initial_capabilities: compiled
+            enabled_capabilities: compiled
                 .content()
-                .initial_capabilities
-                .iter()
-                .map(|capability| capability.capability.id.clone())
-                .collect(),
-            on_demand_capabilities: compiled
-                .content()
-                .on_demand_capabilities
+                .enabled_capabilities
                 .iter()
                 .map(|capability| capability.capability.id.clone())
                 .collect(),
@@ -2785,15 +2757,9 @@ impl AgentPlatform {
             },
             profile_kind: compiled.content().required_runtime_profile,
             full_auto: FullAutoExecutionWire::fixed(),
-            initial_capabilities: compiled
+            enabled_capabilities: compiled
                 .content()
-                .initial_capabilities
-                .iter()
-                .map(|capability| capability.capability.id.clone())
-                .collect(),
-            on_demand_capabilities: compiled
-                .content()
-                .on_demand_capabilities
+                .enabled_capabilities
                 .iter()
                 .map(|capability| capability.capability.id.clone())
                 .collect(),
@@ -3088,7 +3054,7 @@ impl AgentPlatform {
             &registry,
             &environment,
             CompileRequest {
-                miniapp_capabilities: Vec::new(),
+                plugin_product_capabilities: Vec::new(),
                 revision,
                 principal: principal.clone(),
                 scene: scene.into(),
@@ -3274,18 +3240,12 @@ impl AgentPlatform {
             owner_ref: session.owner_ref,
             resolved_snapshot_ref: execution.compiled.snapshot_ref().clone(),
             generation: active.generation,
-            initial_capabilities: content
-                .initial_capabilities
-                .iter()
-                .map(|capability| capability.capability.id.clone())
-                .collect(),
-            on_demand_capabilities: content
-                .on_demand_capabilities
+            enabled_capabilities: content
+                .enabled_capabilities
                 .iter()
                 .map(|capability| capability.capability.id.clone())
                 .collect(),
             active_capabilities: active.active,
-            compact_on_demand_index: content.compact_on_demand_index.clone(),
             typed_resource_bindings: execution.compiled.resource_bindings().to_vec(),
         })
     }
@@ -3642,7 +3602,6 @@ impl AgentPlatform {
             )
             .await?;
         let capabilities = Arc::new(SessionCapabilityState::new(&compiled));
-        replay_capability_state(&self.sessions, session_id, &capabilities).await?;
         let head = self.sessions.head(session_id).await?;
         let runtime_binding = match (
             head.runtime_bound_event_id,
@@ -3823,7 +3782,7 @@ impl AgentSessionCommandPort for AgentPlatform {
         create.activation_event_id = Some(creation_event_id("active-set-0"));
         create.initial_active_capability_ids = compiled
             .content()
-            .initial_capabilities
+            .enabled_capabilities
             .iter()
             .map(|capability| capability.capability.id.as_ref().to_owned())
             .collect();
@@ -4013,95 +3972,6 @@ impl AgentSessionCommandPort for AgentPlatform {
             turn_event,
             runtime_response,
         })
-    }
-
-    async fn activate_capability(
-        &self,
-        request: ActivateCapabilityRequest,
-    ) -> Result<ActivationOutcome, AgentPlatformError> {
-        self.require_owned_session(&request.principal, &request.agent_session_id)
-            .await?;
-        let execution = self.execution_for(&request.agent_session_id).await?;
-        let current = execution.capabilities.snapshot()?;
-        if current.active.contains(&request.capability_id) {
-            return Ok(ActivationOutcome::AlreadyActive {
-                generation: current.generation,
-            });
-        }
-        if current.generation != request.expected_generation {
-            return Err(KernelError::ActivationGenerationConflict {
-                expected: request.expected_generation,
-                current: current.generation,
-            }
-            .into());
-        }
-        let plan = execution
-            .compiled
-            .content()
-            .on_demand_activation_plans
-            .get(&request.capability_id)
-            .ok_or_else(|| KernelError::CapabilityNotInPreset {
-                capability_id: request.capability_id.clone(),
-            })?
-            .clone();
-        let generation = current
-            .generation
-            .checked_add(1)
-            .ok_or(KernelError::ActivationGenerationExhausted)?;
-        let mut active = current.active.clone();
-        active.extend(plan.capability_bundle.iter().cloned());
-        let active_ids = active
-            .iter()
-            .map(|capability| capability.as_ref().to_owned())
-            .collect::<Vec<_>>();
-        let delta = plan
-            .capability_bundle
-            .iter()
-            .map(|capability| capability.as_ref().to_owned())
-            .collect::<Vec<_>>();
-        self.sessions
-            .append_event(&SessionEventAppend {
-                agent_session_id: request.agent_session_id.clone(),
-                event_id: stable_event_id(
-                    "active-set",
-                    &request.agent_session_id,
-                    request.idempotency_key.as_ref(),
-                ),
-                producer_id: EventProducerId::from("capability_host"),
-                idempotency_key: request.idempotency_key,
-                runtime_binding_id: None,
-                runtime_producer_seq: None,
-                semantic_event: SemanticSessionEventDraft {
-                    kind: SessionEventKind("capability/active-set-committed".to_owned()),
-                    kind_version: 1,
-                    correlation_id: CorrelationId::from(
-                        request.agent_session_id.as_ref().to_owned(),
-                    ),
-                    causation_event_id: None,
-                    payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-                        "generation": generation,
-                        "active_capability_ids": active_ids,
-                        "active_set_digest": digest_payload(&active_ids)?,
-                        "delta": delta,
-                        "requested_capability_id": &request.capability_id
-                    }))),
-                },
-            })
-            .await?;
-        match execution.capabilities.activate_at_boundary(
-            request.expected_generation,
-            &request.capability_id,
-            CompletedTurnBoundary::committed(request.completed_turn_operation_id),
-        ) {
-            Ok(outcome) => Ok(outcome),
-            Err(error) => {
-                self.executions
-                    .write()
-                    .await
-                    .remove(&request.agent_session_id);
-                Err(error.into())
-            }
-        }
     }
 
     async fn invoke_capability(
@@ -4356,7 +4226,7 @@ impl AgentSessionCommandPort for AgentPlatform {
             .await?;
         request.child_initial_active_capability_ids = compiled
             .content()
-            .initial_capabilities
+            .enabled_capabilities
             .iter()
             .map(|capability| capability.capability.id.as_ref().to_owned())
             .collect();
@@ -4593,69 +4463,6 @@ fn validate_compiler_convergence(
         return Err(AgentPlatformError::Contract(
             "persisted control-plane Snapshot and Kernel compiler ceiling diverged".to_owned(),
         ));
-    }
-    Ok(())
-}
-
-async fn replay_capability_state(
-    sessions: &AgentSessionStore,
-    session_id: &AgentSessionId,
-    capabilities: &SessionCapabilityState,
-) -> Result<(), AgentPlatformError> {
-    let mut cursor: Option<SessionEventCursor> = None;
-    loop {
-        let page = sessions.read_events(session_id, cursor.as_ref(), 500).await?;
-        if page.events.is_empty() {
-            break;
-        }
-        for event in &page.events {
-            if event.kind.0 != "capability/active-set-committed" {
-                continue;
-            }
-            let SessionEventPayloadRef::InlineJson(payload) = &event.payload else {
-                return Err(AgentPlatformError::Contract(
-                    "active-set event must use inline canonical JSON".to_owned(),
-                ));
-            };
-            let generation = payload
-                .0
-                .get("generation")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| {
-                    AgentPlatformError::Contract(
-                        "active-set event has no generation".to_owned(),
-                    )
-                })?;
-            if generation == 0 {
-                continue;
-            }
-            let requested = payload
-                .0
-                .get("requested_capability_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    AgentPlatformError::Contract(
-                        "active-set replay requires requested_capability_id".to_owned(),
-                    )
-                })?;
-            let current = capabilities.snapshot()?;
-            if current.generation >= generation {
-                continue;
-            }
-            capabilities.activate_at_boundary(
-                current.generation,
-                &CapabilityId::from(requested.to_owned()),
-                CompletedTurnBoundary::committed(OperationId::from(format!(
-                    "replay:{}",
-                    event.event_id.as_ref()
-                ))),
-            )?;
-        }
-        let next = page.next_cursor;
-        if cursor.as_ref().is_some_and(|cursor| cursor.seq == next.seq) {
-            break;
-        }
-        cursor = Some(next);
     }
     Ok(())
 }

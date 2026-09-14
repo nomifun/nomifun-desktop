@@ -38,7 +38,7 @@ describe('Guid and PluginRuntime surface separation', () => {
     expect(guidPage.includes('send.sendMessageHandler')).toBe(true);
     expect(guidPage.includes('pluginRuntimeMode')).toBe(false);
     expect(guidPage.includes('pluginRuntimeQuickStart')).toBe(false);
-    expect(guidPage.includes('miniapp=')).toBe(false);
+    expect(guidPage.includes('pluginRuntime=')).toBe(false);
     expect(guidPage.includes('new URLSearchParams(location.search)')).toBe(
       false
     );

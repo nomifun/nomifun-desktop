@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use nomi_process_runtime::probe_process_identity;
 use nomifun_agent_contracts::{
-    ArtifactId, DigestHex, MiniAppBridgeCallId, MiniAppId, MiniAppKvHandleDescriptor,
-    MiniAppKvHandleId, MiniAppReleaseId, MiniAppReleaseRef, MiniAppServiceLifecycle,
-    MiniAppServiceRuntimeFingerprint, MiniAppServiceStorageDescriptor,
-    ResolvedMiniAppServiceSpec, ResolvedMiniAppServiceSpecInputs, RuntimeInstallationId,
+    ArtifactId, DigestHex, PluginBridgeCallId, PluginProductId, PluginKvHandleDescriptor,
+    PluginKvHandleId, PluginReleaseId, PluginReleaseRef, PluginServiceLifecycle,
+    PluginServiceRuntimeFingerprint, PluginServiceStorageDescriptor,
+    ResolvedPluginServiceSpec, ResolvedPluginServiceSpecInputs, RuntimeInstallationId,
     RuntimeTarget, StrictJsonValue, VersionString, digest_bytes,
 };
 use nomifun_plugin_platform::runtime::{
@@ -32,7 +32,7 @@ export async function start(context) {
           method,
           payload,
           hostGeneration: context.hostGeneration,
-          miniappId: context.miniappId,
+          pluginId: context.pluginId,
         };
       }
       if (method === "hang") {
@@ -80,7 +80,7 @@ fn node_executable() -> Option<PathBuf> {
     std::fs::canonicalize(discovered).ok()
 }
 
-fn runtime_fingerprint(node: &Path) -> MiniAppServiceRuntimeFingerprint {
+fn runtime_fingerprint(node: &Path) -> PluginServiceRuntimeFingerprint {
     let bytes = std::fs::read(node).expect("read Node executable");
     let output = Command::new(node)
         .arg("--version")
@@ -92,7 +92,7 @@ fn runtime_fingerprint(node: &Path) -> MiniAppServiceRuntimeFingerprint {
         .trim()
         .trim_start_matches('v')
         .to_owned();
-    MiniAppServiceRuntimeFingerprint {
+    PluginServiceRuntimeFingerprint {
         runtime_installation_id: RuntimeInstallationId::from(format!(
             "test-node-{}",
             &digest_bytes(&bytes).as_ref()[..16]
@@ -114,15 +114,15 @@ fn digest(seed: &str) -> DigestHex {
 fn service_spec(
     node: &Path,
     module_bytes: &[u8],
-    miniapp_id: &str,
+    plugin_product_id: &str,
     epoch: u64,
-    lifecycle: MiniAppServiceLifecycle,
-) -> ResolvedMiniAppServiceSpec {
-    let miniapp_id = MiniAppId::from(miniapp_id);
-    ResolvedMiniAppServiceSpec::new(ResolvedMiniAppServiceSpecInputs {
-        miniapp_id: miniapp_id.clone(),
-        release: MiniAppReleaseRef {
-            release_id: MiniAppReleaseId::from(Uuid::now_v7().to_string()),
+    lifecycle: PluginServiceLifecycle,
+) -> ResolvedPluginServiceSpec {
+    let plugin_product_id = PluginProductId::from(plugin_product_id);
+    ResolvedPluginServiceSpec::new(ResolvedPluginServiceSpecInputs {
+        plugin_product_id: plugin_product_id.clone(),
+        release: PluginReleaseRef {
+            release_id: PluginReleaseId::from(Uuid::now_v7().to_string()),
             artifact_id: ArtifactId::from(Uuid::now_v7().to_string()),
             release_digest: digest("release"),
             manifest_digest: digest("manifest"),
@@ -131,9 +131,9 @@ fn service_spec(
         service_module_digest: digest_bytes(module_bytes),
         lifecycle,
         host_protocol_version:
-            nomifun_agent_contracts::MINIAPP_SERVICE_HOST_PROTOCOL_VERSION.into(),
+            nomifun_agent_contracts::PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
         sdk_contract_version:
-            nomifun_agent_contracts::MINIAPP_SERVICE_SDK_CONTRACT_VERSION.into(),
+            nomifun_agent_contracts::PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
         runtime: runtime_fingerprint(node),
         config_schema_digest: digest("config-schema"),
         config_snapshot_digest: digest("config-snapshot"),
@@ -143,13 +143,13 @@ fn service_spec(
         runtime_requirements_digest: digest("runtime-requirements"),
         bridge_contract_digest: digest("bridge-contract"),
         contribution_set_digest: digest("contribution-set"),
-        storage: MiniAppServiceStorageDescriptor {
-            kv: MiniAppKvHandleDescriptor {
-                handle_id: MiniAppKvHandleId::from(format!(
+        storage: PluginServiceStorageDescriptor {
+            kv: PluginKvHandleDescriptor {
+                handle_id: PluginKvHandleId::from(format!(
                     "test-kv-{}",
-                    miniapp_id.as_ref()
+                    plugin_product_id.as_ref()
                 )),
-                miniapp_id,
+                plugin_product_id,
                 namespace_revision: 1,
             },
             files_dir: None,
@@ -159,9 +159,9 @@ fn service_spec(
     .expect("valid resolved Service spec")
 }
 
-fn fence(spec: &ResolvedMiniAppServiceSpec, generation: u64) -> PluginRuntimeServiceGenerationFence {
+fn fence(spec: &ResolvedPluginServiceSpec, generation: u64) -> PluginRuntimeServiceGenerationFence {
     PluginRuntimeServiceGenerationFence {
-        miniapp_id: spec.miniapp_id.clone(),
+        plugin_product_id: spec.plugin_product_id.clone(),
         release: spec.release.clone(),
         active_release_epoch: spec.active_release_epoch,
         service_run_key: spec.service_run_key.clone(),
@@ -198,7 +198,7 @@ fn write_module(directory: &TempDir, name: &str, source: &str) -> PathBuf {
 
 async fn invoke(
     process: &Arc<dyn nomifun_plugin_platform::runtime::PluginRuntimeServiceProcess>,
-    spec: &ResolvedMiniAppServiceSpec,
+    spec: &ResolvedPluginServiceSpec,
     generation: u64,
     call_id: &str,
     method: &str,
@@ -209,7 +209,7 @@ async fn invoke(
         .invoke(
             PluginRuntimeServiceInvocation {
                 fence: fence(spec, generation),
-                call_id: MiniAppBridgeCallId::from(call_id),
+                call_id: PluginBridgeCallId::from(call_id),
                 method: method.to_owned(),
                 payload: StrictJsonValue(payload),
             },
@@ -266,9 +266,9 @@ async fn real_node_service_invokes_cancels_and_rejects_stale_generation() {
     let spec = service_spec(
         &node,
         SERVICE_MODULE.as_bytes(),
-        "miniapp-service-a",
+        "plugin-service-a",
         1,
-        MiniAppServiceLifecycle::OnDemand,
+        PluginServiceLifecycle::OnDemand,
     );
     let process = factory(&node, &module, Duration::from_secs(2))
         .start(PluginRuntimeServiceLaunch {
@@ -291,7 +291,7 @@ async fn real_node_service_invokes_cancels_and_rejects_stale_generation() {
     .expect("invoke echo");
     assert_eq!(echoed.0["payload"], json!({"value": 42}));
     assert_eq!(echoed.0["hostGeneration"], 1);
-    assert_eq!(echoed.0["miniappId"], "miniapp-service-a");
+    assert_eq!(echoed.0["pluginId"], "plugin-service-a");
 
     let stale = invoke(
         &process,
@@ -342,9 +342,9 @@ async fn node_path_alias_is_resolved_once_and_still_requires_the_selected_digest
     let spec = service_spec(
         &node,
         SERVICE_MODULE.as_bytes(),
-        "miniapp-node-alias",
+        "plugin-node-alias",
         1,
-        MiniAppServiceLifecycle::OnDemand,
+        PluginServiceLifecycle::OnDemand,
     );
 
     // A package manager can retarget the PATH alias after admission. The
@@ -390,9 +390,9 @@ async fn real_node_service_starts_from_an_extended_length_module_path() {
     let spec = service_spec(
         &node,
         SERVICE_MODULE.as_bytes(),
-        "miniapp-service-long-path",
+        "plugin-service-long-path",
         1,
-        MiniAppServiceLifecycle::OnDemand,
+        PluginServiceLifecycle::OnDemand,
     );
     let process = factory(&node, &module, Duration::from_secs(2))
         .start(PluginRuntimeServiceLaunch {
@@ -416,16 +416,16 @@ async fn crash_is_isolated_and_stop_reaps_spawned_process_tree() {
     let first_spec = service_spec(
         &node,
         SERVICE_MODULE.as_bytes(),
-        "miniapp-service-first",
+        "plugin-service-first",
         1,
-        MiniAppServiceLifecycle::OnDemand,
+        PluginServiceLifecycle::OnDemand,
     );
     let second_spec = service_spec(
         &node,
         SERVICE_MODULE.as_bytes(),
-        "miniapp-service-second",
+        "plugin-service-second",
         1,
-        MiniAppServiceLifecycle::OnDemand,
+        PluginServiceLifecycle::OnDemand,
     );
     let first = factory
         .start(PluginRuntimeServiceLaunch {
@@ -519,9 +519,9 @@ async fn invalid_module_and_request_timeout_fail_closed() {
     let invalid_spec = service_spec(
         &node,
         INVALID_SERVICE_MODULE.as_bytes(),
-        "miniapp-service-invalid",
+        "plugin-service-invalid",
         1,
-        MiniAppServiceLifecycle::OnDemand,
+        PluginServiceLifecycle::OnDemand,
     );
     let error = factory(&node, &invalid_module, Duration::from_millis(150))
         .start(PluginRuntimeServiceLaunch {
@@ -537,9 +537,9 @@ async fn invalid_module_and_request_timeout_fail_closed() {
     let spec = service_spec(
         &node,
         SERVICE_MODULE.as_bytes(),
-        "miniapp-service-timeout",
+        "plugin-service-timeout",
         1,
-        MiniAppServiceLifecycle::OnDemand,
+        PluginServiceLifecycle::OnDemand,
     );
     let process = factory(&node, &module, Duration::from_millis(150))
         .start(PluginRuntimeServiceLaunch {

@@ -25,11 +25,11 @@ async fn workspace_uses_provider_ownership_and_purges_membership_in_the_delete_t
 #[tokio::test]
 async fn document_migration_preserves_draft_identity_data_and_revisions() {
     let pool = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
-    sqlx::raw_sql(include_str!("../migrations/093_miniapp_product_documents.sql")).execute(&pool).await.unwrap();
+    sqlx::raw_sql(include_str!("../migrations/093_plugin_product_documents.sql")).execute(&pool).await.unwrap();
     let owner = "0190f5fe-7c00-7000-8000-000000000001";
     let plugin = "0190f5fe-7c00-7000-8000-000000000002";
-    let content = serde_json::json!({"miniapp_id":plugin,"revision":7,"html":"user content","nested":{"miniapp_id":"immutable-provenance"}});
-    sqlx::query("INSERT INTO miniapp_product_documents(owner_user_id, document_key, revision, content_json, updated_at) VALUES (?, 'draft:example', 7, ?, 42)")
+    let content = serde_json::json!({"plugin_product_id":plugin,"revision":7,"html":"user content","nested":{"plugin_product_id":"immutable-provenance"}});
+    sqlx::query("INSERT INTO plugin_product_documents(owner_user_id, document_key, revision, content_json, updated_at) VALUES (?, 'draft:example', 7, ?, 42)")
         .bind(owner).bind(content.to_string()).execute(&pool).await.unwrap();
     sqlx::raw_sql(include_str!("../migrations/094_plugin_product_documents.sql")).execute(&pool).await.unwrap();
     let (revision, json, updated): (i64, String, i64) = sqlx::query_as("SELECT revision, content_json, updated_at FROM plugin_product_documents WHERE owner_user_id = ?")
@@ -39,9 +39,9 @@ async fn document_migration_preserves_draft_identity_data_and_revisions() {
     assert_eq!(updated, 42);
     assert_eq!(value["revision"], 7);
     assert_eq!(value["plugin_id"], plugin);
-    assert!(value.get("miniapp_id").is_none());
+    assert!(value.get("plugin_product_id").is_none());
     assert_eq!(value["html"], "user content");
-    assert_eq!(value["nested"]["miniapp_id"], "immutable-provenance");
-    let aliases: i64 = sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE name = 'miniapp_product_documents'").fetch_one(&pool).await.unwrap();
-    assert_eq!(aliases, 0);
+    assert_eq!(value["nested"]["plugin_product_id"], "immutable-provenance");
+    let tables: i64 = sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE name = 'miniapp_product_documents'").fetch_one(&pool).await.unwrap();
+    assert_eq!(tables, 0);
 }

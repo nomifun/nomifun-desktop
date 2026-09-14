@@ -36,5 +36,6 @@ pub use service::{
     ConversationService, ConversationSupervisionHook, DELIVERY_NOTIFY_ORIGIN,
     DeliveryNotifyRegistration, IdempotentMessageDelivery, IdmmTurnScope,
     BackgroundTaskRegistrar, PublicTurnDeliveryState, TurnCompletionObserver,
+    ProductAgentResolution, ProductAgentSnapshotResolver, ProductAgentTarget,
 };
 pub use state::ConversationRouterState;

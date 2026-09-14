@@ -1636,38 +1636,38 @@
       },
       {
         "package": {
-          "id": "nomifun.miniapp",
+          "id": "nomifun.plugin",
           "version": "1.0.0"
         },
         "source": {
           "source_kind": "bundled",
-          "source_identity": "nomifun.miniapp"
+          "source_identity": "nomifun.plugin"
         },
         "capabilities": [
           {
             "capability": {
-              "id": "miniapp.read",
+              "id": "plugin.read",
               "version": "1.0.0"
             },
             "kind": "tool"
           },
           {
             "capability": {
-              "id": "miniapp.edit",
+              "id": "plugin.edit",
               "version": "1.0.0"
             },
             "kind": "tool"
           },
           {
             "capability": {
-              "id": "miniapp.publish",
+              "id": "plugin.publish",
               "version": "1.0.0"
             },
             "kind": "tool"
           },
           {
             "capability": {
-              "id": "miniapp.serve",
+              "id": "plugin.serve",
               "version": "1.0.0"
             },
             "kind": "tool"
@@ -1755,5 +1755,5 @@
       }
     ]
   },
-  "payload_digest": "71c6aeb654159f99777e63a6444c1c2be4450e0be050f4daa350d19b8fce26a6"
+  "payload_digest": "cd85680e160f852a069bbeb8e58db3fe8b6e912b2585c792c9e4ba988b22b2bf"
 }

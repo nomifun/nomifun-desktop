@@ -5,19 +5,19 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use nomifun_agent_contracts::{
-    canonical_json_bytes, digest_bytes, DigestHex, JavaScriptBuildProfile, MiniAppId,
-    MiniAppProjectId, VersionString, MINIAPP_RELEASE_PROFILE_VERSION,
+    canonical_json_bytes, digest_bytes, DigestHex, JavaScriptBuildProfile, PluginProductId,
+    PluginProjectId, VersionString, PLUGIN_RELEASE_PROFILE_VERSION,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const MINIAPP_SOURCE_STORE_FORMAT_VERSION: &str = "1.0.0";
-pub const MINIAPP_SOURCE_BUILD_PROFILE_VERSION: &str = MINIAPP_RELEASE_PROFILE_VERSION;
+pub const PLUGIN_SOURCE_STORE_FORMAT_VERSION: &str = "1.0.0";
+pub const PLUGIN_SOURCE_BUILD_PROFILE_VERSION: &str = PLUGIN_RELEASE_PROFILE_VERSION;
 
 const SOURCES_DIRECTORY: &str = "sources";
-const MINIAPPS_DIRECTORY: &str = "miniapps";
+const PLUGINS_DIRECTORY: &str = "plugins";
 const PROJECTS_DIRECTORY: &str = "projects";
 const SOURCE_DIRECTORY: &str = "source";
 const REVISIONS_DIRECTORY: &str = "revisions";
@@ -131,23 +131,23 @@ pub enum PluginRuntimeSourceStoreError {
 #[serde(deny_unknown_fields)]
 pub struct PluginRuntimeSourceScope {
     pub owner_id: String,
-    pub miniapp_id: MiniAppId,
-    pub project_id: MiniAppProjectId,
+    pub plugin_product_id: PluginProductId,
+    pub project_id: PluginProjectId,
 }
 
 impl PluginRuntimeSourceScope {
     pub fn new(
         owner_id: impl AsRef<str>,
-        miniapp_id: impl AsRef<str>,
+        plugin_product_id: impl AsRef<str>,
         project_id: impl AsRef<str>,
     ) -> Result<Self, PluginRuntimeSourceStoreError> {
         let owner_id = validate_scope_segment("owner_id", owner_id.as_ref())?;
-        let miniapp_id = validate_scope_segment("miniapp_id", miniapp_id.as_ref())?;
+        let plugin_product_id = validate_scope_segment("plugin_product_id", plugin_product_id.as_ref())?;
         let project_id = validate_scope_segment("project_id", project_id.as_ref())?;
         Ok(Self {
             owner_id,
-            miniapp_id: MiniAppId::from(miniapp_id),
-            project_id: MiniAppProjectId::from(project_id),
+            plugin_product_id: PluginProductId::from(plugin_product_id),
+            project_id: PluginProjectId::from(project_id),
         })
     }
 }
@@ -162,7 +162,7 @@ pub struct PluginRuntimeDependencyLockV1 {
 impl PluginRuntimeDependencyLockV1 {
     pub fn empty() -> Self {
         Self {
-            format_version: VersionString::from(MINIAPP_SOURCE_STORE_FORMAT_VERSION),
+            format_version: VersionString::from(PLUGIN_SOURCE_STORE_FORMAT_VERSION),
             dependencies: BTreeMap::new(),
         }
     }
@@ -177,7 +177,7 @@ impl PluginRuntimeDependencyLockV1 {
     }
 
     fn validate(&self) -> Result<(), PluginRuntimeSourceStoreError> {
-        if self.format_version.as_ref() != MINIAPP_SOURCE_STORE_FORMAT_VERSION {
+        if self.format_version.as_ref() != PLUGIN_SOURCE_STORE_FORMAT_VERSION {
             return Err(PluginRuntimeSourceStoreError::InvalidRecord(
                 "dependency lock format version is unsupported".into(),
             ));
@@ -261,8 +261,8 @@ pub struct PluginRuntimeSourceExactImportRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginRuntimeSourceProject {
     pub owner_id: String,
-    pub miniapp_id: MiniAppId,
-    pub project_id: MiniAppProjectId,
+    pub plugin_product_id: PluginProductId,
+    pub project_id: PluginProjectId,
     pub display_name: String,
     pub managed_relative_path: String,
     pub source_snapshot_digest: DigestHex,
@@ -369,13 +369,13 @@ impl PluginRuntimeSourceStore {
     pub fn create_project(
         &self,
         owner: impl AsRef<str>,
-        miniapp_id: impl AsRef<str>,
+        plugin_product_id: impl AsRef<str>,
         project_id: impl AsRef<str>,
         display_name: impl Into<String>,
     ) -> Result<PluginRuntimeSourceProject, PluginRuntimeSourceStoreError> {
         self.create_project_with_service(
             owner,
-            miniapp_id,
+            plugin_product_id,
             project_id,
             display_name,
             None,
@@ -385,14 +385,14 @@ impl PluginRuntimeSourceStore {
     pub fn create_service_project(
         &self,
         owner: impl AsRef<str>,
-        miniapp_id: impl AsRef<str>,
+        plugin_product_id: impl AsRef<str>,
         project_id: impl AsRef<str>,
         display_name: impl Into<String>,
         service_main_mjs: impl Into<Vec<u8>>,
     ) -> Result<PluginRuntimeSourceProject, PluginRuntimeSourceStoreError> {
         self.create_project_with_service(
             owner,
-            miniapp_id,
+            plugin_product_id,
             project_id,
             display_name,
             Some(service_main_mjs.into()),
@@ -405,7 +405,7 @@ impl PluginRuntimeSourceStore {
     ) -> Result<PluginRuntimeSourceProject, PluginRuntimeSourceStoreError> {
         let scope = PluginRuntimeSourceScope::new(
             &request.scope.owner_id,
-            request.scope.miniapp_id.as_ref(),
+            request.scope.plugin_product_id.as_ref(),
             request.scope.project_id.as_ref(),
         )?;
         let display_name = validate_display_name(request.display_name)?;
@@ -415,7 +415,7 @@ impl PluginRuntimeSourceStore {
             validate_digest_value(request.expected_dependency_lock_digest.as_ref())?;
         if request.build_generation == 0
             || request.build_profile_version.as_ref()
-                != MINIAPP_SOURCE_BUILD_PROFILE_VERSION
+                != PLUGIN_SOURCE_BUILD_PROFILE_VERSION
         {
             return Err(PluginRuntimeSourceStoreError::InvalidRecord(
                 "exact Source import requires a positive build generation and the current build profile version"
@@ -456,17 +456,17 @@ impl PluginRuntimeSourceStore {
         }
 
         let project_record = ProjectRecord {
-            format_version: MINIAPP_SOURCE_STORE_FORMAT_VERSION.into(),
+            format_version: PLUGIN_SOURCE_STORE_FORMAT_VERSION.into(),
             owner_id: scope.owner_id.clone(),
-            miniapp_id: scope.miniapp_id.as_ref().into(),
+            plugin_product_id: scope.plugin_product_id.as_ref().into(),
             project_id: scope.project_id.as_ref().into(),
             display_name,
         };
         let head = HeadRecord {
-            format_version: MINIAPP_SOURCE_STORE_FORMAT_VERSION.into(),
+            format_version: PLUGIN_SOURCE_STORE_FORMAT_VERSION.into(),
             snapshot_digest: snapshot.snapshot_digest.clone(),
             dependency_lock_digest: observed_dependency_lock_digest,
-            build_profile: JavaScriptBuildProfile::MiniAppReleaseV1,
+            build_profile: JavaScriptBuildProfile::PluginReleaseV1,
             build_profile_version: request.build_profile_version.as_ref().into(),
             source_revision: 1,
             build_generation: request.build_generation,
@@ -486,18 +486,18 @@ impl PluginRuntimeSourceStore {
     fn create_project_with_service(
         &self,
         owner: impl AsRef<str>,
-        miniapp_id: impl AsRef<str>,
+        plugin_product_id: impl AsRef<str>,
         project_id: impl AsRef<str>,
         display_name: impl Into<String>,
         service_main_mjs: Option<Vec<u8>>,
     ) -> Result<PluginRuntimeSourceProject, PluginRuntimeSourceStoreError> {
-        let scope = PluginRuntimeSourceScope::new(owner, miniapp_id, project_id)?;
+        let scope = PluginRuntimeSourceScope::new(owner, plugin_product_id, project_id)?;
         let display_name = validate_display_name(display_name.into())?;
 
         let project_record = ProjectRecord {
-            format_version: MINIAPP_SOURCE_STORE_FORMAT_VERSION.into(),
+            format_version: PLUGIN_SOURCE_STORE_FORMAT_VERSION.into(),
             owner_id: scope.owner_id.clone(),
-            miniapp_id: scope.miniapp_id.as_ref().into(),
+            plugin_product_id: scope.plugin_product_id.as_ref().into(),
             project_id: scope.project_id.as_ref().into(),
             display_name,
         };
@@ -521,11 +521,11 @@ impl PluginRuntimeSourceStore {
         let prepared = prepare_source_files(files, content_kind, self.limits)?;
         let snapshot = snapshot_record(&prepared)?;
         let head = HeadRecord {
-            format_version: MINIAPP_SOURCE_STORE_FORMAT_VERSION.into(),
+            format_version: PLUGIN_SOURCE_STORE_FORMAT_VERSION.into(),
             snapshot_digest: snapshot.snapshot_digest.clone(),
             dependency_lock_digest: digest_bytes(&lock_bytes),
-            build_profile: JavaScriptBuildProfile::MiniAppReleaseV1,
-            build_profile_version: MINIAPP_SOURCE_BUILD_PROFILE_VERSION.into(),
+            build_profile: JavaScriptBuildProfile::PluginReleaseV1,
+            build_profile_version: PLUGIN_SOURCE_BUILD_PROFILE_VERSION.into(),
             source_revision: 1,
             build_generation: 1,
         };
@@ -544,11 +544,11 @@ impl PluginRuntimeSourceStore {
     pub fn read_snapshot(
         &self,
         owner: impl AsRef<str>,
-        miniapp_id: impl AsRef<str>,
+        plugin_product_id: impl AsRef<str>,
         project_id: impl AsRef<str>,
         expected_digest: impl AsRef<str>,
     ) -> Result<PluginRuntimeSourceSnapshot, PluginRuntimeSourceStoreError> {
-        let scope = PluginRuntimeSourceScope::new(owner, miniapp_id, project_id)?;
+        let scope = PluginRuntimeSourceScope::new(owner, plugin_product_id, project_id)?;
         let expected_digest = validate_digest_value(expected_digest.as_ref())?;
         let _guard = self.lock_mutation()?;
         let snapshot = self.read_snapshot_unlocked(&scope)?;
@@ -564,10 +564,10 @@ impl PluginRuntimeSourceStore {
     pub fn current_snapshot(
         &self,
         owner: impl AsRef<str>,
-        miniapp_id: impl AsRef<str>,
+        plugin_product_id: impl AsRef<str>,
         project_id: impl AsRef<str>,
     ) -> Result<PluginRuntimeSourceSnapshot, PluginRuntimeSourceStoreError> {
-        let scope = PluginRuntimeSourceScope::new(owner, miniapp_id, project_id)?;
+        let scope = PluginRuntimeSourceScope::new(owner, plugin_product_id, project_id)?;
         let _guard = self.lock_mutation()?;
         self.read_snapshot_unlocked(&scope)
     }
@@ -575,13 +575,13 @@ impl PluginRuntimeSourceStore {
     pub fn prepare_file_replace(
         &self,
         owner: impl AsRef<str>,
-        miniapp_id: impl AsRef<str>,
+        plugin_product_id: impl AsRef<str>,
         project_id: impl AsRef<str>,
         expected_digest: impl AsRef<str>,
         path: impl AsRef<str>,
         bytes: impl Into<Vec<u8>>,
     ) -> Result<PluginRuntimePreparedSourceMutation, PluginRuntimeSourceStoreError> {
-        let scope = PluginRuntimeSourceScope::new(owner, miniapp_id, project_id)?;
+        let scope = PluginRuntimeSourceScope::new(owner, plugin_product_id, project_id)?;
         let expected_digest = validate_digest_value(expected_digest.as_ref())?;
         let path = path.as_ref();
         let replacement = bytes.into();
@@ -598,18 +598,21 @@ impl PluginRuntimeSourceStore {
             .iter()
             .all(|file| file.normalized_relative_path != path)
             && path != crate::runtime::PLUGIN_RUNTIME_MANIFEST_PATH
+            && path != "service/main.mjs"
+            && path != "ui/index.html"
         {
             return Err(PluginRuntimeSourceStoreError::InvalidPath {
                 path: path.to_owned(),
                 reason: "Source edit may replace only an existing managed file".into(),
             });
         }
-        let remove_surface = path == "ui/index.html" && replacement.is_empty()
-            && current.content_kind() == PluginRuntimeSourceContentKind::Service;
+        // Entrypoints describe roles of this source revision, not a fixed product class.
+        let remove_entrypoint = replacement.is_empty()
+            && (path == "service/main.mjs" || path == "ui/index.html");
         let mut inputs = current
             .files
             .iter()
-            .filter(|file| !(remove_surface && file.normalized_relative_path == path))
+            .filter(|file| !(remove_entrypoint && file.normalized_relative_path == path))
             .map(|file| {
                 PluginRuntimeSourceFileInput::new(
                     file.normalized_relative_path.clone(),
@@ -621,10 +624,10 @@ impl PluginRuntimeSourceStore {
                 )
             })
             .collect::<Vec<_>>();
-        if path == crate::runtime::PLUGIN_RUNTIME_MANIFEST_PATH && current.file(path).is_none() {
+        if !remove_entrypoint && current.file(path).is_none() {
             inputs.push(PluginRuntimeSourceFileInput::new(path, replacement));
         }
-        let content_kind = current.content_kind();
+        let content_kind = source_content_kind(inputs.iter().map(|file| file.normalized_relative_path.as_str()));
         let prepared = prepare_source_files(inputs.clone(), content_kind, self.limits)?;
         let next_snapshot = snapshot_record(&prepared)?;
         let next_build_generation = if next_snapshot.snapshot_digest
@@ -653,14 +656,14 @@ impl PluginRuntimeSourceStore {
             return Ok(self
                 .current_snapshot(
                     &prepared.scope.owner_id,
-                    prepared.scope.miniapp_id.as_ref(),
+                    prepared.scope.plugin_product_id.as_ref(),
                     prepared.scope.project_id.as_ref(),
                 )?
                 .project);
         }
         self.replace_source_with_kind(
             &prepared.scope.owner_id,
-            prepared.scope.miniapp_id.as_ref(),
+            prepared.scope.plugin_product_id.as_ref(),
             prepared.scope.project_id.as_ref(),
             prepared.expected_source_snapshot_digest.as_ref(),
             prepared.files.clone(),
@@ -671,11 +674,11 @@ impl PluginRuntimeSourceStore {
     pub fn read_revision_files(
         &self,
         owner: impl AsRef<str>,
-        miniapp_id: impl AsRef<str>,
+        plugin_product_id: impl AsRef<str>,
         project_id: impl AsRef<str>,
         source_snapshot_digest: impl AsRef<str>,
     ) -> Result<Vec<PluginRuntimeSourceFile>, PluginRuntimeSourceStoreError> {
-        let scope = PluginRuntimeSourceScope::new(owner, miniapp_id, project_id)?;
+        let scope = PluginRuntimeSourceScope::new(owner, plugin_product_id, project_id)?;
         let source_snapshot_digest =
             validate_digest_value(source_snapshot_digest.as_ref())?;
         let _guard = self.lock_mutation()?;
@@ -696,14 +699,14 @@ impl PluginRuntimeSourceStore {
     pub fn replace_source(
         &self,
         owner: impl AsRef<str>,
-        miniapp_id: impl AsRef<str>,
+        plugin_product_id: impl AsRef<str>,
         project_id: impl AsRef<str>,
         expected_digest: impl AsRef<str>,
         files: Vec<PluginRuntimeSourceFileInput>,
     ) -> Result<PluginRuntimeSourceProject, PluginRuntimeSourceStoreError> {
         self.replace_source_with_kind(
             owner,
-            miniapp_id,
+            plugin_product_id,
             project_id,
             expected_digest,
             files,
@@ -714,14 +717,14 @@ impl PluginRuntimeSourceStore {
     pub fn replace_service_source(
         &self,
         owner: impl AsRef<str>,
-        miniapp_id: impl AsRef<str>,
+        plugin_product_id: impl AsRef<str>,
         project_id: impl AsRef<str>,
         expected_digest: impl AsRef<str>,
         files: Vec<PluginRuntimeSourceFileInput>,
     ) -> Result<PluginRuntimeSourceProject, PluginRuntimeSourceStoreError> {
         self.replace_source_with_kind(
             owner,
-            miniapp_id,
+            plugin_product_id,
             project_id,
             expected_digest,
             files,
@@ -732,13 +735,13 @@ impl PluginRuntimeSourceStore {
     fn replace_source_with_kind(
         &self,
         owner: impl AsRef<str>,
-        miniapp_id: impl AsRef<str>,
+        plugin_product_id: impl AsRef<str>,
         project_id: impl AsRef<str>,
         expected_digest: impl AsRef<str>,
         files: Vec<PluginRuntimeSourceFileInput>,
         content_kind: PluginRuntimeSourceContentKind,
     ) -> Result<PluginRuntimeSourceProject, PluginRuntimeSourceStoreError> {
-        let scope = PluginRuntimeSourceScope::new(owner, miniapp_id, project_id)?;
+        let scope = PluginRuntimeSourceScope::new(owner, plugin_product_id, project_id)?;
         let expected_digest = validate_digest_value(expected_digest.as_ref())?;
         let prepared = prepare_source_files(files, content_kind, self.limits)?;
         let next_snapshot = snapshot_record(&prepared)?;
@@ -778,7 +781,7 @@ impl PluginRuntimeSourceStore {
         }
 
         let next_head = HeadRecord {
-            format_version: MINIAPP_SOURCE_STORE_FORMAT_VERSION.into(),
+            format_version: PLUGIN_SOURCE_STORE_FORMAT_VERSION.into(),
             snapshot_digest: next_snapshot.snapshot_digest.clone(),
             dependency_lock_digest: current.dependency_lock_digest.clone(),
             build_profile: current.project.build_profile,
@@ -796,10 +799,10 @@ impl PluginRuntimeSourceStore {
     pub fn delete_project(
         &self,
         owner: impl AsRef<str>,
-        miniapp_id: impl AsRef<str>,
+        plugin_product_id: impl AsRef<str>,
         project_id: impl AsRef<str>,
     ) -> Result<(), PluginRuntimeSourceStoreError> {
-        let scope = PluginRuntimeSourceScope::new(owner, miniapp_id, project_id)?;
+        let scope = PluginRuntimeSourceScope::new(owner, plugin_product_id, project_id)?;
         let _guard = self.lock_mutation()?;
         let project_root = self.project_root(&scope);
         let project = self.load_project_root_unlocked(&scope)?;
@@ -818,10 +821,10 @@ impl PluginRuntimeSourceStore {
     pub fn purge_project(
         &self,
         owner: impl AsRef<str>,
-        miniapp_id: impl AsRef<str>,
+        plugin_product_id: impl AsRef<str>,
         project_id: impl AsRef<str>,
     ) -> Result<(), PluginRuntimeSourceStoreError> {
-        let scope = PluginRuntimeSourceScope::new(owner, miniapp_id, project_id)?;
+        let scope = PluginRuntimeSourceScope::new(owner, plugin_product_id, project_id)?;
         let _guard = self.lock_mutation()?;
         let parent = self.project_parent(&scope);
         let Some(canonical_parent) =
@@ -973,20 +976,20 @@ impl PluginRuntimeSourceStore {
     ) -> Result<PathBuf, PluginRuntimeSourceStoreError> {
         let owner_root = self.sources_root.join(&scope.owner_id);
         ensure_direct_child_directory(&self.sources_root, &owner_root)?;
-        let miniapps_root = owner_root.join(MINIAPPS_DIRECTORY);
-        ensure_direct_child_directory(&owner_root, &miniapps_root)?;
-        let miniapp_root = miniapps_root.join(scope.miniapp_id.as_ref());
-        ensure_direct_child_directory(&miniapps_root, &miniapp_root)?;
-        let projects_root = miniapp_root.join(PROJECTS_DIRECTORY);
-        ensure_direct_child_directory(&miniapp_root, &projects_root)?;
+        let plugins_root = owner_root.join(PLUGINS_DIRECTORY);
+        ensure_direct_child_directory(&owner_root, &plugins_root)?;
+        let plugin_root = plugins_root.join(scope.plugin_product_id.as_ref());
+        ensure_direct_child_directory(&plugins_root, &plugin_root)?;
+        let projects_root = plugin_root.join(PROJECTS_DIRECTORY);
+        ensure_direct_child_directory(&plugin_root, &projects_root)?;
         Ok(projects_root)
     }
 
     fn project_parent(&self, scope: &PluginRuntimeSourceScope) -> PathBuf {
         self.sources_root
             .join(&scope.owner_id)
-            .join(MINIAPPS_DIRECTORY)
-            .join(scope.miniapp_id.as_ref())
+            .join(PLUGINS_DIRECTORY)
+            .join(scope.plugin_product_id.as_ref())
             .join(PROJECTS_DIRECTORY)
     }
 
@@ -1016,8 +1019,8 @@ impl PluginRuntimeSourceStore {
         }
         Ok(PluginRuntimeSourceProject {
             owner_id: record.owner_id,
-            miniapp_id: MiniAppId::from(record.miniapp_id),
-            project_id: MiniAppProjectId::from(record.project_id),
+            plugin_product_id: PluginProductId::from(record.plugin_product_id),
+            project_id: PluginProjectId::from(record.project_id),
             display_name: record.display_name,
             managed_relative_path: self
                 .managed_relative_source_path(scope),
@@ -1061,8 +1064,8 @@ impl PluginRuntimeSourceStore {
         let files = read_revision_files(&revision_root, &snapshot, self.limits)?;
         let project = PluginRuntimeSourceProject {
             owner_id: record.owner_id,
-            miniapp_id: MiniAppId::from(record.miniapp_id),
-            project_id: MiniAppProjectId::from(record.project_id),
+            plugin_product_id: PluginProductId::from(record.plugin_product_id),
+            project_id: PluginProjectId::from(record.project_id),
             display_name: record.display_name,
             managed_relative_path: self.managed_relative_source_path(scope),
             source_snapshot_digest: head.snapshot_digest.clone(),
@@ -1095,9 +1098,9 @@ impl PluginRuntimeSourceStore {
             )?,
             self.limits.max_metadata_bytes,
         )?;
-        if project_record.format_version != MINIAPP_SOURCE_STORE_FORMAT_VERSION
+        if project_record.format_version != PLUGIN_SOURCE_STORE_FORMAT_VERSION
             || project_record.owner_id != scope.owner_id
-            || project_record.miniapp_id != scope.miniapp_id.as_ref()
+            || project_record.plugin_product_id != scope.plugin_product_id.as_ref()
             || project_record.project_id != scope.project_id.as_ref()
         {
             return Err(PluginRuntimeSourceStoreError::ScopeMismatch);
@@ -1141,7 +1144,7 @@ impl PluginRuntimeSourceStore {
             fs::canonicalize(&project_root).map_err(|error| io_error(&project_root, error))?;
         if canonical_project.parent() != Some(canonical_parent.as_path()) {
             return Err(PluginRuntimeSourceStoreError::CorruptSource(
-                "project root escaped its owner/miniapp/project parent".into(),
+                "project root escaped its owner/plugin/project parent".into(),
             ));
         }
         Ok(canonical_project)
@@ -1178,9 +1181,9 @@ impl PluginRuntimeSourceStore {
 
     fn managed_relative_source_path(&self, scope: &PluginRuntimeSourceScope) -> String {
         format!(
-            "{SOURCES_DIRECTORY}/{}/{MINIAPPS_DIRECTORY}/{}/{PROJECTS_DIRECTORY}/{}/{SOURCE_DIRECTORY}",
+            "{SOURCES_DIRECTORY}/{}/{PLUGINS_DIRECTORY}/{}/{PROJECTS_DIRECTORY}/{}/{SOURCE_DIRECTORY}",
             scope.owner_id,
-            scope.miniapp_id.as_ref(),
+            scope.plugin_product_id.as_ref(),
             scope.project_id.as_ref()
         )
     }
@@ -1191,7 +1194,7 @@ impl PluginRuntimeSourceStore {
 struct ProjectRecord {
     format_version: String,
     owner_id: String,
-    miniapp_id: String,
+    plugin_product_id: String,
     project_id: String,
     display_name: String,
 }
@@ -1210,9 +1213,9 @@ struct HeadRecord {
 
 impl HeadRecord {
     fn validate(&self) -> Result<(), PluginRuntimeSourceStoreError> {
-        if self.format_version != MINIAPP_SOURCE_STORE_FORMAT_VERSION
-            || self.build_profile != JavaScriptBuildProfile::MiniAppReleaseV1
-            || self.build_profile_version != MINIAPP_SOURCE_BUILD_PROFILE_VERSION
+        if self.format_version != PLUGIN_SOURCE_STORE_FORMAT_VERSION
+            || self.build_profile != JavaScriptBuildProfile::PluginReleaseV1
+            || self.build_profile_version != PLUGIN_SOURCE_BUILD_PROFILE_VERSION
             || self.source_revision == 0
             || self.build_generation == 0
         {
@@ -1236,7 +1239,7 @@ struct SnapshotRecord {
 
 impl SnapshotRecord {
     fn validate(&self) -> Result<(), PluginRuntimeSourceStoreError> {
-        if self.format_version != MINIAPP_SOURCE_STORE_FORMAT_VERSION {
+        if self.format_version != PLUGIN_SOURCE_STORE_FORMAT_VERSION {
             return Err(PluginRuntimeSourceStoreError::InvalidRecord(
                 "source snapshot format version is unsupported".into(),
             ));
@@ -1356,12 +1359,12 @@ fn build_snapshot_record(
         content_kind,
     )?;
     let payload = SnapshotPayload {
-        format_version: MINIAPP_SOURCE_STORE_FORMAT_VERSION,
+        format_version: PLUGIN_SOURCE_STORE_FORMAT_VERSION,
         files: &files,
     };
     let snapshot_digest = canonical_digest(&payload)?;
     Ok(SnapshotRecord {
-        format_version: MINIAPP_SOURCE_STORE_FORMAT_VERSION.into(),
+        format_version: PLUGIN_SOURCE_STORE_FORMAT_VERSION.into(),
         files,
         snapshot_digest,
     })

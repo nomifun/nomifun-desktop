@@ -1729,8 +1729,8 @@ async fn checkpoint_validation_and_snapshot_admission_are_exact() {
         profile_digest: profile_digest.clone(),
         native_features: BTreeSet::new(),
         native_actions: BTreeSet::new(),
-        initial_capabilities: BTreeMap::<CapabilityId, RuntimeCapabilityExecutionContract>::new(),
-        on_demand_capabilities: BTreeMap::new(),
+        enabled_capabilities: BTreeMap::<CapabilityId, RuntimeCapabilityExecutionContract>::new(),
+
         packages: BTreeMap::new(),
         skills: BTreeMap::new(),
         mcp_tools: BTreeMap::new(),

@@ -78,7 +78,7 @@
         "scripts/",
         "docs/specs/2026-08-28-agent-capability-platform-v2/"
       ],
-      "deliverable": "Preset/Binding/Snapshot/Remote contracts, official exact-set seed manifest and D-022/D-026 fixtures",
+      "deliverable": "Preset/Binding/Snapshot/Remote contracts, official exact-set seed manifest and D-026 fixtures",
       "deletion_manifest": null,
       "required_local_checks": [
         "git diff --check",

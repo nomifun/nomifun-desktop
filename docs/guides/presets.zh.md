@@ -24,14 +24,14 @@ Runtime、网络、系统和提供商管理仍属于全局设置，尤其是
 | 对象 | 所属方 | Agent 工作台能做什么 |
 | --- | --- | --- |
 | Package / Plugin | 平台扩展域 | 只读取已正式物化的来源和 provenance |
-| MiniApp Active Release | MiniApp 产品域 | 只读取已发布、可供消费者使用的贡献 |
+| Plugin Active Release | Plugin Product 域 | 只读取已发布、可供消费者使用的贡献 |
 | Capability Catalog | 平台能力目录域 | 查询能力、来源、合同、支持的消费者和 availability |
 | Skill Catalog | 平台技能目录域 | 选择 instruction/workflow；Skill 本身不是执行器 |
 | AgentPreset | Agent authoring 域 | 保存用户意图和当前 Revision 引用 |
 | AgentPresetRevision | Agent authoring 域 | 保存不可变 payload、ContributionLock 和 revision digest |
 | Agent Session | Agent 运行域 | 消费冻结的 Snapshot，不反向改写 Revision |
 
-Plugin/MiniApp 是平台能力供给层，不是 Agent 子系统。安装、启停、配置、Credential、
+Plugin Product 是平台能力供给层，不是 Agent 子系统。安装、启停、配置、Credential、
 KV、`dataDir`、发布和 Service 生命周期由所属平台域负责；Agent 只能绑定正式的
 typed resource 或已物化 Capability。
 
@@ -41,9 +41,9 @@ typed resource 或已物化 Capability。
 
 | 种子 | 初始内容 | 不会自动做什么 |
 | --- | --- | --- |
-| 轻量 | 身份、指令和模型路由 | 不加入工具、Workspace、MCP、Plugin 或 MiniApp |
+| 轻量 | 身份、指令和模型路由 | 不加入工具、Workspace、MCP 或 Plugin |
 | 通用 | 官方常用 Capability/Skill | 不吸收用户安装的全部扩展 |
-| 全面 | 官方 Coding 基线 | 不安装或纳入全部 Plugin/MiniApp |
+| 全面 | 官方 Coding 基线 | 不安装或纳入全部 Plugin |
 | 自定义 | 空白或可选种子 | 不允许填写内部 ID、Digest 或 Runtime 参数 |
 
 所有创建结果都进入同一条主链：
@@ -135,4 +135,4 @@ generated inventory residual，详见：
 - [`DECISIONS.zh.md`](../specs/2026-08-28-agent-capability-platform-v2/DECISIONS.zh.md)
 - [`05-system-capability-replacement-foundation.zh.md`](../specs/2026-08-28-agent-capability-platform-v2/05-system-capability-replacement-foundation.zh.md)
 
-在 AP-7 admission 通过前，不得开始 06 的 Plugin/MiniApp 代码实施。
+在 AP-7 admission 通过前，不得开始 06 的 Plugin Product 代码实施。

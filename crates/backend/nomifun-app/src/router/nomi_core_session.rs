@@ -23,8 +23,8 @@ use futures_util::FutureExt;
 use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
 use nomifun_ai_agent::{
     AgentRuntimeRegistry, AgentStreamEvent, KernelNomiPluginToolSession,
-    NomiMiniAppToolInvoker, NomiMiniAppToolInvocation,
-    NomiMiniAppToolSchemaResolver, NomiPluginToolError,
+    NomiPluginProductToolInvocation, NomiPluginProductToolInvoker,
+    NomiPluginProductToolSchemaResolver, NomiPluginToolError,
     NomiPluginToolSchemaResolver, NomiPluginToolSession,
     NomiPluginToolSessionProvider, NomiPluginToolSessionRequest,
     NomiPlatformBuiltinContextAdmission,
@@ -34,16 +34,17 @@ use nomifun_ai_agent::{
 };
 use nomifun_agent_contracts::{
     AgentBindingValue, AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata,
-    ArtifactId,
-    MiniAppBridgeCallId, OperationId, PrincipalRef, RemoteBindingProvenance,
-    ResolvedMiniAppCapability, ScopeKey, StrictJsonValue, UserId,
+    ArtifactId, ContributionSourceKind, OperationId, PluginBridgeCallId,
+    PrincipalRef, RemoteBindingProvenance, ResolvedCapability, ScopeKey,
+    StrictJsonValue, UserId,
 };
 use nomifun_agent_control_plane::{
     AgentControlPlane, AuthenticatedOwner, ControlPlaneError,
     control_plane_router_without_legacy_skills,
 };
 use nomifun_api_types::{
-    AgentBindingValueDto, AgentResourceSelectionDto, AgentSessionCapabilitySelectionDto,
+    AgentBindingValueDto, AgentResourceSelectionDto,
+    AgentSessionCapabilitySelectionDto,
     ApiResponse, ConversationResponse,
     ConversationRuntimeStateKind, CreateAgentSessionRequestDto, CreateConversationRequest,
     CreateAgentSessionResponseDto, CreateAgentSessionTurnRequestDto,
@@ -59,6 +60,7 @@ use nomifun_api_types::{
     SwitchAgentSessionPresetRequestDto, SwitchAgentSessionPresetResponseDto,
     UpdateAgentSessionCapabilitySelectionRequestDto,
     UpdateAgentSessionCapabilitySelectionResponseDto,
+    CreateAgentPresetFromTemplateRequest, PutAgentBindingRequest,
 };
 use nomifun_common::{AppError, MessagePosition, MessageType};
 use nomifun_conversation::runtime_state::RuntimeBuildLease;
@@ -67,7 +69,10 @@ use nomifun_conversation::service::{
     BackgroundTurnRuntimePreparation, IdempotentMessageDelivery,
     PublicTurnDeliveryState,
 };
-use nomifun_conversation::{AgentExecutionConversationPort, ConversationService, IdmmTurnScope};
+use nomifun_conversation::{
+    AgentExecutionConversationPort, ConversationService, IdmmTurnScope,
+    ProductAgentResolution, ProductAgentSnapshotResolver, ProductAgentTarget,
+};
 use nomifun_db::{
     AgentExecutionTurnAuthority, AppendNomiRemoteEventParams, GetOrCreateRemoteSessionParams,
     IRemoteBindingRepository, RemoteOpenResult, SortOrder, TransitionNomiRemoteSessionParams,
@@ -107,6 +112,224 @@ pub(crate) struct NomiCoreSessionOwner {
     execution: AgentExecutionConversationPort,
     autowork_runtime_lease_issuer: nomifun_requirement::AutoWorkRuntimeLeaseIssuer,
     autowork_config_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ProductAgentSelection {
+    Template { template_key: String },
+    Preset { preset_id: String },
+}
+
+impl ProductAgentSelection {
+    fn template_id(&self) -> Option<&str> {
+        match self { Self::Template { template_key } => Some(template_key), _ => None }
+    }
+    fn preset_id(&self) -> Option<&str> {
+        match self { Self::Preset { preset_id } => Some(preset_id), _ => None }
+    }
+}
+
+pub(crate) struct NomiCoreProductAgentResolver {
+    control_plane: Arc<AgentControlPlane>,
+    owner_id: Arc<str>,
+    pool: nomifun_db::SqlitePool,
+    default_binding_lock: tokio::sync::Mutex<()>,
+}
+
+impl NomiCoreProductAgentResolver {
+    pub(crate) fn new(control_plane: Arc<AgentControlPlane>, owner_id: Arc<str>, pool: nomifun_db::SqlitePool) -> Self {
+        Self {
+            control_plane,
+            owner_id,
+            pool,
+            default_binding_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    async fn selection(&self, owner: &UserId, kind: &str, id: &str) -> Result<Option<ProductAgentSelection>, AppError> {
+        let raw: Option<String> = sqlx::query_scalar("SELECT selection_json FROM product_agent_selections WHERE owner_user_id = ? AND target_kind = ? AND target_id = ?")
+            .bind(owner.as_ref()).bind(kind).bind(id).fetch_optional(&self.pool).await
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+        raw.map(|raw| serde_json::from_str(&raw).map_err(|error| AppError::Internal(error.to_string()))).transpose()
+    }
+
+    async fn save_selection(&self, owner: &UserId, kind: &str, id: &str, selection: &ProductAgentSelection) -> Result<(), AppError> {
+        let raw = serde_json::to_string(selection).map_err(|error| AppError::Internal(error.to_string()))?;
+        sqlx::query("INSERT INTO product_agent_selections (owner_user_id, target_kind, target_id, selection_json) VALUES (?, ?, ?, ?) ON CONFLICT(owner_user_id, target_kind, target_id) DO UPDATE SET selection_json = excluded.selection_json")
+            .bind(owner.as_ref()).bind(kind).bind(id).bind(raw).execute(&self.pool).await
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn materialize(&self, owner: &UserId, selection: &ProductAgentSelection, model: Option<&AgentChatModelSelectionDto>) -> Result<AgentBindingValueDto, AppError> {
+        self.control_plane.validate_product_selection(owner, selection.template_id(), selection.preset_id(), model).await.map_err(control_plane_error_to_app)?;
+        let preset_id = match selection {
+            ProductAgentSelection::Preset { preset_id } => preset_id.clone(),
+            ProductAgentSelection::Template { template_key } => self.control_plane.create_from_template(owner, template_key,
+                CreateAgentPresetFromTemplateRequest {
+                    model: model.cloned(), reuse_existing: true, display_name: template_key.clone(), description: None,
+                    model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new(),
+                }).await.map_err(control_plane_error_to_app)?.preset.preset_id,
+        };
+        self.control_plane.resolve_agent_session_binding_with_model(owner, &preset_id, model).await.map_err(control_plane_error_to_app)
+    }
+}
+
+#[async_trait]
+impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
+    async fn resolve(
+        &self,
+        owner_id: &str,
+        target: &ProductAgentTarget,
+        requested_model: Option<&nomifun_common::ProviderWithModel>,
+    ) -> Result<ProductAgentResolution, AppError> {
+        let owner = UserId::from(owner_id.to_owned());
+        let _guard = self.default_binding_lock.lock().await;
+        let existing = self
+            .control_plane
+            .get_agent_binding(
+                &owner,
+                target.target_kind.clone(),
+                target.target_id.clone(),
+            )
+            .await
+            .map_err(control_plane_error_to_app)?;
+        let selection = self.selection(&owner, &target.target_kind, &target.target_id).await?;
+        let binding = if let Some(selection) = selection {
+            let model = requested_model.map(|model| AgentChatModelSelectionDto { provider_id: model.provider_id.clone(), model: model.model.clone() });
+            let mut binding = self.materialize(&owner, &selection, model.as_ref()).await?;
+            if existing.as_ref().is_some_and(|record| record.agent_binding.preset_revision_ref == binding.preset_revision_ref
+                && record.agent_binding.resolved_snapshot_ref == binding.resolved_snapshot_ref) {
+                existing.unwrap().agent_binding
+            } else {
+                let previous = existing.as_ref().map(|record| record.agent_binding.binding_version);
+                binding.binding_version = previous.unwrap_or(0) + 1;
+                self.control_plane.put_agent_binding(&owner, target.target_kind.clone(), target.target_id.clone(),
+                    PutAgentBindingRequest { expected_binding_version: previous, agent_binding: binding }).await.map_err(control_plane_error_to_app)?.agent_binding
+            }
+        } else if let Some(existing) = existing {
+            if let Some(model) = requested_model {
+                self
+                    .control_plane
+                    .resolve_agent_session_binding_with_model(
+                        &owner,
+                        &existing.agent_binding.preset_revision_ref.preset_id,
+                        Some(&AgentChatModelSelectionDto {
+                            provider_id: model.provider_id.clone(),
+                            model: model.model.clone(),
+                        }),
+                    )
+                    .await
+                    .map_err(control_plane_error_to_app)?
+            } else {
+                existing.agent_binding
+            }
+        } else {
+            let editor = self
+                .control_plane
+                .create_from_template(
+                    &owner,
+                    &target.default_template_key,
+                    CreateAgentPresetFromTemplateRequest {
+                        model: requested_model.map(|model| AgentChatModelSelectionDto {
+                            provider_id: model.provider_id.clone(),
+                            model: model.model.clone(),
+                        }),
+                        reuse_existing: true,
+                        display_name: target.default_template_key.clone(),
+                        description: None,
+                        model_route_refs: BTreeMap::new(),
+                        chat_route_records: BTreeMap::new(),
+                    },
+                )
+                .await
+                .map_err(control_plane_error_to_app)?;
+            let mut binding = self
+                .control_plane
+                .resolve_agent_session_binding(&owner, &editor.preset.preset_id)
+                .await
+                .map_err(control_plane_error_to_app)?;
+            binding.binding_version = 1;
+            self.control_plane
+                .put_agent_binding(
+                    &owner,
+                    target.target_kind.clone(),
+                    target.target_id.clone(),
+                    PutAgentBindingRequest {
+                        expected_binding_version: None,
+                        agent_binding: binding,
+                    },
+                )
+                .await
+                .map_err(control_plane_error_to_app)?
+                .agent_binding
+        };
+        let (binding, revision, snapshot) = self
+            .control_plane
+            .saved_binding_artifacts(&owner, &binding)
+            .await
+            .map_err(control_plane_error_to_app)?;
+        let editor = self
+            .control_plane
+            .editor(
+                &owner,
+                binding.preset_revision_ref.preset_id.as_ref(),
+                Some(binding.preset_revision_ref.revision),
+            )
+            .await
+            .map_err(control_plane_error_to_app)?;
+        let common_owner = nomifun_common::UserId::parse(owner_id.to_owned())
+            .map_err(|error| AppError::Forbidden(format!("invalid product Agent owner: {error}")))?;
+        let projected = super::nomi_core_agent_projection::project_saved_artifacts(
+            &common_owner,
+            binding,
+            revision,
+            snapshot,
+            Some(&editor.preset.display_name),
+        )?;
+        Ok(ProductAgentResolution {
+            snapshot: projected.projection.snapshot,
+            runtime_extra: projected.projection.request.extra,
+        })
+    }
+}
+
+#[async_trait]
+impl nomifun_customer_service::CustomerServiceAgentPolicyResolver
+    for NomiCoreProductAgentResolver
+{
+    async fn resolve(
+        &self,
+        cs_agent_id: &str,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<nomifun_customer_service::CustomerServiceAgentPolicy, AppError> {
+        let target = ProductAgentTarget {
+            target_kind: "customer".to_owned(),
+            target_id: cs_agent_id.to_owned(),
+            default_template_key: "customer-service.default".to_owned(),
+        };
+        let requested_model = nomifun_common::ProviderWithModel {
+            provider_id: provider_id.to_owned(),
+            model: model.to_owned(),
+            use_model: Some(model.to_owned()),
+        };
+        let resolved = ProductAgentSnapshotResolver::resolve(
+            self,
+            // Customer-service product resources are installation-owner scoped.
+            // The target binding itself carries the authenticated owner and the
+            // control plane rejects cross-owner reads.
+            self.owner_id.as_ref(),
+            &target,
+            Some(&requested_model),
+        )
+        .await?;
+        Ok(nomifun_customer_service::CustomerServiceAgentPolicy {
+            capabilities: resolved.snapshot.enabled_capabilities.into_iter().collect(),
+            instructions: resolved.snapshot.instructions,
+        })
+    }
 }
 
 impl NomiCoreSessionOwner {
@@ -371,7 +594,7 @@ pub(crate) struct NomiCorePluginToolSessionProvider {
         super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry,
     robot_owner: Option<Arc<super::nomi_core_robot::NomiCoreRobotWave4Owner>>,
     plugin_runtime:
-        Arc<nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService>,
+        Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
 }
 
 impl NomiCorePluginToolSessionProvider {
@@ -394,7 +617,7 @@ impl NomiCorePluginToolSessionProvider {
         resource_bindings: super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry,
         robot_owner: Option<Arc<super::nomi_core_robot::NomiCoreRobotWave4Owner>>,
         plugin_runtime: Arc<
-            nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService,
+            nomifun_plugin_platform::runtime::PluginRuntimeApplicationService,
         >,
     ) -> Self {
         Self {
@@ -465,9 +688,8 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
         };
         let wave2_workspace_selected = revision
             .payload
-            .initial_capabilities
+            .enabled_capabilities
             .iter()
-            .chain(&revision.payload.on_demand_capabilities)
             .any(|selection| {
                 matches!(
                     selection.capability.id.as_ref(),
@@ -545,22 +767,14 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
             ))
         })?;
         let robot_capability_ids = super::nomi_core_robot::tool_capability_ids();
-        let initial_robot_ids = compiled
+        let enabled_robot_ids = compiled
             .content()
-            .initial_capabilities
+            .enabled_capabilities
             .iter()
             .map(|capability| capability.capability.id.clone())
             .filter(|capability_id| robot_capability_ids.contains(capability_id))
             .collect::<BTreeSet<_>>();
-        let deferred_robot_ids = compiled
-            .content()
-            .on_demand_capabilities
-            .iter()
-            .map(|capability| capability.capability.id.clone())
-            .filter(|capability_id| robot_capability_ids.contains(capability_id))
-            .collect::<BTreeSet<_>>();
-        let plugin_session = if initial_robot_ids.is_empty()
-            && deferred_robot_ids.is_empty()
+        let plugin_session = if enabled_robot_ids.is_empty()
         {
             plugin_session
         } else {
@@ -585,8 +799,7 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
                     &principal,
                     &session_id,
                     robot_binding,
-                    &initial_robot_ids,
-                    &deferred_robot_ids,
+                    &enabled_robot_ids,
                 )
                 .await
                 .map_err(AppError::Conflict)?;
@@ -594,19 +807,16 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
                 .with_host_dynamic_tools(descriptors, invoker)
                 .map_err(|error| AppError::Conflict(error.to_string()))?
         };
-        let miniapp_actions =
-            KernelNomiPluginToolSession::materialize_miniapp_actions(
-                &compiled,
-                &principal,
-                &session_id,
-                &ScopeKey::from(format!(
-                    "session:{}",
-                    request.conversation_id
-                )),
-                Arc::new(NomiCoreMiniAppSchemaResolver {
-                    application: Arc::clone(&self.plugin_runtime),
-                }),
-            )
+        let plugin_product_actions =
+            KernelNomiPluginToolSession::materialize_plugin_product_actions(
+            &compiled,
+            &principal,
+            &session_id,
+            &ScopeKey::from(format!("session:{}", request.conversation_id)),
+            Arc::new(NomiCorePluginProductSchemaResolver {
+                application: Arc::clone(&self.plugin_runtime),
+            }),
+        )
             .await
             .map_err(|error| {
                 AppError::Conflict(format!(
@@ -622,9 +832,9 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
                 owner,
                 session_id,
             }))
-            .with_miniapp_actions(
-                miniapp_actions,
-                Arc::new(NomiCoreMiniAppToolInvoker {
+            .with_plugin_product_actions(
+                plugin_product_actions,
+                Arc::new(NomiCorePluginProductToolInvoker {
                     application: Arc::clone(&self.plugin_runtime),
                     owner_user_id: common_owner.as_ref().to_owned(),
                 }),
@@ -956,17 +1166,17 @@ fn install_runtime_mcp_selection(
     Ok(())
 }
 
-struct NomiCoreMiniAppSchemaResolver {
+struct NomiCorePluginProductSchemaResolver {
     application:
-        Arc<nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService>,
+        Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
 }
 
 #[async_trait]
-impl NomiMiniAppToolSchemaResolver for NomiCoreMiniAppSchemaResolver {
+impl NomiPluginProductToolSchemaResolver for NomiCorePluginProductSchemaResolver {
     async fn resolve(
         &self,
         owner: &PrincipalRef,
-        capability: &ResolvedMiniAppCapability,
+        capability: &ResolvedCapability,
         reference: &nomifun_agent_contracts::CanonicalSchemaRef,
     ) -> Result<StrictJsonValue, String> {
         if owner.principal_kind != "user" {
@@ -983,38 +1193,75 @@ impl NomiMiniAppToolSchemaResolver for NomiCoreMiniAppSchemaResolver {
     }
 }
 
-struct NomiCoreMiniAppToolInvoker {
+struct NomiCorePluginProductToolInvoker {
     application:
-        Arc<nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService>,
+        Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
     owner_user_id: String,
 }
 
 #[async_trait]
-impl NomiMiniAppToolInvoker for NomiCoreMiniAppToolInvoker {
+impl NomiPluginProductToolInvoker for NomiCorePluginProductToolInvoker {
     async fn invoke(
         &self,
-        request: NomiMiniAppToolInvocation,
+        request: NomiPluginProductToolInvocation,
     ) -> Result<StrictJsonValue, NomiPluginToolError> {
+        request
+            .capability()
+            .validate()
+            .map_err(|error| NomiPluginToolError::Contract(error.message))?;
+        let plugin_product_id = request
+            .capability()
+            .plugin_product_id
+            .clone()
+            .ok_or_else(|| {
+                NomiPluginToolError::Contract(
+                    "Plugin Product capability is missing plugin_product_id".to_owned(),
+                )
+            })?;
+        let active_release = request
+            .capability()
+            .active_release
+            .clone()
+            .ok_or_else(|| {
+                NomiPluginToolError::Contract(
+                    "Plugin Product capability is missing active_release".to_owned(),
+                )
+            })?;
+        let active_release_epoch = request
+            .capability()
+            .active_release_epoch
+            .ok_or_else(|| {
+                NomiPluginToolError::Contract(
+                    "Plugin Product capability is missing active_release_epoch".to_owned(),
+                )
+            })?;
+        let catalog_digest = request
+            .capability()
+            .catalog_digest
+            .clone()
+            .ok_or_else(|| {
+                NomiPluginToolError::Contract(
+                    "Plugin Product capability is missing catalog_digest".to_owned(),
+                )
+            })?;
         let operation_id = request.operation_id().clone();
         self.application
             .invoke_agent_capability(
                 PluginRuntimeAgentCapabilityInvocation {
                     owner_user_id: self.owner_user_id.clone(),
-                    miniapp_id: request.capability().miniapp_id.clone(),
+                    plugin_product_id,
                     capability: request.capability().capability.clone(),
                     action_id: request.action().action_id.clone(),
                     action_allowlist: request
                         .capability()
                         .action_allowlist
                         .clone(),
-                    active_release: request.capability().active_release.clone(),
-                    active_release_epoch: request
-                        .capability()
-                        .active_release_epoch,
-                    catalog_digest: request.capability().catalog_digest.clone(),
+                    active_release,
+                    active_release_epoch,
+                    catalog_digest,
                     operation_id: operation_id.clone(),
-                    call_id: MiniAppBridgeCallId::from(format!(
-                        "nomi-miniapp:{}",
+                    call_id: PluginBridgeCallId::from(format!(
+                        "nomi-plugin-product:{}",
                         operation_id.as_ref()
                     )),
                     payload: request.input().clone(),
@@ -1071,18 +1318,15 @@ pub(super) fn compile_nomi_plugin_snapshot(
             audience: persisted.audience.clone(),
             created_at_ms: persisted.created_at_ms,
             resolver_run_id: persisted.resolver_run_id.clone(),
-            miniapp_capabilities: persisted
+            plugin_product_capabilities: persisted
                 .content
-                .initial_miniapp_capabilities
+                .enabled_capabilities
                 .iter()
+                .filter(|capability| {
+                    capability.contribution_lock.source_kind
+                        == ContributionSourceKind::PluginProductActiveRelease
+                })
                 .cloned()
-                .chain(
-                    persisted
-                        .content
-                        .on_demand_miniapp_capabilities
-                        .iter()
-                        .cloned(),
-                )
                 .collect(),
         },
     )
@@ -1374,6 +1618,9 @@ impl nomifun_channel::ChannelSessionPort for NomiCoreSessionOwner {
         idempotency_key: &str,
         request: SendMessageRequest,
     ) -> Result<nomifun_channel::ChannelTurnDelivery, AppError> {
+        self.service
+            .refresh_product_agent_for_existing(owner_id, session_id)
+            .await?;
         let delivery = self
             .service
             .send_message_with_idempotency_key(
@@ -2849,6 +3096,7 @@ const NOMI_CORE_REMOTE_CANCEL_COMMAND_TIMEOUT: Duration = Duration::from_secs(30
 /// adapter never constructs an AgentRuntimeRegistry or a ConversationService.
 #[derive(Clone)]
 pub(crate) struct NomiCoreAgentApiState {
+    product_agent_resolver: Arc<NomiCoreProductAgentResolver>,
     pub(crate) session_owner: Arc<NomiCoreSessionOwner>,
     pub(crate) control_plane: Arc<AgentControlPlane>,
     pub(crate) remote_repository: Arc<dyn IRemoteBindingRepository>,
@@ -2868,8 +3116,10 @@ impl NomiCoreAgentApiState {
         resource_bindings: super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry,
         mcp_server_repository: Arc<dyn nomifun_db::IMcpServerRepository>,
         wave4_owners: Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
+        product_agent_resolver: Arc<NomiCoreProductAgentResolver>,
     ) -> Self {
         Self {
+            product_agent_resolver,
             session_owner,
             control_plane,
             remote_repository,
@@ -3065,6 +3315,10 @@ pub(crate) fn build_nomi_core_remote_router(
 
 fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
     Router::new()
+        .route(
+            "/api/product-agent-bindings/{target_kind}/{target_id}",
+            get(product_agent_options).put(select_product_agent_binding),
+        )
         .route("/api/agent-sessions", post(create_nomi_core_agent_session))
         .route("/api/runtime-engines", get(list_runtime_engines))
         .route(
@@ -3100,6 +3354,172 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
             post(fork_nomi_core_agent_session),
         )
         .with_state(state)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelectProductAgentBindingRequest {
+    #[serde(default)]
+    preset_id: Option<String>,
+    #[serde(default)]
+    selection: Option<ProductAgentSelection>,
+    #[serde(default)]
+    model: Option<AgentChatModelSelectionDto>,
+    #[serde(default)]
+    conversation_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ProductAgentOptionsQuery {
+    provider_id: Option<String>,
+    model: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProductAgentOption {
+    selection: ProductAgentSelection,
+    display_name: String,
+    available: bool,
+    reason: Option<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProductAgentOptions {
+    selection: ProductAgentSelection,
+    options: Vec<ProductAgentOption>,
+    needs_model: bool,
+}
+
+fn product_option_reason(error: &ControlPlaneError) -> &'static str {
+    let details = error.details().unwrap_or(Value::Null);
+    let features = details["missing_features"].as_array();
+    if error.code().as_ref() == "MODEL_ROUTE_FEATURES_MISSING" {
+        if details["required_protocol"] == "openai.responses" || features.is_some_and(|items| items.iter().any(|item| item == "WebSearch")) {
+            return "web_search";
+        }
+        if features.is_some_and(|items| items.iter().any(|item| item == "ImageInput")) { return "vision"; }
+    }
+    if error.code().as_ref().starts_with("MODEL_") { return "model"; }
+    if error.code().as_ref() == "AGENT_PRESET_NOT_FOUND" { return "removed"; }
+    "capability"
+}
+
+fn require_product_target(state: &NomiCoreAgentApiState, owner: &AuthenticatedOwner, kind: &str, id: &str) -> Result<&'static str, NomiCoreApiError> {
+    if owner.as_ref() != state.product_agent_resolver.owner_id.as_ref() {
+        return Err(NomiCoreApiError::new(StatusCode::FORBIDDEN, "RESOURCE_OWNER_MISMATCH", "product settings require the installation owner"));
+    }
+    if id.trim().is_empty() || id.len() > 512 || id.trim() != id {
+        return Err(NomiCoreApiError::new(StatusCode::BAD_REQUEST, "PRESET_RESOURCE_NOT_BOUND", "invalid product target"));
+    }
+    product_default_template(kind).ok_or_else(|| NomiCoreApiError::new(StatusCode::UNPROCESSABLE_ENTITY,
+        "CAPABILITY_UNAVAILABLE_ON_PLATFORM", "unsupported product target"))
+}
+
+async fn product_agent_options(
+    State(state): State<NomiCoreAgentApiState>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path((kind, id)): Path<(String, String)>,
+    Query(query): Query<ProductAgentOptionsQuery>,
+) -> Result<Json<ApiResponse<ProductAgentOptions>>, NomiCoreApiError> {
+    let default = require_product_target(&state, &owner, &kind, &id)?;
+    let model = match (query.provider_id, query.model) {
+        (Some(provider_id), Some(model)) => Some(AgentChatModelSelectionDto { provider_id, model }),
+        (None, None) => None,
+        _ => return Err(NomiCoreApiError::new(StatusCode::BAD_REQUEST, "MODEL_ROUTE_NOT_FOUND", "incomplete model selection")),
+    };
+    let library = state.control_plane.library(&owner).await?;
+    let mut candidates = library.official_templates.iter().map(|template| {
+        let key = serde_json::to_value(template.template_key).unwrap().as_str().unwrap().to_owned();
+        (ProductAgentSelection::Template { template_key: key.clone() }, key)
+    }).collect::<Vec<_>>();
+    candidates.extend(library.user_presets.iter().map(|preset| (ProductAgentSelection::Preset { preset_id: preset.preset_id.clone() }, preset.display_name.clone())));
+    let selection = match state.product_agent_resolver.selection(&owner, &kind, &id).await? {
+        Some(selection) => selection,
+        None => match state.control_plane.get_agent_binding(&owner, kind.clone(), id.clone()).await? {
+            Some(record) => {
+                let id = record.agent_binding.preset_revision_ref.preset_id;
+                match state.control_plane.internal_official_template(&owner, &id).await.unwrap_or(None) {
+                    Some(key) => ProductAgentSelection::Template { template_key: key.as_str().to_owned() },
+                    None => ProductAgentSelection::Preset { preset_id: id },
+                }
+            }
+            None => ProductAgentSelection::Template { template_key: default.to_owned() },
+        },
+    };
+    if !candidates.iter().any(|(candidate, _)| candidate == &selection) {
+        let name = match selection.preset_id() {
+            Some(id) => state.control_plane.editor(&owner, id, None).await.map(|editor| editor.preset.display_name).unwrap_or_default(),
+            None => String::new(),
+        };
+        candidates.push((selection.clone(), name));
+    }
+    let mut options = Vec::new();
+    for (selection, display_name) in candidates {
+        let result = state.control_plane.validate_product_selection(&owner, selection.template_id(), selection.preset_id(), model.as_ref()).await;
+        options.push(ProductAgentOption { selection, display_name, available: result.is_ok(), reason: result.err().as_ref().map(product_option_reason) });
+    }
+    Ok(Json(ApiResponse::ok(ProductAgentOptions { selection, options, needs_model: model.is_none() })))
+}
+
+fn product_default_template(target_kind: &str) -> Option<&'static str> {
+    match target_kind {
+        "companion" => Some("companion.default"),
+        "robot" => Some("robot.default"),
+        "customer" => Some("customer-service.default"),
+        "creative_studio_canvas" => Some("creative-studio.default"),
+        _ => None,
+    }
+}
+
+async fn select_product_agent_binding(
+    State(state): State<NomiCoreAgentApiState>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path((target_kind, target_id)): Path<(String, String)>,
+    Json(request): Json<SelectProductAgentBindingRequest>,
+) -> Result<Json<ApiResponse<Value>>, NomiCoreApiError> {
+    let default = require_product_target(&state, &owner, &target_kind, &target_id)?;
+    let selection = match (request.selection, request.preset_id) {
+        (Some(selection), None) => selection,
+        (None, Some(preset_id)) => ProductAgentSelection::Preset { preset_id },
+        _ => return Err(NomiCoreApiError::new(StatusCode::BAD_REQUEST, "AGENT_PRESET_NOT_FOUND", "select exactly one Agent")),
+    };
+    let _guard = state.product_agent_resolver.default_binding_lock.lock().await;
+    let mut model = request.model;
+    if let Some(id) = request.conversation_id.as_deref() {
+        let current = state.session_owner.get_session(owner.as_ref(), id).await?;
+        let belongs = (current.extra["product_agent_target_kind"] == target_kind && current.extra["product_agent_target_id"] == target_id)
+            || (target_kind == "companion" && current.extra["companion_id"] == target_id && current.extra["robot_session"] != true)
+            || (target_kind == "robot" && current.extra["robot_id"] == target_id);
+        if !belongs { return Err(NomiCoreApiError::new(StatusCode::FORBIDDEN, "RESOURCE_OWNER_MISMATCH", "conversation belongs to another product target")); }
+        if current.status == nomifun_common::ConversationStatus::Running {
+            return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "REMOTE_SESSION_BUSY", "wait for the current reply"));
+        }
+        if let Some(current_model) = current.model {
+            model = Some(AgentChatModelSelectionDto { provider_id: current_model.provider_id, model: current_model.model });
+        }
+    }
+    // Validate before any binding/selection mutation, including stale UI requests.
+    state.control_plane.validate_product_selection(&owner, selection.template_id(), selection.preset_id(), model.as_ref()).await?;
+    let mut response = json!({ "selection": selection, "needs_model": model.is_none() });
+    if model.is_some() {
+        let mut binding = state.product_agent_resolver.materialize(&owner, &selection, model.as_ref()).await?;
+        if let Some(id) = request.conversation_id.as_deref() {
+            let (value, revision, snapshot) = state.control_plane.saved_binding_artifacts(&owner, &binding).await?;
+            let name = state.control_plane.editor(&owner, &binding.preset_revision_ref.preset_id, None).await?.preset.display_name;
+            let projected = super::nomi_core_agent_projection::project_saved_artifacts(&common_owner_id(&owner)?, value, revision, snapshot, Some(&name))?;
+            state.session_owner.service().replace_product_agent_resolution(owner.as_ref(), id,
+                &ProductAgentTarget { target_kind: target_kind.clone(), target_id: target_id.clone(), default_template_key: default.to_owned() },
+                ProductAgentResolution { snapshot: projected.projection.snapshot, runtime_extra: projected.projection.request.extra }).await?;
+        }
+        let existing = state.control_plane.get_agent_binding(&owner, target_kind.clone(), target_id.clone()).await?;
+        let previous = existing.as_ref().map(|record| record.agent_binding.binding_version);
+        binding.binding_version = previous.unwrap_or(0) + 1;
+        let stored = state.control_plane.put_agent_binding(&owner, target_kind.clone(), target_id.clone(),
+            PutAgentBindingRequest { expected_binding_version: previous, agent_binding: binding }).await?;
+        response["agent_binding"] = serde_json::to_value(stored.agent_binding)?;
+    }
+    state.product_agent_resolver.save_selection(&owner, &target_kind, &target_id, &selection).await?;
+    Ok(Json(ApiResponse::ok(response)))
 }
 
 fn nomi_core_remote_routes(state: NomiCoreAgentApiState) -> Router {
@@ -3468,11 +3888,8 @@ pub(super) struct NomiCoreSessionMetadata {
 struct NomiCoreAgentSessionCapabilityResponse {
     resolved_snapshot_ref: nomifun_agent_contracts::ResolvedSnapshotRef,
     generation: u64,
-    initial_capabilities: Vec<String>,
-    on_demand_capabilities: Vec<String>,
+    enabled_capabilities: Vec<String>,
     active_capabilities: Vec<String>,
-    compact_on_demand_index:
-        Vec<nomifun_agent_contracts::CompactOnDemandCapabilityEntry>,
     /// Explicitly distinguishes saved-preset projection from a live Kernel
     /// active-set query.  It prevents a consumer from mistaking generation 0
     /// for an unimplemented empty response.
@@ -4964,9 +5381,11 @@ async fn create_nomi_core_agent_session(
         .await?
         .preset
         .display_name;
-    let projection =
+    let mut projection =
         resolve_saved_binding_projection(&state, &owner, &binding, request.title.as_deref())
             .await?;
+    // The conversation title is not the Agent's identity.
+    projection.projection.snapshot.preset_name = agent_name.clone();
     let mcp_selection = match capability_selection.as_ref() {
         Some(selection) => {
             explicit_session_mcp_selection(
@@ -5112,21 +5531,13 @@ async fn get_nomi_core_agent_session_capabilities(
             "the capability projection Snapshot differs from the Session binding",
         ));
     }
-    let initial_capabilities = projection
+    let enabled_capabilities = projection
         .revision
         .payload
-        .initial_capabilities
+        .enabled_capabilities
         .iter()
         .map(|selection| selection.capability.id.as_ref().to_owned())
         .collect::<Vec<_>>();
-    let on_demand_capabilities = projection
-        .revision
-        .payload
-        .on_demand_capabilities
-        .iter()
-        .map(|selection| selection.capability.id.as_ref().to_owned())
-        .collect::<Vec<_>>();
-    let compact_on_demand_index = projection.snapshot.content.compact_on_demand_index;
     let live_activation = state
         .session_owner
         .runtime_registry
@@ -5161,16 +5572,16 @@ async fn get_nomi_core_agent_session_capabilities(
                 "nomi_core_live_runtime",
             )
         } else {
-            (0, initial_capabilities.clone(), "nomi_core_saved_binding")
+            (0, enabled_capabilities.clone(), "nomi_core_saved_binding")
         };
     Ok(Json(ApiResponse::ok(
         NomiCoreAgentSessionCapabilityResponse {
             resolved_snapshot_ref: metadata.binding.resolved_snapshot_ref,
             generation,
-            initial_capabilities: initial_capabilities.clone(),
-            on_demand_capabilities,
+            enabled_capabilities: enabled_capabilities.clone(),
+
             active_capabilities,
-            compact_on_demand_index,
+
             state_source,
         },
     )))

@@ -84,7 +84,7 @@
 
 .previewModal {
   width: min(1120px, calc(100vw - 32px));
-  max-height: calc(100dvh - 32px);
+  max-height: calc(100vh - 32px);
   overflow: hidden;
 }
 
@@ -95,7 +95,7 @@
 .previewStage {
   position: relative;
   /* Leave room for the header and viewport gutters, even in a short window. */
-  height: min(72dvh, 800px, calc(100dvh - 80px));
+  height: min(72vh, 800px, calc(100vh - 80px));
   overflow: hidden;
   background: #181818;
   color: #f3f3f3;
@@ -718,40 +718,6 @@
   background: var(--color-bg-2);
 }
 
-@media (max-width: 720px) {
-  .nodeToolbar .toolLabel {
-    display: none;
-  }
-
-  .cropModal :global(.arco-modal-content) {
-    padding: 14px;
-  }
-
-  .cropMetaBar {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .aspectSelect {
-    justify-content: space-between;
-  }
-
-  .splitWorkspace {
-    grid-template-columns: 1fr;
-  }
-
-  .splitControlPane {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .splitSummary {
-    grid-column: 1 / -1;
-  }
-
-  .splitGenerateButton {
-    grid-column: 1 / -1;
-  }
-}
 
 @media (max-width: 920px) {
   .maskDialog {

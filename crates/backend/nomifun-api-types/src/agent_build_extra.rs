@@ -175,6 +175,13 @@ pub struct NomiBuildExtra {
     /// `None` means there is no companion binding.
     #[serde(default, deserialize_with = "deserialize_companion_id")]
     pub companion_id: Option<String>,
+    /// Server-projected product Agent ceiling. `None` preserves legacy
+    /// Companion sessions; `Some(false)` suppresses the corresponding native
+    /// capability family for a selected Agent that did not grant it.
+    #[serde(default)]
+    pub companion_memory_enabled: Option<bool>,
+    #[serde(default)]
+    pub companion_skills_enabled: Option<bool>,
     /// Knowledge bases mounted into this session's workspace, computed when
     /// the Agent runtime is created. The Nomi factory renders
     /// these into a system-prompt section so the agent knows what extended
@@ -221,10 +228,6 @@ pub struct NomiBuildExtra {
     /// attachment behavior.
     #[serde(default)]
     pub vision_input: Option<bool>,
-    /// True when `llm.vision` is inside the frozen on-demand ceiling but has
-    /// not yet been activated for the current Session.
-    #[serde(default)]
-    pub vision_on_demand: bool,
     /// Canonical runtime profile projected from an official Agent revision.
     /// The Nomi factory accepts `coding` only when the exact bounded coding
     /// tool policy is present; open JSON cannot use this field to add tools.
@@ -285,7 +288,6 @@ mod tests {
 
         let ordinary: NomiBuildExtra = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(ordinary.vision_input, None);
-        assert!(!ordinary.vision_on_demand);
     }
 
     #[test]

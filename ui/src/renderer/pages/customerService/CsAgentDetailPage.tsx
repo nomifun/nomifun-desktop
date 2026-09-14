@@ -34,6 +34,7 @@ import CsChannelBotsSection from './CsChannelBotsSection';
 import styles from './CsAgentDetailPage.module.css';
 import { useCsAgent } from './useCsAgents';
 import { useKnowledgeBaseOptions } from './useKnowledgeBaseOptions';
+import ProductAgentBindingSelect from '@/renderer/components/agent/ProductAgentBindingSelect';
 
 /** One titled card section on the detail page. */
 const Section: React.FC<{ title: string; extra?: React.ReactNode; children: React.ReactNode }> = ({ title, extra, children }) => (
@@ -420,6 +421,23 @@ const CsAgentDetailContent: React.FC<{ csAgentId: CsAgentId | null }> = ({ csAge
           <div className={`${styles.column} ${styles.leftColumn}`}>
             {/* 模型与知识库 */}
             <Section title={t('customerService.sections.modelKnowledge', { defaultValue: '模型与知识库' })}>
+              <div className={styles.modelRow}>
+                <span className={styles.fieldLabel}>
+                  {t('agentSettings.productBinding.label', { defaultValue: 'Agent 设定' })}
+                </span>
+                <ProductAgentBindingSelect
+                  targetKind='customer'
+                  targetId={agent.cs_agent_id}
+                  defaultTemplateKey='customer-service.default'
+                  model={agent.provider_id && agent.model ? {
+                    id: agent.provider_id,
+                    use_model: agent.model,
+                  } : undefined}
+                />
+              </div>
+
+              <div className={styles.divider} />
+
               <div className={styles.modelRow}>
                 <span className={styles.fieldLabel}>{t('common.model', { defaultValue: '模型' })}</span>
                 <div className={styles.modelControls}>

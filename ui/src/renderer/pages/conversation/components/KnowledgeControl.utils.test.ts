@@ -93,6 +93,15 @@ describe('KnowledgeControl search helpers', () => {
     expect(source.includes("t('knowledge.mount.rootMissing'")).toBe(true);
   });
 
+  test('returns an unmounted draft to an inert read-only policy', () => {
+    const source = readFileSync(new URL('./KnowledgeControl.tsx', import.meta.url), 'utf8');
+
+    expect(
+      source.includes("{ writeback: false, writeback_eagerness: 'manual' as const }")
+    ).toBe(true);
+    expect(source.includes('targetUnresolved || binding.kb_ids.length === 0')).toBe(true);
+  });
+
   test('refreshes the mounted binding when another surface changes the same target', () => {
     const source = readFileSync(new URL('./KnowledgeControl.tsx', import.meta.url), 'utf8');
 

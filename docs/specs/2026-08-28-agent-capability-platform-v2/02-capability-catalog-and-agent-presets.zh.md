@@ -1,4 +1,4 @@
-# Capability 目录与 Agent Preset 产品/领域设计（经 05 修订）
+# Capability 目录与 Agent Preset 产品/领域设计（2026-09-13 二态修订）
 
 > 文档性质：这是经 2026-09-02 止损修订后的**产品与领域设计**，用于说明
 > Capability Catalog、Agent Preset、typed resource binding、Compiler、Snapshot
@@ -16,7 +16,7 @@
 
 - Package、Capability、Skill、MCP Tool Mapping 四层领域边界；
 - 版本化 Agent Preset 与不可变 Revision；
-- initial/on-demand Capability 组合；
+- 单一已启用 Capability 集合；
 - typed resource binding、principal 与业务 ownership；
 - 单一 canonical Compiler；
 - 只包含实际执行闭包的 Resolved Snapshot；
@@ -164,8 +164,8 @@ Snapshot 只锁定该 Session 实际选择和可能按需激活的闭包，不�
 ### 2.8 AgentSession
 
 `AgentSession` 是产品历史与执行生命周期的唯一 aggregate，使用唯一
-`AgentSessionId(UUIDv7)`。Chat、Coding、Remote、自动化和 Agent Editor 的“试用 Agent”
-都创建同一种 Session，不建立第二个 Conversation 容器或测试专用 Session。
+`AgentSessionId(UUIDv7)`。Chat、Coding、Remote 和自动化都创建同一种 Session，不建立
+第二个 Conversation 容器。
 
 ### 2.9 Typed Resource Binding
 
@@ -645,10 +645,8 @@ AgentPresetRevision
   schema_version
   surfaces[]
   model_routes[]
-  initial_capabilities[]
-  on_demand_capabilities[]
+  enabled_capabilities[]
   skill_bindings[]
-  typed_resource_bindings[]
   persona / instructions
   context_policy
   execution_constraints
@@ -656,9 +654,8 @@ AgentPresetRevision
   revision_digest
 ```
 
-Revision 保存后不可原地修改。编辑器 Save 总是创建新 Revision；“试用 Agent”对 dirty
-draft 先执行普通 Save，对 clean draft 复用当前 Revision，然后创建普通 AgentSession。
-不存在 TestRevision、DraftSnapshot 或 ephemeral execution。
+Revision 保存后不可原地修改。编辑器 Save 在内容变化时创建新 Revision，未变化时复用
+当前 Revision；不存在额外的草稿快照或临时执行记录。
 
 ### 7.2 Capability Selection
 
@@ -667,20 +664,13 @@ draft 先执行普通 Save，对 clean draft 复用当前 Revision，然后创�
 ```text
 capability_ref
 action_allowlist[]
-resource_binding_refs[]
 ```
 
-Initial/on-demand 由 selection 所在集合表达，不再重复保存 `required`、`exposure`、
-destination constraints、context/tool budget override 或未传给 handler 的 config。
-未来只有出现真实执行语义和消费者时，才为 selection 增加字段。
+是否启用仅由 `enabled_capabilities` 集合表达。同一个 CapabilityId 只能出现一次，未在集合内的能力不授权给 Agent；不存在启动启用、按需启用或第三种配置状态。
 
-同一 CapabilityId 只能出现在一个集合：
+集合保存 exact roots 和 action allowlist。Compiler 为 roots 计算最小 dependency closure。编辑器启用时先展示需要同时启用的依赖，禁用时先展示会一并禁用的依赖方，确认后一次提交完整变更。
 
-- `initial_capabilities`：Session 启动后立即可见；
-- `on_demand_capabilities`：属于 frozen ceiling，可在 turn boundary 激活。
-
-两个集合只保存 direct roots。Compiler 为实际 roots 计算最小 dependency closure，不把
-整个 Catalog 复制进 Snapshot。
+Resource 实例仍由实际会话或使用目标选择；需要配置和来源当前不可用是诊断信息，不是另一种启用模式。
 
 ### 7.3 Skill Binding
 
@@ -734,7 +724,7 @@ creative-studio.default
 
 - 对应 Capability 已有真实 owner 和消费者；
 - 默认资源使用 picker 或 typed slot，不写入具体用户资源 ID；
-- Preview 能解释缺失资源和平台不可用；
+- Save 能解释缺失资源和平台不可用；
 - 创建 Session 后走同一 Compiler、Snapshot、Runtime 和 SessionEvent 主链；
 - 不以 placeholder、fake handler 或静默删减能力形成“可运行”。
 
@@ -781,12 +771,11 @@ Compiler 不因“可能会用”就打开资源。真实连接和 handle 由对
 
 ## 10. 单一 Canonical Compiler
 
-Preview、Save 和 Test 必须调用同一个纯 Compiler：
+Save 必须调用唯一的纯 Compiler：
 
 ```text
-Preview ─┐
-Save ────┼─> one canonical Compiler
-Test ────┘          │
+Save ─────> one canonical Compiler
+                    │
                     └─> Snapshot + authority + diagnostics
 
 Session Open ─> 读取已保存 Snapshot + 当前执行兼容检查
@@ -798,13 +787,13 @@ RuntimeProfile、Snapshot digest 或 Provider selection 算法。
 Compiler 的确定性流程：
 
 1. 读取 exact AgentPresetRevision；
-2. 校验 initial/on-demand direct roots 不重复；
+2. 校验已启用 direct roots 不重复；
 3. 只为这些 roots 计算最小 dependency closure 和 conflict；
 4. 冻结 exact Skill，并校验 Skill requirement 子集；
 5. 为已选择的 MCP-backed Capability 校验 mapping 和 schema hash；
 6. 为实际选择的 Browser/Computer member解析 exact Role Provider；
 7. 校验所选闭包需要的 platform、model route、typed resources 和 Runtime features；
-8. 生成 initial plan、on-demand plan、authority 和 diagnostics；
+8. 为已启用闭包生成 Tool/Context 投影、authority 和 diagnostics；
 9. 生成一个 Resolved Snapshot。
 
 Compiler 不做：
@@ -831,7 +820,7 @@ Snapshot 只锁定实际执行闭包：
 - model route 与 connection config revision；
 - typed resource binding refs；
 - 当前执行所需 Runtime protocol/features；
-- initial/on-demand 分组与 activation plan；
+- 单一已启用能力集合及其最小依赖闭包；
 - Browser/Computer exact Provider lock；
 - Snapshot content digest。
 
@@ -850,8 +839,7 @@ Snapshot 只锁定实际执行闭包：
 ### 11.3 RuntimeProfile
 
 `CompiledRuntimeProfile` 是 Compiler 的内部派生结果，不是用户字段。它把 Snapshot 翻译为
-当前固定 Runtime 可消费的 instructions、feature flags、Tool/Context plan 和 compact
-on-demand index。
+当前固定 Runtime 可消费的 instructions、feature flags 和 Tool/Context 投影。
 
 `chat.minimal` 从空 Capability 集合正向构造，不先初始化 Coding、Workspace、Git、Shell、
 Skill、MCP、Knowledge、Browser 或 Computer 再过滤。
@@ -860,22 +848,17 @@ Skill、MCP、Knowledge、Browser 或 Computer 再过滤。
 功能测试确认，不通过固定 Capability 数量、统计 benchmark 或另一套 reference runner
 证明。
 
-### 11.4 On-demand Activation
+### 11.4 已启用能力的执行
 
-On-demand 只在 frozen Snapshot ceiling 内工作：
+Session 从已保存 Snapshot 一次建立完整的已启用闭包，普通工具立即进入允许的工具集合，ContextContributor 在初始化时组装。Session 中不存在搜索后增加能力权限的入口、activation plan、compact index 或可单调扩张的授权集合。
 
-1. Compiler 已预计算该 root 的最小 activation plan；
-2. Runtime 在 turn boundary 把选中的 plan 合并进 active set；
-3. 激活不再次调用 Compiler，也不重新选择 Provider、模型或资源；
-4. 外部资源在第一次实际调用时 lazy acquire；
-5. Snapshot 外 Capability 返回 `CAPABILITY_NOT_IN_PRESET`。
+每次实际调用仍检查精确 Snapshot、action allowlist、principal、资源 ownership 和来源契约。Snapshot 外能力返回 `CAPABILITY_NOT_IN_PRESET`。外部连接可在实际使用时建立，这是资源生命周期管理，不改变能力是否启用。
 
-Active set 是 Session 执行状态，不是第二份 Snapshot。它只能在 Snapshot ceiling 内单调
-增加。
+修改能力需要保存新的 Revision；新会话使用新的 Snapshot，不在运行中悄悄扩大已有 Snapshot 的能力范围。
 
 ### 11.5 Compatibility
 
-兼容性在建立 Runtime binding、激活实际 Capability 或其执行实现变化时检查并缓存，不在
+兼容性在建立 Runtime binding 或其执行实现变化时检查并缓存，不在
 每个普通 Turn 对整个 ceiling 和全局 inventory 重算。
 
 如果原 Snapshot 所需的 exact Capability、Provider、schema 或 Runtime feature 不再可用，
@@ -891,7 +874,6 @@ Snapshot、不静默换 Provider、不降级 Coding。用户需要继续工作�
 
 - 本地 Chat；
 - Coding；
-- Agent Editor 试用；
 - Remote；
 - scheduled/automation run；
 - Companion、Requirement 或其他成熟业务入口。
@@ -906,7 +888,7 @@ SessionEvent 保存恢复和产品历史真正需要的语义事实：
 - 最终用户消息；
 - 最终 assistant message；
 - 中断时最多一份 bounded partial；
-- Capability activation；
+- 初始能力集合与 Snapshot 身份；
 - Tool call 和 bounded final result；
 - 外部不确定 Effect 的 reservation/result reference；
 - completed compaction；
@@ -1134,25 +1116,12 @@ Remote 不提供 Capability scope、Runtime mode、confirmation 或全局 Regist
 - 模型选择；
 - 按任务分组的能力开关；
 - Workspace、Knowledge、MCP/连接器等 picker；
-- 保存；
-- 试用 Agent。
+- 保存。
 
-Initial/on-demand 可由模板和 Capability metadata 提供默认值；高级覆盖放在开发者视图。
+工作台使用“已启用能力 / 全部能力”双栏，两侧独立分类与搜索。勾选仅是临时批量操作；移入启用、移出禁用，支持单项加减和撤销。Agent 列表复用会话页的贴边 ContentSider 与固定标题栏开关。
 普通用户不需要手填 CapabilityId、Snapshot digest、ResourceId、owner 或 canonical JSON。
 
-Revision、Snapshot、Provider provenance、protocol 和 raw diagnostic 放入折叠的技术详情，
-不成为主流程。
-
-“试用 Agent”执行：
-
-```text
-dirty draft -> 普通 Save Revision
-clean draft -> 复用当前 Revision
--> canonical Compiler
--> 普通 AgentSession
-```
-
-它使用真实 resource binding 和真实 Effect 语义，不增加 mock/suppressed Effect 模式。
+Revision、Snapshot、Provider provenance 和 protocol 不成为编辑器主流程。
 
 模板页展示当前真正可用的产品模板，不承诺固定卡片数量。候选模板在后端能力和资源流程
 未完成前不出现在默认入口。
@@ -1164,13 +1133,13 @@ clean draft -> 复用当前 Revision
 API 至少需要覆盖：
 
 - materialized Package、Capability、Skill 和 MCP mapping 查询；
-- Agent Preset 创建、Revision 保存和 Preview；
+- Agent Preset 创建和 Revision 保存；
 - AgentSession create/read/turn/events/messages/fork/delete；
 - Agent binding 和 RemoteBinding；
 - Remote open/turn/observe/cancel。
 
-所有 Session API 使用同一个 `AgentSessionId`。产品不提供 test-only Session route、
-Runtime selector 或 public capability activation mutation。
+所有 Session API 使用同一个 `AgentSessionId`。产品不提供 Runtime selector 或 public
+capability activation mutation。
 
 持久化保留真正被产品读取的事实：
 
@@ -1199,7 +1168,7 @@ Runtime selector 或 public capability activation mutation。
 2. Package、ServiceKey、裸 MCP Tool 和 template key 不进入已保存 Snapshot selection；
 3. Skill 不自动扩张 Capability；
 4. MCP Tool 未完成 canonical mapping 时不能进入 Agent；
-5. 一个 canonical Compiler 同时服务 Preview、Save 和 Test；
+5. Save 使用唯一的 canonical Compiler；
 6. Session Open 读取已保存 Snapshot，不重新编译另一份结果；
 7. Snapshot 只冻结实际选择闭包和 exact Provider，不冻结无关全局目录；
 8. Snapshot 外调用统一失败，运行中的 Agent 不能修改自己的 ceiling；
@@ -1225,7 +1194,7 @@ Runtime selector 或 public capability activation mutation。
 | Minimal Chat | 空 Capability/Skill/MCP/Workspace 正向编译，最终 `tools=[]`，正常 turn/stream/cancel |
 | Coding | 当前正式核心 Coding surface 真实可用，不以 mock 或弱化 fallback 补齐 |
 | Package | first-party 与 test alternate 使用同一 registration/materializer |
-| Compiler | Preview、Save、Test 对同一输入得到同一 Snapshot content |
+| Compiler | Save 对同一输入得到确定的 Snapshot content |
 | Resource | owner mismatch、missing binding 和 operation mismatch 明确失败 |
 | On-demand | 只能激活 frozen ceiling，资源按首次真实使用 lazy acquire |
 | Browser/Computer | first-party 与 alternate Provider 可替换，消费者代码不变，无具体实现旁路 |

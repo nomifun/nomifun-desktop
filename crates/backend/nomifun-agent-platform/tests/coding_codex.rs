@@ -6,7 +6,7 @@ use nomifun_agent_contracts::{
     CheckpointDiscardReason, CheckpointRehydrateSource, ContributionLock,
     ContributionSourceKind, CorrelationId, DigestHex, EventId, EventProducerId,
     IdempotencyKey, NativeActionStartAckExchange, OperationId, PackageId, PackageRef,
-    PluginMountId, PluginSourceKind, PluginSourceMetadata, PrecomputedActivationPlan,
+    PluginMountId, PluginSourceKind, PluginSourceMetadata,
     PresetRevisionRef, PrincipalRef, ResolvedCapability, ResolvedSnapshotContent,
     ResolvedSnapshotId, ResolvedSnapshotRef, ResourceBindingId, ResourceId, ResourceKind,
     RuntimeCheckpointValidationResult, RuntimeProfileKind, SessionEventKind,
@@ -80,15 +80,15 @@ fn resolved_capability(reference: &CapabilityRef) -> ResolvedCapability {
                 source_package.id.as_ref().to_owned(),
             ),
             mount_id: None,
-            miniapp_id: None,
+            plugin_product_id: None,
             mcp_binding_id: None,
             contribution_id,
             contract_digest: schema_digest.clone(),
         },
-        resolved_mount_id: PluginMountId::from(format!(
+        resolved_mount_id: Some(PluginMountId::from(format!(
             "fixture.{}",
             reference.id.as_ref()
-        )),
+        ))),
         resolved_source: PluginSourceMetadata {
             source_kind: PluginSourceKind::Bundled,
             source_identity: source_package.id.as_ref().to_owned(),
@@ -98,40 +98,19 @@ fn resolved_capability(reference: &CapabilityRef) -> ResolvedCapability {
         schema_digest,
         dependency_path: vec![reference.id.clone()],
         required_runtime_features: BTreeSet::new(),
+        plugin_product_id: None,
+        active_release: None,
+        active_release_epoch: None,
+        catalog_digest: None,
+        display_name: None,
+        description: None,
+        actions: Vec::new(),
+        required_resource_kinds: BTreeSet::new(),
+        action_allowlist: BTreeSet::new(),
     }
 }
 
 fn resolved_content(contract: &CodingCodexContract) -> ResolvedSnapshotContent {
-    let activation_plans = contract
-        .on_demand_capabilities
-        .iter()
-        .map(|reference| {
-            (
-                reference.id.clone(),
-                PrecomputedActivationPlan {
-                    root_capability_id: reference.id.clone(),
-                    capability_bundle: vec![reference.id.clone()],
-                    tool_schema_refs: Vec::new(),
-                    context_schema_refs: Vec::new(),
-                    model_route_refs: Vec::new(),
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let compact_on_demand_index = contract
-        .on_demand_capabilities
-        .iter()
-        .map(|reference| nomifun_agent_contracts::CompactOnDemandCapabilityEntry {
-            capability_id: reference.id.clone(),
-            display_name: reference.id.as_ref().to_owned(),
-            short_description: "Coding on-demand capability".to_owned(),
-            search_terms: vec![reference.id.as_ref().to_owned()],
-            activation_plan_digest: DigestHex::from(format!(
-                "{}-plan",
-                reference.id.as_ref()
-            )),
-        })
-        .collect();
     ResolvedSnapshotContent {
         schema_version: VersionString::from("1.0.0"),
         resolver_version: VersionString::from("1.0.0"),
@@ -149,21 +128,12 @@ fn resolved_content(contract: &CodingCodexContract) -> ResolvedSnapshotContent {
         compiled_runtime_profile_digest: DigestHex::from("coding-profile"),
         model_route_refs: BTreeMap::new(),
         chat_route_identity: None,
-        initial_capabilities: contract
-            .initial_capabilities
+        enabled_capabilities: contract
+            .enabled_capabilities
             .iter()
             .map(resolved_capability)
             .collect(),
-        on_demand_capabilities: contract
-            .on_demand_capabilities
-            .iter()
-            .map(resolved_capability)
-            .collect(),
-        initial_miniapp_capabilities: Vec::new(),
-        on_demand_miniapp_capabilities: Vec::new(),
         required_resource_kinds: BTreeSet::from([ResourceKind::from("workspace")]),
-        on_demand_activation_plans: activation_plans,
-        compact_on_demand_index,
         capability_allowlist: contract.ceiling_ids(),
         skill_locks: Vec::new(),
         mcp_tool_locks: Vec::new(),
@@ -333,8 +303,7 @@ fn frozen_coding_contract_validates_snapshot_profile_and_native_ack() {
         runtime_protocol_version: VersionString::from("1.0.0"),
         profile_digest: content.compiled_runtime_profile_digest,
         enabled_runtime_features: contract.required_runtime_features.clone(),
-        initial_capabilities: contract.initial_ids(),
-        on_demand_capabilities: contract.on_demand_ids(),
+        enabled_capabilities: contract.enabled_ids(),
         typed_resource_bindings: vec![workspace_binding()],
     };
     contract.validate_runtime_profile(&profile).unwrap();

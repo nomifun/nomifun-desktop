@@ -5,6 +5,7 @@
  */
 
 import React from 'react';
+import WorkbenchPanel from '../WorkbenchPanel';
 import ImageWorkbenchComposer from './ImageWorkbenchComposer';
 import ImageWorkbenchResults from './ImageWorkbenchResults';
 import type { ImageWorkbenchProps } from './types';
@@ -22,7 +23,11 @@ const ImageWorkbench: React.FC<ImageWorkbenchProps> = (props) => (
     data-task-state={props.task.state}
   >
     <main className={props.layout === 'side' ? styles.sideLayout : styles.bottomLayout}>
-      {props.layout === 'side' ? <ImageWorkbenchComposer {...props} /> : null}
+      {props.layout === 'side' ? (
+        <WorkbenchPanel kind='image'>
+          <ImageWorkbenchComposer {...props} />
+        </WorkbenchPanel>
+      ) : null}
       <ImageWorkbenchResults
         results={props.results}
         selectedResultIds={props.selectedResultIds}
@@ -38,7 +43,11 @@ const ImageWorkbench: React.FC<ImageWorkbenchProps> = (props) => (
         historyHasMore={props.historyHasMore}
         onLoadMoreResults={props.onLoadMoreResults}
       />
-      {props.layout === 'bottom' ? <ImageWorkbenchComposer {...props} /> : null}
+      {props.layout === 'bottom' ? (
+        <WorkbenchPanel kind='image' position='bottom'>
+          <ImageWorkbenchComposer {...props} />
+        </WorkbenchPanel>
+      ) : null}
     </main>
   </div>
 );

@@ -14,7 +14,7 @@ use nomifun_agent_session::{
 };
 use nomifun_api_types::{
     AgentPresetEditorResponse, AgentPresetSourceDto, OfficialPresetKeyDto,
-    OfficialPresetTemplateDto, PreviewStatusDto, ResolveAgentPresetPreviewResponse,
+    OfficialPresetTemplateDto,
 };
 use nomifun_chat_model_broker::{
     ChatContentPart, ChatCausality, ChatCausalityGate, ChatFinishReason, ChatModelError,
@@ -375,8 +375,6 @@ pub enum ChatMinimalError {
     Template(String),
     #[error("chat.minimal ordinary Revision mismatch: {0}")]
     Revision(String),
-    #[error("chat.minimal Preview mismatch: {0}")]
-    Preview(String),
     #[error("chat.minimal Snapshot mismatch: {0}")]
     Snapshot(String),
     #[error("managed_minimal RuntimeProfile mismatch: {0}")]
@@ -419,8 +417,8 @@ impl ChatMinimalContract {
                     "OfficialPresetSeedManifest has no chat.minimal role coverage".to_owned(),
                 )
             })?;
-        if !seed.initial_capabilities.is_empty()
-            || !seed.on_demand_capabilities.is_empty()
+        if !seed.enabled_capabilities.is_empty()
+
             || !seed.skill_bindings.is_empty()
             || !seed.required_resource_kinds.is_empty()
             || !seed.required_runtime_features.is_empty()
@@ -453,8 +451,8 @@ impl ChatMinimalContract {
                 "official template identity or lifecycle flags differ".to_owned(),
             ));
         }
-        if !template.seed.initial_capabilities.is_empty()
-            || !template.seed.on_demand_capabilities.is_empty()
+        if !template.seed.enabled_capabilities.is_empty()
+
             || !template.seed.skill_bindings.is_empty()
             || !template.seed.required_resource_kinds.is_empty()
             || !template.seed.required_runtime_features.is_empty()
@@ -495,8 +493,8 @@ impl ChatMinimalContract {
             ));
         }
         let document = &revision.document;
-        if !document.initial_capabilities.is_empty()
-            || !document.on_demand_capabilities.is_empty()
+        if !document.enabled_capabilities.is_empty()
+
             || !document.skill_bindings.is_empty()
             || !document.persona.is_empty()
             || !document.instructions.is_empty()
@@ -509,56 +507,6 @@ impl ChatMinimalContract {
         if document.model_route_refs.len() != 1 {
             return Err(ChatMinimalError::Revision(
                 "chat.minimal Revision must freeze exactly one model route".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn validate_preview(
-        &self,
-        preview: &ResolveAgentPresetPreviewResponse,
-    ) -> Result<(), ChatMinimalError> {
-        if preview.status != PreviewStatusDto::Ready
-            || !preview.can_save_revision
-            || !preview.can_create_session
-            || !preview.diagnostics.is_empty()
-            || preview.resolved_snapshot_ref.is_none()
-        {
-            return Err(ChatMinimalError::Preview(
-                "chat.minimal Preview is not a ready executable Snapshot".to_owned(),
-            ));
-        }
-        let summary = &preview.summary;
-        if summary.initial_count != 0
-            || summary.on_demand_count != 0
-            || summary.active_at_start_count != 0
-            || summary.model_tool_count != 0
-            || summary.context_contributor_count != 0
-            || summary.on_demand_index_count != 0
-            || summary.skill_count != 0
-            || summary.mcp_count != 0
-            || summary.required_resource_kind_count != 0
-            || summary.provider_initialization_count != 1
-        {
-            return Err(ChatMinimalError::Preview(
-                "Preview summary is not the exact zero-tool shape".to_owned(),
-            ));
-        }
-        let inspector = &preview.inspector;
-        if inspector.runtime_profile.as_deref() != Some("managed_minimal")
-            || !inspector.required_runtime_features.is_empty()
-            || !inspector.initial_capabilities.is_empty()
-            || !inspector.on_demand_capabilities.is_empty()
-            || !inspector.compact_on_demand_index.is_empty()
-            || !inspector.tool_schema_refs.is_empty()
-            || !inspector.context_schema_refs.is_empty()
-            || !inspector.mcp_materializations.is_empty()
-            || !inspector.required_resource_kinds.is_empty()
-            || !inspector.service_key_diagnostics.is_empty()
-        {
-            return Err(ChatMinimalError::Preview(
-                "Preview inspector contains a hidden capability, index, tool, context, MCP, or resource"
-                    .to_owned(),
             ));
         }
         Ok(())
@@ -584,10 +532,10 @@ impl ChatMinimalContract {
         }
         if snapshot.model_route_refs.len() != 1
             || !snapshot.required_runtime_features.is_empty()
-            || !snapshot.initial_capabilities.is_empty()
-            || !snapshot.on_demand_capabilities.is_empty()
-            || !snapshot.on_demand_activation_plans.is_empty()
-            || !snapshot.compact_on_demand_index.is_empty()
+            || !snapshot.enabled_capabilities.is_empty()
+
+
+
             || !snapshot.capability_allowlist.is_empty()
             || !snapshot.skill_locks.is_empty()
             || !snapshot.mcp_tool_locks.is_empty()
@@ -605,8 +553,8 @@ impl ChatMinimalContract {
     ) -> Result<(), ChatMinimalError> {
         if profile.kind != RuntimeProfileKind::ManagedMinimal
             || !profile.enabled_runtime_features.is_empty()
-            || !profile.initial_capabilities.is_empty()
-            || !profile.on_demand_capabilities.is_empty()
+            || !profile.enabled_capabilities.is_empty()
+
             || !profile.typed_resource_bindings.is_empty()
         {
             return Err(ChatMinimalError::RuntimeProfile(

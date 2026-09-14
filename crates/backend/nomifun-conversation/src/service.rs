@@ -975,6 +975,35 @@ pub trait ConversationSupervisionHook: Send + Sync {
     fn on_turn_start(&self, conversation_id: &str, admitted_scope: IdmmTurnScope);
 }
 
+/// Host-owned resolver for product entry points that have their own durable
+/// identity (Companion, Robot, Creative Studio canvas, and IM-backed
+/// Companion). The product crate supplies only that identity; the application
+/// control plane resolves either its saved target binding or the corresponding
+/// official default and returns an immutable Agent snapshot plus the runtime
+/// ceiling derived from that exact revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductAgentTarget {
+    pub target_kind: String,
+    pub target_id: String,
+    pub default_template_key: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProductAgentResolution {
+    pub snapshot: AgentResolvedSnapshot,
+    pub runtime_extra: serde_json::Value,
+}
+
+#[async_trait::async_trait]
+pub trait ProductAgentSnapshotResolver: Send + Sync {
+    async fn resolve(
+        &self,
+        owner_id: &str,
+        target: &ProductAgentTarget,
+        requested_model: Option<&ProviderWithModel>,
+    ) -> Result<ProductAgentResolution, AppError>;
+}
+
 /// Completion hook for keyed turns (spec D2 delivery-notify push).
 ///
 /// Defined here so `nomifun-conversation` stays free of gateway/companion
@@ -1059,6 +1088,8 @@ pub struct ConversationService {
     /// as `cron_service`). Wired by `nomifun-app` so a desktop turn arms 智能决策
     /// supervision; `None` in contexts that don't run IDMM (tests, webui-only).
     supervision_hook: Arc<RwLock<Option<Arc<dyn ConversationSupervisionHook>>>>,
+    product_agent_snapshot_resolver:
+        Arc<RwLock<Option<Arc<dyn ProductAgentSnapshotResolver>>>>,
     /// Spec D2 delivery-notify hook (same slot pattern): invoked after a
     /// keyed turn's terminal receipt is durably persisted. `None` (default /
     /// tests) disables completion push entirely.
@@ -2240,6 +2271,7 @@ impl ConversationService {
             conversation_repo,
             agent_metadata_repo,
             supervision_hook: Arc::new(RwLock::new(None)),
+            product_agent_snapshot_resolver: Arc::new(RwLock::new(None)),
             turn_completion_observer: Arc::new(RwLock::new(None)),
             background_task_registrar: Arc::new(RwLock::new(None)),
             failover_provider_repo: Arc::new(RwLock::new(None)),
@@ -2303,6 +2335,15 @@ impl ConversationService {
     pub fn with_supervision_hook(&self, hook: Arc<dyn ConversationSupervisionHook>) {
         if let Ok(mut guard) = self.supervision_hook.write() {
             *guard = Some(hook);
+        }
+    }
+
+    pub fn with_product_agent_snapshot_resolver(
+        &self,
+        resolver: Arc<dyn ProductAgentSnapshotResolver>,
+    ) {
+        if let Ok(mut guard) = self.product_agent_snapshot_resolver.write() {
+            *guard = Some(resolver);
         }
     }
 
@@ -4162,7 +4203,7 @@ impl ConversationService {
         &self,
         user_id: &str,
         mut req: CreateConversationRequest,
-        trusted_snapshot: Option<AgentResolvedSnapshot>,
+        mut trusted_snapshot: Option<AgentResolvedSnapshot>,
         creation_key: Option<&str>,
         creative_studio_target: Option<CreativeStudioAgentCreationTarget>,
     ) -> Result<(ConversationResponse, bool), AppError> {
@@ -4212,6 +4253,20 @@ impl ConversationService {
             req.decision_policy = DecisionPolicy::default();
             req.execution_template_id = None;
             req.channel_chat_id = None;
+        }
+
+        if authority.controls_host()
+            && trusted_snapshot.is_none()
+            && let Some(target) = product_agent_target(&req.extra, creative_studio_target.as_ref())
+            && let Some(resolver) = self
+                .product_agent_snapshot_resolver
+                .read()
+                .ok()
+                .and_then(|guard| guard.clone())
+        {
+            let resolution = resolver.resolve(user_id, &target, req.model.as_ref()).await?;
+            apply_product_agent_resolution(&mut req.extra, &target, &resolution)?;
+            trusted_snapshot = Some(resolution.snapshot);
         }
 
         let now = now_ms();
@@ -4422,7 +4477,10 @@ impl ConversationService {
             None => (Vec::new(), Vec::new()),
         };
 
-        let auto_inject_names = if authority.controls_host() {
+        let auto_inject_names = if authority.controls_host()
+            && !is_tool_free_agent_extra(&extra)
+            && extra.get("product_agent_target_kind").is_none()
+        {
             self.skill_resolver.auto_inject_names().await
         } else {
             Vec::new()
@@ -5354,6 +5412,11 @@ impl ConversationService {
             "computer_use",
             "nomi_core_session",
             "agent_name",
+            "companion_memory_enabled",
+            "companion_skills_enabled",
+            "product_agent_target_kind",
+            "product_agent_target_id",
+            "product_agent_capabilities",
         ] {
             object.remove(key);
             if let Some(value) = replacement_object.get(key) {
@@ -5364,7 +5427,9 @@ impl ConversationService {
         object.remove("preset_context");
         object.remove("preset_instructions_embedded");
 
-        let auto_inject = if self.execution_authority(user_id).controls_host() {
+        let auto_inject = if self.execution_authority(user_id).controls_host()
+            && replacement_object.get("product_agent_target_kind").is_none()
+        {
             self.skill_resolver.auto_inject_names().await
         } else {
             Vec::new()
@@ -5408,6 +5473,75 @@ impl ConversationService {
         self.project_execution_relation(user_id, &mut response).await?;
         self.broadcast_list_changed(user_id, id, "updated", response.source.as_ref());
         Ok(response)
+    }
+
+    /// Apply a newly selected target-scoped product Agent to the product's
+    /// existing conversation without replacing its history or workspace.
+    pub async fn replace_product_agent_resolution(
+        &self,
+        user_id: &str,
+        id: &str,
+        target: &ProductAgentTarget,
+        resolution: ProductAgentResolution,
+    ) -> Result<ConversationResponse, AppError> {
+        let existing = self
+            .conversation_repo
+            .get(parse_conv_id(id)?)
+            .await?
+            .filter(|row| row.user_id == user_id)
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {id} not found")))?;
+        let mut extra: serde_json::Value = serde_json::from_str(&existing.extra).map_err(|error| {
+            AppError::Internal(format!("Conversation {id} has invalid extra JSON: {error}"))
+        })?;
+        apply_product_agent_resolution(&mut extra, target, &resolution)?;
+        self.replace_agent_preset_snapshot(user_id, id, resolution.snapshot, extra)
+            .await
+    }
+
+    /// Refresh an existing product conversation from its target binding. This
+    /// is used by long-lived IM and Robot sessions before their next turn so a
+    /// settings change takes effect without deleting history.
+    pub async fn refresh_product_agent_for_existing(
+        &self,
+        user_id: &str,
+        id: &str,
+    ) -> Result<ConversationResponse, AppError> {
+        let existing = self
+            .conversation_repo
+            .get(parse_conv_id(id)?)
+            .await?
+            .filter(|row| row.user_id == user_id)
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {id} not found")))?;
+        let extra: serde_json::Value = serde_json::from_str(&existing.extra).map_err(|error| {
+            AppError::Internal(format!("Conversation {id} has invalid extra JSON: {error}"))
+        })?;
+        let Some(target) = product_agent_target(&extra, None) else {
+            return row_to_response(existing, &self.workspace_root);
+        };
+        let Some(resolver) = self
+            .product_agent_snapshot_resolver
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+        else {
+            return row_to_response(existing, &self.workspace_root);
+        };
+        let model = existing
+            .model
+            .as_deref()
+            .map(parse_provider_with_model)
+            .transpose()?;
+        let resolution = resolver.resolve(user_id, &target, model.as_ref()).await?;
+        let already_current = existing.preset_id.as_deref()
+            == Some(resolution.snapshot.preset_id.as_str())
+            && existing.preset_revision == Some(resolution.snapshot.preset_revision)
+            && extra.get("product_agent_target_kind").and_then(serde_json::Value::as_str)
+                == Some(target.target_kind.as_str());
+        if already_current {
+            return row_to_response(existing, &self.workspace_root);
+        }
+        self.replace_product_agent_resolution(user_id, id, &target, resolution)
+            .await
     }
 
     /// Merge backend-owned Agent metadata into `conversation.extra` without
@@ -5574,7 +5708,13 @@ impl ConversationService {
             ));
         }
 
-        let auto_inject_names = self.skill_resolver.auto_inject_names().await;
+        let existing_extra: serde_json::Value = serde_json::from_str(&existing.extra)
+            .map_err(|error| AppError::Internal(format!("Invalid conversation extra: {error}")))?;
+        let auto_inject_names = if is_tool_free_agent_extra(&existing_extra) {
+            Vec::new()
+        } else {
+            self.skill_resolver.auto_inject_names().await
+        };
         let mut desired_skills = compute_initial_skills(
             &auto_inject_names,
             enabled_skills,
@@ -7000,6 +7140,9 @@ impl ConversationService {
             return Err(AppError::BadRequest("Message content must not be empty".into()));
         }
 
+        self.refresh_product_agent_for_existing(user_id, conversation_id)
+            .await?;
+
         let conversation_key = parse_conv_id(conversation_id)?;
         let runtime_build_lease =
             self.begin_public_runtime_preparation(conversation_key, user_id)?;
@@ -8360,7 +8503,7 @@ impl ConversationService {
         &self,
         user_id: &str,
         conversation_id: &str,
-        req: SendMessageRequest,
+        mut req: SendMessageRequest,
         runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
         send_authority: MessageSendAuthority,
         durable_delivery: Option<DurableDeliveryLease>,
@@ -8599,6 +8742,12 @@ impl ConversationService {
         let creative_studio_turn = durable_delivery
             .as_ref()
             .is_some_and(|delivery| delivery.creative_studio_turn);
+        if creative_studio_turn
+            && !req.inject_skills.is_empty()
+            && !row_agent_snapshot_has_capability(&row, "workshop.canvas.read")?
+        {
+            req.inject_skills.clear();
+        }
         // Skill metadata is captured when a Nomi runtime is built. Recycle the
         // hidden Creative Studio runtime for every explicitly skilled turn so
         // a cached engine can never keep an older Skill registry.
@@ -12378,6 +12527,203 @@ enum CancelOrigin {
 
 // ── Internal Helpers ────────────────────────────────────────────────
 
+fn is_tool_free_agent_extra(extra: &serde_json::Value) -> bool {
+    extra.get("enforce_tool_allowlist").and_then(serde_json::Value::as_bool) == Some(true)
+        && extra.get("allowed_tools").and_then(serde_json::Value::as_array).is_some_and(Vec::is_empty)
+}
+
+fn row_agent_snapshot_has_capability(
+    row: &ConversationRow,
+    capability: &str,
+) -> Result<bool, AppError> {
+    let Some(raw) = row.agent_snapshot.as_deref() else {
+        return Ok(true);
+    };
+    let snapshot: AgentResolvedSnapshot = serde_json::from_str(raw).map_err(|error| {
+        AppError::Internal(format!(
+            "Conversation {} has invalid Agent snapshot: {error}",
+            row.conversation_id
+        ))
+    })?;
+    Ok(snapshot
+        .enabled_capabilities
+        .iter()
+        .any(|enabled| enabled == capability))
+}
+
+fn product_agent_target(
+    extra: &serde_json::Value,
+    creative_studio_target: Option<&CreativeStudioAgentCreationTarget>,
+) -> Option<ProductAgentTarget> {
+    if let Some(target) = creative_studio_target {
+        return Some(ProductAgentTarget {
+            target_kind: "creative_studio_canvas".to_owned(),
+            target_id: target.project_id.clone(),
+            default_template_key: "creative-studio.default".to_owned(),
+        });
+    }
+    let object = extra.as_object()?;
+    if let (Some(target_kind), Some(target_id)) = (
+        object
+            .get("product_agent_target_kind")
+            .and_then(serde_json::Value::as_str),
+        object
+            .get("product_agent_target_id")
+            .and_then(serde_json::Value::as_str),
+    ) {
+        let default_template_key = match target_kind {
+            "companion" => "companion.default",
+            "robot" => "robot.default",
+            "customer" => "customer-service.default",
+            "creative_studio_canvas" => "creative-studio.default",
+            _ => return None,
+        };
+        return Some(ProductAgentTarget {
+            target_kind: target_kind.to_owned(),
+            target_id: target_id.to_owned(),
+            default_template_key: default_template_key.to_owned(),
+        });
+    }
+    if object.get("robot_session").and_then(serde_json::Value::as_bool) == Some(true) {
+        return object
+            .get("robot_id")
+            .and_then(serde_json::Value::as_str)
+            .map(|robot_id| ProductAgentTarget {
+                target_kind: "robot".to_owned(),
+                target_id: robot_id.to_owned(),
+                default_template_key: "robot.default".to_owned(),
+            });
+    }
+    let companion_id = object.get("companion_id").and_then(serde_json::Value::as_str)?;
+    let is_companion = object
+        .get("companion_session")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        || object.get("channel_platform").and_then(serde_json::Value::as_str).is_some();
+    is_companion.then(|| ProductAgentTarget {
+        target_kind: "companion".to_owned(),
+        target_id: companion_id.to_owned(),
+        default_template_key: "companion.default".to_owned(),
+    })
+}
+
+fn apply_product_agent_resolution(
+    extra: &mut serde_json::Value,
+    target: &ProductAgentTarget,
+    resolution: &ProductAgentResolution,
+) -> Result<(), AppError> {
+    let object = extra.as_object_mut().ok_or_else(|| {
+        AppError::Internal("product Agent runtime extra must be an object".to_owned())
+    })?;
+    let projected = resolution.runtime_extra.as_object().ok_or_else(|| {
+        AppError::Internal("resolved product Agent runtime policy must be an object".to_owned())
+    })?;
+    for key in [
+        "chat_config_revision_digest",
+        "allowed_tools",
+        "enforce_tool_allowlist",
+        "deferred_tools",
+        "browser_use",
+        "computer_use",
+        "runtime_profile",
+        "vision_input",
+        "mcp_capabilities",
+    ] {
+        if let Some(value) = projected.get(key) {
+            object.insert(key.to_owned(), value.clone());
+        }
+    }
+    object.insert(
+        "product_agent_target_kind".to_owned(),
+        serde_json::Value::String(target.target_kind.clone()),
+    );
+    object.insert(
+        "product_agent_target_id".to_owned(),
+        serde_json::Value::String(target.target_id.clone()),
+    );
+    object.insert(
+        "product_agent_capabilities".to_owned(),
+        serde_json::to_value(&resolution.snapshot.enabled_capabilities).unwrap_or_default(),
+    );
+
+    let enabled = resolution
+        .snapshot
+        .enabled_capabilities
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    if matches!(target.target_kind.as_str(), "companion" | "robot") {
+        if !enabled.contains("companion.persona") {
+            object.remove("system_prompt");
+        }
+        object.insert(
+            "companion_memory_enabled".to_owned(),
+            serde_json::Value::Bool(enabled.iter().any(|id| id.starts_with("memory.companion."))),
+        );
+        object.insert(
+            "companion_skills_enabled".to_owned(),
+            serde_json::Value::Bool(
+                enabled.contains("companion.learn") || enabled.contains("companion.evolve"),
+            ),
+        );
+    }
+    if target.target_kind == "robot" {
+        let tools_enabled = [
+            "robot.display",
+            "robot.motion",
+            "robot.vision",
+            "robot.device_tools",
+        ]
+        .into_iter()
+        .any(|capability| enabled.contains(capability));
+        if !tools_enabled {
+            object.remove("selected_session_mcp_servers");
+            object.remove("session_mcp_servers");
+        } else {
+            if let Some(allowed) = object
+                .get_mut("allowed_tools")
+                .and_then(serde_json::Value::as_array_mut)
+                && !allowed.iter().any(|value| value.as_str() == Some("mcp.tool_proxy"))
+            {
+                allowed.push(serde_json::Value::String("mcp.tool_proxy".to_owned()));
+            }
+            let capabilities = [
+                "robot.display",
+                "robot.motion",
+                "robot.vision",
+                "robot.device_tools",
+            ]
+            .into_iter()
+            .filter(|capability| enabled.contains(capability))
+            .collect::<Vec<_>>()
+            .join(",");
+            for key in ["selected_session_mcp_servers", "session_mcp_servers"] {
+                let Some(servers) = object.get_mut(key).and_then(serde_json::Value::as_array_mut)
+                else {
+                    continue;
+                };
+                for server in servers {
+                    let Some(url) = server
+                        .pointer_mut("/transport/url")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned)
+                    else {
+                        continue;
+                    };
+                    if url.contains("/robot-mcp/") {
+                        server["transport"]["url"] = serde_json::Value::String(format!(
+                            "{}{}capabilities={capabilities}",
+                            url,
+                            if url.contains('?') { "&" } else { "?" },
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Render the immutable preset snapshot as explicit runtime context.
 ///
 /// Preset instructions alone are insufficient for introspection: a model can
@@ -12386,6 +12732,17 @@ enum CancelOrigin {
 /// makes activation observable to the model without asking adapters to reload
 /// the mutable catalog.
 fn render_agent_snapshot_runtime_context(snapshot: &AgentResolvedSnapshot) -> String {
+    if snapshot.enabled_capabilities.is_empty()
+        && snapshot.included_skills.is_empty()
+        && snapshot.required_resource_kinds.is_empty()
+    {
+        let mut context = format!("[NomiFun active preset]\nName: {}\nRevision: {}", snapshot.preset_name, snapshot.preset_revision);
+        if !snapshot.instructions.trim().is_empty() {
+            context.push('\n');
+            context.push_str(snapshot.instructions.trim());
+        }
+        return context;
+    }
     let mut prompt = format!(
         "[NomiFun active preset]\n\
          Name: {}\n\
@@ -12449,7 +12806,7 @@ fn project_agent_snapshot_runtime_context(
             row.conversation_id
         ))
     })?;
-    let snapshot: AgentResolvedSnapshot =
+    let mut snapshot: AgentResolvedSnapshot =
         serde_json::from_str(raw_snapshot).map_err(|error| {
             AppError::Internal(format!(
                 "Conversation {} has invalid agent_snapshot: {error}",
@@ -12476,6 +12833,13 @@ fn project_agent_snapshot_runtime_context(
         return Ok(());
     }
 
+    // Older session projections used the conversation title as preset_name.
+    // The server-stamped Agent label remains available on those sessions.
+    if let Some(name) = object.get("agent_name").and_then(serde_json::Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+    {
+        snapshot.preset_name = name.to_owned();
+    }
     let context = serde_json::Value::String(render_agent_snapshot_runtime_context(&snapshot));
     match agent_type {
         AgentType::Nomi => {
@@ -12623,6 +12987,9 @@ impl ConversationService {
         runtime_options: &AgentRuntimeBuildOptions,
         required_skills: &[String],
     ) -> Result<(), AppError> {
+        if is_tool_free_agent_extra(&runtime_options.extra) && required_skills.is_empty() {
+            return Ok(());
+        }
         if !self.execution_authority(&row.user_id).controls_host() {
             if !required_skills.is_empty() {
                 return Err(AppError::Forbidden(
@@ -13954,6 +14321,22 @@ mod tests {
     const PROVIDER_ID_2: &str = "0190f5fe-7c00-7a00-8000-000000000002";
     const RUNTIME_PRESET_ID: &str = "0190f5fe-7c00-7a00-8000-000000000003";
 
+    #[test]
+    fn companion_desktop_and_im_share_one_product_agent_target() {
+        let companion_id = "0190f5fe-7c00-7a00-8000-000000000099";
+        let desktop = product_agent_target(&json!({
+            "companion_session": true,
+            "companion_id": companion_id,
+        }), None).unwrap();
+        let im = product_agent_target(&json!({
+            "channel_platform": "telegram",
+            "companion_id": companion_id,
+        }), None).unwrap();
+        assert_eq!(desktop, im);
+        assert_eq!(desktop.target_kind, "companion");
+        assert_eq!(desktop.default_template_key, "companion.default");
+    }
+
     fn runtime_agent_snapshot() -> AgentResolvedSnapshot {
         AgentResolvedSnapshot {
             preset_id: RUNTIME_PRESET_ID.to_owned(),
@@ -13967,8 +14350,7 @@ mod tests {
             resolved_model: None,
             included_skills: Vec::new(),
             excluded_auto_skills: Vec::new(),
-            initial_capabilities: Vec::new(),
-            on_demand_capabilities: Vec::new(),
+            enabled_capabilities: Vec::new(),
             required_resource_kinds: std::collections::BTreeSet::new(),
             knowledge_policy: Default::default(),
             warnings: Vec::new(),

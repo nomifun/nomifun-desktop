@@ -196,6 +196,8 @@ impl ProviderHealthCheckService {
             install_embedded_agent_execution: false,
             allowed_tools: Vec::new(),
             enforce_tool_allowlist: false,
+            companion_memory_enabled: true,
+            companion_skills_enabled: true,
             deferred_tools: Vec::new(),
             write_root: None,
         })
@@ -760,7 +762,7 @@ mod tests {
         let mut adjudicated = probe_result(StopReason::EndTurn);
         adjudicated.completion_adjudication = Some(
             CompletionAdjudication::UnbackedStateChangeClaim {
-                target: "miniapp.html".to_owned(),
+                target: "plugin.html".to_owned(),
             },
         );
         let failure = probe_terminal_failure(&adjudicated)

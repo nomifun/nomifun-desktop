@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use nomifun_agent_contracts::{CanonicalErrorCode, DigestHex, MiniAppId, OperationId};
+use nomifun_agent_contracts::{CanonicalErrorCode, DigestHex, PluginProductId, OperationId};
 use nomifun_api_types::{
     DurableOperationKindDto, DurableOperationOwnerDto, DurableOperationStateDto,
     DurableOperationSummaryDto,
@@ -31,7 +31,7 @@ pub enum PluginRuntimeOperationState {
 pub struct DurablePluginRuntimeOperation {
     pub operation_id: OperationId,
     pub revision: u64,
-    pub miniapp_id: MiniAppId,
+    pub plugin_product_id: PluginProductId,
     pub kind: PluginRuntimeOperationKind,
     pub state: PluginRuntimeOperationState,
     pub cancelable: bool,
@@ -45,7 +45,7 @@ pub struct DurablePluginRuntimeOperation {
 impl DurablePluginRuntimeOperation {
     pub fn running(
         operation_id: OperationId,
-        miniapp_id: MiniAppId,
+        plugin_product_id: PluginProductId,
         kind: PluginRuntimeOperationKind,
         cancelable: bool,
         now_ms: i64,
@@ -53,7 +53,7 @@ impl DurablePluginRuntimeOperation {
         let value = Self {
             operation_id,
             revision: 1,
-            miniapp_id,
+            plugin_product_id,
             kind,
             state: PluginRuntimeOperationState::Running,
             cancelable,
@@ -127,7 +127,7 @@ impl DurablePluginRuntimeOperation {
 
     pub fn validate(&self) -> PluginRuntimePlatformResult<()> {
         if self.operation_id.as_ref().trim().is_empty()
-            || self.miniapp_id.as_ref().trim().is_empty()
+            || self.plugin_product_id.as_ref().trim().is_empty()
             || self.revision == 0
             || self.started_at_ms <= 0
             || self.progress_percent.is_some_and(|value| value > 100)
@@ -195,11 +195,11 @@ impl DurablePluginRuntimeOperation {
                 PluginRuntimeOperationKind::Import => DurableOperationKindDto::Import,
                 PluginRuntimeOperationKind::Export => DurableOperationKindDto::Export,
                 PluginRuntimeOperationKind::PermanentDelete => {
-                    DurableOperationKindDto::MiniappPermanentDelete
+                    DurableOperationKindDto::PluginPermanentDelete
                 }
             },
-            owner: DurableOperationOwnerDto::Miniapp {
-                miniapp_id: self.miniapp_id.0.clone(),
+            owner: DurableOperationOwnerDto::PluginRuntime {
+                plugin_id: self.plugin_product_id.0.clone(),
             },
             state: match self.state {
                 PluginRuntimeOperationState::Running => DurableOperationStateDto::Running,

@@ -358,7 +358,7 @@ mod tests {
         state.begin_attempt();
         state.ledger.replace_plan(vec![
             step("scaffold the layout", StepStatus::Completed),
-            step("write miniapp.html", StepStatus::InProgress),
+            step("write plugin.html", StepStatus::InProgress),
             step("verify it opens", StepStatus::Pending),
         ]);
         state
@@ -372,7 +372,7 @@ mod tests {
 
         let section = state.take_section().expect("restart renders a section");
         assert!(section.contains("[x] scaffold the layout"));
-        assert!(section.contains("[>] write miniapp.html"));
+        assert!(section.contains("[>] write plugin.html"));
         assert!(section.contains("[ ] verify it opens"));
         assert!(section.contains("ok    Bash: mkdir -p toolbox"));
         assert!(section.contains("Write (6142 bytes of arguments streamed, NOT executed)"));

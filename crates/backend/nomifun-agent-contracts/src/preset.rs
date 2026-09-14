@@ -13,11 +13,12 @@ use crate::runtime::RuntimeProfileKind;
 use crate::{
     ActionId, AgentPresetId, ArtifactEnvelope, CanonicalErrorCode, CanonicalSchemaRef,
     ContributionId, ContributionSourceKind, DigestHex, ChatRouteIdentity, ChatRouteRecord,
-    McpBindingId, McpServerId, McpToolKey, MiniAppId, ModelRouteId, OperationId, PluginMountId,
+    McpBindingId, McpServerId, McpToolKey, ModelRouteId, OperationId, PluginMountId,
+    PluginProductId,
     PrincipalRef, ResolvedSnapshotId, ResourceKind, RuntimeFeatureId,
     StableSourceIdentity, TypedResourceBindings, UserId, VersionString,
 };
-use crate::miniapp_m1::MiniAppReleaseRef;
+use crate::plugin_runtime::PluginReleaseRef;
 
 pub const CAPABILITY_NOT_MATERIALIZED: &str = "CAPABILITY_NOT_MATERIALIZED";
 pub const CAPABILITY_NOT_IN_PRESET: &str = "CAPABILITY_NOT_IN_PRESET";
@@ -63,7 +64,7 @@ pub struct ContributionLock {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount_id: Option<PluginMountId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub miniapp_id: Option<MiniAppId>,
+    pub plugin_product_id: Option<PluginProductId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_binding_id: Option<McpBindingId>,
     pub contribution_id: ContributionId,
@@ -83,19 +84,19 @@ impl ContributionLock {
         let valid_source_identity = match self.source_kind {
             ContributionSourceKind::PlatformBuiltin => {
                 self.mount_id.is_none()
-                    && self.miniapp_id.is_none()
+                    && self.plugin_product_id.is_none()
                     && self.mcp_binding_id.is_none()
             }
             ContributionSourceKind::PluginMount => {
                 self.mount_id.is_some()
-                    && self.miniapp_id.is_none()
+                    && self.plugin_product_id.is_none()
                     && self.mcp_binding_id.is_none()
             }
-            ContributionSourceKind::MiniAppActiveRelease => {
-                self.miniapp_id.is_some() && self.mcp_binding_id.is_none()
+            ContributionSourceKind::PluginProductActiveRelease => {
+                self.plugin_product_id.is_some() && self.mcp_binding_id.is_none()
             }
             ContributionSourceKind::McpBinding => {
-                self.mcp_binding_id.is_some() && self.miniapp_id.is_none()
+                self.mcp_binding_id.is_some() && self.plugin_product_id.is_none()
             }
         };
         if !valid_source_identity {
@@ -192,8 +193,7 @@ pub struct AgentPresetRevisionPayload {
     /// opaque IDs are not sufficient to construct a provider request.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub chat_route_records: BTreeMap<String, ChatRouteRecord>,
-    pub initial_capabilities: Vec<CapabilitySelection>,
-    pub on_demand_capabilities: Vec<CapabilitySelection>,
+    pub enabled_capabilities: Vec<CapabilitySelection>,
     pub skill_bindings: Vec<SkillRef>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub system_role_provider_overrides:
@@ -256,8 +256,8 @@ impl AgentPresetRevision {
             Some(&self.reference.revision_id()),
         )?;
         validate_capability_selections(
-            &self.payload.initial_capabilities,
-            &self.payload.on_demand_capabilities,
+            &self.payload.enabled_capabilities,
+
         )?;
         validate_role_provider_overrides(&self.payload.system_role_provider_overrides)?;
         validate_contribution_locks(&self.contribution_locks)?;
@@ -384,12 +384,31 @@ pub struct ResolvedCapability {
     pub source_package: PackageRef,
     pub contribution_id: ContributionId,
     pub contribution_lock: ContributionLock,
-    pub resolved_mount_id: PluginMountId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_mount_id: Option<PluginMountId>,
     pub resolved_source: PluginSourceMetadata,
     pub target_artifact_digest: DigestHex,
     pub schema_digest: DigestHex,
     pub dependency_path: Vec<crate::CapabilityId>,
     pub required_runtime_features: BTreeSet<RuntimeFeatureId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_product_id: Option<PluginProductId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_release: Option<PluginReleaseRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_release_epoch: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_digest: Option<DigestHex>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<CapabilityActionDescriptor>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub required_resource_kinds: BTreeSet<ResourceKind>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub action_allowlist: BTreeSet<ActionId>,
 }
 
 impl ResolvedCapability {
@@ -414,10 +433,9 @@ impl ResolvedCapability {
             self.contribution_id.as_ref(),
             "contribution_id",
         )?;
-        validate_non_empty_canonical_value(
-            self.resolved_mount_id.as_ref(),
-            "resolved_mount_id",
-        )?;
+        if let Some(mount_id) = &self.resolved_mount_id {
+            validate_non_empty_canonical_value(mount_id.as_ref(), "resolved_mount_id")?;
+        }
         validate_non_empty_canonical_value(
             &self.resolved_source.source_identity,
             "resolved_source.source_identity",
@@ -436,7 +454,7 @@ impl ResolvedCapability {
             ));
         }
         if let Some(mount_id) = &self.contribution_lock.mount_id
-            && mount_id != &self.resolved_mount_id
+            && self.resolved_mount_id.as_ref() != Some(mount_id)
         {
             return Err(snapshot_capability_violation(
                 &self.capability.id,
@@ -470,130 +488,103 @@ impl ResolvedCapability {
                 "dependency_path must terminate at the resolved capability",
             ));
         }
-        Ok(())
-    }
-}
-
-/// Exact executable facts for a Capability published by a MiniApp Active
-/// Release.
-///
-/// MiniApp capabilities are published into the shared Catalog but are not
-/// materialized in the Kernel Plugin Registry.  Keeping this projection
-/// separate from [`ResolvedCapability`] prevents a MiniApp Release from being
-/// represented as a fake Plugin mount while still freezing the manifest,
-/// release identity, publication digest, and action allowlist in the Agent
-/// Snapshot.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ResolvedMiniAppCapability {
-    pub capability: CapabilityRef,
-    pub source_package: PackageRef,
-    pub contribution_id: ContributionId,
-    pub contribution_lock: ContributionLock,
-    pub miniapp_id: MiniAppId,
-    pub active_release: MiniAppReleaseRef,
-    pub active_release_epoch: u64,
-    pub catalog_digest: DigestHex,
-    pub display_name: String,
-    pub description: String,
-    pub actions: Vec<CapabilityActionDescriptor>,
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub required_resource_kinds: BTreeSet<ResourceKind>,
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub action_allowlist: BTreeSet<ActionId>,
-}
-
-impl ResolvedMiniAppCapability {
-    pub fn validate(&self) -> Result<(), PresetContractViolation> {
-        validate_non_empty_canonical_value(
-            self.source_package.id.as_ref(),
-            "source_package.id",
-        )?;
-        validate_non_empty_canonical_value(
-            self.source_package.version.as_ref(),
-            "source_package.version",
-        )?;
-        validate_non_empty_canonical_value(
-            self.contribution_id.as_ref(),
-            "contribution_id",
-        )?;
-        validate_non_empty_canonical_value(self.miniapp_id.as_ref(), "miniapp_id")?;
-        self.active_release
-            .validate()
-            .map_err(|error| snapshot_capability_violation(
-                &self.capability.id,
-                error.to_string(),
-            ))?;
-        if self.active_release_epoch == 0 {
-            return Err(snapshot_capability_violation(
-                &self.capability.id,
-                "active_release_epoch must be greater than zero",
-            ));
-        }
-        if !is_lowercase_hex_digest(&self.catalog_digest) {
-            return Err(snapshot_capability_violation(
-                &self.capability.id,
-                "catalog_digest must be 64 lowercase hexadecimal characters",
-            ));
-        }
-        self.contribution_lock.validate()?;
-        if self.contribution_lock.source_kind
-            != ContributionSourceKind::MiniAppActiveRelease
-            || self.contribution_lock.miniapp_id.as_ref() != Some(&self.miniapp_id)
-            || self.contribution_lock.mount_id.is_some()
-            || self.contribution_lock.mcp_binding_id.is_some()
-            || self.contribution_lock.contribution_id != self.contribution_id
-        {
-            return Err(snapshot_capability_violation(
-                &self.capability.id,
-                "MiniApp contribution lock has invalid provenance",
-            ));
-        }
-        let declared_actions = self.actions
-            .iter()
-            .map(|action| action.action_id.clone())
-            .collect::<BTreeSet<_>>();
-        if let Some(action_id) = self
-            .action_allowlist
-            .iter()
-            .find(|action_id| !declared_actions.contains(*action_id))
-        {
-            return Err(snapshot_capability_violation(
-                &self.capability.id,
-                format!(
-                    "MiniApp action allowlist contains undeclared action {}",
-                    action_id.as_ref()
-                ),
-            ));
-        }
-        if self.actions.is_empty() {
-            return Err(snapshot_capability_violation(
-                &self.capability.id,
-                "MiniApp capability must freeze at least one action",
-            ));
+        match self.contribution_lock.source_kind {
+            ContributionSourceKind::PluginProductActiveRelease => {
+                let product_id = self.plugin_product_id.as_ref().ok_or_else(|| {
+                    snapshot_capability_violation(
+                        &self.capability.id,
+                        "plugin_product_id is required for a Plugin Product release",
+                    )
+                })?;
+                validate_non_empty_canonical_value(product_id.as_ref(), "plugin_product_id")?;
+                let release = self.active_release.as_ref().ok_or_else(|| {
+                    snapshot_capability_violation(
+                        &self.capability.id,
+                        "active_release is required for a Plugin Product release",
+                    )
+                })?;
+                release
+                    .validate()
+                    .map_err(|error| snapshot_capability_violation(
+                        &self.capability.id,
+                        error.to_string(),
+                    ))?;
+                let active_release_epoch = self.active_release_epoch.ok_or_else(|| {
+                    snapshot_capability_violation(
+                        &self.capability.id,
+                        "active_release_epoch is required for a Plugin Product release",
+                    )
+                })?;
+                if active_release_epoch == 0 {
+                    return Err(snapshot_capability_violation(
+                        &self.capability.id,
+                        "active_release_epoch must be greater than zero",
+                    ));
+                }
+                if !self.resolved_mount_id.is_none()
+                    || self.contribution_lock.mount_id.is_some()
+                    || self.contribution_lock.mcp_binding_id.is_some()
+                    || self.contribution_lock.plugin_product_id.as_ref() != Some(product_id)
+                {
+                    return Err(snapshot_capability_violation(
+                        &self.capability.id,
+                        "Plugin Product release provenance is invalid",
+                    ));
+                }
+                let catalog_digest = self.catalog_digest.as_ref().ok_or_else(|| {
+                    snapshot_capability_violation(
+                        &self.capability.id,
+                        "catalog_digest is required for a Plugin Product release",
+                    )
+                })?;
+                if !is_lowercase_hex_digest(catalog_digest) {
+                    return Err(snapshot_capability_violation(
+                        &self.capability.id,
+                        "catalog_digest must be 64 lowercase hexadecimal characters",
+                    ));
+                }
+                let declared_actions = self
+                    .actions
+                    .iter()
+                    .map(|action| action.action_id.clone())
+                    .collect::<BTreeSet<_>>();
+                if let Some(action_id) = self
+                    .action_allowlist
+                    .iter()
+                    .find(|action_id| !declared_actions.contains(*action_id))
+                {
+                    return Err(snapshot_capability_violation(
+                        &self.capability.id,
+                        format!(
+                            "Plugin Product action allowlist contains undeclared action {}",
+                            action_id.as_ref()
+                        ),
+                    ));
+                }
+                if self.actions.is_empty() {
+                    return Err(snapshot_capability_violation(
+                        &self.capability.id,
+                        "Plugin Product capability must freeze at least one action",
+                    ));
+                }
+            }
+            _ => {
+                if self.plugin_product_id.is_some()
+                    || self.active_release.is_some()
+                    || self.active_release_epoch.is_some()
+                    || self.catalog_digest.is_some()
+                    || !self.actions.is_empty()
+                    || !self.action_allowlist.is_empty()
+                {
+                    return Err(snapshot_capability_violation(
+                        &self.capability.id,
+                        "release profile fields require Plugin Product release provenance",
+                    ));
+                }
+            }
         }
         Ok(())
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct CompactOnDemandCapabilityEntry {
-    pub capability_id: crate::CapabilityId,
-    pub display_name: String,
-    pub short_description: String,
-    pub search_terms: Vec<String>,
-    pub activation_plan_digest: DigestHex,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PrecomputedActivationPlan {
-    pub root_capability_id: crate::CapabilityId,
-    pub capability_bundle: Vec<crate::CapabilityId>,
-    pub tool_schema_refs: Vec<CanonicalSchemaRef>,
-    pub context_schema_refs: Vec<CanonicalSchemaRef>,
-    pub model_route_refs: Vec<ModelRouteId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -658,17 +649,9 @@ pub struct ResolvedSnapshotContent {
     pub model_route_refs: BTreeMap<String, ModelRouteId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_route_identity: Option<ChatRouteIdentity>,
-    pub initial_capabilities: Vec<ResolvedCapability>,
-    pub on_demand_capabilities: Vec<ResolvedCapability>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub initial_miniapp_capabilities: Vec<ResolvedMiniAppCapability>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub on_demand_miniapp_capabilities: Vec<ResolvedMiniAppCapability>,
+    pub enabled_capabilities: Vec<ResolvedCapability>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub required_resource_kinds: BTreeSet<ResourceKind>,
-    pub on_demand_activation_plans:
-        BTreeMap<crate::CapabilityId, PrecomputedActivationPlan>,
-    pub compact_on_demand_index: Vec<CompactOnDemandCapabilityEntry>,
     pub capability_allowlist: BTreeSet<crate::CapabilityId>,
     pub skill_locks: Vec<ResolvedSkillLock>,
     pub mcp_tool_locks: Vec<ResolvedMcpToolLock>,
@@ -696,12 +679,8 @@ pub struct ResolvedSnapshotEnvelope {
 impl ResolvedSnapshotEnvelope {
     pub fn validate(&self) -> Result<(), PresetContractViolation> {
         validate_resolved_capability_sets(
-            &self.content.initial_capabilities,
-            &self.content.on_demand_capabilities,
-        )?;
-        validate_resolved_miniapp_capability_sets(
-            &self.content.initial_miniapp_capabilities,
-            &self.content.on_demand_miniapp_capabilities,
+            &self.content.enabled_capabilities,
+
         )?;
         validate_snapshot_chat_route_identity(&self.content)?;
         validate_resolved_role_provider_locks(
@@ -709,8 +688,8 @@ impl ResolvedSnapshotEnvelope {
         )?;
         validate_resolved_mcp_tool_locks(
             &self.content.mcp_tool_locks,
-            &self.content.initial_capabilities,
-            &self.content.on_demand_capabilities,
+            &self.content.enabled_capabilities,
+
         )?;
         let digest = digest_payload(&self.content).map_err(|error| PresetContractViolation {
             code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
@@ -724,30 +703,6 @@ impl ResolvedSnapshotEnvelope {
         }
         Ok(())
     }
-}
-
-fn validate_resolved_miniapp_capability_sets(
-    initial: &[ResolvedMiniAppCapability],
-    on_demand: &[ResolvedMiniAppCapability],
-) -> Result<(), PresetContractViolation> {
-    let mut ids = BTreeSet::new();
-    for (set_name, capabilities) in [
-        ("initial_miniapp_capabilities", initial),
-        ("on_demand_miniapp_capabilities", on_demand),
-    ] {
-        for capability in capabilities {
-            capability.validate()?;
-            if !ids.insert(capability.capability.id.clone()) {
-                return Err(snapshot_capability_violation(
-                    &capability.capability.id,
-                    format!(
-                        "MiniApp capability appears more than once across Snapshot sets ({set_name})"
-                    ),
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 fn validate_resolved_role_provider_locks(
@@ -774,7 +729,6 @@ fn validate_resolved_role_provider_locks(
 fn validate_resolved_mcp_tool_locks(
     locks: &[ResolvedMcpToolLock],
     initial: &[ResolvedCapability],
-    on_demand: &[ResolvedCapability],
 ) -> Result<(), PresetContractViolation> {
     let mut identity_keys = BTreeSet::new();
     let mut capability_ids = BTreeSet::new();
@@ -799,7 +753,7 @@ fn validate_resolved_mcp_tool_locks(
 
         let resolved = initial
             .iter()
-            .chain(on_demand.iter())
+
             .find(|capability| capability.capability.id == lock.capability_id)
             .ok_or_else(|| {
                 mcp_lock_violation(format!(
@@ -940,8 +894,7 @@ impl OfficialPresetKey {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OfficialPresetSeed {
-    pub initial_capabilities: Vec<CapabilityRef>,
-    pub on_demand_capabilities: Vec<CapabilityRef>,
+    pub enabled_capabilities: Vec<CapabilityRef>,
     pub skill_bindings: Vec<SkillRef>,
     pub required_resource_kinds: BTreeSet<ResourceKind>,
     pub required_runtime_features: BTreeSet<RuntimeFeatureId>,
@@ -997,14 +950,13 @@ impl OfficialPresetSeedManifestPayload {
 
         for (key, seed) in &self.templates {
             validate_exact_capability_refs(
-                &seed.initial_capabilities,
-                &seed.on_demand_capabilities,
+                &seed.enabled_capabilities,
+
             )?;
             let coverage = &self.role_coverage[key];
             let selected = seed
-                .initial_capabilities
+                .enabled_capabilities
                 .iter()
-                .chain(&seed.on_demand_capabilities)
                 .map(|capability| capability.id.clone())
                 .collect::<BTreeSet<_>>();
             if !coverage.required_capability_ids.is_subset(&selected)
@@ -1022,8 +974,8 @@ impl OfficialPresetSeedManifestPayload {
 
         let chat = &self.templates[&OfficialPresetKey::ChatMinimal];
         let chat_coverage = &self.role_coverage[&OfficialPresetKey::ChatMinimal];
-        if !chat.initial_capabilities.is_empty()
-            || !chat.on_demand_capabilities.is_empty()
+        if !chat.enabled_capabilities.is_empty()
+
             || !chat.skill_bindings.is_empty()
             || !chat.required_resource_kinds.is_empty()
             || !chat.required_runtime_features.is_empty()
@@ -1040,9 +992,8 @@ impl OfficialPresetSeedManifestPayload {
 
         let coding = &self.templates[&OfficialPresetKey::CodingCodex];
         if coding
-            .initial_capabilities
+            .enabled_capabilities
             .iter()
-            .chain(&coding.on_demand_capabilities)
             .any(|capability| {
                 capability.id.as_ref().starts_with("browser.")
                     || capability.id.as_ref().starts_with("computer.")
@@ -1062,9 +1013,8 @@ impl OfficialPresetSeedManifestPayload {
 
         let companion = &self.templates[&OfficialPresetKey::CompanionDefault];
         let companion_union = companion
-            .initial_capabilities
+            .enabled_capabilities
             .iter()
-            .chain(&companion.on_demand_capabilities)
             .map(|capability| capability.id.as_ref())
             .collect::<BTreeSet<_>>();
         for capability in [
@@ -1143,9 +1093,8 @@ impl OfficialPresetSeedManifestPayload {
             .collect::<Vec<_>>();
         for (key, seed) in &self.templates {
             for capability in seed
-                .initial_capabilities
+                .enabled_capabilities
                 .iter()
-                .chain(&seed.on_demand_capabilities)
             {
                 if !available.iter().any(|available| available == capability) {
                     return Err(PresetContractViolation {
@@ -1245,57 +1194,6 @@ pub fn canonical_api_inventory_payload() -> CanonicalApiInventoryPayload {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum EditorDraftState {
-    Clean,
-    Dirty,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum EditorRevisionAction {
-    ReuseCurrentRevision,
-    SaveOrdinaryVisibleRevision,
-    SaveFailed,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct D022EditorTestFixtureCase {
-    pub case_id: String,
-    pub draft_state: EditorDraftState,
-    pub revision_action: EditorRevisionAction,
-    pub expected_revision_delta: u32,
-    pub expected_agent_session_delta: u32,
-    pub expected_external_effect_delta: u32,
-    pub selected_revision_is_ordinary_visible_immutable: bool,
-    pub uses_exact_agent_binding_value: bool,
-    pub session_create_path: Option<String>,
-    pub session_is_ordinary_persistent: bool,
-    pub delete_path: Option<String>,
-    pub uses_real_typed_resources: bool,
-    pub uses_full_auto: bool,
-    pub expected_error: Option<CanonicalErrorCode>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct D022EditorTestFixturePayload {
-    pub schema_version: VersionString,
-    pub cases: Vec<D022EditorTestFixtureCase>,
-    pub forbidden_backend_surface: BTreeSet<String>,
-}
-
-pub const D022_EDITOR_TEST_FIXTURE_JSON: &str =
-    include_str!("../contracts/presets/d022-editor-test.fixture.json");
-
-pub fn d022_editor_test_fixture_cases() -> Vec<D022EditorTestFixtureCase> {
-    serde_json::from_str::<D022EditorTestFixturePayload>(D022_EDITOR_TEST_FIXTURE_JSON)
-        .expect("D-022 fixture must match D022EditorTestFixturePayload")
-        .cases
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PresetContractViolation {
     pub code: CanonicalErrorCode,
@@ -1304,13 +1202,9 @@ pub struct PresetContractViolation {
 
 fn validate_capability_selections(
     initial: &[CapabilitySelection],
-    on_demand: &[CapabilitySelection],
 ) -> Result<(), PresetContractViolation> {
     validate_capability_ids(
         initial.iter().map(|selection| &selection.capability.id),
-        on_demand
-            .iter()
-            .map(|selection| &selection.capability.id),
     )
 }
 
@@ -1409,16 +1303,12 @@ fn looks_like_semver(value: &str) -> bool {
 
 fn validate_resolved_capability_sets(
     initial: &[ResolvedCapability],
-    on_demand: &[ResolvedCapability],
 ) -> Result<(), PresetContractViolation> {
-    for capability in initial.iter().chain(on_demand) {
+    for capability in initial.iter() {
         capability.validate()?;
     }
     validate_capability_ids(
         initial.iter().map(|selection| &selection.capability.id),
-        on_demand
-            .iter()
-            .map(|selection| &selection.capability.id),
     )
 }
 
@@ -1438,46 +1328,23 @@ fn snapshot_capability_violation(
 
 fn validate_exact_capability_refs(
     initial: &[CapabilityRef],
-    on_demand: &[CapabilityRef],
 ) -> Result<(), PresetContractViolation> {
     validate_capability_ids(
         initial.iter().map(|selection| &selection.id),
-        on_demand.iter().map(|selection| &selection.id),
     )
 }
 
 fn validate_capability_ids<'a>(
-    initial: impl Iterator<Item = &'a crate::CapabilityId>,
-    on_demand: impl Iterator<Item = &'a crate::CapabilityId>,
+    enabled: impl Iterator<Item = &'a crate::CapabilityId>,
 ) -> Result<(), PresetContractViolation> {
-    let mut initial_ids = BTreeSet::new();
-    for capability in initial {
-        if !initial_ids.insert(capability) {
+    let mut ids = BTreeSet::new();
+    for capability in enabled {
+        if !ids.insert(capability) {
             return Err(PresetContractViolation {
                 code: CanonicalErrorCode::from(PRESET_CAPABILITY_DUPLICATE),
-                message: format!("duplicate initial capability {}", capability.as_ref()),
+                message: format!("duplicate enabled capability {}", capability.as_ref()),
             });
         }
-    }
-
-    let mut on_demand_ids = BTreeSet::new();
-    for capability in on_demand {
-        if !on_demand_ids.insert(capability) {
-            return Err(PresetContractViolation {
-                code: CanonicalErrorCode::from(PRESET_CAPABILITY_DUPLICATE),
-                message: format!("duplicate on-demand capability {}", capability.as_ref()),
-            });
-        }
-    }
-
-    if let Some(overlap) = initial_ids.intersection(&on_demand_ids).next() {
-        return Err(PresetContractViolation {
-            code: CanonicalErrorCode::from(PRESET_CAPABILITY_SET_OVERLAP),
-            message: format!(
-                "capability {} cannot be both initial and on-demand",
-                overlap.as_ref()
-            ),
-        });
     }
     Ok(())
 }
@@ -1512,12 +1379,12 @@ mod tests {
                 source_kind: ContributionSourceKind::PlatformBuiltin,
                 source_identity: StableSourceIdentity::from("fixture.package"),
                 mount_id: None,
-                miniapp_id: None,
+                plugin_product_id: None,
                 mcp_binding_id: None,
                 contribution_id,
                 contract_digest: DigestHex::from(schema_digest),
             },
-            resolved_mount_id: PluginMountId::from("fixture.mount"),
+            resolved_mount_id: None,
             resolved_source: PluginSourceMetadata {
                 source_kind: crate::PluginSourceKind::Bundled,
                 source_identity: "fixture.package".to_owned(),
@@ -1527,6 +1394,15 @@ mod tests {
             schema_digest: DigestHex::from(schema_digest),
             dependency_path: vec![capability_id],
             required_runtime_features: BTreeSet::new(),
+            plugin_product_id: None,
+            active_release: None,
+            active_release_epoch: None,
+            catalog_digest: None,
+            display_name: None,
+            description: None,
+            actions: Vec::new(),
+            required_resource_kinds: BTreeSet::new(),
+            action_allowlist: BTreeSet::new(),
         }
     }
 
@@ -1546,8 +1422,7 @@ mod tests {
     }
 
     fn snapshot_content(
-        initial_capabilities: Vec<ResolvedCapability>,
-        on_demand_capabilities: Vec<ResolvedCapability>,
+        enabled_capabilities: Vec<ResolvedCapability>,
         mcp_tool_locks: Vec<ResolvedMcpToolLock>,
     ) -> ResolvedSnapshotContent {
         ResolvedSnapshotContent {
@@ -1565,13 +1440,8 @@ mod tests {
             compiled_runtime_profile_digest: DigestHex::from("fixture-profile"),
             model_route_refs: BTreeMap::new(),
             chat_route_identity: None,
-            initial_capabilities,
-            on_demand_capabilities,
-            initial_miniapp_capabilities: Vec::new(),
-            on_demand_miniapp_capabilities: Vec::new(),
+            enabled_capabilities,
             required_resource_kinds: BTreeSet::new(),
-            on_demand_activation_plans: BTreeMap::new(),
-            compact_on_demand_index: Vec::new(),
             capability_allowlist: BTreeSet::new(),
             skill_locks: Vec::new(),
             mcp_tool_locks,
@@ -1609,8 +1479,7 @@ mod tests {
             schema_version: VersionString::from("1.0.0"),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
-            initial_capabilities: Vec::new(),
-            on_demand_capabilities: Vec::new(),
+            enabled_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
             system_role_provider_overrides: BTreeMap::new(),
             persona: String::new(),
@@ -1636,7 +1505,7 @@ mod tests {
         );
 
         let mut snapshot =
-            serde_json::to_value(snapshot_content(Vec::new(), Vec::new(), Vec::new()))
+            serde_json::to_value(snapshot_content(Vec::new(), Vec::new()))
                 .unwrap();
         snapshot["typed_resource_bindings"] = serde_json::json!([]);
         assert!(
@@ -1645,7 +1514,7 @@ mod tests {
         );
 
         let mut nested_snapshot =
-            serde_json::to_value(snapshot_content(Vec::new(), Vec::new(), Vec::new()))
+            serde_json::to_value(snapshot_content(Vec::new(), Vec::new()))
                 .unwrap();
         nested_snapshot["on_demand_activation_plans"] = serde_json::json!({
             "knowledge.search": {
@@ -1728,14 +1597,12 @@ mod tests {
 
         let duplicate_identity = envelope(snapshot_content(
             initial.clone(),
-            Vec::new(),
             vec![first.clone(), first.clone()],
         ));
         assert!(duplicate_identity.validate().is_err());
 
         let duplicate_capability = envelope(snapshot_content(
             initial,
-            Vec::new(),
             vec![
                 first,
                 mcp_lock(
@@ -1750,14 +1617,12 @@ mod tests {
     }
 
     #[test]
-    fn resolved_snapshot_mcp_lock_matches_initial_or_on_demand_capability_schema() {
+    fn resolved_snapshot_mcp_lock_matches_enabled_capability_schema() {
         let digest = "a".repeat(64);
-        let initial = vec![resolved_capability("capability.initial", &digest)];
-        let on_demand = vec![resolved_capability("capability.lazy", &digest)];
+        let initial = vec![resolved_capability("capability.initial", &digest), resolved_capability("capability.extra", &digest)];
 
         let valid = envelope(snapshot_content(
             initial.clone(),
-            on_demand.clone(),
             vec![
                 mcp_lock(
                     "server-1",
@@ -1765,14 +1630,13 @@ mod tests {
                     "capability.initial",
                     &digest,
                 ),
-                mcp_lock("server-1", "vendor.lazy", "capability.lazy", &digest),
+                mcp_lock("server-1", "vendor.extra", "capability.extra", &digest),
             ],
         ));
         assert!(valid.validate().is_ok());
 
         let unknown = envelope(snapshot_content(
             initial.clone(),
-            on_demand.clone(),
             vec![mcp_lock(
                 "server-1",
                 "vendor.unknown",
@@ -1784,7 +1648,6 @@ mod tests {
 
         let independent_tool_schema_digest = envelope(snapshot_content(
             initial,
-            on_demand,
             vec![mcp_lock(
                 "server-1",
                 "vendor.initial",
@@ -1820,13 +1683,12 @@ mod tests {
     }
 
     #[test]
-    fn capability_sets_are_mutually_exclusive() {
+    fn enabled_capabilities_reject_duplicate_ids() {
         let error = validate_exact_capability_refs(
-            &[capability("fs.read")],
-            &[capability("fs.read")],
+            &[capability("fs.read"), capability("fs.read")],
         )
         .unwrap_err();
-        assert_eq!(error.code.as_ref(), PRESET_CAPABILITY_SET_OVERLAP);
+        assert_eq!(error.code.as_ref(), PRESET_CAPABILITY_DUPLICATE);
     }
 
     #[test]
@@ -1849,34 +1711,6 @@ mod tests {
     #[test]
     fn official_seed_fixture_is_the_valid_target_contract() {
         official_preset_seed_manifest_payload().validate().unwrap();
-    }
-
-    #[test]
-    fn d022_has_clean_dirty_and_save_failure_cases() {
-        let cases = d022_editor_test_fixture_cases();
-        assert_eq!(cases.len(), 3);
-        assert!(cases.iter().any(|case| {
-            case.draft_state == EditorDraftState::Clean
-                && case.expected_revision_delta == 0
-                && case.expected_agent_session_delta == 1
-                && case.session_create_path.as_deref() == Some("/api/agent-sessions")
-                && case.delete_path.as_deref()
-                    == Some("/api/agent-sessions/{agent_session_id}")
-        }));
-        assert!(cases.iter().any(|case| {
-            case.draft_state == EditorDraftState::Dirty
-                && case.expected_revision_delta == 1
-                && case.expected_agent_session_delta == 1
-                && case.selected_revision_is_ordinary_visible_immutable
-                && case.uses_exact_agent_binding_value
-        }));
-        assert!(cases.iter().any(|case| {
-            case.revision_action == EditorRevisionAction::SaveFailed
-                && case.expected_agent_session_delta == 0
-                && case.expected_external_effect_delta == 0
-                && case.session_create_path.is_none()
-                && case.delete_path.is_none()
-        }));
     }
 
     #[test]

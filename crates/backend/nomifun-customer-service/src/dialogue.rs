@@ -2,8 +2,9 @@
 //!
 //! Per turn: resolve the `(bot, visitor, chat)` lane, merge any pending
 //! visitor texts, take the context window, build a disposable one-shot engine
-//! request whose tool table is EXACTLY the three read-only customer-service
-//! tools, run it under the per-agent semaphore, persist and return the reply.
+//! request whose tool table is the selected Agent's subset of the three
+//! read-only customer-service tools, run it under the per-agent semaphore,
+//! persist and return the reply.
 //!
 //! Concurrency invariants (spec §设计 C):
 //! - cross-visitor turns run in parallel, capped per agent by
@@ -14,6 +15,8 @@
 //!   `None` and must not send anything).
 
 use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::RwLock;
 
 use dashmap::DashMap;
 use nomifun_ai_agent::{OneShotDeps, OneShotTurnRequest, run_one_shot_turn};
@@ -51,6 +54,22 @@ pub trait TurnRunner: Send + Sync {
     async fn run(&self, req: OneShotTurnRequest) -> Result<String, AppError>;
 }
 
+#[derive(Debug, Clone)]
+pub struct CustomerServiceAgentPolicy {
+    pub capabilities: BTreeSet<String>,
+    pub instructions: String,
+}
+
+#[async_trait::async_trait]
+pub trait CustomerServiceAgentPolicyResolver: Send + Sync {
+    async fn resolve(
+        &self,
+        cs_agent_id: &str,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<CustomerServiceAgentPolicy, AppError>;
+}
+
 /// Production runner: the generic one-shot engine entry.
 pub struct LiveTurnRunner {
     pub deps: OneShotDeps,
@@ -78,6 +97,7 @@ pub struct CsDialogueEngine {
     semaphores: DashMap<String, Arc<Semaphore>>,
     /// Per-dialogue lanes (pending buffer + serial lock).
     lanes: DashMap<String, Arc<LaneState>>,
+    agent_policy_resolver: RwLock<Option<Arc<dyn CustomerServiceAgentPolicyResolver>>>,
 }
 
 impl CsDialogueEngine {
@@ -92,6 +112,16 @@ impl CsDialogueEngine {
             runner,
             semaphores: DashMap::new(),
             lanes: DashMap::new(),
+            agent_policy_resolver: RwLock::new(None),
+        }
+    }
+
+    pub fn with_agent_policy_resolver(
+        &self,
+        resolver: Arc<dyn CustomerServiceAgentPolicyResolver>,
+    ) {
+        if let Ok(mut guard) = self.agent_policy_resolver.write() {
+            *guard = Some(resolver);
         }
     }
 
@@ -286,18 +316,59 @@ impl CsDialogueEngine {
                 .await?;
         }
 
+        let policy = self
+            .agent_policy_resolver
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone());
+        let policy = match policy {
+            Some(resolver) => Some(
+                resolver
+                    .resolve(&agent.cs_agent_id, &provider_id, &model)
+                    .await?,
+            ),
+            None => None,
+        };
+        let allows = |capability: &str| {
+            policy
+                .as_ref()
+                .is_none_or(|policy| policy.capabilities.contains(capability))
+        };
         let kb_ids: Vec<KnowledgeBaseId> = agent
             .knowledge_base_ids_vec()
             .into_iter()
             .filter_map(|id| KnowledgeBaseId::parse(id).ok())
             .collect();
-        // Construction-time whitelist: EXACTLY the three read-only tools.
-        let tools = build_cs_tools(
+        // Construction-time whitelist: only the selected Agent's subset of
+        // these three read-only tools reaches the one-shot engine.
+        let mut tools = build_cs_tools(
             Arc::clone(&self.knowledge),
             Arc::clone(&self.repo),
             &agent.cs_agent_id,
             kb_ids,
         );
+        tools.retain(|tool| match tool.name.as_str() {
+            "knowledge_search" => allows("knowledge.search"),
+            "knowledge_read" => allows("knowledge.read"),
+            "cs_notes_search" => allows("customer_service.notes.read"),
+            _ => false,
+        });
+        let notes = if allows("customer_service.notes.read") {
+            self.pre_retrieved_notes(&agent.cs_agent_id, &user_text).await
+        } else {
+            Vec::new()
+        };
+        let mut system_prompt = if allows("customer_service.dialogue") {
+            build_system_prompt_with_notes(&agent, &notes)
+        } else {
+            "You are the selected Agent for this conversation. Answer the visitor directly within the capabilities granted to this Agent.".to_owned()
+        };
+        if let Some(policy) = policy.as_ref()
+            && !policy.instructions.trim().is_empty()
+        {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(policy.instructions.trim());
+        }
 
         let request = OneShotTurnRequest {
             provider: nomifun_common::ProviderWithModel {
@@ -305,10 +376,7 @@ impl CsDialogueEngine {
                 model,
                 use_model: None,
             },
-            system_prompt: build_system_prompt_with_notes(
-                &agent,
-                &self.pre_retrieved_notes(&agent.cs_agent_id, &user_text).await,
-            ),
+            system_prompt,
             history,
             user_text,
             tools,
@@ -526,6 +594,7 @@ mod tests {
         history_len: usize,
         tool_names: Vec<String>,
         timeout_secs: u64,
+        system_prompt: String,
     }
 
     impl StubRunner {
@@ -551,6 +620,7 @@ mod tests {
                 history_len: req.history.len(),
                 tool_names: req.tools.iter().map(|tool| tool.name.clone()).collect(),
                 timeout_secs: req.timeout_secs,
+                system_prompt: req.system_prompt.clone(),
             });
             if let Some(barrier) = &self.barrier {
                 barrier.wait().await;
@@ -568,6 +638,46 @@ mod tests {
             ChannelPluginId::new().into_string(),
             ChannelUserId::new().into_string(),
         )
+    }
+
+    struct MinimalPolicy;
+
+    #[async_trait::async_trait]
+    impl CustomerServiceAgentPolicyResolver for MinimalPolicy {
+        async fn resolve(
+            &self,
+            _cs_agent_id: &str,
+            _provider_id: &str,
+            _model: &str,
+        ) -> Result<CustomerServiceAgentPolicy, AppError> {
+            Ok(CustomerServiceAgentPolicy {
+                capabilities: BTreeSet::new(),
+                instructions: "MINIMAL_CUSTOMER_AGENT".to_owned(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_agent_policy_removes_customer_tools_and_business_prompt() {
+        let fx = fixture().await;
+        let agent = create_agent(&fx.repo, 1).await;
+        let runner = StubRunner::new(None, 0);
+        let engine = CsDialogueEngine::new(
+            Arc::clone(&fx.repo),
+            Arc::clone(&fx.knowledge),
+            runner.clone(),
+        );
+        engine.with_agent_policy_resolver(Arc::new(MinimalPolicy));
+        let (plugin, visitor) = ids();
+        engine
+            .handle_visitor_message(&agent.cs_agent_id, &plugin, &visitor, "chat", "hello")
+            .await
+            .unwrap();
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].tool_names.is_empty());
+        assert!(calls[0].system_prompt.contains("MINIMAL_CUSTOMER_AGENT"));
+        assert!(!calls[0].system_prompt.contains("你是客服"));
     }
 
     /// ① 跨访客并发：两个不同访客的回合重叠执行（barrier 证明）。

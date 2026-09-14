@@ -319,7 +319,17 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
     const nextIds = isSelected ? binding.kb_ids.filter((x) => x !== baseId) : [...binding.kb_ids, baseId];
     // Auto-enable when first base selected; auto-disable when last removed
     const nextEnabled = nextIds.length > 0 ? true : false;
-    void persist({ ...binding, kb_ids: nextIds, enabled: nextEnabled });
+    void persist({
+      ...binding,
+      kb_ids: nextIds,
+      enabled: nextEnabled,
+      // An unmounted draft must be a genuinely optional, inert state. Do not
+      // carry a stale write-back policy into session creation after the final
+      // base is removed.
+      ...(nextEnabled
+        ? {}
+        : { writeback: false, writeback_eagerness: 'manual' as const }),
+    });
   };
 
   const handleWritebackToggle = (v: boolean) => {
@@ -569,7 +579,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
                 <Switch
                   size='small'
                   checked={binding.writeback}
-                  disabled={targetUnresolved}
+                  disabled={targetUnresolved || binding.kb_ids.length === 0}
                   onChange={handleWritebackToggle}
                 />
               </div>

@@ -13,14 +13,14 @@ export function capabilityCategory(reference: CapabilityReference): CapabilityCa
   if (['fs', 'vcs', 'process', 'terminal', 'workspace', 'ssh'].includes(family)) return 'development';
   if (['web', 'browser', 'computer', 'a11y', 'citation'].includes(family)) return 'web';
   if (['agent', 'companion', 'channel', 'customer_service', 'robot'].includes(family)) return 'collaboration';
-  if (['creation', 'workshop', 'office', 'miniapp'].includes(family)) return 'creation';
+  if (['creation', 'workshop', 'office', 'plugin'].includes(family)) return 'creation';
   if (['requirements', 'autowork', 'schedule', 'idmm', 'notification', 'remote', 'ingress'].includes(family)) return 'automation';
   if (family === 'llm') return 'models';
   return 'integrations';
 }
 
 export const selectedCapabilityReferences = (document: AgentPresetDocument): CapabilityReference[] =>
-  [...new Map([...document.initial_capabilities, ...document.on_demand_capabilities]
+  [...new Map(document.enabled_capabilities
     .map(({ capability }) => [capabilityReferenceKey(capability), capability])).values()];
 
 export const isBuiltinCapability = (item: CapabilityCatalogItem): boolean =>

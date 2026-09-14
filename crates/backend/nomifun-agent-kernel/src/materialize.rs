@@ -527,7 +527,7 @@ fn capability_provenance(
                     mcp.mapping.server_id.as_ref()
                 )),
                 mount_id,
-                miniapp_id: None,
+                plugin_product_id: None,
                 mcp_binding_id: Some(mcp.binding_id.clone()),
                 contribution_id: contribution_id.clone(),
                 contract_digest: schema_digest.clone(),
@@ -566,7 +566,7 @@ fn package_contribution_lock(
             registration.source.source_identity.clone(),
         ),
         mount_id,
-        miniapp_id: None,
+        plugin_product_id: None,
         mcp_binding_id: None,
         contribution_id,
         contract_digest,

@@ -8,6 +8,7 @@ import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { Message } from '@arco-design/web-react';
 import type { TFunction } from 'i18next';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useWorkbenchLayout } from '../useWorkbenchLayout';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 
@@ -59,7 +60,6 @@ import {
 import {
   VideoWorkbench,
   videoWorkbenchDimensions as resolveVideoWorkbenchDimensions,
-  type VideoWorkbenchLayout,
 } from '../video';
 import {
   standaloneWorkbenchOwner,
@@ -179,7 +179,7 @@ const OwnedVideoWorkbenchReady: React.FC<{
   const [initialDraft] = useState(
     () => readStandaloneWorkbenchDraft('video') ?? createDefaultVideoWorkbenchDraft()
   );
-  const [layout, setLayout] = useState<VideoWorkbenchLayout>(initialDraft.layout);
+  const [layout, setLayout] = useWorkbenchLayout('video', initialDraft.layout);
   const [prompt, setPrompt] = useState(initialDraft.prompt);
   const [model, setModel] = useState<CreativeModelSelectionRef | null>(
     initialDraft.model ? { ...initialDraft.model } : null

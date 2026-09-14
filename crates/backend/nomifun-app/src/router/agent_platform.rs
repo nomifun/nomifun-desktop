@@ -57,10 +57,8 @@ struct SessionEventsQuery {
 struct AgentSessionCapabilityStateResponse {
     resolved_snapshot_ref: nomifun_agent_contracts::ResolvedSnapshotRef,
     generation: u64,
-    initial_capabilities: Vec<String>,
-    on_demand_capabilities: Vec<String>,
+    enabled_capabilities: Vec<String>,
     active_capabilities: Vec<String>,
-    compact_on_demand_index: Vec<nomifun_agent_contracts::CompactOnDemandCapabilityEntry>,
 }
 
 #[derive(Serialize)]
@@ -249,13 +247,8 @@ async fn agent_session_capabilities(
         AgentSessionCapabilityStateResponse {
             resolved_snapshot_ref: catalog.resolved_snapshot_ref,
             generation: catalog.generation,
-            initial_capabilities: catalog
-                .initial_capabilities
-                .into_iter()
-                .map(|capability| capability.as_ref().to_owned())
-                .collect(),
-            on_demand_capabilities: catalog
-                .on_demand_capabilities
+            enabled_capabilities: catalog
+                .enabled_capabilities
                 .into_iter()
                 .map(|capability| capability.as_ref().to_owned())
                 .collect(),
@@ -264,7 +257,6 @@ async fn agent_session_capabilities(
                 .into_iter()
                 .map(|capability| capability.as_ref().to_owned())
                 .collect(),
-            compact_on_demand_index: catalog.compact_on_demand_index,
         },
     )))
 }

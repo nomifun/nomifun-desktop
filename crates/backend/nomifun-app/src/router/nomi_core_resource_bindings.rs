@@ -34,6 +34,10 @@ pub(crate) const MANAGED_TERMINAL_RESOURCE_ID: &str = "managed-terminal";
 
 const MAX_RESOURCE_SELECTIONS: usize = 32;
 const MAX_RESOURCE_FIELD_BYTES: usize = 512;
+// Knowledge mounting is deliberately optional at session creation. A session
+// may start without a base and gain its conversation-scoped, read/write policy
+// through the knowledge binding control before the first task is delivered.
+const OPTIONAL_UNBOUND_RESOURCE_KINDS: [&str; 1] = ["knowledge_base"];
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResourceSelectionResolutionError {
@@ -158,7 +162,7 @@ impl NomiCoreResourceBindingResolverRegistry {
             ),
             customer_service: Arc::clone(&services.customer_service_service),
             workshop: Arc::clone(&services.workshop_service),
-            miniapp: Arc::clone(&services.plugin_runtime),
+            plugin_runtime: Arc::clone(&services.plugin_runtime),
             providers: Arc::clone(&services.provider_repo),
             provider_models: Arc::clone(&services.provider_model_repo),
             provider_capabilities: Arc::clone(&services.provider_model_capability_repo),
@@ -234,7 +238,10 @@ impl NomiCoreResourceBindingResolverRegistry {
 
         let missing = required
             .keys()
-            .filter(|kind| !selections_by_kind.contains_key(*kind))
+            .filter(|kind| {
+                !selections_by_kind.contains_key(*kind)
+                    && !OPTIONAL_UNBOUND_RESOURCE_KINDS.contains(&kind.as_str())
+            })
             .cloned()
             .collect::<Vec<_>>();
         if !missing.is_empty() {
@@ -314,9 +321,8 @@ impl NomiCoreResourceBindingResolverRegistry {
             })?;
         let capability_ids = revision
             .payload
-            .initial_capabilities
+            .enabled_capabilities
             .iter()
-            .chain(&revision.payload.on_demand_capabilities)
             .map(|selection| selection.capability.id.as_ref().to_owned())
             .collect::<BTreeSet<_>>();
         let derived_kinds = required_operations(&capability_ids)
@@ -388,7 +394,7 @@ const SUPPORTED_RESOURCE_KINDS: [&str; 15] = [
     "canvas",
     "asset_library",
     "generation_provider",
-    "miniapp",
+    "plugin",
 ];
 
 fn required_operations(
@@ -460,10 +466,10 @@ fn required_operations(
             "creation.image" | "creation.image_edit" => grant("generation_provider", "image"),
             "creation.video" => grant("generation_provider", "video"),
             "creation.audio" => grant("generation_provider", "audio"),
-            "miniapp.read" => grant("miniapp", "read"),
-            "miniapp.edit" => grant("miniapp", "edit"),
-            "miniapp.publish" => grant("miniapp", "publish"),
-            "miniapp.serve" => grant("miniapp", "serve"),
+            "plugin.read" => grant("plugin", "read"),
+            "plugin.edit" => grant("plugin", "edit"),
+            "plugin.publish" => grant("plugin", "publish"),
+            "plugin.serve" => grant("plugin", "serve"),
             _ => {}
         }
     }
@@ -478,7 +484,7 @@ struct ProductResourceDependencies {
     customer: Arc<nomifun_customer_service::CustomerServiceAgentCapabilityOwner>,
     customer_service: Arc<nomifun_customer_service::CustomerServiceService>,
     workshop: Arc<nomifun_workshop::WorkshopService>,
-    miniapp: Arc<nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService>,
+    plugin_runtime: Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
     providers: Arc<dyn IProviderRepository>,
     provider_models: Arc<dyn IProviderModelRepository>,
     provider_capabilities: Arc<dyn IProviderModelCapabilityRepository>,
@@ -514,7 +520,7 @@ impl NomiCoreResourceAuthority for ProductResourceAuthority {
             "customer" => self.resolve_customer(request).await,
             "canvas" | "asset_library" => self.resolve_workshop(request).await,
             "generation_provider" => self.resolve_generation_provider(request).await,
-            "miniapp" => self.resolve_miniapp(request).await,
+            "plugin" => self.resolve_plugin(request).await,
             _ => Err(ResourceSelectionResolutionError::invalid(format!(
                 "unsupported product resource kind {}",
                 self.kind
@@ -1027,12 +1033,12 @@ impl ProductResourceAuthority {
         })
     }
 
-    async fn resolve_miniapp(
+    async fn resolve_plugin(
         &self,
         request: ResourceAuthorityRequest,
     ) -> Result<ServerResolvedResource, ResourceSelectionResolutionError> {
         self.dependencies
-            .miniapp
+            .plugin_runtime
             .workshop(&request.owner_id, &request.resource_id)
             .await
             .map_err(|_| ResourceSelectionResolutionError::not_found(self.kind, &request.resource_id))?;
@@ -1106,10 +1112,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_unused_and_missing_selections_fail_closed() {
-        let registry = registry("knowledge_base", &["search"]);
+    async fn duplicate_unused_and_missing_mandatory_selections_fail_closed() {
+        let knowledge_registry = registry("knowledge_base", &["search"]);
         let capabilities = BTreeSet::from(["knowledge.search".to_owned()]);
-        let duplicate = registry
+        let duplicate = knowledge_registry
             .resolve(
                 "owner-1",
                 &[
@@ -1128,13 +1134,13 @@ mod tests {
             .unwrap_err();
         assert_eq!(duplicate.code(), "RESOURCE_SELECTION_INVALID");
 
-        let missing = registry
-            .resolve("owner-1", &[], &capabilities)
+        let missing = registry("workspace", &["read"])
+            .resolve("owner-1", &[], &BTreeSet::from(["fs.read".to_owned()]))
             .await
             .unwrap_err();
         assert_eq!(missing.code(), "RESOURCE_SELECTION_REQUIRED");
 
-        let unused = registry
+        let unused = knowledge_registry
             .resolve(
                 "owner-1",
                 &[AgentResourceSelectionDto {
@@ -1146,6 +1152,20 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(unused.code(), "RESOURCE_SELECTION_UNUSED");
+    }
+
+    #[tokio::test]
+    async fn knowledge_base_may_remain_unbound_until_the_session_mount_is_applied() {
+        let bindings = registry("knowledge_base", &["search"])
+            .resolve(
+                "owner-1",
+                &[],
+                &BTreeSet::from(["knowledge.search".to_owned()]),
+            )
+            .await
+            .unwrap();
+
+        assert!(bindings.is_empty());
     }
 
     #[tokio::test]
@@ -1216,7 +1236,7 @@ mod tests {
             "workshop.canvas.read".into(),
             "workshop.asset.read".into(),
             "creation.image".into(),
-            "miniapp.read".into(),
+            "plugin.product.read".into(),
         ]);
         let derived = required_operations(&capabilities);
         assert_eq!(

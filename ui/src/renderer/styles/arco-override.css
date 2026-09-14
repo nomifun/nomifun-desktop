@@ -349,17 +349,13 @@ body[arco-theme='dark'] .sider-soft-popover .arco-popover-arrow {
 }
 
 /* Mount & Usage: one workspace-like frame, with a bounded consumer list and
-   a quiet rules rail. The split changes direction on compact screens. */
+   a quiet rules rail. */
 .knowledge-use-shell {
   box-shadow: inset 0 0 0 1px rgba(var(--primary-6), 0.015);
 }
 
 .knowledge-use-rules-desktop {
   border-left: 1px solid var(--color-border-2);
-}
-
-.knowledge-use-rules-mobile {
-  border-top: 1px solid var(--color-border-2);
 }
 
 .knowledge-use-step {
@@ -891,35 +887,6 @@ body[arco-theme='dark'] .arco-message.arco-message-error {
   color: color-mix(in srgb, var(--danger, #f53f3f) 70%, var(--text-primary, #1d2129)) !important;
 }
 
-/* Settings modal mobile tabs styles */
-/* 设置弹窗移动端 Tabs 样式 */
-.settings-mobile-tabs {
-  .arco-tabs-nav {
-    border-bottom: 1px solid var(--color-border-2);
-  }
-
-  .arco-tabs-nav-tab {
-    font-size: 14px;
-    padding: 8px 0;
-    margin: 0 12px;
-    color: var(--color-text-2);
-  }
-
-  .arco-tabs-nav-tab:first-child {
-    margin-left: 0;
-  }
-
-  .arco-tabs-nav-tab-active {
-    color: var(--color-text-1);
-    font-weight: 500;
-  }
-
-  .arco-tabs-nav-ink {
-    height: 2px;
-    background: var(--color-primary);
-  }
-}
-
 /* WebUI / Channels tabs in Remote settings */
 .settings-remote-tabs {
   .arco-tabs-nav {
@@ -944,50 +911,6 @@ body[arco-theme='dark'] .arco-message.arco-message-error {
     height: 2px;
     background: var(--color-primary);
   }
-}
-
-/* Guid (homepage) mobile: cap model / permission pills so long values
- * truncate instead of pushing the `+` and send buttons off-screen.
- * Driven by LayoutContext.isMobile (data-mobile attribute) so it fires
- * even when CSS media queries don't — Electron windows can report widths
- * wider than 768px while still being shaped like mobile. Lives here in
- * the global stylesheet because the homepage doesn't import sendbox.css. */
-[data-mobile='true'] .agent-mode-compact-pill,
-[data-mobile='true'] [data-testid='guid-model-selector'],
-[data-mobile='true'] [data-testid='mode-selector'] {
-  max-width: 130px !important;
-  min-width: 0 !important;
-  overflow: hidden !important;
-}
-
-[data-mobile='true'] .agent-mode-compact-pill .arco-btn-content {
-  min-width: 0 !important;
-  overflow: hidden !important;
-}
-
-/* Inside the guid model selector, only the label text shrinks/truncates;
- * the leading brain icon and trailing down chevron stay at their natural
- * size so the dropdown affordance never disappears. The button's direct
- * child is a flex span containing [icon, label, chevron]. */
-[data-mobile='true'] [data-testid='guid-model-selector'] > span {
-  min-width: 0 !important;
-  overflow: hidden !important;
-}
-
-[data-mobile='true'] [data-testid='guid-model-selector'] > span > span:nth-child(2) {
-  min-width: 0 !important;
-  overflow: hidden !important;
-  text-overflow: clip !important;
-  white-space: nowrap !important;
-}
-
-/* Tighten the gap between model and mode pills on mobile by trimming
- * each pill's horizontal padding — Arco's round buttons default to
- * ~12px each side, leaving a visible ~24px chasm even with gap:0. */
-[data-mobile='true'] [data-testid='guid-model-selector'].arco-btn-shape-round,
-[data-mobile='true'] [data-testid='mode-selector'] .arco-btn-shape-round {
-  padding-left: 4px !important;
-  padding-right: 4px !important;
 }
 
 /* List pagination — Arco's default active page chip and the

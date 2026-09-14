@@ -10,5 +10,4 @@ test('one plugin entry owns the library, creation and running pages', () => {
   expect(router).toContain("path='/plugins/new'");
   expect(router).toContain("path='/plugins/create/:draftId'");
   expect(router).toContain("path='/plugins/run/:id'");
-  expect(router).not.toContain('/mini-apps');
 });

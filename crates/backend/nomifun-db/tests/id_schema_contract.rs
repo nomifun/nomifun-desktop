@@ -231,22 +231,6 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "mcp_servers",
     "message_correlations",
     "messages",
-    "miniapp_build_operation_lineage",
-    "miniapp_catalog_publications",
-    "miniapp_credential_bindings",
-    "miniapp_deletion_intents",
-    "miniapp_kv",
-    "miniapp_library_state",
-    "miniapp_products",
-    "miniapp_projects",
-    "miniapp_publish_authorizations",
-    "miniapp_release_artifacts",
-    "miniapp_releases",
-    "miniapp_service_test_receipts",
-    "miniapp_source_mutation_commits",
-    "miniapp_source_mutation_intents",
-    "miniapp_surface_sessions",
-    "miniapps",
     "nomi_agent_bindings",
     "nomi_agent_preset_revisions",
     "nomi_agent_presets",
@@ -256,17 +240,32 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "nomi_wave4_action_receipts",
     "oauth_tokens",
     "plugin_artifacts",
+    "plugin_build_operation_lineage",
     "plugin_candidate_test_receipts",
+    "plugin_catalog_publications",
     "plugin_credential_binding_mutations",
     "plugin_credential_bindings",
+    "plugin_deletion_intents",
     "plugin_dependency_mutation_commits",
     "plugin_dependency_mutation_intents",
     "plugin_kv",
+    "plugin_library_state",
+    "plugin_mount_credential_bindings",
+    "plugin_mount_kv",
     "plugin_mount_revisions",
     "plugin_mounts",
     "plugin_product_documents",
+    "plugin_products",
     "plugin_projects",
+    "plugin_publish_authorizations",
     "plugin_ready_candidates",
+    "plugin_release_artifacts",
+    "plugin_releases",
+    "plugin_service_test_receipts",
+    "plugin_source_mutation_commits",
+    "plugin_source_mutation_intents",
+    "plugin_surface_sessions",
+    "product_agent_selections",
     "product_operations",
     "provider_connections",
     "provider_model_capabilities",
@@ -531,14 +530,6 @@ async fn runtime_v3_schema_has_no_physical_foreign_keys_or_cascades_and_only_gua
             "trg_conversations_running_exit_guard",
             "trg_conversations_running_insert_guard",
             "trg_conversations_running_owner_immutable",
-            "trg_miniapp_source_build_start_guard",
-            "trg_miniapp_source_commit_cleanup",
-            "trg_miniapp_source_commit_insert_guard",
-            "trg_miniapp_source_intent_insert_guard",
-            "trg_miniapp_source_product_delete_guard",
-            "trg_miniapp_source_product_update_guard",
-            "trg_miniapp_source_project_delete_guard",
-            "trg_miniapp_source_project_update_guard",
             "trg_nomi_remote_events_append_only_delete",
             "trg_nomi_remote_events_append_only_update",
             "trg_nomi_remote_sessions_provenance_immutable",
@@ -547,21 +538,21 @@ async fn runtime_v3_schema_has_no_physical_foreign_keys_or_cascades_and_only_gua
             "trg_plugin_candidate_imported_provenance_guard",
             "trg_plugin_candidate_receipts_exact_insert",
             "trg_plugin_candidate_receipts_immutable",
-            "trg_plugin_credential_binding_delete_guard",
-            "trg_plugin_credential_binding_insert_guard",
-            "trg_plugin_credential_binding_update_guard",
-            "trg_plugin_credential_binding_updated_at_monotonic",
             "trg_plugin_dependency_commit_cleanup",
             "trg_plugin_dependency_commit_insert_guard",
             "trg_plugin_dependency_intent_insert_guard",
             "trg_plugin_dependency_project_delete_guard",
             "trg_plugin_dependency_project_update_guard",
-            "trg_plugin_kv_updated_at_monotonic",
             "trg_plugin_mount_binding_revision_cleanup",
             "trg_plugin_mount_binding_revision_guard",
             "trg_plugin_mount_binding_revision_shape_guard",
             "trg_plugin_mount_config_revision_guard",
             "trg_plugin_mount_config_revision_shape_guard",
+            "trg_plugin_mount_credential_binding_delete_guard",
+            "trg_plugin_mount_credential_binding_insert_guard",
+            "trg_plugin_mount_credential_binding_update_guard",
+            "trg_plugin_mount_credential_binding_updated_at_monotonic",
+            "trg_plugin_mount_kv_updated_at_monotonic",
             "trg_plugin_mount_pointer_insert_guard",
             "trg_plugin_mount_pointer_update_guard",
             "trg_plugin_mount_revision_authorization_guard",
@@ -577,6 +568,14 @@ async fn runtime_v3_schema_has_no_physical_foreign_keys_or_cascades_and_only_gua
             "trg_plugin_project_metadata_update_guard",
             "trg_plugin_project_ready_candidate_update_guard",
             "trg_plugin_ready_candidate_insert_guard",
+            "trg_plugin_source_build_start_guard",
+            "trg_plugin_source_commit_cleanup",
+            "trg_plugin_source_commit_insert_guard",
+            "trg_plugin_source_intent_insert_guard",
+            "trg_plugin_source_product_delete_guard",
+            "trg_plugin_source_product_update_guard",
+            "trg_plugin_source_project_delete_guard",
+            "trg_plugin_source_project_update_guard",
             "trg_product_operation_log_insert_guard",
             "trg_product_operation_log_update_guard",
             "trg_product_operation_result_guard",
@@ -1343,7 +1342,7 @@ async fn contract_rejects_legacy_workshop_asset_origin_task_path() {
 async fn external_owner_columns_enforce_uuidv7_without_requiring_local_parents() {
     let database = init_database_memory().await.expect("database");
     let pool = database.pool();
-    let plugin_id = nomifun_common::generate_id();
+    let plugin_product_id = nomifun_common::generate_id();
     let companion_id = nomifun_common::generate_id();
     let binding_companion_id = nomifun_common::generate_id();
     let knowledge_binding_id = nomifun_common::KnowledgeBindingId::new();
@@ -1353,7 +1352,7 @@ async fn external_owner_columns_enforce_uuidv7_without_requiring_local_parents()
          (channel_plugin_id, type, name, enabled, config, companion_id, created_at, updated_at) \
          VALUES (?, 'fixture', 'companion fixture', 0, '{}', ?, 1, 1)",
     )
-    .bind(&plugin_id)
+    .bind(&plugin_product_id)
     .bind(&companion_id)
     .execute(pool)
     .await
@@ -1373,7 +1372,7 @@ async fn external_owner_columns_enforce_uuidv7_without_requiring_local_parents()
     ] {
         assert!(
             sqlx::query(statement)
-                .bind(&plugin_id)
+                .bind(&plugin_product_id)
                 .execute(pool)
                 .await
                 .is_err(),

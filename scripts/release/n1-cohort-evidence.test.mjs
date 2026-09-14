@@ -20,7 +20,7 @@ const record = (cell_id, host_target, stage) => ({
   check_ids: ['native_product'],
 });
 
-describe('N1/M1 cohort evidence', () => {
+describe('Plugin N1/M1 cohort evidence', () => {
   test('validates a required native record', () => {
     expect(
       validatePlatformRecord(record('windows_desktop_x64', 'x86_64-pc-windows-msvc', 'candidate'))

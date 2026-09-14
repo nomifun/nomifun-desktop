@@ -19,7 +19,6 @@ use nomifun_agent_contracts::{
     FRESH_V4_BASELINE_SQL, FRESH_V4_DATA_GENERATION, FRESH_V4_MIGRATION_HEAD,
     FRESH_V4_PROJECTION_SCHEMA_VERSION,
 };
-use nomifun_agent_control_plane::CompilerReleaseInputs;
 use nomifun_agent_domain_wave1::{
     Wave1CapabilityOperation, Wave1ContextHostRequest, Wave1FetchRequest, Wave1HostPort,
     Wave1HostPortError, Wave1HostRequest, Wave1KnowledgeReadRequest,
@@ -1590,15 +1589,6 @@ async fn initialize_platform(
         host_surface: current_host_surface(),
         availability_evidence_revision: C7_AVAILABILITY_REVISION.to_owned(),
     };
-    let release = CompilerReleaseInputs {
-        resolver_version: VersionString::from(CONTRACT_VERSION),
-        runtime_protocol_version: VersionString::from(CONTRACT_VERSION),
-        runtime_feature_inventory_digest: feature_digest,
-        canonical_schema_manifest_digest: expected_schema_digest,
-        target_contribution_manifest_digest: seed.target_first_party_contribution_digest,
-        availability_evidence_revision: C7_AVAILABILITY_REVISION.to_owned(),
-    };
-
     let registrations = bundled_registrations_with_host_ports(host_ports)?;
 
     // Runtime process supervision is real and shared by all v4 Sessions. Its
@@ -1650,7 +1640,6 @@ async fn initialize_platform(
     let mut config = AgentPlatformConfig::with_runtime(
         pool,
         policy,
-        release,
         kernel_environment,
         runtime,
         broker,
@@ -2399,7 +2388,7 @@ mod tests {
         TypedResourceBinding,
     ) {
         let owner = principal();
-        let initial_capabilities = capability_ids
+        let enabled_capabilities = capability_ids
             .iter()
             .copied()
             .map(|capability_id| CapabilitySelection {
@@ -2428,8 +2417,8 @@ mod tests {
             schema_version: VersionString::from(CONTRACT_VERSION),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
-            initial_capabilities,
-            on_demand_capabilities: Vec::new(),
+            enabled_capabilities,
+
             skill_bindings: Vec::new(),
             system_role_provider_overrides: BTreeMap::new(),
             persona: format!("Wave 1 {fixture_name} test"),
@@ -2469,7 +2458,7 @@ mod tests {
                     format!("wave1-{fixture_name}-test"),
             },
             CompileRequest {
-                miniapp_capabilities: Vec::new(),
+                plugin_product_capabilities: Vec::new(),
                 revision,
                 principal: owner.clone(),
                 scene: format!("wave1-{fixture_name}-test"),
@@ -2883,11 +2872,11 @@ mod tests {
                 schema_version: VersionString::from(CONTRACT_VERSION),
                 model_route_refs: BTreeMap::new(),
                 chat_route_records: BTreeMap::new(),
-                initial_capabilities: selected_capability_ids
+                enabled_capabilities: selected_capability_ids
                     .iter()
                     .map(|id| capability(id))
                     .collect(),
-                on_demand_capabilities: Vec::new(),
+
                 skill_bindings: Vec::new(),
                 system_role_provider_overrides: BTreeMap::new(),
                 persona: "Browser role live test".to_owned(),
@@ -2922,7 +2911,7 @@ mod tests {
                 &materialized,
                 &environment,
                 CompileRequest {
-                    miniapp_capabilities: Vec::new(),
+                    plugin_product_capabilities: Vec::new(),
                     revision,
                     principal: owner.clone(),
                     scene: "browser-role-live-test".to_owned(),
@@ -3183,11 +3172,11 @@ mod tests {
                 schema_version: VersionString::from(CONTRACT_VERSION),
                 model_route_refs: BTreeMap::new(),
                 chat_route_records: BTreeMap::new(),
-                initial_capabilities: selected_capability_ids
+                enabled_capabilities: selected_capability_ids
                     .iter()
                     .map(|id| capability(id))
                     .collect(),
-                on_demand_capabilities: Vec::new(),
+
                 skill_bindings: Vec::new(),
                 system_role_provider_overrides: BTreeMap::new(),
                 persona: "Computer role live test".to_owned(),
@@ -3222,7 +3211,7 @@ mod tests {
                 &materialized,
                 &environment,
                 CompileRequest {
-                    miniapp_capabilities: Vec::new(),
+                    plugin_product_capabilities: Vec::new(),
                     revision,
                     principal: owner.clone(),
                     scene: "computer-role-live-test".to_owned(),
@@ -3525,8 +3514,7 @@ mod tests {
                 nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT.to_owned(),
                 route_record,
             )]),
-            initial_capabilities: Vec::new(),
-            on_demand_capabilities: Vec::new(),
+            enabled_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
             system_role_provider_overrides: BTreeMap::new(),
             persona: "Agent platform host chat fixture".to_owned(),

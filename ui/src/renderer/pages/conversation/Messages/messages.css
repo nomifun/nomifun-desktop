@@ -209,15 +209,6 @@
   color: var(--color-text-2);
 }
 
-@media (pointer: coarse) {
-  .message-error-note__toggle,
-  .message-error-note__retry,
-  .message-error-note__actions .message-error-note__feedback {
-    min-width: 44px;
-    min-height: 44px;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
   .message-error-note__toggle > span {
     transition: none;

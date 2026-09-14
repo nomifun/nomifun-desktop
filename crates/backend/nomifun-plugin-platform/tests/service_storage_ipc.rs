@@ -9,15 +9,15 @@ use std::{
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    ArtifactId, DigestHex, MiniAppAdditiveMigrationAction, MiniAppBridgeCallId,
-    MiniAppBridgeKvRequest, MiniAppId, MiniAppMigration, MiniAppMigrationColumn, MiniAppMigrationId,
-    MiniAppReleaseId,
-    MiniAppReleaseRef, MiniAppServiceLifecycle, MiniAppServiceRuntimeFingerprint,
-    MiniAppServiceStorageDescriptor, ResolvedMiniAppServiceSpec, ResolvedMiniAppServiceSpecInputs,
+    ArtifactId, DigestHex, PluginAdditiveMigrationAction, PluginBridgeCallId,
+    PluginBridgeKvRequest, PluginProductId, PluginMigration, PluginMigrationColumn, PluginMigrationId,
+    PluginReleaseId,
+    PluginReleaseRef, PluginServiceLifecycle, PluginServiceRuntimeFingerprint,
+    PluginServiceStorageDescriptor, ResolvedPluginServiceSpec, ResolvedPluginServiceSpecInputs,
     RuntimeInstallationId, RuntimeTarget, StrictJsonValue, VersionString, digest_bytes,
 };
 use nomifun_db::{
-    CreateMiniAppM1Params, IMiniAppM1Repository, MiniAppM1Kind, SqliteMiniAppM1Repository,
+    CreatePluginRuntimeParams, IPluginRuntimeRepository, PluginRuntimeKind, SqlitePluginRuntimeRepository,
     init_database_memory, installation_owner_id,
 };
 use nomifun_plugin_platform::runtime::{
@@ -105,10 +105,10 @@ fn node_executable() -> Option<PathBuf> {
 
 fn spec(
     node: &std::path::Path,
-    miniapp_id: MiniAppId,
-    storage: MiniAppServiceStorageDescriptor,
+    plugin_product_id: PluginProductId,
+    storage: PluginServiceStorageDescriptor,
     module: &[u8],
-) -> ResolvedMiniAppServiceSpec {
+) -> ResolvedPluginServiceSpec {
     let runtime_bytes = std::fs::read(node).unwrap();
     let version = std::process::Command::new(node)
         .arg("--version")
@@ -119,22 +119,22 @@ fn spec(
         .trim()
         .trim_start_matches('v')
         .to_owned();
-    ResolvedMiniAppServiceSpec::new(ResolvedMiniAppServiceSpecInputs {
-        miniapp_id: miniapp_id.clone(),
-        release: MiniAppReleaseRef {
-            release_id: MiniAppReleaseId::from(Uuid::now_v7().to_string()),
+    ResolvedPluginServiceSpec::new(ResolvedPluginServiceSpecInputs {
+        plugin_product_id: plugin_product_id.clone(),
+        release: PluginReleaseRef {
+            release_id: PluginReleaseId::from(Uuid::now_v7().to_string()),
             artifact_id: ArtifactId::from(Uuid::now_v7().to_string()),
             release_digest: digest("release"),
             manifest_digest: digest("manifest"),
         },
         active_release_epoch: 1,
         service_module_digest: digest_bytes(module),
-        lifecycle: MiniAppServiceLifecycle::OnDemand,
+        lifecycle: PluginServiceLifecycle::OnDemand,
         host_protocol_version:
-            nomifun_agent_contracts::MINIAPP_SERVICE_HOST_PROTOCOL_VERSION.into(),
+            nomifun_agent_contracts::PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
         sdk_contract_version:
-            nomifun_agent_contracts::MINIAPP_SERVICE_SDK_CONTRACT_VERSION.into(),
-        runtime: MiniAppServiceRuntimeFingerprint {
+            nomifun_agent_contracts::PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
+        runtime: PluginServiceRuntimeFingerprint {
             runtime_installation_id: RuntimeInstallationId::from("storage-ipc-node"),
             runtime_target: RuntimeTarget::from("windows-x86_64"),
             runtime_executable_digest: digest_bytes(&runtime_bytes),
@@ -163,14 +163,14 @@ async fn real_node_service_round_trips_host_storage_without_exposing_db_path() {
     let module = temp.path().join("main.mjs");
     tokio::fs::write(&module, STORAGE_SERVICE).await.unwrap();
     let storage = Arc::new(InMemoryPluginRuntimeManagedStorage::new());
-    let miniapp_id = MiniAppId::from("miniapp-storage-ipc");
+    let plugin_product_id = PluginProductId::from("plugin-storage-ipc");
     let resolved = storage
-        .resolve_service_storage("owner", &miniapp_id, true, true)
+        .resolve_service_storage("owner", &plugin_product_id, true, true)
         .await
         .unwrap();
     let service_spec = spec(
         &node,
-        miniapp_id.clone(),
+        plugin_product_id.clone(),
         resolved.descriptor.clone(),
         STORAGE_SERVICE.as_bytes(),
     );
@@ -199,13 +199,13 @@ async fn real_node_service_round_trips_host_storage_without_exposing_db_path() {
         .invoke(
             PluginRuntimeServiceInvocation {
                 fence: nomifun_plugin_platform::runtime::PluginRuntimeServiceGenerationFence {
-                    miniapp_id: service_spec.miniapp_id.clone(),
+                    plugin_product_id: service_spec.plugin_product_id.clone(),
                     release: service_spec.release.clone(),
                     active_release_epoch: service_spec.active_release_epoch,
                     service_run_key: service_spec.service_run_key.clone(),
                     host_generation: 1,
                 },
-                call_id: MiniAppBridgeCallId::from("storage-call"),
+                call_id: PluginBridgeCallId::from("storage-call"),
                 method: "storage".into(),
                 payload: StrictJsonValue(json!({})),
             },
@@ -228,18 +228,18 @@ async fn real_node_service_round_trips_production_sqlite_storage() {
     };
     let database = init_database_memory().await.unwrap();
     let owner = installation_owner_id(database.pool()).await.unwrap();
-    let miniapp_id = Uuid::now_v7().to_string();
+    let plugin_product_id = Uuid::now_v7().to_string();
     let project_id = Uuid::now_v7().to_string();
-    SqliteMiniAppM1Repository::new(database.pool().clone())
-        .create(&CreateMiniAppM1Params {
+    SqlitePluginRuntimeRepository::new(database.pool().clone())
+        .create(&CreatePluginRuntimeParams {
             owner_user_id: owner.clone(),
-            miniapp_id: miniapp_id.clone(),
+            plugin_product_id: plugin_product_id.clone(),
             project_id,
             expected_library_revision: 0,
             display_name: "Node SQLite fixture".into(),
             description: None,
             icon_asset_id: None,
-            kind: MiniAppM1Kind::Service,
+            kind: PluginRuntimeKind::Plugin,
             materialized_catalog_digest: digest("catalog").as_ref().to_owned(),
             config_schema_json: r#"{"type":"object"}"#.into(),
             config_json: "{}".into(),
@@ -257,23 +257,23 @@ async fn real_node_service_round_trips_production_sqlite_storage() {
         SqlitePluginRuntimeManagedStorage::new(temp.path().join("managed"), database.pool().clone())
             .unwrap(),
     );
-    let miniapp = MiniAppId::from(miniapp_id);
+    let plugin = PluginProductId::from(plugin_product_id);
     let resolved = storage
-        .resolve_service_storage(&owner, &miniapp, false, true)
+        .resolve_service_storage(&owner, &plugin, false, true)
         .await
         .unwrap();
-    let migration = MiniAppMigration::new(
-        MiniAppMigrationId::from("001_create_state"),
-        vec![MiniAppAdditiveMigrationAction::CreateTable {
+    let migration = PluginMigration::new(
+        PluginMigrationId::from("001_create_state"),
+        vec![PluginAdditiveMigrationAction::CreateTable {
             table_name: "state".into(),
             columns: vec![
-                MiniAppMigrationColumn {
+                PluginMigrationColumn {
                     name: "id".into(),
                     declared_type: "TEXT".into(),
                     nullable: false,
                     default_literal: None,
                 },
-                MiniAppMigrationColumn {
+                PluginMigrationColumn {
                     name: "value".into(),
                     declared_type: "INTEGER".into(),
                     nullable: false,
@@ -285,7 +285,7 @@ async fn real_node_service_round_trips_production_sqlite_storage() {
     )
     .unwrap();
     let db_descriptor = resolved.descriptor.private_database.as_ref().unwrap();
-    let release = MiniAppReleaseRef {
+    let release = PluginReleaseRef {
         release_id: "release-node-sqlite".into(),
         artifact_id: "artifact-node-sqlite".into(),
         release_digest: digest("release-node-sqlite"),
@@ -294,7 +294,7 @@ async fn real_node_service_round_trips_production_sqlite_storage() {
     storage
         .apply_additive_migrations(
             &owner,
-            &miniapp,
+            &plugin,
             &resolved.descriptor,
             &db_descriptor.migration_ledger_digest,
             &release,
@@ -304,12 +304,12 @@ async fn real_node_service_round_trips_production_sqlite_storage() {
         .await
         .unwrap();
     let resolved = storage
-        .resolve_service_storage(&owner, &miniapp, false, true)
+        .resolve_service_storage(&owner, &plugin, false, true)
         .await
         .unwrap();
     let service_spec = spec(
         &node,
-        miniapp.clone(),
+        plugin.clone(),
         resolved.descriptor,
         SQLITE_STORAGE_SERVICE.as_bytes(),
     );
@@ -338,13 +338,13 @@ async fn real_node_service_round_trips_production_sqlite_storage() {
         .invoke(
             PluginRuntimeServiceInvocation {
                 fence: nomifun_plugin_platform::runtime::PluginRuntimeServiceGenerationFence {
-                    miniapp_id: service_spec.miniapp_id.clone(),
+                    plugin_product_id: service_spec.plugin_product_id.clone(),
                     release: service_spec.release.clone(),
                     active_release_epoch: service_spec.active_release_epoch,
                     service_run_key: service_spec.service_run_key.clone(),
                     host_generation: 1,
                 },
-                call_id: MiniAppBridgeCallId::from("sqlite-storage-call"),
+                call_id: PluginBridgeCallId::from("sqlite-storage-call"),
                 method: "storage".into(),
                 payload: StrictJsonValue(json!({})),
             },
@@ -372,14 +372,14 @@ impl PluginRuntimeServiceStoragePort for SlowStorage {
     async fn resolve_service_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         uses_files: bool,
         uses_private_database: bool,
     ) -> nomifun_plugin_platform::runtime::PluginRuntimePlatformResult<PluginRuntimeServiceStorageResolution> {
         self.inner
             .resolve_service_storage(
                 owner_user_id,
-                miniapp_id,
+                plugin_product_id,
                 uses_files,
                 uses_private_database,
             )
@@ -389,11 +389,11 @@ impl PluginRuntimeServiceStoragePort for SlowStorage {
     async fn apply_additive_migrations(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
-        storage: &MiniAppServiceStorageDescriptor,
+        plugin_product_id: &PluginProductId,
+        storage: &PluginServiceStorageDescriptor,
         expected_ledger_digest: &DigestHex,
-        release: &MiniAppReleaseRef,
-        migrations: &[MiniAppMigration],
+        release: &PluginReleaseRef,
+        migrations: &[PluginMigration],
         applied_at_ms: i64,
     ) -> nomifun_plugin_platform::runtime::PluginRuntimePlatformResult<
         nomifun_plugin_platform::runtime::PluginRuntimeMigrationLedger,
@@ -401,7 +401,7 @@ impl PluginRuntimeServiceStoragePort for SlowStorage {
         self.inner
             .apply_additive_migrations(
                 owner_user_id,
-                miniapp_id,
+                plugin_product_id,
                 storage,
                 expected_ledger_digest,
                 release,
@@ -413,15 +413,15 @@ impl PluginRuntimeServiceStoragePort for SlowStorage {
 
     async fn handle_service_request(
         &self,
-        miniapp_id: &MiniAppId,
-        storage: &MiniAppServiceStorageDescriptor,
+        plugin_product_id: &PluginProductId,
+        storage: &PluginServiceStorageDescriptor,
         request: PluginRuntimeServiceStorageRequest,
         cancellation: PluginRuntimeCallCancellation,
     ) -> nomifun_plugin_platform::runtime::PluginRuntimePlatformResult<StrictJsonValue> {
         let slow = matches!(
             &request,
             PluginRuntimeServiceStorageRequest::Kv {
-                request: MiniAppBridgeKvRequest::Get { key }
+                request: PluginBridgeKvRequest::Get { key }
             } if key == "slow"
         );
         if slow {
@@ -434,17 +434,17 @@ impl PluginRuntimeServiceStoragePort for SlowStorage {
             return Err(PluginRuntimePlatformError::Canceled);
         }
         self.inner
-            .handle_service_request(miniapp_id, storage, request, cancellation)
+            .handle_service_request(plugin_product_id, storage, request, cancellation)
             .await
     }
 
     async fn purge_service_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
     ) -> nomifun_plugin_platform::runtime::PluginRuntimePlatformResult<()> {
         self.inner
-            .purge_service_storage(owner_user_id, miniapp_id)
+            .purge_service_storage(owner_user_id, plugin_product_id)
             .await
     }
 }
@@ -466,14 +466,14 @@ async fn slow_storage_request_does_not_block_other_calls_and_cancel_reaches_host
         started: Arc::new(tokio::sync::Notify::new()),
         active: Arc::new(AtomicBool::new(false)),
     });
-    let miniapp = MiniAppId::from("miniapp-concurrent-storage");
+    let plugin = PluginProductId::from("plugin-concurrent-storage");
     let resolved = storage
-        .resolve_service_storage("owner", &miniapp, false, false)
+        .resolve_service_storage("owner", &plugin, false, false)
         .await
         .unwrap();
     let service_spec = spec(
         &node,
-        miniapp,
+        plugin,
         resolved.descriptor,
         CONCURRENT_STORAGE_SERVICE.as_bytes(),
     );
@@ -508,13 +508,13 @@ async fn slow_storage_request_does_not_block_other_calls_and_cancel_reaches_host
             .invoke(
                 PluginRuntimeServiceInvocation {
                     fence: nomifun_plugin_platform::runtime::PluginRuntimeServiceGenerationFence {
-                        miniapp_id: slow_spec.miniapp_id.clone(),
+                        plugin_product_id: slow_spec.plugin_product_id.clone(),
                         release: slow_spec.release.clone(),
                         active_release_epoch: slow_spec.active_release_epoch,
                         service_run_key: slow_spec.service_run_key.clone(),
                         host_generation: 1,
                     },
-                    call_id: MiniAppBridgeCallId::from("slow-call"),
+                    call_id: PluginBridgeCallId::from("slow-call"),
                     method: "slow".into(),
                     payload: StrictJsonValue(json!({})),
                 },
@@ -536,13 +536,13 @@ async fn slow_storage_request_does_not_block_other_calls_and_cancel_reaches_host
         process.invoke(
             PluginRuntimeServiceInvocation {
                 fence: nomifun_plugin_platform::runtime::PluginRuntimeServiceGenerationFence {
-                    miniapp_id: service_spec.miniapp_id.clone(),
+                    plugin_product_id: service_spec.plugin_product_id.clone(),
                     release: service_spec.release.clone(),
                     active_release_epoch: service_spec.active_release_epoch,
                     service_run_key: service_spec.service_run_key.clone(),
                     host_generation: 1,
                 },
-                call_id: MiniAppBridgeCallId::from("fast-call"),
+                call_id: PluginBridgeCallId::from("fast-call"),
                 method: "fast".into(),
                 payload: StrictJsonValue(json!({})),
             },

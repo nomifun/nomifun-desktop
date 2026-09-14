@@ -237,7 +237,7 @@
     "identity": {
       "title": "身份与源码",
       "hint": "Product 与 Project 是独立事实；Release 只消费冻结的 Source 与 dependency lock。",
-      "miniappId": "Plugin ID",
+      "pluginId": "Plugin ID",
       "projectId": "Project ID",
       "productRevision": "Product 修订",
       "projectRevision": "Project 修订",
@@ -337,7 +337,7 @@
         "remote": "Remote",
         "automation": "自动化",
         "ui": "UI",
-        "miniappService": "Plugin Service"
+        "pluginService": "Plugin Service"
       },
       "availability": {
         "active": "可用",

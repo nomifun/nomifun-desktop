@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-mod activation;
+mod session_capabilities;
 mod authority;
 mod compiler;
 mod error;
@@ -12,7 +12,7 @@ mod registry;
 mod service;
 mod state;
 
-pub use activation::*;
+pub use session_capabilities::*;
 pub use authority::*;
 pub use compiler::*;
 pub use error::*;

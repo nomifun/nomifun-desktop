@@ -1,0 +1,13 @@
+.utilities { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; margin: 18px 4px 0; padding: 10px 2px; }
+.systemTools { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; }
+.utility { display: inline-flex; align-items: center; gap: 6px; padding: 3px 0; border: 0; background: transparent; color: var(--text-secondary); font: inherit; font-size: 12px; line-height: 20px; cursor: pointer; white-space: nowrap; }
+.utility:hover { color: rgb(var(--primary-6)); }
+.status { font-size: 11px; color: var(--text-secondary); }
+.helpMenu { display: flex; flex-direction: column; gap: 2px; }
+.helpMenu button { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 0; border-radius: 8px; background: transparent; color: var(--text-primary); text-align: left; font: inherit; font-size: 13px; cursor: pointer; }
+.helpMenu button:hover { background: var(--color-fill-2); }
+.helpMenu button:focus-visible, .utility:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: 3px; }
+
+@media (max-height: 720px) {
+  .utilities { margin-top: 8px; padding-top: 4px; padding-bottom: 4px; }
+}

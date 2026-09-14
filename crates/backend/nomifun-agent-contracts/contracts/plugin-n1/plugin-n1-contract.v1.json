@@ -47,7 +47,7 @@
     "build",
     "import",
     "export",
-    "miniapp_permanent_delete"
+    "plugin_product_permanent_delete"
   ],
   "durable_operation_states": [
     "running",

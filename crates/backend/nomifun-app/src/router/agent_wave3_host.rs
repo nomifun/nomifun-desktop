@@ -15,11 +15,11 @@ use nomifun_agent_domain_wave3::{Wave3OwnerBindings, composed_host_port};
 use nomifun_agent_kernel::PluginRegistration;
 use nomifun_ai_agent::NomiPlatformBuiltinToolSchemaResolver;
 use nomifun_creation::CreationService;
-use nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService;
+use nomifun_plugin_platform::runtime::PluginRuntimeApplicationService;
 use nomifun_workshop::WorkshopService;
 
 use super::agent_wave3_creation_host::Wave3CreationHost;
-use super::agent_wave3_miniapp_host::NomiWave3MiniAppHost;
+use super::agent_wave3_plugin_host::NomiWave3PluginHost;
 use super::agent_wave3_workshop_host::NomiWave3WorkshopHost;
 
 pub(crate) const NOMI_WAVE3_TOOL_IDS: [&str; 14] = [
@@ -33,10 +33,10 @@ pub(crate) const NOMI_WAVE3_TOOL_IDS: [&str; 14] = [
     "workshop.asset.read",
     "workshop.asset.write",
     "workshop.template.run",
-    "miniapp.read",
-    "miniapp.edit",
-    "miniapp.publish",
-    "miniapp.serve",
+    "plugin.read",
+    "plugin.edit",
+    "plugin.publish",
+    "plugin.serve",
 ];
 
 pub(crate) fn approved_capability_ids() -> BTreeSet<CapabilityId> {
@@ -47,11 +47,11 @@ pub(crate) fn approved_capability_ids() -> BTreeSet<CapabilityId> {
 }
 
 /// Build host-backed registrations from the exact application service
-/// singletons already used by the Creative Studio and MiniApp HTTP products.
+/// singletons already used by the Creative Studio and Plugin HTTP products.
 pub(crate) fn registrations(
     creation: Arc<CreationService>,
     workshop: Arc<WorkshopService>,
-    miniapp: Arc<PluginRuntimeM1ApplicationService>,
+    plugin_runtime: Arc<PluginRuntimeApplicationService>,
 ) -> Result<Vec<PluginRegistration>, String> {
     let workshop_host = NomiWave3WorkshopHost::new(
         Arc::clone(&workshop),
@@ -63,7 +63,7 @@ pub(crate) fn registrations(
                 Wave3CreationHost::new(creation, Arc::clone(&workshop)).into_host_port(),
             )
             .with_workshop(workshop_host.into_port())
-            .with_miniapp(NomiWave3MiniAppHost::new(miniapp).into_port()),
+            .with_plugin(NomiWave3PluginHost::new(plugin_runtime).into_port()),
     );
     nomifun_agent_domain_wave3::registrations_with_host_port(host)
 }
@@ -116,7 +116,7 @@ mod tests {
         assert!(approved.iter().all(|id| {
             id.as_ref().starts_with("creation.")
                 || id.as_ref().starts_with("workshop.")
-                || id.as_ref().starts_with("miniapp.")
+                || id.as_ref().starts_with("plugin.product.")
         }));
     }
 }

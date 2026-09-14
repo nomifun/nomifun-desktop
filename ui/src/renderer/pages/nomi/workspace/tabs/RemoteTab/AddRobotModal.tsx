@@ -13,17 +13,20 @@ import { webui, type IApiRobotEndpoints } from '@/common/adapter/ipcBridge';
 import type { CompanionId } from '@/common/types/ids';
 import CopyIconButton from '@/renderer/components/base/CopyIconButton';
 import NomiModal from '@/renderer/components/base/NomiModal';
+import ProductAgentBindingSelect from '@/renderer/components/agent/ProductAgentBindingSelect';
+import type { TProviderWithModel } from '@/common/config/storage';
 
 interface AddRobotModalProps {
   visible: boolean;
   companionId: CompanionId;
   companionName: string;
+  model?: Pick<TProviderWithModel, 'id' | 'use_model'>;
   onCancel: () => void;
   onClaimed: () => void;
 }
 
 /**
- * 「添加机器人」弹窗：两步——把设备指向本机的 OTA 地址，然后输入设备屏上的 6 位激活码。
+ * Pair the device, then expose its own Agent settings before completing setup.
  *
  * Every non-loopback NIC is listed because the machine the robot can reach is
  * not necessarily the one the user thinks of as "the" address. The LAN listener
@@ -34,6 +37,7 @@ const AddRobotModal: React.FC<AddRobotModalProps> = ({
   visible,
   companionId,
   companionName,
+  model,
   onCancel,
   onClaimed,
 }) => {
@@ -41,6 +45,8 @@ const AddRobotModal: React.FC<AddRobotModalProps> = ({
   const [endpoints, setEndpoints] = useState<IApiRobotEndpoints | null>(null);
   const [code, setCode] = useState('');
   const [claiming, setClaiming] = useState(false);
+  const [claimedRobotId, setClaimedRobotId] = useState<string | null>(null);
+  const [savingAgent, setSavingAgent] = useState(false);
   const [enablingLan, setEnablingLan] = useState(false);
 
   const refreshEndpoints = useCallback(async () => {
@@ -55,6 +61,7 @@ const AddRobotModal: React.FC<AddRobotModalProps> = ({
   useEffect(() => {
     if (!visible) return;
     setCode('');
+    setClaimedRobotId(null);
     void refreshEndpoints();
   }, [visible, refreshEndpoints]);
 
@@ -76,7 +83,8 @@ const AddRobotModal: React.FC<AddRobotModalProps> = ({
   const claim = useCallback(async () => {
     setClaiming(true);
     try {
-      await ipcBridge.robot.claim.invoke({ code: code.trim(), companion_id: companionId });
+      const robot = await ipcBridge.robot.claim.invoke({ code: code.trim(), companion_id: companionId });
+      setClaimedRobotId(robot.robot_id);
       Message.success(t('nomi.robot.claimOk', { companionName }));
       onClaimed();
     } catch (error) {
@@ -99,71 +107,97 @@ const AddRobotModal: React.FC<AddRobotModalProps> = ({
   return (
     <NomiModal
       visible={visible}
-      onCancel={onCancel}
+      onCancel={() => {
+        if (!claiming && !savingAgent) onCancel();
+      }}
       header={{ title: t('nomi.robot.addTitle'), showClose: true }}
       footer={null}
       style={{ width: 560 }}
     >
       <div className='flex flex-col gap-14px py-4px'>
-        {lanOff && (
-          <div className='flex flex-wrap items-center gap-8px rd-8px border border-solid border-[rgba(var(--warning-6),0.32)] bg-[rgba(var(--warning-6),0.08)] px-12px py-8px'>
-            <span className='min-w-0 flex-1 text-12px leading-18px text-t-primary'>
-              {t('nomi.robot.lanOff')}
-            </span>
-            {webui.lifecycleSupported ? (
-              <Button
-                size='mini'
-                type='primary'
-                loading={enablingLan}
-                onClick={() => void enableLan()}
-              >
-                {t('nomi.robot.lanEnable')}
-              </Button>
-            ) : (
-              <span className='text-12px text-t-tertiary'>{t('nomi.robot.lanUnavailable')}</span>
-            )}
-          </div>
-        )}
-
         <div className='flex flex-col gap-6px'>
-          <span className='text-12px leading-18px text-t-secondary'>{t('nomi.robot.otaStep')}</span>
-          {endpoints == null || endpoints.ota_urls.length === 0 ? (
-            <span className='text-12px text-t-tertiary'>{t('nomi.robot.otaNone')}</span>
-          ) : (
-            endpoints.ota_urls.map((url) => (
-              <div
-                key={url}
-                className='flex min-w-0 items-center gap-8px rd-8px border border-solid border-[var(--color-border-2)] px-10px py-6px'
-              >
-                <span className='min-w-0 flex-1 truncate font-mono text-12px text-t-primary'>
-                  {url}
-                </span>
-                <CopyIconButton text={url} size={14} className='h-22px w-22px shrink-0' />
-              </div>
-            ))
-          )}
+          <span className='text-14px font-medium text-t-primary'>{t('nomi.robot.agentLabel')}</span>
+          <span className='text-12px leading-18px text-t-secondary'>
+            {t(claimedRobotId ? 'nomi.robot.agentHint' : 'nomi.robot.agentBeforeClaim')}
+          </span>
         </div>
-
-        <div className='flex flex-col gap-6px'>
-          <span className='text-12px leading-18px text-t-secondary'>{t('nomi.robot.codeStep')}</span>
-          <div className='flex items-center gap-8px'>
-            <Input
-              value={code}
-              maxLength={6}
-              placeholder={t('nomi.robot.codePlaceholder')}
-              className='max-w-160px'
-              onChange={(next: string) => setCode(next.replace(/\D/g, ''))}
+        {claimedRobotId ? (
+          <>
+            <span className='text-12px text-t-secondary'>{t('nomi.robot.claimOk', { companionName })}</span>
+            <ProductAgentBindingSelect
+              targetKind='robot'
+              targetId={claimedRobotId}
+              defaultTemplateKey='robot.default'
+              model={model}
+              onSavingChange={setSavingAgent}
             />
-            <Button
-              type='primary'
-              loading={claiming}
-              disabled={code.trim().length !== 6}
-              onClick={() => void claim()}
-            >
-              {t('nomi.robot.claim')}
+            <Button type='primary' disabled={savingAgent} onClick={onCancel}>
+              {t('nomi.robot.finishSetup')}
             </Button>
-          </div>
-        </div>
+          </>
+        ) : (
+          <>
+            {lanOff && (
+              <div className='flex flex-wrap items-center gap-8px rd-8px border border-solid border-[rgba(var(--warning-6),0.32)] bg-[rgba(var(--warning-6),0.08)] px-12px py-8px'>
+                <span className='min-w-0 flex-1 text-12px leading-18px text-t-primary'>
+                  {t('nomi.robot.lanOff')}
+                </span>
+                {webui.lifecycleSupported ? (
+                  <Button
+                    size='mini'
+                    type='primary'
+                    loading={enablingLan}
+                    onClick={() => void enableLan()}
+                  >
+                    {t('nomi.robot.lanEnable')}
+                  </Button>
+                ) : (
+                  <span className='text-12px text-t-tertiary'>{t('nomi.robot.lanUnavailable')}</span>
+                )}
+              </div>
+            )}
+
+            <div className='flex flex-col gap-6px'>
+              <span className='text-12px leading-18px text-t-secondary'>{t('nomi.robot.otaStep')}</span>
+              {endpoints == null || endpoints.ota_urls.length === 0 ? (
+                <span className='text-12px text-t-tertiary'>{t('nomi.robot.otaNone')}</span>
+              ) : (
+                endpoints.ota_urls.map((url) => (
+                  <div
+                    key={url}
+                    className='flex min-w-0 items-center gap-8px rd-8px border border-solid border-[var(--color-border-2)] px-10px py-6px'
+                  >
+                    <span className='min-w-0 flex-1 truncate font-mono text-12px text-t-primary'>
+                      {url}
+                    </span>
+                    <CopyIconButton text={url} size={14} className='h-22px w-22px shrink-0' />
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className='flex flex-col gap-6px'>
+              <span className='text-12px leading-18px text-t-secondary'>{t('nomi.robot.codeStep')}</span>
+              <div className='flex items-center gap-8px'>
+                <Input
+                  value={code}
+                  maxLength={6}
+                  placeholder={t('nomi.robot.codePlaceholder')}
+                  className='max-w-160px'
+                  onChange={(next: string) => setCode(next.replace(/\D/g, ''))}
+                />
+                <Button
+                  type='primary'
+                  loading={claiming}
+                  disabled={code.trim().length !== 6}
+                  onClick={() => void claim()}
+                >
+                  {t('nomi.robot.claim')}
+                </Button>
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </NomiModal>
   );

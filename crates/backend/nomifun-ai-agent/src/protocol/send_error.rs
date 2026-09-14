@@ -1087,7 +1087,7 @@ mod tests {
     #[test]
     fn unbacked_completion_is_a_non_retryable_provider_quality_failure() {
         let err = AgentSendError::provider_unbacked_completion(
-            "The accepted request required 'miniapp.html', but no durable evidence matched it.",
+            "The accepted request required 'plugin.html', but no durable evidence matched it.",
         );
 
         assert_eq!(
@@ -1110,7 +1110,7 @@ mod tests {
         assert_eq!(
             err.stream_error().detail.as_deref(),
             Some(
-                "The accepted request required 'miniapp.html', but no durable evidence matched it."
+                "The accepted request required 'plugin.html', but no durable evidence matched it."
             )
         );
     }

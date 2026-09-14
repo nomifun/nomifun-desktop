@@ -212,10 +212,11 @@ async fn installation_token_is_limited_to_headless_product_control_planes() {
         .jwt_service
         .sign(services.authoritative_user_id.as_ref(), "owner")
         .expect("sign owner JWT");
-    for (path, token) in [
-        ("/api/plugins", "wrong-installation-token"),
-        ("/api/plugins", owner_jwt.as_str()),
-        ("/api/capabilities", installation_token),
+    // Read routes explicitly permit an authenticated installation owner JWT.
+    for (path, token, expected) in [
+        ("/api/plugins", "wrong-installation-token", StatusCode::FORBIDDEN),
+        ("/api/plugins", owner_jwt.as_str(), StatusCode::OK),
+        ("/api/capabilities", installation_token, StatusCode::FORBIDDEN),
     ] {
         let response = router
             .clone()
@@ -228,7 +229,7 @@ async fn installation_token_is_limited_to_headless_product_control_planes() {
             )
             .await
             .expect("dispatch rejected product request");
-        assert_eq!(response.status(), StatusCode::FORBIDDEN, "route {path}");
+        assert_eq!(response.status(), expected, "route {path}");
     }
 
     services
@@ -391,15 +392,15 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
                 .find(|item| item["template_key"] == "coding.codex")
         })
         .expect("coding template");
-    let on_demand = coding["seed"]["on_demand_capabilities"]
+    let enabled = coding["seed"]["enabled_capabilities"]
         .as_array()
-        .expect("coding on-demand capabilities");
+        .expect("coding enabled capabilities");
     for capability_id in ["vcs.stage", "vcs.commit"] {
         assert!(
-            on_demand
+            enabled
                 .iter()
                 .any(|item| item["id"] == capability_id),
-            "{capability_id} must remain an on-demand placement in the coding seed"
+            "{capability_id} must remain an enabled placement in the coding seed"
         );
     }
 
@@ -408,8 +409,8 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
 }
 
 #[tokio::test]
-async fn nomi_core_accepts_on_demand_placement_without_widening_initial_tools() {
-    let trust_secret = "on-demand-placement-local-trust";
+async fn nomi_core_accepts_enabled_placement_as_immediately_available_tools() {
+    let trust_secret = "enabled-placement-local-trust";
     let (router, services) = common::build_local_trust_app(trust_secret).await;
     let created = router
         .clone()
@@ -421,6 +422,7 @@ async fn nomi_core_accepts_on_demand_placement_without_widening_initial_tools() 
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&json!({
+                        "reuse_existing": false,
                         "display_name": "On-demand placement smoke",
                         "model_route_refs": {},
                         "chat_route_records": {}
@@ -442,7 +444,7 @@ async fn nomi_core_accepts_on_demand_placement_without_widening_initial_tools() 
         .expect("placement preset id")
         .to_owned();
     let revision = created_value["data"]["revision"]["reference"].clone();
-    let deferred_ids = [
+    let enabled_ids = [
         "vcs.stage",
         "web.fetch",
         "agent.delegate",
@@ -451,62 +453,49 @@ async fn nomi_core_accepts_on_demand_placement_without_widening_initial_tools() 
         "agent.fork",
         "schedule.store",
     ];
-    created_value["data"]["draft"]["document"]["on_demand_capabilities"] = json!(
-        deferred_ids.iter().map(|id| json!({
+    created_value["data"]["draft"]["document"]["enabled_capabilities"] = json!(
+        enabled_ids.iter().map(|id| json!({
             "capability": {"id": id, "version": "1.0.0"},
             "action_allowlist": []
         })).collect::<Vec<_>>()
     );
-    let preview = router
+    let saved = router
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/api/agent-presets/{preset_id}/resolve-preview"))
+                .uri(format!("/api/agent-presets/{preset_id}/revisions"))
                 .header("x-nomi-local-trust", trust_secret)
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&json!({
                         "expected_current_revision": revision,
                         "draft": created_value["data"]["draft"],
-                        "scene": "agent_settings",
-                        "surface": "desktop",
-                        "audience": "owner"
                     }))
-                    .expect("serialize on-demand preview request"),
+                    .expect("serialize enabled save request"),
                 ))
-                .expect("build on-demand preview request"),
+                .expect("build enabled save request"),
         )
         .await
-        .expect("dispatch on-demand preview request");
-    assert_eq!(preview.status(), StatusCode::OK);
-    let preview_body = axum::body::to_bytes(preview.into_body(), 4 * 1024 * 1024)
+        .expect("dispatch enabled save request");
+    assert_eq!(saved.status(), StatusCode::OK);
+    let saved_body = axum::body::to_bytes(saved.into_body(), 4 * 1024 * 1024)
         .await
-        .expect("read on-demand preview response");
-    let preview_value: Value = serde_json::from_slice(&preview_body).expect("preview JSON");
-    assert_eq!(preview_value["data"]["status"], "ready");
-    assert!(
-        preview_value["data"]["diagnostics"]
+        .expect("read enabled save response");
+    let saved_value: Value = serde_json::from_slice(&saved_body).expect("save JSON");
+    assert_eq!(
+        saved_value["data"]["revision"]["document"]["enabled_capabilities"]
             .as_array()
-            .is_some_and(|diagnostics| diagnostics.is_empty()),
-        "a supported on-demand capability must produce a clean preview"
+            .map(Vec::len),
+        Some(enabled_ids.len()),
+        "the saved revision must retain the enabled placement"
     );
-    assert_eq!(
-        preview_value["data"]["summary"]["initial_count"],
-        0,
-        "moving a capability to on-demand must remove it from the initial set"
-    );
-    assert_eq!(
-        preview_value["data"]["summary"]["on_demand_count"],
-        deferred_ids.len(),
-        "the preview must retain the on-demand placement"
-    );
-    for id in deferred_ids {
+    for id in enabled_ids {
         assert!(
-            preview_value["data"]["inspector"]["on_demand_capabilities"]
+            saved_value["data"]["revision"]["document"]["enabled_capabilities"]
                 .as_array()
                 .is_some_and(|items| items.iter().any(|item| item["capability"]["id"] == id)),
-            "the immutable preview must expose deferred capability {id}"
+            "the immutable revision must retain deferred capability {id}"
         );
     }
 
@@ -531,8 +520,7 @@ async fn configured_agent_creation_persists_adjusted_capabilities_and_keeps_offi
     let official_before = before["data"]["official_templates"].clone();
     let document = json!({
         "schema_version":"1.0.0", "model_route_refs":{}, "chat_route_records":{},
-        "initial_capabilities":[{"capability":{"id":"fs.read","version":"1.0.0"}}],
-        "on_demand_capabilities":[{"capability":{"id":"web.fetch","version":"1.0.0"}},{"capability":{"id":"agent.execution.plan","version":"1.0.0"}}],
+        "enabled_capabilities":[{"capability":{"id":"fs.read","version":"1.0.0"}},{"capability":{"id":"web.fetch","version":"1.0.0"}},{"capability":{"id":"agent.execution.plan","version":"1.0.0"}}],
         "skill_bindings":[], "system_role_provider_overrides":{}, "persona":"Research helper",
         "instructions":"Use only the selected capabilities.", "starter_prompts":[]
     });
@@ -546,17 +534,270 @@ async fn configured_agent_creation_persists_adjusted_capabilities_and_keeps_offi
     let id = created["data"]["preset"]["preset_id"].as_str().unwrap();
     let (status, reloaded) = call(router.clone(), "GET", &format!("/api/agent-presets/{id}/editor"), json!({})).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(reloaded["data"]["draft"]["document"]["initial_capabilities"], created["data"]["revision"]["document"]["initial_capabilities"]);
-    assert_eq!(reloaded["data"]["draft"]["document"]["on_demand_capabilities"], created["data"]["revision"]["document"]["on_demand_capabilities"]);
-    assert_eq!(reloaded["data"]["draft"]["document"]["initial_capabilities"].as_array().unwrap().len(), 1);
-    assert_eq!(reloaded["data"]["draft"]["document"]["on_demand_capabilities"].as_array().unwrap().len(), 2);
+    assert_eq!(reloaded["data"]["draft"]["document"]["enabled_capabilities"], created["data"]["revision"]["document"]["enabled_capabilities"]);
+    assert_eq!(reloaded["data"]["draft"]["document"]["enabled_capabilities"].as_array().unwrap().len(), 3);
     let mut invalid = document;
-    invalid["initial_capabilities"] = json!([{"capability":{"id":"missing.capability","version":"1.0.0"}}]);
+    invalid["enabled_capabilities"] = json!([{"capability":{"id":"missing.capability","version":"1.0.0"}}]);
     let (status, _) = call(router.clone(), "POST", "/api/agent-presets", json!({"display_name":"Must not persist", "document":invalid})).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let (_, after) = call(router, "GET", "/api/agent-preset-templates?source=official", json!({})).await;
     assert_eq!(after["data"]["user_presets"].as_array().unwrap().len(), before_count + 1);
     assert_eq!(after["data"]["official_templates"], official_before);
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
+async fn official_template_creation_requires_explicit_persistence_intent() {
+    const TRUST: &str = "official-agent-explicit-intent";
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let response = router.clone().oneshot(Request::builder()
+        .method("POST")
+        .uri("/api/agent-presets/from-template/chat.minimal")
+        .header("x-nomi-local-trust", TRUST)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&json!({
+            "display_name": "Must not become my Agent",
+            "model_route_refs": {},
+            "chat_route_records": {}
+        })).unwrap())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY,
+        "omitting launch/save intent must fail closed instead of creating a personal Agent");
+
+    let library_response = router.oneshot(Request::builder()
+        .uri("/api/agent-preset-templates")
+        .header("x-nomi-local-trust", TRUST)
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(library_response.status(), StatusCode::OK);
+    let library: Value = serde_json::from_slice(&axum::body::to_bytes(
+        library_response.into_body(), 4 * 1024 * 1024).await.unwrap()).unwrap();
+    assert_eq!(library["data"]["user_presets"], json!([]));
+    let persisted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nomi_agent_presets")
+        .fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(persisted, 0, "rejected ambiguous requests must not write hidden or visible configurations");
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
+async fn product_agent_selection_precedes_models_and_preflights_incompatible_choices() {
+    const TRUST: &str = "product-selection-preflight";
+    async fn call(router: axum::Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+        let response = router.oneshot(Request::builder().method(method).uri(path)
+            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let (_, created) = call(router.clone(), "POST", "/api/companion/companions", json!({ "name": "Choose Agent first", "character": "ink" })).await;
+    let companion_id = created["data"]["companion_id"].as_str().unwrap();
+    let chosen = json!({ "kind": "template", "template_key": "chat.minimal" });
+    let mut paths = Vec::new();
+    for kind in ["companion", "robot", "customer", "creative_studio_canvas"] {
+        let path = format!("/api/product-agent-bindings/{kind}/{companion_id}");
+        let (status, saved) = call(router.clone(), "PUT", &path, json!({ "selection": chosen })).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["data"]["needs_model"], true);
+        let (status, reloaded) = call(router.clone(), "GET", &path, json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{reloaded}");
+        assert_eq!(reloaded["data"]["selection"], chosen);
+        paths.push(path);
+    }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nomi_agent_presets").fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(count, 0, "model-free selection must not allocate executable presets or select a default model");
+    let upstream = wiremock::MockServer::start().await;
+    let (status, provider) = call(router.clone(), "POST", "/api/providers", json!({
+        "platform": "stepfun-plan", "name": "Preflight StepFun",
+        "base_url": format!("{}/step_plan/v1", upstream.uri()),
+        "auth_scheme": "bearer", "credentials": { "api_keys": ["test-only"] }, "enabled": true,
+        "initial_model": { "model": "step-3.7-flash", "enabled": true,
+            "capabilities": [{ "task": "chat", "traits": ["function_calling", "reasoning", "streaming"],
+                "protocol": "openai.chat_text", "connection_role": "default", "provider_params": {} }] }
+    })).await;
+    assert_eq!(status, StatusCode::CREATED, "{provider}");
+    let model = json!({ "provider_id": provider["data"]["provider_id"], "model": "step-3.7-flash" });
+    for path in &paths {
+        let query = format!("{path}?provider_id={}&model=step-3.7-flash", model["provider_id"].as_str().unwrap());
+        let (status, options) = call(router.clone(), "GET", &query, json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{options}");
+        let general = options["data"]["options"].as_array().unwrap().iter().find(|item| item["selection"]["template_key"] == "assistant.general").unwrap();
+        assert_eq!(general["available"], false);
+        assert_eq!(general["reason"], "web_search");
+        let (status, rejected) = call(router.clone(), "PUT", path, json!({
+            "selection": { "kind": "template", "template_key": "assistant.general" }, "model": model,
+        })).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+        let (_, after) = call(router.clone(), "GET", path, json!({})).await;
+        assert_eq!(after["data"]["selection"], chosen, "a stale/invalid selection cannot change the saved Agent");
+    }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nomi_agent_presets").fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(count, 0, "availability checks and failed selections must be read-only");
+    let (status, patched) = call(router.clone(), "PATCH", &format!("/api/companion/companions/{companion_id}"), json!({ "model": model })).await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    let (status, thread) = call(router.clone(), "POST", &format!("/api/companion/companions/{companion_id}/companion/threads"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    let snapshot: String = sqlx::query_scalar("SELECT agent_snapshot FROM conversations WHERE conversation_id = ?")
+        .bind(thread["data"]["conversation_id"].as_str().unwrap()).fetch_one(services.database.pool()).await.unwrap();
+    let snapshot: Value = serde_json::from_str(&snapshot).unwrap();
+    assert_eq!(snapshot["enabled_capabilities"], json!([]), "configuring a model must retain the Agent chosen earlier");
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
+async fn creative_studio_entry_uses_its_official_agent() {
+    const TRUST: &str = "creative-product-agent";
+    async fn call(router: axum::Router, path: &str, body: Value) -> (StatusCode, Value) {
+        let response = router.oneshot(Request::builder().method("POST").uri(path)
+            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let upstream = wiremock::MockServer::start().await;
+    let (status, provider) = call(router.clone(), "/api/providers", json!({
+        "platform": "stepfun-plan", "name": "Creative Agent regression",
+        "base_url": format!("{}/step_plan/v1", upstream.uri()),
+        "auth_scheme": "bearer", "credentials": { "api_keys": ["test-only"] },
+        "enabled": true, "initial_model": {
+            "model": "step-3.7-flash", "enabled": true,
+            "capabilities": [{ "task": "chat", "traits": ["function_calling", "reasoning", "streaming"],
+                "protocol": "openai.chat_text", "connection_role": "default", "provider_params": {} }]
+        }
+    })).await;
+    assert_eq!(status, StatusCode::CREATED, "{provider}");
+    let provider_id = provider["data"]["provider_id"].as_str().unwrap();
+    let (status, canvas) = call(router.clone(), "/api/creative-studio/canvases",
+        json!({
+            "title": "Agent-bound canvas",
+            "agentKickoff": {
+                "prompt": "plan",
+                "model": { "providerId": provider_id, "model": "step-3.7-flash" }
+            }
+        })).await;
+    assert_eq!(status, StatusCode::CREATED, "{canvas}");
+    let canvas_id = canvas["data"]["canvas"]["canvasId"].as_str().unwrap();
+    let document_json: String = sqlx::query_scalar(
+        "SELECT document_json FROM creative_studio_projects WHERE project_id = ?")
+        .bind(canvas_id).fetch_one(services.database.pool()).await.unwrap();
+    let document: Value = serde_json::from_str(&document_json).unwrap();
+    let session_id = document["chatSessions"][0]["id"].as_str().unwrap();
+    let pending_key = document["chatSessions"][0]["pendingTurn"]["idempotencyKey"]
+        .as_str().unwrap();
+    let (status, session) = call(router.clone(),
+        "/api/creative-studio/canvas-agent-sessions/resolve", json!({
+            "canvas_id": canvas_id,
+            "session_id": session_id,
+            "model": { "provider_id": provider_id, "model": "step-3.7-flash" },
+            "pending_turn_idempotency_key": pending_key
+        })).await;
+    assert_eq!(status, StatusCode::CREATED, "{session}");
+    let conversation_id = session["data"]["binding"]["conversation_id"].as_str().unwrap();
+    let snapshot_json: String = sqlx::query_scalar(
+        "SELECT agent_snapshot FROM conversations WHERE conversation_id = ?")
+        .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
+    let snapshot: Value = serde_json::from_str(&snapshot_json).unwrap();
+    assert_eq!(snapshot["preset_name"], "creative-studio.default");
+    assert!(snapshot["enabled_capabilities"].as_array().unwrap().iter()
+        .any(|capability| capability == "workshop.canvas.edit"));
+    let target_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM nomi_agent_bindings WHERE target_kind = 'creative_studio_canvas' AND target_id = ?")
+        .bind(canvas_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(target_count, 1);
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
+async fn companion_entry_uses_its_official_agent_and_can_switch_to_minimal() {
+    const TRUST: &str = "companion-product-agent";
+    async fn call(
+        router: axum::Router,
+        method: &str,
+        path: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let response = router.oneshot(Request::builder().method(method).uri(path)
+            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let upstream = wiremock::MockServer::start().await;
+    let (status, provider) = call(router.clone(), "POST", "/api/providers", json!({
+        "platform": "stepfun-plan", "name": "Companion Agent regression",
+        "base_url": format!("{}/step_plan/v1", upstream.uri()),
+        "auth_scheme": "bearer", "credentials": { "api_keys": ["test-only"] },
+        "enabled": true, "initial_model": {
+            "model": "step-3.7-flash", "enabled": true,
+            "capabilities": [{ "task": "chat", "traits": ["function_calling", "reasoning", "streaming"],
+                "protocol": "openai.chat_text", "connection_role": "default", "provider_params": {} }]
+        }
+    })).await;
+    assert_eq!(status, StatusCode::CREATED, "{provider}");
+    let provider_id = provider["data"]["provider_id"].as_str().unwrap();
+    let (status, companion) = call(router.clone(), "POST", "/api/companion/companions",
+        json!({ "name": "Agent-bound companion", "character": "ink" })).await;
+    assert_eq!(status, StatusCode::CREATED, "{companion}");
+    let companion_id = companion["data"]["companion_id"].as_str().unwrap();
+    let (status, patched) = call(router.clone(), "PATCH",
+        &format!("/api/companion/companions/{companion_id}"),
+        json!({ "model": { "provider_id": provider_id, "model": "step-3.7-flash" } })).await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    let (status, thread) = call(router.clone(), "POST",
+        &format!("/api/companion/companions/{companion_id}/companion/threads"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    let conversation_id = thread["data"]["conversation_id"].as_str().unwrap();
+    let (preset_id, snapshot_json, _extra_json): (String, String, String) = sqlx::query_as(
+        "SELECT preset_id, agent_snapshot, extra FROM conversations WHERE conversation_id = ?")
+        .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
+    let snapshot: Value = serde_json::from_str(&snapshot_json).unwrap();
+    assert!(snapshot["enabled_capabilities"].as_array().unwrap().iter()
+        .any(|capability| capability == "companion.persona"));
+    assert_eq!(snapshot["preset_name"], "companion.default");
+    let (status, options) = call(router.clone(), "GET",
+        &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{options}");
+    assert_eq!(options["data"]["selection"], json!({ "kind": "template", "template_key": "companion.default" }),
+        "old internal official bindings must not appear as duplicate personal Agents");
+    let target_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM nomi_agent_bindings WHERE target_kind = 'companion' AND target_id = ?")
+        .bind(companion_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(target_count, 1);
+
+    let (status, minimal) = call(router.clone(), "POST",
+        "/api/agent-presets/from-template/chat.minimal", json!({
+            "display_name": "chat.minimal", "reuse_existing": true,
+            "model": { "provider_id": provider_id, "model": "step-3.7-flash" }
+        })).await;
+    assert_eq!(status, StatusCode::OK, "{minimal}");
+    let minimal_id = minimal["data"]["preset"]["preset_id"].as_str().unwrap();
+    let (status, selected) = call(router.clone(), "PUT",
+        &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({
+            "preset_id": minimal_id,
+            "conversation_id": conversation_id
+        })).await;
+    assert_eq!(status, StatusCode::OK, "{selected}");
+    let (new_preset_id, snapshot_json, extra_json): (String, String, String) = sqlx::query_as(
+        "SELECT preset_id, agent_snapshot, extra FROM conversations WHERE conversation_id = ?")
+        .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_ne!(new_preset_id, preset_id);
+    let snapshot: Value = serde_json::from_str(&snapshot_json).unwrap();
+    let extra: Value = serde_json::from_str(&extra_json).unwrap();
+    assert_eq!(snapshot["enabled_capabilities"], json!([]));
+    assert_eq!(extra["companion_memory_enabled"], false);
+    assert_eq!(extra["companion_skills_enabled"], false);
+    assert!(extra.get("system_prompt").is_none());
+    assert_eq!(extra["product_agent_target_kind"], "companion");
+    assert!(upstream.received_requests().await.unwrap().is_empty());
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
 }
@@ -603,6 +844,134 @@ async fn official_agent_direct_launch_reuses_configuration_and_creates_sessions(
 }
 
 #[tokio::test]
+async fn official_agent_launch_ignores_obsolete_internal_configurations() {
+    const TRUST: &str = "obsolete-official-agent-cache";
+    async fn call(router: axum::Router, path: &str, body: Value) -> (StatusCode, Value) {
+        let response = router.oneshot(Request::builder().method("POST").uri(path)
+            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let upstream = wiremock::MockServer::start().await;
+    let (status, provider) = call(router.clone(), "/api/providers", json!({
+        "platform": "stepfun-plan", "name": "StepFun launch regression",
+        "base_url": format!("{}/step_plan/v1", upstream.uri()),
+        "auth_scheme": "bearer", "credentials": { "api_keys": ["test-only"] },
+        "enabled": true, "initial_model": {
+            "model": "step-3.7-flash", "enabled": true,
+            "capabilities": [{ "task": "chat", "traits": ["function_calling", "reasoning", "streaming"],
+                "protocol": "openai.chat_text", "connection_role": "default", "provider_params": {} }]
+        }
+    })).await;
+    assert_eq!(status, StatusCode::CREATED, "{provider}");
+    let path = "/api/agent-presets/from-template/chat.minimal";
+    let request = json!({ "display_name": "Minimal", "reuse_existing": true,
+        "model": { "provider_id": provider["data"]["provider_id"], "model": "step-3.7-flash" } });
+    let (status, original) = call(router.clone(), path, request.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{original}");
+    let original_id = original["data"]["preset"]["preset_id"].as_str().unwrap();
+    assert_eq!(original["data"]["revision"]["document"]["chat_route_records"]["agent_chat"]["primary"]["model"], "step-3.7-flash");
+
+    // A retained bun run dev dataset predates capability field retirement.
+    // Internal launch configurations are a cache, not the selected Agent.
+    let mut old_payload = original["data"]["revision"]["document"].clone();
+    old_payload["initial_capabilities"] = old_payload.as_object_mut().unwrap()
+        .remove("enabled_capabilities").unwrap();
+    old_payload["on_demand_capabilities"] = json!([]);
+    let old_payload = serde_json::to_string(&old_payload).unwrap();
+    sqlx::query("UPDATE nomi_agent_preset_revisions SET payload_json = ? WHERE preset_id = ?")
+        .bind(&old_payload).bind(original_id).execute(services.database.pool()).await.unwrap();
+
+    let (status, fresh) = call(router.clone(), path, request.clone()).await;
+    assert_eq!(status, StatusCode::OK, "obsolete cached revision must not block launch: {fresh}");
+    let fresh_id = fresh["data"]["preset"]["preset_id"].as_str().unwrap();
+    assert_ne!(fresh_id, original_id);
+
+    // Snapshot schema drift is also a cache miss, even with a current payload.
+    sqlx::query("UPDATE nomi_agent_preset_revisions SET snapshot_json = json_set(snapshot_json, '$.retired_field', 1) WHERE preset_id = ?")
+        .bind(fresh_id).execute(services.database.pool()).await.unwrap();
+    let (status, usable) = call(router.clone(), path, request.clone()).await;
+    assert_eq!(status, StatusCode::OK, "obsolete cached snapshot must not block launch: {usable}");
+    let usable_id = usable["data"]["preset"]["preset_id"].as_str().unwrap();
+    assert_ne!(usable_id, fresh_id);
+    let (status, reused) = call(router.clone(), path, request.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{reused}");
+    assert_eq!(reused["data"]["preset"]["preset_id"], usable_id);
+    let (status, session) = call(router.clone(), "/api/agent-sessions",
+        json!({ "preset_id": usable_id, "title": "你好", "model": request["model"] })).await;
+    assert_eq!(status, StatusCode::OK, "fresh configuration must create a session: {session}");
+    assert!(session["data"]["agent_session_id"].is_string());
+    let session_id = session["data"]["agent_session_id"].as_str().unwrap();
+    let (extra, snapshot): (String, String) = sqlx::query_as(
+        "SELECT extra, agent_snapshot FROM conversations WHERE conversation_id = ?")
+        .bind(session_id).fetch_one(services.database.pool()).await.unwrap();
+    let extra: Value = serde_json::from_str(&extra).unwrap();
+    let snapshot: Value = serde_json::from_str(&snapshot).unwrap();
+    assert_eq!(extra["skills"], json!([]), "minimal chat must not auto-enable skills");
+    assert_eq!(snapshot["preset_name"], "Minimal", "conversation title must not replace Agent identity");
+
+    // Preparing a session-specific model variant scans the same cache. Use a
+    // different source model so this exercises the variant path as well.
+    let (status, source) = call(router.clone(), path,
+        json!({ "display_name": "Different source model", "reuse_existing": false })).await;
+    assert_eq!(status, StatusCode::OK, "{source}");
+    let (status, variant) = call(router.clone(), "/api/agent-sessions", json!({
+        "preset_id": source["data"]["preset"]["preset_id"], "model": request["model"]
+    })).await;
+    assert_eq!(status, StatusCode::OK, "obsolete caches must not block model variants: {variant}");
+    assert_eq!(variant["data"]["agent_binding"], session["data"]["agent_binding"]);
+    assert!(upstream.received_requests().await.unwrap().is_empty(),
+        "Agent preparation must not require a model API call");
+
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/step_plan/v1/chat/completions"))
+        .respond_with(wiremock::ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(concat!(
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"MINIMAL_REPLY_OK\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n")))
+        .mount(&upstream).await;
+    let (status, turn) = call(router.clone(), &format!("/api/agent-sessions/{session_id}/turns"),
+        json!({ "input": { "content": "你好" }, "idempotency_key": uuid::Uuid::now_v7().to_string() })).await;
+    assert_eq!(status, StatusCode::OK, "{turn}");
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let replies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND position = 'left' AND content LIKE '%MINIMAL_REPLY_OK%'")
+                .bind(session_id).fetch_one(services.database.pool()).await.unwrap();
+            if replies > 0 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }).await.expect("minimal model reply should be persisted");
+    let requests = upstream.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["model"], "step-3.7-flash");
+    assert!(body.get("tools").is_none_or(|tools| tools.as_array().is_some_and(Vec::is_empty)));
+    let system = body["messages"].as_array().unwrap().iter()
+        .filter(|message| message["role"] == "system")
+        .filter_map(|message| message["content"].as_str()).collect::<Vec<_>>().join("\n");
+    assert!(system.len() < 2000, "minimal prompt must stay small: {} bytes", system.len());
+    for forbidden in ["MEMORY.md", "Skill tool", "Working directory", "native image generation"] {
+        assert!(!system.contains(forbidden), "unexpected minimal prompt context: {forbidden}");
+    }
+
+    // Historical references remain intact and explicitly selecting invalid
+    // data still fails closed; cache recovery must not weaken validation.
+    let saved: String = sqlx::query_scalar("SELECT payload_json FROM nomi_agent_preset_revisions WHERE preset_id = ?")
+        .bind(original_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(saved, old_payload);
+    let (status, _) = call(router, "/api/agent-sessions",
+        json!({ "preset_id": original_id, "model": request["model"] })).await;
+    assert!(!status.is_success());
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
 async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_unchanged() {
     const TRUST: &str = "agent-model-selection-test";
     async fn call(router: axum::Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
@@ -617,8 +986,8 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
     let (status, original) = call(router.clone(), "POST", "/api/agent-presets", json!({
         "display_name": "Personal model test", "document": {
             "schema_version": "1.0.0", "model_route_refs": {}, "chat_route_records": {},
-            "initial_capabilities": [{ "capability": { "id": "fs.read", "version": "1.0.0" } }],
-            "on_demand_capabilities": [], "skill_bindings": [], "system_role_provider_overrides": {},
+            "enabled_capabilities": [{ "capability": { "id": "fs.read", "version": "1.0.0" } }],
+            "skill_bindings": [], "system_role_provider_overrides": {},
             "persona": "Research helper", "instructions": "Keep my working rules", "starter_prompts": []
         }
     })).await;
@@ -631,7 +1000,8 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
     let mut sessions = Vec::new();
     for _ in 0..2 {
         let (status, result) = call(router.clone(), "POST", "/api/agent-sessions", json!({
-            "preset_id": preset_id, "title": "Chosen model", "model": selection
+            "preset_id": preset_id, "title": "Chosen model", "model": selection,
+            "resource_selections": [{ "resource_kind": "workspace", "resource_id": "default-workspace" }]
         })).await;
         assert_eq!(status, StatusCode::OK, "{result}");
         let id = result["data"]["agent_session_id"].as_str().unwrap();
@@ -647,7 +1017,7 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
         assert_eq!(record["primary"]["provider_id"], selection["provider_id"]);
         assert_eq!(record["primary"]["model"], selection["model"]);
         assert_eq!(record["failovers"], json!([]));
-        for field in ["initial_capabilities", "on_demand_capabilities", "skill_bindings", "system_role_provider_overrides", "persona", "instructions"] {
+        for field in ["enabled_capabilities", "skill_bindings", "system_role_provider_overrides", "persona", "instructions"] {
             assert_eq!(editor["data"]["revision"]["document"][field], original["revision"]["document"][field], "must retain {field}");
         }
         sessions.push(binding);
@@ -684,6 +1054,7 @@ async fn nomi_core_agent_settings_template_and_binding_surface_is_persistent() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
+                        "reuse_existing": false,
                         "display_name": "Nomi-core smoke preset",
                         "model_route_refs": {},
                         "chat_route_records": {}
@@ -932,6 +1303,7 @@ async fn nomi_core_agent_session_projects_saved_chat_binding_without_internal_in
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
+                        "reuse_existing": false,
                         "display_name": "Nomi-core session smoke",
                         "model_route_refs": {},
                         "chat_route_records": {}
@@ -953,35 +1325,31 @@ async fn nomi_core_agent_session_projects_saved_chat_binding_without_internal_in
     let revision = template["data"]["revision"]["reference"].clone();
     let draft = template["data"]["draft"].clone();
 
-    let preview_response = router
+    let saved_response = router
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/api/agent-presets/{preset_id}/resolve-preview"))
+                .uri(format!("/api/agent-presets/{preset_id}/revisions"))
                 .header("x-nomi-local-trust", "agent-session-local-trust")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
                         "expected_current_revision": revision,
                         "draft": draft,
-                        "scene": "agent_session",
-                        "surface": "desktop",
-                        "audience": "owner"
                     }))
-                    .expect("serialize session preview request"),
+                    .expect("serialize clean revision save request"),
                 ))
-                .expect("build session preview request"),
+                .expect("build clean revision save request"),
         )
         .await
-        .expect("dispatch session preview request");
-    assert_eq!(preview_response.status(), StatusCode::OK);
-    let preview_body = axum::body::to_bytes(preview_response.into_body(), 4 * 1024 * 1024)
+        .expect("dispatch clean revision save request");
+    assert_eq!(saved_response.status(), StatusCode::OK);
+    let saved_body = axum::body::to_bytes(saved_response.into_body(), 4 * 1024 * 1024)
         .await
-        .expect("read session preview response");
-    let preview: Value = serde_json::from_slice(&preview_body).expect("session preview JSON");
-    assert_eq!(preview["data"]["status"], "ready");
-    let expected_snapshot = preview["data"]["resolved_snapshot_ref"].clone();
+        .expect("read clean revision save response");
+    let saved: Value = serde_json::from_slice(&saved_body).expect("clean revision save JSON");
+    let expected_snapshot = saved["data"]["resolved_snapshot_ref"].clone();
 
     let rejected = router
         .clone()
@@ -1230,6 +1598,7 @@ async fn nomi_core_remote_replays_frozen_binding_and_persists_event_cursor() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
+                        "reuse_existing": false,
                         "display_name": "Nomi-core remote smoke",
                         "model_route_refs": {},
                         "chat_route_records": {}
@@ -1245,44 +1614,40 @@ async fn nomi_core_remote_replays_frozen_binding_and_persists_event_cursor() {
         .await
         .expect("read remote preset response");
     let preset: Value = serde_json::from_slice(&preset_body).expect("remote preset JSON");
-    // The creation response does not include a Preview object. Resolve the
-    // saved revision once through the canonical API to obtain the exact
+    // A clean save reuses the immutable Revision and returns the exact
     // Snapshot reference used by RemoteBinding.
     let preset_id = preset["data"]["preset"]["preset_id"]
         .as_str()
         .expect("remote preset id");
     let revision = preset["data"]["revision"]["reference"].clone();
     let editor_draft = preset["data"]["draft"].clone();
-    let preview = router
+    let saved = router
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/api/agent-presets/{preset_id}/resolve-preview"))
+                .uri(format!("/api/agent-presets/{preset_id}/revisions"))
                 .header("x-nomi-local-trust", "remote-local-trust")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
                         "expected_current_revision": revision,
                         "draft": editor_draft,
-                        "scene": "remote",
-                        "surface": "remote",
-                        "audience": "owner"
                     }))
-                    .expect("serialize remote preview request"),
+                    .expect("serialize clean remote revision save request"),
                 ))
-                .expect("build remote preview request"),
+                .expect("build clean remote revision save request"),
         )
         .await
-        .expect("dispatch remote preview request");
-    assert_eq!(preview.status(), StatusCode::OK);
-    let preview_body = axum::body::to_bytes(preview.into_body(), 4 * 1024 * 1024)
+        .expect("dispatch clean remote revision save request");
+    assert_eq!(saved.status(), StatusCode::OK);
+    let saved_body = axum::body::to_bytes(saved.into_body(), 4 * 1024 * 1024)
         .await
-        .expect("read remote preview response");
-    let preview: Value = serde_json::from_slice(&preview_body).expect("remote preview JSON");
+        .expect("read clean remote revision save response");
+    let saved: Value = serde_json::from_slice(&saved_body).expect("clean remote revision save JSON");
     let binding = serde_json::json!({
         "preset_revision_ref": revision,
-        "resolved_snapshot_ref": preview["data"]["resolved_snapshot_ref"],
+        "resolved_snapshot_ref": saved["data"]["resolved_snapshot_ref"],
         "typed_resource_bindings": [],
         "binding_version": 1
     });

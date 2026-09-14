@@ -333,12 +333,12 @@ fn revision(
             schema_version: VersionString::from(VERSION),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
-            initial_capabilities: vec![
+            enabled_capabilities: vec![
                 selection(TOOL_ID, &[TOOL_ACTION, RELEASE_COUNT_ACTION]),
                 selection(CONTEXT_ID, &[]),
                 selection(RESOURCE_ID, &[]),
             ],
-            on_demand_capabilities: Vec::new(),
+
             skill_bindings: Vec::new(),
             system_role_provider_overrides: BTreeMap::new(),
             persona: "JavaScript adapter fixture".into(),
@@ -418,7 +418,7 @@ fn compile_snapshot(
         materialized,
         &environment(materialized.registry_digest.clone()),
         CompileRequest {
-            miniapp_capabilities: Vec::new(),
+            plugin_product_capabilities: Vec::new(),
             revision: revision(owner, materialized),
             principal: owner.clone(),
             scene: "fixture".into(),

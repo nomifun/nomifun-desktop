@@ -521,7 +521,7 @@ fn validate_resolved_target(
         || resolved.source_package != expected.target.package
         || resolved.contribution_id != expected.contribution_id
         || resolved.contribution_lock.contract_digest != expected.contract_digest
-        || resolved.resolved_mount_id != expected.target.mount_id
+        || resolved.resolved_mount_id != Some(expected.target.mount_id.clone())
         || resolved.target_artifact_digest != expected.target.artifact_digest
     {
         return Err(drift(

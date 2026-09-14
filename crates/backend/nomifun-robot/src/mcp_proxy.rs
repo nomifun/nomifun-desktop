@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -23,7 +23,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 use crate::mcp_bridge::ToolCallError;
-use crate::tool_registry::RobotToolRegistry;
+use crate::tool_registry::{RobotToolRegistry, tool_capability};
 
 /// The MCP server name the model sees this toolset under.
 pub const MCP_PROXY_SERVER_NAME: &str = "robot";
@@ -103,9 +103,29 @@ fn rpc_error(id: Option<Value>, code: i64, message: String) -> Response {
     .into_response()
 }
 
+fn tool_call_response(id: Option<Value>, result: Result<String, ToolCallError>) -> Response {
+    match result {
+        Ok(text) => Json(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "content": [{ "type": "text", "text": text }], "isError": false },
+        }))
+        .into_response(),
+        Err(ToolCallError::Rejected(message)) => rpc_error(id, -32601, message),
+        Err(error @ ToolCallError::Offline) => rpc_error(id, -32000, error.to_string()),
+        Err(error) => Json(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "content": [{ "type": "text", "text": error.to_string() }], "isError": true },
+        }))
+        .into_response(),
+    }
+}
+
 async fn handle_rpc(
     State(state): State<ProxyState>,
     Path(robot_id): Path<String>,
+    Query(query): Query<ProxyQuery>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
@@ -129,6 +149,9 @@ async fn handle_rpc(
         return StatusCode::ACCEPTED.into_response();
     }
 
+    let allowed = query.capabilities.as_deref().map(|value| {
+        value.split(',').filter(|item| !item.is_empty()).collect::<std::collections::BTreeSet<_>>()
+    });
     match method {
         "initialize" => Json(json!({
             "jsonrpc": "2.0",
@@ -146,6 +169,9 @@ async fn handle_rpc(
                 .tools(&robot_id)
                 .await
                 .into_iter()
+                .filter(|tool| allowed.as_ref().is_none_or(|allowed| {
+                    allowed.contains(tool_capability(&tool.device_name).capability_id())
+                }))
                 .map(|t| {
                     json!({
                         "name": t.exposed_name,
@@ -164,25 +190,29 @@ async fn handle_rpc(
                 return rpc_error(id, -32602, "tools/call needs a name".to_owned());
             };
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            match state.registry.call(&robot_id, name, args).await {
-                Ok(text) => Json(json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": { "content": [{ "type": "text", "text": text }], "isError": false },
-                }))
-                .into_response(),
-                Err(ToolCallError::Rejected(message)) => rpc_error(id, -32601, message),
-                Err(error @ ToolCallError::Offline) => rpc_error(id, -32000, error.to_string()),
-                Err(error) => Json(json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": { "content": [{ "type": "text", "text": error.to_string() }], "isError": true },
-                }))
-                .into_response(),
+            let descriptor = state.registry.tools(&robot_id).await.into_iter()
+                .find(|tool| tool.exposed_name == name);
+            let Some(descriptor) = descriptor else {
+                return tool_call_response(id, state.registry.call(&robot_id, name, args).await);
+            };
+            let capability = tool_capability(&descriptor.device_name);
+            if allowed.as_ref().is_some_and(|allowed| !allowed.contains(capability.capability_id())) {
+                return rpc_error(id, -32601, format!("tool {name} is outside the selected Agent capability ceiling"));
             }
+            tool_call_response(
+                id,
+                state.registry.call_exact_for_capability(
+                    &robot_id, capability, name, Some(&descriptor.device_name), args,
+                ).await,
+            )
         }
         other => rpc_error(id, -32601, format!("method not supported: {other}")),
     }
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct ProxyQuery {
+    capabilities: Option<String>,
 }
 
 #[cfg(test)]
@@ -296,6 +326,25 @@ mod tests {
             reply["result"].get("nextCursor").is_none(),
             "the device's 8000-byte paging is absorbed here, not passed on"
         );
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn product_agent_capability_query_filters_list_and_call() {
+        let (registry, _client) = fixture().await;
+        let server = RobotMcpProxyServer::spawn(registry).await.unwrap();
+        let url = format!("{}?capabilities=robot.display", server.url_for("aa:bb"));
+        let client = reqwest::Client::new();
+        let list: Value = client.post(&url).bearer_auth(&server.token)
+            .json(&json!({ "jsonrpc": "2.0", "id": 20, "method": "tools/list" }))
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(list["result"]["tools"], json!([]));
+        let call: Value = client.post(&url).bearer_auth(&server.token)
+            .json(&json!({ "jsonrpc": "2.0", "id": 21, "method": "tools/call",
+                "params": { "name": "robot_gimbal_look", "arguments": {} } }))
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(call["error"]["code"], -32601);
+        assert!(call["error"]["message"].as_str().unwrap().contains("capability ceiling"));
         server.stop();
     }
 

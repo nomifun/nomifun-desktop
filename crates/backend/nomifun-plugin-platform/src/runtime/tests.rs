@@ -4,20 +4,20 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
     ArtifactId, CredentialSlotDeclaration, CredentialSlotKey, CredentialSlotKind, DigestHex,
-    JavaScriptBuildProfile, LocalizedMetadata, MiniAppDatabaseHandleId,
-    MiniAppFilesDirDescriptor, MiniAppFilesHandleId, MiniAppId, MiniAppKvHandleDescriptor,
-    MiniAppKvHandleId, MiniAppNonUiReleaseFingerprint, MiniAppPointerExpectation,
-    MiniAppPrivateDatabaseDescriptor, MiniAppProductLifecycleState, MiniAppProjectId,
-    MiniAppPublishAuthorization, MiniAppPublishRequest, MiniAppReadyOrigin, MiniAppReadyRelease,
-    MiniAppReleaseArtifactV1, MiniAppReleaseFile, MiniAppReleaseId, MiniAppReleaseRef,
-    MiniAppReleaseV1Manifest, MiniAppResourceContract, MiniAppRollbackRequest,
-    MiniAppServiceLifecycle, MiniAppServiceReleaseDescriptor, MiniAppServiceRuntimeFingerprint,
-    MiniAppServiceStorageDescriptor, MiniAppSourceLineage, MiniAppUiOnlyAutoPublishAuthorization,
-    MiniAppUiOnlyAutoPublishProof, MiniAppUserAuthorizationId, OperationId, PackageContributions,
-    PackageId, PackageRef, ResolvedMiniAppServiceSpec, ResolvedMiniAppServiceSpecInputs,
+    JavaScriptBuildProfile, LocalizedMetadata, PluginDatabaseHandleId,
+    PluginFilesDirDescriptor, PluginFilesHandleId, PluginProductId, PluginKvHandleDescriptor,
+    PluginKvHandleId, PluginNonUiReleaseFingerprint, PluginPointerExpectation,
+    PluginPrivateDatabaseDescriptor, PluginProductLifecycleState, PluginProjectId,
+    PluginPublishAuthorization, PluginPublishRequest, PluginReadyOrigin, PluginReadyRelease,
+    PluginReleaseArtifactV1, PluginReleaseFile, PluginReleaseId, PluginReleaseRef,
+    PluginReleaseV1Manifest, PluginResourceContract, PluginRollbackRequest,
+    PluginServiceLifecycle, PluginServiceReleaseDescriptor, PluginServiceRuntimeFingerprint,
+    PluginServiceStorageDescriptor, PluginReleaseSourceLineage, PluginUiOnlyAutoPublishAuthorization,
+    PluginUiOnlyAutoPublishProof, PluginUserAuthorizationId, OperationId, PackageContributions,
+    PackageId, PackageRef, ResolvedPluginServiceSpec, ResolvedPluginServiceSpecInputs,
     ResourceKind, RuntimeInstallationId, RuntimeTarget, StrictJsonValue, VersionString,
-    MINIAPP_M1_SCHEMA_VERSION, MINIAPP_RELEASE_PROFILE_VERSION,
-    MINIAPP_SERVICE_HOST_PROTOCOL_VERSION, MINIAPP_SERVICE_SDK_CONTRACT_VERSION,
+    PLUGIN_RUNTIME_SCHEMA_VERSION, PLUGIN_RELEASE_PROFILE_VERSION,
+    PLUGIN_SERVICE_HOST_PROTOCOL_VERSION, PLUGIN_SERVICE_SDK_CONTRACT_VERSION,
     canonical_ui_tree_digest, digest_bytes, digest_payload,
 };
 
@@ -28,8 +28,8 @@ const T0: i64 = 1_800_000_000_000;
 #[tokio::test]
 async fn repository_contract_keeps_release_slots_and_catalog_atomic() {
     let repository: Arc<dyn PluginRuntimeRepository> = Arc::new(InMemoryPluginRuntimeRepository::new());
-    let first = create_root(&repository, "miniapp-a", PluginRuntimeKind::UiOnly).await;
-    let second = create_root(&repository, "miniapp-b", PluginRuntimeKind::UiOnly).await;
+    let first = create_root(&repository, "plugin-a", false).await;
+    let second = create_root(&repository, "plugin-b", false).await;
     let second_expectation = PluginRuntimeMutationExpectation::from_snapshot(&second);
 
     let first = complete_ready(
@@ -56,7 +56,7 @@ async fn repository_contract_keeps_release_slots_and_catalog_atomic() {
     let first = publish_repository(&repository, &first, "catalog-a-v1", T0 + 20).await;
     assert_eq!(
         first.root.product.lifecycle,
-        MiniAppProductLifecycleState::Disabled
+        PluginProductLifecycleState::Disabled
     );
     assert!(first.catalog.is_none());
     assert_eq!(first.root.product.pointers.active_release_epoch, 1);
@@ -107,9 +107,9 @@ async fn repository_contract_keeps_release_slots_and_catalog_atomic() {
         v2
     );
 
-    let rollback = MiniAppRollbackRequest {
-        miniapp_id: first.root.product.miniapp_id.clone(),
-        expected: MiniAppPointerExpectation::from_state(&first.root.product.pointers),
+    let rollback = PluginRollbackRequest {
+        plugin_product_id: first.root.product.plugin_product_id.clone(),
+        expected: PluginPointerExpectation::from_state(&first.root.product.pointers),
         rollback_target: v1.clone(),
         target_catalog_digest: digest("catalog-a-v1-restored"),
         actor_id: "user-1".into(),
@@ -146,7 +146,7 @@ async fn repository_contract_keeps_release_slots_and_catalog_atomic() {
 #[tokio::test]
 async fn repository_contract_enforces_lifecycle_without_intermediate_disabled_commit() {
     let repository: Arc<dyn PluginRuntimeRepository> = Arc::new(InMemoryPluginRuntimeRepository::new());
-    let created = create_root(&repository, "miniapp-lifecycle", PluginRuntimeKind::UiOnly).await;
+    let created = create_root(&repository, "plugin-lifecycle", false).await;
     let enable_without_active = repository
         .commit_lifecycle(CommitPluginRuntimeLifecycle {
             expected: PluginRuntimeMutationExpectation::from_snapshot(&created),
@@ -160,13 +160,13 @@ async fn repository_contract_enforces_lifecycle_without_intermediate_disabled_co
     ));
     assert_eq!(
         repository
-            .get(&created.root.product.miniapp_id)
+            .get(&created.root.product.plugin_product_id)
             .await
             .unwrap()
             .root
             .product
             .lifecycle,
-        MiniAppProductLifecycleState::Disabled
+        PluginProductLifecycleState::Disabled
     );
 
     let ready = complete_ready(
@@ -180,7 +180,7 @@ async fn repository_contract_enforces_lifecycle_without_intermediate_disabled_co
     let published = publish_repository(&repository, &ready, "catalog-lifecycle", T0 + 20).await;
     let mut running = DurablePluginRuntimeOperation::running(
         OperationId::from("lifecycle-build"),
-        published.root.product.miniapp_id.clone(),
+        published.root.product.plugin_product_id.clone(),
         PluginRuntimeOperationKind::Build,
         true,
         T0 + 21,
@@ -219,7 +219,7 @@ async fn repository_contract_enforces_lifecycle_without_intermediate_disabled_co
     );
     assert_eq!(
         trashed.root.product.lifecycle,
-        MiniAppProductLifecycleState::Trashed
+        PluginProductLifecycleState::Trashed
     );
     assert!(trashed.catalog.is_none());
 
@@ -240,7 +240,7 @@ async fn repository_contract_enforces_lifecycle_without_intermediate_disabled_co
     .await;
     assert_eq!(
         restored.root.product.lifecycle,
-        MiniAppProductLifecycleState::Disabled
+        PluginProductLifecycleState::Disabled
     );
     assert!(restored.catalog.is_none());
 }
@@ -248,7 +248,7 @@ async fn repository_contract_enforces_lifecycle_without_intermediate_disabled_co
 #[tokio::test]
 async fn repository_contract_keeps_delete_intent_and_operation_outside_owner_root() {
     let repository: Arc<dyn PluginRuntimeRepository> = Arc::new(InMemoryPluginRuntimeRepository::new());
-    let created = create_root(&repository, "miniapp-delete", PluginRuntimeKind::UiOnly).await;
+    let created = create_root(&repository, "plugin-delete", false).await;
     let ready = complete_ready(
         &repository,
         &created,
@@ -285,7 +285,7 @@ async fn repository_contract_keeps_delete_intent_and_operation_outside_owner_roo
     let deletion = deleting.deletion.as_ref().expect("deleting intent");
     assert_eq!(
         deleting.root.product.lifecycle,
-        MiniAppProductLifecycleState::Deleting
+        PluginProductLifecycleState::Deleting
     );
     assert!(!deletion.operation.cancelable);
     assert!(deleting.catalog.is_none());
@@ -297,7 +297,7 @@ async fn repository_contract_keeps_delete_intent_and_operation_outside_owner_roo
 
     let failed = repository
         .fail_delete(FailPluginRuntimeDelete {
-            miniapp_id: deleting.root.product.miniapp_id.clone(),
+            plugin_product_id: deleting.root.product.plugin_product_id.clone(),
             operation_id: first_operation.clone(),
             expected_operation_revision: 1,
             error: "managed_data_unavailable".into(),
@@ -318,7 +318,7 @@ async fn repository_contract_keeps_delete_intent_and_operation_outside_owner_roo
     let second_operation = OperationId::from("delete-operation-2");
     let restarted = repository
         .restart_delete(RestartPluginRuntimeDelete {
-            miniapp_id: failed.root.product.miniapp_id.clone(),
+            plugin_product_id: failed.root.product.plugin_product_id.clone(),
             expected_operation_id: first_operation.clone(),
             operation_id: second_operation.clone(),
             now_ms: T0 + 70,
@@ -345,7 +345,7 @@ async fn repository_contract_keeps_delete_intent_and_operation_outside_owner_roo
 
     repository
         .finalize_delete(FinalizePluginRuntimeDelete {
-            miniapp_id: restarted.root.product.miniapp_id.clone(),
+            plugin_product_id: restarted.root.product.plugin_product_id.clone(),
             operation_id: second_operation.clone(),
             expected_operation_revision: 1,
             now_ms: T0 + 80,
@@ -353,7 +353,7 @@ async fn repository_contract_keeps_delete_intent_and_operation_outside_owner_roo
         .await
         .unwrap();
     assert!(matches!(
-        repository.get(&restarted.root.product.miniapp_id).await,
+        repository.get(&restarted.root.product.plugin_product_id).await,
         Err(PluginRuntimePlatformError::NotFound(_))
     ));
     assert_eq!(
@@ -367,9 +367,9 @@ async fn repository_contract_keeps_delete_intent_and_operation_outside_owner_roo
 }
 
 #[tokio::test]
-async fn repository_contract_rejects_cross_shape_release_and_legacy_state() {
+async fn repository_contract_checks_storage_without_mutually_exclusive_product_kinds() {
     let repository: Arc<dyn PluginRuntimeRepository> = Arc::new(InMemoryPluginRuntimeRepository::new());
-    let ui = create_root(&repository, "miniapp-ui", PluginRuntimeKind::UiOnly).await;
+    let ui = create_root(&repository, "plugin-ui", false).await;
     let service_artifact = artifact("service-on-ui", true);
     let operation = start_import(&repository, &ui, "import-service-on-ui").await;
     let completed = complete_import_operation(operation, &service_artifact, T0 + 10);
@@ -377,7 +377,7 @@ async fn repository_contract_rejects_cross_shape_release_and_legacy_state() {
         .complete_ready_release(CompleteReadyReleaseCommit {
             expected: PluginRuntimeMutationExpectation::from_snapshot(&ui),
             release: stored_release(
-                &ui.root.product.miniapp_id,
+                &ui.root.product.plugin_product_id,
                 service_artifact,
                 &completed.operation_id,
                 T0 + 10,
@@ -388,7 +388,7 @@ async fn repository_contract_rejects_cross_shape_release_and_legacy_state() {
         .await;
     assert!(matches!(result, Err(PluginRuntimePlatformError::InvalidState(_))));
 
-    let service = create_root(&repository, "miniapp-service", PluginRuntimeKind::Service).await;
+    let service = create_root(&repository, "plugin-service", true).await;
     let ui_artifact = artifact("ui-on-service", false);
     let operation = start_import(&repository, &service, "import-ui-on-service").await;
     let completed = complete_import_operation(operation, &ui_artifact, T0 + 20);
@@ -396,7 +396,7 @@ async fn repository_contract_rejects_cross_shape_release_and_legacy_state() {
         .complete_ready_release(CompleteReadyReleaseCommit {
             expected: PluginRuntimeMutationExpectation::from_snapshot(&service),
             release: stored_release(
-                &service.root.product.miniapp_id,
+                &service.root.product.plugin_product_id,
                 ui_artifact,
                 &completed.operation_id,
                 T0 + 20,
@@ -405,14 +405,13 @@ async fn repository_contract_rejects_cross_shape_release_and_legacy_state() {
             now_ms: T0 + 20,
         })
         .await;
-    assert!(matches!(result, Err(PluginRuntimePlatformError::InvalidState(_))));
-
+    assert!(result.is_ok(), "a product with managed storage may publish a UI-only release");
     let encoded = serde_json::to_value(&service.root).unwrap();
     let text = serde_json::to_string(&encoded).unwrap();
     for legacy in [
         "conversation_id",
         "guid_mode",
-        "legacy_miniapp_id",
+        "legacy_plugin_product_id",
         "html",
         "resolved_service_spec",
         "service_health",
@@ -422,25 +421,25 @@ async fn repository_contract_rejects_cross_shape_release_and_legacy_state() {
 }
 
 #[tokio::test]
-async fn application_service_allows_strict_ui_change_for_service_miniapp() {
+async fn application_service_allows_strict_ui_change_for_service_plugin() {
     let repository: Arc<dyn PluginRuntimeRepository> = Arc::new(InMemoryPluginRuntimeRepository::new());
     let runtime = Arc::new(RecordingRuntime::default());
-    let service = PluginRuntimeApplicationService::new(PluginRuntimeApplicationDependencies {
+    let service = PluginRuntimeMutationService::new(PluginRuntimeApplicationDependencies {
         repository: repository.clone(),
         runtime: runtime.clone(),
         managed_data: Arc::new(NoopPluginRuntimeManagedData),
         mutations: Arc::new(PluginRuntimeOwnerMutationCoordinator::new()),
     });
-    let miniapp_id = MiniAppId::from("miniapp-service-auto");
+    let plugin_product_id = PluginProductId::from("plugin-service-auto");
     let created = service
         .create(CreatePluginRuntime {
             expected_library_revision: 0,
-            miniapp_id: miniapp_id.clone(),
-            project_id: MiniAppProjectId::from("project-service-auto"),
+            plugin_product_id: plugin_product_id.clone(),
+            project_id: PluginProjectId::from("project-service-auto"),
             display_name: "Service Auto".into(),
             description: None,
-            kind: PluginRuntimeKind::Service,
-            storage: storage(&miniapp_id, PluginRuntimeKind::Service),
+            kind: PluginRuntimeKind::Plugin,
+            storage: storage(&plugin_product_id, true),
             now_ms: T0,
         })
         .await
@@ -460,7 +459,7 @@ async fn application_service_allows_strict_ui_change_for_service_miniapp() {
     let first = service
         .publish(PublishPluginRuntime {
             expected: PluginRuntimeMutationExpectation::from_snapshot(&first),
-            authorization: MiniAppPublishAuthorization::ManualUser {
+            authorization: PluginPublishAuthorization::ManualUser {
                 actor_id: "user-1".into(),
             },
             target_catalog_digest: digest("catalog-service-auto-v1"),
@@ -496,7 +495,7 @@ async fn application_service_allows_strict_ui_change_for_service_miniapp() {
         first_spec.service_run_key, target_spec.service_run_key,
         "UI-only changes must keep the Service run key stable"
     );
-    let proof = MiniAppUiOnlyAutoPublishProof {
+    let proof = PluginUiOnlyAutoPublishProof {
         current_release: current.release_ref().clone(),
         target_release: target.release_ref().clone(),
         current_ui_tree_digest: current.artifact.manifest.payload.ui.as_ref().unwrap().ui_tree_digest.clone(),
@@ -509,9 +508,9 @@ async fn application_service_allows_strict_ui_change_for_service_miniapp() {
         static_validation_passed: true,
         no_unknown_changes: true,
     };
-    let authorization = MiniAppUiOnlyAutoPublishAuthorization {
-        authorization_id: MiniAppUserAuthorizationId::from("auto-service-ui"),
-        miniapp_id: miniapp_id.clone(),
+    let authorization = PluginUiOnlyAutoPublishAuthorization {
+        authorization_id: PluginUserAuthorizationId::from("auto-service-ui"),
+        plugin_product_id: plugin_product_id.clone(),
         enabled: true,
         authorization_revision: 1,
         user_authorized_at_ms: T0 + 1,
@@ -519,7 +518,7 @@ async fn application_service_allows_strict_ui_change_for_service_miniapp() {
     let forged = service
         .publish(PublishPluginRuntime {
             expected: PluginRuntimeMutationExpectation::from_snapshot(&second),
-            authorization: MiniAppPublishAuthorization::AutoUiOnly {
+            authorization: PluginPublishAuthorization::AutoUiOnly {
                 authorization: authorization.clone(),
                 proof: Box::new(proof.clone()),
             },
@@ -541,7 +540,7 @@ async fn application_service_allows_strict_ui_change_for_service_miniapp() {
     let published = service
         .publish(PublishPluginRuntime {
             expected: PluginRuntimeMutationExpectation::from_snapshot(&authorized),
-            authorization: MiniAppPublishAuthorization::AutoUiOnly {
+            authorization: PluginPublishAuthorization::AutoUiOnly {
                 authorization,
                 proof: Box::new(proof),
             },
@@ -634,16 +633,16 @@ impl PluginRuntimeRuntimePort for RecordingRuntime {
 async fn create_root(
     repository: &Arc<dyn PluginRuntimeRepository>,
     id: &str,
-    kind: PluginRuntimeKind,
+    with_storage: bool,
 ) -> PluginRuntimeRepositorySnapshot {
-    let miniapp_id = MiniAppId::from(id);
+    let plugin_product_id = PluginProductId::from(id);
     let root = PluginRuntimeDataRoot::new(
-        miniapp_id.clone(),
-        MiniAppProjectId::from(format!("project-{id}")),
+        plugin_product_id.clone(),
+        PluginProjectId::from(format!("project-{id}")),
         id.into(),
         None,
-        kind,
-        storage(&miniapp_id, kind),
+        PluginRuntimeKind::Plugin,
+        storage(&plugin_product_id, with_storage),
         T0,
     )
     .unwrap();
@@ -659,7 +658,7 @@ async fn create_root(
 async fn complete_ready(
     repository: &Arc<dyn PluginRuntimeRepository>,
     snapshot: &PluginRuntimeRepositorySnapshot,
-    artifact: MiniAppReleaseArtifactV1,
+    artifact: PluginReleaseArtifactV1,
     operation_id: &str,
     now_ms: i64,
 ) -> PluginRuntimeRepositorySnapshot {
@@ -676,13 +675,13 @@ async fn complete_ready(
 async fn complete_ready_with_expectation(
     repository: &Arc<dyn PluginRuntimeRepository>,
     expectation: PluginRuntimeMutationExpectation,
-    artifact: MiniAppReleaseArtifactV1,
+    artifact: PluginReleaseArtifactV1,
     operation_id: &str,
     now_ms: i64,
 ) -> PluginRuntimeRepositorySnapshot {
     let operation = DurablePluginRuntimeOperation::running(
         OperationId::from(operation_id),
-        expectation.miniapp_id.clone(),
+        expectation.plugin_product_id.clone(),
         PluginRuntimeOperationKind::Import,
         true,
         now_ms - 1,
@@ -691,7 +690,7 @@ async fn complete_ready_with_expectation(
     repository.start_operation(operation.clone()).await.unwrap();
     let completed = complete_import_operation(operation, &artifact, now_ms);
     let release = stored_release(
-        &expectation.miniapp_id,
+        &expectation.plugin_product_id,
         artifact,
         &completed.operation_id,
         now_ms,
@@ -714,7 +713,7 @@ async fn start_import(
 ) -> DurablePluginRuntimeOperation {
     let operation = DurablePluginRuntimeOperation::running(
         OperationId::from(operation_id),
-        snapshot.root.product.miniapp_id.clone(),
+        snapshot.root.product.plugin_product_id.clone(),
         PluginRuntimeOperationKind::Import,
         true,
         T0 + 1,
@@ -726,7 +725,7 @@ async fn start_import(
 
 fn complete_import_operation(
     mut operation: DurablePluginRuntimeOperation,
-    artifact: &MiniAppReleaseArtifactV1,
+    artifact: &PluginReleaseArtifactV1,
     now_ms: i64,
 ) -> DurablePluginRuntimeOperation {
     operation
@@ -740,27 +739,27 @@ fn complete_import_operation(
 }
 
 fn stored_release(
-    miniapp_id: &MiniAppId,
-    artifact: MiniAppReleaseArtifactV1,
+    plugin_product_id: &PluginProductId,
+    artifact: PluginReleaseArtifactV1,
     operation_id: &OperationId,
     now_ms: i64,
 ) -> StoredPluginRuntimeRelease {
     let suffix = artifact.artifact_id.as_ref().replace("artifact-", "");
-    let release = MiniAppReleaseRef {
-        release_id: MiniAppReleaseId::from(format!("release-{suffix}")),
+    let release = PluginReleaseRef {
+        release_id: PluginReleaseId::from(format!("release-{suffix}")),
         artifact_id: artifact.artifact_id.clone(),
         release_digest: artifact.artifact_digest.clone(),
         manifest_digest: artifact.manifest.payload_digest.clone(),
     };
     StoredPluginRuntimeRelease::new(
-        miniapp_id.clone(),
+        plugin_product_id.clone(),
         artifact,
-        MiniAppReadyRelease {
-            miniapp_id: miniapp_id.clone(),
+        PluginReadyRelease {
+            plugin_product_id: plugin_product_id.clone(),
             release,
             origin_operation_id: operation_id.clone(),
-            origin: MiniAppReadyOrigin::Import,
-            source_lineage: MiniAppSourceLineage::RuntimeOnly,
+            origin: PluginReadyOrigin::Import,
+            source_lineage: PluginReleaseSourceLineage::RuntimeOnly,
             matching_service_test_receipt: None,
             created_at_ms: now_ms,
         },
@@ -789,12 +788,12 @@ async fn publish_repository_result(
     repository
         .commit_release(CommitPluginRuntimeRelease {
             expected: PluginRuntimeMutationExpectation::from_snapshot(snapshot),
-            command: PluginRuntimeReleaseCommand::Publish(MiniAppPublishRequest {
-                miniapp_id: snapshot.root.product.miniapp_id.clone(),
-                expected: MiniAppPointerExpectation::from_state(&snapshot.root.product.pointers),
+            command: PluginRuntimeReleaseCommand::Publish(PluginPublishRequest {
+                plugin_product_id: snapshot.root.product.plugin_product_id.clone(),
+                expected: PluginPointerExpectation::from_state(&snapshot.root.product.pointers),
                 target_ready_release: target,
                 target_catalog_digest: digest(catalog_seed),
-                authorization: MiniAppPublishAuthorization::ManualUser {
+                authorization: PluginPublishAuthorization::ManualUser {
                     actor_id: "user-1".into(),
                 },
             }),
@@ -819,7 +818,7 @@ async fn lifecycle_repository(
         .unwrap()
 }
 
-fn artifact(seed: &str, with_service: bool) -> MiniAppReleaseArtifactV1 {
+fn artifact(seed: &str, with_service: bool) -> PluginReleaseArtifactV1 {
     let mut files = vec![
         release_file("ui/index.html", &format!("index-{seed}")),
         release_file("ui/app.js", &format!("ui-{seed}")),
@@ -836,15 +835,15 @@ fn artifact(seed: &str, with_service: bool) -> MiniAppReleaseArtifactV1 {
             .iter()
             .find(|file| file.normalized_relative_path == "service/main.mjs")
             .unwrap();
-        MiniAppServiceReleaseDescriptor {
+        PluginServiceReleaseDescriptor {
             entrypoint: "service/main.mjs".into(),
             module_digest: module.digest.clone(),
-            lifecycle: MiniAppServiceLifecycle::OnDemand,
+            lifecycle: PluginServiceLifecycle::OnDemand,
             uses_files: true,
             uses_private_database: true,
             service_contract_digest: digest("service-contract"),
-            host_protocol_version: MINIAPP_SERVICE_HOST_PROTOCOL_VERSION.into(),
-            sdk_contract_version: MINIAPP_SERVICE_SDK_CONTRACT_VERSION.into(),
+            host_protocol_version: PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
+            sdk_contract_version: PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
             runtime_requirements_digest: digest("runtime-requirements"),
         }
     });
@@ -864,23 +863,23 @@ fn artifact(seed: &str, with_service: bool) -> MiniAppReleaseArtifactV1 {
         })
         .into_iter()
         .collect::<Vec<_>>();
-    let resource_contract = MiniAppResourceContract {
+    let resource_contract = PluginResourceContract {
         required_resource_kinds: with_service
             .then(|| ResourceKind::from("knowledge.base"))
             .into_iter()
             .collect(),
     };
-    let manifest = MiniAppReleaseV1Manifest {
-        schema_version: MINIAPP_M1_SCHEMA_VERSION.into(),
-        build_profile: JavaScriptBuildProfile::MiniAppReleaseV1,
-        build_profile_version: MINIAPP_RELEASE_PROFILE_VERSION.into(),
+    let manifest = PluginReleaseV1Manifest {
+        schema_version: PLUGIN_RUNTIME_SCHEMA_VERSION.into(),
+        build_profile: JavaScriptBuildProfile::PluginReleaseV1,
+        build_profile_version: PLUGIN_RELEASE_PROFILE_VERSION.into(),
         display: LocalizedMetadata {
             name: "Example".into(),
             description: "Example Plugin".into(),
             localized_names: BTreeMap::new(),
             localized_descriptions: BTreeMap::new(),
         },
-        ui: Some(nomifun_agent_contracts::MiniAppUiReleaseDescriptor {
+        ui: Some(nomifun_agent_contracts::PluginUiReleaseDescriptor {
             entrypoint: "ui/index.html".into(),
             entrypoint_digest: entrypoint.digest.clone(),
             ui_tree_digest: canonical_ui_tree_digest(&files).unwrap(),
@@ -897,18 +896,18 @@ fn artifact(seed: &str, with_service: bool) -> MiniAppReleaseArtifactV1 {
         schemas: BTreeMap::new(),
         bridge_contract_digest: digest("bridge-contract"),
         contribution_package: PackageRef {
-            id: PackageId::from("miniapp.example.release"),
+            id: PackageId::from("plugin.example.release"),
             version: VersionString::from("1.0.0"),
         },
         contributions: PackageContributions::default(),
         migrations: Vec::new(),
     };
-    MiniAppReleaseArtifactV1::new(ArtifactId::from(format!("artifact-{seed}")), manifest, files)
+    PluginReleaseArtifactV1::new(ArtifactId::from(format!("artifact-{seed}")), manifest, files)
         .unwrap()
 }
 
-fn release_file(path: &str, seed: &str) -> MiniAppReleaseFile {
-    MiniAppReleaseFile {
+fn release_file(path: &str, seed: &str) -> PluginReleaseFile {
+    PluginReleaseFile {
         normalized_relative_path: path.into(),
         digest: digest(seed),
         size_bytes: seed.len() as u64,
@@ -919,25 +918,25 @@ fn digest(seed: &str) -> DigestHex {
     digest_bytes(seed.as_bytes())
 }
 
-fn storage(miniapp_id: &MiniAppId, kind: PluginRuntimeKind) -> MiniAppServiceStorageDescriptor {
-    MiniAppServiceStorageDescriptor {
-        kv: MiniAppKvHandleDescriptor {
-            handle_id: MiniAppKvHandleId::from(format!("kv-{}", miniapp_id.as_ref())),
-            miniapp_id: miniapp_id.clone(),
+fn storage(plugin_product_id: &PluginProductId, with_storage: bool) -> PluginServiceStorageDescriptor {
+    PluginServiceStorageDescriptor {
+        kv: PluginKvHandleDescriptor {
+            handle_id: PluginKvHandleId::from(format!("kv-{}", plugin_product_id.as_ref())),
+            plugin_product_id: plugin_product_id.clone(),
             namespace_revision: 1,
         },
-        files_dir: (kind == PluginRuntimeKind::Service).then(|| MiniAppFilesDirDescriptor {
-            handle_id: MiniAppFilesHandleId::from(format!("files-{}", miniapp_id.as_ref())),
-            miniapp_id: miniapp_id.clone(),
+        files_dir: with_storage.then(|| PluginFilesDirDescriptor {
+            handle_id: PluginFilesHandleId::from(format!("files-{}", plugin_product_id.as_ref())),
+            plugin_product_id: plugin_product_id.clone(),
             absolute_path: format!(
-                "C:\\NomiFun\\miniapps\\{}\\files",
-                miniapp_id.as_ref()
+                "C:\\NomiFun\\plugins\\{}\\files",
+                plugin_product_id.as_ref()
             ),
         }),
-        private_database: (kind == PluginRuntimeKind::Service).then(|| {
-            MiniAppPrivateDatabaseDescriptor {
-                handle_id: MiniAppDatabaseHandleId::from(format!("db-{}", miniapp_id.as_ref())),
-                miniapp_id: miniapp_id.clone(),
+        private_database: with_storage.then(|| {
+            PluginPrivateDatabaseDescriptor {
+                handle_id: PluginDatabaseHandleId::from(format!("db-{}", plugin_product_id.as_ref())),
+                plugin_product_id: plugin_product_id.clone(),
                 schema_epoch: 1,
                 migration_ledger_digest: digest("empty-migration-ledger"),
             }
@@ -949,18 +948,18 @@ fn service_spec(
     snapshot: &PluginRuntimeRepositorySnapshot,
     release: &StoredPluginRuntimeRelease,
     epoch: u64,
-) -> ResolvedMiniAppServiceSpec {
+) -> ResolvedPluginServiceSpec {
     let manifest = &release.artifact.manifest.payload;
     let service = manifest.service.as_ref().expect("Service Release");
-    ResolvedMiniAppServiceSpec::new(ResolvedMiniAppServiceSpecInputs {
-        miniapp_id: snapshot.root.product.miniapp_id.clone(),
+    ResolvedPluginServiceSpec::new(ResolvedPluginServiceSpecInputs {
+        plugin_product_id: snapshot.root.product.plugin_product_id.clone(),
         release: release.release_ref().clone(),
         active_release_epoch: epoch,
         service_module_digest: service.module_digest.clone(),
         lifecycle: service.lifecycle,
         host_protocol_version: service.host_protocol_version.clone(),
         sdk_contract_version: service.sdk_contract_version.clone(),
-        runtime: MiniAppServiceRuntimeFingerprint {
+        runtime: PluginServiceRuntimeFingerprint {
             runtime_installation_id: RuntimeInstallationId::from("runtime-1"),
             runtime_target: RuntimeTarget::from("windows-x86_64"),
             runtime_executable_digest: digest("node-runtime"),
@@ -981,10 +980,10 @@ fn service_spec(
 
 fn non_ui_fingerprint(
     release: &StoredPluginRuntimeRelease,
-    spec: &ResolvedMiniAppServiceSpec,
-) -> MiniAppNonUiReleaseFingerprint {
+    spec: &ResolvedPluginServiceSpec,
+) -> PluginNonUiReleaseFingerprint {
     let manifest = &release.artifact.manifest.payload;
-    MiniAppNonUiReleaseFingerprint {
+    PluginNonUiReleaseFingerprint {
         manifest_without_ui_digest: digest("manifest-without-ui"),
         service_run_key: Some(spec.service_run_key.clone()),
         migration_set_digest: manifest.migration_set_digest().unwrap(),

@@ -39,7 +39,7 @@ const descriptor: PluginRuntimeSurfaceLaunchDescriptor = {
   surface_generation: 1,
   surface_capability: 'surface-capability',
   ui_entrypoint: 'ui/index.html',
-  kind: 'ui_only',
+  kind: 'plugin',
 };
 
 afterEach(() => cleanup());
