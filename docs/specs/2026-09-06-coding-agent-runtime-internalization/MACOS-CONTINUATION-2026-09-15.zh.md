@@ -98,8 +98,37 @@ Command-R 后可正常渲染操作；不能把这个首次观察写成无条件�
 - `agent-v2-contract check`：通过；未改写生成物。
 - 综合 `bun run check` 仍在旧术语门禁失败，不宣称全绿；原 109 处存储/历史/实现引用未全局替换。
 - 本轮真实诊断还出现过 ProviderUnavailable，保留每次日志，没有替换 Provider/模型。
-- 原包 `973bbe206` 的架构、资源和退出证明保留，但本轮代码变化后需要重新构建最终 app/DMG。
+- 原包 `973bbe206` 的架构、资源和退出证明作为历史证据保留；当前制品已更新为下述源码。
   未执行 Developer ID 签名、公证或发布。
 
 本机日志、一次性数据及辅助脚本位于 `.git/macos-engine-20260914/`，不随源码提交。
 Windows 需回归共享工具声明、预算和缓存行为；Linux 原生运行继续 TODO。
+
+## 继续打包与非交互验收
+
+源码提交：`2ede9aaf73eff787abd2315130a04b7dd68a4265`，构建时工作区干净；`bun run build:mac arm` 退出 0，
+Release 编译 8m25s。日志 `package-continuation-build.log`。只构建 arm64。
+
+- app：`target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app`
+- DMG：`dist/desktop/NomiFun_0.7.6_aarch64.dmg`（87,529,766 字节）
+- release-lock v2 对应上述源码，文件摘要验证通过；DMG 的 `hdiutil verify` 通过。
+- 从 DMG 只读挂载目录比对主程序与构建 app：一致；架构 arm64、执行权限存在。
+- 401 个前端文件的路径和 SHA-256 一致，LICENSE/NOTICE 一致，没有旧 Runtime/hello 制品。
+
+| 当前制品 | SHA-256 |
+| --- | --- |
+| DMG | `0f4c16cd7ca5123872cefd9d123198ba43fbbc33fc953fecbf958aa816fb1d11` |
+| 主程序 | `8567e3e188e22b0410a243b014c6c6431dfe95f02fd3be27a94621d1cf4c65f3` |
+| release-lock | `ba7d669a708f873c475b580d341f028774de3e0ea45ebfda0bb0f656a8bfe0cd` |
+
+Mac 锁定时只执行了非交互验证：从 DMG 包内主程序启动，使用新的隔离数据目录，
+health 200；发送 SIGTERM 后有正常插件清理日志，退出码 0。见
+`package-startup-2ede9aaf7.json`、`package-startup-2ede9aaf7.log`。
+这不补足当前制品的原生 UI 点击发送验证；不能把上版 UI 或退出操作直接写成当前包已重复执行。
+
+`check-macos-arm64-native.mjs` 总结果仍为 fail：严格 codesign 检查退出 1，
+`code has no resources but signature indicates they must be present`。主程序仅有 linker ad-hoc 签名，
+没有完整 bundle 签名或公证；未修改门禁。其他架构、资源、发布锁和 DMG 完整性检查通过。
+
+当前仍待用户解锁 Mac，完成原生 UI 发送、新会话 binding 以及修改 Agent 后旧会话不改绑的现场验证。
+目标未标记完成。本轮构建与本地提交均未推送，未发布 Release 或更新。

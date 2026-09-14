@@ -2,7 +2,7 @@
 
 > 2026-09-15 继续验收：真实双引擎八阶段、独立真实压缩和活动进程取消均已有通过证据。
 > 修复原生工作台到首页的旧缓存问题；最终 UI 发送验证因 Mac 锁定待用户解锁。
-> 本轮代码需要新的 app/DMG，目标仍在进行中。详见 [MACOS-CONTINUATION-2026-09-15.zh.md](MACOS-CONTINUATION-2026-09-15.zh.md)。
+> 本轮已从干净源码构建 arm64 app/DMG，完整性和非交互启动/退出通过；目标仍在进行中。详见 [MACOS-CONTINUATION-2026-09-15.zh.md](MACOS-CONTINUATION-2026-09-15.zh.md)。
 
 > 2026-09-14 macOS 接手补充：基线 `2ff029512` 已同步，本轮修复已本地提交、未 push。
 > arm64 开发启动、隔离 WebView、app/DMG 与包内 Command-Q 活动终端回收已验证；严格 bundle 签名仍失败。

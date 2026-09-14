@@ -15,7 +15,7 @@
     "validation_policy": "Isolated native dev and app/DMG validation; StepFun step-3.7-flash only; no Release, updater publication or push",
     "source_baseline": "2ff02951266b12008cf1f7ea63c3b27cff9a192a",
     "handoff": "MACOS-CONTINUATION-2026-09-15.zh.md",
-    "status": "official-live-chain-and-compaction-passed; native-ui-send-awaiting-mac-unlock; package-rebuild-required",
+    "status": "official-live-chain-compaction-cancel-passed; current-arm64-package-verified-noninteractively; native-ui-send-awaiting-mac-unlock",
     "engine_builds": {
       "nomifun.nomi": "0.7.6-host62",
       "nomifun.coding": "0.7.6-host2-coding-loop95"
@@ -49,7 +49,16 @@
       "shutdown_and_credential_audit": "passed"
     },
     "package_checks": {
-      "status": "rebuild_required",
+      "status": "built from clean source; native UI send pending",
+      "host_arch": "arm64",
+      "dmg_sha256": "0f4c16cd7ca5123872cefd9d123198ba43fbbc33fc953fecbf958aa816fb1d11",
+      "host_sha256": "8567e3e188e22b0410a243b014c6c6431dfe95f02fd3be27a94621d1cf4c65f3",
+      "release_lock_sha256": "ba7d669a708f873c475b580d341f028774de3e0ea45ebfda0bb0f656a8bfe0cd",
+      "frontend_401_files_and_legal": "passed",
+      "hdiutil_integrity": "passed",
+      "isolated_package_startup": "health 200",
+      "sigterm_cleanup": "logged normal shutdown; exit 0",
+      "bundle_signature": "strict verification failed; linker ad-hoc only",
       "developer_id_signing": "not_run",
       "notarization": "not_run",
       "release_updater_publication": "not_run"
@@ -82,7 +91,8 @@
         "normal_data_root_restart": "passed: health 200, SIGTERM cleanup, exit 0",
         "latest_source": "rebuild required; previous 973bbe206 artifacts remain historical evidence"
       }
-    }
+    },
+    "source_commit": "2ede9aaf73eff787abd2315130a04b7dd68a4265"
   },
   "previous_windows_delivery_scope": {
     "platform": "windows-local",
