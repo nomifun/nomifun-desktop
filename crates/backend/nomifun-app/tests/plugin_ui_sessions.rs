@@ -15,27 +15,6 @@ mod admission;
 
 const TRUST: &str = "plugin-ui-session-test";
 
-// Each host mode runs in its own process: never mutate process-global env
-// while other Tokio/libtest workers might be composing an application.
-fn in_agent_ui_host(test: &str, enabled: bool) -> bool {
-    const CHILD: &str = "NOMIFUN_TEST_AGENT_UI_CHILD";
-    const OPT_IN: &str = "NOMIFUN_ALLOW_EXPERIMENTAL_AGENT_UI";
-    if std::env::var(CHILD).as_deref() == Ok(test) {
-        assert_eq!(std::env::var(OPT_IN).as_deref() == Ok("1"), enabled);
-        return true;
-    }
-    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-    command.args(["--exact", test, "--nocapture"]).env(CHILD, test);
-    if enabled {
-        command.env(OPT_IN, "1");
-    } else {
-        command.env_remove(OPT_IN);
-    }
-    let status = command.status().expect("run isolated Agent UI host test");
-    assert!(status.success(), "Agent UI host test failed: {test}");
-    false
-}
-
 async fn request(
     router: &axum::Router,
     method: &str,
@@ -155,11 +134,7 @@ fn latest_user_input(expected: &'static str) -> impl wiremock::Match {
 
 #[tokio::test]
 async fn installed_ui_uses_owned_session_commands_and_never_replays_a_turn_on_reopen() {
-    if !in_agent_ui_host("installed_ui_uses_owned_session_commands_and_never_replays_a_turn_on_reopen", true) {
-        return;
-    }
     let (router, services) = common::build_local_trust_app(TRUST).await;
-    assert_eq!(get(&router, "/api/system/info").await["experimental_agent_ui_available"], true);
     let upstream = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/step_plan/v1/chat/completions"))
@@ -264,6 +239,24 @@ async fn installed_ui_uses_owned_session_commands_and_never_replays_a_turn_on_re
     let (status, plain_error) = request(&router, "POST", &open_path, plain_grant).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(plain_error["code"], "NOMI_CORE_AGENT_SESSION_NOT_FOUND");
+
+    // An existing Surface grant cannot outlive Session ownership, and opening
+    // another view must not bypass the same owner boundary.
+    let other_owner = uuid::Uuid::now_v7().to_string();
+    sqlx::query("UPDATE conversations SET user_id = ? WHERE conversation_id = ?")
+        .bind(&other_owner).bind(session_id).execute(services.database.pool()).await.unwrap();
+    assert_eq!(request(&router, "POST", &open_path, grant.clone()).await.0, StatusCode::NOT_FOUND);
+    for command in [
+        observe.clone(),
+        json!({"operation": "turn", "input": {"content": "must not run"}, "idempotency_key": "wrong-owner"}),
+        json!({"operation": "cancel"}),
+    ] {
+        let (status, error) = request(&router, "POST", &bridge_path, bridge_body(&surface, command)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{error}");
+    }
+    sqlx::query("UPDATE conversations SET user_id = ? WHERE conversation_id = ?")
+        .bind(&owner_id).bind(session_id).execute(services.database.pool()).await.unwrap();
+    assert!(upstream.received_requests().await.unwrap().is_empty());
 
     let mut stale = grant.clone();
     stale["agent_session"]["expected_release_digest"] = json!("0".repeat(64));
@@ -445,6 +438,7 @@ async fn installed_ui_uses_owned_session_commands_and_never_replays_a_turn_on_re
     .await
     .unwrap();
     assert!(scope.is_none());
+    let before_disable = post(&router, &open_path, grant.clone()).await;
     let w = get(&router, &format!("/api/plugins/runtimes/{plugin_id}/workshop")).await;
     post(&router, &format!("/api/plugins/runtimes/{plugin_id}/enabled"), json!({
         "plugin_id": plugin_id, "expected_product_revision": w["plugin"]["product_revision"],
@@ -454,6 +448,14 @@ async fn installed_ui_uses_owned_session_commands_and_never_replays_a_turn_on_re
     })).await;
     assert_eq!(get(&router, "/api/agent-catalog/ui/agent-session").await, json!([]));
     assert!(!request(&router, "POST", &open_path, grant).await.0.is_success());
+    for command in [
+        json!({"operation": "observe", "after_seq": 0, "limit": 50}),
+        json!({"operation": "turn", "input": {"content": "must not run"}, "idempotency_key": "disabled"}),
+        json!({"operation": "cancel"}),
+    ] {
+        assert!(!request(&router, "POST", &bridge_path, bridge_body(&before_disable, command)).await.0.is_success(),
+            "disabling the plugin must revoke an existing Session grant");
+    }
 
     // The product template is ordinary editable source, not a special runtime.
     // Creating it does not grant access, publish a view or invoke a model.

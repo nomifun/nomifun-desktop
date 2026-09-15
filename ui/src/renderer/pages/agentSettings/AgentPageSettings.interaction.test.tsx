@@ -16,7 +16,6 @@ import * as platform from '@/renderer/utils/platform';
 import { emitter } from '@/renderer/utils/emitter';
 import { AgentSessionViewHost } from '../agentSession/AgentSessionPage';
 import AgentPageSettings from './AgentPageSettings';
-import { AgentUiAvailabilityContext } from '@/renderer/hooks/agent/useAgentUiAvailable';
 import AgentPresetEditor from './AgentPresetEditor';
 import en from '../../services/i18n/locales/en-US/agentSettings.json';
 import pluginEn from '../../services/i18n/locales/en-US/pluginRuntime.json';
@@ -74,7 +73,7 @@ async function mount(options: {
   const page = (current = preset, dirty = options.dirty ?? false) => {
     const actual = options.stable === false ? { ...current, current_stable_revision: undefined } : current;
     const draft = { preset_id: actual.preset_id, display_name: actual.display_name, document: createEmptyAgentPresetDocument() };
-    return <AgentUiAvailabilityContext.Provider value={true}><I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => cache, dedupingInterval: 0, shouldRetryOnError: false }}>
+    return <I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => cache, dedupingInterval: 0, shouldRetryOnError: false }}>
       <MemoryRouter initialEntries={['/agent']}><Routes><Route path='/agent' element={options.editor
         ? <AgentPresetEditor key={actual.preset_id} editor={{ preset: actual, draft }} draft={draft}
           catalog={{ capabilities: [], skills: [], mcp_tools: [], roles: [] }} busyAction={null} dirty={dirty}
@@ -82,7 +81,7 @@ async function mount(options: {
         : <AgentPageSettings key={actual.preset_id} preset={actual} busy={false} dirty={dirty} />} />
         <Route path='/agent-sessions/:id' element={<Session />} />
       </Routes></MemoryRouter>
-    </SWRConfig></I18nextProvider></AgentUiAvailabilityContext.Provider>;
+    </SWRConfig></I18nextProvider>;
   };
   let result!: ReturnType<typeof render>;
   await act(async () => { result = render(page()); });
@@ -96,9 +95,12 @@ async function mount(options: {
     launch, bridge, history, sessionPreference, draftChanged, saveAgent, guid };
 }
 
-test('real editor saves page consent before any Session, then opens its page without sending a message', async () => {
+test('ordinary user saves a plugin page in the real editor and opens it without host opt-in or sending a message', async () => {
   const v = await mount({ editor: true });
   await v.view.findByRole('option', { name: /Custom page/ });
+  expect((v.view.getByRole('combobox', { name: en.page.default }) as HTMLSelectElement).value).toBe('');
+  expect(v.save).not.toHaveBeenCalled();
+  expect(v.launch).not.toHaveBeenCalled();
   v.select();
   expect(v.view.getByText(en.page.savePageFirst)).toBeTruthy();
   fireEvent.click(v.view.getByRole('button', { name: en.page.open }));
@@ -121,6 +123,26 @@ test('real editor saves page consent before any Session, then opens its page wit
   expect(v.bridge).not.toHaveBeenCalled();
   expect(v.guid).not.toHaveBeenCalled();
   expect(v.history).toHaveBeenCalledWith('chat.history.refresh');
+});
+
+test('ordinary user can save a plugin default then restore builtin while the plugin remains available', async () => {
+  const v = await mount();
+  await v.view.findByRole('option', { name: /Custom page/ });
+  v.select();
+  fireEvent.click(v.view.getByRole('button', { name: en.page.save }));
+  await waitFor(() => expect(v.stored().binding.selection).toEqual(choice));
+  await waitFor(() => expect(v.view.queryByText(en.page.savePageFirst)).toBeNull());
+  fireEvent.change(v.view.getByRole('combobox', { name: en.page.default }), { target: { value: '' } });
+  fireEvent.click(v.view.getByRole('button', { name: en.page.save }));
+  await waitFor(() => expect(v.stored().binding.selection).toBeNull());
+  await waitFor(() => expect(v.view.queryByText(en.page.savePageFirst)).toBeNull());
+  expect(v.save.mock.calls[1][0]).toEqual({ preset_id: preset.preset_id,
+    request: { expected_binding_version: 1, selection: null } });
+  fireEvent.click(v.view.getByRole('button', { name: en.page.open }));
+  await v.view.findByText('Built-in session');
+  expect(v.launch).not.toHaveBeenCalled();
+  expect(v.turn).not.toHaveBeenCalled();
+  expect(v.bridge).not.toHaveBeenCalled();
 });
 
 test('dirty Agent configuration does not block independent page saving, but blocks launching an old revision', async () => {

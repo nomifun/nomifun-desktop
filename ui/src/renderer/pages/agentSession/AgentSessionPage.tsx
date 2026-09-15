@@ -9,7 +9,6 @@ import type { AgentUiContribution, PluginRuntimeSurfaceLaunchDescriptor } from '
 import { agentUiChoiceKey as choiceKey } from '@/common/utils/agentUiChoice';
 import PluginRuntimeSurfacePanel from '../plugins/runtime/PluginRuntimeSurfacePanel';
 import styles from './AgentSessionPage.module.css';
-import { useAgentUiAvailable } from '@/renderer/hooks/agent/useAgentUiAvailable';
 import { useAgentUiBindingCache } from '@/renderer/hooks/agent/useAgentUiBindingCache';
 
 const BuiltinAgentSessionPage = React.lazy(() => import('./BuiltinAgentSessionPage'));
@@ -24,14 +23,7 @@ async function closeView(surface: PluginRuntimeSurfaceLaunchDescriptor) {
 type ViewState = { selection: AgentUiContribution; surface?: PluginRuntimeSurfaceLaunchDescriptor; failed?: boolean };
 
 /** Only presentation is selected here. The backend retains all Session state. */
-export function AgentSessionViewHost(props: {
-  sessionId: string; children: React.ReactNode; onDraftCreated?: (draftId: string) => void;
-}) {
-  const available = useAgentUiAvailable();
-  return available ? <ExperimentalAgentSessionViewHost {...props} /> : <>{props.children}</>;
-}
-
-function ExperimentalAgentSessionViewHost({ sessionId, children, onDraftCreated }: {
+export function AgentSessionViewHost({ sessionId, children, onDraftCreated }: {
   sessionId: string; children: React.ReactNode; onDraftCreated?: (draftId: string) => void;
 }) {
   const { t } = useTranslation();

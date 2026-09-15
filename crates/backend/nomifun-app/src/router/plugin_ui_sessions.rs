@@ -5,7 +5,6 @@ use nomifun_agent_contracts::PluginAgentSessionRequest;
 use nomifun_plugin_platform::runtime::{PluginAgentSessionPort, PluginRuntimeApplicationError};
 
 use super::*;
-use crate::router::plugin_product::agent_ui_admission;
 
 pub(crate) struct NomiCorePluginUiSessions {
     owner: Weak<NomiCoreSessionOwner>,
@@ -38,8 +37,6 @@ impl NomiCorePluginUiSessions {
         PluginRuntimeApplicationError,
     > {
         // Both Surface open and every Session bridge request pass this boundary.
-        // Keep the port installed while disabled so stale grants fail explicitly.
-        agent_ui_admission::require_enabled()?;
         let id = parse_agent_session_id(id).map_err(ui_error)?;
         let owner = self.owner()?;
         let user = AuthenticatedOwner(UserId::from(user));
@@ -73,7 +70,6 @@ impl PluginAgentSessionPort for NomiCorePluginUiSessions {
         id: &str,
         request: PluginAgentSessionRequest,
     ) -> Result<StrictJsonValue, PluginRuntimeApplicationError> {
-        agent_ui_admission::require_enabled()?;
         request
             .validate()
             .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;

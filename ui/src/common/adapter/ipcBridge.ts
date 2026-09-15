@@ -1334,7 +1334,6 @@ export const application = {
         work_dir: string;
         log_dir: string;
         storage_generation: string;
-        experimental_agent_ui_available?: boolean;
         platform: string;
         arch: string;
       },
@@ -1345,7 +1344,6 @@ export const application = {
       workDir: raw.work_dir,
       logDir: raw.log_dir,
       storageGeneration: raw.storage_generation,
-      experimentalAgentUiAvailable: raw.experimental_agent_ui_available === true,
       platform: raw.platform,
       arch: raw.arch,
     })
