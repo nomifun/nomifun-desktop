@@ -201,6 +201,8 @@ mod tests {
             typed_parameters: BTreeMap::new(),
         };
         let payload = AgentPresetRevisionPayload {
+            context_order: Vec::new(),
+            middleware_order: Vec::new(),
             runtime_engine: None,
             schema_version: VersionString::from(CONTRACT_VERSION),
             model_route_refs: BTreeMap::new(),
