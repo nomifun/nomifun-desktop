@@ -40,7 +40,6 @@ import type {
   CreativeTaskOwner,
   CreativeTaskInputRole,
   CreativeTaskReference,
-  CreativeStandaloneWorkbenchKind,
   CreativeTaskStatus,
 } from './types';
 
@@ -71,31 +70,8 @@ const CREATION_MODEL_TASKS = new Set<CreativeCreationModelTask>([
   'image_edit',
   'video_generation',
   'speech_synthesis',
+  'music_generation',
 ]);
-const STANDALONE_WORKBENCH_KINDS = new Set<CreativeStandaloneWorkbenchKind>([
-  'image',
-  'video',
-  'audio',
-]);
-
-function parseStandaloneWorkbenchKind(
-  value: unknown,
-  field: string,
-  code: 'invalid_request' | 'invalid_response' = 'invalid_response'
-): CreativeStandaloneWorkbenchKind {
-  if (
-    typeof value !== 'string' ||
-    !STANDALONE_WORKBENCH_KINDS.has(value as CreativeStandaloneWorkbenchKind)
-  ) {
-    throw new CreativeTaskContractError(
-      code,
-      `Invalid standalone workbench kind: ${String(value)}`,
-      field
-    );
-  }
-  return value as CreativeStandaloneWorkbenchKind;
-}
-
 export interface CreationTaskWireApi {
   create(body: unknown, idempotencyKey: string, signal?: AbortSignal): Promise<unknown>;
   get(taskId: string, signal?: AbortSignal): Promise<unknown>;
@@ -223,26 +199,20 @@ function requireExactKeys(
 
 function parseOwner(value: unknown): CreativeTaskOwner {
   const owner = requireRecord(value, 'owner');
+  if (owner.kind === 'conversation_turn') {
+    requireExactKeys(owner, ['kind', 'conversation_id', 'message_id'], 'owner');
+    return {
+      kind: 'conversation_turn',
+      conversationId: parseCreativeOwnerId(owner.conversation_id, 'owner.conversation_id'),
+      messageId: parseCreativeOwnerId(owner.message_id, 'owner.message_id'),
+    };
+  }
   if (owner.kind === 'canvas_node') {
     requireExactKeys(owner, ['kind', 'canvas_id', 'node_id'], 'owner');
     return {
       kind: 'canvas_node',
       canvasId: parseCreativeOwnerId(owner.canvas_id, 'owner.canvas_id'),
       nodeId: String(parseCreativeStudioNodeId(owner.node_id)),
-    };
-  }
-  if (owner.kind === 'standalone_workbench') {
-    requireExactKeys(
-      owner,
-      ['kind', 'workbench_kind'],
-      'owner'
-    );
-    return {
-      kind: 'standalone_workbench',
-      workbenchKind: parseStandaloneWorkbenchKind(
-        owner.workbench_kind,
-        'owner.workbench_kind'
-      ),
     };
   }
   if (owner.kind === 'template_step') {
@@ -525,7 +495,7 @@ export function mapCreationTaskWire(
   assertStatusContract(task);
   if (
     task.deletedAt !== null &&
-    (task.owner.kind !== 'standalone_workbench' ||
+    (task.owner.kind !== 'conversation_turn' ||
       task.status === 'queued' ||
       task.status === 'running' ||
       task.deletedAt < task.submittedAt)
@@ -541,21 +511,18 @@ export function mapCreationTaskWire(
 }
 
 function normalizeOwner(owner: CreativeTaskOwner): CreativeTaskOwner {
+  if (owner.kind === 'conversation_turn') {
+    return {
+      kind: 'conversation_turn',
+      conversationId: parseCreativeOwnerId(owner.conversationId, 'owner.conversationId', 'invalid_request'),
+      messageId: parseCreativeOwnerId(owner.messageId, 'owner.messageId', 'invalid_request'),
+    };
+  }
   if (owner.kind === 'canvas_node') {
     return {
       kind: 'canvas_node',
       canvasId: parseCreativeOwnerId(owner.canvasId, 'owner.canvasId', 'invalid_request'),
       nodeId: String(parseCreativeStudioNodeId(owner.nodeId)),
-    };
-  }
-  if (owner.kind === 'standalone_workbench') {
-    return {
-      kind: 'standalone_workbench',
-      workbenchKind: parseStandaloneWorkbenchKind(
-        owner.workbenchKind,
-        'owner.workbenchKind',
-        'invalid_request'
-      ),
     };
   }
   return {
@@ -594,17 +561,14 @@ function normalizeIdentity(identity: CreativeTaskIdentity): CreativeTaskIdentity
 }
 
 function ownerWire(owner: CreativeTaskOwner): Record<string, string> {
+  if (owner.kind === 'conversation_turn') {
+    return { kind: owner.kind, conversation_id: owner.conversationId, message_id: owner.messageId };
+  }
   if (owner.kind === 'canvas_node') {
     return {
       kind: owner.kind,
       canvas_id: owner.canvasId,
       node_id: owner.nodeId,
-    };
-  }
-  if (owner.kind === 'standalone_workbench') {
-    return {
-      kind: owner.kind,
-      workbench_kind: owner.workbenchKind,
     };
   }
   return {
@@ -770,24 +734,6 @@ export class HttpCreationTaskApi implements CreationTaskWireApi {
     return this.request('POST', '/api/creative-studio/tasks', body, signal, {
       'Idempotency-Key': idempotencyKey,
     });
-  }
-
-  listStandalone(query: string, signal?: AbortSignal): Promise<unknown> {
-    return this.request(
-      'GET',
-      `/api/creative-studio/tasks${query ? `?${query}` : ''}`,
-      undefined,
-      signal
-    );
-  }
-
-  retireStandalone(body: unknown, signal?: AbortSignal): Promise<unknown> {
-    return this.request(
-      'POST',
-      '/api/creative-studio/tasks/retire',
-      body,
-      signal
-    );
   }
 
   get(taskId: string, signal?: AbortSignal): Promise<unknown> {

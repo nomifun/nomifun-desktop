@@ -141,7 +141,7 @@ fn project_internal(
     let route = exact_chat_route(input.revision, input.snapshot)?;
     let capability_tools = project_capabilities_with_dynamic(
         input.revision,
-        &route,
+        route.as_ref(),
         |capability_id, deferred| {
             plugin_tools
                 .map(|tools| {
@@ -188,7 +188,7 @@ fn project_internal(
 fn project_revision_parts(
     revision_document: &AgentPresetRevision,
     title_input: Option<&str>,
-    route: ChatRouteRecord,
+    route: Option<ChatRouteRecord>,
     capability_tools: ProjectedCapabilityTools,
     coding_profile: bool,
     required_resource_kinds: BTreeSet<String>,
@@ -219,10 +219,10 @@ fn project_revision_parts(
         eagerness: None,
         grounded: knowledge_enabled,
     };
-    let resolved_model = ExecutionModelRef {
+    let resolved_model = route.as_ref().map(|route| ExecutionModelRef {
         provider_id: route.primary.provider_id.clone(),
         model: route.primary.model.clone(),
-    };
+    });
     let projected_snapshot = AgentResolvedSnapshot {
         canonical_binding: None,
         preset_id: revision_document.reference.preset_id.as_ref().to_owned(),
@@ -233,7 +233,7 @@ fn project_revision_parts(
         resolved_agent_id: None,
         resolved_agent_type: Some(AgentType::Nomi.serde_name().to_owned()),
         resolved_agent_backend: Some("nomi".to_owned()),
-        resolved_model: Some(resolved_model.clone()),
+        resolved_model,
         included_skills,
         excluded_auto_skills: Vec::new(),
         enabled_capabilities: capability_tools.initial_capability_ids.clone(),
@@ -244,7 +244,7 @@ fn project_revision_parts(
 
     let extra = json!({
         "system_prompt": instructions,
-        "chat_config_revision_digest": route.primary.config_revision_digest,
+        "chat_config_revision_digest": route.as_ref().map(|route| &route.primary.config_revision_digest),
         "allowed_tools": capability_tools.allowed_tools,
         "enforce_tool_allowlist": true,
         "deferred_tools": [],
@@ -272,7 +272,7 @@ fn project_revision_parts(
         request: CreateConversationRequest {
             r#type: AgentType::Nomi,
             name: Some(title),
-            model: Some(ProviderWithModel {
+            model: route.map(|route| ProviderWithModel {
                 provider_id: route.primary.provider_id,
                 model: route.primary.model,
                 use_model: None,
@@ -333,7 +333,16 @@ fn contract_error(error: nomifun_agent_contracts::PresetContractViolation) -> Ap
 fn exact_chat_route(
     revision: &AgentPresetRevision,
     snapshot: &ResolvedSnapshotEnvelope,
-) -> Result<ChatRouteRecord, AppError> {
+) -> Result<Option<ChatRouteRecord>, AppError> {
+    if !revision.payload.model_route_refs.contains_key(CHAT_TASK)
+        && !revision.payload.chat_route_records.contains_key(CHAT_TASK)
+        && nomifun_agent_contracts::is_direct_creation_agent(revision.payload.enabled_capabilities.iter().map(|selection| selection.capability.id.as_ref()))
+    {
+        if snapshot.content.chat_route_identity.is_some() || snapshot.content.model_route_refs.contains_key(CHAT_TASK) {
+            return Err(AppError::Conflict("task-only Agent snapshot unexpectedly contains a Chat route".into()));
+        }
+        return Ok(None);
+    }
     let route_id = revision
         .payload
         .model_route_refs
@@ -360,7 +369,7 @@ fn exact_chat_route(
             "snapshot chat route identity does not exactly match the revision chat route".into(),
         ));
     }
-    Ok(record.clone())
+    Ok(Some(record.clone()))
 }
 
 #[derive(Debug, Default)]
@@ -401,7 +410,7 @@ pub(crate) enum NomiCapabilityProjection {
     /// is deliberately distinct from `HostOnly`: both the selected Chat route
     /// and the runtime provider capability are checked before model delivery.
     VisionContext,
-    /// Uses the exact OpenAI Responses route's provider-native web_search
+    /// Uses an independently resolved search provider's native web_search
     /// owner. The route feature is checked before the tool is projected.
     WebSearchTool,
     HostOnly {
@@ -420,6 +429,7 @@ pub(crate) fn nomi_capability_projection(
 ) -> Result<NomiCapabilityProjection, AppError> {
     let projection = match capability_id {
         nomifun_ai_agent::tool_discovery::CAPABILITY_ID => NomiCapabilityProjection::Tools(&["ToolSearch"]),
+        "creation.image" => NomiCapabilityProjection::Tools(&["image_gen"]),
         // Native filesystem family.
         "fs.read" => NomiCapabilityProjection::Tools(&["Read"]),
         "fs.search" => NomiCapabilityProjection::Tools(&["Grep", "Glob"]),
@@ -604,35 +614,6 @@ pub(crate) fn validate_nomi_capability_projection(
             )
         })?;
     validate_vision_route(revision)?;
-    validate_web_search_route(revision)?;
-    Ok(())
-}
-
-fn validate_web_search_route(revision: &AgentPresetRevision) -> Result<(), AppError> {
-    let selected = revision
-        .payload
-        .enabled_capabilities
-        .iter()
-        .any(|selection| selection.capability.id.as_ref() == "web.search");
-    if !selected {
-        return Ok(());
-    }
-    let route = revision
-        .payload
-        .chat_route_records
-        .get(CHAT_TASK)
-        .ok_or_else(|| unsupported("web.search", "agent_chat route record is required"))?;
-    if route.primary.protocol != nomifun_agent_contracts::ChatRouteProtocol::OpenaiResponses
-        || !route
-            .primary
-            .features
-            .contains(&nomifun_agent_contracts::ChatRouteFeature::WebSearch)
-    {
-        return Err(unsupported(
-            "web.search",
-            "the exact primary Chat route must use openai.responses and declare web_search",
-        ));
-    }
     Ok(())
 }
 
@@ -748,7 +729,7 @@ fn is_native_nomi_capability(capability_id: &str) -> bool {
 
 fn project_capabilities_with_dynamic(
     revision: &AgentPresetRevision,
-    route: &ChatRouteRecord,
+    route: Option<&ChatRouteRecord>,
     mut dynamic_provider_names: impl FnMut(&str, bool) -> Vec<String>,
 ) -> Result<ProjectedCapabilityTools, AppError> {
     let mut initial_tools = BTreeSet::new();
@@ -816,6 +797,7 @@ fn project_capabilities_with_dynamic(
                 target.insert("Computer".to_owned());
             }
             NomiCapabilityProjection::VisionContext => {
+                let route = route.ok_or_else(|| unsupported("llm.vision", "a Chat route is required"))?;
                 if !route
                     .primary
                     .features
@@ -832,18 +814,6 @@ fn project_capabilities_with_dynamic(
                 vision_input = true;
             }
             NomiCapabilityProjection::WebSearchTool => {
-                if route.primary.protocol
-                    != nomifun_agent_contracts::ChatRouteProtocol::OpenaiResponses
-                    || !route
-                        .primary
-                        .features
-                        .contains(&nomifun_agent_contracts::ChatRouteFeature::WebSearch)
-                {
-                    return Err(unsupported(
-                        "web.search",
-                        "the exact primary Chat route must use openai.responses and declare web_search",
-                    ));
-                }
                 target.insert(nomifun_ai_agent::web_search::WEB_SEARCH_TOOL_NAME.to_owned());
             }
             NomiCapabilityProjection::HostOnly { browser, computer } => {
@@ -1144,6 +1114,25 @@ mod tests {
     }
 
     #[test]
+    fn task_only_agent_projects_without_any_chat_route_or_model() {
+        let mut fixture = fixture();
+        fixture.2.payload.enabled_capabilities = vec![capability("creation.music", true)];
+        fixture.2.payload.chat_route_records.clear();
+        fixture.2.payload.model_route_refs.clear();
+        fixture.3.content.chat_route_identity = None;
+        fixture.3.content.model_route_refs.clear();
+        fixture.3.content.enabled_capabilities = vec![resolved_capability("creation.music")];
+        fixture.3.content.capability_allowlist = BTreeSet::from(["creation.music".into()]);
+        refresh_fixture_identity(&mut fixture);
+        let result = project(input(&fixture)).unwrap();
+        assert!(result.request.model.is_none());
+        assert!(result.snapshot.resolved_model.is_none());
+        fixture.2.payload.enabled_capabilities.push(capability("web.search", true));
+        refresh_fixture_identity(&mut fixture);
+        assert!(project(input(&fixture)).is_err(), "a general assistant still requires its Chat route");
+    }
+
+    #[test]
     fn exact_binding_projects_chat_route_without_freezing_target_resources() {
         let fixture = fixture();
         let result = project(input(&fixture)).unwrap();
@@ -1413,7 +1402,7 @@ mod tests {
     }
 
     #[test]
-    fn web_search_requires_and_uses_an_exact_responses_search_route() {
+    fn web_search_preserves_authority_without_requiring_a_native_chat_search_route() {
         let mut search_fixture = fixture();
         search_fixture.2.payload.enabled_capabilities = vec![capability("web.search", true)];
         let route = search_fixture
@@ -1431,11 +1420,13 @@ mod tests {
         let result = project(input(&search_fixture)).expect("web search projection");
         assert_eq!(result.request.extra["allowed_tools"], json!(["web_search"]));
 
-        let mut unsupported = fixture();
-        unsupported.2.payload.enabled_capabilities = vec![capability("web.search", true)];
-        refresh_fixture_identity(&mut unsupported);
-        assert!(validate_nomi_capability_projection(&unsupported.2).is_err());
-        assert!(project(input(&unsupported)).is_err());
+        let mut ordinary = fixture();
+        ordinary.2.payload.enabled_capabilities = vec![capability("web.search", true)];
+        refresh_fixture_identity(&mut ordinary);
+        validate_nomi_capability_projection(&ordinary.2).unwrap();
+        let result = project(input(&ordinary)).unwrap();
+        assert_eq!(result.request.extra["allowed_tools"], json!(["web_search"]));
+        assert_eq!(result.request.model.as_ref().unwrap().model, ordinary.2.payload.chat_route_records[CHAT_TASK].primary.model);
     }
 
     #[test]

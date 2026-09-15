@@ -122,6 +122,7 @@ fn make_factory(
         companion_skill_sink: None,
         model_invoke,
         model_invoke_service: None,
+        creation_service: None,
         provider_config_digest_resolver: None,
         encryption_key: test_encryption_key(),
         data_dir: PathBuf::from("/tmp/nomi-test"),

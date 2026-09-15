@@ -20,8 +20,7 @@ use nomifun_api_types::{
 use nomifun_agent_control_plane::AgentControlPlane;
 pub(crate) use nomifun_agent_domain_wave3::CREATIVE_ASSET_LIBRARY_RESOURCE_ID;
 use nomifun_db::{
-    IChannelRepository, IMcpServerRepository, IProviderModelCapabilityRepository,
-    IProviderModelRepository, IProviderRepository,
+    IChannelRepository, IMcpServerRepository,
 };
 use serde_json::{Value, json};
 
@@ -162,9 +161,6 @@ impl NomiCoreResourceBindingResolverRegistry {
             customer_service: Arc::clone(&services.customer_service_service),
             workshop: Arc::clone(&services.workshop_service),
             plugin_runtime: Arc::clone(&services.plugin_runtime),
-            providers: Arc::clone(&services.provider_repo),
-            provider_models: Arc::clone(&services.provider_model_repo),
-            provider_capabilities: Arc::clone(&services.provider_model_capability_repo),
             channels: Arc::new(nomifun_db::SqliteChannelRepository::new(
                 services.database.pool().clone(),
             )),
@@ -424,7 +420,7 @@ fn validate_selection_field(
     Ok(())
 }
 
-const SUPPORTED_RESOURCE_KINDS: [&str; 15] = [
+const SUPPORTED_RESOURCE_KINDS: [&str; 14] = [
     "workspace",
     "knowledge_base",
     "project_memory",
@@ -438,7 +434,6 @@ const SUPPORTED_RESOURCE_KINDS: [&str; 15] = [
     "customer",
     "canvas",
     "asset_library",
-    "generation_provider",
     "plugin",
 ];
 
@@ -511,10 +506,6 @@ fn required_operations(
             "workshop.asset.read" | "office.preview" => grant("asset_library", "read"),
             "workshop.asset.write" | "office.document.edit" | "office.sheet.edit"
             | "office.slides.edit" => grant("asset_library", "write"),
-            "creation.text" => grant("generation_provider", "text"),
-            "creation.image" | "creation.image_edit" => grant("generation_provider", "image"),
-            "creation.video" => grant("generation_provider", "video"),
-            "creation.audio" => grant("generation_provider", "audio"),
             "plugin.read" => grant("plugin", "read"),
             "plugin.edit" => grant("plugin", "edit"),
             "plugin.publish" => grant("plugin", "publish"),
@@ -534,9 +525,6 @@ struct ProductResourceDependencies {
     customer_service: Arc<nomifun_customer_service::CustomerServiceService>,
     workshop: Arc<nomifun_workshop::WorkshopService>,
     plugin_runtime: Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
-    providers: Arc<dyn IProviderRepository>,
-    provider_models: Arc<dyn IProviderModelRepository>,
-    provider_capabilities: Arc<dyn IProviderModelCapabilityRepository>,
     channels: Arc<dyn IChannelRepository>,
     mcp_servers: Arc<dyn IMcpServerRepository>,
     robots: Option<Arc<nomifun_robot::registry::RobotRegistry>>,
@@ -568,7 +556,6 @@ impl NomiCoreResourceAuthority for ProductResourceAuthority {
             "robot" => self.resolve_robot(request).await,
             "customer" => self.resolve_customer(request).await,
             "canvas" | "asset_library" => self.resolve_workshop(request).await,
-            "generation_provider" => self.resolve_generation_provider(request).await,
             "plugin" => self.resolve_plugin(request).await,
             _ => Err(ResourceSelectionResolutionError::invalid(format!(
                 "unsupported product resource kind {}",
@@ -989,108 +976,6 @@ impl ProductResourceAuthority {
                 BTreeMap::new(),
             )
         }
-    }
-
-    async fn resolve_generation_provider(
-        &self,
-        request: ResourceAuthorityRequest,
-    ) -> Result<ServerResolvedResource, ResourceSelectionResolutionError> {
-        let provider = self
-            .dependencies
-            .providers
-            .find_by_id(&request.resource_id)
-            .await
-            .map_err(|_| ResourceSelectionResolutionError::not_found(self.kind, &request.resource_id))?
-            .ok_or_else(|| ResourceSelectionResolutionError::not_found(self.kind, &request.resource_id))?;
-        if !provider.enabled {
-            return Err(ResourceSelectionResolutionError::unavailable(
-                self.kind,
-                &request.resource_id,
-                "the selected generation provider is disabled",
-            ));
-        }
-        let models = self
-            .dependencies
-            .provider_models
-            .list_for_provider(&provider.provider_id)
-            .await
-            .map_err(|error| ResourceSelectionResolutionError::unavailable(
-                self.kind,
-                &request.resource_id,
-                format!("provider model inventory is unavailable: {error}"),
-            ))?;
-        let enabled_models = models
-            .iter()
-            .filter(|model| model.enabled)
-            .map(|model| (model.model.clone(), model.sort_order))
-            .collect::<BTreeMap<_, _>>();
-        let capabilities = self
-            .dependencies
-            .provider_capabilities
-            .list_for_provider(&provider.provider_id)
-            .await
-            .map_err(|error| ResourceSelectionResolutionError::unavailable(
-                self.kind,
-                &request.resource_id,
-                format!("provider capability inventory is unavailable: {error}"),
-            ))?;
-        let mut tasks = Vec::new();
-        for capability in &request.selected_capability_ids {
-            let mapping = match capability.as_str() {
-                "creation.text" => Some(("creation.text", "chat")),
-                "creation.image" => Some(("creation.image", "image_generation")),
-                "creation.image_edit" => Some(("creation.image_edit", "image_edit")),
-                "creation.video" => Some(("creation.video", "video_generation")),
-                "creation.audio" => Some(("creation.audio", "speech_synthesis")),
-                _ => None,
-            };
-            if let Some(mapping) = mapping {
-                tasks.push(mapping);
-            }
-        }
-        let mut typed_parameters = BTreeMap::new();
-        let mut chosen_models = BTreeSet::new();
-        for (capability_id, task) in tasks {
-            let selected_model = capabilities
-                .iter()
-                .filter(|capability| capability.task == task)
-                .filter_map(|capability| {
-                    enabled_models
-                        .get(&capability.model)
-                        .map(|sort_order| (sort_order, capability.model.as_str()))
-                })
-                .min_by(|left, right| left.cmp(right))
-                .map(|(_, model)| model.to_owned())
-                .ok_or_else(|| {
-                    ResourceSelectionResolutionError::unavailable(
-                        self.kind,
-                        &request.resource_id,
-                        format!("the provider has no enabled model for task {task}"),
-                    )
-                })?;
-            typed_parameters.insert(format!("model.{capability_id}"), selected_model.clone());
-            chosen_models.insert(selected_model);
-        }
-        if chosen_models.len() == 1 {
-            typed_parameters.insert(
-                "model".to_owned(),
-                chosen_models.into_iter().next().expect("one model"),
-            );
-        }
-        Ok(ServerResolvedResource {
-            resource_id: provider.provider_id.clone(),
-            allowed_operations: BTreeSet::from([
-                "audio".to_owned(),
-                "image".to_owned(),
-                "text".to_owned(),
-                "video".to_owned(),
-            ]),
-            connection_config_ref: Some(ConnectionConfigRef::from(format!(
-                "provider:{}@{}",
-                provider.provider_id, provider.config_revision
-            ))),
-            typed_parameters,
-        })
     }
 
     async fn resolve_plugin(

@@ -12,10 +12,8 @@ import type { ProviderId } from '@/common/types/ids';
 import type { CreativeAsset } from '../../assets';
 import { createEmptyCreativeProjectDocument } from '../../domain';
 import type { CreativeTask } from '../../tasks';
-import type {
-  CreativeWorkbenchReferences,
-  VideoWorkbenchOperation,
-} from '../../workbenches/runtime';
+import type { GenerationReferences, CanvasVideoOperation } from '../generation';
+
 import { createInitialCanvasState } from '../core';
 import { testNode, testUuid } from '../core/testFixtures';
 import {
@@ -102,14 +100,14 @@ const asset = (
   updatedAt: 1,
 });
 
-const noReferences = (): CreativeWorkbenchReferences => ({
+const noReferences = (): GenerationReferences => ({
   assets: [],
   bindings: [],
 });
 
 const operation = (
-  capability: VideoWorkbenchOperation['capability']
-): VideoWorkbenchOperation => ({ task: 'video_generation', capability });
+  capability: CanvasVideoOperation['capability']
+): CanvasVideoOperation => ({ task: 'video_generation', capability });
 
 const thrownMessage = (action: () => void): string => {
   try {
@@ -123,8 +121,8 @@ const thrownMessage = (action: () => void): string => {
 const prepareFixture = (overrides: {
   source?: ReturnType<typeof testNode<'video'>>;
   sourceAsset?: CreativeAsset | null;
-  operation?: VideoWorkbenchOperation;
-  references?: CreativeWorkbenchReferences;
+  operation?: CanvasVideoOperation;
+  references?: GenerationReferences;
   prompt?: string;
   resolution?: string;
   aspectRatio?: string;

@@ -22,11 +22,11 @@ import { parseProviderId } from '@/common/types/ids';
 import NomiCreativeModelSelect from '../../models/NomiCreativeModelSelect';
 import type { CreativeModelCatalogSnapshot } from '../../models';
 import {
-  imageWorkbenchFixedSizeOptions,
-  imageWorkbenchSizePolicyForModel,
-} from '../../workbenches/image';
-import ImageSizePicker from '../../workbenches/image/ImageSizePicker';
-import { exactWorkbenchModelOptions } from '../../workbenches/runtime';
+  imageGenerationFixedSizeOptions,
+  imageGenerationSizePolicyForModel,
+} from '@renderer/creation/parameters/image';
+import ImageSizePicker from '@renderer/creation/parameters/ImageSizePicker';
+import { exactGenerationModelOptions } from '@renderer/creation/modelSelection';
 import {
   cloneTemplateDefinition,
   type CreativeTemplateDefinitionV1,
@@ -366,7 +366,7 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
     const expectedTask: CreativeTemplateImageTask =
       generate.referenceVariableIds.length > 0 ? 'image_edit' : 'image_generation';
     const options = modelCatalog
-      ? exactWorkbenchModelOptions(modelCatalog, expectedTask)
+      ? exactGenerationModelOptions(modelCatalog, expectedTask)
       : [];
     const selectedModel = generate.generation.model
       ? options.find(
@@ -375,8 +375,8 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
             option.model === generate.generation.model.model
         )
       : null;
-    const policy = imageWorkbenchSizePolicyForModel(selectedModel);
-    const sizeOptions = imageWorkbenchFixedSizeOptions(policy.options);
+    const policy = imageGenerationSizePolicyForModel(selectedModel);
+    const sizeOptions = imageGenerationFixedSizeOptions(policy.options);
     const selectedSize =
       sizeOptions.find(
         (option) =>
@@ -448,7 +448,7 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
       unmountOnExit
       confirmLoading={saving}
       getPopupContainer={() =>
-        document.getElementById('creative-studio-portal-root') ?? document.body
+        document.getElementById('resource-page-portal-root') ?? document.body
       }
       onCancel={onCancel}
       onOk={onSave}
@@ -657,8 +657,8 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
                   option.providerId === selection.providerId &&
                   option.model === selection.model
               );
-              const policy = imageWorkbenchSizePolicyForModel(selectedModel);
-              const size = imageWorkbenchFixedSizeOptions(policy.options).find(
+              const policy = imageGenerationSizePolicyForModel(selectedModel);
+              const size = imageGenerationFixedSizeOptions(policy.options).find(
                 (option) => !option.disabled
               );
               onChange(

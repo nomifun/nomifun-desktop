@@ -18,6 +18,7 @@ pub mod auth;
 pub mod call;
 pub mod chat_executor;
 pub mod error;
+pub mod default_model;
 pub mod manifest;
 mod media_prompt;
 pub mod realtime;
@@ -45,6 +46,7 @@ pub use chat_executor::{
     SingleAttemptStream,
 };
 pub use error::{InvokeError, InvokeErrorKind};
+pub use default_model::default_model_preference_key;
 pub use manifest::{
     ALL_MODEL_TASKS, AuthSchemeDescriptor, ModelProtocolManifestResponse,
     PlatformPresetDescriptor, ProtocolDefaultConnection, ProtocolDescriptor,
@@ -71,7 +73,7 @@ pub use transport::{
 };
 pub use types::{
     AsrRequest, EmbedRequest, ImageEditRequest, ImageGenRequest, InputAsset, JobHandle,
-    ModelRef, ProducedAsset, ProducedData, RerankRequest, RerankResult, TaskOutcome, TaskRequest, TaskResult,
+    ModelRef, MusicGenRequest, ProducedAsset, ProducedData, RerankRequest, RerankResult, TaskOutcome, TaskRequest, TaskResult,
     TtsRequest, VideoGenRequest,
 };
 pub use url_algebra::{

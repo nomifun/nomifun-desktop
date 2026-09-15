@@ -393,6 +393,7 @@ async fn bind_channel_session(stack: &Stack, conversation_id: &str) {
 
 fn send_request(content: &str) -> SendMessageRequest {
     SendMessageRequest {
+        preset_id: None,
         content: content.to_owned(),
         files: vec![],
         inject_skills: vec![],

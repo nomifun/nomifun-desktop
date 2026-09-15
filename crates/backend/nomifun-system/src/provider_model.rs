@@ -818,6 +818,7 @@ fn model_task_order(task: ModelTask) -> u8 {
         ModelTask::SpeechRecognition => 6,
         ModelTask::Embedding => 7,
         ModelTask::Rerank => 8,
+        ModelTask::MusicGeneration => 9,
     }
 }
 

@@ -714,6 +714,7 @@ mod tests {
             prompt: "make it blue".into(),
             count: 1,
             size: None,
+            quality: None,
             inputs: vec![input(b"hi")],
             extra: json!({}),
         });
@@ -756,6 +757,7 @@ mod tests {
             prompt: "ocean waves".into(),
             seconds: Some(5),
             size: Some("1280x720".into()),
+            resolution: None,
             inputs: vec![input(b"hi")],
             extra: json!({}),
         });
@@ -792,6 +794,7 @@ mod tests {
             prompt: "ocean waves".into(),
             seconds: Some(5),
             size: None,
+            resolution: None,
             inputs: vec![],
             extra: json!({}),
         });

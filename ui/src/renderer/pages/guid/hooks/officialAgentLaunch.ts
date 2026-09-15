@@ -33,7 +33,7 @@ export async function prepareOfficialAgent(
       model_route_refs: {},
       chat_route_records: {},
       reuse_existing: true,
-      ...(model
+      ...(model && template.template_key !== 'creative-studio.default'
         ? { model: { provider_id: model.id, model: model.use_model } }
         : {}),
     },

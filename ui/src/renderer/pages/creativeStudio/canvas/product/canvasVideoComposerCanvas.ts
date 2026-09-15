@@ -21,14 +21,8 @@ import {
   type CreativeTask,
   type CreativeTaskReference,
 } from '../../tasks';
-import {
-  prepareVideoWorkbenchRun,
-  workbenchResumeRequestsFromDocument,
-  type CreativeWorkbenchReferences,
-  type CreativeWorkbenchResumeRequest,
-  type PreparedCreativeWorkbenchRun,
-  type VideoWorkbenchOperation,
-} from '../../workbenches/runtime';
+import { prepareCanvasVideoRun, canvasResumeRequestsFromDocument, type GenerationReferences, type CanvasGenerationResumeRequest, type PreparedCanvasGenerationRun, type CanvasVideoOperation } from '../generation';
+
 import { validateCanvasConnection, type CanvasState } from '../core';
 import {
   canvasTaskResultPosition,
@@ -66,7 +60,7 @@ export interface CanvasVideoComposeTaskSummary {
 export interface PreparedCanvasVideoCompose {
   configNode: ConfigNode;
   connection: Omit<CreativeCanvasConnection, 'id'>;
-  plan: PreparedCreativeWorkbenchRun;
+  plan: PreparedCanvasGenerationRun;
 }
 
 export type CanvasVideoComposeMode =
@@ -382,8 +376,8 @@ export function prepareCanvasVideoCompose(input: {
   sourceAsset: CreativeAsset | null;
   catalog: CreativeModelCatalogSnapshot;
   model: CreativeModelSelectionRef;
-  operation: VideoWorkbenchOperation;
-  references: CreativeWorkbenchReferences;
+  operation: CanvasVideoOperation;
+  references: GenerationReferences;
   prompt: string;
   settings: Omit<CanvasVideoComposeSettings, 'model'>;
 }): PreparedCanvasVideoCompose {
@@ -440,7 +434,7 @@ export function prepareCanvasVideoCompose(input: {
     input.viewportSize,
     { position: configPosition, locked: true }
   );
-  const plan = prepareVideoWorkbenchRun({
+  const plan = prepareCanvasVideoRun({
     catalog: input.catalog,
     canvasId: input.projectId,
     nodeId: base.id,
@@ -502,11 +496,11 @@ export function prepareCanvasVideoCompose(input: {
 
 export function canvasVideoComposeResumeRequests(
   document: CreativeProjectDocument
-): CreativeWorkbenchResumeRequest[] {
+): CanvasGenerationResumeRequest[] {
   const owners = new Set(
     document.nodes.filter(isCanvasVideoComposeConfig).map((node) => node.id)
   );
-  return workbenchResumeRequestsFromDocument(document).filter(
+  return canvasResumeRequestsFromDocument(document).filter(
     (request) =>
       request.reference.owner.kind === 'canvas_node' &&
       owners.has(request.reference.owner.nodeId)

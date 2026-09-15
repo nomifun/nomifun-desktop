@@ -495,7 +495,7 @@ const CreativeImageSplitDialog: React.FC<CreativeImageSplitDialogProps> = (
       closable={!props.busy}
       unmountOnExit
       getPopupContainer={() =>
-        document.getElementById("creative-studio-portal-root") ??
+        document.getElementById("resource-page-portal-root") ??
         document.body
       }
       onCancel={props.onClose}

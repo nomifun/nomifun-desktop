@@ -184,6 +184,9 @@ const SendBox: React.FC<{
   className?: string;
   tools?: React.ReactNode;
   rightTools?: React.ReactNode;
+  creationTools?: React.ReactNode;
+  preserveDraftUntilAccepted?: boolean;
+  skipChatWarmup?: boolean;
   sideTools?: React.ReactNode;
   /** Conversation-only: compact status control rendered inside the composer header row. */
   topRightTools?: React.ReactNode;
@@ -217,6 +220,9 @@ const SendBox: React.FC<{
   loading,
   tools,
   rightTools,
+  creationTools,
+  preserveDraftUntilAccepted = false,
+  skipChatWarmup = false,
   sideTools,
   topRightTools,
   disabled,
@@ -983,14 +989,14 @@ const SendBox: React.FC<{
     // (Idempotent: single-flight in warmupConversation + warmedConversationRef +
     // the backend's per-conversation OnceCell, so a redundant call is a no-op.)
     const cid = conversationContext?.conversation_id;
-    if (cid && warmedConversationRef.current !== cid) {
+    if (cid && !skipChatWarmup && warmedConversationRef.current !== cid) {
       if (warmupTimerRef.current) clearTimeout(warmupTimerRef.current);
       warmupTimerRef.current = setTimeout(() => {
         warmedConversationRef.current = cid;
         warmupConversation(cid).catch(() => {});
       }, 300);
     }
-  }, [handlePasteFocus, conversationContext?.conversation_id]);
+  }, [handlePasteFocus, conversationContext?.conversation_id, skipChatWarmup]);
   const handleInputBlur = useCallback(() => {
     if (warmupTimerRef.current) {
       clearTimeout(warmupTimerRef.current);
@@ -1148,7 +1154,7 @@ const SendBox: React.FC<{
   // Builds the final message from the current draft and CLEARS the input.
   // Returns null when there's nothing to send. Mirrors the compose half of
   // sendMessageHandler so steer can reuse it.
-  const composeAndClear = (): string | null => {
+  const composeAndClear = (clear = true): string | null => {
     if (!input.trim() && domSnippets.length === 0) return null;
 
     historyDraftRef.current = null;
@@ -1176,9 +1182,11 @@ const SendBox: React.FC<{
 
     // 立即清空输入框，避免异步 onSend 完成后覆盖用户新输入
     // Clear input immediately to prevent async onSend completion from overwriting new user input
-    setInput('');
-    clearDomSnippets();
-    setReplyQuote(null);
+    if (clear) {
+      setInput('');
+      clearDomSnippets();
+      setReplyQuote(null);
+    }
 
     return finalMessage;
   };
@@ -1266,10 +1274,18 @@ const SendBox: React.FC<{
       domSnippetCount: domSnippets.length,
     });
     setIsLoading(true);
-    const finalMessage = composeAndClear();
+    const submittedDraft = input;
+    const finalMessage = composeAndClear(!preserveDraftUntilAccepted);
     if (finalMessage == null) return;
 
     onSend(finalMessage)
+      .then(() => {
+        if (preserveDraftUntilAccepted && latestInputRef.current === submittedDraft) {
+          setInputRef.current('');
+          clearDomSnippets();
+          setReplyQuote(null);
+        }
+      })
       .catch(() => {})
       .finally(() => {
         setIsLoading(false);
@@ -1755,13 +1771,14 @@ const SendBox: React.FC<{
             )}
           </div>
           {!isSingleLine && (
-            <div className='sendbox-bottom-row flex items-center justify-between gap-2 w-full'>
+            <div className='sendbox-bottom-row flex items-center justify-between gap-2 w-full' style={creationTools ? { flexWrap: 'wrap', justifyContent: 'flex-start' } : undefined}>
               <div
                 className='sendbox-tools'
               >
                 {tools}
               </div>
-              <div className='sendbox-actions flex items-center gap-2'>
+              {creationTools}
+              <div className='sendbox-actions flex items-center gap-2' style={creationTools ? { marginLeft: 'auto', maxWidth: '100%' } : undefined}>
                 {rightTools}
                 {renderedSpeechButton}
                 {sendButtonPrefix}

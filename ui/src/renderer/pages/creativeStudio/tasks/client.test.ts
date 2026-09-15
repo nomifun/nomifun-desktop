@@ -12,7 +12,7 @@ import {
   HttpCreationTaskApi,
   mapCreationTaskWire,
 } from './client';
-import { CreativeTaskContractError } from './types';
+import { CreativeTaskContractError, sameCreativeTaskOwner } from './types';
 import type {
   CreateCreativeTaskInput,
   CreativeTaskIdentity,
@@ -90,6 +90,22 @@ async function caught(promise: Promise<unknown>): Promise<unknown> {
 }
 
 describe('CreativeTaskClient', () => {
+  test('maps conversation-owned music tasks and freezes their message identity', () => {
+    const owner = { kind: 'conversation_turn' as const, conversationId: PROJECT_ID, messageId: NODE_ID };
+    const task = mapCreationTaskWire(wireTask('succeeded', {
+      owner: { kind: 'conversation_turn', conversation_id: PROJECT_ID, message_id: NODE_ID },
+      capability: 'music',
+      inputs: [],
+      deleted_at: 200,
+    }));
+    expect(task.owner).toEqual(owner);
+    expect(task.task).toBe('music_generation');
+    expect(task.deletedAt).toBe(200);
+    expect(sameCreativeTaskOwner(task.owner, { ...owner, messageId: TASK_ID })).toBe(false);
+    expect(() => mapCreationTaskWire(wireTask('queued', {
+      owner: { kind: 'conversation_turn', conversation_id: PROJECT_ID, message_id: 'invalid' },
+    }))).toThrow(CreativeTaskContractError);
+  });
   test('sends the exact creation wire body and maps the response to camelCase', async () => {
     const calls: Array<{ body: unknown; idempotencyKey: string; signal?: AbortSignal }> = [];
     const api: CreationTaskWireApi = {
@@ -180,65 +196,10 @@ describe('CreativeTaskClient', () => {
     expect(task.owner).toEqual(owner);
   });
 
-  test('round-trips the exact standalone workbench owner without a config node', async () => {
-    const owner = {
-      kind: 'standalone_workbench' as const,
-      workbenchKind: 'image' as const,
-    };
-    let body: unknown;
-    const client = new CreativeTaskClient({
-      create: async (value, key) => {
-        body = value;
-        return wireTask('queued', {
-          creation_task_id: key,
-          owner: {
-            kind: 'standalone_workbench',
-            workbench_kind: 'image',
-          },
-        });
-      },
-      get: async () => wireTask(),
-      cancel: async () => wireTask('canceled'),
-    });
-
-    const task = await client.create(createInput({ owner }));
-
-    expect(body).toEqual({
-      owner: {
-        kind: 'standalone_workbench',
-        workbench_kind: 'image',
-      },
-      provider_id: PROVIDER_ID,
-      model: 'image-model-v1',
-      capability: 't2i',
-      params: { prompt: 'Aurora', count: 1 },
-      inputs: [{ asset_id: ASSET_ID, kind: 'image', role: 'reference' }],
-    });
-    expect(task.owner).toEqual(owner);
+  test('rejects the retired standalone owner wire contract', () => {
+    expect(() => mapCreationTaskWire(wireTask('queued', { owner: {kind:'standalone_workbench',workbench_kind:'image'} }))).toThrow(CreativeTaskContractError);
   });
 
-  test('does not resurrect a retired exact replay through create', async () => {
-    const owner = {
-      kind: 'standalone_workbench' as const,
-      workbenchKind: 'image' as const,
-    };
-    const client = new CreativeTaskClient({
-      create: async (_value, key) =>
-        wireTask('failed', {
-          creation_task_id: key,
-          owner: {
-            kind: 'standalone_workbench',
-            workbench_kind: 'image',
-          },
-          deleted_at: 200,
-        }),
-      get: async () => wireTask(),
-      cancel: async () => wireTask('canceled'),
-    });
-    const error = await caught(client.create(createInput({ owner })));
-    expect(error instanceof CreativeTaskContractError).toBe(true);
-    expect((error as CreativeTaskContractError).field).toBe('deleted_at');
-  });
 
   test('keeps unprovable legacy inputs nullable and rejects invented kinds', () => {
     expect(mapCreationTaskWire(wireTask('queued', { inputs: null })).inputs).toBeNull();
@@ -400,10 +361,11 @@ describe('CreativeTaskClient', () => {
     ]);
   });
 
-  test('accepts tombstones only for terminal standalone history tasks', () => {
+  test('accepts tombstones only for terminal conversation history tasks', () => {
     const owner = {
-      kind: 'standalone_workbench',
-      workbench_kind: 'image',
+      kind: 'conversation_turn',
+      conversation_id: PROJECT_ID,
+      message_id: NODE_ID,
     };
     expect(
       mapCreationTaskWire(

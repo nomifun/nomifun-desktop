@@ -22,12 +22,13 @@ use crate::error::InvokeError;
 use crate::realtime::RealtimeAdapterRegistry;
 use crate::routes_table::preset_protocol_recommendation;
 
-pub const ALL_MODEL_TASKS: [ModelTask; 9] = [
+pub const ALL_MODEL_TASKS: [ModelTask; 10] = [
     ModelTask::Chat,
     ModelTask::RealtimeConversation,
     ModelTask::ImageGeneration,
     ModelTask::ImageEdit,
     ModelTask::VideoGeneration,
+    ModelTask::MusicGeneration,
     ModelTask::SpeechSynthesis,
     ModelTask::SpeechRecognition,
     ModelTask::Embedding,
@@ -248,6 +249,7 @@ impl From<ModelTask> for TaskOrdinal {
             ModelTask::SpeechRecognition => 6,
             ModelTask::Embedding => 7,
             ModelTask::Rerank => 8,
+            ModelTask::MusicGeneration => 9,
         })
     }
 }
@@ -499,7 +501,7 @@ const OPENAI_CHAT_PLATFORMS: &[&str] = &[
 
 use ModelTask::{
     Chat, Embedding, ImageEdit, ImageGeneration, RealtimeConversation, Rerank, SpeechRecognition,
-    SpeechSynthesis, VideoGeneration,
+    SpeechSynthesis, VideoGeneration, MusicGeneration,
 };
 use ProtocolEndpointPurpose::{Content, Poll, Session, Submit};
 use ProtocolExecutorKind::{Agent, AsyncJob, ModelInvoke, RealtimeSession};
@@ -557,6 +559,7 @@ const PROTOCOL_SPECS: &[ProtocolSpec] = &[
     ] },
     ProtocolSpec { id: "dashscope.embeddings", tasks: &[Embedding], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["dashscope"], connection_role: None, endpoints: &[origin_endpoint(Embedding, "endpoint", Submit, "POST", "/api/v1/services/embeddings/text-embedding/text-embedding")] },
     ProtocolSpec { id: "minimax.t2a", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["minimax"], connection_role: None, endpoints: &[endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/t2a_v2")] },
+    ProtocolSpec { id: "minimax.music", tasks: &[MusicGeneration], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["minimax"], connection_role: None, endpoints: &[endpoint(MusicGeneration, "endpoint", Submit, "POST", "/music_generation")] },
     ProtocolSpec { id: "mimo.chat_asr", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["mimo"], connection_role: None, endpoints: &[endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/chat/completions")] },
     ProtocolSpec { id: "mimo.chat_tts", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["mimo"], connection_role: None, endpoints: &[endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/chat/completions")] },
     ProtocolSpec { id: "siliconflow.audio_speech", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["siliconflow"], connection_role: None, endpoints: &[endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/audio/speech")] },
@@ -787,6 +790,7 @@ fn provider_params_encoding(
         | ("dashscope.images", ImageGeneration)
         | ("dashscope.embeddings", Embedding)
         | ("minimax.t2a", SpeechSynthesis)
+        | ("minimax.music", MusicGeneration)
         | ("mimo.chat_asr", SpeechRecognition)
         | ("mimo.chat_tts", SpeechSynthesis)
         | ("siliconflow.audio_speech", SpeechSynthesis)
@@ -1989,7 +1993,7 @@ mod tests {
             (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
         });
         assert_eq!(
-            hash, 6_676_285_168_683_914_907,
+            hash, 4_581_283_236_433_659_689,
             "recommendation URL snapshot changed:\n{snapshot}"
         );
     }

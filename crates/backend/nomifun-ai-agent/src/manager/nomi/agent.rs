@@ -317,6 +317,7 @@ pub struct NomiAgentManager {
     /// published, so route readiness and tool presence cannot disagree.
     image_generation_availability: std::sync::RwLock<ImageGenerationAvailability>,
     image_generation_discovery: Option<Arc<dyn ImageGenerationToolDiscovery>>,
+    hosted_media_creation_tools: HashSet<String>,
     image_generation_response_in_chinese: bool,
 }
 
@@ -901,8 +902,8 @@ pub(crate) struct NomiHostWiring {
     pub image_generation_discovery_failed: bool,
     /// The app's normalized UI language captured on this runtime build.
     pub image_generation_response_in_chinese: bool,
-    /// Search tool backed by the exact authorized Chat route. `None` means the
-    /// selected route cannot satisfy `web.search`; no public fallback exists.
+    /// Authorized search tool. Its backend resolves on invocation independently
+    /// of Chat; `None` means search is outside this session's capability ceiling.
     pub web_search_tool: Option<Box<dyn nomi_tools::Tool>>,
     /// Renderer sharing this Session's bounded search-citation store.
     pub citation_render_tool: Option<Box<dyn nomi_tools::Tool>>,
@@ -913,6 +914,7 @@ pub(crate) struct NomiHostWiring {
     /// The app-owned provider resolves this from persisted Session/Binding
     /// facts and the shared Kernel. Model/config JSON cannot construct it.
     pub plugin_tool_session: Option<crate::NomiPluginToolSession>,
+    pub creation_context: Option<Arc<dyn nomi_agent::context_contributor::ContextContributor>>,
 }
 
 impl Default for NomiHostWiring {
@@ -932,6 +934,7 @@ impl Default for NomiHostWiring {
 
             lazy_mcp_runtime: None,
             plugin_tool_session: None,
+            creation_context: None,
         }
     }
 }
@@ -1027,6 +1030,7 @@ impl NomiAgentManager {
                 config_extra.compat_overrides.supports_image == Some(true),
             )
         }).transpose()?;
+        let hosted_media_creation_tools = plugin_tool_session.as_ref().map(|session| session.media_creation_provider_names()).unwrap_or_default();
         let hosted_effects = plugin_tool_session.as_ref().and_then(crate::NomiPluginToolSession::effect_scope);
         let capability_state = plugin_tool_session
             .as_ref()
@@ -1506,6 +1510,7 @@ impl NomiAgentManager {
             }
         }
         if let Some(session) = plugin_tool_session {
+            let session = session.with_creation_receipt_sink(backend_output_sink.clone(), conversation_id.clone());
             session.register_into(engine.registry_mut()).map_err(|error| {
                 AppError::Internal(format!(
                     "Nomi Plugin Tool registration failed: {error}"
@@ -1520,6 +1525,9 @@ impl NomiAgentManager {
                 );
         }
         for contributor in hosted_context_contributors {
+            engine.register_context_contributor(contributor);
+        }
+        if let Some(contributor) = host_wiring.creation_context {
             engine.register_context_contributor(contributor);
         }
         for middleware in model_middleware {
@@ -1712,6 +1720,7 @@ impl NomiAgentManager {
                 image_generation_availability,
             ),
             image_generation_discovery,
+            hosted_media_creation_tools,
             image_generation_response_in_chinese,
         })
     }
@@ -1726,12 +1735,12 @@ impl NomiAgentManager {
     /// Refresh the process-owned image route before a new turn becomes active.
     /// Discovery is local-only; registry replacement happens under the engine
     /// mutex and the route state is published last.
-    async fn refresh_image_generation_capability(&self) -> ImageGenerationAvailability {
+    async fn refresh_image_generation_capability(&self, message_id: &str) -> ImageGenerationAvailability {
         let Some(discovery) = self.image_generation_discovery.as_ref() else {
             return self.image_generation_availability();
         };
 
-        let discovered = discovery.discover_tool().await;
+        let discovered = discovery.discover_tool(Some((message_id, self.backend_output_sink.clone()))).await;
         let mut engine = self.engine.lock().await;
         engine.registry_mut().unregister(IMAGE_GEN_TOOL_NAME);
         let availability = match discovered {
@@ -2080,7 +2089,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                     .map_err(AgentSendError::from_app_error)?;
                 return Ok(());
             }
-            availability = self.refresh_image_generation_capability() => availability,
+            availability = self.refresh_image_generation_capability(&source_message_id) => availability,
         };
 
         let direct_image_intent = classify_image_generation_intent(&data.content);
@@ -2199,6 +2208,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 false,
             ))
         } else if image_generation_intent == ImageGenerationIntent::Creation
+            && self.hosted_media_creation_tools.is_empty()
             && image_generation_availability != ImageGenerationAvailability::Ready
         {
             Some((
@@ -2338,7 +2348,9 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 ImageGenerationIntent::Creation | ImageGenerationIntent::ExplicitExternal
             );
         let image_tool_allowlist = if image_generation_intent == ImageGenerationIntent::Creation {
-            Some(HashSet::from([IMAGE_GEN_TOOL_NAME.to_owned()]))
+            let mut allowed = self.hosted_media_creation_tools.clone();
+            if image_generation_availability == ImageGenerationAvailability::Ready { allowed.insert(IMAGE_GEN_TOOL_NAME.to_owned()); }
+            Some(allowed)
         } else if image_intent_classification_failed
             || ambiguous_visual_requires_tool_gate
             || plan_mode_image_request_requires_tool_gate
@@ -2437,18 +2449,12 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                         "failed to begin recoverable artifact delivery: {error}"
                     )))
                 })?;
-            if matches!(
-                image_generation_intent,
-                ImageGenerationIntent::Creation | ImageGenerationIntent::ExplicitExternal
-            ) {
-                self.backend_output_sink
-                    .require_image_artifact_for_turn()
-                    .map_err(|error| {
-                        AgentSendError::from_app_error(AppError::Internal(format!(
-                            "failed to register image-generation artifact requirement: {error}"
-                        )))
-                    })?;
-            }
+            let requirement = match image_generation_intent {
+                ImageGenerationIntent::Creation => self.backend_output_sink.require_native_creation_task_for_turn(),
+                ImageGenerationIntent::ExplicitExternal => self.backend_output_sink.require_image_artifact_for_turn(),
+                _ => Ok(()),
+            };
+            requirement.map_err(|error| AgentSendError::from_app_error(AppError::Internal(format!("failed to register generation completion requirement: {error}"))))?;
             engine.set_steering_inbox(Some(self.steering_inbox.clone()));
             engine.set_system_resource_inbox(Some(self.system_resource_inbox.clone()));
             // Completion adjudication is bound to trusted user-authored input,
@@ -3976,7 +3982,7 @@ fn image_artifact_delivery_error_to_send_error(
 ) -> AgentSendError {
     let lower = delivery_error.trim().to_ascii_lowercase();
     let model_skipped_required_tool =
-        lower.starts_with("accepted turn required a verified image artifact")
+        (lower.starts_with("accepted turn required a verified image artifact") || lower.starts_with("accepted turn required a durable image-generation task"))
             && !lower.contains(';');
     let model_or_image_tool_returned_no_artifact = [
         "tool returned an error",
@@ -5128,6 +5134,23 @@ mod tests {
         }
     }
 
+    struct AcceptedMediaTaskTool { name: &'static str, sink: Arc<BackendOutputSink>, conversation_id: String }
+
+    #[async_trait::async_trait]
+    impl Tool for AcceptedMediaTaskTool {
+        fn name(&self) -> &str { self.name }
+        fn artifact_identity(&self) -> &str { "nomifun_creation_task" }
+        fn description(&self) -> &str { "Test host creation task submission" }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool { true }
+        fn input_schema(&self) -> serde_json::Value { serde_json::json!({"type":"object","properties":{}}) }
+        fn category(&self) -> ToolCategory { ToolCategory::Exec }
+        async fn execute(&self, _input: serde_json::Value) -> ToolResult {
+            let scope = self.sink.native_creation_task_scope(&self.conversation_id).unwrap();
+            self.sink.register_native_creation_task(&scope, "accepted-media-task").unwrap();
+            ToolResult::text(r#"{"creation_task_id":"accepted-media-task","status":"queued"}"#)
+        }
+    }
+
     struct MissingImageArtifactTool;
 
     #[async_trait::async_trait]
@@ -5175,7 +5198,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ImageGenerationToolDiscovery for SequencedImageToolDiscovery {
-        async fn discover_tool(&self) -> Result<Option<Box<dyn Tool>>, AppError> {
+        async fn discover_tool(&self, _turn: Option<(&str, Arc<BackendOutputSink>)>) -> Result<Option<Box<dyn Tool>>, AppError> {
             let ready = self
                 .ready
                 .lock()
@@ -5188,7 +5211,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ImageGenerationToolDiscovery for BlockingImageToolDiscovery {
-        async fn discover_tool(&self) -> Result<Option<Box<dyn Tool>>, AppError> {
+        async fn discover_tool(&self, _turn: Option<(&str, Arc<BackendOutputSink>)>) -> Result<Option<Box<dyn Tool>>, AppError> {
             self.started.add_permits(1);
             std::future::pending().await
         }
@@ -5468,6 +5491,7 @@ mod tests {
                 ImageGenerationAvailability::NoConfiguredModel,
             ),
             image_generation_discovery: None,
+            hosted_media_creation_tools: HashSet::new(),
             image_generation_response_in_chinese: false,
         }
     }
@@ -5768,6 +5792,7 @@ mod tests {
                 ImageGenerationAvailability::NoConfiguredModel,
             ),
             image_generation_discovery: None,
+            hosted_media_creation_tools: HashSet::new(),
             image_generation_response_in_chinese: false,
         };
         let attachment_dir = tempfile::tempdir().unwrap();
@@ -6061,6 +6086,76 @@ mod tests {
                     && data.content.contains("No image was generated")
         )));
         assert!(!events.iter().any(|event| matches!(event, AgentStreamEvent::ToolCall(_))));
+    }
+
+    #[tokio::test]
+    async fn native_image_restriction_preserves_authorized_kernel_creation_tools() {
+        for (name, prompt) in [
+            ("frozen_creation_image", "Generate an image of a cat"),
+            ("frozen_creation_image_edit", "修改刚才生成的图片：给小猫加一条蓝色围巾"),
+        ] {
+            let provider = Arc::new(ScriptedProvider::new(vec![
+                vec![LlmEvent::ToolUse { id: "media-call".into(), name: name.into(), input: serde_json::json!({}), extra: Default::default() }, LlmEvent::Done { stop_reason: StopReason::ToolUse, usage: Default::default() }],
+                vec![LlmEvent::TextDelta("Submitted the task.".into()), LlmEvent::Done { stop_reason: StopReason::EndTurn, usage: Default::default() }],
+            ]));
+            let mut agent = make_agent_with_provider(provider.clone());
+            *agent.image_generation_availability.get_mut().unwrap() = ImageGenerationAvailability::NotEntitled;
+            agent.hosted_media_creation_tools.insert(name.into());
+            let tool = AcceptedMediaTaskTool { name, sink: agent.backend_output_sink.clone(), conversation_id: agent.runtime.conversation_id().to_owned() };
+            assert!(agent.engine.get_mut().registry_mut().register(Box::new(tool)));
+            assert!(agent.engine.get_mut().registry_mut().register(Box::new(BrowserScreenshotOnlyTool)));
+            agent.engine.get_mut().set_host_context_value(IMAGE_ROUTE_CONTEXT_KEY, Some(IMAGE_ROUTE_NATIVE));
+            agent.send_message(SendMessageData { content: prompt.into(), msg_id: "restricted-native-kernel-creation".into(), source_message_id: None, files: vec![], inject_skills: vec![], origin: None }).await.unwrap();
+            let requests = provider.requests();
+            assert_eq!(requests.len(), 2, "native exclusion must not reject the authorized Kernel task");
+            assert_eq!(requests[0].tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(), vec![name]);
+            // Strict routes offer the authorized tool once. After its accepted
+            // receipt the response pass cannot issue a second billable task.
+            assert!(requests[1].tools.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn native_image_restriction_without_kernel_creation_still_rejects() {
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let mut agent = make_agent_with_provider(provider.clone());
+        *agent.image_generation_availability.get_mut().unwrap() = ImageGenerationAvailability::NotEntitled;
+        let mut events = agent.subscribe();
+        agent.send_message(SendMessageData { content: "Generate an image of a cat".into(), msg_id: "restricted-no-kernel".into(), source_message_id: None, files: vec![], inject_skills: vec![], origin: None }).await.unwrap();
+        assert_eq!(provider.calls(), 0);
+        assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(event,
+            AgentStreamEvent::Text(data) if data.content.contains("not permitted in this restricted Agent session"))));
+    }
+
+    #[tokio::test]
+    async fn general_media_followup_can_edit_or_animate_without_enabling_browser() {
+        for (name, prompt) in [
+            ("frozen_creation_image_edit", "把刚才的图片改成水彩"),
+            ("frozen_creation_video", "把第二张图片生成视频"),
+        ] {
+            let provider = Arc::new(ScriptedProvider::new(vec![
+                vec![LlmEvent::ToolUse { id: "media-call".into(), name: name.into(), input: serde_json::json!({}), extra: Default::default() }, LlmEvent::Done { stop_reason: StopReason::ToolUse, usage: Default::default() }],
+                vec![LlmEvent::TextDelta("Submitted the task.".into()), LlmEvent::Done { stop_reason: StopReason::EndTurn, usage: Default::default() }],
+            ]));
+            let mut agent = make_agent_with_provider(provider.clone());
+            agent.hosted_media_creation_tools.insert(name.into());
+            let tool = AcceptedMediaTaskTool { name, sink: agent.backend_output_sink.clone(), conversation_id: agent.runtime.conversation_id().to_owned() };
+            assert!(agent.engine.get_mut().registry_mut().register(Box::new(tool)));
+            assert!(agent.engine.get_mut().registry_mut().register(Box::new(BrowserScreenshotOnlyTool)));
+            agent.engine.get_mut().set_host_context_value(
+                IMAGE_ROUTE_CONTEXT_KEY,
+                Some(IMAGE_ROUTE_NATIVE),
+            );
+            // The generic visual classification still permits the task-specific
+            // action even with no text-to-image model configured.
+            agent.send_message(SendMessageData { content: prompt.into(), msg_id: "media-followup".into(), source_message_id: None, files: vec![], inject_skills: vec![], origin: None }).await.unwrap();
+            let requests = provider.requests();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(), vec![name], "the creation turn must advertise the frozen media action");
+            for request in requests {
+                assert!(request.tools.iter().all(|tool| tool.name == name), "follow-up passes may not reopen unrelated tools");
+            }
+        }
     }
 
     #[tokio::test]

@@ -656,7 +656,7 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
         autoFocus={false}
         unmountOnExit
         getPopupContainer={() =>
-          document.getElementById('creative-studio-portal-root') ?? document.body
+          document.getElementById('resource-page-portal-root') ?? document.body
         }
         onCancel={() => action !== 'delete' && setDeleting(null)}
         onOk={() => void deleteTemplate()}

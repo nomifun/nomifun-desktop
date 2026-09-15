@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -181,6 +181,8 @@ struct ArtifactDeliveryTurn {
     /// cannot satisfy an image-generation request with text alone (or with an
     /// observational Browser screenshot that deliberately has no receipt).
     required_contract: Option<ArtifactContract>,
+    require_native_creation_task: bool,
+    accepted_native_creation_tasks: HashSet<String>,
     /// Assistant prose for a host-routed artifact turn stays provisional until
     /// the required receipt survives final re-verification. This closes the
     /// last false-success window: a provider cannot stream "generated" to the
@@ -936,6 +938,8 @@ impl BackendOutputSink {
         turn.advance_generation();
         turn.defer_artifact_terminals = defer_artifact_terminals;
         turn.required_contract = None;
+        turn.require_native_creation_task = false;
+        turn.accepted_native_creation_tasks.clear();
         turn.hold_text_until_verified = false;
         turn.held_text.clear();
         turn.recovery_source = recovery_source;
@@ -983,6 +987,34 @@ impl BackendOutputSink {
         Ok(())
     }
 
+    /// Only the native CreationService adapter receives this trusted scope.
+    /// The model's JSON result cannot create a receipt or satisfy this gate.
+    pub(crate) fn native_creation_task_scope(&self, conversation_id: &str) -> Result<ArtifactRecoverySource, String> {
+        let turn = self.artifact_delivery_turn.lock().map_err(|_| "creation receipt ledger lock was poisoned".to_owned())?;
+        let source = turn.recovery_source.as_ref().filter(|source| turn.active && source.conversation_id == conversation_id)
+            .ok_or_else(|| "native generation requires the active conversation turn".to_owned())?;
+        Ok(source.clone())
+    }
+
+    pub(crate) fn register_native_creation_task(&self, scope: &ArtifactRecoverySource, task_id: &str) -> Result<(), String> {
+        let mut turn = self.artifact_delivery_turn.lock().map_err(|_| "creation receipt ledger lock was poisoned".to_owned())?;
+        if !turn.active || !turn.recovery_source.as_ref().is_some_and(|source| source.conversation_id == scope.conversation_id && source.wire_msg_id == scope.wire_msg_id) {
+            return Err("generation was accepted but its originating chat turn has ended; follow the durable task card".into());
+        }
+        turn.accepted_native_creation_tasks.insert(task_id.to_owned());
+        turn.advance_generation();
+        Ok(())
+    }
+
+    pub(crate) fn require_native_creation_task_for_turn(&self) -> Result<(), String> {
+        let mut turn = self.artifact_delivery_turn.lock().map_err(|_| "creation receipt ledger lock was poisoned".to_owned())?;
+        if !turn.active { return Err("creation receipt turn was not active".into()); }
+        turn.require_native_creation_task = true;
+        turn.hold_text_until_verified = true;
+        turn.advance_generation();
+        Ok(())
+    }
+
     /// Abandon the provisional ledger and any assistant prose held behind its
     /// receipt gate. Used for cancellation/provider failure paths that cannot
     /// reach the normal sealing step.
@@ -1002,6 +1034,8 @@ impl BackendOutputSink {
         turn.advance_generation();
         turn.defer_artifact_terminals = false;
         turn.required_contract = None;
+        turn.require_native_creation_task = false;
+        turn.accepted_native_creation_tasks.clear();
         turn.hold_text_until_verified = false;
         turn.held_text.clear();
         turn.recovery_source = None;
@@ -1022,6 +1056,8 @@ impl BackendOutputSink {
         turn.advance_generation();
         turn.defer_artifact_terminals = false;
         turn.required_contract = None;
+        turn.require_native_creation_task = false;
+        turn.accepted_native_creation_tasks.clear();
         turn.hold_text_until_verified = false;
         turn.held_text.clear();
         turn.recovery_source = None;
@@ -1126,6 +1162,9 @@ impl BackendOutputSink {
         let mut required_contract_satisfied = false;
         let mut failures = Vec::new();
         let mut receipts = Vec::new();
+        if turn.require_native_creation_task && turn.accepted_native_creation_tasks.is_empty() {
+            failures.push("accepted turn required a durable image-generation task, but none was committed".to_owned());
+        }
         for obligation in turn.calls.values() {
             match &obligation.status {
                 ArtifactCallDeliveryStatus::CompletedVerified { artifacts, .. } => {
@@ -1607,6 +1646,8 @@ impl BackendOutputSink {
         let sealed_generation = turn.generation;
         turn.defer_artifact_terminals = false;
         turn.required_contract = None;
+        turn.require_native_creation_task = false;
+        turn.accepted_native_creation_tasks.clear();
         // Keep the sealed prose in the ledger until every deferred artifact
         // terminal is published. A failed prepare/send returns to the manager's
         // accepted-root restore, whose OutputDiscarded must still be able to
@@ -2704,6 +2745,21 @@ impl OutputSink for BackendOutputSink {
             };
         };
 
+        if name == "image_gen" && !is_error && images.is_empty() {
+            let task_id = serde_json::from_str::<serde_json::Value>(content).ok()
+                .and_then(|value| value.get("creation_task_id").and_then(serde_json::Value::as_str).map(str::to_owned));
+            let accepted = {
+                let mut turn = self.artifact_delivery_turn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let accepted = turn.active && task_id.as_ref().is_some_and(|id| turn.accepted_native_creation_tasks.contains(id));
+                if accepted { turn.calls.remove(&call_id); turn.advance_generation(); }
+                accepted
+            };
+            if accepted {
+                let _ = self.emit_terminal_tool_result(call_id, name, false, content, Vec::new());
+                return ToolMediaDelivery::Unmanaged;
+            }
+        }
+
         // update_plan special case: emit a Plan event so the frontend renders
         // the checklist (MessagePlan) instead of a raw JSON tool card. This
         // lives in the shared result funnel so every emit_tool_result* path —
@@ -3209,6 +3265,34 @@ mod tests {
     fn make_sink() -> (BackendOutputSink, broadcast::Receiver<AgentStreamEvent>) {
         let (tx, rx) = broadcast::channel(16);
         (BackendOutputSink::new(tx), rx)
+    }
+
+    #[test]
+    fn native_task_receipt_requires_trusted_acceptance_and_exact_active_scope() {
+        let (sink, _rx) = make_sink();
+        sink.begin_deferred_artifact_delivery_turn_for("conversation", "wire-1").unwrap();
+        sink.require_native_creation_task_for_turn().unwrap();
+        let scope = sink.native_creation_task_scope("conversation").unwrap();
+        sink.emit_tool_call("accepted", "image_gen", r#"{"prompt":"fox"}"#);
+        sink.register_native_creation_task(&scope, "task-1").unwrap();
+        assert!(matches!(sink.emit_tool_result_with_images("accepted", "image_gen", false, r#"{"creation_task_id":"task-1","status":"queued"}"#, &[]), ToolMediaDelivery::Unmanaged));
+        assert!(sink.finish_artifact_delivery_turn().is_ok());
+        sink.begin_deferred_artifact_delivery_turn_for("conversation", "wire-2").unwrap();
+        sink.require_native_creation_task_for_turn().unwrap();
+        assert!(sink.register_native_creation_task(&scope, "task-1").is_err());
+        sink.emit_tool_call("forged", "image_gen", "{}");
+        sink.emit_tool_result_with_images("forged", "image_gen", false, r#"{"creation_task_id":"task-1","status":"succeeded"}"#, &[]);
+        assert!(sink.finish_artifact_delivery_turn().is_err());
+    }
+
+    #[test]
+    fn accepted_native_task_does_not_satisfy_external_image_artifact_requirement() {
+        let (sink, _rx) = make_sink();
+        sink.begin_deferred_artifact_delivery_turn_for("conversation", "wire-1").unwrap();
+        sink.require_image_artifact_for_turn().unwrap();
+        let scope = sink.native_creation_task_scope("conversation").unwrap();
+        sink.register_native_creation_task(&scope, "task-1").unwrap();
+        assert!(sink.finish_artifact_delivery_turn().is_err());
     }
 
     #[test]

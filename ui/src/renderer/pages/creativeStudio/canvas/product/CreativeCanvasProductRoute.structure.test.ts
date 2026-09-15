@@ -198,7 +198,7 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('runtime.taskExists(')).toBe(true);
     expect(source.includes('creativeStudio.canvas.tasks.recovering')).toBe(true);
     expect(source.includes('正在恢复图片任务…')).toBe(false);
-    expect(source.includes('imageWorkbenchModelOptions(modelCatalog, \'image_edit\')')).toBe(true);
+    expect(source.includes('catalogImageModelOptions(modelCatalog, \'image_edit\')')).toBe(true);
     expect(source.includes('withCanvasImageComposeDraft(node, update(current))')).toBe(true);
     expect(source.includes('mergeKey: `image-composer:${nodeId}`')).toBe(true);
     expect(source.includes('imageComposeDrafts')).toBe(false);
@@ -216,9 +216,9 @@ describe('Creative Canvas product route composition', () => {
     expect(
       wiring.includes("import('@renderer/pages/creativeStudio/canvas/product')")
     ).toBe(true);
-    expect(wiring.includes('path="canvas/:canvasId"')).toBe(true);
+    expect(wiring.includes("CANVAS_PATTERN = '/nomi/canvases/:canvasId'")).toBe(true);
     expect(wiring.includes('path="canvas/:projectId"')).toBe(false);
-    expect(wiring.includes('/workshop/canvases')).toBe(true);
+    expect(wiring.includes('/nomi/canvases')).toBe(true);
     expect(wiring.includes('/api/creative-studio/canvases/{canvasId}/agent-ops')).toBe(
       true
     );

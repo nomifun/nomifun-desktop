@@ -3602,6 +3602,7 @@ impl AppServices {
             authoritative_user_id: authoritative_user_id.clone(),
             model_invoke: model_invoke_service.clone(),
             model_invoke_service: Some(model_invoke_service.clone()),
+            creation_service: Some(creation_service.clone()),
             provider_config_digest_resolver: Some(provider_config_digest_resolver),
             encryption_key,
             data_dir: data_dir.clone(),

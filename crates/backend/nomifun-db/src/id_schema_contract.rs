@@ -939,6 +939,9 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     // Canonical Creative Studio task history survives project deletion, while
     // creation itself still locks and validates a live project row.
     text_ref!("creation_tasks", "project_id" => "creative_studio_projects", "project_id", true, "idx_creation_tasks_project_id", KeepHistory),
+    text_ref!("creation_tasks", "conversation_id" => "conversations", "conversation_id", true, "idx_creation_tasks_conversation", KeepHistory),
+    text_ref!("creation_tasks", "message_id" => "messages", "message_id", true, "idx_creation_tasks_message", KeepHistory)
+        .with_aggregate_scope("parent.conversation_id = child.conversation_id"),
     text_ref!("creation_tasks", "template_id" => "creative_studio_templates", "template_id", true, "idx_creation_tasks_template_id", KeepHistory),
     text_ref!("creation_tasks", "template_run_id" => "creative_studio_template_runs", "template_run_id", true, "idx_creation_tasks_template_run_id", KeepHistory)
         .with_aggregate_scope("parent.template_id = child.template_id"),
@@ -1158,15 +1161,25 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
     ),
     json_text_ref!(
         "workshop_assets", "origin", "$.canvas_id",
-        "SELECT json_extract(origin, '$.canvas_id') AS value FROM workshop_assets WHERE json_type(origin, '$.canvas_id') = 'text' AND json_type(origin, '$.node_id') = 'text' AND json_type(origin, '$.project_id') IS NULL AND json_type(origin, '$.workbench_kind') IS NULL" =>
+        "SELECT json_extract(origin, '$.canvas_id') AS value FROM workshop_assets WHERE json_type(origin, '$.canvas_id') = 'text' AND json_type(origin, '$.node_id') = 'text' AND json_type(origin, '$.project_id') IS NULL" =>
         "creative_studio_projects", "project_id", "idx_workshop_assets_origin_canvas_id", KeepHistory, AllowMissingHistoricalParent
     ),
     // `project_id` remains a wire/storage compatibility alias only for old
-    // Canvas origins. Standalone provenance is intentionally excluded.
+    // Canvas origins.
     json_text_ref!(
         "workshop_assets", "origin", "$.project_id",
-        "SELECT json_extract(origin, '$.project_id') AS value FROM workshop_assets WHERE json_type(origin, '$.project_id') = 'text' AND json_type(origin, '$.node_id') = 'text' AND json_type(origin, '$.canvas_id') IS NULL AND json_type(origin, '$.workbench_kind') IS NULL" =>
+        "SELECT json_extract(origin, '$.project_id') AS value FROM workshop_assets WHERE json_type(origin, '$.project_id') = 'text' AND json_type(origin, '$.node_id') = 'text' AND json_type(origin, '$.canvas_id') IS NULL" =>
         "creative_studio_projects", "project_id", "idx_workshop_assets_origin_project_id", KeepHistory, AllowMissingHistoricalParent
+    ),
+    json_text_ref!(
+        "workshop_assets", "origin", "$.conversation_id",
+        "SELECT json_extract(origin, '$.conversation_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
+        "conversations", "conversation_id", "idx_workshop_assets_origin_conversation", KeepHistory, AllowMissingHistoricalParent
+    ),
+    json_text_ref!(
+        "workshop_assets", "origin", "$.message_id",
+        "SELECT json_extract(origin, '$.message_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
+        "messages", "message_id", "idx_workshop_assets_origin_message", KeepHistory, AllowMissingHistoricalParent
     ),
     json_text_ref!(
         "workshop_assets", "origin", "$.template_id",
@@ -2710,13 +2723,15 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             &[
                 "BEFORE INSERT ON WORKSHOP_ASSETS",
                 "RAISE(ABORT, 'UNSUPPORTED CREATIVE ASSET ORIGIN ID KEY')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN CANVAS IDENTIFIER')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN LEGACY CANVAS COMPATIBILITY IDENTIFIER')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKBENCH_KIND')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN CANVAS_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN PROJECT_ID')",
+                "JSON_TYPE(NEW.ORIGIN, '$.WORKBENCH_KIND') IS NOT NULL",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN CONVERSATION_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN MESSAGE_ID')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN TEMPLATE_ID')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN TEMPLATE_RUN_ID')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN TEMPLATE_STEP_ID')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET CANVAS/STANDALONE/TEMPLATE OWNER BRANCH')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET CONVERSATION/CANVAS/TEMPLATE OWNER BRANCH')",
             ],
         ),
         (
@@ -2724,13 +2739,15 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             &[
                 "BEFORE UPDATE OF ORIGIN ON WORKSHOP_ASSETS",
                 "RAISE(ABORT, 'UNSUPPORTED CREATIVE ASSET ORIGIN ID KEY')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN CANVAS IDENTIFIER')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN LEGACY CANVAS COMPATIBILITY IDENTIFIER')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKBENCH_KIND')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN CANVAS_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN PROJECT_ID')",
+                "JSON_TYPE(NEW.ORIGIN, '$.WORKBENCH_KIND') IS NOT NULL",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN CONVERSATION_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN MESSAGE_ID')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN TEMPLATE_ID')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN TEMPLATE_RUN_ID')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN TEMPLATE_STEP_ID')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET CANVAS/STANDALONE/TEMPLATE OWNER BRANCH')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET CONVERSATION/CANVAS/TEMPLATE OWNER BRANCH')",
             ],
         ),
         (
@@ -3013,6 +3030,8 @@ async fn require_workshop_asset_origin_id_contract(
     }
     for key in [
         "PROJECT_ID",
+        "CONVERSATION_ID",
+        "MESSAGE_ID",
         "TEMPLATE_ID",
         "TEMPLATE_RUN_ID",
         "TEMPLATE_STEP_ID",
@@ -3131,6 +3150,7 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
             "creationTaskId",
             "projectId",
             "workbenchKind",
+            "workbench_kind",
             "templateId",
             "templateRunId",
             "templateStepId",
@@ -3182,47 +3202,22 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
         let has_canvas = object.contains_key("canvas_id");
         let has_legacy_canvas = object.contains_key("project_id");
         let has_node = object.contains_key("node_id");
-        let has_workbench = object.contains_key("workbench_kind");
-        if let Some(kind) = object.get("workbench_kind") {
-            let valid = kind
-                .as_str()
-                .is_some_and(|kind| matches!(kind, "image" | "video" | "audio"));
-            if !valid {
-                return Err(DbError::Init(format!(
-                    "v3 workshop asset {asset_id} origin.workbench_kind is invalid"
-                )));
+        let any_canvas = has_canvas || has_legacy_canvas || has_node;
+        let canvas_owner = (has_canvas != has_legacy_canvas) && has_node;
+        let conversation = object.contains_key("conversation_id");
+        let message = object.contains_key("message_id");
+        for key in ["conversation_id", "message_id"] {
+            if let Some(value) = object.get(key) {
+                let value=value.as_str().ok_or_else(|| DbError::Init(format!("asset {asset_id} origin.{key} must be a UUIDv7")))?;
+                nomifun_common::validate_uuidv7(value).map_err(|e| DbError::Init(e.to_string()))?;
             }
         }
-        let has_template = ["template_id", "template_run_id", "template_step_id"]
-            .iter()
-            .any(|key| object.contains_key(*key));
-        if has_canvas && has_legacy_canvas {
-            return Err(DbError::Init(format!(
-                "v3 workshop asset {asset_id} Canvas origin contains both canonical canvas_id and the legacy project_id compatibility field"
-            )));
+        let template_count = ["template_id","template_run_id","template_step_id"].iter().filter(|key|object.contains_key(**key)).count();
+        if (any_canvas && !canvas_owner) || conversation != message || (template_count != 0 && template_count != 3)
+            || usize::from(canvas_owner) + usize::from(conversation && message) + usize::from(template_count == 3) > 1 {
+            return Err(DbError::Init(format!("v3 workshop asset {asset_id} origin requires a single complete owner branch")));
         }
-        let canvas_owner = (has_canvas || has_legacy_canvas) && has_node && !has_workbench;
-        let standalone_owner = !has_canvas && !has_node && has_workbench;
-        if (has_canvas || has_legacy_canvas || has_node || has_workbench)
-            && (!canvas_owner && !standalone_owner || has_template)
-        {
-            return Err(DbError::Init(format!(
-                "v3 workshop asset {asset_id} origin has an invalid Canvas or standalone owner branch"
-            )));
-        }
-        if has_template
-            && (!["template_id", "template_run_id", "template_step_id"]
-                .iter()
-                .all(|key| object.contains_key(*key))
-                || object.contains_key("canvas_id")
-                || object.contains_key("project_id")
-                || object.contains_key("node_id")
-                || object.contains_key("workbench_kind"))
-        {
-            return Err(DbError::Init(format!(
-                "v3 workshop asset {asset_id} origin has an invalid template-step owner branch"
-            )));
-        }
+
     }
     Ok(())
 }

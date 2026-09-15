@@ -49,7 +49,7 @@ const Harness = ({ resolveAsset, onCanvasInput = () => {} }: {
         ><article>image node</article></CreativeCanvasImageToolbar>
       </div>
       {visible ? <CreativeImagePreviewDialog node={node} resolveAsset={resolveAsset} onClose={() => setVisible(false)} /> : null}
-      <div id='creative-studio-portal-root' />
+      <div id='resource-page-portal-root' />
       </section>
     </I18nextProvider>
   );

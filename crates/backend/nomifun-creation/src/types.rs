@@ -21,6 +21,8 @@ pub enum MediaCapability {
     V2v,
     /// text → speech
     Tts,
+    /// Newly composed music, distinct from speech synthesis.
+    Music,
     /// LLM text
     Text,
 }
@@ -36,6 +38,7 @@ impl MediaCapability {
             Self::I2v => "i2v",
             Self::V2v => "v2v",
             Self::Tts => "tts",
+            Self::Music => "music",
             Self::Text => "text",
         }
     }
@@ -50,6 +53,7 @@ impl MediaCapability {
             "i2v" => Self::I2v,
             "v2v" => Self::V2v,
             "tts" => Self::Tts,
+            "music" => Self::Music,
             "text" => Self::Text,
             _ => return None,
         })
@@ -122,49 +126,6 @@ impl CreationInputKind {
     }
 }
 
-/// Stable aggregate discriminator for generation outside an individual canvas
-/// node. It is part of task ownership and therefore immutable after creation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StandaloneWorkbenchKind {
-    Image,
-    Video,
-    Audio,
-}
-
-impl StandaloneWorkbenchKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Image => "image",
-            Self::Video => "video",
-            Self::Audio => "audio",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        Some(match value {
-            "image" => Self::Image,
-            "video" => Self::Video,
-            "audio" => Self::Audio,
-            _ => return None,
-        })
-    }
-
-    pub fn accepts_capability(self, capability: MediaCapability) -> bool {
-        match self {
-            Self::Image => matches!(
-                capability,
-                MediaCapability::T2i | MediaCapability::I2i | MediaCapability::Inpaint
-            ),
-            Self::Video => matches!(
-                capability,
-                MediaCapability::T2v | MediaCapability::I2v | MediaCapability::V2v
-            ),
-            Self::Audio => capability == MediaCapability::Tts,
-        }
-    }
-}
-
 /// One ordered input binding to a task (contract §3.3 `inputs[]`). `kind` and
 /// `role` are both explicit so history/retry never guesses from a URL, file
 /// extension, or a later asset-library state.
@@ -174,6 +135,17 @@ pub struct CreationInput {
     pub asset_id: String,
     pub kind: CreationInputKind,
     pub role: String,
+}
+
+/// Server-owned reference captured from one ordinary conversation attachment.
+/// `file_index` preserves order among the original files, including non-images.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationCreationReference {
+    pub asset_id: String,
+    pub file_name: String,
+    pub file_index: usize,
+    pub kind: CreationInputKind,
 }
 
 /// A structured error stored on a failed task (`error` JSON column).
@@ -256,25 +228,5 @@ impl From<nomifun_model_invoke::InvokeError> for CreationError {
             | K::NotPollable => "provider_error",
         };
         Self { kind: kind.to_string(), message: e.message, http_status: e.http_status }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{MediaCapability, StandaloneWorkbenchKind};
-
-    #[test]
-    fn standalone_workbench_kind_accepts_only_its_media_family() {
-        assert!(StandaloneWorkbenchKind::Image.accepts_capability(MediaCapability::T2i));
-        assert!(StandaloneWorkbenchKind::Image.accepts_capability(MediaCapability::I2i));
-        assert!(StandaloneWorkbenchKind::Image.accepts_capability(MediaCapability::Inpaint));
-        assert!(!StandaloneWorkbenchKind::Image.accepts_capability(MediaCapability::T2v));
-        assert!(StandaloneWorkbenchKind::Video.accepts_capability(MediaCapability::T2v));
-        assert!(StandaloneWorkbenchKind::Video.accepts_capability(MediaCapability::I2v));
-        assert!(StandaloneWorkbenchKind::Video.accepts_capability(MediaCapability::V2v));
-        assert!(!StandaloneWorkbenchKind::Video.accepts_capability(MediaCapability::Tts));
-        assert!(StandaloneWorkbenchKind::Audio.accepts_capability(MediaCapability::Tts));
-        assert!(!StandaloneWorkbenchKind::Audio.accepts_capability(MediaCapability::T2i));
-        assert!(!StandaloneWorkbenchKind::Audio.accepts_capability(MediaCapability::Text));
     }
 }

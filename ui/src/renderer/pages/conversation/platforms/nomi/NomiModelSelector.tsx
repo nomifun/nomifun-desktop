@@ -15,6 +15,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import classNames from 'classnames';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
+import { useCreationComposer } from '@/renderer/creation/CreationComposerContext';
 
 const NomiModelSelector: React.FC<{
   selection?: NomiModelSelection;
@@ -27,6 +28,7 @@ const NomiModelSelector: React.FC<{
   const compact = compactProp ?? isPreviewOpen;
   const defaultModelLabel = t('common.defaultModel');
   const providerLabel = useModelSelectorProviderLabel();
+  const creation = useCreationComposer();
 
   const current_model = selection?.current_model;
   const label = getModelDisplayLabel({
@@ -71,6 +73,7 @@ const NomiModelSelector: React.FC<{
       trigger='click'
       droplist={
         <Menu>
+          {creation?.draft.mode && <Menu.Item key='chat-model-purpose' disabled><span style={{ display: 'block', width: 240, whiteSpace: 'normal' }}>聊天模型用于普通对话与工具推理。本次直接生成使用左侧生成模型，二者独立。</span></Menu.Item>}
           {providers.map((provider) => {
             const models = getAvailableModels(provider);
             if (!models.length) return null;

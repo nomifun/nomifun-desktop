@@ -2657,6 +2657,7 @@ mod tests {
                     CONVERSATION_ID,
                     "interactive-race",
                     SendMessageRequest {
+                        preset_id: None,
                         content: "interactive message".to_owned(),
                         files: Vec::new(),
                         inject_skills: Vec::new(),

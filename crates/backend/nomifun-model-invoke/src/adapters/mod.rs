@@ -229,6 +229,7 @@ pub mod deepgram;
 pub mod gemini;
 pub mod generic_rerank;
 pub mod minimax;
+pub mod minimax_music;
 pub mod mimo;
 pub mod openai_audio;
 pub mod openai_embeddings;
@@ -265,6 +266,7 @@ pub fn default_adapters() -> Vec<Arc<dyn ProtocolAdapter>> {
         Arc::new(dashscope::DashScopeImagesAdapter),
         Arc::new(dashscope::DashScopeEmbeddingsAdapter),
         Arc::new(minimax::MiniMaxT2aAdapter),
+        Arc::new(minimax_music::MiniMaxMusicAdapter),
         Arc::new(mimo::MiMoChatAsrAdapter),
         Arc::new(mimo::MiMoChatTtsAdapter),
         Arc::new(siliconflow::SiliconFlowAudioSpeechAdapter),
@@ -463,6 +465,7 @@ mod tests {
             ("dashscope.images", ModelTask::ImageGeneration),
             ("dashscope.embeddings", ModelTask::Embedding),
             ("minimax.t2a", ModelTask::SpeechSynthesis),
+            ("minimax.music", ModelTask::MusicGeneration),
             ("mimo.chat_asr", ModelTask::SpeechRecognition),
             ("mimo.chat_tts", ModelTask::SpeechSynthesis),
             ("siliconflow.audio_speech", ModelTask::SpeechSynthesis),
@@ -483,7 +486,7 @@ mod tests {
             let adapter = registry.get(protocol, task).expect("registered + supported");
             assert_eq!(adapter.id(), protocol);
         }
-        assert_eq!(default_adapters().len(), 31);
+        assert_eq!(default_adapters().len(), 32);
         // Tasks outside an adapter's declared support are refused.
         assert!(registry.get("agnes.images", ModelTask::Chat).is_err());
         assert!(registry.get("agnes.video_jobs", ModelTask::ImageGeneration).is_err());
