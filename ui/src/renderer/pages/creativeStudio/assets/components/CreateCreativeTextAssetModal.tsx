@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Button, Checkbox, Input, InputTag, Modal } from '@arco-design/web-react';
+import { Button, Input, InputTag, Modal } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -111,14 +111,6 @@ const CreateCreativeTextAssetModal: React.FC<CreateCreativeTextAssetModalProps> 
             />
           </label>
         </div>
-
-        <Checkbox
-          checked={value.inLibrary}
-          disabled={submitting}
-          onChange={(inLibrary) => patch({ inLibrary })}
-        >
-          {labels.saveToLibrary}
-        </Checkbox>
 
         {!valid ? <p className={styles.requiredHint}>{labels.requiredHint}</p> : null}
         {error ? (

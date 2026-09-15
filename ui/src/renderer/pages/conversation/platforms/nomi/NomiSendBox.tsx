@@ -18,8 +18,7 @@ import SessionCapabilityPicker, {
 } from '@/renderer/components/chat/SessionCapabilityPicker';
 import SendBox from '@/renderer/components/chat/SendBox';
 import FileAttachButton from '@/renderer/components/media/FileAttachButton';
-import FilePreview from '@/renderer/components/media/FilePreview';
-import HorizontalFileList from '@/renderer/components/media/HorizontalFileList';
+import ComposerAttachments from '@/renderer/components/chat/ComposerAttachments';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 import { useAutoTitle } from '@/renderer/hooks/chat/useAutoTitle';
 import { getSendBoxDraftHook, type FileOrFolderItem } from '@/renderer/hooks/chat/useSendBoxDraft';
@@ -64,7 +63,7 @@ import { allSupportedExts } from '@/renderer/services/FileService';
 import { emitter, useAddEventListener } from '@/renderer/utils/emitter';
 import { mergeFileSelectionItems } from '@/renderer/utils/file/fileSelection';
 import { buildDisplayMessage, collectSelectedFiles } from '@/renderer/utils/file/messageFiles';
-import { Message, Tag, Tooltip } from '@arco-design/web-react';
+import { Message, Tooltip } from '@arco-design/web-react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { NomiMessageRuntime } from './useNomiMessage';
@@ -74,7 +73,7 @@ import type { NomiModelSelection } from './useNomiModelSelection';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { evaluateNomiVisionSend } from './nomiVisionSendGuard';
 import { steerOrQueue } from './steerOrQueue';
-import CreationControls, { CreationReferences } from '@/renderer/creation/CreationControls';
+import CreationControls from '@/renderer/creation/CreationControls';
 import { useCreationComposer } from '@/renderer/creation/CreationComposerContext';
 import { useGenerationModel } from '@/renderer/creation/useGenerationModel';
 import { buildCreationRequest, creationAttempt, acknowledgeCreationAttempt } from '@/renderer/creation/submission';
@@ -1000,6 +999,7 @@ const NomiSendBox: React.FC<{
           (
             <div
               className='sendbox-responsive-config-group flex flex-1 items-center justify-end gap-2 min-w-0'
+              data-composer-group
               data-testid='nomi-sendbox-config-group'
             >
               {hasContextUsage && (
@@ -1027,50 +1027,12 @@ const NomiSendBox: React.FC<{
             </div>
           )
         }
-        prefix={
-          <>
-            <CreationReferences />
-            {uploadFile.length > 0 && (
-              <HorizontalFileList>
-                {uploadFile.map((path) => (
-                  <FilePreview
-                    key={path}
-                    data-testid={`nomi-file-tag-${uploadFile.indexOf(path)}`}
-                    path={path}
-                    onRemove={() => setUploadFile(uploadFile.filter((v) => v !== path))}
-                  />
-                ))}
-              </HorizontalFileList>
-            )}
-            {atPath.some((item) => (typeof item === 'string' ? false : !item.isFile)) && (
-              <div className='flex flex-wrap items-center gap-8px mb-8px'>
-                {atPath.map((item) => {
-                  if (typeof item === 'string') return null;
-                  if (!item.isFile) {
-                    const folderIndex = atPath.filter((v) => typeof v !== 'string' && !v.isFile).indexOf(item);
-                    return (
-                      <Tag
-                        key={item.path}
-                        data-testid={`nomi-folder-tag-${folderIndex}`}
-                        bordered={false}
-                        className='!bg-primary-1 !text-primary-6'
-                        closable
-                        onClose={() => {
-                          const newAtPath = atPath.filter((v) => (typeof v === 'string' ? true : v.path !== item.path));
-                          emitter.emit('nomi.selected.file', newAtPath);
-                          setAtPath(newAtPath);
-                        }}
-                      >
-                        {item.name}
-                      </Tag>
-                    );
-                  }
-                  return null;
-                })}
-              </div>
-            )}
-          </>
-        }
+        renderAttachments={(workspaceItems, onRemoveWorkspaceItem) => <ComposerAttachments
+          files={uploadFile}
+          onRemoveFile={(path) => setUploadFile(previous => previous.filter(file => file !== path))}
+          workspaceItems={workspaceItems}
+          onRemoveWorkspaceItem={onRemoveWorkspaceItem}
+        />}
         onSend={onSendHandler}
         onSteer={onSteerHandler}
         steerAvailable={!isCreating}

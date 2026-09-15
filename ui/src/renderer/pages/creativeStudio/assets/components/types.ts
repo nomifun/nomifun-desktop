@@ -51,7 +51,6 @@ export interface CreativeTextAssetFormValue {
   textContent: string;
   collection: string;
   tags: string[];
-  inLibrary: boolean;
 }
 
 export interface CreativeAssetLibraryLabels {
@@ -95,8 +94,6 @@ export interface CreativeAssetLibraryLabels {
   clearSelection: string;
   selectedCount: (count: number) => string;
   resultCount: (visible: number, total: number) => string;
-  addToLibrary: string;
-  removeFromLibrary: string;
   insertIntoCanvas: string;
   downloadSelected: string;
   deleteSelected: string;
@@ -125,7 +122,6 @@ export interface CreateTextAssetLabels {
   collectionPlaceholder: string;
   tagsLabel: string;
   tagsPlaceholder: string;
-  saveToLibrary: string;
   cancel: string;
   submit: string;
   submitting: string;
@@ -136,7 +132,7 @@ export type CreativeAssetAction = (asset: CreativeAsset) => void;
 export type CreativeAssetBatchAction = (assets: readonly CreativeAsset[]) => void;
 
 export const createCreativeAssetLibraryLabels = (t: TFunction): CreativeAssetLibraryLabels => ({
-  title: t('creativeStudio.assets.library.title', { defaultValue: '素材库' }),
+  title: t('creativeStudio.assets.library.title', { defaultValue: '资产库' }),
   description: t('creativeStudio.assets.library.description', { defaultValue: '集中管理画布使用的图片、视频、音频与文本素材。' }),
   searchPlaceholder: t('creativeStudio.assets.library.searchPlaceholder', { defaultValue: '搜索标题、合集或标签' }),
   clearSearch: t('creativeStudio.assets.library.clearSearch', { defaultValue: '清除搜索' }),
@@ -148,7 +144,7 @@ export const createCreativeAssetLibraryLabels = (t: TFunction): CreativeAssetLib
   video: t('creativeStudio.assets.kind.video', { defaultValue: '视频' }),
   audio: t('creativeStudio.assets.kind.audio', { defaultValue: '音频' }),
   text: t('creativeStudio.assets.kind.text', { defaultValue: '文本' }),
-  libraryScope: t('creativeStudio.assets.scope.library', { defaultValue: '素材库' }),
+  libraryScope: t('creativeStudio.assets.scope.library', { defaultValue: '资产库' }),
   canvasScope: t('creativeStudio.assets.scope.canvas', { defaultValue: '画布素材' }),
   gridView: t('creativeStudio.assets.view.grid', { defaultValue: '网格视图' }),
   listView: t('creativeStudio.assets.view.list', { defaultValue: '列表视图' }),
@@ -167,7 +163,7 @@ export const createCreativeAssetLibraryLabels = (t: TFunction): CreativeAssetLib
   emptyTitle: t('creativeStudio.assets.library.emptyTitle', { defaultValue: '还没有素材' }),
   emptyDescription: t('creativeStudio.assets.library.emptyDescription', { defaultValue: '上传媒体或创建文本素材，开始构建你的创作资源库。' }),
   canvasEmptyTitle: t('creativeStudio.assets.library.canvasEmptyTitle', { defaultValue: '当前画布还没有素材' }),
-  canvasEmptyDescription: t('creativeStudio.assets.library.canvasEmptyDescription', { defaultValue: '生成、上传或从素材库插入内容后，相关素材会出现在这里。' }),
+  canvasEmptyDescription: t('creativeStudio.assets.library.canvasEmptyDescription', { defaultValue: '生成、上传或从资产库插入内容后，相关素材会出现在这里。' }),
   filteredEmptyTitle: t('creativeStudio.assets.library.filteredEmptyTitle', { defaultValue: '没有匹配的素材' }),
   filteredEmptyDescription: t('creativeStudio.assets.library.filteredEmptyDescription', { defaultValue: '尝试更换类型、范围或搜索关键词。' }),
   retry: t('creativeStudio.assets.library.retry', { defaultValue: '重试' }),
@@ -176,8 +172,6 @@ export const createCreativeAssetLibraryLabels = (t: TFunction): CreativeAssetLib
   clearSelection: t('creativeStudio.assets.library.clearSelection', { defaultValue: '取消选择' }),
   selectedCount: (count) => t('creativeStudio.assets.library.selectedCount', { defaultValue: '已选择 {{itemCount}} 项', itemCount: count }),
   resultCount: (visible, total) => t('creativeStudio.assets.library.resultCount', { defaultValue: '已显示 {{visible}} / {{total}} 项', visible, total }),
-  addToLibrary: t('creativeStudio.assets.library.addToLibrary', { defaultValue: '加入素材库' }),
-  removeFromLibrary: t('creativeStudio.assets.library.removeFromLibrary', { defaultValue: '移出素材库' }),
   insertIntoCanvas: t('creativeStudio.assets.library.insertIntoCanvas', { defaultValue: '插入画布' }),
   downloadSelected: t('creativeStudio.assets.library.downloadSelected', { defaultValue: '下载' }),
   deleteSelected: t('creativeStudio.assets.library.deleteSelected', { defaultValue: '删除' }),
@@ -206,7 +200,6 @@ export const createTextAssetLabels = (t: TFunction): CreateTextAssetLabels => ({
   collectionPlaceholder: t('creativeStudio.assets.textAsset.collectionPlaceholder', { defaultValue: '可选，例如：品牌素材' }),
   tagsLabel: t('creativeStudio.assets.textAsset.tagsLabel', { defaultValue: '标签' }),
   tagsPlaceholder: t('creativeStudio.assets.textAsset.tagsPlaceholder', { defaultValue: '输入标签后按回车' }),
-  saveToLibrary: t('creativeStudio.assets.textAsset.saveToLibrary', { defaultValue: '保存到素材库' }),
   cancel: t('creativeStudio.assets.textAsset.cancel', { defaultValue: '取消' }),
   submit: t('creativeStudio.assets.textAsset.submit', { defaultValue: '创建素材' }),
   submitting: t('creativeStudio.assets.textAsset.submitting', { defaultValue: '正在创建' }),

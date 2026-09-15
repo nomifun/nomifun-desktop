@@ -31,7 +31,7 @@ describe('capability hub navigation', () => {
     expect(siderSource.includes("navTo('/agent')")).toBe(true);
     expect(
       siderSource.includes(
-        "navTo('/guid', false, { resetAgentSelection: true })"
+        "navTo('/guid')"
       )
     ).toBe(true);
     expect(siderSource.includes("pathname === '/agent' || pathname.startsWith('/agent-sessions/')")).toBe(true);
