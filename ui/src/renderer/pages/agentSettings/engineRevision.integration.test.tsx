@@ -52,7 +52,7 @@ for (const family of ['nomi', 'coding']) {
         official_templates: [template], user_presets: editor ? [editor.preset] : [], active_bindings: [],
         fresh_start: { data_generation: 4, legacy_data_imported: false, official_template_count: 1, user_preset_count: editor ? 1 : 0 },
       };
-      else if (['/api/capabilities', '/api/agent-catalog/skills', '/api/mcp-tool-mappings'].includes(path)) data = [];
+      else if (path === '/api/agent-catalog') data = { capabilities: [], skills: [], mcp_tools: [], roles: [] };
       else if (path === '/api/agent-presets' && init?.method === 'POST') {
         const request = JSON.parse(String(init.body)) as CreateAgentPresetRequest;
         requests.push(request);
@@ -94,6 +94,7 @@ for (const family of ['nomi', 'coding']) {
         [AGENT_PRESET_LIBRARY_SWR_KEY]: { official_templates: [template], user_presets: [], active_bindings: [] } },
     }}><Harness /></SWRConfig></MemoryRouter></I18nextProvider>);
     await waitFor(() => expect(controller.loading).toBe(false));
+    expect(controller.error).toBeNull();
     fireEvent.click(screen.getByRole('tab', { name: en.workbench.settingsTab }));
     const option = runtimeEngineOptions([descriptor])[0];
     fireEvent.click(screen.getByRole('combobox', { name: en.runtimeEngine.label }));
@@ -155,8 +156,7 @@ test('workbench engine and enabled capabilities survive revision save, reopen an
       official_templates: [], user_presets: [editor.preset], active_bindings: [],
       fresh_start: { data_generation: 4, legacy_data_imported: false, official_template_count: 0, user_preset_count: 1 },
     };
-    else if (path === '/api/capabilities') data = [capability];
-    else if (path === '/api/agent-catalog/skills' || path === '/api/mcp-tool-mappings') data = [];
+    else if (path === '/api/agent-catalog') data = { capabilities: [capability], skills: [], mcp_tools: [], roles: [] };
     else if (path === `/api/agent-presets/${presetId}/editor`) data = editor;
     else if (path === `/api/agent-presets/${presetId}/revisions` && init?.method === 'POST') {
       const request = JSON.parse(String(init.body)) as SaveAgentPresetRevisionRequest;
@@ -187,6 +187,7 @@ test('workbench engine and enabled capabilities survive revision save, reopen an
     fallback: { 'runtime-engines': [descriptor], providers: [] },
   }}><Harness /></SWRConfig></MemoryRouter></I18nextProvider>);
   await waitFor(() => expect(controller.loading).toBe(false));
+  expect(controller.error).toBeNull();
   await act(async () => { await controller.openPreset(editor.preset); });
   fireEvent.click(screen.getByRole('tab', { name: en.workbench.settingsTab }));
   fireEvent.click(screen.getByRole('combobox', { name: en.runtimeEngine.label }));
