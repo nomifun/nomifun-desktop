@@ -1083,6 +1083,17 @@ unsafe fn try_final_group_kill(
     if config.fault == FAULT_FAIL_FINAL_GROUP_KILL_ONCE && _attempt == 0 {
         return -1;
     }
+    // While the original host is alive it retains the exact unreaped PTY
+    // session leader until we exit. Job-control shells place background and
+    // foreground jobs in different process groups; seal those as well. After
+    // abrupt host death that lease is unavailable, so do not widen a cached
+    // PGID into authority over a numeric session ID.
+    if config.external_session
+        && unsafe { parent_is_original(config.parent_pid) }
+        && unsafe { super::macos_session::seal_owned_session(leader, Some(config.parent_pid)) }.is_err()
+    {
+        return -1;
+    }
     let result = unsafe { libc::kill(-leader, libc::SIGKILL) };
     if result == 0 {
         return 0;
