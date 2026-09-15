@@ -55,8 +55,16 @@ test('personal editor submits order through its existing save action', () => {
   const result = render(<I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), fallback: { providers: [] }, revalidateOnMount: false }}><MemoryRouter><Harness /></MemoryRouter></SWRConfig></I18nextProvider>);
   const view = within(result.container);
   fireEvent.click(view.getByRole('tab', { name: en.workbench.settingsTab }));
+  expect(view.getByRole('textbox', { name: en.fields.name })).toBeTruthy();
+  expect(view.getByRole('combobox', { name: en.runtimeEngine.label })).toBeTruthy();
+  expect(view.queryByRole('region', { name: en.middlewareOrder.title }) === null).toBe(true);
+  expect(view.queryByRole('region', { name: en.contextOrder.title }) === null).toBe(true);
+  fireEvent.click(view.getByRole('tab', { name: en.workbench.skillsTab }));
+  expect(view.getAllByRole('heading', { level: 3 }).slice(0, 2).map(node => node.textContent)).toEqual([en.middlewareOrder.title, en.contextOrder.title]);
+  expect(within(view.getByRole('tabpanel')).getByText(en.sections.skillsMcp)).toBeTruthy();
+  expect(view.queryByRole('textbox', { name: en.fields.name }) === null).toBe(true);
   fireEvent.click(view.getByRole('button', { name: 'Move z earlier' }));
-  fireEvent.click(view.getByRole('button', { name: 'Move middleware m-z earlier' }));
+  fireEvent.click(view.getByRole('button', { name: 'Move m-z earlier' }));
   fireEvent.click(view.getByRole('button', { name: 'common.save' }));
   expect(saved?.document.context_order).toEqual(['z', 'a']);
   expect(saved?.document.middleware_order).toEqual(['m-z', 'm-a']);
@@ -100,7 +108,7 @@ test('middleware order preserves Context and selection, retains missing choices,
   expect(view.getAllByRole('listitem').map(row => row.textContent)).toEqual([
     `m-a${en.middlewareOrder.phase.unknown}↑↓`, `m-z${en.middlewareOrder.phase.unknown}↑↓`,
   ]);
-  fireEvent.click(view.getByRole('button', { name: 'Move middleware m-z earlier' }));
+  fireEvent.click(view.getByRole('button', { name: 'Move m-z earlier' }));
   expect(result.state().middleware_order).toEqual(['m-z', 'm-a']);
   expect(result.state().context_order).toEqual(document.context_order);
   expect(result.state().enabled_capabilities).toEqual(document.enabled_capabilities);
@@ -111,7 +119,7 @@ test('middleware order preserves Context and selection, retains missing choices,
   result.unmount();
   const missing = mount(ordered, [middlewareCatalog[1]], true, 'middleware'), readonly = within(missing.container);
   expect(readonly.getByText(en.middlewareOrder.missing)).toBeTruthy();
-  fireEvent.click(readonly.getByRole('button', { name: 'Move middleware m-z later' }));
+  fireEvent.click(readonly.getByRole('button', { name: 'Move m-z later' }));
   expect(missing.state()).toEqual(ordered);
   expect((readonly.getByRole('button', { name: en.middlewareOrder.reset }) as HTMLButtonElement).disabled).toBe(true);
   const removed = placeCapability(ordered, middlewareCatalog[0].capability, 'none');
@@ -139,7 +147,7 @@ test('execution stages come from the host and unknown selected extensions remain
     `model${en.middlewareOrder.phase.before_model}↑↓`,
   ]);
   expect(view.getByText(en.middlewareOrder.toolAccess)).toBeTruthy();
-  fireEvent.click(view.getByRole('button', { name: 'Move middleware check earlier' }));
+  fireEvent.click(view.getByRole('button', { name: 'Move check earlier' }));
   expect(result.state().middleware_order).toEqual(['check', 'unknown', 'future', 'model']);
   expect(result.state().enabled_capabilities).toEqual(original.enabled_capabilities);
 });

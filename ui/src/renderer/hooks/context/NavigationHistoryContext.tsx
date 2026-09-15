@@ -7,7 +7,7 @@
 /**
  * Navigation history stack for the in-app back/forward buttons.
  *
- * Behaves like a browser history: every time the route pathname changes we
+ * Behaves like a browser history: every time the route changes we
  * push an entry; calling back()/forward() moves the cursor; when a new
  * navigation happens while the cursor is in the middle of the stack, entries
  * after the cursor are discarded (just like opening a new page after going
@@ -15,7 +15,8 @@
  *
  * This captures route-level navigations only (e.g. switching conversations,
  * opening settings). Intra-page interactions like scrolling or sending a
- * message do not change the pathname and are correctly ignored.
+ * message do not change the route and are correctly ignored. Each entry also
+ * retains its route state in this bounded in-memory stack.
  */
 
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
@@ -25,6 +26,7 @@ const MAX_HISTORY = 50;
 
 type HistoryEntry = {
   path: string; // full path including search + hash
+  state: unknown;
 };
 
 type NavigationHistoryContextValue = {
@@ -32,6 +34,7 @@ type NavigationHistoryContextValue = {
   canForward: boolean;
   back: () => void;
   forward: () => void;
+  replaceCurrent: (path: string, state: unknown) => void;
 };
 
 const NavigationHistoryContext = createContext<NavigationHistoryContextValue | null>(null);
@@ -44,7 +47,7 @@ export const NavigationHistoryProvider: React.FC<React.PropsWithChildren> = ({ c
   const navigate = useNavigate();
   const navigationType = useNavigationType();
 
-  const [stack, setStack] = useState<HistoryEntry[]>(() => [{ path: buildPath(location) }]);
+  const [stack, setStack] = useState<HistoryEntry[]>(() => [{ path: buildPath(location), state: location.state }]);
   const [cursor, setCursor] = useState(0);
 
   // When back()/forward() triggers navigate(), the location listener below
@@ -60,17 +63,15 @@ export const NavigationHistoryProvider: React.FC<React.PropsWithChildren> = ({ c
     const path = buildPath(location);
     setStack((prevStack) => {
       const prevEntry = prevStack[cursor];
-      if (prevEntry && prevEntry.path === path) {
-        // Same path as current cursor — no-op (initial render, or a redundant push).
-        return prevStack;
-      }
+      const entry = { path, state: location.state };
+      if (prevEntry?.path === path && prevEntry.state === location.state) return prevStack;
       // navigate(..., { replace: true }) should overwrite the current cursor
       // entry rather than push a new one — otherwise replace navigations grow
       // the in-app history stack and incorrectly enable the back button (e.g.
       // when ConversationIndex redirects from a 404'd conversation to '/').
-      if (navigationType === NavigationType.Replace) {
+      if (navigationType === NavigationType.Replace || prevEntry?.path === path) {
         const next = prevStack.slice();
-        next[cursor] = { path };
+        next[cursor] = entry;
         return next;
       }
       // POP (browser/native back-forward): we already mutate cursor + stack
@@ -79,7 +80,7 @@ export const NavigationHistoryProvider: React.FC<React.PropsWithChildren> = ({ c
       // hardware back), so treat it like a push for consistency.
       // Discard any forward entries past the cursor, then append.
       const truncated = prevStack.slice(0, cursor + 1);
-      truncated.push({ path });
+      truncated.push(entry);
       // Enforce max length by dropping from the oldest side.
       if (truncated.length > MAX_HISTORY) {
         const overflow = truncated.length - MAX_HISTORY;
@@ -90,10 +91,21 @@ export const NavigationHistoryProvider: React.FC<React.PropsWithChildren> = ({ c
       setCursor(truncated.length - 1);
       return truncated;
     });
-    // We intentionally only depend on pathname/search/hash — not `cursor` —
+    // We intentionally depend on the location — not `cursor` —
     // because `cursor` is kept consistent inside the setStack updater above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.pathname, location.search, location.hash, navigationType]);
+  }, [location.pathname, location.search, location.hash, location.state, location.key, navigationType]);
+
+  // Record a deliberate replacement before a caller immediately leaves. React
+  // may batch both navigations, hiding the intermediate location from effects.
+  const replaceCurrent = useCallback((path: string, state: unknown) => {
+    setStack(current => {
+      const next = current.slice();
+      next[cursor] = { path, state };
+      return next;
+    });
+    void navigate(path, { replace: true, state });
+  }, [cursor, navigate]);
 
   const back = useCallback(() => {
     const next = cursor - 1;
@@ -105,7 +117,7 @@ export const NavigationHistoryProvider: React.FC<React.PropsWithChildren> = ({ c
     // Use { replace: true } so traversing our own stack doesn't grow
     // React Router's history unboundedly — this is meant to emulate
     // browser back/forward, which never creates new history entries.
-    void navigate(target.path, { replace: true });
+    void navigate(target.path, { replace: true, state: target.state });
   }, [cursor, stack, navigate]);
 
   const forward = useCallback(() => {
@@ -115,7 +127,7 @@ export const NavigationHistoryProvider: React.FC<React.PropsWithChildren> = ({ c
     if (!target) return;
     skipNextRef.current = true;
     setCursor(next);
-    void navigate(target.path, { replace: true });
+    void navigate(target.path, { replace: true, state: target.state });
   }, [cursor, stack, navigate]);
 
   const value = useMemo<NavigationHistoryContextValue>(
@@ -124,8 +136,9 @@ export const NavigationHistoryProvider: React.FC<React.PropsWithChildren> = ({ c
       canForward: cursor < stack.length - 1,
       back,
       forward,
+      replaceCurrent,
     }),
-    [cursor, stack.length, back, forward]
+    [cursor, stack.length, back, forward, replaceCurrent]
   );
 
   return <NavigationHistoryContext.Provider value={value}>{children}</NavigationHistoryContext.Provider>;

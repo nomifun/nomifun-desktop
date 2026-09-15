@@ -358,6 +358,32 @@ fn target_path_matches(raw: Option<&str>, workspace: &Path, filename: &str) -> b
             .is_some_and(|parent| canonical_path_eq(parent, workspace))
 }
 
+/// Diagnostic categories only: none of these variants is accepted as equal.
+/// Never include actual content, a preview, byte values, or an input hash in
+/// live diagnostics. The synthetic fixture still requires exact UTF-8 bytes.
+fn content_difference(value: &Value) -> Option<&'static str> {
+    let Some(actual) = value.as_str() else {
+        return Some("BEFORE_TOOL_TARGET_CONTENT_NOT_STRING");
+    };
+    if actual.as_bytes() == CONTENT.as_bytes() {
+        return None;
+    }
+    let line = CONTENT
+        .strip_suffix('\n')
+        .expect("fixed fixture ends in LF");
+    Some(if actual == line {
+        "BEFORE_TOOL_TARGET_CONTENT_MISSING_FINAL_LF"
+    } else if actual == format!("{line}\\n") {
+        "BEFORE_TOOL_TARGET_CONTENT_LITERAL_BACKSLASH_N"
+    } else if actual == format!("{line}\r\n") {
+        "BEFORE_TOOL_TARGET_CONTENT_CRLF"
+    } else if actual == format!("{CONTENT}\n") {
+        "BEFORE_TOOL_TARGET_CONTENT_EXTRA_FINAL_LF"
+    } else {
+        "BEFORE_TOOL_TARGET_CONTENT_OTHER_BYTES"
+    })
+}
+
 /// Return the host-authored turn identity only after actual tool and subsequent
 /// assistant projections agree. Assistant words alone can never prove denial.
 fn inspect_turn(
@@ -426,8 +452,11 @@ fn inspect_turn(
     ) {
         return Err(fail(phase, "BEFORE_TOOL_TARGET_PATH_INVALID"));
     }
-    if tool["args"]["content"].as_str() != Some(CONTENT) {
-        return Err(fail(phase, "BEFORE_TOOL_TARGET_CONTENT_INVALID"));
+    if let Some(code) = content_difference(&tool["args"]["content"]) {
+        if !denied && std::fs::read(workspace.join(ALLOW_FILE)).ok().as_deref() == Some(CONTENT.as_bytes()) {
+            return Err(fail(phase, "BEFORE_TOOL_TARGET_CONTENT_PROJECTION_DIFFERS_FROM_FILE"));
+        }
+        return Err(fail(phase, code));
     }
     if tool["call_id"].as_str().is_none_or(str::is_empty) {
         return Err(fail(phase, "BEFORE_TOOL_TARGET_CALL_ID_INVALID"));
@@ -637,7 +666,7 @@ fn stage_prompt(denied: bool) -> Result<String, SmokeFailure> {
         ""
     };
     Ok(format!(
-        "This is a disposable business-rule integration test. All content is synthetic test data, with no credentials. Call the native Write tool exactly once using this exact argument object:\n{WRITE_ARGUMENTS_PREFIX}{arguments}\nDo not read files, run shell commands, use other tools, retry, rename the target, or bypass a selected check. {note}If the business check rejects the attempted write, consume that tool error and stop. After the tool result arrives, reply with exactly {marker}; no earlier prose or other text."
+        "This is a disposable business-rule integration test. All content is synthetic test data, with no credentials. Call the native Write tool exactly once using this exact argument object:\n{WRITE_ARGUMENTS_PREFIX}{arguments}\nThe content value is one line terminated by exactly one LF newline (U+000A). The Write tool does not add a newline for you. Its content argument must itself contain the final LF. Preserve that final newline in the tool argument and file; do not trim it or write a literal backslash followed by n. 请特别注意：content 参数本身必须包含最后一个换行符，工具不会自动补换行。 Do not read files, run shell commands, use other tools, retry, rename the target, or bypass a selected check. {note}If the business check rejects the attempted write, consume that tool error and stop. After the tool result arrives, reply with exactly {marker}; no earlier prose or other text."
     ))
 }
 
@@ -1037,6 +1066,35 @@ mod tests {
                 json!({"file_path":if denied { DENY_FILE } else { ALLOW_FILE },"content":CONTENT})
             );
             assert!(!prompt.contains(if denied { ALLOW_FILE } else { DENY_FILE }));
+        }
+    }
+    #[test]
+    fn before_tool_content_evidence_classifies_without_accepting_byte_differences() {
+        let line = CONTENT.strip_suffix('\n').unwrap();
+        assert_eq!(content_difference(&json!(CONTENT)), None);
+        for (value, code) in [
+            (Value::Null, "BEFORE_TOOL_TARGET_CONTENT_NOT_STRING"),
+            (json!(42), "BEFORE_TOOL_TARGET_CONTENT_NOT_STRING"),
+            (json!(line), "BEFORE_TOOL_TARGET_CONTENT_MISSING_FINAL_LF"),
+            (
+                json!(format!("{line}\\n")),
+                "BEFORE_TOOL_TARGET_CONTENT_LITERAL_BACKSLASH_N",
+            ),
+            (
+                json!(format!("{line}\r\n")),
+                "BEFORE_TOOL_TARGET_CONTENT_CRLF",
+            ),
+            (
+                json!(format!("{CONTENT}\n")),
+                "BEFORE_TOOL_TARGET_CONTENT_EXTRA_FINAL_LF",
+            ),
+            (
+                json!("different synthetic data"),
+                "BEFORE_TOOL_TARGET_CONTENT_OTHER_BYTES",
+            ),
+        ] {
+            assert_eq!(content_difference(&value), Some(code));
+            assert_ne!(value.as_str(), Some(CONTENT));
         }
     }
 }

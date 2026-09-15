@@ -8,7 +8,7 @@ import AgentCapabilityWorkspace from './AgentCapabilityWorkspace';
 import AgentRuntimeEngineSelector from './AgentRuntimeEngineSelector';
 import AgentRoleProviderPicker from './AgentRoleProviderPicker';
 import { unavailableCapabilityReferences } from './capabilityGroups';
-import { TEMPLATE_I18N_PATH } from './model';
+import { TEMPLATE_I18N_PATH, editingDocument, type TemplateEditingState } from './model';
 import styles from './AgentSettingsPage.module.css';
 
 type Props = {
@@ -17,6 +17,8 @@ type Props = {
   catalog: AgentCatalogResponse;
   onSave: (displayName: string, document: AgentPresetDocument, description: string) => void;
   onDirtyChange?: (dirty: boolean) => void;
+  initialEditing?: TemplateEditingState;
+  onEditingChange?: (editing: TemplateEditingState) => void;
 };
 
 export const documentFromTemplate = (template: OfficialPresetTemplate): AgentPresetDocument => ({
@@ -26,14 +28,16 @@ export const documentFromTemplate = (template: OfficialPresetTemplate): AgentPre
   skill_bindings: structuredClone(template.seed.skill_bindings),
 });
 
-const OfficialTemplateOverview: React.FC<Props> = ({ template, busy, catalog, onSave, onDirtyChange }) => {
+const OfficialTemplateOverview: React.FC<Props> = ({ template, busy, catalog, onSave, onDirtyChange, initialEditing, onEditingChange }) => {
   const { t } = useTranslation();
   const path = TEMPLATE_I18N_PATH[template.template_key];
   const name = t(`agentSettings.template.${path}.name`);
   const original = useMemo(() => documentFromTemplate(template), [template]);
-  const [document, setDocument] = useState<AgentPresetDocument>(original);
-  const [displayName, setDisplayName] = useState(name);
-  const [activeTab, setActiveTab] = useState('capabilities');
+  const [document, setDocument] = useState<AgentPresetDocument>(() => ({ ...original, ...initialEditing?.document }));
+  const [displayName, setDisplayName] = useState(initialEditing?.displayName ?? name);
+  const [activeTab, setActiveTab] = useState(initialEditing?.activeTab ?? 'capabilities');
+  useEffect(() => { onEditingChange?.({ displayName, document: editingDocument(document), activeTab }); },
+    [displayName, document, activeTab, onEditingChange]);
   const tabs = [
     { key: 'capabilities', label: t('agentSettings.workbench.capabilityTab') },
     { key: 'providers', label: t('agentSettings.providers.title') },

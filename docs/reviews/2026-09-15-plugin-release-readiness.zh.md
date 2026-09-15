@@ -199,6 +199,24 @@ bun test --cwd ui src/renderer/pages/agentSession src/renderer/pages/agentSettin
 
 尚未执行本轮提交/推送、正式打包安装、真实模型或 macOS arm64 验收。跨 OS 应在包含本节代码的实际提交上**不设置实验变量**，复验用户入口与授权拒绝，继续执行下方 MAC/P0 项；源码通过不代表双平台发布放行。
 
+### 2.8 macOS 工具前检查实施检查点（2026-09-15，未正式放行）
+
+基线 `14d10aa39dc2c56678acb24c94aee58ef5833aa6` 已包含 §2.7 页面开放代码。
+新增 H1a 实施检查点 `8cd2cebcf19ba57fd530503a1b80afc2b75c848d` 已按用户授权
+提交并推送；前文“尚未提交”仅描述当时采集状态。
+
+该检查点接入 Nomi + PluginProduct before_tool、原 owner 只读预检、取消传递、
+普通模板及发布确认，现有工作台可发现和选择。H1b 与 U1 尚未实施。
+定向真实 Node/原生工具本地闭环、契约检查和 `bun run check` 已通过，具体覆盖、
+失败修复、范围限制及后续实模失败见[实施记录](2026-09-15-agent-tool-hooks-implementation.zh.md)。
+
+后续工作区已补齐原生发布/选择/保存、新会话的真实 StepFun 放行/拒绝和续接、
+精确回执、旧绑定保留、最小窗口和正常退出。独立严格 LF smoke 仍失败，窗口观察
+曾意外启动默认开发目录，具体证据和处置均保留在实施记录，不隐藏或改记通过。
+当前 hooks 制品验收仍未完成；不将旧多 Engine macOS app/DMG 或 §2.7 Windows
+测试作为新 hooks 证明。Windows x64 的共享代码
+复核和正式候选包、签名仍按下面 TODO 补证，不执行自动上传或 Release 发布。
+
 ## 3. 跨 OS TODO（正常产品路径，不触发通用重构）
 
 首发范围保持 Windows x64 + macOS arm64；Intel Mac、Windows arm64、Linux 和 macOS universal 不进入本次排期。此前 Windows Node Service / storage IPC 证据见 §2.2，本次删除后的 Windows 专项回归已通过（§2.5），安装包及 macOS 仍待验。桌面仅限 Tauri / 桌面级 WebUI、最小 880×600，不加入手机/平板目标。
