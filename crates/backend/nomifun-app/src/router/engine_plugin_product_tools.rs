@@ -15,7 +15,7 @@ use nomifun_engine_core::{
 };
 use nomifun_plugin_platform::runtime::{
     PluginRuntimeAgentCapabilityInvocation, PluginRuntimeAgentCapabilityPort,
-    PluginRuntimeApplicationError, PluginRuntimeApplicationService,
+    PluginRuntimeApplicationError, PluginRuntimeApplicationService, PluginRuntimeCallCancellation,
 };
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
@@ -33,7 +33,35 @@ pub(crate) enum PluginProductCallError {
     Unknown(String),
 }
 
+/// One persisted call-id codec for both read-only admission and dispatch.
+fn product_bridge_call_id(operation: &OperationId) -> PluginBridgeCallId {
+    PluginBridgeCallId::from(format!(
+        "platform-miniapp:{}",
+        operation.as_ref()
+    ))
+}
+
 impl PluginProductOwner {
+    /// Read-only admission for exposing a target's arguments to a selected
+    /// check. No receipt is reserved and no Service or resource is started.
+    pub(crate) async fn preflight(&self, user: &str, capability: &ResolvedCapability,
+        action: &nomifun_agent_contracts::ActionId, operation: OperationId, input: StrictJsonValue)
+        -> Result<(), PluginProductCallError> {
+        validate_invocation(capability, action).map_err(|e| PluginProductCallError::Rejected(e.to_string()))?;
+        let (Some(product), Some(release), Some(epoch), Some(catalog)) = (
+            capability.plugin_product_id.as_ref(), capability.active_release.as_ref(),
+            capability.active_release_epoch, capability.catalog_digest.as_ref()) else {
+            return Err(PluginProductCallError::Rejected("Plugin Product is missing frozen release authority".into()));
+        };
+        self.application.preflight_agent_capability(&PluginRuntimeAgentCapabilityInvocation {
+            cancellation: Default::default(),
+            owner_user_id: user.to_owned(), plugin_product_id: product.clone(), capability: capability.capability.clone(),
+            action_id: action.clone(), action_allowlist: capability.action_allowlist.clone(),
+            active_release: release.clone(), active_release_epoch: epoch, catalog_digest: catalog.clone(),
+            call_id: product_bridge_call_id(&operation),
+            operation_id: operation, payload: input,
+        }).await.map_err(|_| PluginProductCallError::Rejected("Product tool is unavailable or its input is not admitted".into()))
+    }
     /// Caller supplies only its host-frozen capability. The real Service owner
     /// rechecks release/catalog/action authority immediately before dispatch.
     pub(crate) async fn invoke(
@@ -44,6 +72,7 @@ impl PluginProductOwner {
         action: &nomifun_agent_contracts::ActionId,
         operation: OperationId,
         input: StrictJsonValue,
+        cancellation: PluginRuntimeCallCancellation,
     ) -> Result<StrictJsonValue, PluginProductCallError> {
         validate_invocation(capability, action)
             .map_err(|error| {
@@ -82,6 +111,7 @@ impl PluginProductOwner {
         let result = self
             .application
             .invoke_agent_capability(PluginRuntimeAgentCapabilityInvocation {
+                cancellation,
                 owner_user_id: user.to_owned(),
                 plugin_product_id: product.clone(),
                 capability: capability.capability.clone(),
@@ -91,16 +121,13 @@ impl PluginProductOwner {
                 active_release_epoch: epoch,
                 catalog_digest: catalog.clone(),
                 // Retain the historical call identity alongside the receipt codec.
-                call_id: PluginBridgeCallId::from(format!(
-                    "platform-miniapp:{}",
-                    operation.as_ref()
-                )),
+                call_id: product_bridge_call_id(&operation),
                 operation_id: operation,
                 payload: input,
             })
             .await;
         let written = match &result {
-            Ok(output) if capability.actions == [nomifun_agent_contracts::model_middleware::action()] => {
+            Ok(output) if nomifun_agent_contracts::tool_middleware::phase_for_actions(&capability.actions).is_some() => {
                 self.receipts.returned_digest(receipt, &output.0).await
             }
             Ok(output) => self.receipts.returned(receipt, &output.0).await,
@@ -221,6 +248,7 @@ fn validate_invocation(
     // Service/receipt owner, but must never become model-visible function tools.
     let hidden_consumer = capability.actions.len() == 1
         && (*descriptor == nomifun_agent_contracts::model_middleware::action()
+            || *descriptor == nomifun_agent_contracts::tool_middleware::before_action()
             || *descriptor == nomifun_ai_agent::tool_discovery::action());
     if descriptor.presentation != ToolPresentationKind::FunctionTool && !hidden_consumer {
         return Err(failure("Product action has no supported execution consumer"));
@@ -331,6 +359,7 @@ impl EngineToolInvoker for SessionTools {
                 &invocation.binding.action_id,
                 invocation.operation_id,
                 invocation.call.arguments,
+                PluginRuntimeCallCancellation::default(),
             )
             .await;
         match result {

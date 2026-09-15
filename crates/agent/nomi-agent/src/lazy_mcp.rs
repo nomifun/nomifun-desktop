@@ -108,6 +108,15 @@ impl SessionMcpConnectFailure {
 
 #[async_trait]
 pub trait SessionMcpConnector: Send + Sync {
+    /// Revalidate exact frozen bindings using the existing host authority only.
+    /// Never resolve credentials, initialize transports, or perform MCP RPC.
+    async fn preflight(
+        &self,
+        _bindings: &[SessionMcpBindingRef],
+    ) -> Result<(), String> {
+        Err("This MCP connector cannot authorize before_tool without connecting; use a host connector with read-only binding preflight".into())
+    }
+
     /// Resolve exact config refs and secret refs, then establish the physical
     /// connections. This is never called by runtime construction.
     async fn connect(
@@ -206,6 +215,8 @@ impl LazyMcpRuntime {
         if self.0.closed.load(Ordering::Acquire) {
             return Err(SessionMcpConnectFailure::TransportUnavailable);
         }
+        self.0.connector.preflight(&self.0.bindings).await
+            .map_err(|_| SessionMcpConnectFailure::ResourceUnavailable)?;
         let was_connected = self.0.managers.get().is_some();
         let managers = self
             .0
@@ -224,6 +235,13 @@ impl LazyMcpRuntime {
             self.publish_activation(true, false);
         }
         Ok(server_names(managers))
+    }
+
+    async fn preflight(&self) -> Result<(), String> {
+        if self.0.closed.load(Ordering::Acquire) {
+            return Err("MCP session is closed; start a new authorized session".into());
+        }
+        self.0.connector.preflight(&self.0.bindings).await
     }
 
     pub fn connected_managers(
@@ -387,6 +405,12 @@ impl Tool for McpConnectTool {
     }
     fn is_concurrency_safe(&self, _input: &Value) -> bool { false }
     fn is_deferred(&self) -> bool { true }
+    async fn preflight_hook(&self, input: &Value, _context: &ToolExecutionContext) -> Result<(), String> {
+        if input.as_object().is_none_or(|object| !object.is_empty()) {
+            return Err("mcp_connect accepts no arguments".into());
+        }
+        self.0.preflight().await
+    }
     async fn execute(&self, input: Value) -> ToolResult {
         if input.as_object().is_none_or(|object| !object.is_empty()) {
             return ToolResult::error(json!({
@@ -450,6 +474,18 @@ impl Tool for GenericMcpToolProxy {
     }
     fn is_concurrency_safe(&self, _input: &Value) -> bool { false }
     fn is_deferred(&self) -> bool { true }
+    async fn preflight_hook(&self, input: &Value, _context: &ToolExecutionContext) -> Result<(), String> {
+        let input: ProxyInput = serde_json::from_value(input.clone())
+            .map_err(|_| "server, tool and object arguments are required".to_owned())?;
+        if !valid_selector(&input.server) || !valid_selector(&input.tool) {
+            return Err("server and tool must be exact bounded names".into());
+        }
+        self.0.preflight().await?;
+        let (manager, _) = self.0.exact_tool(&input.server, &input.tool).map_err(|_| {
+            "MCP target schema is unavailable without connection; call mcp_connect first, then select an exact discovered server/tool".to_owned()
+        })?;
+        manager.preflight_tool(&input.server, &input.tool, &Value::Object(input.arguments))
+    }
     async fn execute(&self, input: Value) -> ToolResult {
         self.execute_with_context(input, &ToolExecutionContext::from_scoped_tool_call(
             "lazy-mcp-direct", "generic-proxy"
@@ -471,10 +507,18 @@ impl Tool for GenericMcpToolProxy {
                 "code": "INVALID_PAYLOAD", "message": "server and tool must be exact bounded names"
             }).to_string());
         }
+        if self.0.preflight().await.is_err() {
+            return safe_error(SessionMcpConnectFailure::ResourceUnavailable);
+        }
         let (manager, definition) = match self.0.exact_tool(&input.server, &input.tool) {
             Ok(found) => found,
             Err(error) => return safe_error(error),
         };
+        if let Err(error) = manager.preflight_tool(
+            &input.server, &input.tool, &Value::Object(input.arguments.clone()),
+        ) {
+            return ToolResult::error(error);
+        }
         McpToolProxy::new(
             definition.name,
             input.server,
@@ -515,7 +559,17 @@ macro_rules! lazy_resource_tool {
             fn input_schema(&self) -> JsonSchema { $inner::new(Vec::new()).input_schema() }
             fn is_concurrency_safe(&self, _input: &Value) -> bool { true }
             fn is_deferred(&self) -> bool { true }
+            async fn preflight_hook(&self, input: &Value, context: &ToolExecutionContext) -> Result<(), String> {
+                self.0.preflight().await?;
+                let managers = self.0.connected_managers().map_err(|_| {
+                    "MCP resource catalog is unavailable; call mcp_connect first".to_owned()
+                })?;
+                $inner::new(managers).preflight_hook(input, context).await
+            }
             async fn execute(&self, input: Value) -> ToolResult {
+                if self.0.preflight().await.is_err() {
+                    return safe_error(SessionMcpConnectFailure::ResourceUnavailable);
+                }
                 match self.0.connected_managers() {
                     Ok(managers) => $inner::new(managers).execute(input).await,
                     Err(error) => safe_error(error),
@@ -563,9 +617,15 @@ mod tests {
         connects: Arc<AtomicUsize>,
         manager: Mutex<Option<Arc<McpManager>>>,
         secret: String,
+        authorized: Arc<AtomicBool>,
     }
     #[async_trait]
     impl SessionMcpConnector for Connector {
+        async fn preflight(&self, bindings: &[SessionMcpBindingRef]) -> Result<(), String> {
+            assert_eq!(bindings[0].resource_id(), "server-id");
+            if !self.authorized.load(Ordering::Acquire) { return Err("binding withdrawn".into()); }
+            Ok(())
+        }
         async fn connect(&self, bindings: &[SessionMcpBindingRef])
             -> Result<Vec<Arc<McpManager>>, SessionMcpConnectFailure>
         {
@@ -577,13 +637,13 @@ mod tests {
         }
     }
 
-    fn fixture() -> (LazyMcpRuntime, Arc<AtomicUsize>, Arc<Mutex<Vec<Value>>>, Arc<AtomicUsize>, String) {
+    fn fixture() -> (LazyMcpRuntime, Arc<AtomicUsize>, Arc<Mutex<Vec<Value>>>, Arc<AtomicUsize>, String, Arc<AtomicBool>) {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let closes = Arc::new(AtomicUsize::new(0));
         let manager = Arc::new(McpManager::new_for_test_with_tools(vec![(
             "bound", true, vec![McpToolDef {
                 name: "lookup".to_owned(), description: Some("Lookup".to_owned()),
-                input_schema: json!({"type":"object"}), annotations: None,
+                input_schema: json!({"type":"object","additionalProperties":false}), annotations: None,
             }], Box::new(Transport {
                 responses: Mutex::new(VecDeque::from([json!({
                     "content": [{"type":"text","text":"fixture result"}], "isError": false
@@ -592,19 +652,46 @@ mod tests {
         )]));
         let connects = Arc::new(AtomicUsize::new(0));
         let secret = "fixture-secret-never-serialized".to_owned();
+        let authorized = Arc::new(AtomicBool::new(true));
         let runtime = LazyMcpRuntime::new(
             vec![SessionMcpBindingRef::new("server-id", "mcp:server-id@7").unwrap()],
             Arc::new(Connector {
                 connects: Arc::clone(&connects), manager: Mutex::new(Some(manager)),
-                secret: secret.clone(),
+                secret: secret.clone(), authorized: authorized.clone(),
             }),
         ).unwrap();
-        (runtime, connects, requests, closes, secret)
+        (runtime, connects, requests, closes, secret, authorized)
+    }
+
+    #[tokio::test]
+    async fn hook_preflight_never_connects_or_dispatches_and_checks_exact_target_schema() {
+        let (runtime, connects, requests, _, _, authorized) = fixture();
+        let context = ToolExecutionContext::from_scoped_tool_call("preflight", "mcp");
+        let proxy = GenericMcpToolProxy::new(runtime.clone());
+        McpConnectTool::new(runtime.clone()).preflight_hook(&json!({}), &context).await.unwrap();
+        let error = proxy.preflight_hook(&json!({"server":"bound","tool":"lookup","arguments":{}}), &context).await.unwrap_err();
+        assert!(error.contains("mcp_connect"));
+        assert_eq!(connects.load(Ordering::Acquire), 0);
+        assert!(requests.lock().unwrap().is_empty());
+        runtime.activate().await.unwrap();
+        proxy.preflight_hook(&json!({"server":"bound","tool":"lookup","arguments":{}}), &context).await.unwrap();
+        assert!(proxy.preflight_hook(&json!({"server":"other","tool":"lookup","arguments":{}}), &context).await.is_err());
+        // Top-level arguments is an object but the exact tool rejects unknown
+        // fields, proving the generic wrapper is not the authorization schema.
+        assert!(proxy.preflight_hook(&json!({"server":"bound","tool":"lookup","arguments":{"private":"do-not-share"}}), &context).await.is_err());
+        assert!(requests.lock().unwrap().is_empty());
+        assert_eq!(connects.load(Ordering::Acquire), 1);
+        authorized.store(false, Ordering::Release);
+        let result = proxy.execute(json!({"server":"bound","tool":"lookup","arguments":{}})).await;
+        assert!(result.is_error);
+        assert!(requests.lock().unwrap().is_empty(), "withdrawal after preflight must fence dispatch");
+        assert!(runtime.activate().await.is_err(), "cached activation must recheck authority");
+        runtime.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn zero_connection_before_explicit_activation_then_real_proxy_call() {
-        let (runtime, connects, requests, _closes, secret) = fixture();
+        let (runtime, connects, requests, _closes, secret, _) = fixture();
         let proxy = GenericMcpToolProxy::new(runtime.clone());
         let before = proxy.execute(json!({
             "server":"bound", "tool":"lookup", "arguments":{}
@@ -629,7 +716,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_is_idempotent_and_closes_connected_manager() {
-        let (runtime, _, _, closes, _) = fixture();
+        let (runtime, _, _, closes, _, _) = fixture();
         assert_eq!(runtime.activation_snapshot().generation, 0);
         let mut activation = runtime.subscribe_activation();
         runtime.activate().await.unwrap();
@@ -659,7 +746,7 @@ mod tests {
 
     #[test]
     fn schemas_never_expose_binding_session_or_secret_fields() {
-        let (runtime, _, _, _, secret) = fixture();
+        let (runtime, _, _, _, secret, _) = fixture();
         for schema in [
             McpConnectTool::new(runtime.clone()).input_schema(),
             GenericMcpToolProxy::new(runtime.clone()).input_schema(),
@@ -675,7 +762,7 @@ mod tests {
 
     #[test]
     fn all_lazy_mcp_tools_are_deferred_until_tool_search() {
-        let (runtime, connects, _, _, _) = fixture();
+        let (runtime, connects, _, _, _, _) = fixture();
         let mut registry = nomi_tools::registry::ToolRegistry::new();
         for tool in [
             Box::new(McpConnectTool::new(runtime.clone())) as Box<dyn Tool>,

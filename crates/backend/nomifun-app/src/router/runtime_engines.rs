@@ -266,6 +266,8 @@ impl RuntimeEngineHost {
 struct NomiAdmission;
 pub(crate) fn validate_nomi_snapshot(snapshot: &nomifun_agent_contracts::ResolvedSnapshotEnvelope) -> Result<(), AppError> {
     use nomifun_agent_contracts::{ContributionSourceKind, PluginSourceKind};
+    nomifun_ai_agent::tool_middleware::validate_selection(&snapshot.content)
+        .map_err(|e| AppError::Conflict(e.to_string()))?;
     let selected = snapshot.content.enabled_capabilities.iter().collect::<Vec<_>>();
     let resources = selected.iter().any(|entry| entry.capability.id.as_ref() == "mcp.resource");
     if resources && selected.iter().any(|entry| entry.capability.id.as_ref() == "mcp.tool_proxy") {
@@ -307,6 +309,7 @@ pub(crate) fn validate_nomi_snapshot(snapshot: &nomifun_agent_contracts::Resolve
     Ok(())
 }
 impl RuntimeEngineAdmission for NomiAdmission {
+    fn supports_tool_hooks(&self, _binding: &RuntimeEngineBinding) -> bool { true }
     fn uses_nomi_session(&self, _binding: &RuntimeEngineBinding) -> bool { true }
 
     fn validate_snapshot(&self, binding: &RuntimeEngineBinding, snapshot: &nomifun_agent_contracts::ResolvedSnapshotEnvelope) -> Result<(), AppError> {
@@ -321,7 +324,7 @@ impl RuntimeEngineAdmission for NomiAdmission {
 pub(crate) fn nomi_descriptor() -> RuntimeEngineDescriptor {
     RuntimeEngineDescriptor {
         family_id: "nomifun.nomi".into(),
-        build_id: format!("{}-host62", env!("CARGO_PKG_VERSION")),
+        build_id: format!("{}-host63", env!("CARGO_PKG_VERSION")),
         build_digest: format!(
             "{:x}",
             Sha256::digest(
@@ -364,6 +367,22 @@ pub(crate) fn nomi_descriptor() -> RuntimeEngineDescriptor {
                     include_str!("../../../nomifun-agent-kernel/src/compiler.rs"),
                     include_str!("../../../nomifun-agent-kernel/src/session_capabilities.rs"),
                     include_str!("../../../nomifun-ai-agent/src/runtime_admission.rs"),
+                    include_str!("../../../nomifun-agent-contracts/src/tool_middleware.rs"),
+                    include_str!("../../../nomifun-ai-agent/src/tool_middleware.rs"),
+                    include_str!("../../../nomifun-ai-agent/src/model_middleware.rs"),
+                    include_str!("nomi_core_tool_discovery.rs"),
+                    include_str!("../../../../agent/nomi-agent/src/tool_middleware.rs"),
+                    include_str!("../../../../agent/nomi-agent/src/tool_execution.rs"),
+                    include_str!("../../../../agent/nomi-agent/src/engine/mod.rs"),
+                    include_str!("../../../../agent/nomi-tools/src/lib.rs"),
+                    include_str!("../../../../agent/nomi-tools/src/read.rs"),
+                    include_str!("../../../../agent/nomi-tools/src/write.rs"),
+                    include_str!("../../../../agent/nomi-tools/src/edit.rs"),
+                    include_str!("../../../../agent/nomi-tools/src/apply_patch.rs"),
+                    include_str!("../../../../agent/nomi-tools/src/bash.rs"),
+                    include_str!("../../../../agent/nomi-tools/src/exec_command.rs"),
+                    include_str!("../../../../agent/nomi-agent/src/lazy_mcp.rs"),
+                    include_str!("../../../../agent/nomi-mcp/src/manager.rs"),
                     include_str!("../../../nomifun-agent-domain-wave2/src/lib.rs"),
                     include_str!("../../../nomifun-agent-domain-wave2/src/workspace_schema.rs"),
                     include_str!("../../../nomifun-agent-domain-wave2/src/process_schema.rs"),

@@ -59,6 +59,16 @@ export interface PluginRuntimeGenerateRequest {
 const draftPath = (id: string) =>
   `/api/plugins/drafts/${encodeURIComponent(id)}`;
 type DraftCommand = { id: string; expected_revision: number };
+export interface PluginServiceTestConfirmation {
+  draft_id: string;
+  expected_revision: number;
+  release_digest: string;
+  receipt_id: string;
+  display_name: string;
+}
+type SaveDraftCommand = DraftCommand & {
+  acknowledge_service_test?: { release_digest: string; receipt_id: string };
+};
 export const pluginRuntimeProduct = {
   workspace: httpGet<PluginRuntimeWorkspace, void>('/api/plugins/workspace'),
   updateWorkspace: httpPost<PluginRuntimeWorkspace, PluginRuntimeWorkspace>(
@@ -67,6 +77,9 @@ export const pluginRuntimeProduct = {
   drafts: httpGet<PluginRuntimeDraft[], void>('/api/plugins/drafts'),
   agentSessionTemplate: httpPost<PluginRuntimeDraft, void>(
     '/api/plugins/drafts/from-template/agent-session-view',
+  ),
+  beforeToolTemplate: httpPost<PluginRuntimeDraft, void>(
+    '/api/plugins/drafts/from-template/before-tool',
   ),
   draft: httpGet<PluginRuntimeDraft, { id: string }>(({ id }) => draftPath(id)),
   generate: httpPost<PluginRuntimeDraft, PluginRuntimeGenerateRequest>(
@@ -81,9 +94,11 @@ export const pluginRuntimeProduct = {
     ({ expected_revision }) => ({ expected_revision }),
   ),
   save: withResponseMap(
-    httpPost<PluginRuntimeWorkshop, DraftCommand>(
+    httpPost<PluginRuntimeWorkshop, SaveDraftCommand>(
       ({ id }) => `${draftPath(id)}/save`,
-      ({ expected_revision }) => ({ expected_revision }),
+      ({ expected_revision, acknowledge_service_test }) => ({ expected_revision,
+        ...(acknowledge_service_test ? { acknowledge_service_test } : {}),
+      }),
     ),
     (value) => ({
       ...value,

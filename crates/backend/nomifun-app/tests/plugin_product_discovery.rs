@@ -205,6 +205,9 @@ fn discovery_capability(id: &str) -> CapabilityManifest {
     }
 }
 
+#[path = "plugin_product_before_tool.rs"]
+mod before_tool;
+
 #[path = "plugin_product_before_model.rs"]
 mod before_model;
 

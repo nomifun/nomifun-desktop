@@ -1445,6 +1445,16 @@ struct NomiCorePluginProductToolInvoker {
 
 #[async_trait]
 impl NomiPluginProductToolInvoker for NomiCorePluginProductToolInvoker {
+    async fn preflight(&self, request: NomiPluginProductToolInvocation) -> Result<(), NomiPluginToolError> {
+        let owner = super::engine_plugin_product_tools::PluginProductOwner {
+            application: self.application.clone(), receipts: self.receipts.clone(),
+        };
+        owner.preflight(&self.owner_user_id, request.capability(), &request.action().action_id,
+            request.operation_id().clone(), request.input().clone()).await.map_err(|error| match error {
+                super::engine_plugin_product_tools::PluginProductCallError::Rejected(message) => NomiPluginToolError::Contract(message),
+                super::engine_plugin_product_tools::PluginProductCallError::Unknown(message) => NomiPluginToolError::OutcomeUnknown(message),
+            })
+    }
     async fn invoke(
         &self,
         request: NomiPluginProductToolInvocation,
@@ -1453,7 +1463,8 @@ impl NomiPluginProductToolInvoker for NomiCorePluginProductToolInvoker {
             application: self.application.clone(), receipts: self.receipts.clone(),
         };
         owner.invoke(&self.owner_user_id, &self.session_id, request.capability(),
-            &request.action().action_id, request.operation_id().clone(), request.input().clone())
+            &request.action().action_id, request.operation_id().clone(), request.input().clone(),
+            nomifun_plugin_platform::runtime::PluginRuntimeCallCancellation::from_shared_flag(request.cancellation().shared_flag()))
             .await.map_err(|error| match error {
                 super::engine_plugin_product_tools::PluginProductCallError::Rejected(message) => NomiPluginToolError::Contract(message),
                 super::engine_plugin_product_tools::PluginProductCallError::Unknown(message) => NomiPluginToolError::OutcomeUnknown(message),
@@ -1529,6 +1540,10 @@ pub(super) fn compile_nomi_plugin_snapshot(
         },
     )
     .map_err(kernel_error_to_app)?;
+    // Existing Sessions must enforce the same source-aware consumer admission
+    // as preview/save; Mount snapshots intentionally do not embed action lists.
+    super::nomi_core_tool_discovery::validate_snapshot(&registry, &compiled.envelope)
+        .map_err(control_plane_error_to_app)?;
     if compiled.envelope != persisted {
         return Err(AppError::Conflict(
             "current Kernel compilation differs from the persisted Nomi resolved Snapshot"

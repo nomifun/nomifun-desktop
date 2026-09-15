@@ -6,6 +6,8 @@
   background: var(--color-bg-1);
   color: var(--color-text-1);
 }
+.publishCheck { display: flex; flex-direction: column; gap: 12px; }
+.publishCheck p { margin: 0; color: var(--color-text-2); line-height: 1.7; }
 .header {
   display: flex;
   align-items: center;

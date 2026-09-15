@@ -42,13 +42,22 @@
     "closeFailed": "The old view was disconnected locally, but server revocation could not be confirmed. Retry closing the plugin from its library before relying on revocation."
   },
   "middlewareOrder": {
-    "title": "Model request middleware order",
-    "hint": "Selected before_model middleware runs in this order. Unlisted middleware follows in ID order; each receives the previous result. This does not change permissions or Context order. Save to apply to new sessions; existing sessions keep their frozen order.",
-    "empty": "Add request middleware capabilities to configure their order.",
+    "title": "Execution extensions",
+    "hint": "Selected extensions run in this order within their stage. Unlisted extensions follow in ID order. Model request extensions adjust the request; tool checks allow or block execution. Save this Agent to apply changes to new sessions; existing sessions keep their frozen order.",
+    "empty": "Select published execution extensions in Capabilities to configure their order here.",
     "up": "Move middleware {{name}} earlier",
     "down": "Move middleware {{name}} later",
-    "reset": "Use default middleware ID order",
-    "missing": "Middleware is unavailable or no longer selected. Restore it or reset the order."
+    "reset": "Use default extension ID order",
+    "missing": "Extension is unavailable or no longer selected. Restore it or reset the order.",
+    "toolAccess": "Selected tool checks can read the tool name and the parameter view shared by the host. They can block execution, but cannot grant permissions, replace your approval or change tool parameters. A failed check stops execution.",
+    "createBeforeTool": "Create a before-tool check",
+    "createHint": "Create an editable draft, publish it explicitly, then return to Capabilities to select it for this Agent. Creating a draft does not enable it.",
+    "createFailed": "The check draft could not be created. Try again explicitly; no extension was selected.",
+    "phase": {
+      "before_model": "Before model request",
+      "before_tool": "Before tool execution",
+      "unknown": "Stage unrecognized"
+    }
   },
   "contextOrder": {
     "title": "Context contribution order",

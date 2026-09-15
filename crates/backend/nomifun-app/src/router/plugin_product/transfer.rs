@@ -50,6 +50,7 @@ pub(super) async fn inspect(
 ) -> Result<Json<ApiResponse<Draft>>, AppError> {
     let service = service(&state)?;
     let mut draft = Draft {
+        service_test_confirmation: None,
         id: uuid::Uuid::now_v7().to_string(),
         revision: 0,
         name: request

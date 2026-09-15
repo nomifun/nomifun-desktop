@@ -31,6 +31,9 @@ use nomifun_agent_contracts::{
 };
 use serde_json::json;
 
+#[path = "invocation_preflight_tests.rs"]
+mod invocation_preflight_tests;
+
 #[path = "dependency_call_tests.rs"]
 mod dependency_call_tests;
 

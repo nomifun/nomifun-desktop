@@ -30,6 +30,7 @@ const SYSTEM: &str = r#"You create complete, polished, immediately usable Plugin
 Return only a JSON object with fields: name, description, assistant_message, html, service_source, source_manifest.
 html is a full HTML document when a page helps the user, otherwise the empty string. service_source is null when no backend is needed; otherwise it is a complete Node ES module exporting async function start(context) returning { async invoke({method,payload,signal}) { ... }, async dispose() { ... } }. Built-in Node modules and fetch are available in the service. Do not invent connected accounts or credentials or use third-party packages. Implement only the effects required by the user. Clean up timers in dispose and honor cancellation. For persistence use context.storage.kv.get(key) (returns {value,revision}), .set(key,value), .delete(key). No arbitrary paths, embedded secrets, or access to the host application's database.
 source_manifest is null for a simple page or an object with actions and optional lifecycle ('on_demand' or 'continuous'). Each action has id (a unique lowercase method name), name, description, input_schema, output_schema, and effect ('pure', 'read_local', 'read_sensitive', 'write_reversible', 'write_durable', 'execute_local', 'external_transmit', 'destructive', or 'irreversible'). Use the strongest actual effect. Provide accurate JSON schemas. Every declared action must be implemented by invoke using exactly its id as method. NomiFun exposes these actions to the AI assistant. A page can invoke the same backend with await window.nomi.service.invoke(method,payload). When window.nomi.preview is true, backend work is unavailable: show a clear save-first explanation instead of calling the service or inventing a result. Use continuous only for explicitly requested ongoing background work.
+For an Agent execution extension, copy the matching entry from available_execution_extensions into source_manifest.actions, preserving its exact id, input_schema, output_schema and pure effect. You may change its name and description. These reserved actions are hidden host consumers, not model-callable tools. Implement the exact method in the ordinary Service; the user must publish, select the capability in a Nomi Agent, save and start a new session. agent.before_tool can only return {decision:'allow'} or {decision:'deny',reason:'...'} (nonempty reason, at most 2048 UTF-8 bytes); do not patch arguments, approve permissions or call a target tool yourself. Inspect only supplied redacted arguments. Preserve original before_model behavior when editing it. Do not invent unsupported hook phases, an Engine loader or a parallel event system. Honor signal.aborted before asynchronous work and listen for abort; never treat cancellation as allow.
 Only when the user asks for a replacement Agent session page, include source_manifest.agent_view with nonempty name and description. This feature requires explicit selection of this exact release by the user. Use window.nomi.agentSession.observe({after_seq:0,limit:50}), .turn({content:text},intentKey), and .cancel() through the existing SDK. Keep the page a minimal chat client: poll persisted history, keep input local to the page, and use the built-in view for unsupported controls. Never automatically resend a turn after a timeout or start one on page load; show unconfirmed outcomes and ask the user to check host history. Do not build another Session store, durable composer, autosave or pending-request recovery system. In preview or without a Session grant, explain how to select the page instead of fabricating conversation data. No separate service_source is required for this UI. Preserve trusted host recovery controls; never access the parent or host database.
 Use the language of the user's request. The HTML must be a complete self-contained document with inline CSS and JavaScript. No external scripts, packages, frameworks, CDN, imports, images, network requests, popups or parent-window access. Use semantic HTML controls and CSS; use text or CSS for visual decoration. Implement the user's actual requested interactions, never a title-only template or fake success. If a feature cannot be implemented with the available browser and storage capabilities, explain the limitation honestly in assistant_message and provide the usable part without pretending external services are connected.
 Persistent storage API is provided by the host: await window.nomi.storage.get(key) returns a JSON value or null; await window.nomi.storage.set(key,value); await window.nomi.storage.delete(key). These methods wait for the host to connect. Always use this API for persistent data. Never use localStorage, sessionStorage, indexedDB, cookies or fetch. In preview the same storage API is temporary; a saved app uses its own durable storage. Start with an empty actual user dataset, not fictitious personal records. You may show clearly labeled placeholders in an empty state.
@@ -133,6 +134,7 @@ pub(super) async fn generate(
         draft
     } else {
         let mut draft = Draft {
+        service_test_confirmation: None,
             id: uuid::Uuid::now_v7().to_string(),
             revision: 0,
             name: "".into(),
@@ -191,6 +193,7 @@ pub(super) async fn generate(
         role: "user".into(),
         content: request.requirement.trim().to_owned(),
     });
+    draft.service_test_confirmation = None;
     draft.status = "generating".into();
     draft.error = None;
     service.put_draft(&owner, &mut draft).await?;
@@ -223,6 +226,7 @@ pub(super) async fn generate(
             Ok(app) => {
                 latest.name = app.name;
                 latest.description = app.description;
+                latest.service_test_confirmation = None;
                 latest.html = app.html;
                 latest.service_source = app.service_source;
                 latest.source_manifest = app.source_manifest;
@@ -268,7 +272,14 @@ impl PluginProductService {
         )
         .await
         .map_err(|_| AppError::ProviderUnavailable("Connect an available chat model".into()))?;
-        let prompt=serde_json::to_string(&serde_json::json!({"conversation":draft.messages,"current_html":draft.html,"current_service_source":draft.service_source,"current_manifest":draft.source_manifest,"instruction":"Return the complete plugin. Preserve existing functions and stored data. Include every current service method and declaration unless the user explicitly asks to remove them."})).map_err(internal)?;
+        let extensions = [
+            (nomifun_agent_contracts::model_middleware::action(), nomifun_agent_contracts::model_middleware::schemas(), "模型请求前处理"),
+            (nomifun_agent_contracts::tool_middleware::before_action(), nomifun_agent_contracts::tool_middleware::schemas(), "工具执行前检查"),
+        ].into_iter().map(|(action, schemas, name)| serde_json::json!({
+            "id": action.action_id, "name": name, "description": name,
+            "input_schema": schemas[&action.input_schema], "output_schema": schemas[&action.output_schema], "effect": "pure"
+        })).collect::<Vec<_>>();
+        let prompt=serde_json::to_string(&serde_json::json!({"conversation":draft.messages,"current_html":draft.html,"current_service_source":draft.service_source,"current_manifest":draft.source_manifest,"available_execution_extensions":extensions,"instruction":"Return the complete plugin. Preserve existing functions and stored data. Include every current service method and declaration unless the user explicitly asks to remove them."})).map_err(internal)?;
         let mut messages = vec![nomifun_ai_agent::factory::provider_config::user_message(
             prompt,
         )];

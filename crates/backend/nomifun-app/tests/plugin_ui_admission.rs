@@ -256,6 +256,7 @@ async fn assert_mixed_tool_still_executes(
     let result = services
         .plugin_runtime
         .invoke_agent_capability(PluginRuntimeAgentCapabilityInvocation {
+        cancellation: Default::default(),
             owner_user_id: owner,
             plugin_product_id: plugin_id.into(),
             capability: tool.capability.clone(),

@@ -3003,6 +3003,8 @@ fn validate_contributions(
     for capability in &contributions.capabilities {
         crate::model_middleware::validate_manifest(capability)
             .map_err(|reason| invalid("contributions.before_model", reason))?;
+        crate::tool_middleware::validate_manifest(capability)
+            .map_err(|reason| invalid("contributions.tool_hooks", reason))?;
         if capability.kind == crate::CapabilityKind::UiContribution || capability.contributions.ui_slot.is_some() {
             if capability.kind != crate::CapabilityKind::UiContribution
                 || capability.contributions.ui_slot.is_none()

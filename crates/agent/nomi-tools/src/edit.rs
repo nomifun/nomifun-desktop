@@ -8,6 +8,7 @@ use nomi_protocol::events::ToolCategory;
 use nomi_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
+use crate::file_cache::{GuardCacheAccess, cached_mtime_for_guard};
 use crate::file_cache::{FileStateCache, file_mtime_ms, update_cache_after_write};
 
 /// A single find/replace operation within a file.
@@ -58,6 +59,115 @@ pub struct EditTool {
 }
 
 impl EditTool {
+    fn prepare_edit(&self, input: &Value, cache_access: GuardCacheAccess) -> Result<(String, Vec<EditOp>), ToolResult> {
+        let Some(file_path) = input["file_path"].as_str() else {
+            return Err(ToolResult {
+                content: "Missing required parameter: file_path".to_string(),
+                is_error: true,
+                images: Vec::new(),
+            });
+        };
+
+        // Resolve a relative file_path against the session working directory
+        // (matching ReadTool/Grep/Glob/Bash) before any filesystem use.
+        let resolved = crate::path_guard::resolve_against_cwd(file_path, self.cwd.as_deref());
+        let file_path = resolved.as_str();
+
+        // Write-root containment (opt-in): reject edits outside the configured root.
+        if let Some(msg) = crate::path_guard::ensure_within_root(file_path, self.write_root.as_deref()) {
+            return Err(ToolResult {
+                content: msg,
+                is_error: true,
+                images: Vec::new(),
+            });
+        }
+
+        // Accept either a multi-edit `edits` array (applied atomically in one
+        // write) or the legacy single old_string/new_string triple.
+        let ops: Vec<EditOp> = if let Some(arr) = input["edits"].as_array() {
+            if arr.is_empty() {
+                return Err(ToolResult {
+                    content: "edits array must not be empty".to_string(),
+                    is_error: true,
+                    images: Vec::new(),
+                });
+            }
+            let mut ops = Vec::with_capacity(arr.len());
+            for (i, e) in arr.iter().enumerate() {
+                let (Some(o), Some(n)) = (e["old_string"].as_str(), e["new_string"].as_str()) else {
+                    return Err(ToolResult {
+                        content: format!("edit #{}: missing old_string or new_string", i + 1),
+                        is_error: true,
+                        images: Vec::new(),
+                    });
+                };
+                ops.push(EditOp {
+                    old_string: o.to_string(),
+                    new_string: n.to_string(),
+                    replace_all: e["replace_all"].as_bool().unwrap_or(false),
+                });
+            }
+            ops
+        } else {
+            let Some(old_string) = input["old_string"].as_str() else {
+                return Err(ToolResult {
+                    content: "Missing required parameter: old_string".to_string(),
+                    is_error: true,
+                    images: Vec::new(),
+                });
+            };
+            let Some(new_string) = input["new_string"].as_str() else {
+                return Err(ToolResult {
+                    content: "Missing required parameter: new_string".to_string(),
+                    is_error: true,
+                    images: Vec::new(),
+                });
+            };
+            vec![EditOp {
+                old_string: old_string.to_string(),
+                new_string: new_string.to_string(),
+                replace_all: input["replace_all"].as_bool().unwrap_or(false),
+            }]
+        };
+
+        let path = Path::new(file_path);
+
+        // Cache guard: "must Read first" + staleness detection.
+        if let Some(cache_arc) = &self.file_cache {
+            let Ok(cached_mtime) = cached_mtime_for_guard(cache_arc, path, cache_access) else {
+                return Err(ToolResult::error("File state cache is unavailable; refusing to edit"));
+            };
+            if cached_mtime.is_none() {
+                return Err(ToolResult {
+                    content: format!(
+                        "You must Read {} before editing. Use the Read tool first \
+                         so the file content is loaded into context.",
+                        file_path
+                    ),
+                    is_error: true,
+                    images: Vec::new(),
+                });
+            }
+            // Staleness check: compare cached mtime with current disk mtime.
+            let disk_mtime = file_mtime_ms(path);
+            if let (Some(cached_mt), Some(disk_mt)) = (cached_mtime, disk_mtime)
+                && cached_mt != disk_mt
+            {
+                return Err(ToolResult {
+                    content: format!(
+                        "File {} has been modified externally since last read. \
+                         Read the file again to see the current content before editing.",
+                        file_path
+                    ),
+                    is_error: true,
+                    images: Vec::new(),
+                });
+            }
+        }
+
+        Ok((resolved, ops))
+    }
+
     /// Create an EditTool with optional file state cache.
     ///
     /// When cache is `Some`, the tool enforces:
@@ -152,113 +262,21 @@ impl Tool for EditTool {
         false
     }
 
+    async fn preflight_hook(
+        &self,
+        input: &Value,
+        _context: &crate::ToolExecutionContext,
+    ) -> Result<(), String> {
+        self.prepare_edit(input, GuardCacheAccess::Inspect).map(|_| ()).map_err(|error| error.content)
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
-        let Some(file_path) = input["file_path"].as_str() else {
-            return ToolResult {
-                content: "Missing required parameter: file_path".to_string(),
-                is_error: true,
-                images: Vec::new(),
-            };
+        let (resolved, ops) = match self.prepare_edit(&input, GuardCacheAccess::Execute) {
+            Ok(args) => args,
+            Err(error) => return error,
         };
-
-        // Resolve a relative file_path against the session working directory
-        // (matching ReadTool/Grep/Glob/Bash) before any filesystem use.
-        let resolved = crate::path_guard::resolve_against_cwd(file_path, self.cwd.as_deref());
         let file_path = resolved.as_str();
-
-        // Write-root containment (opt-in): reject edits outside the configured root.
-        if let Some(msg) = crate::path_guard::ensure_within_root(file_path, self.write_root.as_deref()) {
-            return ToolResult {
-                content: msg,
-                is_error: true,
-                images: Vec::new(),
-            };
-        }
-
-        // Accept either a multi-edit `edits` array (applied atomically in one
-        // write) or the legacy single old_string/new_string triple.
-        let ops: Vec<EditOp> = if let Some(arr) = input["edits"].as_array() {
-            if arr.is_empty() {
-                return ToolResult {
-                    content: "edits array must not be empty".to_string(),
-                    is_error: true,
-                    images: Vec::new(),
-                };
-            }
-            let mut ops = Vec::with_capacity(arr.len());
-            for (i, e) in arr.iter().enumerate() {
-                let (Some(o), Some(n)) = (e["old_string"].as_str(), e["new_string"].as_str()) else {
-                    return ToolResult {
-                        content: format!("edit #{}: missing old_string or new_string", i + 1),
-                        is_error: true,
-                        images: Vec::new(),
-                    };
-                };
-                ops.push(EditOp {
-                    old_string: o.to_string(),
-                    new_string: n.to_string(),
-                    replace_all: e["replace_all"].as_bool().unwrap_or(false),
-                });
-            }
-            ops
-        } else {
-            let Some(old_string) = input["old_string"].as_str() else {
-                return ToolResult {
-                    content: "Missing required parameter: old_string".to_string(),
-                    is_error: true,
-                    images: Vec::new(),
-                };
-            };
-            let Some(new_string) = input["new_string"].as_str() else {
-                return ToolResult {
-                    content: "Missing required parameter: new_string".to_string(),
-                    is_error: true,
-                    images: Vec::new(),
-                };
-            };
-            vec![EditOp {
-                old_string: old_string.to_string(),
-                new_string: new_string.to_string(),
-                replace_all: input["replace_all"].as_bool().unwrap_or(false),
-            }]
-        };
-
         let path = Path::new(file_path);
-
-        // Cache guard: "must Read first" + staleness detection.
-        if let Some(cache_arc) = &self.file_cache {
-            let Ok(mut cache) = cache_arc.write() else {
-                return ToolResult::error("File state cache is unavailable; refusing to edit");
-            };
-            let cached = cache.get(path);
-            if cached.is_none() {
-                return ToolResult {
-                    content: format!(
-                        "You must Read {} before editing. Use the Read tool first \
-                         so the file content is loaded into context.",
-                        file_path
-                    ),
-                    is_error: true,
-                    images: Vec::new(),
-                };
-            }
-            // Staleness check: compare cached mtime with current disk mtime.
-            let cached_mtime = cached.map(|s| s.mtime_ms);
-            let disk_mtime = file_mtime_ms(path);
-            if let (Some(cached_mt), Some(disk_mt)) = (cached_mtime, disk_mtime)
-                && cached_mt != disk_mt
-            {
-                return ToolResult {
-                    content: format!(
-                        "File {} has been modified externally since last read. \
-                         Read the file again to see the current content before editing.",
-                        file_path
-                    ),
-                    is_error: true,
-                    images: Vec::new(),
-                };
-            }
-        }
 
         let content = match std::fs::read_to_string(file_path) {
             Ok(c) => c,

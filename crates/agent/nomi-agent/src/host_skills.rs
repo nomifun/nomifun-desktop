@@ -79,6 +79,16 @@ impl HostSkill {
         format!("skill:{}", self.metadata.name)
     }
 
+    /// Revalidate source authority and exact resource metadata without reading
+    /// or substituting Skill content. Execution performs these checks again.
+    pub async fn preflight_hook(&self, resource: Option<&str>) -> Result<(), String> {
+        self.access.authorize().await?;
+        if resource.is_some_and(|path| !self.resources.contains_key(path)) {
+            return Err("Skill resource is not declared by the selected package".into());
+        }
+        Ok(())
+    }
+
     pub async fn read(
         &self,
         args: Option<&str>,
@@ -217,6 +227,21 @@ mod tests {
     }
     fn access() -> Arc<Access> {
         Arc::new(Access(AtomicBool::new(true)))
+    }
+
+    #[tokio::test]
+    async fn hook_preflight_checks_declared_target_and_current_source_authority() {
+        let guard = access();
+        let hosted = HostSkill::read_only(
+            "pkg.guide", "guide", "BODY MUST STAY PRIVATE",
+            BTreeMap::from([("declared".into(), vec![0xff])]), guard.clone(),
+        ).unwrap();
+        hosted.preflight_hook(None).await.unwrap();
+        hosted.preflight_hook(Some("declared")).await.unwrap();
+        assert!(hosted.preflight_hook(Some("other")).await.is_err());
+        guard.0.store(false, Ordering::SeqCst);
+        assert!(hosted.preflight_hook(None).await.is_err());
+        assert!(hosted.read(None, None, None).await.is_err());
     }
 
     #[tokio::test]

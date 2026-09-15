@@ -80,6 +80,34 @@ impl ReadTool {
         Self { file_cache, cwd }
     }
 
+    fn parse_input(input: &Value) -> Result<(Vec<String>, Option<usize>, Option<usize>), ToolResult> {
+        let parse_range = |name: &str| match input.get(name) {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => value
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .map(Some)
+                .ok_or_else(|| format!("{name} must be a non-negative integer that fits usize")),
+        };
+        let (offset, limit) = match (parse_range("offset"), parse_range("limit")) {
+            (Ok(offset), Ok(limit)) => (offset, limit),
+            (Err(error), _) | (_, Err(error)) => return Err(ToolResult::error(error)),
+        };
+
+        let paths = match Self::requested_paths(input) {
+            Ok(paths) => paths,
+            Err(content) => {
+                return Err(ToolResult {
+                    content,
+                    is_error: true,
+                    images: Vec::new(),
+                });
+            }
+        };
+
+        Ok((paths, offset, limit))
+    }
+
     fn requested_paths(input: &Value) -> Result<Vec<String>, String> {
         let has_single = input.get("file_path").is_some();
         let has_batch = input.get("file_paths").is_some();
@@ -416,29 +444,18 @@ impl Tool for ReadTool {
         true
     }
 
-    async fn execute(&self, input: Value) -> ToolResult {
-        let parse_range = |name: &str| match input.get(name) {
-            None | Some(Value::Null) => Ok(None),
-            Some(value) => value
-                .as_u64()
-                .and_then(|value| usize::try_from(value).ok())
-                .map(Some)
-                .ok_or_else(|| format!("{name} must be a non-negative integer that fits usize")),
-        };
-        let (offset, limit) = match (parse_range("offset"), parse_range("limit")) {
-            (Ok(offset), Ok(limit)) => (offset, limit),
-            (Err(error), _) | (_, Err(error)) => return ToolResult::error(error),
-        };
+    async fn preflight_hook(
+        &self,
+        input: &Value,
+        _context: &crate::ToolExecutionContext,
+    ) -> Result<(), String> {
+        Self::parse_input(input).map(|_| ()).map_err(|error| error.content)
+    }
 
-        let paths = match Self::requested_paths(&input) {
-            Ok(paths) => paths,
-            Err(content) => {
-                return ToolResult {
-                    content,
-                    is_error: true,
-                    images: Vec::new(),
-                };
-            }
+    async fn execute(&self, input: Value) -> ToolResult {
+        let (paths, offset, limit) = match Self::parse_input(&input) {
+            Ok(parsed) => parsed,
+            Err(error) => return error,
         };
 
         let single = paths.len() == 1 && input.get("file_path").is_some();
@@ -1001,3 +1018,7 @@ mod tests {
         assert!(result.content.contains("omitted before base64 encoding"));
     }
 }
+
+#[cfg(test)]
+#[path = "hook_preflight_tests.rs"]
+mod hook_preflight_tests;

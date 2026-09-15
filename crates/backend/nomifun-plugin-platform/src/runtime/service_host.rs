@@ -24,7 +24,14 @@ pub struct PluginRuntimeCallCancellation {
     canceled: Arc<AtomicBool>,
 }
 
+impl PartialEq for PluginRuntimeCallCancellation {
+    fn eq(&self, other: &Self) -> bool { Arc::ptr_eq(&self.canceled, &other.canceled) }
+}
+
 impl PluginRuntimeCallCancellation {
+    /// Preserve an existing caller signal across the application boundary.
+    pub fn from_shared_flag(canceled: Arc<AtomicBool>) -> Self { Self { canceled } }
+
     pub fn cancel(&self) {
         self.canceled.store(true, Ordering::Release);
     }
@@ -554,6 +561,9 @@ impl PluginRuntimeServiceHostPort for InMemoryPluginRuntimeServiceHost {
         cancellation: PluginRuntimeCallCancellation,
         now_ms: i64,
     ) -> PluginRuntimePlatformResult<StrictJsonValue> {
+        if cancellation.is_canceled() {
+            return Err(PluginRuntimePlatformError::Canceled);
+        }
         let slot = self.slot(&spec.plugin_product_id).await.ok_or_else(|| {
             PluginRuntimePlatformError::ServiceUnavailable("Active Service is not bound".into())
         })?;

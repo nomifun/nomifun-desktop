@@ -135,6 +135,7 @@ pub struct PluginRuntimeSurfaceAsset {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PluginRuntimeAgentCapabilityInvocation {
+    pub cancellation: PluginRuntimeCallCancellation,
     pub owner_user_id: String,
     pub plugin_product_id: PluginProductId,
     pub capability: nomifun_agent_contracts::CapabilityRef,
@@ -150,6 +151,17 @@ pub struct PluginRuntimeAgentCapabilityInvocation {
 
 #[async_trait]
 pub trait PluginRuntimeAgentCapabilityPort: Send + Sync {
+    /// Read-only owner admission. Alternate ports must explicitly implement
+    /// this before they can disclose tool arguments to a pre-tool hook.
+    async fn preflight_agent_capability(
+        &self,
+        _request: &PluginRuntimeAgentCapabilityInvocation,
+    ) -> Result<(), PluginRuntimeApplicationError> {
+        Err(PluginRuntimeApplicationError::Invalid(
+            "Plugin Agent capability preflight is unsupported by this owner".into(),
+        ))
+    }
+
     async fn invoke_agent_capability(
         &self,
         request: PluginRuntimeAgentCapabilityInvocation,
@@ -558,10 +570,20 @@ impl PluginRuntimeApplicationService {
             })
     }
 
-    async fn invoke_agent_capability_inner(
+    /// Check the current Product owner and exact release without resolving a
+    /// Service spec, storage, module registration, or starting a process.
+    /// Invocation independently repeats these checks before dispatch.
+    pub async fn preflight_agent_capability(
         &self,
-        request: PluginRuntimeAgentCapabilityInvocation,
-    ) -> Result<StrictJsonValue, PluginRuntimeApplicationError> {
+        request: &PluginRuntimeAgentCapabilityInvocation,
+    ) -> Result<(), PluginRuntimeApplicationError> {
+        self.admit_agent_capability(request).await.map(|_| ())
+    }
+
+    async fn admit_agent_capability(
+        &self,
+        request: &PluginRuntimeAgentCapabilityInvocation,
+    ) -> Result<PluginRuntimeSnapshot, PluginRuntimeApplicationError> {
         validate_request_identity(request.owner_user_id.as_str(), "owner_user_id")?;
         validate_request_identity(request.plugin_product_id.as_ref(), "plugin_product_id")?;
         request
@@ -655,17 +677,11 @@ impl PluginRuntimeApplicationService {
                 "CAPABILITY_RESOURCE_BINDING_UNAVAILABLE".into(),
             ));
         }
-        if !capability
-            .manifest
-            .contributions
-            .actions
-            .iter()
-            .any(|action| action.action_id == request.action_id)
-        {
-            return Err(PluginRuntimeApplicationError::Invalid(
+        let action = capability.manifest.contributions.actions.iter()
+            .find(|action| action.action_id == request.action_id)
+            .ok_or_else(|| PluginRuntimeApplicationError::Invalid(
                 "CAPABILITY_ACTION_NOT_DECLARED".into(),
-            ));
-        }
+            ))?;
         if !request.action_allowlist.is_empty()
             && !request.action_allowlist.contains(&request.action_id)
         {
@@ -673,6 +689,46 @@ impl PluginRuntimeApplicationService {
                 "CAPABILITY_ACTION_NOT_ALLOWED".into(),
             ));
         }
+        let schema = stored.artifact.manifest.payload.schemas.get(&action.input_schema)
+            .ok_or_else(|| PluginRuntimeApplicationError::Invalid(
+                "Plugin Agent capability input schema is unavailable".into(),
+            ))?;
+        let validator = jsonschema::validator_for(&schema.0).map_err(|_| {
+            PluginRuntimeApplicationError::Invalid(
+                "Plugin Agent capability input schema is invalid".into(),
+            )
+        })?;
+        if !validator.is_valid(&request.payload.0) {
+            return Err(PluginRuntimeApplicationError::Invalid(
+                "Plugin Agent capability input does not match its action schema".into(),
+            ));
+        }
+        if stored.artifact.manifest.payload.service.is_none() {
+            return Err(PluginRuntimeApplicationError::Invalid(
+                "Plugin Agent capability requires an Active Service".into(),
+            ));
+        }
+        Ok(snapshot)
+    }
+
+    async fn invoke_agent_capability_inner(
+        &self,
+        request: PluginRuntimeAgentCapabilityInvocation,
+    ) -> Result<StrictJsonValue, PluginRuntimeApplicationError> {
+        if request.cancellation.is_canceled() {
+            return Err(PluginRuntimeApplicationError::Invalid(
+                "Plugin Agent capability was canceled before dispatch".into(),
+            ));
+        }
+        let snapshot = self.admit_agent_capability(&request).await?;
+        if request.cancellation.is_canceled() {
+            return Err(PluginRuntimeApplicationError::Invalid(
+                "Plugin Agent capability was canceled before dispatch".into(),
+            ));
+        }
+        let active = snapshot.active_release.as_ref().ok_or_else(|| {
+            PluginRuntimeApplicationError::Invalid("no Active Release".into())
+        })?;
         let spec = self
             .resolve_service_spec(
                 &snapshot,
@@ -693,7 +749,7 @@ impl PluginRuntimeApplicationService {
                 request.call_id,
                 request.action_id.as_ref().to_owned(),
                 request.payload,
-                PluginRuntimeCallCancellation::default(),
+                request.cancellation,
                 positive_now_ms(),
             )
             .await
@@ -6303,6 +6359,13 @@ fn ui_only_non_ui_manifest_digest(
 
 #[async_trait]
 impl PluginRuntimeAgentCapabilityPort for PluginRuntimeApplicationService {
+    async fn preflight_agent_capability(
+        &self,
+        request: &PluginRuntimeAgentCapabilityInvocation,
+    ) -> Result<(), PluginRuntimeApplicationError> {
+        PluginRuntimeApplicationService::preflight_agent_capability(self, request).await
+    }
+
     async fn invoke_agent_capability(
         &self,
         request: PluginRuntimeAgentCapabilityInvocation,
@@ -6560,6 +6623,9 @@ fn plugin_capability_catalog_item(
             nomifun_agent_contracts::CapabilityKind::UiContribution => "ui_contribution",
         }
         .to_owned(),
+        middleware_phase: nomifun_agent_contracts::tool_middleware::phase_for_actions(
+            &manifest.contributions.actions,
+        ).map(str::to_owned),
         display_name: manifest.display.name.clone(),
         description: manifest.display.description.clone(),
         source_package: nomifun_api_types::ExactCatalogRefDto {

@@ -16,6 +16,31 @@ pub(crate) fn validate_snapshot(
     snapshot: &ResolvedSnapshotEnvelope,
 ) -> Result<(), nomifun_agent_control_plane::ControlPlaneError> {
     tool_discovery::validate_selection(registry, &snapshot.content)
+        .and_then(|_| {
+            // Mount snapshots deliberately omit Product action projections.
+            // Inspect the exact, already-validated materialized manifest so an
+            // unordered Mount hook cannot disappear from consumer admission.
+            for resolved in snapshot.content.contributions().filter(|resolved| {
+                resolved.contribution_lock.source_kind != ContributionSourceKind::PluginProductActiveRelease
+            }) {
+                let current = registry.capability(&resolved.capability.id).ok_or_else(|| {
+                    nomifun_ai_agent::NomiPluginToolError::Contract(
+                        "Selected middleware source is no longer materialized".into(),
+                    )
+                })?;
+                if let Some(action) = current.manifest.contributions.actions.iter().find(|action| {
+                    action.action_id.as_ref() == nomifun_ai_agent::tool_middleware::BEFORE_ACTION_ID
+                        || action.action_id.as_ref() == nomifun_ai_agent::model_middleware::ACTION_ID
+                }) {
+                    return Err(nomifun_ai_agent::NomiPluginToolError::Contract(format!(
+                        "{} requires a Plugin Product Active Release; Mount and bundled sources are unsupported",
+                        action.action_id.as_ref(),
+                    )));
+                }
+            }
+            Ok(())
+        })
+        .and_then(|_| nomifun_ai_agent::tool_middleware::validate_selection(&snapshot.content))
         .and_then(|_| nomifun_ai_agent::model_middleware::validate_selection(&snapshot.content)).map_err(|error| {
         nomifun_agent_control_plane::ControlPlaneError::canonical(
             "CAPABILITY_UNAVAILABLE",

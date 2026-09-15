@@ -13,6 +13,7 @@ use nomi_types::skill_types::ContextModifier;
 use nomi_types::tool::{ToolDef, ToolResult};
 
 use nomi_tools::{ToolExecutionContext, registry::ToolRegistry};
+use crate::tool_middleware::{BeforeToolDecision, ToolCallMiddleware};
 
 pub(crate) const SKIPPED_AFTER_PRIOR_ERROR: &str = "\
 Skipped because a previous tool call in this assistant turn failed. Inspect the failed result first, then decide whether to retry with a larger timeout, use exec_command/write_stdin for long-running commands, or choose a different next step. Do not assume this step ran.";
@@ -21,10 +22,44 @@ Skipped because a previous tool call in this assistant turn failed. Inspect the 
 /// paired with per-call context modifiers (None for non-skill tools).
 pub struct ToolCallOutcome {
     pub results: Vec<ContentBlock>,
+    /// A failed gate stops inference after completed results have been accounted for.
+    pub fatal_hook_error: Option<String>,
+    /// Host-proven non-execution under a selected gate; never infer this from error text.
+    pub hook_not_dispatched_call_ids: BTreeSet<String>,
     pub modifiers: Vec<Option<ContextModifier>>,
     /// Machine-observed state-changing effects completed by nested Agents,
     /// paired by index with `results`.
     pub delegated_effects: Vec<Vec<String>>,
+}
+
+struct ToolHookRun<'a> {
+    middleware: &'a [Arc<dyn ToolCallMiddleware>],
+    fatal: std::sync::Mutex<Option<String>>,
+    dispatched: std::sync::Mutex<BTreeSet<String>>,
+}
+impl<'a> ToolHookRun<'a> {
+    fn new(middleware: &'a [Arc<dyn ToolCallMiddleware>]) -> Self {
+        Self { middleware, fatal: std::sync::Mutex::new(None), dispatched: std::sync::Mutex::new(BTreeSet::new()) }
+    }
+    fn record_dispatch(&self, id: &str) {
+        if !self.middleware.is_empty() {
+            self.dispatched.lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_owned());
+        }
+    }
+    fn not_dispatched(&self, calls: &[ContentBlock]) -> BTreeSet<String> {
+        if self.middleware.is_empty() { return BTreeSet::new(); }
+        let dispatched = self.dispatched.lock().unwrap_or_else(|e| e.into_inner());
+        calls.iter().filter_map(|call| match call {
+            ContentBlock::ToolUse { id, .. } if !dispatched.contains(id) => Some(id.clone()),
+            _ => None,
+        }).collect()
+    }
+    fn error(&self) -> Option<String> {
+        self.fatal.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+    fn fail(&self, error: String) {
+        self.fatal.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert(error);
+    }
 }
 
 /// Keeps the diagnostic `started`/`completed` lifecycle paired even when an
@@ -156,7 +191,9 @@ pub async fn execute_tool_calls_scoped(
     mut hooks: Option<&mut HookEngine>,
     compaction_level: nomi_compact::CompactionLevel,
     toon_enabled: bool,
+    middleware: &[Arc<dyn ToolCallMiddleware>],
 ) -> Result<ToolCallOutcome, std::convert::Infallible> {
+    let hook_run = ToolHookRun::new(middleware);
     let mut results = Vec::new();
     let mut modifiers = Vec::new();
     let mut delegated_effects = Vec::new();
@@ -184,18 +221,12 @@ pub async fn execute_tool_calls_scoped(
             // This preserves the provider-turn snapshot even when ToolSearch
             // and its target are emitted together, and guarantees deferred or
             // schema-invalid tools cannot run.
-            let mut completed: Vec<
-                Option<(ContentBlock, Option<ContextModifier>, Vec<String>)>,
-            > =
+            let mut completed: Vec<Option<(ContentBlock, Option<ContextModifier>, Vec<String>)>> =
                 std::iter::repeat_with(|| None)
                     .take(batch.calls.len())
                     .collect();
             for (idx, call) in batch.calls.iter().enumerate() {
-                if let Some(gated) = invocation_gate_result(
-                    registry,
-                    call,
-                    authority,
-                ) {
+                if let Some(gated) = invocation_gate_result(registry, call, authority) {
                     completed[idx] = Some((gated, None, Vec::new()));
                 }
             }
@@ -223,6 +254,7 @@ pub async fn execute_tool_calls_scoped(
                         hooks_shared,
                         compaction_level,
                         toon_enabled,
+                        &hook_run,
                     )
                 })
                 .collect();
@@ -248,11 +280,7 @@ pub async fn execute_tool_calls_scoped(
                     delegated_effects.push(Vec::new());
                     continue;
                 }
-                if let Some(gated) = invocation_gate_result(
-                    registry,
-                    call,
-                    authority,
-                ) {
+                if let Some(gated) = invocation_gate_result(registry, call, authority) {
                     halt_after_error = true;
                     results.push(gated);
                     modifiers.push(None);
@@ -273,6 +301,7 @@ pub async fn execute_tool_calls_scoped(
                         hooks_shared,
                         compaction_level,
                         toon_enabled,
+                        &hook_run,
                     )
                     .await;
                 }
@@ -290,6 +319,8 @@ pub async fn execute_tool_calls_scoped(
     }
 
     Ok(ToolCallOutcome {
+        fatal_hook_error: hook_run.error(),
+        hook_not_dispatched_call_ids: hook_run.not_dispatched(tool_calls),
         results,
         modifiers,
         delegated_effects,
@@ -423,6 +454,7 @@ async fn execute_single(
     compaction_level: nomi_compact::CompactionLevel,
     toon_enabled: bool,
 ) -> (ContentBlock, Option<ContextModifier>, Vec<String>) {
+    let hook_run = ToolHookRun::new(&[]);
     let authority = ProviderToolAuthority::from_request_tools(&registry.to_tool_defs());
     execute_single_with_authority(
         registry,
@@ -432,6 +464,7 @@ async fn execute_single(
         hooks,
         compaction_level,
         toon_enabled,
+        &hook_run,
     )
     .await
 }
@@ -444,9 +477,9 @@ async fn execute_single_with_authority(
     hooks: Option<&HookEngine>,
     compaction_level: nomi_compact::CompactionLevel,
     toon_enabled: bool,
+    hook_run: &ToolHookRun<'_>,
 ) -> (ContentBlock, Option<ContextModifier>, Vec<String>) {
-    let ContentBlock::ToolUse { name, input, .. } = call
-    else {
+    let ContentBlock::ToolUse { name, input, .. } = call else {
         unreachable!("execute_single called with non-ToolUse block")
     };
 
@@ -463,8 +496,73 @@ async fn execute_single_with_authority(
     } else {
         timeout
     };
-    match tokio::time::timeout(
-        timeout,
+    let deadline = tokio::time::Instant::now() + timeout;
+    let pre_checked = !hook_run.middleware.is_empty();
+    if pre_checked {
+        let ContentBlock::ToolUse { id, .. } = call else {
+            unreachable!()
+        };
+        let context = ToolExecutionContext::from_scoped_tool_call(execution_scope, id);
+        let check_deadline = deadline.min(tokio::time::Instant::now() + Duration::from_secs(5));
+        let checked = tokio::time::timeout_at(check_deadline, AssertUnwindSafe(async {
+            if hook_run.error().is_some() { return Err("before_tool stopped after an earlier gate failure".to_owned()); }
+            let tool = registry.get(name).ok_or_else(|| "before_tool target is unavailable".to_owned())?;
+            tool.preflight_hook(input, &context).await
+                .map_err(|_| "before_tool target admission is unsupported or rejected; target tool was not executed".to_owned())?;
+            if hook_run.error().is_some() { return Err("before_tool stopped after an earlier gate failure".to_owned()); }
+            if let Some(hooks) = hooks {
+                if let Err(error) = hooks.run_pre_tool_use(name, input).await {
+                    return Ok(BeforeToolDecision::Deny { reason: format!("Blocked by configured hook: {error}") });
+                }
+            }
+            let safe_input = crate::tool_middleware::input(context.operation_id(), id, name, input)?;
+            crate::tool_middleware::apply(hook_run.middleware, safe_input, || hook_run.error().is_some() || tokio::time::Instant::now() >= check_deadline).await
+        }).catch_unwind()).await;
+        let checked = match checked {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err("before_tool panicked; target tool was not executed".to_owned()),
+            Err(_) => Err(
+                "before_tool exceeded its shared checking deadline; target tool was not executed"
+                    .to_owned(),
+            ),
+        };
+        // A future may become ready in the same poll as its timer. Never
+        // dispatch a target after an over-budget check returned an apparent allow.
+        let checked = if tokio::time::Instant::now() >= check_deadline {
+            Err("before_tool exceeded its shared checking deadline; target tool was not executed".to_owned())
+        } else {
+            checked
+        };
+        let denied = match checked {
+            Ok(BeforeToolDecision::Allow {}) if hook_run.error().is_none() => None,
+            Ok(BeforeToolDecision::Deny { reason }) => Some(format!(
+                "Blocked by before_tool hook: {}. Target tool was not executed.",
+                nomi_redact::redact_secrets_owned(reason)
+            )),
+            Err(error) => {
+                hook_run.fail(error.clone());
+                Some(error)
+            }
+            Ok(BeforeToolDecision::Allow {}) => Some(
+                "before_tool stopped after an earlier gate failure; target tool was not executed"
+                    .to_owned(),
+            ),
+        };
+        if let Some(content) = denied {
+            return (
+                ContentBlock::ToolResult {
+                    tool_use_id: id.clone(),
+                    content,
+                    is_error: true,
+                    images: Vec::new(),
+                },
+                None,
+                Vec::new(),
+            );
+        }
+    }
+    match tokio::time::timeout_at(
+        deadline,
         execute_single_without_deadline(
             registry,
             call,
@@ -472,6 +570,8 @@ async fn execute_single_with_authority(
             hooks,
             compaction_level,
             toon_enabled,
+            pre_checked,
+            hook_run,
         ),
     )
     .await
@@ -523,6 +623,8 @@ async fn execute_single_without_deadline(
     hooks: Option<&HookEngine>,
     compaction_level: nomi_compact::CompactionLevel,
     toon_enabled: bool,
+    pre_checked: bool,
+    hook_run: &ToolHookRun<'_>,
 ) -> (ContentBlock, Option<ContextModifier>, Vec<String>) {
     let ContentBlock::ToolUse {
         id, name, input, ..
@@ -534,7 +636,8 @@ async fn execute_single_without_deadline(
     let mut execution_log = ToolExecutionLog::start(name, id);
 
     // Run pre-tool-use hooks
-    if let Some(hook_engine) = hooks
+    if !pre_checked
+        && let Some(hook_engine) = hooks
         && let Err(e) = hook_engine.run_pre_tool_use(name, input).await
     {
         execution_log.finish(false, "blocked_by_hook");
@@ -566,6 +669,7 @@ async fn execute_single_without_deadline(
             // a separate process.
             let execution_context =
                 ToolExecutionContext::from_scoped_tool_call(execution_scope, id);
+            hook_run.record_dispatch(id);
             let r = match AssertUnwindSafe(
                 tool.execute_with_context(input.clone(), &execution_context),
             )
@@ -722,7 +826,9 @@ pub async fn execute_tool_calls_with_protocol(
     mut hooks: Option<&mut HookEngine>,
     compaction_level: nomi_compact::CompactionLevel,
     toon_enabled: bool,
+    middleware: &[Arc<dyn ToolCallMiddleware>],
 ) -> Result<ToolCallOutcome, std::convert::Infallible> {
+    let hook_run = ToolHookRun::new(middleware);
     let mut results = Vec::new();
     let mut modifiers = Vec::new();
     let mut delegated_effects = Vec::new();
@@ -793,12 +899,12 @@ pub async fn execute_tool_calls_with_protocol(
                         hooks_shared,
                         compaction_level,
                         toon_enabled,
+                        &hook_run,
                     )
                 })
                 .collect();
             let batch_results = futures::future::join_all(futures).await;
-            for (offset, (block, modifier, nested_effects)) in
-                batch_results.into_iter().enumerate()
+            for (offset, (block, modifier, nested_effects)) in batch_results.into_iter().enumerate()
             {
                 let idx = group.start + offset;
                 if let (
@@ -835,8 +941,7 @@ pub async fn execute_tool_calls_with_protocol(
 
         // Serial path for stateful or non-concurrent tools.
         let call = &tool_calls[group.start];
-        let ContentBlock::ToolUse { id, name, .. } = call
-        else {
+        let ContentBlock::ToolUse { id, name, .. } = call else {
             continue;
         };
 
@@ -871,6 +976,7 @@ pub async fn execute_tool_calls_with_protocol(
                 hooks_shared,
                 compaction_level,
                 toon_enabled,
+                &hook_run,
             )
             .await;
         }
@@ -890,6 +996,8 @@ pub async fn execute_tool_calls_with_protocol(
     }
 
     Ok(ToolCallOutcome {
+        fatal_hook_error: hook_run.error(),
+        hook_not_dispatched_call_ids: hook_run.not_dispatched(tool_calls),
         results,
         modifiers,
         delegated_effects,
@@ -1238,6 +1346,7 @@ mod tests {
         };
 
         for scope in ["conversation-a:turn-1", "conversation-a:turn-2"] {
+            let hook_run = ToolHookRun::new(&[]);
             let (result, _, _) = execute_single_with_authority(
                 &registry,
                 &call,
@@ -1246,6 +1355,7 @@ mod tests {
                 None,
                 nomi_compact::CompactionLevel::Off,
                 false,
+                &hook_run,
             )
             .await;
             assert!(
@@ -1503,7 +1613,7 @@ mod tests {
             None,
             nomi_compact::CompactionLevel::Off,
             false,
-        )
+         &[])
         .await
         .unwrap();
         assert!(matches!(
@@ -1534,7 +1644,7 @@ mod tests {
             None,
             nomi_compact::CompactionLevel::Off,
             false,
-        )
+         &[])
         .await
         .unwrap();
         assert!(matches!(
@@ -1691,6 +1801,7 @@ mod tests {
         };
         let authority = ProviderToolAuthority::from_request_tools(&registry.to_tool_defs());
 
+        let hook_run = ToolHookRun::new(&[]);
         let (result, modifier, delegated_effects) = execute_single_with_authority(
             &registry,
             &call,
@@ -1699,6 +1810,7 @@ mod tests {
             None,
             nomi_compact::CompactionLevel::Off,
             false,
+            &hook_run,
         )
         .await;
 
@@ -1851,7 +1963,7 @@ mod tests {
             None,
             nomi_compact::CompactionLevel::Off,
             false,
-        )
+         &[])
         .await
         .unwrap();
 
@@ -1884,7 +1996,7 @@ mod tests {
 
         // With no deferred preflight these two concurrency-safe calls would be
         // grouped and ToolRunning would be emitted before execute_single.
-        let outcome = execute_tool_calls_with_protocol(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), &writer, "msg-protocol-concurrent", None, nomi_compact::CompactionLevel::Off, false)
+        let outcome = execute_tool_calls_with_protocol(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), &writer, "msg-protocol-concurrent", None, nomi_compact::CompactionLevel::Off, false, &[])
         .await
         .unwrap();
 
@@ -1913,7 +2025,7 @@ mod tests {
             deferred_call("protocol-target"),
         ];
 
-        let outcome = execute_tool_calls_with_protocol(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), &writer, "msg-protocol-frozen-gate", None, nomi_compact::CompactionLevel::Off, false)
+        let outcome = execute_tool_calls_with_protocol(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), &writer, "msg-protocol-frozen-gate", None, nomi_compact::CompactionLevel::Off, false, &[])
         .await
         .unwrap();
 
@@ -2001,3 +2113,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tool_execution_hook_tests.rs"]
+mod hook_tests;

@@ -17,6 +17,7 @@ pub mod manifest;
 pub mod plugin_runtime;
 pub mod model_route;
 pub mod model_middleware;
+pub mod tool_middleware;
 pub mod package;
 pub mod plugin_n1;
 pub mod preset;

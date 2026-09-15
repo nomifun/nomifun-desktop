@@ -65,7 +65,7 @@ async fn surface_revocation_during_session_read_withholds_success_and_private_er
             .await;
         let mut value = draft();
         service.put_draft(&owner, &mut value).await.unwrap();
-        let saved = service.save_draft(&owner, &mut value).await.unwrap();
+        let SaveOutcome::Saved(saved) = service.save_draft(&owner, &mut value, None).await.unwrap() else { panic!("UI-only save unexpectedly requested Service input") };
         let id = saved.plugin.plugin_id;
         let digest = saved.plugin.releases.active.unwrap().release_digest;
         let surface = service

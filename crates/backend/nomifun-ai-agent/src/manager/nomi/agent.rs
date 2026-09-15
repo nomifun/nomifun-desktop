@@ -1039,6 +1039,10 @@ impl NomiAgentManager {
             .map(|session| session.model_middleware()).transpose()
             .map_err(|error| AppError::Internal(format!("Nomi before_model assembly failed: {error}")))?
             .unwrap_or_default();
+        let tool_middleware = plugin_tool_session.as_ref()
+            .map(|session| session.tool_middleware()).transpose()
+            .map_err(|error| AppError::Internal(format!("Nomi tool check assembly failed: {error}")))?
+            .unwrap_or_default();
         let session_control_sink = plugin_tool_session
             .as_ref()
             .and_then(crate::NomiPluginToolSession::session_control_sink);
@@ -1520,6 +1524,9 @@ impl NomiAgentManager {
         }
         for middleware in model_middleware {
             engine.register_model_middleware(middleware);
+        }
+        for middleware in tool_middleware {
+            engine.register_tool_middleware(middleware);
         }
         if let Some(sink) = session_control_sink {
             let controls: [(&str, Box<dyn nomi_tools::Tool>); 3] = [
