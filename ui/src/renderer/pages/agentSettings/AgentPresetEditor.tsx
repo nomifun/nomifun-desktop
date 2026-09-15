@@ -147,6 +147,11 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   const busy = busyAction !== null;
   const unavailableCount = unavailableCapabilityReferences(draft.document, catalog.capabilities).length;
   const chatRouteRecord = draft.document.chat_route_records[AGENT_CHAT_MODEL_TASK];
+  const capabilityIds = draft.document.enabled_capabilities.map((selection) => String(selection.capability.id));
+  const mediaCapabilities = ['creation.image', 'creation.image_edit', 'creation.video', 'creation.music', 'creation.audio'];
+  const directCreation = capabilityIds.some((id) => mediaCapabilities.includes(id))
+    && capabilityIds.every((id) => [...mediaCapabilities, 'session.attachments.read', 'workshop.asset.read', 'workshop.asset.write'].includes(id));
+  const needsChatModel = !directCreation && !chatRouteRecord;
   const selectedSkills = new Set(draft.document.skill_bindings.map((skill) => skill.id));
   const catalogByReference = useMemo(() => new Map(catalog.capabilities.map((item) => [capabilityReferenceKey(item.capability), item])), [catalog.capabilities]);
   const patchDocument = (transform: Parameters<typeof updateDocument>[1]) => onDraftChange(updateDocument(draft, transform));
@@ -211,14 +216,14 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
               }
             />
           </label>
-          <label className={styles.field}>
+          {!directCreation && <label className={styles.field}>
             <span>{t('common.model')}</span>
             <AgentChatModelPicker
               record={chatRouteRecord}
               disabled={busy}
               onChange={applyChatRouteRecord}
             />
-          </label>
+          </label>}
           <label className={`${styles.field} ${styles.fieldWide}`}>
             <span>{t('agentSettings.fields.description')}</span>
             <Input
@@ -264,7 +269,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
             />
           </label>
         </div>
-        {!chatRouteRecord && (
+        {needsChatModel && (
           <Alert
             className={styles.inlineNotice}
             type='warning'
@@ -276,7 +281,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
           />
         )}
       </section>
-        {!chatRouteRecord && onOpenModels && <Button type='text' onClick={onOpenModels}>{t('agentSettings.workbench.manageModels')}</Button>}
+        {needsChatModel && onOpenModels && <Button type='text' onClick={onOpenModels}>{t('agentSettings.workbench.manageModels')}</Button>}
       </div>}
       {activeTab === 'extensions' && <div role='tabpanel' id='agent-panel-extensions' aria-labelledby='agent-tab-extensions'><section className={styles.section} id='agent-settings-skills-mcp'>
         <Collapse defaultActiveKey={[]} className={styles.advancedCollapse}>
@@ -366,10 +371,10 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
       </section></div>}
     </div>
     <footer className={styles.actionBar}>
-      <div className={styles.saveStatus}><span className={dirty || unavailableCount ? styles.statusWarningDot : styles.statusReadyDot} /><div><strong>{t(dirty ? 'agentSettings.workbench.pendingChanges' : 'agentSettings.workbench.savedHint')}</strong><span>{t(unavailableCount ? 'agentSettings.workbench.disabledSave' : !chatRouteRecord ? 'agentSettings.workbench.modelNeeded' : 'agentSettings.workbench.saveHint')}</span></div></div>
+      <div className={styles.saveStatus}><span className={dirty || unavailableCount ? styles.statusWarningDot : styles.statusReadyDot} /><div><strong>{t(dirty ? 'agentSettings.workbench.pendingChanges' : 'agentSettings.workbench.savedHint')}</strong><span>{t(unavailableCount ? 'agentSettings.workbench.disabledSave' : needsChatModel ? 'agentSettings.workbench.modelNeeded' : 'agentSettings.workbench.saveHint')}</span></div></div>
       <div className={styles.actionButtons}>
         {dirty && onDiscard && <Button type='text' disabled={busy} onClick={onDiscard}>{t('agentSettings.workbench.resetChanges')}</Button>}
-        {dirty || !editor.preset.current_stable_revision ? <Button type='primary' icon={<Save theme='outline' size={15} />} loading={busyAction === 'save'} disabled={busy || unavailableCount > 0 || !draft.display_name.trim() || !chatRouteRecord} onClick={onSave}>{t('common.save')}</Button> :
+        {dirty || !editor.preset.current_stable_revision ? <Button type='primary' icon={<Save theme='outline' size={15} />} loading={busyAction === 'save'} disabled={busy || unavailableCount > 0 || !draft.display_name.trim() || needsChatModel} onClick={onSave}>{t('common.save')}</Button> :
           <AgentConversationAction hasStableRevision={Boolean(editor.preset.current_stable_revision)} dirty={dirty} busy={busy} onClick={() => onStartConversation(editor.preset)} />}
       </div>
     </footer>

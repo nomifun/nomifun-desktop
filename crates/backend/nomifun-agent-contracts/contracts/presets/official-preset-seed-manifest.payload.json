@@ -1,6 +1,6 @@
 {
   "manifest_version": "1.0.0",
-  "target_first_party_contribution_digest": "cd85680e160f852a069bbeb8e58db3fe8b6e912b2585c792c9e4ba988b22b2bf",
+  "target_first_party_contribution_digest": "60e05105cf82aa55a8fd6a428b836e29e6ea18a0cef02eabfd91799fcb443868",
   "target_runtime_feature_inventory_digest": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
   "templates": {
     "chat.minimal": {
@@ -53,6 +53,26 @@
         },
         {
           "id": "memory.project.citation",
+          "version": "1.0.0"
+        },
+        {
+          "id": "creation.image",
+          "version": "1.0.0"
+        },
+        {
+          "id": "creation.image_edit",
+          "version": "1.0.0"
+        },
+        {
+          "id": "creation.video",
+          "version": "1.0.0"
+        },
+        {
+          "id": "creation.music",
+          "version": "1.0.0"
+        },
+        {
+          "id": "creation.audio",
           "version": "1.0.0"
         }
       ],
@@ -399,30 +419,6 @@
     "creative-studio.default": {
       "enabled_capabilities": [
         {
-          "id": "workshop.canvas.read",
-          "version": "1.0.0"
-        },
-        {
-          "id": "workshop.asset.read",
-          "version": "1.0.0"
-        },
-        {
-          "id": "workshop.canvas.edit",
-          "version": "1.0.0"
-        },
-        {
-          "id": "workshop.asset.write",
-          "version": "1.0.0"
-        },
-        {
-          "id": "workshop.template.run",
-          "version": "1.0.0"
-        },
-        {
-          "id": "creation.text",
-          "version": "1.0.0"
-        },
-        {
           "id": "creation.image",
           "version": "1.0.0"
         },
@@ -435,32 +431,29 @@
           "version": "1.0.0"
         },
         {
+          "id": "creation.music",
+          "version": "1.0.0"
+        },
+        {
           "id": "creation.audio",
           "version": "1.0.0"
         },
         {
-          "id": "plugin.read",
+          "id": "session.attachments.read",
           "version": "1.0.0"
         },
         {
-          "id": "plugin.edit",
+          "id": "workshop.asset.read",
           "version": "1.0.0"
         },
         {
-          "id": "plugin.publish",
-          "version": "1.0.0"
-        },
-        {
-          "id": "plugin.serve",
+          "id": "workshop.asset.write",
           "version": "1.0.0"
         }
       ],
       "skill_bindings": [],
       "required_resource_kinds": [
-        "asset_library",
-        "canvas",
-        "generation_provider",
-        "plugin"
+        "asset_library"
       ],
       "required_runtime_features": []
     }
@@ -475,12 +468,18 @@
     "assistant.general": {
       "required_capability_categories": [
         "attachments",
+        "generation",
         "knowledge",
         "project_memory",
         "web_research"
       ],
       "required_capability_ids": [
         "citation.render",
+        "creation.audio",
+        "creation.image",
+        "creation.image_edit",
+        "creation.music",
+        "creation.video",
         "fs.read",
         "knowledge.read",
         "knowledge.search",
@@ -646,34 +645,23 @@
     },
     "creative-studio.default": {
       "required_capability_categories": [
-        "canvas_asset",
+        "attachments",
         "editing",
-        "generation",
-        "plugin",
-        "templates"
+        "generation"
       ],
       "required_capability_ids": [
         "creation.audio",
         "creation.image",
         "creation.image_edit",
-        "creation.text",
+        "creation.music",
         "creation.video",
-        "plugin.edit",
-        "plugin.publish",
-        "plugin.read",
-        "plugin.serve",
+        "session.attachments.read",
         "workshop.asset.read",
-        "workshop.asset.write",
-        "workshop.canvas.edit",
-        "workshop.canvas.read",
-        "workshop.template.run"
+        "workshop.asset.write"
       ],
       "required_runtime_features": [],
       "required_resource_kinds": [
-        "asset_library",
-        "canvas",
-        "generation_provider",
-        "plugin"
+        "asset_library"
       ]
     }
   },

@@ -64,7 +64,7 @@ const expectClosed = async (trigger: HTMLButtonElement) => {
 
 afterEach(() => {
   cleanup();
-  document.getElementById('creative-studio-portal-root')?.remove();
+  document.getElementById('resource-page-portal-root')?.remove();
 });
 
 describe('CreativeAssetActionsMenu', () => {
@@ -92,7 +92,7 @@ describe('CreativeAssetActionsMenu', () => {
 
   test('portals the popup outside the card so card overflow cannot clip actions', async () => {
     const portal = document.createElement('div');
-    portal.id = 'creative-studio-portal-root';
+    portal.id = 'resource-page-portal-root';
     document.body.appendChild(portal);
     const { container, getByRole } = render(<article>{menu()}</article>);
     const popup = await openMenu(getByRole('button', { name: `更多：${asset.title}` }) as HTMLButtonElement);

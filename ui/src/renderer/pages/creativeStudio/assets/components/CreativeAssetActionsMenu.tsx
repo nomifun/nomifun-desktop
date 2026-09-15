@@ -8,6 +8,7 @@ import { Dropdown } from '@arco-design/web-react';
 import { Delete, Download, EditTwo, MoreOne, PreviewOpen } from '@icon-park/react';
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Link } from 'react-router-dom';
 
 import type { CreativeAsset } from '../types';
 import { creativeAssetDisplayTitle } from '../presentation';
@@ -24,7 +25,7 @@ interface CreativeAssetActionsMenuProps {
   onRemove?: CreativeAssetAction;
 }
 
-const popupContainer = () => document.getElementById('creative-studio-portal-root') ?? document.body;
+const popupContainer = () => document.getElementById('resource-page-portal-root') ?? document.body;
 const iconProps = { theme: 'outline' as const, size: 15, fill: 'currentColor', strokeWidth: 3 };
 
 /** Presentation-only menu: the page retains preview, edit and delete dialogs. */
@@ -47,7 +48,7 @@ const CreativeAssetActionsMenu: React.FC<CreativeAssetActionsMenuProps> = ({
   useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
 
   const focusMenu = useCallback((menu: HTMLDivElement | null) => {
-    const items = menu?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]');
+    const items = menu?.querySelectorAll<HTMLElement>('[role="menuitem"]');
     if (items?.length) items[focusLast.current ? items.length - 1 : 0]?.focus({ preventScroll: true });
   }, []);
 
@@ -65,15 +66,15 @@ const CreativeAssetActionsMenu: React.FC<CreativeAssetActionsMenuProps> = ({
     }
     if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
-    const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')];
+    const items = [...event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)')];
     if (!items.length) return;
-    const index = items.indexOf(event.currentTarget.ownerDocument.activeElement as HTMLButtonElement);
+    const index = items.indexOf(event.currentTarget.ownerDocument.activeElement as HTMLElement);
     const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
       : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
     items[next]?.focus();
   };
 
-  if (!actions.length) return null;
+  if (!actions.length && !asset.origin?.conversationId) return null;
   return (
     <Dropdown
       trigger='click'
@@ -105,6 +106,15 @@ const CreativeAssetActionsMenu: React.FC<CreativeAssetActionsMenuProps> = ({
               <span>{action.label}</span>
             </button>
           ))}
+          {asset.origin?.conversationId && <Link
+            role='menuitem'
+            className={styles.assetMenuItem}
+            to={`/conversation/${asset.origin.conversationId}`}
+            onClick={(event) => { event.stopPropagation(); closeAndRestoreFocus(); }}
+          >
+            <span aria-hidden='true'><PreviewOpen {...iconProps} /></span>
+            <span>跳转到会话</span>
+          </Link>}
         </div>
       ) : <span />}
     >

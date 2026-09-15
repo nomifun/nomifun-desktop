@@ -69,7 +69,6 @@ export const RESOURCE_KIND_I18N_KEYS: Readonly<Record<string, string>> = {
   companion_memory: 'companionMemory',
   computer: 'computer',
   customer: 'customer',
-  generation_provider: 'generationProvider',
   knowledge_base: 'knowledgeBase',
   mcp_server: 'mcpConnection',
   plugin: 'pluginRuntime',

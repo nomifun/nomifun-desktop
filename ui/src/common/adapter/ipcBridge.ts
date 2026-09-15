@@ -1130,6 +1130,7 @@ export const conversation = {
           content: p.input,
           files: p.files,
           inject_skills: p.inject_skills,
+          preset_id: p.preset_id,
         },
         { idempotencyKey, initialOnly: p.initial_only === true }
       );
@@ -3467,6 +3468,7 @@ interface ISendMessageParams {
   /** Automatic Guid/QuickStart handoff; never set for explicit user sends. */
   initial_only?: boolean;
   inject_skills?: string[];
+  preset_id?: AgentPresetId;
 }
 
 // Server-assigned identifier for the newly created user message. Clients must

@@ -1204,3 +1204,6 @@ async fn update_nomi_rejects_extra_model_from_patch() {
     let unchanged = svc.get(USER_ID, &conv.conversation_id).await.unwrap();
     assert_eq!(unchanged.model.unwrap().model, "gpt-4o");
 }
+
+#[path = "conversation_crud/creation.rs"]
+mod creation;

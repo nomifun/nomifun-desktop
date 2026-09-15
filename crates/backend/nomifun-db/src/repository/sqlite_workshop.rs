@@ -92,7 +92,8 @@ struct OriginReferences {
     provider_id: Option<String>,
     canvas_id: Option<String>,
     node_id: Option<String>,
-    workbench_kind: Option<String>,
+    conversation_id: Option<String>,
+    message_id: Option<String>,
     template_id: Option<String>,
     template_run_id: Option<String>,
     template_step_id: Option<String>,
@@ -136,7 +137,8 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
             provider_id: None,
             canvas_id: None,
             node_id: None,
-            workbench_kind: None,
+            conversation_id: None,
+            message_id: None,
             template_id: None,
             template_run_id: None,
             template_step_id: None,
@@ -156,6 +158,7 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
         "creationTaskId",
         "projectId",
         "workbenchKind",
+        "workbench_kind",
         "templateId",
         "templateRunId",
         "templateStepId",
@@ -177,36 +180,14 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
         ));
     }
     let node_id = optional_origin_id(object, "node_id")?;
-    let workbench_kind = match object.get("workbench_kind") {
-        None => None,
-        Some(Value::String(value)) if matches!(value.as_str(), "image" | "video" | "audio") => {
-            Some(value.clone())
-        }
-        Some(Value::String(value)) => {
-            return Err(DbError::Conflict(format!(
-                "workshop asset origin.workbench_kind {value:?} is invalid"
-            )));
-        }
-        Some(Value::Null) => {
-            return Err(DbError::Conflict(
-                "workshop asset origin.workbench_kind must be omitted when absent".into(),
-            ));
-        }
-        Some(_) => {
-            return Err(DbError::Conflict(
-                "workshop asset origin.workbench_kind must be image, video, or audio".into(),
-            ));
-        }
-    };
+    let conversation_id = optional_origin_id(object, "conversation_id")?;
+    let message_id = optional_origin_id(object, "message_id")?;
     let template_id = optional_origin_id(object, "template_id")?;
     let template_run_id = optional_origin_id(object, "template_run_id")?;
     let template_step_id = optional_origin_id(object, "template_step_id")?;
     let creation_task_id = optional_origin_id(object, "creation_task_id")?;
     let canvas_owner = node_id.is_some()
-        && workbench_kind.is_none()
         && (canonical_canvas_id.is_some() || legacy_canvas_id.is_some());
-    let standalone_owner =
-        canonical_canvas_id.is_none() && node_id.is_none() && workbench_kind.is_some();
     let template_owner_count = [
         template_id.is_some(),
         template_run_id.is_some(),
@@ -221,21 +202,12 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
                 .into(),
         ));
     }
-    let any_owner = canonical_canvas_id.is_some()
-        || legacy_canvas_id.is_some()
-        || node_id.is_some()
-        || workbench_kind.is_some();
-    if any_owner && !canvas_owner && !standalone_owner {
-        return Err(DbError::Conflict(
-            "workshop asset origin requires exactly one CanvasNode or standalone-workbench branch"
-                .into(),
-        ));
-    }
-    if any_owner && template_owner_count != 0 {
-        return Err(DbError::Conflict(
-            "workshop asset origin cannot combine Canvas or standalone ownership with template-step ownership"
-                .into(),
-        ));
+    let any_canvas = canonical_canvas_id.is_some() || legacy_canvas_id.is_some() || node_id.is_some();
+    let any_conversation = conversation_id.is_some() || message_id.is_some();
+    let conversation_owner = conversation_id.is_some() && message_id.is_some();
+    if (any_canvas && !canvas_owner) || (any_conversation && !conversation_owner)
+        || usize::from(canvas_owner) + usize::from(conversation_owner) + usize::from(template_owner_count == 3) > 1 {
+        return Err(DbError::Conflict("workshop asset origin requires one complete conversation, Canvas node, or template step branch".into()));
     }
     Ok(OriginReferences {
         provider_id,
@@ -245,7 +217,8 @@ fn origin_references(origin: Option<&str>) -> Result<OriginReferences, DbError> 
             None
         },
         node_id,
-        workbench_kind,
+        conversation_id,
+        message_id,
         template_id,
         template_run_id,
         template_step_id,
@@ -312,7 +285,8 @@ fn validate_prompt_library_asset_identity(
     if references.provider_id.is_some()
         || references.canvas_id.is_some()
         || references.node_id.is_some()
-        || references.workbench_kind.is_some()
+        || references.conversation_id.is_some()
+        || references.message_id.is_some()
         || references.template_id.is_some()
         || references.template_run_id.is_some()
         || references.template_step_id.is_some()
@@ -1095,7 +1069,6 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
             "SELECT creation_task_id FROM creation_tasks \
              WHERE project_id = ? \
                AND node_id IS NOT NULL \
-               AND workbench_kind IS NULL \
                AND template_id IS NULL \
                AND template_run_id IS NULL \
                AND template_step_id IS NULL \
@@ -1454,8 +1427,7 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
             }
         }
         let canvas_origin = references.canvas_id.is_some()
-            && references.node_id.is_some()
-            && references.workbench_kind.is_none();
+            && references.node_id.is_some();
         if canvas_origin {
             let canvas_id = references
                 .canvas_id
@@ -1501,63 +1473,20 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
                 )));
             }
         }
+        if let Some(conversation_id) = references.conversation_id.as_ref() {
+            let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages m JOIN conversations c ON c.conversation_id=m.conversation_id WHERE m.conversation_id=? AND m.message_id=?")
+                .bind(conversation_id).bind(references.message_id.as_deref()).fetch_one(&mut *tx).await?;
+            if exists != 1 { return Err(DbError::Conflict("workshop asset origin references a missing conversation turn".into())); }
+        }
         if let Some(creation_task_id) = references.creation_task_id {
-            let task = sqlx::query_as::<
-                _,
-                (
-                    Option<String>,
-                    Option<String>,
-                    Option<String>,
-                    Option<String>,
-                    Option<String>,
-                    Option<String>,
-                ),
-            >(
-                "UPDATE creation_tasks SET status = status WHERE creation_task_id = ? \
-                 RETURNING project_id, node_id, workbench_kind, template_id, template_run_id, template_step_id",
-            )
-            .bind(&creation_task_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let task = task.ok_or_else(|| {
-                DbError::Conflict(format!(
-                    "workshop asset origin references missing creation task '{creation_task_id}'"
-                ))
-            })?;
-            let expected = (
-                references.canvas_id.as_deref(),
-                references.node_id.as_deref(),
-                references.workbench_kind.as_deref(),
-                references.template_id.as_deref(),
-                references.template_run_id.as_deref(),
-                references.template_step_id.as_deref(),
-            );
-            let actual = (
-                task.0.as_deref(),
-                task.1.as_deref(),
-                task.2.as_deref(),
-                task.3.as_deref(),
-                task.4.as_deref(),
-                task.5.as_deref(),
-            );
-            let standalone_task = task.2.is_some()
-                && task.1.is_none()
-                && task.3.is_none()
-                && task.4.is_none()
-                && task.5.is_none();
-            let owner_matches = if standalone_task {
-                references.workbench_kind.as_deref() == task.2.as_deref()
-                    && references.node_id.is_none()
-                    && references.template_id.is_none()
-                    && references.template_run_id.is_none()
-                    && references.template_step_id.is_none()
-            } else {
-                expected == actual
-            };
-            if !owner_matches {
-                return Err(DbError::Conflict(format!(
-                    "workshop asset origin owner does not match creation task '{creation_task_id}'"
-                )));
+            let task: Option<(Option<String>,Option<String>,Option<String>,Option<String>,Option<String>,Option<String>,Option<String>)> = sqlx::query_as(
+                "UPDATE creation_tasks SET status = status WHERE creation_task_id = ? RETURNING project_id,node_id,template_id,template_run_id,template_step_id,conversation_id,message_id"
+            ).bind(&creation_task_id).fetch_optional(&mut *tx).await?;
+            let task = task.ok_or_else(|| DbError::Conflict(format!("workshop asset origin references missing creation task '{creation_task_id}'")))?;
+            let expected = (references.canvas_id.as_deref(),references.node_id.as_deref(),references.template_id.as_deref(),references.template_run_id.as_deref(),references.template_step_id.as_deref(),references.conversation_id.as_deref(),references.message_id.as_deref());
+            let actual = (task.0.as_deref(),task.1.as_deref(),task.2.as_deref(),task.3.as_deref(),task.4.as_deref(),task.5.as_deref(),task.6.as_deref());
+            if expected != actual {
+                return Err(DbError::Conflict(format!("workshop asset origin owner does not match creation task '{creation_task_id}'")));
             }
         }
         sqlx::query(
@@ -1974,6 +1903,13 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
 
 #[cfg(test)]
 mod tests {
+    async fn seed_asset_conversation(db: &crate::Database, conversation_id: &str, message_id: &str) {
+        sqlx::query("INSERT INTO conversations(conversation_id,user_id,name,type,created_at,updated_at) VALUES (?,?,'source','nomi',1,1)")
+            .bind(conversation_id).bind(nomifun_common::generate_id()).execute(db.pool()).await.unwrap();
+        sqlx::query("INSERT INTO messages(message_id,conversation_id,type,content,position,status,hidden,created_at) VALUES (?,?,'text','{}','right','finish',0,1)")
+            .bind(message_id).bind(conversation_id).execute(db.pool()).await.unwrap();
+    }
+
     use super::*;
     use crate::init_database_memory;
 
@@ -2754,40 +2690,39 @@ mod tests {
 
         assert_eq!(created_origin["creation_task_id"], creation_task_id);
 
-        let standalone_task_id = nomifun_common::generate_id();
-        sqlx::query(
-            "INSERT INTO creation_tasks \
-             (creation_task_id, project_id, workbench_kind, provider_id, model, capability, params, \
-              input_bindings, status, submitted_at, request_fingerprint) \
-             VALUES (?, ?, 'video', ?, 'model', 't2v', '{}', '[]', 'running', 1, \
-              '{\"asset_origin_fixture\":\"standalone\"}')",
-        )
-        .bind(&standalone_task_id)
-        .bind(&project_id)
-        .bind(&provider_id)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        let standalone_asset_id = nomifun_common::generate_id();
-        let mut standalone = sample_asset(
-            2,
-            &standalone_asset_id,
-            "video",
-            "standalone task owner",
-        );
-        standalone.origin = Some(
-            serde_json::json!({
-                "workbench_kind": "video",
-                "creation_task_id": standalone_task_id
-            })
-            .to_string(),
-        );
-        let standalone_created = repo.create_asset(&standalone).await.unwrap();
-        assert_eq!(
-            serde_json::from_str::<Value>(standalone_created.origin.as_deref().unwrap())
-                .unwrap()["workbench_kind"],
-            "video"
-        );
+        let conversation_id = nomifun_common::generate_id();
+        let message_id = nomifun_common::generate_id();
+        seed_asset_conversation(&db, &conversation_id, &message_id).await;
+        let conversation_task_id = nomifun_common::generate_id();
+        sqlx::query("INSERT INTO creation_tasks(creation_task_id,conversation_id,message_id,provider_id,model,capability,params,input_bindings,status,submitted_at,request_fingerprint) VALUES (?,?,?,?,'model','t2v','{}','[]','running',1,'{}')")
+            .bind(&conversation_task_id).bind(&conversation_id).bind(&message_id).bind(&provider_id).execute(db.pool()).await.unwrap();
+        let mut generated = sample_asset(2, &nomifun_common::generate_id(), "video", "conversation task owner");
+        generated.origin = Some(serde_json::json!({"conversation_id":conversation_id,"message_id":message_id,"creation_task_id":conversation_task_id}).to_string());
+        let created = repo.create_asset(&generated).await.unwrap();
+        assert_eq!(serde_json::from_str::<Value>(created.origin.as_deref().unwrap()).unwrap()["conversation_id"], conversation_id);
+        generated.asset_id = nomifun_common::generate_id();
+        generated.origin = Some(serde_json::json!({"conversation_id":conversation_id,"message_id":nomifun_common::generate_id(),"creation_task_id":conversation_task_id}).to_string());
+        assert!(repo.create_asset(&generated).await.is_err());
+        // Deleting a settled source conversation must not invalidate a saved
+        // result's provenance, while new writes still need a live source turn.
+        sqlx::query("UPDATE creation_tasks SET status='canceled' WHERE creation_task_id=?")
+            .bind(&conversation_task_id).execute(db.pool()).await.unwrap();
+        sqlx::query("DELETE FROM messages WHERE conversation_id=?").bind(&conversation_id).execute(db.pool()).await.unwrap();
+        sqlx::query("DELETE FROM conversations WHERE conversation_id=?").bind(&conversation_id).execute(db.pool()).await.unwrap();
+        assert!(repo.get_asset(&created.asset_id).await.unwrap().is_some());
+        let edited = repo.update_asset(&created.asset_id, UpdateAssetParams {
+            title: Some("saved after source deletion"), tags: Some(r#"["kept"]"#),
+            in_library: Some(false), ..Default::default()
+        }, 2).await.unwrap();
+        assert_eq!(edited.tags, r#"["kept"]"#);
+        assert!(!edited.in_library);
+        let saved = repo.update_asset(&created.asset_id, UpdateAssetParams {
+            in_library: Some(true), ..Default::default()
+        }, 3).await.unwrap();
+        assert!(saved.in_library);
+        assert_eq!(saved.origin, created.origin);
+        generated.origin = created.origin.clone();
+        assert!(repo.create_asset(&generated).await.is_err());
 
         let mut wrong_owner = sample_asset(2, ASSET_2, "image", "wrong task owner");
         wrong_owner.origin = Some(
@@ -2951,63 +2886,6 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn legacy_standalone_origin_ignores_removed_project_provenance() {
-        let (repo, db) = repo().await;
-        let project_id = nomifun_common::generate_id();
-        let document = serde_json::json!({
-            "schema": "nomifun.creative-studio/v1",
-            "projectId": project_id,
-            "nodes": []
-        });
-        sqlx::query(
-            "INSERT INTO creative_studio_projects \
-             (project_id, title, revision, node_count, connection_count, document_json, created_at, updated_at) \
-             VALUES (?, 'legacy standalone provenance', 1, 0, 0, ?, 1, 1)",
-        )
-        .bind(&project_id)
-        .bind(document.to_string())
-        .execute(db.pool())
-        .await
-        .unwrap();
-
-        let task_id = nomifun_common::generate_id();
-        sqlx::query(
-            "INSERT INTO creation_tasks \
-             (creation_task_id, project_id, workbench_kind, provider_id, model, capability, \
-              params, input_bindings, status, submitted_at, finished_at, request_fingerprint) \
-             VALUES (?, ?, 'video', ?, 'legacy', 't2v', '{}', '[]', 'failed', 1, 2, '{}')",
-        )
-        .bind(&task_id)
-        .bind(&project_id)
-        .bind(nomifun_common::generate_id())
-        .execute(db.pool())
-        .await
-        .unwrap();
-
-        repo.delete_creative_project(&project_id).await.unwrap();
-
-        let mut legacy = sample_asset(1, &nomifun_common::generate_id(), "video", "legacy");
-        legacy.origin = Some(
-            serde_json::json!({
-                "project_id": nomifun_common::generate_id(),
-                "workbench_kind": "video",
-                "creation_task_id": task_id
-            })
-            .to_string(),
-        );
-        repo.create_asset(&legacy).await.unwrap();
-
-        let mut current = sample_asset(2, &nomifun_common::generate_id(), "video", "current");
-        current.origin = Some(
-            serde_json::json!({
-                "workbench_kind": "video",
-                "creation_task_id": task_id
-            })
-            .to_string(),
-        );
-        repo.create_asset(&current).await.unwrap();
-    }
 
     #[tokio::test]
     async fn task_input_and_result_assets_remain_restricted_after_retirement() {
@@ -3046,12 +2924,13 @@ mod tests {
         }]);
         sqlx::query(
             "INSERT INTO creation_tasks \
-             (creation_task_id, project_id, workbench_kind, provider_id, model, capability, params, \
+             (creation_task_id, conversation_id, message_id, provider_id, model, capability, params, \
               input_bindings, status, result_asset_ids, submitted_at, finished_at, deleted_at, request_fingerprint) \
-             VALUES (?, ?, 'image', ?, 'model', 'i2i', '{}', ?, 'succeeded', ?, 1, 2, 3, '{}')",
+             VALUES (?, ?, ?, ?, 'model', 'i2i', '{}', ?, 'succeeded', ?, 1, 2, 3, '{}')",
         )
         .bind(&task_id)
         .bind(CREATIVE_PROJECT_A)
+        .bind(&task_id)
         .bind(&provider_id)
         .bind(inputs.to_string())
         .bind(serde_json::to_string(&[ASSET_2]).unwrap())
@@ -3307,10 +3186,12 @@ mod tests {
         let provider_id = nomifun_common::ProviderId::new().into_string();
         sqlx::query("INSERT INTO providers (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, created_at, updated_at) VALUES (?, 'test', 'origin test', 'https://example.invalid', 'bearer', '', 1, 1)")
             .bind(&provider_id).execute(db.pool()).await.unwrap();
-        sqlx::query("INSERT INTO creation_tasks (creation_task_id, workbench_kind, provider_id, model, capability, params, input_bindings, result_asset_ids, status, submitted_at, request_fingerprint) VALUES (?, 'image', ?, 'model', 't2i', '{}', '[]', '[]', 'running', 1, '{}')")
-            .bind(&task_id).bind(&provider_id).execute(db.pool()).await.unwrap();
+        let conversation_id=nomifun_common::generate_id();
+        seed_asset_conversation(&db,&conversation_id,&task_id).await;
+        sqlx::query("INSERT INTO creation_tasks(creation_task_id,conversation_id,message_id,provider_id,model,capability,params,input_bindings,result_asset_ids,status,submitted_at,request_fingerprint) VALUES (?,?,?,?,'model','t2i','{}','[]','[]','running',1,'{}')")
+            .bind(&task_id).bind(&conversation_id).bind(&task_id).bind(&provider_id).execute(db.pool()).await.unwrap();
         let result = WorkshopAssetRow {
-            origin: Some(serde_json::json!({ "workbench_kind": "image", "creation_task_id": task_id }).to_string()),
+            origin: Some(serde_json::json!({ "conversation_id": conversation_id, "message_id": task_id, "creation_task_id": task_id }).to_string()),
             ..sample_asset(0, ASSET_1, "image", "persisted before task commit")
         };
         repo.create_asset(&result).await.unwrap();

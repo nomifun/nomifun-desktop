@@ -21,6 +21,7 @@ type GuidActionRowProps = {
 
   // Agent identity and session model are independent launch choices.
   modelSelectorNode: React.ReactNode;
+  creationControls?: React.ReactNode;
 
   // Send button
   loading: boolean;
@@ -37,6 +38,7 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
   files,
   onFilesUploaded,
   modelSelectorNode,
+  creationControls,
   loading,
   isButtonDisabled,
   speechInputNode,
@@ -120,7 +122,7 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
   );
 
   return (
-    <div className={styles.actionRow}>
+    <div className={styles.actionRow} style={creationControls ? { flexWrap: 'wrap', justifyContent: 'flex-start' } : undefined}>
       <div className={styles.actionTools}>
         <div className={styles.actionEntry}>
           <Dropdown trigger='hover' onVisibleChange={setIsPlusDropdownOpen} droplist={menuContent}>
@@ -156,7 +158,8 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
           )}
         </div>
       </div>
-      <div className={`${styles.actionSubmit} ${styles.actionSubmitResponsive}`}>
+      {creationControls}
+      <div className={`${styles.actionSubmit} ${styles.actionSubmitResponsive}`} style={creationControls ? { marginLeft: 'auto' } : undefined}>
         <div
           className={`${styles.actionConfigGroup} ${styles.actionConfigGroupResponsive}`}
         >

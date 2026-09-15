@@ -36,7 +36,7 @@ fn openai_route(task: ModelTask) -> Option<TaskRoute> {
         // as a video model. `openai.videos` stays in the registry until the
         // shutdown so already-saved capabilities keep resolving; delete the spec
         // and its adapter after that date.
-        VideoGeneration => None,
+        VideoGeneration | MusicGeneration => None,
         SpeechSynthesis => route("openai.audio_speech"),
         SpeechRecognition => route("openai.audio_transcriptions"),
         Embedding => route("openai.embeddings"),
@@ -104,6 +104,7 @@ pub fn preset_protocol_recommendation(platform: &str, task: ModelTask) -> Option
 
         // MiniMax TTS has a provider-specific request/response codec.
         ("minimax", SpeechSynthesis) => route("minimax.t2a"),
+        ("minimax", MusicGeneration) => route("minimax.music"),
         // MiMo audio models use specialized chat-completions serializers.
         ("mimo", SpeechRecognition) => route("mimo.chat_asr"),
         ("mimo", SpeechSynthesis) => route("mimo.chat_tts"),

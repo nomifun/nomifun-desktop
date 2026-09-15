@@ -153,6 +153,9 @@ fn build_submit_form(
     model_params: &Value,
     req: &VideoGenRequest,
 ) -> Result<Form, InvokeError> {
+    if req.inputs.len() > 1 || req.inputs.iter().any(|input| !matches!(input.role.as_str(), "first_frame" | "reference")) {
+        return Err(InvokeError::new(InvokeErrorKind::InvalidParams, "OpenAI video supports only one first-frame image; last frames and multiple references are unsupported"));
+    }
     let mut fields = scalar_request_fields(model_params, &req.extra)?;
     fields.remove("input_reference");
     fields.insert("model".into(), model.to_string());
@@ -167,13 +170,11 @@ fn build_submit_form(
     for (key, value) in fields {
         form = form.text(key, value);
     }
-    // i2v reference frame — the first reference/first_frame input.
-    if let Some(reference) = req
-        .inputs
-        .iter()
-        .find(|i| matches!(i.role.as_str(), "reference" | "first_frame"))
-        .or_else(|| req.inputs.first())
-    {
+    // This endpoint has exactly one input_reference, used as the first frame.
+    if let Some(reference) = req.inputs.first() {
+        if !reference.mime.starts_with("image/") || reference.bytes.is_empty() {
+            return Err(InvokeError::new(InvokeErrorKind::InvalidParams, "OpenAI video first frame must contain image bytes"));
+        }
         let part = Part::bytes(reference.bytes.clone())
             .file_name("input_reference")
             .mime_str(&reference.mime)
@@ -260,11 +261,22 @@ mod tests {
 
     // -- wiremock submit → poll → content chain ------------------------------
 
+    #[test]
+    fn video_submit_rejects_last_frames_and_multiple_inputs_before_network() {
+        for roles in [vec!["last_frame"], vec!["first_frame", "last_frame"], vec!["reference", "reference"], vec!["mask"]] {
+            let inputs = roles.iter().map(|role| InputAsset { id: None, role: (*role).into(), mime: "image/png".into(), bytes: b"frame".to_vec() }).collect();
+            let TaskRequest::VideoGeneration(req) = video_request(inputs) else { unreachable!() };
+            let error = build_submit_form("sora-2", &json!({}), &req).err().expect("unsupported input must fail");
+            assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
+        }
+    }
+
     fn video_request(inputs: Vec<InputAsset>) -> TaskRequest {
         TaskRequest::VideoGeneration(VideoGenRequest {
             prompt: "a wave".into(),
             seconds: Some(4),
             size: Some("1280x720".into()),
+            resolution: None,
             inputs,
             extra: json!({}),
         })

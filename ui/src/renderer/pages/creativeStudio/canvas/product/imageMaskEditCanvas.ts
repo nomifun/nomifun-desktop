@@ -21,12 +21,8 @@ import {
   type CreativeTask,
   type CreativeTaskReference,
 } from '../../tasks';
-import {
-  prepareImageWorkbenchRun,
-  workbenchResumeRequestsFromDocument,
-  type CreativeWorkbenchResumeRequest,
-  type PreparedCreativeWorkbenchRun,
-} from '../../workbenches/runtime';
+import { prepareCanvasImageRun, canvasResumeRequestsFromDocument, type CanvasGenerationResumeRequest, type PreparedCanvasGenerationRun } from '../generation';
+
 import { validateCanvasConnection, type CanvasState } from '../core';
 import { creativeImageMaskEditPrompt } from '../imageTools';
 import {
@@ -47,7 +43,7 @@ type ConfigNode = Extract<CreativeCanvasNode, { type: 'config' }>;
 export interface PreparedCanvasImageMaskEdit {
   configNode: ConfigNode;
   connection: Omit<CreativeCanvasConnection, 'id'>;
-  plan: PreparedCreativeWorkbenchRun;
+  plan: PreparedCanvasGenerationRun;
 }
 
 export function isCanvasImageMaskEditConfig(
@@ -147,7 +143,7 @@ export function prepareCanvasImageMaskEdit(input: {
     input.referenceDimensions.height > 0 &&
     input.referenceDimensions.width <= 8_192 &&
     input.referenceDimensions.height <= 8_192;
-  const plan = prepareImageWorkbenchRun({
+  const plan = prepareCanvasImageRun({
     catalog: input.catalog,
     canvasId: input.projectId,
     nodeId: base.id,
@@ -221,13 +217,13 @@ export function prepareCanvasImageMaskEdit(input: {
 
 export function canvasImageMaskEditResumeRequests(
   document: CreativeProjectDocument
-): CreativeWorkbenchResumeRequest[] {
+): CanvasGenerationResumeRequest[] {
   const owners = new Map(
     document.nodes
       .filter(isCanvasImageMaskEditConfig)
       .map((node) => [node.id, node])
   );
-  return workbenchResumeRequestsFromDocument(document).filter(
+  return canvasResumeRequestsFromDocument(document).filter(
     (request) =>
       request.reference.owner.kind === 'canvas_node' &&
       owners.has(request.reference.owner.nodeId)

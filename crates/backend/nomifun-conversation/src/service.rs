@@ -58,6 +58,8 @@ use tracing::{debug, error, info, warn};
 
 #[path = "creative_studio_agent_session.rs"]
 pub mod creative_studio_agent_session;
+#[path = "conversation_creation.rs"]
+pub mod conversation_creation;
 
 use crate::convert::{
     TOOL_CONTENT_COMPACT_THRESHOLD_BYTES, message_needs_artifact_history_audit,
@@ -997,6 +999,16 @@ pub struct ProductAgentResolution {
 
 #[async_trait::async_trait]
 pub trait ProductAgentSnapshotResolver: Send + Sync {
+    async fn resolve_preset(
+        &self,
+        owner_id: &str,
+        preset_id: &str,
+        requested_model: Option<&ProviderWithModel>,
+        current_binding: Option<&nomifun_api_types::AgentBindingValueDto>,
+    ) -> Result<ProductAgentResolution, AppError> {
+        let _ = (owner_id, preset_id, requested_model, current_binding);
+        Err(AppError::BadRequest("Preset resolution is unavailable".into()))
+    }
     async fn resolve(
         &self,
         owner_id: &str,
@@ -1042,6 +1054,7 @@ pub enum DeliveryNotifyRegistration {
 
 #[derive(Clone)]
 pub struct ConversationService {
+    creation_service: Arc<RwLock<Option<Arc<nomifun_creation::CreationService>>>>,
     /// Immutable installation owner used to derive the maximum runtime
     /// authority for every persisted Conversation owner.  This keeps host
     /// capability decisions inside the service and out of open `extra` JSON.
@@ -1984,15 +1997,16 @@ impl ConversationService {
     }
 
     fn turn_delivery_request_payload(req: &SendMessageRequest) -> String {
-        serde_json::json!({
+        let mut payload = serde_json::json!({
             "content": &req.content,
             "files": &req.files,
             "inject_skills": &req.inject_skills,
             "hidden": req.hidden,
             "origin": &req.origin,
             "channel_platform": &req.channel_platform,
-        })
-        .to_string()
+        });
+        if let Some(preset_id) = &req.preset_id { payload["preset_id"] = serde_json::json!(preset_id); }
+        payload.to_string()
     }
 
     fn truncated_continuation_request_payload(
@@ -2281,6 +2295,7 @@ impl ConversationService {
     ) -> Self {
         Self {
             authoritative_user_id,
+            creation_service: Arc::new(RwLock::new(None)),
             workspace_root,
             user_events,
             skill_resolver,
@@ -5387,10 +5402,9 @@ impl ConversationService {
             .model
             .as_deref()
             .map(parse_provider_with_model)
-            .transpose()?
-            .ok_or_else(|| AppError::BadRequest("Nomi conversation has no current model".to_owned()))?;
-        let current_lead = conversation_lead_model(&current_model)?;
-        if snapshot.resolved_model.as_ref() != Some(&current_lead) {
+            .transpose()?;
+        let current_lead = current_model.as_ref().map(conversation_lead_model).transpose()?;
+        if snapshot.resolved_model.as_ref() != current_lead.as_ref() {
             return Err(AppError::BadRequest(
                 "replacement Agent snapshot must be resolved for the conversation's current model"
                     .to_owned(),
@@ -5980,6 +5994,10 @@ impl ConversationService {
             // owner must let the explicit database transaction finish. Dropping
             // the repository future on an inner timeout would lose the
             // captured Cron IDs needed for post-commit scheduler/file cleanup.
+            if let Err(error) = service.cancel_conversation_creations(&conversation_id).await {
+                let _ = result_tx.send(Err(error));
+                return;
+            }
             let delete_cleanup = match service
                 .conversation_repo
                 .delete_with_cleanup(&conversation_id)
@@ -6271,6 +6289,8 @@ impl ConversationService {
         }
         self.runtime_state.clear_knowledge_signature(id);
         self.runtime_state.clear_turn_tokens(id);
+
+        self.cancel_conversation_creations(id).await?;
 
         // The repository transaction also clears ACP resume identity/context
         // usage and absorbs accepted turn receipts. Keeping those mutations in
@@ -7556,6 +7576,7 @@ impl ConversationService {
         }
 
         let req = SendMessageRequest {
+            preset_id: None,
             content: format!(
                 "{TRUNCATED_CONTINUATION_INSTRUCTION}\n\n{}",
                 original_delivery.content
@@ -8219,6 +8240,13 @@ impl ConversationService {
             None => None,
         };
         runtime_build_lease.ensure_active()?;
+
+        if let Some(preset_id) = req.preset_id.as_deref() {
+            if send_authority != MessageSendAuthority::OwnerInteractive || req.hidden || req.origin.is_some() || req.channel_platform.is_some() || creative_studio_authority.is_some() {
+                return Err(AppError::BadRequest("Agent selection belongs to an interactive conversation turn".into()));
+            }
+            self.apply_next_turn_preset(user_id, &row, preset_id, &runtime_build_lease).await?;
+        }
 
         // Snapshot the persistent generation immediately before admission.
         // The repository consumes it with the receipt INSERT and Running
@@ -8948,7 +8976,7 @@ impl ConversationService {
             }
             if existing.position.as_deref() != Some("right")
                 || existing.r#type != "text"
-                || existing.content != expected_content.to_string()
+                || !user_message_matches_requested_content(&existing.content, &expected_content)
             {
                 return Err(AppError::Conflict(
                     "internal message operation id was reused with different content".to_owned(),
@@ -9360,44 +9388,52 @@ impl ConversationService {
             msg_id: Some(user_msg_id.clone()),
             r#type: "text".into(),
             content: match interaction.as_ref() {
-                Some(interaction) => serde_json::json!({ "content": req.content, "interaction": interaction }),
-                None => serde_json::json!({ "content": req.content }),
+                Some(interaction) => serde_json::json!({ "content": req.content, "interaction": interaction, "agent_snapshot": row.agent_snapshot.as_deref().and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()) }),
+                None => serde_json::json!({ "content": req.content, "agent_snapshot": row.agent_snapshot.as_deref().and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()) }),
             }.to_string(),
             position: Some("right".into()),
             status: Some("finish".into()),
             hidden: req.hidden,
             created_at: now_ms(),
         };
-        if existing_user_message.is_none() {
-            if let Err(e) = self.conversation_repo.insert_message(&user_msg).await {
-                warn!(msg_id = %user_msg_id, error = %ErrorChain(&e), "Failed to insert user message");
-                let receipt_error = format!("{}", ErrorChain(&e));
-                let receipt_completion = Self::turn_receipt_completion(
-                    durable_operation_id,
-                    durable_kind,
-                    durable_request_payload.as_deref(),
-                    false,
-                    None,
-                    Some(&receipt_error),
-                    relay_error_code::fixed_failure(relay_error_code::PREPARATION_FAILED),
-                );
-                self.release_and_complete_turn(
-                    &mut turn_handle,
-                    runtime_registry,
-                    user_id,
-                    conversation_id,
-                    &first_turn_msg_id,
-                    receipt_completion,
-                    durable_guard.clone(),
-                    companion,
-                    companion_id,
-                    origin,
-                    channel_platform,
-                )
-                .await;
-                return Err(e.into());
+        let persist_user_message = async {
+            if existing_user_message.is_none() {
+                self.conversation_repo.insert_message(&user_msg).await?;
             }
-
+            if !creative_studio_turn {
+                self.persist_ordinary_creation_references(user_id, &row, &user_msg_id, &req.files).await?;
+            }
+            Ok::<(), AppError>(())
+        }.await;
+        if let Err(e) = persist_user_message {
+            warn!(msg_id = %user_msg_id, error = %ErrorChain(&e), "Failed to persist user message or creation references");
+            let receipt_error = format!("{}", ErrorChain(&e));
+            let receipt_completion = Self::turn_receipt_completion(
+                durable_operation_id,
+                durable_kind,
+                durable_request_payload.as_deref(),
+                false,
+                None,
+                Some(&receipt_error),
+                relay_error_code::fixed_failure(relay_error_code::PREPARATION_FAILED),
+            );
+            self.release_and_complete_turn(
+                &mut turn_handle,
+                runtime_registry,
+                user_id,
+                conversation_id,
+                &first_turn_msg_id,
+                receipt_completion,
+                durable_guard.clone(),
+                companion,
+                companion_id,
+                origin,
+                channel_platform,
+            )
+            .await;
+            return Err(e);
+        }
+        if existing_user_message.is_none() {
             info!(msg_id = %user_msg_id, "User message persisted");
         }
 
@@ -12885,6 +12921,17 @@ fn is_tool_free_agent_extra(extra: &serde_json::Value) -> bool {
         && extra.get("allowed_tools").and_then(serde_json::Value::as_array).is_some_and(Vec::is_empty)
 }
 
+fn user_message_matches_requested_content(stored: &str, expected: &serde_json::Value) -> bool {
+    let Ok(mut stored) = serde_json::from_str::<serde_json::Value>(stored) else {
+        return false;
+    };
+    if let Some(object) = stored.as_object_mut() {
+        object.remove("agent_snapshot");
+        object.remove("creation_references");
+    }
+    stored == *expected
+}
+
 fn row_agent_snapshot_has_capability(
     row: &ConversationRow,
     capability: &str,
@@ -14589,6 +14636,21 @@ mod tests {
     const PROVIDER_ID_1: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const PROVIDER_ID_2: &str = "0190f5fe-7c00-7a00-8000-000000000002";
     const RUNTIME_PRESET_ID: &str = "0190f5fe-7c00-7a00-8000-000000000003";
+
+    #[test]
+    fn creation_reference_metadata_does_not_change_idempotent_user_content() {
+        let expected = json!({"content":"Edit the first photo", "interaction":{"device":"desktop"}});
+        let mut stored = expected.clone();
+        stored["agent_snapshot"] = json!({"preset_id":"server-owned"});
+        stored["creation_references"] = json!([{"asset_id":"server-owned"}]);
+        assert!(user_message_matches_requested_content(&stored.to_string(), &expected));
+        stored["content"] = json!("Edit the other photo");
+        assert!(!user_message_matches_requested_content(&stored.to_string(), &expected));
+        stored["content"] = expected["content"].clone();
+        stored["interaction"] = json!({"device":"other"});
+        assert!(!user_message_matches_requested_content(&stored.to_string(), &expected));
+        assert!(!user_message_matches_requested_content("not json", &expected));
+    }
 
     #[test]
     fn companion_desktop_and_im_share_one_product_agent_target() {

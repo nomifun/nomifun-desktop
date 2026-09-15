@@ -12,6 +12,7 @@ import { Input } from '@arco-design/web-react';
 import React from 'react';
 import styles from '../index.module.css';
 import GuidWorkspaceFootnote from './GuidWorkspaceFootnote';
+import { CreationReferences } from '@/renderer/creation/CreationControls';
 
 type GuidInputCardProps = {
   // Input state
@@ -156,6 +157,7 @@ const GuidInputCard: React.FC<GuidInputCardProps> = ({
             </div>
           )}
           <UploadProgressBar source='sendbox' />
+          <CreationReferences />
           {actionRow}
         </SessionCapabilityComposerLayout>
       </div>

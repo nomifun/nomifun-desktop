@@ -1536,6 +1536,13 @@
             "version": "1.0.0"
           },
           "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "creation.music",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
         }
       ],
       "skills": [],

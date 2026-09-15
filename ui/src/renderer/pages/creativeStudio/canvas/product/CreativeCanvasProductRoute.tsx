@@ -1,3 +1,4 @@
+import { effectiveImageReferenceInputLimit, imageReferenceInputPolicy } from '@renderer/creation/parameters/imageReferencePolicy';
 /**
  * @license
  * Copyright 2025-2026 NomiFun (nomifun.com)
@@ -42,9 +43,9 @@ import {
   type CreativeAssetUploadRejection,
 } from '../../assets/page/model';
 import {
-  CREATIVE_STUDIO_PROJECTS_PATH,
-  CREATIVE_STUDIO_TEMPLATES_PATH,
-} from '../../app/routes';
+  CANVASES_PATH,
+  TEMPLATES_PATH,
+} from '../../app/resourceRoutes';
 import {
   DEFAULT_CREATIVE_STUDIO_PANELS,
   isCreativeCanvasUserNode,
@@ -63,22 +64,15 @@ import type { PromptLibrarySelection } from '../../prompts';
 import { useCreativeProject } from '../../services';
 import type { CreativeTaskReference } from '../../tasks';
 import {
-  effectiveImageReferenceInputLimit,
-  imageWorkbenchSizePolicyForModel,
-  imageWorkbenchSelectableSizeOptions,
-  imageReferenceInputPolicy,
-  normalizeImageWorkbenchSettingsSize,
-  type ImageWorkbenchAspectRatioOption,
-  type ImageWorkbenchModelIdentity,
-  type ImageWorkbenchSettings,
-} from '../../workbenches/image';
-import {
-  exactWorkbenchModelOptions,
-  imageWorkbenchModelOptions,
-  type CreativeWorkbenchRuntimeSnapshot,
-  type CreativeWorkbenchReferences,
-  type PreparedCreativeWorkbenchRun,
-} from '../../workbenches/runtime';
+  imageGenerationSizePolicyForModel,
+  imageGenerationSelectableSizeOptions,
+  normalizeImageGenerationSettingsSize,
+  type ImageGenerationAspectRatioOption,
+  type ImageGenerationModelIdentity,
+  type ImageGenerationSettings,
+} from '@renderer/creation/parameters/image';
+import { type CanvasGenerationRuntimeSnapshot, type GenerationReferences, type PreparedCanvasGenerationRun } from '../generation';
+import { exactGenerationModelOptions, imageGenerationModelOptions as catalogImageModelOptions } from '@renderer/creation/modelSelection';
 import type {
   CreativeTemplateDefinitionV1,
   CreativeTemplateRunAggregateV1,
@@ -261,7 +255,7 @@ const INITIAL_SAVE: CanvasCasSaveSnapshot = {
   error: null,
 };
 
-const INITIAL_CANVAS_TASK_RUNTIME: CreativeWorkbenchRuntimeSnapshot = {
+const INITIAL_CANVAS_TASK_RUNTIME: CanvasGenerationRuntimeSnapshot = {
   state: 'idle',
   entries: [],
   submissionFailures: [],
@@ -324,7 +318,7 @@ interface PendingImageSplit {
 }
 
 interface PendingImageMaskSubmission {
-  plan: PreparedCreativeWorkbenchRun;
+  plan: PreparedCanvasGenerationRun;
   reference: CreativeTaskReference;
   failureOrder: number;
 }
@@ -337,7 +331,7 @@ interface PendingImageMaskEdit {
 
 interface PendingCanvasImageComposeSubmission {
   nodeId: string;
-  plan: PreparedCreativeWorkbenchRun;
+  plan: PreparedCanvasGenerationRun;
   failureOrder: number;
 }
 
@@ -348,7 +342,7 @@ interface CanvasImageComposeIssue {
 
 interface PendingCanvasVideoComposeSubmission {
   nodeId: string;
-  plan: PreparedCreativeWorkbenchRun;
+  plan: PreparedCanvasGenerationRun;
   failureOrder: number;
 }
 
@@ -359,7 +353,7 @@ interface CanvasVideoComposeIssue {
 
 interface PendingCanvasAudioComposeSubmission {
   nodeId: string;
-  plan: PreparedCreativeWorkbenchRun;
+  plan: PreparedCanvasGenerationRun;
   failureOrder: number;
 }
 
@@ -541,9 +535,9 @@ const canvasTextComposerReferences = (
   };
 });
 
-const canvasImageWorkbenchReferences = (
+const canvasImageGenerationReferences = (
   resolution: CanvasImageReferenceResolution
-): CreativeWorkbenchReferences => ({
+): GenerationReferences => ({
   assets: resolution.references.map((reference) => reference.asset),
   bindings: resolution.references.map((reference) => ({
     assetId: reference.assetId,
@@ -784,14 +778,14 @@ const SaveRecoveryAction: React.FC<{
 
 const CanvasTaskRuntimeAction: React.FC<{
   label: string;
-  snapshot: CreativeWorkbenchRuntimeSnapshot;
+  snapshot: CanvasGenerationRuntimeSnapshot;
   busy: boolean;
   onCancel(taskId: string): void;
   onRetry(taskId: string): void;
 }> = ({ label, snapshot, busy, onCancel, onRetry }) => {
   const { t } = useTranslation();
   const taskLabel = (
-    _task: CreativeWorkbenchRuntimeSnapshot['entries'][number]['task']
+    _task: CanvasGenerationRuntimeSnapshot['entries'][number]['task']
   ) => label;
   const requestError = snapshot.entries.find(
     (entry) => entry.requestError !== null
@@ -995,7 +989,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   );
   const [imageMaskError, setImageMaskError] = useState<string | null>(null);
   const [imageTaskRuntime, setImageTaskRuntime] =
-    useState<CreativeWorkbenchRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
+    useState<CanvasGenerationRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
   const [imageTaskRuntimeReady, setImageTaskRuntimeReady] = useState(false);
   const [imageTaskRuntimeEpoch, setImageTaskRuntimeEpoch] = useState(0);
   const [imageTaskRuntimeActionBusy, setImageTaskRuntimeActionBusy] =
@@ -1006,7 +1000,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [imageComposeSubmission, setImageComposeSubmission] =
     useState<PendingCanvasImageComposeSubmission | null>(null);
   const [videoTaskRuntime, setVideoTaskRuntime] =
-    useState<CreativeWorkbenchRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
+    useState<CanvasGenerationRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
   const [videoTaskRuntimeReady, setVideoTaskRuntimeReady] = useState(false);
   const [videoTaskRuntimeEpoch, setVideoTaskRuntimeEpoch] = useState(0);
   const [videoTaskRuntimeActionBusy, setVideoTaskRuntimeActionBusy] =
@@ -1017,7 +1011,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [videoComposeSubmission, setVideoComposeSubmission] =
     useState<PendingCanvasVideoComposeSubmission | null>(null);
   const [audioTaskRuntime, setAudioTaskRuntime] =
-    useState<CreativeWorkbenchRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
+    useState<CanvasGenerationRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
   const [audioTaskRuntimeReady, setAudioTaskRuntimeReady] = useState(false);
   const [audioTaskRuntimeEpoch, setAudioTaskRuntimeEpoch] = useState(0);
   const [audioTaskRuntimeActionBusy, setAudioTaskRuntimeActionBusy] =
@@ -1105,27 +1099,27 @@ const CreativeCanvasProductRoute: React.FC = () => {
     query: assetQuery,
   });
   const imageMaskModelOptions = useMemo(
-    () => exactWorkbenchModelOptions(modelCatalog, 'image_edit'),
+    () => exactGenerationModelOptions(modelCatalog, 'image_edit'),
     [modelCatalog]
   );
   const imageComposeModelOptions = useMemo(
-    () => imageWorkbenchModelOptions(modelCatalog, 'image_edit'),
+    () => catalogImageModelOptions(modelCatalog, 'image_edit'),
     [modelCatalog]
   );
   const imageGenerationModelOptions = useMemo(
-    () => imageWorkbenchModelOptions(modelCatalog, 'image_generation'),
+    () => catalogImageModelOptions(modelCatalog, 'image_generation'),
     [modelCatalog]
   );
   const imageGenerationExactOptions = useMemo(
-    () => exactWorkbenchModelOptions(modelCatalog, 'image_generation'),
+    () => exactGenerationModelOptions(modelCatalog, 'image_generation'),
     [modelCatalog]
   );
   const videoModelOptions = useMemo(
-    () => exactWorkbenchModelOptions(modelCatalog, 'video_generation'),
+    () => exactGenerationModelOptions(modelCatalog, 'video_generation'),
     [modelCatalog]
   );
   const audioModelOptions = useMemo(
-    () => exactWorkbenchModelOptions(modelCatalog, 'speech_synthesis'),
+    () => exactGenerationModelOptions(modelCatalog, 'speech_synthesis'),
     [modelCatalog]
   );
 
@@ -1789,7 +1783,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, [flushBeforeLeave, navigate]);
 
   const handleOpenTemplateCenter = useCallback(async () => {
-    if (await flushBeforeLeave()) navigate(CREATIVE_STUDIO_TEMPLATES_PATH);
+    if (await flushBeforeLeave()) navigate(TEMPLATES_PATH);
   }, [flushBeforeLeave, navigate]);
 
   const templateRunner = useMemo<CreativeTemplateRunnerPort>(
@@ -2649,7 +2643,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
       result: Awaited<
         ReturnType<CanvasImageTaskRuntimeBridgeHandle['submit']>
       >,
-      plan: PreparedCreativeWorkbenchRun
+      plan: PreparedCanvasGenerationRun
     ) => {
       if (result.kind === 'admitted') {
         setPendingImageMaskEdit(null);
@@ -2952,7 +2946,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const applyImageComposeAdmission = useCallback(
     (
       nodeId: string,
-      plan: PreparedCreativeWorkbenchRun,
+      plan: PreparedCanvasGenerationRun,
       result: Awaited<ReturnType<CanvasImageTaskRuntimeBridgeHandle['submit']>>
     ) => {
       if (result.kind === 'admitted') {
@@ -2987,7 +2981,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
       nodeId: string,
       prompt: string,
       mentions: readonly CreativeImagePromptMention[],
-      settings: ImageWorkbenchSettings
+      settings: ImageGenerationSettings
     ) => {
       const editor = editorRef.current;
       const runtime = imageTaskRuntimeRef.current;
@@ -3181,7 +3175,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           viewportSize: measuredSize(canvasHostRef.current),
           sourceNode: source,
           sourceAsset,
-          references: canvasImageWorkbenchReferences(referenceResolution),
+          references: canvasImageGenerationReferences(referenceResolution),
           catalog: modelCatalog,
           model: selectedModel,
           prompt,
@@ -3289,7 +3283,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const applyVideoComposeAdmission = useCallback(
     (
       nodeId: string,
-      plan: PreparedCreativeWorkbenchRun,
+      plan: PreparedCanvasGenerationRun,
       result: Awaited<ReturnType<CanvasVideoTaskRuntimeBridgeHandle['submit']>>
     ) => {
       if (result.kind === 'admitted') {
@@ -3665,7 +3659,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const applyAudioComposeAdmission = useCallback(
     (
       nodeId: string,
-      plan: PreparedCreativeWorkbenchRun,
+      plan: PreparedCanvasGenerationRun,
       result: Awaited<ReturnType<CanvasAudioTaskRuntimeBridgeHandle['submit']>>
     ) => {
       if (result.kind === 'admitted') {
@@ -4349,7 +4343,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     setRecoveryBusy(true);
     try {
       if (await flushBeforeLeave()) {
-        navigate(CREATIVE_STUDIO_PROJECTS_PATH);
+        navigate(CANVASES_PATH);
       }
     } finally {
       setRecoveryBusy(false);
@@ -5155,12 +5149,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
                         )
                       : []),
                   ].sort((left, right) => left.ordinal - right.ordinal);
-                  const composeSizePolicy = imageWorkbenchSizePolicyForModel(resolvedModel);
-                  const composeSizeOptions = imageWorkbenchSelectableSizeOptions(
+                  const composeSizePolicy = imageGenerationSizePolicyForModel(resolvedModel);
+                  const composeSizeOptions = imageGenerationSelectableSizeOptions(
                     composeSizePolicy.options
                   );
-                  const composeSettings: ImageWorkbenchSettings =
-                    normalizeImageWorkbenchSettingsSize(
+                  const composeSettings: ImageGenerationSettings =
+                    normalizeImageGenerationSettingsSize(
                       {
                         ...composeDraft.settings,
                         model: resolvedModel
@@ -5263,7 +5257,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           onOpenPromptLibrary={() =>
                             openPromptLibrary()
                           }
-                          onModelChange={(model: ImageWorkbenchModelIdentity | null) =>
+                          onModelChange={(model: ImageGenerationModelIdentity | null) =>
                             updateImageComposeDraft(
                               node.id,
                               (current) => {
@@ -5276,9 +5270,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
                                   : null;
                                 return {
                                   ...current,
-                                  settings: normalizeImageWorkbenchSettingsSize(
+                                  settings: normalizeImageGenerationSettingsSize(
                                     { ...current.settings, model },
-                                    imageWorkbenchSizePolicyForModel(modelOption)
+                                    imageGenerationSizePolicyForModel(modelOption)
                                   ),
                                 };
                               }
@@ -5302,7 +5296,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                               })
                             )
                           }
-                          onAspectRatioChange={(option: ImageWorkbenchAspectRatioOption) =>
+                          onAspectRatioChange={(option: ImageGenerationAspectRatioOption) =>
                             updateImageComposeDraft(
                               node.id,
                               (current) => ({

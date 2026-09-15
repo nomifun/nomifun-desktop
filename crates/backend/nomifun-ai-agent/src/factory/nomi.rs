@@ -573,10 +573,12 @@ pub(super) async fn build(
     // restricted principals retain their model-only ceiling.
     let image_generation_discovery: Option<Arc<dyn ImageGenerationToolDiscovery>> =
         if platform_gateway_entitled {
-            deps.model_invoke_service.as_ref().map(|invoke| {
+            deps.model_invoke_service.as_ref().zip(deps.creation_service.as_ref()).map(|(invoke, creation)| {
                 Arc::new(CatalogImageGenerationToolDiscovery::new(
                     deps.client_prefs.clone(),
                     invoke.clone(),
+                    creation.clone(),
+                    ctx.conversation_id.clone(),
                 )) as Arc<dyn ImageGenerationToolDiscovery>
             })
         } else {
@@ -584,7 +586,7 @@ pub(super) async fn build(
         };
     let (image_generation_tool, image_generation_discovery_failed) =
         match image_generation_discovery.as_ref() {
-            Some(discovery) => match discovery.discover_tool().await {
+            Some(discovery) => match discovery.discover_tool(None).await {
                 Ok(tool) => (tool, false),
                 Err(error) => {
                     warn!(
@@ -791,23 +793,15 @@ pub(super) async fn build(
         .iter()
         .any(|name| name == crate::web_search::WEB_SEARCH_TOOL_NAME)
     {
-        if fields.provider != "openai-responses" || !fields.supports_web_search {
-            return Err(AppError::UnprocessableEntity(
-                "web.search requires an exact openai.responses Chat model declaring the web_search trait"
-                    .to_owned(),
-            ));
-        }
-        let endpoint = fields.base_url.as_deref().ok_or_else(|| {
-            AppError::UnprocessableEntity(
-                "web.search requires the exact OpenAI Responses endpoint".to_owned(),
-            )
-        })?;
-        let provider = crate::web_search::OpenAiResponsesSearchProvider::new(
-            endpoint,
-            fields.api_key.clone(),
-            fields.model.clone(),
-        )
-        .map_err(AppError::UnprocessableEntity)?;
+        // Search resolves its own exact configured model only when invoked.
+        // An absent search provider cannot block normal Chat or media tasks.
+        let provider = crate::web_search::CatalogSearchProvider::new(
+            deps.model_invoke.clone(),
+            nomifun_model_invoke::ModelRef {
+                provider_id: selected_model.provider_id.clone(),
+                model: selected_model.model.clone(),
+            },
+        );
         Some(Box::new(crate::web_search::WebSearchTool::with_citations(
             Arc::new(provider),
             Arc::clone(&session_citations),
@@ -1175,6 +1169,13 @@ pub(super) async fn build(
         image_generation_entitled: platform_gateway_entitled,
         image_generation_discovery_failed,
         image_generation_response_in_chinese: app_language == "zh-CN",
+        creation_context: if is_instance_owner {
+            deps.creation_service.as_ref().map(|service| {
+                Arc::new(crate::creation_context::ConversationCreationContext::new(service.clone(), ctx.conversation_id.clone())
+                    .with_model_catalog(deps.model_invoke.clone(), deps.client_prefs.clone(),
+                        plugin_tool_session.as_ref().map(|session| session.media_creation_catalog_tools()).unwrap_or_default())) as Arc<dyn crate::ContextContributor>
+            })
+        } else { None },
         web_search_tool,
         citation_render_tool,
         lazy_mcp_runtime,

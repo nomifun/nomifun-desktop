@@ -17,21 +17,21 @@ import React, {
 import { useTranslation } from 'react-i18next';
 
 import {
-  IMAGE_WORKBENCH_QUALITY_OPTIONS,
-  imageWorkbenchAspectRatioValue,
-  imageWorkbenchModelKey,
-  imageWorkbenchResolutionLabel,
-  imageWorkbenchSizeOptionForSettings,
-  parseImageWorkbenchModelKey,
-  type ImageWorkbenchAspectRatioOption,
-  type ImageWorkbenchInterfaceMode,
-  type ImageWorkbenchModelIdentity,
-  type ImageWorkbenchModelOption,
-  type ImageWorkbenchQuality,
-  type ImageWorkbenchSettings,
-  type ImageWorkbenchTaskSummary,
-} from '../../workbenches/image';
-import ImageSizePicker from '../../workbenches/image/ImageSizePicker';
+  IMAGE_GENERATION_QUALITY_OPTIONS,
+  imageGenerationAspectRatioValue,
+  imageGenerationModelKey,
+  imageGenerationResolutionLabel,
+  imageGenerationSizeOptionForSettings,
+  parseImageGenerationModelKey,
+  type ImageGenerationAspectRatioOption,
+  type ImageGenerationInterfaceMode,
+  type ImageGenerationModelIdentity,
+  type ImageGenerationModelOption,
+  type ImageGenerationQuality,
+  type ImageGenerationSettings,
+} from '@renderer/creation/parameters/image';
+import type { CanvasImageComposeTaskSummary } from './canvasImageComposerCanvas';
+import ImageSizePicker from '@renderer/creation/parameters/ImageSizePicker';
 import CreativeCanvasReferencePromptInput, {
   relabelCreativeCanvasPromptMentions,
   type CreativeCanvasPromptMentionBinding,
@@ -52,11 +52,11 @@ export interface CreativeCanvasImageComposerProps {
   initialPrompt: string;
   initialMentions?: readonly CreativeCanvasPromptMentionBinding[];
   references?: readonly CreativeCanvasImageComposerReference[];
-  settings: ImageWorkbenchSettings;
-  aspectRatioOptions: readonly ImageWorkbenchAspectRatioOption[];
+  settings: ImageGenerationSettings;
+  aspectRatioOptions: readonly ImageGenerationAspectRatioOption[];
   maxCount: number;
-  modelOptions: readonly ImageWorkbenchModelOption[];
-  task: ImageWorkbenchTaskSummary;
+  modelOptions: readonly ImageGenerationModelOption[];
+  task: CanvasImageComposeTaskSummary;
   disabled?: boolean;
   generateBlocked?: boolean;
   error?: string | null;
@@ -66,10 +66,10 @@ export interface CreativeCanvasImageComposerProps {
   onReferenceDisconnect?(connectionId: string): void;
   onReferencesDisconnect?(connectionIds: readonly string[]): void;
   onOpenPromptLibrary(): void;
-  onModelChange(model: ImageWorkbenchModelIdentity | null): void;
-  onInterfaceModeChange(mode: ImageWorkbenchInterfaceMode): void;
-  onQualityChange(quality: ImageWorkbenchQuality): void;
-  onAspectRatioChange(option: ImageWorkbenchAspectRatioOption): void;
+  onModelChange(model: ImageGenerationModelIdentity | null): void;
+  onInterfaceModeChange(mode: ImageGenerationInterfaceMode): void;
+  onQualityChange(quality: ImageGenerationQuality): void;
+  onAspectRatioChange(option: ImageGenerationAspectRatioOption): void;
   onCountChange(count: number): void;
   onGenerate(
     prompt: string,
@@ -180,19 +180,19 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
   const canGenerate = retrySubmission
     ? !disabled && onRetrySubmission !== undefined
     : !disabled && !generateBlocked && !busy && (prompt.trim().length > 0 || hasTextInput) && settings.model !== null;
-  const modelValue = settings.model ? imageWorkbenchModelKey(settings.model) : undefined;
+  const modelValue = settings.model ? imageGenerationModelKey(settings.model) : undefined;
   const modelOptionByKey = useMemo(
-    () => new Map(modelOptions.map((option) => [imageWorkbenchModelKey(option), option])),
+    () => new Map(modelOptions.map((option) => [imageGenerationModelKey(option), option])),
     [modelOptions]
   );
-  const selectedSizeOption = imageWorkbenchSizeOptionForSettings(aspectRatioOptions, settings);
+  const selectedSizeOption = imageGenerationSizeOptionForSettings(aspectRatioOptions, settings);
   const selectedAspectRatio = selectedSizeOption
     ? selectedSizeOption.value === 'auto'
       ? selectedSizeOption.label
-      : imageWorkbenchAspectRatioValue(selectedSizeOption)
+      : imageGenerationAspectRatioValue(selectedSizeOption)
     : '';
   const selectedResolution = selectedSizeOption
-    ? imageWorkbenchResolutionLabel(selectedSizeOption)
+    ? imageGenerationResolutionLabel(selectedSizeOption)
     : '';
   const sizeSummary = [...new Set([selectedAspectRatio, selectedResolution])]
     .filter(Boolean).join(' · ');
@@ -404,15 +404,15 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
               onChange={(key) =>
                 onModelChange(
                   typeof key === 'string'
-                    ? parseImageWorkbenchModelKey(key, modelOptions)
+                    ? parseImageGenerationModelKey(key, modelOptions)
                     : null
                 )
               }
             >
               {modelOptions.map((option) => (
                 <Select.Option
-                  key={imageWorkbenchModelKey(option)}
-                  value={imageWorkbenchModelKey(option)}
+                  key={imageGenerationModelKey(option)}
+                  value={imageGenerationModelKey(option)}
                   disabled={option.disabled}
                 >
                   <span className={composerStyles.modelOption}>
@@ -462,7 +462,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                       value={settings.interfaceMode}
                       disabled={disabled}
                       onChange={(value) =>
-                        onInterfaceModeChange(value as ImageWorkbenchInterfaceMode)
+                        onInterfaceModeChange(value as ImageGenerationInterfaceMode)
                       }
                     >
                       <Radio value='images'>{t('creativeStudio.image.interface.images')}</Radio>
@@ -485,10 +485,10 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                         })}
                         disabled={disabled}
                         onChange={(event) =>
-                          onQualityChange(event.target.value as ImageWorkbenchQuality)
+                          onQualityChange(event.target.value as ImageGenerationQuality)
                         }
                       >
-                        {IMAGE_WORKBENCH_QUALITY_OPTIONS.map((option) => (
+                        {IMAGE_GENERATION_QUALITY_OPTIONS.map((option) => (
                           <option key={option.value} value={option.value}>
                             {option.label}
                           </option>

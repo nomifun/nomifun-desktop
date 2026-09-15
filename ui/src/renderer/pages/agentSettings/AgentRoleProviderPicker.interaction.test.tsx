@@ -63,6 +63,23 @@ describe('component implementation selection', () => {
     expect(saved?.enabled_capabilities.map(item => item.capability)).toEqual([capability]);
   });
 
+  test('professional generation preset saves through the existing form without a chat model', () => {
+    const original: AgentPresetDraft = { preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000001'), display_name: 'Creative', document: createEmptyAgentPresetDocument() };
+    original.document.enabled_capabilities = [{ capability: { id: asCapabilityId('creation.music'), version: '1.0.0' }, action_allowlist: [] }];
+    const mediaCatalog: AgentCatalogResponse = { ...catalog, capabilities: [{ ...catalog.capabilities[0], capability: original.document.enabled_capabilities[0].capability }] };
+    let saved = false;
+    const result = render(<I18nextProvider i18n={i18n}><MemoryRouter>
+      <AgentPresetEditor editor={{ preset: { preset_id: original.preset_id, display_name: original.display_name, source: 'user', bound_target_count: 0 }, draft: original }}
+        draft={original} catalog={mediaCatalog} busyAction={null} dirty={true}
+        onDraftChange={() => {}} onSave={() => { saved = true; }} onStartConversation={() => {}} />
+    </MemoryRouter></I18nextProvider>);
+    const button = within(result.container).getByRole('button', { name: 'common.save' });
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(button);
+    expect(saved).toBe(true);
+    expect(original.document.chat_route_records).toEqual({});
+  });
+
   test('personal editor passes the selected implementation in its existing save draft', async () => {
     const original: AgentPresetDraft = { preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000001'), display_name: 'Research', document: initial() };
     original.document.chat_route_records.agent_chat = { schema: 'nomifun.chat-route-record.v1', task: 'agent_chat', failovers: [], primary: {

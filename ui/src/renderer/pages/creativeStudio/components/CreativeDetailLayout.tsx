@@ -21,7 +21,7 @@ export const CreativeDetailModal: React.FC<React.PropsWithChildren<{
     autoFocus={false}
     focusLock
     unmountOnExit
-    getPopupContainer={() => document.getElementById('creative-studio-portal-root') ?? document.body}
+    getPopupContainer={() => document.getElementById('resource-page-portal-root') ?? document.body}
     onCancel={onClose}
   >
     {children}

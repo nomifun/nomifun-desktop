@@ -2,11 +2,9 @@
 /**
  * Creative Studio legacy-surface retirement gate.
  *
- * The new product intentionally reuses `/workshop`, so a broad search for the
- * word "workshop" would also reject canonical crates and storage. This gate
- * instead checks the retired UI trees, exact legacy routes/namespaces, and the
- * old HTTP namespace. Pass `--dist` after a production UI build to scan the
- * emitted bundle as well.
+ * Canvas and asset resources keep their domain/storage contracts. The former
+ * product shell and independent generation pages must not return. The only
+ * legacy browser values retained are one-way draft/resume import formats.
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -18,12 +16,21 @@ const DIST = join(ROOT, 'ui', 'dist');
 const CHECK_DIST = process.argv.includes('--dist');
 
 const LEGACY_TRACKED_PATHS = [
+  /^ui\/src\/renderer\/pages\/creativeStudio\/workbenches\//,
+  /^ui\/src\/renderer\/pages\/creativeStudio\/app\/(?:CreativeStudioFocusShell|CreativeStudioSider|resumeLocation|routes)(?:\.|\/)/,
+  /^ui\/src\/renderer\/pages\/creativeStudio\/tasks\/historyClient(?:\.|\/)/,
+  /^ui\/src\/renderer\/utils\/workspace\/workbenchSiderEvents\.ts$/,
+  /^ui\/src\/renderer\/components\/layout\/Sider\/SiderNav\/SiderCreativeStudioEntry\.tsx$/,
   /^ui\/src\/renderer\/pages\/(?:workshop|assets)\//,
   /^ui\/src\/renderer\/components\/layout\/Sider\/SiderNav\/SiderWorkshopEntry\.tsx$/,
   /^ui\/src\/renderer\/services\/i18n\/locales\/(?:en-US|zh-CN)\/workshop(?:Canvas|Assets|Editor|Generation|Agent)?\.json$/,
 ];
 
 const RUNTIME_MARKERS = [
+  { label: 'retired independent generation import', pattern: /workbenches\/(?:image|video|audio|runtime|history|drafts|product)(?:\/|['"])/g },
+  { label: 'retired product shell', pattern: /\b(?:CreativeStudioFocusShell|CreativeStudioSider|SiderCreativeStudioEntry|ImageWorkbenchProductRoute|VideoWorkbenchProductRoute)\b/g },
+  { label: 'retired independent history API', pattern: /\b(?:listStandalone|retireStandalone|creativeTaskHistoryClient)\b/g },
+  { label: 'retired product route', pattern: /<Route\s+path=['"]\/workshop(?:\/[^'"]*)?['"]/g },
   { label: 'retired page import', pattern: /pages\/(?:workshop|assets)(?:\/|['"])/g },
   { label: 'retired sidebar component', pattern: /SiderWorkshopEntry/g },
   { label: 'retired top-level asset route', pattern: /(['"])\/assets\1/g },
@@ -53,8 +60,15 @@ const DIST_MARKERS = [
   { label: 'retired Gateway tool name', pattern: /nomi_workshop_[A-Za-z0-9_]+/g },
 ];
 
+const BACKEND_MARKERS = [
+  {
+    label: 'retired standalone task owner or API',
+    pattern: /\b(?:StandaloneWorkbenchKind|StandaloneWorkbench|CreationWorkbenchKind|ListStandaloneWorkbenchTasksParams|RetireStandaloneWorkbenchTasksParams|list_standalone_workbench_tasks(?:_page)?|retire_standalone_workbench_tasks)\b/g,
+  },
+];
+
 const trackedFiles = () =>
-  execFileSync('git', ['ls-files', '-z'], {
+  execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], {
     cwd: ROOT,
     encoding: 'utf8',
     maxBuffer: 16 * 1024 * 1024,
@@ -99,6 +113,9 @@ const retiredTracked = files.filter((path) =>
 const runtimeViolations = files
   .filter(isRuntimeSource)
   .flatMap((path) => scanSource(path, readFileSync(join(ROOT, path), 'utf8'), RUNTIME_MARKERS));
+for (const path of files.filter((path) => /^crates\/backend\/[^/]+\/src\/.+\.rs$/.test(path))) {
+  runtimeViolations.push(...scanSource(path, readFileSync(join(ROOT, path), 'utf8'), BACKEND_MARKERS));
+}
 
 const distViolations = [];
 if (CHECK_DIST) {

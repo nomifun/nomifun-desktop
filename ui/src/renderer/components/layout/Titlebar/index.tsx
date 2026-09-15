@@ -10,9 +10,7 @@ import TitlebarLanguageMenu from './TitlebarLanguageMenu';
 import WindowControls from '../WindowControls';
 import { sessionSiderChannel } from '@renderer/utils/workspace/sessionSiderEvents';
 import { agentSiderChannel } from '@renderer/utils/workspace/agentSiderEvents';
-import { workbenchSiderChannels } from '@renderer/utils/workspace/workbenchSiderEvents';
 import ContentSiderTitlebarToggle from '../ContentSider/ContentSiderTitlebarToggle';
-import { CREATIVE_STUDIO_IMAGE_PATH, CREATIVE_STUDIO_VIDEO_PATH } from '@renderer/pages/creativeStudio/app/routes';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useNavigationHistory } from '@/renderer/hooks/context/NavigationHistoryContext';
 import { isDesktopShell, isMacOS } from '@/renderer/utils/platform';
@@ -84,14 +82,9 @@ const Titlebar: React.FC = () => {
     location.pathname === '/terminal-new' ||
     location.pathname.startsWith('/terminal/');
   const isAgentRoute = location.pathname === '/agent';
-  const workbenchKind = location.pathname === CREATIVE_STUDIO_IMAGE_PATH ? 'image'
-    : location.pathname === CREATIVE_STUDIO_VIDEO_PATH ? 'video' : null;
-  const contentSiderChannel = workbenchKind ? workbenchSiderChannels[workbenchKind]
-    : isAgentRoute ? agentSiderChannel : sessionSiderChannel;
-  const contentSiderExpandLabel = workbenchKind ? t('creativeStudio.workbenchSider.expand')
-    : isAgentRoute ? t('agentSettings.workbench.showList') : t('sessionList.expandList');
-  const contentSiderCollapseLabel = workbenchKind ? t('creativeStudio.workbenchSider.collapse')
-    : isAgentRoute ? t('agentSettings.workbench.hideList') : t('sessionList.collapseList');
+  const contentSiderChannel = isAgentRoute ? agentSiderChannel : sessionSiderChannel;
+  const contentSiderExpandLabel = isAgentRoute ? t('agentSettings.workbench.showList') : t('sessionList.expandList');
+  const contentSiderCollapseLabel = isAgentRoute ? t('agentSettings.workbench.hideList') : t('sessionList.collapseList');
 
   const handleSiderToggle = () => {
     if (!showSiderToggle || !layout?.setSiderCollapsed) return;
@@ -190,7 +183,7 @@ const Titlebar: React.FC = () => {
           onClick: () => navigateAfterCreativeStudioFlush(() => navigate('/terminal-new')),
           children: <Terminal theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />,
         })}
-        {(isSessionRoute || isAgentRoute || workbenchKind) && (
+        {(isSessionRoute || isAgentRoute) && (
           <ContentSiderTitlebarToggle
             channel={contentSiderChannel}
             expandLabel={contentSiderExpandLabel}

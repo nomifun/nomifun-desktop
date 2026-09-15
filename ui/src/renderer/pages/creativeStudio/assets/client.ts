@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { parseAssetId } from '@/common/types/ids';
+import { parseAssetId, parseConversationId, parseMessageId } from '@/common/types/ids';
 
 import { workshopAssetApi } from './api';
 import { isCreativeAssetDeleted } from './types';
@@ -64,16 +64,8 @@ function mapOrigin(value: unknown): CreativeAssetOrigin | null {
     throw new TypeError('Invalid creative asset origin');
   }
   const origin = value as Record<string, unknown>;
-  const workbenchKind =
-    origin.workbench_kind === 'image' ||
-    origin.workbench_kind === 'video' ||
-    origin.workbench_kind === 'audio'
-      ? origin.workbench_kind
-      : undefined;
   const canonicalCanvasId = optionalString(origin.canvas_id);
-  const legacyCanvasId = workbenchKind
-    ? undefined
-    : optionalString(origin.project_id);
+  const legacyCanvasId = optionalString(origin.project_id);
   if (
     canonicalCanvasId &&
     legacyCanvasId &&
@@ -90,11 +82,12 @@ function mapOrigin(value: unknown): CreativeAssetOrigin | null {
     throw new TypeError('Invalid creative asset prompt-library origin');
   }
   return {
+    conversationId: origin.conversation_id ? parseConversationId(origin.conversation_id) : undefined,
+    messageId: origin.message_id ? parseMessageId(origin.message_id) : undefined,
     prompt: optionalString(origin.prompt),
     model: optionalString(origin.model),
     providerId: optionalString(origin.provider_id),
     params: optionalRecord(origin.params),
-    workbenchKind,
     canvasId: canonicalCanvasId ?? legacyCanvasId,
     nodeId: optionalString(origin.node_id),
     generationTaskId: optionalString(origin.creation_task_id),

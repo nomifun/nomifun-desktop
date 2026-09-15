@@ -1,7 +1,8 @@
 //! Authorized SearchProvider-backed implementation of `web.search`.
 //!
 //! The production owner is OpenAI Responses built-in `web_search`, using the
-//! exact model route and credential already resolved by the server. No browser
+//! exact search model and credential resolved on each invocation. It is
+//! independent of the conversation model. No browser
 //! scraping, consumer RSS endpoint, or model-supplied credential is accepted.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -81,6 +82,8 @@ pub struct SearchProviderResponse {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchProviderErrorKind {
+    NotConfigured,
+    AmbiguousModel,
     Timeout,
     Transport,
     UpstreamRejected,
@@ -114,6 +117,66 @@ pub trait SearchProvider: Send + Sync {
         query: &str,
         count: usize,
     ) -> Result<SearchProviderResponse, SearchProviderError>;
+}
+
+/// Resolve only configured, enabled search models at tool execution time.
+/// Constructing a General Agent never needs a search account, and discovery
+/// never upgrades a Chat-only model or contacts an unconfigured public service.
+pub(crate) struct CatalogSearchProvider {
+    invoke: Arc<nomifun_model_invoke::ModelInvokeService>,
+    conversation_model: nomifun_model_invoke::ModelRef,
+}
+
+impl CatalogSearchProvider {
+    pub(crate) fn new(invoke: Arc<nomifun_model_invoke::ModelInvokeService>, conversation_model: nomifun_model_invoke::ModelRef) -> Self {
+        Self { invoke, conversation_model }
+    }
+
+    async fn resolve(&self) -> Result<OpenAiResponsesSearchProvider, SearchProviderError> {
+        let capabilities = self.invoke.provider_model_capability_repo().list().await
+            .map_err(|error| SearchProviderError::new(SearchProviderErrorKind::NotConfigured, error.to_string()))?;
+        let mut candidates = Vec::new();
+        for capability in capabilities {
+            if capability.task != "chat" || capability.protocol != "openai.responses"
+                || !serde_json::from_str::<Vec<nomifun_api_types::ModelTrait>>(&capability.traits)
+                    .is_ok_and(|traits| traits.contains(&nomifun_api_types::ModelTrait::WebSearch)) {
+                continue;
+            }
+            // Reuse the Chat resolver's enabled-model, protocol, connection,
+            // endpoint, origin and decrypted-credential checks verbatim.
+            let Ok(fields) = crate::factory::provider_config::resolve_provider_fields(
+                &self.invoke, &capability.provider_id, &capability.model,
+            ).await else { continue; };
+            if fields.provider == "openai-responses" && fields.supports_web_search {
+                candidates.push((nomifun_model_invoke::ModelRef { provider_id: capability.provider_id, model: capability.model }, fields));
+            }
+        }
+        let models = candidates.iter().map(|(model, _)| model.clone()).collect::<Vec<_>>();
+        let index = select_search_model(&self.conversation_model, &models)
+            .map_err(|kind| SearchProviderError::new(kind, "No unambiguous configured native web-search model is available"))?;
+        let (_, fields) = candidates.swap_remove(index);
+        OpenAiResponsesSearchProvider::new(fields.base_url.as_deref().unwrap_or_default(), fields.api_key, fields.model)
+            .map_err(|message| SearchProviderError::new(SearchProviderErrorKind::NotConfigured, message))
+    }
+}
+
+fn select_search_model(conversation: &nomifun_model_invoke::ModelRef, candidates: &[nomifun_model_invoke::ModelRef]) -> Result<usize, SearchProviderErrorKind> {
+    if let Some(index) = candidates.iter().position(|candidate| candidate.provider_id == conversation.provider_id && candidate.model == conversation.model) {
+        return Ok(index);
+    }
+    match candidates.len() {
+        0 => Err(SearchProviderErrorKind::NotConfigured),
+        1 => Ok(0),
+        _ => Err(SearchProviderErrorKind::AmbiguousModel),
+    }
+}
+
+#[async_trait]
+impl SearchProvider for CatalogSearchProvider {
+    fn provider_id(&self) -> &str { "configured.openai.responses.web_search" }
+    async fn search(&self, query: &str, count: usize) -> Result<SearchProviderResponse, SearchProviderError> {
+        self.resolve().await?.search(query, count).await
+    }
 }
 
 /// Server-built OpenAI Responses search connection. The secret is retained in
@@ -360,7 +423,7 @@ impl Tool for WebSearchTool {
         WEB_SEARCH_TOOL_NAME
     }
     fn description(&self) -> &str {
-        "Search through the exact authorized OpenAI Responses model connection and return bounded, citable URL sources."
+        "Search with a configured search provider and return bounded, citable URL sources. Search is independent of the conversation model. If no search provider is configured, report that limitation; never fabricate search results."
     }
     fn input_schema(&self) -> JsonSchema {
         json!({
@@ -440,6 +503,14 @@ impl Tool for WebSearchTool {
                     "authorized web search provider failed"
                 );
                 let (code, message) = match error.kind {
+                    SearchProviderErrorKind::NotConfigured => (
+                        "WEB_SEARCH_NOT_CONFIGURED",
+                        "Web search has no available configured provider. Configure an enabled OpenAI Responses model with the web_search trait in Model Management. Chat and media generation remain available.",
+                    ),
+                    SearchProviderErrorKind::AmbiguousModel => (
+                        "WEB_SEARCH_MODEL_AMBIGUOUS",
+                        "Several independent web-search models are configured. Enable exactly one search model or select a search-capable conversation model; no model was selected automatically.",
+                    ),
                     SearchProviderErrorKind::Timeout => (
                         "WEB_SEARCH_TIMEOUT",
                         "The authorized web search timed out.",
@@ -567,6 +638,63 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{body_json, header, method, path}};
 
     struct EmptyProvider;
+
+    #[test]
+    fn search_model_selection_is_independent_exact_and_never_order_based() {
+        use nomifun_model_invoke::ModelRef;
+        let model = |name: &str| ModelRef { provider_id: "provider".into(), model: name.into() };
+        let conversation = model("chat-only");
+        assert_eq!(select_search_model(&conversation, &[]), Err(SearchProviderErrorKind::NotConfigured));
+        assert_eq!(select_search_model(&conversation, &[model("search")]), Ok(0));
+        assert_eq!(select_search_model(&conversation, &[model("first"), model("second")]), Err(SearchProviderErrorKind::AmbiguousModel));
+        assert_eq!(select_search_model(&model("second"), &[model("first"), model("second")]), Ok(1));
+        assert_eq!(conversation.model, "chat-only");
+    }
+
+    #[tokio::test]
+    async fn catalog_search_resolves_lazily_without_changing_the_chat_model() {
+        use nomifun_db::{CreateProviderParams, IProviderRepository, NewProviderModel, NewProviderModelCapability,
+            SqliteProviderRepository, SqliteProviderModelRepository, SqliteProviderModelCapabilityRepository,
+            SqliteProviderConnectionRepository, init_database_memory};
+        use nomifun_model_invoke::{ModelInvokeService, ModelRef, AdapterRegistry, default_adapters};
+        let server = MockServer::start().await;
+        let database = init_database_memory().await.unwrap();
+        let pool = database.pool().clone();
+        let providers = Arc::new(SqliteProviderRepository::new(pool.clone()));
+        let key = [0x42; 32];
+        let credential = nomifun_common::encrypt_string(r#"{"api_keys":["search-test-key"]}"#, &key).unwrap();
+        let conversation = ModelRef { provider_id: nomifun_common::ProviderId::new().to_string(), model: "chat-only".into() };
+        let invoke = Arc::new(ModelInvokeService::new(
+            providers.clone(), Arc::new(SqliteProviderModelRepository::new(pool.clone())),
+            Arc::new(SqliteProviderModelCapabilityRepository::new(pool.clone())),
+            Arc::new(SqliteProviderConnectionRepository::new(pool)), key,
+            reqwest::Client::builder().no_proxy().build().unwrap(), AdapterRegistry::new(default_adapters()),
+        ));
+        let search = Arc::new(CatalogSearchProvider::new(invoke, conversation.clone()));
+        let tool = WebSearchTool::new(search.clone());
+        let unavailable = tool.execute(json!({"query":"test"})).await;
+        assert!(unavailable.is_error);
+        assert_eq!(serde_json::from_str::<Value>(&unavailable.content).unwrap()["code"], "WEB_SEARCH_NOT_CONFIGURED");
+        assert!(server.received_requests().await.unwrap().is_empty());
+        let search_id = nomifun_common::ProviderId::new().to_string();
+        providers.create(CreateProviderParams {
+            provider_id: Some(&search_id), platform: "openai", name: "Independent search",
+            base_url: &server.uri(), auth_scheme: "bearer", credentials_encrypted: &credential,
+            enabled: true, bedrock_config: None, sort_order: None,
+        }, &NewProviderModel { model: "search-only", enabled: true, sort_order: 0, description: None,
+            capabilities: &[NewProviderModelCapability { task: "chat", traits: r#"["web_search"]"#,
+                protocol: "openai.responses", connection_role: "default", endpoint: Some("/v1/responses"),
+                provider_params: "{}", context_limit: Some(131072), ..Default::default() }],
+        }, &[]).await.unwrap();
+        // The same already-created Tool observes the newly configured backend.
+        let resolved = search.resolve().await.unwrap();
+        assert_eq!(resolved.model, "search-only");
+        assert_eq!(resolved.endpoint.path(), "/v1/responses");
+        assert_eq!(resolved.api_key, "search-test-key");
+        assert_eq!(search.conversation_model.provider_id, conversation.provider_id);
+        assert_eq!(search.conversation_model.model, "chat-only");
+        assert!(server.received_requests().await.unwrap().is_empty(), "model discovery must stay local");
+    }
 
     struct LeakyFailureProvider;
 

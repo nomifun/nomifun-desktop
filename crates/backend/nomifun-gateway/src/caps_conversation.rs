@@ -355,6 +355,7 @@ async fn send(
         }
     }
     let req = SendMessageRequest {
+        preset_id: None,
         content: p.content,
         files: vec![],
         inject_skills: vec![],

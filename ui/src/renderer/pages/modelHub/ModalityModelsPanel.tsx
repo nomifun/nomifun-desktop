@@ -46,22 +46,30 @@ import {
 import { SerializedLatestWriteQueue } from './serializedLatestWriteQueue';
 import ModelHubPageHeader from './ModelHubPageHeader';
 
-type ImageGenerationDefaultModel = NonNullable<
+type GenerationDefaultModel = NonNullable<
   ConfigKeyMap['models.default.imageGeneration']
 >;
 
-interface ImageGenerationDefaultControlProps {
-  preferenceKey: 'models.default.imageGeneration';
+export type GenerationDefaultPreferenceKey = 'models.default.imageGeneration' | 'models.default.imageEdit' | 'models.default.videoGeneration' | 'models.default.musicGeneration' | 'models.default.speechSynthesis';
+const taskForDefault = {
+  'models.default.imageGeneration': 'image_generation',
+  'models.default.imageEdit': 'image_edit',
+  'models.default.videoGeneration': 'video_generation',
+  'models.default.musicGeneration': 'music_generation',
+  'models.default.speechSynthesis': 'speech_synthesis',
+} as const;
+interface GenerationDefaultControlProps {
+  preferenceKey: GenerationDefaultPreferenceKey;
 }
 
-const ImageGenerationDefaultControl: React.FC<
-  ImageGenerationDefaultControlProps
+const GenerationDefaultControl: React.FC<
+  GenerationDefaultControlProps
 > = ({ preferenceKey }) => {
   const { t } = useTranslation();
   const [message, messageContext] = useArcoMessage({ maxCount: 1 });
-  const { groups, isLoading } = useModelsForTask('image_generation');
+  const { groups, isLoading } = useModelsForTask(taskForDefault[preferenceKey]);
   const [defaultModel, setDefaultModel] =
-    useState<ImageGenerationDefaultModel | null>(
+    useState<GenerationDefaultModel | null>(
       () => configService.get(preferenceKey) ?? null,
     );
   const [isSavingDefault, setIsSavingDefault] = useState(false);
@@ -77,7 +85,7 @@ const ImageGenerationDefaultControl: React.FC<
     const unsubscribe = configService.subscribe(preferenceKey, (value) => {
       if (active && !writeQueueRef.current.hasPending) {
         setDefaultModel(
-          (value as ImageGenerationDefaultModel | undefined) ?? null,
+          (value as GenerationDefaultModel | undefined) ?? null,
         );
       }
     });
@@ -89,7 +97,7 @@ const ImageGenerationDefaultControl: React.FC<
   }, [preferenceKey]);
 
   const persistDefault = useCallback(
-    async (next: ImageGenerationDefaultModel | null) => {
+    async (next: GenerationDefaultModel | null) => {
       setDefaultModel(next);
       setIsSavingDefault(true);
 
@@ -140,7 +148,7 @@ const ImageGenerationDefaultControl: React.FC<
           controls={
             <div className='flex min-w-0 flex-wrap items-center justify-end gap-8px'>
               <TaskModelSelect
-                task='image_generation'
+                task={taskForDefault[preferenceKey]}
                 size='small'
                 disabled={noCandidates || isSavingDefault}
                 value={defaultModel}
@@ -173,7 +181,7 @@ export interface ModalityModelsPanelProps {
   /** Chat alone owns the install-wide default conversation model. */
   showDefaultModel?: boolean;
   /** Optional install-wide default owned by this model task. */
-  defaultModelPreferenceKey?: 'models.default.imageGeneration';
+  defaultModelPreferenceKey?: GenerationDefaultPreferenceKey;
 }
 
 /**
@@ -408,7 +416,7 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
       )}
 
       {defaultModelPreferenceKey && (
-        <ImageGenerationDefaultControl
+        <GenerationDefaultControl
           preferenceKey={defaultModelPreferenceKey}
         />
       )}
