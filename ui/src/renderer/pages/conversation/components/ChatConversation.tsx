@@ -137,7 +137,6 @@ const NomiConversationPanel: React.FC<{
   const hasPreset = Boolean(conversation.preset_id);
   const creation = useCreationDraft(conversation.id);
   const [stagedPresetId, setStagedPresetId] = useState(creation.draft.presetId ?? conversation.preset_id);
-  const previousOrdinaryAgent = useRef<GuidAgentSelection>(creation.draft.previousAgent || { kind: 'template', templateKey: 'chat.minimal' });
   const { library: agentLibrary, presets: savedAgentPresets, isLoading: agentsLoading, error: agentsError, refresh: refreshAgents } = useAgentPresets();
   const executableAgentPresets = useMemo(
     () => savedAgentPresets.filter(isExecutableAgentPreset),
@@ -167,7 +166,6 @@ const NomiConversationPanel: React.FC<{
       creation.draft.agentLabel ?? (conversation.extra as { agent_name?: string } | undefined)?.agent_name
         ?? conversation.agent_snapshot?.preset_name,
     );
-    previousOrdinaryAgent.current = creation.draft.previousAgent || { kind: 'template', templateKey: 'chat.minimal' };
   }, [conversation.id]);
   const [collaborators, setCollaboratorsState] = useState<TExecutionModelRef[]>(() => {
     const pool = conversation.execution_model_pool;
@@ -482,7 +480,6 @@ const NomiConversationPanel: React.FC<{
   selectedAgentRef.current = agentChoice;
   const switchAgent = (selection: GuidAgentSelection, mode?: CreationMode) => {
     const creative = selection.kind === 'template' && selection.templateKey === 'creative-studio.default';
-    if (creative && !creation.draft.mode) previousOrdinaryAgent.current = agentChoice;
     const presetId = selection.kind === 'preset' ? selection.presetId : undefined;
     const label = selection.kind === 'template'
       ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[selection.templateKey]}.name`)
@@ -490,7 +487,7 @@ const NomiConversationPanel: React.FC<{
     setStagedPresetId(presetId);
     setAgentChoice(selection);
     setSelectedAgentLabel(label);
-    creation.update(draft => ({ ...draft, selectedAgent: selection, presetId, agentLabel: label, previousAgent: creative ? previousOrdinaryAgent.current : selection, mode: creative ? mode || draft.lastMode : null, lastMode: mode || draft.lastMode }));
+    creation.update(draft => ({ ...draft, selectedAgent: selection, presetId, agentLabel: label, mode: creative ? mode || draft.lastMode : null, lastMode: mode || draft.lastMode }));
   };
   const resolvePreset = async () => {
     // Official templates must prepare current seed capabilities on each submission.
@@ -511,7 +508,7 @@ const NomiConversationPanel: React.FC<{
     if (creation.draft.mode) creation.setMode(mode);
     else switchAgent({ kind: 'template', templateKey: 'creative-studio.default' }, mode);
   };
-  const exitCreation = () => switchAgent(previousOrdinaryAgent.current);
+  const exitCreation = () => switchAgent({ kind: 'template', templateKey: 'assistant.general' });
   const currentAgentLabel = selectedAgentLabel ?? presetPresetInfo?.name ?? 'Agent';
   const agentSelectorNode = (
     <GuidAgentSelector

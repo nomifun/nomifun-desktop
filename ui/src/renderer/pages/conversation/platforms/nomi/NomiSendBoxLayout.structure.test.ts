@@ -178,17 +178,16 @@ describe('Nomi sendbox control layout', () => {
     const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
     const modelSource = readSource(new URL('./NomiModelSelector.tsx', import.meta.url));
     const sendBoxCss = readSource(new URL('../../../../components/chat/SendBox/sendbox.css', import.meta.url));
+    const responsiveCss = readSource(new URL('../../../../components/chat/ResponsiveComposerRow.module.css', import.meta.url));
     const collaboratorSource = readSource(new URL('../../../guid/components/GuidCollaboratorSelector.tsx', import.meta.url));
 
     expect(sendBoxSource.includes('sendbox-responsive-config-group')).toBe(true);
-    expect(sendBoxCss.includes('container-name: sendbox-config')).toBe(true);
-    expect(sendBoxCss.includes('@container sendbox-config (max-width: 560px)')).toBe(true);
-    expect(sendBoxCss.includes('.sendbox-responsive-label')).toBe(true);
+    expect(sendBoxCss.includes('container-name: sendbox-config')).toBe(false);
+    expect(responsiveCss.includes("[data-compact='true']")).toBe(true);
+    expect(responsiveCss.includes('.sendbox-responsive-label')).toBe(true);
     expect(sendBoxCss.includes(".nomi-sendbox-collaboration-btn[aria-pressed='true']")).toBe(true);
-    expect(sendBoxCss.includes('max-width 160ms ease')).toBe(true);
-    expect(sendBoxCss.includes('@media (hover: hover) and (pointer: fine)')).toBe(true);
-    expect(sendBoxCss.includes('.nomi-sendbox-model-btn:hover')).toBe(true);
-    expect(sendBoxCss.includes('display: inline-flex !important')).toBe(true);
+    expect(responsiveCss.includes(':hover, :focus-visible')).toBe(true);
+    expect(responsiveCss.includes('display: inline-flex !important')).toBe(true);
 
     for (const source of [modelSource, collaboratorSource]) {
       expect(source.includes('<Tooltip')).toBe(false);

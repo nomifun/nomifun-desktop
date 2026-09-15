@@ -7,7 +7,8 @@
 import { configService } from '@/common/config/configService';
 import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
 import type { AgentPresetSummary, OfficialPresetTemplate } from '@/common/types/agentPlatform';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { useGuidDraftState } from './useGuidDraftState';
 import {
   DEFAULT_GUID_AGENT_SELECTION,
   isExecutableAgentPreset,
@@ -57,7 +58,7 @@ export const useGuidAgentSelection = ({
   selectedAgentPresetId,
   locationKey,
 }: UseGuidAgentSelectionOptions): GuidAgentSelectionResult => {
-  const [selection, setSelectionState] = useState<GuidAgentSelection>(() => {
+  const [selection, setSelectionState] = useGuidDraftState<GuidAgentSelection>('agent', () => {
     try {
       return readSavedSelection();
     } catch {
@@ -85,7 +86,7 @@ export const useGuidAgentSelection = ({
   const setSelection = useCallback((nextSelection: GuidAgentSelection) => {
     setSelectionState(nextSelection);
     saveSelection(nextSelection);
-  }, []);
+  }, [setSelectionState]);
 
   const selectDefaultTemplate = useCallback(() => {
     setSelection(DEFAULT_GUID_AGENT_SELECTION);

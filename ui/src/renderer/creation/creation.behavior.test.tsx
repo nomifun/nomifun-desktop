@@ -1,6 +1,7 @@
 import '../../../test/setup-dom.ts';
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import { Message } from '@arco-design/web-react';
 import { useState, type ReactNode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { SWRConfig } from 'swr';
@@ -37,15 +38,15 @@ function mount(generationProvider = provider) {
   const cache = new Map();
   const wrapper = ({ children }: { children: ReactNode }) => <MemoryRouter><SWRConfig value={{ provider: () => cache, fallback: { providers: [generationProvider] }, revalidateOnMount: false, shouldRetryOnError: false }}>{children}</SWRConfig></MemoryRouter>;
   return renderHook(() => {
-    const [selection, setSelection] = useState<GuidAgentSelection>({ kind: 'template', templateKey: 'assistant.general' });
+    const [selection, setSelection] = useState<GuidAgentSelection>({ kind: 'template', templateKey: 'chat.minimal' });
     const [input, setInput] = useState('一只橘猫');
-    const creation = useGuidCreation({ selection, setSelection, officialTemplates: [template], selectedPreset: undefined, selectedTemplate: template, presets: [], draftPresets: [], isLoading: false, isLoaded: true, loadError: undefined, refreshPresets: async () => {} }, input, [], '');
+    const creation = useGuidCreation({ selection, setSelection, officialTemplates: [template], selectedPreset: undefined, selectedTemplate: template, presets: [], draftPresets: [], isLoading: false, isLoaded: true, loadError: undefined, refreshPresets: async () => {} }, input, [], '', () => setInput(''));
     return { creation, selection, input, setInput };
   }, { wrapper });
 }
 
 describe('conversation creation admission and draft behavior', () => {
-  test('task selection switches to creative Agent and exit restores ordinary Agent without clearing prompt, references or per-mode settings', async () => {
+  test('task selection switches to creative Agent and chat selects general assistant without clearing prompt, references or per-mode settings', async () => {
     const hook = mount();
     act(() => hook.result.current.creation.selectMode('image'));
     await waitFor(() => expect(hook.result.current.creation.ready).toBe(true));
@@ -87,12 +88,30 @@ describe('conversation creation admission and draft behavior', () => {
     act(() => hook.result.current.creation.selectMode(mode as CreationMode));
     await waitFor(() => expect(hook.result.current.creation.ready).toBe(true));
     await act(async () => { await hook.result.current.creation.send(); });
+    expect(hook.result.current.input).toBe('');
+    expect(hook.result.current.creation.draft.references).toEqual([]);
     expect(calls.find(call => call.url.endsWith('/api/agent-sessions'))?.body).toEqual({ preset_id: presetId, title: '一只橘猫', resource_selections: [{ resource_kind: 'asset_library', resource_id: 'creative-studio-assets' }] });
     const presetCalls = calls.filter(call => call.url.endsWith('/from-template/creative-studio.default'));
     expect(presetCalls).toHaveLength(2);
     for (const call of presetCalls) expect(call.body).not.toHaveProperty('model');
     expect(calls.find(call => call.url.endsWith('/creation-tasks'))?.body).toMatchObject({ preset_id: presetId, provider_id: providerId, model: 'image-exact', capability, params: { prompt: '一只橘猫' } });
     expect(calls.some(call => call.url.endsWith('/messages') || call.url.includes('switch-preset'))).toBe(false);
+  });
+
+  test('failed generation admission retains the editable prompt and references', async () => {
+    const toast = spyOn(Message, 'error').mockReturnValue(() => {});
+    try {
+      globalThis.fetch = (async () => new Response(JSON.stringify({ success: false, error: 'Service unavailable' }), { status: 503 })) as typeof fetch;
+      const hook = mount();
+      act(() => hook.result.current.creation.selectMode('image'));
+      await waitFor(() => expect(hook.result.current.creation.ready).toBe(true));
+      act(() => hook.result.current.creation.update(draft => ({ ...draft, references: [{ asset_id: 'reference-one', kind: 'image', title: '参考图', role: 'reference' }] })));
+      await act(async () => { await hook.result.current.creation.send(); });
+      expect(hook.result.current.input).toBe('一只橘猫');
+      expect(hook.result.current.creation.draft.references).toHaveLength(1);
+      expect(hook.result.current.creation.draft.mode).toBe('image');
+      expect(toast).toHaveBeenCalledTimes(1);
+    } finally { toast.mockRestore(); }
   });
 
   test('freezes provider settings, ignores inactive music references, and reuses uncertain admission keys', () => {

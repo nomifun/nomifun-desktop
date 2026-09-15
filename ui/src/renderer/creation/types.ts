@@ -17,7 +17,6 @@ export interface CreationDraft {
   pendingPrompt?: string;
   pendingFiles?: string[];
   selectedAgent?: GuidAgentSelectionPreference;
-  previousAgent?: GuidAgentSelectionPreference;
   presetId?: AgentPresetId;
   agentLabel?: string;
 }

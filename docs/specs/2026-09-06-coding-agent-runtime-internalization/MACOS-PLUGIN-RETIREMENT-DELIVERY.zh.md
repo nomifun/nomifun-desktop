@@ -115,3 +115,30 @@ bun run build:mac arm
 
 本机证据在 `.git/macos-final-delivery/`，第一版失败证据另存 `initial-package-85d4620a7/`。
 这些日志、隔离数据与 dist 制品不随 Git 提交上传。
+
+## 后续签名诊断与源码交付（2026-09-16）
+
+本节更新前述构建时的 Git 状态；制品的源码归属和失败记录保持原事实。
+
+### 严格签名失败的具体原因
+
+实查原 app：`adhoc,linker-signed`、`Info.plist=not bound`、`Sealed Resources=none`。
+主程序只有链接器临时签名，完整 app 未做资源封存签名。构建脚本的本地模式关闭了最终签名，
+因此严格 bundle 校验失败；这不等同于前端资源文件丢失。
+
+对隔离临时副本执行 `codesign --force --sign - --timestamp=none` 后，相同的
+`codesign --verify --deep --strict --verbose=2` 通过，输出 `valid on disk` 和
+`satisfies its Designated Requirement`，资源封存版本 2、391 个文件。
+这证明完整 ad-hoc 签名足以修复本次严格检查失败，无需 Apple 证书；正式分发所需的
+Developer ID 签名、公证与 Gatekeeper 验证仍是另外的验收项。
+
+该诊断只修改临时副本，没有修改构建脚本或重制交付 DMG；上文原 DMG 的 SHA-256 与签名失败
+状态继续有效。后续修复本地打包流程时，应在组装完成后、生成 DMG 和 release-lock 前完成签名。
+
+### 本次 commit + push
+
+用户随后明确授权 commit + push。在干净工作区 fetch 后，使用普通 merge 合入
+`71b5b1643`，自动合并 i18n 生成索引，无冲突；保留远程输入框/多模态草稿和本地会话页退役、
+PTY 回收修复，不重写共享历史。合并后的前端定向测试为 **18 文件、80 测试、526 断言通过**，
+`bun run check` 全链通过（含 TypeScript、桌面边界、i18n 和进程边界）。
+此轮提交推送的是源码和文档；没有重新构建或发布制品，也没有对合并后源码新增原生/真实模型声明。

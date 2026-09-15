@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import type { CreationDraft, CreationMode } from './types';
 import { browserStorageGenerationKey } from '@/common/utils/browserStorageKey';
 
@@ -18,14 +18,17 @@ function read(scope: string): CreationDraft {
 
 export function useCreationDraft(scope: string) {
   const [entry, setEntry] = useState(() => ({ scope, value: read(scope) }));
+  const current = useRef(entry);
   const draft = entry.scope === scope ? entry.value : read(scope);
-  if (entry.scope !== scope) setEntry({ scope, value: draft });
+  if (entry.scope !== scope) {
+    current.current = { scope, value: draft };
+    setEntry(current.current);
+  }
   const update = useCallback((change: (value: CreationDraft) => CreationDraft) => {
-    setEntry(previous => {
-      const value = change(previous.scope === scope ? previous.value : read(scope));
-      try { sessionStorage.setItem(storageKey(scope), JSON.stringify(value)); } catch { /* Memory remains authoritative if browser storage is full. */ }
-      return { scope, value };
-    });
+    const value = change(current.current.scope === scope ? current.current.value : read(scope));
+    current.current = { scope, value };
+    try { sessionStorage.setItem(storageKey(scope), JSON.stringify(value)); } catch { /* Memory remains authoritative if browser storage is full. */ }
+    setEntry(current.current);
   }, [scope]);
   const setMode = useCallback((mode: CreationMode | null) => update(value => ({ ...value, mode, lastMode: mode || value.lastMode })), [update]);
   return { draft, update, setMode };

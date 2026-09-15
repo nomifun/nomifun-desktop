@@ -25,11 +25,8 @@ export function buildCreationRequest(draft: CreationDraft, prompt: string, prese
     if (size?.value === 'auto') {
       delete params.size; delete params.width; delete params.height;
     } else if (size) Object.assign(params, { size: size.requestSize || size.value, width: size.width, height: size.height });
-    params.count = Math.min(policy.maxCount, Math.max(1, Number(params.count) || 1));
     delete params.aspect;
-  } else if (mode === 'video') {
-    params.count = Math.min(8, Math.max(1, Number(params.count) || 1));
-  } else {
+  } else if (mode === 'music') {
     params.instrumental = params.instrumental !== false;
     if (params.instrumental) delete params.lyrics;
   }
