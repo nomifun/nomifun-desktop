@@ -37,7 +37,7 @@ describe('Creative asset picker dialog', () => {
     expect(pickerSource.includes('<CreativeAssetMedia')).toBe(true);
     expect(pickerSource.includes('alignCenter={false}')).toBe(true);
     expect(pickerSource.includes("role='listbox'")).toBe(true);
-    expect(pickerSource.includes("role='tablist'")).toBe(true);
+    expect(pickerSource.includes("role='tablist'")).toBe(false);
     expect(pickerSource.includes("t('creativeStudio.assets.picker.searchPlaceholder'")).toBe(
       true
     );

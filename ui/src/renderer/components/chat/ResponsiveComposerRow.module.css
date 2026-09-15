@@ -1,0 +1,49 @@
+.row {
+  container-type: inline-size;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  flex-wrap: nowrap !important;
+}
+
+.row button:has(:global(.sendbox-responsive-label)) { flex-shrink: 0; }
+
+.row[data-measuring='true'] [data-composer-group] {
+  flex: 0 0 auto !important;
+  width: max-content !important;
+  max-width: none !important;
+}
+
+.row[data-measuring='true'] button:has(:global(.sendbox-responsive-label)) {
+  width: max-content !important;
+  max-width: none !important;
+  flex-shrink: 0 !important;
+}
+
+.row[data-compact='true']:not([data-measuring]) button:has(:global(.sendbox-responsive-label)) {
+  width: 28px !important;
+  min-width: 28px !important;
+  max-width: 28px !important;
+  height: 28px;
+  padding: 0 !important;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.row[data-compact='true']:not([data-measuring]) :global(.sendbox-responsive-label),
+.row[data-compact='true']:not([data-measuring]) :global(.sendbox-responsive-chevron) {
+  display: none !important;
+}
+
+.row[data-compact='true']:not([data-measuring]) button:has(:global(.sendbox-responsive-label)):is(:hover, :focus-visible, [aria-expanded='true']) {
+  width: max-content !important;
+  max-width: min(280px, 55cqw) !important;
+  padding: 0 6px !important;
+  position: relative;
+  z-index: 2;
+}
+
+.row[data-compact='true']:not([data-measuring]) button:is(:hover, :focus-visible, [aria-expanded='true']) :is(:global(.sendbox-responsive-label), :global(.sendbox-responsive-chevron)) {
+  display: inline-flex !important;
+}

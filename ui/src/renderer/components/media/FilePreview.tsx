@@ -4,12 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Close } from '@icon-park/react';
+import { Close, FolderOpen } from '@icon-park/react';
 import React, { useEffect, useState } from 'react';
 import { getFileExtension } from '@/renderer/services/FileService';
 import { ipcBridge } from '@/common';
-import { Image } from '@arco-design/web-react';
+import { Image, Message } from '@arco-design/web-react';
 import fileIcon from '@/renderer/assets/icons/file-icon.svg';
+import ComposerAttachmentTile from '@/renderer/components/chat/ComposerAttachmentTile';
+import attachmentStyles from '@/renderer/components/chat/ComposerAttachments.module.css';
+import ImageLightbox from './ImageLightbox';
+import { downloadFileFromPath } from '@/renderer/utils/file/download';
+import { usePreviewLauncher } from '@/renderer/hooks/file/usePreviewLauncher';
+import { getFileTypeInfo } from '@/renderer/utils/file/fileType';
+import { isPreviewSupportedExt } from '@/renderer/pages/conversation/Workspace/utils/filePreview';
 
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg']);
 
@@ -38,22 +45,28 @@ interface FilePreviewProps {
   /** Omit for pure read-only display (no delete affordance is rendered). */
   onRemove?: () => void;
   readonly?: boolean;
+  compact?: boolean;
+  ordinal?: number;
+  isDirectory?: boolean;
+  inactive?: boolean;
 }
 
-const FilePreview: React.FC<FilePreviewProps> = ({ path, onRemove, readonly = false }) => {
+const FilePreview: React.FC<FilePreviewProps> = ({ path, onRemove, readonly = false, compact = false, ordinal, isDirectory = false, inactive = false }) => {
   // Defensive check: ensure path is a string
   if (typeof path !== 'string') {
     console.error('[FilePreview] Invalid path type:', typeof path, path);
     return null;
   }
 
-  const isImage = isImageFile(path);
+  const isImage = !isDirectory && isImageFile(path);
   // 直接从路径中提取文件名，不清理时间戳后缀
   // Extract filename directly from path without cleaning timestamp suffix
   const file_name = path.split(/[\\/]/).pop() || '';
   const fileExt = getFileExtension(path).toUpperCase().replace('.', '');
   const [imageUrl, setImageUrl] = useState<string>('');
   const [fileSize, setFileSize] = useState<string>('');
+  const [viewing, setViewing] = useState(false);
+  const { launchPreview, canPreview, loading: opening } = usePreviewLauncher();
 
   useEffect(() => {
     // 获取文件大小
@@ -111,6 +124,25 @@ const FilePreview: React.FC<FilePreviewProps> = ({ path, onRemove, readonly = fa
     e.stopPropagation();
     onRemove?.();
   };
+
+  const openFile = async () => {
+    if (isImage) { setViewing(true); return; }
+    try {
+      if (!isDirectory && canPreview && isPreviewSupportedExt(file_name)) {
+        const { contentType, language } = getFileTypeInfo(file_name);
+        await launchPreview({ originalPath: path, file_name, contentType, language, editable: false });
+      } else await ipcBridge.shell.openFile.invoke(path);
+    } catch (error) { Message.error(error instanceof Error ? error.message : String(error)); }
+  };
+
+  if (compact) return <>
+    <ComposerAttachmentTile title={file_name} detail={[path, isDirectory ? '文件夹' : `${fileExt} ${fileSize}`, inactive ? '本轮不使用' : ''].filter(Boolean).join('\n')} ordinal={ordinal} inactive={inactive} onRemove={!readonly ? onRemove : undefined}>
+      <button type='button' className={attachmentStyles.open} aria-label={`${isImage ? '查看图片' : '查看文件'}：${file_name}`} disabled={opening || (isImage && !imageUrl)} onClick={() => void openFile()}>
+        {isDirectory ? <FolderOpen size={24} fill='currentColor' /> : isImage && imageUrl ? <img src={imageUrl} alt={file_name} /> : <img className={attachmentStyles.fileIcon} src={fileIcon} alt={isImage ? '正在读取图片' : fileExt} />}
+      </button>
+    </ComposerAttachmentTile>
+    {viewing && imageUrl && <ImageLightbox key={imageUrl} src={imageUrl} title={file_name} onClose={() => setViewing(false)} onDownload={() => downloadFileFromPath(path, file_name)} />}
+  </>;
 
   if (isImage) {
     return (

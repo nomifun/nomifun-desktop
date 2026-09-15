@@ -25,15 +25,13 @@ import {
 import { creativeAssetUploadQueueReducer } from './uploadQueue';
 
 describe('creative asset library route model', () => {
-  test('builds a global library-only paginated query without inventing a canvas scope', () => {
+  test('builds a global paginated query including assets regardless of library marking without inventing a canvas scope', () => {
     expect(buildGlobalCreativeAssetQuery('  campaign  ', 'video')).toEqual({
-      inLibrary: true,
       kind: 'video',
       search: 'campaign',
       sort: 'updated_desc',
     });
     expect(buildGlobalCreativeAssetQuery('   ', 'all')).toEqual({
-      inLibrary: true,
       kind: undefined,
       search: undefined,
       sort: 'updated_desc',
@@ -105,20 +103,17 @@ describe('creative asset library route model', () => {
       title: '  Hero  ',
       collection: '  Launch  ',
       tags: ['blue', ' blue ', '', 'wide'],
-      inLibrary: true,
-    })).toEqual({ title: 'Hero', collection: 'Launch', tags: ['blue', 'wide'], inLibrary: true });
+    })).toEqual({ title: 'Hero', collection: 'Launch', tags: ['blue', 'wide'] });
     expect(normalizeCreativeTextAssetForm({
       title: ' Copy ',
       textContent: ' Body ',
       collection: ' Notes ',
       tags: ['draft', 'draft'],
-      inLibrary: true,
     })).toEqual({
       title: 'Copy',
       textContent: 'Body',
       collection: 'Notes',
       tags: ['draft'],
-      inLibrary: true,
     });
   });
 

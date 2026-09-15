@@ -1,4 +1,4 @@
-import { imageGenerationSizePolicyForModel, type ImageGenerationModelOption, type ImageGenerationSizePolicy } from './parameters/image';
+import { imageGenerationSizePolicyForModel, type ImageGenerationAspectRatioOption, type ImageGenerationModelOption, type ImageGenerationSizePolicy } from './parameters/image';
 import type { CreationMode, CreationParameters, CreationInput } from './types';
 
 type Model = Pick<ImageGenerationModelOption, 'model' | 'protocol' | 'platform'> | null | undefined;
@@ -31,8 +31,27 @@ export function creationParameterPolicy(model: Model) {
     : protocol === 'zhipu.video_jobs' ? { seconds: [5, 10], sizes: ['1280x720', '1920x1080'] }
     : protocol === 'xai.video_jobs' ? { seconds: [5, 10], sizes: ['480p', '720p', '1080p'] }
     : protocol === 'siliconflow.video_jobs' ? { seconds: [], sizes: ['1280x720', '720x1280'] }
+    : protocol === 'agnes.video_jobs' ? { seconds: [], sizes: ['1280x720', '720x1280', '720x720', '1920x1080', '1080x1920', '1080x1080'] }
     : { seconds: [], sizes: [] };
   return { qualities, video };
+}
+
+/** Present ratio and resolution separately while submitting the native pixel size. */
+export function creationVideoSizeOptions(model: Model): ImageGenerationAspectRatioOption[] {
+  const pixels = creationParameterPolicy(model).video.sizes.filter(value => /^\d+x\d+$/.test(value));
+  if (!pixels.length) return [];
+  return [
+    { value: 'auto', label: '自动', width: null, height: null },
+    ...sizes(pixels).map(option => ({ ...option, resolution: `${Math.min(option.width, option.height)}p` })),
+  ];
+}
+
+export function creationMaxCount(mode: CreationMode, model: Model): number {
+  return mode === 'image' ? Math.min(4, creationImageSizePolicy(model).maxCount) : 4;
+}
+
+export function creationCount(mode: CreationMode, value: unknown, model: Model): number {
+  return Math.min(creationMaxCount(mode, model), Math.max(1, Math.floor(Number(value) || 1)));
 }
 
 /** Only composer-owned user parameters can be copied from history to a new task. */
@@ -47,7 +66,7 @@ export function normalizeCreationParameters(mode: CreationMode, value: CreationP
     if (!policy.qualities.includes(String(params.quality))) delete params.quality;
     const image = creationImageSizePolicy(model);
     if (!image.options.some(size => (params.size !== undefined && size.requestSize === params.size) || (params.aspect !== undefined && size.value === params.aspect))) { delete params.size; delete params.width; delete params.height; delete params.aspect; }
-    params.count = Math.min(image.maxCount, Math.max(1, Number(params.count) || 1));
+    params.count = creationCount(mode, params.count, model);
   } else if (mode === 'video') {
     if (!policy.video.seconds.includes(Number(params.seconds))) delete params.seconds;
     if (!params.size) {
@@ -57,7 +76,7 @@ export function normalizeCreationParameters(mode: CreationMode, value: CreationP
     }
     if (!policy.video.sizes.includes(String(params.size))) delete params.size;
     delete params.aspect; delete params.resolution;
-    params.count = Math.min(8, Math.max(1, Number(params.count) || 1));
+    params.count = creationCount(mode, params.count, model);
   }
   return params;
 }

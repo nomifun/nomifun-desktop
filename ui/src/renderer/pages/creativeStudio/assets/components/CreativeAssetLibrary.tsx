@@ -79,7 +79,6 @@ export interface CreativeAssetLibraryProps {
   onEditAsset?: CreativeAssetAction;
   onDownloadAsset?: CreativeAssetAction;
   onRemoveAsset?: CreativeAssetAction;
-  onSetSelectedLibrary?: (assets: readonly CreativeAsset[], inLibrary: boolean) => void;
   onInsertSelected?: CreativeAssetBatchAction;
   onDownloadSelected?: CreativeAssetBatchAction;
   onRemoveSelected?: CreativeAssetBatchAction;
@@ -264,7 +263,6 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
   onEditAsset,
   onDownloadAsset,
   onRemoveAsset,
-  onSetSelectedLibrary,
   onInsertSelected,
   onDownloadSelected,
   onRemoveSelected,
@@ -529,15 +527,6 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
             {allVisibleSelected ? labels.clearSelection : labels.selectAll}
           </button>
           <div className={styles.selectionActions}>
-            {onSetSelectedLibrary ? (
-              <button
-                type='button'
-                disabled={busy}
-                onClick={() => onSetSelectedLibrary(selectedAssets, scope !== 'library')}
-              >
-                {scope === 'library' ? labels.removeFromLibrary : labels.addToLibrary}
-              </button>
-            ) : null}
             {onInsertSelected ? (
               <button type='button' disabled={busy} onClick={() => onInsertSelected(selectedAssets)}>
                 <Plus theme='outline' size={14} fill='currentColor' strokeWidth={3} />
