@@ -153,17 +153,6 @@ pub trait PluginRuntimeAgentCapabilityPort: Send + Sync {
     async fn invoke_agent_capability(
         &self,
         request: PluginRuntimeAgentCapabilityInvocation,
-    ) -> Result<StrictJsonValue, PluginRuntimeApplicationError> {
-        self.invoke_agent_capability_with_events(request, None).await
-    }
-
-    /// A trusted host consumer may request bounded incremental values. These
-    /// are not a new Agent authorization or a completed operation receipt;
-    /// domain consumers still validate their event/terminal semantics.
-    async fn invoke_agent_capability_with_events(
-        &self,
-        request: PluginRuntimeAgentCapabilityInvocation,
-        events: Option<tokio::sync::mpsc::Sender<StrictJsonValue>>,
     ) -> Result<StrictJsonValue, PluginRuntimeApplicationError>;
 }
 
@@ -329,40 +318,6 @@ impl PluginRuntimeApplicationService {
         *self.agent_sessions.write().await = Some(port);
     }
 
-    /// Called only by the trusted owner-scoped event projector, not by plugin commands.
-    /// Resolve once per bounded batch, then recheck after asynchronous Session admission.
-    pub async fn project_agent_session_stream(
-        &self,
-        owner_user_id: &str,
-        conversation_id: &str,
-        events: &[Value],
-    ) -> Result<Vec<nomifun_api_types::PluginAgentSessionStreamDto>, PluginRuntimeApplicationError> {
-        if events.len() > 32 || events.iter().any(|event| {
-            event["conversation_id"].as_str() != Some(conversation_id)
-                || !event["type"].is_string()
-        }) {
-            return Err(PluginRuntimeApplicationError::Invalid("invalid Session event batch".into()));
-        }
-        let initial = self.repository.agent_surface_sessions(owner_user_id, conversation_id).await?;
-        if initial.is_empty() { return Ok(Vec::new()); }
-        self.agent_session_port().await?.authorize(owner_user_id, conversation_id).await?;
-        let current = self.repository.agent_surface_sessions(owner_user_id, conversation_id).await?;
-        let mut projected = Vec::new();
-        for surface in current {
-            // A replaced view must not inherit this in-flight batch.
-            if !initial.iter().any(|old| old.surface_session_id == surface.surface_session_id
-                && old.generation == surface.generation) { continue; }
-            for event in events {
-                projected.push(nomifun_api_types::PluginAgentSessionStreamDto {
-                    plugin_id: surface.plugin_product_id.clone(),
-                    surface_session_id: surface.surface_session_id.clone(),
-                    surface_generation: surface.generation as u64,
-                    event: event.clone(),
-                });
-            }
-        }
-        Ok(projected)
-    }
 
     async fn agent_session_port(&self) -> Result<Arc<dyn super::PluginAgentSessionPort>, PluginRuntimeApplicationError> {
         self.agent_sessions.read().await.clone().ok_or_else(||
@@ -606,7 +561,6 @@ impl PluginRuntimeApplicationService {
     async fn invoke_agent_capability_inner(
         &self,
         request: PluginRuntimeAgentCapabilityInvocation,
-        events: Option<tokio::sync::mpsc::Sender<StrictJsonValue>>,
     ) -> Result<StrictJsonValue, PluginRuntimeApplicationError> {
         validate_request_identity(request.owner_user_id.as_str(), "owner_user_id")?;
         validate_request_identity(request.plugin_product_id.as_ref(), "plugin_product_id")?;
@@ -734,14 +688,13 @@ impl PluginRuntimeApplicationService {
             })?;
         self.service_runtime()
             .await
-            .invoke_with_events(
+            .invoke(
                 &spec,
                 request.call_id,
                 request.action_id.as_ref().to_owned(),
                 request.payload,
                 PluginRuntimeCallCancellation::default(),
                 positive_now_ms(),
-                events,
             )
             .await
             .map_err(|error| PluginRuntimeApplicationError::Runtime(error.to_string()))
@@ -1513,7 +1466,7 @@ impl PluginRuntimeApplicationService {
         let current_runtime = self
             .service_runtime()
             .await
-            .current_fingerprint_for(&receipt.runtime)
+            .current_runtime_fingerprint()
             .await
             .map_err(|error| {
                 PluginRuntimeApplicationError::Runtime(format!(
@@ -4033,7 +3986,7 @@ impl PluginRuntimeApplicationService {
         let current_runtime = self
             .service_runtime()
             .await
-            .current_fingerprint_for(&receipt.runtime)
+            .current_runtime_fingerprint()
             .await
             .map_err(|error| {
                 PluginRuntimeApplicationError::Runtime(format!(
@@ -4639,44 +4592,21 @@ impl PluginRuntimeApplicationService {
         Ok(())
     }
 
-    /// A Node runtime switch must not interrupt independent native Services.
-    pub async fn shutdown_node_service_runtime(
-        &self,
-        owner_user_id: &str,
-    ) -> Result<(), PluginRuntimeApplicationError> {
-        let runtime = self.service_runtime().await;
-        for product in self.enabled_node_service_products(owner_user_id).await? {
-            runtime.stop(&product).await
-                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
-        }
-        Ok(())
-    }
-
-    async fn enabled_node_service_products(
-        &self,
-        owner_user_id: &str,
-    ) -> Result<Vec<PluginProductId>, PluginRuntimeApplicationError> {
-        let library = self.repository.library(owner_user_id).await?;
-        let mut expected = Vec::new();
-        for product in library.products.iter().filter(|product| product.lifecycle == "enabled") {
-            let snapshot = self.repository.get(owner_user_id, &product.plugin_product_id).await?
-                .ok_or(PluginRuntimeApplicationError::NotFound)?;
-            let Some(active) = &snapshot.active_release else { continue; };
-            let stored = self.load_verified_release(owner_user_id, &snapshot.project.project_id, active)?;
-            if stored.artifact.manifest.payload.service.as_ref().is_some_and(|service| service.execution.is_node()) {
-                expected.push(PluginProductId::from(product.plugin_product_id.clone()));
-            }
-        }
-        expected.sort();
-        Ok(expected)
-    }
-
     pub async fn validate_service_runtime_candidate(
         &self,
         owner_user_id: &str,
         candidate: &ResolvedNodeRuntime,
     ) -> Result<(), PluginRuntimeApplicationError> {
-        let expected = self.enabled_node_service_products(owner_user_id).await?;
+        let library = self.repository.library(owner_user_id).await?;
+        let mut expected = Vec::new();
+        for product in library.products.iter().filter(|product| product.lifecycle == "enabled") {
+            let snapshot = self.repository.get(owner_user_id, &product.plugin_product_id).await?
+                .ok_or(PluginRuntimeApplicationError::NotFound)?;
+            if self.release_has_service(&snapshot, snapshot.active_release.as_ref())? {
+                expected.push(PluginProductId::from(product.plugin_product_id.clone()));
+            }
+        }
+        expected.sort();
         if expected.is_empty() {
             return Ok(());
         }
@@ -6373,12 +6303,11 @@ fn ui_only_non_ui_manifest_digest(
 
 #[async_trait]
 impl PluginRuntimeAgentCapabilityPort for PluginRuntimeApplicationService {
-    async fn invoke_agent_capability_with_events(
+    async fn invoke_agent_capability(
         &self,
         request: PluginRuntimeAgentCapabilityInvocation,
-        events: Option<tokio::sync::mpsc::Sender<StrictJsonValue>>,
     ) -> Result<StrictJsonValue, PluginRuntimeApplicationError> {
-        self.invoke_agent_capability_inner(request, events).await
+        self.invoke_agent_capability_inner(request).await
     }
 }
 

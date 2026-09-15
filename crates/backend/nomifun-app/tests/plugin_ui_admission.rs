@@ -10,6 +10,7 @@ async fn experimental_agent_ui_default_denies_without_disabling_builtin_or_gener
         return;
     }
     let (router, services) = common::build_local_trust_app(TRUST).await;
+    assert_eq!(get(&router, "/api/system/info").await["experimental_agent_ui_available"], false);
     let upstream = wiremock::MockServer::start().await;
     let provider = post(&router, "/api/providers", json!({
         "platform": "stepfun-plan", "name": "Admission model",
@@ -169,26 +170,6 @@ async fn experimental_agent_ui_default_denies_without_disabling_builtin_or_gener
         assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
         assert_eq!(error["code"], "EXPERIMENTAL_AGENT_UI_DISABLED");
     }
-    let owner = nomifun_db::installation_owner_id(services.database.pool())
-        .await
-        .unwrap();
-    let projected = services
-        .plugin_runtime
-        .project_agent_session_stream(
-            &owner,
-            session_id,
-            &[json!({"conversation_id": session_id, "type": "text", "data": "private"})],
-        )
-        .await;
-    assert!(matches!(
-        projected,
-        Err(
-            nomifun_plugin_platform::runtime::PluginRuntimeApplicationError::AgentSession {
-                status: 403,
-                ..
-            }
-        )
-    ));
     assert_eq!(get(&router, &session_path).await, original_session);
     assert_eq!(get(&router, &editor_path).await, original_editor);
     assert!(upstream.received_requests().await.unwrap().is_empty());

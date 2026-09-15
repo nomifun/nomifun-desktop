@@ -16,6 +16,7 @@ import * as platform from '@/renderer/utils/platform';
 import { emitter } from '@/renderer/utils/emitter';
 import { AgentSessionViewHost } from '../agentSession/AgentSessionPage';
 import AgentPageSettings from './AgentPageSettings';
+import { AgentUiAvailabilityContext } from '@/renderer/hooks/agent/useAgentUiAvailable';
 import AgentPresetEditor from './AgentPresetEditor';
 import en from '../../services/i18n/locales/en-US/agentSettings.json';
 import pluginEn from '../../services/i18n/locales/en-US/pluginRuntime.json';
@@ -73,7 +74,7 @@ async function mount(options: {
   const page = (current = preset, dirty = options.dirty ?? false) => {
     const actual = options.stable === false ? { ...current, current_stable_revision: undefined } : current;
     const draft = { preset_id: actual.preset_id, display_name: actual.display_name, document: createEmptyAgentPresetDocument() };
-    return <I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => cache, dedupingInterval: 0, shouldRetryOnError: false }}>
+    return <AgentUiAvailabilityContext.Provider value={true}><I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => cache, dedupingInterval: 0, shouldRetryOnError: false }}>
       <MemoryRouter initialEntries={['/agent']}><Routes><Route path='/agent' element={options.editor
         ? <AgentPresetEditor key={actual.preset_id} editor={{ preset: actual, draft }} draft={draft}
           catalog={{ capabilities: [], skills: [], mcp_tools: [], roles: [] }} busyAction={null} dirty={dirty}
@@ -81,7 +82,7 @@ async function mount(options: {
         : <AgentPageSettings key={actual.preset_id} preset={actual} busy={false} dirty={dirty} />} />
         <Route path='/agent-sessions/:id' element={<Session />} />
       </Routes></MemoryRouter>
-    </SWRConfig></I18nextProvider>;
+    </SWRConfig></I18nextProvider></AgentUiAvailabilityContext.Provider>;
   };
   let result!: ReturnType<typeof render>;
   await act(async () => { result = render(page()); });

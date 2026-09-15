@@ -79,6 +79,7 @@ fn resolve_storage_generation() -> String {
 /// Build the system info response from the current runtime environment.
 pub fn get_system_info() -> SystemInfoResponse {
     SystemInfoResponse {
+        experimental_agent_ui_available: std::env::var("NOMIFUN_ALLOW_EXPERIMENTAL_AGENT_UI").as_deref() == Ok("1"),
         cache_dir: resolve_cache_dir(),
         work_dir: resolve_work_dir(),
         log_dir: resolve_log_dir(),

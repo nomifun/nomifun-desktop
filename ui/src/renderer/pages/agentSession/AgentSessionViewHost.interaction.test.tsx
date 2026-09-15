@@ -5,6 +5,7 @@ import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { SWRConfig } from 'swr';
+import { useEffect } from 'react';
 import { agentPlatform, pluginRuntimes } from '@/common/adapter/ipcBridge';
 import { pluginRuntimeProduct, type PluginRuntimeDraft } from '@/common/adapter/pluginRuntimeProductBridge';
 import * as platform from '@/renderer/utils/platform';
@@ -13,6 +14,7 @@ import type { AgentPresetUiBinding, AgentUiContribution, PluginRuntimeSurfaceLau
 import en from '../../services/i18n/locales/en-US/agentSettings.json';
 import pluginEn from '../../services/i18n/locales/en-US/pluginRuntime.json';
 import { AgentSessionViewHost } from './AgentSessionPage';
+import { AgentUiAvailabilityContext } from '@/renderer/hooks/agent/useAgentUiAvailable';
 
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'en-US', fallbackLng: 'en-US', resources: {
@@ -40,6 +42,7 @@ const builtinPreference: AgentPresetUiBinding = {
 async function open(options: {
   preference?: () => Promise<AgentPresetUiBinding>;
   choices?: AgentUiContribution[];
+  available?: boolean;
 } = {}) {
   const catalog = spyOn(agentPlatform.agentUiContributions, 'invoke').mockResolvedValue(options.choices ?? [choice]);
   let stored = structuredClone(builtinPreference);
@@ -54,38 +57,54 @@ async function open(options: {
   spyOn(platform, 'resolveBackendAssetUrl').mockReturnValue('about:blank');
   const cache = new Map();
   const draftCreated = mock((_draftId: string) => {});
+  let builtinMounts = 0;
+  function BuiltinProbe() {
+    useEffect(() => { builtinMounts++; }, []);
+    return <div>Built-in session content</div>;
+  }
   const page = (sessionId: string) => <SWRConfig value={{ provider: () => cache, dedupingInterval: 2000, shouldRetryOnError: false }}>
-    <I18nextProvider i18n={i18n}><AgentSessionViewHost key={sessionId} sessionId={sessionId} onDraftCreated={draftCreated}>
-      <div>Built-in session content</div>
-    </AgentSessionViewHost></I18nextProvider>
+    <I18nextProvider i18n={i18n}><AgentUiAvailabilityContext.Provider value={options.available ?? true}><AgentSessionViewHost key={sessionId} sessionId={sessionId} onDraftCreated={draftCreated}>
+      <BuiltinProbe />
+    </AgentSessionViewHost></AgentUiAvailabilityContext.Provider></I18nextProvider>
   </SWRConfig>;
   const result = render(page('session-a'));
   const view = within(result.container);
-  if (options.choices?.length !== 0) await view.findByRole('option', { name: /My Agent/ });
+  if (options.available !== false && options.choices?.length !== 0) await view.findByRole('option', { name: /My Agent/ });
   if (!options.preference) await view.findByText('Built-in session content');
   const select = () => fireEvent.change(view.getByRole('combobox'), {
     target: { value: (view.getByRole('option', { name: /My Agent/ }) as HTMLOptionElement).value },
   });
   const use = () => fireEvent.click(view.getByRole('button', { name: en.view.use }));
-  return { ...result, view, catalog, preference, save, launch, close, bridge, select, use, page, draftCreated };
+  return { ...result, view, catalog, preference, save, launch, close, bridge, select, use, page, draftCreated, builtinMounts: () => builtinMounts };
 }
 
-test('empty server catalog keeps builtin usable without advertising experimental view setup', async () => {
-  const v = await open({ choices: [] });
+test.each(['hang', 'error'])('disabled bootstrap never reads catalog or preference, even on their %s path', async (failure) => {
+  const v = await open({ available: false, preference: () => failure === 'hang'
+    ? new Promise(() => {}) : Promise.reject(new Error('unavailable')) });
   expect(v.view.getByText('Built-in session content')).toBeTruthy();
   expect(v.view.queryByRole('combobox')).toBeNull();
   expect(v.view.queryByRole('button', { name: en.view.createTemplate })).toBeNull();
   expect(v.launch).not.toHaveBeenCalled();
   expect(v.save).not.toHaveBeenCalled();
   expect(v.bridge).not.toHaveBeenCalled();
+  expect(v.catalog).not.toHaveBeenCalled();
+  expect(v.preference).not.toHaveBeenCalled();
+  expect(v.builtinMounts()).toBe(1);
 });
 
-test('disabled experiment preserves saved consent but opens builtin and allows explicit clearing', async () => {
+test('enabled empty catalog offers the first template without a published plugin', async () => {
+  const v = await open({ choices: [] });
+  expect(v.view.getByRole('button', { name: en.view.createTemplate })).toBeTruthy();
+  expect(v.view.getByText('Built-in session content')).toBeTruthy();
+  expect(v.launch).not.toHaveBeenCalled();
+});
+
+test('unavailable saved release opens builtin and allows explicit clearing', async () => {
   const v = await open({ choices: [], preference: async () => ({ ...builtinPreference,
     binding: { binding_version: 4, selection: choice } }) });
   await v.view.findByText(en.view.defaultUnavailable);
   await v.view.findByText('Built-in session content');
-  expect(v.view.queryByRole('button', { name: en.view.createTemplate })).toBeNull();
+  expect(v.view.getByRole('button', { name: en.view.createTemplate })).toBeTruthy();
   expect(v.launch).not.toHaveBeenCalled();
   expect(v.save).not.toHaveBeenCalled();
   fireEvent.click(v.view.getByRole('button', { name: en.view.clearDefault }));
@@ -106,6 +125,7 @@ test('remembered exact release opens a fresh grant for each Session; it is not a
   expect(v.close).toHaveBeenCalledTimes(1);
   expect(v.save).not.toHaveBeenCalled();
   expect(v.bridge).not.toHaveBeenCalled();
+  expect(v.builtinMounts()).toBe(0);
 });
 
 test('temporary builtin choice wins over late persisted consent', async () => {

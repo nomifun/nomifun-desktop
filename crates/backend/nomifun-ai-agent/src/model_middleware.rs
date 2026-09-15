@@ -19,6 +19,8 @@ impl Binding {
     }
 }
 
+/// Nomi preview/save admission shares runtime selection's exact contract checks.
+/// The generic compiler validates order and identity, not support for Nomi hooks.
 pub fn validate_selection(
     content: &nomifun_agent_contracts::ResolvedSnapshotContent,
 ) -> Result<(), NomiPluginToolError> {

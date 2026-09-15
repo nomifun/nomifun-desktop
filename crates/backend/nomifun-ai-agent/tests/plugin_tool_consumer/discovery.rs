@@ -390,7 +390,7 @@ async fn product_discovery_uses_frozen_adapter_without_exposing_hidden_action() 
     );
     assert!(
         base.clone()
-            .with_plugin_product_actions(Vec::new(), invoker.clone())
+            .bind_hosted_execution(product_bindings(Vec::new(), invoker.clone()))
             .is_err()
     );
     let actions = KernelNomiPluginToolSession::materialize_plugin_product_actions(
@@ -406,7 +406,7 @@ async fn product_discovery_uses_frozen_adapter_without_exposing_hidden_action() 
     .unwrap();
     assert_eq!(actions.len(), 1);
     let loaded = base
-        .with_plugin_product_actions(actions, invoker.clone())
+        .bind_hosted_execution(product_bindings(actions, invoker.clone()))
         .unwrap();
     assert!(loaded.actions().is_empty());
     assert!(loaded.plugin_product_actions().is_empty());

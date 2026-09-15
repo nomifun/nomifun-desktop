@@ -1007,6 +1007,25 @@ struct NomiLifecycleIdentity {
 #[path = "model_middleware.rs"]
 pub mod model_middleware;
 
+/// Host-owned inputs collected before installing any execution consumer.
+/// Product tools, hidden hooks and dynamic tools receive one finalized scope.
+/// This is assembly data, not another registry or executor.
+pub struct NomiHostedSessionBindings {
+    pub effect_scope: Arc<crate::engine_effect_scope::EngineEffectScope>,
+    pub product: Option<(Vec<NomiPluginProductToolAction>, Arc<dyn NomiPluginProductToolInvoker>)>,
+    pub dynamic: Option<(Vec<NomiHostDynamicToolDescriptor>, Arc<dyn NomiHostDynamicToolInvoker>)>,
+    pub context: Vec<Arc<dyn ContextContributor>>,
+    pub session_control: Option<Arc<dyn crate::SessionControlSink>>,
+    pub mcp_resources: Option<crate::nomi_resources::NomiMcpResources>,
+}
+
+impl NomiHostedSessionBindings {
+    pub fn new(effect_scope: Arc<crate::engine_effect_scope::EngineEffectScope>) -> Self {
+        Self { effect_scope, product: None, dynamic: None, context: Vec::new(),
+            session_control: None, mcp_resources: None }
+    }
+}
+
 /// A complete set of Plugin action tools for one frozen Nomi session.
 #[derive(Clone)]
 pub struct NomiPluginToolSession {
@@ -1025,9 +1044,6 @@ pub struct NomiPluginToolSession {
     actions: Arc<[NomiPluginToolAction]>,
     invoker: Arc<dyn NomiPluginToolInvoker>,
     plugin_product_actions: Arc<[NomiPluginProductToolAction]>,
-    // Retain validated Hidden identities only to rebind consumers when the
-    // host installs its effect scope after the Product adapter.
-    plugin_product_hidden_actions: Arc<[NomiPluginProductToolAction]>,
     plugin_product_invoker: Option<Arc<dyn NomiPluginProductToolInvoker>>,
     initial_context_contributions: Arc<[NomiInitialContextContribution]>,
     host_dynamic_actions: Arc<[NomiHostDynamicToolAction]>,
@@ -1093,7 +1109,7 @@ impl NomiPluginToolSession {
 
     pub(crate) fn has_hosted_mcp_resources(&self) -> bool { self.mcp_resources.is_some() }
 
-    pub fn with_mcp_resources(mut self, resources: crate::nomi_resources::NomiMcpResources) -> Result<Self, NomiPluginToolError> {
+    fn with_mcp_resources(mut self, resources: crate::nomi_resources::NomiMcpResources) -> Result<Self, NomiPluginToolError> {
         if self.mcp_resources.is_some() || !self.execution_constraints.allows_capability("mcp.resource") {
             return Err(NomiPluginToolError::Contract("MCP resource adapter is already installed or outside the execution ceiling".into()));
         }
@@ -1147,7 +1163,6 @@ impl NomiPluginToolSession {
             actions: Arc::from(actions),
             invoker,
             plugin_product_actions: Arc::from(Vec::<NomiPluginProductToolAction>::new()),
-            plugin_product_hidden_actions: Arc::from(Vec::<NomiPluginProductToolAction>::new()),
             plugin_product_invoker: None,
             initial_context_contributions: Arc::from(
                 Vec::<NomiInitialContextContribution>::new(),
@@ -1165,9 +1180,36 @@ impl NomiPluginToolSession {
         })
     }
 
-    /// Retain hosted tool dispatches across cancellation of their caller. Must
-    /// be installed once by the authenticated host, before runtime construction.
-    pub fn with_effect_scope(
+    /// Install host execution bindings once, after collecting all dependencies.
+    /// No consumer is published with an unscoped invoker and later rebound.
+    pub fn bind_hosted_execution(
+        mut self,
+        bindings: NomiHostedSessionBindings,
+    ) -> Result<Self, NomiPluginToolError> {
+        self = self.install_effect_scope(bindings.effect_scope)?;
+        if let Some((actions, invoker)) = bindings.product {
+            self = self.install_plugin_product_actions(actions, invoker)?;
+        }
+        if let Some((actions, invoker)) = bindings.dynamic {
+            self = self.install_host_dynamic_tools(actions, invoker)?;
+        }
+        for contributor in bindings.context {
+            self = self.with_context_contributor(contributor)?;
+        }
+        if let Some(resources) = bindings.mcp_resources {
+            self = self.with_mcp_resources(resources)?;
+        }
+        if let Some(sink) = bindings.session_control {
+            self = self.with_session_control_sink(sink);
+        }
+        self.model_middleware()?;
+        if matches!(self.discovery_policy, Some(crate::tool_discovery::DiscoveryBinding::Product(_))) {
+            return Err(NomiPluginToolError::Contract("Selected Product discovery policy is missing its exact action adapter".into()));
+        }
+        Ok(self)
+    }
+
+    fn install_effect_scope(
         mut self,
         scope: Arc<crate::engine_effect_scope::EngineEffectScope>,
     ) -> Result<Self, NomiPluginToolError> {
@@ -1187,42 +1229,12 @@ impl NomiPluginToolSession {
         self.invoker = Arc::new(OwnedNomiPluginToolInvoker {
             delegate: self.invoker.clone(), scope: scope.clone(),
         });
-        if let Some(delegate) = self.plugin_product_invoker.take() {
-            let invoker: Arc<dyn NomiPluginProductToolInvoker> =
-                Arc::new(OwnedNomiPluginProductToolInvoker { delegate, scope: scope.clone() });
-            self.rebind_product_hidden_consumers(invoker.clone())?;
-            self.plugin_product_invoker = Some(invoker);
-        }
-        if let Some(delegate) = self.host_dynamic_invoker.take() {
-            self.host_dynamic_invoker = Some(Arc::new(OwnedNomiDynamicToolInvoker { delegate, scope: scope.clone() }));
-        }
         self.effect_scope = Some(scope);
         Ok(self)
     }
 
     pub fn effect_scope(&self) -> Option<Arc<crate::engine_effect_scope::EngineEffectScope>> {
         self.effect_scope.clone()
-    }
-
-    fn rebind_product_hidden_consumers(
-        &mut self,
-        invoker: Arc<dyn NomiPluginProductToolInvoker>,
-    ) -> Result<(), NomiPluginToolError> {
-        let middleware = self.plugin_product_hidden_actions.iter()
-            .filter(|action| action.identity.action == model_middleware::action())
-            .collect::<Vec<_>>();
-        model_middleware::bind(&mut self.model_middleware, &middleware, &self.resolved_snapshot_ref, invoker.clone())?;
-        // These exact identities already passed selection/schema validation in
-        // with_plugin_product_actions; do not rediscover or change the choice.
-        if let Some(action) = self.plugin_product_hidden_actions.iter()
-            .find(|action| action.identity.action == crate::tool_discovery::action())
-        {
-            self.discovery_policy = Some(crate::tool_discovery::DiscoveryBinding::Ready(
-                action.capability_id().clone(),
-                Arc::new(NomiPluginProductDiscoveryPolicy { action: action.clone(), invoker }),
-            ));
-        }
-        Ok(())
     }
 
     pub fn context_contributors(
@@ -1249,7 +1261,7 @@ impl NomiPluginToolSession {
 
     /// Append a mandatory host context source without replacing lifecycle or
     /// Robot contributors already materialized for this exact Session.
-    pub fn with_context_contributor(mut self, contributor: Arc<dyn ContextContributor>) -> Result<Self, NomiPluginToolError> {
+    fn with_context_contributor(mut self, contributor: Arc<dyn ContextContributor>) -> Result<Self, NomiPluginToolError> {
         if self.context_contributors.len() >= 64 {
             return Err(NomiPluginToolError::Contract("too many host context contributors".into()));
         }
@@ -1265,7 +1277,7 @@ impl NomiPluginToolSession {
     /// Attach the native control owner for this exact host-authenticated
     /// AgentSession. It is intentionally not accepted by Plugin manifests or
     /// model input.
-    pub fn with_session_control_sink(
+    fn with_session_control_sink(
         mut self,
         sink: Arc<dyn crate::SessionControlSink>,
     ) -> Self {
@@ -1282,7 +1294,7 @@ impl NomiPluginToolSession {
     /// Add exact Plugin Product Active Release actions to this same Nomi Tool
     /// session. Plugin and Plugin Product actions share one registry/policy
     /// surface, while their invokers remain separate execution adapters.
-    pub fn with_plugin_product_actions(
+    fn install_plugin_product_actions(
         mut self,
         mut actions: Vec<NomiPluginProductToolAction>,
         invoker: Arc<dyn NomiPluginProductToolInvoker>,
@@ -1295,10 +1307,9 @@ impl NomiPluginToolSession {
         }
         // Bind every consumer to the same retained invoker, including Hidden
         // consumers assembled below, not just the model-visible tool list.
-        let invoker: Arc<dyn NomiPluginProductToolInvoker> = match &self.effect_scope {
-            Some(scope) => Arc::new(OwnedNomiPluginProductToolInvoker { delegate: invoker, scope: scope.clone() }),
-            None => invoker,
-        };
+        let scope = self.effect_scope.clone().ok_or_else(|| NomiPluginToolError::Contract("host execution scope is missing".into()))?;
+        let invoker: Arc<dyn NomiPluginProductToolInvoker> =
+            Arc::new(OwnedNomiPluginProductToolInvoker { delegate: invoker, scope });
         let middleware = actions.iter().filter(|a| a.identity.action == model_middleware::action()).collect::<Vec<_>>();
         model_middleware::bind(&mut self.model_middleware, &middleware, &self.resolved_snapshot_ref, invoker.clone())?;
         let hidden = actions.iter().filter(|action| action.identity.action.presentation == ToolPresentationKind::Hidden
@@ -1320,9 +1331,6 @@ impl NomiPluginToolSession {
             (_, []) => {}
             _ => return Err(NomiPluginToolError::Contract("Unexpected or conflicting Product discovery action".into())),
         }
-        self.plugin_product_hidden_actions = actions.iter()
-            .filter(|action| action.identity.action.presentation == ToolPresentationKind::Hidden)
-            .cloned().collect::<Vec<_>>().into();
         actions.retain(|action| action.identity.action.presentation == ToolPresentationKind::FunctionTool);
         actions.sort_by(|left, right| {
             (
@@ -1394,7 +1402,7 @@ impl NomiPluginToolSession {
         self.capability_state.clone()
     }
 
-    pub fn with_host_dynamic_tools(
+    fn install_host_dynamic_tools(
         mut self,
         mut descriptors: Vec<NomiHostDynamicToolDescriptor>,
         invoker: Arc<dyn NomiHostDynamicToolInvoker>,
@@ -1442,10 +1450,8 @@ impl NomiPluginToolSession {
             });
         }
         self.host_dynamic_actions = Arc::from(actions);
-        self.host_dynamic_invoker = Some(match &self.effect_scope {
-            Some(scope) => Arc::new(OwnedNomiDynamicToolInvoker { delegate: invoker, scope: scope.clone() }),
-            None => invoker,
-        });
+        let scope = self.effect_scope.clone().ok_or_else(|| NomiPluginToolError::Contract("host execution scope is missing".into()))?;
+        self.host_dynamic_invoker = Some(Arc::new(OwnedNomiDynamicToolInvoker { delegate: invoker, scope }));
         Ok(self)
     }
 

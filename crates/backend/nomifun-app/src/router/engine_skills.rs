@@ -1,4 +1,7 @@
 //! Snapshot-selected Skill bodies/resources from verified immutable artifacts.
+#[cfg(test)]
+mod tests;
+
 use nomifun_agent_contracts::{ContributionSourceKind, LogicalArtifactRef, ResolvedSkillLock};
 use nomifun_agent_kernel::{CompiledSnapshot, MaterializedRegistry, MaterializedSkill};
 use nomifun_common::AppError;
@@ -59,6 +62,32 @@ pub(super) async fn compile(
     registry: &MaterializedRegistry,
     artifacts: Arc<FsPluginArtifactStore>,
 ) -> Result<SelectedSkills, AppError> {
+    compile_with_mode(snapshot, registry, artifacts, LoadMode::Resources).await
+}
+
+/// Cold command discovery verifies the same frozen bodies, but does not
+/// materialize resource content or decode images. The store still reads and
+/// hashes the complete artifact inventory to verify its integrity.
+pub(super) async fn compile_commands(
+    snapshot: &CompiledSnapshot,
+    registry: &MaterializedRegistry,
+    artifacts: Arc<FsPluginArtifactStore>,
+) -> Result<SelectedSkills, AppError> {
+    compile_with_mode(snapshot, registry, artifacts, LoadMode::Commands).await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoadMode {
+    Commands,
+    Resources,
+}
+
+async fn compile_with_mode(
+    snapshot: &CompiledSnapshot,
+    registry: &MaterializedRegistry,
+    artifacts: Arc<FsPluginArtifactStore>,
+    mode: LoadMode,
+) -> Result<SelectedSkills, AppError> {
     if snapshot.registry_generation != registry.generation
         || snapshot.registry_digest != registry.registry_digest
     {
@@ -69,23 +98,41 @@ pub(super) async fn compile(
     }
     let selected = snapshot.content().skill_locks.iter().map(|lock| {
         let skill = registry.skill(&lock.skill.id).ok_or_else(|| error("selected Skill is not materialized"))?;
-        if skill.definition.version != lock.skill.version || skill.definition.body_ref.digest != lock.body_digest
-            || skill.contribution_lock.source_kind != ContributionSourceKind::PluginMount
-            || !lock.required_capabilities.iter().all(|id| snapshot.content().enabled_capabilities.iter().any(|item| &item.capability.id == id)) {
+        validate_lock(lock, skill)?;
+        if !lock.required_capabilities.iter().all(|id| snapshot.content().enabled_capabilities.iter().any(|item| &item.capability.id == id)) {
             return Err(error("Skill requires an exact packaged contribution and active capability dependencies"));
         }
         Ok((lock.clone(), skill.clone()))
     }).collect::<Result<Vec<_>, AppError>>()?;
     // Store verification reads and hashes package inventories; don't block a
     // Tokio worker. Only selected, compiled targets enter this task.
-    tokio::task::spawn_blocking(move || load(selected, artifacts.as_ref()))
+    tokio::task::spawn_blocking(move || load(selected, artifacts.as_ref(), mode))
         .await
         .map_err(error)?
+}
+
+fn validate_lock(lock: &ResolvedSkillLock, skill: &MaterializedSkill) -> Result<(), AppError> {
+    if skill.definition.id != lock.skill.id
+        || skill.definition.version != lock.skill.version
+        || skill.definition.body_ref.digest != lock.body_digest
+        || skill.contribution_lock.source_kind != ContributionSourceKind::PluginMount
+        || skill.contribution_lock != lock.contribution_lock
+        || skill.contribution_lock.mount_id.as_ref() != Some(&lock.resolved_mount_id)
+        || skill.mount_id != lock.resolved_mount_id
+        || skill.source != lock.resolved_source
+        || skill.target_artifact_digest != lock.target_artifact_digest
+        || skill.contract_digest != lock.contribution_lock.contract_digest
+        || skill.definition.requires_capabilities.iter().map(|item| item.id.clone()).collect::<BTreeSet<_>>() != lock.required_capabilities
+    {
+        return Err(error("Skill differs from its exact frozen contribution lock"));
+    }
+    Ok(())
 }
 
 fn load(
     selected: Vec<(ResolvedSkillLock, MaterializedSkill)>,
     artifacts: &FsPluginArtifactStore,
+    mode: LoadMode,
 ) -> Result<SelectedSkills, AppError> {
     let mut result = SelectedSkills::default();
     let mut resources = BTreeMap::new();
@@ -136,6 +183,9 @@ fn load(
             lock: lock.clone(), markdown: body,
             description: skill.definition.display.description.clone(),
         });
+        if mode == LoadMode::Commands {
+            continue;
+        }
         for resource in &skill.definition.resources {
             if resources.len() >= 64 {
                 return Err(error("at most 64 selected Skill resources are supported"));

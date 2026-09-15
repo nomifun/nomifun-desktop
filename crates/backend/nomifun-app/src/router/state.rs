@@ -585,12 +585,11 @@ pub(crate) async fn try_build_module_states(
         .map_err(|error| anyhow::anyhow!("Plugin Service managed storage composition failed: {error}"))?,
     );
     let service_runtime = Arc::new(
-        nomifun_plugin_platform::runtime::ProductionPluginRuntimeServiceRuntimeBinding::new_with_storage_and_native_policy(
+        nomifun_plugin_platform::runtime::ProductionPluginRuntimeServiceRuntimeBinding::new_with_storage(
             runtime_authority,
             service_registry,
             Some(service_storage),
             nomifun_plugin_platform::runtime::DEFAULT_MAX_ACTIVE_SERVICE_HOSTS,
-            std::env::var("NOMIFUN_ALLOW_NATIVE_PLUGINS").as_deref() == Ok("1"),
         )
         .map_err(|error| anyhow::anyhow!("Plugin Service runtime composition failed: {error}"))?,
     );

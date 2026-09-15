@@ -1194,6 +1194,51 @@ fn managed_skill_and_mcp_backed_capability_keep_exact_provenance() {
 }
 
 #[test]
+fn middleware_order_checks_registry_kind_and_consumer_not_action_contract() {
+    use nomifun_agent_contracts::{CapabilityConsumer, capability_surface_declarations};
+
+    for (kind, consumer, supported) in [
+        (CapabilityKind::TurnMiddleware, CapabilityConsumer::Agent, true),
+        (CapabilityKind::Tool, CapabilityConsumer::Agent, false),
+        (CapabilityKind::TurnMiddleware, CapabilityConsumer::Automation, false),
+    ] {
+        let mut registration = sample_registration("middleware:");
+        let manifest = &mut registration.metadata.manifest.payload.contributions.capabilities[0];
+        manifest.kind = kind;
+        manifest.supported_surfaces = capability_surface_declarations(["test"], [consumer]);
+        // Keep the sample's unrelated action/schema, not Nomi's before_model contract.
+        refresh_manifest(&mut registration);
+        if kind != CapabilityKind::Tool {
+            // The sample's Tool handler is not a TurnMiddleware execution adapter.
+            // Rebuild the registration so materialization still checks handler kinds.
+            registration = PluginRegistration::new(registration.metadata);
+        }
+        let registry = KernelRegistry::new(
+            MaterializationPolicy::stable_with_test_fixtures(VERSION),
+            Arc::new(InMemoryPluginStatePersistence::new()),
+        ).unwrap();
+        let materialized = registry.replace_all(vec![registration]).unwrap();
+        let mut revision = sample_revision("middleware-owner");
+        revision.payload.middleware_order = vec![SAMPLE_CAPABILITY.into()];
+        revision.reference.revision_digest = revision.revision_digest().unwrap();
+        let result = AgentPresetCompiler::compile(
+            &materialized,
+            &compiler_environment(materialized.registry_digest.clone()),
+            compile_request(revision, principal("middleware-owner")),
+        );
+        if supported {
+            let compiled = result.expect("alternative Agent middleware contract should compile");
+            assert_eq!(compiled.content().middleware_order, vec![CapabilityId::from(SAMPLE_CAPABILITY)]);
+            assert_eq!(compiled.policy(&SAMPLE_CAPABILITY.into()).unwrap().allowed_actions,
+                BTreeSet::from([ActionId::from(SAMPLE_ACTION)]));
+        } else {
+            assert!(matches!(result, Err(KernelError::InvalidPresetRevision { reason })
+                if reason.contains("must be an Agent TurnMiddleware")));
+        }
+    }
+}
+
+#[test]
 fn managed_skill_revision_lock_fails_closed_on_mount_drift() {
     let registry = KernelRegistry::new(
         managed_policy(),

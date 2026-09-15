@@ -208,8 +208,8 @@ fn discovery_capability(id: &str) -> CapabilityManifest {
 #[path = "plugin_product_before_model.rs"]
 mod before_model;
 
-#[path = "plugin_product_stream.rs"]
-mod service_stream;
+#[path = "plugin_product_service.rs"]
+mod service_invocation;
 
 #[tokio::test]
 async fn published_discovery_is_consumed_by_nomi_and_conflicts_are_rejected_before_save() {

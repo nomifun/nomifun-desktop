@@ -2,14 +2,16 @@
 
 ## 当前发布口径（2026-09-15，优先于历史实施安排）
 
+本轮批准实施的清理项、两个独立开放方向及来源支持矩阵以 [架构收敛记录](2026-09-15-plugin-architecture-convergence.zh.md) 为准。旧 Skill loader、Service 流式前置、UI 专用事件协议及重型参考客户端不再作为现行能力；本轮同时收正宿主装配和 hook 验证职责。具体测试结果见发布台账，不沿用历史通过数。
+
 最新目标是**尽快上线，尽可能可替换，而非任意替换**。当前执行入口改为 [P0 发布台账](2026-09-15-plugin-release-readiness.zh.md)，不再以 §3 的 29 项全部完成、五问整体关单或历史 JS-only/全替换路线作为上线条件。
 
 - 正式默认：内置 Agent、模型链路、UI。已有 Tool / Context / discovery / `before_model` / 只读 Skill 仅在已支持边界内按证据验收。
-- native Service / Rust SDK 的既有实现及 §2.40 历史证据保留；定位为默认关闭、显式启用的可信开发者实验，不是撤销实现。插件 Agent 页面为实验能力，不作为正式默认 UI。
+- native Service 后端、Rust 作者 SDK、启用入口及专属示例/打包/测试路径按最新决定删除，不保留默认关闭或显式启用实验。代码删除已完成；已通过检查及待补回归统一见发布台账。§2.40 仅保留历史记录，历史测试不代表现行支持。插件 Agent 页面决策独立，正式默认仍为内置 UI。
 - 模型插件、整个 runtime、Shell、深层基础设施替换延期。已有前置实现不代表正式支持，也不触发继续开发这些延期项。
 - §3 改为长期能力评估清单，不是上线欠账；仅影响本次正式范围的实际缺陷进入 P0。历史段落中的“当前”“本期”“在途”“下一步”均按记录当时理解，不是本轮指令。
 
-本轮已完成收敛改造与 Windows 定向回归，最终修复、实际证据及剩余上线 TODO 统一在发布台账维护。正式制品验收仍未完成，不得从历史通过数推断当前工作区、发布构建或其他 OS/架构已通过。跨 OS TODO 和后续开发/验证 prompt 同样在那里维护，不在本轮启动跨平台重构。
+此前收敛改造与 Windows 定向回归保留为历史证据。原生插件已移除，Windows 删除专项回归通过；最新证据统一见[发布台账 §2.5](2026-09-15-plugin-release-readiness.zh.md#25-原生插件删除后的验证进展2026-09-15)。正式制品与 macOS 验收未完成，不由历史通过数推断。
 
 ## 历史实施记录（以下日期、事实和编号保留）
 
@@ -17,11 +19,11 @@
 
 启动代码基线：`439bb385a`
 
-最新同步目标：`e617feb2b`（本批 7 个上游提交，整合与验证见 §2.40）
+历史同步目标：`e617feb2b`（当时 7 个上游提交，同步记录见 §2.40）
 
 状态：实施中，完整目标尚未完成
 
-当前批次为 §2.40 的远程同步与 Rust 原生 Service 实施，按最新授权新增原生执行后端及作者 SDK，并复用现有 Product 平台。历史 JS-only 约束不再限制本批；历史切片测试仍只代表当时证据。原生后端交付不等于完整模型/UI/主循环替换交付。
+§2.40 记录曾同步并实现原生 Service 后端及作者 SDK，后按范围收敛删除的历史。其详细设计、开发与打包方案已移除；历史切片测试只代表当时证据，不代表现行原生插件支持，也不等于完整模型/UI/主循环替换交付。
 
 阅读入口：当前开发顺序与实现卡统一见 [报告 §27.14](2026-09-13-agent-plugin-capability-assessment.zh.md#2714-进度纠偏与下一批停止条件)；本台账 §2 保留历史切片证据，§3 记录剩余范围。历史段落中的“下一步”和“在途”标题不另作当前排期或最新状态。Product `before_model` 已按 §2.28～2.29 限定范围收口；最近用户功能卡为 §2.32 消息来源与基础呈现。§2.33 审批与 §2.34 模型预检仅研究；§2.35～2.36 已实现原 Service 流式前置及产品内部受管调用接线，§2.37 将已有模型纯数据合同归位到合同层。模型选择/消费尚未接通。B 整体及完整目标均未完成。
 
@@ -29,9 +31,9 @@
 
 ## 1. 范围与架构约束
 
-实施范围来自 [评估报告 §27](2026-09-13-agent-plugin-capability-assessment.zh.md#271-直接结论与逐项对应)：用户 capability 可选替换、UI、Agent 全环节、Skill 装载、简单化组装。最新授权已纳入 native-process Service 后端和 Rust 作者 SDK；不增加 Wasm 或 Rust 动态库装载，不另建第二套平台。Rust 宿主与已有内置实现继续维护。
+历史实施范围来自 [评估报告 §27](2026-09-13-agent-plugin-capability-assessment.zh.md#271-直接结论与逐项对应)：用户 capability 可选替换、UI、Agent 全环节、Skill 装载、简单化组装。原 native Service 后端与 Rust 作者 SDK 按最新决定删除；Rust 宿主、内置实现、Node、共享 Service 流式和模型合同继续保留，不另建第二套平台。
 
-**历史约束（2026-09-14，原生后端排期已由 §2.40 更新）：** 具体实现如果在现有 JS 支持下不合理、明显更适合等 Rust 插件，则本期延期，不做临时 JS 版本。按报告 §27.13 逐项筛选；29 行继续跟踪长期目标，但不再是本期强制全量 JS 清单。不得以新增原生代理、复制状态/执行器或预建 Rust 空框架满足名义覆盖。普通 UI、异步业务及有成熟公开协议的实现继续推进；不能仅因宿主使用 Rust 就延期。
+**历史约束（2026-09-14，不构成恢复原生插件的计划）：** 具体实现若在 JS 支持下不合理，则延期，不做临时 JS 版本。按报告 §27.13 筛选；29 行继续跟踪长期目标，不是本期强制全量 JS 清单。不得新增原生代理、复制状态/执行器或预建 Rust 空框架满足名义覆盖；普通 UI、异步业务及成熟公开协议的实现不因宿主使用 Rust 而自动延期。
 
 当前代码已合并 Plugin/MiniApp 统一工程，不重复建立身份、Catalog、Snapshot 或产品平台。保留唯一 canonical Compiler、冻结 Provider/制品身份、目标级资源绑定、单 Session 执行 owner；业务消费者通过 `nomifun-ai-agent` 接缝，不新增直接依赖 Nomi 内部模块的旁路。安装/发布属于 Plugin 平台，Agent 只消费已发布贡献。
 
@@ -940,28 +942,22 @@ Broker 首次运行有 3 项失败：上游 Anthropic/Bedrock/Vertex 样本仍�
 
 **本次没有修改生产代码、添加空 SPI、开放模型 capability 或交付用户模型替换。** 这是局部实施决策，不抵扣行 17 的用户验收，也不重记 §2.38 的测试为本次新证据。只做文档空白检查；文档改动不运行 Rust/UI 构建、全量测试、浏览器或付费模型。本阶段没有新增 Rust 插件后端，原生密集实现仍按 §27.13 延期。
 
-### 2.40 同步新基线并落地 Rust 原生 Service（2026-09-15）
+### 2.40 同步与原生插件删除的历史记录（2026-09-15）
 
-按用户最新授权执行，不再沿用前节“本阶段不新增 Rust 后端”的限制。安全同步到 `e617feb2b`（7 个上游提交），保留全部已有改动及同步备份；没有 commit/push。
+当时按授权安全同步到 `e617feb2b`（7 个上游提交），保留既有改动和同步备份，当轮没有 commit/push。曾实现 Rust 原生 Service 后端及作者 SDK，后按用户范围收敛决定删除；代码删除已完成，最新检查与待补回归见发布台账 §2.5。
 
-新增 target/执行身份合同、原生 Release 入口、共享 Service 进程适配、默认拒绝的宿主启用策略、Rust SDK 和打包示例。App 已组合此后端；原生调用/Test 不访问 Node，Node 切换验证只处理 Node Service。Service 测试凭据按相应后端识别，不把原生 Release 错判为缺失 Node。Windows 长路径的原生启动 cwd 问题在真实 Product 测试中发现并修复。
+原生专属架构、启用、SDK、打包及测试开发方案不再保留。Windows 原生进程和 application 的 2＋3 项曾通过，仅作为历史事实，不代表现行支持，不是删除后的验证证据。共享 Service 流式与模型合同工作见 §2.35～2.39，保留且不改写为原生插件专属能力。
 
-设计、信任边界和剩余功能见报告 §27.17；可复现命令见 [`原生 Rust Service 开发指南`](../plugins/native-rust-service.zh.md)。本节不关闭 29 项领域清单，也不把本批包装成完整模型/UI/主循环可替换的交付。
+本节保留的非 native 历史验证（不外推为当前候选通过）：
 
-本批验证（Windows x64，本节通过数不引用历史轮次）：
-
-| 检查 | 结果/证据范围 |
+| 检查 | 历史结果/证据范围 |
 |---|---|
-| `cargo test -p nomifun-agent-contracts --lib` | 100 通过，包括 Node JSON 保持原样、混合指纹拒绝、Native 精确入口校验。首次运行发现同步前已有的旧 Preset 测试夹具仍写退役双数组；仅更新夹具为 `enabled_capabilities` 后重跑通过，不恢复旧生产别名 |
-| SDK echo 构建 + `package_native_echo` 实际执行 | 成功生成真实可执行文件和标准可导入 Release/Share Bundle；本地演示产物在 `.tmp-native-example-release/bundle/release`，不提交二进制 |
-| `native_service` + `service_application`，显式 `--include-ignored --test-threads=1` | 2 + 3 通过。覆盖默认拒绝/错 target、真实原生调用/流式/KV/取消/崩溃/摘要篡改、导入/Test receipt/发布/启用/Agent capability 入口，以及 Node 切换不停止或误校验 Native。注入的 Node authority 一旦被访问即 panic |
-| `service_process` + `service_storage_ipc`，`--test-threads=1` | 16 + 3 通过。首次并行运行一项流式事件等待超时，串行完整重跑通过；未放宽原断言或跳过失败测试 |
-| `cargo test -p nomifun-plugin-platform --lib service_runtime -- --test-threads=1` | 4 通过，包含 Node 候选切换、run-key 重算及一次性 Test receipt |
-| `agent-v2-contract write` 后运行生成器 `check` | 通过，生成到工作区的 schema/摘要与当前合同一致；没有 Git commit |
+| Node `service_process` + `service_storage_ipc` | 16＋3 通过；首次并行流式事件等待超时，串行完整重跑通过，未放宽断言或跳过失败 |
+| 共享 `service_runtime` | 4 项通过，涉及 Node 候选切换、run-key 与一次性 Test receipt |
+| 合同及 App 组合检查 | 当时合同 100 项及生成器 write/check、App tests 编译检查通过；首次编译时序交叠后冻结源码重跑，既有告警保留 |
 
-App 组合层最终 `cargo check -p nomifun-app --tests --no-default-features` 通过（仍有 unused/dead-code warnings）。初次检查与 Node 切换修正的编译时序交叠，读取了缺失新方法的旧依赖产物；冻结源码后完整重跑通过。`git diff --check` 和最终 schema `check` 通过，无未解决合并冲突，暂存区为空，未 commit/push。
+当轮未执行 workspace 全量、浏览器/Nomi 主循环端到端、付费模型或其他 OS/架构验收。不据此关闭 29 项长期领域清单或完整模型/UI/Runtime 替换目标。
 
-没有运行 workspace 全量测试、浏览器/Nomi 主循环端到端、付费模型调用或其他 OS/架构的原生运行验收。Agent 证据是现有 Product capability 调用入口，不是完整模型替换或整套 Nomi 主循环替换证据。
 
 <a id="3-原始-29-个环节不得缩减的跟踪清单"></a>
 

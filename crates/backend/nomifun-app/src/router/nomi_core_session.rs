@@ -905,7 +905,7 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
         };
         if prepared.constraints.restricted() { return Ok(Vec::new()); }
         let registry = self.kernel.snapshot().map_err(|error| AppError::Conflict(error.to_string()))?;
-        let skills = super::engine_skills::compile(&prepared.compiled, &registry, self.skill_artifacts.clone()).await?;
+        let skills = super::engine_skills::compile_commands(&prepared.compiled, &registry, self.skill_artifacts.clone()).await?;
         skills.validate_extra(&prepared.response.extra)?;
         let commands = nomifun_ai_agent::plugin_skills::verified_skill_commands(
             self.kernel.clone(), prepared.compiled, None, skills.commands,
@@ -979,9 +979,9 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
             .filter(|capability_id| robot_capability_ids.contains(capability_id))
             .filter(|capability_id| constraints.allows_capability(capability_id.as_ref()))
             .collect::<BTreeSet<_>>();
-        let plugin_session = if enabled_robot_ids.is_empty()
+        let dynamic = if enabled_robot_ids.is_empty()
         {
-            plugin_session
+            None
         } else {
             let owner = self.robot_owner.as_ref().ok_or_else(|| {
                 AppError::Conflict(
@@ -1008,12 +1008,10 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
                 )
                 .await
                 .map_err(AppError::Conflict)?;
-            plugin_session
-                .with_host_dynamic_tools(descriptors, Arc::new(super::hosted_effect_receipts::RobotReceiptInvoker {
+            Some((descriptors, Arc::new(super::hosted_effect_receipts::RobotReceiptInvoker {
                     receipts: self.hosted_effects.clone(), user: principal.principal_id.clone(),
                     session: session_id.as_ref().to_owned(), delegate: invoker,
-                }))
-                .map_err(|error| AppError::Conflict(error.to_string()))?
+                }) as Arc<dyn nomifun_ai_agent::NomiHostDynamicToolInvoker>))
         };
         let plugin_product_actions = if constraints.restricted() { Vec::new() } else {
             KernelNomiPluginToolSession::materialize_plugin_product_actions(
@@ -1050,36 +1048,35 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
         ];
         if let Some(witness) = &git_witness { witnesses.push(witness.clone()); }
         let effect_scope = Arc::new(nomifun_ai_agent::engine_effect_scope::EngineEffectScope::new(witnesses)?);
-        let plugin_session = if constraints.allows_capability("mcp.resource") && compiled.content()
+        let mcp_resources = if constraints.allows_capability("mcp.resource") && compiled.content()
             .enabled_capabilities.iter()
             .any(|entry| entry.capability.id.as_ref() == "mcp.resource") {
             let active = plugin_session.capability_state().ok_or_else(|| AppError::Conflict("MCP resource capability state is unavailable".into()))?;
             let resources = super::nomi_core_mcp_resources::adapter(self.kernel.clone(), compiled.clone(),
                 active, self.wave2_owner.clone(), principal.clone(), session_id.clone(), resource_image_model, constraints)?;
-            plugin_session.with_mcp_resources(resources).map_err(|error| AppError::Conflict(error.to_string()))?
-        } else { plugin_session };
+            Some(resources)
+        } else { None };
         self.wave2_owner.ensure_mcp_settled(&principal.principal_id, session_id.as_ref()).await?;
-        let plugin_session = plugin_session.with_context_contributor(
+        let mut context: Vec<Arc<dyn nomifun_ai_agent::ContextContributor>> = vec![
             super::nomi_core_mcp_catalog::recovery_context(Arc::clone(&self.wave2_owner),
                 principal.principal_id.clone(), session_id.as_ref().to_owned()),
-        ).map_err(|error| AppError::Conflict(error.to_string()))?;
-        let plugin_session = plugin_session.with_context_contributor(hosted_witness)
-            .map_err(|error| AppError::Conflict(error.to_string()))?;
-        let plugin_session = match git_witness {
-            Some(witness) => plugin_session.with_context_contributor(witness)
-                .map_err(|error| AppError::Conflict(error.to_string()))?,
-            None => plugin_session,
-        };
-        plugin_session
-            .with_session_control_sink(Arc::new(NomiCoreSessionControlSink {
+            hosted_witness,
+        ];
+        if let Some(witness) = git_witness { context.push(witness); }
+        plugin_session.bind_hosted_execution(nomifun_ai_agent::NomiHostedSessionBindings {
+            effect_scope,
+            dynamic,
+            context,
+            mcp_resources,
+            session_control: Some(Arc::new(NomiCoreSessionControlSink {
                 session_owner: Arc::clone(&self.session_owner),
                 control_plane: Arc::clone(&self.control_plane),
                 mcp_server_repository: Arc::clone(&self.mcp_server_repository),
                 resource_bindings: self.resource_bindings.clone(),
                 owner,
                 session_id: session_id.clone(),
-            }))
-            .with_plugin_product_actions(
+            })),
+            product: Some((
                 plugin_product_actions,
                 Arc::new(NomiCorePluginProductToolInvoker {
                     application: Arc::clone(&self.plugin_runtime),
@@ -1087,8 +1084,8 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
                     session_id: session_id.as_ref().to_owned(),
                     receipts: self.hosted_effects.clone(),
                 }),
-            )
-            .and_then(|session| session.with_effect_scope(effect_scope))
+            )),
+        })
             .map(Some)
         .map_err(|error| {
             AppError::Conflict(format!(
