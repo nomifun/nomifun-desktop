@@ -81,23 +81,17 @@ mod tests {
     }
 
     #[test]
-    fn agent_view_is_explicit_ui_only_and_can_coexist_with_actions() {
+    fn historical_agent_view_parses_but_cannot_materialize_new_publications() {
         let package = PackageRef { id: "plugin.example".into(), version: "1.0.0".into() };
-        let mut plain = PluginRuntimeSourceManifest::default();
-        plain.materialize_actions(&package).unwrap();
-        assert!(plain.contributions.capabilities.is_empty());
-        let mut view = PluginRuntimeSourceManifest::parse(br#"{"agent_view":{"name":"My view","description":"My Agent page"},"actions":[{"id":"echo","name":"Echo","description":"Echo","input_schema":{"type":"object"},"output_schema":{"type":"object"},"effect":"pure"}]}"#).unwrap();
-        view.materialize_actions(&package).unwrap();
-        assert_eq!(view.contributions.capabilities.len(), 2);
-        let cap = &view.contributions.capabilities[0];
-        assert_eq!(cap.id.as_ref(), "plugin.example.ui.agent-session");
-        assert_eq!(cap.kind, CapabilityKind::UiContribution);
-        assert_eq!(cap.supported_consumers().unwrap(), std::collections::BTreeSet::from([CapabilityConsumer::Ui]));
-        assert_eq!(cap.contributions.ui_slot, Some(nomifun_agent_contracts::UiContributionSlot::AgentSession));
-        assert!(cap.contributions.actions.is_empty());
-        assert_eq!(view.contributions.capabilities[1].kind, CapabilityKind::Tool);
-        view.agent_view.as_mut().unwrap().name = " ".into();
-        assert!(view.materialize_actions(&package).is_err());
+        let source = br#"{"agent_view":{"name":"My view","description":"Historical page"},"actions":[{"id":"echo","name":"Echo","description":"Echo","input_schema":{"type":"object"},"output_schema":{"type":"object"},"effect":"pure"}]}"#;
+        let mut historical = PluginRuntimeSourceManifest::parse(source).unwrap();
+        assert!(historical.agent_view.is_some());
+        assert_eq!(historical.actions.len(), 1);
+        assert!(historical.materialize_actions(&package).unwrap_err().contains("unsupported"));
+        historical.agent_view = None;
+        historical.materialize_actions(&package).unwrap();
+        assert_eq!(historical.contributions.capabilities.len(), 1);
+        assert_eq!(historical.contributions.capabilities[0].kind, CapabilityKind::Tool);
     }
 
     #[test]
@@ -133,21 +127,10 @@ impl PluginRuntimeSourceManifest {
     }
 
     pub fn materialize_actions(&mut self, package: &PackageRef) -> Result<(), String> {
-        if let Some(view) = &self.agent_view {
-            if view.name.trim().is_empty() || view.description.trim().is_empty() {
-                return Err("Agent view requires a name and description".into());
-            }
-            let id = format!("{}.ui.agent-session", package.id.as_ref());
-            self.contributions.capabilities.push(CapabilityManifest {
-                id: id.clone().into(), contribution_id: format!("capability:{id}").into(),
-                version: package.version.clone(), kind: CapabilityKind::UiContribution, package: package.clone(),
-                display: LocalizedMetadata { name: view.name.clone(), description: view.description.clone(), localized_names: BTreeMap::new(), localized_descriptions: BTreeMap::new() },
-                requires: vec![], conflicts: vec![], requires_runtime_features: vec![],
-                supported_surfaces: capability_surface_declarations(["desktop"], [CapabilityConsumer::Ui]),
-                supported_platforms: vec![PlatformConstraint::Any],
-                config_schema: StrictJsonValue(serde_json::json!({"type":"object", "additionalProperties":false})),
-                contributions: CapabilityContributions { ui_slot: Some(nomifun_agent_contracts::UiContributionSlot::AgentSession), ..Default::default() },
-            });
+        if self.agent_view.is_some() || self.contributions.capabilities.iter().any(|capability| {
+            capability.contributions.ui_slot == Some(nomifun_agent_contracts::UiContributionSlot::AgentSession)
+        }) {
+            return Err("Plugin Agent Session views are unsupported; remove the agent_view/AgentSession declaration before publishing".into());
         }
         let mut ids = std::collections::BTreeSet::new();
         for action in &self.actions {

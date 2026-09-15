@@ -258,7 +258,6 @@ struct PluginRuntimeStores {
 
 #[derive(Clone)]
 pub struct PluginRuntimeApplicationService {
-    agent_sessions: Arc<RwLock<Option<Arc<dyn super::PluginAgentSessionPort>>>>,
     repository: Arc<dyn IPluginRuntimeRepository>,
     stores: PluginRuntimeStores,
     source_mutation_lock: Arc<Mutex<()>>,
@@ -304,7 +303,6 @@ impl PluginRuntimeApplicationService {
             .map_err(|error| store_error("Release Store cleanup", error))?;
         Ok(Self {
             repository,
-            agent_sessions: Arc::new(RwLock::new(None)),
             stores: PluginRuntimeStores { source, release },
             source_mutation_lock: Arc::new(Mutex::new(())),
             service_runtime: Arc::new(RwLock::new(Arc::new(NoopPluginRuntimeServiceRuntime))),
@@ -326,15 +324,6 @@ impl PluginRuntimeApplicationService {
         *self.catalog_sink.write().await = Some(sink);
     }
 
-    pub async fn install_agent_session_port(&self, port: Arc<dyn super::PluginAgentSessionPort>) {
-        *self.agent_sessions.write().await = Some(port);
-    }
-
-
-    async fn agent_session_port(&self) -> Result<Arc<dyn super::PluginAgentSessionPort>, PluginRuntimeApplicationError> {
-        self.agent_sessions.read().await.clone().ok_or_else(||
-            PluginRuntimeApplicationError::Invalid("Agent Session UI access is unavailable on this host".into()))
-    }
 
     async fn catalog_sink(&self) -> Option<Arc<dyn PluginProductCapabilityCatalogSink>> {
         self.catalog_sink.read().await.clone()
@@ -3919,6 +3908,13 @@ impl PluginRuntimeApplicationService {
             &snapshot.project.project_id,
             ready,
         )?;
+        if stored.artifact.manifest.payload.contributions.capabilities.iter().any(|capability| {
+            capability.contributions.ui_slot == Some(nomifun_agent_contracts::UiContributionSlot::AgentSession)
+        }) {
+            return Err(PluginRuntimeApplicationError::Invalid(
+                "Plugin Agent Session views are unsupported; remove the declaration before publishing".into(),
+            ));
+        }
         if stored.artifact.manifest.payload.service.is_none()
             && (request.expected_service_test_receipt_id.is_some() || request.acknowledge_test_warning) {
             return Err(PluginRuntimeApplicationError::Invalid(
@@ -5080,8 +5076,7 @@ impl PluginRuntimeApplicationService {
         self.open_surface_with_agent_session(owner_user_id, plugin_product_id, None).await
     }
 
-    /// An authenticated host UI explicitly grants access to one existing Session.
-    /// Ordinary plugin opens carry no Session authority; reload does not inherit it.
+    /// Historical Session-grant requests are rejected; ordinary App opens remain supported.
     pub async fn open_surface_with_agent_session(
         &self,
         owner_user_id: &str,
@@ -5099,8 +5094,10 @@ impl PluginRuntimeApplicationService {
         ui_capability: Option<&nomifun_agent_contracts::CapabilityRef>,
     ) -> Result<PluginRuntimeSurfaceLaunchDescriptorDto, PluginRuntimeApplicationError> {
         validate_request_identity(plugin_product_id, "plugin_product_id")?;
-        if let Some((session_id, _)) = agent_session {
-            self.agent_session_port().await?.authorize(owner_user_id, session_id).await?;
+        if agent_session.is_some() || ui_capability.is_some() {
+            return Err(PluginRuntimeApplicationError::Invalid(
+                "Plugin Agent Session views and Session access grants are unsupported".into(),
+            ));
         }
         let snapshot = self
             .repository
@@ -5124,25 +5121,6 @@ impl PluginRuntimeApplicationService {
         let entrypoint = stored.artifact.manifest.payload.ui.as_ref()
             .ok_or_else(|| PluginRuntimeApplicationError::Invalid("This plugin does not provide a page".into()))?
             .entrypoint.clone();
-        if agent_session.is_some_and(|(_, expected_digest)| expected_digest != active.release_digest) {
-            return Err(PluginRuntimeApplicationError::Invalid(
-                "Selected UI release changed; review the new release before granting Session access".into(),
-            ));
-        }
-        if let Some(selected) = ui_capability {
-            let publication = self.catalog_publication_for_snapshot(owner_user_id, &snapshot)?
-                .ok_or(PluginRuntimeApplicationError::NotFound)?;
-            let contribution = publication.capabilities.iter().find(|item| &item.entry.capability == selected)
-                .ok_or_else(|| PluginRuntimeApplicationError::Invalid("Selected UI capability is not in this active release".into()))?;
-            if agent_session.is_none()
-                || contribution.manifest.kind != nomifun_agent_contracts::CapabilityKind::UiContribution
-                || contribution.manifest.contributions.ui_slot != Some(nomifun_agent_contracts::UiContributionSlot::AgentSession)
-            {
-                return Err(PluginRuntimeApplicationError::Invalid("Selected capability does not provide an Agent Session view".into()));
-            }
-            contribution.entry.operation_lock(CapabilityConsumer::Ui)
-                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
-        }
         if stored.artifact.manifest.payload.service.is_some() {
             let spec = self
                 .resolve_service_spec(
@@ -5180,7 +5158,7 @@ impl PluginRuntimeApplicationService {
         let session = self
             .repository
             .open_surface_session_cas(&OpenPluginRuntimeSurfaceSessionParams {
-                conversation_id: agent_session.map(|(id, _)| id.to_owned()),
+                conversation_id: None,
                 owner_user_id: owner_user_id.to_owned(),
                 plugin_product_id: plugin_product_id.to_owned(),
                 surface_session_id: Uuid::now_v7().to_string(),
@@ -5313,6 +5291,13 @@ impl PluginRuntimeApplicationService {
         expected_release_digest: &str,
         request: PluginBridgeRequest,
     ) -> Result<StrictJsonValue, PluginRuntimeApplicationError> {
+        // Reject even a historical Surface row carrying a Session id. This
+        // removed authority never reaches a Service or Session owner.
+        if matches!(&request.target, PluginBridgeTarget::AgentSession { .. }) {
+            return Err(PluginRuntimeApplicationError::Invalid(
+                "Plugin Agent Session access is unsupported".into(),
+            ));
+        }
         let surface_session = self
             .resolve_surface_session(
                 plugin_product_id,
@@ -5376,18 +5361,9 @@ impl PluginRuntimeApplicationService {
             .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         let call_id = request.call_id.clone();
         match request.target {
-            PluginBridgeTarget::AgentSession { request } => {
-                let session_id = surface_session.conversation_id.as_deref().ok_or_else(||
-                    PluginRuntimeApplicationError::Invalid("This Surface has no Agent Session access grant".into()))?;
-                let result = self.agent_session_port().await?
-                    .request(owner_user_id, plugin_product_id, session_id, request).await;
-                // Do not deliver private data to a Surface revoked during a read.
-                // A turn already admitted by the Session owner is not replayed or
-                // canceled merely because its view was closed.
-                self.resolve_surface_session(plugin_product_id, capability,
-                    active_release_epoch, expected_release_digest).await?;
-                result
-            }
+            PluginBridgeTarget::AgentSession { .. } => Err(PluginRuntimeApplicationError::Invalid(
+                "Plugin Agent Session access is unsupported".into(),
+            )),
             PluginBridgeTarget::HostKv { request } => {
                 self.execute_surface_kv(
                     owner_user_id,

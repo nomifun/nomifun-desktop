@@ -94,9 +94,6 @@ use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-#[path = "plugin_ui_sessions.rs"]
-mod plugin_ui_sessions;
-pub(crate) use plugin_ui_sessions::NomiCorePluginUiSessions;
 
 /// The single Nomi-core Session owner exposed to production domain wiring.
 ///
@@ -3527,10 +3524,6 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
             get(get_nomi_core_agent_session_capabilities),
         )
         .route(
-            "/api/agent-sessions/{agent_session_id}/ui-binding",
-            get(get_nomi_core_session_ui_binding),
-        )
-        .route(
             "/api/agent-sessions/{agent_session_id}/preset",
             put(switch_nomi_core_agent_session_preset),
         )
@@ -5740,19 +5733,6 @@ async fn get_nomi_core_agent_session(
     )
     .await?;
     Ok(Json(ApiResponse::ok(observation)))
-}
-
-async fn get_nomi_core_session_ui_binding(
-    State(state): State<NomiCoreAgentApiState>,
-    Extension(owner): Extension<AuthenticatedOwner>, Path(agent_session_id): Path<String>,
-) -> Result<Json<ApiResponse<nomifun_api_types::AgentPresetUiBindingResponse>>, NomiCoreApiError> {
-    let session_id = parse_agent_session_id(&agent_session_id)?;
-    let response = load_owned_nomi_core_session(&state, &owner, &session_id).await?;
-    let metadata = session_metadata(&response, &owner)?;
-    // Derive the target from the existing Session owner, not from UI input.
-    let binding = state.control_plane.ui_binding(&owner,
-        metadata.binding.preset_revision_ref.preset_id.as_ref()).await?;
-    Ok(Json(ApiResponse::ok(binding)))
 }
 
 async fn get_nomi_core_agent_session_capabilities(

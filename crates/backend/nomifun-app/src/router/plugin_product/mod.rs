@@ -265,7 +265,6 @@ pub(crate) fn write_routes() -> Router<PluginRuntimeM1RouterState> {
     Router::new()
         .route("/api/plugins/workspace", post(update_workspace))
         .route("/api/plugins/authoring", post(authoring::generate))
-        .route("/api/plugins/drafts/from-template/agent-session-view", post(templates::agent_session_view))
         .route("/api/plugins/drafts/from-template/before-tool", post(templates::before_tool))
         .route("/api/plugins/drafts/{draft_id}/cancel", post(cancel))
         .route("/api/plugins/drafts/{draft_id}/save", post(save))

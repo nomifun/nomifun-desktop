@@ -26,7 +26,6 @@ export interface PluginRuntimeDraft {
   service_source: string | null;
   source_manifest?: {
     actions?: Array<{ id: string; name: string; description: string }>;
-    agent_view?: { name: string; description: string };
   } | null;
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
   status:
@@ -75,9 +74,6 @@ export const pluginRuntimeProduct = {
     '/api/plugins/workspace',
   ),
   drafts: httpGet<PluginRuntimeDraft[], void>('/api/plugins/drafts'),
-  agentSessionTemplate: httpPost<PluginRuntimeDraft, void>(
-    '/api/plugins/drafts/from-template/agent-session-view',
-  ),
   beforeToolTemplate: httpPost<PluginRuntimeDraft, void>(
     '/api/plugins/drafts/from-template/before-tool',
   ),

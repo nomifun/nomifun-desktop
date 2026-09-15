@@ -101,32 +101,6 @@ export function parseBridgeRequest(value: unknown): PluginRuntimeBridgeRequest |
   if (typeof callId !== 'string' || !callId.trim() || callId.length > 256) {
     return null;
   }
-  if (target?.target === 'agent_session') {
-    if (Object.keys(request!).length !== 2 || Object.keys(target).length !== 2) return null;
-    const command = asObject(target.request);
-    if (!command) return null;
-    // Identity/authority fields are not forwarded or silently ignored.
-    const keys = Object.keys(command);
-    if (command.operation === 'cancel' && keys.length === 1) {
-      return { call_id: callId, target: { target: 'agent_session', request: { operation: 'cancel' } } };
-    }
-    if (command.operation === 'observe' && keys.length === 3 &&
-        Number.isSafeInteger(command.after_seq) && Number(command.after_seq) >= 0 &&
-        Number.isSafeInteger(command.limit) && Number(command.limit) >= 1 && Number(command.limit) <= 200) {
-      return { call_id: callId, target: { target: 'agent_session', request: {
-        operation: 'observe', after_seq: Number(command.after_seq), limit: Number(command.limit),
-      } } };
-    }
-    const input = asObject(command.input);
-    const key = command.idempotency_key;
-    if (command.operation === 'turn' && keys.length === 3 && input &&
-        typeof key === 'string' && key.trim() && new TextEncoder().encode(key).length <= 256) {
-      return { call_id: callId, target: { target: 'agent_session', request: {
-        operation: 'turn', input, idempotency_key: key,
-      } } };
-    }
-    return null;
-  }
   if (target?.target === 'service') {
     const method = target.method;
     const payload = asObject(target.payload);

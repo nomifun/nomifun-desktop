@@ -559,9 +559,6 @@ pub(crate) async fn try_build_module_states(
         )
         .await
         .map_err(|error| anyhow::anyhow!("Nomi-core Agent/Plugin platform composition failed: {error:#}"))?;
-    services.plugin_runtime.install_agent_session_port(Arc::new(
-        super::nomi_core_session::NomiCorePluginUiSessions::new(&conversation_owner),
-    )).await;
     let javascript_runtime =
         super::javascript_runtime::build_javascript_runtime_state(
             javascript_runtime_foundation,
@@ -985,7 +982,6 @@ async fn build_nomi_core_agent_api_state(
         templates,
         compiler,
     )
-    .with_ui_binding_store(store)
     .with_installation_role_binding_store(Arc::new(
         super::nomi_core_role_defaults::NomiCoreRoleBindingStore::new(services.database.pool().clone()),
     ))

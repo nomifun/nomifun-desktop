@@ -49,6 +49,7 @@ fn capability(id: &str) -> CapabilityManifest {
 
 async fn stats(application: &PluginRuntimeApplicationService, base: &PluginRuntimeAgentCapabilityInvocation) -> Value {
     let mut request = base.clone();
+    request.cancellation = Default::default();
     request.call_id = uuid::Uuid::now_v7().to_string().into();
     request.payload = StrictJsonValue(json!({"mode":"stats"}));
     application.invoke_agent_capability(request).await.unwrap().0
@@ -101,6 +102,7 @@ async fn published_service_preserves_authority_cancellation_and_disable_fences()
     // No rejected call may enter the actual JS handler.
     for field in ["owner", "capability", "action", "allowlist", "epoch", "catalog", "release"] {
         let mut invalid = request.clone();
+        invalid.cancellation = Default::default();
         invalid.call_id = format!("denied-{field}").into();
         match field {
             "owner" => invalid.owner_user_id = uuid::Uuid::now_v7().to_string(),
@@ -117,6 +119,9 @@ async fn published_service_preserves_authority_cancellation_and_disable_fences()
     wait_stats(&application, &request, 1, 0).await;
 
     let mut canceled = request.clone();
+    // This is a separate invocation, not another waiter for the base call.
+    // Cloning the same cancellation handle would cancel later stats probes too.
+    canceled.cancellation = Default::default();
     canceled.call_id = "future-dropped".into();
     canceled.payload = StrictJsonValue(json!({"mode":"wait"}));
     let call = {
@@ -129,6 +134,7 @@ async fn published_service_preserves_authority_cancellation_and_disable_fences()
     wait_stats(&application, &request, 2, 1).await;
 
     let mut failing = request.clone();
+    failing.cancellation = Default::default();
     failing.call_id = "unary-failure".into();
     failing.payload = StrictJsonValue(json!({"mode":"fail"}));
     let error = application.invoke_agent_capability(failing).await.unwrap_err();
@@ -136,6 +142,7 @@ async fn published_service_preserves_authority_cancellation_and_disable_fences()
     wait_stats(&application, &request, 3, 1).await;
 
     let mut withdrawn = request.clone();
+    withdrawn.cancellation = Default::default();
     withdrawn.call_id = "disabled-in-flight".into();
     withdrawn.payload = StrictJsonValue(json!({"mode":"wait"}));
     let call = {
@@ -151,6 +158,7 @@ async fn published_service_preserves_authority_cancellation_and_disable_fences()
         "expected_active_release_digest":product["releases"]["active"]["release_digest"], "enabled":false,
     })).await;
     assert!(tokio::time::timeout(Duration::from_secs(5), call).await.unwrap().unwrap().is_err());
+    assert!(!request.cancellation.is_canceled(), "an independent call must test the disable fence, not inherit cancellation");
     assert!(application.invoke_agent_capability(request).await.is_err());
     application.shutdown_service_runtime(services.authoritative_user_id.as_ref()).await.unwrap();
 }

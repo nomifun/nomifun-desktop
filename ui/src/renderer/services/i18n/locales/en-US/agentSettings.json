@@ -7,40 +7,6 @@
     "unavailable": "The catalog or selected build is unavailable. Retry or choose another engine for this Agent. No automatic fallback is used.",
     "codingLimit": "This Coding build provides file/Git tools, conversation-isolated snapshots, commands/interactive processes, MCP and plugin tools, and packaged Skills, subject to the Agent's saved enabled capabilities, bound resources and platform permissions. New conversations freeze that configuration; capabilities are not activated on demand. Instructions added during execution are handled at execution boundaries. Images require an enabled vision capability and a compatible model. Git push is limited to explicitly authorized pushes to configured local/file remotes; SSH/HTTPS credentials, force push and ref deletion are unavailable. These capabilities have not all completed end-to-end validation."
   },
-  "page": {
-    "title": "Agent page",
-    "hint": "The built-in page remains the default. Plugin pages are available for the Agent session view, with session reading, message sending and turn cancellation; they are not a full client replacement. Attachments, permission interactions and recovery are not fully supported. Page preferences are saved separately from the Agent configuration.",
-    "default": "Default page",
-    "builtin": "Built-in Agent page",
-    "missing": "Saved plugin release is unavailable",
-    "save": "Save page default",
-    "open": "Open saved Agent page",
-    "continue": "Continue to created session",
-    "openHint": "Open an empty session using the saved Agent configuration, then compose your first message in its page. No message is sent by this action. To choose a model, workspace or other resources first, use Start conversation below.",
-    "saveAgentFirst": "Save or discard Agent changes before opening its page.",
-    "savePageFirst": "Save the page choice before opening it, or select the currently saved default.",
-    "openFailed": "Opening the session was not confirmed. Check conversation history before creating another; no creation or message is retried automatically. If resources or a model are required, use Start conversation below."
-  },
-  "view": {
-    "title": "Session view",
-    "choose": "Choose a plugin view",
-    "use": "Use selected view",
-    "builtin": "Use built-in view",
-    "remember": "Set selected view as Agent default",
-    "clearDefault": "Restore built-in default",
-    "defaultConsent": "Saving a default for {{name}} allows this exact plugin release to read, send and cancel in its sessions whenever you open their pages. This does not grant access in the background or change running sessions. Upgrades require a new choice. Using a view without saving affects this page only.",
-    "defaultFailed": "The saved page choice could not be read. The built-in view remains available; refresh before saving a default.",
-    "defaultSaveFailed": "Saving the page default was not confirmed. Refresh to check the saved choice before trying again; no save or turn is retried automatically.",
-    "defaultUnavailable": "The saved exact plugin release is unavailable. Its choice is retained; use the built-in view or explicitly select an available release.",
-    "createTemplate": "Create reference view draft",
-    "templateFailed": "Draft creation was not confirmed. Check drafts in the plugin library before trying again. No view was selected or Session access granted.",
-    "consent": "Using a plugin view grants this exact release access to read this session, send messages and cancel turns. This replaces only the session view, not the full client; attachments, permission interactions and recovery are not fully supported. Changing views does not restart or cancel a turn.",
-    "current": "Selected: {{name}}",
-    "failed": "The selected view could not open. Retry or explicitly return to the built-in view.",
-    "catalogFailed": "Plugin views could not be refreshed. You can still use the built-in view.",
-    "changed": "The selected release is no longer available. Refresh and review a current view, or return to the built-in view.",
-    "closeFailed": "The old view was disconnected locally, but server revocation could not be confirmed. Retry closing the plugin from its library before relying on revocation."
-  },
   "middlewareOrder": {
     "title": "Execution extensions",
     "hint": "Extensions in the same stage follow this list, then the default order. Save to apply changes to new sessions only.",
@@ -286,32 +252,6 @@
   },
   "navigation": {
     "railTitle": "Agent Workbench"
-  },
-  "session": {
-    "title": "Agent Session",
-    "open": "Open Session",
-    "loading": "Loading canonical Session projections…",
-    "backToSettings": "Agent Workbench",
-    "fork": "Fork Session",
-    "delete": "Delete Session",
-    "deleteConfirm": "Delete this Session permanently? Its transcript, projections, Runtime binding, checkpoint, and Session-owned resources will be removed.",
-    "deletedTitle": "Session deleted",
-    "deletedBody": "This AgentSession has crossed the irreversible deletion fence. Its transcript cannot be viewed, continued, observed, forked, or restored.",
-    "generation": "Active generation",
-    "lastSeq": "Last sequence",
-    "checkpoint": "Checkpoint through sequence",
-    "activeCapabilities": "Active capabilities",
-    "runtime": "Runtime Inspector",
-    "inspector": "Session Inspector",
-    "details": "Canonical event details",
-    "continuationRequired": "The frozen Snapshot is not executable on the current stack. History remains read-only; continue only by explicitly forking a new AgentSession.",
-    "empty": "No transcript projections have been committed yet.",
-    "inputPlaceholder": "Send an ordinary Turn to this Session…",
-    "send": "Send Turn",
-    "role": {
-      "user": "You",
-      "assistant": "Agent"
-    }
   },
   "workbench": {
     "categories": {

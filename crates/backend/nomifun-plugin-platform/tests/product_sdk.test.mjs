@@ -19,46 +19,39 @@ function runtime(t) {
     clearTimeout(id) { timers.delete(id); },
   });
   t.after(() => { channel.port1.close(); channel.port2.close(); timers.clear(); });
-  return { api: window.nomi.agentSession, storage: window.nomi.storage, host: channel.port2, timers };
+  assert.equal(window.nomi.agentSession, undefined);
+  return { api: window.nomi.service, storage: window.nomi.storage, host: channel.port2, timers };
 }
 
-test('actual SDK exchanges scoped commands and preserves Session error codes', { timeout: 5000 }, async (t) => {
+test('ordinary Service SDK exchanges calls and preserves host error codes without Session authority', { timeout: 5000 }, async t => {
   const { api, host, timers } = runtime(t);
   const received = [];
-  host.on('message', (request) => {
+  host.on('message', request => {
     received.push(request);
-    const failure = request.target.request.operation === 'cancel';
-    host.postMessage({
-      type: 'nomifun-plugin-bridge-result-v1', call_id: request.call_id,
-      ok: !failure, result: { messages: [] },
-      ...(failure ? { error: { code: 'NOMI_CORE_AGENT_SESSION_NOT_FOUND', message: 'Session unavailable' } } : {}),
-    });
+    const failure = request.target.method === 'fail';
+    host.postMessage({ type: 'nomifun-plugin-bridge-result-v1', call_id: request.call_id,
+      ok: !failure, result: { value: 7 },
+      ...(failure ? { error: { code: 'SERVICE_UNAVAILABLE', message: 'Service unavailable' } } : {}) });
   });
-  assert.deepEqual(await api.observe(), { messages: [] });
-  await api.turn({ content: 'hello' }, 'intent-1');
-  await assert.rejects(api.cancel(), { code: 'NOMI_CORE_AGENT_SESSION_NOT_FOUND' });
-  assert.deepEqual(received.map(value => value.target.request), [
-    { operation: 'observe', after_seq: 0, limit: 100 },
-    { operation: 'turn', input: { content: 'hello' }, idempotency_key: 'intent-1' },
-    { operation: 'cancel' },
+  assert.deepEqual(await api.invoke('echo', { value: 7 }), { value: 7 });
+  await assert.rejects(api.invoke('fail'), { code: 'SERVICE_UNAVAILABLE' });
+  assert.deepEqual(received.map(value => value.target), [
+    { target: 'service', method: 'echo', payload: { value: 7 } },
+    { target: 'service', method: 'fail', payload: {} },
   ]);
-  for (const request of received) {
-    assert.deepEqual(Object.keys(request).sort(), ['call_id', 'target']);
-    assert.deepEqual(Object.keys(request.target).sort(), ['request', 'target']);
-  }
   assert.equal(timers.size, 0);
 });
 
-test('SDK rejects malformed calls locally and never retries an ambiguous turn', { timeout: 5000 }, async (t) => {
+test('SDK rejects invalid Service calls locally and never retries ambiguous effects', { timeout: 5000 }, async t => {
   const { api, host, timers } = runtime(t);
-  await assert.rejects(api.observe({ limit: 0 }), /Invalid Session history/);
-  await assert.rejects(api.turn({}, '字'.repeat(86)), /stable idempotency/);
+  await assert.rejects(api.invoke(''), /Invalid service method/);
+  await assert.rejects(api.invoke('x'.repeat(257)), /Invalid service method/);
   assert.equal(timers.size, 0);
   let calls = 0;
   let arrived;
   const arrival = new Promise(resolve => { arrived = resolve; });
   host.on('message', () => { calls++; arrived(); });
-  const rejected = assert.rejects(api.turn({ content: 'one intent' }, 'intent-2'), { code: 'PLUGIN_BRIDGE_TIMEOUT' });
+  const rejected = assert.rejects(api.invoke('mutate', { value: 1 }), { code: 'PLUGIN_BRIDGE_TIMEOUT' });
   await arrival;
   for (const callback of [...timers.values()]) callback();
   await rejected;
@@ -66,12 +59,11 @@ test('SDK rejects malformed calls locally and never retries an ambiguous turn', 
   assert.equal(calls, 1);
 });
 
-test('SDK clears pending request when structured cloning fails', { timeout: 5000 }, async (t) => {
+test('SDK clears pending request when structured cloning fails', { timeout: 5000 }, async t => {
   const { api, timers } = runtime(t);
-  await assert.rejects(api.turn({ content: 'hello', invalid: () => {} }, 'intent-3'), { name: 'DataCloneError' });
+  await assert.rejects(api.invoke('echo', { invalid: () => {} }), { name: 'DataCloneError' });
   assert.equal(timers.size, 0);
 });
-
 
 test('versioned storage uses existing KV wire, preserves tombstones and reports conflicts without retry', { timeout: 5000 }, async t => {
   const { storage, host } = runtime(t);

@@ -963,3 +963,6 @@ async fn callable_service_release_runs_build_publish_enable_start_and_agent_invo
 
 #[path = "service_application/agent_capability_preflight.rs"]
 mod agent_capability_preflight;
+
+#[path = "service_application/retired_agent_view.rs"]
+mod retired_agent_view;

@@ -1,4 +1,4 @@
-//! A real installed UI release calls the production Session owner, not a test port.
+//! Ordinary App surfaces retain storage while retired Session grants fail closed.
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
@@ -52,8 +52,8 @@ async fn post(router: &axum::Router, path: &str, body: Value) -> Value {
 
 async fn install_ui(router: &axum::Router) -> Value {
     let draft = post(router, "/api/plugins/runtimes/import/inspect", json!({
-        "filename": "agent-view.html",
-        "content": "<!doctype html><html><head><title>Agent view</title></head><body><main>Agent</main></body></html>"
+        "filename": "ordinary-app.html",
+        "content": "<!doctype html><html><head><title>Ordinary app</title></head><body><main>Agent</main></body></html>"
     })).await;
     post(
         router,
@@ -86,441 +86,67 @@ async fn get(router: &axum::Router, path: &str) -> Value {
     body["data"].clone()
 }
 
-// Use the public authoring/build/publish path, not a manufactured Catalog entry.
-async fn publish_agent_view(router: &axum::Router, plugin_id: &str) -> Value {
-    publish_agent_view_manifest(router, plugin_id, json!({"agent_view": {
-        "name": "My Agent view", "description": "Explicit Session presentation"
-    }}), false).await
-}
-
-async fn publish_agent_view_manifest(
-    router: &axum::Router, plugin_id: &str, manifest: Value, acknowledge_test_warning: bool,
-) -> Value {
-    let base = format!("/api/plugins/runtimes/{plugin_id}");
-    let w = get(router, &format!("{base}/workshop")).await;
-    let w = post(router, &format!("{base}/source/edit"), json!({
-        "plugin_id": plugin_id, "expected_product_revision": w["plugin"]["product_revision"],
-        "project_id": w["project_id"], "expected_project_revision": w["project_revision"],
-        "expected_build_generation": w["build_generation"],
-        "expected_source_snapshot_digest": w["source_snapshot_digest"],
-        "path": "nomifun.plugin.json", "content": manifest.to_string()
-    })).await;
-    let w = post(router, &format!("{base}/build"), json!({
-        "plugin_id": plugin_id, "expected_product_revision": w["plugin"]["product_revision"],
-        "project_id": w["project_id"], "expected_project_revision": w["project_revision"],
-        "expected_build_generation": w["build_generation"],
-        "expected_source_snapshot_digest": w["source_snapshot_digest"],
-        "expected_dependency_lock_digest": w["dependency_lock_digest"]
-    })).await;
-    post(router, &format!("{base}/publish"), json!({
-        "plugin_id": plugin_id, "expected_product_revision": w["plugin"]["product_revision"],
-        "expected_pointer_revision": w["plugin"]["releases"]["pointer_revision"],
-        "expected_active_release_epoch": w["plugin"]["releases"]["active_release_epoch"],
-        "ready_release_id": w["plugin"]["releases"]["ready"]["release_id"],
-        "expected_ready_release_digest": w["plugin"]["releases"]["ready"]["release_digest"],
-        "expected_active_release_digest": w["plugin"]["releases"]["active"]["release_digest"],
-        "acknowledge_test_warning": acknowledge_test_warning
-    })).await["plugin"].clone()
-}
-
-fn latest_user_input(expected: &'static str) -> impl wiremock::Match {
-    move |request: &wiremock::Request| {
-        request.body_json::<Value>().ok().is_some_and(|body| {
-            body["messages"].as_array().and_then(|messages| messages.last())
-                .is_some_and(|message| message["role"] == "user" && message["content"] == expected)
-        })
-    }
-}
-
 #[tokio::test]
-async fn installed_ui_uses_owned_session_commands_and_never_replays_a_turn_on_reopen() {
+async fn ordinary_app_surface_keeps_storage_without_any_session_grant() {
     let (router, services) = common::build_local_trust_app(TRUST).await;
-    let upstream = wiremock::MockServer::start().await;
-    wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/step_plan/v1/chat/completions"))
-        .and(latest_user_input("hello from plugin UI"))
-        .respond_with(wiremock::ResponseTemplate::new(200)
-            .insert_header("content-type", "text/event-stream")
-            .set_body_string(concat!(
-                r#"data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"PLUGIN_UI_REPLY"},"finish_reason":null}]}"#, "\n\n",
-                r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#, "\n\n",
-                "data: [DONE]\n\n")))
-        // One actual send. Reopen/observe must not add calls; the removed
-        // stream and durable-composer scenarios no longer send extra turns.
-        .expect(1).mount(&upstream).await;
-    let provider = post(&router, "/api/providers", json!({
-        "platform": "stepfun-plan", "name": "Plugin UI model",
-        "base_url": format!("{}/step_plan/v1", upstream.uri()),
-        "auth_scheme": "bearer", "credentials": {"api_keys": ["test-only"]},
-        "enabled": true, "initial_model": {"model": "step-3.7-flash", "enabled": true,
-            "capabilities": [{"task": "chat", "traits": ["function_calling", "streaming"],
-                "protocol": "openai.chat_text", "connection_role": "default", "provider_params": {}}]}
-    })).await;
-    let preset = post(
-        &router,
-        "/api/agent-presets/from-template/chat.minimal",
-        json!({
-            "display_name": "Plugin UI test", "reuse_existing": true,
-            "model": {"provider_id": provider["provider_id"], "model": "step-3.7-flash"}
-        }),
-    )
-    .await;
-    let session = post(
-        &router,
-        "/api/agent-sessions",
-        json!({
-            "preset_id": preset["preset"]["preset_id"], "title": "Plugin UI session"
-        }),
-    )
-    .await;
-    let session_id = session["agent_session_id"].as_str().unwrap();
     let plugin = install_ui(&router).await;
-    let plugin_id = plugin["plugin_id"].as_str().unwrap();
-    assert_eq!(get(&router, "/api/agent-catalog/ui/agent-session").await, json!([]), "HTML alone must not opt into Agent presentation");
-    let plugin = publish_agent_view(&router, plugin_id).await;
-    let views = get(&router, "/api/agent-catalog/ui/agent-session").await;
-    assert_eq!(views.as_array().unwrap().len(), 1);
-    assert_eq!(views[0]["plugin_id"], plugin_id);
-    assert_eq!(views[0]["expected_release_digest"], plugin["releases"]["active"]["release_digest"]);
-    let capability = views[0]["capability"].clone();
-    let agent_catalog = get(&router, "/api/agent-catalog").await;
-    assert!(!agent_catalog["capabilities"].as_array().unwrap().iter().any(|item| item["capability"] == capability), "a UI contribution must never become an Agent Tool");
-    let open_path = format!("/api/plugins/runtimes/{plugin_id}/surface/open");
-    let bridge_path = format!("/api/plugins/runtimes/{plugin_id}/surface/bridge");
-    let grant = json!({"plugin_id": plugin_id, "agent_session": {
-        "agent_session_id": session_id,
-        "expected_release_digest": plugin["releases"]["active"]["release_digest"],
-        "ui_capability": capability
-    }});
-    let observe = json!({"operation": "observe", "after_seq": 0, "limit": 100});
-
-    let standalone = post(&router, &open_path, json!({"plugin_id": plugin_id})).await;
-    let (status, _) = request(
+    let id = plugin["plugin_id"].as_str().unwrap();
+    let base = format!("/api/plugins/runtimes/{id}");
+    let surface = post(
         &router,
-        "POST",
-        &bridge_path,
-        bridge_body(&standalone, observe.clone()),
+        &format!("{base}/surface/open"),
+        json!({"plugin_id":id}),
     )
     .await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "standalone view must not acquire Session authority"
-    );
-    let surface = post(&router, &open_path, grant.clone()).await;
-    for invalid in [json!({"id": "not-a-ui-capability", "version": "1.0.0"}), json!({"id": capability["id"], "version": "99.0.0"})] {
-        let mut wrong = grant.clone();
-        wrong["agent_session"]["ui_capability"] = invalid;
-        assert_eq!(request(&router, "POST", &open_path, wrong).await.0, StatusCode::BAD_REQUEST);
-    }
-    let observed = post(
-        &router,
-        &bridge_path,
-        bridge_body(&surface, observe.clone()),
-    )
-    .await;
-    assert_eq!(observed["session"]["agent_session_id"], session_id);
-    assert_eq!(observed["messages"], json!([]));
-    assert!(
-        upstream.received_requests().await.unwrap().is_empty(),
-        "opening/observing must not start a turn"
-    );
-
-    // Being an owned Conversation is insufficient: it must carry the canonical
-    // AgentSession metadata produced by the real Session application service.
-    let plain_id = uuid::Uuid::now_v7().to_string();
-    let owner_id = nomifun_db::installation_owner_id(services.database.pool())
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO conversations (conversation_id, user_id, name, type, created_at, updated_at) VALUES (?, ?, 'Not an AgentSession', 'nomi', 1, 1)")
-        .bind(&plain_id).bind(&owner_id).execute(services.database.pool()).await.unwrap();
-    let mut plain_grant = grant.clone();
-    plain_grant["agent_session"]["agent_session_id"] = json!(plain_id);
-    let (status, plain_error) = request(&router, "POST", &open_path, plain_grant).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(plain_error["code"], "NOMI_CORE_AGENT_SESSION_NOT_FOUND");
-
-    // An existing Surface grant cannot outlive Session ownership, and opening
-    // another view must not bypass the same owner boundary.
-    let other_owner = uuid::Uuid::now_v7().to_string();
-    sqlx::query("UPDATE conversations SET user_id = ? WHERE conversation_id = ?")
-        .bind(&other_owner).bind(session_id).execute(services.database.pool()).await.unwrap();
-    assert_eq!(request(&router, "POST", &open_path, grant.clone()).await.0, StatusCode::NOT_FOUND);
-    for command in [
-        observe.clone(),
-        json!({"operation": "turn", "input": {"content": "must not run"}, "idempotency_key": "wrong-owner"}),
-        json!({"operation": "cancel"}),
-    ] {
-        let (status, error) = request(&router, "POST", &bridge_path, bridge_body(&surface, command)).await;
-        assert_eq!(status, StatusCode::NOT_FOUND, "{error}");
-    }
-    sqlx::query("UPDATE conversations SET user_id = ? WHERE conversation_id = ?")
-        .bind(&owner_id).bind(session_id).execute(services.database.pool()).await.unwrap();
-    assert!(upstream.received_requests().await.unwrap().is_empty());
-
-    let mut stale = grant.clone();
-    stale["agent_session"]["expected_release_digest"] = json!("0".repeat(64));
-    assert_eq!(
-        request(&router, "POST", &open_path, stale).await.0,
-        StatusCode::BAD_REQUEST
-    );
-    // Failed consent must leave the previous valid view intact.
+    let bridge = format!("{base}/surface/bridge");
     post(
         &router,
-        &bridge_path,
-        bridge_body(&surface, observe.clone()),
-    )
-    .await;
-    let mut missing = grant.clone();
-    missing["agent_session"]["agent_session_id"] = json!(uuid::Uuid::now_v7().to_string());
-    assert_eq!(
-        request(&router, "POST", &open_path, missing).await.0,
-        StatusCode::NOT_FOUND
-    );
-    let mut spoofed = observe.clone();
-    spoofed["agent_session_id"] = json!(uuid::Uuid::now_v7().to_string());
-    assert_eq!(
-        request(
-            &router,
-            "POST",
-            &bridge_path,
-            bridge_body(&surface, spoofed)
-        )
-        .await
-        .0,
-        StatusCode::UNPROCESSABLE_ENTITY
-    );
-    let (status, invalid) = request(
-        &router,
-        "POST",
-        &bridge_path,
-        bridge_body(
+        &bridge,
+        storage_body(
             &surface,
-            json!({"operation": "turn", "input": {}, "idempotency_key": "invalid"}),
+            json!({"operation":"set","key":"draft","value":"ordinary data"}),
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        invalid["code"], "NOMI_CORE_INVALID_REQUEST",
-        "Session error codes must survive the bridge"
-    );
-
-    let turn = json!({"operation": "turn", "input": {"content": "hello from plugin UI"}, "idempotency_key": "same-intent"});
-    let sent = post(&router, &bridge_path, bridge_body(&surface, turn.clone())).await;
-    assert_eq!(sent["agent_session_id"], session_id);
-    // Close the view immediately after admission; it neither owns nor cancels the turn.
-    post(
+    let stored = post(
         &router,
-        &format!("/api/plugins/runtimes/{plugin_id}/surface/close"),
+        &bridge,
+        storage_body(&surface, json!({"operation":"get","key":"draft"})),
+    )
+    .await;
+    assert_eq!(stored["value"], "ordinary data");
+    for operation in [
+        json!({"operation":"observe","after_seq":0,"limit":10}),
+        json!({"operation":"turn","input":{"content":"must not run"},"idempotency_key":"retired"}),
+        json!({"operation":"cancel"}),
+    ] {
+        let (status, error) =
+            request(&router, "POST", &bridge, bridge_body(&surface, operation)).await;
+        assert!(!status.is_success(), "{error}");
+        assert!(error.to_string().contains("unsupported"), "{error}");
+    }
+    let (status, error) = request(
+        &router,
+        "POST",
+        &format!("{base}/surface/open"),
         json!({
-            "plugin_id": plugin_id, "surface_session_id": surface["surface_session_id"],
-            "surface_capability": surface["surface_capability"]
+            "plugin_id":id,"agent_session":{"agent_session_id":uuid::Uuid::now_v7().to_string(),
+            "expected_release_digest":plugin["releases"]["active"]["release_digest"]}
         }),
     )
     .await;
-    assert!(
-        !request(
-            &router,
-            "POST",
-            &bridge_path,
-            bridge_body(&surface, observe.clone())
-        )
+    assert!(!status.is_success(), "{error}");
+    assert!(error.to_string().contains("unsupported"));
+    let still_open = post(
+        &router,
+        &format!("{base}/surface/open"),
+        json!({"plugin_id":id}),
+    )
+    .await;
+    assert!(still_open["surface_capability"].is_string());
+    services
+        .plugin_runtime
+        .shutdown_service_runtime(services.authoritative_user_id.as_ref())
         .await
-        .0
-        .is_success()
-    );
-    let reopened = post(&router, &open_path, grant.clone()).await;
-    let history = tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            let page = post(
-                &router,
-                &bridge_path,
-                bridge_body(&reopened, observe.clone()),
-            )
-            .await;
-            if page["messages"].to_string().contains("PLUGIN_UI_REPLY") {
-                break page;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("real Nomi reply must become visible through plugin history");
-    assert_eq!(
-        history["events"],
-        json!([]),
-        "message history must not pretend to replay token events"
-    );
-    assert!(history["messages"].as_array().unwrap().iter().any(|message|
-        message["message_type"] == "text" && message["projection"]["content"] == "PLUGIN_UI_REPLY"));
-    let replay = post(&router, &bridge_path, bridge_body(&reopened, turn)).await;
-    assert_eq!(replay["operation_id"], sent["operation_id"]);
-    assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
-    let (status, public_history) = request(
-        &router,
-        "GET",
-        &format!("/api/agent-sessions/{session_id}"),
-        Value::Null,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{public_history}");
-    assert_eq!(
-        public_history["data"]["messages"], history["messages"],
-        "plugin and built-in read the same projection"
-    );
-    // Exercise cancellation of a real in-flight Nomi model request as well as
-    // observation/replay; a test-only Session port cannot establish this.
-    wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/step_plan/v1/chat/completions"))
-        .and(latest_user_input("cancel this request"))
-        .respond_with(
-            wiremock::ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                // Longer than the cancellation assertion deadline: natural
-                // completion cannot make a broken cancellation path pass.
-                .set_delay(std::time::Duration::from_secs(30))
-                .set_body_string("data: [DONE]\n\n"),
-        )
-        .expect(1)
-        .mount(&upstream)
-        .await;
-    post(&router, &bridge_path, bridge_body(&reopened, json!({
-        "operation": "turn", "input": {"content": "cancel this request"}, "idempotency_key": "cancel-intent"
-    }))).await;
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while upstream.received_requests().await.unwrap().len() < 2 {
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("second turn must actually reach the model before cancellation");
-    let active = post(&router, &bridge_path, bridge_body(&reopened, observe.clone())).await;
-    assert_eq!(active["head"]["status"], "running", "cancel must act on an active turn");
-    post(
-        &router,
-        &bridge_path,
-        bridge_body(&reopened, json!({"operation": "cancel"})),
-    )
-    .await;
-
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            let page = post(
-                &router,
-                &bridge_path,
-                bridge_body(&reopened, observe.clone()),
-            )
-            .await;
-            if page["head"]["status"] != "running" {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("cancel must stop the Session's active turn");
-
-
-    // An ordinary reopen clears, rather than inherits, the old Session grant.
-    let normal = post(&router, &open_path, json!({"plugin_id": plugin_id})).await;
-    assert_eq!(
-        request(&router, "POST", &bridge_path, bridge_body(&normal, observe))
-            .await
-            .0,
-        StatusCode::BAD_REQUEST
-    );
-    let scope: Option<String> = sqlx::query_scalar(
-        "SELECT conversation_id FROM plugin_surface_sessions WHERE plugin_product_id = ?",
-    )
-    .bind(plugin_id)
-    .fetch_one(services.database.pool())
-    .await
-    .unwrap();
-    assert!(scope.is_none());
-    let before_disable = post(&router, &open_path, grant.clone()).await;
-    let w = get(&router, &format!("/api/plugins/runtimes/{plugin_id}/workshop")).await;
-    post(&router, &format!("/api/plugins/runtimes/{plugin_id}/enabled"), json!({
-        "plugin_id": plugin_id, "expected_product_revision": w["plugin"]["product_revision"],
-        "expected_pointer_revision": w["plugin"]["releases"]["pointer_revision"],
-        "expected_active_release_digest": w["plugin"]["releases"]["active"]["release_digest"],
-        "enabled": false
-    })).await;
-    assert_eq!(get(&router, "/api/agent-catalog/ui/agent-session").await, json!([]));
-    assert!(!request(&router, "POST", &open_path, grant).await.0.is_success());
-    for command in [
-        json!({"operation": "observe", "after_seq": 0, "limit": 50}),
-        json!({"operation": "turn", "input": {"content": "must not run"}, "idempotency_key": "disabled"}),
-        json!({"operation": "cancel"}),
-    ] {
-        assert!(!request(&router, "POST", &bridge_path, bridge_body(&before_disable, command)).await.0.is_success(),
-            "disabling the plugin must revoke an existing Session grant");
-    }
-
-    // The product template is ordinary editable source, not a special runtime.
-    // Creating it does not grant access, publish a view or invoke a model.
-    let calls_before_template = upstream.received_requests().await.unwrap().len();
-    let draft = post(&router, "/api/plugins/drafts/from-template/agent-session-view", json!({})).await;
-    assert_eq!(draft["status"], "ready");
-    assert!(draft["service_source"].is_null());
-    assert!(draft["import"].is_null());
-    assert!(draft["html"].as_str().unwrap().contains("api.observe"));
-    assert!(!draft["html"].as_str().unwrap().contains("api.subscribe"));
-    assert_eq!(get(&router, "/api/agent-catalog/ui/agent-session").await, json!([]));
-    let reference = post(&router, &format!("/api/plugins/drafts/{}/save", draft["id"].as_str().unwrap()),
-        json!({"expected_revision": draft["revision"]})).await;
-    let views = get(&router, "/api/agent-catalog/ui/agent-session").await;
-    assert_eq!(views.as_array().unwrap().len(), 1);
-    let reference_id = reference["plugin"]["plugin_id"].as_str().unwrap();
-    assert_eq!(views[0]["plugin_id"], reference_id);
-    let reference_surface = post(&router, &format!("/api/plugins/runtimes/{reference_id}/surface/open"), json!({
-        "plugin_id": reference_id, "agent_session": {"agent_session_id": session_id,
-            "expected_release_digest": views[0]["expected_release_digest"], "ui_capability": views[0]["capability"]}
-    })).await;
-    let reference_history = post(&router, &format!("/api/plugins/runtimes/{reference_id}/surface/bridge"),
-        bridge_body(&reference_surface, json!({"operation": "observe", "after_seq": 0, "limit": 50}))).await;
-    assert_eq!(reference_history["session"]["agent_session_id"], session_id);
-    assert!(reference_history["messages"].to_string().contains("PLUGIN_UI_REPLY"));
-    assert_eq!(upstream.received_requests().await.unwrap().len(), calls_before_template);
-
-    let reference_bridge = format!("/api/plugins/runtimes/{reference_id}/surface/bridge");
-
-    // Persisted source kinds travel unchanged through the same public and
-    // plugin observation, without guessing from content or executing tools.
-    let mut fixtures = Vec::new();
-    for (kind, content) in [
-        ("tool_call", json!({"name": "Read", "status": "error", "error": "fixture failure"})),
-        ("tool_group", json!([{"name": "Read", "status": "Success", "result_display": "fixture output"}])),
-        ("plan", json!({"entries": [{"content": "fixture step", "status": "in_progress"}]})),
-        ("thinking", json!({"content": "fixture thought", "status": "done"})),
-        ("tips", json!({"content": "fixture warning", "type": "warning"})),
-        ("agent_status", json!({"agent_name": "Nomi", "status": "connected"})),
-        ("permission", json!({"content": "fixture permission is not an assistant reply"})),
-    ] {
-        let message_id = uuid::Uuid::now_v7().to_string();
-        services.conversation_repo.insert_message(&nomifun_db::models::MessageRow {
-            id: 0, message_id: message_id.clone(), conversation_id: session_id.to_owned(),
-            msg_id: None, r#type: kind.to_owned(), content: content.to_string(),
-            position: Some("left".to_owned()), status: Some("error".to_owned()),
-            hidden: false, created_at: 1,
-        }).await.unwrap();
-        fixtures.push((message_id, kind, content));
-    }
-    let typed_history = post(&router, &reference_bridge, bridge_body(&reference_surface,
-        json!({"operation": "observe", "after_seq": 0, "limit": 50}))).await;
-    let public = get(&router, &format!("/api/agent-sessions/{session_id}")).await;
-    assert_eq!(typed_history["messages"], public["messages"]);
-    for (id, kind, content) in fixtures {
-        let message = typed_history["messages"].as_array().unwrap().iter()
-            .find(|message| message["projection_id"] == id).expect("source row is visible");
-        assert_eq!(message["message_type"], kind);
-        assert_eq!(message["message_status"], "error");
-        assert_eq!(message["presentation_intent"], "left");
-        assert_eq!(message["projection"], content, "metadata must not rewrite the body");
-        let digest = nomifun_agent_contracts::digest_payload(&content).unwrap();
-        assert_eq!(message["semantic_digest"], digest.as_ref());
-    }
-    assert_eq!(upstream.received_requests().await.unwrap().len(), calls_before_template);
-    services.shutdown_browser_platform().await.unwrap();
-    services.database.close().await;
+        .unwrap();
 }

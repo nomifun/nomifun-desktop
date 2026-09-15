@@ -13,8 +13,8 @@ H0 / H1a / H1b / U1，不使用此前多 Engine 的通过结果替代新功能�
 | --- | --- | --- |
 | H0 工具链局部核对 | 已完成静态接线核对 | 下方 owner、覆盖矩阵与缺口已定位；不表示 hooks 已实现 |
 | H1a 执行前检查 | macOS 原生核心产品闭环通过；严格 LF smoke 失败保留 | 已有发布、选择、保存、新会话、真实模型/Node/工具、拒绝与续接证据；Windows/制品待总验收 |
-| H1b 成功结果整理 | 下一阶段，尚未实施 | 已执行事实先由现有 owner 保留，后处理失败不丢结果、不重放 |
-| U1 业务输入与结果展示 | 待 H1b 闭环 | 保留现有页面平台，仅补表单、明确提交和有依据的展示 |
+| H1b 成功结果整理 | 因成本偏高移出开发计划 | 不预留 after_tool 空接口，不启动其专属结果/媒体结算改造 |
+| U0/U1 会话页替换及页面增强 | 用户已取消，源码移除及 macOS 核心验证通过 | 会话恢复标准 UI；普通带 UI App/常驻插件保留，见[退役记录](2026-09-15-agent-session-view-retirement.zh.md) |
 
 ## H0：实际调用链
 
@@ -38,7 +38,7 @@ Nomi 的 `execute_tool_calls_scoped` 与 `execute_tool_calls_with_protocol`
 | MCP resource / Skill / fork | 各现有 adapter 与 Session owner | 内部资源/技能资格不得被外层 gate 冒充；不递归挂钩内部动作 |
 | Mount dependency、Service 内部调用、hook 自身调用 | 原 Kernel / Product owner | 不经过 Nomi 外层工具 hook，不构成递归 hook 调度 |
 
-### H1b 必须先修的结果所有权窗口
+### 已取消 H1b 的成本依据与既有风险（非后续实施卡）
 
 1. 当前单工具 timeout 包含 shell pre、实际执行和 shell post。目标成功后等待
    post 时，结果、附件、modifier 和 delegated effects 仍在局部 future 内；
@@ -50,16 +50,23 @@ Nomi 的 `execute_tool_calls_scoped` 与 `execute_tool_calls_with_protocol`
    retained task 不能被当作工具结果缓存。Product 回执在返回前已保留，但不能代替
    Nomi 对文本、附件和 delegated effects 的所有权。
 
-H1b 的必要局部调整：每调用完成后、任何后处理 await 前同步交给现有 turn owner；
-取消结算先使用已完成结果，只对未完成调用生成取消/未知状态。原结果用于媒体、
-效果、回执和历史，插件只生成标明来源的模型消费文本。不得另建历史库或执行系统。
+进一步只读核对确认：restore accepted root 会恢复旧消息；manager 的取消/失败路径、
+媒体 sink 和 Conversation 终态又会统一回滚待交付附件。安全实现 after_tool 还需要
+明确可编辑文本与宿主警告/资源引用的边界，不能直接替换整个成功结果正文。
+
+用户已允许成本高的 hook 不实现。基于上述跨层成本，取消 H1b 及仅为它准备的结果
+owner/媒体子集结算改造，不将其更名为前置项目继续推进。尚未开放的 after_tool
+合同/schema 草案已删除，运行时继续明确拒绝不支持阶段；before_tool/before_model
+及既有配置型 shell hooks 保留。上述既有风险仍是未修复的审查结论；若在现行支持
+路径复现具体缺陷，按具体问题评估，不据此自动启动原 H1b 改造。
 
 ## 验证边界
 
-本轮只使用隔离数据目录 `.git/hook-product-validation/`，不读取日常凭据，
-不修改用户真实数据，不上传制品。真实模型固定为用户授权的 StepFun Coding Plan
+本轮验收要求使用隔离数据目录 `.git/hook-product-validation/`，不读取日常凭据、
+不修改用户真实数据、不上传制品；实际退出观察偏差及默认开发目录被触及的事实见下文，
+不能以这项要求替代实际结果。真实模型固定为用户授权的 StepFun Coding Plan
 `step-3.7-flash`；凭据不写入本文件、源码、命令参数或测试日志。
-Cargo 串行；独立源代码模块允许并发，U1 在工具 hooks 闭环后实施。
+Cargo 串行；独立源代码模块允许并发。after_tool 与会话页替换 U0/U1 均已取消，普通 App UI/常驻插件不受影响。
 
 ## H1a 实施与核心产品证据（非正式发布放行）
 
@@ -218,5 +225,5 @@ MCP resource read，以及没有只读 owner 准入口的动态工具当前明�
 取得资格，也不向 hook 外送未准入参数。复合 Skill 只覆盖外层一次调用，不递归拦截内部动作。
 
 Windows x64 需要重跑当前相同源码的 Node 冷启动、取消/进程回收、空格/Unicode 路径、
-文件缓存预检、发布确认和 native UI；macOS 结果不代替 Windows。H1b 与 U1 尚未实施，
+文件缓存预检、发布确认和 native UI；macOS 结果不代替 Windows。H1b 及会话页替换 U0/U1 已取消，
 签名、公证、当前 hooks 的正式安装包和最终真实模型验收仍未完成。

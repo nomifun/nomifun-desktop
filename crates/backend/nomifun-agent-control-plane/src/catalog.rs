@@ -437,6 +437,7 @@ impl CatalogSnapshot {
                     .manifest
                     .supports_consumer(CapabilityConsumer::Agent)
                     && capability.source.source_kind != PluginSourceKind::TestFixture
+                    && capability.manifest.contributions.ui_slot != Some(nomifun_agent_contracts::UiContributionSlot::AgentSession)
             })
             .map(|capability| {
                 let manifest = &capability.manifest;
@@ -470,6 +471,7 @@ impl CatalogSnapshot {
                 if capability
                     .entry
                     .supports_consumer(CapabilityConsumer::Agent)
+                    && capability.manifest.contributions.ui_slot != Some(nomifun_agent_contracts::UiContributionSlot::AgentSession)
                 {
                     capabilities.push(capability_catalog_item(
                         &capability.manifest,
