@@ -1,5 +1,11 @@
 # macOS 多 Engine 继续验收（2026-09-15）
 
+> 09:10 最终接续：Mac 已解锁，开发窗口及当前 DMG 内的 Nomi/Coding 原生发送、
+> 官方模板保存、个人 Agent 改引擎后旧 Session 不改绑、Command-Q 活动终端回收均已补验。
+> 本轮本地 macOS 开发与交付基线收尾完成，仍有下述明确失败和未执行项；不是正式发布验收全绿。
+> 以下锁定和待验描述保留为当时记录，以文末“解锁后的最终原生验收”为当前结果。
+
+
 本记录接续 `MACOS-DELIVERY-2026-09-14.zh.md`，不覆盖原失败记录。所有工作仍在
 `rf/agent-capability-platform-v2`；未 push、未发布 Release/更新。此前源码基线为
 `3e5bca1e1`，包含要求的 `2ff029512`。本轮目标尚未全部完成。
@@ -146,3 +152,76 @@ health 200；发送 SIGTERM 后有正常插件清理日志，退出码 0。见
 接续名为 `macOS 原生会话绑定` 的个人 Agent 测试。若端口已被其他服务使用，更新测试连接配置。
 
 当前制品及源码验证结果保持不变；没有推送或发布。
+
+## 解锁后的最终原生验收
+
+09:00–09:10（Asia/Shanghai），从保留的隔离测试根恢复，主代理串行执行，没有新增实现修改。
+bun run dev --no-watch 使用前述一次性 Cargo runner 的字节相同原生 app 身份启动，编译 13.59s；
+本次窗口直接正常显示，无需 Cmd-R。开发 app 使用 localhost:5173，包内应用使用
+tauri://localhost。真实用户数据和已安装应用均未使用。
+
+### 个人 Agent 与精确绑定
+
+- 原生开发窗口使用“macOS 原生会话绑定”发送 Nomi 消息，显示 native-ui-binding-ok；
+  会话 01a0a294-9142-71a0-a0e0-0c32c17c06fa 正常 finished，绑定
+  nomifun.nomi / 0.7.6-host62 / default，digest
+  96d8a2d2eff35ba5f90d0f39f373e32f457367567058ec9a398126e719c59ad0。
+- 在同一个人 Agent 基本设置中明确选择 Coding 并保存为 revision 2，新会话绑定
+  nomifun.coding / 0.7.6-host2-coding-loop95 / coding，digest
+  d1f2edb8f4be0c1eb91088962e0b54fe043862ec914439cf78ffd3023d939953。
+- 配置正确的模型特性后，新 Coding 会话
+  01a0a298-b208-79d2-9f6a-a951732ca37f 返回 native-ui-binding-ok 并 finished。
+  修改模型后创建流程使用新的冻结 preset 快照；不将该派生快照误报为原个人 Agent revision 3。
+- 对比首次 Nomi 会话保存前后及包内运行后的数据库事实，原 Nomi binding 完全不变。
+  证据：native-ui-nomi-before.json、native-ui-binding-final.json。
+- 开发窗口 Command-Q 正常退出，runner 退出 0，无开发 app/runner 残留；
+  日志 dev-gui-resume.log 有正常插件及终端清理。
+
+### 当前 DMG 的官方模板、发送与退出
+
+当前包仍为干净源码 2ede9aaf73eff787abd2315130a04b7dd68a4265 构建，摘要保持前表不变。
+从 DMG 只读挂载的 NomiFun.app 启动，使用原有隔离测试根；没有使用 Vite。
+
+- 官方“最简问答”模板的基本设置可发现 Nomi host62 与 Coding loop95，选择 Coding 后
+  保存为 DMG Coding Template Verification；“使用 Agent”保留该选择与本地模拟模型。
+- 包内 Coding 会话 01a0a29b-2b18-7871-9b7e-e72ec27c7f68 与默认 Nomi 会话
+  01a0a29b-567a-7b42-88ba-5625a96e6444 均通过原生点击发送，显示模拟回复并 finished；
+  两者数据库 binding 分别匹配上面的精确 build/digest/profile。
+- 从原生“新建终端”启动精确命令 /bin/sh -c 'sleep 120 & wait'。
+  退出前实测 app 81268、watchdog 81562、shell 81563、sleep 81564 在运行；
+  Command-Q 后全部 PID 消失、终端行数 0、日志 deleted=2（含一次错误输入已退出的终端），
+  应用退出码 0。
+- 证据：package-native-ui-final.json、package-final-active-processes.txt、
+  package-ui-original-root.log。模拟服务已停止、DMG 已卸载；隔离数据和日志保留。
+- 再次计算 DMG 和 release-lock SHA-256 与前表一致；已有 updater manifest 摘要未变化。
+
+本次 UI 模型服务是 127.0.0.1 的确定性 fixture，不连接云端，不冒充真实模型验收。
+真实 StepFun step-3.7-flash 八阶段与独立压缩的成功证据仍为前述真实测试日志。
+
+### 新发现及操作失败，如实保留
+
+1. 模拟模型初始 traits 为空，Coding 在请求发送前报 UnsupportedFeature。
+   第一次特性编辑误点弹窗外而未保存，复验仍失败；实际保存 streaming/function_calling/reasoning
+   后数据库已确认。没有修改路由或权限门禁。
+2. 旧 Coding 会话在模型配置变更后续发明确报 RouteRevisionMismatch；
+   使用新会话后成功。这是冻结路由版本校验，不静默采用新配置。
+3. **Coding 错误消息上的“重试”当前走 edit-resubmit/rewind，返回 400：
+   The selected runtime does not support rewind。** 此入口限制未修复，本轮没有增加 Coding rewind。
+   现有失败会话保留，已成功验证的正常新建/续接与真实执行链不等同于重试支持。
+4. 直接复制已创建数据集到另一个根进行包内测试，因归属关系报
+   reserved as the external work root of another NomiFun dataset。
+   保留拒绝日志 package-ui-final.log，退出该实例后在原隔离根启动成功；
+   没有改写 dataset 身份、历史存储编码或绕过归属检查。
+5. 首次终端输入误拼接 $SHELL 且引号被输入方式改变，终端已退出；
+   用原生 setValue 明确设置完整命令后才取得 shell/sleep 在运行的退出证据，不计前次为通过。
+
+### 收尾边界
+
+本轮 macOS 本地基线所需原生交互与包内退出已补齐。严格 codesign 仍失败，未执行
+Developer ID 签名、公证及 Gatekeeper 安装/升级/卸载；bun run check 仍有 109 处旧术语引用，
+不能宣称工程门禁或正式发布验收全绿。真实模型调用中取消、异常退出后的旧数据根恢复、
+真实用户库迁移仍未验证；本地模拟活动进程取消和正常退出有独立证据。
+Windows 当前公共修改仍需原生回归，Linux 继续 TODO，社区 Engine 示例不在验收范围。
+
+最终 fetch 只更新远程引用；指定分支仍包含 2ff029512，未 reset、强推或覆盖他人工作。
+本轮新增的收尾内容仅为文档及本地证据，不需要重打包。没有 push、Release 或更新发布。

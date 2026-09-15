@@ -15,13 +15,13 @@
     "validation_policy": "Isolated native dev and app/DMG validation; StepFun step-3.7-flash only; no Release, updater publication or push",
     "source_baseline": "2ff02951266b12008cf1f7ea63c3b27cff9a192a",
     "handoff": "MACOS-CONTINUATION-2026-09-15.zh.md",
-    "status": "blocked-on-manual-mac-unlock; native-ui-send-and-binding-verification-incomplete",
+    "status": "local-macos-baseline-closed-with-documented-failures-and-not-run-items; not-release-ready",
     "engine_builds": {
       "nomifun.nomi": "0.7.6-host62",
       "nomifun.coding": "0.7.6-host2-coding-loop95"
     },
     "engineering_checks": {
-      "ui_targeted_tests": "85 passed",
+      "ui_targeted_tests": "continuation 73 passed; initial 85 passed (overlapping suites, not summed)",
       "engine_core_coding_tests": "51 passed",
       "process_tests": "71 passed",
       "migration_tests": "12 passed",
@@ -37,8 +37,9 @@
       "startup": "passed arm64, isolated data root and WebView store",
       "runner_sigint_shutdown": "passed",
       "cli_sigint_shutdown": "passed",
-      "native_window_interaction": "temporary byte-identical app identity; window interaction and Use Agent selection verified after reload; sending blocked by locked Mac",
-      "webview_isolation": "passed fresh root and unit regression"
+      "native_window_interaction": "passed byte-identical app identity: native Nomi/Coding send, personal engine save, exact old binding preserved; resumed window rendered without reload",
+      "webview_isolation": "passed fresh root and unit regression",
+      "native_command_q_shutdown": "passed exit 0, runner and app gone"
     },
     "live_provider": {
       "model": "step-3.7-flash",
@@ -49,7 +50,7 @@
       "shutdown_and_credential_audit": "passed"
     },
     "package_checks": {
-      "status": "built from clean source; native UI send pending",
+      "status": "built from clean source; native UI Nomi/Coding send and active terminal Command-Q verified; strict signature still fails",
       "host_arch": "arm64",
       "dmg_sha256": "0f4c16cd7ca5123872cefd9d123198ba43fbbc33fc953fecbf958aa816fb1d11",
       "host_sha256": "8567e3e188e22b0410a243b014c6c6431dfe95f02fd3be27a94621d1cf4c65f3",
@@ -61,7 +62,11 @@
       "bundle_signature": "strict verification failed; linker ad-hoc only",
       "developer_id_signing": "not_run",
       "notarization": "not_run",
-      "release_updater_publication": "not_run"
+      "release_updater_publication": "not_run",
+      "native_official_template_engine_save": "passed: Coding selected and saved as personal Agent, then launched",
+      "native_ui_send_exact_binding": "passed both engines using loopback fixture; old Nomi binding unchanged",
+      "native_command_q_active_terminal": "passed: app/watchdog/sh/sleep gone, terminal rows 0, normal cleanup, exit 0",
+      "evidence": ".git/macos-engine-20260914/package-native-ui-final.json"
     },
     "not_run": [
       "community_engine_example",
@@ -69,7 +74,6 @@
       "Windows_regression_on_current_changes",
       "live_model_cancel",
       "production_user_database_migration",
-      "native_UI_send_new_session_end_to_end",
       "abnormal_exit_old_data_root_recovery",
       "Gatekeeper_install_upgrade_uninstall"
     ],
@@ -94,11 +98,21 @@
     },
     "source_commit": "2ede9aaf73eff787abd2315130a04b7dd68a4265",
     "blocker_audit": {
-      "condition": "Mac locked; CUA automatic unlock failed",
-      "consecutive_goal_turns": 3,
-      "test_processes": "stopped; data preserved",
-      "resume_evidence": ".git/macos-engine-20260914/paused-state.json"
-    }
+      "condition": "resolved: Mac unlocked; pending native UI verification completed",
+      "prior_consecutive_goal_turns": 3,
+      "test_processes": "stopped; DMG unmounted; isolated data preserved",
+      "resume_evidence": ".git/macos-engine-20260914/package-native-ui-final.json"
+    },
+    "known_failures": [
+      "strict macOS bundle signature verification fails; signing/notarization not run",
+      "bun run check fails: 109 retired vocabulary references",
+      "Coding error retry invokes unsupported rewind and returns HTTP 400"
+    ],
+    "observed_guard_rejections": [
+      "UI fixture missing model traits rejected before provider request; saved traits and new session succeed",
+      "Existing Coding session rejects changed model route with RouteRevisionMismatch",
+      "Copied dataset root rejected by ownership guard; original isolated root reused"
+    ]
   },
   "previous_windows_delivery_scope": {
     "platform": "windows-local",
