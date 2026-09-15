@@ -1,6 +1,5 @@
 //! User-facing Plugin workflow. Authoring stays in recoverable draft documents;
 //! only the explicit save command commits a production release.
-pub(crate) mod agent_ui_admission;
 mod authoring;
 mod templates;
 #[cfg(test)]

@@ -43,7 +43,6 @@ import { configService } from '@/common/config/configService';
 import { application } from '@/common/adapter/ipcBridge';
 import { isHandledAuthExpiredHttpError } from '@/common/adapter/httpBridge';
 import { initializeBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
-import { AgentUiAvailabilityContext } from './hooks/agent/useAgentUiAvailable';
 configService.initialize().catch((err) => {
   console.error('Failed to initialize config:', err);
 });
@@ -90,7 +89,6 @@ const Config: React.FC<PropsWithChildren> = ({ children }) => {
 const Main = () => {
   const { ready, status } = useAuth();
   const [configReady, setConfigReady] = useState(false);
-  const [agentUiAvailable, setAgentUiAvailable] = useState(false);
   const [configError, setConfigError] = useState<Error | null>(null);
 
   useEffect(() => {
@@ -100,7 +98,6 @@ const Main = () => {
     // login transition into an application-level render failure.
     if (!ready || status !== 'authenticated') {
       setConfigReady(false);
-      setAgentUiAvailable(false);
       setConfigError(null);
       return;
     }
@@ -119,7 +116,6 @@ const Main = () => {
         // initializer owns that recoverable fallback; only real runtime
         // failures should reach the application error state below.
         .then((info) => {
-          if (active) setAgentUiAvailable(info?.experimentalAgentUiAvailable === true);
           initializeBrowserStorageGeneration(info?.storageGeneration);
         })
         .catch((err) => {
@@ -181,7 +177,7 @@ const Main = () => {
     return <AppLoader />;
   }
 
-  return <AgentUiAvailabilityContext.Provider value={agentUiAvailable}>{router}</AgentUiAvailabilityContext.Provider>;
+  return router;
 };
 
 const App = HOC.Wrapper(Config)(Main);

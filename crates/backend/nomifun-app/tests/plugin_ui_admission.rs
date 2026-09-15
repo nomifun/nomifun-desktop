@@ -1,16 +1,10 @@
-//! Disabled production host, including persisted grants from an earlier opt-in.
+//! Agent pages are public choices, while built-in presentation remains the default.
 use super::*;
 
 #[tokio::test]
-async fn experimental_agent_ui_default_denies_without_disabling_builtin_or_generic_surfaces() {
-    if !in_agent_ui_host(
-        "admission::experimental_agent_ui_default_denies_without_disabling_builtin_or_generic_surfaces",
-        false,
-    ) {
-        return;
-    }
+async fn agent_ui_is_available_without_opt_in_and_preserves_builtin_and_generic_surfaces() {
     let (router, services) = common::build_local_trust_app(TRUST).await;
-    assert_eq!(get(&router, "/api/system/info").await["experimental_agent_ui_available"], false);
+    assert!(get(&router, "/api/system/info").await.get("experimental_agent_ui_available").is_none());
     let upstream = wiremock::MockServer::start().await;
     let provider = post(&router, "/api/providers", json!({
         "platform": "stepfun-plan", "name": "Admission model",
@@ -53,18 +47,20 @@ async fn experimental_agent_ui_default_denies_without_disabling_builtin_or_gener
         json!({}),
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert_eq!(body["code"], "FORBIDDEN");
-    assert_eq!(get(&router, "/api/plugins/drafts").await, json!([]));
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["status"], "ready");
+    assert_eq!(get(&router, "/api/plugins/drafts").await.as_array().unwrap().len(), 1);
+    assert_eq!(get(&router, "/api/agent-catalog/ui/agent-session").await, json!([]));
 
     let plugin = install_ui(&router).await;
     let id = plugin["plugin_id"].as_str().unwrap();
     let plugin = publish_mixed_agent_view(&router, id).await;
-    assert_eq!(
-        get(&router, "/api/agent-catalog/ui/agent-session").await,
-        json!([]),
-        "even a published Agent view must be unavailable on a default host"
-    );
+    let views = get(&router, "/api/agent-catalog/ui/agent-session").await;
+    assert_eq!(views.as_array().unwrap().len(), 1);
+    assert_eq!(views[0]["plugin_id"], id);
+    assert_eq!(views[0]["expected_release_digest"], plugin["releases"]["active"]["release_digest"]);
+    assert!(get(&router, &binding_path).await["binding"]["selection"].is_null(),
+        "publishing a page must not select it by default");
     let tool_id = format!("plugin.{id}.echo");
     assert!(
         get(&router, "/api/agent-catalog").await["capabilities"]
@@ -72,7 +68,7 @@ async fn experimental_agent_ui_default_denies_without_disabling_builtin_or_gener
             .unwrap()
             .iter()
             .any(|item| item["capability"]["id"] == tool_id),
-        "disabling the UI of a mixed plugin must not hide its Tool"
+        "publishing the UI of a mixed plugin must not hide its Tool"
     );
 
     let open_path = format!("/api/plugins/runtimes/{id}/surface/open");
@@ -88,92 +84,56 @@ async fn experimental_agent_ui_default_denies_without_disabling_builtin_or_gener
     )
     .await;
     assert_eq!(generic["outcome"], "value");
-    let (status, error) = request(
-        &router,
-        "POST",
-        &open_path,
-        json!({
-            "plugin_id": id, "agent_session": {"agent_session_id": session_id,
-                "expected_release_digest": plugin["releases"]["active"]["release_digest"]}
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
-    assert_eq!(error["code"], "EXPERIMENTAL_AGENT_UI_DISABLED");
+    // Public discovery is not a Session grant: standalone bridges still fail.
+    for command in [
+        json!({"operation": "observe", "after_seq": 0, "limit": 50}),
+        json!({"operation": "turn", "input": {"content": "must not run"}, "idempotency_key": "denied"}),
+        json!({"operation": "cancel"}),
+    ] {
+        let (status, error) = request(&router, "POST", &bridge_path, bridge_body(&surface, command)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    }
 
-    // Seed only historical presentation/grant facts, as if the host restarted
-    // without opt-in. No new production write path or bypass is introduced.
-    let selection = json!({
-        "plugin_id": id, "capability": {"id": format!("plugin.{id}.ui.agent-session"), "version": "1.0.0"},
-        "expected_release_digest": plugin["releases"]["active"]["release_digest"],
-        "display_name": "Previously selected page", "description": "Saved consent"
-    });
-    let binding = json!({"binding_version": 7, "selection": selection});
-    sqlx::query("UPDATE nomi_agent_presets SET ui_binding_json = ? WHERE preset_id = ?")
-        .bind(binding.to_string())
-        .bind(preset_id)
-        .execute(services.database.pool())
-        .await
-        .unwrap();
+    let selection = views[0].clone();
+    let binding = json!({"binding_version": 1, "selection": selection});
+    let (status, saved) = request(&router, "PUT", &binding_path, json!({
+        "expected_binding_version": 0, "selection": selection
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["data"]["binding"], binding);
     assert_eq!(get(&router, &binding_path).await["binding"], binding);
     assert_eq!(
         get(&router, &format!("{session_path}/ui-binding")).await["binding"],
         binding
     );
-    let (status, error) = request(
-        &router,
-        "PUT",
-        &binding_path,
-        json!({
-            "expected_binding_version": 7, "selection": selection
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
-    assert_eq!(error["code"], "AGENT_UI_CHOICE_UNAVAILABLE");
-    assert_eq!(get(&router, &binding_path).await["binding"], binding);
+    let surface = post(&router, &open_path, json!({
+        "plugin_id": id, "agent_session": {"agent_session_id": session_id,
+            "expected_release_digest": selection["expected_release_digest"],
+            "ui_capability": selection["capability"]}
+    })).await;
+    let observed = post(&router, &bridge_path, bridge_body(&surface,
+        json!({"operation": "observe", "after_seq": 0, "limit": 50}))).await;
+    assert_eq!(observed["session"]["agent_session_id"], session_id);
+    assert_eq!(observed["messages"], json!([]));
     let (status, cleared) = request(
         &router,
         "PUT",
         &binding_path,
         json!({
-            "expected_binding_version": 7, "selection": null
+            "expected_binding_version": 1, "selection": null
         }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{cleared}");
     assert_eq!(
         cleared["data"]["binding"],
-        json!({"binding_version": 8, "selection": null})
+        json!({"binding_version": 2, "selection": null})
     );
 
-    sqlx::query(
-        "UPDATE plugin_surface_sessions SET conversation_id = ? WHERE surface_session_id = ?",
-    )
-    .bind(session_id)
-    .bind(surface["surface_session_id"].as_str().unwrap())
-    .execute(services.database.pool())
-    .await
-    .unwrap();
-    for command in [
-        json!({"operation": "observe", "after_seq": 0, "limit": 50}),
-        json!({"operation": "turn", "input": {"content": "must not run"}, "idempotency_key": "denied"}),
-        json!({"operation": "cancel"}),
-    ] {
-        let (status, error) = request(
-            &router,
-            "POST",
-            &bridge_path,
-            bridge_body(&surface, command),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
-        assert_eq!(error["code"], "EXPERIMENTAL_AGENT_UI_DISABLED");
-    }
     assert_eq!(get(&router, &session_path).await, original_session);
     assert_eq!(get(&router, &editor_path).await, original_editor);
     assert!(upstream.received_requests().await.unwrap().is_empty());
-    // Closing a stale view remains possible while the experiment is disabled.
+    // Switching back to built-in presentation leaves execution unchanged.
     post(
         &router,
         &format!("/api/plugins/runtimes/{id}/surface/close"),
@@ -209,7 +169,7 @@ async fn experimental_agent_ui_default_denies_without_disabling_builtin_or_gener
         }
     })
     .await
-    .expect("disabled plugin UI must not disable builtin Session turns");
+    .expect("public plugin UI must not disable builtin Session turns");
     assert_mixed_tool_still_executes(&router, &services, preset_id, id, &tool_id).await;
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
@@ -311,8 +271,7 @@ async fn assert_mixed_tool_still_executes(
         .await
         .expect("mixed-plugin Tool invocation must not fail with a stale Catalog digest");
     assert_eq!(result, payload);
-    assert_eq!(
-        get(router, "/api/agent-catalog/ui/agent-session").await,
-        json!([])
-    );
+    let views = get(router, "/api/agent-catalog/ui/agent-session").await;
+    assert_eq!(views.as_array().unwrap().len(), 1);
+    assert_eq!(views[0]["plugin_id"], plugin_id);
 }

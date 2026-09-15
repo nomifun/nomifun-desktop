@@ -7,9 +7,6 @@ pub(super) async fn agent_session_view(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
 ) -> Result<Json<ApiResponse<Draft>>, AppError> {
-    if !agent_ui_admission::enabled() {
-        return Err(AppError::Forbidden(agent_ui_admission::DISABLED_MESSAGE.into()));
-    }
     let service = service(&state)?;
     Ok(Json(ApiResponse::ok(create_agent_session_draft(&service, user.id.as_str()).await?)))
 }

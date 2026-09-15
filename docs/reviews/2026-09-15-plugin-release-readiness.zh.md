@@ -1,8 +1,8 @@
 # 插件发布就绪台账：尽快上线，尽可能可替换
 
-日期：2026-09-15。状态：**本轮 Skill、Service/UI 前置清理及装配简化已完成，定向回归、聚合检查和 Windows desktop check 通过，见 §2.6；正式制品与双平台上线验收未完成。** 原生插件删除专项及此前 Windows 定向回归仅作为对应历史证据。
+日期：2026-09-15。状态：**已有 Agent 页面开关移除及 Windows 定向回归、聚合检查、desktop check 已完成，见 §2.7；正式制品与双平台上线验收未完成。** 此前 Skill、Service/UI 前置清理及装配简化证据见 §2.6，原生删除及更早回归仅作为对应历史证据。
 
-基线说明：`48affddb7` 是此前已推送的候选，不包含本轮原生删除和架构收敛；当前交接以包含 §2.6 记录及对应代码的实际提交为准。下文未提交工作区记录属于当时验证事实。用户已确认首发 **Windows x64 + macOS Apple Silicon（arm64）**，当前在 Windows 开发，macOS 按 §3.1 交接补充开发/验证。Intel Mac、Windows arm64 和 Linux 不纳入此次首发，不要求 macOS universal 制品；文档更新不代表已安装候选包验收通过。
+基线说明：原生删除和架构收敛已随 `70c28b5de86f820a535bdcca48191244196f2e2f` 提交并推送；本轮在其上筛选 hooks/UI 计划并移除已有 Agent 页面的实验开关，新 hooks 尚未实现。下文未提交工作区记录属于当时验证事实。首发为 **Windows x64 + macOS Apple Silicon（arm64）**；不包含 Intel Mac、Windows arm64、Linux 或 universal 制品。页面开放的最新验证单独记录，不以 §2.6 旧证据代替。
 
 发布方式已确认：开源大重构直接正式上线，不设小范围候选分发、灰度或反馈等待阶段。下文候选制品只用于必要技术验收，不新增用户试用流程；复用已有发布方式。本轮尚未执行制品发布。
 
@@ -10,7 +10,9 @@
 
 Rust native 删除决定不变：原生插件后端、Rust 作者 SDK、启用入口、示例及专属打包/测试路径已移除，不保留实验入口。本轮另外删除无生产消费者的 Service 流式分支；保留 Node 普通调用、存储 IPC、取消/生命周期、生产模型合同及正常产品路径。
 
-当前范围入口为[架构收敛记录](2026-09-15-plugin-architecture-convergence.zh.md)：用户已批准第一、第二、第三批及支持矩阵同步，不再等待历史 A/B 选择。页面仍默认关闭，保留显式选择能力，撤掉专用事件协议并简化参考页，不扩新领域。
+当前范围入口为[架构收敛记录](2026-09-15-plugin-architecture-convergence.zh.md)：不再等待历史 A/B 选择。用户要求开发的能力开放可用，因此已有 Agent 页面移除实验开关，内置仍默认、插件由用户选择；专用事件协议和重型参考页不恢复。
+
+最新产品取舍：外部插件模型 Provider、安装型/热加载 Agent Runtime、Shell 和其他 hook/UI 扩展候选移出计划。仅保留新增 before_tool/after_tool 及已有页面内业务输入/结果展示，详见[确定清单 §0.1](2026-09-15-agent-plugin-remaining-work-and-decisions.zh.md)。这些新增项尚未实现，不能写入本次支持声明；一旦开发完成，必须具有普通用户可发现和使用的完整链路，不设置长期默认关闭的实验开关。
 
 本文覆盖 [能力评估](2026-09-13-agent-plugin-capability-assessment.zh.md) 与 [历史实施台账](2026-09-14-agent-plugin-openness-implementation.zh.md) 中旧 JS-only、任意/全栈替换和“下一批”排期；非 native 历史实现及测试记录保留，native 详细方案收缩为曾实现后按范围收敛删除的历史记录。29 项是长期能力评估，不是上线欠账，不要求清零，也不承诺任意替换。
 
@@ -20,16 +22,20 @@ Rust native 删除决定不变：原生插件后端、Rust 作者 SDK、启用�
 
 | 定位 | 范围与边界 |
 |---|---|
-| 正式默认 | 内置 Agent、内置模型链路、内置 UI；默认产品流程不能依赖实验功能 |
+| 正式默认 | 内置 Agent、内置模型链路、内置 UI；用户未选择时不自动加载第三方插件页面 |
 | 已支持、按证据验收 | Tool、Context、discovery、`before_model`、只读 Skill；限定已接线来源、阶段、权限、冻结身份及真实消费者，不扩大为全领域替换或可执行 Skill |
 | 删除项（代码已完成） | 原生插件后端、Rust 作者 SDK、启用入口及专属示例/打包/测试路径；不再列为可启用实验，Windows 删除专项回归已通过，详见 §2.5 |
 | 本轮收敛删除 | 旧 Skill loader/resolver、Service 事件流/emit、UI 专用事件投影/订阅、参考页自动草稿恢复及宿主隐藏消费者重新绑定；结果见 §2.6 |
-| 页面实验 | 插件 Agent 页面默认关闭，宿主 `NOMIFUN_ALLOW_EXPERIMENTAL_AGENT_UI=1` 显式启用；正式默认仍为内置 UI，不宣称完整页面交互、恢复、多视图或 Shell 替换 |
-| 延期 | 模型插件、整个 Agent runtime、Shell、深层基础设施替换；生产模型合同不是插件 Provider 交付，Service 流式前置本轮删除 |
+| 页面可选能力 | 移除实验开关，普通用户可创建/发布/选择/记住偏好/切回；内置 UI 仍默认，不宣称全部附件/审批交互、自动草稿恢复、多视图或 Shell 替换 |
+| 取消开发 | 外部插件模型 Provider、安装型/热加载 Agent Runtime；保留内置模型与源码引擎注册/编译选择，不重复建设 |
+| 待开发 | 新 hooks 仅 before_tool/after_tool；页面增强仅业务输入/结果展示；未完成不计为已支持 |
+| 不做 | 应用 Shell、其他通用 hook/UI 扩展；保留现有内置正常功能，不按历史全量目标扩张 |
 
 删除范围以上表及架构收敛记录为准，不删除 Rust 宿主、内置实现、Node 普通 Service 或必要执行保护，不重做平台。长期项若发现影响正式范围的安全/可用性问题，应登记具体 P0 缺陷，不把整个长期项升级成上线前必做。
 
-页面实验开关仅识别精确值 `1`，修改后重启宿主，不提供插件自授权或动态开关。关闭页面实验时，页面候选为空、模板创建和 Agent Session 访问拒绝；历史偏好仍可读取和显式清除，内置会话、普通无会话授权的 Surface 及关闭操作仍可用。不修改共享发布目录摘要，避免影响同一插件内的普通 Tool。
+页面不再依赖实验环境变量、systemInfo availability 字段或前端 context；删除开关不是返回恒 true 的兼容层。仍由原 owner、精确 release、Surface/Session 授权和停用状态决定访问资格，未选插件时内置页默认。普通 Surface 和同一插件的 Tool 不因页面选择改变权限；不用开放入口代替真实授权。
+
+§2.1～2.6 中“默认关闭”“显式 opt-in”及其测试是历史阶段证据，已被当前公开可选决定替代；不再作为开发/交接指令。此前测试通过不自动证明本轮开关移除通过。
 
 ## 2. P0 六项发布台账
 
@@ -37,12 +43,12 @@ Rust native 删除决定不变：原生插件后端、Rust 作者 SDK、启用�
 
 | ID | 发布项 | 本次最小验收要求 | 状态 | 本轮结果 / 证据 |
 |---|---|---|---|---|
-| P0-1 | 范围与删除边界 | 核对正式默认 Agent/模型/UI；原生插件后端/SDK 与启用入口已移除，旧入口不再可用；页面实验边界清楚，延期能力不误导为正式支持 | 已移除，Windows 删除专项回归通过 | 合同 write/check、contracts `--lib` 100 项及聚合检查已通过，见 §2.5；Node 与 Agent 运行期回归通过，制品验收待补 |
+| P0-1 | 范围与删除边界 | 核对正式默认 Agent/模型/UI；原生插件后端/SDK 与启用入口已移除；已有页面正常开放且有限能力清楚，未实现能力不误导为正式支持 | 代码与 Windows 专项通过，制品待验 | 原生删除证据见 §2.5；本轮页面开关移除、正常选择与授权保护见 §2.7 |
 | P0-2 | 产品流程 | 在内置默认链路核对安装/导入、发布、选择、保存、重启后使用；Tool/Context/discovery/before_model/只读 Skill 各以对应真实消费者及已支持形态验收，不以单一示例替代全部证据 | 删除后 Product 回归通过，制品流程待验 | 此前 Product 4 项、Agent 消费者 41 项、UI 产品 3 项通过；删除后最终回归见 §2.5；安装包重启后流程与真实模型调用尚未验证 |
 | P0-3 | 故障安全 | 核对权限/冻结身份、撤下或停用、漂移、超时、取消、崩溃、非法输出和回收；禁止静默换实现或扩大授权；native 删除不破坏 Node/共享 Service/正常产品路径 | 删除后故障回归通过，安装后待验 | 删除后 Node Service 16 项、storage IPC 3 项及 Product 4 项通过（§2.5）；不替代安装后进程回收验收 |
 | P0-4 | 最小数据安全与兼容边界 | 新安装/显式新数据目录、保存重启和不可用插件诊断正常；不兼容旧库明确拒绝且保留数据，说明现有新目录配置方式；不要求历史升级/回滚矩阵 | 已有迁移专项证据保留，安装后最小路径待验 | 上游前缀新增迁移 3 项、published-main 5 项、displaced Agent 3 项仅为已有证据；不扩大为无缝升级承诺，未操作用户实际数据 |
-| P0-5 | 发布构建 | 明确本次实际发布 OS/架构及制品；对应正式构建、安装/启动/卸载和必要签名检查，核对路径与运行时依赖；其他平台未验证不得宣称通过 | 删除后聚合检查与 desktop check 通过，发布产物待验 | 最新 `bun run check` 与 Windows `cargo check -p nomifun-desktop` 已通过，见 §2.5；不替代正式制品构建和安装验收 |
-| P0-6 | 文档 | 用户入口、作者说明、正式/实验/延期边界、删除决定、已知限制及数据恢复说明与实际制品一致；交付 Node/正常产品路径的跨 OS TODO / prompt | 文档已整理，制品一致性待最终复核 | 删除原生作者指南及开发/打包/测试指令，收缩历史方案；不将文档更新记为代码或制品验收通过 |
+| P0-5 | 发布构建 | 明确本次实际发布 OS/架构及制品；对应正式构建、安装/启动/卸载和必要签名检查，核对路径与运行时依赖；其他平台未验证不得宣称通过 | 聚合检查与 desktop check 通过，发布产物待验 | 最新 `bun run check` 与 Windows `cargo check -p nomifun-desktop` 已通过，见 §2.7；不替代正式制品构建和安装验收 |
+| P0-6 | 文档 | 用户入口、作者说明、已支持/未实现/取消范围、删除决定、已知限制及数据恢复说明与实际制品一致；交付跨 OS TODO / prompt | 文档已整理，制品一致性待最终复核 | 同步页面正常开放及 hooks/UI 确定清单，保留历史验证事实；不将文档更新记为制品验收通过 |
 
 放行规则：主代理在声明的发布目标上取得六项适用证据并处理实际阻塞后，才能写发布结论。未覆盖目标从发布声明中明确排除或继续待验证，不得用 Windows x64 结果替代其他平台。缺少非发布目标的环境不应自动阻塞无关范围。
 
@@ -94,7 +100,7 @@ Rust native 删除决定不变：原生插件后端、Rust 作者 SDK、启用�
 2. 在隔离测试数据目录构建/安装该候选，补验导入或安装、发布选择、保存重启、停用切回内置、新目录启动、不兼容旧库的明确拒绝和数据保留、卸载及适用签名；不覆盖真实用户数据，不另做历史升级/回滚矩阵。本轮未给出制品级通过结论。
 3. 按 D4 复用现有专项证据，在最先具备授权模型配置的环境补一次默认 Agent 响应和无副作用插件 Tool 的实模检查，不新建测试平台或多厂商矩阵。本进程专用凭据未配置，当前优先交接已有配置的产品环境；实模仍待验，不能由模拟结果代替。步骤见[决策文档 §8.1](2026-09-15-agent-plugin-remaining-work-and-decisions.zh.md)。macOS arm64 按 §3～4 接续；首发之外架构继续延期。
 
-不再排入本次剩余 TODO：新增插件领域、模型替换、整 runtime/Shell、完整插件 UI、原生沙箱或跨平台通用重构。
+不再排入本次剩余 TODO：其他新增插件领域、完整插件 UI、应用 Shell、原生沙箱或跨平台通用重构。外部模型插件与安装型/热加载引擎已取消，源码引擎机制保留；更多 hooks 仅做独立设计，不将设计当作 release 实现。
 
 ### 2.4 候选工作区整理与词汇检查收口（2026-09-15）
 
@@ -167,6 +173,32 @@ UI 55 项复现命令：`bun test --cwd ui src/renderer/pages/agentSession src/r
 
 正式制品安装、签名、真实模型与 macOS arm64 仍未验收。跨 OS 交接应同时阅读本轮架构收敛记录 §5：不恢复 Service 流式、UI 专用订阅或重型草稿恢复协议，不把旧历史测试名当作必须恢复的产品能力。
 
+### 2.7 已有 Agent 页面正常开放（2026-09-15，Windows x64）
+
+基线为 `70c28b5de86f820a535bdcca48191244196f2e2f` 加本轮未提交增量。删除后端实验准入模块、目录/模板/偏好/Session 入口开关、systemInfo availability 字段、前端 context 和 bootstrap 门控；不保留恒 true 兼容包装。普通用户可创建参考草稿、发布、选择、记住偏好及切回内置；不自动选择第三方，不改变执行配置。
+
+保留并验证 owner、精确 release/capability、Surface/Session 授权、停用撤权、偏好版本冲突、取消和重开不重放。新增 `before_tool` / `after_tool` 与业务页面增强仅完成范围设计，未实现，不计入本节交付。
+
+| 检查 | 本轮结果 | 证据 / 边界 |
+|---|---|---|
+| `cargo test -p nomifun-api-types --lib lifecycle::tests` | 11 通过 | `%TEMP%/nomifun-agent-ui-api-tests.{stdout,stderr}.log`；验证 systemInfo 不再输出实验字段 |
+| `cargo test -p nomifun-app --test plugin_ui_sessions -- --test-threads=1` | 3 通过 | `%TEMP%/nomifun-agent-ui-sessions-tests.{stdout,stderr}.log`；包含 admission/binding 子模块，无 opt-in 的创建/发布/选择/持久化、真实 Node 发送/取消和越权/失效拒绝；模型使用 wiremock，不是实模 |
+| UI 定向回归（命令如下） | 9 文件、58 测试、389 断言通过 | 本会话工具输出，无独立日志；覆盖页面、设置、启动、普通 bridge/wire 与 Surface，保留已保存选择解析先于内置页副作用 |
+| `bun run test:agent-view-template` | 12 通过，无跳过 | 本会话工具输出；参考页与 SDK 的发送一次、取消、不明结果不重放、失效/销毁行为 |
+| `bun run check` | 全链通过 | `.tmp-page-open-check.{out,err}`；包含 typecheck、桌面边界、i18n 和词汇守卫等 |
+| `cargo check --locked --offline -p nomifun-desktop` | 通过 | `.tmp-page-open-desktop.{out,err}`；App 仍有 28 条非本次位置的编译警告，未扩大清理范围 |
+| `git diff --check` 与开关引用检索 | 通过 | 生产代码不再存在实验开关/context/availability 字段；仅负向测试保留旧字段名以断言其不存在 |
+
+UI 精确复现命令：
+
+```text
+bun test --cwd ui src/renderer/pages/agentSession src/renderer/pages/agentSettings/AgentPageSettings.interaction.test.tsx src/renderer/main.bootstrap.structure.test.ts src/common/adapter/ipcBridge.plugin-runtime-wire.test.ts src/renderer/pages/plugins/runtime/agentSessionBridge.test.ts src/renderer/pages/plugins/runtime/PluginRuntimeSurfacePanel.interaction.test.tsx
+```
+
+本轮独立定向测试合计 **84 项通过**，不重复计入重跑。UI 首轮 32 项和第一次扩展 58 项均通过，但有 React `act` 警告；仅修正测试初始化/保存的异步等待后重跑，最终 58 项无该警告，未放宽生产断言。前端单独 typecheck、desktop-ui-boundary、i18n 亦通过，聚合检查已覆盖，不另计测试数。
+
+尚未执行本轮提交/推送、正式打包安装、真实模型或 macOS arm64 验收。跨 OS 应在包含本节代码的实际提交上**不设置实验变量**，复验用户入口与授权拒绝，继续执行下方 MAC/P0 项；源码通过不代表双平台发布放行。
+
 ## 3. 跨 OS TODO（正常产品路径，不触发通用重构）
 
 首发范围保持 Windows x64 + macOS arm64；Intel Mac、Windows arm64、Linux 和 macOS universal 不进入本次排期。此前 Windows Node Service / storage IPC 证据见 §2.2，本次删除后的 Windows 专项回归已通过（§2.5），安装包及 macOS 仍待验。桌面仅限 Tauri / 桌面级 WebUI、最小 880×600，不加入手机/平板目标。
@@ -213,7 +245,7 @@ macOS 专用交接 prompt（配合 §4 的已有命令使用）：
 此前候选为 48affddb7；最新改动含原生插件删除及 Skill/Service/UI/宿主装配收敛。接手时检查最新分支/提交、交接增量和工作区，记录实际基线，不把旧测试视为本轮通过。
 已确认首发 macOS Apple Silicon（arm64），桌面宿主目标为 aarch64-apple-darwin；在相应目标机验证。
 逐项执行发布台账 MAC-1～8 和 §4 的适用命令；Intel Mac、Windows arm64、Linux 和 universal 制品不在本次范围。
-以默认内置 Agent/模型/UI、Node 插件与普通 Service 为验收路径；页面仍默认关闭，显式启用后验证。没有待回答 A/B 选择，不恢复原生插件、Service 流式、UI 专用订阅或草稿恢复协议。
+以默认内置 Agent/模型/UI、Node 插件与普通 Service 为验收路径；不设置实验变量，验证普通用户创建/发布/选择页面及保存/重启/切回。没有待回答 A/B 选择，不恢复原生插件、Service 流式、UI 专用订阅或草稿恢复协议。
 仅针对复现的 macOS 缺陷做最小必要修复，先协调共享文件写入范围，不回滚 Windows 改动。
 实际验收安装、保存重启、新目录使用/不兼容旧库保护、运行权限/路径、签名公证及 Node/产品进程组与子孙进程回收。
 兼容遵循最小工作量：保留已有迁移，不新增历史适配/转换工具/升级回滚矩阵，不自动删除或覆盖旧数据。
@@ -230,7 +262,7 @@ macOS 专用交接 prompt（配合 §4 的已有命令使用）：
 任务：在已批准的 Windows x64 或 macOS arm64 目标机补充正常插件产品的定向开发与验证。
 先读取 AGENTS.md、架构收敛记录、剩余工作文档和发布台账，确认实际分支/提交、工作区改动、OS/架构及 Rust/Node/Bun。
 原生插件后端/SDK 已移除，Windows 删除专项回归通过；不恢复旧后端/启用入口。
-保留 Node 普通 Service、存储 IPC、取消/生命周期、生产模型合同及默认内置 Agent/模型/UI；页面仍默认关闭。不要恢复被删除的 Service 流式和 UI 专用事件协议。
+保留 Node 普通 Service、存储 IPC、取消/生命周期、生产模型合同及默认内置 Agent/模型/UI；插件页面普通用户可选，无实验开关。不要恢复被删除的 Service 流式和 UI 专用事件协议。
 不回滚其他工作者改动；修复使用 apply_patch，先协调共享文件写入范围。
 仅为 TODO-OS-1～6 的已证实缺陷做必要修复，不启动通用跨平台重构或新增插件领域。
 核对宿主/Node 架构、权限与签名、进程树/进程组清理、安装路径/cwd/依赖及 Node 生命周期。

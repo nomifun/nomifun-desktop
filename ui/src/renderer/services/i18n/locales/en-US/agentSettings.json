@@ -9,7 +9,7 @@
   },
   "page": {
     "title": "Agent page",
-    "hint": "The built-in page is the supported default. Plugin pages are experimental and require host opt-in; attachments, permission interactions and recovery are not fully supported. Page preferences are saved separately from the Agent configuration.",
+    "hint": "The built-in page remains the default. Plugin pages are available for the Agent session view, with session reading, message sending and turn cancellation; they are not a full client replacement. Attachments, permission interactions and recovery are not fully supported. Page preferences are saved separately from the Agent configuration.",
     "default": "Default page",
     "builtin": "Built-in Agent page",
     "missing": "Saved plugin release is unavailable",
@@ -22,7 +22,7 @@
     "openFailed": "Opening the session was not confirmed. Check conversation history before creating another; no creation or message is retried automatically. If resources or a model are required, use Start conversation below."
   },
   "view": {
-    "title": "Session view (experimental)",
+    "title": "Session view",
     "choose": "Choose a plugin view",
     "use": "Use selected view",
     "builtin": "Use built-in view",
@@ -31,10 +31,10 @@
     "defaultConsent": "Saving a default for {{name}} allows this exact plugin release to read, send and cancel in its sessions whenever you open their pages. This does not grant access in the background or change running sessions. Upgrades require a new choice. Using a view without saving affects this page only.",
     "defaultFailed": "The saved page choice could not be read. The built-in view remains available; refresh before saving a default.",
     "defaultSaveFailed": "Saving the page default was not confirmed. Refresh to check the saved choice before trying again; no save or turn is retried automatically.",
-    "defaultUnavailable": "The saved exact plugin release is unavailable or experimental plugin pages are disabled on this host. Its choice is retained; use the built-in view or explicitly select an available release.",
+    "defaultUnavailable": "The saved exact plugin release is unavailable. Its choice is retained; use the built-in view or explicitly select an available release.",
     "createTemplate": "Create reference view draft",
     "templateFailed": "Draft creation was not confirmed. Check drafts in the plugin library before trying again. No view was selected or Session access granted.",
-    "consent": "Using a plugin view grants this exact release access to read this session, send messages and cancel turns. Changing views does not restart or cancel a turn.",
+    "consent": "Using a plugin view grants this exact release access to read this session, send messages and cancel turns. This replaces only the session view, not the full client; attachments, permission interactions and recovery are not fully supported. Changing views does not restart or cancel a turn.",
     "current": "Selected: {{name}}",
     "failed": "The selected view could not open. Retry or explicitly return to the built-in view.",
     "catalogFailed": "Plugin views could not be refreshed. You can still use the built-in view.",

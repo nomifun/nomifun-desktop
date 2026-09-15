@@ -3,9 +3,6 @@ use serde::{Deserialize, Serialize};
 /// Response for `GET /api/system/info`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SystemInfoResponse {
-    /// Host-only experimental UI admission, not a Surface grant.
-    #[serde(default)]
-    pub experimental_agent_ui_available: bool,
     pub cache_dir: String,
     pub work_dir: String,
     pub log_dir: String,
@@ -87,7 +84,6 @@ mod tests {
     #[test]
     fn test_system_info_response_serialization() {
         let resp = SystemInfoResponse {
-            experimental_agent_ui_available: false,
             cache_dir: "/home/user/.cache/nomifun".into(),
             work_dir: "/home/user/.local/share/nomifun".into(),
             log_dir: "/home/user/.local/state/nomifun/logs".into(),
@@ -105,7 +101,7 @@ mod tests {
         );
         assert_eq!(json["platform"], "linux");
         assert_eq!(json["arch"], "x64");
-        assert_eq!(json["experimental_agent_ui_available"], false);
+        assert!(json.get("experimental_agent_ui_available").is_none());
         // Verify snake_case
         assert!(json.get("cacheDir").is_none());
     }
@@ -113,7 +109,6 @@ mod tests {
     #[test]
     fn test_system_info_response_roundtrip() {
         let original = SystemInfoResponse {
-            experimental_agent_ui_available: true,
             cache_dir: "/tmp/cache".into(),
             work_dir: "/tmp/work".into(),
             log_dir: "/tmp/logs".into(),
