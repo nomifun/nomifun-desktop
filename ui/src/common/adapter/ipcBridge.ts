@@ -2317,9 +2317,6 @@ const fromApiPluginRuntimeSourceFile = (
 });
 
 export const pluginRuntimes = {
-  agentSessionStream: wsEmitter<import('../types/pluginRuntimePlatform').PluginAgentSessionStream>('plugin.agent-session.stream'),
-  agentSessionResync: wsEmitter<unknown>('plugin.agent-session.resync-required'),
-  reconnected: wsEmitter<undefined>('ws.reconnected'),
   library: withResponseMap(
     httpGet<PluginRuntimeLibraryResponse, void>('/api/plugins/runtimes'),
     fromApiPluginRuntimeLibrary

@@ -23,31 +23,10 @@ use nomifun_common::UserId as CommonUserId;
 use serde::{Deserialize, Serialize};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 
-/// Host rollout affects only the Agent page picker, never the shared Catalog
-/// publication: its digest is also frozen into executable Tool snapshots.
 pub(super) fn control_plane_router_without_legacy_skills(
     control_plane: std::sync::Arc<nomifun_agent_control_plane::AgentControlPlane>,
 ) -> axum::Router {
     nomifun_agent_control_plane::control_plane_router_without_legacy_skills(control_plane)
-        .route_layer(axum::middleware::from_fn(agent_ui_catalog_admission))
-}
-
-async fn agent_ui_catalog_admission(
-    axum::Extension(_owner): axum::Extension<nomifun_agent_control_plane::AuthenticatedOwner>,
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    if request.method() == axum::http::Method::GET
-        && request.extensions().get::<axum::extract::MatchedPath>()
-            .is_some_and(|path| path.as_str() == "/api/agent-catalog/ui/agent-session")
-        && !super::plugin_product::agent_ui_admission::enabled()
-    {
-        return axum::Json(nomifun_api_types::ApiResponse::ok(
-            Vec::<nomifun_api_types::AgentUiContributionDto>::new(),
-        )).into_response();
-    }
-    next.run(request).await
 }
 
 fn now_ms() -> i64 {
@@ -476,12 +455,6 @@ impl nomifun_agent_control_plane::AgentUiBindingStore for NomiCoreControlPlaneSt
     async fn put(&self, owner: &UserId, preset: &AgentPresetId,
         selection: Option<nomifun_api_types::AgentUiContributionDto>, expected_version: u64)
         -> Result<nomifun_api_types::AgentUiBindingDto, ControlPlaneError> {
-        if selection.is_some() && !super::plugin_product::agent_ui_admission::enabled() {
-            return Err(ControlPlaneError::canonical(
-                "AGENT_UI_CHOICE_UNAVAILABLE", StatusCode::UNPROCESSABLE_ENTITY,
-                super::plugin_product::agent_ui_admission::DISABLED_MESSAGE,
-            ));
-        }
         let expected = i64::try_from(expected_version).ok().filter(|version| *version < i64::MAX)
             .ok_or_else(|| ControlPlaneError::canonical("AGENT_UI_BINDING_VERSION_CONFLICT", StatusCode::CONFLICT, "invalid or exhausted page binding version"))?;
         let binding = nomifun_api_types::AgentUiBindingDto { binding_version: expected_version + 1, selection };

@@ -3,7 +3,7 @@
 use crate::plugin_tools::NomiPluginToolError;
 use async_trait::async_trait;
 use nomi_protocol::events::ToolCategory;
-use nomi_tools::Tool;
+use nomi_tools::{Tool, ToolExecutionContext};
 use nomi_types::tool::{JsonSchema, ToolImage, ToolResult};
 use nomifun_engine_core::{EngineContextContent, EngineContextResource};
 use serde_json::{Value, json};
@@ -129,6 +129,33 @@ impl Tool for NomiSelectedSkills {
     fn category(&self) -> ToolCategory {
         ToolCategory::Info
     }
+    async fn preflight_hook(&self, input: &Value, _context: &ToolExecutionContext) -> Result<(), String> {
+        let request = serde_json::from_value::<Read>(input.clone())
+            .map_err(|_| "Invalid Skill resource arguments".to_owned())?;
+        let resource = self.resources.get(&request.id)
+            .ok_or("Unknown Skill resource; select an exact id from this Session's frozen index")?;
+        // These are immutable host-prepared resources. Inspect only identity,
+        // kind and size; no content projection or image allocation before hook.
+        match &resource.content {
+            EngineContextContent::Image { .. } => {
+                if !self.supports_image {
+                    return Err("Skill image requires enabled llm.vision and a host-confirmed image model".into());
+                }
+                if input.get("offset").is_some() || input.get("limit").is_some() {
+                    return Err("Image reads must omit offset/limit".into());
+                }
+            }
+            EngineContextContent::Text { text } => {
+                if !(4..=16384).contains(&request.limit.unwrap_or(8192))
+                    || request.offset.unwrap_or(0) > text.len()
+                {
+                    return Err("Skill resource page is outside the selected resource bounds".into());
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
         let Ok(request) = serde_json::from_value::<Read>(input.clone()) else {
             return ToolResult::error(
@@ -186,5 +213,32 @@ impl Tool for NomiSelectedSkills {
             }
             end = offset + ((end - offset) / 2).max(first);
         }
+    }
+}
+
+#[cfg(test)]
+mod hook_preflight_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn selected_resource_preflight_checks_exact_identity_and_image_authority() {
+        let mut tool = NomiSelectedSkills::new(Vec::new(), Arc::new(BTreeMap::from([
+            ("text".into(), EngineContextResource {
+                label: "Text".into(), provenance: "selected".into(),
+                content: EngineContextContent::Text { text: "private resource body".into() },
+            }),
+            ("image".into(), EngineContextResource {
+                label: "Image".into(), provenance: "selected".into(),
+                content: EngineContextContent::Image { media_type: "image/png".into(), data_base64: "AA==".into() },
+            }),
+        ]))).unwrap();
+        let context = ToolExecutionContext::from_scoped_tool_call("preflight", "selected-skills");
+        tool.preflight_hook(&json!({"id":"text"}), &context).await.unwrap();
+        assert!(tool.preflight_hook(&json!({"id":"other"}), &context).await.is_err());
+        assert!(tool.preflight_hook(&json!({"id":"text","offset":999}), &context).await.is_err());
+        assert!(tool.preflight_hook(&json!({"id":"image"}), &context).await.is_err());
+        tool.image_policy(true);
+        tool.preflight_hook(&json!({"id":"image"}), &context).await.unwrap();
+        assert!(tool.preflight_hook(&json!({"id":"image","offset":0}), &context).await.is_err());
     }
 }

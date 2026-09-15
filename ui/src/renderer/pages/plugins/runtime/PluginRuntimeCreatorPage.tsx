@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Alert, Button, Input, Spin } from '@arco-design/web-react';
+import { Alert, Button, Input, Modal, Spin } from '@arco-design/web-react';
 import { ArrowLeft, Send, PreviewOpen } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
@@ -9,11 +9,21 @@ import { parsePluginRuntimeId } from '@/common/types/ids';
 import {
   pluginRuntimeProduct,
   type PluginRuntimeDraft,
+  type PluginServiceTestConfirmation,
 } from '@/common/adapter/pluginRuntimeProductBridge';
 import { useGuidModelSelection } from '@/renderer/pages/guid/hooks/useGuidModelSelection';
 import PluginRuntimeDraftPreview from './PluginRuntimeDraftPreview';
 import { libraryChanged } from './libraryState';
 import styles from './PluginRuntimeProduct.module.css';
+
+function serviceTestConfirmation(error: unknown, draftId: string): PluginServiceTestConfirmation | null {
+  if (!isBackendHttpError(error) || error.status !== 409 || error.code !== 'PLUGIN_SERVICE_TEST_INPUT_REQUIRED') return null;
+  const value = error.details as Partial<PluginServiceTestConfirmation> | null;
+  return value && value.draft_id === draftId && Number.isSafeInteger(value.expected_revision) && Number(value.expected_revision) >= 0 &&
+    typeof value.release_digest === 'string' && /^[a-f0-9]{64}$/.test(value.release_digest) &&
+    typeof value.receipt_id === 'string' && !!value.receipt_id && typeof value.display_name === 'string'
+    ? value as PluginServiceTestConfirmation : null;
+}
 
 export default function PluginRuntimeCreatorPage({
   embedded = false,
@@ -42,6 +52,15 @@ export default function PluginRuntimeCreatorPage({
     [previewValid, setPreviewValid] = useState(false),
     [previewError, setPreviewError] = useState('');
   const [loading, setLoading] = useState(Boolean(draftId || appId));
+  const [saveError, setSaveError] = useState('');
+  const [confirmation, setConfirmation] = useState<{ receipt: PluginServiceTestConfirmation; draft: PluginRuntimeDraft } | null>(null);
+  const savePending = useRef(false);
+  const routeIdentity = `${draftId ?? ''}:${appId ?? ''}`;
+  const currentRoute = useRef({ identity: routeIdentity, generation: 0 });
+  if (currentRoute.current.identity !== routeIdentity) {
+    currentRoute.current = { identity: routeIdentity, generation: currentRoute.current.generation + 1 };
+  }
+  useEffect(() => { setConfirmation(null); setSaveError(''); }, [routeIdentity]);
   const repairCount = useRef(0),
     sending = useRef(false),
     lastGood = useRef<string>('');
@@ -154,6 +173,7 @@ export default function PluginRuntimeCreatorPage({
       sending.current = true;
       setBusy(true);
       setError('');
+      setSaveError(''); setConfirmation(null);
       if (!repair) repairCount.current = 0;
       try {
         const next = await pluginRuntimeProduct.generate.invoke({
@@ -240,29 +260,56 @@ export default function PluginRuntimeCreatorPage({
       setError(t('pluginRuntime.product.operationFailed'));
     }
   };
-  const save = async () => {
-    if (!draft || generating || (html ? !previewValid || previewError : !draft.service_source)) return;
+  const save = async (confirmed?: NonNullable<typeof confirmation>) => {
+    if (!draft || generating || savePending.current || (html ? !previewValid || previewError : !draft.service_source)) return;
+    if (confirmed && (confirmed !== confirmation || confirmed.draft !== draft || confirmed.receipt.draft_id !== draft.id)) {
+      setConfirmation(null); setSaveError(t('pluginRuntime.product.publishCheck.stale')); return;
+    }
+    savePending.current = true;
+    const savingRoute = currentRoute.current;
+    const active = () => mounted.current && currentRoute.current === savingRoute;
     setBusy(true);
     setError('');
+    setSaveError('');
     try {
       const result = await pluginRuntimeProduct.save.invoke({
         id: draft.id,
-        expected_revision: draft.revision,
+        expected_revision: confirmed?.receipt.expected_revision ?? draft.revision,
+        ...(confirmed ? { acknowledge_service_test: {
+          release_digest: confirmed.receipt.release_digest, receipt_id: confirmed.receipt.receipt_id,
+        } } : {}),
       });
+      if (!active()) return;
+      setConfirmation(null);
       libraryChanged();
-      navigate(`/plugins/run/${result.plugin.plugin_id}?saved=1`);
-    } catch {
-      setError(t('pluginRuntime.product.saveFailed'));
+      await navigate(`/plugins/run/${result.plugin.plugin_id}?saved=1`);
+    } catch (error) {
+      if (!active()) return;
+      const receipt = !confirmed && serviceTestConfirmation(error, draft.id);
+      if (receipt) {
+        // The check advanced this draft's revision. Keep that exact response
+        // revision for both editing and confirmation; never substitute a later fetch.
+        const checkedDraft: PluginRuntimeDraft = { ...draft, revision: receipt.expected_revision, status: 'ready', error: null };
+        applyDraft(checkedDraft);
+        setConfirmation({ receipt, draft: checkedDraft });
+        return;
+      }
+      setConfirmation(null);
+      setSaveError(t(confirmed || (isBackendHttpError(error) && error.status === 409)
+        ? 'pluginRuntime.product.publishCheck.stale' : 'pluginRuntime.product.saveFailed'));
       try {
-        applyDraft(await pluginRuntimeProduct.draft.invoke({ id: draft.id }));
+        const refreshed = await pluginRuntimeProduct.draft.invoke({ id: draft.id });
+        if (active()) applyDraft(refreshed);
       } catch {
         /* retain the recoverable draft */
       }
     } finally {
+      savePending.current = false;
       if (mounted.current) setBusy(false);
     }
   };
-  const errorNotice = (error || draft?.error) && (
+  const saveNotice = saveError || (draft?.error === 'save_failed' ? t('pluginRuntime.product.saveFailed') : '');
+  const errorNotice = !saveNotice && !confirmation && (error || draft?.error) && (
     <Alert
       type='error'
       content={
@@ -455,7 +502,9 @@ export default function PluginRuntimeCreatorPage({
         <h1>{draft?.name || initial.name || t('pluginRuntime.product.untitled')}</h1>
         <span className={styles.muted} role='status'>
           {t(
-            generating
+            savePending.current
+              ? 'pluginRuntime.product.publishCheck.checking'
+              : generating
               ? 'pluginRuntime.product.generating'
               : 'pluginRuntime.product.draftSaved',
           )}
@@ -477,6 +526,22 @@ export default function PluginRuntimeCreatorPage({
       </header>
       {modelNotice}
       {errorNotice}
+      {saveNotice && !confirmation && <Alert type='error' content={saveNotice} action={
+        <Button size='small' disabled={generating} onClick={() => void save()}>{t('pluginRuntime.product.publishCheck.retry')}</Button>
+      } />}
+      <Modal visible={!!confirmation} title={t('pluginRuntime.product.publishCheck.title')}
+        maskClosable={false} escToExit={!busy} closable={!busy} confirmLoading={busy}
+        onCancel={() => { if (!savePending.current) setConfirmation(null); }}
+        onOk={() => { if (confirmation) void save(confirmation); }}
+        okText={t('pluginRuntime.product.publishCheck.confirm')} cancelText={t('pluginRuntime.product.publishCheck.edit')}
+        cancelButtonProps={{ disabled: busy }} unmountOnExit>
+        <div className={styles.publishCheck}>
+          <strong>{confirmation?.receipt.display_name}</strong>
+          <Alert type='success' content={t('pluginRuntime.product.publishCheck.startupPassed')} />
+          <Alert type='warning' content={t('pluginRuntime.product.publishCheck.unverified')} />
+          <p>{t('pluginRuntime.product.publishCheck.consent')}</p>
+        </div>
+      </Modal>
       {previewError && (
         <Alert
           type='warning'
@@ -524,9 +589,9 @@ export default function PluginRuntimeCreatorPage({
                 </div>
               ))}
               {generating && (
-                <p role='status' className={styles.muted}>
-                  <Spin size={12} /> {t('pluginRuntime.product.generatingHint')}
-                </p>
+                <div role='status' className={styles.muted}>
+                  <Spin size={12} /> {t(savePending.current ? 'pluginRuntime.product.publishCheck.checking' : 'pluginRuntime.product.generatingHint')}
+                </div>
               )}
             </div>
             {composer}

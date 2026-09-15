@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::plugin_n1::CredentialSlotDeclaration;
-use crate::{NativePluginTarget, PluginServiceExecution};
 use crate::{
     ArtifactEnvelope, ArtifactId, CanonicalErrorCode, CanonicalSchemaRef,
     DigestHex, JavaScriptBuildProfile, LocalizedMetadata, OperationId,
@@ -133,8 +132,6 @@ pub enum PluginServiceLifecycle {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PluginServiceReleaseDescriptor {
-    #[serde(default, skip_serializing_if = "PluginServiceExecution::is_node")]
-    pub execution: PluginServiceExecution,
     pub entrypoint: String,
     pub module_digest: DigestHex,
     pub lifecycle: PluginServiceLifecycle,
@@ -148,10 +145,10 @@ pub struct PluginServiceReleaseDescriptor {
 
 impl PluginServiceReleaseDescriptor {
     pub fn validate(&self) -> Result<(), PluginRuntimeContractError> {
-        if self.entrypoint != self.execution.entrypoint() {
+        if self.entrypoint != "service/main.mjs" {
             return Err(invalid(
                 "service.entrypoint",
-                "Service entrypoint does not match its declared execution backend",
+                "Plugin Product Service entrypoint must be service/main.mjs",
             ));
         }
         validate_digest(&self.module_digest, "service.module_digest")?;
@@ -623,10 +620,10 @@ impl PluginReleaseArtifactV1 {
                     }
                     ui_entrypoint_digest = Some(&file.digest);
                 }
-            } else if self.manifest.payload.service.as_ref().is_some_and(|service| path == service.entrypoint) {
+            } else if path == "service/main.mjs" {
                 if file.size_bytes == 0 {
                     return Err(invalid(
-                        "files.service.entrypoint",
+                        "files.service/main.mjs",
                         "Plugin Product Service entrypoint must not be empty",
                     ));
                 }
@@ -634,7 +631,7 @@ impl PluginReleaseArtifactV1 {
             } else {
                 return Err(invalid(
                     "files.normalized_relative_path",
-                    "plugin-release-v1 permits ui/** and the exact declared Service entrypoint only",
+                    "plugin-release-v1 permits ui/** and optional service/main.mjs only",
                 ));
             }
             previous = Some(path);
@@ -655,13 +652,13 @@ impl PluginReleaseArtifactV1 {
             (Some(_), None) => {
                 return Err(invalid(
                     "files",
-                    "Service manifest requires its exact declared entrypoint",
+                    "Service manifest requires service/main.mjs",
                 ));
             }
             (None, Some(_)) => {
                 return Err(invalid(
                     "files",
-                    "UI-only manifest cannot carry a Service entrypoint",
+                    "UI-only manifest cannot carry service/main.mjs",
                 ));
             }
             (Some(_), Some(_)) => {
@@ -1542,49 +1539,25 @@ impl PluginServiceStorageDescriptor {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[serde(untagged)]
-pub enum PluginServiceRuntimeFingerprint {
-    Node {
-        runtime_installation_id: RuntimeInstallationId,
-        runtime_target: RuntimeTarget,
-        runtime_executable_digest: DigestHex,
-        node_version: VersionString,
-    },
-    Native {
-        native_target: NativePluginTarget,
-        native_executable_digest: DigestHex,
-    },
+pub struct PluginServiceRuntimeFingerprint {
+    pub runtime_installation_id: RuntimeInstallationId,
+    pub runtime_target: RuntimeTarget,
+    pub runtime_executable_digest: DigestHex,
+    pub node_version: VersionString,
 }
 
 impl PluginServiceRuntimeFingerprint {
     fn validate(&self) -> Result<(), PluginRuntimeContractError> {
-        let Self::Node { runtime_installation_id, runtime_target, runtime_executable_digest, node_version } = self else {
-            return validate_digest(self.executable_digest(), "runtime.native_executable_digest");
-        };
         validate_nonempty(
-            runtime_installation_id.as_ref(),
+            self.runtime_installation_id.as_ref(),
             "runtime.runtime_installation_id",
         )?;
-        validate_nonempty(runtime_target.as_ref(), "runtime.runtime_target")?;
+        validate_nonempty(self.runtime_target.as_ref(), "runtime.runtime_target")?;
         validate_digest(
-            runtime_executable_digest,
+            &self.runtime_executable_digest,
             "runtime.runtime_executable_digest",
         )?;
-        validate_nonempty(node_version.as_ref(), "runtime.node_version")
-    }
-
-    pub fn executable_digest(&self) -> &DigestHex {
-        match self {
-            Self::Node { runtime_executable_digest, .. } => runtime_executable_digest,
-            Self::Native { native_executable_digest, .. } => native_executable_digest,
-        }
-    }
-
-    pub fn target(&self) -> RuntimeTarget {
-        match self {
-            Self::Node { runtime_target, .. } => runtime_target.clone(),
-            Self::Native { native_target, .. } => native_target.as_str().into(),
-        }
+        validate_nonempty(self.node_version.as_ref(), "runtime.node_version")
     }
 }
 
@@ -1737,9 +1710,6 @@ impl ResolvedPluginServiceSpec {
             "sdk_contract_version",
         )?;
         self.runtime.validate()?;
-        if matches!(&self.runtime, PluginServiceRuntimeFingerprint::Native { native_executable_digest, .. } if native_executable_digest != &self.service_module_digest) {
-            return Err(invalid("runtime.native_executable_digest", "Native runtime must be the exact release executable"));
-        }
         validate_digest(&self.config_schema_digest, "config_schema_digest")?;
         validate_digest(&self.config_snapshot_digest, "config_snapshot_digest")?;
         validate_digest(
@@ -2136,7 +2106,7 @@ impl PluginServiceTestReceipt {
         }
         self.runtime.validate()?;
         validate_nonempty(self.host_target.as_ref(), "host_target")?;
-        if self.host_target != self.runtime.target() {
+        if self.host_target != self.runtime.runtime_target {
             return Err(invalid(
                 "host_target",
                 "Service Test target must equal the selected Runtime target",
@@ -3033,6 +3003,8 @@ fn validate_contributions(
     for capability in &contributions.capabilities {
         crate::model_middleware::validate_manifest(capability)
             .map_err(|reason| invalid("contributions.before_model", reason))?;
+        crate::tool_middleware::validate_manifest(capability)
+            .map_err(|reason| invalid("contributions.tool_hooks", reason))?;
         if capability.kind == crate::CapabilityKind::UiContribution || capability.contributions.ui_slot.is_some() {
             if capability.kind != crate::CapabilityKind::UiContribution
                 || capability.contributions.ui_slot.is_none()
@@ -3159,7 +3131,6 @@ mod tests {
                 .find(|file| file.normalized_relative_path == "service/main.mjs")
                 .unwrap();
             PluginServiceReleaseDescriptor {
-                execution: Default::default(),
                 entrypoint: "service/main.mjs".into(),
                 module_digest: service.digest.clone(),
                 lifecycle: PluginServiceLifecycle::OnDemand,
@@ -3210,22 +3181,37 @@ mod tests {
     }
 
     #[test]
-    fn native_release_requires_exact_target_entrypoint_and_keeps_node_default_bytes() {
-        let mut files = vec![release_file("ui/index.html", "ui"), release_file("service/main.mjs", "service")];
-        let mut manifest = manifest(&files, true);
-        let node = manifest.service.as_ref().unwrap();
-        let serialized = serde_json::to_value(node).unwrap();
+    fn service_release_rejects_non_javascript_execution_and_entrypoints() {
+        let files = vec![release_file("ui/index.html", "ui"), release_file("service/main.mjs", "service")];
+        let manifest = manifest(&files, true);
+        let service = manifest.service.as_ref().unwrap();
+        let serialized = serde_json::to_value(service).unwrap();
         assert!(serialized.get("execution").is_none());
-        assert_eq!(serde_json::from_value::<PluginServiceReleaseDescriptor>(serialized).unwrap(), *node);
-        let service = manifest.service.as_mut().unwrap();
-        service.execution = PluginServiceExecution::Native { target: NativePluginTarget::WindowsX64 };
-        assert!(service.validate().is_err());
-        service.entrypoint = "service/plugin.exe".into();
-        assert!(service.validate().is_ok());
-        assert!(PluginReleaseArtifactV1::new("native".into(), manifest.clone(), files.clone()).is_err());
-        files[1].normalized_relative_path = "service/plugin.exe".into();
-        let artifact = PluginReleaseArtifactV1::new("native".into(), manifest, files).unwrap();
-        assert!(artifact.validate().is_ok());
+        assert_eq!(serde_json::from_value::<PluginServiceReleaseDescriptor>(serialized.clone()).unwrap(), *service);
+        let mut unsupported = serialized;
+        unsupported["execution"] = json!({"kind":"native","target":"x86_64-pc-windows-msvc"});
+        assert!(serde_json::from_value::<PluginServiceReleaseDescriptor>(unsupported).is_err());
+        for entrypoint in ["service/plugin.exe", "service/plugin"] {
+            let mut invalid = manifest.clone();
+            invalid.service.as_mut().unwrap().entrypoint = entrypoint.into();
+            assert!(invalid.validate().is_err());
+            let mut invalid_files = files.clone();
+            invalid_files[1].normalized_relative_path = entrypoint.into();
+            assert!(PluginReleaseArtifactV1::new("unsupported".into(), manifest.clone(), invalid_files).is_err());
+        }
+    }
+
+    #[test]
+    fn service_runtime_fingerprint_preserves_node_wire_format_and_rejects_other_backends() {
+        let node = json!({"runtime_installation_id":"node-test", "runtime_target":"windows-x64",
+            "runtime_executable_digest":"a".repeat(64), "node_version":"22.0.0"});
+        let parsed: PluginServiceRuntimeFingerprint = serde_json::from_value(node.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), node);
+        let unsupported = json!({"native_target":"x86_64-pc-windows-msvc", "native_executable_digest":"b".repeat(64)});
+        assert!(serde_json::from_value::<PluginServiceRuntimeFingerprint>(unsupported).is_err());
+        let mut mixed = node;
+        mixed["native_target"] = json!("x86_64-pc-windows-msvc");
+        assert!(serde_json::from_value::<PluginServiceRuntimeFingerprint>(mixed).is_err());
     }
 
     #[test]
@@ -3377,7 +3363,7 @@ mod tests {
     }
 
     fn runtime() -> PluginServiceRuntimeFingerprint {
-        PluginServiceRuntimeFingerprint::Node {
+        PluginServiceRuntimeFingerprint {
             runtime_installation_id: RuntimeInstallationId::from("runtime-1"),
             runtime_target: RuntimeTarget::from("windows-x86_64"),
             runtime_executable_digest: digest("node"),
@@ -4011,7 +3997,7 @@ mod tests {
             outcome: PluginServiceTestOutcome::Passed,
             error_code: None,
             runtime: spec.runtime.clone(),
-            host_target: spec.runtime.target(),
+            host_target: spec.runtime.runtime_target.clone(),
             host_protocol_version: PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
             sdk_contract_version: PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
             test_contract_version: PLUGIN_SERVICE_TEST_CONTRACT_VERSION.into(),

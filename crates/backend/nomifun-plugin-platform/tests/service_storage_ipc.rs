@@ -134,7 +134,7 @@ fn spec(
             nomifun_agent_contracts::PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
         sdk_contract_version:
             nomifun_agent_contracts::PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
-        runtime: PluginServiceRuntimeFingerprint::Node {
+        runtime: PluginServiceRuntimeFingerprint {
             runtime_installation_id: RuntimeInstallationId::from("storage-ipc-node"),
             runtime_target: RuntimeTarget::from("windows-x86_64"),
             runtime_executable_digest: digest_bytes(&runtime_bytes),
@@ -208,7 +208,6 @@ async fn real_node_service_round_trips_host_storage_without_exposing_db_path() {
                 call_id: PluginBridgeCallId::from("storage-call"),
                 method: "storage".into(),
                 payload: StrictJsonValue(json!({})),
-                events: None,
             },
             PluginRuntimeCallCancellation::default(),
         )
@@ -348,7 +347,6 @@ async fn real_node_service_round_trips_production_sqlite_storage() {
                 call_id: PluginBridgeCallId::from("sqlite-storage-call"),
                 method: "storage".into(),
                 payload: StrictJsonValue(json!({})),
-                events: None,
             },
             PluginRuntimeCallCancellation::default(),
         )
@@ -519,7 +517,6 @@ async fn slow_storage_request_does_not_block_other_calls_and_cancel_reaches_host
                     call_id: PluginBridgeCallId::from("slow-call"),
                     method: "slow".into(),
                     payload: StrictJsonValue(json!({})),
-                    events: None,
                 },
                 slow_cancellation_for_task,
             )
@@ -548,7 +545,6 @@ async fn slow_storage_request_does_not_block_other_calls_and_cancel_reaches_host
                 call_id: PluginBridgeCallId::from("fast-call"),
                 method: "fast".into(),
                 payload: StrictJsonValue(json!({})),
-                events: None,
             },
             PluginRuntimeCallCancellation::default(),
         ),

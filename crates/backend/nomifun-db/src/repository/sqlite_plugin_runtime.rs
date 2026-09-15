@@ -1053,7 +1053,7 @@ fn canonical_service_test_receipt(
             ));
         }
     }
-    if receipt.host_target != receipt.runtime.target()
+    if receipt.host_target != receipt.runtime.runtime_target
         || receipt.host_protocol_version.as_ref() != PLUGIN_SERVICE_HOST_PROTOCOL_VERSION
         || receipt.sdk_contract_version.as_ref() != PLUGIN_SERVICE_SDK_CONTRACT_VERSION
         || receipt.test_contract_version.as_ref() != PLUGIN_SERVICE_TEST_CONTRACT_VERSION
@@ -1069,7 +1069,7 @@ fn canonical_service_test_receipt(
         (receipt.release.release_digest.as_ref(), "receipt.release_digest"),
         (receipt.service_run_key.as_ref(), "receipt.service_run_key"),
         (
-            receipt.runtime.executable_digest().as_ref(),
+            receipt.runtime.runtime_executable_digest.as_ref(),
             "receipt.runtime.runtime_executable_digest",
         ),
         (
@@ -5511,34 +5511,6 @@ impl IPluginRuntimeRepository for SqlitePluginRuntimeRepository {
         .map_err(DbError::Query)
     }
 
-    async fn agent_surface_sessions(
-        &self,
-        owner_user_id: &str,
-        conversation_id: &str,
-    ) -> Result<Vec<PluginRuntimeSurfaceSessionRow>, DbError> {
-        validate_uuid(owner_user_id, "owner_user_id")?;
-        validate_uuid(conversation_id, "conversation_id")?;
-        sqlx::query_as::<_, PluginRuntimeSurfaceSessionRow>(
-            "SELECT session.* FROM plugin_surface_sessions session
-             JOIN plugin_products product
-               ON product.plugin_product_id = session.plugin_product_id
-              AND product.owner_user_id = session.owner_user_id
-             JOIN conversations conversation
-               ON conversation.conversation_id = session.conversation_id
-              AND conversation.user_id = session.owner_user_id
-             WHERE session.owner_user_id = ? AND session.conversation_id = ?
-               AND product.lifecycle = 'enabled'
-               AND product.active_release_id = session.active_release_id
-               AND product.active_release_digest = session.active_release_digest
-               AND product.active_release_epoch = session.active_release_epoch
-             ORDER BY session.surface_session_id",
-        )
-        .bind(owner_user_id)
-        .bind(conversation_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(DbError::Query)
-    }
 
     async fn close_surface_session_cas(
         &self,

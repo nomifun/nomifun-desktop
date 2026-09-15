@@ -26,7 +26,7 @@ use nomifun_agent_contracts::{
     ValidatedPluginConfig, VersionString, capability_surface_declarations,
     digest_payload,
 };
-use nomifun_ai_agent::{NomiPluginToolSchemaResolver, NomiPluginSkillArtifact, NomiPluginSkillArtifactResolver};
+use nomifun_ai_agent::NomiPluginToolSchemaResolver;
 use nomifun_agent_kernel::{KernelRegistry, PluginRegistration};
 use nomifun_agent_control_plane::KernelCatalogProvider;
 use nomifun_api_types::{
@@ -828,36 +828,6 @@ impl PluginOperationCancellation for RuntimeBoundPluginBuildExecutor {
 
 struct NomiCorePluginArtifactResolver {
     artifacts: Arc<FsPluginArtifactStore>,
-}
-
-#[async_trait]
-impl NomiPluginSkillArtifactResolver for NomiCorePluginArtifactResolver {
-    async fn resolve(&self, lock: &nomifun_agent_contracts::ResolvedSkillLock) -> Result<NomiPluginSkillArtifact, String> {
-        let artifacts = Arc::clone(&self.artifacts);
-        let lock = lock.clone();
-        tokio::task::spawn_blocking(move || {
-            use nomifun_ai_agent::plugin_skills::{MAX_SKILL_FILE_BYTES, MAX_SESSION_SKILL_BYTES, MAX_SESSION_SKILL_FILES};
-            if lock.contribution_lock.source_kind != nomifun_agent_contracts::ContributionSourceKind::PluginMount
-                || lock.contribution_lock.mount_id.as_ref() != Some(&lock.resolved_mount_id) {
-                return Err("package Skill requires an exact Mount lock".to_owned());
-            }
-            let stored = artifacts.store().load(&lock.target_artifact_digest).map_err(|e| e.to_string())?;
-            let definition = stored.artifact.manifest.payload.package.contributions.skills.iter()
-                .find(|skill| skill.id == lock.skill.id && skill.version == lock.skill.version)
-                .ok_or_else(|| "Skill is absent from the frozen artifact".to_owned())?.clone();
-            if digest_payload(&definition).map_err(|e| e.to_string())? != lock.contribution_lock.contract_digest
-                || definition.body_ref.digest != lock.body_digest
-                || definition.package != stored.artifact.manifest.payload.package_ref() {
-                return Err("Skill artifact differs from its frozen contribution".to_owned());
-            }
-            let references = std::iter::once(definition.body_ref.clone())
-                .chain(definition.resources.iter().map(|r| r.artifact.clone())).collect::<Vec<_>>();
-            let files = artifacts.store().read_declared_files(&lock.target_artifact_digest, &references,
-                MAX_SKILL_FILE_BYTES as u64, MAX_SESSION_SKILL_BYTES as u64, MAX_SESSION_SKILL_FILES)
-                .map_err(|e| e.to_string())?;
-            Ok(NomiPluginSkillArtifact { definition, files })
-        }).await.map_err(|e| format!("Skill artifact read failed: {e}"))?
-    }
 }
 
 #[async_trait]
@@ -2983,7 +2953,7 @@ export async function activate() {
         capability_id: &str,
         selection: Option<nomifun_api_types::RoleProviderSelectionDto>,
         catalog: Arc<KernelCatalogProvider>,
-        skill_resolver: Option<Arc<dyn NomiPluginSkillArtifactResolver>>,
+        skill_artifacts: Option<Arc<FsPluginArtifactStore>>,
         conflict_peer: Option<&str>,
     ) -> nomifun_ai_agent::NomiPluginToolSession {
         use nomifun_agent_control_plane::{AgentControlPlane, ControlPlaneStore, InMemoryControlPlaneStore, OfficialTemplateCatalog, PresetRevisionCompiler};
@@ -3030,7 +3000,7 @@ export async function activate() {
             // Submit the public Catalog choice without reconstructing its contract/Mount.
             draft.document.system_role_provider_overrides.insert(selection.role.key.role_id.clone(), selection);
         }
-        if skill_resolver.is_some() {
+        if skill_artifacts.is_some() {
             draft.document.skill_bindings = vec![nomifun_api_types::ExactCatalogRefDto {
                 id: "test.nomicore.plugin.guide".into(), version: "1.0.0".into(),
             }];
@@ -3104,8 +3074,16 @@ export async function activate() {
             assert!(prompt.starts_with("Base instructions\n\n"));
             assert!(prompt.contains("Context from the installed JS artifact"));
         }
-        if let Some(resolver) = skill_resolver {
-            session.with_package_skills(kernel, compiled, resolver).await.unwrap()
+        if let Some(artifacts) = skill_artifacts {
+            let skills = crate::router::engine_skills::compile(&compiled, &materialized, artifacts).await.unwrap();
+            assert!(skills.resources().values().any(|resource| matches!(
+                &resource.content, nomifun_engine_core::EngineContextContent::Text { text }
+                    if text.contains("Exact package reference")
+            )));
+            session.with_selected_skills(nomifun_ai_agent::nomi_skills::NomiSelectedSkills::new(
+                skills.instructions, skills.resources,
+            ).unwrap()).unwrap()
+                .with_verified_skill_commands(kernel, compiled, skills.commands).unwrap()
         } else { session }
     }
 
@@ -3144,9 +3122,7 @@ export async function activate() {
         .await
         .unwrap();
         let schema_resolver = Arc::clone(&composition.schema_resolver);
-        let skill_resolver: Arc<dyn NomiPluginSkillArtifactResolver> = Arc::new(
-            NomiCorePluginArtifactResolver { artifacts: composition.skill_artifacts.clone() },
-        );
+        let skill_artifacts = composition.skill_artifacts.clone();
         let state = composition.router;
         assert_eq!(state.service.list_library(&owner_user_id).await.unwrap().library_revision, 0);
         let response = plugin_read_routes(state.clone())
@@ -3627,14 +3603,15 @@ export async function activate() {
             assert_eq!(selection.is_some(), id.ends_with("-facade"));
             let session = assert_installed_context_reaches_nomi_prompt(
                 Arc::clone(&kernel), Arc::clone(&schema_resolver), &owner_user_id, id, selection, Arc::clone(&catalog),
-                (id == "test.nomicore.plugin.context").then(|| skill_resolver.clone()),
+                (id == "test.nomicore.plugin.context").then(|| skill_artifacts.clone()),
                 (id == "test.nomicore.plugin.context-facade").then_some("test.nomicore.plugin.turn-context"),
             ).await;
             if !session.package_skills().is_empty() {
                 let skill = &session.package_skills()[0];
                 assert_eq!(skill.metadata().name, "test.nomicore.plugin.guide");
                 assert!(skill.read(Some("hello"), None, None).await.unwrap().contains("ONLY_IN_PACKAGE hello"));
-                assert!(skill.read(None, Some(&resource_ref.normalized_relative_path), None).await.unwrap().contains("Exact package reference"));
+                assert!(skill.read(None, Some(&resource_ref.normalized_relative_path), None).await.is_err(),
+                    "commands cannot expose resources outside the shared typed resource tool");
                 assert!(skill.read(None, Some("../manifest.json"), None).await.is_err());
                 let mut allowed = Vec::new();
                 let mut deferred = vec!["Skill".into()];

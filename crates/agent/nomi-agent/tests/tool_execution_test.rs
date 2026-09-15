@@ -88,7 +88,7 @@ async fn test_execute_single_tool_call() {
 
     let tool_calls = vec![make_tool_use("call-1", "echo")];
 
-    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false)
+    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false, &[])
     .await
     .expect("execution should succeed");
 
@@ -120,7 +120,7 @@ async fn test_execute_concurrent_safe_tools() {
         make_tool_use("id-b", "tool_b"),
     ];
 
-    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false)
+    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false, &[])
     .await
     .expect("execution should succeed");
 
@@ -155,7 +155,7 @@ async fn test_execute_non_concurrent_tools_sequential() {
         make_tool_use("id-b", "seq_b"),
     ];
 
-    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false)
+    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false, &[])
     .await
     .expect("execution should succeed");
 
@@ -191,7 +191,7 @@ async fn test_execute_non_concurrent_tools_stops_after_error() {
         make_tool_use("id-later", "seq_later"),
     ];
 
-    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false)
+    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false, &[])
     .await
     .expect("execution should succeed");
 
@@ -224,7 +224,7 @@ async fn test_protocol_execution_stops_after_sequential_error() {
     let writer_capture = Arc::new(CapturingEmitter::default());
     let writer: Arc<dyn ProtocolEmitter> = writer_capture.clone();
 
-    let outcome = execute_tool_calls_with_protocol(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), &writer, "msg-sequential-error", None, CompactionLevel::Off, false)
+    let outcome = execute_tool_calls_with_protocol(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), &writer, "msg-sequential-error", None, CompactionLevel::Off, false, &[])
     .await
     .expect("execution should succeed");
 
@@ -258,7 +258,7 @@ async fn test_unknown_tool_returns_error() {
 
     let tool_calls = vec![make_tool_use("id-x", "nonexistent_tool")];
 
-    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false)
+    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false, &[])
     .await
     .expect("execute_tool_calls itself should not fail");
 
@@ -286,7 +286,7 @@ async fn test_tool_error_returns_error_result() {
 
     let tool_calls = vec![make_tool_use("id-fail", "fail_tool")];
 
-    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false)
+    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false, &[])
     .await
     .expect("execution should succeed");
 
@@ -317,7 +317,7 @@ async fn test_pre_hook_blocks_tool() {
 
     let tool_calls = vec![make_tool_use("id-blocked", "echo")];
 
-    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", Some(&mut hook_engine), CompactionLevel::Off, false)
+    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", Some(&mut hook_engine), CompactionLevel::Off, false, &[])
     .await
     .expect("execute_tool_calls itself should not fail");
 
@@ -355,7 +355,7 @@ async fn test_post_hook_runs_after_tool() {
 
     let tool_calls = vec![make_tool_use("id-post", "echo")];
 
-    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", Some(&mut hook_engine), CompactionLevel::Off, false)
+    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", Some(&mut hook_engine), CompactionLevel::Off, false, &[])
     .await
     .expect("execution should succeed");
 
@@ -383,7 +383,7 @@ async fn test_tool_result_truncation() {
 
     let tool_calls = vec![make_tool_use("id-big", "big_tool")];
 
-    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false)
+    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false, &[])
     .await
     .expect("execution should succeed");
 

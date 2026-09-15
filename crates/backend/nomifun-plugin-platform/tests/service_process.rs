@@ -26,7 +26,15 @@ import { spawn } from "node:child_process";
 
 export async function start(context) {
   return {
-    async invoke({ method, payload, signal }) {
+    async invoke({ method, payload, signal, ...rest }) {
+      if (method === "invocation_contract") {
+        return { extraKeys: Object.keys(rest), abortSignal: signal instanceof AbortSignal };
+      }
+      if (method === "null") return null;
+      if (method === "unsupported_event") {
+        process.stdout.write(JSON.stringify({kind: "event"}) + "\n");
+        return await new Promise(() => {});
+      }
       if (method === "echo") {
         return {
           method,
@@ -78,9 +86,6 @@ const INVALID_SERVICE_MODULE: &str = "export const value = 1;\n";
 #[path = "service_process/cancellation.rs"]
 mod cancellation;
 
-#[path = "service_process/streaming.rs"]
-mod streaming;
-
 fn node_executable() -> Option<PathBuf> {
     let discovered = which::which("node").ok()?;
     std::fs::canonicalize(discovered).ok()
@@ -98,7 +103,7 @@ fn runtime_fingerprint(node: &Path) -> PluginServiceRuntimeFingerprint {
         .trim()
         .trim_start_matches('v')
         .to_owned();
-    PluginServiceRuntimeFingerprint::Node {
+    PluginServiceRuntimeFingerprint {
         runtime_installation_id: RuntimeInstallationId::from(format!(
             "test-node-{}",
             &digest_bytes(&bytes).as_ref()[..16]
@@ -218,7 +223,6 @@ async fn invoke(
                 call_id: PluginBridgeCallId::from(call_id),
                 method: method.to_owned(),
                 payload: StrictJsonValue(payload),
-                events: None,
             },
             cancellation,
         )
@@ -300,6 +304,17 @@ async fn real_node_service_invokes_cancels_and_rejects_stale_generation() {
     assert_eq!(echoed.0["hostGeneration"], 1);
     assert_eq!(echoed.0["pluginId"], "plugin-service-a");
 
+    let contract = invoke(
+        &process, &spec, 1, "call-contract", "invocation_contract", json!({}),
+        PluginRuntimeCallCancellation::default(),
+    ).await.unwrap();
+    assert_eq!(contract.0, json!({"extraKeys":["callId"], "abortSignal":true}));
+    let null = invoke(
+        &process, &spec, 1, "call-null", "null", json!({}),
+        PluginRuntimeCallCancellation::default(),
+    ).await.unwrap();
+    assert!(null.0.is_null(), "explicit null must remain a valid unary result");
+
     let stale = invoke(
         &process,
         &spec,
@@ -331,6 +346,27 @@ async fn real_node_service_invokes_cancels_and_rejects_stale_generation() {
         .expect_err("canceled invocation must not produce a value");
     assert!(matches!(canceled, PluginRuntimeServiceProcessError::Rejected(_)));
 
+    process.stop().await;
+}
+
+#[tokio::test]
+async fn service_event_frames_are_unsupported_protocol() {
+    let node = node_executable().expect("Node is required for the Service protocol regression");
+    let directory = TempDir::new().unwrap();
+    let module = write_module(&directory, "main.mjs", SERVICE_MODULE);
+    let spec = service_spec(
+        &node, SERVICE_MODULE.as_bytes(), "unsupported-service-event", 1,
+        PluginServiceLifecycle::OnDemand,
+    );
+    let process = factory(&node, &module, Duration::from_secs(5))
+        .start(PluginRuntimeServiceLaunch { spec: spec.clone(), host_generation: 1 })
+        .await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(3), invoke(
+        &process, &spec, 1, "call-event", "unsupported_event", json!({}),
+        PluginRuntimeCallCancellation::default(),
+    )).await.expect("unsupported frame must fail without waiting for the watchdog");
+    assert!(matches!(result, Err(PluginRuntimeServiceProcessError::Crashed(message))
+        if message.contains("unsupported frame kind event")));
     process.stop().await;
 }
 
@@ -370,9 +406,7 @@ async fn node_path_alias_is_resolved_once_and_still_requires_the_selected_digest
     process.stop().await;
 
     let mut wrong = spec;
-    if let PluginServiceRuntimeFingerprint::Node { runtime_executable_digest, .. } = &mut wrong.runtime {
-        *runtime_executable_digest = digest_bytes(b"different executable");
-    }
+    wrong.runtime.runtime_executable_digest = digest_bytes(b"different executable");
     let error = factory.start(PluginRuntimeServiceLaunch {
         spec: wrong,
         host_generation: 2,

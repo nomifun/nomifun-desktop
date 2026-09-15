@@ -48,11 +48,6 @@ use uuid::Uuid;
 const CALLABLE_CAPABILITY_ID: &str = "plugin.callable.echo";
 const CALLABLE_ACTION_ID: &str = "plugin.callable.echo.invoke";
 
-#[path = "support/native.rs"]
-mod native_support;
-#[path = "service_application/native.rs"]
-mod native;
-
 #[derive(Default)]
 struct TestProcessFactory;
 
@@ -108,7 +103,7 @@ impl TestRuntime {
     }
 
     fn runtime_fingerprint() -> PluginServiceRuntimeFingerprint {
-        PluginServiceRuntimeFingerprint::Node {
+        PluginServiceRuntimeFingerprint {
             runtime_installation_id: RuntimeInstallationId::from("test-runtime"),
             runtime_target: RuntimeTarget::from("windows-x86_64"),
             runtime_executable_digest: digest("runtime"),
@@ -264,7 +259,7 @@ impl PluginRuntimeServiceRuntimeBinding for TestRuntime {
             },
             error_code: None,
             runtime: input.spec.runtime.clone(),
-            host_target: input.spec.runtime.target(),
+            host_target: input.spec.runtime.runtime_target.clone(),
             host_protocol_version: PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
             sdk_contract_version: PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
             test_contract_version: PLUGIN_SERVICE_TEST_CONTRACT_VERSION.into(),
@@ -474,6 +469,7 @@ fn agent_invocation(
     call_id: &str,
 ) -> PluginRuntimeAgentCapabilityInvocation {
     PluginRuntimeAgentCapabilityInvocation {
+        cancellation: Default::default(),
         owner_user_id: owner.to_owned(),
         plugin_product_id: PluginProductId::from(plugin_product_id),
         capability: CapabilityRef {
@@ -645,6 +641,7 @@ async fn service_product_runs_the_application_surface_bridge_lifecycle() {
 
     let stale_catalog = application
         .invoke_agent_capability(PluginRuntimeAgentCapabilityInvocation {
+        cancellation: Default::default(),
             owner_user_id: owner.clone(),
                 plugin_product_id: created.plugin.plugin_id.clone().into(),
             capability: CapabilityRef {
@@ -871,16 +868,6 @@ async fn callable_service_release_runs_build_publish_enable_start_and_agent_invo
     ));
 
     let allowed = BTreeSet::from([ActionId::from(CALLABLE_ACTION_ID)]);
-    let (events, mut receiver) = tokio::sync::mpsc::channel(1);
-    let unsupported = application.invoke_agent_capability_with_events(
-        agent_invocation(
-            &owner, &started.plugin.plugin_id, &active,
-            started.plugin.releases.active_release_epoch, catalog_digest.clone(),
-            allowed.clone(), "agent-stream-unsupported",
-        ), Some(events),
-    ).await.unwrap_err();
-    assert!(unsupported.to_string().contains("does not support incremental invocation"));
-    assert!(receiver.recv().await.is_none());
     let result = application
         .invoke_agent_capability(agent_invocation(
             &owner,
@@ -973,3 +960,6 @@ async fn callable_service_release_runs_build_publish_enable_start_and_agent_invo
     );
     assert!(!runtime.started.lock().await.is_empty());
 }
+
+#[path = "service_application/agent_capability_preflight.rs"]
+mod agent_capability_preflight;

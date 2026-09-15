@@ -1565,6 +1565,22 @@ fn json_value_kind(value: &Value) -> &'static str {
     }
 }
 
+/// Validate an already-authorized exact target before exposing its arguments
+/// to a hook. Uses the same bounded schema compiler as registered tools and
+/// emits a non-reflective error: invalid argument values stay at the host.
+pub fn validate_tool_input_schema(
+    tool_name: &str,
+    schema: &Value,
+    input: &Value,
+) -> Result<(), String> {
+    let validator = compile_input_validator(tool_name, schema)
+        .map_err(|_| "MCP target input schema is unavailable or invalid; refresh the authorized tool catalog".to_owned())?;
+    if !validator.is_valid(input) {
+        return Err("MCP target arguments do not match its actual input schema; correct the arguments using the discovered tool schema".to_owned());
+    }
+    Ok(())
+}
+
 fn compile_input_validator(tool_name: &str, schema: &Value) -> Result<Validator, String> {
     let Some(schema_object) = schema.as_object() else {
         return Err("tool input schema must be a JSON object".to_string());

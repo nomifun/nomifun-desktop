@@ -274,6 +274,14 @@ impl Tool for McpToolProxy {
         self.deferred
     }
 
+    async fn preflight_hook(
+        &self,
+        input: &Value,
+        _context: &ToolExecutionContext,
+    ) -> Result<(), String> {
+        self.manager.preflight_tool(&self.server_name, &self.tool_name, input)
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
         let call = self
             .manager

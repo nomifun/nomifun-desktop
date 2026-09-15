@@ -15,27 +15,6 @@ mod admission;
 
 const TRUST: &str = "plugin-ui-session-test";
 
-// Each host mode runs in its own process: never mutate process-global env
-// while other Tokio/libtest workers might be composing an application.
-fn in_agent_ui_host(test: &str, enabled: bool) -> bool {
-    const CHILD: &str = "NOMIFUN_TEST_AGENT_UI_CHILD";
-    const OPT_IN: &str = "NOMIFUN_ALLOW_EXPERIMENTAL_AGENT_UI";
-    if std::env::var(CHILD).as_deref() == Ok(test) {
-        assert_eq!(std::env::var(OPT_IN).as_deref() == Ok("1"), enabled);
-        return true;
-    }
-    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-    command.args(["--exact", test, "--nocapture"]).env(CHILD, test);
-    if enabled {
-        command.env(OPT_IN, "1");
-    } else {
-        command.env_remove(OPT_IN);
-    }
-    let status = command.status().expect("run isolated Agent UI host test");
-    assert!(status.success(), "Agent UI host test failed: {test}");
-    false
-}
-
 async fn request(
     router: &axum::Router,
     method: &str,
@@ -155,9 +134,6 @@ fn latest_user_input(expected: &'static str) -> impl wiremock::Match {
 
 #[tokio::test]
 async fn installed_ui_uses_owned_session_commands_and_never_replays_a_turn_on_reopen() {
-    if !in_agent_ui_host("installed_ui_uses_owned_session_commands_and_never_replays_a_turn_on_reopen", true) {
-        return;
-    }
     let (router, services) = common::build_local_trust_app(TRUST).await;
     let upstream = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
@@ -169,7 +145,9 @@ async fn installed_ui_uses_owned_session_commands_and_never_replays_a_turn_on_re
                 r#"data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"PLUGIN_UI_REPLY"},"finish_reason":null}]}"#, "\n\n",
                 r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#, "\n\n",
                 "data: [DONE]\n\n")))
-        .expect(3).mount(&upstream).await;
+        // One actual send. Reopen/observe must not add calls; the removed
+        // stream and durable-composer scenarios no longer send extra turns.
+        .expect(1).mount(&upstream).await;
     let provider = post(&router, "/api/providers", json!({
         "platform": "stepfun-plan", "name": "Plugin UI model",
         "base_url": format!("{}/step_plan/v1", upstream.uri()),
@@ -261,6 +239,24 @@ async fn installed_ui_uses_owned_session_commands_and_never_replays_a_turn_on_re
     let (status, plain_error) = request(&router, "POST", &open_path, plain_grant).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(plain_error["code"], "NOMI_CORE_AGENT_SESSION_NOT_FOUND");
+
+    // An existing Surface grant cannot outlive Session ownership, and opening
+    // another view must not bypass the same owner boundary.
+    let other_owner = uuid::Uuid::now_v7().to_string();
+    sqlx::query("UPDATE conversations SET user_id = ? WHERE conversation_id = ?")
+        .bind(&other_owner).bind(session_id).execute(services.database.pool()).await.unwrap();
+    assert_eq!(request(&router, "POST", &open_path, grant.clone()).await.0, StatusCode::NOT_FOUND);
+    for command in [
+        observe.clone(),
+        json!({"operation": "turn", "input": {"content": "must not run"}, "idempotency_key": "wrong-owner"}),
+        json!({"operation": "cancel"}),
+    ] {
+        let (status, error) = request(&router, "POST", &bridge_path, bridge_body(&surface, command)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{error}");
+    }
+    sqlx::query("UPDATE conversations SET user_id = ? WHERE conversation_id = ?")
+        .bind(&owner_id).bind(session_id).execute(services.database.pool()).await.unwrap();
+    assert!(upstream.received_requests().await.unwrap().is_empty());
 
     let mut stale = grant.clone();
     stale["agent_session"]["expected_release_digest"] = json!("0".repeat(64));
@@ -425,35 +421,6 @@ async fn installed_ui_uses_owned_session_commands_and_never_replays_a_turn_on_re
     .await
     .expect("cancel must stop the Session's active turn");
 
-    // Exercise the production event-bus observer and WS manager queue, not a
-    // synthetic plugin event. This is not a browser/WebSocket handshake test.
-    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
-    let connection = services.ws_manager.add_client(owner_id.clone(), TRUST.into(), tx);
-    post(&router, &bridge_path, bridge_body(&reopened, json!({
-        "operation": "turn", "input": {"content": "hello from plugin UI"}, "idempotency_key": "stream-intent"
-    }))).await;
-    let event = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while let Some(message) = rx.recv().await {
-            let nomifun_realtime::WsOutbound::Text(text) = message else { continue; };
-            let message: Value = serde_json::from_str(&text).unwrap();
-            if message["name"] == "plugin.agent-session.stream" && message["data"]["event"].to_string().contains("PLUGIN_UI_REPLY") {
-                return message["data"].clone();
-            }
-        }
-        panic!("WS transport closed before plugin stream delivery");
-    }).await.expect("real Nomi events must reach the scoped plugin WS projection");
-    assert_eq!(event["plugin_id"], plugin_id);
-    assert_eq!(event["surface_session_id"], reopened["surface_session_id"]);
-    assert_eq!(event["surface_generation"], reopened["surface_generation"]);
-    assert_eq!(event["event"]["conversation_id"], session_id);
-    services.ws_manager.remove_client(connection);
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            let page = post(&router, &bridge_path, bridge_body(&reopened, observe.clone())).await;
-            if page["head"]["status"] != "running" { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-    }).await.expect("stream turn must complete before teardown");
 
     // An ordinary reopen clears, rather than inherits, the old Session grant.
     let normal = post(&router, &open_path, json!({"plugin_id": plugin_id})).await;
@@ -471,9 +438,7 @@ async fn installed_ui_uses_owned_session_commands_and_never_replays_a_turn_on_re
     .await
     .unwrap();
     assert!(scope.is_none());
-    assert!(services.plugin_runtime.project_agent_session_stream(&owner_id, session_id,
-        &[json!({"conversation_id": session_id, "type": "text", "data": "after revoke"})])
-        .await.unwrap().is_empty());
+    let before_disable = post(&router, &open_path, grant.clone()).await;
     let w = get(&router, &format!("/api/plugins/runtimes/{plugin_id}/workshop")).await;
     post(&router, &format!("/api/plugins/runtimes/{plugin_id}/enabled"), json!({
         "plugin_id": plugin_id, "expected_product_revision": w["plugin"]["product_revision"],
@@ -483,6 +448,14 @@ async fn installed_ui_uses_owned_session_commands_and_never_replays_a_turn_on_re
     })).await;
     assert_eq!(get(&router, "/api/agent-catalog/ui/agent-session").await, json!([]));
     assert!(!request(&router, "POST", &open_path, grant).await.0.is_success());
+    for command in [
+        json!({"operation": "observe", "after_seq": 0, "limit": 50}),
+        json!({"operation": "turn", "input": {"content": "must not run"}, "idempotency_key": "disabled"}),
+        json!({"operation": "cancel"}),
+    ] {
+        assert!(!request(&router, "POST", &bridge_path, bridge_body(&before_disable, command)).await.0.is_success(),
+            "disabling the plugin must revoke an existing Session grant");
+    }
 
     // The product template is ordinary editable source, not a special runtime.
     // Creating it does not grant access, publish a view or invoke a model.
@@ -491,7 +464,8 @@ async fn installed_ui_uses_owned_session_commands_and_never_replays_a_turn_on_re
     assert_eq!(draft["status"], "ready");
     assert!(draft["service_source"].is_null());
     assert!(draft["import"].is_null());
-    assert!(draft["html"].as_str().unwrap().contains("Retry same request"));
+    assert!(draft["html"].as_str().unwrap().contains("api.observe"));
+    assert!(!draft["html"].as_str().unwrap().contains("api.subscribe"));
     assert_eq!(get(&router, "/api/agent-catalog/ui/agent-session").await, json!([]));
     let reference = post(&router, &format!("/api/plugins/drafts/{}/save", draft["id"].as_str().unwrap()),
         json!({"expected_revision": draft["revision"]})).await;
@@ -509,59 +483,7 @@ async fn installed_ui_uses_owned_session_commands_and_never_replays_a_turn_on_re
     assert!(reference_history["messages"].to_string().contains("PLUGIN_UI_REPLY"));
     assert_eq!(upstream.received_requests().await.unwrap().len(), calls_before_template);
 
-    // Recovery data lives in existing plugin KV. Save the immutable intent
-    // before a send, reopen, then explicitly retry with the same host key.
     let reference_bridge = format!("/api/plugins/runtimes/{reference_id}/surface/bridge");
-    let key = format!("agent-session/composer/v1/{session_id}");
-    let recovery = json!({"version": 1, "session_id": session_id, "text": "hello from plugin UI",
-        "pending": {"key": "recovered-reference-intent", "input": {"content": "hello from plugin UI"}}});
-    let empty = post(&router, &reference_bridge, storage_body(&reference_surface, json!({"operation": "get", "key": key}))).await;
-    assert_eq!(empty["outcome"], "value");
-    assert!(empty["value"].is_null() && empty["revision"].is_null());
-    let written = post(&router, &reference_bridge, storage_body(&reference_surface,
-        json!({"operation": "compare_and_swap", "key": key, "value": recovery}))).await;
-    assert_eq!(written["applied"], true);
-    assert_eq!(written["current_revision"], 1);
-    let reference_turn = json!({"operation": "turn", "input": recovery["pending"]["input"],
-        "idempotency_key": recovery["pending"]["key"]});
-    let reference_sent = post(&router, &reference_bridge, bridge_body(&reference_surface, reference_turn.clone())).await;
-    let reopened_reference = post(&router, &format!("/api/plugins/runtimes/{reference_id}/surface/open"), json!({
-        "plugin_id": reference_id, "agent_session": {"agent_session_id": session_id,
-            "expected_release_digest": views[0]["expected_release_digest"], "ui_capability": views[0]["capability"]}
-    })).await;
-    let restored = post(&router, &reference_bridge, storage_body(&reopened_reference,
-        json!({"operation": "get", "key": key}))).await;
-    assert_eq!(restored["value"], recovery);
-    assert_eq!(restored["revision"], 1);
-    let reference_retry = post(&router, &reference_bridge, bridge_body(&reopened_reference, reference_turn)).await;
-    assert_eq!(reference_retry["operation_id"], reference_sent["operation_id"]);
-    let stale_write = request(&router, "POST", &reference_bridge, storage_body(&reference_surface,
-        json!({"operation": "compare_and_swap", "key": key, "expected_revision": 1, "value": {"stale": true}}))).await;
-    assert!(!stale_write.0.is_success(), "old Surface cannot overwrite recovery after reopen");
-    let conflict = post(&router, &reference_bridge, storage_body(&reopened_reference,
-        json!({"operation": "compare_and_swap", "key": key, "expected_revision": 99, "value": {"stale": true}}))).await;
-    assert_eq!(conflict["applied"], false);
-    let unchanged = post(&router, &reference_bridge, storage_body(&reopened_reference,
-        json!({"operation": "get", "key": key}))).await;
-    assert_eq!(unchanged["value"], recovery);
-    let cleared = post(&router, &reference_bridge, storage_body(&reopened_reference,
-        json!({"operation": "compare_and_swap", "key": key, "expected_revision": 1}))).await;
-    assert_eq!(cleared["applied"], true);
-    assert_eq!(cleared["current_revision"], 2);
-    let tombstone = post(&router, &reference_bridge, storage_body(&reopened_reference,
-        json!({"operation": "get", "key": key}))).await;
-    assert!(tombstone["value"].is_null());
-    assert_eq!(tombstone["revision"], 2);
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            let page = post(&router, &reference_bridge, bridge_body(&reopened_reference,
-                json!({"operation": "observe", "after_seq": 0, "limit": 50}))).await;
-            if page["head"]["status"] != "running" { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-    }).await.expect("reference turn must finish before teardown");
-    assert_eq!(upstream.received_requests().await.unwrap().len(), calls_before_template + 1,
-        "explicit retry after reopen must not execute another model request");
 
     // Persisted source kinds travel unchanged through the same public and
     // plugin observation, without guessing from content or executing tools.
@@ -584,7 +506,7 @@ async fn installed_ui_uses_owned_session_commands_and_never_replays_a_turn_on_re
         }).await.unwrap();
         fixtures.push((message_id, kind, content));
     }
-    let typed_history = post(&router, &reference_bridge, bridge_body(&reopened_reference,
+    let typed_history = post(&router, &reference_bridge, bridge_body(&reference_surface,
         json!({"operation": "observe", "after_seq": 0, "limit": 50}))).await;
     let public = get(&router, &format!("/api/agent-sessions/{session_id}")).await;
     assert_eq!(typed_history["messages"], public["messages"]);
@@ -598,7 +520,7 @@ async fn installed_ui_uses_owned_session_commands_and_never_replays_a_turn_on_re
         let digest = nomifun_agent_contracts::digest_payload(&content).unwrap();
         assert_eq!(message["semantic_digest"], digest.as_ref());
     }
-    assert_eq!(upstream.received_requests().await.unwrap().len(), calls_before_template + 1);
+    assert_eq!(upstream.received_requests().await.unwrap().len(), calls_before_template);
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
 }

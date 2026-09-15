@@ -1,6 +1,9 @@
 import type { AgentPresetDocument, CapabilityCatalogItem, CapabilityId } from '@/common/types/agentPlatform';
-import { Button } from '@arco-design/web-react';
+import { Alert, Button, Tag } from '@arco-design/web-react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
+import { pluginRuntimeProduct } from '@/common/adapter/pluginRuntimeProductBridge';
 import styles from './AgentContextOrder.module.css';
 
 type Props = {
@@ -13,15 +16,34 @@ type Props = {
 
 export default function AgentContributionOrder({ document, catalog, disabled = false, kind = 'context', onChange }: Props) {
   const { t } = useTranslation();
+  const navigate = useNavigate();
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState(false);
+  const pending = useRef(false);
+  const mounted = useRef(false);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const field = kind === 'context' ? 'context_order' : 'middleware_order';
   const labels = kind === 'context' ? 'contextOrder' : 'middlewareOrder';
   const selected = new Map(document.enabled_capabilities.map(value => [value.capability.id, value.capability.version]));
   const contexts = new Map(catalog.filter(item => (kind === 'context' ? item.kind === 'context_contributor' :
-    item.kind === 'turn_middleware' && item.action_count === 1 && item.context_contributor_count === 0) &&
+    item.kind === 'turn_middleware' || item.middleware_phase !== undefined) &&
     selected.get(item.capability.id) === item.capability.version).map(item => [item.capability.id, item]));
   // Retain unavailable explicit choices so a catalog refresh cannot silently change the draft.
   const explicit = document[field] ?? [];
   const ids = [...explicit, ...[...contexts.keys()].filter(id => !explicit.includes(id)).sort()];
+  const createBeforeTool = async () => {
+    if (disabled || pending.current) return;
+    pending.current = true; setCreating(true); setCreateError(false);
+    try {
+      const draft = await pluginRuntimeProduct.beforeToolTemplate.invoke();
+      if (mounted.current) await navigate(`/plugins/create/${encodeURIComponent(draft.id)}`);
+    } catch {
+      if (mounted.current) setCreateError(true);
+    } finally {
+      pending.current = false;
+      if (mounted.current) setCreating(false);
+    }
+  };
   const move = (id: CapabilityId, offset: number) => {
     if (disabled) return;
     const index = ids.indexOf(id), target = index + offset;
@@ -33,12 +55,26 @@ export default function AgentContributionOrder({ document, catalog, disabled = f
   return <section className={styles.section} aria-label={t(`agentSettings.${labels}.title`)}>
     <h3>{t(`agentSettings.${labels}.title`)}</h3>
     <p>{t(`agentSettings.${labels}.hint`)}</p>
+    {kind === 'middleware' && <>
+      <p>{t('agentSettings.middlewareOrder.toolAccess')}</p>
+      <div className={styles.authoring}>
+        <Button size='small' loading={creating} disabled={disabled || creating} onClick={() => void createBeforeTool()}>
+          {t('agentSettings.middlewareOrder.createBeforeTool')}
+        </Button>
+        <p>{t('agentSettings.middlewareOrder.createHint')}</p>
+      </div>
+      {createError && <Alert type='warning' content={t('agentSettings.middlewareOrder.createFailed')} />}
+    </>}
     {!ids.length && <p>{t(`agentSettings.${labels}.empty`)}</p>}
     <ol className={styles.list}>
       {ids.map((id, index) => {
         const item = contexts.get(id), name = item?.display_name ?? id;
         return <li key={id} className={styles.item}>
           <span className={styles.name}>{name}{!item && <small>{t(`agentSettings.${labels}.missing`)}</small>}</span>
+          {kind === 'middleware' && <Tag size='small' className={styles.phase}>
+            {t(`agentSettings.middlewareOrder.phase.${item?.middleware_phase === 'before_model' || item?.middleware_phase === 'before_tool'
+              ? item.middleware_phase : 'unknown'}`)}
+          </Tag>}
           <Button size='small' disabled={disabled || index === 0} aria-label={t(`agentSettings.${labels}.up`, { name })} onClick={() => move(id, -1)}>↑</Button>
           <Button size='small' disabled={disabled || index === ids.length - 1} aria-label={t(`agentSettings.${labels}.down`, { name })} onClick={() => move(id, 1)}>↓</Button>
         </li>;

@@ -1,10 +1,6 @@
 (() => {
   if (window.nomi) return;
   const pending = new Map();
-  const streamListeners = new Set();
-  let streamSubscribed = false;
-  let subscriptionId = 0;
-  let streamDelivery = Promise.resolve();
   let port;
   let resolveReady;
   const ready = new Promise(resolve => { resolveReady = resolve; });
@@ -13,25 +9,6 @@
     port = window.__nomifunPluginBridge;
     port.addEventListener('message', event => {
       const result = event.data;
-      if (result?.type === 'nomifun-plugin-agent-session-event-v1' && Number.isSafeInteger(result.seq) && result.seq > 0) {
-        if (!streamSubscribed || result.subscription_id !== subscriptionId ||
-            !['stream', 'resync_required'].includes(result.kind)) return;
-        const registrations = [...streamListeners];
-        // Serial delivery lets an async recovery callback complete before later
-        // fragments. Host credits bound queued work; ACK only after consumption.
-        streamDelivery = streamDelivery.then(async () => {
-          for (const registration of registrations) {
-            if (!streamListeners.has(registration)) continue;
-            try { await registration.listener(result.kind === 'stream'
-              ? { kind: 'stream', event: result.event }
-              : { kind: 'resync_required', reason: result.reason }); }
-            catch (error) { console.error('Plugin Session stream listener failed', error); }
-          }
-        }).finally(() => {
-          try { port.postMessage({ type: 'nomifun-plugin-agent-session-ack-v1', subscription_id: result.subscription_id, seq: result.seq }); } catch {}
-        });
-        return;
-      }
       if (!result || result.type !== 'nomifun-plugin-bridge-result-v1') return;
       const operation = pending.get(result.call_id);
       if (!operation) return;
@@ -99,25 +76,6 @@
       return callTarget({ target: 'service', method, payload });
     }
   }), agentSession: Object.freeze({
-    // Live events are not replayable tokens. On resync_required discard stale
-    // transient state and query observe(); never restart/replay a turn.
-    subscribe(listener) {
-      if (typeof listener !== 'function') throw new TypeError('A Session stream listener is required');
-      const registration = { listener };
-      streamListeners.add(registration);
-      void ready.then(() => {
-        if (!streamListeners.size || streamSubscribed) return;
-        port.postMessage({ type: 'nomifun-plugin-agent-session-subscribe-v1', subscription_id: ++subscriptionId });
-        streamSubscribed = true;
-      }).catch(error => { console.error('Plugin Session stream subscription failed', error); });
-      return () => {
-        streamListeners.delete(registration);
-        if (!streamListeners.size && streamSubscribed) {
-          streamSubscribed = false;
-          try { port.postMessage({ type: 'nomifun-plugin-agent-session-unsubscribe-v1', subscription_id: subscriptionId }); } catch {}
-        }
-      };
-    },
     // The host UI must explicitly bind this Surface to a Session first.
     // Never auto-retry mutations; retain the same caller-supplied key when
     // reconciling an ambiguous turn result after a view reconnect.

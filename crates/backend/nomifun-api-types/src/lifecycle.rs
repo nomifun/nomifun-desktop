@@ -101,6 +101,7 @@ mod tests {
         );
         assert_eq!(json["platform"], "linux");
         assert_eq!(json["arch"], "x64");
+        assert!(json.get("experimental_agent_ui_available").is_none());
         // Verify snake_case
         assert!(json.get("cacheDir").is_none());
     }
