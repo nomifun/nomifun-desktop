@@ -324,6 +324,38 @@ impl Tool for SkillTool {
         false
     }
 
+    async fn preflight_hook(
+        &self,
+        input: &Value,
+        _context: &ToolExecutionContext,
+    ) -> Result<(), String> {
+        let name = input["skill"].as_str().ok_or("Missing required parameter: skill")?;
+        let skill = self.find_skill(name).ok_or("Skill is not in the selected catalog")?;
+        if self.checker.check(skill) == SkillPermission::Deny {
+            return Err("Skill is denied by configuration".into());
+        }
+        if skill.disable_model_invocation {
+            return Err("Skill does not allow model invocation".into());
+        }
+        if input.get("args").is_some_and(|value| !value.is_string())
+            || input.get("resource").is_some_and(|value| !value.is_string())
+        {
+            return Err("Skill args and resource must be strings when supplied".into());
+        }
+        if let Some(hosted) = self.host_skills.get(&skill.name) {
+            return hosted.preflight_hook(input["resource"].as_str()).await;
+        }
+        if input.get("resource").is_some() {
+            return Err("resource reads require an exact hosted Skill".into());
+        }
+        if skill.execution_context == ExecutionContext::Fork && self.invocation_runner.is_none() {
+            return Err("Selected Skill requires an available Agent invocation runner".into());
+        }
+        // Only the outer Skill call is checked. No content preparation, shell
+        // hook or nested Agent invocation occurs before the capability gate.
+        Ok(())
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
         self.execute_inner(input, None).await
     }
@@ -443,6 +475,21 @@ mod tests {
             "/tmp".to_string(),
             SkillPermissionChecker::new(vec![]),
         )
+    }
+
+    #[tokio::test]
+    async fn preflight_denies_skill_before_preparing_content_or_starting_a_fork() {
+        let context = ToolExecutionContext::from_scoped_tool_call("preflight", "skill");
+        let mut skill = make_skill("restricted", "private instructions");
+        skill.execution_context = ExecutionContext::Fork;
+        let denied = SkillTool::new(Arc::new(vec![skill.clone()]), ".".into(),
+            SkillPermissionChecker::new(vec!["restricted".into()]));
+        let error = denied.preflight_hook(&json!({"skill":"restricted"}), &context).await.unwrap_err();
+        assert!(error.contains("denied"));
+        let allowed = SkillTool::new(Arc::new(vec![skill]), ".".into(), SkillPermissionChecker::new(vec![]));
+        let error = allowed.preflight_hook(&json!({"skill":"restricted"}), &context).await.unwrap_err();
+        assert!(error.contains("runner"));
+        assert!(allowed.preflight_hook(&json!({"skill":"unknown"}), &context).await.is_err());
     }
 
     #[tokio::test]

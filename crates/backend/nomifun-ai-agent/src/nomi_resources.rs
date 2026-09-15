@@ -238,6 +238,14 @@ impl Tool for ResourceTool {
         }
         schema
     }
+    async fn preflight_hook(&self, _input: &Value, _context: &ToolExecutionContext) -> Result<(), String> {
+        // The platform port currently authorizes the live resource operation
+        // while reserving its owner epoch and discovering the remote target.
+        // Frozen server IDs alone cannot establish that authority. Never call
+        // read/read_image just to approve exposing their parameters to a hook.
+        Err("before_tool cannot preflight this platform MCP resource path without acquiring its owner operation; use a supported exact MCP tool, or use a separate session without before_tool for resource discovery and reads".into())
+    }
+
     async fn execute(&self, _: Value) -> ToolResult {
         ToolResult::error("MCP resources require an engine-owned execution context")
     }

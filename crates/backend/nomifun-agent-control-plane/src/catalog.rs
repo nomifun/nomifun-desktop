@@ -672,6 +672,7 @@ fn capability_catalog_item(
             })
             .collect(),
         action_count: manifest.contributions.actions.len() as u32,
+        middleware_phase: nomifun_agent_contracts::tool_middleware::phase_for_actions(&manifest.contributions.actions).map(str::to_owned),
         context_contributor_count: manifest
             .contributions
             .context_schema_refs

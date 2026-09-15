@@ -9,6 +9,7 @@ pub mod companion_tools;
 pub mod context;
 pub mod context_contributor;
 pub mod model_middleware;
+pub mod tool_middleware;
 pub mod cron_tools;
 pub mod memory_tools;
 pub mod mcp_capability_tools;

@@ -6967,6 +6967,7 @@ dependencies = [
  "async-trait",
  "getrandom 0.2.17",
  "hex",
+ "jsonschema",
  "junction",
  "libc",
  "nomi-process-runtime",

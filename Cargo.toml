@@ -320,6 +320,12 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
+# Runtime attestation hashes the complete Node executable before every launch.
+# Keep the cryptographic implementation fast in development too, so two cold
+# Services fit the unchanged hook deadline without caching or skipping hashes.
+[profile.dev.package.sha2]
+opt-level = 3
+
 [profile.test]
 # Test binaries in this workspace are unusually large on Windows. Even minimal
 # line tables produced hundreds of MiB of PDB data per integration target, so
@@ -329,6 +335,9 @@ debug = false
 
 [profile.test.package."*"]
 debug = false
+
+[profile.test.package.sha2]
+opt-level = 3
 
 # Size-optimized release profile. The packaged `nomifun-desktop.exe` is the first
 # and largest file the NSIS installer writes, and an oversized *unsigned* binary

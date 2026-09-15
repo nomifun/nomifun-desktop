@@ -1,11 +1,12 @@
 import '../../../../test/setup-dom.ts';
 import '@arco-design/web-react/lib/_util/react-19-adapter';
-import { cleanup, fireEvent, render, within } from '@testing-library/react';
-import { afterEach, expect, test } from 'bun:test';
+import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
+import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { useState } from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom';
+import { pluginRuntimeProduct, type PluginRuntimeDraft } from '@/common/adapter/pluginRuntimeProductBridge';
 import { SWRConfig } from 'swr';
 import { asCapabilityId, asPackageId, createEmptyAgentPresetDocument, placeCapability, type AgentPresetDocument, type CapabilityCatalogItem } from '@/common/types/agentPlatform';
 import en from '../../services/i18n/locales/en-US/agentSettings.json';
@@ -29,9 +30,12 @@ function mount(document = initial(), currentCatalog = catalog, disabled = false,
     const [value, setValue] = useState(document);
     return <AgentContextOrder document={value} catalog={currentCatalog} disabled={disabled} kind={kind} onChange={next => { current = next; setValue(next); }} />;
   };
-  return { ...render(<I18nextProvider i18n={i18n}><Harness /></I18nextProvider>), state: () => current };
+  const Creator = () => <div>Draft {useParams().id}</div>;
+  return { ...render(<I18nextProvider i18n={i18n}><MemoryRouter><Routes>
+    <Route path='/' element={<Harness />} /><Route path='/plugins/create/:id' element={<Creator />} />
+  </Routes></MemoryRouter></I18nextProvider>), state: () => current };
 }
-afterEach(cleanup);
+afterEach(() => { cleanup(); mock.restore(); });
 
 test('personal editor submits order through its existing save action', () => {
   const original: AgentPresetDraft = { preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000001'), display_name: 'Ordered Agent', document: initial() };
@@ -93,7 +97,9 @@ test('middleware order preserves Context and selection, retains missing choices,
     ...initial().enabled_capabilities, ...middlewareCatalog.slice(0, 2).map(value => ({ capability: value.capability })),
   ] };
   const result = mount(document, [...catalog, ...middlewareCatalog], false, 'middleware'), view = within(result.container);
-  expect(view.getAllByRole('listitem').map(row => row.textContent)).toEqual(['m-a↑↓', 'm-z↑↓']);
+  expect(view.getAllByRole('listitem').map(row => row.textContent)).toEqual([
+    `m-a${en.middlewareOrder.phase.unknown}↑↓`, `m-z${en.middlewareOrder.phase.unknown}↑↓`,
+  ]);
   fireEvent.click(view.getByRole('button', { name: 'Move middleware m-z earlier' }));
   expect(result.state().middleware_order).toEqual(['m-z', 'm-a']);
   expect(result.state().context_order).toEqual(document.context_order);
@@ -112,4 +118,82 @@ test('middleware order preserves Context and selection, retains missing choices,
   expect(removed.middleware_order).toEqual(['m-a']);
   expect(removed.context_order).toEqual(document.context_order);
   expect(placeCapability(removed, middlewareCatalog[1].capability, 'none').middleware_order).toBeUndefined();
+});
+
+test('execution stages come from the host and unknown selected extensions remain in order', () => {
+  const extensions: CapabilityCatalogItem[] = [
+    { ...item('model', 'turn_middleware'), middleware_phase: 'before_model' },
+    { ...item('check', 'turn_middleware'), middleware_phase: 'before_tool' },
+    { ...item('unknown', 'turn_middleware'), action_count: 4 },
+    { ...item('future', 'turn_middleware'), middleware_phase: 'future_stage' as CapabilityCatalogItem['middleware_phase'] },
+  ];
+  const original: AgentPresetDocument = { ...initial(),
+    enabled_capabilities: extensions.map(value => ({ capability: value.capability })),
+    middleware_order: [asCapabilityId('unknown'), asCapabilityId('check')],
+  };
+  const result = mount(original, extensions, false, 'middleware'), view = within(result.container);
+  expect(view.getAllByRole('listitem').map(row => row.textContent)).toEqual([
+    `unknown${en.middlewareOrder.phase.unknown}↑↓`,
+    `check${en.middlewareOrder.phase.before_tool}↑↓`,
+    `future${en.middlewareOrder.phase.unknown}↑↓`,
+    `model${en.middlewareOrder.phase.before_model}↑↓`,
+  ]);
+  expect(view.getByText(en.middlewareOrder.toolAccess)).toBeTruthy();
+  fireEvent.click(view.getByRole('button', { name: 'Move middleware check earlier' }));
+  expect(result.state().middleware_order).toEqual(['check', 'unknown', 'future', 'model']);
+  expect(result.state().enabled_capabilities).toEqual(original.enabled_capabilities);
+});
+
+test('ordinary user creates one check draft from an empty list without publishing or changing selection', async () => {
+  let finish!: (draft: PluginRuntimeDraft) => void;
+  const create = spyOn(pluginRuntimeProduct.beforeToolTemplate, 'invoke').mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  const publish = spyOn(pluginRuntimeProduct.save, 'invoke');
+  const document = createEmptyAgentPresetDocument();
+  const result = mount(document, [], false, 'middleware'), view = within(result.container);
+  expect(view.getByText(en.middlewareOrder.empty)).toBeTruthy();
+  const button = view.getByRole('button', { name: en.middlewareOrder.createBeforeTool });
+  fireEvent.click(button); fireEvent.click(button);
+  expect(create).toHaveBeenCalledTimes(1);
+  expect(create.mock.calls[0]).toEqual([]);
+  expect((button as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => { finish({ id: 'check-draft' } as PluginRuntimeDraft); });
+  expect(view.getByText('Draft check-draft')).toBeTruthy();
+  expect(publish).not.toHaveBeenCalled();
+  expect(result.state()).toEqual(document);
+});
+
+test('failed check draft creation is visible and retries only on another explicit click', async () => {
+  const create = spyOn(pluginRuntimeProduct.beforeToolTemplate, 'invoke').mockRejectedValue(new Error('offline'));
+  const result = mount(createEmptyAgentPresetDocument(), [], false, 'middleware'), view = within(result.container);
+  fireEvent.click(view.getByRole('button', { name: en.middlewareOrder.createBeforeTool }));
+  await waitFor(() => expect(view.getByText(en.middlewareOrder.createFailed)).toBeTruthy());
+  expect(create).toHaveBeenCalledTimes(1);
+  await act(async () => { fireEvent.click(view.getByRole('button', { name: en.middlewareOrder.createBeforeTool })); });
+  expect(create).toHaveBeenCalledTimes(2);
+  expect(view.queryByText(/Draft /)).toBeNull();
+});
+
+test('disabled editor cannot create a check and Context does not offer the execution template', () => {
+  const create = spyOn(pluginRuntimeProduct.beforeToolTemplate, 'invoke');
+  const result = mount(createEmptyAgentPresetDocument(), [], true, 'middleware'), view = within(result.container);
+  const button = view.getByRole('button', { name: en.middlewareOrder.createBeforeTool });
+  expect((button as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(button);
+  expect(create).not.toHaveBeenCalled();
+  result.unmount();
+  const context = mount();
+  expect(within(context.container).queryByRole('button', { name: en.middlewareOrder.createBeforeTool })).toBeNull();
+});
+
+test('a late check draft response cannot navigate after the editor unmounts', async () => {
+  let finish!: (draft: PluginRuntimeDraft) => void;
+  const create = spyOn(pluginRuntimeProduct.beforeToolTemplate, 'invoke').mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  const result = mount(createEmptyAgentPresetDocument(), [], false, 'middleware');
+  fireEvent.click(within(result.container).getByRole('button', { name: en.middlewareOrder.createBeforeTool }));
+  result.unmount();
+  const next = mount(createEmptyAgentPresetDocument(), [], false, 'middleware');
+  await act(async () => { finish({ id: 'old-draft' } as PluginRuntimeDraft); });
+  expect(within(next.container).queryByText('Draft old-draft')).toBeNull();
+  expect(within(next.container).getByRole('button', { name: en.middlewareOrder.createBeforeTool })).toBeTruthy();
+  expect(create).toHaveBeenCalledTimes(1);
 });

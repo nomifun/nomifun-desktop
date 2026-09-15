@@ -1005,6 +1005,7 @@ async fn invalid_host_dynamic_payload_is_rejected_before_invoker_dispatch() {
         None,
         Default::default(),
         false,
+        &[],
     )
     .await
     .unwrap();

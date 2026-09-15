@@ -84,6 +84,7 @@ async fn published_service_preserves_authority_cancellation_and_disable_fences()
         &id, &release, &PackageContributions { capabilities: vec![capability(&id)], ..Default::default() },
     ).unwrap();
     let request = PluginRuntimeAgentCapabilityInvocation {
+        cancellation: Default::default(),
         owner_user_id: services.authoritative_user_id.to_string(),
         plugin_product_id: id.clone().into(),
         capability: CapabilityRef { id: capability(&id).id, version: "1.0.0".into() },

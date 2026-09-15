@@ -259,6 +259,7 @@ export interface AgentPresetLibraryResponse {
 export interface CapabilityCatalogItem {
   capability: ExactCatalogRef<'capability'>;
   kind: string;
+  middleware_phase?: 'before_model' | 'before_tool';
   display_name: string;
   description: string;
   source_package: ExactCatalogRef<'package'>;

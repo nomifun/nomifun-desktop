@@ -106,6 +106,23 @@ impl Tool for WriteStdinTool {
         }
     }
 
+    async fn preflight_hook(
+        &self,
+        input: &Value,
+        _context: &crate::ToolExecutionContext,
+    ) -> Result<(), String> {
+        let id = input.get("session_id").and_then(Value::as_u64)
+            .ok_or_else(|| "write_stdin: missing required parameter `session_id`".to_string())?;
+        let entry = self.store.get(id)
+            .ok_or_else(|| format!("write_stdin: unknown or finished session_id={id}"))?;
+        // Inspect never renews a session lease, consumes output, or changes its
+        // cursor. The final write/poll still rechecks the same owner identity.
+        let state = entry.lock_state().await;
+        self.supervisor.terminal_outcome_if_ready(entry.owner(), &entry.session_id(), state.cursor())
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
         let id = match input.get("session_id").and_then(Value::as_u64) {
             Some(id) => id,

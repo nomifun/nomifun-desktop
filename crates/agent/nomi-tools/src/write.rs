@@ -8,6 +8,7 @@ use nomi_protocol::events::ToolCategory;
 use nomi_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
+use crate::file_cache::{GuardCacheAccess, cached_mtime_for_guard};
 use crate::file_cache::{FileStateCache, update_cache_after_write};
 
 pub struct WriteTool {
@@ -21,6 +22,68 @@ pub struct WriteTool {
 }
 
 impl WriteTool {
+    fn prepare_write<'a>(&self, input: &'a Value, cache_access: GuardCacheAccess) -> Result<(String, &'a str, bool), ToolResult> {
+        let Some(file_path) = input["file_path"].as_str() else {
+            return Err(ToolResult {
+                content: "Missing required parameter: file_path".to_string(),
+                is_error: true,
+                images: Vec::new(),
+            });
+        };
+        let Some(content) = input["content"].as_str() else {
+            return Err(ToolResult {
+                content: "Missing required parameter: content".to_string(),
+                is_error: true,
+                images: Vec::new(),
+            });
+        };
+
+        // Resolve a relative file_path against the session working directory
+        // (matching ReadTool/Grep/Glob/Bash) before any filesystem use — so a
+        // relative write lands in the conversation workspace, not the process cwd.
+        let resolved = crate::path_guard::resolve_against_cwd(file_path, self.cwd.as_deref());
+        let file_path = resolved.as_str();
+
+        let path = Path::new(file_path);
+        let existed = path.exists();
+
+        // Write-root containment (opt-in): reject writes outside the configured
+        // root before touching the filesystem.
+        if let Some(msg) = crate::path_guard::ensure_within_root(file_path, self.write_root.as_deref()) {
+            return Err(ToolResult {
+                content: msg,
+                is_error: true,
+                images: Vec::new(),
+            });
+        }
+
+        // Enforce "must Read first" for files that already exist: overwriting a
+        // file the model never read silently clobbers content it cannot see.
+        // New files are exempt (Write's purpose is creation). Only enforced when
+        // a file cache is wired; None disables it, preserving legacy behavior.
+        if existed
+            && let Some(cache_arc) = &self.file_cache
+        {
+            let Ok(cached_mtime) = cached_mtime_for_guard(cache_arc, path, cache_access) else {
+                return Err(ToolResult::error("File state cache is unavailable; refusing to overwrite"));
+            };
+            if cached_mtime.is_none() {
+                return Err(ToolResult {
+                    content: format!(
+                        "You must Read {} before overwriting it — it already exists. \
+                         Use the Read tool first, or use Edit for a targeted change.",
+                        file_path
+                    ),
+                    is_error: true,
+                    images: Vec::new(),
+                });
+            }
+        }
+
+        Ok((resolved, content, existed))
+    }
+
+
     /// Create a WriteTool with optional file state cache.
     ///
     /// When cache is `Some`, the tool updates the cache after each successful
@@ -90,63 +153,21 @@ impl Tool for WriteTool {
         false
     }
 
+    async fn preflight_hook(
+        &self,
+        input: &Value,
+        _context: &crate::ToolExecutionContext,
+    ) -> Result<(), String> {
+        self.prepare_write(input, GuardCacheAccess::Inspect).map(|_| ()).map_err(|error| error.content)
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
-        let Some(file_path) = input["file_path"].as_str() else {
-            return ToolResult {
-                content: "Missing required parameter: file_path".to_string(),
-                is_error: true,
-                images: Vec::new(),
-            };
+        let (resolved, content, existed) = match self.prepare_write(&input, GuardCacheAccess::Execute) {
+            Ok(args) => args,
+            Err(error) => return error,
         };
-        let Some(content) = input["content"].as_str() else {
-            return ToolResult {
-                content: "Missing required parameter: content".to_string(),
-                is_error: true,
-                images: Vec::new(),
-            };
-        };
-
-        // Resolve a relative file_path against the session working directory
-        // (matching ReadTool/Grep/Glob/Bash) before any filesystem use — so a
-        // relative write lands in the conversation workspace, not the process cwd.
-        let resolved = crate::path_guard::resolve_against_cwd(file_path, self.cwd.as_deref());
         let file_path = resolved.as_str();
-
         let path = Path::new(file_path);
-        let existed = path.exists();
-
-        // Write-root containment (opt-in): reject writes outside the configured
-        // root before touching the filesystem.
-        if let Some(msg) = crate::path_guard::ensure_within_root(file_path, self.write_root.as_deref()) {
-            return ToolResult {
-                content: msg,
-                is_error: true,
-                images: Vec::new(),
-            };
-        }
-
-        // Enforce "must Read first" for files that already exist: overwriting a
-        // file the model never read silently clobbers content it cannot see.
-        // New files are exempt (Write's purpose is creation). Only enforced when
-        // a file cache is wired; None disables it, preserving legacy behavior.
-        if existed
-            && let Some(cache_arc) = &self.file_cache
-        {
-            let Ok(mut cache) = cache_arc.write() else {
-                return ToolResult::error("File state cache is unavailable; refusing to overwrite");
-            };
-            if cache.get(path).is_none() {
-                return ToolResult {
-                    content: format!(
-                        "You must Read {} before overwriting it — it already exists. \
-                         Use the Read tool first, or use Edit for a targeted change.",
-                        file_path
-                    ),
-                    is_error: true,
-                    images: Vec::new(),
-                };
-            }
-        }
 
         // Create parent directories
         if let Some(parent) = path.parent().filter(|p| !p.exists()) {

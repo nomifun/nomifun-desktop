@@ -12,6 +12,9 @@ use serde_json::Value;
 use crate::RuntimeEngineBinding;
 
 pub trait RuntimeEngineAdmission: Send + Sync {
+    /// Explicit source-registered support for Product tool hooks. Other engines
+    /// reject these selections before an Agent can be saved or started.
+    fn supports_tool_hooks(&self, _binding: &RuntimeEngineBinding) -> bool { false }
     /// Opt in only when conversational state is rebuilt from the platform
     /// history ports each turn, with no independent/private prompt history.
     /// Maintenance retires the live runtime and advances the owner's history
