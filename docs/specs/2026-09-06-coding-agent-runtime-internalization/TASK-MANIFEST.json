@@ -11,108 +11,71 @@
       "nomifun.coding"
     ],
     "community_example_acceptance_required": false,
-    "cross_platform_policy": "Windows shared-code regression required; Linux runtime acceptance remains TODO",
-    "validation_policy": "Isolated native dev and app/DMG validation; StepFun step-3.7-flash only; no Release, updater publication or push",
+    "cross_platform_policy": "Windows current shared-code native regression required; Linux runtime acceptance remains TODO",
+    "validation_policy": "Isolated native dev and app/DMG validation; real StepFun step-3.7-flash only; no Release, updater publication or push",
     "source_baseline": "2ff02951266b12008cf1f7ea63c3b27cff9a192a",
-    "handoff": "MACOS-CONTINUATION-2026-09-15.zh.md",
-    "status": "local-macos-baseline-closed-with-documented-failures-and-not-run-items; not-release-ready",
+    "synchronized_remote_commit": "70c28b5de",
+    "source_commit": "6125f1a6453f915f1dfcdd5d4543f8d45182c5d2",
+    "handoff": "MACOS-REVALIDATION-2026-09-15.zh.md",
+    "previous_macos_record": "MACOS-CONTINUATION-2026-09-15.zh.md",
+    "status": "current-source-local-macos-baseline-verified; live-provider-blocked-missing-credential; strict-signature-failed; not-release-ready",
     "engine_builds": {
       "nomifun.nomi": "0.7.6-host62",
       "nomifun.coding": "0.7.6-host2-coding-loop95"
     },
     "engineering_checks": {
-      "ui_targeted_tests": "continuation 73 passed; initial 85 passed (overlapping suites, not summed)",
-      "engine_core_coding_tests": "51 passed",
-      "process_tests": "71 passed",
-      "migration_tests": "12 passed",
+      "bun_run_check": "passed entire chain; previous vocabulary failure no longer applies",
+      "ui_targeted_tests": "30 passed after catalog fixture repair",
+      "engine_core_tests": "14 passed",
+      "coding_tests": "39 passed after payload fixture repair",
+      "official_engine_fixture_tests": "15 passed; 3 live provider tests ignored",
+      "migration_tests": "6 passed",
       "macos_desktop_tests": "5 passed",
-      "legacy_skill_tests": "4 passed",
-      "official_engine_fixture_tests": "15 passed, including active native process cancellation for both engines",
-      "contract_check": "passed",
-      "bun_run_check": "failed: 109 retired references",
-      "wave2_tests": "16 passed after correcting invalid fs.read fixture",
-      "coding_tests": "39 passed"
+      "macos_script_tests": "21 passed"
     },
     "native_dev": {
-      "startup": "passed arm64, isolated data root and WebView store",
-      "runner_sigint_shutdown": "passed",
-      "cli_sigint_shutdown": "passed",
-      "native_window_interaction": "passed byte-identical app identity: native Nomi/Coding send, personal engine save, exact old binding preserved; resumed window rendered without reload",
-      "webview_isolation": "passed fresh root and unit regression",
-      "native_command_q_shutdown": "passed exit 0, runner and app gone"
+      "startup": "passed arm64, fresh isolated data root and WebView; native Vite window",
+      "native_engine_save_binding": "passed official-template Coding save, personal change to Nomi, new binding and old Coding continuation",
+      "native_command_q_shutdown": "passed exit 0, app/runner/Vite and ports gone"
     },
     "live_provider": {
       "model": "step-3.7-flash",
-      "nomi": "four stages passed",
-      "coding": "four stages passed",
-      "compaction": "passed: one real summary and one context replacement; canonical synthetic history retained",
-      "transient_failures": "ProviderUnavailable observed in other attempts; no fallback",
-      "shutdown_and_credential_audit": "passed"
+      "status": "blocked: NOMIFUN_LIVE_STEPFUN_API_KEY absent",
+      "current_source_calls": "not_run",
+      "historical_evidence": "Prior StepFun eight-stage and compaction success remains attributed to previous report only"
     },
     "package_checks": {
-      "status": "built from clean source; native UI Nomi/Coding send and active terminal Command-Q verified; strict signature still fails",
+      "source_commit": "6125f1a6453f915f1dfcdd5d4543f8d45182c5d2",
+      "status": "arm64 build and native package interaction/Command-Q passed; strict bundle signature failed",
       "host_arch": "arm64",
-      "dmg_sha256": "0f4c16cd7ca5123872cefd9d123198ba43fbbc33fc953fecbf958aa816fb1d11",
-      "host_sha256": "8567e3e188e22b0410a243b014c6c6431dfe95f02fd3be27a94621d1cf4c65f3",
-      "release_lock_sha256": "ba7d669a708f873c475b580d341f028774de3e0ea45ebfda0bb0f656a8bfe0cd",
-      "frontend_401_files_and_legal": "passed",
+      "dmg_size_bytes": 88448834,
+      "dmg_sha256": "b180461069336f3aaa025efd3699f9dd5a5c6e95b240cf12df5112824a9a0683",
+      "host_sha256": "833da569de6147c7af6e0a6d45ff06da3d5607df08167e7c913acb7fb0f64a84",
+      "release_lock_sha256": "24af389bffc728311ccd52726c14d5796162fdefc14e97cbb581bb1a3860ca7c",
+      "frontend_files": 404,
+      "resources_legal_and_mounted_host": "exact match",
       "hdiutil_integrity": "passed",
-      "isolated_package_startup": "health 200",
-      "sigterm_cleanup": "logged normal shutdown; exit 0",
-      "bundle_signature": "strict verification failed; linker ad-hoc only",
+      "isolated_package_startup": "health 200; tauri://localhost",
+      "native_nomi_new_and_coding_resume": "passed loopback fixture, four total sessions finished, old exact bindings unchanged",
+      "native_command_q_active_terminal": "passed: app/watchdog/sh/sleep gone, all terminal row counts 0, exit 0",
+      "bundle_signature": "failed strict codesign: code has no resources but signature indicates they must be present",
       "developer_id_signing": "not_run",
       "notarization": "not_run",
       "release_updater_publication": "not_run",
-      "native_official_template_engine_save": "passed: Coding selected and saved as personal Agent, then launched",
-      "native_ui_send_exact_binding": "passed both engines using loopback fixture; old Nomi binding unchanged",
-      "native_command_q_active_terminal": "passed: app/watchdog/sh/sleep gone, terminal rows 0, normal cleanup, exit 0",
-      "evidence": ".git/macos-engine-20260914/package-native-ui-final.json"
+      "evidence": ".git/macos-engine-70c28b5de/package-process-cleanup.json"
     },
     "not_run": [
-      "community_engine_example",
-      "Linux_acceptance",
-      "Windows_regression_on_current_changes",
+      "current_source_real_model_dual_engine_chain",
+      "current_source_real_compaction",
       "live_model_cancel",
+      "abnormal_exit_recovery",
       "production_user_database_migration",
-      "abnormal_exit_old_data_root_recovery",
-      "Gatekeeper_install_upgrade_uninstall"
+      "Windows_native_regression",
+      "Linux_acceptance",
+      "Gatekeeper_install_upgrade_uninstall",
+      "Coding_rewind_retry_revalidation"
     ],
-    "previous_verified_package": {
-      "source_commit": "973bbe206fc92c0a2032eeaaa31e659994dc8fa5",
-      "source_overlay_sha256": "1d7245418a8139f37e10aa9ed0ac7f8dbc9d5e11e2b2ffb453ca8cf1df0cd6eb",
-      "checks": {
-        "arm64_app_dmg": "passed clean-source build",
-        "hdiutil_integrity": "passed",
-        "frontend_401_files_and_legal": "passed",
-        "native_window_agent_selection_save": "passed in f7e97669f package; UI source unchanged in final package",
-        "native_window_startup_and_command_q_with_active_terminal": "passed final package; exit 0, no remaining PIDs, terminal row removed",
-        "dmg_sha256": "857a4270b5de09bd698df71b41db792dc3718314aa7f2fb654b38630855e25c4",
-        "host_sha256": "724ce22da1addaacba31466c9134e7b5cdcec0e27b4466830b26c9a37da37d2d",
-        "bundle_signature": "failed strict codesign; linker adhoc only",
-        "developer_id_signing": "not_run",
-        "notarization": "not_run",
-        "release_updater_publication": "not_run",
-        "normal_data_root_restart": "passed: health 200, SIGTERM cleanup, exit 0",
-        "latest_source": "rebuild required; previous 973bbe206 artifacts remain historical evidence"
-      }
-    },
-    "source_commit": "2ede9aaf73eff787abd2315130a04b7dd68a4265",
-    "blocker_audit": {
-      "condition": "resolved: Mac unlocked; pending native UI verification completed",
-      "prior_consecutive_goal_turns": 3,
-      "test_processes": "stopped; DMG unmounted; isolated data preserved",
-      "resume_evidence": ".git/macos-engine-20260914/package-native-ui-final.json"
-    },
-    "known_failures": [
-      "strict macOS bundle signature verification fails; signing/notarization not run",
-      "bun run check fails: 109 retired vocabulary references",
-      "Coding error retry invokes unsupported rewind and returns HTTP 400"
-    ],
-    "observed_guard_rejections": [
-      "UI fixture missing model traits rejected before provider request; saved traits and new session succeed",
-      "Existing Coding session rejects changed model route with RouteRevisionMismatch",
-      "Copied dataset root rejected by ownership guard; original isolated root reused"
-    ]
+    "temporary_ui_blocker": "Mac locked at first package observation; user unlocked, native checks completed"
   },
   "previous_windows_delivery_scope": {
     "platform": "windows-local",
