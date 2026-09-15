@@ -6,6 +6,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import AgentCapabilityWorkspace from './AgentCapabilityWorkspace';
 import AgentRuntimeEngineSelector from './AgentRuntimeEngineSelector';
+import AgentRoleProviderPicker from './AgentRoleProviderPicker';
 import { unavailableCapabilityReferences } from './capabilityGroups';
 import { TEMPLATE_I18N_PATH } from './model';
 import styles from './AgentSettingsPage.module.css';
@@ -35,6 +36,7 @@ const OfficialTemplateOverview: React.FC<Props> = ({ template, busy, catalog, on
   const [activeTab, setActiveTab] = useState('capabilities');
   const tabs = [
     { key: 'capabilities', label: t('agentSettings.workbench.capabilityTab') },
+    { key: 'providers', label: t('agentSettings.providers.title') },
     { key: 'settings', label: t('agentSettings.workbench.settingsTab') },
   ];
   const dirty = JSON.stringify(document) !== JSON.stringify(original) || displayName !== name;
@@ -72,6 +74,9 @@ const OfficialTemplateOverview: React.FC<Props> = ({ template, busy, catalog, on
             </div>
           </div>
         </section>
+      </div>}
+      {activeTab === 'providers' && <div role='tabpanel' id='template-panel-providers' aria-labelledby='template-tab-providers'>
+        <AgentRoleProviderPicker document={document} catalog={catalog} disabled={busy} onChange={setDocument} />
       </div>}
     </div>
     <footer className={styles.actionBar}>

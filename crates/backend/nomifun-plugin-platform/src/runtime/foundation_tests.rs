@@ -852,7 +852,7 @@ fn service_spec(
             nomifun_agent_contracts::PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
         sdk_contract_version:
             nomifun_agent_contracts::PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
-        runtime: PluginServiceRuntimeFingerprint {
+        runtime: PluginServiceRuntimeFingerprint::Node {
             runtime_installation_id: RuntimeInstallationId::from("runtime-test"),
             runtime_target: RuntimeTarget::from("windows-x86_64"),
             runtime_executable_digest: digest("runtime-executable"),

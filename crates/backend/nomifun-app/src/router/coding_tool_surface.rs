@@ -290,7 +290,7 @@ impl nomifun_ai_agent::RuntimeEngineAdmission for CodingAdmission {
             return Err(error("Coding supports at most 128 selected capabilities"));
         }
         for capability in products {
-            super::engine_miniapp_tools::validate_capability(capability)?;
+            super::engine_plugin_product_tools::validate_capability(capability)?;
             allowed.insert(capability.capability.id.as_ref().to_owned());
         }
         let mut policy = nomifun_ai_agent::RuntimeEngineSupport::enabled_only(allowed);

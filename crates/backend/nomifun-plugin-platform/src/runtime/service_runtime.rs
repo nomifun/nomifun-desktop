@@ -15,7 +15,7 @@ use crate::runtime::{
     PluginRuntimePlatformResult, PluginRuntimeServiceHostPort, PluginRuntimeServiceHostState,
     PluginRuntimeServiceModuleRegistry, PluginRuntimeServiceProcessFactory,
     RuntimeAwarePluginRuntimeServiceProcessFactory, PluginRuntimeServiceLaunch,
-    NodePluginRuntimeServiceProcessFactory, PluginRuntimeServiceStoragePort,
+    PluginRuntimeServiceProcessAdapterFactory, PluginRuntimeServiceStoragePort,
     PluginRuntimeServiceStorageRequest, PluginRuntimeServiceStorageResolution,
     PluginRuntimeServiceTestStorageResolution, PluginRuntimeMigrationLedger,
 };
@@ -49,8 +49,7 @@ impl PluginRuntimeServiceSpecInput {
             ));
         }
         self.descriptor
-            .clone()
-            .validate_for_platform()
+            .validate()
             .map_err(PluginRuntimePlatformError::Contract)?;
         self.storage
             .validate_for_platform(&self.plugin_product_id)
@@ -233,6 +232,14 @@ pub trait PluginRuntimeServiceRuntimeBinding: Send + Sync {
         Ok(None)
     }
 
+    async fn current_fingerprint_for(
+        &self,
+        expected: &PluginServiceRuntimeFingerprint,
+    ) -> PluginRuntimePlatformResult<Option<PluginServiceRuntimeFingerprint>> {
+        if matches!(expected, PluginServiceRuntimeFingerprint::Native { .. }) { return Ok(None); }
+        self.current_runtime_fingerprint().await
+    }
+
     async fn resolve_spec(
         &self,
         input: PluginRuntimeServiceSpecInput,
@@ -258,6 +265,26 @@ pub trait PluginRuntimeServiceRuntimeBinding: Send + Sync {
         cancellation: PluginRuntimeCallCancellation,
         now_ms: i64,
     ) -> PluginRuntimePlatformResult<StrictJsonValue>;
+
+    /// Opt-in incremental delivery on the same call. Runtimes without stream
+    /// support must reject it, never run a unary call and silently lose events.
+    async fn invoke_with_events(
+        &self,
+        spec: &ResolvedPluginServiceSpec,
+        call_id: PluginBridgeCallId,
+        method: String,
+        payload: StrictJsonValue,
+        cancellation: PluginRuntimeCallCancellation,
+        now_ms: i64,
+        events: Option<tokio::sync::mpsc::Sender<StrictJsonValue>>,
+    ) -> PluginRuntimePlatformResult<StrictJsonValue> {
+        if events.is_some() {
+            return Err(PluginRuntimePlatformError::ServiceUnavailable(
+                "Plugin Service Runtime does not support incremental invocation".into(),
+            ));
+        }
+        self.invoke(spec, call_id, method, payload, cancellation, now_ms).await
+    }
 
     async fn cancel(&self, plugin_product_id: &PluginProductId, call_id: &PluginBridgeCallId);
 
@@ -379,6 +406,7 @@ impl PluginRuntimeServiceRuntimeBinding for NoopPluginRuntimeServiceRuntime {
 /// coordinator and resolves each process against the committed JavaScript
 /// Runtime authority and exact Release module registry.
 pub struct ProductionPluginRuntimeServiceRuntimeBinding {
+    allow_native: bool,
     authority: Arc<dyn CommittedRuntimeProvider>,
     registry: Arc<PluginRuntimeServiceModuleRegistry>,
     host: Arc<InMemoryPluginRuntimeServiceHost>,
@@ -409,10 +437,21 @@ impl ProductionPluginRuntimeServiceRuntimeBinding {
         storage: Option<Arc<dyn PluginRuntimeServiceStoragePort>>,
         max_active_service_hosts: usize,
     ) -> PluginRuntimePlatformResult<Self> {
+        Self::new_with_storage_and_native_policy(authority, registry, storage, max_active_service_hosts, false)
+    }
+
+    /// Opt-in is a host trust decision: native plugins have OS process authority.
+    pub fn new_with_storage_and_native_policy(
+        authority: Arc<dyn CommittedRuntimeProvider>,
+        registry: Arc<PluginRuntimeServiceModuleRegistry>,
+        storage: Option<Arc<dyn PluginRuntimeServiceStoragePort>>,
+        max_active_service_hosts: usize,
+        allow_native: bool,
+    ) -> PluginRuntimePlatformResult<Self> {
         let mut runtime_factory = RuntimeAwarePluginRuntimeServiceProcessFactory::new(
             Arc::clone(&authority),
             Arc::clone(&registry) as Arc<dyn crate::runtime::PluginRuntimeServiceModuleResolver>,
-        );
+        ).with_native_plugins(allow_native);
         if let Some(storage) = storage.as_ref() {
             runtime_factory = runtime_factory.with_storage(Arc::clone(storage));
         }
@@ -422,6 +461,7 @@ impl ProductionPluginRuntimeServiceRuntimeBinding {
             max_active_service_hosts,
         )?);
         Ok(Self {
+            allow_native,
             authority,
             registry,
             host,
@@ -440,6 +480,18 @@ impl ProductionPluginRuntimeServiceRuntimeBinding {
 
 #[async_trait]
 impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntimeBinding {
+    async fn current_fingerprint_for(
+        &self,
+        expected: &PluginServiceRuntimeFingerprint,
+    ) -> PluginRuntimePlatformResult<Option<PluginServiceRuntimeFingerprint>> {
+        match expected {
+            PluginServiceRuntimeFingerprint::Native { native_target, .. } => Ok(
+                (self.allow_native && Some(*native_target) == nomifun_agent_contracts::NativePluginTarget::current())
+                    .then(|| expected.clone())
+            ),
+            _ => self.current_runtime_fingerprint().await,
+        }
+    }
     async fn resolve_storage(
         &self,
         owner_user_id: &str,
@@ -627,13 +679,14 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
                 "Plugin managed Service storage is not configured".into(),
             )
         })?;
-        let lease = self
+        let lease = if matches!(input.spec.runtime, PluginServiceRuntimeFingerprint::Node { .. }) { Some(self
             .authority
             .acquire_use(nomifun_js_runtime::JavaScriptWorkKind::PluginServiceTestHost)
             .await
-            .map_err(|error| PluginRuntimePlatformError::Runtime(error.to_string()))?;
+            .map_err(|error| PluginRuntimePlatformError::Runtime(error.to_string()))?) } else { None };
+        let factory = if let Some(lease) = &lease {
         let runtime = lease.runtime();
-        let expected_runtime = PluginServiceRuntimeFingerprint {
+        let expected_runtime = PluginServiceRuntimeFingerprint::Node {
             runtime_installation_id: runtime.fingerprint.runtime_installation_id.clone(),
             runtime_target: runtime.fingerprint.runtime_target.clone(),
             runtime_executable_digest: runtime.fingerprint.executable_digest.clone(),
@@ -642,11 +695,16 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
         if input.spec.runtime != expected_runtime {
             return Err(PluginRuntimePlatformError::StaleServiceGeneration);
         }
-        let factory = NodePluginRuntimeServiceProcessFactory::new(
+        PluginRuntimeServiceProcessAdapterFactory::new(
             runtime.executable_path.clone(),
             Arc::clone(&self.registry) as Arc<dyn crate::runtime::PluginRuntimeServiceModuleResolver>,
         )?
-        .with_storage(Arc::clone(storage));
+        } else {
+            if !self.allow_native {
+                return Err(PluginRuntimePlatformError::ServiceUnavailable("Native plugins require explicit host opt-in".into()));
+            }
+            PluginRuntimeServiceProcessAdapterFactory::native(self.registry.clone())
+        }.with_storage(Arc::clone(storage));
         let host_generation = 1;
         let launch = PluginRuntimeServiceLaunch {
             spec: input.spec.clone(),
@@ -664,12 +722,14 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
                     None,
                 )
             }
-            Err(_) => (
+            Err(error) => {
+                tracing::warn!(%error, "Plugin Service test host failed");
+                (
                 PluginServiceTestOutcome::Failed,
                 Some(CanonicalErrorCode::from(
                     "plugin_service_test_host_failed",
                 )),
-            ),
+            )},
         };
         let receipt = PluginServiceTestReceipt {
             receipt_id: input.receipt_id,
@@ -679,7 +739,7 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
             outcome,
             error_code,
             runtime: input.spec.runtime.clone(),
-            host_target: input.spec.runtime.runtime_target.clone(),
+            host_target: input.spec.runtime.target(),
             host_protocol_version: PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
             sdk_contract_version: PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
             test_contract_version: PLUGIN_SERVICE_TEST_CONTRACT_VERSION.into(),
@@ -706,7 +766,7 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
             .committed_runtime()
             .await
             .map_err(|error| PluginRuntimePlatformError::Runtime(error.to_string()))?
-            .map(|runtime| PluginServiceRuntimeFingerprint {
+            .map(|runtime| PluginServiceRuntimeFingerprint::Node {
                 runtime_installation_id: runtime.fingerprint.runtime_installation_id,
                 runtime_target: runtime.fingerprint.runtime_target,
                 runtime_executable_digest: runtime.fingerprint.executable_digest,
@@ -719,6 +779,14 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
         input: PluginRuntimeServiceSpecInput,
     ) -> PluginRuntimePlatformResult<ResolvedPluginServiceSpec> {
         input.validate()?;
+        let runtime = match input.descriptor.execution {
+        nomifun_agent_contracts::PluginServiceExecution::Native { target } => {
+            if !self.allow_native || Some(target) != nomifun_agent_contracts::NativePluginTarget::current() {
+                return Err(PluginRuntimePlatformError::ServiceUnavailable("Native plugins require host opt-in and a matching target".into()));
+            }
+            PluginServiceRuntimeFingerprint::Native { native_target: target, native_executable_digest: input.descriptor.module_digest.clone() }
+        }
+        nomifun_agent_contracts::PluginServiceExecution::Node => {
         let runtime = self
             .authority
             .committed_runtime()
@@ -729,11 +797,13 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
                     "no committed JavaScript Runtime is selected".into(),
                 )
             })?;
-        let runtime = PluginServiceRuntimeFingerprint {
+        PluginServiceRuntimeFingerprint::Node {
             runtime_installation_id: runtime.fingerprint.runtime_installation_id,
             runtime_target: runtime.fingerprint.runtime_target,
             runtime_executable_digest: runtime.fingerprint.executable_digest,
             node_version: runtime.fingerprint.node_version,
+        }
+        }
         };
         ResolvedPluginServiceSpec::new(ResolvedPluginServiceSpecInputs {
             plugin_product_id: input.plugin_product_id,
@@ -794,6 +864,21 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
             .await
     }
 
+    async fn invoke_with_events(
+        &self,
+        spec: &ResolvedPluginServiceSpec,
+        call_id: PluginBridgeCallId,
+        method: String,
+        payload: StrictJsonValue,
+        cancellation: PluginRuntimeCallCancellation,
+        now_ms: i64,
+        events: Option<tokio::sync::mpsc::Sender<StrictJsonValue>>,
+    ) -> PluginRuntimePlatformResult<StrictJsonValue> {
+        self.host
+            .invoke_with_events(spec, call_id, method, payload, cancellation, now_ms, events)
+            .await
+    }
+
     async fn cancel(&self, plugin_product_id: &PluginProductId, call_id: &PluginBridgeCallId) {
         self.host.cancel(plugin_product_id, call_id).await;
     }
@@ -825,8 +910,10 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
         &self,
         candidate: &ResolvedNodeRuntime,
     ) -> PluginRuntimePlatformResult<Vec<PluginProductId>> {
-        let specs = self.host.enabled_service_specs().await;
-        let factory = NodePluginRuntimeServiceProcessFactory::new(
+        let specs: Vec<_> = self.host.enabled_service_specs().await.into_iter()
+            .filter(|spec| matches!(spec.runtime, PluginServiceRuntimeFingerprint::Node { .. })).collect();
+        if specs.is_empty() { return Ok(Vec::new()); }
+        let factory = PluginRuntimeServiceProcessAdapterFactory::new(
             candidate.executable_path.clone(),
             Arc::clone(&self.registry) as Arc<dyn crate::runtime::PluginRuntimeServiceModuleResolver>,
         )?;
@@ -879,7 +966,7 @@ fn spec_with_runtime(
         lifecycle: spec.lifecycle,
         host_protocol_version: spec.host_protocol_version.clone(),
         sdk_contract_version: spec.sdk_contract_version.clone(),
-        runtime: PluginServiceRuntimeFingerprint {
+        runtime: PluginServiceRuntimeFingerprint::Node {
             runtime_installation_id: candidate.fingerprint.runtime_installation_id.clone(),
             runtime_target: candidate.fingerprint.runtime_target.clone(),
             runtime_executable_digest: candidate.fingerprint.executable_digest.clone(),
@@ -910,38 +997,6 @@ fn validate_digest(value: &DigestHex, field: &str) -> PluginRuntimePlatformResul
         Err(PluginRuntimePlatformError::InvalidState(format!(
             "{field} must be a lowercase SHA-256 digest"
         )))
-    }
-}
-
-// These validation helpers are intentionally kept at the platform boundary.
-// The contract types keep their detailed validators private because they are
-// also used by schema generation; this adapter needs the same exact checks
-// without exposing mutable internals.
-trait PlatformServiceDescriptorValidation {
-    fn validate_for_platform(&self) -> Result<(), nomifun_agent_contracts::PluginRuntimeContractError>;
-}
-
-impl PlatformServiceDescriptorValidation for PluginServiceReleaseDescriptor {
-    fn validate_for_platform(&self) -> Result<(), nomifun_agent_contracts::PluginRuntimeContractError> {
-        if self.entrypoint != "service/main.mjs" {
-            return Err(nomifun_agent_contracts::PluginRuntimeContractError::InvalidField {
-                field: "service.entrypoint",
-                reason: "Service entrypoint must be service/main.mjs".into(),
-            });
-        }
-        if self.module_digest.as_ref().len() != 64
-            || !self
-                .module_digest
-                .as_ref()
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(nomifun_agent_contracts::PluginRuntimeContractError::InvalidField {
-                field: "service.module_digest",
-                reason: "Service module digest is invalid".into(),
-            });
-        }
-        Ok(())
     }
 }
 
@@ -1110,6 +1165,7 @@ mod tests {
             },
             active_release_epoch: 1,
             descriptor: PluginServiceReleaseDescriptor {
+                execution: Default::default(),
                 entrypoint: "service/main.mjs".into(),
                 module_digest: digest("module"),
                 lifecycle: PluginServiceLifecycle::OnDemand,
@@ -1159,6 +1215,7 @@ mod tests {
             },
             active_release_epoch: 1,
             descriptor: PluginServiceReleaseDescriptor {
+                execution: Default::default(),
                 entrypoint: "service/main.mjs".into(),
                 module_digest: digest("module"),
                 lifecycle: PluginServiceLifecycle::OnDemand,
@@ -1199,7 +1256,7 @@ mod tests {
                 lifecycle: input.descriptor.lifecycle,
                 host_protocol_version: input.descriptor.host_protocol_version.clone(),
                 sdk_contract_version: input.descriptor.sdk_contract_version.clone(),
-                runtime: PluginServiceRuntimeFingerprint {
+                runtime: PluginServiceRuntimeFingerprint::Node {
                     runtime_installation_id: "node-a".into(),
                     runtime_target: "windows-x86_64".into(),
                     runtime_executable_digest: digest("node-a"),
@@ -1239,7 +1296,7 @@ mod tests {
         assert_ne!(original.runtime, rebound.runtime);
         assert_ne!(original.service_run_key, rebound.service_run_key);
         assert_eq!(
-            rebound.runtime.runtime_executable_digest,
+            rebound.runtime.executable_digest().clone(),
             candidate.fingerprint.executable_digest
         );
     }
@@ -1294,7 +1351,7 @@ export async function start() {
             lifecycle: PluginServiceLifecycle::OnDemand,
             host_protocol_version: PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
             sdk_contract_version: PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
-            runtime: PluginServiceRuntimeFingerprint {
+            runtime: PluginServiceRuntimeFingerprint::Node {
                 runtime_installation_id: RuntimeInstallationId::from("old-node"),
                 runtime_target: RuntimeTarget::from("windows-x86_64"),
                 runtime_executable_digest: digest("old-node"),
@@ -1445,7 +1502,7 @@ export async function start() {
             lifecycle: PluginServiceLifecycle::OnDemand,
             host_protocol_version: PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
             sdk_contract_version: PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
-            runtime: PluginServiceRuntimeFingerprint {
+            runtime: PluginServiceRuntimeFingerprint::Node {
                 runtime_installation_id: fingerprint.runtime_installation_id,
                 runtime_target: fingerprint.runtime_target,
                 runtime_executable_digest: node_digest,

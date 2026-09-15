@@ -17,6 +17,7 @@ pub struct SelectedSkills {
     pub(super) ids: BTreeSet<String>,
     pub(super) instructions: Vec<String>,
     pub(super) resources: Arc<BTreeMap<String, EngineContextResource>>,
+    pub(super) commands: Vec<nomifun_ai_agent::plugin_skills::NomiVerifiedSkillCommand>,
 }
 
 fn error(value: impl std::fmt::Display) -> AppError {
@@ -131,6 +132,10 @@ fn load(
         }
         result.ids.insert(lock.skill.id.as_ref().to_owned());
         result.instructions.push(instruction);
+        result.commands.push(nomifun_ai_agent::plugin_skills::NomiVerifiedSkillCommand {
+            lock: lock.clone(), markdown: body,
+            description: skill.definition.display.description.clone(),
+        });
         for resource in &skill.definition.resources {
             if resources.len() >= 64 {
                 return Err(error("at most 64 selected Skill resources are supported"));

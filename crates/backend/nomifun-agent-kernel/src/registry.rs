@@ -94,13 +94,15 @@ impl PublishedRegistry {
     }
 }
 
+/// Clones share one publication authority, state store and resource ledger.
+#[derive(Clone)]
 pub struct KernelRegistry {
     policy: MaterializationPolicy,
     state_store: Arc<PluginStateStore>,
-    published: RwLock<Arc<PublishedRegistry>>,
-    resource_handles: tokio::sync::Mutex<
+    published: Arc<RwLock<Arc<PublishedRegistry>>>,
+    resource_handles: Arc<tokio::sync::Mutex<
         BTreeMap<ResourceHandleKey, Arc<dyn ResourceHandle>>,
-    >,
+    >>,
 }
 
 impl KernelRegistry {
@@ -121,8 +123,8 @@ impl KernelRegistry {
         Self {
             policy,
             state_store,
-            published: RwLock::new(Arc::new(PublishedRegistry::empty())),
-            resource_handles: tokio::sync::Mutex::new(BTreeMap::new()),
+            published: Arc::new(RwLock::new(Arc::new(PublishedRegistry::empty()))),
+            resource_handles: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -403,6 +405,63 @@ impl KernelRegistry {
         active: &ActiveCapabilitySetSnapshot,
         request: CapabilityInvocationRequest,
     ) -> Result<nomifun_agent_contracts::StrictJsonValue, KernelError> {
+        self.invoke_shared(Arc::new(snapshot.clone()), active, request)
+            .await
+    }
+
+    /// The Session-owned plan is shared with nested calls rather than copied
+    /// for every Tool. This is the same admission/dispatch as `invoke`.
+    pub async fn invoke_shared(
+        &self,
+        snapshot: Arc<CompiledSnapshot>,
+        active: &ActiveCapabilitySetSnapshot,
+        request: CapabilityInvocationRequest,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, KernelError> {
+        snapshot.require_contribution(&request.capability_id)?;
+        self.invoke_scoped(
+            snapshot, Arc::new(active.clone()), request, Arc::new(Vec::new()),
+        )
+        .await
+    }
+
+    pub(crate) fn invoke_scoped(
+        &self,
+        snapshot: Arc<CompiledSnapshot>,
+        active: Arc<ActiveCapabilitySetSnapshot>,
+        request: CapabilityInvocationRequest,
+        ancestry: Arc<Vec<crate::dependency_call::DependencyAncestor>>,
+    ) -> std::pin::Pin<Box<
+        dyn std::future::Future<Output = Result<nomifun_agent_contracts::StrictJsonValue, KernelError>>
+            + Send + '_,
+    >> {
+        Box::pin(async move {
+            let mut lineage = ancestry.as_ref().clone();
+            // Ancestry is authority evidence, not another copy of Tool input.
+            let mut request = request;
+            let input = std::mem::replace(
+                &mut request.input,
+                nomifun_agent_contracts::StrictJsonValue(serde_json::Value::Null),
+            );
+            lineage.push(crate::dependency_call::DependencyAncestor::Tool(request.clone()));
+            request.input = input;
+            let (dependencies, _guard) = crate::CapabilityDependencyCaller::scoped(
+                self.clone(),
+                Arc::clone(&snapshot),
+                Arc::clone(&active),
+                Arc::new(lineage),
+            );
+            self.invoke_admitted(&snapshot, &active, request, dependencies)
+                .await
+        })
+    }
+
+    async fn invoke_admitted(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: CapabilityInvocationRequest,
+        dependencies: crate::CapabilityDependencyCaller,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, KernelError> {
         ThinAuthority::enforce(snapshot, active, &request)?;
         {
             let published = self
@@ -415,20 +474,7 @@ impl KernelRegistry {
                 &request.capability_id,
             )?;
         }
-        let role_request = RoleMemberInvocationRequest {
-            principal: request.principal.clone(),
-            session_owner: request.session_owner.clone(),
-            operation_id: request.operation_id.clone(),
-            correlation_id: request.correlation_id.clone(),
-            capability_id: request.capability_id.clone(),
-            resource_binding_ids: request.resource_binding_ids.clone(),
-            state_scope_key: request.state_scope_key.clone(),
-            admission: RoleMemberAdmission::Agent {
-                agent_session_id: request.agent_session_id.clone(),
-                resolved_snapshot_ref: request.resolved_snapshot_ref.clone(),
-                active_set_generation: request.active_set_generation,
-            },
-        };
+        let role_request = agent_role_request(&request);
         if snapshot
             .content()
             .resolved_role_providers
@@ -477,6 +523,7 @@ impl KernelRegistry {
                 request.action_id,
                 request.idempotency_key,
                 request.input,
+                Some(dependencies),
             )
             .await;
         }
@@ -529,6 +576,7 @@ impl KernelRegistry {
             (
                 Arc::clone(&binding.handler),
                 CapabilityInvocationContext {
+                    dependencies,
                     principal: request.principal,
                     agent_session_id: request.agent_session_id,
                     operation_id: request.operation_id,
@@ -549,6 +597,53 @@ impl KernelRegistry {
             )
         };
         handler.invoke(context, request.input).await
+    }
+
+    pub(crate) fn invocation_dependencies(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        ancestor: &crate::dependency_call::DependencyAncestor,
+    ) -> Result<Vec<nomifun_agent_contracts::CapabilityRef>, KernelError> {
+        use crate::dependency_call::DependencyAncestor;
+        let request = ancestor.access();
+        let kind = match ancestor {
+            DependencyAncestor::Tool(tool) => {
+                ThinAuthority::enforce(snapshot, active, tool)?;
+                RoleMemberDispatchKind::AgentTool { action_id: &tool.action_id }
+            }
+            DependencyAncestor::Context(_) => {
+                ThinAuthority::enforce_access(snapshot, active, &request)?;
+                RoleMemberDispatchKind::Context
+            }
+        };
+        let published = self.published.read()
+            .map_err(|_| KernelError::RegistryPoisoned)?;
+        validate_exact_capability_target(&published, snapshot, &request.capability_id)?;
+        let capability = published.materialized.capability(&request.capability_id)
+            .ok_or_else(|| KernelError::CapabilityNotInPreset {
+                capability_id: request.capability_id.clone(),
+            })?;
+        if published.materialized.role_for_capability(&request.capability_id).is_some() {
+            let member = resolve_role_member_dispatch(
+                &published,
+                RoleAdmissionEvidence::Agent { snapshot, active },
+                &role_request_from_access(request.clone()),
+                kind,
+            )?.member;
+            let provider = published.materialized.role_provider(
+                &member.role_id, &member.provider_lock.provider.mount_id,
+            )
+                .ok_or(KernelError::RegistryPoisoned)?;
+            let provider_member = provider.contribution.members.get(&request.capability_id)
+                .ok_or(KernelError::RegistryPoisoned)?;
+            if let Some(implementation) = &provider_member.implementation {
+                return published.materialized.capability(&implementation.id)
+                    .map(|value| value.manifest.requires.clone())
+                    .ok_or(KernelError::RegistryPoisoned);
+            }
+        }
+        Ok(capability.manifest.requires.clone())
     }
 
     /// Invoke one ordinary Tool contribution from a non-Agent consumer.
@@ -660,7 +755,19 @@ impl KernelRegistry {
         active: &ActiveCapabilitySetSnapshot,
         request: CapabilityAccessRequest,
     ) -> Result<ContextContributionResult, KernelError> {
+        self.contribute_context_with_input(snapshot, active, request, Default::default()).await
+    }
+
+    pub async fn contribute_context_with_input(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: CapabilityAccessRequest,
+        input: nomifun_agent_contracts::ContextContributionInput,
+    ) -> Result<ContextContributionResult, KernelError> {
+        snapshot.require_contribution(&request.capability_id)?;
         ThinAuthority::enforce_access(snapshot, active, &request)?;
+        self.validate_context_input(&request.capability_id, &input)?;
         let role_backed = {
             let published = self
                 .published
@@ -692,10 +799,11 @@ impl KernelRegistry {
         };
         if role_backed {
             return self
-                .contribute_role_context(
+                .contribute_role_context_with_input(
                     snapshot,
                     active,
                     role_request_from_access(request),
+                    input,
                 )
                 .await;
         }
@@ -738,10 +846,13 @@ impl KernelRegistry {
                 schema_ref.clone(),
             )
         };
+        let (dependencies, _guard) = self.context_dependency_scope(snapshot, active, request);
         factory
             .contribute(CapabilityContextContributionRequest {
+                dependencies,
                 context,
                 schema_ref,
+                input,
             })
             .await
     }
@@ -875,6 +986,7 @@ impl KernelRegistry {
             request.action_id,
             request.idempotency_key,
             request.input,
+            None,
         )
         .await
     }
@@ -888,15 +1000,46 @@ impl KernelRegistry {
         active: &ActiveCapabilitySetSnapshot,
         request: RoleMemberInvocationRequest,
     ) -> Result<ContextContributionResult, KernelError> {
+        self.contribute_role_context_with_input(snapshot, active, request, Default::default()).await
+    }
+
+    pub async fn contribute_role_context_with_input(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: RoleMemberInvocationRequest,
+        input: nomifun_agent_contracts::ContextContributionInput,
+    ) -> Result<ContextContributionResult, KernelError> {
+        snapshot.require_contribution(&request.capability_id)?;
+        self.validate_context_input(&request.capability_id, &input)?;
         self.ensure_role_resources_for_member(
             RoleAdmissionEvidence::Agent { snapshot, active },
             &request,
             CapabilityKind::ContextContributor,
         )
         .await?;
+        let RoleMemberAdmission::Agent { agent_session_id, resolved_snapshot_ref, active_set_generation } = &request.admission else {
+            return Err(KernelError::CapabilityExecution {
+                reason: "Agent Context requires Agent admission".into(),
+            });
+        };
+        let (dependencies, _guard) = self.context_dependency_scope(snapshot, active, CapabilityAccessRequest {
+            principal: request.principal.clone(),
+            session_owner: request.session_owner.clone(),
+            agent_session_id: agent_session_id.clone(),
+            operation_id: request.operation_id.clone(),
+            correlation_id: request.correlation_id.clone(),
+            resolved_snapshot_ref: resolved_snapshot_ref.clone(),
+            active_set_generation: *active_set_generation,
+            capability_id: request.capability_id.clone(),
+            resource_binding_ids: request.resource_binding_ids.clone(),
+            state_scope_key: request.state_scope_key.clone(),
+        });
         self.contribute_role_context_with_evidence(
             RoleAdmissionEvidence::Agent { snapshot, active },
             request,
+            input,
+            Some(dependencies),
         )
         .await
     }
@@ -915,6 +1058,7 @@ impl KernelRegistry {
                     .to_owned(),
             });
         }
+        self.validate_context_input(&request.capability_id, &Default::default())?;
         self.ensure_role_resources_for_member(
             RoleAdmissionEvidence::Operation,
             &request,
@@ -924,6 +1068,8 @@ impl KernelRegistry {
         self.contribute_role_context_with_evidence(
             RoleAdmissionEvidence::Operation,
             request,
+            Default::default(),
+            None,
         )
         .await
     }
@@ -932,6 +1078,8 @@ impl KernelRegistry {
         &self,
         evidence: RoleAdmissionEvidence<'_>,
         request: RoleMemberInvocationRequest,
+        input: nomifun_agent_contracts::ContextContributionInput,
+        dependencies: Option<crate::CapabilityDependencyCaller>,
     ) -> Result<ContextContributionResult, KernelError> {
         let (factory, context, schema_ref) = {
             let published = self
@@ -966,10 +1114,41 @@ impl KernelRegistry {
         };
         factory
             .contribute(ContextContributionRequest {
+                dependencies,
                 context,
                 schema_ref,
+                input,
             })
             .await
+    }
+
+    fn context_dependency_scope(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: CapabilityAccessRequest,
+    ) -> (crate::CapabilityDependencyCaller, crate::dependency_call::DependencyInvocationGuard) {
+        crate::CapabilityDependencyCaller::scoped(
+            self.clone(), Arc::new(snapshot.clone()), Arc::new(active.clone()),
+            Arc::new(vec![crate::dependency_call::DependencyAncestor::Context(request)]),
+        )
+    }
+
+    fn validate_context_input(
+        &self,
+        capability_id: &nomifun_agent_contracts::CapabilityId,
+        input: &nomifun_agent_contracts::ContextContributionInput,
+    ) -> Result<(), KernelError> {
+        input.validate().map_err(|reason| KernelError::CapabilityExecution { reason })?;
+        let published = self.published.read().map_err(|_| KernelError::RegistryPoisoned)?;
+        let capability = published.materialized.capability(capability_id)
+            .ok_or_else(|| KernelError::CapabilityNotInPreset { capability_id: capability_id.clone() })?;
+        if capability.manifest.contributions.context_phase != input.phase() {
+            return Err(KernelError::CapabilityExecution {
+                reason: format!("Context {} cannot consume {:?} input", capability_id.as_ref(), input.phase()),
+            });
+        }
+        Ok(())
     }
 
     /// Acquire one ResourceProvider member through the exact frozen Role
@@ -1137,31 +1316,12 @@ impl KernelRegistry {
                     role_id: resolved.role_id.clone(),
                     mount_id: resolved.provider_lock.provider.mount_id.clone(),
                 })?;
-            let target_member = provider
-                .contribution
-                .members
-                .get(&request.capability_id)
-                .ok_or_else(|| KernelError::RoleProviderMemberUnavailable {
-                    role_id: resolved.role_id.clone(),
-                    capability_id: request.capability_id.clone(),
-                })?;
             let mut acquisitions = Vec::new();
             for (resource_capability_id, resource_member) in
-                &provider.contribution.members
+                published.materialized.role_resource_members(
+                    provider, &request.capability_id,
+                )
             {
-                let Some(resource_capability) = published
-                    .materialized
-                    .capability(resource_capability_id)
-                else {
-                    continue;
-                };
-                if resource_capability.manifest.kind != CapabilityKind::ResourceProvider
-                    || resource_member
-                        .required_resource_kinds
-                        .is_disjoint(&target_member.required_resource_kinds)
-                {
-                    continue;
-                }
                 let factory = published
                     .role_resource_factories
                     .get(&(
@@ -1514,12 +1674,30 @@ fn capability_provenance_drift<T>(
     })
 }
 
+fn agent_role_request(request: &CapabilityInvocationRequest) -> RoleMemberInvocationRequest {
+    RoleMemberInvocationRequest {
+        principal: request.principal.clone(),
+        session_owner: request.session_owner.clone(),
+        operation_id: request.operation_id.clone(),
+        correlation_id: request.correlation_id.clone(),
+        capability_id: request.capability_id.clone(),
+        resource_binding_ids: request.resource_binding_ids.clone(),
+        state_scope_key: request.state_scope_key.clone(),
+        admission: RoleMemberAdmission::Agent {
+            agent_session_id: request.agent_session_id.clone(),
+            resolved_snapshot_ref: request.resolved_snapshot_ref.clone(),
+            active_set_generation: request.active_set_generation,
+        },
+    }
+}
+
 async fn dispatch_resolved_role_tool(
     target: RoleMemberDispatchTarget,
     context: ResolvedRoleMemberContext,
     action_id: ActionId,
     idempotency_key: nomifun_agent_contracts::IdempotencyKey,
     input: nomifun_agent_contracts::StrictJsonValue,
+    dependencies: Option<crate::CapabilityDependencyCaller>,
 ) -> Result<nomifun_agent_contracts::StrictJsonValue, KernelError> {
     match target {
         RoleMemberDispatchTarget::AgentTool(handler) => {
@@ -1542,6 +1720,7 @@ async fn dispatch_resolved_role_tool(
             handler
                 .invoke(
                     CapabilityInvocationContext {
+                        dependencies: dependencies.ok_or(KernelError::RegistryPoisoned)?,
                         principal: context.principal,
                         agent_session_id,
                         operation_id: context.operation_id,

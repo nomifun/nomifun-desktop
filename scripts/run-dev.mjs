@@ -337,7 +337,7 @@ export function loadWindowsToolchainEnvironment(
   return initialized;
 }
 
-// The Plugin clean-start refactor intentionally replaced historical MiniApp
+// The Plugin clean-start refactor intentionally replaced the historical product
 // migrations. Reusing NomiFun-dev[-nomi-core] cannot upgrade that database.
 // Give Windows dev a stable generation-specific root without deleting or
 // rewriting old data. Explicit data roots remain the caller's responsibility.

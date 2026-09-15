@@ -79,20 +79,55 @@ pub struct PresetRevisionCompiler {
     canonical_registry: Option<Arc<dyn CanonicalRegistryProvider>>,
     canonical_environment: Option<CompilerEnvironment>,
     runtime_validator: Option<Arc<dyn Fn(&AgentPresetRevisionPayload, &ResolvedSnapshotEnvelope) -> Result<(), String> + Send + Sync>>,
+    consumer_validator: Option<Arc<ConsumerValidator>>,
 }
 
+type ConsumerValidator = dyn Fn(&MaterializedRegistry, &ResolvedSnapshotEnvelope) -> Result<(), ControlPlaneError> + Send + Sync;
+
 impl PresetRevisionCompiler {
+    pub(crate) fn with_current_role_bindings(
+        mut self,
+        bindings: std::collections::BTreeMap<nomifun_agent_contracts::ExecutionRoleId, nomifun_agent_contracts::InstallationRoleBinding>,
+    ) -> Result<Self, ControlPlaneError> {
+        let environment = self.canonical_environment.as_mut().ok_or_else(||
+            ControlPlaneError::Wire("canonical compiler environment is not configured".into()))?;
+        environment.installation_role_bindings = bindings;
+        Ok(self)
+    }
+
+    pub(crate) fn validate_role_default(
+        &self,
+        selection: &nomifun_agent_contracts::RoleProviderSelection,
+    ) -> Result<(), ControlPlaneError> {
+        let (registry, environment) = self.canonical_inputs()?;
+        KernelAgentPresetCompiler::validate_role_default(&registry, &environment, selection)
+            .map_err(|error| ControlPlaneError::canonical(
+                error.canonical_code(), axum::http::StatusCode::UNPROCESSABLE_ENTITY, error.to_string(),
+            ))
+    }
+
     pub fn new(official_templates: OfficialTemplateCatalog) -> Self {
         Self {
             official_templates,
             canonical_registry: None,
             canonical_environment: None,
             runtime_validator: None,
+            consumer_validator: None,
         }
     }
 
+    /// Validate a host consumer against the very registry/plan used by the
+    /// canonical compiler. This may reject, never rewrite or re-resolve it.
+    /// Runs for compilation and unchanged saved-plan reuse alike, including
+    /// authoring saves and product selection checks that invoke the compiler.
+    pub fn with_consumer_validator<F>(mut self, validate: F) -> Self
+    where F: Fn(&MaterializedRegistry, &ResolvedSnapshotEnvelope) -> Result<(), ControlPlaneError> + Send + Sync + 'static {
+        self.consumer_validator = Some(Arc::new(validate));
+        self
+    }
+
     /// Bind revision saves to the exact registry and environment used by
-    /// Session Open. The provider is evaluated for every changed draft.
+    /// Session Open. The provider is also evaluated before reusing a saved draft.
     pub fn with_canonical_registry<P>(
         mut self,
         provider: Arc<P>,
@@ -145,15 +180,23 @@ impl PresetRevisionCompiler {
             None
         };
         let materialization_unchanged = match (
+            current_revision,
             current_snapshot,
-            current_canonical_inputs
-                .as_ref()
-                .map(|(registry, _)| registry.as_ref()),
+            current_canonical_inputs.as_ref(),
         ) {
-            (Some(snapshot), Some(registry)) => snapshot_matches_registry(snapshot, registry)?,
+            (Some(revision), Some(snapshot), Some((registry, environment))) => {
+                snapshot_matches_registry(snapshot, registry)?
+                    && snapshot.content.context_order == revision.payload.context_order
+                    && snapshot.content.middleware_order == revision.payload.middleware_order
+                    && KernelAgentPresetCompiler::skills_unchanged(registry, revision, snapshot)
+                    && KernelAgentPresetCompiler::role_providers_unchanged(
+                        registry, environment, revision, snapshot,
+                    )
+            }
             _ => true,
         };
         let clean = payload_unchanged && materialization_unchanged;
+        let consumer_registry = current_canonical_inputs.as_ref().map(|(registry, _)| registry.clone());
         let canonical_inputs = if clean {
             None
         } else if let Some(inputs) = current_canonical_inputs {
@@ -166,6 +209,7 @@ impl PresetRevisionCompiler {
         } else {
             resolved_plugin_product_capabilities_for_payload(&payload, catalog)?
         };
+        let consumer_registry = canonical_inputs.as_ref().map(|(registry, _)| registry.clone()).or(consumer_registry);
         let contribution_locks = if clean {
             current_revision
                 .map(|revision| revision.contribution_locks.clone())
@@ -295,6 +339,17 @@ impl PresetRevisionCompiler {
                 CanonicalErrorCode::from("AGENT_RUNTIME_ENGINE_UNAVAILABLE"), message, None,
             ));
             snapshot = None;
+        }
+        if let (Some(validate), Some(candidate)) = (&self.consumer_validator, &snapshot) {
+            let registry = consumer_registry.as_deref().ok_or_else(||
+                ControlPlaneError::Wire("consumer validation requires the canonical registry".into()))?;
+            if let Err(error) = validate(registry, candidate) {
+                diagnostics.push(CompilationDiagnostic {
+                    code: error.code().as_ref().to_owned(), message: error.to_string(),
+                    subject: None, details: error.details(),
+                });
+                snapshot = None;
+            }
         }
         Ok(PresetCompilation {
             payload,
@@ -487,6 +542,8 @@ fn resolved_plugin_product_capability_for_selection(
     }
 
     let resolved = ResolvedCapability {
+        consumption: Default::default(),
+        dependency_refs: Vec::new(),
         capability: capability.entry.capability.clone(),
         source_package: manifest.package.clone(),
         contribution_id: capability.entry.contribution_id.clone(),
@@ -851,6 +908,10 @@ pub fn revision_api(
 }
 
 #[cfg(test)]
+#[path = "compiler_role_tests.rs"]
+mod role_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use nomifun_agent_contracts::{
@@ -879,6 +940,8 @@ mod tests {
         let seed = templates.seed(OfficialPresetKey::CodingCodex).unwrap();
         let payload = AgentPresetRevisionPayload {
             runtime_engine: None,
+            context_order: Vec::new(),
+            middleware_order: Vec::new(),
             schema_version: VersionString::from("1.0.0"),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
@@ -1128,6 +1191,8 @@ mod tests {
         };
         let catalog = CatalogSnapshot {
             capabilities: vec![materialized_capability.clone()],
+            role_contracts: Vec::new(),
+            role_providers: Vec::new(),
             formal_capability_entries: BTreeMap::from([(
                 catalog_entry.capability.clone(),
                 catalog_entry,
@@ -1157,6 +1222,8 @@ mod tests {
         registry.mcp_tools.insert(mcp_key, materialized_mcp);
         let payload = AgentPresetRevisionPayload {
             runtime_engine: None,
+            context_order: Vec::new(),
+            middleware_order: Vec::new(),
             schema_version: VersionString::from("1.0.0"),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
@@ -1296,6 +1363,8 @@ mod tests {
 
         let catalog = CatalogSnapshot {
             capabilities: Vec::new(),
+            role_contracts: Vec::new(),
+            role_providers: Vec::new(),
             formal_capability_entries: BTreeMap::from([(
                 entry.capability.clone(),
                 entry.clone(),
@@ -1314,6 +1383,8 @@ mod tests {
         let action_allowlist = BTreeSet::from([action.action_id.clone()]);
         let payload = AgentPresetRevisionPayload {
             runtime_engine: None,
+            context_order: Vec::new(),
+            middleware_order: Vec::new(),
             schema_version: VersionString::from("1.0.0"),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),

@@ -3,17 +3,17 @@
   "payload": {
     "manifest_version": "1.0.0",
     "database_schema_digest": "1613407d942fc25ef1283839887c0f3441e403ac10db73110783331f2c0f2fbb",
-    "rust_contract_schema_digest": "539d4a63ed0f06478e0cc437668dc28412096fdf35b9041df51140e72eb99a88",
-    "package_schema_digest": "f82782c856ba53068161c4b0c98ba761c63a755ff23c773162571aa8fbe9d881",
+    "rust_contract_schema_digest": "e8edee60d25f9c33a45452cb6ad5ac9a69ecc042d01a5b73068fcf241c8d2f14",
+    "package_schema_digest": "27d2a130667208209d17da375a92577bbbf978dd3eef92ace9d7f1da218b0825",
     "official_preset_seed_manifest_digest": "afea86ddbb7a1e6e5788b07f0925cf4376e25d4939fe1852d332bf4b3762ebfe",
     "canonical_api_inventory_digest": "ae0ae25648dcda0908ada7e07a8da5843fcf9cc1241320c0d8fa04dd7b0bbb1d",
     "session_event_registry_digest": "e2cec429a2166b519e364483f94e47edfe4bc8c208ddc6bbdb82d70c5e69c74c",
     "error_registry_digest": "fe64ac21087f7c86594f0c9ccd1158e3b97616288e3d0cf295d376276f99d62c",
-    "runtime_protocol_digest": "4db15b75ea7825ad4c8ab0bcff7d1ee82ed87d110b8586048f2111eedaa8b195",
+    "runtime_protocol_digest": "553d20e4a85bd2264014f9f441feebb47c21ccf673532ffa2124e280230a8b14",
     "runtime_feature_inventory_digest": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
     "deletion_manifest_set_digest": "67d56ad6eced3599b3d02e78223af7fc08ad448ec70f83a9c39c7c9602d93cf8",
     "platform_validation_contract_digest": "a3f5180906c239d791a03281199d80f2ea957dbe8382fb849dc2926935672a9c",
     "confirmed_decision_contract_digest": "c1eeb87b010954fa19324fb59d63c9d8722d6704fe1121ea63f41d4d06d14643"
   },
-  "payload_digest": "3941d3c2c6b1340d3285ec1db1b06be4e9210faf1d5ddcc08dc759799ff4b3d0"
+  "payload_digest": "5d1675fef43e1c743316e6d6ebeb8355de422a8ece761f4204dbd37e8b3c0006"
 }

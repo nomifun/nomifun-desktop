@@ -9,6 +9,8 @@ mod dto;
 mod manifest;
 mod error;
 mod bridge;
+mod agent_ui;
+pub use agent_ui::*;
 mod backup;
 mod model;
 mod operation;

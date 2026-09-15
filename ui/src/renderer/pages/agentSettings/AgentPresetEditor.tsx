@@ -35,6 +35,9 @@ import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSe
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import AgentCapabilityWorkspace from './AgentCapabilityWorkspace';
 import AgentRuntimeEngineSelector from './AgentRuntimeEngineSelector';
+import AgentRoleProviderPicker from './AgentRoleProviderPicker';
+import AgentContributionOrder from './AgentContributionOrder';
+import AgentPageSettings from './AgentPageSettings';
 import { unavailableCapabilityReferences } from './capabilityGroups';
 import {
   TEMPLATE_I18N_PATH,
@@ -157,6 +160,8 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   );
   const tabs = [
     { key: 'capabilities', label: t('agentSettings.workbench.capabilityTab') },
+    { key: 'providers', label: t('agentSettings.providers.title') },
+    { key: 'page', label: t('agentSettings.page.title') },
     { key: 'settings', label: t('agentSettings.workbench.settingsTab') },
     { key: 'extensions', label: t('agentSettings.workbench.skillsTab') },
   ];
@@ -178,7 +183,15 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
       {activeTab === 'capabilities' && <div className={styles.capabilityPanel} role='tabpanel' id='agent-panel-capabilities' aria-labelledby='agent-tab-capabilities'>
         <AgentCapabilityWorkspace document={draft.document} catalog={catalog.capabilities} disabled={busy} onChange={(document) => onDraftChange({ ...draft, document })} />
       </div>}
+      {activeTab === 'providers' && <div role='tabpanel' id='agent-panel-providers' aria-labelledby='agent-tab-providers'>
+        <AgentRoleProviderPicker document={draft.document} catalog={catalog} disabled={busy} onChange={(document) => onDraftChange({ ...draft, document })} />
+      </div>}
+      {activeTab === 'page' && <div role='tabpanel' id='agent-panel-page' aria-labelledby='agent-tab-page'>
+        <AgentPageSettings key={editor.preset.preset_id} preset={editor.preset} busy={busy} dirty={dirty} />
+      </div>}
       {activeTab === 'settings' && <div role='tabpanel' id='agent-panel-settings' aria-labelledby='agent-tab-settings'>
+        <AgentContributionOrder document={draft.document} catalog={catalog.capabilities} disabled={busy} onChange={(document) => onDraftChange({ ...draft, document })} />
+        <AgentContributionOrder kind='middleware' document={draft.document} catalog={catalog.capabilities} disabled={busy} onChange={(document) => onDraftChange({ ...draft, document })} />
         <section className={styles.section} id='agent-settings-basic'>
         <div className={styles.sectionHeading}>
           <div>

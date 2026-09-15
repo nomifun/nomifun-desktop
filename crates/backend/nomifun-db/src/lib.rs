@@ -7,6 +7,8 @@ mod id_schema_contract;
 pub mod models;
 mod repository;
 mod plugin_product_documents;
+mod installation_role_bindings;
+pub use installation_role_bindings::{load_installation_role_bindings, put_installation_role_binding};
 pub use plugin_product_documents::PluginProductDocuments;
 
 pub use database::{

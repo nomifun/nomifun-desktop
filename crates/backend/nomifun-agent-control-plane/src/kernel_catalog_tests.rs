@@ -143,14 +143,14 @@ mod catalog_materialization_tests {
     #[test]
     fn plugin_product_publication_enters_the_same_shared_catalog_provider() {
         let package = PackageRef {
-            id: PackageId::from("miniapp.catalog"),
+            id: PackageId::from("plugin-product.catalog"),
             version: VersionString::from("1.0.0"),
         };
-        let plugin_product_id = PluginProductId::from("miniapp-catalog");
-        let artifact_digest = digest_bytes(b"miniapp-artifact");
+        let plugin_product_id = PluginProductId::from("plugin-product-catalog");
+        let artifact_digest = digest_bytes(b"plugin-product-artifact");
         let manifest = CapabilityManifest {
-            id: CapabilityId::from("miniapp.catalog.search"),
-            contribution_id: ContributionId::from("capability:miniapp.catalog.search"),
+            id: CapabilityId::from("plugin-product.catalog.search"),
+            contribution_id: ContributionId::from("capability:plugin-product.catalog.search"),
             version: VersionString::from("1.0.0"),
             kind: CapabilityKind::Tool,
             package: package.clone(),
@@ -172,10 +172,10 @@ mod catalog_materialization_tests {
             contributions: CapabilityContributions::default(),
         };
         let active_release = PluginReleaseRef {
-            release_id: PluginReleaseId::from("release-miniapp-search"),
-            artifact_id: ArtifactId::from("artifact-miniapp-search"),
+            release_id: PluginReleaseId::from("release-plugin-product-search"),
+            artifact_id: ArtifactId::from("artifact-plugin-product-search"),
             release_digest: artifact_digest.clone(),
-            manifest_digest: digest_bytes(b"miniapp-manifest"),
+            manifest_digest: digest_bytes(b"plugin-product-manifest"),
         };
         let entry = CapabilityCatalogMaterializer::materialize(CapabilityCatalogMaterialization {
             manifest: manifest.clone(),
@@ -184,7 +184,7 @@ mod catalog_materialization_tests {
                     package: package.clone(),
                 },
                 source_kind: ContributionSourceKind::PluginProductActiveRelease,
-                source_identity: StableSourceIdentity::from("plugin-product:miniapp-catalog"),
+                source_identity: StableSourceIdentity::from("plugin-product:plugin-product-catalog"),
                 mount_id: None,
                 plugin_product_id: Some(plugin_product_id.clone()),
                 mcp_binding_id: None,
@@ -231,10 +231,10 @@ mod catalog_materialization_tests {
             .unwrap(),
         );
         let provider =
-            KernelCatalogProvider::new(kernel).with_miniapp_publication_source(store.clone());
+            KernelCatalogProvider::new(kernel).with_plugin_product_publication_source(store.clone());
         let snapshot = provider.snapshot().unwrap();
         let reference = CapabilityRef {
-            id: CapabilityId::from("miniapp.catalog.search"),
+            id: CapabilityId::from("plugin-product.catalog.search"),
             version: VersionString::from("1.0.0"),
         };
         assert_eq!(
@@ -251,7 +251,7 @@ mod catalog_materialization_tests {
             package
         );
         assert!(snapshot.as_api().unwrap().capabilities.iter().any(|item| {
-            item.capability.id == "miniapp.catalog.search"
+            item.capability.id == "plugin-product.catalog.search"
                 && item.source_kind == "plugin_product_active_release"
         }));
 

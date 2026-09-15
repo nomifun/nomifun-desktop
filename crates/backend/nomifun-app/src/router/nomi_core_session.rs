@@ -40,8 +40,8 @@ use nomifun_agent_contracts::{
 };
 use nomifun_agent_control_plane::{
     AgentControlPlane, AuthenticatedOwner, ControlPlaneError,
-    control_plane_router_without_legacy_skills,
 };
+use super::nomi_core_control_plane::control_plane_router_without_legacy_skills;
 use nomifun_api_types::{
     AgentBindingValueDto, AgentResourceSelectionDto,
     AgentSessionCapabilitySelectionDto,
@@ -93,6 +93,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 use uuid::Uuid;
+
+#[path = "plugin_ui_sessions.rs"]
+mod plugin_ui_sessions;
+pub(crate) use plugin_ui_sessions::NomiCorePluginUiSessions;
 
 /// The single Nomi-core Session owner exposed to production domain wiring.
 ///
@@ -754,14 +758,13 @@ impl NomiCorePluginToolSessionProvider {
             plugin_runtime,
         }
     }
-}
 
-#[async_trait]
-impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
-    async fn resolve(
+    // The same persisted binding and Compiler admission serve description and
+    // execution. Everything below this method's result is runtime materialization.
+    async fn compile_request(
         &self,
         request: NomiPluginToolSessionRequest,
-    ) -> Result<Option<NomiPluginToolSession>, AppError> {
+    ) -> Result<Option<PreparedNomiPluginSession>, AppError> {
         let common_owner = nomifun_common::UserId::parse(
             request.owner_id.clone(),
         )
@@ -877,6 +880,50 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
             &principal,
         )?;
         let compiled = Arc::new(compiled);
+        Ok(Some(PreparedNomiPluginSession { owner, session_id, principal, compiled, response, constraints, resource_image_model }))
+    }
+}
+
+struct PreparedNomiPluginSession {
+    owner: AuthenticatedOwner,
+    session_id: AgentSessionId,
+    principal: PrincipalRef,
+    compiled: Arc<CompiledSnapshot>,
+    response: ConversationResponse,
+    constraints: nomifun_api_types::ExecutionConstraints,
+    resource_image_model: bool,
+}
+
+#[async_trait]
+impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
+    async fn discover_skill_commands(
+        &self,
+        request: NomiPluginToolSessionRequest,
+    ) -> Result<Vec<nomifun_api_types::SlashCommandItem>, AppError> {
+        let Some(prepared) = self.compile_request(request).await? else {
+            return Ok(Vec::new());
+        };
+        if prepared.constraints.restricted() { return Ok(Vec::new()); }
+        let registry = self.kernel.snapshot().map_err(|error| AppError::Conflict(error.to_string()))?;
+        let skills = super::engine_skills::compile(&prepared.compiled, &registry, self.skill_artifacts.clone()).await?;
+        skills.validate_extra(&prepared.response.extra)?;
+        let commands = nomifun_ai_agent::plugin_skills::verified_skill_commands(
+            self.kernel.clone(), prepared.compiled, None, skills.commands,
+        ).map_err(|error| AppError::Conflict(format!("Nomi Skill discovery failed: {error}")))?;
+        let mut items = commands.iter().filter(|skill| skill.metadata().user_invocable)
+            .map(|skill| nomifun_api_types::SlashCommandItem {
+                command: skill.command_name(), description: skill.metadata().description.clone(),
+            }).collect::<Vec<_>>();
+        items.sort_by(|a, b| a.command.cmp(&b.command));
+        Ok(items)
+    }
+
+    async fn resolve(
+        &self,
+        request: NomiPluginToolSessionRequest,
+    ) -> Result<Option<NomiPluginToolSession>, AppError> {
+        let Some(PreparedNomiPluginSession { owner, session_id, principal, compiled, response, constraints, resource_image_model }) =
+            self.compile_request(request).await? else { return Ok(None); };
         let registry = self.kernel.snapshot().map_err(|error| AppError::Conflict(error.to_string()))?;
         super::nomi_core_mcp_catalog::validate_resources(&compiled, &registry, &principal)?;
         let skills = super::engine_skills::compile(&compiled, &registry, self.skill_artifacts.clone()).await?;
@@ -898,7 +945,7 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
             session_id.clone(),
             ScopeKey::from(format!(
                 "session:{}",
-                request.conversation_id
+                session_id.as_ref()
             )),
             Arc::clone(&self.schema_resolver),
             tool_admission,
@@ -917,6 +964,11 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
                 skills.instructions, skills.resources,
             ).map_err(|error| AppError::Conflict(error.to_string()))?)
                 .map_err(|error| AppError::Conflict(error.to_string()))?
+        };
+        let plugin_session = if constraints.restricted() { plugin_session } else {
+            plugin_session.with_verified_skill_commands(
+                Arc::clone(&self.kernel), Arc::clone(&compiled), skills.commands,
+            ).map_err(|error| AppError::Conflict(format!("Nomi Skill command materialization failed: {error}")))?
         };
         let robot_capability_ids = super::nomi_core_robot::tool_capability_ids();
         let enabled_robot_ids = compiled
@@ -968,7 +1020,7 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
             &compiled,
             &principal,
             &session_id,
-            &ScopeKey::from(format!("session:{}", request.conversation_id)),
+            &ScopeKey::from(format!("session:{}", session_id.as_ref())),
             Arc::new(NomiCorePluginProductSchemaResolver {
                 application: Arc::clone(&self.plugin_runtime),
             }),
@@ -1025,14 +1077,14 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
                 mcp_server_repository: Arc::clone(&self.mcp_server_repository),
                 resource_bindings: self.resource_bindings.clone(),
                 owner,
-                session_id,
+                session_id: session_id.clone(),
             }))
             .with_plugin_product_actions(
                 plugin_product_actions,
                 Arc::new(NomiCorePluginProductToolInvoker {
                     application: Arc::clone(&self.plugin_runtime),
-                    owner_user_id: common_owner.as_ref().to_owned(),
-                    session_id: request.conversation_id.clone(),
+                    owner_user_id: principal.principal_id.clone(),
+                    session_id: session_id.as_ref().to_owned(),
                     receipts: self.hosted_effects.clone(),
                 }),
             )
@@ -1400,14 +1452,14 @@ impl NomiPluginProductToolInvoker for NomiCorePluginProductToolInvoker {
         &self,
         request: NomiPluginProductToolInvocation,
     ) -> Result<StrictJsonValue, NomiPluginToolError> {
-        let owner = super::engine_miniapp_tools::MiniAppOwner {
+        let owner = super::engine_plugin_product_tools::PluginProductOwner {
             application: self.application.clone(), receipts: self.receipts.clone(),
         };
         owner.invoke(&self.owner_user_id, &self.session_id, request.capability(),
             &request.action().action_id, request.operation_id().clone(), request.input().clone())
             .await.map_err(|error| match error {
-                super::engine_miniapp_tools::MiniAppCallError::Rejected(message) => NomiPluginToolError::Contract(message),
-                super::engine_miniapp_tools::MiniAppCallError::Unknown(message) => NomiPluginToolError::OutcomeUnknown(message),
+                super::engine_plugin_product_tools::PluginProductCallError::Rejected(message) => NomiPluginToolError::Contract(message),
+                super::engine_plugin_product_tools::PluginProductCallError::Unknown(message) => NomiPluginToolError::OutcomeUnknown(message),
             })
     }
 }
@@ -1432,6 +1484,15 @@ pub(super) fn compile_nomi_plugin_snapshot(
     }
     let registry = kernel.snapshot().map_err(kernel_error_to_app)?;
     let mut environment = compiler_environment.clone();
+    // A saved Snapshot freezes inherited choices too. Revalidate these exact
+    // targets; never consult current installation defaults during execution.
+    environment.installation_role_bindings = persisted.content.resolved_role_providers.iter()
+        .map(|(role_id, lock)| (role_id.clone(), nomifun_agent_contracts::InstallationRoleBinding {
+            selection: nomifun_agent_contracts::RoleProviderSelection {
+                role: lock.provider.role.clone(),
+                provider_mount_id: lock.provider.mount_id.clone(),
+            }, binding_version: 1, updated_at_ms: 0,
+        })).collect();
     environment.required_runtime_protocol_version = persisted
         .content
         .required_runtime_protocol_version
@@ -3452,6 +3513,10 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
         .route(
             "/api/agent-sessions/{agent_session_id}/capabilities",
             get(get_nomi_core_agent_session_capabilities),
+        )
+        .route(
+            "/api/agent-sessions/{agent_session_id}/ui-binding",
+            get(get_nomi_core_session_ui_binding),
         )
         .route(
             "/api/agent-sessions/{agent_session_id}/preset",
@@ -5665,6 +5730,19 @@ async fn get_nomi_core_agent_session(
     Ok(Json(ApiResponse::ok(observation)))
 }
 
+async fn get_nomi_core_session_ui_binding(
+    State(state): State<NomiCoreAgentApiState>,
+    Extension(owner): Extension<AuthenticatedOwner>, Path(agent_session_id): Path<String>,
+) -> Result<Json<ApiResponse<nomifun_api_types::AgentPresetUiBindingResponse>>, NomiCoreApiError> {
+    let session_id = parse_agent_session_id(&agent_session_id)?;
+    let response = load_owned_nomi_core_session(&state, &owner, &session_id).await?;
+    let metadata = session_metadata(&response, &owner)?;
+    // Derive the target from the existing Session owner, not from UI input.
+    let binding = state.control_plane.ui_binding(&owner,
+        metadata.binding.preset_revision_ref.preset_id.as_ref()).await?;
+    Ok(Json(ApiResponse::ok(binding)))
+}
+
 async fn get_nomi_core_agent_session_capabilities(
     State(state): State<NomiCoreAgentApiState>,
     Extension(owner): Extension<AuthenticatedOwner>,
@@ -5845,9 +5923,20 @@ async fn start_nomi_core_agent_session_turn(
     Path(agent_session_id): Path<String>,
     Json(request): Json<CreateAgentSessionTurnRequestDto>,
 ) -> Result<Json<ApiResponse<CreateAgentSessionTurnResponseDto>>, NomiCoreApiError> {
-    let session_id = parse_agent_session_id(&agent_session_id)?;
-    let response = load_owned_nomi_core_session(&state, &owner, &session_id).await?;
-    let _metadata = session_metadata(&response, &owner)?;
+    let result = start_owned_session_turn(&state.session_owner, &owner, &agent_session_id, request).await?;
+    Ok(Json(ApiResponse::ok(result)))
+}
+
+/// Both the built-in page and a scoped plugin UI use the same admission path.
+async fn start_owned_session_turn(
+    session_owner: &Arc<NomiCoreSessionOwner>,
+    owner: &AuthenticatedOwner,
+    agent_session_id: &str,
+    request: CreateAgentSessionTurnRequestDto,
+) -> Result<CreateAgentSessionTurnResponseDto, NomiCoreApiError> {
+    let session_id = parse_agent_session_id(agent_session_id)?;
+    let response = load_session_from_owner(session_owner, owner, &session_id).await?;
+    let _metadata = session_metadata(&response, owner)?;
     let input = bounded_turn_input(request.input)?;
     let idempotency_key = canonical_nonempty(&request.idempotency_key, "idempotency_key")?;
     let operation_id = OperationId::from(format!(
@@ -5855,8 +5944,7 @@ async fn start_nomi_core_agent_session_turn(
         session_id.as_ref(),
         idempotency_key
     ));
-    let delivery = state
-        .session_owner
+    let delivery = session_owner
         .send_session_message_idempotent(
             owner.as_ref(),
             session_id.as_ref(),
@@ -5864,22 +5952,21 @@ async fn start_nomi_core_agent_session_turn(
             input,
         )
         .await?;
-    let updated = state
-        .session_owner
+    let updated = session_owner
         .get_session(owner.as_ref(), session_id.as_ref())
         .await?;
-    let cursor = durable_message_cursor(&state.session_owner, &session_id).await?;
+    let cursor = durable_message_cursor(session_owner, &session_id).await?;
     let status = if delivery.completed {
         projected_session_status(&updated)
     } else {
         "running".to_owned()
     };
-    Ok(Json(ApiResponse::ok(CreateAgentSessionTurnResponseDto {
+    Ok(CreateAgentSessionTurnResponseDto {
         agent_session_id: session_id.as_ref().to_owned(),
         operation_id: operation_id.as_ref().to_owned(),
         cursor,
         status,
-    })))
+    })
 }
 
 async fn get_nomi_core_agent_session_messages(
@@ -6901,8 +6988,16 @@ async fn load_owned_nomi_core_session(
     owner: &AuthenticatedOwner,
     session_id: &AgentSessionId,
 ) -> Result<ConversationResponse, NomiCoreApiError> {
-    let response = state
-        .session_owner
+    load_session_from_owner(&state.session_owner, owner, session_id).await
+}
+
+/// The HTTP and plugin view adapters must enforce the same identity invariant.
+async fn load_session_from_owner(
+    session_owner: &Arc<NomiCoreSessionOwner>,
+    owner: &AuthenticatedOwner,
+    session_id: &AgentSessionId,
+) -> Result<ConversationResponse, NomiCoreApiError> {
+    let response = session_owner
         .get_session(owner.as_ref(), session_id.as_ref())
         .await
         .map_err(NomiCoreApiError::from)?;
@@ -7674,6 +7769,8 @@ fn message_projection(
             .position
             .clone()
             .unwrap_or_else(|| "message".to_owned()),
+        message_type: Some(row.r#type.clone()),
+        message_status: row.status.clone(),
         projection,
         semantic_digest,
     })

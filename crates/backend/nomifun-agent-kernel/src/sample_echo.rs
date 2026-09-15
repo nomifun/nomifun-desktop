@@ -31,6 +31,9 @@ use nomifun_agent_contracts::{
 };
 use serde_json::json;
 
+#[path = "dependency_call_tests.rs"]
+mod dependency_call_tests;
+
 use crate::{
     AgentPresetCompiler, CapabilityHandler, CapabilityInvocationContext,
     CapabilityInvocationRequest, CompileRequest, CompilerEnvironment,
@@ -156,6 +159,8 @@ fn registration_for(
                 presentation: ToolPresentationKind::FunctionTool,
             }],
             context_schema_refs: Vec::new(),
+            context_phase: Default::default(),
+            ui_slot: None,
             event_schema_refs: Vec::new(),
             resource_kinds: BTreeSet::from([ResourceKind::from(
                 SAMPLE_RESOURCE_KIND,
@@ -511,6 +516,8 @@ fn role_capability(
         contributions: CapabilityContributions {
             actions,
             context_schema_refs,
+            context_phase: Default::default(),
+            ui_slot: None,
             event_schema_refs: Vec::new(),
             resource_kinds: BTreeSet::from([resource_kind]),
             host_ports: Vec::new(),
@@ -589,6 +596,7 @@ fn operation_role_registration(
             (
                 tool.id.clone(),
                 RoleProviderMemberContribution {
+                    implementation: None,
                     supported_platforms: vec![PlatformConstraint::Any],
                     required_resource_kinds: required_resource_kinds.clone(),
                 },
@@ -596,6 +604,7 @@ fn operation_role_registration(
             (
                 context.id.clone(),
                 RoleProviderMemberContribution {
+                    implementation: None,
                     supported_platforms: vec![PlatformConstraint::Any],
                     required_resource_kinds: required_resource_kinds.clone(),
                 },
@@ -603,6 +612,7 @@ fn operation_role_registration(
             (
                 resource.id.clone(),
                 RoleProviderMemberContribution {
+                    implementation: None,
                     supported_platforms: vec![PlatformConstraint::Any],
                     required_resource_kinds,
                 },
@@ -825,6 +835,8 @@ fn role_operation_request(
 fn sample_revision(owner_id: &str) -> AgentPresetRevision {
     let payload = AgentPresetRevisionPayload {
         runtime_engine: None,
+        context_order: Vec::new(),
+        middleware_order: Vec::new(),
         schema_version: VersionString::from(VERSION),
         model_route_refs: BTreeMap::new(),
         chat_route_records: BTreeMap::new(),

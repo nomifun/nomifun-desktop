@@ -215,6 +215,9 @@ fn parse_input<T: for<'de> Deserialize<'de>>(
 
 fn map_plugin_error(error: PluginRuntimeApplicationError) -> Wave3HostPortError {
     match error {
+        PluginRuntimeApplicationError::AgentSession { message, .. } => {
+            Wave3HostPortError::new(WAVE3_PLUGIN_RUNTIME_FAILED, message)
+        }
         PluginRuntimeApplicationError::NotFound => {
             Wave3HostPortError::new(WAVE3_PLUGIN_NOT_FOUND, "bound Plugin was not found")
         }

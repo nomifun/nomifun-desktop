@@ -13,6 +13,7 @@
         "mount_load",
         "mount_unload",
         "capability_invoke",
+        "dependency_invoke",
         "context_contribute",
         "resource_acquire",
         "resource_release",
@@ -28,6 +29,7 @@
         "mount_load",
         "mount_unload",
         "capability_invoke",
+        "dependency_invoke",
         "context_contribute",
         "resource_acquire",
         "resource_release",
@@ -67,5 +69,5 @@
       "linux_headless_x64"
     ]
   },
-  "payload_digest": "7a610569dbd2b89a0f6725d7fe1ac0e97962d205ec2c8d1b6d497e7aea7e8424"
+  "payload_digest": "a8a838368f774cfc36bb3655a799030242ee2c39f817df87e0b6f9113f216154"
 }

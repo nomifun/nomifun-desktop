@@ -16,6 +16,9 @@ mod published_main_migrations;
 mod displaced_agent_preset_migration;
 mod displaced_conversation_runtime_migration;
 
+#[cfg(test)]
+mod plugin_ui_upgrade_tests;
+
 /// Maximum number of connections in the pool.
 const MAX_CONNECTIONS: u32 = 5;
 

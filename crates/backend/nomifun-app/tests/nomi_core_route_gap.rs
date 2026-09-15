@@ -129,6 +129,8 @@ async fn default_nomi_core_router_answers_canonical_catalog_requests() {
     let (router, services) = common::build_local_trust_app("route-gap-local-trust").await;
     for path in [
         "/api/agent-preset-templates?source=official",
+        "/api/agent-catalog",
+        "/api/agent-role-defaults",
         "/api/capabilities",
         "/api/agent-catalog/skills",
         "/api/mcp-tool-mappings",
@@ -150,6 +152,11 @@ async fn default_nomi_core_router_answers_canonical_catalog_requests() {
             .expect("read catalog response");
         let value: Value = serde_json::from_slice(&body).expect("catalog response JSON");
         assert!(value.get("data").is_some(), "catalog response must be wrapped: {path}");
+        if path == "/api/agent-catalog" {
+            for field in ["capabilities", "skills", "mcp_tools", "roles"] {
+                assert!(value["data"][field].is_array(), "complete Catalog must include {field}");
+            }
+        }
     }
     services.shutdown_browser_platform().await.expect("browser cleanup");
     services.database.close().await;

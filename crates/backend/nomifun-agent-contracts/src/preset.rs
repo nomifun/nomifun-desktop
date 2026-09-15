@@ -187,6 +187,14 @@ pub struct AgentPresetRevisionPayload {
     /// Omission preserves the default Nomi behavior of older revisions and their digests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_engine: Option<AgentRuntimeEngineSelection>,
+    /// Ordered Context contributors; omitted contributors follow canonical ID order.
+    /// This is presentation/execution order, never an authorization grant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_order: Vec<crate::CapabilityId>,
+    /// Ordered request middleware; omitted contributors follow canonical ID
+    /// order. This controls composition, never selection or authorization.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub middleware_order: Vec<crate::CapabilityId>,
     pub schema_version: VersionString,
     pub model_route_refs: BTreeMap<String, ModelRouteId>,
     /// Complete route facts used by the Fresh-v4 persistence writer. Legacy
@@ -260,7 +268,16 @@ impl AgentPresetRevision {
 
         )?;
         validate_role_provider_overrides(&self.payload.system_role_provider_overrides)?;
+        validate_context_order(
+            &self.payload.context_order,
+            &self.payload.enabled_capabilities.iter().map(|value| value.capability.id.clone()).collect(),
+        )?;
         validate_contribution_locks(&self.contribution_locks)?;
+        validate_contribution_order(
+            &self.payload.middleware_order,
+            &self.payload.enabled_capabilities.iter().map(|value| value.capability.id.clone()).collect(),
+            "middleware_order",
+        )?;
         let digest = self.revision_digest().map_err(|error| PresetContractViolation {
             code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
             message: error.to_string(),
@@ -377,9 +394,31 @@ fn validate_chat_route_records_for_revision(
     Ok(())
 }
 
+/// Why a capability belongs to this plan. Membership does not imply public
+/// Tool/Context consumption; dependencies execute through a scoped caller.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityConsumption {
+    #[default]
+    Contribution,
+    Dependency,
+}
+
+impl CapabilityConsumption {
+    pub fn is_contribution(&self) -> bool {
+        matches!(self, Self::Contribution)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedCapability {
+    #[serde(default, skip_serializing_if = "CapabilityConsumption::is_contribution")]
+    pub consumption: CapabilityConsumption,
+    /// Exact direct edges of the selected execution plan, not a second copy of
+    /// the dependency's descriptor or a grant to call arbitrary plan members.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_refs: Vec<CapabilityRef>,
     pub capability: CapabilityRef,
     pub source_package: PackageRef,
     pub contribution_id: ContributionId,
@@ -593,6 +632,10 @@ pub struct ResolvedSkillLock {
     pub skill: SkillRef,
     pub body_digest: DigestHex,
     pub required_capabilities: BTreeSet<crate::CapabilityId>,
+    pub contribution_lock: ContributionLock,
+    pub resolved_mount_id: PluginMountId,
+    pub resolved_source: PluginSourceMetadata,
+    pub target_artifact_digest: DigestHex,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -638,6 +681,10 @@ pub struct ResolvedRoleProviderLock {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedSnapshotContent {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_order: Vec<crate::CapabilityId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub middleware_order: Vec<crate::CapabilityId>,
     pub schema_version: VersionString,
     pub resolver_version: VersionString,
     pub preset_revision_ref: PresetRevisionRef,
@@ -662,6 +709,12 @@ pub struct ResolvedSnapshotContent {
     pub target_contribution_manifest_digest: DigestHex,
 }
 
+impl ResolvedSnapshotContent {
+    pub fn contributions(&self) -> impl Iterator<Item = &ResolvedCapability> {
+        self.enabled_capabilities.iter().filter(|value| value.consumption.is_contribution())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedSnapshotEnvelope {
@@ -683,6 +736,33 @@ impl ResolvedSnapshotEnvelope {
 
         )?;
         validate_snapshot_chat_route_identity(&self.content)?;
+        validate_dependency_graph(&self.content)?;
+        let order_candidates = self.content.contributions()
+            .map(|value| value.capability.id.clone())
+            .filter(|id| self.content.capability_allowlist.contains(id))
+            .collect();
+        validate_context_order(&self.content.context_order, &order_candidates)?;
+        validate_contribution_order(&self.content.middleware_order, &order_candidates, "middleware_order")?;
+        let mut skill_ids = BTreeSet::new();
+        for lock in &self.content.skill_locks {
+            lock.contribution_lock.validate()?;
+            if !skill_ids.insert(&lock.skill.id)
+                || lock.skill.id.as_ref().trim().is_empty()
+                || lock.skill.version.as_ref().trim().is_empty()
+                || lock.resolved_mount_id.as_ref().trim().is_empty()
+                || lock.resolved_source.source_identity.trim().is_empty()
+                || !is_lowercase_hex_digest(&lock.body_digest)
+                || !is_lowercase_hex_digest(&lock.target_artifact_digest)
+                || (lock.contribution_lock.source_kind == ContributionSourceKind::PluginMount
+                    && lock.contribution_lock.mount_id.as_ref() != Some(&lock.resolved_mount_id))
+                || !lock.required_capabilities.is_subset(&self.content.capability_allowlist)
+            {
+                return Err(PresetContractViolation {
+                    code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
+                    message: format!("Skill {} has invalid identity, provenance or dependencies", lock.skill.id.as_ref()),
+                });
+            }
+        }
         validate_resolved_role_provider_locks(
             &self.content.resolved_role_providers,
         )?;
@@ -703,6 +783,81 @@ impl ResolvedSnapshotEnvelope {
         }
         Ok(())
     }
+}
+
+fn validate_context_order(
+    order: &[crate::CapabilityId],
+    selected: &BTreeSet<crate::CapabilityId>,
+) -> Result<(), PresetContractViolation> {
+    validate_contribution_order(order, selected, "context_order")
+}
+
+fn validate_contribution_order(
+    order: &[crate::CapabilityId],
+    selected: &BTreeSet<crate::CapabilityId>,
+    field: &str,
+) -> Result<(), PresetContractViolation> {
+    let mut seen = BTreeSet::new();
+    for id in order {
+        if !selected.contains(id) || !seen.insert(id) {
+            return Err(PresetContractViolation {
+                code: CanonicalErrorCode::from(PRESET_CONTRIBUTION_LOCK_INVALID),
+                message: format!("{field} contains duplicate or unselected capability {}", id.as_ref()),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validate the frozen graph itself, independent of its digest and the live
+/// Registry. Edges describe exact membership, never authority to call a peer.
+fn validate_dependency_graph(content: &ResolvedSnapshotContent) -> Result<(), PresetContractViolation> {
+    let nodes = content.enabled_capabilities.iter()
+        .map(|value| (value.capability.id.clone(), value)).collect::<BTreeMap<_, _>>();
+    let invalid = |message: &str| PresetContractViolation {
+        code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
+        message: message.into(),
+    };
+    if nodes.keys().cloned().collect::<BTreeSet<_>>() != content.capability_allowlist {
+        return Err(invalid("capability_allowlist must match the frozen dependency graph"));
+    }
+    let mut incoming = nodes.keys().map(|id| (id.clone(), 0usize)).collect::<BTreeMap<_, _>>();
+    for node in nodes.values() {
+        let mut seen = BTreeSet::new();
+        for dependency in &node.dependency_refs {
+            if !seen.insert(&dependency.id)
+                || !nodes.get(&dependency.id).is_some_and(|target| target.capability == *dependency)
+            {
+                return Err(invalid("dependency edges must be unique exact references to frozen capabilities"));
+            }
+            *incoming.get_mut(&dependency.id).expect("validated target") += 1;
+        }
+    }
+    let mut ready = incoming.iter().filter(|(_, count)| **count == 0)
+        .map(|(id, _)| id.clone()).collect::<Vec<_>>();
+    let mut visited = 0;
+    while let Some(id) = ready.pop() {
+        visited += 1;
+        for edge in &nodes[&id].dependency_refs {
+            let count = incoming.get_mut(&edge.id).expect("validated target");
+            *count -= 1;
+            if *count == 0 { ready.push(edge.id.clone()); }
+        }
+    }
+    if visited != nodes.len() {
+        return Err(invalid("frozen capability dependency graph contains a cycle"));
+    }
+    let mut reachable = BTreeSet::new();
+    let mut work = content.contributions().map(|value| value.capability.id.clone()).collect::<Vec<_>>();
+    while let Some(id) = work.pop() {
+        if reachable.insert(id.clone()) {
+            work.extend(nodes[&id].dependency_refs.iter().map(|edge| edge.id.clone()));
+        }
+    }
+    if reachable.len() != nodes.len() {
+        return Err(invalid("dependency-only capabilities must be reachable from a contribution"));
+    }
+    Ok(())
 }
 
 fn validate_resolved_role_provider_locks(
@@ -753,7 +908,7 @@ fn validate_resolved_mcp_tool_locks(
 
         let resolved = initial
             .iter()
-
+            .filter(|capability| capability.consumption.is_contribution())
             .find(|capability| capability.capability.id == lock.capability_id)
             .ok_or_else(|| {
                 mcp_lock_violation(format!(
@@ -1365,6 +1520,8 @@ mod tests {
             version: VersionString::from("1.0.0"),
         };
         ResolvedCapability {
+            consumption: Default::default(),
+            dependency_refs: Vec::new(),
             capability: CapabilityRef {
                 id: capability_id.clone(),
                 version: VersionString::from("1.0.0"),
@@ -1421,7 +1578,11 @@ mod tests {
         enabled_capabilities: Vec<ResolvedCapability>,
         mcp_tool_locks: Vec<ResolvedMcpToolLock>,
     ) -> ResolvedSnapshotContent {
+        let capability_allowlist = enabled_capabilities.iter()
+            .map(|value| value.capability.id.clone()).collect();
         ResolvedSnapshotContent {
+            context_order: Vec::new(),
+            middleware_order: Vec::new(),
             schema_version: VersionString::from("1.0.0"),
             resolver_version: VersionString::from("1.0.0"),
             preset_revision_ref: PresetRevisionRef {
@@ -1438,7 +1599,7 @@ mod tests {
             chat_route_identity: None,
             enabled_capabilities,
             required_resource_kinds: BTreeSet::new(),
-            capability_allowlist: BTreeSet::new(),
+            capability_allowlist,
             skill_locks: Vec::new(),
             mcp_tool_locks,
             resolved_role_providers: BTreeMap::new(),
@@ -1469,9 +1630,90 @@ mod tests {
     }
 
     #[test]
+    fn frozen_dependency_graph_validates_structure_even_with_a_fresh_digest() {
+        let mut root = resolved_capability("root", &"a".repeat(64));
+        let mut child = resolved_capability("child", &"b".repeat(64));
+        child.consumption = CapabilityConsumption::Dependency;
+        root.dependency_refs = vec![child.capability.clone()];
+        let content = snapshot_content(vec![root, child], Vec::new());
+        assert!(envelope(content.clone()).validate().is_ok());
+        assert_eq!(content.contributions().count(), 1);
+        for case in 0..6 {
+            let mut invalid = content.clone();
+            match case {
+                0 => invalid.enabled_capabilities[0].dependency_refs[0].version = "wrong".into(),
+                1 => invalid.enabled_capabilities[0].dependency_refs.push(content.enabled_capabilities[1].capability.clone()),
+                2 => invalid.enabled_capabilities[1].dependency_refs.push(content.enabled_capabilities[0].capability.clone()),
+                3 => invalid.enabled_capabilities[0].dependency_refs.clear(),
+                4 => invalid.context_order.push("child".into()),
+                _ => { invalid.capability_allowlist.remove(&crate::CapabilityId::from("child")); },
+            }
+            assert!(envelope(invalid).validate().is_err(), "case {case}");
+        }
+        let mut direct_too = content;
+        direct_too.enabled_capabilities[1].consumption = CapabilityConsumption::Contribution;
+        direct_too.context_order.push("child".into());
+        assert_eq!(direct_too.contributions().count(), 2);
+        assert!(envelope(direct_too).validate().is_ok());
+    }
+
+    #[test]
+    fn legacy_contribution_serialization_does_not_invent_dependency_edges() {
+        let capability = resolved_capability("root", &"a".repeat(64));
+        let value = serde_json::to_value(&capability).unwrap();
+        assert!(value.get("consumption").is_none());
+        assert!(value.get("dependency_refs").is_none());
+        let decoded: ResolvedCapability = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(decoded, capability);
+        assert_eq!(digest_payload(&decoded).unwrap(), digest_payload(&value).unwrap());
+    }
+
+    #[test]
+    fn context_order_is_optional_unique_selected_and_digest_covered() {
+        let selected = BTreeSet::from([crate::CapabilityId::from("a"), "z".into()]);
+        assert!(validate_context_order(&["z".into(), "a".into()], &selected).is_ok());
+        assert!(validate_context_order(&["z".into(), "z".into()], &selected).is_err());
+        assert!(validate_context_order(&["missing".into()], &selected).is_err());
+        let mut content = snapshot_content(Vec::new(), Vec::new());
+        let legacy = serde_json::to_value(&content).unwrap();
+        assert!(legacy.get("context_order").is_none());
+        assert_eq!(serde_json::from_value::<ResolvedSnapshotContent>(legacy.clone()).unwrap(), content);
+        assert_eq!(digest_payload(&legacy).unwrap(), digest_payload(&content).unwrap());
+        content.context_order = vec!["z".into(), "a".into()];
+        let first = digest_payload(&content).unwrap();
+        content.context_order.reverse();
+        assert_ne!(first, digest_payload(&content).unwrap());
+        assert!(envelope(content).validate().unwrap_err().message.contains("context_order"));
+    }
+
+    #[test]
+    fn middleware_order_is_optional_unique_selected_and_digest_covered() {
+        let mut content = snapshot_content(vec![resolved_capability("a", &"a".repeat(64)), resolved_capability("z", &"b".repeat(64))], Vec::new());
+        let legacy = serde_json::to_value(&content).unwrap();
+        assert!(legacy.get("middleware_order").is_none());
+        assert_eq!(serde_json::from_value::<ResolvedSnapshotContent>(legacy.clone()).unwrap(), content);
+        assert_eq!(digest_payload(&legacy).unwrap(), digest_payload(&content).unwrap());
+        content.middleware_order = vec!["z".into(), "a".into()];
+        assert!(envelope(content.clone()).validate().is_ok());
+        let first = digest_payload(&content).unwrap();
+        content.middleware_order.reverse();
+        assert_ne!(first, digest_payload(&content).unwrap());
+        for order in [vec!["z", "z"], vec!["missing"]] {
+            let mut invalid = content.clone();
+            invalid.middleware_order = order.into_iter().map(Into::into).collect();
+            assert!(envelope(invalid).validate().unwrap_err().message.contains("middleware_order"));
+        }
+        content.enabled_capabilities[0].consumption = CapabilityConsumption::Dependency;
+        content.enabled_capabilities[1].dependency_refs = vec![content.enabled_capabilities[0].capability.clone()];
+        assert!(envelope(content).validate().unwrap_err().message.contains("middleware_order"));
+    }
+
+    #[test]
     fn resource_neutral_preset_contract_rejects_legacy_resource_fields() {
         let mut payload = serde_json::to_value(AgentPresetRevisionPayload {
             runtime_engine: None,
+            context_order: Vec::new(),
+            middleware_order: Vec::new(),
             schema_version: VersionString::from("1.0.0"),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
@@ -1483,6 +1725,12 @@ mod tests {
             starter_prompts: Vec::new(),
         })
         .unwrap();
+        assert!(payload.get("context_order").is_none());
+        let legacy: AgentPresetRevisionPayload = serde_json::from_value(payload.clone()).unwrap();
+        assert!(legacy.context_order.is_empty());
+        assert!(payload.get("middleware_order").is_none());
+        assert!(legacy.middleware_order.is_empty());
+        assert_eq!(digest_payload(&payload).unwrap(), digest_payload(&legacy).unwrap());
         payload["resource_bindings"] = serde_json::json!([]);
         assert!(
             serde_json::from_value::<AgentPresetRevisionPayload>(payload).is_err(),
@@ -1529,10 +1777,10 @@ mod tests {
     }
 
     #[test]
-    fn agent_runtime_configuration_is_versioned_without_rehashing_legacy_payloads() {
+    fn agent_runtime_configuration_is_versioned_without_rehashing_pre_engine_payloads() {
         let legacy = serde_json::json!({
             "schema_version":"1.0.0", "model_route_refs":{},
-            "initial_capabilities":[], "on_demand_capabilities":[], "skill_bindings":[],
+            "enabled_capabilities":[], "skill_bindings":[],
             "persona":"", "instructions":""
         });
         let payload: AgentPresetRevisionPayload = serde_json::from_value(legacy.clone()).unwrap();

@@ -39,6 +39,46 @@ const PLUGIN_REJECTION_FENCES = new Map([
   ['scripts/gate-agent-v2.mjs', /docs\/specs\/2026-08-28-agent-capability-platform-v2\/06-phase-n1-plugin-miniapp-simplified-implementation-plan\.zh\.md/],
 ]);
 
+// Persistence compatibility, NOT active API/type exemptions. Only these ten
+// complete source lines may retain the old codec. SQL checksums, stored tool
+// names, call IDs and rejection receipts must survive the internal rename.
+const PLUGIN_PERSISTED_LINES = new Map([
+  ['crates/backend/nomifun-app/src/router/engine_plugin_product_tools.rs', [
+    '"platform-miniapp:{}",',
+    '.rejected(receipt, "MINIAPP_REJECTED_BEFORE_DISPATCH")',
+    'let name = format!("miniapp_{:x}", Sha256::digest(&identity));',
+    '"MINIAPP_REJECTED_BEFORE_DISPATCH: frozen authority could not be admitted; no Service call was dispatched.",',
+  ]],
+  ['crates/backend/nomifun-app/src/router/hosted_effect_receipts.rs', [
+    'Self::PluginProduct => "miniapp",',
+  ]],
+  ['crates/backend/nomifun-app/src/router/coding_runtime_recovery.rs', [
+    '|| !matches!(domain.as_str(), "miniapp" | "robot" | "git")',
+  ]],
+  ['crates/backend/nomifun-db/migrations/102_conversation_hosted_effects.sql', [
+    "owner_domain TEXT NOT NULL CHECK(owner_domain IN ('miniapp', 'robot')),",
+  ]],
+  ['crates/backend/nomifun-db/migrations/103_conversation_git_effects.sql', [
+    "owner_domain TEXT NOT NULL CHECK(owner_domain IN ('miniapp', 'robot', 'git')),",
+  ]],
+  ['crates/backend/nomifun-db/src/database/displaced_conversation_runtime_migration/tests.rs', [
+    "VALUES (23, ?, ?, 'hosted-once', 'runtime-turn', 1, 'miniapp', 'hosted-capability', " + String.fromCharCode(92),
+    'assert_eq!(row, (23, "miniapp".into(), "hosted-once".into(), "pending".into(), None));',
+  ]],
+]);
+
+function isAllowedPluginLine(path, line) {
+  return PLUGIN_REJECTION_FENCES.get(path)?.test(line) ||
+    (PLUGIN_PERSISTED_LINES.get(path) ?? []).includes(line.trim());
+}
+
+function isDeletionManifest(path) {
+  return path.endsWith('.json') && [
+    'crates/backend/nomifun-agent-contracts/contracts/deletion/',
+    'crates/backend/nomifun-agent-contracts/contracts/historical/agent-v2/deletion/',
+  ].some((prefix) => path.startsWith(prefix));
+}
+
 // These exact implementation and wire identities previously exposed two
 // delegation stacks to configuration/model callers. Internal deployment
 // classes such as `LocalDelegateTool` remain valid; only the retired public
@@ -151,13 +191,13 @@ for (const path of workspacePaths()) {
   if (!existsSync(absolute) || path === SELF) continue;
 
   // Deletion manifests describe removed historical entrypoints, not live code.
-  if (!path.startsWith('crates/backend/nomifun-agent-contracts/contracts/deletion/')) {
+  if (!isDeletionManifest(path)) {
     if (RETIRED_PLUGIN_TERM.test(path)) {
       violations.push(path + ': retired plugin product identity in active path');
     }
     if (SOURCE_EXTENSIONS.has(extname(path))) {
       for (const [index, line] of readFileSync(absolute, 'utf8').split(/\r?\n/).entries()) {
-        if (RETIRED_PLUGIN_TERM.test(line) && !PLUGIN_REJECTION_FENCES.get(path)?.test(line)) {
+        if (RETIRED_PLUGIN_TERM.test(line) && !isAllowedPluginLine(path, line)) {
           violations.push(path + ':' + (index + 1) + ': ' + line.trim());
         }
       }
@@ -186,6 +226,30 @@ for (const path of workspacePaths()) {
 
 function invariant(condition, message) {
   if (!condition) violations.push(`architecture invariant: ${message}`);
+}
+
+// Always run the fence regression assertions as part of the ordinary check.
+// Neither adding another retired symbol to an allowed line nor copying that
+// line into another file is an accepted compatibility change.
+for (const [path, lines] of PLUGIN_PERSISTED_LINES) {
+  const actual = readFileSync(resolve(ROOT, path), 'utf8').split(/\r?\n/).map((line) => line.trim());
+  for (const line of lines) {
+    invariant(actual.filter((entry) => entry === line).length === 1,
+      `persisted codec fence must exist exactly once: ${path}: ${line}`);
+    invariant(isAllowedPluginLine(path, `  ${line}  `), `exact codec fence rejected: ${path}`);
+    invariant(!isAllowedPluginLine(path, `${line} // new MiniAppService`), `codec fence accepts appended active identity: ${path}`);
+    invariant(!isAllowedPluginLine(path, 'struct MiniAppService;'), `codec fence exempts whole file: ${path}`);
+    invariant(!isAllowedPluginLine('crates/new-api.rs', line), `codec fence escapes its source file: ${path}`);
+  }
+}
+invariant(isDeletionManifest('crates/backend/nomifun-agent-contracts/contracts/historical/agent-v2/deletion/domain-wave-3-creative-multimodal.json'),
+  'archived deletion manifests describe removed code, not live identities');
+for (const path of [
+  'crates/backend/nomifun-agent-contracts/contracts/historical/agent-v2/schemas.json',
+  'crates/backend/nomifun-agent-contracts/contracts/historical/agent-v2/deletion/active.rs',
+  'crates/backend/nomifun-app/src/deletion/active.json',
+]) {
+  invariant(!isDeletionManifest(path), `deletion exclusion is too broad: ${path}`);
 }
 
 for (const retiredSample of ['/api/fleets', 'fleet_members', 'FleetList']) {

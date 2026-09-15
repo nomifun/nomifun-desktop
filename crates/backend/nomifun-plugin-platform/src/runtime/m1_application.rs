@@ -108,6 +108,15 @@ use crate::runtime::{
 
 #[derive(Debug, Error)]
 pub enum PluginRuntimeApplicationError {
+    /// Preserve the application Session contract across the scoped view adapter.
+    /// This is a host result, never an error envelope supplied by plugin code.
+    #[error("Agent Session operation failed ({code}): {message}")]
+    AgentSession {
+        status: u16,
+        code: String,
+        message: String,
+        details: Option<Value>,
+    },
     #[error("Plugin input is invalid: {0}")]
     Invalid(String),
     #[error("Plugin runtime failed: {0}")]
@@ -144,6 +153,17 @@ pub trait PluginRuntimeAgentCapabilityPort: Send + Sync {
     async fn invoke_agent_capability(
         &self,
         request: PluginRuntimeAgentCapabilityInvocation,
+    ) -> Result<StrictJsonValue, PluginRuntimeApplicationError> {
+        self.invoke_agent_capability_with_events(request, None).await
+    }
+
+    /// A trusted host consumer may request bounded incremental values. These
+    /// are not a new Agent authorization or a completed operation receipt;
+    /// domain consumers still validate their event/terminal semantics.
+    async fn invoke_agent_capability_with_events(
+        &self,
+        request: PluginRuntimeAgentCapabilityInvocation,
+        events: Option<tokio::sync::mpsc::Sender<StrictJsonValue>>,
     ) -> Result<StrictJsonValue, PluginRuntimeApplicationError>;
 }
 
@@ -237,6 +257,7 @@ struct PluginRuntimeStores {
 
 #[derive(Clone)]
 pub struct PluginRuntimeApplicationService {
+    agent_sessions: Arc<RwLock<Option<Arc<dyn super::PluginAgentSessionPort>>>>,
     repository: Arc<dyn IPluginRuntimeRepository>,
     stores: PluginRuntimeStores,
     source_mutation_lock: Arc<Mutex<()>>,
@@ -282,6 +303,7 @@ impl PluginRuntimeApplicationService {
             .map_err(|error| store_error("Release Store cleanup", error))?;
         Ok(Self {
             repository,
+            agent_sessions: Arc::new(RwLock::new(None)),
             stores: PluginRuntimeStores { source, release },
             source_mutation_lock: Arc::new(Mutex::new(())),
             service_runtime: Arc::new(RwLock::new(Arc::new(NoopPluginRuntimeServiceRuntime))),
@@ -301,6 +323,50 @@ impl PluginRuntimeApplicationService {
         sink: Arc<dyn PluginProductCapabilityCatalogSink>,
     ) {
         *self.catalog_sink.write().await = Some(sink);
+    }
+
+    pub async fn install_agent_session_port(&self, port: Arc<dyn super::PluginAgentSessionPort>) {
+        *self.agent_sessions.write().await = Some(port);
+    }
+
+    /// Called only by the trusted owner-scoped event projector, not by plugin commands.
+    /// Resolve once per bounded batch, then recheck after asynchronous Session admission.
+    pub async fn project_agent_session_stream(
+        &self,
+        owner_user_id: &str,
+        conversation_id: &str,
+        events: &[Value],
+    ) -> Result<Vec<nomifun_api_types::PluginAgentSessionStreamDto>, PluginRuntimeApplicationError> {
+        if events.len() > 32 || events.iter().any(|event| {
+            event["conversation_id"].as_str() != Some(conversation_id)
+                || !event["type"].is_string()
+        }) {
+            return Err(PluginRuntimeApplicationError::Invalid("invalid Session event batch".into()));
+        }
+        let initial = self.repository.agent_surface_sessions(owner_user_id, conversation_id).await?;
+        if initial.is_empty() { return Ok(Vec::new()); }
+        self.agent_session_port().await?.authorize(owner_user_id, conversation_id).await?;
+        let current = self.repository.agent_surface_sessions(owner_user_id, conversation_id).await?;
+        let mut projected = Vec::new();
+        for surface in current {
+            // A replaced view must not inherit this in-flight batch.
+            if !initial.iter().any(|old| old.surface_session_id == surface.surface_session_id
+                && old.generation == surface.generation) { continue; }
+            for event in events {
+                projected.push(nomifun_api_types::PluginAgentSessionStreamDto {
+                    plugin_id: surface.plugin_product_id.clone(),
+                    surface_session_id: surface.surface_session_id.clone(),
+                    surface_generation: surface.generation as u64,
+                    event: event.clone(),
+                });
+            }
+        }
+        Ok(projected)
+    }
+
+    async fn agent_session_port(&self) -> Result<Arc<dyn super::PluginAgentSessionPort>, PluginRuntimeApplicationError> {
+        self.agent_sessions.read().await.clone().ok_or_else(||
+            PluginRuntimeApplicationError::Invalid("Agent Session UI access is unavailable on this host".into()))
     }
 
     async fn catalog_sink(&self) -> Option<Arc<dyn PluginProductCapabilityCatalogSink>> {
@@ -540,6 +606,7 @@ impl PluginRuntimeApplicationService {
     async fn invoke_agent_capability_inner(
         &self,
         request: PluginRuntimeAgentCapabilityInvocation,
+        events: Option<tokio::sync::mpsc::Sender<StrictJsonValue>>,
     ) -> Result<StrictJsonValue, PluginRuntimeApplicationError> {
         validate_request_identity(request.owner_user_id.as_str(), "owner_user_id")?;
         validate_request_identity(request.plugin_product_id.as_ref(), "plugin_product_id")?;
@@ -667,13 +734,14 @@ impl PluginRuntimeApplicationService {
             })?;
         self.service_runtime()
             .await
-            .invoke(
+            .invoke_with_events(
                 &spec,
                 request.call_id,
                 request.action_id.as_ref().to_owned(),
                 request.payload,
                 PluginRuntimeCallCancellation::default(),
                 positive_now_ms(),
+                events,
             )
             .await
             .map_err(|error| PluginRuntimeApplicationError::Runtime(error.to_string()))
@@ -737,8 +805,7 @@ impl PluginRuntimeApplicationService {
                 stored
                     .artifact_root
                     .join("files")
-                    .join("service")
-                    .join("main.mjs"),
+                    .join(&descriptor.entrypoint),
             )
             .await
             .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
@@ -1446,7 +1513,7 @@ impl PluginRuntimeApplicationService {
         let current_runtime = self
             .service_runtime()
             .await
-            .current_runtime_fingerprint()
+            .current_fingerprint_for(&receipt.runtime)
             .await
             .map_err(|error| {
                 PluginRuntimeApplicationError::Runtime(format!(
@@ -3961,10 +4028,12 @@ impl PluginRuntimeApplicationService {
                 ),
             ));
         }
+        let receipt: PluginServiceTestReceipt = serde_json::from_str(&row.receipt_json)
+            .map_err(|error| PluginRuntimeApplicationError::Runtime(format!("stored Service Test receipt is invalid: {error}")))?;
         let current_runtime = self
             .service_runtime()
             .await
-            .current_runtime_fingerprint()
+            .current_fingerprint_for(&receipt.runtime)
             .await
             .map_err(|error| {
                 PluginRuntimeApplicationError::Runtime(format!(
@@ -3987,12 +4056,6 @@ impl PluginRuntimeApplicationService {
                 ),
             ));
         }
-        let receipt: PluginServiceTestReceipt =
-            serde_json::from_str(&row.receipt_json).map_err(|error| {
-                PluginRuntimeApplicationError::Runtime(format!(
-                    "stored Service Test receipt is invalid: {error}"
-                ))
-            })?;
         match receipt.outcome {
             PluginServiceTestOutcome::Passed => Ok(()),
             PluginServiceTestOutcome::Failed
@@ -4576,21 +4639,44 @@ impl PluginRuntimeApplicationService {
         Ok(())
     }
 
-    pub async fn validate_service_runtime_candidate(
+    /// A Node runtime switch must not interrupt independent native Services.
+    pub async fn shutdown_node_service_runtime(
         &self,
         owner_user_id: &str,
-        candidate: &ResolvedNodeRuntime,
     ) -> Result<(), PluginRuntimeApplicationError> {
+        let runtime = self.service_runtime().await;
+        for product in self.enabled_node_service_products(owner_user_id).await? {
+            runtime.stop(&product).await
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    async fn enabled_node_service_products(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<PluginProductId>, PluginRuntimeApplicationError> {
         let library = self.repository.library(owner_user_id).await?;
         let mut expected = Vec::new();
         for product in library.products.iter().filter(|product| product.lifecycle == "enabled") {
             let snapshot = self.repository.get(owner_user_id, &product.plugin_product_id).await?
                 .ok_or(PluginRuntimeApplicationError::NotFound)?;
-            if self.release_has_service(&snapshot, snapshot.active_release.as_ref())? {
+            let Some(active) = &snapshot.active_release else { continue; };
+            let stored = self.load_verified_release(owner_user_id, &snapshot.project.project_id, active)?;
+            if stored.artifact.manifest.payload.service.as_ref().is_some_and(|service| service.execution.is_node()) {
                 expected.push(PluginProductId::from(product.plugin_product_id.clone()));
             }
         }
         expected.sort();
+        Ok(expected)
+    }
+
+    pub async fn validate_service_runtime_candidate(
+        &self,
+        owner_user_id: &str,
+        candidate: &ResolvedNodeRuntime,
+    ) -> Result<(), PluginRuntimeApplicationError> {
+        let expected = self.enabled_node_service_products(owner_user_id).await?;
         if expected.is_empty() {
             return Ok(());
         }
@@ -5005,7 +5091,31 @@ impl PluginRuntimeApplicationService {
         owner_user_id: &str,
         plugin_product_id: &str,
     ) -> Result<PluginRuntimeSurfaceLaunchDescriptorDto, PluginRuntimeApplicationError> {
+        self.open_surface_with_agent_session(owner_user_id, plugin_product_id, None).await
+    }
+
+    /// An authenticated host UI explicitly grants access to one existing Session.
+    /// Ordinary plugin opens carry no Session authority; reload does not inherit it.
+    pub async fn open_surface_with_agent_session(
+        &self,
+        owner_user_id: &str,
+        plugin_product_id: &str,
+        agent_session: Option<(&str, &str)>,
+    ) -> Result<PluginRuntimeSurfaceLaunchDescriptorDto, PluginRuntimeApplicationError> {
+        self.open_surface_with_ui_selection(owner_user_id, plugin_product_id, agent_session, None).await
+    }
+
+    pub async fn open_surface_with_ui_selection(
+        &self,
+        owner_user_id: &str,
+        plugin_product_id: &str,
+        agent_session: Option<(&str, &str)>,
+        ui_capability: Option<&nomifun_agent_contracts::CapabilityRef>,
+    ) -> Result<PluginRuntimeSurfaceLaunchDescriptorDto, PluginRuntimeApplicationError> {
         validate_request_identity(plugin_product_id, "plugin_product_id")?;
+        if let Some((session_id, _)) = agent_session {
+            self.agent_session_port().await?.authorize(owner_user_id, session_id).await?;
+        }
         let snapshot = self
             .repository
             .get(owner_user_id, plugin_product_id)
@@ -5028,6 +5138,25 @@ impl PluginRuntimeApplicationService {
         let entrypoint = stored.artifact.manifest.payload.ui.as_ref()
             .ok_or_else(|| PluginRuntimeApplicationError::Invalid("This plugin does not provide a page".into()))?
             .entrypoint.clone();
+        if agent_session.is_some_and(|(_, expected_digest)| expected_digest != active.release_digest) {
+            return Err(PluginRuntimeApplicationError::Invalid(
+                "Selected UI release changed; review the new release before granting Session access".into(),
+            ));
+        }
+        if let Some(selected) = ui_capability {
+            let publication = self.catalog_publication_for_snapshot(owner_user_id, &snapshot)?
+                .ok_or(PluginRuntimeApplicationError::NotFound)?;
+            let contribution = publication.capabilities.iter().find(|item| &item.entry.capability == selected)
+                .ok_or_else(|| PluginRuntimeApplicationError::Invalid("Selected UI capability is not in this active release".into()))?;
+            if agent_session.is_none()
+                || contribution.manifest.kind != nomifun_agent_contracts::CapabilityKind::UiContribution
+                || contribution.manifest.contributions.ui_slot != Some(nomifun_agent_contracts::UiContributionSlot::AgentSession)
+            {
+                return Err(PluginRuntimeApplicationError::Invalid("Selected capability does not provide an Agent Session view".into()));
+            }
+            contribution.entry.operation_lock(CapabilityConsumer::Ui)
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
+        }
         if stored.artifact.manifest.payload.service.is_some() {
             let spec = self
                 .resolve_service_spec(
@@ -5065,6 +5194,7 @@ impl PluginRuntimeApplicationService {
         let session = self
             .repository
             .open_surface_session_cas(&OpenPluginRuntimeSurfaceSessionParams {
+                conversation_id: agent_session.map(|(id, _)| id.to_owned()),
                 owner_user_id: owner_user_id.to_owned(),
                 plugin_product_id: plugin_product_id.to_owned(),
                 surface_session_id: Uuid::now_v7().to_string(),
@@ -5260,6 +5390,18 @@ impl PluginRuntimeApplicationService {
             .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         let call_id = request.call_id.clone();
         match request.target {
+            PluginBridgeTarget::AgentSession { request } => {
+                let session_id = surface_session.conversation_id.as_deref().ok_or_else(||
+                    PluginRuntimeApplicationError::Invalid("This Surface has no Agent Session access grant".into()))?;
+                let result = self.agent_session_port().await?
+                    .request(owner_user_id, plugin_product_id, session_id, request).await;
+                // Do not deliver private data to a Surface revoked during a read.
+                // A turn already admitted by the Session owner is not replayed or
+                // canceled merely because its view was closed.
+                self.resolve_surface_session(plugin_product_id, capability,
+                    active_release_epoch, expected_release_digest).await?;
+                result
+            }
             PluginBridgeTarget::HostKv { request } => {
                 self.execute_surface_kv(
                     owner_user_id,
@@ -6231,11 +6373,12 @@ fn ui_only_non_ui_manifest_digest(
 
 #[async_trait]
 impl PluginRuntimeAgentCapabilityPort for PluginRuntimeApplicationService {
-    async fn invoke_agent_capability(
+    async fn invoke_agent_capability_with_events(
         &self,
         request: PluginRuntimeAgentCapabilityInvocation,
+        events: Option<tokio::sync::mpsc::Sender<StrictJsonValue>>,
     ) -> Result<StrictJsonValue, PluginRuntimeApplicationError> {
-        self.invoke_agent_capability_inner(request).await
+        self.invoke_agent_capability_inner(request, events).await
     }
 }
 
@@ -6384,7 +6527,12 @@ fn build_plugin_catalog_publication(
             .map(|consumer| {
                 (
                     consumer,
-                    if service_dispatch_available
+                    if consumer == CapabilityConsumer::Ui
+                        && manifest.kind == nomifun_agent_contracts::CapabilityKind::UiContribution
+                        && manifest.contributions.ui_slot.is_some()
+                    {
+                        CatalogAvailability::Active
+                    } else if service_dispatch_available
                         && matches!(
                             consumer,
                             CapabilityConsumer::Agent
@@ -6965,6 +7113,7 @@ fn store_error(
 
 fn build_error_code(error: &PluginRuntimeApplicationError) -> &'static str {
     match error {
+        PluginRuntimeApplicationError::AgentSession { .. } => "PLUGIN_AGENT_SESSION_ERROR",
         PluginRuntimeApplicationError::NotFound => "PLUGIN_NOT_FOUND",
         PluginRuntimeApplicationError::Database(_) => "PLUGIN_DATABASE_ERROR",
         PluginRuntimeApplicationError::Runtime(_) => "PLUGIN_RUNTIME_ERROR",

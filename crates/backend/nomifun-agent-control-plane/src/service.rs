@@ -117,11 +117,90 @@ pub struct AgentControlPlane {
     impact_catalog: Arc<dyn RevisionImpactCatalogProvider>,
     templates: OfficialTemplateCatalog,
     compiler: PresetRevisionCompiler,
+    role_bindings: Option<Arc<dyn crate::InstallationRoleBindingStore>>,
+    ui_bindings: Option<Arc<dyn crate::AgentUiBindingStore>>,
     default_chat_route_resolver: Option<Arc<dyn DefaultChatRouteResolver>>,
     template_launch_lock: tokio::sync::Mutex<()>,
 }
 
 impl AgentControlPlane {
+    pub fn with_ui_binding_store(mut self, store: Arc<dyn crate::AgentUiBindingStore>) -> Self {
+        self.ui_bindings = Some(store);
+        self
+    }
+
+    fn ui_binding_store(&self) -> Result<&dyn crate::AgentUiBindingStore, ControlPlaneError> {
+        self.ui_bindings.as_deref().ok_or_else(|| ControlPlaneError::canonical(
+            "AGENT_UI_BINDING_UNAVAILABLE", axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "this host does not provide persistent Agent page selection",
+        ))
+    }
+
+    pub async fn ui_binding(&self, owner: &UserId, preset_id: &str)
+        -> Result<nomifun_api_types::AgentPresetUiBindingResponse, ControlPlaneError> {
+        let stored = self.owned_preset(owner, preset_id).await?;
+        let binding = self.ui_binding_store()?.load(owner, &stored.preset.preset_id).await?;
+        Ok(nomifun_api_types::AgentPresetUiBindingResponse {
+            preset_id: preset_id.to_owned(), display_name: stored.preset.display_name, binding,
+        })
+    }
+
+    pub async fn put_ui_binding(&self, owner: &UserId, preset_id: &str,
+        request: nomifun_api_types::PutAgentUiBindingRequest)
+        -> Result<nomifun_api_types::AgentPresetUiBindingResponse, ControlPlaneError> {
+        let stored = self.owned_preset(owner, preset_id).await?;
+        let selection = match request.selection {
+            None => None,
+            Some(requested) => Some(self.agent_ui_contributions()?.into_iter().find(|candidate| {
+                candidate.plugin_id == requested.plugin_id && candidate.capability == requested.capability
+                    && candidate.expected_release_digest == requested.expected_release_digest
+            }).ok_or_else(|| ControlPlaneError::canonical("AGENT_UI_CHOICE_UNAVAILABLE",
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                "the exact Agent page contribution is no longer available; choose an active release"))?),
+        };
+        let binding = self.ui_binding_store()?.put(owner, &stored.preset.preset_id,
+            selection, request.expected_binding_version).await?;
+        Ok(nomifun_api_types::AgentPresetUiBindingResponse {
+            preset_id: preset_id.to_owned(), display_name: stored.preset.display_name, binding,
+        })
+    }
+
+    pub fn with_installation_role_binding_store(mut self, store: Arc<dyn crate::InstallationRoleBindingStore>) -> Self {
+        self.role_bindings = Some(store);
+        self
+    }
+
+    async fn authoring_compiler(&self, owner: &UserId) -> Result<PresetRevisionCompiler, ControlPlaneError> {
+        match &self.role_bindings {
+            Some(store) => self.compiler.clone().with_current_role_bindings(store.load(owner).await?),
+            None => Ok(self.compiler.clone()),
+        }
+    }
+
+    fn role_binding_store(&self) -> Result<&dyn crate::InstallationRoleBindingStore, ControlPlaneError> {
+        self.role_bindings.as_deref().ok_or_else(|| ControlPlaneError::canonical(
+            "ROLE_DEFAULT_MANAGEMENT_UNAVAILABLE", axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "this host has not configured installation default management",
+        ))
+    }
+
+    pub async fn role_defaults(&self, owner: &UserId) -> Result<Vec<nomifun_api_types::InstallationRoleBindingDto>, ControlPlaneError> {
+        self.role_binding_store()?.load(owner).await?.values().map(wire_cast).collect()
+    }
+
+    pub async fn put_role_default(&self, owner: &UserId, role_id: &str, request: nomifun_api_types::PutAgentRoleDefaultRequest)
+        -> Result<nomifun_api_types::InstallationRoleBindingDto, ControlPlaneError> {
+        if request.selection.role.key.role_id != role_id {
+            return Err(ControlPlaneError::canonical("ROLE_DEFAULT_IDENTITY_MISMATCH",
+                axum::http::StatusCode::BAD_REQUEST, "selection must match the requested Role"));
+        }
+        let store = self.role_binding_store()?;
+        store.load(owner).await?;
+        let selection = wire_cast(&request.selection)?;
+        self.compiler.validate_role_default(&selection)?;
+        wire_cast(&store.put(owner, selection, request.expected_binding_version).await?)
+    }
+
     pub fn new(
         store: Arc<dyn ControlPlaneStore>,
         catalog: Arc<dyn CatalogProvider>,
@@ -137,6 +216,8 @@ impl AgentControlPlane {
             impact_catalog,
             templates,
             compiler,
+            role_bindings: None,
+            ui_bindings: None,
             default_chat_route_resolver: None,
             template_launch_lock: tokio::sync::Mutex::new(()),
         }
@@ -223,6 +304,10 @@ impl AgentControlPlane {
 
     pub fn catalog(&self) -> Result<AgentCatalogResponse, ControlPlaneError> {
         self.catalog.snapshot()?.as_api()
+    }
+
+    pub fn agent_ui_contributions(&self) -> Result<Vec<nomifun_api_types::AgentUiContributionDto>, ControlPlaneError> {
+        self.catalog.snapshot()?.agent_ui_contributions()
     }
 
     pub fn resolve_capability(
@@ -405,6 +490,8 @@ impl AgentControlPlane {
         }
         let document = nomifun_api_types::AgentPresetDocumentDto {
             runtime_engine: None,
+            context_order: Vec::new(),
+            middleware_order: Vec::new(),
             schema_version: "1.0.0".into(),
             model_route_refs,
             chat_route_records,
@@ -696,7 +783,7 @@ impl AgentControlPlane {
             current_revision: None,
             document,
         };
-        let compilation = self.compiler.compile(owner, &draft, None, source_snapshot.as_ref(), template_key, &catalog)?;
+        let compilation = self.authoring_compiler(owner).await?.compile(owner, &draft, None, source_snapshot.as_ref(), template_key, &catalog)?;
         if compilation.snapshot.is_none() {
             return Err(ControlPlaneError::with_details("PRESET_REVISION_SAVE_FAILED",
                 axum::http::StatusCode::UNPROCESSABLE_ENTITY, "Agent is unavailable",
@@ -731,7 +818,7 @@ impl AgentControlPlane {
             .source_template_key
             .map(|key| wire_cast(&key))
             .transpose()?;
-        let compilation = self.compiler.compile(
+        let compilation = self.authoring_compiler(owner).await?.compile(
             owner,
             &request.draft,
             current.as_ref(),
@@ -1168,7 +1255,7 @@ impl AgentControlPlane {
             document: document.clone(),
         };
         let catalog = self.catalog.snapshot()?;
-        let compilation = self.compiler.compile(
+        let compilation = self.authoring_compiler(owner).await?.compile(
             owner,
             &draft,
             None,
@@ -1414,6 +1501,8 @@ impl AgentControlPlane {
 fn empty_document() -> nomifun_api_types::AgentPresetDocumentDto {
     nomifun_api_types::AgentPresetDocumentDto {
         runtime_engine: None,
+        context_order: Vec::new(),
+        middleware_order: Vec::new(),
         schema_version: "1.0.0".into(),
         model_route_refs: BTreeMap::new(),
         chat_route_records: BTreeMap::new(),

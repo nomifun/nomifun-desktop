@@ -165,9 +165,24 @@ export interface RoleProviderSelection {
   provider_mount_id: string;
 }
 
+export interface InstallationRoleBinding {
+  selection: RoleProviderSelection;
+  binding_version: number;
+  updated_at_ms: number;
+}
+
+export interface PutAgentRoleDefaultRequest {
+  selection: RoleProviderSelection;
+  expected_binding_version: number;
+}
+
 export interface AgentPresetDocument {
   /** Versioned Agent configuration, resolved by the host when a session is created. */
   runtime_engine?: RuntimeEngineSelection;
+  /** Context order within each phase; omitted contributors follow canonical ID order. */
+  context_order?: CapabilityId[];
+  /** Request middleware composition order; omitted contributors follow ID order. */
+  middleware_order?: CapabilityId[];
   schema_version: string;
   model_route_refs: Record<string, string>;
   chat_route_records: Partial<Record<typeof AGENT_CHAT_MODEL_TASK, ChatRouteRecord>>;
@@ -278,10 +293,27 @@ export interface McpToolCatalogItem {
   materialization_version: string;
 }
 
+export interface RoleProviderCatalogItem {
+  selection: RoleProviderSelection;
+  display_name: string;
+  description: string;
+  source_package: ExactCatalogRef<'package'>;
+  source_kind: string;
+  supported_capabilities: ExactCatalogRef<'capability'>[];
+}
+
+/** Candidates only; the canonical compiler checks compatibility and authorization. */
+export interface RoleCatalogItem {
+  role: ExactRoleContractRef;
+  capabilities: ExactCatalogRef<'capability'>[];
+  providers: RoleProviderCatalogItem[];
+}
+
 export interface AgentCatalogResponse {
   capabilities: CapabilityCatalogItem[];
   skills: SkillCatalogItem[];
   mcp_tools: McpToolCatalogItem[];
+  roles: RoleCatalogItem[];
 }
 
 export interface AgentPresetRevision {

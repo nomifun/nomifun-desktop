@@ -6,6 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
+import { createPluginAgentSessionStreamRelay } from '@/common/utils/pluginAgentSessionStream';
 import type {
   PluginRuntimeBridgeKvRequest,
   PluginRuntimeBridgeRequest,
@@ -16,7 +17,6 @@ import { Button, Spin } from '@arco-design/web-react';
 import { CloseOne, Refresh } from '@icon-park/react';
 import React, {
   useCallback,
-  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -95,11 +95,37 @@ function parseKvRequest(value: unknown): PluginRuntimeBridgeKvRequest | null {
   };
 }
 
-function parseBridgeRequest(value: unknown): PluginRuntimeBridgeRequest | null {
+export function parseBridgeRequest(value: unknown): PluginRuntimeBridgeRequest | null {
   const request = asObject(value);
   const callId = request?.call_id;
   const target = asObject(request?.target);
   if (typeof callId !== 'string' || !callId.trim() || callId.length > 256) {
+    return null;
+  }
+  if (target?.target === 'agent_session') {
+    if (Object.keys(request!).length !== 2 || Object.keys(target).length !== 2) return null;
+    const command = asObject(target.request);
+    if (!command) return null;
+    // Identity/authority fields are not forwarded or silently ignored.
+    const keys = Object.keys(command);
+    if (command.operation === 'cancel' && keys.length === 1) {
+      return { call_id: callId, target: { target: 'agent_session', request: { operation: 'cancel' } } };
+    }
+    if (command.operation === 'observe' && keys.length === 3 &&
+        Number.isSafeInteger(command.after_seq) && Number(command.after_seq) >= 0 &&
+        Number.isSafeInteger(command.limit) && Number(command.limit) >= 1 && Number(command.limit) <= 200) {
+      return { call_id: callId, target: { target: 'agent_session', request: {
+        operation: 'observe', after_seq: Number(command.after_seq), limit: Number(command.limit),
+      } } };
+    }
+    const input = asObject(command.input);
+    const key = command.idempotency_key;
+    if (command.operation === 'turn' && keys.length === 3 && input &&
+        typeof key === 'string' && key.trim() && new TextEncoder().encode(key).length <= 256) {
+      return { call_id: callId, target: { target: 'agent_session', request: {
+        operation: 'turn', input, idempotency_key: key,
+      } } };
+    }
     return null;
   }
   if (target?.target === 'service') {
@@ -158,6 +184,7 @@ const PluginRuntimeSurfacePanel: React.FC<PluginRuntimeSurfacePanelProps> = ({
   const bridgePortRef = useRef<MessagePort | null>(null);
   const inFlightCallsRef = useRef<Set<string> | null>(null);
   const handshakeCleanupRef = useRef<(() => void) | null>(null);
+  const streamCleanupRef = useRef<(() => void) | null>(null);
   const closingRef = useRef(closing);
   const assetPath = useMemo(
     () => pluginRuntimeSurfaceAssetPath(descriptor),
@@ -190,6 +217,8 @@ const PluginRuntimeSurfacePanel: React.FC<PluginRuntimeSurfacePanelProps> = ({
 
   const closeBridge = useCallback(() => {
     clearHandshake();
+    streamCleanupRef.current?.();
+    streamCleanupRef.current = null;
     const port = bridgePortRef.current;
     bridgePortRef.current = null;
     if (port) {
@@ -212,10 +241,21 @@ const PluginRuntimeSurfacePanel: React.FC<PluginRuntimeSurfacePanelProps> = ({
       const channel = new MessageChannel();
       const hostPort = channel.port1;
       const inFlightCalls = new Set<string>();
+      const stream = createPluginAgentSessionStreamRelay(hostPort, descriptor);
+      const stopEvents = ipcBridge.pluginRuntimes.agentSessionStream.on(value => {
+        if (!closingRef.current) stream.stream(value);
+      });
+      const resync = () => { if (!closingRef.current) stream.resync(); };
+      const stopResync = ipcBridge.pluginRuntimes.agentSessionResync.on(resync);
+      const stopReconnect = ipcBridge.pluginRuntimes.reconnected.on(resync);
+      streamCleanupRef.current = () => {
+        stream.close(); stopEvents(); stopResync(); stopReconnect();
+      };
       bridgePortRef.current = hostPort;
       inFlightCallsRef.current = inFlightCalls;
       hostPort.onmessage = (event: MessageEvent<unknown>) => {
         if (bridgePortRef.current !== hostPort) return;
+        if (stream.receive(event.data)) return;
         const raw = asObject(event.data);
         const request = parseBridgeRequest(event.data);
         const rawCallId =
@@ -406,9 +446,10 @@ const PluginRuntimeSurfacePanel: React.FC<PluginRuntimeSurfacePanelProps> = ({
     return closeBridge;
   }, [bridgeDescriptorKey, closeBridge]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     closingRef.current = closing;
-  }, [closing]);
+    if (closing) revokeBridge();
+  }, [closing, revokeBridge]);
 
   const handleFrameLoad = useCallback(() => {
     setFrameLoading(false);

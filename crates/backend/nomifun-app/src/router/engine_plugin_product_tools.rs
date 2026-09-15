@@ -1,4 +1,4 @@
-//! Frozen Plugin Product function tools shared by source-integrated engines.
+//! Frozen Plugin Product tools and hidden consumers shared by source-integrated engines.
 //! Service execution, authority and receipts remain owned by the application.
 use std::sync::Arc;
 
@@ -23,17 +23,17 @@ use tokio_util::sync::CancellationToken;
 use super::hosted_effect_receipts::{Domain, HostedEffectReceipts};
 
 #[derive(Clone)]
-pub(crate) struct MiniAppOwner {
+pub(crate) struct PluginProductOwner {
     pub application: Arc<PluginRuntimeApplicationService>,
     pub receipts: HostedEffectReceipts,
 }
 
-pub(crate) enum MiniAppCallError {
+pub(crate) enum PluginProductCallError {
     Rejected(String),
     Unknown(String),
 }
 
-impl MiniAppOwner {
+impl PluginProductOwner {
     /// Caller supplies only its host-frozen capability. The real Service owner
     /// rechecks release/catalog/action authority immediately before dispatch.
     pub(crate) async fn invoke(
@@ -44,9 +44,13 @@ impl MiniAppOwner {
         action: &nomifun_agent_contracts::ActionId,
         operation: OperationId,
         input: StrictJsonValue,
-    ) -> Result<StrictJsonValue, MiniAppCallError> {
-        validate_capability(capability)
-            .map_err(|error| MiniAppCallError::Rejected(error.to_string()))?;
+    ) -> Result<StrictJsonValue, PluginProductCallError> {
+        validate_invocation(capability, action)
+            .map_err(|error| {
+                // Validation reasons are host-authored and contain no payloads.
+                tracing::warn!(stage = "capability_admission", %error, "Product invocation rejected");
+                PluginProductCallError::Rejected(error.to_string())
+            })?;
         // Unified capabilities carry optional release fields. Never default to
         // another product/release or panic, even for a caller-supplied snapshot.
         let (Some(product), Some(release), Some(epoch), Some(catalog)) = (
@@ -55,7 +59,7 @@ impl MiniAppOwner {
             capability.active_release_epoch,
             capability.catalog_digest.as_ref(),
         ) else {
-            return Err(MiniAppCallError::Rejected(
+            return Err(PluginProductCallError::Rejected(
                 "Plugin Product capability is missing frozen release authority".into(),
             ));
         };
@@ -68,10 +72,13 @@ impl MiniAppOwner {
                 capability.capability.id.as_ref(),
                 action.as_ref(),
                 &input.0,
-                Domain::MiniApp,
+                Domain::PluginProduct,
             )
             .await
-            .map_err(|error| MiniAppCallError::Unknown(error.to_string()))?;
+            .map_err(|error| {
+                tracing::warn!(stage = "receipt_admission", "Product invocation has no live turn authority");
+                PluginProductCallError::Unknown(error.to_string())
+            })?;
         let result = self
             .application
             .invoke_agent_capability(PluginRuntimeAgentCapabilityInvocation {
@@ -93,6 +100,9 @@ impl MiniAppOwner {
             })
             .await;
         let written = match &result {
+            Ok(output) if capability.actions == [nomifun_agent_contracts::model_middleware::action()] => {
+                self.receipts.returned_digest(receipt, &output.0).await
+            }
             Ok(output) => self.receipts.returned(receipt, &output.0).await,
             // These exact variants currently precede Service invocation in the
             // application owner. Other failures MUST keep the receipt pending.
@@ -106,13 +116,13 @@ impl MiniAppOwner {
             }
             Err(_) => Ok(()),
         };
-        written.map_err(|error| MiniAppCallError::Unknown(error.to_string()))?;
+        written.map_err(|error| PluginProductCallError::Unknown(error.to_string()))?;
         result.map_err(|error| match error {
             PluginRuntimeApplicationError::Invalid(_)
             | PluginRuntimeApplicationError::NotFound => {
-                MiniAppCallError::Rejected(error.to_string())
+                PluginProductCallError::Rejected(error.to_string())
             }
-            _ => MiniAppCallError::Unknown(error.to_string()),
+            _ => PluginProductCallError::Unknown(error.to_string()),
         })
     }
 
@@ -130,13 +140,13 @@ impl MiniAppOwner {
                 == ContributionSourceKind::PluginProductActiveRelease
         });
         if capabilities.clone().count() > 128 {
-            return Err(failure("too many MiniApp capabilities"));
+            return Err(failure("too many Plugin Product capabilities"));
         }
         for capability in capabilities {
             validate_capability(capability)?;
             let policy = snapshot
                 .policy(&capability.capability.id)
-                .ok_or_else(|| failure("missing MiniApp authority policy"))?;
+                .ok_or_else(|| failure("missing Plugin Product authority policy"))?;
             let before = exposures.len();
             for action in &capability.actions {
                 if action.presentation != ToolPresentationKind::FunctionTool
@@ -147,19 +157,19 @@ impl MiniAppOwner {
                     continue;
                 }
                 if exposures.len() >= 128 {
-                    return Err(failure("MiniApp tool surface exceeds 128 actions"));
+                    return Err(failure("Plugin Product tool surface exceeds 128 actions"));
                 }
                 let schema = self
                     .application
                     .resolve_agent_capability_schema(user, capability, &action.input_schema)
                     .await
-                    .map_err(|_| failure("frozen MiniApp schema unavailable"))?;
+                    .map_err(|_| failure("frozen Plugin Product schema unavailable"))?;
                 if nomifun_agent_contracts::canonical_json_bytes(&schema)
                     .map_err(failure)?
                     .len()
                     > 64 * 1024
                 {
-                    return Err(failure("MiniApp schema exceeds its context budget"));
+                    return Err(failure("Plugin Product schema exceeds its context budget"));
                 }
                 let identity = nomifun_agent_contracts::canonical_json_bytes(&(capability, action))
                     .map_err(failure)?;
@@ -167,7 +177,7 @@ impl MiniAppOwner {
                 exposures.push(EngineToolExposure {
                     definition: nomifun_chat_model_broker::ChatToolDefinition {
                         name: name[..63].to_owned(),
-                        description: format!("{}: {}. MiniApp Service action {}; uses the frozen platform grant. A reply does not imply remote effects are reversible.",
+                        description: format!("{}: {}. Plugin Product Service action {}; uses the frozen platform grant. A reply does not imply remote effects are reversible.",
                             capability.display_name.as_deref().unwrap_or(capability.capability.id.as_ref()),
                             capability.description.as_deref().unwrap_or(""), action.action_id.as_ref()),
                         input_schema: schema, deferred: false,
@@ -176,7 +186,7 @@ impl MiniAppOwner {
                 });
             }
             if exposures.len() == before {
-                return Err(failure("MiniApp has no admitted function action"));
+                return Err(failure("Plugin Product has no admitted function action"));
             }
         }
         Ok(exposures)
@@ -184,6 +194,41 @@ impl MiniAppOwner {
 }
 
 pub(crate) fn validate_capability(capability: &ResolvedCapability) -> Result<(), AppError> {
+    validate_capability_bounds(capability)?;
+    if !capability.actions.iter().any(|action| {
+        action.presentation == ToolPresentationKind::FunctionTool
+            && (capability.action_allowlist.is_empty()
+                || capability.action_allowlist.contains(&action.action_id))
+    }) {
+        return Err(failure("Plugin Product has no admitted function action"));
+    }
+    Ok(())
+}
+
+fn validate_invocation(
+    capability: &ResolvedCapability,
+    action: &nomifun_agent_contracts::ActionId,
+) -> Result<(), AppError> {
+    validate_capability_bounds(capability)?;
+    if !capability.action_allowlist.is_empty()
+        && !capability.action_allowlist.contains(action)
+    {
+        return Err(failure("Product action is outside frozen allowance"));
+    }
+    let descriptor = capability.actions.iter().find(|entry| &entry.action_id == action)
+        .ok_or_else(|| failure("Product action is absent from frozen capability"))?;
+    // These existing host consumers execute Hidden actions through the same
+    // Service/receipt owner, but must never become model-visible function tools.
+    let hidden_consumer = capability.actions.len() == 1
+        && (*descriptor == nomifun_agent_contracts::model_middleware::action()
+            || *descriptor == nomifun_ai_agent::tool_discovery::action());
+    if descriptor.presentation != ToolPresentationKind::FunctionTool && !hidden_consumer {
+        return Err(failure("Product action has no supported execution consumer"));
+    }
+    Ok(())
+}
+
+fn validate_capability_bounds(capability: &ResolvedCapability) -> Result<(), AppError> {
     if capability.contribution_lock.source_kind
         != ContributionSourceKind::PluginProductActiveRelease
     {
@@ -191,7 +236,7 @@ pub(crate) fn validate_capability(capability: &ResolvedCapability) -> Result<(),
     }
     capability
         .validate()
-        .map_err(|_| failure("invalid frozen MiniApp capability"))?;
+        .map_err(|_| failure("invalid frozen Plugin Product capability"))?;
     let mut actions = std::collections::BTreeSet::new();
     if capability.display_name.as_ref().is_some_and(|name| name.len() > 256)
         || capability.description.as_ref().is_some_and(|description| description.len() > 4096)
@@ -205,32 +250,27 @@ pub(crate) fn validate_capability(capability: &ResolvedCapability) -> Result<(),
             .map_err(failure)?
             .len()
             > 256 * 1024
-        || !capability.actions.iter().any(|action| {
-            action.presentation == ToolPresentationKind::FunctionTool
-                && (capability.action_allowlist.is_empty()
-                    || capability.action_allowlist.contains(&action.action_id))
-        })
     {
         return Err(failure(
-            "MiniApp requires bounded, unique function actions without unsupported resource grants",
+            "Product requires bounded, unique actions without unsupported resource grants",
         ));
     }
     Ok(())
 }
 
 fn failure(message: impl std::fmt::Display) -> AppError {
-    AppError::Conflict(format!("Engine MiniApp tools: {message}"))
+    AppError::Conflict(format!("Engine Plugin Product tools: {message}"))
 }
 fn rejected() -> EngineToolError {
     EngineToolError::ToolInvocation(
-        "MiniApp invocation differs from frozen Session authority".into(),
+        "Plugin Product invocation differs from frozen Session authority".into(),
     )
 }
 
 /// Installed inside the one retained EngineToolHost. Never expose this raw
 /// invoker as a caller-owned future: the owner receipt must survive cancellation.
 pub(crate) struct SessionTools {
-    pub owner: MiniAppOwner,
+    pub owner: PluginProductOwner,
     pub inner: Arc<dyn EngineToolInvoker>,
     pub snapshot: Arc<CompiledSnapshot>,
     pub active: Arc<SessionCapabilityState>,
@@ -249,7 +289,7 @@ impl EngineToolInvoker for SessionTools {
         if cancellation.is_cancelled() {
             return Err(EngineToolError::Cancelled);
         }
-        // Covers all lanes, not only MiniApp: an earlier unknown hosted effect
+        // Covers all lanes, not only Plugin Product: an earlier unknown hosted effect
         // cannot be followed by a different tool while cleanup is unproven.
         self.owner
             .receipts
@@ -297,16 +337,16 @@ impl EngineToolInvoker for SessionTools {
             Ok(output) => Ok(EngineToolResult::text(
                 invocation.call.call_id,
                 serde_json::to_string(&output.0).map_err(|_| {
-                    EngineToolError::ToolInvocation("MiniApp result could not be encoded".into())
+                    EngineToolError::ToolInvocation("Plugin Product result could not be encoded".into())
                 })?,
                 false,
             )),
-            Err(MiniAppCallError::Rejected(_)) => Ok(EngineToolResult::text(
+            Err(PluginProductCallError::Rejected(_)) => Ok(EngineToolResult::text(
                 invocation.call.call_id,
                 "MINIAPP_REJECTED_BEFORE_DISPATCH: frozen authority could not be admitted; no Service call was dispatched.",
                 true,
             )),
-            Err(MiniAppCallError::Unknown(_)) => Err(EngineToolError::ToolInvocation(
+            Err(PluginProductCallError::Unknown(_)) => Err(EngineToolError::ToolInvocation(
                 "HOSTED_EFFECT_UNPROVEN: stop and inspect owner state; do not retry".into(),
             )),
         }

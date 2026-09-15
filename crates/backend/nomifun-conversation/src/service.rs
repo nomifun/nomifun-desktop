@@ -3198,6 +3198,16 @@ impl ConversationService {
             .await
     }
 
+    /// Command discovery never warms up an Agent or admits a turn.
+    pub async fn get_slash_commands(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<Vec<nomifun_api_types::SlashCommandItem>, AppError> {
+        self.require_owned_conversation(user_id, conversation_id).await?;
+        self.runtime_registry.get_slash_commands(user_id, conversation_id).await
+    }
+
     pub(crate) fn runtime_handle(&self, conversation_id: &str) -> Result<AgentRuntimeHandle, AppError> {
         self.runtime_registry
             .get_runtime(conversation_id)

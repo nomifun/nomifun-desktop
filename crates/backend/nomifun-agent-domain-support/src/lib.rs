@@ -365,6 +365,8 @@ pub fn registration(spec: PackageSpec) -> Result<PluginRegistration, DomainRegis
             contributions: CapabilityContributions {
                 actions,
                 context_schema_refs,
+                context_phase: Default::default(),
+                ui_slot: None,
                 event_schema_refs,
                 resource_kinds,
                 host_ports: Vec::new(),

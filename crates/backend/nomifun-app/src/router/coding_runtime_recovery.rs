@@ -346,7 +346,7 @@ impl CodingRestartRecovery {
                                 || !hosted_operations.insert(dispatch.operation_id.clone())
                                 || hosted_receipts.remove(&dispatch.operation_id) != Some(target)
                             {
-                                return Err("MiniApp dispatch lacks its exact returned/rejected owner receipt".into());
+                                return Err("Plugin Product dispatch lacks its exact returned/rejected owner receipt".into());
                             }
                         }
                         _ => {
@@ -487,7 +487,7 @@ impl CodingRestartRecovery {
                                     .is_some()
                             {
                                 return Err(
-                                    "MiniApp tool admission is malformed or duplicated".into()
+                                    "Plugin Product tool admission is malformed or duplicated".into()
                                 );
                             }
                         }
@@ -515,7 +515,7 @@ impl CodingRestartRecovery {
             );
         }
         if !hosted_receipts.is_empty() {
-            return Err("MiniApp owner receipts have no matching durable tool dispatch".into());
+            return Err("Plugin Product owner receipts have no matching durable tool dispatch".into());
         }
         if !robot_receipts.is_empty() {
             return Err("Robot owner receipts have no matching durable device dispatch".into());
@@ -534,7 +534,7 @@ impl CodingRestartRecovery {
                 .execute(&mut *tx).await.map_err(|error| error.to_string())?;
         }
         tx.commit().await.map_err(|error| error.to_string())?;
-        Ok("exact boot generation + exact compiled Coding build + contiguous write-ahead journal + matched MCP/MiniApp/Robot/Git owner receipts + no process-owner dispatch or latest exact owner cleanup barrier or durable joined turn-cleanup witness; history closed without replay, no command-success/rollback/physical-service-quiescence claim".into())
+        Ok("exact boot generation + exact compiled Coding build + contiguous write-ahead journal + matched MCP/Plugin Product/Robot/Git owner receipts + no process-owner dispatch or latest exact owner cleanup barrier or durable joined turn-cleanup witness; history closed without replay, no command-success/rollback/physical-service-quiescence claim".into())
     }
 }
 

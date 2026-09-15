@@ -9,6 +9,10 @@ mod error;
 mod impact;
 mod kernel_catalog;
 mod routes;
+mod role_defaults;
+pub use role_defaults::InstallationRoleBindingStore;
+mod ui_bindings;
+pub use ui_bindings::AgentUiBindingStore;
 mod service;
 mod store;
 mod wire;
@@ -25,7 +29,7 @@ pub use continuation::{
 pub use error::ControlPlaneError;
 pub use kernel_catalog::{
     KernelCatalogProvider, materialize_capability_catalog_entries,
-    materialize_catalog_snapshot, materialize_catalog_snapshot_with_miniapps,
+    materialize_catalog_snapshot, materialize_catalog_snapshot_with_plugin_products,
 };
 pub use impact::{
     ControlPlaneRevisionImpactCatalogProvider, RevisionImpactCatalogProvider,

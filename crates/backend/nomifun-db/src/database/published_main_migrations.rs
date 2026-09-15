@@ -19,24 +19,41 @@ pub(super) fn is_published_main_prefix(
     rows: &[SqliteRow],
     migrator: &Migrator,
 ) -> Result<bool, DbError> {
-    if !matches!(rows.len(), 59 | 60) {
+    let prefix = migrator.iter().filter(|migration| migration.version <= 58)
+        .collect::<Vec<_>>();
+    let mut published_tail = Vec::new();
+    for (published, canonical) in RELOCATIONS {
+        let Some(expected) = migrator.iter().find(|migration| migration.version == canonical) else {
+            return Ok(false);
+        };
+        published_tail.push((published, expected));
+    }
+    // Only the exact published asset SQL identifies this branch. Once found,
+    // malformed lineages must fail before SQLx can apply an earlier missing DDL.
+    let mut recognized = false;
+    for row in rows {
+        let version: i64 = row.try_get("version").map_err(DbError::Query)?;
+        let checksum: Vec<u8> = row.try_get("checksum").map_err(DbError::Query)?;
+        recognized |= published_tail.iter().any(|(published, expected)|
+            version == *published && checksum.as_slice() == expected.checksum.as_ref());
+    }
+    if !recognized {
         return Ok(false);
     }
-    for (index, row) in rows.iter().enumerate() {
+    if rows.len() != prefix.len() + 1 && rows.len() != prefix.len() + 2 {
+        return Err(DbError::Init("published main lineage must contain the complete common prefix and only 059 or 059/060".into()));
+    }
+    // The common prefix has the canonical 027 gap; version is not row offset.
+    let expected = prefix.into_iter().map(|migration| (migration.version, migration))
+        .chain(published_tail);
+    for (row, (expected_version, expected)) in rows.iter().zip(expected) {
         let version: i64 = row.try_get("version").map_err(DbError::Query)?;
         let success: bool = row.try_get("success").map_err(DbError::Query)?;
         let checksum: Vec<u8> = row.try_get("checksum").map_err(DbError::Query)?;
-        if version != index as i64 + 1 || !success {
-            return Ok(false);
-        }
-        let canonical_version = RELOCATIONS.iter()
-            .find(|(published, _)| *published == version)
-            .map_or(version, |(_, canonical)| *canonical);
-        let Some(expected) = migrator.iter().find(|migration| migration.version == canonical_version) else {
-            return Ok(false);
-        };
-        if checksum.as_slice() != expected.checksum.as_ref() {
-            return Ok(false);
+        if version != expected_version || !success || checksum.as_slice() != expected.checksum.as_ref() {
+            return Err(DbError::Init(format!(
+                "published main lineage does not match authenticated migration {expected_version}"
+            )));
         }
     }
     Ok(true)
@@ -60,13 +77,16 @@ pub(super) async fn adopt_and_migrate(
         transaction.rollback().await.map_err(DbError::Query)?;
         return Ok(false);
     }
+    let published_rows = rows.iter().map(|row| {
+        Ok((row.try_get::<i64, _>("version").map_err(DbError::Query)?,
+            row.try_get::<Vec<u8>, _>("checksum").map_err(DbError::Query)?))
+    }).collect::<Result<Vec<_>, DbError>>()?;
+    let published_head = published_rows.last().map(|row| row.0);
     let result = async {
         for (published, canonical) in RELOCATIONS {
-            if published as usize > rows.len() {
+            let Some((_, checksum)) = published_rows.iter().find(|row| row.0 == published) else {
                 continue;
-            }
-            let checksum: Vec<u8> = rows[published as usize - 1]
-                .try_get("checksum").map_err(DbError::Query)?;
+            };
             let changed = sqlx::query(
                 "UPDATE _sqlx_migrations SET version = ? WHERE version = ? AND success = 1 AND checksum = ?",
             )
@@ -87,7 +107,7 @@ pub(super) async fn adopt_and_migrate(
     }
     transaction.commit().await.map_err(DbError::Query)?;
     tracing::info!(
-        published_head = rows.len(),
+        published_head,
         "Converged published main asset migrations 059/060 to canonical 073/074 with unchanged checksums"
     );
     Ok(true)

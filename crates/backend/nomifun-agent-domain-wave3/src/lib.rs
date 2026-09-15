@@ -1427,6 +1427,8 @@ fn capability_manifest(
                 presentation: ToolPresentationKind::FunctionTool,
             }],
             context_schema_refs: Vec::new(),
+            context_phase: Default::default(),
+            ui_slot: None,
             event_schema_refs: Vec::new(),
             resource_kinds: spec
                 .resource_kinds

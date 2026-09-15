@@ -78,6 +78,14 @@ name = "plugin_e2e"
 path = "tests/plugin_e2e.rs"
 
 [[test]]
+name = "plugin_ui_sessions"
+path = "tests/plugin_ui_sessions.rs"
+
+[[test]]
+name = "plugin_product_discovery"
+path = "tests/plugin_product_discovery.rs"
+
+[[test]]
 name = "auxiliary_e2e"
 path = "tests/auxiliary_e2e.rs"
 

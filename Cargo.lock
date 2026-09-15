@@ -6121,6 +6121,9 @@ dependencies = [
  "nomifun-common",
  "nomifun-db",
  "nomifun-engine-core",
+ "nomifun-js-host",
+ "nomifun-js-kernel-adapter",
+ "nomifun-js-runtime",
  "nomifun-knowledge",
  "nomifun-mcp",
  "nomifun-model-invoke",
@@ -6988,6 +6991,19 @@ dependencies = [
  "walkdir",
  "which 7.0.3",
  "zip 2.4.2",
+]
+
+[[package]]
+name = "nomifun-plugin-sdk"
+version = "0.7.6"
+dependencies = [
+ "async-trait",
+ "hex",
+ "nomifun-agent-contracts",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

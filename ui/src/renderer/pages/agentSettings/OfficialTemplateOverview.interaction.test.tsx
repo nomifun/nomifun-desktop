@@ -32,7 +32,7 @@ function mount(busy = false) {
   let dirty = false;
   const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><SWRConfig value={{
     provider: () => new Map(), fallback: { 'runtime-engines': engines }, revalidateOnMount: false,
-  }}><OfficialTemplateOverview template={template} busy={busy} catalog={{ capabilities: [], skills: [], mcp_tools: [] }}
+  }}><OfficialTemplateOverview template={template} busy={busy} catalog={{ capabilities: [], skills: [], mcp_tools: [], roles: [] }}
     onSave={(_name, document) => saves.push(structuredClone(document))}
     onDirtyChange={(value) => { dirty = value; }}
   /></SWRConfig></MemoryRouter></I18nextProvider>);

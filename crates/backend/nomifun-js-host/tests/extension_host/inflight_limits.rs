@@ -86,3 +86,35 @@ async fn coalesced_callers_count_toward_the_work_limit() {
         2
     );
 }
+
+#[tokio::test]
+async fn abandoned_work_uses_reserved_cancellation_capacity() {
+    let host = limited_host(1, Duration::from_secs(3)).await;
+    let temp = TempDir::new().unwrap();
+    let generation = load(&host, &temp, "mount-a", 'a').await;
+    let pending = host.start_invocation(
+        contribution(target("mount-a", 'a')),
+        ActionId::from("wait_for_cancel"),
+        StrictJsonValue(json!({})),
+    ).await.unwrap();
+    assert_eq!(host.invoke(
+        contribution(target("mount-a", 'a')),
+        ActionId::from("echo"),
+        StrictJsonValue(json!({})),
+    ).await.unwrap_err(), JavaScriptHostError::QueueFull);
+    drop(pending);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match host.invoke(
+                contribution(target("mount-a", 'a')),
+                ActionId::from("echo"),
+                StrictJsonValue(json!({})),
+            ).await {
+                Ok(_) => break,
+                Err(JavaScriptHostError::QueueFull) => tokio::time::sleep(Duration::from_millis(10)).await,
+                Err(error) => panic!("unexpected host error: {error}"),
+            }
+        }
+    }).await.expect("abandoned work kept the only work slot");
+    host.stop_generation(generation).await.unwrap();
+}

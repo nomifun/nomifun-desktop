@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use nomi_protocol::events::ToolCategory;
@@ -10,6 +11,33 @@ use crate::{
 };
 
 const MIN_INEXACT_QUERY_CHARS: usize = 3;
+
+/// Schema-free, host-filtered metadata supplied to a discovery policy.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolDiscoveryCandidate {
+    pub name: String,
+    pub description: String,
+    pub aliases: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolDiscoveryInput {
+    pub query: String,
+    pub candidates: Vec<ToolDiscoveryCandidate>,
+    pub limit: usize,
+}
+
+/// A Session-bound policy returns routes, never schemas or authorization.
+/// The registry validates and commits the complete result after this future
+/// finishes. Dropping it (cancel/timeout) must cancel the underlying work.
+#[async_trait]
+pub trait ToolDiscoveryPolicy: Send + Sync {
+    async fn select(&self, input: ToolDiscoveryInput) -> Result<Vec<String>, String>;
+}
+
+pub use crate::registry::deferred_search::rank_tool_discovery;
 
 fn projected_match(name: &str, description: &str) -> Value {
     json!({
@@ -128,6 +156,7 @@ impl Tool for ToolSearchTool {
         }
         let information_chars = query.chars().filter(|ch| ch.is_alphanumeric()).count();
         if information_chars < MIN_INEXACT_QUERY_CHARS
+            && !self.deferred_state.has_discovery_policy()
             && !self.deferred_state.has_exact_search_term(query)
         {
             return ToolResult {
@@ -140,7 +169,10 @@ impl Tool for ToolSearchTool {
             };
         }
 
-        let matched_defs = self.deferred_state.search_and_activate(query);
+        let matched_defs = match self.deferred_state.search_and_activate_with_policy(query).await {
+            Ok(matches) => matches,
+            Err(message) => return ToolResult::error(message),
+        };
 
         if matched_defs.is_empty() {
             return ToolResult {

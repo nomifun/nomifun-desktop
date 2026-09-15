@@ -481,7 +481,7 @@ impl RuntimeSwitchParticipant for NomiCoreRuntimeSwitchParticipant {
             )));
         }
         self.release_runtime
-            .shutdown_service_runtime(owner_user_id)
+            .shutdown_node_service_runtime(owner_user_id)
             .await
             .map_err(|error| {
                 JavaScriptRuntimeError::SwitchBusy(format!(

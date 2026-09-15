@@ -281,6 +281,8 @@ fn registration(
                     json!({"type":"object", "additionalProperties":false}),
                 ),
                 contributions: CapabilityContributions {
+                    context_phase: Default::default(),
+                    ui_slot: None,
                     actions: vec![CapabilityActionDescriptor {
                         action_id: tool.action(),
                         input_schema: tool.input_ref(),

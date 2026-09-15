@@ -3,8 +3,23 @@ import { spawn } from "node:child_process";
 
 let resourceReleaseCount = 0;
 let retiredSdk;
+let retiredDependencies;
 
 export async function activate({ mount, sdk }) {
+  const cancellationState = { tool_started: 0, tool_cancelled: 0, context_started: 0, context_cancelled: 0 };
+  async function waitForCancellation(signal, kind) {
+    cancellationState[`${kind}_started`] += 1;
+    await new Promise((resolve, reject) => {
+      const abort = () => {
+        cancellationState[`${kind}_cancelled`] += 1;
+        const error = new Error("fixture canceled");
+        error.name = "AbortError";
+        reject(error);
+      };
+      if (signal.aborted) abort();
+      else signal.addEventListener("abort", abort, { once: true });
+    });
+  }
   let serviceResult;
   if (mount.config.value.activation === "service") {
     serviceResult = await sdk.credential.resolve("activation");
@@ -33,8 +48,19 @@ export async function activate({ mount, sdk }) {
     },
     capabilities: {
       [contributionId]: {
-        async invoke({ actionId, input, signal, contribution }) {
+        async invoke({ actionId, input, signal, contribution, dependencies }) {
           switch (actionId) {
+            case "dependency":
+              return await dependencies.invoke(input);
+            case "retain_dependency":
+              retiredDependencies = dependencies;
+              if (input.reject) throw new Error("retained then rejected");
+              return null;
+            case "late_dependency":
+              return await retiredDependencies.invoke(input).catch((error) => ({ error: error.message }));
+            case "detach_dependency":
+              serviceResult = dependencies.invoke(input).catch((error) => ({ error: error.message }));
+              return null;
             case "start_service":
               serviceResult = sdk.credential.resolve(input.slot ?? "fixture")
                 .catch((error) => ({ error: error.message }));
@@ -56,18 +82,10 @@ export async function activate({ mount, sdk }) {
               await new Promise(() => {});
               return null;
             case "wait_for_cancel":
-              await new Promise((resolve, reject) => {
-                signal.addEventListener(
-                  "abort",
-                  () => {
-                    const error = new Error("fixture canceled");
-                    error.name = "AbortError";
-                    reject(error);
-                  },
-                  { once: true },
-                );
-              });
+              await waitForCancellation(signal, "tool");
               return null;
+            case "cancellation_state":
+              return { ...cancellationState };
             case "crash":
               process.exit(81);
               return null;
@@ -94,7 +112,14 @@ export async function activate({ mount, sdk }) {
               throw new Error(`unknown fixture action ${actionId}`);
           }
         },
-        async contributeContext({ schemaRef, contribution }) {
+        async contributeContext({ schemaRef, contribution, signal, input, dependencies }) {
+          if (schemaRef === "schema://fixture/dependencies") {
+            const command = JSON.parse(input.turn.text);
+            return this.invoke({ actionId: command.action, input: command.input, contribution, signal, dependencies });
+          }
+          if (schemaRef === "schema://fixture/wait-for-cancel") {
+            await waitForCancellation(signal, "context");
+          }
           return {
             schema_ref: schemaRef,
             mount_id: contribution.target.mount_id,

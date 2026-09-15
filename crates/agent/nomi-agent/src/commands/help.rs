@@ -23,6 +23,7 @@ impl SlashCommand for HelpCommand {
             .registry
             .all()
             .iter()
+            .filter(|cmd| cmd.is_visible())
             .map(|cmd| (cmd.name(), cmd.description()))
             .collect();
         entries.sort_by_key(|(name, _)| *name);

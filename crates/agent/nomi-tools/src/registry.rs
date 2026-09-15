@@ -7,6 +7,10 @@ use serde_json::Value;
 
 use crate::Tool;
 
+#[path = "registry/deferred_search.rs"]
+pub(crate) mod deferred_search;
+use deferred_search::DeferredSearchSnapshot;
+
 pub(crate) const MAX_DEFERRED_SEARCH_MATCHES: usize = 5;
 const RESERVED_PROVIDER_NAME_PREFIXES: &[&str] = &["mcp__"];
 const MAX_TOOL_SCHEMA_BYTES: usize = 512 * 1024;
@@ -34,8 +38,9 @@ pub struct DeferredToolState {
 
 #[derive(Default)]
 struct DeferredToolStateInner {
+    discovery_policy: Option<Arc<dyn crate::tool_search::ToolDiscoveryPolicy>>,
     /// Search catalog keyed by the current provider-visible display name.
-    catalog: BTreeMap<String, DeferredCatalogEntry>,
+    catalog: BTreeMap<String, Arc<DeferredCatalogEntry>>,
     /// Stable activation identities, never provider-visible display aliases.
     activated: BTreeSet<String>,
     /// Restored session activations whose dynamic tools are not registered yet.
@@ -52,6 +57,34 @@ struct DeferredCatalogEntry {
 }
 
 impl DeferredToolState {
+    pub(crate) fn has_discovery_policy(&self) -> bool {
+        self.inner.read().unwrap_or_else(|p| p.into_inner()).discovery_policy.is_some()
+    }
+
+    pub(crate) async fn search_and_activate_with_policy(&self, query: &str) -> Result<Vec<ToolDef>, &'static str> {
+        let selected = {
+            let inner = self.inner.read().unwrap_or_else(|p| p.into_inner());
+            inner.discovery_policy.clone().map(|policy| (policy, DeferredSearchSnapshot::capture(&inner)))
+        };
+        let Some((policy, snapshot)) = selected else {
+            return Ok(self.search_and_activate(query));
+        };
+        let input = crate::tool_search::ToolDiscoveryInput {
+            query: query.to_owned(), candidates: snapshot.candidates(), limit: MAX_DEFERRED_SEARCH_MATCHES,
+        };
+        // Bound IPC metadata as a whole, without silently truncating candidates
+        // or substituting the built-in policy chosen by a different user.
+        if query.len() > 4096 || serde_json::to_vec(&input).map_err(|_| "Discovery input could not be encoded")?.len() > 256 * 1024 {
+            return Err("Discovery metadata exceeds the 256 KiB policy input budget (query limit 4 KiB)");
+        }
+        let names = tokio::time::timeout(std::time::Duration::from_secs(5), policy.select(input))
+            .await.map_err(|_| "Selected discovery policy timed out; no tools were activated")?
+            .map_err(|error| {
+                tracing::warn!(%error, "Selected tool discovery policy failed");
+                "Selected discovery policy failed; no tools were activated"
+            })?;
+        snapshot.activate(&mut self.inner.write().unwrap_or_else(|p| p.into_inner()), &names)
+    }
     /// Whether this tool's full schema should be sent to the provider.
     pub fn is_activated(&self, identity: &str) -> bool {
         self.inner
@@ -170,11 +203,11 @@ impl DeferredToolState {
             let display_name = definition.name.clone();
             inner.catalog.insert(
                 display_name,
-                DeferredCatalogEntry {
+                Arc::new(DeferredCatalogEntry {
                     definition,
                     activation_identity: activation_identity.clone(),
                     search_aliases,
-                },
+                }),
             );
             if inner.pending_restored.remove(&activation_identity) {
                 inner.activated.insert(activation_identity);
@@ -223,72 +256,17 @@ impl DeferredToolState {
     /// sharing that alias (bounded by the cap). Prefix/substring/description
     /// matches follow. Aliases are lookup-only and never authorize execution.
     pub(crate) fn search_and_activate(&self, query: &str) -> Vec<ToolDef> {
-        let query = query.trim().to_lowercase();
-        if query.is_empty() {
-            return Vec::new();
-        }
         let mut inner = self
             .inner
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut ranked: Vec<(u8, DeferredCatalogEntry)> = inner
-            .catalog
-            .values()
-            .filter_map(|entry| {
-                let definition = &entry.definition;
-                let name = definition.name.to_lowercase();
-                let description = definition.description.to_lowercase();
-                let rank = if name == query {
-                    0
-                } else if entry.search_aliases.iter().any(|alias| alias == &query) {
-                    1
-                } else if name.starts_with(&query) {
-                    2
-                } else if entry
-                    .search_aliases
-                    .iter()
-                    .any(|alias| alias.starts_with(&query))
-                {
-                    3
-                } else if name.contains(&query) {
-                    4
-                } else if entry
-                    .search_aliases
-                    .iter()
-                    .any(|alias| alias.contains(&query))
-                {
-                    5
-                } else if description.contains(&query) {
-                    6
-                } else {
-                    return None;
-                };
-                Some((rank, entry.clone()))
-            })
-            .collect();
-        ranked.sort_by(|(left_rank, left), (right_rank, right)| {
-            left_rank
-                .cmp(right_rank)
-                .then_with(|| left.definition.name.cmp(&right.definition.name))
-        });
-        let exact_rank = ranked
-            .first()
-            .map(|(rank, _)| *rank)
-            .filter(|rank| *rank <= 1);
-        let matches: Vec<DeferredCatalogEntry> = ranked
-            .into_iter()
-            .take_while(|(rank, _)| exact_rank.is_none_or(|exact| *rank == exact))
-            .take(MAX_DEFERRED_SEARCH_MATCHES)
-            .map(|(_, entry)| entry)
-            .collect();
-        for entry in &matches {
-            inner.pending_restored.remove(&entry.activation_identity);
-            inner.activated.insert(entry.activation_identity.clone());
-        }
-        matches
-            .into_iter()
-            .map(|entry| entry.definition)
-            .collect()
+        // The built-in still executes under one lock. Ranking itself has no
+        // access to activation state; committing validates the whole selection
+        // against the captured entries before changing any Session identities.
+        let snapshot = DeferredSearchSnapshot::capture(&inner);
+        let names = snapshot.rank(query);
+        snapshot.activate(&mut inner, &names)
+            .expect("built-in ranking selects unique current catalog entries within the cap")
     }
 }
 
@@ -341,6 +319,17 @@ impl Default for ToolRegistry {
     }
 }
 impl ToolRegistry {
+    /// Installed by the Session host from its frozen selection, not model input.
+    /// Replacing a running Session's policy requires rebuilding that Session.
+    pub fn install_discovery_policy(&mut self, policy: Arc<dyn crate::tool_search::ToolDiscoveryPolicy>) -> Result<(), &'static str> {
+        let mut inner = self.deferred_state.inner.write().unwrap_or_else(|p| p.into_inner());
+        if inner.discovery_policy.is_some() {
+            return Err("Session discovery policy is already installed");
+        }
+        inner.discovery_policy = Some(policy);
+        Ok(())
+    }
+
     pub fn new() -> Self {
         Self {
             tools: Vec::new(),

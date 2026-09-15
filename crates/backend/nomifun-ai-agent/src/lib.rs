@@ -29,6 +29,10 @@ pub mod manager;
 pub mod nomi_session_persistence;
 pub mod one_shot;
 pub mod plugin_tools;
+pub mod tool_discovery;
+pub use plugin_tools::model_middleware;
+pub mod plugin_skills;
+pub use plugin_skills::{NomiPluginSkillArtifact, NomiPluginSkillArtifactResolver};
 mod plugin_tool_error_projection;
 pub mod protocol;
 pub mod registry;
@@ -98,6 +102,7 @@ pub use factory::provider_config::{
 };
 pub use one_shot::{OneShotDeps, OneShotTool, OneShotTurnRequest, one_shot_handler, run_one_shot_turn};
 pub use plugin_tools::{
+    supports_nomi_plugin_capability,
     KernelNomiPluginToolSession,
     NomiHostDynamicToolDescriptor, NomiHostDynamicToolError,
     NomiHostDynamicToolInvocation,

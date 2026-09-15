@@ -17,6 +17,7 @@ use crate::contracts::{
     ProviderIdRef, ProviderResponseId, ProviderRoundId, ResolvedChatRoute, ToolCallId,
 };
 use crate::ports::CredentialLease;
+use crate::provider_reasoning::ProviderReasoningRoute;
 
 pub type ProviderWireStream =
     Pin<Box<dyn Stream<Item = Result<ProviderWireFrame, ChatModelError>> + Send>>;

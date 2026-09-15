@@ -416,7 +416,7 @@ pub(crate) fn nomi_descriptor() -> RuntimeEngineDescriptor {
                     include_str!("engine_history.rs"),
                     include_str!("mcp_effect_receipts.rs"),
                     include_str!("hosted_effect_receipts.rs"),
-                    include_str!("engine_miniapp_tools.rs"),
+                    include_str!("engine_plugin_product_tools.rs"),
                     include_str!("nomi_core_robot.rs"),
                     include_str!("../../../nomifun-robot/src/tool_registry.rs"),
                     include_str!("../../../nomifun-robot/src/vision.rs"),

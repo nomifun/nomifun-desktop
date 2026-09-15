@@ -7,7 +7,9 @@
 import '../../../../../test/setup-dom.ts';
 
 import { cleanup, fireEvent, render, within } from '@testing-library/react';
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+import { ipcBridge } from '@/common';
+import * as platform from '@/renderer/utils/platform';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import type { PluginRuntimeSurfaceLaunchDescriptor } from '@/common/types/pluginRuntimePlatform';
@@ -73,6 +75,53 @@ let reloads = 0;
 let closes = 0;
 
 describe('PluginRuntime Surface accessibility and recovery', () => {
+  test('scoped event listeners are removed when the Surface closes', () => {
+    const callbacks: Array<(value: never) => void> = [];
+    let stopped = 0;
+    const mocks = [
+      ipcBridge.pluginRuntimes.agentSessionStream,
+      ipcBridge.pluginRuntimes.agentSessionResync,
+      ipcBridge.pluginRuntimes.reconnected,
+    ].map(emitter => spyOn(emitter, 'on').mockImplementation((callback: (value: never) => void) => {
+      callbacks.push(callback);
+      return () => { stopped++; };
+    }));
+    const OriginalChannel = globalThis.MessageChannel;
+    // The handshake is driven explicitly below; do not navigate to a backend
+    // during a DOM lifecycle test (native MessagePort is tested in the SDK).
+    const assetUrl = spyOn(platform, 'resolveBackendAssetUrl').mockReturnValue('about:blank');
+    const sent: unknown[] = [];
+    const port = { onmessage: null as ((event: { data: unknown }) => void) | null, postMessage: (message: unknown) => sent.push(message), start() {}, close() {} };
+    globalThis.MessageChannel = class { port1 = port; port2 = { close() {} }; } as unknown as typeof MessageChannel;
+    try {
+      const view = renderSurface();
+      const frame = view.container.querySelector('iframe')!;
+      const outbound = spyOn(frame.contentWindow!, 'postMessage').mockImplementation(() => {});
+      fireEvent.load(frame);
+      const challenge = outbound.mock.calls[0]?.[0] as { nonce: string };
+      expect(challenge.nonce).toBeDefined();
+      window.dispatchEvent(new MessageEvent('message', { source: frame.contentWindow, origin: 'null', data: {
+        type: 'nomifun-plugin-bridge-handshake-v1', version: '1.0.0', nonce: challenge.nonce,
+      } }));
+      expect(callbacks).toHaveLength(3);
+      port.onmessage?.({ data: { type: 'nomifun-plugin-agent-session-subscribe-v1', subscription_id: 1 } });
+      callbacks[0]!({ ...descriptor, event: { type: 'text', data: 'authorized' } } as never);
+      expect(sent).toHaveLength(2);
+      view.rerender(<I18nextProvider i18n={i18n}><PluginRuntimeSurfacePanel descriptor={descriptor}
+        displayName='Status Board' reloading={false} closing={true} onReload={() => {}} onClose={() => {}} /></I18nextProvider>);
+      expect(stopped).toBe(3);
+      callbacks[0]!({ ...descriptor, event: { type: 'text', data: 'late' } } as never);
+      expect(sent).toHaveLength(2);
+      view.unmount();
+      expect(stopped).toBe(3);
+      outbound.mockRestore();
+    } finally {
+      assetUrl.mockRestore();
+      globalThis.MessageChannel = OriginalChannel;
+      for (const mock of mocks) mock.mockRestore();
+    }
+  });
+
   test('names the Surface controls and exposes a retry after frame failure', () => {
     reloads = 0;
     closes = 0;

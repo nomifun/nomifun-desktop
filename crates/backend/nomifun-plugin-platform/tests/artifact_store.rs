@@ -217,6 +217,31 @@ fn directory_and_zip_import_share_one_idempotent_artifact() {
 }
 
 #[test]
+fn declared_reads_verify_exact_paths_digests_and_allocation_limits() {
+    let (_temp, store, package) = fixture();
+    let imported = store.import_directory(&package, &NeverCancel).unwrap();
+    let digest = &imported.stored.artifact.artifact_digest;
+    let reference = nomifun_agent_contracts::LogicalArtifactRef {
+        artifact_id: "reference".into(), normalized_relative_path: "resources/nested/schema.json".into(), digest: sha256(b"{}"),
+    };
+    assert_eq!(store.read_declared_files(digest, &[reference.clone()], 2, 2, 1).unwrap()[&reference.normalized_relative_path], b"{}");
+    for (file, total, count) in [(1, 2, 1), (2, 1, 1), (2, 2, 0)] {
+        assert!(store.read_declared_files(digest, &[reference.clone()], file, total, count).is_err());
+    }
+    assert!(store.read_declared_files(digest, &[reference.clone(), reference.clone()], 4, 8, 2).is_err());
+    for path in ["../manifest.json", "resources/../manifest.json", "C:/secret", "resources/NESTED/schema.json", "resources/missing"] {
+        let mut wrong = reference.clone();
+        wrong.normalized_relative_path = path.into();
+        assert!(store.read_declared_files(digest, &[wrong], 1024, 1024, 1).is_err(), "{path}");
+    }
+    let mut wrong = reference.clone();
+    wrong.digest = sha256(b"other");
+    assert!(store.read_declared_files(digest, &[wrong], 1024, 1024, 1).is_err());
+    fs::write(imported.stored.package_root.join(&reference.normalized_relative_path), b"[]").unwrap();
+    assert!(store.read_declared_files(digest, &[reference], 1024, 1024, 1).is_err());
+}
+
+#[test]
 fn inspection_validates_directory_and_zip_without_publishing() {
     let (temp, store, package) = fixture();
     let directory = store.inspect_directory(&package, &NeverCancel).unwrap();

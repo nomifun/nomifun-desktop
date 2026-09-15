@@ -159,7 +159,7 @@ pub(crate) fn descriptor() -> RuntimeEngineDescriptor {
                     include_str!("../../../nomifun-ai-agent/src/nomi_resources.rs"),
                     include_str!("mcp_effect_receipts.rs"),
                     include_str!("hosted_effect_receipts.rs"),
-                    include_str!("engine_miniapp_tools.rs"),
+                    include_str!("engine_plugin_product_tools.rs"),
                     include_str!("engine_robot_tools.rs"),
                     include_str!("nomi_core_robot.rs"),
                     include_str!("../../../nomifun-robot/src/tool_registry.rs"),
@@ -261,7 +261,7 @@ pub(crate) fn factory(
                     definition, capability_id: binding.capability_id.clone(), action_id: binding.action_id.clone(),
                 }
             }))?;
-            let full_plan = full_plan.merged(&resources.miniapp_tool_plan().await?).map_err(error)?;
+            let full_plan = full_plan.merged(&resources.plugin_product_tool_plan().await?).map_err(error)?;
             let full_plan = full_plan.merged(&resources.robot_tool_plan().await?).map_err(error)?;
             if full_plan.len() > 128 { return Err(error("Coding tool surface exceeds 128 actions")); }
             let skills = session_host.read_selected_skills(&admitted).await?;

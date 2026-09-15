@@ -497,6 +497,7 @@ pub struct SetPluginRuntimeAutoPublishParams {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenPluginRuntimeSurfaceSessionParams {
+    pub conversation_id: Option<String>,
     pub owner_user_id: String,
     pub plugin_product_id: String,
     pub surface_session_id: String,
@@ -794,6 +795,13 @@ pub trait IPluginRuntimeRepository: Send + Sync {
         &self,
         params: &ResolvePluginRuntimeSurfaceSessionParams,
     ) -> Result<Option<PluginRuntimeSurfaceSessionRow>, DbError>;
+
+    /// Current UI grants for one owned Conversation, never a new subscription registry.
+    async fn agent_surface_sessions(
+        &self,
+        owner_user_id: &str,
+        conversation_id: &str,
+    ) -> Result<Vec<PluginRuntimeSurfaceSessionRow>, DbError>;
 
     async fn close_surface_session_cas(
         &self,

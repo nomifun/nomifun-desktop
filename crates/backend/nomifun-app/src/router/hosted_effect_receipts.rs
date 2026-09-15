@@ -1,4 +1,4 @@
-//! Source-turn attribution, not a replacement for MiniApp/Robot/Git owners.
+//! Source-turn attribution, not a replacement for Plugin Product/Robot/Git owners.
 //! Pending dispatch is never cleared by engine completion or application restart.
 use async_trait::async_trait;
 use nomifun_common::AppError;
@@ -20,16 +20,16 @@ pub(crate) struct Receipt {
 }
 #[derive(Clone, Copy)]
 pub(crate) enum Domain {
-    // Historical Plugin Product receipt codec. Keep `miniapp` on disk so
+    // Preserve the historical on-disk codec, independent of the Rust name, so
     // existing effects remain visible to recovery and replay protection.
-    MiniApp,
+    PluginProduct,
     Robot,
     Git,
 }
 impl Domain {
     fn as_str(self) -> &'static str {
         match self {
-            Self::MiniApp => "miniapp",
+            Self::PluginProduct => "miniapp",
             Self::Robot => "robot",
             Self::Git => "git",
         }
@@ -138,6 +138,14 @@ impl HostedEffectReceipts {
     pub(crate) async fn returned(&self, receipt: Receipt, result: &Value) -> Result<(), AppError> {
         self.finish(receipt, "returned", bounded(result)?).await
     }
+    /// Request-local middleware patches must not become persistent prompt
+    /// content through the recovery ledger. Keep outcome evidence, not text.
+    pub(crate) async fn returned_digest(&self, receipt: Receipt, result: &Value) -> Result<(), AppError> {
+        let summary = summarize(result)?;
+        self.finish(receipt, "returned", json!({
+            "content_omitted": true, "serialized_bytes": summary.bytes, "sha256": summary.digest()
+        })).await
+    }
     /// Only for a typed owner rejection known to occur BEFORE remote dispatch.
     pub(crate) async fn rejected(
         &self,
@@ -205,7 +213,7 @@ impl HostedEffectReceipts {
             WHERE e.user_id = ? AND e.conversation_id = ? AND r.message_id = ? AND r.kind = 'turn' AND e.state != 'rejected')")
             .bind(user).bind(session).bind(source).fetch_one(&self.pool).await.map_err(|_| failure())?;
         if dispatched != 0 {
-            return Err(AppError::Conflict("The source already dispatched a hosted MiniApp/Robot/Git call. Automatic retry or edit/resubmit cannot reverse its effects; inspect state and send a new instruction.".into()));
+            return Err(AppError::Conflict("The source already dispatched a hosted Plugin Product/Robot/Git call. Automatic retry or edit/resubmit cannot reverse its effects; inspect state and send a new instruction.".into()));
         }
         Ok(())
     }

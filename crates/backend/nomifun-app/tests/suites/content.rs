@@ -42,6 +42,19 @@ fn every_top_level_integration_test_is_registered() {
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     registered.extend(GROUPED_TEST_FILES.iter().map(|file| (*file).to_owned()));
+    // Source-integrated plugin cases run inside these explicitly registered
+    // product targets; they are not independent Cargo test executables.
+    for (parent, child) in [
+        ("plugin_product_discovery.rs", "plugin_product_before_model.rs"),
+        ("plugin_product_discovery.rs", "plugin_product_stream.rs"),
+        ("plugin_ui_sessions.rs", "plugin_ui_binding.rs"),
+        ("plugin_ui_sessions.rs", "plugin_ui_admission.rs"),
+    ] {
+        assert!(registered.contains(parent), "missing parent target: {parent}");
+        let source = std::fs::read_to_string(manifest_dir.join("tests").join(parent)).unwrap();
+        assert!(source.contains(&format!(r#"#[path = "{child}"]"#)), "missing child module: {child}");
+        registered.insert(child.to_owned());
+    }
 
     let actual = std::fs::read_dir(manifest_dir.join("tests"))
         .expect("tests directory must be readable")

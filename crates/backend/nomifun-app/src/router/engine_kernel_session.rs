@@ -63,7 +63,7 @@ pub(crate) struct EngineKernelAssembly {
     pub kernel: Arc<KernelRegistry>,
     pub environment: CompilerEnvironment,
     pub wave2: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
-    pub miniapp: super::engine_miniapp_tools::MiniAppOwner,
+    pub plugin_product: super::engine_plugin_product_tools::PluginProductOwner,
     pub robot: Option<Arc<super::nomi_core_robot::NomiCoreRobotWave4Owner>>,
 }
 
@@ -104,8 +104,8 @@ pub struct EngineKernelSession {
     active: Arc<SessionCapabilityState>,
     kernel: Arc<KernelRegistry>,
     wave2: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
-    miniapp: super::engine_miniapp_tools::MiniAppOwner,
-    miniapp_plan: tokio::sync::OnceCell<EngineToolPlan>,
+    plugin_product: super::engine_plugin_product_tools::PluginProductOwner,
+    plugin_product_plan: tokio::sync::OnceCell<EngineToolPlan>,
     robot: Option<Arc<super::nomi_core_robot::NomiCoreRobotWave4Owner>>,
     robot_tools: tokio::sync::OnceCell<Option<Arc<super::engine_robot_tools::FrozenTools>>>,
     state: Mutex<State>,
@@ -240,8 +240,8 @@ impl EngineKernelSession {
             kernel: assembly.kernel.clone(),
             wave2: assembly.wave2.clone(),
             git_root,
-            miniapp: assembly.miniapp.clone(),
-            miniapp_plan: tokio::sync::OnceCell::new(),
+            plugin_product: assembly.plugin_product.clone(),
+            plugin_product_plan: tokio::sync::OnceCell::new(),
             robot: assembly.robot.clone(),
             robot_tools: tokio::sync::OnceCell::new(),
             state: Mutex::new(State::default()),
@@ -303,20 +303,20 @@ impl EngineKernelSession {
 
     /// Plugin Product actions from the immutable enabled capability set.
     /// Reading their schemas does not activate capabilities or start Services.
-    pub async fn miniapp_tool_plan(&self) -> Result<EngineToolPlan, AppError> {
+    pub async fn plugin_product_tool_plan(&self) -> Result<EngineToolPlan, AppError> {
         if self.constraints.restricted() {
             return Ok(EngineToolPlan::default());
         }
         let plan = self
-            .miniapp_plan
+            .plugin_product_plan
             .get_or_try_init(|| async {
                 let exposures = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
-                    self.miniapp
+                    self.plugin_product
                         .exposures(&self.principal.principal_id, &self.compiled),
                 )
                 .await
-                .map_err(|_| failure("MiniApp schema resolution timed out"))??;
+                .map_err(|_| failure("Plugin Product schema resolution timed out"))??;
                 self.compile_tool_plan(exposures)
             })
             .await?;
@@ -332,7 +332,7 @@ impl EngineKernelSession {
         }
         tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            self.miniapp
+            self.plugin_product
                 .receipts
                 .context(&self.principal.principal_id, self.session_id.as_ref()),
         )
@@ -347,7 +347,7 @@ impl EngineKernelSession {
         if let Some(root) = &self.git_root {
             self.wave2.ensure_workspace_git_evidence(root).await?;
         }
-        self.miniapp
+        self.plugin_product
             .receipts
             .ensure_settled(&self.principal.principal_id, self.session_id.as_ref())
             .await
@@ -383,7 +383,7 @@ impl EngineKernelSession {
                     std::time::Duration::from_secs(30),
                     super::engine_robot_tools::FrozenTools::resolve(
                         owner,
-                        self.miniapp.receipts.clone(),
+                        self.plugin_product.receipts.clone(),
                         self.principal.clone(),
                         self.session_id.clone(),
                         &self.compiled,
@@ -602,13 +602,13 @@ impl EngineKernelSession {
                 .resolved_capability(&binding.capability_id)
                 .is_some_and(|selected| selected.contribution_lock.source_kind == nomifun_agent_contracts::ContributionSourceKind::PluginProductActiveRelease)
                 && self
-                    .miniapp_plan
+                    .plugin_product_plan
                     .get()
                     .and_then(|frozen| frozen.binding(&definition.name))
                     != Some(binding)
             {
                 return Err(failure(
-                    "MiniApp tools require the exact host-resolved schema surface",
+                    "Plugin Product tools require the exact host-resolved schema surface",
                 ));
             }
         }
@@ -637,8 +637,8 @@ impl EngineKernelSession {
             }) as Arc<dyn nomifun_engine_core::EngineToolInvoker>,
             None => invoker,
         };
-        let invoker = super::engine_miniapp_tools::SessionTools {
-            owner: self.miniapp.clone(),
+        let invoker = super::engine_plugin_product_tools::SessionTools {
+            owner: self.plugin_product.clone(),
             inner: invoker,
             snapshot: self.compiled.clone(),
             active: self.active.clone(),
@@ -646,7 +646,7 @@ impl EngineKernelSession {
             session: self.session_id.clone(),
             plan: plan.clone(),
         };
-        // Check the exact frozen mapping BEFORE Robot/MiniApp/media adapters;
+        // Check the exact frozen mapping BEFORE Robot/Plugin Product/media adapters;
         // none may dispatch using a caller-supplied capability/effect label.
         let invoker = ConstrainedTools {
             inner: Arc::new(invoker),
