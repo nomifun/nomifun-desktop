@@ -359,6 +359,25 @@ impl McpManager {
         result
     }
 
+    /// Inspect only the connected, host-bound catalog. This never connects,
+    /// lists tools over RPC, or dispatches the target.
+    pub fn preflight_tool(
+        &self,
+        server_name: &str,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<(), String> {
+        let server = self.servers.get(server_name).ok_or_else(||
+            "MCP server is unavailable; activate the selected MCP connection first".to_owned())?;
+        let mut matches = server.tools.iter().filter(|tool| tool.name == tool_name);
+        let tool = matches.next().ok_or_else(||
+            "MCP tool is not in the authorized server catalog; discover an exact tool first".to_owned())?;
+        if matches.next().is_some() {
+            return Err("MCP target is ambiguous; refresh the selected server catalog".to_owned());
+        }
+        nomi_tools::registry::validate_tool_input_schema(tool_name, &tool.input_schema, arguments)
+    }
+
     /// Execute a tool on a specific server.
     ///
     /// Returns a structured [`McpCallOutput`] keeping text and artifact content

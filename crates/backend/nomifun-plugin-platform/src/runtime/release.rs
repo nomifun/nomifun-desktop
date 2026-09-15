@@ -1049,7 +1049,7 @@ fn validate_release_path(
     if path == "ui/index.html"
         || path.starts_with("ui/")
         || (content_kind == PluginRuntimeReleaseContentKind::Service
-            && matches!(path, "service/main.mjs" | "service/plugin.exe" | "service/plugin"))
+            && path == "service/main.mjs")
     {
         Ok(())
     } else {
@@ -1070,7 +1070,7 @@ fn validate_release_path(
 
 fn validate_stored_release_path(path: &str) -> Result<(), PluginRuntimeReleaseStoreError> {
     validate_relative_path(path)?;
-    if path == "ui/index.html" || path.starts_with("ui/") || matches!(path, "service/main.mjs" | "service/plugin.exe" | "service/plugin") {
+    if path == "ui/index.html" || path.starts_with("ui/") || path == "service/main.mjs" {
         Ok(())
     } else {
         Err(PluginRuntimeReleaseStoreError::InvalidPath {

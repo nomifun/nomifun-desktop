@@ -93,18 +93,6 @@ pub struct PluginRuntimeStaticServiceInput {
     pub runtime_requirements_digest: DigestHex,
 }
 
-/// A precompiled native Service. The host never runs Cargo/build scripts.
-#[derive(Clone, Debug)]
-pub struct PluginRuntimeNativeServiceInput {
-    pub executable: Vec<u8>,
-    pub target: nomifun_agent_contracts::NativePluginTarget,
-    pub lifecycle: PluginServiceLifecycle,
-    pub uses_files: bool,
-    pub uses_private_database: bool,
-    pub service_contract_digest: DigestHex,
-    pub runtime_requirements_digest: DigestHex,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginRuntimeStaticServiceMaterialization {
     pub descriptor: PluginServiceReleaseDescriptor,
@@ -196,22 +184,6 @@ impl PluginRuntimeStaticBundleBuilder {
 pub fn build_plugin_static_bundle(
     input: PluginRuntimeStaticBundleInput,
 ) -> Result<PluginReleaseArtifactV1, PluginRuntimeStaticBundleBuildError> {
-    build_bundle(input, None)
-}
-
-pub fn build_plugin_native_bundle(
-    input: PluginRuntimeStaticBundleInput,
-    native: PluginRuntimeNativeServiceInput,
-) -> Result<PluginReleaseArtifactV1, PluginRuntimeStaticBundleBuildError> {
-    if input.service.is_some() { return Err(PluginRuntimeStaticBundleBuildError::InvalidServiceSourceContent); }
-    let service = materialize_native_service_release(native)?;
-    build_bundle(input, Some(service))
-}
-
-fn build_bundle(
-    input: PluginRuntimeStaticBundleInput,
-    native: Option<PluginRuntimeStaticServiceMaterialization>,
-) -> Result<PluginReleaseArtifactV1, PluginRuntimeStaticBundleBuildError> {
     validate_no_custom_scripts(input.package_json.as_deref())?;
 
     let PluginRuntimeStaticBundleInput {
@@ -233,7 +205,7 @@ fn build_bundle(
         migrations,
     } = input;
 
-    if ui_index_html.is_empty() && service.is_none() && native.is_none() {
+    if ui_index_html.is_empty() && service.is_none() {
         return Err(PluginRuntimeStaticBundleBuildError::EmptyFile { path: "ui/index.html".into() });
     }
 
@@ -258,7 +230,7 @@ fn build_bundle(
 
     let service = service
         .map(materialize_service_release)
-        .transpose()?.or(native);
+        .transpose()?;
     let service_descriptor = service
         .as_ref()
         .map(|materialized| materialized.descriptor.clone());
@@ -382,7 +354,6 @@ pub fn materialize_service_release(
     let module_digest = digest_bytes(&main_mjs);
     Ok(PluginRuntimeStaticServiceMaterialization {
         descriptor: PluginServiceReleaseDescriptor {
-            execution: Default::default(),
             entrypoint: PLUGIN_SERVICE_ENTRYPOINT.to_owned(),
             module_digest,
             lifecycle,
@@ -404,36 +375,12 @@ pub fn materialize_service_release(
     })
 }
 
-pub fn materialize_native_service_release(
-    input: PluginRuntimeNativeServiceInput,
-) -> Result<PluginRuntimeStaticServiceMaterialization, PluginRuntimeStaticBundleBuildError> {
-    if input.executable.is_empty() || input.executable.len() > 256 * 1024 * 1024 {
-        return Err(PluginRuntimeStaticBundleBuildError::InvalidServiceSourceContent);
-    }
-    let execution = nomifun_agent_contracts::PluginServiceExecution::Native { target: input.target };
-    Ok(PluginRuntimeStaticServiceMaterialization {
-        descriptor: PluginServiceReleaseDescriptor {
-            execution,
-            entrypoint: execution.entrypoint().into(),
-            module_digest: digest_bytes(&input.executable),
-            lifecycle: input.lifecycle,
-            uses_files: input.uses_files,
-            uses_private_database: input.uses_private_database,
-            service_contract_digest: input.service_contract_digest,
-            host_protocol_version: PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
-            sdk_contract_version: PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
-            runtime_requirements_digest: input.runtime_requirements_digest,
-        },
-        file: PluginRuntimeStaticBundleFile::new(execution.entrypoint(), input.executable),
-    })
-}
-
 pub fn validate_static_bundle_path(
     path: &str,
 ) -> Result<(), PluginRuntimeStaticBundleBuildError> {
     validate_normalized_relative_path(path)?;
     if path == "ui/index.html"
-        || matches!(path, "service/main.mjs" | "service/plugin.exe" | "service/plugin")
+        || path == "service/main.mjs"
         || path.starts_with("ui/")
     {
         Ok(())

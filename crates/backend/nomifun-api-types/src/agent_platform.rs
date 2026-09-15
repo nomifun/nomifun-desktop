@@ -334,6 +334,8 @@ pub struct CapabilityCatalogItemDto {
     pub required_capabilities: Vec<ExactCatalogRefDto>,
     pub conflicting_capabilities: Vec<ExactCatalogRefDto>,
     pub action_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub middleware_phase: Option<String>,
     pub context_contributor_count: u32,
 }
 

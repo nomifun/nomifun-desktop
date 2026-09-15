@@ -19,6 +19,8 @@ impl Binding {
     }
 }
 
+/// Nomi preview/save admission shares runtime selection's exact contract checks.
+/// The generic compiler validates order and identity, not support for Nomi hooks.
 pub fn validate_selection(
     content: &nomifun_agent_contracts::ResolvedSnapshotContent,
 ) -> Result<(), NomiPluginToolError> {
@@ -57,19 +59,7 @@ pub(super) fn selected(
             consumer: None,
         });
     }
-    let mut positions = BTreeMap::new();
-    for (index, id) in content.middleware_order.iter().enumerate() {
-        if positions.insert(id, index).is_some()
-            || !bindings
-                .iter()
-                .any(|binding| &binding.resolved.capability.id == id)
-        {
-            return Err(NomiPluginToolError::Contract(format!(
-                "middleware_order has a duplicate or unsupported request middleware {}",
-                id.as_ref()
-            )));
-        }
-    }
+    let positions = middleware_positions(content)?;
     bindings.sort_by_key(|binding| {
         (
             positions
@@ -80,6 +70,21 @@ pub(super) fn selected(
         )
     });
     Ok(bindings)
+}
+
+/// One frozen ordering list, filtered by each actual supported phase.
+pub(super) fn middleware_positions(content: &nomifun_agent_contracts::ResolvedSnapshotContent)
+    -> Result<BTreeMap<CapabilityId, usize>, NomiPluginToolError> {
+    let mut positions = BTreeMap::new();
+    for (index, id) in content.middleware_order.iter().enumerate() {
+        if positions.insert(id.clone(), index).is_some()
+            || !content.contributions().any(|item| &item.capability.id == id
+                && nomifun_agent_contracts::tool_middleware::phase_for_actions(&item.actions).is_some()) {
+            return Err(NomiPluginToolError::Contract(format!(
+                "middleware_order has a duplicate or unsupported execution middleware {}", id.as_ref())));
+        }
+    }
+    Ok(positions)
 }
 
 pub(super) fn bind(
@@ -127,6 +132,7 @@ impl ModelRequestMiddleware for ProductMiddleware {
         let value = self
             .invoker
             .invoke(NomiPluginProductToolInvocation {
+                cancellation: Default::default(),
                 identity: self.action.identity.clone(),
                 operation_id: key.clone().into(),
                 idempotency_key: key.clone().into(),

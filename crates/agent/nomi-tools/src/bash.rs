@@ -22,6 +22,20 @@ use crate::{
     windows_shell::{ShellOutputSanitizer, shell_transport, validate_shell_script},
 };
 
+/// Hook preflight can prove the local-owner path with the existing request
+/// normalizer. Sandboxed spawning remains at its platform owner and therefore
+/// is explicitly unsupported here until it exposes a read-only admission API.
+pub(crate) fn preflight_local_process(
+    request: nomi_process_runtime::ProcessRequest,
+    session_cwd: &Path,
+) -> Result<(), String> {
+    let request = normalize_request(request, session_cwd).map_err(|error| error.to_string())?;
+    if !matches!(request.capability.sandbox, nomi_process_runtime::SandboxPolicy::UnrestrictedLocalOwner) {
+        return Err("before_tool preflight does not support this process sandbox policy; platform spawn authorization cannot be completed without dispatch".into());
+    }
+    Ok(())
+}
+
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
 const BASH_OUTPUT_MAX_BYTES: usize = 48_000;
@@ -250,6 +264,29 @@ impl Tool for BashTool {
 
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
         false
+    }
+
+    async fn preflight_hook(
+        &self,
+        input: &Value,
+        _context: &crate::ToolExecutionContext,
+    ) -> Result<(), String> {
+        let command = input["command"].as_str()
+            .ok_or_else(|| "Missing required parameter: command".to_string())?;
+        validate_shell_script(command)?;
+        let cwd = requested_workdir(input, &self.cwd)?;
+        preflight_local_process(nomi_process_runtime::ProcessRequest {
+            owner: ProcessOwner::new(self.invocation_id, Uuid::nil()),
+            command: CommandSpec::Shell {
+                shell: if cfg!(windows) { ShellKind::PowerShell } else { ShellKind::Posix },
+                script: command.to_owned(),
+            },
+            cwd,
+            env: BTreeMap::new(),
+            transport: shell_transport(false),
+            policy: ProcessPolicy::default(),
+            capability: self.capability.clone(),
+        }, &self.cwd)
     }
 
     async fn execute(&self, input: Value) -> ToolResult {

@@ -195,6 +195,19 @@ pub trait Tool: Send + Sync {
     /// Execute the tool
     async fn execute(&self, input: Value) -> ToolResult;
 
+    /// Read-only admission before exposing canonical arguments to a selected
+    /// Product hook. Boundary adapters must reuse their actual owner's live
+    /// authorization checks without acquiring resources or dispatching work.
+    /// The real invocation still rechecks authority after the hook returns.
+    /// Unsupported tools fail explicitly; an absent hook never calls this.
+    async fn preflight_hook(
+        &self,
+        _input: &Value,
+        _context: &ToolExecutionContext,
+    ) -> Result<(), String> {
+        Err(format!("Tool '{}' does not support execution hook admission", self.name()))
+    }
+
     /// Maximum wall-clock time for one invocation, including host-side hooks.
     ///
     /// This is an engine safety net, not a replacement for a tool's own

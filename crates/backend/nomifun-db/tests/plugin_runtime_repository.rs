@@ -678,7 +678,6 @@ fn fixture_artifact_payload_with_service(
             ui_tree_digest: canonical_ui_tree_digest(&files).unwrap(),
         }),
         service: has_service.then(|| PluginServiceReleaseDescriptor {
-            execution: Default::default(),
             entrypoint: "service/main.mjs".to_owned(),
             module_digest: files[1].digest.clone(),
             lifecycle: PluginServiceLifecycle::OnDemand,
@@ -995,7 +994,7 @@ fn service_test_receipt_params(
     let ready_row = snapshot.ready_release.as_ref().unwrap();
     let ready: PluginReadyRelease =
         serde_json::from_str(&ready_row.release_record_json).unwrap();
-    let runtime = PluginServiceRuntimeFingerprint::Node {
+    let runtime = PluginServiceRuntimeFingerprint {
         runtime_installation_id: RuntimeInstallationId::from("test-runtime"),
         runtime_target: RuntimeTarget::from("windows-x86_64"),
         runtime_executable_digest: DigestHex::from(digest_seed.to_string().repeat(64)),

@@ -342,16 +342,18 @@ impl AgentPresetCompiler {
             }
         }
         for id in &request.revision.payload.middleware_order {
-            let action = nomifun_agent_contracts::model_middleware::action();
-            let valid = plugin_product_by_id.get(id).is_some_and(|value| value.actions == [action.clone()])
+            // Revision validation owns unique, directly selected order entries.
+            // Product projections have already passed exact identity validation
+            // and carry no kind; the application owns their consumer support.
+            // Registry entries additionally expose a structural kind/consumer.
+            let valid = plugin_product_by_id.contains_key(id)
                 || registry.capability(id).is_some_and(|value| {
                     value.manifest.kind == nomifun_agent_contracts::CapabilityKind::TurnMiddleware
                         && value.manifest.supports_consumer(CapabilityConsumer::Agent)
-                        && value.manifest.contributions.actions == [action]
                 });
             if !valid {
                 return Err(KernelError::InvalidPresetRevision {
-                    reason: format!("middleware_order capability {} must support the before_model request contract", id.as_ref()),
+                    reason: format!("middleware_order capability {} must be an Agent TurnMiddleware or an application-supplied Product contribution", id.as_ref()),
                 });
             }
         }
@@ -1658,6 +1660,72 @@ mod tests {
             created_at_ms: 2,
             resolver_run_id: OperationId::from("compiler-test"),
         }
+    }
+
+    #[test]
+    fn middleware_order_accepts_alternative_product_contract_and_freezes_it() {
+        let capability = plugin_product_capability(BTreeSet::from([ACTION_ID.into()]));
+        let mut saved_revision = revision(
+            capability.action_allowlist.clone(),
+            capability.contribution_lock.clone(),
+        );
+        let unordered = AgentPresetCompiler::compile(
+            &MaterializedRegistry::empty(),
+            &environment(),
+            compile_request(saved_revision.clone(), capability.clone()),
+        ).unwrap();
+        saved_revision.payload.middleware_order = vec![CAPABILITY_ID.into()];
+        saved_revision.reference.revision_digest = saved_revision.revision_digest().unwrap();
+        let compiled = AgentPresetCompiler::compile(
+            &MaterializedRegistry::empty(),
+            &environment(),
+            compile_request(saved_revision, capability.clone()),
+        ).expect("consumer support is not a generic compiler concern");
+
+        assert_eq!(compiled.content().middleware_order, vec![CapabilityId::from(CAPABILITY_ID)]);
+        assert_eq!(compiled.content().enabled_capabilities, vec![capability.clone()]);
+        assert_eq!(compiled.policy(&CAPABILITY_ID.into()), unordered.policy(&CAPABILITY_ID.into()));
+        assert_ne!(compiled.snapshot_ref(), unordered.snapshot_ref());
+        assert_ne!(compiled.content().compiled_runtime_profile_digest,
+            unordered.content().compiled_runtime_profile_digest);
+    }
+
+    #[test]
+    fn middleware_order_still_rejects_duplicate_and_unselected_product_entries() {
+        let capability = plugin_product_capability(BTreeSet::new());
+        for order in [vec![CAPABILITY_ID, CAPABILITY_ID], vec!["plugin.unselected"]] {
+            let mut saved_revision = revision(BTreeSet::new(), capability.contribution_lock.clone());
+            saved_revision.payload.middleware_order = order.into_iter().map(Into::into).collect();
+            saved_revision.reference.revision_digest = saved_revision.revision_digest().unwrap();
+            let error = AgentPresetCompiler::compile(
+                &MaterializedRegistry::empty(),
+                &environment(),
+                compile_request(saved_revision, capability.clone()),
+            ).expect_err("middleware order must be unique and directly selected");
+            assert!(matches!(error, KernelError::InvalidPresetRevision { reason }
+                if reason.contains("middleware_order contains duplicate or unselected")));
+        }
+    }
+
+    #[test]
+    fn middleware_order_still_rejects_product_identity_drift() {
+        let capability = plugin_product_capability(BTreeSet::new());
+        let mut saved_revision = revision(BTreeSet::new(), capability.contribution_lock.clone());
+        saved_revision.payload.middleware_order = vec![CAPABILITY_ID.into()];
+        saved_revision.payload.enabled_capabilities[0].capability.version = "2.0.0".into();
+        saved_revision.reference.revision_digest = saved_revision.revision_digest().unwrap();
+        assert!(matches!(AgentPresetCompiler::compile(
+            &MaterializedRegistry::empty(), &environment(),
+            compile_request(saved_revision.clone(), capability.clone()),
+        ), Err(KernelError::CapabilityNotMaterialized { .. })));
+
+        saved_revision.payload.enabled_capabilities[0].capability = capability.capability.clone();
+        saved_revision.contribution_locks[0].contract_digest = digest('e');
+        saved_revision.reference.revision_digest = saved_revision.revision_digest().unwrap();
+        assert!(matches!(AgentPresetCompiler::compile(
+            &MaterializedRegistry::empty(), &environment(),
+            compile_request(saved_revision, capability),
+        ), Err(KernelError::CapabilityProvenanceDrift { .. })));
     }
 
     #[test]

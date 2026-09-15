@@ -72,7 +72,6 @@ test('SDK clears pending request when structured cloning fails', { timeout: 5000
   assert.equal(timers.size, 0);
 });
 
-const prefix = 'nomifun-plugin-agent-session-';
 
 test('versioned storage uses existing KV wire, preserves tombstones and reports conflicts without retry', { timeout: 5000 }, async t => {
   const { storage, host } = runtime(t);
@@ -117,88 +116,4 @@ test('versioned storage rejects unsafe revisions and does not accept malformed s
   await assert.rejects(storage.read('draft'), /no revision/);
   await assert.rejects(storage.read('draft'), /Invalid storage revision/);
   await assert.rejects(storage.compareAndSwap('draft', null, {}), /no revision/);
-});
-function inbox(host) {
-  const queued = [];
-  const waiting = [];
-  host.on('message', value => {
-    if (waiting.length) waiting.shift()(value);
-    else queued.push(value);
-  });
-  return { queued, next: () => queued.length ? Promise.resolve(queued.shift()) : new Promise(resolve => waiting.push(resolve)) };
-}
-function frame(host, subscription_id, seq, fields = {}) {
-  host.postMessage({ type: prefix + 'event-v1', subscription_id, seq, kind: 'stream', event: { seq }, ...fields });
-}
-
-test('async recovery observes durable history before ACK, without starting a turn', { timeout: 5000 }, async t => {
-  const { api, host } = runtime(t);
-  const messages = inbox(host);
-  let recovered = false;
-  const stop = api.subscribe(async value => {
-    assert.equal(value.kind, 'resync_required');
-    assert.deepEqual(await api.observe(), { messages: ['durable'] });
-    recovered = true;
-  });
-  const subscribe = await messages.next();
-  assert.equal(subscribe.type, prefix + 'subscribe-v1');
-  frame(host, subscribe.subscription_id, 1, { kind: 'resync_required', reason: 'initial' });
-  const observe = await messages.next();
-  assert.equal(observe.target.request.operation, 'observe');
-  assert.equal(recovered, false);
-  assert.equal(messages.queued.length, 0);
-  host.postMessage({ type: 'nomifun-plugin-bridge-result-v1', call_id: observe.call_id, ok: true, result: { messages: ['durable'] } });
-  assert.equal((await messages.next()).type, prefix + 'ack-v1');
-  assert.equal(recovered, true);
-  stop();
-  assert.equal((await messages.next()).type, prefix + 'unsubscribe-v1');
-});
-
-test('serial delivery survives a throwing listener and duplicate functions unsubscribe independently', { timeout: 5000 }, async t => {
-  const { api, host } = runtime(t);
-  const messages = inbox(host);
-  const delivered = [];
-  let release;
-  const paused = new Promise(resolve => { release = resolve; });
-  const callback = async value => {
-    delivered.push(value.event.seq);
-    if (value.event.seq === 1) await paused;
-    if (value.event.seq === 2) throw new Error('plugin error');
-  };
-  const stop1 = api.subscribe(callback);
-  const stop2 = api.subscribe(callback);
-  const { subscription_id } = await messages.next();
-  stop1();
-  frame(host, subscription_id, 1); frame(host, subscription_id, 2); frame(host, subscription_id, 3);
-  release();
-  for (const seq of [1, 2, 3]) assert.equal((await messages.next()).seq, seq);
-  assert.deepEqual(delivered, [1, 2, 3]);
-  stop2();
-  assert.equal((await messages.next()).type, prefix + 'unsubscribe-v1');
-});
-
-test('unsubscribe/resubscribe discards old frames and queued callbacks', { timeout: 5000 }, async t => {
-  const { api, host } = runtime(t);
-  const messages = inbox(host);
-  let entered, release;
-  const started = new Promise(resolve => { entered = resolve; });
-  const paused = new Promise(resolve => { release = resolve; });
-  const old = [];
-  const stop = api.subscribe(async value => { old.push(value.event.seq); entered(); await paused; });
-  const first = await messages.next();
-  frame(host, first.subscription_id, 1);
-  await started;
-  frame(host, first.subscription_id, 2);
-  stop();
-  assert.equal((await messages.next()).type, prefix + 'unsubscribe-v1');
-  const current = [];
-  api.subscribe(value => current.push(value.event.seq));
-  const second = await messages.next();
-  assert.notEqual(first.subscription_id, second.subscription_id);
-  frame(host, first.subscription_id, 3);
-  frame(host, second.subscription_id, 4);
-  release();
-  while ((await messages.next()).seq !== 4) { /* drain old ACKs */ }
-  assert.deepEqual(old, [1]);
-  assert.deepEqual(current, [4]);
 });

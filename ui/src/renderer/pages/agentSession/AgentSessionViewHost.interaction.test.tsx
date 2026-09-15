@@ -5,6 +5,7 @@ import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { SWRConfig } from 'swr';
+import { useEffect } from 'react';
 import { agentPlatform, pluginRuntimes } from '@/common/adapter/ipcBridge';
 import { pluginRuntimeProduct, type PluginRuntimeDraft } from '@/common/adapter/pluginRuntimeProductBridge';
 import * as platform from '@/renderer/utils/platform';
@@ -54,12 +55,18 @@ async function open(options: {
   spyOn(platform, 'resolveBackendAssetUrl').mockReturnValue('about:blank');
   const cache = new Map();
   const draftCreated = mock((_draftId: string) => {});
+  let builtinMounts = 0;
+  function BuiltinProbe() {
+    useEffect(() => { builtinMounts++; }, []);
+    return <div>Built-in session content</div>;
+  }
   const page = (sessionId: string) => <SWRConfig value={{ provider: () => cache, dedupingInterval: 2000, shouldRetryOnError: false }}>
     <I18nextProvider i18n={i18n}><AgentSessionViewHost key={sessionId} sessionId={sessionId} onDraftCreated={draftCreated}>
-      <div>Built-in session content</div>
+      <BuiltinProbe />
     </AgentSessionViewHost></I18nextProvider>
   </SWRConfig>;
-  const result = render(page('session-a'));
+  let result!: ReturnType<typeof render>;
+  await act(async () => { result = render(page('session-a')); });
   const view = within(result.container);
   if (options.choices?.length !== 0) await view.findByRole('option', { name: /My Agent/ });
   if (!options.preference) await view.findByText('Built-in session content');
@@ -67,28 +74,53 @@ async function open(options: {
     target: { value: (view.getByRole('option', { name: /My Agent/ }) as HTMLOptionElement).value },
   });
   const use = () => fireEvent.click(view.getByRole('button', { name: en.view.use }));
-  return { ...result, view, catalog, preference, save, launch, close, bridge, select, use, page, draftCreated };
+  return { ...result, view, catalog, preference, save, launch, close, bridge, select, use, page, draftCreated, builtinMounts: () => builtinMounts };
 }
 
-test('empty server catalog keeps builtin usable without advertising experimental view setup', async () => {
-  const v = await open({ choices: [] });
+test('ordinary users can create, select, save and return to builtin without a host opt-in', async () => {
+  const v = await open();
+  const create = spyOn(pluginRuntimeProduct.agentSessionTemplate, 'invoke').mockResolvedValue({ id: 'draft-one' } as PluginRuntimeDraft);
   expect(v.view.getByText('Built-in session content')).toBeTruthy();
-  expect(v.view.queryByRole('combobox')).toBeNull();
-  expect(v.view.queryByRole('button', { name: en.view.createTemplate })).toBeNull();
+  expect((v.view.getByRole('combobox') as HTMLSelectElement).value).toBe('');
+  expect(v.catalog).toHaveBeenCalledTimes(1);
+  expect(v.preference).toHaveBeenCalledWith({ agent_session_id: 'session-a' });
   expect(v.launch).not.toHaveBeenCalled();
   expect(v.save).not.toHaveBeenCalled();
+  expect(v.builtinMounts()).toBe(1);
+  fireEvent.click(v.view.getByRole('button', { name: en.view.createTemplate }));
+  await waitFor(() => expect(v.draftCreated).toHaveBeenCalledWith('draft-one'));
+  expect(create).toHaveBeenCalledTimes(1);
+  expect(v.launch).not.toHaveBeenCalled();
+  v.select(); v.use();
+  await waitFor(() => expect(v.container.querySelector('iframe')).not.toBeNull());
+  fireEvent.click(v.view.getByRole('button', { name: en.view.remember }));
+  await waitFor(() => expect(v.view.getByRole('button', { name: en.view.clearDefault }).hasAttribute('disabled')).toBe(false));
+  expect(v.save).toHaveBeenCalledWith({ preset_id: 'preset-a', request: {
+    expected_binding_version: 0, selection: choice,
+  } });
+  fireEvent.click(v.view.getByRole('button', { name: en.view.builtin }));
+  await v.view.findByText('Built-in session content');
+  await waitFor(() => expect(v.close).toHaveBeenCalledTimes(1));
+  expect(v.launch).toHaveBeenCalledTimes(1);
   expect(v.bridge).not.toHaveBeenCalled();
 });
 
-test('disabled experiment preserves saved consent but opens builtin and allows explicit clearing', async () => {
+test('empty catalog offers the first template without a published plugin', async () => {
+  const v = await open({ choices: [] });
+  expect(v.view.getByRole('button', { name: en.view.createTemplate })).toBeTruthy();
+  expect(v.view.getByText('Built-in session content')).toBeTruthy();
+  expect(v.launch).not.toHaveBeenCalled();
+});
+
+test('unavailable saved release opens builtin and allows explicit clearing', async () => {
   const v = await open({ choices: [], preference: async () => ({ ...builtinPreference,
     binding: { binding_version: 4, selection: choice } }) });
   await v.view.findByText(en.view.defaultUnavailable);
   await v.view.findByText('Built-in session content');
-  expect(v.view.queryByRole('button', { name: en.view.createTemplate })).toBeNull();
+  expect(v.view.getByRole('button', { name: en.view.createTemplate })).toBeTruthy();
   expect(v.launch).not.toHaveBeenCalled();
   expect(v.save).not.toHaveBeenCalled();
-  fireEvent.click(v.view.getByRole('button', { name: en.view.clearDefault }));
+  await act(async () => { fireEvent.click(v.view.getByRole('button', { name: en.view.clearDefault })); });
   await waitFor(() => expect(v.save).toHaveBeenCalledWith({ preset_id: 'preset-a', request: {
     expected_binding_version: 4, selection: null,
   } }));
@@ -104,6 +136,20 @@ test('remembered exact release opens a fresh grant for each Session; it is not a
   await waitFor(() => expect(v.launch).toHaveBeenCalledTimes(2));
   expect(v.launch.mock.calls[1][0].agent_session?.agent_session_id).toBe('session-b');
   expect(v.close).toHaveBeenCalledTimes(1);
+  expect(v.save).not.toHaveBeenCalled();
+  expect(v.bridge).not.toHaveBeenCalled();
+  expect(v.builtinMounts()).toBe(0);
+});
+
+test('saved selection resolves before builtin can mount or produce side effects', async () => {
+  let resolve!: (value: AgentPresetUiBinding) => void;
+  const v = await open({ preference: () => new Promise(r => { resolve = r; }) });
+  expect(v.view.queryByText('Built-in session content')).toBeNull();
+  expect(v.builtinMounts()).toBe(0);
+  expect(v.launch).not.toHaveBeenCalled();
+  await act(async () => { resolve({ ...builtinPreference, binding: { binding_version: 2, selection: choice } }); });
+  await waitFor(() => expect(v.container.querySelector('iframe')).not.toBeNull());
+  expect(v.builtinMounts()).toBe(0);
   expect(v.save).not.toHaveBeenCalled();
   expect(v.bridge).not.toHaveBeenCalled();
 });

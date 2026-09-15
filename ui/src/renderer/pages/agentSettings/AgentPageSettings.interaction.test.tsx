@@ -95,9 +95,12 @@ async function mount(options: {
     launch, bridge, history, sessionPreference, draftChanged, saveAgent, guid };
 }
 
-test('real editor saves page consent before any Session, then opens its page without sending a message', async () => {
+test('ordinary user saves a plugin page in the real editor and opens it without host opt-in or sending a message', async () => {
   const v = await mount({ editor: true });
   await v.view.findByRole('option', { name: /Custom page/ });
+  expect((v.view.getByRole('combobox', { name: en.page.default }) as HTMLSelectElement).value).toBe('');
+  expect(v.save).not.toHaveBeenCalled();
+  expect(v.launch).not.toHaveBeenCalled();
   v.select();
   expect(v.view.getByText(en.page.savePageFirst)).toBeTruthy();
   fireEvent.click(v.view.getByRole('button', { name: en.page.open }));
@@ -120,6 +123,26 @@ test('real editor saves page consent before any Session, then opens its page wit
   expect(v.bridge).not.toHaveBeenCalled();
   expect(v.guid).not.toHaveBeenCalled();
   expect(v.history).toHaveBeenCalledWith('chat.history.refresh');
+});
+
+test('ordinary user can save a plugin default then restore builtin while the plugin remains available', async () => {
+  const v = await mount();
+  await v.view.findByRole('option', { name: /Custom page/ });
+  v.select();
+  fireEvent.click(v.view.getByRole('button', { name: en.page.save }));
+  await waitFor(() => expect(v.stored().binding.selection).toEqual(choice));
+  await waitFor(() => expect(v.view.queryByText(en.page.savePageFirst)).toBeNull());
+  fireEvent.change(v.view.getByRole('combobox', { name: en.page.default }), { target: { value: '' } });
+  fireEvent.click(v.view.getByRole('button', { name: en.page.save }));
+  await waitFor(() => expect(v.stored().binding.selection).toBeNull());
+  await waitFor(() => expect(v.view.queryByText(en.page.savePageFirst)).toBeNull());
+  expect(v.save.mock.calls[1][0]).toEqual({ preset_id: preset.preset_id,
+    request: { expected_binding_version: 1, selection: null } });
+  fireEvent.click(v.view.getByRole('button', { name: en.page.open }));
+  await v.view.findByText('Built-in session');
+  expect(v.launch).not.toHaveBeenCalled();
+  expect(v.turn).not.toHaveBeenCalled();
+  expect(v.bridge).not.toHaveBeenCalled();
 });
 
 test('dirty Agent configuration does not block independent page saving, but blocks launching an old revision', async () => {

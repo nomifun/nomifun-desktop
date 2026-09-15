@@ -836,7 +836,6 @@ fn artifact(seed: &str, with_service: bool) -> PluginReleaseArtifactV1 {
             .find(|file| file.normalized_relative_path == "service/main.mjs")
             .unwrap();
         PluginServiceReleaseDescriptor {
-            execution: Default::default(),
             entrypoint: "service/main.mjs".into(),
             module_digest: module.digest.clone(),
             lifecycle: PluginServiceLifecycle::OnDemand,
@@ -960,7 +959,7 @@ fn service_spec(
         lifecycle: service.lifecycle,
         host_protocol_version: service.host_protocol_version.clone(),
         sdk_contract_version: service.sdk_contract_version.clone(),
-        runtime: PluginServiceRuntimeFingerprint::Node {
+        runtime: PluginServiceRuntimeFingerprint {
             runtime_installation_id: RuntimeInstallationId::from("runtime-1"),
             runtime_target: RuntimeTarget::from("windows-x86_64"),
             runtime_executable_digest: digest("node-runtime"),

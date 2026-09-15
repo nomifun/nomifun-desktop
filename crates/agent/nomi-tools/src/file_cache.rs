@@ -50,6 +50,11 @@ impl FileStateCache {
         self.entries.get(&normalized)
     }
 
+    /// Inspect a cached state without promoting it or changing eviction order.
+    pub fn peek(&self, path: &Path) -> Option<&FileState> {
+        self.entries.peek(&normalize_path(path))
+    }
+
     /// Insert or update a file state entry.
     ///
     /// Evicts least-recently-used entries when the byte-size limit or
@@ -137,6 +142,29 @@ impl FileStateCache {
     /// Current total byte size of all cached content.
     pub fn current_size_bytes(&self) -> usize {
         self.current_size_bytes
+    }
+}
+
+/// Metadata lookup for the shared mutation guards. Execution retains the
+/// existing LRU promotion; a hook preflight must only inspect the same entry.
+#[derive(Clone, Copy)]
+pub(crate) enum GuardCacheAccess {
+    Inspect,
+    Execute,
+}
+
+pub(crate) fn cached_mtime_for_guard(
+    cache: &std::sync::RwLock<FileStateCache>,
+    path: &Path,
+    access: GuardCacheAccess,
+) -> Result<Option<u64>, ()> {
+    match access {
+        GuardCacheAccess::Inspect => cache.read()
+            .map(|cache| cache.peek(path).map(|state| state.mtime_ms))
+            .map_err(|_| ()),
+        GuardCacheAccess::Execute => cache.write()
+            .map(|mut cache| cache.get(path).map(|state| state.mtime_ms))
+            .map_err(|_| ()),
     }
 }
 
@@ -306,6 +334,20 @@ mod tests {
         let config = make_config(10, 1_000_000);
         let mut cache = FileStateCache::new(&config);
         assert!(cache.get(Path::new("/does/not/exist")).is_none());
+    }
+
+    #[test]
+    fn hook_preflight_peek_preserves_lru_eviction_order() {
+        let mut cache = FileStateCache::new(&make_config(2, 1_000_000));
+        cache.insert(PathBuf::from("/a"), make_state("a", 1));
+        cache.insert(PathBuf::from("/b"), make_state("b", 2));
+        assert!(cache.peek(Path::new("/a")).is_some());
+        assert!(cache.peek(Path::new("/missing")).is_none());
+        cache.insert(PathBuf::from("/c"), make_state("c", 3));
+        assert!(cache.peek(Path::new("/a")).is_none());
+        assert!(cache.peek(Path::new("/b")).is_some());
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.current_size_bytes(), 2);
     }
 
     #[test]

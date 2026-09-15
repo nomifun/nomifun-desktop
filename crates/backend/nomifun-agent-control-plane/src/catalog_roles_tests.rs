@@ -93,6 +93,7 @@ fn fixture() -> (CatalogSnapshot, Vec<CapabilityCatalogItemDto>) {
         required_capabilities: Vec::new(),
         conflicting_capabilities: Vec::new(),
         action_count: 1,
+        middleware_phase: None,
         context_contributor_count: 0,
     }];
     (catalog, capabilities)

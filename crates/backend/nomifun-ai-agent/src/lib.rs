@@ -32,8 +32,8 @@ pub mod one_shot;
 pub mod plugin_tools;
 pub mod tool_discovery;
 pub use plugin_tools::model_middleware;
+pub use plugin_tools::tool_middleware;
 pub mod plugin_skills;
-pub use plugin_skills::{NomiPluginSkillArtifact, NomiPluginSkillArtifactResolver};
 mod plugin_tool_error_projection;
 pub mod protocol;
 pub mod registry;
@@ -118,7 +118,7 @@ pub use plugin_tools::{
     NomiPlatformBuiltinLifecycleAdmission,
     NomiPlatformBuiltinLifecycleInvocation,
     NomiPlatformBuiltinLifecycleInvoker,
-    NomiPluginToolSession, NomiPluginToolSessionProvider,
+    NomiHostedSessionBindings, NomiPluginToolSession, NomiPluginToolSessionProvider,
     NomiPluginToolSessionRequest, NomiPluginProductToolAction,
     NomiPluginProductToolInvocation, NomiPluginProductToolInvoker,
     NomiPluginProductToolSchemaResolver,

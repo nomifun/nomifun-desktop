@@ -14,7 +14,8 @@ use nomifun_ai_agent::model_middleware as contract;
 struct Product {
     expected: nomifun_agent_contracts::ResolvedCapability,
     inputs: Mutex<Vec<Value>>,
-    cancelled: Arc<AtomicUsize>,
+    finished: Arc<AtomicUsize>,
+    release: tokio::sync::Notify,
 }
 
 struct DropEvidence(Arc<AtomicUsize>);
@@ -61,9 +62,9 @@ impl NomiPluginProductToolInvoker for Product {
                 ));
             }
             "wait" => {
-                let _evidence = DropEvidence(self.cancelled.clone());
-                std::future::pending::<()>().await;
-                unreachable!()
+                let _evidence = DropEvidence(self.finished.clone());
+                self.release.notified().await;
+                json!({})
             }
             _ => json!({"system":format!("transformed:{text}"), "tool_names":["Allowed"]}),
         };
@@ -191,7 +192,8 @@ async fn setup() -> (nomifun_ai_agent::NomiPluginToolSession, Arc<Product>) {
     let product = Arc::new(Product {
         expected: compiled.content().contributions().next().unwrap().clone(),
         inputs: Mutex::new(Vec::new()),
-        cancelled: Arc::new(AtomicUsize::new(0)),
+        finished: Arc::new(AtomicUsize::new(0)),
+        release: tokio::sync::Notify::new(),
     });
     let kernel = Arc::new(
         KernelRegistry::new(policy(), Arc::new(InMemoryPluginStatePersistence::new())).unwrap(),
@@ -214,7 +216,7 @@ async fn setup() -> (nomifun_ai_agent::NomiPluginToolSession, Arc<Product>) {
     assert!(base.model_middleware().is_err());
     assert!(
         base.clone()
-            .with_plugin_product_actions(Vec::new(), product.clone())
+            .bind_hosted_execution(product_bindings(Vec::new(), product.clone()))
             .is_err()
     );
     let schemas = contract::schemas();
@@ -246,7 +248,7 @@ async fn setup() -> (nomifun_ai_agent::NomiPluginToolSession, Arc<Product>) {
     .await
     .unwrap();
     let loaded = base
-        .with_plugin_product_actions(actions, product.clone())
+        .bind_hosted_execution(product_bindings(actions, product.clone()))
         .unwrap();
     let mut tools = ToolRegistry::new();
     loaded.register_into(&mut tools).unwrap();
@@ -338,7 +340,7 @@ async fn before_model_hidden_tool_is_rejected_even_if_provider_requests_it() {
 }
 
 #[tokio::test]
-async fn product_before_model_failure_blocks_provider_and_timeout_drops_invocation() {
+async fn product_before_model_failure_blocks_provider_and_timeout_retains_invocation() {
     let (loaded, product) = setup().await;
     let workspace = tempfile::tempdir().unwrap();
     for text in [
@@ -372,7 +374,21 @@ async fn product_before_model_failure_blocks_provider_and_timeout_drops_invocati
             "{text}: {error}"
         );
     }
-    assert_eq!(product.cancelled.load(Ordering::SeqCst), 1);
+    settle_retained_wait(&loaded, &product).await;
+}
+
+async fn settle_retained_wait(loaded: &nomifun_ai_agent::NomiPluginToolSession, product: &Product) {
+    let scope = loaded.effect_scope().unwrap();
+    assert_eq!(product.finished.load(Ordering::SeqCst), 0,
+        "caller cancellation must not discard the hosted operation");
+    assert!(scope.ensure_turn_open().is_err(), "cancellation must close further dispatch");
+    assert!(scope.begin_turn().is_err(), "a pending operation is not proof of settlement");
+    product.release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(2), scope.settle_turn()).await.unwrap().unwrap();
+    assert_eq!(product.finished.load(Ordering::SeqCst), 1,
+        "settlement must await the original operation, not spawn a retry");
+    scope.begin_turn().unwrap();
+    scope.settle_turn().await.unwrap();
 }
 
 struct Filter {
@@ -381,7 +397,7 @@ struct Filter {
 }
 
 #[tokio::test]
-async fn dropping_before_model_turn_drops_the_product_invocation_without_provider_request() {
+async fn dropping_before_model_turn_retains_the_product_invocation_without_provider_request() {
     let (loaded, product) = setup().await;
     let capture = Arc::new(Capture {
         requests: Mutex::new(Vec::new()),
@@ -404,7 +420,7 @@ async fn dropping_before_model_turn_drops_the_product_invocation_without_provide
         .await
         .is_err()
     );
-    assert_eq!(product.cancelled.load(Ordering::SeqCst), 1);
+    settle_retained_wait(&loaded, &product).await;
     assert_eq!(product.inputs.lock().unwrap().len(), 1);
     assert!(capture.requests.lock().unwrap().is_empty());
 }

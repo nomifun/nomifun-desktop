@@ -199,25 +199,44 @@ struct RepositorySessionMcpConnector {
     oauth_enabled: bool,
 }
 
+impl RepositorySessionMcpConnector {
+    /// Shared read-only binding authorization; transport and credential work
+    /// remains exclusively in connect after this same owner check.
+    async fn authorized_rows(
+        &self,
+        bindings: &[SessionMcpBindingRef],
+    ) -> Result<Vec<McpServerRow>, SessionMcpConnectFailure> {
+        let mut rows = Vec::with_capacity(bindings.len());
+        let mut names = std::collections::BTreeSet::new();
+        for binding in bindings {
+            let row = self.repository.find_by_id(binding.resource_id()).await
+                .map_err(|_| SessionMcpConnectFailure::ResourceUnavailable)?
+                .filter(|row| row.enabled && row.deleted_at.is_none())
+                .ok_or(SessionMcpConnectFailure::ResourceUnavailable)?;
+            let expected_ref = format!("mcp-server:{}@{}", row.mcp_server_id, row.updated_at);
+            if binding.connection_config_ref() != expected_ref || !names.insert(row.name.clone()) {
+                return Err(SessionMcpConnectFailure::ResourceUnavailable);
+            }
+            rows.push(row);
+        }
+        Ok(rows)
+    }
+}
+
 #[async_trait]
 impl SessionMcpConnector for RepositorySessionMcpConnector {
+    async fn preflight(&self, bindings: &[SessionMcpBindingRef]) -> Result<(), String> {
+        self.authorized_rows(bindings).await.map(|_| ()).map_err(|_| {
+            "Selected MCP binding is unavailable, disabled or changed; select the current server revision in a new session".into()
+        })
+    }
+
     async fn connect(
         &self,
         bindings: &[SessionMcpBindingRef],
     ) -> Result<Vec<Arc<McpManager>>, SessionMcpConnectFailure> {
         let mut servers = HashMap::new();
-        for binding in bindings {
-            let row = self
-                .repository
-                .find_by_id(binding.resource_id())
-                .await
-                .map_err(|_| SessionMcpConnectFailure::ResourceUnavailable)?
-                .filter(|row| row.enabled && row.deleted_at.is_none())
-                .ok_or(SessionMcpConnectFailure::ResourceUnavailable)?;
-            let expected_ref = format!("mcp-server:{}@{}", row.mcp_server_id, row.updated_at);
-            if binding.connection_config_ref() != expected_ref {
-                return Err(SessionMcpConnectFailure::ResourceUnavailable);
-            }
+        for row in self.authorized_rows(bindings).await? {
             let mut config = row_to_mcp_server_config(&row)
                 .map_err(|_| SessionMcpConnectFailure::TransportUnavailable)?;
             if self.oauth_enabled

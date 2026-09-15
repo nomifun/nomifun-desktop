@@ -6970,6 +6970,7 @@ dependencies = [
  "async-trait",
  "getrandom 0.2.17",
  "hex",
+ "jsonschema",
  "junction",
  "libc",
  "nomi-process-runtime",
@@ -6994,19 +6995,6 @@ dependencies = [
  "walkdir",
  "which 7.0.3",
  "zip 2.4.2",
-]
-
-[[package]]
-name = "nomifun-plugin-sdk"
-version = "0.7.6"
-dependencies = [
- "async-trait",
- "hex",
- "nomifun-agent-contracts",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]

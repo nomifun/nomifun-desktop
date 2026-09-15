@@ -1,4 +1,4 @@
-//! Both Product adapter/scope installation orders must retain Hidden calls.
+//! Atomic hosted binding must retain Hidden calls and fence unknown effects.
 use super::*;
 use nomifun_ai_agent::{NomiPluginToolSession, engine_effect_scope::EngineEffectScope};
 use tokio::sync::Notify;
@@ -40,7 +40,6 @@ impl NomiPluginProductToolInvoker for ControlledProduct {
 
 async fn setup(
     middleware: bool,
-    scope_first: bool,
     product: Arc<ControlledProduct>,
 ) -> (NomiPluginToolSession, Arc<EngineEffectScope>) {
     let (mut capability, _) = plugin_product_fixture();
@@ -61,13 +60,10 @@ async fn setup(
         Arc::new(SchemaMap::default()),
     ).await.unwrap();
     let scope = Arc::new(EngineEffectScope::new(Vec::new()).unwrap());
-    let loaded = if scope_first {
-        base.with_effect_scope(scope.clone()).unwrap()
-            .with_plugin_product_actions(actions, product).unwrap()
-    } else {
-        base.with_plugin_product_actions(actions, product).unwrap()
-            .with_effect_scope(scope.clone()).unwrap()
-    };
+    let loaded = base.bind_hosted_execution(nomifun_ai_agent::NomiHostedSessionBindings {
+        product: Some((actions, product)),
+        ..nomifun_ai_agent::NomiHostedSessionBindings::new(scope.clone())
+    }).unwrap();
     assert!(Arc::ptr_eq(&loaded.effect_scope().unwrap(), &scope));
     assert!(loaded.plugin_product_actions().is_empty(), "Hidden actions must not become model tools");
     (loaded, scope)
@@ -91,11 +87,11 @@ async fn invoke_hidden(loaded: &NomiPluginToolSession, middleware: bool) -> bool
 }
 
 #[tokio::test]
-async fn hidden_consumers_retain_cancelled_calls_in_either_installation_order() {
+async fn hidden_consumers_retain_cancelled_calls_after_atomic_binding() {
     for middleware in [true, false] {
-        for scope_first in [true, false] {
+        {
             let product = Arc::new(ControlledProduct::default());
-            let (loaded, scope) = setup(middleware, scope_first, product.clone()).await;
+            let (loaded, scope) = setup(middleware, product.clone()).await;
             scope.begin_turn().unwrap();
             let mut waiter = Box::pin(invoke_hidden(&loaded, middleware));
             tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -125,11 +121,11 @@ async fn hidden_consumers_retain_cancelled_calls_in_either_installation_order() 
 }
 
 #[tokio::test]
-async fn hidden_consumers_fence_unknown_outcomes_in_either_installation_order() {
+async fn hidden_consumers_fence_unknown_outcomes_after_atomic_binding() {
     for middleware in [true, false] {
-        for scope_first in [true, false] {
+        {
             let product = Arc::new(ControlledProduct { unknown: true, ..Default::default() });
-            let (loaded, scope) = setup(middleware, scope_first, product.clone()).await;
+            let (loaded, scope) = setup(middleware, product.clone()).await;
             scope.begin_turn().unwrap();
             product.release.notify_one();
             assert!(!invoke_hidden(&loaded, middleware).await);

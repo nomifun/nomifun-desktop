@@ -14,6 +14,40 @@ pub struct GrepTool {
 }
 
 impl GrepTool {
+    fn prepare_search<'a>(&self, input: &'a Value) -> Result<(&'a str, String, Option<&'a str>, bool, usize), ToolResult> {
+        let Some(pattern) = input["pattern"].as_str() else {
+            return Err(ToolResult {
+                content: "Missing required parameter: pattern".to_string(),
+                is_error: true,
+                images: Vec::new(),
+            });
+        };
+
+        for name in ["path", "glob"] {
+            if input.get(name).is_some_and(|value| !value.is_null() && !value.is_string()) {
+                return Err(ToolResult::error(format!("{name} must be a string")));
+            }
+        }
+        let raw_path = input["path"].as_str().unwrap_or(".");
+        let path = crate::path_guard::resolve_against_cwd(raw_path, Some(&self.cwd));
+
+        let glob_pattern = input["glob"].as_str();
+        let case_insensitive = match input.get("case_insensitive") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(value)) => *value,
+            _ => return Err(ToolResult::error("case_insensitive must be a boolean")),
+        };
+        let context_lines = match input.get("context_lines") {
+            None | Some(Value::Null) => 0,
+            Some(value) => match value.as_u64().and_then(|value| usize::try_from(value).ok()) {
+                Some(value) => value,
+                None => return Err(ToolResult::error("context_lines must be a non-negative integer that fits usize")),
+            },
+        };
+
+        Ok((pattern, path, glob_pattern, case_insensitive, context_lines))
+    }
+
     pub fn new(cwd: PathBuf) -> Self {
         Self { cwd }
     }
@@ -70,37 +104,18 @@ impl Tool for GrepTool {
         true
     }
 
+    async fn preflight_hook(
+        &self,
+        input: &Value,
+        _context: &crate::ToolExecutionContext,
+    ) -> Result<(), String> {
+        self.prepare_search(input).map(|_| ()).map_err(|error| error.content)
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
-        let Some(pattern) = input["pattern"].as_str() else {
-            return ToolResult {
-                content: "Missing required parameter: pattern".to_string(),
-                is_error: true,
-                images: Vec::new(),
-            };
-        };
-
-        for name in ["path", "glob"] {
-            if input.get(name).is_some_and(|value| !value.is_null() && !value.is_string()) {
-                return ToolResult::error(format!("{name} must be a string"));
-            }
-        }
-        let raw_path = input["path"].as_str().unwrap_or(".");
-        let path = crate::path_guard::resolve_against_cwd(raw_path, Some(&self.cwd));
-
-        tracing::debug!(cwd = %self.cwd.display(), resolved_path = %path, pattern = %pattern, "GrepTool searching");
-
-        let glob_pattern = input["glob"].as_str();
-        let case_insensitive = match input.get("case_insensitive") {
-            None | Some(Value::Null) => false,
-            Some(Value::Bool(value)) => *value,
-            _ => return ToolResult::error("case_insensitive must be a boolean"),
-        };
-        let context_lines = match input.get("context_lines") {
-            None | Some(Value::Null) => 0,
-            Some(value) => match value.as_u64().and_then(|value| usize::try_from(value).ok()) {
-                Some(value) => value,
-                None => return ToolResult::error("context_lines must be a non-negative integer that fits usize"),
-            },
+        let (pattern, path, glob_pattern, case_insensitive, context_lines) = match self.prepare_search(&input) {
+            Ok(args) => args,
+            Err(error) => return error,
         };
 
         // Try ripgrep first, fallback to grep

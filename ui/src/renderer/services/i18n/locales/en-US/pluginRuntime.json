@@ -515,6 +515,17 @@
     "saveOpen": "Save and open",
     "saveUpdate": "Save changes",
     "saveFailed": "Saving did not finish. Your draft is retained. Retry to continue.",
+    "publishCheck": {
+      "title": "Pre-publication check",
+      "checking": "Checking publication…",
+      "startupPassed": "Service startup check passed.",
+      "unverified": "Business rules have not been verified. This service needs real task inputs to test its behavior; a successful startup does not establish that its checks are correct.",
+      "consent": "Publish this checked version with business behavior still marked unverified. Publishing does not select or enable this extension for an Agent. Review its rules before selecting it.",
+      "confirm": "Confirm publication",
+      "edit": "Return to editing",
+      "retry": "Check and save again",
+      "stale": "Publication could not be confirmed, or the checked source, configuration or runtime changed. Your draft is retained. Run the check again and review its current result before publishing."
+    },
     "savedNotice": "Saved to My plugins and ready to use.",
     "edit": "Edit with AI",
     "recreate": "Recreate with AI",

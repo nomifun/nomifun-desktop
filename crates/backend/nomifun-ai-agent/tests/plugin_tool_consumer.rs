@@ -57,6 +57,18 @@ use nomifun_ai_agent::{
 };
 use serde_json::{Value, json};
 
+fn product_bindings(
+    actions: Vec<nomifun_ai_agent::NomiPluginProductToolAction>,
+    invoker: Arc<dyn NomiPluginProductToolInvoker>,
+) -> nomifun_ai_agent::NomiHostedSessionBindings {
+    let scope = Arc::new(nomifun_ai_agent::engine_effect_scope::EngineEffectScope::new(Vec::new()).unwrap());
+    scope.begin_turn().unwrap();
+    nomifun_ai_agent::NomiHostedSessionBindings {
+        product: Some((actions, invoker)),
+        ..nomifun_ai_agent::NomiHostedSessionBindings::new(scope)
+    }
+}
+
 const VERSION: &str = "1.0.0";
 const OWNER: &str = "0190f5fe-7c00-7a00-8000-000000000001";
 const SESSION: &str = "0190f5fe-7c00-7a00-8000-000000000002";
@@ -951,8 +963,11 @@ async fn invalid_host_dynamic_payload_is_rejected_before_invoker_dispatch() {
     let base = session(kernel, compile(&materialized), schemas).await;
     let dynamic_invoker = Arc::new(CountingHostDynamicInvoker::default());
     let dynamic_name = "robot_dynamic_schema_guard";
+    let scope = Arc::new(nomifun_ai_agent::engine_effect_scope::EngineEffectScope::new(Vec::new()).unwrap());
+    scope.begin_turn().unwrap();
     let session = base
-        .with_host_dynamic_tools(
+        .bind_hosted_execution(nomifun_ai_agent::NomiHostedSessionBindings {
+            dynamic: Some((
             vec![NomiHostDynamicToolDescriptor {
                 capability_id: CapabilityId::from("robot.display"),
                 provider_name: dynamic_name.to_owned(),
@@ -969,7 +984,9 @@ async fn invalid_host_dynamic_payload_is_rejected_before_invoker_dispatch() {
                 deferred: false,
             }],
             dynamic_invoker.clone(),
-        )
+            )),
+            ..nomifun_ai_agent::NomiHostedSessionBindings::new(scope)
+        })
         .unwrap();
     let mut registry = ToolRegistry::new();
     session.register_into(&mut registry).unwrap();
@@ -988,6 +1005,7 @@ async fn invalid_host_dynamic_payload_is_rejected_before_invoker_dispatch() {
         None,
         Default::default(),
         false,
+        &[],
     )
     .await
     .unwrap();
@@ -1654,8 +1672,19 @@ async fn plugin_product_active_release_action_joins_the_same_nomi_tool_session()
     assert!(actions[0].provider_name().starts_with("plugin_product__"));
 
     let invoker = Arc::new(CapturingPluginProductInvoker::default());
+    let mut conflicting = product_bindings(actions.clone(), invoker.clone());
+    conflicting.dynamic = Some((vec![NomiHostDynamicToolDescriptor {
+        capability_id: "robot.display".into(),
+        provider_name: actions[0].provider_name().to_owned(),
+        description: "Conflicting host route".into(),
+        input_schema: StrictJsonValue(json!({"type":"object"})),
+        effect_class: EffectClass::Physical,
+        deferred: false,
+    }], Arc::new(CountingHostDynamicInvoker::default())));
+    assert!(base.clone().bind_hosted_execution(conflicting).is_err(),
+        "atomic assembly must reject Product/dynamic route collisions before publishing consumers");
     let session = base
-        .with_plugin_product_actions(actions, invoker.clone())
+        .bind_hosted_execution(product_bindings(actions, invoker.clone()))
         .unwrap();
     assert_eq!(session.actions().len(), 0);
     assert_eq!(session.plugin_product_actions().len(), 1);
@@ -1695,7 +1724,7 @@ async fn plugin_product_active_release_action_joins_the_same_nomi_tool_session()
 }
 
 #[tokio::test]
-async fn plugin_product_unknown_effect_fences_both_scope_installation_orders() {
+async fn plugin_product_unknown_effect_fences_atomic_hosted_binding() {
     struct UnknownEffectInvoker;
 
     #[async_trait]
@@ -1708,7 +1737,7 @@ async fn plugin_product_unknown_effect_fences_both_scope_installation_orders() {
         }
     }
 
-    for scope_first in [true, false] {
+    {
         let (capability, schemas) = plugin_product_fixture();
         let compiled = compile_plugin_product_fixture(&capability);
         let kernel = Arc::new(
@@ -1737,17 +1766,13 @@ async fn plugin_product_unknown_effect_fences_both_scope_installation_orders() {
         let scope = Arc::new(
             nomifun_ai_agent::engine_effect_scope::EngineEffectScope::new(Vec::new()).unwrap(),
         );
-        let session = if scope_first {
-            base.with_effect_scope(scope.clone())
-                .unwrap()
-                .with_plugin_product_actions(actions, Arc::new(UnknownEffectInvoker))
-                .unwrap()
-        } else {
-            base.with_plugin_product_actions(actions, Arc::new(UnknownEffectInvoker))
-                .unwrap()
-                .with_effect_scope(scope.clone())
-                .unwrap()
-        };
+        let session = base.bind_hosted_execution(nomifun_ai_agent::NomiHostedSessionBindings {
+            product: Some((actions, Arc::new(UnknownEffectInvoker))),
+            ..nomifun_ai_agent::NomiHostedSessionBindings::new(scope.clone())
+        }).unwrap();
+        assert!(session.clone().bind_hosted_execution(
+            nomifun_ai_agent::NomiHostedSessionBindings::new(scope.clone())
+        ).is_err(), "host execution bindings cannot be installed twice");
         let mut registry = ToolRegistry::new();
         session.register_into(&mut registry).unwrap();
         scope.begin_turn().unwrap();

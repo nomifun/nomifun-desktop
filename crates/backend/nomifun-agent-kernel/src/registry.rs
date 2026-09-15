@@ -399,6 +399,42 @@ impl KernelRegistry {
         Ok(materialized)
     }
 
+    /// Recheck the current invocation owner without acquiring resources or
+    /// dispatching a handler. This is evidence for a pre-tool gate, not an
+    /// authorization token: `invoke` still performs its own final checks.
+    pub fn preflight_invocation(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: &CapabilityInvocationRequest,
+    ) -> Result<(), KernelError> {
+        snapshot.require_contribution(&request.capability_id)?;
+        self.validate_invocation_admission(snapshot, active, request)
+    }
+
+    fn validate_invocation_admission(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: &CapabilityInvocationRequest,
+    ) -> Result<(), KernelError> {
+        ThinAuthority::enforce(snapshot, active, request)?;
+        let published = self.published.read()
+            .map_err(|_| KernelError::RegistryPoisoned)?;
+        validate_exact_capability_target(&published, snapshot, &request.capability_id)?;
+        if published.materialized.role_for_capability(&request.capability_id).is_some() {
+            resolve_role_member_dispatch(
+                &published,
+                RoleAdmissionEvidence::Agent { snapshot, active },
+                &agent_role_request(request),
+                RoleMemberDispatchKind::AgentTool { action_id: &request.action_id },
+            )?;
+        } else {
+            resolve_agent_tool_handler(&published, snapshot, &request.capability_id)?;
+        }
+        Ok(())
+    }
+
     pub async fn invoke(
         &self,
         snapshot: &CompiledSnapshot,
@@ -462,18 +498,7 @@ impl KernelRegistry {
         request: CapabilityInvocationRequest,
         dependencies: crate::CapabilityDependencyCaller,
     ) -> Result<nomifun_agent_contracts::StrictJsonValue, KernelError> {
-        ThinAuthority::enforce(snapshot, active, &request)?;
-        {
-            let published = self
-                .published
-                .read()
-                .map_err(|_| KernelError::RegistryPoisoned)?;
-            validate_exact_capability_target(
-                &published,
-                snapshot,
-                &request.capability_id,
-            )?;
-        }
+        self.validate_invocation_admission(snapshot, active, &request)?;
         let role_request = agent_role_request(&request);
         if snapshot
             .content()
@@ -532,25 +557,13 @@ impl KernelRegistry {
                 .published
                 .read()
                 .map_err(|_| KernelError::RegistryPoisoned)?;
-            let binding = published.handlers.get(&request.capability_id).ok_or_else(|| {
-                KernelError::MissingCapabilityHandler {
-                    mount_id: published.materialized.capabilities[&request.capability_id]
-                        .mount_id
-                        .clone(),
-                    capability_id: request.capability_id.clone(),
-                }
-            })?;
+            validate_exact_capability_target(&published, snapshot, &request.capability_id)?;
+            let binding = resolve_agent_tool_handler(&published, snapshot, &request.capability_id)?;
             let frozen = snapshot
                 .resolved_capability(&request.capability_id)
                 .ok_or_else(|| KernelError::CapabilityNotInPreset {
                     capability_id: request.capability_id.clone(),
                 })?;
-            if frozen.resolved_mount_id.as_ref() != Some(&binding.mount_id) {
-                return capability_provenance_drift(
-                    &request.capability_id,
-                    "handler binding does not match the frozen mount",
-                );
-            }
             let state = published
                 .state_handles
                 .get(&binding.mount_id)
@@ -1432,6 +1445,38 @@ impl KernelRegistry {
 #[cfg(test)]
 #[path = "registry_resource_tests.rs"]
 mod resource_tests;
+
+fn resolve_agent_tool_handler<'a>(
+    published: &'a PublishedRegistry,
+    snapshot: &CompiledSnapshot,
+    capability_id: &CapabilityId,
+) -> Result<&'a HandlerBinding, KernelError> {
+    let current = published.materialized.capability(capability_id)
+        .ok_or_else(|| KernelError::CapabilityProvenanceDrift {
+            capability_id: capability_id.clone(),
+            reason: "the frozen target is no longer materialized".to_owned(),
+        })?;
+    let binding = published.handlers.get(capability_id).ok_or_else(|| {
+        KernelError::MissingCapabilityHandler {
+            mount_id: current.mount_id.clone(),
+            capability_id: capability_id.clone(),
+        }
+    })?;
+    let frozen = snapshot.resolved_capability(capability_id)
+        .ok_or_else(|| KernelError::CapabilityNotInPreset {
+            capability_id: capability_id.clone(),
+        })?;
+    if frozen.resolved_mount_id.as_ref() != Some(&binding.mount_id) {
+        return capability_provenance_drift(
+            capability_id,
+            "handler binding does not match the frozen mount",
+        );
+    }
+    if !published.state_handles.contains_key(&binding.mount_id) {
+        return Err(KernelError::RegistryPoisoned);
+    }
+    Ok(binding)
+}
 
 fn validate_exact_capability_target(
     published: &PublishedRegistry,

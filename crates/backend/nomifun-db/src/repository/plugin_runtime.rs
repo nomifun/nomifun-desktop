@@ -796,12 +796,6 @@ pub trait IPluginRuntimeRepository: Send + Sync {
         params: &ResolvePluginRuntimeSurfaceSessionParams,
     ) -> Result<Option<PluginRuntimeSurfaceSessionRow>, DbError>;
 
-    /// Current UI grants for one owned Conversation, never a new subscription registry.
-    async fn agent_surface_sessions(
-        &self,
-        owner_user_id: &str,
-        conversation_id: &str,
-    ) -> Result<Vec<PluginRuntimeSurfaceSessionRow>, DbError>;
 
     async fn close_surface_session_cas(
         &self,

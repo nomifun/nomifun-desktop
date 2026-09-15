@@ -3,9 +3,6 @@ use super::*;
 
 #[tokio::test]
 async fn preset_ui_binding_is_persistent_exact_owned_and_independent_of_execution() {
-    if !in_agent_ui_host("ui_binding::preset_ui_binding_is_persistent_exact_owned_and_independent_of_execution", true) {
-        return;
-    }
     // Use a file-backed fixture because this card promises durable consent.
     let root = tempfile::Builder::new()
         .prefix("nomifun-ui-binding-")

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>敏感文件检查</title>
+<style>
+:root { color-scheme:light dark; font:15px/1.65 system-ui,sans-serif; }
+* { box-sizing:border-box; } body { margin:0; padding:24px; }
+main { max-width:680px; margin:auto; } h1 { font-size:24px; margin:0 0 8px; }
+p { margin:12px 0; } .note { padding:16px; border:1px solid #8885; border-radius:12px; }
+li { margin:8px 0; } code { overflow-wrap:anywhere; } small { opacity:.8; }
+</style></head><body><main>
+<h1>敏感文件检查</h1>
+<p>在 Nomi 调用工具前，先检查这次操作是否直接引用敏感文件。</p>
+<div class="note"><strong>这份草稿不会自动生效</strong><ol>
+<li>按业务需要调整检查规则，然后点击宿主的“保存”。</li>
+<li>返回 Agent 工作台，将“敏感文件检查”选入能力列表并保存。</li>
+<li>使用该 Nomi Agent 新建会话。既有会话保留原配置。</li>
+</ol></div>
+<p>示例会阻止参数中直接引用 <code>.env</code>、<code>id_rsa</code> 或 <code>id_ed25519</code> 的操作，并显示原因。</p>
+<p>检查只接收工具名称及脱敏后的参数。它可以拒绝操作，不能批准权限，也不会改变工具参数。</p>
+<small>这是可编辑的业务规则示例，不是完整的命令安全策略。文件名变换等间接引用不在示例识别范围内；平台原有权限仍然有效。此页面不执行测试工具、不访问你的文件。</small>
+</main></body></html>

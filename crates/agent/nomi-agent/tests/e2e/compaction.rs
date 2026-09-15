@@ -137,13 +137,13 @@ async fn case_9_off_vs_safe_content() {
     }];
 
     // Off
-    let outcome_off = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false)
+    let outcome_off = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false, &[])
     .await
     .expect("should succeed");
     let content_off = extract_tool_result_content(&outcome_off).unwrap();
 
     // Safe
-    let outcome_safe = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Safe, false)
+    let outcome_safe = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Safe, false, &[])
     .await
     .expect("should succeed");
     let content_safe = extract_tool_result_content(&outcome_safe).unwrap();
@@ -323,7 +323,7 @@ async fn case_11_toon_comprehension_and_system_prompt() {
         extra: None,
     }];
 
-    let outcome = execute_tool_calls_scoped(&registry_check, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry_check.to_tool_defs()), "", None, CompactionLevel::Full, true)
+    let outcome = execute_tool_calls_scoped(&registry_check, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry_check.to_tool_defs()), "", None, CompactionLevel::Full, true, &[])
     .await
     .expect("should succeed");
     let content = extract_tool_result_content(&outcome).unwrap();

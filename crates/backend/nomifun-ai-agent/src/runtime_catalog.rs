@@ -238,7 +238,13 @@ impl RuntimeEngineCatalog {
         binding: &RuntimeEngineBinding,
         snapshot: &nomifun_agent_contracts::ResolvedSnapshotEnvelope,
     ) -> Result<(), AppError> {
-        self.registration(binding)?.admission.validate_snapshot(binding, snapshot)
+        let registration = self.registration(binding)?;
+        if !registration.admission.supports_tool_hooks(binding)
+            && snapshot.content.contributions().any(|capability| capability.actions.iter()
+                .any(|action| nomifun_agent_contracts::tool_middleware::is_tool_hook(&action.action_id))) {
+            return Err(invalid("The selected Engine does not support Product tool hooks; choose Nomi or remove the hook"));
+        }
+        registration.admission.validate_snapshot(binding, snapshot)
     }
 
     pub fn validate_session_extra(

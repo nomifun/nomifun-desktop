@@ -8,6 +8,7 @@ import type { AgentPresetSummary } from '@/common/types/agentPlatform';
 import { agentUiChoiceKey } from '@/common/utils/agentUiChoice';
 import { emitter } from '@/renderer/utils/emitter';
 import styles from './AgentPageSettings.module.css';
+import { useAgentUiBindingCache } from '@/renderer/hooks/agent/useAgentUiBindingCache';
 
 /** Configure presentation before the first Session, through the existing APIs. */
 export default function AgentPageSettings({ preset, busy, dirty }: {
@@ -15,6 +16,7 @@ export default function AgentPageSettings({ preset, busy, dirty }: {
 }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const updateBindingCache = useAgentUiBindingCache();
   const selectId = useId();
   const { data, error, isValidating, mutate } = useSWR(
     ['agent-preset-ui-binding', preset.preset_id],
@@ -48,6 +50,7 @@ export default function AgentPageSettings({ preset, busy, dirty }: {
       const next = await agentPlatform.putPresetUiBinding.invoke({ preset_id: preset.preset_id, request: {
         expected_binding_version: data.binding.binding_version, selection: selected ?? null,
       } });
+      await updateBindingCache(next);
       if (!mounted.current) return;
       await mutate(next, false);
       if (mounted.current) setCandidate(undefined);

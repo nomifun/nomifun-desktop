@@ -24,7 +24,14 @@ pub struct PluginRuntimeCallCancellation {
     canceled: Arc<AtomicBool>,
 }
 
+impl PartialEq for PluginRuntimeCallCancellation {
+    fn eq(&self, other: &Self) -> bool { Arc::ptr_eq(&self.canceled, &other.canceled) }
+}
+
 impl PluginRuntimeCallCancellation {
+    /// Preserve an existing caller signal across the application boundary.
+    pub fn from_shared_flag(canceled: Arc<AtomicBool>) -> Self { Self { canceled } }
+
     pub fn cancel(&self) {
         self.canceled.store(true, Ordering::Release);
     }
@@ -64,10 +71,6 @@ pub struct PluginRuntimeServiceInvocation {
     pub call_id: PluginBridgeCallId,
     pub method: String,
     pub payload: StrictJsonValue,
-    /// Optional, bounded host-side incremental delivery. The invocation future
-    /// still owns completion and cancellation; events alone are not success.
-    /// Dropping the receiver cancels this request, not the whole Service.
-    pub events: Option<tokio::sync::mpsc::Sender<StrictJsonValue>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -151,22 +154,6 @@ pub trait PluginRuntimeServiceHostPort: Send + Sync {
         payload: StrictJsonValue,
         cancellation: PluginRuntimeCallCancellation,
         now_ms: i64,
-    ) -> PluginRuntimePlatformResult<StrictJsonValue> {
-        self.invoke_with_events(spec, call_id, method, payload, cancellation, now_ms, None).await
-    }
-
-    /// Same invocation ownership and generation checks as a unary call. The
-    /// caller must poll completion while consuming this bounded channel; its
-    /// items are provisional until the original invocation returns success.
-    async fn invoke_with_events(
-        &self,
-        spec: &ResolvedPluginServiceSpec,
-        call_id: PluginBridgeCallId,
-        method: String,
-        payload: StrictJsonValue,
-        cancellation: PluginRuntimeCallCancellation,
-        now_ms: i64,
-        events: Option<tokio::sync::mpsc::Sender<StrictJsonValue>>,
     ) -> PluginRuntimePlatformResult<StrictJsonValue>;
 
     async fn cancel(&self, plugin_product_id: &PluginProductId, call_id: &PluginBridgeCallId);
@@ -565,7 +552,7 @@ impl PluginRuntimeServiceHostPort for InMemoryPluginRuntimeServiceHost {
         Ok(())
     }
 
-    async fn invoke_with_events(
+    async fn invoke(
         &self,
         spec: &ResolvedPluginServiceSpec,
         call_id: PluginBridgeCallId,
@@ -573,8 +560,10 @@ impl PluginRuntimeServiceHostPort for InMemoryPluginRuntimeServiceHost {
         payload: StrictJsonValue,
         cancellation: PluginRuntimeCallCancellation,
         now_ms: i64,
-        events: Option<tokio::sync::mpsc::Sender<StrictJsonValue>>,
     ) -> PluginRuntimePlatformResult<StrictJsonValue> {
+        if cancellation.is_canceled() {
+            return Err(PluginRuntimePlatformError::Canceled);
+        }
         let slot = self.slot(&spec.plugin_product_id).await.ok_or_else(|| {
             PluginRuntimePlatformError::ServiceUnavailable("Active Service is not bound".into())
         })?;
@@ -618,7 +607,6 @@ impl PluginRuntimeServiceHostPort for InMemoryPluginRuntimeServiceHost {
                     call_id: call_id.clone(),
                     method,
                     payload,
-                    events,
                 },
                 cancellation.clone(),
             )

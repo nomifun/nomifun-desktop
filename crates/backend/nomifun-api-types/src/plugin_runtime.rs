@@ -206,16 +206,6 @@ pub struct PluginRuntimeSurfaceLaunchDescriptorDto {
     pub kind: PluginRuntimeKindDto,
 }
 
-/// Live projection only. There is no durable token replay cursor or authority token.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PluginAgentSessionStreamDto {
-    pub plugin_id: String,
-    pub surface_session_id: String,
-    pub surface_generation: u64,
-    pub event: Value,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreatePluginRuntimeProjectRequest {
