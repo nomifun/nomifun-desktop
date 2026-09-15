@@ -2,13 +2,15 @@
 
 > macOS 接续：当前源码已接入 Nomi + PluginProduct `before_tool`，普通发布、选择、
 > 保存及真实执行/拒绝的原生证据见[实施记录](2026-09-15-agent-tool-hooks-implementation.zh.md)。
-> `after_tool` 与 U1 尚未实施。以下历史收敛段落不代替最新源码及正式放行记录。
+> `after_tool` 已取消；用户后续明确取消整个会话页替换能力，U0/U1 一并移除。
+> 普通带 UI App/常驻插件不受影响，进度见[退役记录](2026-09-15-agent-session-view-retirement.zh.md)。
+> 以下历史收敛段落不代替最新源码及正式放行记录。
 
-日期：2026-09-15。此前批准的第一、第二、第三批收敛已完成。本页是当前支持范围入口；最新筛选仅保留新增工具前后 hooks 和页面内业务输入/结果展示，移除其他 hook/UI 扩展候选。已有页面删除实验开关，完成开发的能力正常开放使用；新 hooks 尚未实现，不提前扩大 release 声明。
+日期：2026-09-15。此前批准的第一、第二、第三批收敛已完成。最新范围保留 before_model/before_tool 和普通 App UI/常驻插件；after_tool 及插件替换会话页取消。会话使用标准界面，不继续专属客户端或表单改造；正式 release 声明按保留能力的实际证据确定。
 
 状态：此前代码收敛及 213 项测试证据见发布台账 §2.6。本轮已有页面开放已完成，定向测试、聚合检查及 Windows desktop check 通过，增量证据见 §2.7；尚未提交该增量或发布。交接以包含本记录及对应代码的实际提交为准，正式安装包、真实模型及 macOS 实机验收不由源码测试替代。
 
-目标：尽快交付结构清楚、可验证且用户能直接选择使用的插件能力，尽可能允许组合和替换 Agent 能力，而非替换任意宿主部件。正式默认仍为内置 Agent、模型和 UI；插件 Agent 页面不再需要宿主实验开关，不自动替用户选择第三方。
+目标：交付结构清楚、可验证且用户能直接使用的插件能力，组合有价值的 Agent 能力。会话统一使用标准 UI；普通插件在独立 App Surface 中运行，不替换会话工作区。
 
 ## 1. 两个方向独立验收
 
@@ -30,20 +32,21 @@
 | Tool discovery | 内置与已支持的 Mount/Product 实现可选择；不允许冲突选择，停用/非法结果不静默换实现 | 能力替换 |
 | Context | Nomi 已消费受支持的 Mount 来源初始/逐轮 Context；不是任意 Product Context，也不是整个 Prompt 替换 | 能力组合及明确阶段消费 |
 | Skill | 精确锁定包内只读正文/资源；共享加载器与显式命令；Product manifest 不接受 Skill；不支持 shell/fork/hooks | 能力组合 |
-| Agent 页面 | 普通用户可创建/发布/选择并保存偏好，无实验开关；共享宿主 observe/turn/cancel，宿主拥有会话状态 | 页面替换，非完整客户端 |
+| 会话页替换 | 用户已取消；移除选择/偏好/模板和 Session UI 授权，旧链接进入同一标准会话 | 退役，不保留备用开关 |
+| 普通 App UI / 常驻插件 | 独立 HTML Surface、Node Service/continuous、storage/KV 和原工具能力保留 | 不受会话页替换退役影响 |
 | `before_model` | 已支持 Product Hidden action、既有顺序和真实调用；只开放该受支持阶段，不向模型增加可见工具 | 生命周期插入 |
 | 模型 Provider | 保留内置 Provider/模型配置、Broker 与共享请求/事件合同；不提供外部插件实现入口 | 外部插件方向已取消，不列延期欠账 |
 | Agent Runtime | 已有源码注册、Engine Catalog/SDK、编译打包及精确引擎选择；保留 Session owner | 源码级可替换；安装型/热加载计划取消 |
 | Browser/Computer | 有合同/适配器及内置宿主路径；不能据此宣称所有内置运行派发都已可被用户实现替换 | 新替换路径延期 |
 | `before_tool` | Nomi + PluginProduct 执行前允许/拒绝；原 owner 预检、冻结顺序、普通发布/选择和生产消费者已接线；限制与验收见实施记录 | 生命周期插入；已取得 macOS 原生核心证据，尚非双平台正式放行 |
-| `after_tool` | 成功结果文本的模型消费视图；尚未实现 | 下一实施阶段，不算交付 |
+| `after_tool` | 因结果保留、文本边界及媒体结算改造成本偏高取消；合同草案已清理 | 已移出开发计划，无延期卡 |
 | 应用 Shell / 其他 hook 与 UI 插槽扩展 | 从开发计划移除，不保留后续实施卡 | 不做 |
 | 规划、记忆、调度 | 不扩展、不预建新协议或 JS 临时实现 | 本轮未授权领域 |
 | Rust 原生插件 | 原生 Service 后端、作者 SDK、启用入口和专属示例已删除；保留 Rust 宿主 | 不支持 |
 
 PluginMount 的共享 Extension Host 与 Product 的独立 Service 在生命周期、权限和资源管理上有实际区别。本次保留隔离，不为表面统一做一次大型迁移。未来是否合并，要基于具体消费者，而不是强行补齐来源矩阵。
 
-Agent 页面只替换会话工作区；应用 Shell 指导航、全局布局及跨页面组织，不是终端 shell。具体边界及模型/Runtime 代码去留依据见[当前评估](2026-09-13-agent-plugin-capability-assessment.zh.md)。新 hooks 方案见[设计草案](2026-09-15-agent-hooks-design.zh.md)：保留现有配置型 shell hooks，但它们不是已开放的 capability 插件阶段。没有专属代码需另删时保留有生产用途的模型和引擎设施，不按名称批量清理。
+会话页替换与应用 Shell 替换均不做；独立 App UI 和 Node 常驻服务继续保留。历史插件和绑定数据不自动删除或改编码，旧声明不能再授予会话 UI 权限。hooks 范围见[设计记录](2026-09-15-agent-hooks-design.zh.md)，现有配置型 shell hooks 保持原功能。
 
 ## 3. 此前收敛实施项与停止条件（历史记录）
 
@@ -73,17 +76,17 @@ Agent 页面只替换会话工作区；应用 Shell 指导航、全局布局及�
 
 首发仍为 Windows x64 + macOS arm64。当前在 Windows 修改；不增加 Intel Mac、Linux、移动端或新测试平台。
 
-TODO：Apple Silicon 下 Node 启停/取消/崩溃回收、含空格及非 ASCII 路径、资源读取、WKWebView Surface/MessagePort；不设置实验环境变量，验证内置页面默认启动、插件模板创建/发布/选择/保存/切换/撤下；安装包与适用签名。先复用台账现有跨 OS 验收，不恢复被删除的协议。
+TODO：Apple Silicon 下 Node 启停/取消/崩溃回收、含空格及非 ASCII 路径、资源读取、普通 App 的 WKWebView Surface/MessagePort；验证标准会话、旧链接导航、普通 App 发布/打开/KV/常驻启停及已移除 Session UI 授权的拒绝；安装包与适用签名另验。不恢复会话替换页或被删除协议。
 
 ```text
 请在 macOS arm64 接续本次插件架构收敛工作。
 先读 AGENTS.md、docs/reviews/2026-09-15-plugin-architecture-convergence.zh.md
 及 docs/reviews/2026-09-15-plugin-release-readiness.zh.md，核对实际交接提交和工作区。
-目标是验证并修复当前 JS 插件正式路径及可选 Agent 页面，不增加 Rust 插件、
+目标是验证当前普通 App/常驻插件与标准会话，确认会话替换页已移除；不增加 Rust 插件、
 Service streaming、UI 专用事件订阅、可执行 Skill 或其他延期领域。
 复用已有测试，验证 Node 生命周期/取消/存储、只读 Skill 路径与资源、
-内置 UI 仍默认，普通用户无需实验开关即可使用插件页面；验证首个参考模板、
-发布选择、保存偏好、发送/取消、撤下与切回，注意 WKWebView/MessagePort。
+会话统一使用标准UI，普通带UI App/常驻插件保持可用；验证普通App的
+发布、打开、KV保存、Service启停及退役Session UI授权拒绝，注意WKWebView/MessagePort。
 在隔离数据目录进行 arm64 安装、启动、重启、卸载及适用签名验证，
 有授权模型环境再做最小实模调用；不读取或输出凭据，不修改用户真实数据。
 只修复复现的跨 OS 缺陷，保留权限、冻结身份和未知结果保护。

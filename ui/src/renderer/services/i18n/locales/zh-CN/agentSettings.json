@@ -7,40 +7,6 @@
     "unavailable": "引擎目录或所选构建不可用，请重试或为该 Agent 选择其他引擎。不会自动回退到其他引擎。",
     "codingLimit": "此 Coding 构建提供文件/Git 工具、会话隔离快照、命令/交互进程、MCP 与插件工具及制品内 Skills，可用范围受 Agent 已保存的启用能力、绑定资源及平台权限约束。新会话会冻结这份配置，不会按需激活能力。执行中追加的指令在执行边界处理。图片需已启用的视觉能力及兼容模型。Git 推送仅限明确授权后向已配置的本地/file 远程推送；不支持 SSH/HTTPS 凭据、强制推送或删除引用。这些能力尚未全部完成端到端验证。"
   },
-  "page": {
-    "title": "Agent 页面",
-    "hint": "默认仍使用内置页面。插件页面已开放用于 Agent 会话视图，支持读取会话、发送消息和取消回合，并非完整客户端替代；附件、权限交互和恢复体验尚未完整支持。页面偏好与 Agent 配置独立保存。",
-    "default": "默认页面",
-    "builtin": "内置 Agent 页面",
-    "missing": "已保存的插件版本不可用",
-    "save": "保存页面默认值",
-    "open": "打开已保存的 Agent 页面",
-    "continue": "继续打开已创建的会话",
-    "openHint": "使用已保存的 Agent 配置打开空会话，再在其页面中输入第一条消息；本操作不会发送消息。若需先选择模型、工作目录或其他资源，请使用下方“使用 Agent”入口。",
-    "saveAgentFirst": "请先保存或放弃 Agent 配置修改，再打开页面。",
-    "savePageFirst": "请先保存页面选择，或重新选中当前已保存的默认值。",
-    "openFailed": "未能确认会话已打开。再次创建前请先检查会话历史；系统不会自动重试创建或发送消息。如需配置资源或模型，请使用下方“使用 Agent”入口。"
-  },
-  "view": {
-    "title": "会话视图",
-    "choose": "选择插件视图",
-    "use": "使用所选视图",
-    "builtin": "使用内置视图",
-    "remember": "将所选视图设为此 Agent 默认",
-    "clearDefault": "恢复内置默认视图",
-    "defaultConsent": "保存 {{name}} 的默认视图后，每次打开其会话页面时，都会允许此精确插件版本读取该会话、发送消息和取消回合。不授予后台访问，不改变运行中的会话；升级版本需重新选择。仅使用而不保存，只影响当前页面。",
-    "defaultFailed": "无法读取已保存的页面选择，仍可使用内置视图；保存默认前请先刷新。",
-    "defaultSaveFailed": "未能确认默认页面保存结果。请刷新核对已保存的选择后再决定是否重试；不会自动重试保存或回合。",
-    "defaultUnavailable": "已保存的精确插件版本不可用，选择仍保留。请使用内置视图，或明确选择可用版本。",
-    "createTemplate": "创建参考视图草稿",
-    "templateFailed": "未能确认草稿创建结果，请先在插件库检查草稿，再决定是否重试。没有选择视图或授予会话访问权限。",
-    "consent": "使用插件视图将授予此精确发布版本读取本会话、发送消息和取消回合的权限。仅替换会话视图，并非完整客户端；附件、权限交互和恢复体验尚未完整支持。切换视图不会重启或取消回合。",
-    "current": "已选择：{{name}}",
-    "failed": "所选视图无法打开。请重试，或主动切回内置视图。",
-    "catalogFailed": "无法刷新插件视图列表，仍可使用内置视图。",
-    "changed": "所选发布版本已不可用。请刷新并重新确认当前视图，或切回内置视图。",
-    "closeFailed": "旧视图已在本地断开，但未能确认服务端撤销。请从插件库重试关闭，再依赖撤销结果。"
-  },
   "middlewareOrder": {
     "title": "执行扩展",
     "hint": "同阶段的扩展按列表顺序执行，其余使用默认顺序。保存后仅对新会话生效。",
@@ -286,32 +252,6 @@
   },
   "navigation": {
     "railTitle": "Agent 工作台"
-  },
-  "session": {
-    "title": "Agent 会话",
-    "open": "打开会话",
-    "loading": "正在加载 canonical Session projection…",
-    "backToSettings": "Agent 工作台",
-    "fork": "Fork 会话",
-    "delete": "删除会话",
-    "deleteConfirm": "永久删除该会话？Transcript、Projection、Runtime binding、checkpoint 与 Session-owned resource 都会被清除。",
-    "deletedTitle": "会话已删除",
-    "deletedBody": "该 AgentSession 已越过不可逆删除 fence，无法再查看 transcript、继续、观察、fork 或恢复。",
-    "generation": "Active generation",
-    "lastSeq": "最后 sequence",
-    "checkpoint": "Checkpoint through sequence",
-    "activeCapabilities": "Active capabilities",
-    "runtime": "Runtime Inspector",
-    "inspector": "Session Inspector",
-    "details": "Canonical event 详情",
-    "continuationRequired": "冻结 Snapshot 在当前执行栈不可用。历史保持只读；继续工作必须显式 fork 新 AgentSession。",
-    "empty": "尚无已提交的 transcript projection。",
-    "inputPlaceholder": "向该 Session 发送普通 Turn…",
-    "send": "发送 Turn",
-    "role": {
-      "user": "你",
-      "assistant": "Agent"
-    }
   },
   "workbench": {
     "categories": {

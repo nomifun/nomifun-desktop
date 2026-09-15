@@ -58,14 +58,12 @@ fn control_plane_router_with_legacy_skill_route(
 ) -> Router {
     let router = Router::new()
         .route("/api/agent-catalog", get(get_catalog))
-        .route("/api/agent-catalog/ui/agent-session", get(get_agent_ui_contributions))
         .route("/api/agent-role-defaults", get(get_role_defaults))
         .route("/api/agent-role-defaults/{role_id}", put(put_role_default))
         .route("/api/agent-preset-templates", get(list_official_templates))
         .route("/api/capabilities", get(list_capabilities))
         .route("/api/mcp-tool-mappings", get(list_mcp_tools))
         .route("/api/agent-presets", post(create_preset))
-        .route("/api/agent-presets/{preset_id}/ui-binding", get(get_ui_binding).put(put_ui_binding))
         .route(
             "/api/agent-presets/{preset_id}",
             delete(retire_preset),
@@ -133,28 +131,6 @@ async fn get_catalog(
 ) -> Result<Json<ApiResponse<AgentCatalogResponse>>, ControlPlaneError> {
     // One materialization for capability members and exact Provider candidates.
     Ok(Json(ApiResponse::ok(control_plane.catalog()?)))
-}
-
-async fn get_agent_ui_contributions(
-    State(control_plane): State<Arc<AgentControlPlane>>,
-    Extension(_owner): Extension<AuthenticatedOwner>,
-) -> Result<Json<ApiResponse<Vec<nomifun_api_types::AgentUiContributionDto>>>, ControlPlaneError> {
-    Ok(Json(ApiResponse::ok(control_plane.agent_ui_contributions()?)))
-}
-
-async fn get_ui_binding(
-    State(control_plane): State<Arc<AgentControlPlane>>,
-    Extension(owner): Extension<AuthenticatedOwner>, Path(preset_id): Path<String>,
-) -> Result<Json<ApiResponse<nomifun_api_types::AgentPresetUiBindingResponse>>, ControlPlaneError> {
-    Ok(Json(ApiResponse::ok(control_plane.ui_binding(&owner, &preset_id).await?)))
-}
-
-async fn put_ui_binding(
-    State(control_plane): State<Arc<AgentControlPlane>>,
-    Extension(owner): Extension<AuthenticatedOwner>, Path(preset_id): Path<String>,
-    Json(request): Json<nomifun_api_types::PutAgentUiBindingRequest>,
-) -> Result<Json<ApiResponse<nomifun_api_types::AgentPresetUiBindingResponse>>, ControlPlaneError> {
-    Ok(Json(ApiResponse::ok(control_plane.put_ui_binding(&owner, &preset_id, request).await?)))
 }
 
 async fn get_role_defaults(

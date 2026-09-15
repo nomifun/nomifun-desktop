@@ -75,27 +75,5 @@
       if (typeof method !== 'string' || !method || method.length > 256) return Promise.reject(new Error('Invalid service method'));
       return callTarget({ target: 'service', method, payload });
     }
-  }), agentSession: Object.freeze({
-    // The host UI must explicitly bind this Surface to a Session first.
-    // Never auto-retry mutations; retain the same caller-supplied key when
-    // reconciling an ambiguous turn result after a view reconnect.
-    observe({ after_seq = 0, limit = 100 } = {}) {
-      if (!Number.isSafeInteger(after_seq) || after_seq < 0 ||
-          !Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
-        return Promise.reject(new Error('Invalid Session history page'));
-      }
-      return callTarget({ target: 'agent_session', request: { operation: 'observe', after_seq, limit } });
-    },
-    turn(input, idempotency_key) {
-      if (!input || typeof input !== 'object' || Array.isArray(input) ||
-          typeof idempotency_key !== 'string' || !idempotency_key.trim() ||
-          new TextEncoder().encode(idempotency_key).length > 256) {
-        return Promise.reject(new Error('A Session turn needs an input object and a stable idempotency key'));
-      }
-      return callTarget({ target: 'agent_session', request: { operation: 'turn', input, idempotency_key } });
-    },
-    cancel() {
-      return callTarget({ target: 'agent_session', request: { operation: 'cancel' } });
-    }
   }) }), writable: false });
 })();

@@ -641,13 +641,6 @@ const fromRevokedInstallationToken = (): RevokeInstallationTokenResponse => ({
 });
 
 export const agentPlatform = {
-  agentUiContributions: httpGet<import('../types/pluginRuntimePlatform').AgentUiContribution[], void>('/api/agent-catalog/ui/agent-session'),
-  presetUiBinding: httpGet<import('../types/pluginRuntimePlatform').AgentPresetUiBinding, { preset_id: string }>(
-    params => `/api/agent-presets/${encodeURIComponent(params.preset_id)}/ui-binding`
-  ),
-  putPresetUiBinding: httpPut<import('../types/pluginRuntimePlatform').AgentPresetUiBinding, {
-    preset_id: string; request: import('../types/pluginRuntimePlatform').PutAgentUiBindingRequest;
-  }>(params => `/api/agent-presets/${encodeURIComponent(params.preset_id)}/ui-binding`, params => params.request),
   roleDefaults: httpGet<InstallationRoleBinding[], void>('/api/agent-role-defaults'),
   putRoleDefault: httpPut<InstallationRoleBinding, PutAgentRoleDefaultRequest>(
     params => `/api/agent-role-defaults/${encodeURIComponent(params.selection.role.key.role_id)}`
@@ -755,9 +748,6 @@ export const agentPlatform = {
     list: httpGet<RuntimeEngineDescriptor[], void>('/api/runtime-engines'),
   },
   sessions: {
-    uiBinding: httpGet<import('../types/pluginRuntimePlatform').AgentPresetUiBinding, { agent_session_id: string }>(
-      params => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/ui-binding`
-    ),
     create: httpPost<CreateAgentSessionResponse, CreateAgentSessionRequest>(
       '/api/agent-sessions'
     ),

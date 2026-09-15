@@ -32,7 +32,7 @@ fn error(value: impl std::fmt::Display) -> AppError {
 pub(crate) fn descriptor() -> RuntimeEngineDescriptor {
     RuntimeEngineDescriptor {
         family_id: "nomifun.coding".into(),
-        build_id: format!("{}-host2-coding-loop96", env!("CARGO_PKG_VERSION")),
+        build_id: format!("{}-host2-coding-loop97", env!("CARGO_PKG_VERSION")),
         build_digest: format!(
             "{:x}",
             Sha256::digest(

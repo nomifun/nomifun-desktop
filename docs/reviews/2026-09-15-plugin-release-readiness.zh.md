@@ -1,6 +1,6 @@
 # 插件发布就绪台账：尽快上线，尽可能可替换
 
-日期：2026-09-15。状态：**已有 Agent 页面开关移除及 Windows 定向回归、聚合检查、desktop check 已完成，见 §2.7；正式制品与双平台上线验收未完成。** 此前 Skill、Service/UI 前置清理及装配简化证据见 §2.6，原生删除及更早回归仅作为对应历史证据。
+日期：2026-09-15。状态：**用户已取消插件替换会话页，U0/U1 退役；普通带 UI App/常驻插件保留。移除进度见退役记录，正式制品与双平台上线验收未完成。** §2.7 是先前页面开放的历史证据，不再代表现行范围。
 
 基线说明：原生删除和架构收敛已随 `70c28b5de86f820a535bdcca48191244196f2e2f` 提交并推送；本轮在其上筛选 hooks/UI 计划并移除已有 Agent 页面的实验开关，新 hooks 尚未实现。下文未提交工作区记录属于当时验证事实。首发为 **Windows x64 + macOS Apple Silicon（arm64）**；不包含 Intel Mac、Windows arm64、Linux 或 universal 制品。页面开放的最新验证单独记录，不以 §2.6 旧证据代替。
 
@@ -10,9 +10,9 @@
 
 Rust native 删除决定不变：原生插件后端、Rust 作者 SDK、启用入口、示例及专属打包/测试路径已移除，不保留实验入口。本轮另外删除无生产消费者的 Service 流式分支；保留 Node 普通调用、存储 IPC、取消/生命周期、生产模型合同及正常产品路径。
 
-当前范围入口为[架构收敛记录](2026-09-15-plugin-architecture-convergence.zh.md)：不再等待历史 A/B 选择。用户要求开发的能力开放可用，因此已有 Agent 页面移除实验开关，内置仍默认、插件由用户选择；专用事件协议和重型参考页不恢复。
+当前范围入口为[架构收敛记录](2026-09-15-plugin-architecture-convergence.zh.md)和[会话页替换退役记录](2026-09-15-agent-session-view-retirement.zh.md)：会话统一使用标准界面，普通带 UI App/常驻插件照常保留。不恢复专用会话客户端、实验开关或备用接入。
 
-最新产品取舍：外部插件模型 Provider、安装型/热加载 Agent Runtime、Shell 和其他 hook/UI 扩展候选移出计划。仅保留新增 before_tool/after_tool 及已有页面内业务输入/结果展示，详见[确定清单 §0.1](2026-09-15-agent-plugin-remaining-work-and-decisions.zh.md)。这些新增项尚未实现，不能写入本次支持声明；一旦开发完成，必须具有普通用户可发现和使用的完整链路，不设置长期默认关闭的实验开关。
+最新产品取舍：保留 before_model、已实现的 before_tool 和普通 App UI/常驻插件；after_tool 因成本取消，会话页替换 U0/U1 因产品决定取消。外部模型插件、热加载引擎、Shell 和其他 hook/UI 扩展仍不做，详见[清单 §0.1](2026-09-15-agent-plugin-remaining-work-and-decisions.zh.md)。支持声明按实际保留能力与证据确定。
 
 本文覆盖 [能力评估](2026-09-13-agent-plugin-capability-assessment.zh.md) 与 [历史实施台账](2026-09-14-agent-plugin-openness-implementation.zh.md) 中旧 JS-only、任意/全栈替换和“下一批”排期；非 native 历史实现及测试记录保留，native 详细方案收缩为曾实现后按范围收敛删除的历史记录。29 项是长期能力评估，不是上线欠账，不要求清零，也不承诺任意替换。
 
@@ -26,14 +26,16 @@ Rust native 删除决定不变：原生插件后端、Rust 作者 SDK、启用�
 | 已支持、按证据验收 | Tool、Context、discovery、`before_model`、只读 Skill；限定已接线来源、阶段、权限、冻结身份及真实消费者，不扩大为全领域替换或可执行 Skill |
 | 删除项（代码已完成） | 原生插件后端、Rust 作者 SDK、启用入口及专属示例/打包/测试路径；不再列为可启用实验，Windows 删除专项回归已通过，详见 §2.5 |
 | 本轮收敛删除 | 旧 Skill loader/resolver、Service 事件流/emit、UI 专用事件投影/订阅、参考页自动草稿恢复及宿主隐藏消费者重新绑定；结果见 §2.6 |
-| 页面可选能力 | 移除实验开关，普通用户可创建/发布/选择/记住偏好/切回；内置 UI 仍默认，不宣称全部附件/审批交互、自动草稿恢复、多视图或 Shell 替换 |
+| 普通 App UI / 常驻插件 | 保留独立 Surface、普通作者入口、Node Service/continuous、storage/KV；不受会话页替换退役影响 |
+| 会话页替换退役 | 移除视图选择/默认偏好/参考模板/Session UI grant及专属客户端，旧链接进入同一标准会话；不删除历史数据 |
 | 取消开发 | 外部插件模型 Provider、安装型/热加载 Agent Runtime；保留内置模型与源码引擎注册/编译选择，不重复建设 |
-| 待开发 | 新 hooks 仅 before_tool/after_tool；页面增强仅业务输入/结果展示；未完成不计为已支持 |
+| U0/U1 | 用户已取消会话页替换及其业务表单增强，不再作为开发或发布条件 |
+| hooks 成本取舍 | before_tool 保留并继续正式验收；after_tool 及其专属前置改造取消，不作为发布门禁或后续实施卡 |
 | 不做 | 应用 Shell、其他通用 hook/UI 扩展；保留现有内置正常功能，不按历史全量目标扩张 |
 
 删除范围以上表及架构收敛记录为准，不删除 Rust 宿主、内置实现、Node 普通 Service 或必要执行保护，不重做平台。长期项若发现影响正式范围的安全/可用性问题，应登记具体 P0 缺陷，不把整个长期项升级成上线前必做。
 
-页面不再依赖实验环境变量、systemInfo availability 字段或前端 context；删除开关不是返回恒 true 的兼容层。仍由原 owner、精确 release、Surface/Session 授权和停用状态决定访问资格，未选插件时内置页默认。普通 Surface 和同一插件的 Tool 不因页面选择改变权限；不用开放入口代替真实授权。
+会话替换能力不保留实验开关或备用入口；普通 Surface 和 Tool 仍由原 owner、精确 release 和授权决定访问资格。保留历史声明解析不等于恢复 Session UI 授权，普通 App 的 Service/KV 和运行权限不扩大。
 
 §2.1～2.6 中“默认关闭”“显式 opt-in”及其测试是历史阶段证据，已被当前公开可选决定替代；不再作为开发/交接指令。此前测试通过不自动证明本轮开关移除通过。
 
@@ -173,7 +175,7 @@ UI 55 项复现命令：`bun test --cwd ui src/renderer/pages/agentSession src/r
 
 正式制品安装、签名、真实模型与 macOS arm64 仍未验收。跨 OS 交接应同时阅读本轮架构收敛记录 §5：不恢复 Service 流式、UI 专用订阅或重型草稿恢复协议，不把旧历史测试名当作必须恢复的产品能力。
 
-### 2.7 已有 Agent 页面正常开放（2026-09-15，Windows x64）
+### 2.7 已有 Agent 页面正常开放（历史记录，现已取消该能力）
 
 基线为 `70c28b5de86f820a535bdcca48191244196f2e2f` 加本轮未提交增量。删除后端实验准入模块、目录/模板/偏好/Session 入口开关、systemInfo availability 字段、前端 context 和 bootstrap 门控；不保留恒 true 兼容包装。普通用户可创建参考草稿、发布、选择、记住偏好及切回内置；不自动选择第三方，不改变执行配置。
 
@@ -206,7 +208,7 @@ bun test --cwd ui src/renderer/pages/agentSession src/renderer/pages/agentSettin
 提交并推送；前文“尚未提交”仅描述当时采集状态。
 
 该检查点接入 Nomi + PluginProduct before_tool、原 owner 只读预检、取消传递、
-普通模板及发布确认，现有工作台可发现和选择。H1b 与 U1 尚未实施。
+普通工具检查模板及发布确认，现有工作台可发现和选择。H1b 已按成本取舍取消；用户后续取消会话页替换 U0/U1，普通带 UI App/常驻插件不受影响。
 定向真实 Node/原生工具本地闭环、契约检查和 `bun run check` 已通过，具体覆盖、
 失败修复、范围限制及后续实模失败见[实施记录](2026-09-15-agent-tool-hooks-implementation.zh.md)。
 
@@ -216,6 +218,18 @@ bun test --cwd ui src/renderer/pages/agentSession src/renderer/pages/agentSettin
 当前 hooks 制品验收仍未完成；不将旧多 Engine macOS app/DMG 或 §2.7 Windows
 测试作为新 hooks 证明。Windows x64 的共享代码
 复核和正式候选包、签名仍按下面 TODO 补证，不执行自动上传或 Release 发布。
+
+### 2.9 会话页替换退役（macOS 验证，未发布制品）
+
+用户明确取消整个替换能力，普通带 UI App/常驻插件不受影响。当前源码已删除专属
+客户端、选择/偏好/模板入口、Session UI 端口和 SDK 门面；旧页面链接进入同一标准会话。
+历史声明及绑定数据保留，新声明、Session Surface grant/bridge 明确拒绝。
+
+前端与后端定向回归、真实 Node/存储、历史混合 continuous Service、before_model/
+before_tool、综合与合同检查通过。原生窗口确认标准正文恢复、Agent 无页面页签、
+普通插件 App 可打开，Command-Q 后进程/端口释放。详细命令、失败修复和证据见
+[退役记录](2026-09-15-agent-session-view-retirement.zh.md)。Windows 实机、当前正式包与
+签名未在该轮验证；不将历史 §2.7 的开放能力恢复为发布要求。
 
 ## 3. 跨 OS TODO（正常产品路径，不触发通用重构）
 
@@ -246,7 +260,7 @@ bun test --cwd ui src/renderer/pages/agentSession src/renderer/pages/agentSettin
 |---|---|---|---|
 | MAC-1 | 核对已选 arm64 目标、最低系统版本和工具链 | 在 Apple Silicon 机器记录宿主 `aarch64-apple-darwin`、OS、Rust/Node/Bun；Rosetta/交叉编译不算实机原生运行验证 | 架构已确认；待目标机执行 |
 | MAC-2 | 编译与正式产品专项 | 按 §4 运行适用检查；验证默认内置 Agent/模型/UI，Tool/Context/discovery/before_model/只读 Skill 的真实消费 | 待执行 |
-| MAC-3 | 安装后的桌面流程 | 候选 app/安装制品的安装、启动、发布选择、保存重启、停用切回内置、卸载；WebView 页面与最小桌面视口 | 待执行 |
+| MAC-3 | 安装后的桌面流程 | 标准会话及旧链接、普通 App 发布/打开/KV保存重启、常驻Service启停、Session UI授权拒绝；安装/卸载与最小桌面视口 | 待执行 |
 | MAC-4 | Node/正常产品平台补充 | bundle/cwd、空格/Unicode/只读路径、运行权限、动态依赖、quarantine、宿主与 Node 架构；Node 缺失/切换/停止的正常行为；不验证已删除原生插件 | 待执行 |
 | MAC-5 | 进程故障与清理 | Node/受管产品进程取消、超时、崩溃、宿主退出后检查 Unix 进程组及子孙进程；必要修复后定向回归 | 待执行 |
 | MAC-6 | 最小数据安全 | 新安装/新目录、保存重启、不兼容旧库明确拒绝且原数据保留；记录新目录的现有配置方式，不追加历史版本适配或升级矩阵 | D3 已确认；待目标机验收 |
@@ -263,7 +277,7 @@ macOS 专用交接 prompt（配合 §4 的已有命令使用）：
 此前候选为 48affddb7；最新改动含原生插件删除及 Skill/Service/UI/宿主装配收敛。接手时检查最新分支/提交、交接增量和工作区，记录实际基线，不把旧测试视为本轮通过。
 已确认首发 macOS Apple Silicon（arm64），桌面宿主目标为 aarch64-apple-darwin；在相应目标机验证。
 逐项执行发布台账 MAC-1～8 和 §4 的适用命令；Intel Mac、Windows arm64、Linux 和 universal 制品不在本次范围。
-以默认内置 Agent/模型/UI、Node 插件与普通 Service 为验收路径；不设置实验变量，验证普通用户创建/发布/选择页面及保存/重启/切回。没有待回答 A/B 选择，不恢复原生插件、Service 流式、UI 专用订阅或草稿恢复协议。
+以标准会话、Node插件与普通App/Service为验收路径；验证普通App发布/打开/KV/常驻启停，以及已移除的Session UI授权被拒绝。不要恢复会话替换页、原生插件、Service流式、UI专用订阅或草稿恢复协议。
 仅针对复现的 macOS 缺陷做最小必要修复，先协调共享文件写入范围，不回滚 Windows 改动。
 实际验收安装、保存重启、新目录使用/不兼容旧库保护、运行权限/路径、签名公证及 Node/产品进程组与子孙进程回收。
 兼容遵循最小工作量：保留已有迁移，不新增历史适配/转换工具/升级回滚矩阵，不自动删除或覆盖旧数据。
@@ -280,7 +294,7 @@ macOS 专用交接 prompt（配合 §4 的已有命令使用）：
 任务：在已批准的 Windows x64 或 macOS arm64 目标机补充正常插件产品的定向开发与验证。
 先读取 AGENTS.md、架构收敛记录、剩余工作文档和发布台账，确认实际分支/提交、工作区改动、OS/架构及 Rust/Node/Bun。
 原生插件后端/SDK 已移除，Windows 删除专项回归通过；不恢复旧后端/启用入口。
-保留 Node 普通 Service、存储 IPC、取消/生命周期、生产模型合同及默认内置 Agent/模型/UI；插件页面普通用户可选，无实验开关。不要恢复被删除的 Service 流式和 UI 专用事件协议。
+保留Node普通/常驻Service、存储IPC、独立App Surface及标准会话；移除插件替换会话页，不影响普通带UI App。不要恢复实验入口、Service流式和UI专用事件协议。
 不回滚其他工作者改动；修复使用 apply_patch，先协调共享文件写入范围。
 仅为 TODO-OS-1～6 的已证实缺陷做必要修复，不启动通用跨平台重构或新增插件领域。
 核对宿主/Node 架构、权限与签名、进程树/进程组清理、安装路径/cwd/依赖及 Node 生命周期。
