@@ -65,6 +65,8 @@ pub fn conversation_routes(state: ConversationRouterState) -> Router {
             patch(update_artifact),
         )
         .route("/api/conversations/{conversation_id}/cancel", post(cancel))
+        .route("/api/conversations/{conversation_id}/creation-tasks", get(list_creation_tasks).post(submit_creation_task))
+        .route("/api/conversations/{conversation_id}/creation-tasks/{task_id}/cancel", post(cancel_creation_task))
         .route("/api/conversations/{conversation_id}/steer", post(steer))
         .route("/api/conversations/{conversation_id}/warmup", post(warmup))
         .route("/api/conversations/active-count", get(active_runtime_count))
@@ -86,6 +88,29 @@ pub fn creative_studio_agent_session_routes(state: ConversationRouterState) -> R
 }
 
 // ── Handlers ───────────────────────────────────────────────────────
+
+async fn submit_creation_task(
+    State(state): State<ConversationRouterState>, Extension(user): Extension<CurrentUser>,
+    Path(id): Path<String>, headers: HeaderMap,
+    body: Result<Json<crate::service::conversation_creation::SubmitConversationCreation>, JsonRejection>,
+) -> Result<(StatusCode, Json<ApiResponse<crate::service::conversation_creation::ConversationCreationResponse>>), AppError> {
+    let Json(request) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let key = public_idempotency_key_from_headers(&headers)?;
+    let response = state.service.submit_conversation_creation(user.id.as_str(), &id, &key, request).await?;
+    Ok((StatusCode::ACCEPTED, Json(ApiResponse::ok(response))))
+}
+
+async fn list_creation_tasks(
+    State(state): State<ConversationRouterState>, Extension(user): Extension<CurrentUser>, Path(id): Path<String>,
+) -> Result<Json<ApiResponse<crate::service::conversation_creation::ConversationCreationPage>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.service.list_conversation_creations(user.id.as_str(), &id).await?)))
+}
+
+async fn cancel_creation_task(
+    State(state): State<ConversationRouterState>, Extension(user): Extension<CurrentUser>, Path((id, task)): Path<(String, String)>,
+) -> Result<Json<ApiResponse<nomifun_creation::CreativeCreationTask>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.service.cancel_conversation_creation(user.id.as_str(), &id, &task).await?)))
+}
 
 async fn resolve_creative_studio_canvas_agent_session(
     State(state): State<ConversationRouterState>,

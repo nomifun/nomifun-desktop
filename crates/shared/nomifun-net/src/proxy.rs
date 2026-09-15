@@ -111,6 +111,65 @@ pub fn apply_detected_proxy(mut builder: reqwest::ClientBuilder) -> reqwest::Cli
     builder
 }
 
+/// Whether a domain actually selects an explicit process/system proxy. This
+/// only gates Fake-IP DNS recovery; untrusted artifact connections still use
+/// the strict direct, DNS-pinned transport. IP literals never enter recovery.
+pub(crate) fn domain_uses_detected_proxy(url: &url::Url) -> bool {
+    let Some(url::Host::Domain(host)) = url.host() else { return false; };
+    let environment = |name: &str| {
+        std::env::var(name).ok().filter(|value| !value.trim().is_empty())
+            .or_else(|| std::env::var(name.to_ascii_lowercase()).ok().filter(|value| !value.trim().is_empty()))
+    };
+    let (selected, exclusions) = if process_has_proxy_env() {
+        let scheme_proxy = match url.scheme() {
+            "https" => environment("HTTPS_PROXY"),
+            "http" if std::env::var_os("REQUEST_METHOD").is_none() => environment("HTTP_PROXY"),
+            _ => None,
+        };
+        (scheme_proxy.or_else(|| environment("ALL_PROXY")), environment("NO_PROXY").unwrap_or_default())
+    } else {
+        let Some(config) = system_proxy_config() else { return false; };
+        let scheme_proxy = match url.scheme() {
+            "https" => config.https_proxy.as_ref(),
+            "http" => config.http_proxy.as_ref(),
+            _ => None,
+        };
+        let selected = scheme_proxy.or(config.all_proxy.as_ref()).cloned();
+        let exclusions = [environment("NO_PROXY").unwrap_or_default(), config.no_proxy.unwrap_or_default()].join(",");
+        (selected, exclusions)
+    };
+    selected.as_deref().is_some_and(|proxy| reqwest::Proxy::all(proxy).is_ok())
+        && !domain_excluded_from_proxy(host, &exclusions)
+}
+
+// Domain-only NO_PROXY semantics used by reqwest: exact names, leading-dot
+// domains, subdomains and '*'. IP/CIDR entries cannot match a domain; literals
+// are deliberately rejected above before this helper is used.
+fn domain_excluded_from_proxy(host: &str, exclusions: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    exclusions.split(',').map(str::trim).filter(|item| !item.is_empty()).any(|item| {
+        let domain = item.trim_start_matches('.').to_ascii_lowercase();
+        domain == "*" || host == domain || host.ends_with(&format!(".{domain}"))
+    })
+}
+
+#[cfg(test)]
+mod fake_dns_proxy_tests {
+    use super::*;
+
+    #[test]
+    fn fake_dns_proxy_gate_respects_domain_exclusions_without_suffix_confusion() {
+        for exclusion in ["*", "example.com", ".example.com", "foo.test,example.com", "EXAMPLE.COM"] {
+            assert!(domain_excluded_from_proxy("cdn.example.com", exclusion), "{exclusion}");
+        }
+        assert!(domain_excluded_from_proxy("example.com", ".example.com"));
+        assert!(!domain_excluded_from_proxy("notexample.com", "example.com"));
+        assert!(!domain_excluded_from_proxy("example.com.evil.test", "example.com"));
+        assert!(!domain_excluded_from_proxy("cdn.example.com", "10.0.0.0/8,127.0.0.1,localhost"));
+        assert!(!domain_uses_detected_proxy(&url::Url::parse("https://198.18.0.12/").unwrap()));
+    }
+}
+
 pub fn child_proxy_env<'a, I>(configured_env_names: I) -> Vec<(String, String)>
 where
     I: IntoIterator<Item = &'a str>,

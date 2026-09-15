@@ -534,6 +534,7 @@ impl AppRobotBackend {
             context.resources = Some(resources.clone());
             let prepare_hook = Arc::new(DeviceTurnPreparation { authority, resources, observations: self.vision_observations.clone() });
             let message = SendMessageRequest {
+                preset_id: None,
                 content: request.text.clone(), files: vec![], inject_skills: vec![],
                 hidden: false, origin: None, channel_platform: Some("robot".to_owned()),
             };

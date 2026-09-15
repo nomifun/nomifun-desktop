@@ -33,6 +33,7 @@ import type { AgentResourceSelection } from '@/common/types/agentPlatform';
 import type { AgentSessionCapabilitySelection } from '@/common/types/agentPlatform';
 import { TEMPLATE_I18N_PATH } from '../../agentSettings/model';
 import { officialAgentLaunchError, prepareOfficialAgent } from './officialAgentLaunch';
+import { creationDraftStorageKey, emptyCreationDraft } from '@/renderer/creation/useCreationDraft';
 
 export type GuidSendDeps = {
   input: string;
@@ -189,6 +190,18 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       );
     }
 
+    // Retain template identity for the next submit; an internal official
+    // preset ID alone is indistinguishable from a personal Agent in the UI.
+    if (selection.kind === 'template' && !conversation.extra?.companion_session) {
+      try {
+        const draftKey = creationDraftStorageKey(conversationId);
+        if (sessionStorage.getItem(draftKey) === null) {
+          sessionStorage.setItem(draftKey, JSON.stringify({
+            ...emptyCreationDraft(), selectedAgent: selection, presetId: launchPreset.preset_id,
+          }));
+        }
+      } catch { /* A created session remains usable when browser storage is unavailable. */ }
+    }
     seedConversationCache(conversation);
     await navigate(`/conversation/${conversationId}`);
   }, [

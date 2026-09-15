@@ -49,7 +49,7 @@ const CreateCreativeTextAssetModal: React.FC<CreateCreativeTextAssetModalProps> 
       maskClosable={!submitting}
       closable={!submitting}
       className={styles.textAssetModal}
-      getPopupContainer={() => document.getElementById('creative-studio-portal-root') ?? document.body}
+      getPopupContainer={() => document.getElementById('resource-page-portal-root') ?? document.body}
       onCancel={() => {
         if (!submitting) onCancel();
       }}

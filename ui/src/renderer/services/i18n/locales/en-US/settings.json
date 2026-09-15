@@ -462,7 +462,8 @@
     "registered": "Registered protocol",
     "noAdapter": "No registered protocol",
     "adapterReady": "Adapter registered",
-    "adapterRequired": "Adapter required"
+    "adapterRequired": "Adapter required",
+    "music_generation": "Music generation"
   },
   "editModel": "Edit Model Platform",
   "modelPlatform": "Model Platform",
@@ -1487,17 +1488,19 @@
       "empty": "No models in this category yet",
       "emptyHint": "No configured model carries this task tag. Tag the capable models under \"Providers & keys\".",
       "emptyNoProviders": "No model providers are configured. Add a provider and model under \"Providers & keys\" first.",
-      "defaultTitle": "Default image model",
-      "defaultHint": "Ordinary image requests prefer this model. An available model explicitly chosen by the user takes precedence.",
-      "defaultUnset": "No default is set. The Agent will select automatically from the available image models.",
-      "defaultLoading": "Checking available image models…",
-      "defaultNoModels": "No enabled model is tagged for image generation, so a default cannot be selected yet.",
-      "defaultClear": "Select automatically",
-      "defaultSaveFailed": "Could not save the default image model. Try again.",
+      "defaultTitle": "Default generation model",
+      "defaultHint": "Automatic tools use this exact model for this task. Professional creation can select a different model.",
+      "defaultUnset": "If exactly one model is available it is used automatically. Choose a default when several models are available.",
+      "defaultLoading": "Checking available models for this task…",
+      "defaultNoModels": "No enabled model supports this task. Configure one before choosing a default.",
+      "defaultClear": "Clear default model",
+      "defaultSaveFailed": "Failed to save the default generation model. Please try again.",
       "imageTitle": "Image generation",
       "imageSubtitle": "Models that can produce images (including the edit-capable ones).",
       "videoTitle": "Video generation",
-      "videoSubtitle": "Models that can produce video."
+      "videoSubtitle": "Models that can produce video.",
+      "musicTitle": "Music models",
+      "musicSubtitle": "Compose instrumental tracks or songs, configured separately from speech. MiniMax Music API is currently restricted to existing paying users."
     },
     "speech": {
       "title": "Speech to Text",
@@ -1521,7 +1524,8 @@
       "vadTitle": "Voice activity detection (VAD)",
       "vadBuiltin": "Built-in Silero VAD (local)",
       "vadBuiltinHint": "Runs on this machine — no network, no provider, and no model to choose. Defaults: sensitivity {{sensitivity}}, end-of-speech pause {{silence}} ms. Each companion can tune both on its own overview page."
-    }
+    },
+    "sectionMusic": "Music generation"
   },
   "otherHub": {
     "title": "Other",

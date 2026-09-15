@@ -14,6 +14,7 @@ export const MODEL_TASK_ORDER = [
   'image_generation',
   'image_edit',
   'video_generation',
+  'music_generation',
   'speech_synthesis',
   'speech_recognition',
   'embedding',

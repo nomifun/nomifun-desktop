@@ -22,7 +22,7 @@ use crate::realtime::{
 };
 use crate::types::{
     AsrRequest, EmbedRequest, ImageEditRequest, ImageGenRequest, InputAsset, JobHandle, ModelRef,
-    RerankRequest, TaskOutcome, TaskRequest, TtsRequest, VideoGenRequest,
+    MusicGenRequest, RerankRequest, TaskOutcome, TaskRequest, TtsRequest, VideoGenRequest,
 };
 use crate::ResolvedCall;
 
@@ -299,6 +299,8 @@ impl ModelInvokeService {
     ) -> Result<(TaskOutcome, InvocationContext), InvokeError> {
         let task = req.task();
         let (call, adapter) = self.resolve(m, task, req).await?;
+        validate_typed_task_controls(&call.protocol, &call.request)?;
+
         if expected_config_revision
             .is_some_and(|expected| call.config_revision != expected)
         {
@@ -659,6 +661,7 @@ fn probe_request_for_protocol(
             prompt: "health check".into(),
             count: 1,
             size: None,
+            quality: None,
             // A real (minimal) PNG: openai.images rejects an input-less edit
             // locally, and a probe that never reaches the wire is vacuous.
             // The stub is not meaningful content. Any upstream rejection still
@@ -676,7 +679,15 @@ fn probe_request_for_protocol(
             prompt: "health check".into(),
             seconds: None,
             size: None,
+            resolution: None,
             inputs: vec![],
+            extra: json!({}),
+        })),
+        ModelTask::MusicGeneration => Some(TaskRequest::MusicGeneration(MusicGenRequest {
+            prompt: "Calm acoustic guitar instrumental".into(),
+            lyrics: None,
+            instrumental: true,
+            format: None,
             extra: json!({}),
         })),
         ModelTask::SpeechSynthesis => Some(TaskRequest::SpeechSynthesis(TtsRequest {
@@ -727,6 +738,31 @@ fn probe_request_for_protocol(
     }
 }
 
+// Reject controls before any billable adapter request when an existing protocol
+// cannot carry them. Protocol-specific cardinality/role checks live in adapters.
+fn validate_typed_task_controls(protocol: &str, request: &TaskRequest) -> Result<(), InvokeError> {
+    match request {
+            TaskRequest::VideoGeneration(request) if request.resolution.is_some() && !matches!(protocol, "ark.video_jobs" | "xai.video_jobs") => {
+                return Err(InvokeError::new(InvokeErrorKind::InvalidParams, format!("{} has no separate resolution control; use its supported size setting", protocol)));
+            }
+            TaskRequest::ImageEdit(request) if request.quality.is_some() && protocol != "openai.images" => {
+                return Err(InvokeError::new(InvokeErrorKind::InvalidParams, format!("{} does not support image-edit quality", protocol)));
+            }
+            TaskRequest::VideoGeneration(request) if !request.inputs.is_empty() => {
+                let supported = match protocol {
+                    "ark.video_jobs" | "xai.video_jobs" | "openai.videos" => true,
+                    "agnes.video_jobs" | "siliconflow.video_jobs" => request.inputs.len() == 1 && matches!(request.inputs[0].role.as_str(), "first_frame" | "reference" | "image"),
+                    _ => false,
+                };
+                if !supported {
+                    return Err(InvokeError::new(InvokeErrorKind::InvalidParams, format!("{protocol} cannot preserve the supplied video input roles")));
+                }
+            }
+            _ => {}
+        }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -746,6 +782,23 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+
+    #[test]
+    fn unsupported_video_inputs_fail_before_adapter_execution() {
+        for (protocol, roles, valid) in [
+            ("siliconflow.video_jobs", vec!["first_frame"], true),
+            ("siliconflow.video_jobs", vec!["first_frame", "last_frame"], false),
+            ("agnes.video_jobs", vec!["last_frame"], false),
+            ("zhipu.video_jobs", vec!["first_frame"], false),
+        ] {
+            let request = TaskRequest::VideoGeneration(VideoGenRequest {
+                prompt: "test".into(), seconds: None, size: None, resolution: None,
+                inputs: roles.into_iter().map(|role| crate::InputAsset { id: None, role: role.into(), bytes: b"frame".to_vec(), mime: "image/png".into() }).collect(), extra: json!({}),
+            });
+            assert_eq!(validate_typed_task_controls(protocol, &request).is_ok(), valid, "{protocol}");
+        }
+    }
+
     use crate::{
         AdapterRegistry, ProducedData, ProtocolEndpointPurpose, TaskResult, TaskRoute,
         default_adapters, preset_protocol_recommendation, protocol_task_descriptor,
@@ -979,6 +1032,7 @@ mod tests {
             prompt: prompt.into(),
             seconds: None,
             size: None,
+            resolution: None,
             inputs: vec![],
             extra: json!({}),
         })

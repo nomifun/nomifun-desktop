@@ -462,7 +462,8 @@
     "registered": "已注册协议",
     "noAdapter": "暂无已注册协议",
     "adapterReady": "适配器已注册",
-    "adapterRequired": "需要适配器"
+    "adapterRequired": "需要适配器",
+    "music_generation": "音乐生成"
   },
   "editModel": "编辑模型平台",
   "modelPlatform": "模型平台",
@@ -1487,17 +1488,19 @@
       "empty": "这一类暂时没有模型",
       "emptyHint": "已配置的模型里没有打上这一类任务标签的。到「供应商与密钥」里为具备能力的模型打标即可。",
       "emptyNoProviders": "尚未配置任何模型供应商。请先到「供应商与密钥」里添加供应商与模型。",
-      "defaultTitle": "默认生图模型",
-      "defaultHint": "普通生图任务优先使用该模型；用户在指令中指定其他可用模型时，以用户选择为准。",
-      "defaultUnset": "未指定默认模型；Agent 将在可用的生图模型中自动选择。",
-      "defaultLoading": "正在检查可用的生图模型…",
-      "defaultNoModels": "没有已启用且带有图像生成任务标签的模型，暂时无法设置默认模型。",
-      "defaultClear": "改为自动选择",
-      "defaultSaveFailed": "默认生图模型保存失败，请重试。",
+      "defaultTitle": "默认生成模型",
+      "defaultHint": "普通助理按当前任务自动使用此模型；专业创作可以单独选择模型。",
+      "defaultUnset": "未设置默认模型；仅有一个可用模型时自动使用，多个模型时请先选择。",
+      "defaultLoading": "正在检查当前任务的可用模型…",
+      "defaultNoModels": "没有已启用且支持当前任务的模型，暂时无法设置默认模型。",
+      "defaultClear": "清除默认模型",
+      "defaultSaveFailed": "默认生成模型保存失败，请重试。",
       "imageTitle": "图像生成",
       "imageSubtitle": "能出图的模型（含带图像编辑能力的）。",
       "videoTitle": "视频生成",
-      "videoSubtitle": "能出视频的模型。"
+      "videoSubtitle": "能出视频的模型。",
+      "musicTitle": "音乐模型",
+      "musicSubtitle": "生成配乐或带人声的音乐。与语音合成分别配置。MiniMax 音乐 API 当前仅向既有付费用户开放。"
     },
     "speech": {
       "title": "语音转文字",
@@ -1521,7 +1524,8 @@
       "vadTitle": "语音活动检测（VAD）",
       "vadBuiltin": "内置 Silero VAD（本地）",
       "vadBuiltinHint": "在本机运行，不联网、不需要供应商，也没有可选的模型。默认灵敏度 {{sensitivity}}、停顿判停 {{silence}} 毫秒；每只伙伴可以在它的总览页单独调。"
-    }
+    },
+    "sectionMusic": "音乐生成"
   },
   "otherHub": {
     "title": "其他",

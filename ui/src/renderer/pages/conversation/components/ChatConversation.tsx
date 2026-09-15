@@ -9,7 +9,7 @@ import { ipcBridge } from '@/common';
 import type { IConversationMcpStatus, IProvider, TChatConversation, TProviderWithModel } from '@/common/config/storage';
 import { CronJobManager } from '@/renderer/pages/cron';
 import { useAgentInfo } from '@/renderer/hooks/agent/useAgentInfo';
-import { Message, Modal } from '@arco-design/web-react';
+import { Message } from '@arco-design/web-react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import ChatLayout, { type ChatLayoutProps } from './ChatLayout';
@@ -45,19 +45,12 @@ import { prepareOfficialAgent } from '@/renderer/pages/guid/hooks/officialAgentL
 import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
 import type { GuidAgentSelection } from '@/renderer/pages/guid/types';
 import type { AgentPresetId } from '@/common/types/agentPlatform';
-import AgentResourcePicker from '@/renderer/components/agent/AgentResourcePicker';
-import {
-  requiredAgentResourcePickerKinds,
-  resolveAgentResourceSelections,
-  type AgentResourceSelectionValue,
-} from '@/renderer/hooks/agent/agentResourceSelection';
-import { requiredResourceKindsForCapabilityReferences } from '@/renderer/hooks/agent/useAgentCapabilityResources';
-import { refreshConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
-import { emitter } from '@/renderer/utils/emitter';
+import { CreationComposerContext } from '@/renderer/creation/CreationComposerContext';
+import { useCreationDraft } from '@/renderer/creation/useCreationDraft';
+import type { CreationMode } from '@/renderer/creation/types';
 import {
   agentSwitchRequiresWebSearchModel,
   classifyAgentSwitchError,
-  resourceSelectionValueFromSessionExtra,
 } from '../utils/agentSwitch';
 
 /** Check whether a specific skill is mounted on the conversation. */
@@ -93,8 +86,6 @@ type AgentSwitchTarget = {
   selection: GuidAgentSelection;
   presetId: AgentPresetId;
   name: string;
-  requiredResourceKinds: string[];
-  capabilityIds: string[];
 };
 
 const NomiConversationLayout: React.FC<{
@@ -144,40 +135,39 @@ const NomiConversationPanel: React.FC<{
   sliderTitle: React.ReactNode;
 }> = ({ conversation, sliderTitle }) => {
   const hasPreset = Boolean(conversation.preset_id);
+  const creation = useCreationDraft(conversation.id);
+  const [stagedPresetId, setStagedPresetId] = useState(creation.draft.presetId ?? conversation.preset_id);
+  const previousOrdinaryAgent = useRef<GuidAgentSelection>(creation.draft.previousAgent || { kind: 'template', templateKey: 'chat.minimal' });
   const { library: agentLibrary, presets: savedAgentPresets, isLoading: agentsLoading, error: agentsError, refresh: refreshAgents } = useAgentPresets();
   const executableAgentPresets = useMemo(
     () => savedAgentPresets.filter(isExecutableAgentPreset),
     [savedAgentPresets],
   );
   const [agentChoice, setAgentChoice] = useState<GuidAgentSelection>(() =>
-    conversation.preset_id
+    creation.draft.selectedAgent ?? (conversation.preset_id
       ? { kind: 'preset', presetId: conversation.preset_id }
-      : { kind: 'template', templateKey: 'chat.minimal' },
+      : { kind: 'template', templateKey: 'chat.minimal' }),
   );
   const [agentSwitching, setAgentSwitching] = useState(false);
-  const agentSwitchingRef = useRef(false);
   const activeConversationIdRef = useRef(conversation.id);
-  const [pendingAgentSwitch, setPendingAgentSwitch] = useState<AgentSwitchTarget | null>(null);
-  const [agentResourceValue, setAgentResourceValue] = useState<AgentResourceSelectionValue>({});
   const [selectedAgentLabel, setSelectedAgentLabel] = useState<string | undefined>(
-    (conversation.extra as { agent_name?: string } | undefined)?.agent_name
+    creation.draft.agentLabel ?? (conversation.extra as { agent_name?: string } | undefined)?.agent_name
       ?? conversation.agent_snapshot?.preset_name,
   );
   useEffect(() => {
     activeConversationIdRef.current = conversation.id;
-    agentSwitchingRef.current = false;
     setAgentChoice(
-      conversation.preset_id
+      creation.draft.selectedAgent ?? (conversation.preset_id
         ? { kind: 'preset', presetId: conversation.preset_id }
-        : { kind: 'template', templateKey: 'chat.minimal' },
+        : { kind: 'template', templateKey: 'chat.minimal' }),
     );
     setAgentSwitching(false);
-    setPendingAgentSwitch(null);
-    setAgentResourceValue({});
+    setStagedPresetId(creation.draft.presetId ?? conversation.preset_id);
     setSelectedAgentLabel(
-      (conversation.extra as { agent_name?: string } | undefined)?.agent_name
+      creation.draft.agentLabel ?? (conversation.extra as { agent_name?: string } | undefined)?.agent_name
         ?? conversation.agent_snapshot?.preset_name,
     );
+    previousOrdinaryAgent.current = creation.draft.previousAgent || { kind: 'template', templateKey: 'chat.minimal' };
   }, [conversation.id]);
   const [collaborators, setCollaboratorsState] = useState<TExecutionModelRef[]>(() => {
     const pool = conversation.execution_model_pool;
@@ -459,18 +449,13 @@ const NomiConversationPanel: React.FC<{
       const prepared = await prepareOfficialAgent(
         template,
         name,
-        modelSelection.current_model ?? conversation.model,
+        selection.templateKey === 'creative-studio.default' ? undefined : modelSelection.current_model ?? conversation.model,
       );
       return {
         conversationId: conversation.id,
         selection,
         presetId: prepared.preset_id,
         name,
-        requiredResourceKinds: [...template.seed.required_resource_kinds],
-        capabilityIds: [
-          ...template.seed.enabled_capabilities,
-
-        ].map((capability) => capability.id),
       };
     }
 
@@ -478,26 +463,11 @@ const NomiConversationPanel: React.FC<{
       (candidate) => candidate.preset_id === selection.presetId,
     );
     if (!preset) throw new Error('Saved Agent is unavailable');
-    const [editor, capabilityCatalog] = await Promise.all([
-      ipcBridge.agentPlatform.getEditor.invoke({ preset_id: preset.preset_id }),
-      ipcBridge.agentPlatform.capabilities.invoke(),
-    ]);
-    const capabilityReferences = [
-      ...editor.draft.document.enabled_capabilities,
-
-    ].map((entry) => entry.capability);
     return {
       conversationId: conversation.id,
       selection,
       presetId: preset.preset_id,
       name: preset.display_name,
-      requiredResourceKinds: [
-        ...requiredResourceKindsForCapabilityReferences(
-          capabilityReferences,
-          capabilityCatalog,
-        ),
-      ],
-      capabilityIds: capabilityReferences.map((capability) => capability.id),
     };
   }, [
     agentLibrary?.official_templates,
@@ -507,119 +477,43 @@ const NomiConversationPanel: React.FC<{
     t,
   ]);
 
-  const initialAgentResourceValue = useCallback(async (
-    requiredResourceKinds: readonly string[],
-  ): Promise<AgentResourceSelectionValue> => {
-    const value = resourceSelectionValueFromSessionExtra(conversation.extra);
-    if (requiredResourceKinds.includes('knowledge_base') && !value.knowledge_base) {
-      try {
-        const binding = await ipcBridge.knowledge.getBinding.invoke({
-          kind: 'conversation',
-          target_id: conversation.id,
-        });
-        if (binding.enabled && binding.kb_ids.length === 1) {
-          value.knowledge_base = binding.kb_ids[0];
-        }
-      } catch (error) {
-        console.warn('[ChatConversation] Failed to reuse the current knowledge binding:', error);
-      }
-    }
-    return value;
-  }, [conversation.extra, conversation.id]);
-
-  const commitAgentSwitch = useCallback(async (
-    target: AgentSwitchTarget,
-    resourceValue: AgentResourceSelectionValue,
-  ) => {
-    const resolution = resolveAgentResourceSelections(
-      target.requiredResourceKinds,
-      resourceValue,
-    );
-    if (resolution.missingKinds.length > 0) {
-      throw new Error(`RESOURCE_SELECTION_REQUIRED:${resolution.missingKinds.join(',')}`);
-    }
-    await ipcBridge.agentPlatform.sessions.switchPreset.invoke({
-      agent_session_id: target.conversationId,
-      request: {
-        preset_id: target.presetId,
-        ...(resolution.selections.length > 0
-          ? { resource_selections: resolution.selections }
-          : {}),
-      },
-    });
-    try {
-      await refreshConversationCache(target.conversationId);
-    } catch (error) {
-      console.warn('[ChatConversation] Agent switched, but the immediate cache refresh failed:', error);
-    }
-    emitter.emit('chat.history.refresh');
-    if (activeConversationIdRef.current !== target.conversationId) return;
-    setAgentChoice(target.selection);
-    setSelectedAgentLabel(target.name);
-    Message.success(t('conversation.chat.switchedToAgent', { agent: target.name }));
-  }, [t]);
-
-  const switchAgent = useCallback(async (selection: GuidAgentSelection) => {
-    if (!hasPreset || agentSwitchingRef.current) return;
-    const switchConversationId = conversation.id;
-    agentSwitchingRef.current = true;
+  // Menus edit only the next draft. Preparing/publishing happens on submit.
+  const selectedAgentRef = useRef(agentChoice);
+  selectedAgentRef.current = agentChoice;
+  const switchAgent = (selection: GuidAgentSelection, mode?: CreationMode) => {
+    const creative = selection.kind === 'template' && selection.templateKey === 'creative-studio.default';
+    if (creative && !creation.draft.mode) previousOrdinaryAgent.current = agentChoice;
+    const presetId = selection.kind === 'preset' ? selection.presetId : undefined;
+    const label = selection.kind === 'template'
+      ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[selection.templateKey]}.name`)
+      : executableAgentPresets.find(preset => preset.preset_id === selection.presetId)?.display_name || 'Agent';
+    setStagedPresetId(presetId);
+    setAgentChoice(selection);
+    setSelectedAgentLabel(label);
+    creation.update(draft => ({ ...draft, selectedAgent: selection, presetId, agentLabel: label, previousAgent: creative ? previousOrdinaryAgent.current : selection, mode: creative ? mode || draft.lastMode : null, lastMode: mode || draft.lastMode }));
+  };
+  const resolvePreset = async () => {
+    // Official templates must prepare current seed capabilities on each submission.
+    if (agentChoice.kind === 'preset' && stagedPresetId) return stagedPresetId;
+    const selected = agentChoice;
     setAgentSwitching(true);
     try {
-      const target = await resolveAgentSwitchTarget(selection);
-      if (activeConversationIdRef.current !== switchConversationId) return;
-      const resourceValue = await initialAgentResourceValue(target.requiredResourceKinds);
-      if (activeConversationIdRef.current !== switchConversationId) return;
-      if (requiredAgentResourcePickerKinds(target.requiredResourceKinds).length > 0) {
-        setAgentResourceValue(resourceValue);
-        setPendingAgentSwitch(target);
-        return;
+      const target = await resolveAgentSwitchTarget(selected);
+      if (activeConversationIdRef.current === target.conversationId && JSON.stringify(selectedAgentRef.current) === JSON.stringify(selected)) {
+        setStagedPresetId(target.presetId);
+        creation.update(draft => ({ ...draft, presetId: target.presetId }));
       }
-      await commitAgentSwitch(target, resourceValue);
-    } catch (error) {
-      showAgentSwitchError(error);
-    } finally {
-      agentSwitchingRef.current = false;
-      setAgentSwitching(false);
-    }
-  }, [
-    commitAgentSwitch,
-    conversation.id,
-    hasPreset,
-    initialAgentResourceValue,
-    resolveAgentSwitchTarget,
-    showAgentSwitchError,
-  ]);
-
-  const confirmAgentSwitch = useCallback(async () => {
-    if (!pendingAgentSwitch || agentSwitchingRef.current) return;
-    if (pendingAgentSwitch.conversationId !== activeConversationIdRef.current) {
-      setPendingAgentSwitch(null);
-      setAgentResourceValue({});
-      return;
-    }
-    agentSwitchingRef.current = true;
-    setAgentSwitching(true);
-    try {
-      await commitAgentSwitch(pendingAgentSwitch, agentResourceValue);
-      setPendingAgentSwitch(null);
-      setAgentResourceValue({});
-    } catch (error) {
-      showAgentSwitchError(error);
-    } finally {
-      agentSwitchingRef.current = false;
-      setAgentSwitching(false);
-    }
-  }, [agentResourceValue, commitAgentSwitch, pendingAgentSwitch, showAgentSwitchError]);
-
-  const pendingResourceResolution = useMemo(
-    () => resolveAgentResourceSelections(
-      pendingAgentSwitch?.requiredResourceKinds ?? [],
-      agentResourceValue,
-    ),
-    [agentResourceValue, pendingAgentSwitch?.requiredResourceKinds],
-  );
+      return target.presetId;
+    } catch (error) { showAgentSwitchError(error); throw error; }
+    finally { setAgentSwitching(false); }
+  };
+  const selectCreationMode = (mode: CreationMode) => {
+    if (creation.draft.mode) creation.setMode(mode);
+    else switchAgent({ kind: 'template', templateKey: 'creative-studio.default' }, mode);
+  };
+  const exitCreation = () => switchAgent(previousOrdinaryAgent.current);
   const currentAgentLabel = selectedAgentLabel ?? presetPresetInfo?.name ?? 'Agent';
-  const agentSelectorNode = hasPreset ? (
+  const agentSelectorNode = (
     <GuidAgentSelector
       compact
       disabled={agentSwitching}
@@ -633,7 +527,7 @@ const NomiConversationPanel: React.FC<{
       onSelectPreset={(presetId) => void switchAgent({ kind: 'preset', presetId })}
       onSelectTemplate={(templateKey) => void switchAgent({ kind: 'template', templateKey })}
     />
-  ) : undefined;
+  );
   const presetResourceKinds = new Set(
     conversation.agent_snapshot?.required_resource_kinds ?? []
   );
@@ -676,7 +570,7 @@ const NomiConversationPanel: React.FC<{
   };
 
   return (
-    <>
+    <CreationComposerContext.Provider value={{ ...creation, presetId: stagedPresetId ?? undefined, preparing: agentSwitching, resolvePreset, selectMode: selectCreationMode, exit: exitCreation }}>
       <NomiConversationLayout
         conversation={conversation}
         chatLayoutProps={chatLayoutProps}
@@ -685,32 +579,7 @@ const NomiConversationPanel: React.FC<{
         collaborationControlNode={collaborationControlNode}
         presetPresetName={presetPresetInfo?.name}
       />
-      <Modal
-        visible={Boolean(pendingAgentSwitch)}
-        title={t('conversation.chat.switchAgentResourcesTitle', {
-          agent: pendingAgentSwitch?.name ?? '',
-        })}
-        confirmLoading={agentSwitching}
-        okButtonProps={{ disabled: pendingResourceResolution.missingKinds.length > 0 }}
-        onOk={() => void confirmAgentSwitch()}
-        onCancel={() => {
-          if (agentSwitching) return;
-          setPendingAgentSwitch(null);
-          setAgentResourceValue({});
-        }}
-        unmountOnExit
-      >
-        {pendingAgentSwitch && (
-          <AgentResourcePicker
-            requiredKinds={pendingAgentSwitch.requiredResourceKinds}
-            capabilityIds={pendingAgentSwitch.capabilityIds}
-            value={agentResourceValue}
-            onChange={setAgentResourceValue}
-            disabled={agentSwitching}
-          />
-        )}
-      </Modal>
-    </>
+    </CreationComposerContext.Provider>
   );
 };
 

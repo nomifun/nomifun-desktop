@@ -22,6 +22,7 @@ pub mod capability;
 pub mod cc_switch;
 pub mod factory;
 pub mod image_generation;
+mod creation_context;
 pub mod knowledge_completer;
 pub mod knowledge_retrieval;
 pub mod knowledge_writeback;

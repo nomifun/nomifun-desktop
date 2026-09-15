@@ -13,7 +13,7 @@ import type { CreativeJsonObject } from '../domain/schema';
 /** Model-invoke tasks that the existing creation service can execute. */
 export type CreativeCreationModelTask = Extract<
   ModelTask,
-  'chat' | 'image_generation' | 'image_edit' | 'video_generation' | 'speech_synthesis'
+  'chat' | 'image_generation' | 'image_edit' | 'video_generation' | 'speech_synthesis' | 'music_generation'
 >;
 
 /** Exact `/api/creative-studio/tasks` capability codes. */
@@ -25,6 +25,7 @@ export type CreativeTaskCapability =
   | 'i2v'
   | 'v2v'
   | 'tts'
+  | 'music'
   | 'text';
 
 export type CreativeTaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled';
@@ -39,14 +40,9 @@ export type CreativeTaskInputRole =
 
 export type CreativeTaskInputKind = 'image' | 'video' | 'audio' | 'text';
 
-export type CreativeStandaloneWorkbenchKind = 'image' | 'video' | 'audio';
-
 export type CreativeTaskOwner =
   | { kind: 'canvas_node'; canvasId: string; nodeId: string }
-  | {
-      kind: 'standalone_workbench';
-      workbenchKind: CreativeStandaloneWorkbenchKind;
-    }
+  | { kind: 'conversation_turn'; conversationId: string; messageId: string }
   | {
       kind: 'template_step';
       templateId: string;
@@ -101,7 +97,7 @@ export interface CreativeTask extends CreativeTaskIdentity {
   submittedAt: number;
   startedAt: number | null;
   finishedAt: number | null;
-  /** Non-null only for a terminal standalone task retired from owner history. */
+  /** Non-null only for a terminal conversation task retired from history. */
   deletedAt: number | null;
 }
 
@@ -114,28 +110,6 @@ export interface CreativeTaskOutput {
   taskId: string;
   owner: CreativeTaskOwner;
   assetIds: string[];
-}
-
-export interface CreativeStandaloneTaskHistoryQuery {
-  workbenchKind: CreativeStandaloneWorkbenchKind;
-  limit?: number;
-  cursor?: string | null;
-  /** Recovery inventory only; the normal history page includes every status. */
-  activeOnly?: boolean;
-}
-
-export interface CreativeStandaloneTaskHistoryPage {
-  items: CreativeTask[];
-  nextCursor: string | null;
-}
-
-export interface CreativeStandaloneTaskRetireInput {
-  workbenchKind: CreativeStandaloneWorkbenchKind;
-  taskIds: readonly string[];
-}
-
-export interface CreativeStandaloneTaskRetireResult {
-  retiredTaskIds: string[];
 }
 
 export type CreativeTaskContractErrorCode =
@@ -166,6 +140,7 @@ const TASK_BY_CAPABILITY: Readonly<Record<CreativeTaskCapability, CreativeCreati
   i2v: 'video_generation',
   v2v: 'video_generation',
   tts: 'speech_synthesis',
+  music: 'music_generation',
   text: 'chat',
 };
 
@@ -219,11 +194,6 @@ export function isCanvasNodeTaskOwner(
   return owner.kind === 'canvas_node';
 }
 
-export function isStandaloneWorkbenchTaskOwner(
-  owner: CreativeTaskOwner
-): owner is Extract<CreativeTaskOwner, { kind: 'standalone_workbench' }> {
-  return owner.kind === 'standalone_workbench';
-}
 
 export function sameCreativeTaskOwner(
   left: CreativeTaskOwner,
@@ -233,11 +203,8 @@ export function sameCreativeTaskOwner(
   if (left.kind === 'canvas_node' && right.kind === 'canvas_node') {
     return left.canvasId === right.canvasId && left.nodeId === right.nodeId;
   }
-  if (
-    left.kind === 'standalone_workbench' &&
-    right.kind === 'standalone_workbench'
-  ) {
-    return left.workbenchKind === right.workbenchKind;
+  if (left.kind === 'conversation_turn' && right.kind === 'conversation_turn') {
+    return left.conversationId === right.conversationId && left.messageId === right.messageId;
   }
   return (
     left.kind === 'template_step' &&

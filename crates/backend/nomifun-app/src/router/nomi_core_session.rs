@@ -133,15 +133,19 @@ impl ProductAgentSelection {
 
 pub(crate) struct NomiCoreProductAgentResolver {
     control_plane: Arc<AgentControlPlane>,
+    runtime_engines: Arc<super::runtime_engines::RuntimeEngineHost>,
+    resource_bindings: super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry,
     owner_id: Arc<str>,
     pool: nomifun_db::SqlitePool,
     default_binding_lock: tokio::sync::Mutex<()>,
 }
 
 impl NomiCoreProductAgentResolver {
-    pub(crate) fn new(control_plane: Arc<AgentControlPlane>, owner_id: Arc<str>, pool: nomifun_db::SqlitePool) -> Self {
+    pub(crate) fn new(control_plane: Arc<AgentControlPlane>, owner_id: Arc<str>, pool: nomifun_db::SqlitePool, runtime_engines: Arc<super::runtime_engines::RuntimeEngineHost>, resource_bindings: super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry) -> Self {
         Self {
             control_plane,
+            runtime_engines,
+            resource_bindings,
             owner_id,
             pool,
             default_binding_lock: tokio::sync::Mutex::new(()),
@@ -179,6 +183,59 @@ impl NomiCoreProductAgentResolver {
 
 #[async_trait]
 impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
+    async fn resolve_preset(
+        &self,
+        owner_id: &str,
+        preset_id: &str,
+        requested_model: Option<&nomifun_common::ProviderWithModel>,
+        current_binding: Option<&AgentBindingValueDto>,
+    ) -> Result<ProductAgentResolution, AppError> {
+        let owner = UserId::from(owner_id.to_owned());
+        let model = requested_model.map(|model| AgentChatModelSelectionDto {
+            provider_id: model.provider_id.clone(), model: model.model.clone(),
+        });
+        let mut binding = self.control_plane.resolve_agent_session_binding_with_model(&owner, preset_id, model.as_ref())
+            .await.map_err(control_plane_error_to_app)?;
+        if let Some(current) = current_binding {
+            let (_, _, target) = self.control_plane.saved_binding_artifacts(&owner, &binding)
+                .await.map_err(control_plane_error_to_app)?;
+            // Reuse only the user's selected resource IDs. The new revision
+            // determines operations, and product authorities validate them anew.
+            let selections = current.typed_resource_bindings.iter()
+                .filter(|resource| target.content.required_resource_kinds.iter().any(|kind| kind.as_ref() == resource.resource_kind))
+                .map(|resource| AgentResourceSelectionDto { resource_kind: resource.resource_kind.clone(), resource_id: resource.resource_id.clone() })
+                .collect::<Vec<_>>();
+            binding = self.resource_bindings.resolve_for_saved_binding(&self.control_plane, &owner, binding, &selections)
+                .await.map_err(|error| AppError::UnprocessableEntity(format!("{}: {}", error.code(), error.message())))?;
+        }
+        let (binding, revision, snapshot) = self.control_plane.saved_binding_artifacts(&owner, &binding)
+            .await.map_err(control_plane_error_to_app)?;
+        let target_engine = self.runtime_engines.validate_agent(&revision.payload, &snapshot)?;
+        let editor = self.control_plane.editor(&owner, revision.reference.preset_id.as_ref(), Some(revision.reference.revision))
+            .await.map_err(control_plane_error_to_app)?;
+        let common_owner = nomifun_common::UserId::parse(owner_id.to_owned())
+            .map_err(|error| AppError::Forbidden(format!("invalid Agent owner: {error}")))?;
+        let mut projected = super::nomi_core_agent_projection::project_saved_artifacts(
+            &common_owner, binding, revision, snapshot, Some(&editor.preset.display_name),
+        )?;
+        if current_binding.is_some() {
+            let repository: Arc<dyn nomifun_db::IMcpServerRepository> = Arc::new(nomifun_db::SqliteMcpServerRepository::new(self.pool.clone()));
+            let selection = exact_session_mcp_selection(&repository, &AuthenticatedOwner(owner.clone()), &projected.binding)
+                .await.map_err(|error| AppError::Conflict(error.message))?;
+            install_runtime_mcp_selection(&mut projected.projection.request.extra, &selection)
+                .map_err(|error| AppError::Conflict(error.message))?;
+        }
+        // A next-turn preset selection rebuilds the runtime just like the
+        // explicit switch endpoint. Its exact Kernel binding must accompany
+        // the projected snapshot; the UI snapshot alone cannot open a session.
+        attach_session_metadata(&mut projected.projection.request.extra, &projected.binding, None)
+            .map_err(|error| AppError::Conflict(error.message))?;
+        projected.projection.request.extra[nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY] = serde_json::to_value(&target_engine)
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+        self.runtime_engines.catalog()?.validate_session_extra(&target_engine, &projected.projection.request.extra)?;
+        Ok(ProductAgentResolution { snapshot: projected.projection.snapshot, runtime_extra: projected.projection.request.extra })
+    }
+
     async fn resolve(
         &self,
         owner_id: &str,
@@ -624,6 +681,7 @@ impl NomiCoreSessionOwner {
                 session_id,
                 operation_id,
                 SendMessageRequest {
+                    preset_id: None,
                     content: message.to_owned(),
                     files: Vec::new(),
                     inject_skills: Vec::new(),
@@ -2633,6 +2691,7 @@ fn cron_turn_message_to_request(
     message: nomifun_cron::CronTurnMessage,
 ) -> SendMessageRequest {
     SendMessageRequest {
+        preset_id: None,
         content: message.content,
         files: message.files,
         inject_skills: message.inject_skills,
@@ -2801,6 +2860,7 @@ fn autowork_message_to_request(
     message: nomifun_requirement::AutoWorkMessage,
 ) -> SendMessageRequest {
     SendMessageRequest {
+        preset_id: None,
         content: message.content,
         files: message.files,
         inject_skills: message.inject_skills,
@@ -7885,6 +7945,13 @@ fn bounded_turn_input(value: Value) -> Result<SendMessageRequest, NomiCoreApiErr
             )
         })?;
     let mut request = nonempty_turn_content(content)?;
+    if let Some(preset_id) = object.get("preset_id") {
+        request.preset_id = serde_json::from_value(preset_id.clone())?;
+        if request.preset_id.as_deref().is_some_and(|value| value.trim().is_empty()) {
+            return Err(NomiCoreApiError::new(StatusCode::BAD_REQUEST, "NOMI_CORE_INVALID_REQUEST", "turn preset_id must be non-empty"));
+        }
+    }
+
     if let Some(files) = object.get("files") {
         request.files = serde_json::from_value(files.clone())?;
     }
@@ -7932,6 +7999,7 @@ fn nonempty_turn_content(content: &str) -> Result<SendMessageRequest, NomiCoreAp
         ));
     }
     Ok(SendMessageRequest {
+        preset_id: None,
         content: content.to_owned(),
         files: Vec::new(),
         inject_skills: Vec::new(),

@@ -38,6 +38,21 @@ pub const ROLE_COVERAGE_INCOMPLETE: &str = "ROLE_COVERAGE_INCOMPLETE";
 pub const MODEL_ROUTE_RECORD_INVALID: &str = "MODEL_ROUTE_RECORD_INVALID";
 pub const PRESET_CONTRIBUTION_LOCK_INVALID: &str = "PRESET_CONTRIBUTION_LOCK_INVALID";
 
+/// A task-only media Agent does not need a language-model route to submit
+/// explicit generation requests. Any conversational or other capability keeps
+/// the normal Chat-route requirement; this is never inferred from its name.
+pub fn is_direct_creation_agent<'a>(capabilities: impl IntoIterator<Item = &'a str>) -> bool {
+    let mut has_generation = false;
+    for capability in capabilities {
+        match capability {
+            "creation.image" | "creation.image_edit" | "creation.video" | "creation.music" | "creation.audio" => has_generation = true,
+            "session.attachments.read" | "workshop.asset.read" | "workshop.asset.write" => {}
+            _ => return false,
+        }
+    }
+    has_generation
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentPresetSource {
@@ -1923,6 +1938,14 @@ mod tests {
             ])
         );
         assert!(!actual.contains("research"));
+    }
+
+    #[test]
+    fn direct_creation_does_not_require_chat_and_general_assistants_still_do() {
+        assert!(is_direct_creation_agent(["creation.image", "creation.video", "creation.music", "creation.audio", "creation.image_edit", "session.attachments.read", "workshop.asset.read", "workshop.asset.write"]));
+        assert!(!is_direct_creation_agent(["creation.image", "web.search"]));
+        assert!(!is_direct_creation_agent(["session.attachments.read"]));
+        assert!(!is_direct_creation_agent(std::iter::empty()));
     }
 
     #[test]

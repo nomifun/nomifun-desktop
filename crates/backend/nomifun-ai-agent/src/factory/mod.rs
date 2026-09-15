@@ -63,6 +63,7 @@ pub struct AgentFactoryDeps {
     /// chat when this capability is enabled. `None` is reserved for
     /// lightweight tests and standalone hosts that must not expose the tool.
     pub model_invoke_service: Option<Arc<ModelInvokeService>>,
+    pub creation_service: Option<Arc<nomifun_creation::CreationService>>,
     pub provider_config_digest_resolver: Option<ProviderConfigDigestResolver>,
     pub encryption_key: [u8; 32],
     pub data_dir: PathBuf,

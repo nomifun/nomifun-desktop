@@ -5,13 +5,13 @@ canonical `canvasId` through `useParams` and keeps `CreativeCanvasEditor` as
 the only reducer and CAS persistence owner.
 
 The production router mounts this default export at
-`/workshop/canvas/:canvasId` inside `CreativeStudioFocusShell`.
+`/nomi/canvases/:canvasId` inside the resource portal boundary.
 It keeps the route split with
 `import('@renderer/pages/creativeStudio/canvas/product')` and the nested
-`path="canvas/:canvasId"` contract.
+`CANVAS_PATTERN = '/nomi/canvases/:canvasId'` contract.
 
-The product's own “返回项目” action awaits the editor CAS `flush()` and only
-The product returns to the Canvas library at `/workshop/canvases` after
+The product's own return action awaits the editor CAS `flush()` and
+returns to the Canvas library at `/nomi/canvases` after
 `noop` or `saved`. A
 `conflict` or `error` stays on the canvas and exposes explicit reload/retry.
 The product chrome is the single visible save/recovery surface and therefore
@@ -20,14 +20,21 @@ message without leaking Canvas IDs or backend diagnostics; only the backend
 code `REVISION_CONFLICT` enables “重新载入远端”. A generic business 409 remains
 an ordinary save error and does not invite the user to discard local work.
 
-The surrounding `CreativeStudioFocusShell` awaits the exported
-`requestCreativeCanvasProductBeforeLeave()` before product navigation. The
+The global sidebar and titlebar await the exported
+`requestCreativeCanvasProductBeforeLeave()` gate before navigation. The
 product route registers and unregisters its active Editor flush gate
 automatically; do not create a second persistence controller.
 
-The shell imports only the lightweight coordination function from
+Navigation imports only the lightweight coordination function from
 `@renderer/pages/creativeStudio/canvas/product/beforeLeave`, so it does not
 eagerly load the product route chunk.
+
+The canvas-owned generation controller, plans and recovery live in
+`../generation`. They reject conversation and template owners. Pure model
+selection, input identity and parameter policies live in `@renderer/creation`;
+the retained canvas has no dependency on an independent generation page or its
+history controller. The resource boundary supplies `resource-page-portal-root`
+without a second product sidebar.
 
 Panel open/view changes call the Editor's canonical `setPanels` port; saved
 width/height values also drive the product layout. Properties dispatch the
@@ -216,5 +223,5 @@ narrow canvas column cannot contain it.
 The migration reader for `nomifun.creative-studio/v1` may still carry an
 internal `projectId`, and legacy project-document/repository adapters may
 translate that historical shape. Those adapters are not the public Canvas API:
-the product library is `/workshop/canvases`, the route parameter is `canvasId`,
+the product library is `/nomi/canvases`, the route parameter is `canvasId`,
 and the Agent endpoint is scoped by `canvasId`.

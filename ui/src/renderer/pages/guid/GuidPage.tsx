@@ -61,6 +61,9 @@ import { useGuidSend } from './hooks/useGuidSend';
 import { useTypewriterPlaceholder } from './hooks/useTypewriterPlaceholder';
 import type { GuidAgentSelection } from './types';
 import styles from './index.module.css';
+import CreationControls from '@/renderer/creation/CreationControls';
+import { CreationComposerContext } from '@/renderer/creation/CreationComposerContext';
+import { useGuidCreation } from '@/renderer/creation/useGuidCreation';
 
 type GuidNavigationState = {
   resetAgentSelection?: boolean;
@@ -103,6 +106,12 @@ const GuidPage: React.FC = () => {
     locationState: navigationState,
   });
   const advancedConfig = useGuidAdvancedConfig();
+  const creation = useGuidCreation(agentSelection, guidInput.input, guidInput.files, guidInput.dir);
+  useEffect(() => {
+    if (creation.draft.pendingPrompt === undefined) return;
+    guidInput.setInput(creation.draft.pendingPrompt);
+    creation.update(draft => ({ ...draft, pendingPrompt: undefined }));
+  }, [creation.draft.pendingPrompt, creation.update, guidInput.setInput]);
   const presetCapabilities = useGuidPresetCapabilities(
     agentSelection.selection.kind === 'preset'
       ? agentSelection.selection.presetId
@@ -278,6 +287,7 @@ const GuidPage: React.FC = () => {
 
   const [sendKeyPref] = useConfig('chat.sendKey');
   const sendKey = sendKeyPref ?? 'enter';
+  const submitInput = creation.draft.mode ? creation.send : send.sendMessageHandler;
 
   const handleInputKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
@@ -371,7 +381,7 @@ const GuidPage: React.FC = () => {
       if (isSubmitGesture(event, sendKey)) {
         event.preventDefault();
         if (!guidInput.input.trim() && !isAutoWorkMode) return;
-        send.sendMessageHandler();
+        void submitInput();
       }
     },
     [
@@ -379,7 +389,7 @@ const GuidPage: React.FC = () => {
       isAutoWorkMode,
       mention,
       sendKey,
-      send.sendMessageHandler,
+      submitInput,
     ]
   );
 
@@ -506,12 +516,14 @@ const GuidPage: React.FC = () => {
   ) : null;
 
   const modelSelectorNode = (
-    <GuidModelSelector
-      isProviderModelMode
-      modelList={modelSelection.modelList}
-      current_model={modelSelection.current_model}
-      setCurrentModel={modelSelection.setCurrentModel}
-    />
+    !creation.draft.mode && (
+      <GuidModelSelector
+        isProviderModelMode
+        modelList={modelSelection.modelList}
+        current_model={modelSelection.current_model}
+        setCurrentModel={modelSelection.setCurrentModel}
+      />
+    )
   );
 
   const autoWorkButtonDisabled =
@@ -522,7 +534,8 @@ const GuidPage: React.FC = () => {
       files={guidInput.files}
       onFilesUploaded={guidInput.handleFilesUploaded}
       modelSelectorNode={modelSelectorNode}
-      loading={guidInput.loading}
+      creationControls={<CreationControls prompt={guidInput.input} onPromptChange={guidInput.setInput} files={guidInput.files} />}
+      loading={guidInput.loading || creation.loading}
       speechInputNode={
         <SpeechInputButton
           disabled={guidInput.loading}
@@ -534,24 +547,25 @@ const GuidPage: React.FC = () => {
           }}
         />
       }
-      autoWorkMode={isAutoWorkMode}
+      autoWorkMode={!creation.draft.mode && isAutoWorkMode}
       isButtonDisabled={
-        isAutoWorkMode ? autoWorkButtonDisabled : send.isButtonDisabled
+        creation.draft.mode ? creation.loading || !creation.ready || !guidInput.input.trim() : isAutoWorkMode ? autoWorkButtonDisabled : send.isButtonDisabled
       }
-      onSend={send.sendMessageHandler}
+      onSend={() => void submitInput()}
     />
   );
 
   return (
+    <CreationComposerContext.Provider value={creation}>
     <ConfigProvider
       getPopupContainer={() => guidContainerRef.current || document.body}
     >
       <div ref={guidContainerRef} className={styles.guidContainer}>
         <div className={styles.guidAdvancedControls}>
-          {advancedControlsNode}
+          {!creation.draft.mode && advancedControlsNode}
         </div>
         <div className={styles.guidPrimaryStage}>
-          <div className={styles.guidLayout}>
+          <div className={styles.guidLayout} style={creation.draft.mode ? { width: '100%' } : undefined}>
             <GuidCompanionShowcase />
 
             {agentSelection.selection.kind === 'preset' && presetCapabilities.error && (
@@ -584,7 +598,7 @@ const GuidPage: React.FC = () => {
               onPaste={guidInput.onPaste}
               onFocus={guidInput.handleTextareaFocus}
               onBlur={guidInput.handleTextareaBlur}
-              placeholder={normalPlaceholder}
+              placeholder={creation.draft.mode ? '描述你想创作的内容，可添加参考素材…' : normalPlaceholder}
               isInputActive={guidInput.isInputFocused}
               isFileDragging={guidInput.isFileDragging}
               activeBorderColor={activeBorderColor}
@@ -629,13 +643,13 @@ const GuidPage: React.FC = () => {
               }
             />
 
-            <AgentResourcePicker
+            {!creation.draft.mode && <AgentResourcePicker
               requiredKinds={resourcePickerKinds}
               capabilityIds={presetCapabilityIds}
               value={resourceSelectionValue}
               onChange={setResourceSelectionValue}
               disabled={guidInput.loading || !presetResourceResolutionReady}
-            />
+            />}
 
             <QuickActionButtons onOpenBugReport={() => setShowFeedbackModal(true)} />
           </div>
@@ -647,6 +661,7 @@ const GuidPage: React.FC = () => {
         />
       </div>
     </ConfigProvider>
+    </CreationComposerContext.Provider>
   );
 };
 

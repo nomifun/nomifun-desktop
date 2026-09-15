@@ -14,11 +14,12 @@ export type CreativeAssetSort =
   | 'size_desc';
 
 export interface CreativeAssetOrigin {
+  conversationId?: string;
+  messageId?: string;
   prompt?: string;
   model?: string;
   providerId?: string;
   params?: Record<string, unknown>;
-  workbenchKind?: 'image' | 'video' | 'audio';
   canvasId?: string;
   nodeId?: string;
   generationTaskId?: string;

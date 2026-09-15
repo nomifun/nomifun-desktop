@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -1066,6 +1066,23 @@ impl fmt::Debug for NomiPluginToolSession {
 }
 
 impl NomiPluginToolSession {
+    pub(crate) fn media_creation_catalog_tools(&self) -> Vec<(String, String)> {
+        self.actions.iter().filter(|action| is_builtin_creation(&action.identity)
+            && action.capability_id().as_ref() != "creation.text")
+            .map(|action| (action.capability_id().as_ref().to_owned(), action.provider_name.clone())).collect()
+    }
+
+    pub(crate) fn media_creation_provider_names(&self) -> std::collections::HashSet<String> {
+        self.actions.iter().filter(|action| is_builtin_creation(&action.identity)
+            && action.capability_id().as_ref() != "creation.text")
+            .map(|action| action.provider_name.clone()).collect()
+    }
+
+    pub(crate) fn with_creation_receipt_sink(mut self, sink: Arc<crate::capability::backend_output_sink::BackendOutputSink>, conversation_id: String) -> Self {
+        self.invoker = Arc::new(NomiCreationReceiptInvoker { delegate: self.invoker.clone(), sink, conversation_id });
+        self
+    }
+
     pub fn execution_constraints(&self) -> nomifun_api_types::ExecutionConstraints {
         self.execution_constraints
     }
@@ -2104,7 +2121,12 @@ impl KernelNomiPluginToolSession {
                 )
             })
             .collect();
+        let creation_turn = Arc::new(NomiCreationTurnContext::default());
+        if actions.iter().any(|action| is_builtin_creation(&action.identity)) {
+            lifecycle_context_contributors.push(creation_turn.clone());
+        }
         let invoker = Arc::new(KernelNomiPluginToolInvoker {
+            creation_turn,
             kernel: Arc::clone(&kernel),
             compiled: Arc::clone(&compiled),
             active: Arc::clone(&active),
@@ -2736,7 +2758,64 @@ impl NomiPluginToolInvoker for OwnedNomiPluginToolInvoker {
     }
 }
 
+/// Captures server-owned turn identity before the provider sees any tools.
+/// A model is never asked to choose a conversation or message owner.
+#[derive(Default)]
+struct NomiCreationTurnContext {
+    source_message_id: RwLock<Option<String>>,
+}
+
+#[async_trait]
+impl ContextContributor for NomiCreationTurnContext {
+    async fn pre_turn_context(&self) -> Option<String> { None }
+    async fn pre_turn_context_for_turn_result(&self, turn: &TurnContext) -> Result<Option<String>, String> {
+        let mut current = self.source_message_id.write().map_err(|_| "creation turn identity lock poisoned".to_owned())?;
+        *current = None;
+        let parsed = uuid::Uuid::parse_str(&turn.source_message_id).map_err(|_| "creation requires an admitted message UUID".to_owned())?;
+        if parsed.get_version_num() != 7 || parsed.to_string() != turn.source_message_id {
+            return Err("creation requires an admitted UUIDv7 message".into());
+        }
+        *current = Some(turn.source_message_id.clone());
+        Ok(None)
+    }
+    fn label(&self) -> &str { "nomifun_creation_turn_owner" }
+}
+
+fn is_builtin_creation(identity: &NomiPluginToolActionIdentity) -> bool {
+    identity.resolved_capability.contribution_lock.source_kind == ContributionSourceKind::PlatformBuiltin
+        && matches!(identity.resolved_capability.capability.id.as_ref(), "creation.text" | "creation.image" | "creation.image_edit" | "creation.video" | "creation.music" | "creation.audio")
+}
+
+fn conversation_creation_schema(mut schema: Value) -> Value {
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) { properties.remove("target"); }
+    if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) { required.retain(|key| key.as_str() != Some("target")); }
+    schema
+}
+
+struct NomiCreationReceiptInvoker {
+    delegate: Arc<dyn NomiPluginToolInvoker>,
+    sink: Arc<crate::capability::backend_output_sink::BackendOutputSink>,
+    conversation_id: String,
+}
+
+#[async_trait]
+impl NomiPluginToolInvoker for NomiCreationReceiptInvoker {
+    async fn invoke(&self, request: NomiPluginToolInvocation) -> Result<StrictJsonValue, NomiPluginToolError> {
+        let scope = if is_builtin_creation(&request.identity) {
+            Some(self.sink.native_creation_task_scope(&self.conversation_id).map_err(NomiPluginToolError::Contract)?)
+        } else { None };
+        let output = self.delegate.invoke(request).await?;
+        if let Some(scope) = scope {
+            let task_id = output.0.get("creation_task_id").and_then(Value::as_str)
+                .ok_or_else(|| NomiPluginToolError::Contract("creation host returned no durable task identity".into()))?;
+            self.sink.register_native_creation_task(&scope, task_id).map_err(NomiPluginToolError::Contract)?;
+        }
+        Ok(output)
+    }
+}
+
 struct KernelNomiPluginToolInvoker {
+    creation_turn: Arc<NomiCreationTurnContext>,
     kernel: Arc<KernelRegistry>,
     compiled: Arc<CompiledSnapshot>,
     active: Arc<SessionCapabilityState>,
@@ -2751,7 +2830,7 @@ struct KernelNomiPluginToolInvoker {
 impl NomiPluginToolInvoker for KernelNomiPluginToolInvoker {
     async fn invoke(
         &self,
-        request: NomiPluginToolInvocation,
+        mut request: NomiPluginToolInvocation,
     ) -> Result<StrictJsonValue, NomiPluginToolError> {
         let key = (
             request.identity.resolved_capability.capability.id.clone(),
@@ -2762,6 +2841,13 @@ impl NomiPluginToolInvoker for KernelNomiPluginToolInvoker {
                 "Plugin Tool invocation identity differs from the materialized session"
                     .to_owned(),
             ));
+        }
+        if is_builtin_creation(&request.identity) {
+            let message_id = self.creation_turn.source_message_id.read()
+                .map_err(|_| NomiPluginToolError::Contract("creation turn identity lock poisoned".into()))?
+                .clone().ok_or_else(|| NomiPluginToolError::Contract("creation requires the active admitted turn".into()))?;
+            let object = request.input.0.as_object_mut().ok_or_else(|| NomiPluginToolError::Contract("creation input must be an object".into()))?;
+            object.insert("target".into(), serde_json::json!({"kind":"conversation_turn", "conversation_id": self.agent_session_id.as_ref(), "message_id": message_id}));
         }
         let active = self.active.snapshot()?;
         let policy = self.compiled.policy(&key.0).ok_or_else(|| {
@@ -3002,7 +3088,7 @@ impl Tool for NomiPluginTool {
     }
 
     fn artifact_identity(&self) -> &str {
-        self.action.artifact_identity()
+        if is_builtin_creation(&self.action.identity) { "nomifun_creation_task" } else { self.action.artifact_identity() }
     }
 
     fn deferred_search_aliases(&self) -> Vec<String> {
@@ -3017,7 +3103,7 @@ impl Tool for NomiPluginTool {
     }
 
     fn input_schema(&self) -> JsonSchema {
-        self.action.input_schema.0.clone()
+        if is_builtin_creation(&self.action.identity) { conversation_creation_schema(self.action.input_schema.0.clone()) } else { self.action.input_schema.0.clone() }
     }
 
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
@@ -3379,6 +3465,22 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
 #[cfg(test)]
 mod dynamic_error_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn creation_turn_context_uses_only_admitted_uuid_and_schema_hides_owner() {
+        let context = NomiCreationTurnContext::default();
+        assert!(context.source_message_id.read().unwrap().is_none());
+        assert!(context.pre_turn_context_for_turn_result(&TurnContext::default()).await.is_err());
+        let message_id = uuid::Uuid::now_v7().to_string();
+        context.pre_turn_context_for_turn_result(&TurnContext { source_message_id: message_id.clone(), ..Default::default() }).await.unwrap();
+        assert_eq!(context.source_message_id.read().unwrap().as_deref(), Some(message_id.as_str()));
+        assert!(context.pre_turn_context_for_turn_result(&TurnContext::default()).await.is_err());
+        assert!(context.source_message_id.read().unwrap().is_none());
+        let schema = conversation_creation_schema(serde_json::json!({"type":"object","additionalProperties":false,"properties":{"target":{},"prompt":{"type":"string"}},"required":["target","prompt"]}));
+        assert!(schema["properties"].get("target").is_none());
+        assert_eq!(schema["required"], serde_json::json!(["prompt"]));
+        assert_eq!(schema["additionalProperties"], false);
+    }
 
     fn payload(code: &str, retry_safe: bool) -> Value {
         let result = model_safe_dynamic_tool_error(

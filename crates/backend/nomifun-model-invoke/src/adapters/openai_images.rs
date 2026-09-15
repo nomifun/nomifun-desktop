@@ -165,6 +165,9 @@ async fn submit_edits(
     text_fields.insert("model".into(), call.model.clone());
     text_fields.insert("prompt".into(), req.prompt.clone());
     text_fields.insert("n".into(), req.count.to_string());
+    if let Some(quality) = &req.quality {
+        text_fields.insert("quality".into(), quality.clone());
+    }
     if let Some(size) = &req.size {
         text_fields.insert("size".into(), size.clone());
     }
@@ -501,6 +504,7 @@ mod tests {
             prompt: "add a hat".into(),
             count: 1,
             size: Some("1024x1024".into()),
+            quality: None,
             inputs: vec![
                 image_input("image", b"img-a", "image/png"),
                 image_input("image", b"img-b", "image/jpeg"),
@@ -528,6 +532,7 @@ mod tests {
             prompt: "p".into(),
             count: 1,
             size: None,
+            quality: None,
             inputs: vec![image_input("image", b"img-a", "image/png")],
             extra: json!({}),
         });
@@ -545,6 +550,7 @@ mod tests {
             prompt: "p".into(),
             count: 1,
             size: None,
+            quality: None,
             inputs: vec![image_input("mask", b"mask-bytes", "image/png")],
             extra: json!({}),
         });

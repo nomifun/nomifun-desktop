@@ -136,16 +136,16 @@ describe('Nomi sendbox control layout', () => {
     const nomiChatSource = readSource(new URL('./NomiChat.tsx', import.meta.url));
     const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
     const agentSwitchBlock = chatSource.slice(
-      chatSource.indexOf('const commitAgentSwitch'),
+      chatSource.indexOf('const switchAgent'),
       chatSource.indexOf('const currentAgentLabel'),
     );
 
     expect(chatSource.includes('<GuidAgentSelector')).toBe(true);
     expect(chatSource.includes('useAgentPresets()')).toBe(true);
-    expect(agentSwitchBlock.includes('sessions.switchPreset.invoke')).toBe(true);
-    expect(agentSwitchBlock.includes('resource_selections: resolution.selections')).toBe(true);
-    expect(chatSource.includes('<AgentResourcePicker')).toBe(true);
-    expect(agentSwitchBlock.includes('refreshConversationCache(target.conversationId)')).toBe(true);
+    expect(agentSwitchBlock.includes('sessions.switchPreset.invoke')).toBe(false);
+    expect(agentSwitchBlock.includes('const resolvePreset')).toBe(true);
+    expect(agentSwitchBlock.includes('setAgentChoice(selection)')).toBe(true);
+    expect(sendBoxSource.includes('preset_id: presetId')).toBe(true);
     expect(agentSwitchBlock.includes('conversation.stop.invoke')).toBe(false);
     expect(nomiChatSource.includes('agentSelectorNode={agentSelectorNode}')).toBe(true);
     expect(sendBoxSource.includes('{agentSelectorNode}')).toBe(true);
@@ -161,6 +161,17 @@ describe('Nomi sendbox control layout', () => {
     expect(initialMessageBlock.includes('!agentWarmed')).toBe(true);
     expect(initialMessageBlock.includes('agentWarmed, conversation_id')).toBe(true);
     expect(initialMessageBlock.includes('initialOnly: true')).toBe(true);
+  });
+
+  test('only personal Agent selections may reuse the staged preset without preparing the current official template', () => {
+    const source = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
+    const admission = source.slice(source.indexOf('const resolvePreset = async () =>'), source.indexOf('const selectCreationMode ='));
+    expect(admission.includes("if (agentChoice.kind === 'preset' && stagedPresetId) return stagedPresetId;")).toBe(true);
+    expect(admission.includes('if (stagedPresetId) return stagedPresetId;')).toBe(false);
+    expect(admission.includes('await resolveAgentSwitchTarget(selected)')).toBe(true);
+    const resolution = source.slice(source.indexOf('const resolveAgentSwitchTarget ='), source.indexOf('// Menus edit only the next draft.'));
+    expect(resolution.includes("if (selection.kind === 'template')")).toBe(true);
+    expect(resolution.includes('await prepareOfficialAgent(')).toBe(true);
   });
 
   test('collapses text pills to icons and expands their labels inline on desktop hover', () => {

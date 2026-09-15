@@ -403,7 +403,7 @@ const CreativeStudioCanvasesPage: React.FC<
         autoFocus={false}
         unmountOnExit
         getPopupContainer={() =>
-          document.getElementById('creative-studio-portal-root') ??
+          document.getElementById('resource-page-portal-root') ??
           document.body
         }
         onCancel={() => {

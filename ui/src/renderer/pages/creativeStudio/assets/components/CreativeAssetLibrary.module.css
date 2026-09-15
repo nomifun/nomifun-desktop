@@ -1003,6 +1003,7 @@
 }
 
 .assetMenuItem {
+  text-decoration: none;
   display: flex;
   min-height: 32px;
   align-items: center;

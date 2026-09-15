@@ -14,11 +14,13 @@ import type { NavigateFunction } from 'react-router-dom';
 
 import type { TProviderWithModel } from '@/common/config/storage';
 import {
+  conversationTarget,
   parseAgentPresetId,
   parseConversationId,
   parseProviderId,
 } from '@/common/types/ids';
-import { setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
+import { sessionStorageKey, setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
+import { creationDraftStorageKey, emptyCreationDraft, useCreationDraft } from '@/renderer/creation/useCreationDraft';
 import type { ExecutableAgentPreset, GuidAgentSelection } from '../types';
 import type {
   AgentResourceSelection,
@@ -188,10 +190,9 @@ const createDeps = ({
 });
 
 const readOnlyHandoff = () => {
-  expect(sessionStorage.length).toBe(1);
-  const key = sessionStorage.key(0);
-  expect(key).not.toBeNull();
-  const handoff = JSON.parse(sessionStorage.getItem(key!) ?? '{}') as Record<
+  const key = sessionStorageKey('initial-message-nomi', conversationTarget(parseConversationId(PRESET_CONVERSATION_ID)));
+  expect(sessionStorage.getItem(key)).not.toBeNull();
+  const handoff = JSON.parse(sessionStorage.getItem(key) ?? '{}') as Record<
     string,
     unknown
   >;
@@ -259,6 +260,24 @@ describe('useGuidSend HTTP behavior', () => {
     expect(calls).toHaveLength(3);
     expect(readOnlyHandoff()).toMatchObject({ input: INPUT, files: FILES });
     expect(navigations).toEqual([`/conversation/${PRESET_CONVERSATION_ID}`]);
+    const nextTurn = renderHook(() => useCreationDraft(PRESET_CONVERSATION_ID));
+    expect(nextTurn.result.current.draft.selectedAgent).toEqual({ kind: 'template', templateKey: 'chat.minimal' });
+    expect(nextTurn.result.current.draft.presetId).toBe(PRESET_ID);
+    expect(nextTurn.result.current.draft.mode).toBeNull();
+  });
+
+  test('official launch does not overwrite a draft already edited in the created conversation', async () => {
+    resetBrowserStorage();
+    installFetchRecorder();
+    const existing = { ...emptyCreationDraft(), selectedAgent: { kind: 'preset', presetId: PRESET_ID }, pendingPrompt: 'Keep my newer draft', parameters: { image: { count: 2 }, video: {}, music: { instrumental: true } } };
+    const key = creationDraftStorageKey(PRESET_CONVERSATION_ID);
+    const hook = renderHook(() => useGuidSend({
+      ...createDeps({ selection: { kind: 'template', templateKey: 'chat.minimal' }, workspaceEnabled: false }),
+      selectedTemplate: TEMPLATE,
+      applyAdvancedConfig: async () => { sessionStorage.setItem(key, JSON.stringify(existing)); },
+    }));
+    await act(async () => { await hook.result.current.handleSend(); });
+    expect(JSON.parse(sessionStorage.getItem(key)!)).toEqual(existing);
   });
 
   test('failed official preparation does not create a session or navigate away', async () => {

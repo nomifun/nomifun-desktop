@@ -58,7 +58,7 @@ const provider = (
 });
 
 describe('modality specs', () => {
-  test('represents all nine tasks independently', () => {
+  test('represents all ten tasks independently', () => {
     expect(Object.values(MODALITY_SPECS).map((spec) => spec.task)).toEqual([
       'chat',
       'realtime_conversation',
@@ -66,6 +66,7 @@ describe('modality specs', () => {
       'image_generation',
       'image_edit',
       'video_generation',
+      'music_generation',
       'speech_synthesis',
       'speech_recognition',
       'embedding',

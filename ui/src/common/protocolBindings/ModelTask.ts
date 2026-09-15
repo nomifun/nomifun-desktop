@@ -4,4 +4,4 @@
  * The task selected by an exact provider-model capability row. Wire values are
  * snake_case.
  */
-export type ModelTask = "chat" | "realtime_conversation" | "image_generation" | "image_edit" | "video_generation" | "speech_synthesis" | "speech_recognition" | "embedding" | "rerank";
+export type ModelTask = "chat" | "realtime_conversation" | "image_generation" | "image_edit" | "video_generation" | "music_generation" | "speech_synthesis" | "speech_recognition" | "embedding" | "rerank";

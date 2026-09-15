@@ -1538,6 +1538,13 @@
               "version": "1.0.0"
             },
             "kind": "tool"
+          },
+          {
+            "capability": {
+              "id": "creation.music",
+              "version": "1.0.0"
+            },
+            "kind": "tool"
           }
         ],
         "skills": [],
@@ -1755,5 +1762,5 @@
       }
     ]
   },
-  "payload_digest": "cd85680e160f852a069bbeb8e58db3fe8b6e912b2585c792c9e4ba988b22b2bf"
+  "payload_digest": "60e05105cf82aa55a8fd6a428b836e29e6ea18a0cef02eabfd91799fcb443868"
 }

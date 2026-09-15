@@ -80,7 +80,11 @@ fn provider_preference_kind(key: &str) -> Option<ProviderPreferenceKind> {
         // Unlike the older model objects, the image default has a deliberately
         // closed canonical shape. Tool-era fields such as `switch` must never be
         // retained under the model-owned key.
-        IMAGE_GENERATION_DEFAULT_MODEL_KEY => Some(ProviderPreferenceKind::CanonicalModelObject),
+        IMAGE_GENERATION_DEFAULT_MODEL_KEY
+        | "models.default.imageEdit"
+        | "models.default.videoGeneration"
+        | "models.default.musicGeneration"
+        | "models.default.speechSynthesis" => Some(ProviderPreferenceKind::CanonicalModelObject),
         SPEECH_TO_TEXT_KEY => Some(ProviderPreferenceKind::OptionalObjectProviderId),
         KNOWLEDGE_RETRIEVAL_KEY => Some(ProviderPreferenceKind::KnowledgeRetrieval),
         _ if is_channel_default_model_key(key) => {

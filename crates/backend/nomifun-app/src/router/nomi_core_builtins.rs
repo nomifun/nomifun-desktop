@@ -81,6 +81,9 @@ pub(crate) async fn build(services: &AppServices) -> anyhow::Result<NomiCoreBuil
         Arc::clone(&services.creation_service),
         Arc::clone(&services.workshop_service),
         Arc::clone(&services.plugin_runtime),
+        Arc::clone(&services.model_invoke_service),
+        services.database.pool().clone(),
+        Arc::clone(&services.authoritative_user_id),
     )
     .map_err(anyhow::Error::msg)?;
     replace_package_registrations(&mut registrations, wave3);
