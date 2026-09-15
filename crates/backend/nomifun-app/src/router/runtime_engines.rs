@@ -324,7 +324,7 @@ impl RuntimeEngineAdmission for NomiAdmission {
 pub(crate) fn nomi_descriptor() -> RuntimeEngineDescriptor {
     RuntimeEngineDescriptor {
         family_id: "nomifun.nomi".into(),
-        build_id: format!("{}-host65", env!("CARGO_PKG_VERSION")),
+        build_id: format!("{}-host66", env!("CARGO_PKG_VERSION")),
         build_digest: format!(
             "{:x}",
             Sha256::digest(

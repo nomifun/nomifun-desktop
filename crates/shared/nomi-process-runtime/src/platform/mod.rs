@@ -18,6 +18,8 @@ pub(crate) mod linux_recovery;
 mod linux_watchdog;
 #[cfg(target_os = "macos")]
 mod macos_watchdog;
+#[cfg(target_os = "macos")]
+mod macos_session;
 #[cfg(unix)]
 mod unix_protocol;
 

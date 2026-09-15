@@ -86,8 +86,8 @@ loop97，旧会话/Agent 精确引擎绑定不自动改写。原生只读历史�
 
 ### 未验证及跨平台接续
 
-本次没有生成新的正式 app/DMG、签名或公证，也没有 Windows 实机结果；旧制品不能代表
-本次移除后的源码。Windows x64 按下面步骤复核，Linux 不纳入首发：
+上述开发窗口验证对应移除提交 `6393f85db`。后续合并及本地包结果见下节；仍没有正式签名、
+公证或 Windows 实机结果。Windows x64 按下面步骤复核，Linux 不纳入首发：
 
 ```text
 在 rf/agent-capability-platform-v2 核对交接提交和本地改动，不 reset/强推。
@@ -99,3 +99,53 @@ service_application retired_agent_view、historical_agent_view、service_process
 保留旧插件、绑定及 catalog digest 数据；验证 Session UI grant/bridge 和新声明被拒绝。
 正式构建、签名和安装验收另记；没有额外授权不上传、发布或推送。
 ```
+
+### 合并后的 macOS 本地包复核
+
+安全合并远程 `7d231c3ec`，保留其统一创建流程，形成 `2648a8c12`；随后更新源码构建身份，
+包对应干净提交 `85d4620a730b12df4b416fc8107bcb8139f0fd29`（Nomi host65 / Coding loop98）。
+没有 reset、强推或推送后续修改。
+
+- 合并后 `bun run check` 通过；前端 11 文件、59 测试、247 断言通过，桌面边界 1888 个源码通过。
+- 后端 `plugin_product_discovery` 8 项、`plugin_ui_sessions` 4 项通过。
+- `bun run build:mac arm` 退出 0；原生 arm64 app/DMG 构建完成，release-lock 与源码一致。
+- DMG 主程序与构建 app 相同；388 个前端文件路径及内容与 `ui/dist` 完全一致；LICENSE/NOTICE
+  一致，`hdiutil verify` 通过。严格 codesign 失败：`code has no resources but signature indicates
+  they must be present`。没有放宽门禁，也没有 Developer ID 签名或公证。
+- 从只读 DMG 启动，lsof 确认实际 backend DB 仍在隔离 fixture；健康检查 200。
+  标准会话显示 `Reply BASELINE.` / `BASELINE`，个人 Agent 无页面替换页签，普通“敏感文件检查”
+  独立 App 页面可打开。截图在 `.git/macos-final-delivery/01-*` 至 `04-*`。
+- **活动终端退出首次失败**：交互 `/bin/sh` 中运行 `sleep 120 & wait`；Command-Q 后 app、
+  watchdog、shell 退出，但独立 PGID 的 sleep 被重新托管到 PID 1，仍然存活。不能把 app 退出 0
+  当作完整回收通过。已在核验其原 PID/PPID/PGID/comm 后终止该测试进程，DMG 已卸载。
+  初始失败证据为 `initial-package-85d4620a7/package-active-processes.json` /
+  `package-cleanup-failure.json`；修复与重验结果见后文。
+
+该阶段 DMG：88,757,328 字节；SHA-256
+`68816d1ebb4648bc0a1f3692eea60dfe334400ac3b7296dfd40e97e6079b6577`。
+它是带上述退出缺陷的本地测试包，不能作为完整交付通过证明。
+
+#### 退出回归的失败与修复过程
+
+- 新增 `force_kill_reaps_interactive_shell_job_group`，实际启动交互 shell、确认后台任务拥有
+  独立 PGID，并在回收后检查该任务 PID。旧代码稳定失败：`interactive PTY job survived cleanup: Ok(())`。
+- 第一次测试输入受 macOS `/bin/sh -i` 的 history expansion 影响，未真正创建任务；使用
+  `set +H` 后才取得上述有效失败。没有把前一次输入错误算作产品回收缺陷。
+- 第一版修复的定向测试通过，`nomifun-terminal --lib` 145 项通过；独立审查继续修正快照期间
+  fork/退出的完整性证明，以及超时后的 cleanup retry。
+- 精确信号 API 的能力预检最初用 signal 0，实测返回 `EINVAL`。确认身份记录 ABI 长度正确后，
+  改为向当前运行进程自身发 SIGCONT：正确 generation 返回 0，错误 generation 返回 ESRCH。
+  动态符号与跨 UID 身份读取版本的交互式 job 回归再次通过。
+- 新 API 在 fork 前解析和预检，缺失时返回明确的 PTY 不支持错误，不以强链接破坏整个 app
+  启动。旧 macOS 的真实运行未验证；Windows 路径保持原实现，Linux 继续 TODO。
+- 完整 runtime 首轮又暴露 lifecycle poller 栈溢出：两个固定身份数组超过其 512 KiB 栈。
+  改用有界匿名 mmap/munmap，不调整线程栈，不在 fork 后调用 Rust 堆分配器。
+- 最终源码：runtime lib **132**、parent_death **2**、pty_contract **11**、terminal lib **145**
+  均通过；`bun run check` 及将新增文件纳入后的 process-runtime boundary 通过；独立只读审查收口。
+  新终端回归通过进程 generation 检查退出，仅 ESRCH 或身份已换代证明原进程消失；失败清理也用
+  内核核验 generation 的信号，不按可复用的数值 PID 杀进程。
+- 修复只扩展 macOS PTY 的普通 job 回收；Engine 构建身份更新为 Nomi host66 / Coding loop99。
+  未回收 leader 保持 session 身份有效，完整扫描证实所有成员已停止后才清理并确认终态；
+  250 ms 内无法证明时保留 Pending，由原 cleanup 路径重试。
+- **限制**：宿主突然死亡后的独立 job 仍未补完整证明，刻意 setsid 脱离会话不在本次扩展范围。
+  现有 parent-death 2 项通过不能升级为这些新增场景通过；修复后包内退出仍需实际重测。
