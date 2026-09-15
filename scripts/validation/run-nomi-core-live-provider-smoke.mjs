@@ -21,6 +21,8 @@
  *     bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --before-tool-smoke --retain-native-fixture
  * Retention is only for this run's native acceptance: app/Node processes still
  * close, and the isolated Provider credential remains encrypted in its store.
+ * A cleaned and credential-audited failing run may also retain its fixture;
+ * its failure status and exit code remain unchanged.
  * The optional family filter is focused diagnostic evidence, never a full dual-engine pass.
  *
  * Cargo always runs first with a credential-free environment and emits JSON
@@ -590,6 +592,16 @@ async function main() {
   }
 
   const typed = typedFailureFromOutput(`${test.stdout}\n${test.stderr}`);
+  if (retainNativeFixture && test.stderr.split(/\r?\n/).some((line) => line.startsWith(NATIVE_FIXTURE_MARKER))) {
+    try {
+      const paths = retainedFixtureFromOutput(test.stderr, validateFixtureParent(fixtureParent));
+      console.log(`live_smoke_native_fixture=${JSON.stringify(paths)}`);
+    } catch {
+      emitFailure('live_smoke_status=fail', 'NATIVE_FIXTURE_EVIDENCE_INVALID', 503);
+      process.exitCode = 2;
+      return;
+    }
+  }
   if (typed) {
     console.error(
       `live_smoke_status=fail phase=${typed.phase} code=${typed.code} status=${typed.status}`,

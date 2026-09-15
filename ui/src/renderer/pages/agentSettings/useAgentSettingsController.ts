@@ -15,7 +15,7 @@ import {
   cloneDraft,
   isDraftDirty,
 } from '@/common/types/agentPlatform';
-import { agentUiErrorMessage } from './model';
+import { agentUiErrorMessage, isAgentModelConfigurationMissing, type AgentEditorReturn } from './model';
 import { AGENT_PRESET_LIBRARY_SWR_KEY } from '@/renderer/hooks/agent/useAgentPresets';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSWRConfig } from 'swr';
@@ -48,7 +48,12 @@ export function useAgentSettingsController() {
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [openingPresetId, setOpeningPresetId] = useState<string | null>(null);
   const [deletingPresetId, setDeletingPresetId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setErrorState] = useState<string | null>(null);
+  const [modelConfigurationMissing, setModelConfigurationMissing] = useState(false);
+  const setError = useCallback((value: string | null) => {
+    setErrorState(value);
+    if (value === null) setModelConfigurationMissing(false);
+  }, []);
 
   const clearEditorState = useCallback(() => {
     setEditor(null);
@@ -120,7 +125,7 @@ export function useAgentSettingsController() {
   }, []);
 
   const openPreset = useCallback(
-    async (preset: AgentPresetSummary) => {
+    async (preset: AgentPresetSummary, returned?: Extract<AgentEditorReturn, { kind: 'preset' }>['draft']) => {
       setBusyAction('open');
       setOpeningPresetId(preset.preset_id);
       setError(null);
@@ -129,6 +134,16 @@ export function useAgentSettingsController() {
           preset_id: preset.preset_id,
         });
         applyEditor(response);
+        if (returned?.preset_id === response.draft.preset_id &&
+            JSON.stringify(returned.current_revision) === JSON.stringify(response.draft.current_revision)) {
+          setDraftState({ ...response.draft, ...returned, document: {
+            ...response.draft.document, ...returned.document,
+            model_route_refs: response.draft.document.model_route_refs,
+            chat_route_records: response.draft.document.chat_route_records,
+          } });
+        } else if (returned) {
+          setError(t('agentSettings.workbench.returnChanged'));
+        }
       } catch (openError) {
         setError(agentUiErrorMessage(openError, 'open'));
       } finally {
@@ -136,7 +151,7 @@ export function useAgentSettingsController() {
         setBusyAction(null);
       }
     },
-    [applyEditor]
+    [applyEditor, t]
   );
 
   const createPreset = useCallback(
@@ -200,8 +215,9 @@ export function useAgentSettingsController() {
       setSelection({ kind: 'preset', preset: response.preset });
       return response;
     } catch (createError) {
-      const missingModel = createError && typeof createError === 'object' && 'code' in createError && createError.code === 'MODEL_ROUTE_NOT_CONFIGURED';
+      const missingModel = isAgentModelConfigurationMissing(createError);
       setError(missingModel ? t('agentSettings.workbench.modelNeeded') : agentUiErrorMessage(createError, 'create'));
+      setModelConfigurationMissing(missingModel);
       return null;
     } finally {
       setBusyAction(null);
@@ -274,12 +290,14 @@ export function useAgentSettingsController() {
       setSelection({ kind: 'preset', preset: saved.preset });
       return saved;
     } catch (saveError) {
-      setError(agentUiErrorMessage(saveError, 'save'));
+      const missingModel = isAgentModelConfigurationMissing(saveError);
+      setError(missingModel ? t('agentSettings.workbench.modelNeeded') : agentUiErrorMessage(saveError, 'save'));
+      setModelConfigurationMissing(missingModel);
       return null;
     } finally {
       setBusyAction(null);
     }
-  }, [draft, refreshPresetLibraries]);
+  }, [draft, refreshPresetLibraries, t]);
 
   const dirty = useMemo(
     () => (draft ? isDraftDirty(savedDraft, draft) : false),
@@ -297,6 +315,7 @@ export function useAgentSettingsController() {
     openingPresetId,
     deletingPresetId,
     error,
+    modelConfigurationMissing,
     dirty,
     load,
     openTemplate,

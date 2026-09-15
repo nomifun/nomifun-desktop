@@ -4,9 +4,11 @@ import { AGENT_SIDER_TOGGLE_EVENT, dispatchAgentSiderStateEvent } from '@/render
 import type { AgentPresetSummary } from '@/common/types/agentPlatform';
 import { Alert, Button, Modal, Spin } from '@arco-design/web-react';
 import { Refresh } from '@icon-park/react';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { useNavigationHistory } from '@/renderer/hooks/context/NavigationHistoryContext';
+import { agentEditorReturn, editingDocument, type AgentEditorReturn, type TemplateEditingState } from './model';
 import AgentPresetEditor from './AgentPresetEditor';
 import AgentRoleDefaults from './AgentRoleDefaults';
 import AgentPresetLibrary from './AgentPresetLibrary';
@@ -18,6 +20,19 @@ import styles from './AgentSettingsPage.module.css';
 const AgentSettingsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const location = useLocation();
+  const navigationHistory = useNavigationHistory();
+  const [returned] = useState(() => agentEditorReturn(location.state, location.search));
+  const [templateEditing, setTemplateEditing] = useState<TemplateEditingState | null>(null);
+  const [templateInitialEditing, setTemplateInitialEditing] = useState(returned?.kind === 'template' ? returned.editing : undefined);
+  const restored = useRef(false);
+  useEffect(() => {
+    if (!returned) return;
+    const { agentEditorReturn: _consumed, ...state } = location.state ?? {};
+    const path = `${location.pathname}${location.search}`;
+    if (navigationHistory) navigationHistory.replaceCurrent(path, state);
+    else void navigate(path, { replace: true, state });
+  }, []);
   const desktopSider = useContentSiderCollapse('nomifun:agent-sider-collapsed', false);
   const resize = useResizableSplit({ unit: 'px', defaultWidth: 300, minWidth: 240, maxWidth: 480, storageKey: 'nomifun:agent-sider-width' });
   const [narrow, setNarrow] = useState(() => typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 1250px)').matches);
@@ -52,7 +67,18 @@ const AgentSettingsPage: React.FC = () => {
     if (!hasUnsavedChanges) { action(); return; }
     setPendingSwitch(() => action);
   };
-  useAgentWorkbenchEntry(controller);
+  useAgentWorkbenchEntry({ ...controller, loading: controller.loading || (!!returned && location.search === returned.search) });
+  useEffect(() => {
+    if (!returned || restored.current || controller.loading || !controller.library) return;
+    restored.current = true;
+    if (returned.kind === 'template') {
+      const template = controller.library.official_templates.find(value => value.template_key === returned.templateKey);
+      if (template) controller.openTemplate(template);
+    } else {
+      const preset = controller.library.user_presets.find(value => value.preset_id === returned.draft.preset_id);
+      if (preset) void controller.openPreset(preset, returned.draft);
+    }
+  }, [returned, controller.loading, controller.library, controller.openTemplate, controller.openPreset]);
   const sourceTemplate =
     controller.draft?.source_template_key == null
       ? undefined
@@ -61,6 +87,33 @@ const AgentSettingsPage: React.FC = () => {
         );
   const selectedTemplate =
     controller.selection?.kind === 'template' ? controller.selection.template : null;
+  const previousTemplate = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (returned?.kind === 'template' && previousTemplate.current === returned.templateKey && selectedTemplate?.template_key !== returned.templateKey) {
+      setTemplateInitialEditing(undefined);
+    }
+    previousTemplate.current = selectedTemplate?.template_key;
+  }, [selectedTemplate?.template_key, returned]);
+  const openKeepingEdits = async (destination: string) => {
+    const params = new URLSearchParams(location.search);
+    let snapshot: AgentEditorReturn | null = null;
+    if (selectedTemplate && templateEditing) {
+      params.delete('preset'); params.set('template', selectedTemplate.template_key);
+      snapshot = { version: 1, search: `?${params}`, kind: 'template', templateKey: selectedTemplate.template_key,
+        editing: templateEditing };
+    } else if (controller.draft) {
+      params.delete('template'); params.set('preset', controller.draft.preset_id);
+      snapshot = { version: 1, search: `?${params}`, kind: 'preset', draft: {
+        ...controller.draft, document: editingDocument(controller.draft.document),
+      } };
+    }
+    if (snapshot) {
+      const path = `/agent${snapshot.search}`, state = { agentEditorReturn: snapshot };
+      if (navigationHistory) navigationHistory.replaceCurrent(path, state);
+      else await navigate(path, { replace: true, state });
+    }
+    await navigate(destination);
+  };
   const startConversation = (preset: AgentPresetSummary) => {
     void navigate('/guid', {
       state: {
@@ -81,11 +134,11 @@ const AgentSettingsPage: React.FC = () => {
             deletingPresetId={controller.deletingPresetId}
             onSelectTemplate={(template) => {
               if (controller.selection?.kind === 'template' && controller.selection.template.template_key === template.template_key) return;
-              beforeSwitch(() => { controller.openTemplate(template); setNarrowSiderOpen(false); });
+              beforeSwitch(() => { setTemplateInitialEditing(undefined); controller.openTemplate(template); setNarrowSiderOpen(false); });
             }}
             onSelectPreset={(preset) => {
               if (controller.selection?.kind === 'preset' && controller.selection.preset.preset_id === preset.preset_id) return;
-              beforeSwitch(() => { void controller.openPreset(preset); setNarrowSiderOpen(false); });
+              beforeSwitch(() => { setTemplateInitialEditing(undefined); void controller.openPreset(preset); setNarrowSiderOpen(false); });
             }}
             onCreatePreset={(displayName) => beforeSwitch(() => { void controller.createPreset(displayName); })}
             onDeletePreset={(preset) => controller.deletePreset(preset)}
@@ -113,6 +166,11 @@ const AgentSettingsPage: React.FC = () => {
           content={
             <div className={styles.errorBody}>
               <span>{controller.error}</span>
+              {controller.modelConfigurationMissing && <div>
+                <Button size='small' type='primary' disabled={controller.busyAction !== null}
+                  onClick={() => void openKeepingEdits('/models')}>{t('agentSettings.workbench.configureChatModel')}</Button>
+                <p>{t('agentSettings.workbench.configureModelReturn')}</p>
+              </div>}
               <Button
                 type='text'
                 size='mini'
@@ -145,6 +203,8 @@ const AgentSettingsPage: React.FC = () => {
               busy={controller.busyAction !== null}
               catalog={controller.catalog}
               onDirtyChange={setTemplateDirty}
+              initialEditing={returned?.kind === 'template' && selectedTemplate.template_key === returned.templateKey ? templateInitialEditing : undefined}
+              onEditingChange={setTemplateEditing}
               onSave={(displayName, document, description) => { void controller.createConfiguredPreset(displayName, document, description); }}
             />
           ) : controller.editor && controller.draft ? (
@@ -159,7 +219,8 @@ const AgentSettingsPage: React.FC = () => {
               onDraftChange={controller.setDraft}
               onSave={() => void controller.saveRevision()}
               onDiscard={controller.discardChanges}
-              onOpenModels={() => beforeSwitch(() => { void navigate('/models'); })}
+              onOpenModels={() => { void openKeepingEdits('/models'); }}
+              onOpenAuthor={openKeepingEdits}
               onStartConversation={startConversation}
             />
           ) : (

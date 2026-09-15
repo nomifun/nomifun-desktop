@@ -4013,9 +4013,11 @@ async fn run_live_provider_smoke(mode: LiveSmokeMode) -> Result<(), SmokeFailure
         else { emit_engine_stage_pass(phase)?; }
     }
     for failure in engine_failures { eprintln!("NOMIFUN_LIVE_SMOKE_ENGINE_FAILURE {failure}"); }
-    result?;
+    // Native UI acceptance is independent from model instruction fidelity.
+    // Explicit retention is safe only here, after shutdown and credential audit;
+    // a failed smoke keeps its original failure and never becomes a pass.
     if let Some(parent) = retained_parent { retain_native_fixture(root, &parent)?; }
-    Ok(())
+    result
 }
 
 async fn read_compaction_evidence(root: &Path) -> Result<(i64, i64), SmokeFailure> {

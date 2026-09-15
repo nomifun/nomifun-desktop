@@ -66,6 +66,7 @@ type AgentPresetEditorProps = {
   onSave: () => void;
   onDiscard?: () => void;
   onOpenModels?: () => void;
+  onOpenAuthor?: (destination: string) => void | Promise<void>;
   onStartConversation: (preset: AgentPresetSummary) => void;
 };
 
@@ -140,7 +141,7 @@ const AgentChatModelPicker: React.FC<{
 
 const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   editor, draft, catalog, sourceTemplate, busyAction, dirty, onDraftChange,
-  onSave, onDiscard, onOpenModels, onStartConversation,
+  onSave, onDiscard, onOpenModels, onOpenAuthor, onStartConversation,
 }) => {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState('capabilities');
@@ -190,8 +191,6 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
         <AgentPageSettings key={editor.preset.preset_id} preset={editor.preset} busy={busy} dirty={dirty} />
       </div>}
       {activeTab === 'settings' && <div role='tabpanel' id='agent-panel-settings' aria-labelledby='agent-tab-settings'>
-        <AgentContributionOrder document={draft.document} catalog={catalog.capabilities} disabled={busy} onChange={(document) => onDraftChange({ ...draft, document })} />
-        <AgentContributionOrder kind='middleware' document={draft.document} catalog={catalog.capabilities} disabled={busy} onChange={(document) => onDraftChange({ ...draft, document })} />
         <section className={styles.section} id='agent-settings-basic'>
         <div className={styles.sectionHeading}>
           <div>
@@ -278,7 +277,10 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
       </section>
         {!chatRouteRecord && onOpenModels && <Button type='text' onClick={onOpenModels}>{t('agentSettings.workbench.manageModels')}</Button>}
       </div>}
-      {activeTab === 'extensions' && <div role='tabpanel' id='agent-panel-extensions' aria-labelledby='agent-tab-extensions'><section className={styles.section} id='agent-settings-skills-mcp'>
+      {activeTab === 'extensions' && <div role='tabpanel' id='agent-panel-extensions' aria-labelledby='agent-tab-extensions'>
+        <AgentContributionOrder kind='middleware' document={draft.document} catalog={catalog.capabilities} disabled={busy} onOpenAuthor={onOpenAuthor} onChange={(document) => onDraftChange({ ...draft, document })} />
+        <AgentContributionOrder document={draft.document} catalog={catalog.capabilities} disabled={busy} onChange={(document) => onDraftChange({ ...draft, document })} />
+        <section className={styles.section} id='agent-settings-skills-mcp'>
         <Collapse defaultActiveKey={[]} className={styles.advancedCollapse}>
           <Collapse.Item name='skills-mcp' header={t('agentSettings.sections.skillsMcp')}>
             <p className={styles.collapseHint}>{t('agentSettings.sections.skillsMcpHint')}</p>

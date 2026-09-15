@@ -12,14 +12,17 @@ type Props = {
   disabled?: boolean;
   kind?: 'context' | 'middleware';
   onChange: (document: AgentPresetDocument) => void;
+  onOpenAuthor?: (destination: string) => void | Promise<void>;
 };
 
-export default function AgentContributionOrder({ document, catalog, disabled = false, kind = 'context', onChange }: Props) {
+export default function AgentContributionOrder({ document, catalog, disabled = false, kind = 'context', onChange, onOpenAuthor }: Props) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState(false);
   const pending = useRef(false);
+  const currentOpenAuthor = useRef(onOpenAuthor);
+  currentOpenAuthor.current = onOpenAuthor;
   const mounted = useRef(false);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const field = kind === 'context' ? 'context_order' : 'middleware_order';
@@ -36,7 +39,11 @@ export default function AgentContributionOrder({ document, catalog, disabled = f
     pending.current = true; setCreating(true); setCreateError(false);
     try {
       const draft = await pluginRuntimeProduct.beforeToolTemplate.invoke();
-      if (mounted.current) await navigate(`/plugins/create/${encodeURIComponent(draft.id)}`);
+      if (mounted.current) {
+        const destination = `/plugins/create/${encodeURIComponent(draft.id)}`;
+        if (currentOpenAuthor.current) await currentOpenAuthor.current(destination);
+        else await navigate(destination);
+      }
     } catch {
       if (mounted.current) setCreateError(true);
     } finally {
