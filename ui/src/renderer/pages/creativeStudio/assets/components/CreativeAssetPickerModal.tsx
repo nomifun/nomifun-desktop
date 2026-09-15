@@ -73,7 +73,6 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
   onConfirm,
 }) => {
   const { t, i18n } = useTranslation();
-  const [scope, setScope] = useState<'mine' | 'library'>('mine');
   const [kind, setKind] = useState<'all' | CreativeAssetKind>('all');
   const [search, setSearch] = useState('');
   const uploadRef = useRef<HTMLInputElement>(null);
@@ -91,7 +90,6 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
     return assets.filter((asset) => {
       if (isCreativeAssetDeleted(asset)) return false;
       if (!acceptedKinds.includes(asset.kind)) return false;
-      if (scope === 'library' && !asset.inLibrary) return false;
       if (kind !== 'all' && asset.kind !== kind) return false;
       if (!query) return true;
       return [asset.title, asset.collection ?? '', ...asset.tags]
@@ -99,7 +97,7 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
         .toLocaleLowerCase()
         .includes(query);
     });
-  }, [acceptedKinds, assets, kind, scope, search]);
+  }, [acceptedKinds, assets, kind, search]);
   const acceptedLabel = useMemo(() => {
     const labels = acceptedKinds.map((acceptedKind) => kindLabels[acceptedKind]);
     try {
@@ -122,7 +120,6 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
 
   useEffect(() => {
     if (!open) return;
-    setScope('mine');
     setKind('all');
     setSearch('');
   }, [open]);
@@ -132,7 +129,7 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
       visible={open}
       alignCenter={false}
       className={styles.modal}
-      title={title ?? t('creativeStudio.assets.picker.title', { defaultValue: '选择真实素材' })}
+      title={title ?? t('creativeStudio.assets.picker.title', { defaultValue: '资产库' })}
       footer={null}
       autoFocus={false}
       focusLock
@@ -142,31 +139,6 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
       }
       onCancel={onCancel}
     >
-      <div
-        className={styles.scopeTabs}
-        role='tablist'
-        aria-label={t('creativeStudio.assets.picker.scopeLabel', { defaultValue: '素材范围' })}
-      >
-        <button
-          type='button'
-          role='tab'
-          aria-selected={scope === 'mine'}
-          data-active={scope === 'mine'}
-          onClick={() => setScope('mine')}
-        >
-          {t('creativeStudio.assets.picker.myAssets', { defaultValue: '我的素材' })}
-        </button>
-        <button
-          type='button'
-          role='tab'
-          aria-selected={scope === 'library'}
-          data-active={scope === 'library'}
-          onClick={() => setScope('library')}
-        >
-          {t('creativeStudio.assets.picker.library', { defaultValue: '素材库' })}
-        </button>
-      </div>
-
       <Input.Search
         value={search}
         className={styles.search}

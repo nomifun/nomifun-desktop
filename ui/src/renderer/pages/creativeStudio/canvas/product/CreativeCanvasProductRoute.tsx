@@ -680,7 +680,7 @@ const manualUploadRejectionMessage = (
     case 'audio_unsupported':
       return t('creativeStudio.canvas.upload.audioUnsupported', {
         defaultValue:
-          '暂不支持手动上传音频；通过音频工作台生成的音频仍会进入素材库。',
+          '暂不支持手动上传音频；通过音频工作台生成的音频仍会进入资产库。',
       });
     case 'file_too_large':
       return t('creativeStudio.canvas.upload.assetTooLarge', {
@@ -2020,7 +2020,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         if (!editor) {
           throw new Error(
             t('creativeStudio.canvas.errors.closedAfterUpload', {
-              defaultValue: '画布已经关闭，图片保留在素材库中。',
+              defaultValue: '画布已经关闭，图片保留在资产库中。',
             })
           );
         }
@@ -2032,7 +2032,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         if (!source) {
           throw new Error(
             t('creativeStudio.canvas.errors.imageNodeRemovedAfterUpload', {
-              defaultValue: '图片节点已被删除，上传结果保留在素材库中。',
+              defaultValue: '图片节点已被删除，上传结果保留在资产库中。',
             })
           );
         }
@@ -2051,7 +2051,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           throw new Error(
             t('creativeStudio.canvas.errors.imageNodeTaskProtected', {
               defaultValue:
-                '图片节点当前受运行任务保护；上传素材已保留在素材库中。',
+                '图片节点当前受运行任务保护；上传素材已保留在资产库中。',
             })
           );
         }
@@ -2247,7 +2247,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           throw new Error(
             t('creativeStudio.canvas.errors.cropSourceChanged', {
               defaultValue:
-                '原图片节点已被删除或替换；裁剪素材已保存在素材库中。',
+                '原图片节点已被删除或替换；裁剪素材已保存在资产库中。',
             })
           );
         }
@@ -5705,7 +5705,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         <p className={styles.panoramaDescription}>
           {t('creativeStudio.canvas.panorama.dialogDescription', {
             defaultValue:
-              '图片已经真实上传并保存在素材库中。检测到宽高比接近 2:1，请确认它应作为普通图片还是等距柱状全景图插入当前画布。',
+              '图片已经真实上传并保存在资产库中。检测到宽高比接近 2:1，请确认它应作为普通图片还是等距柱状全景图插入当前画布。',
           })}
         </p>
       </Modal>

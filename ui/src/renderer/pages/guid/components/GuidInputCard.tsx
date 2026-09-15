@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import FilePreview from '@/renderer/components/media/FilePreview';
+import ComposerAttachments from '@/renderer/components/chat/ComposerAttachments';
 import UploadProgressBar from '@/renderer/components/media/UploadProgressBar';
 import { SessionCapabilityComposerLayout } from '@/renderer/components/chat/SessionCapabilityPicker/ComposerLayout';
 import { useCompositionInput } from '@/renderer/hooks/chat/useCompositionInput';
@@ -12,7 +12,6 @@ import { Input } from '@arco-design/web-react';
 import React from 'react';
 import styles from '../index.module.css';
 import GuidWorkspaceFootnote from './GuidWorkspaceFootnote';
-import { CreationReferences } from '@/renderer/creation/CreationControls';
 
 type GuidInputCardProps = {
   // Input state
@@ -149,15 +148,8 @@ const GuidInputCard: React.FC<GuidInputCardProps> = ({
               {mentionDropdown}
             </div>
           )}
-          {files.length > 0 && (
-            <div className='flex flex-wrap items-center gap-8px mt-12px mb-12px'>
-              {files.map((path) => (
-                <FilePreview key={path} path={path} onRemove={() => onRemoveFile(path)} />
-              ))}
-            </div>
-          )}
           <UploadProgressBar source='sendbox' />
-          <CreationReferences />
+          <ComposerAttachments files={files} onRemoveFile={onRemoveFile} />
           {actionRow}
         </SessionCapabilityComposerLayout>
       </div>

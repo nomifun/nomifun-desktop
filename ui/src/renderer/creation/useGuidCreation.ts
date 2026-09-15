@@ -3,7 +3,6 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { Message } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
 import { parseConversationId, type ConversationId } from '@/common/types/ids';
-import type { GuidAgentSelection } from '@/renderer/pages/guid/types';
 import type { useGuidAgentSelection } from '@/renderer/pages/guid/hooks/useGuidAgentSelection';
 import { prepareOfficialAgent } from '@/renderer/pages/guid/hooks/officialAgentLaunch';
 import { resolveAgentResourceSelections } from '@/renderer/hooks/agent/agentResourceSelection';
@@ -18,12 +17,11 @@ import { readLegacyCreationDraft, acknowledgeLegacyCreationDraft } from './legac
 import { creativeAssetClient } from '@/renderer/pages/creativeStudio/assets/client';
 import { browserStorageGenerationKey } from '@/common/utils/browserStorageKey';
 
-export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>, input: string, files: string[], workspace: string) {
+export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>, input: string, files: string[], workspace: string, onAccepted?: () => void) {
   const creation = useCreationDraft('guid');
   const model = useGenerationModel(creation, files);
   const location = useLocation();
   const navigate = useNavigate();
-  const previous = useRef<GuidAgentSelection>(creation.draft.previousAgent || { kind: 'template', templateKey: 'chat.minimal' });
   const [loading, setLoading] = useState(false);
   const sending = useRef(false);
   const pendingSession = useRef<ConversationId | null>(null);
@@ -32,28 +30,29 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
   const importing = useRef<string | null>(null);
   const isCreative = agent.selection.kind === 'template' && agent.selection.templateKey === 'creative-studio.default';
   const selectMode = useCallback((mode: CreationMode) => {
-    if (!isCreative) {
-      previous.current = agent.selection;
-      creation.update(draft => ({ ...draft, previousAgent: agent.selection }));
-    }
     agent.setSelection({ kind: 'template', templateKey: 'creative-studio.default' });
     creation.setMode(mode);
-  }, [agent.selection, agent.setSelection, creation.setMode, creation.update, isCreative]);
+  }, [agent.setSelection, creation.setMode]);
   const exit = useCallback(() => {
     creation.setMode(null);
-    agent.setSelection(previous.current);
+    agent.setSelection({ kind: 'template', templateKey: 'assistant.general' });
   }, [agent.setSelection, creation.setMode]);
   const selectionKey = JSON.stringify(agent.selection);
   useEffect(() => {
     if (isCreative && !creation.draft.mode) creation.setMode(creation.draft.lastMode);
     else if (!isCreative) {
-      previous.current = agent.selection;
-      creation.update(draft => ({ ...draft, mode: null, previousAgent: agent.selection }));
+      creation.setMode(null);
     }
   }, [selectionKey]);
   useEffect(() => {
-    const mode = new URLSearchParams(location.search).get('creation');
-    if (mode === 'image' || mode === 'video' || mode === 'music') selectMode(mode);
+    const params = new URLSearchParams(location.search);
+    const mode = params.get('creation');
+    if (mode === 'image' || mode === 'video' || mode === 'music') {
+      selectMode(mode);
+      // Consume the entry action so Back/remount cannot overwrite a later choice.
+      params.delete('creation');
+      void navigate({ pathname: location.pathname, search: params.toString(), hash: location.hash }, { replace: true, state: location.state });
+    }
   }, [location.key, location.search]);
   useEffect(() => {
     const mode = creation.draft.mode;
@@ -105,12 +104,14 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
         sessionStorage.removeItem(pendingSessionKey);
       } catch { /* An accepted task still opens its canonical conversation. */ }
       pendingSession.current = null;
+      creation.update(draft => ({ ...draft, references: [], pendingPrompt: undefined, pendingFiles: undefined }));
+      onAccepted?.();
       const conversation = await ipcBridge.conversation.get.invoke({ conversation_id: id }).catch(() => null);
       if (conversation) seedConversationCache(conversation);
       emitter.emit('chat.history.refresh');
       await navigate(`/conversation/${id}`);
     } catch (error) { Message.error(error instanceof Error ? error.message : String(error)); }
     finally { sending.current = false; setLoading(false); }
-  }, [agent.officialTemplates, creation.draft, files, input, model.ready, model.selected, navigate, workspace]);
+  }, [agent.officialTemplates, creation.draft, creation.update, files, input, model.ready, model.selected, navigate, workspace, onAccepted]);
   return { ...creation, selectMode, exit, send, loading, ready: model.ready };
 }

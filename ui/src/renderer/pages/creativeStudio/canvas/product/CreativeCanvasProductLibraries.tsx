@@ -97,7 +97,7 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
     <section
       className={styles.assetPanel}
       aria-label={t('creativeStudio.canvas.assets.libraryLabel', {
-        defaultValue: 'NomiFun 素材库',
+        defaultValue: 'NomiFun 资产库',
       })}
       data-product-asset-library
     >
@@ -105,7 +105,7 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
         <div>
           <strong>
             {t('creativeStudio.canvas.assets.libraryTitle', {
-              defaultValue: '素材库',
+              defaultValue: '资产库',
             })}
           </strong>
           <span>
@@ -118,7 +118,7 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
         <button
           type='button'
           aria-label={t('creativeStudio.canvas.assets.refresh', {
-            defaultValue: '刷新素材库',
+            defaultValue: '刷新资产库',
           })}
           disabled={disabled || state.loading}
           onClick={() => void state.reload()}
@@ -175,7 +175,7 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
             <Loading className={styles.spin} {...iconProps} />
             <span>
               {t('creativeStudio.canvas.assets.loading', {
-                defaultValue: '正在读取素材库…',
+                defaultValue: '正在读取资产库…',
               })}
             </span>
           </div>
@@ -183,7 +183,7 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
           <div className={styles.state} role='alert' data-state='error'>
             <strong>
               {t('creativeStudio.canvas.assets.loadFailed', {
-                defaultValue: '素材库加载失败',
+                defaultValue: '资产库加载失败',
               })}
             </strong>
             <span>{state.error.message}</span>
@@ -202,7 +202,7 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
             </strong>
             <span>
               {t('creativeStudio.canvas.assets.realRecordsOnly', {
-                defaultValue: '这里只显示后端素材库返回的真实记录。',
+                defaultValue: '这里只显示后端资产库返回的真实记录。',
               })}
             </span>
           </div>

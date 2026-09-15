@@ -106,7 +106,12 @@ const GuidPage: React.FC = () => {
     locationState: navigationState,
   });
   const advancedConfig = useGuidAdvancedConfig();
-  const creation = useGuidCreation(agentSelection, guidInput.input, guidInput.files, guidInput.dir);
+  const clearSentInput = useCallback(() => {
+    guidInput.setInput('');
+    guidInput.setFiles([]);
+    guidInput.setDir('');
+  }, [guidInput.setInput, guidInput.setFiles, guidInput.setDir]);
+  const creation = useGuidCreation(agentSelection, guidInput.input, guidInput.files, guidInput.dir, clearSentInput);
   useEffect(() => {
     if (creation.draft.pendingPrompt === undefined) return;
     guidInput.setInput(creation.draft.pendingPrompt);
@@ -418,6 +423,9 @@ const GuidPage: React.FC = () => {
   }`;
 
   useLayoutEffect(() => {
+    // Returning from another page resumes the draft. Only an explicit new
+    // conversation action requests a reset.
+    if (!resetAgentRequested) return;
     guidInput.setInput('');
     guidInput.setFiles([]);
     guidInput.setLoading(false);
@@ -426,7 +434,10 @@ const GuidPage: React.FC = () => {
     }
     advancedConfig.reset();
     setResourceSelectionValue({});
+    creation.update(draft => ({ ...draft, references: [], pendingPrompt: undefined, pendingFiles: undefined }));
   }, [
+    creation.update,
+    setResourceSelectionValue,
     advancedConfig.reset,
     guidInput.setDir,
     guidInput.setFiles,
@@ -434,6 +445,7 @@ const GuidPage: React.FC = () => {
     guidInput.setLoading,
     location.key,
     navigationState?.workspace,
+    resetAgentRequested,
   ]);
 
   useEffect(() => {
@@ -531,7 +543,6 @@ const GuidPage: React.FC = () => {
     autoWorkStartDisabled(guidInput.loading, advancedConfig.autoWork);
   const actionRowNode = (
     <GuidActionRow
-      files={guidInput.files}
       onFilesUploaded={guidInput.handleFilesUploaded}
       modelSelectorNode={modelSelectorNode}
       creationControls={<CreationControls prompt={guidInput.input} onPromptChange={guidInput.setInput} files={guidInput.files} />}

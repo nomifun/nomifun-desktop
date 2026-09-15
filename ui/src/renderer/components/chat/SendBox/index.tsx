@@ -7,6 +7,7 @@
 import type { ConversationId, MessageId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import AtFileMenu from '@/renderer/components/chat/AtFileMenu';
+import ResponsiveComposerRow from '@/renderer/components/chat/ResponsiveComposerRow';
 import BtwOverlay from '@/renderer/components/chat/BtwOverlay';
 import { SessionCapabilityComposerLayout } from '@/renderer/components/chat/SessionCapabilityPicker/ComposerLayout';
 import { useInputFocusRing } from '@/renderer/hooks/chat/useInputFocusRing';
@@ -191,6 +192,7 @@ const SendBox: React.FC<{
   /** Conversation-only: compact status control rendered inside the composer header row. */
   topRightTools?: React.ReactNode;
   prefix?: React.ReactNode;
+  renderAttachments?: (workspaceItems: FileSelectionItem[], onRemoveWorkspaceItem: (path: string) => void) => React.ReactNode;
   placeholder?: string;
   onFilesAdded?: (files: FileMetadata[]) => void;
   supportedExts?: string[];
@@ -216,6 +218,7 @@ const SendBox: React.FC<{
   onEditResubmit,
   onClearContext,
   prefix,
+  renderAttachments,
   className,
   loading,
   tools,
@@ -1627,7 +1630,7 @@ const SendBox: React.FC<{
                 ))}
               </div>
             )}
-            {unmatchedSelectedWorkspaceItems.length > 0 && onSelectedWorkspaceItemsChange && (
+            {!renderAttachments && unmatchedSelectedWorkspaceItems.length > 0 && onSelectedWorkspaceItemsChange && (
               <div className='flex flex-wrap gap-6px mb-8px'>
                 {unmatchedSelectedWorkspaceItems.map((item) => (
                   <Tag
@@ -1770,21 +1773,35 @@ const SendBox: React.FC<{
               </div>
             )}
           </div>
+          {renderAttachments?.(selectedWorkspaceItems ?? [], (path) => {
+            const item = selectedWorkspaceItems?.find(item => getSelectedItemPath(item) === path);
+            if (!item) return;
+            const keys = getSelectedItemMatchKeys(item);
+            let nextInput = input;
+            for (const query of getAllAtFileQueries(input).filter(query => keys.includes(query.query)).reverse()) {
+              nextInput = nextInput.slice(0, query.start) + nextInput.slice(query.end);
+            }
+            if (nextInput !== input) setInput(nextInput);
+            mentionOwnedPathsRef.current.delete(path);
+            externalOwnedPathsRef.current.delete(path);
+            selectedItemByPathRef.current.delete(path);
+            onSelectedWorkspaceItemsChange?.((selectedWorkspaceItems ?? []).filter(item => getSelectedItemPath(item) !== path));
+          })}
           {!isSingleLine && (
-            <div className='sendbox-bottom-row flex items-center justify-between gap-2 w-full' style={creationTools ? { flexWrap: 'wrap', justifyContent: 'flex-start' } : undefined}>
+            <ResponsiveComposerRow className='sendbox-bottom-row flex items-center justify-between gap-2 w-full'>
               <div
                 className='sendbox-tools'
               >
                 {tools}
               </div>
               {creationTools}
-              <div className='sendbox-actions flex items-center gap-2' style={creationTools ? { marginLeft: 'auto', maxWidth: '100%' } : undefined}>
+              <div data-composer-group className='sendbox-actions flex items-center gap-2' style={{ marginLeft: 'auto', maxWidth: '100%' }}>
                 {rightTools}
                 {renderedSpeechButton}
                 {sendButtonPrefix}
                 {renderActionButtons()}
               </div>
-            </div>
+            </ResponsiveComposerRow>
           )}
         </SessionCapabilityComposerLayout>
       </div>

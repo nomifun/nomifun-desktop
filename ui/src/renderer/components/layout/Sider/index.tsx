@@ -117,7 +117,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   );
 
   const handleConversationClick = () =>
-    navTo('/guid', false, { resetAgentSelection: true });
+    navTo('/guid');
   const handleBrowserClick = () => {
     if (browserOverviewTransient) {
       void retryBrowserOverview();
