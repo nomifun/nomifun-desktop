@@ -7,6 +7,10 @@ use nomifun_ai_agent::tool_discovery::{self, CAPABILITY_ID, PACKAGE_ID, ROLE_ID}
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+#[cfg(test)]
+#[path = "nomi_core_middleware_validation_tests.rs"]
+mod middleware_validation_tests;
+
 pub(crate) fn validate_snapshot(
     registry: &nomifun_agent_kernel::MaterializedRegistry,
     snapshot: &ResolvedSnapshotEnvelope,

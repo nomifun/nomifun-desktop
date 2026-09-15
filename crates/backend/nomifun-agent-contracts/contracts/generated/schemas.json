@@ -12777,17 +12777,6 @@
         ],
         "type": "object"
       },
-      "NativePluginTarget": {
-        "enum": [
-          "x86_64-pc-windows-msvc",
-          "aarch64-pc-windows-msvc",
-          "x86_64-unknown-linux-gnu",
-          "aarch64-unknown-linux-gnu",
-          "x86_64-apple-darwin",
-          "aarch64-apple-darwin"
-        ],
-        "type": "string"
-      },
       "PackageContributions": {
         "additionalProperties": false,
         "properties": {
@@ -13151,40 +13140,6 @@
         ],
         "type": "object"
       },
-      "PluginServiceExecution": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "node",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "native",
-                "type": "string"
-              },
-              "target": {
-                "$ref": "#/$defs/NativePluginTarget"
-              }
-            },
-            "required": [
-              "kind",
-              "target"
-            ],
-            "type": "object"
-          }
-        ]
-      },
       "PluginServiceLifecycle": {
         "enum": [
           "on_demand",
@@ -13197,9 +13152,6 @@
         "properties": {
           "entrypoint": {
             "type": "string"
-          },
-          "execution": {
-            "$ref": "#/$defs/PluginServiceExecution"
           },
           "host_protocol_version": {
             "type": "string"
@@ -13979,17 +13931,6 @@
         ],
         "type": "object"
       },
-      "NativePluginTarget": {
-        "enum": [
-          "x86_64-pc-windows-msvc",
-          "aarch64-pc-windows-msvc",
-          "x86_64-unknown-linux-gnu",
-          "aarch64-unknown-linux-gnu",
-          "x86_64-apple-darwin",
-          "aarch64-apple-darwin"
-        ],
-        "type": "string"
-      },
       "PackageContributions": {
         "additionalProperties": false,
         "properties": {
@@ -14230,40 +14171,6 @@
         ],
         "type": "object"
       },
-      "PluginServiceExecution": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "node",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "native",
-                "type": "string"
-              },
-              "target": {
-                "$ref": "#/$defs/NativePluginTarget"
-              }
-            },
-            "required": [
-              "kind",
-              "target"
-            ],
-            "type": "object"
-          }
-        ]
-      },
       "PluginServiceLifecycle": {
         "enum": [
           "on_demand",
@@ -14276,9 +14183,6 @@
         "properties": {
           "entrypoint": {
             "type": "string"
-          },
-          "execution": {
-            "$ref": "#/$defs/PluginServiceExecution"
           },
           "host_protocol_version": {
             "type": "string"
@@ -15063,17 +14967,6 @@
   },
   "plugin_service_spec": {
     "$defs": {
-      "NativePluginTarget": {
-        "enum": [
-          "x86_64-pc-windows-msvc",
-          "aarch64-pc-windows-msvc",
-          "x86_64-unknown-linux-gnu",
-          "aarch64-unknown-linux-gnu",
-          "x86_64-apple-darwin",
-          "aarch64-apple-darwin"
-        ],
-        "type": "string"
-      },
       "PluginFilesDirDescriptor": {
         "additionalProperties": false,
         "properties": {
@@ -15174,48 +15067,28 @@
         "type": "string"
       },
       "PluginServiceRuntimeFingerprint": {
-        "anyOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "node_version": {
-                "type": "string"
-              },
-              "runtime_executable_digest": {
-                "type": "string"
-              },
-              "runtime_installation_id": {
-                "type": "string"
-              },
-              "runtime_target": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "runtime_installation_id",
-              "runtime_target",
-              "runtime_executable_digest",
-              "node_version"
-            ],
-            "type": "object"
+        "additionalProperties": false,
+        "properties": {
+          "node_version": {
+            "type": "string"
           },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "native_executable_digest": {
-                "type": "string"
-              },
-              "native_target": {
-                "$ref": "#/$defs/NativePluginTarget"
-              }
-            },
-            "required": [
-              "native_target",
-              "native_executable_digest"
-            ],
-            "type": "object"
+          "runtime_executable_digest": {
+            "type": "string"
+          },
+          "runtime_installation_id": {
+            "type": "string"
+          },
+          "runtime_target": {
+            "type": "string"
           }
-        ]
+        },
+        "required": [
+          "runtime_installation_id",
+          "runtime_target",
+          "runtime_executable_digest",
+          "node_version"
+        ],
+        "type": "object"
       },
       "PluginServiceStorageDescriptor": {
         "additionalProperties": false,
@@ -15335,17 +15208,6 @@
   },
   "plugin_service_test_receipt": {
     "$defs": {
-      "NativePluginTarget": {
-        "enum": [
-          "x86_64-pc-windows-msvc",
-          "aarch64-pc-windows-msvc",
-          "x86_64-unknown-linux-gnu",
-          "aarch64-unknown-linux-gnu",
-          "x86_64-apple-darwin",
-          "aarch64-apple-darwin"
-        ],
-        "type": "string"
-      },
       "PluginReleaseRef": {
         "additionalProperties": false,
         "properties": {
@@ -15371,48 +15233,28 @@
         "type": "object"
       },
       "PluginServiceRuntimeFingerprint": {
-        "anyOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "node_version": {
-                "type": "string"
-              },
-              "runtime_executable_digest": {
-                "type": "string"
-              },
-              "runtime_installation_id": {
-                "type": "string"
-              },
-              "runtime_target": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "runtime_installation_id",
-              "runtime_target",
-              "runtime_executable_digest",
-              "node_version"
-            ],
-            "type": "object"
+        "additionalProperties": false,
+        "properties": {
+          "node_version": {
+            "type": "string"
           },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "native_executable_digest": {
-                "type": "string"
-              },
-              "native_target": {
-                "$ref": "#/$defs/NativePluginTarget"
-              }
-            },
-            "required": [
-              "native_target",
-              "native_executable_digest"
-            ],
-            "type": "object"
+          "runtime_executable_digest": {
+            "type": "string"
+          },
+          "runtime_installation_id": {
+            "type": "string"
+          },
+          "runtime_target": {
+            "type": "string"
           }
-        ]
+        },
+        "required": [
+          "runtime_installation_id",
+          "runtime_target",
+          "runtime_executable_digest",
+          "node_version"
+        ],
+        "type": "object"
       },
       "PluginServiceTestCredentialMode": {
         "enum": [
@@ -16066,17 +15908,6 @@
         ],
         "type": "object"
       },
-      "NativePluginTarget": {
-        "enum": [
-          "x86_64-pc-windows-msvc",
-          "aarch64-pc-windows-msvc",
-          "x86_64-unknown-linux-gnu",
-          "aarch64-unknown-linux-gnu",
-          "x86_64-apple-darwin",
-          "aarch64-apple-darwin"
-        ],
-        "type": "string"
-      },
       "PackageContributions": {
         "additionalProperties": false,
         "properties": {
@@ -16506,40 +16337,6 @@
         ],
         "type": "object"
       },
-      "PluginServiceExecution": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "node",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "native",
-                "type": "string"
-              },
-              "target": {
-                "$ref": "#/$defs/NativePluginTarget"
-              }
-            },
-            "required": [
-              "kind",
-              "target"
-            ],
-            "type": "object"
-          }
-        ]
-      },
       "PluginServiceLifecycle": {
         "enum": [
           "on_demand",
@@ -16552,9 +16349,6 @@
         "properties": {
           "entrypoint": {
             "type": "string"
-          },
-          "execution": {
-            "$ref": "#/$defs/PluginServiceExecution"
           },
           "host_protocol_version": {
             "type": "string"

@@ -1,13 +1,12 @@
 use super::*;
 use nomifun_agent_contracts::{LogicalArtifactRef, SkillDefinition, SkillRef, digest_bytes};
-use nomifun_ai_agent::{NomiPluginSkillArtifact, NomiPluginSkillArtifactResolver};
+use nomifun_ai_agent::plugin_skills::{NomiVerifiedSkillCommand, verified_skill_commands};
 
 const SKILL: &str = "example.dynamic.guide";
 const BODY: &str = "Package guidance $ARGUMENTS";
 
 #[tokio::test]
 async fn verified_skill_descriptors_keep_body_identity_and_cannot_authorize_cold_reads() {
-    use nomifun_ai_agent::plugin_skills::{NomiVerifiedSkillCommand, verified_skill_commands};
     let (registration, _, _) = fixture('a');
     let kernel = Arc::new(KernelRegistry::new(
         policy_for(PluginSourceKind::ManagedLocal), Arc::new(InMemoryPluginStatePersistence::new()),
@@ -30,21 +29,46 @@ async fn verified_skill_descriptors_keep_body_identity_and_cannot_authorize_cold
 }
 
 #[tokio::test]
-async fn cold_skill_discovery_uses_exact_artifacts_without_materializing_a_session() {
-    use nomifun_ai_agent::plugin_skills::discover_package_skill_commands;
+async fn verified_commands_require_the_matching_active_snapshot_and_dependencies() {
+    use nomifun_agent_kernel::SessionCapabilityState;
+    let (registration, _, _) = fixture('a');
+    let kernel = Arc::new(KernelRegistry::new(
+        policy_for(PluginSourceKind::ManagedLocal), Arc::new(InMemoryPluginStatePersistence::new()),
+    ).unwrap());
+    let registry = kernel.replace_all(vec![registration]).unwrap();
+    let compiled = Arc::new(compiled(&registry));
+    for scenario in ["wrong_snapshot", "inactive_dependency"] {
+        let mut active_snapshot = (*compiled).clone();
+        match scenario {
+            "wrong_snapshot" => active_snapshot.envelope.snapshot_ref.snapshot_id = "another-snapshot".into(),
+            "inactive_dependency" => { active_snapshot.envelope.content.capability_allowlist.remove(&AGENT_TOOL.into()); }
+            _ => unreachable!(),
+        }
+        let active = Arc::new(SessionCapabilityState::new(&active_snapshot));
+        assert!(verified_skill_commands(
+            kernel.clone(), compiled.clone(), Some(active), vec![command(&compiled)],
+        ).is_err(), "{scenario}");
+    }
+    let active = Arc::new(SessionCapabilityState::new(&compiled));
+    let commands = verified_skill_commands(kernel.clone(), compiled.clone(), Some(active), vec![command(&compiled)]).unwrap();
+    assert_eq!(commands[0].read(Some("selected"), None, None).await.unwrap(), "Package guidance selected");
+    assert!(commands[0].read(None, Some("resources/reference.txt"), None).await.is_err());
+    kernel.replace_all(Vec::new()).unwrap();
+    assert!(commands[0].read(None, None, None).await.is_err());
+}
+
+#[tokio::test]
+async fn cold_skill_commands_preserve_visibility_and_treat_execution_directives_as_inert() {
     for scenario in ["valid", "hidden", "unsupported", "bad_digest", "withdraw"] {
-        let (mut registration, _, mut resolver) = fixture('a');
+        let (mut registration, _, mut definition) = fixture('a');
         let body = match scenario {
             "hidden" => "---\nuser-invocable: false\n---\nHidden guidance",
             "unsupported" => "---\ncontext: fork\n---\nMust not run",
             _ => BODY,
         };
-        resolver.definition.body_ref.digest = digest_bytes(body.as_bytes());
-        resolver
-            .files
-            .insert("resources/guide.md".into(), body.as_bytes().to_vec());
+        definition.body_ref.digest = digest_bytes(body.as_bytes());
         let mut manifest = registration.metadata.manifest.payload.clone();
-        manifest.contributions.skills[0] = resolver.definition.clone();
+        manifest.contributions.skills[0] = definition;
         registration.metadata.manifest = ArtifactEnvelope::new(manifest).unwrap();
         let kernel = Arc::new(
             KernelRegistry::new(
@@ -55,23 +79,26 @@ async fn cold_skill_discovery_uses_exact_artifacts_without_materializing_a_sessi
         );
         let registry = kernel.replace_all(vec![registration]).unwrap();
         let compiled = Arc::new(compiled(&registry));
-        if scenario == "bad_digest" {
-            resolver
-                .files
-                .insert("resources/guide.md".into(), b"changed".to_vec());
-        }
         if scenario == "withdraw" {
-            resolver.withdraw = Some(kernel.clone());
+            kernel.replace_all(Vec::new()).unwrap();
         }
         // No NomiPluginToolSession, Context assembly, active set or LLM is created.
-        let commands = discover_package_skill_commands(kernel, compiled, Arc::new(resolver)).await;
+        let command = NomiVerifiedSkillCommand {
+            lock: compiled.content().skill_locks[0].clone(),
+            markdown: if scenario == "bad_digest" { "changed" } else { body }.into(),
+            description: "Guide".into(),
+        };
+        let commands = verified_skill_commands(kernel, compiled, None, vec![command]);
         match scenario {
             "valid" => {
                 let commands = commands.unwrap();
                 assert_eq!(commands.len(), 1);
-                assert_eq!(commands[0].command, format!("skill:{SKILL}"));
+                assert_eq!(commands[0].command_name(), format!("skill:{SKILL}"));
+                assert!(commands[0].metadata().user_invocable);
+                assert!(commands[0].read(None, None, None).await.is_err());
             }
-            "hidden" => assert!(commands.unwrap().is_empty()),
+            "hidden" => assert!(!commands.unwrap()[0].metadata().user_invocable),
+            "unsupported" => assert!(commands.unwrap().is_empty()),
             _ => assert!(commands.is_err(), "{scenario}"),
         }
     }
@@ -154,28 +181,8 @@ fn skill_locks_require_provenance_and_do_not_bypass_consumer_or_dependency_selec
     ));
 }
 
-struct Resolver {
-    definition: SkillDefinition,
-    files: BTreeMap<String, Vec<u8>>,
-    withdraw: Option<Arc<KernelRegistry>>,
-}
-#[async_trait]
-impl NomiPluginSkillArtifactResolver for Resolver {
-    async fn resolve(
-        &self,
-        _: &nomifun_agent_contracts::ResolvedSkillLock,
-    ) -> Result<NomiPluginSkillArtifact, String> {
-        if let Some(kernel) = &self.withdraw {
-            kernel.replace_all(Vec::new()).unwrap();
-        }
-        Ok(NomiPluginSkillArtifact {
-            definition: self.definition.clone(),
-            files: self.files.clone(),
-        })
-    }
-}
 
-fn fixture(artifact: char) -> (PluginRegistration, Arc<SchemaMap>, Resolver) {
+fn fixture(artifact: char) -> (PluginRegistration, Arc<SchemaMap>, SkillDefinition) {
     let (mut registration, schemas) = registration(
         artifact,
         "echo:",
@@ -218,12 +225,15 @@ fn fixture(artifact: char) -> (PluginRegistration, Arc<SchemaMap>, Resolver) {
         .registrar
         .declared_skill_ids
         .insert(SKILL.into());
-    let resolver = Resolver {
-        definition,
-        files: BTreeMap::from([("resources/guide.md".into(), BODY.as_bytes().to_vec())]),
-        withdraw: None,
-    };
-    (registration, schemas, resolver)
+    (registration, schemas, definition)
+}
+
+fn command(compiled: &nomifun_agent_kernel::CompiledSnapshot) -> NomiVerifiedSkillCommand {
+    NomiVerifiedSkillCommand {
+        lock: compiled.content().skill_locks[0].clone(),
+        markdown: BODY.into(),
+        description: "Guide".into(),
+    }
 }
 
 fn compiled(
@@ -369,7 +379,7 @@ async fn snapshot_skill_command_uses_kernel_guard_in_real_bootstrap() {
 
 #[tokio::test]
 async fn frozen_skill_detects_same_body_artifact_upgrade_and_withdrawal() {
-    let (registration, schemas, resolver) = fixture('a');
+    let (registration, schemas, _) = fixture('a');
     let kernel = Arc::new(
         KernelRegistry::new(
             policy_for(PluginSourceKind::ManagedLocal),
@@ -382,8 +392,7 @@ async fn frozen_skill_detects_same_body_artifact_upgrade_and_withdrawal() {
     let old_lock = compiled.content().skill_locks[0].clone();
     let loaded = session(kernel.clone(), (*compiled).clone(), schemas.clone())
         .await
-        .with_package_skills(kernel.clone(), compiled.clone(), Arc::new(resolver))
-        .await
+        .with_verified_skill_commands(kernel.clone(), compiled.clone(), vec![command(&compiled)])
         .unwrap();
     assert_eq!(loaded.package_skills().len(), 1);
     assert_eq!(
@@ -393,7 +402,7 @@ async fn frozen_skill_detects_same_body_artifact_upgrade_and_withdrawal() {
             .unwrap(),
         "Package guidance yes"
     );
-    let (replacement, _, resolver) = fixture('b');
+    let (replacement, _, _) = fixture('b');
     kernel.replace_all(vec![replacement]).unwrap();
     assert!(
         loaded.package_skills()[0]
@@ -410,8 +419,7 @@ async fn frozen_skill_detects_same_body_artifact_upgrade_and_withdrawal() {
     let retry = loaded.clone();
     assert!(
         retry
-            .with_package_skills(kernel.clone(), compiled, Arc::new(resolver))
-            .await
+            .with_verified_skill_commands(kernel.clone(), compiled.clone(), vec![command(&compiled)])
             .is_err()
     );
     kernel.replace_all(Vec::new()).unwrap();
@@ -425,48 +433,8 @@ async fn frozen_skill_detects_same_body_artifact_upgrade_and_withdrawal() {
 }
 
 #[tokio::test]
-async fn bad_body_missing_files_and_withdrawal_during_io_fail_closed() {
-    for scenario in ["digest", "missing", "extra", "definition", "withdraw"] {
-        let (registration, schemas, mut resolver) = fixture('a');
-        let kernel = Arc::new(
-            KernelRegistry::new(
-                policy_for(PluginSourceKind::ManagedLocal),
-                Arc::new(InMemoryPluginStatePersistence::new()),
-            )
-            .unwrap(),
-        );
-        let registry = kernel.replace_all(vec![registration]).unwrap();
-        let compiled = Arc::new(compiled(&registry));
-        let session = session(kernel.clone(), (*compiled).clone(), schemas).await;
-        match scenario {
-            "digest" => {
-                resolver
-                    .files
-                    .get_mut("resources/guide.md")
-                    .unwrap()
-                    .push(b'!');
-            }
-            "missing" => resolver.files.clear(),
-            "extra" => {
-                resolver.files.insert("secret".into(), vec![]);
-            }
-            "definition" => resolver.definition.display.description = "changed".into(),
-            "withdraw" => resolver.withdraw = Some(kernel.clone()),
-            _ => unreachable!(),
-        }
-        assert!(
-            session
-                .with_package_skills(kernel, compiled, Arc::new(resolver))
-                .await
-                .is_err(),
-            "{scenario}"
-        );
-    }
-}
-
-#[tokio::test]
 async fn skill_descriptor_cannot_attach_to_another_snapshot() {
-    let (registration, schemas, resolver) = fixture('a');
+    let (registration, schemas, _) = fixture('a');
     let kernel = Arc::new(
         KernelRegistry::new(
             policy_for(PluginSourceKind::ManagedLocal),
@@ -478,12 +446,12 @@ async fn skill_descriptor_cannot_attach_to_another_snapshot() {
     let mut compiled = compiled(&registry);
     let session = session(kernel.clone(), compiled.clone(), schemas).await;
     compiled.envelope.snapshot_ref.snapshot_id = "another-snapshot".into();
+    let commands = vec![command(&compiled)];
     assert!(
         session
-            .with_package_skills(kernel, Arc::new(compiled), Arc::new(resolver))
-            .await
+            .with_verified_skill_commands(kernel, Arc::new(compiled), commands)
             .unwrap_err()
             .to_string()
-            .contains("differs from its Session")
+            .contains("Session differs")
     );
 }

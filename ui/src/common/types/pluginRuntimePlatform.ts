@@ -416,13 +416,6 @@ export interface PluginRuntimeSurfaceLaunchDescriptor {
   kind: PluginRuntimeKind;
 }
 
-/** Live projection, scoped by a host-issued view identity; never a replay log. */
-export interface PluginAgentSessionStream {
-  plugin_id: PluginRuntimeId;
-  surface_session_id: string;
-  surface_generation: number;
-  event: Record<string, unknown>;
-}
 
 export interface ClosePluginRuntimeSurfaceRequest {
   plugin_id: PluginRuntimeId;

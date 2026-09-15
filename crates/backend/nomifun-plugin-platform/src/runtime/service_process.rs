@@ -1,7 +1,7 @@
 //! Production-oriented Plugin Service process adapter.
 //!
 //! This module is intentionally kept separate from the in-memory Service Host
-//! coordinator. It owns one Node or native process, speaks the Plugin Service
+//! coordinator. It owns one Node process, speaks the Plugin Service
 //! NDJSON protocol, and turns process-tree failure into a generation-scoped
 //! `PluginRuntimeServiceProcessError::Crashed`.
 //!
@@ -69,7 +69,6 @@ if (
 const generation = bootstrap.host_generation;
 const protocolVersion = bootstrap.protocol_version;
 const activeRequests = new Map();
-const eventEmitters = new Map();
 const storageRequests = new Map();
 let storageRequestSequence = 0;
 const invocationContext = new AsyncLocalStorage();
@@ -127,72 +126,6 @@ function controlAck(requestId) {
     request_id: requestId,
     outcome: "ack",
   };
-}
-
-// One unacknowledged event per invocation. emit() must be awaited: there is no
-// unbounded promise/write queue and no task that outlives the original call.
-function createEventEmitter(frame, signal) {
-  let sequence = 0;
-  let pending = null;
-  let closed = false;
-  const aborted = () => Object.assign(new Error("Service event delivery canceled"), {
-    name: "AbortError",
-  });
-  const abort = () => pending?.reject(aborted());
-  signal.addEventListener("abort", abort, { once: true });
-  const emitter = {
-    emit(value) {
-      if (closed || signal.aborted) return Promise.reject(aborted());
-      if (pending) return Promise.reject(new Error("await emit() before emitting another event"));
-      if (!Number.isSafeInteger(sequence + 1)) return Promise.reject(new Error("event sequence exhausted"));
-      sequence += 1;
-      let resolve;
-      let reject;
-      const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-      // Retain the original rejection for finish(), but do not leave an ignored
-      // emit's cancellation as an unrelated process-level unhandled rejection.
-      void promise.catch(() => {});
-      pending = { sequence, resolve, reject, promise };
-      try {
-        void writeFrame({
-          kind: "event",
-          protocol_version: protocolVersion,
-          host_generation: generation,
-          request_id: frame.request_id,
-          call_id: frame.call_id,
-          sequence,
-          value: value ?? null,
-        }).catch(reject);
-      } catch (error) {
-        // JSON serialization can fail synchronously (e.g. a circular value).
-        // Reject this call instead of leaving finish() waiting for a fake ACK.
-        reject(error);
-      }
-      return promise;
-    },
-    acknowledge(ack) {
-      if (signal.aborted) return;
-      if (!pending || ack.call_id !== frame.call_id || ack.sequence !== pending.sequence) {
-        throw new Error("Service event acknowledgement identity mismatch");
-      }
-      const current = pending;
-      pending = null;
-      current.resolve();
-    },
-    async finish() {
-      closed = true;
-      if (pending) await pending.promise;
-    },
-    dispose() {
-      closed = true;
-      signal.removeEventListener("abort", abort);
-      pending?.reject(aborted());
-      pending = null;
-      eventEmitters.delete(frame.request_id);
-    },
-  };
-  eventEmitters.set(frame.request_id, emitter);
-  return emitter;
 }
 
 function storageError(code, message) {
@@ -367,12 +300,6 @@ async function dispatch(frame) {
     return;
   }
 
-  if (frame.kind === "event_ack") {
-    // A cancellation can retire the call while its final ACK is in transit.
-    eventEmitters.get(frame.request_id)?.acknowledge(frame);
-    return;
-  }
-
   if (frame.kind === "control" && frame.operation === "cancel") {
     activeRequests.get(frame.target_request_id)?.abort();
     await writeFrame(controlAck(frame.request_id));
@@ -401,7 +328,6 @@ async function dispatch(frame) {
 
   const controller = new AbortController();
   activeRequests.set(frame.request_id, controller);
-  const emitter = frame.stream === true ? createEventEmitter(frame, controller.signal) : null;
   try {
     const value = await invocationContext.run(
       { requestId: frame.request_id, signal: controller.signal },
@@ -412,14 +338,11 @@ async function dispatch(frame) {
             method: frame.method,
             payload: structuredClone(frame.payload ?? {}),
             signal: controller.signal,
-            ...(emitter ? { emit: emitter.emit } : {}),
           }),
         ),
     );
-    await emitter?.finish();
     await writeFrame(success(frame.request_id, frame.call_id, value));
   } catch (error) {
-    await emitter?.finish().catch(() => {});
     await writeFrame(
       failure(
         frame.request_id,
@@ -432,7 +355,6 @@ async function dispatch(frame) {
       ),
     );
   } finally {
-    emitter?.dispose();
     activeRequests.delete(frame.request_id);
   }
 }
@@ -517,27 +439,20 @@ impl PluginRuntimeServiceModuleResolver for FixedPluginRuntimeServiceModuleResol
     }
 }
 
-pub struct PluginRuntimeServiceProcessAdapterFactory {
-    // None selects a verified native release executable. Both backends use
-    // exactly the same protocol actor, deadlines, queues and process owner.
-    node_executable: Option<PathBuf>,
+pub struct NodePluginRuntimeServiceProcessFactory {
+    node_executable: PathBuf,
     resolver: Arc<dyn PluginRuntimeServiceModuleResolver>,
     limits: PluginRuntimeServiceProcessLimits,
     storage: Option<Arc<dyn PluginRuntimeServiceStoragePort>>,
 }
 
-/// Source compatibility for existing Node integrations. Both backends share
-/// one process owner and protocol actor; this is not another runtime registry.
-pub type NodePluginRuntimeServiceProcessFactory = PluginRuntimeServiceProcessAdapterFactory;
-
 /// Factory that acquires the committed Runtime admission lease for the full
-/// lifetime of every resident Node Service; native processes use release identity.
+/// lifetime of every resident Node Service.
 pub struct RuntimeAwarePluginRuntimeServiceProcessFactory {
     authority: Arc<dyn CommittedRuntimeProvider>,
     resolver: Arc<dyn PluginRuntimeServiceModuleResolver>,
     limits: PluginRuntimeServiceProcessLimits,
     storage: Option<Arc<dyn PluginRuntimeServiceStoragePort>>,
-    allow_native: bool,
 }
 
 impl std::fmt::Debug for RuntimeAwarePluginRuntimeServiceProcessFactory {
@@ -550,11 +465,6 @@ impl std::fmt::Debug for RuntimeAwarePluginRuntimeServiceProcessFactory {
 }
 
 impl RuntimeAwarePluginRuntimeServiceProcessFactory {
-    /// Native executables are trusted OS processes, not sandboxed JavaScript.
-    pub fn with_native_plugins(mut self, allowed: bool) -> Self {
-        self.allow_native = allowed;
-        self
-    }
     pub fn new(
         authority: Arc<dyn CommittedRuntimeProvider>,
         resolver: Arc<dyn PluginRuntimeServiceModuleResolver>,
@@ -564,7 +474,6 @@ impl RuntimeAwarePluginRuntimeServiceProcessFactory {
             resolver,
             limits: PluginRuntimeServiceProcessLimits::default(),
             storage: None,
-            allow_native: false,
         }
     }
 
@@ -617,22 +526,13 @@ impl PluginRuntimeServiceProcessFactory for RuntimeAwarePluginRuntimeServiceProc
         launch: PluginRuntimeServiceLaunch,
     ) -> PluginRuntimePlatformResult<Arc<dyn PluginRuntimeServiceProcess>> {
         self.limits.validate()?;
-        if matches!(launch.spec.runtime, PluginServiceRuntimeFingerprint::Native { .. }) {
-            if !self.allow_native {
-                return Err(PluginRuntimePlatformError::ServiceUnavailable("Native plugins require explicit host opt-in".into()));
-            }
-            let mut factory = PluginRuntimeServiceProcessAdapterFactory::native(self.resolver.clone())
-                .with_limits(self.limits.clone())?;
-            if let Some(storage) = &self.storage { factory = factory.with_storage(storage.clone()); }
-            return factory.start(launch).await;
-        }
         let lease = self
             .authority
             .acquire_use(JavaScriptWorkKind::PluginServiceHost)
             .await
             .map_err(|error| PluginRuntimePlatformError::Runtime(error.to_string()))?;
         let runtime = lease.runtime();
-        let expected_runtime = PluginServiceRuntimeFingerprint::Node {
+        let expected_runtime = PluginServiceRuntimeFingerprint {
             runtime_installation_id: runtime.fingerprint.runtime_installation_id.clone(),
             runtime_target: runtime.fingerprint.runtime_target.clone(),
             runtime_executable_digest: runtime.fingerprint.executable_digest.clone(),
@@ -641,7 +541,7 @@ impl PluginRuntimeServiceProcessFactory for RuntimeAwarePluginRuntimeServiceProc
         if launch.spec.runtime != expected_runtime {
             return Err(PluginRuntimePlatformError::StaleServiceGeneration);
         }
-        let factory = PluginRuntimeServiceProcessAdapterFactory::new(
+        let factory = NodePluginRuntimeServiceProcessFactory::new(
             runtime.executable_path.clone(),
             Arc::clone(&self.resolver),
         )?
@@ -658,20 +558,17 @@ impl PluginRuntimeServiceProcessFactory for RuntimeAwarePluginRuntimeServiceProc
     }
 }
 
-impl std::fmt::Debug for PluginRuntimeServiceProcessAdapterFactory {
+impl std::fmt::Debug for NodePluginRuntimeServiceProcessFactory {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("PluginRuntimeServiceProcessAdapterFactory")
+            .debug_struct("NodePluginRuntimeServiceProcessFactory")
             .field("node_executable", &self.node_executable)
             .field("limits", &self.limits)
             .finish_non_exhaustive()
     }
 }
 
-impl PluginRuntimeServiceProcessAdapterFactory {
-    pub(crate) fn native(resolver: Arc<dyn PluginRuntimeServiceModuleResolver>) -> Self {
-        Self { node_executable: None, resolver, limits: Default::default(), storage: None }
-    }
+impl NodePluginRuntimeServiceProcessFactory {
     pub fn new(
         node_executable: impl Into<PathBuf>,
         resolver: Arc<dyn PluginRuntimeServiceModuleResolver>,
@@ -694,7 +591,7 @@ impl PluginRuntimeServiceProcessAdapterFactory {
             ))
         })?;
         let factory = Self {
-            node_executable: Some(node_executable),
+            node_executable,
             resolver,
             limits: PluginRuntimeServiceProcessLimits::default(),
             storage: None,
@@ -721,7 +618,7 @@ impl PluginRuntimeServiceProcessAdapterFactory {
     }
 
     fn validate_node_executable(&self) -> Result<(), PluginRuntimePlatformError> {
-        let node_executable = self.node_executable.as_ref().ok_or_else(|| PluginRuntimePlatformError::InvalidState("Expected Node executable".into()))?;
+        let node_executable = &self.node_executable;
         if !node_executable.is_absolute() {
             return Err(PluginRuntimePlatformError::InvalidState(
                 "Plugin Service Node executable must be absolute".into(),
@@ -746,7 +643,7 @@ impl PluginRuntimeServiceProcessAdapterFactory {
         spec: &ResolvedPluginServiceSpec,
     ) -> Result<(), PluginRuntimePlatformError> {
         self.validate_node_executable()?;
-        let bytes = tokio::fs::read(self.node_executable.as_ref().expect("validated Node path"))
+        let bytes = tokio::fs::read(&self.node_executable)
             .await
             .map_err(|error| {
                 PluginRuntimePlatformError::Runtime(format!(
@@ -754,10 +651,10 @@ impl PluginRuntimeServiceProcessAdapterFactory {
                 ))
             })?;
         let observed = digest_bytes(&bytes);
-        if &observed != spec.runtime.executable_digest() {
+        if observed != spec.runtime.runtime_executable_digest {
             return Err(PluginRuntimePlatformError::Runtime(format!(
                 "Plugin Service Node executable digest mismatch: expected {}, observed {}",
-                spec.runtime.executable_digest().as_ref(),
+                spec.runtime.runtime_executable_digest.as_ref(),
                 observed.as_ref()
             )));
         }
@@ -812,7 +709,7 @@ impl PluginRuntimeServiceProcessAdapterFactory {
 }
 
 #[async_trait]
-impl PluginRuntimeServiceProcessFactory for PluginRuntimeServiceProcessAdapterFactory {
+impl PluginRuntimeServiceProcessFactory for NodePluginRuntimeServiceProcessFactory {
     async fn start(
         &self,
         launch: PluginRuntimeServiceLaunch,
@@ -827,12 +724,7 @@ impl PluginRuntimeServiceProcessFactory for PluginRuntimeServiceProcessAdapterFa
                 "Plugin Service Host generation must be positive".into(),
             ));
         }
-        match (&self.node_executable, &launch.spec.runtime) {
-            (Some(_), PluginServiceRuntimeFingerprint::Node { .. }) => self.verify_runtime(&launch.spec).await?,
-            (None, PluginServiceRuntimeFingerprint::Native { native_target, .. })
-                if Some(*native_target) == nomifun_agent_contracts::NativePluginTarget::current() => {},
-            _ => return Err(PluginRuntimePlatformError::InvalidState("Service backend or native target does not match this host".into())),
-        }
+        self.verify_runtime(&launch.spec).await?;
         let module = self
             .resolver
             .resolve_module(&launch)
@@ -868,25 +760,13 @@ impl PluginRuntimeServiceProcessFactory for PluginRuntimeServiceProcessAdapterFa
             ))
         })?;
         let bootstrap_hex = hex::encode(bootstrap_json);
-        let executable = self.node_executable.as_ref().unwrap_or(&module);
-        let working_directory = service_process_working_directory(&module, executable)?;
-        let mut builder = ChildProcessBuilder::new(executable);
-        if self.node_executable.is_some() {
-            builder.arg("--input-type=module").arg("-e").arg(SERVICE_HOST_SCRIPT).arg(&bootstrap_hex);
-        } else {
-            // Native code is trusted OS code, not a sandbox. Still do not
-            // implicitly disclose host environment credentials to the child.
-            builder.env_clear().arg("--nomifun-plugin-service").arg(&bootstrap_hex);
-            for name in ["SystemRoot", "WINDIR", "TEMP", "TMP"] {
-                if let Some(value) = std::env::var_os(name) { builder.env(name, value); }
-            }
-            #[cfg(unix)] {
-                use std::os::unix::fs::PermissionsExt;
-                tokio::fs::set_permissions(&module, std::fs::Permissions::from_mode(0o500)).await
-                    .map_err(|error| PluginRuntimePlatformError::Runtime(format!("Native executable permissions: {error}")))?;
-            }
-        }
+        let working_directory = service_process_working_directory(&module, &self.node_executable)?;
+        let mut builder = ChildProcessBuilder::new(&self.node_executable);
         builder
+            .arg("--input-type=module")
+            .arg("-e")
+            .arg(SERVICE_HOST_SCRIPT)
+            .arg(&bootstrap_hex)
             .current_dir(working_directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1005,8 +885,8 @@ fn service_process_working_directory(
         use std::os::windows::ffi::OsStrExt;
 
         // CreateProcessW does not accept an extended-length `lpCurrentDirectory`.
-        // Node imports by verified absolute URL; native code receives its
-        // absolute module path. A short ancestor cwd preserves both identities.
+        // Node imports by verified absolute URL, so a short ancestor cwd does
+        // not weaken module identity or relative imports.
         if module_directory.as_os_str().encode_wide().count() >= 248 {
             return _node_executable
                 .ancestors().skip(1)
@@ -1096,7 +976,7 @@ struct ServiceResponseFrame {
     error: Option<ServiceWireError>,
 }
 
-// A stream may return JSON null after emitting its events. Missing `value`
+// A unary invocation may return JSON null. Missing `value`
 // remains a protocol error; serde's ordinary Option would conflate the two.
 fn deserialize_present_service_value<'de, D>(deserializer: D) -> Result<Option<StrictJsonValue>, D::Error>
 where
@@ -1118,28 +998,6 @@ fn service_response_keeps_null_distinct_from_missing_value() {
     frame.as_object_mut().unwrap().remove("value");
     let missing: ServiceResponseFrame = serde_json::from_value(frame).unwrap();
     assert_eq!(missing.value, None);
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ServiceEventFrame {
-    kind: String,
-    protocol_version: String,
-    host_generation: u64,
-    request_id: String,
-    call_id: String,
-    sequence: u64,
-    value: StrictJsonValue,
-}
-
-#[derive(Serialize)]
-struct ServiceEventAck<'a> {
-    kind: &'static str,
-    protocol_version: &'static str,
-    host_generation: u64,
-    request_id: &'a str,
-    call_id: &'a str,
-    sequence: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1179,7 +1037,6 @@ struct ServiceStorageWireError {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum ServiceInboundFrame {
-    Event(ServiceEventFrame),
     Storage(ServiceStorageRequestFrame),
     Response(ServiceResponseFrame),
 }
@@ -1204,7 +1061,6 @@ struct InvokeFrame<'a> {
     operation: &'static str,
     method: &'a str,
     payload: &'a StrictJsonValue,
-    stream: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1252,15 +1108,6 @@ struct PendingRequest {
     cancellation: Option<PluginRuntimeCallCancellation>,
     deadline: Instant,
     reply: PendingReply,
-    events: Option<PendingEvents>,
-}
-
-struct PendingEvents {
-    sender: mpsc::Sender<StrictJsonValue>,
-    next_sequence: u64,
-    // At most one frame awaits local capacity. No ACK is sent until delivery,
-    // so a conforming Node emitter cannot accumulate a second frame.
-    buffered: Option<StrictJsonValue>,
 }
 
 struct PendingStorageRequest {
@@ -1358,11 +1205,6 @@ impl ServiceProcessActor {
                 }
                 event = self.reader_events.recv() => {
                     match event {
-                        Some(ReaderEvent::Frame(ServiceInboundFrame::Event(frame))) => {
-                            if let Some(exit) = self.handle_event(frame).await {
-                                return exit;
-                            }
-                        }
                         Some(ReaderEvent::Frame(ServiceInboundFrame::Response(frame))) => {
                             if let Some(exit) = self.handle_frame(frame) {
                                 return exit;
@@ -1399,22 +1241,12 @@ impl ServiceProcessActor {
                     let abandoned = self.pending.iter().filter_map(|(id, pending)| {
                         match &pending.reply {
                             PendingReply::Invoke(reply) if reply.is_closed()
-                                || pending.cancellation.as_ref().is_some_and(|c| c.is_canceled())
-                                || pending.events.as_ref().is_some_and(|events| events.sender.is_closed()) => Some(id.clone()),
+                                || pending.cancellation.as_ref().is_some_and(|c| c.is_canceled()) => Some(id.clone()),
                             _ => None,
                         }
                     }).collect::<Vec<_>>();
                     for request_id in abandoned {
                         if let Some(exit) = self.cancel_request(&request_id).await {
-                            return exit;
-                        }
-                    }
-                    let buffered = self.pending.iter().filter_map(|(id, pending)| {
-                        pending.events.as_ref().is_some_and(|events| events.buffered.is_some())
-                            .then(|| id.clone())
-                    }).collect::<Vec<_>>();
-                    for request_id in buffered {
-                        if let Some(exit) = self.flush_event(&request_id).await {
                             return exit;
                         }
                     }
@@ -1446,8 +1278,7 @@ impl ServiceProcessActor {
                     return None;
                 }
                 let call_id = invocation.call_id.as_ref().to_owned();
-                if reply.is_closed() || cancellation.is_canceled()
-                    || invocation.events.as_ref().is_some_and(|events| events.is_closed()) {
+                if reply.is_closed() || cancellation.is_canceled() {
                     cancellation.cancel();
                     let _ = reply.send(Err(PluginRuntimeServiceProcessError::Rejected(
                         "Plugin Service call canceled".into(),
@@ -1470,7 +1301,6 @@ impl ServiceProcessActor {
                     operation: "invoke",
                     method: &invocation.method,
                     payload: &invocation.payload,
-                    stream: invocation.events.is_some(),
                 };
                 if let Err(error) = write_json_line(&mut self.stdin, &frame).await {
                     let _ = reply.send(Err(PluginRuntimeServiceProcessError::Crashed(error)));
@@ -1487,9 +1317,6 @@ impl ServiceProcessActor {
                         cancellation: Some(cancellation),
                         deadline: Instant::now() + self.limits.request_timeout,
                         reply: PendingReply::Invoke(reply),
-                        events: invocation.events.map(|sender| PendingEvents {
-                            sender, next_sequence: 1, buffered: None,
-                        }),
                     },
                 );
                 None
@@ -1523,7 +1350,6 @@ impl ServiceProcessActor {
                         cancellation: None,
                         deadline: Instant::now() + self.limits.shutdown_timeout,
                         reply: PendingReply::Stop,
-                        events: None,
                     },
                 );
                 None
@@ -1566,73 +1392,8 @@ impl ServiceProcessActor {
             cancellation: None,
             deadline: pending.deadline,
             reply: PendingReply::Cancel,
-            events: None,
         });
         None
-    }
-
-    async fn handle_event(&mut self, frame: ServiceEventFrame) -> Option<ActorExit> {
-        if frame.kind != "event"
-            || frame.protocol_version != SERVICE_PROTOCOL_VERSION
-            || frame.host_generation != self.fence.host_generation
-        {
-            return Some(ActorExit::Failed("Plugin Service event identity mismatch".into()));
-        }
-        let Some(pending) = self.pending.get_mut(&frame.request_id) else {
-            // Frames written before cancellation may already be in the pipe.
-            if self.retired_requests.contains_key(&frame.request_id) {
-                return None;
-            }
-            return Some(ActorExit::Failed("Plugin Service emitted an unknown event".into()));
-        };
-        if pending.cancellation.as_ref().is_some_and(|cancel| cancel.is_canceled())
-            || matches!(&pending.reply, PendingReply::Invoke(reply) if reply.is_closed())
-        {
-            return self.cancel_request(&frame.request_id).await;
-        }
-        let Some(events) = pending.events.as_mut() else {
-            return Some(ActorExit::Failed("Plugin Service emitted an event for a unary call".into()));
-        };
-        if pending.call_id.as_deref() != Some(frame.call_id.as_str())
-            || frame.sequence != events.next_sequence
-            || events.buffered.is_some()
-        {
-            return Some(ActorExit::Failed("Plugin Service event order or call identity mismatch".into()));
-        }
-        events.buffered = Some(frame.value);
-        self.flush_event(&frame.request_id).await
-    }
-
-    async fn flush_event(&mut self, request_id: &str) -> Option<ActorExit> {
-        let pending = self.pending.get_mut(request_id)?;
-        let events = pending.events.as_mut()?;
-        let value = events.buffered.take()?;
-        match events.sender.try_send(value) {
-            Ok(()) => {
-                let sequence = events.next_sequence;
-                let Some(next) = sequence.checked_add(1) else {
-                    return Some(ActorExit::Failed("Plugin Service event sequence exhausted".into()));
-                };
-                events.next_sequence = next;
-                let ack = ServiceEventAck {
-                    kind: "event_ack",
-                    protocol_version: SERVICE_PROTOCOL_VERSION,
-                    host_generation: self.fence.host_generation,
-                    request_id,
-                    call_id: pending.call_id.as_deref().expect("event call has an identity"),
-                    sequence,
-                };
-                if let Err(error) = write_json_line(&mut self.stdin, &ack).await {
-                    return Some(ActorExit::Failed(error));
-                }
-                None
-            }
-            Err(mpsc::error::TrySendError::Full(value)) => {
-                events.buffered = Some(value);
-                None
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => self.cancel_request(request_id).await,
-        }
     }
 
     fn handle_frame(&mut self, frame: ServiceResponseFrame) -> Option<ActorExit> {
@@ -1652,9 +1413,6 @@ impl ServiceProcessActor {
                 "Plugin Service emitted an unknown response".into(),
             ));
         };
-        if pending.events.as_ref().is_some_and(|events| events.buffered.is_some()) {
-            return Some(ActorExit::Failed("Plugin Service completed before event delivery".into()));
-        }
         if let Some(call_id) = &pending.call_id {
             if frame.call_id.as_deref() != Some(call_id.as_str()) {
                 return Some(ActorExit::Failed(
@@ -2039,9 +1797,6 @@ async fn read_service_frames(
             Ok(frame) => match frame.get("kind").and_then(serde_json::Value::as_str) {
                 Some("response") => serde_json::from_value::<ServiceResponseFrame>(frame)
                     .map(|frame| ReaderEvent::Frame(ServiceInboundFrame::Response(frame)))
-                    .unwrap_or_else(|error| ReaderEvent::Failed(error.to_string())),
-                Some("event") => serde_json::from_value::<ServiceEventFrame>(frame)
-                    .map(|frame| ReaderEvent::Frame(ServiceInboundFrame::Event(frame)))
                     .unwrap_or_else(|error| ReaderEvent::Failed(error.to_string())),
                 Some("storage_request") => {
                     serde_json::from_value::<ServiceStorageRequestFrame>(frame)

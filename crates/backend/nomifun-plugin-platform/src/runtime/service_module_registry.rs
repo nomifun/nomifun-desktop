@@ -175,21 +175,12 @@ impl PluginRuntimeServiceModuleResolver for PluginRuntimeServiceModuleRegistry {
             .spec
             .validate()
             .map_err(PluginRuntimePlatformError::Contract)?;
-        let path = self.resolve_exact(
+        self.resolve_exact(
             &launch.spec.plugin_product_id,
             &launch.spec.release.release_digest,
             &launch.spec.service_module_digest,
         )
-        .await?;
-        let expected = match &launch.spec.runtime {
-            nomifun_agent_contracts::PluginServiceRuntimeFingerprint::Node { .. } => "main.mjs",
-            nomifun_agent_contracts::PluginServiceRuntimeFingerprint::Native { native_target, .. } =>
-                Path::new(native_target.entrypoint()).file_name().and_then(|s| s.to_str()).expect("fixed native entrypoint"),
-        };
-        if path.file_name().and_then(|name| name.to_str()) != Some(expected) {
-            return Err(PluginRuntimePlatformError::InvalidState("Service entrypoint does not match execution backend".into()));
-        }
-        Ok(path)
+        .await
     }
 }
 
@@ -261,7 +252,7 @@ fn validate_module_path(
             "Plugin Service module path escaped the registry root".into(),
         ));
     }
-    if !matches!(canonical.file_name().and_then(|name| name.to_str()), Some("main.mjs" | "plugin.exe" | "plugin"))
+    if canonical.file_name().and_then(|name| name.to_str()) != Some("main.mjs")
         || canonical
             .parent()
             .and_then(Path::file_name)
@@ -366,7 +357,7 @@ mod tests {
                 nomifun_agent_contracts::PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
             sdk_contract_version:
                 nomifun_agent_contracts::PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
-            runtime: nomifun_agent_contracts::PluginServiceRuntimeFingerprint::Node {
+            runtime: nomifun_agent_contracts::PluginServiceRuntimeFingerprint {
                 runtime_installation_id: RuntimeInstallationId::from("node-installation"),
                 runtime_target: RuntimeTarget::from("windows-x86_64"),
                 runtime_executable_digest: digest("node"),
@@ -515,6 +506,36 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(outside_error, PluginRuntimePlatformError::InvalidState(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_paths_other_than_fixed_service_entrypoint() {
+        let temp = TempDir::new().unwrap();
+        let registry = PluginRuntimeServiceModuleRegistry::new(temp.path()).unwrap();
+        for relative_path in [
+            "release-a/service/plugin",
+            "release-a/service/plugin.exe",
+            "release-a/service/main.js",
+            "release-a/other/main.mjs",
+        ] {
+            let path = temp.path().join(relative_path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "export async function start() {}").unwrap();
+
+            let error = registry
+                .register(
+                    PluginProductId::from("plugin-a"),
+                    digest("release-a"),
+                    path,
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                PluginRuntimePlatformError::InvalidState(message)
+                    if message == "Plugin Service module path must end with service/main.mjs"
+            ));
+        }
     }
 
     #[cfg(unix)]

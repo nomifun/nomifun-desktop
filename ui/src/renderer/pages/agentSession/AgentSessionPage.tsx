@@ -9,6 +9,8 @@ import type { AgentUiContribution, PluginRuntimeSurfaceLaunchDescriptor } from '
 import { agentUiChoiceKey as choiceKey } from '@/common/utils/agentUiChoice';
 import PluginRuntimeSurfacePanel from '../plugins/runtime/PluginRuntimeSurfacePanel';
 import styles from './AgentSessionPage.module.css';
+import { useAgentUiAvailable } from '@/renderer/hooks/agent/useAgentUiAvailable';
+import { useAgentUiBindingCache } from '@/renderer/hooks/agent/useAgentUiBindingCache';
 
 const BuiltinAgentSessionPage = React.lazy(() => import('./BuiltinAgentSessionPage'));
 
@@ -22,10 +24,18 @@ async function closeView(surface: PluginRuntimeSurfaceLaunchDescriptor) {
 type ViewState = { selection: AgentUiContribution; surface?: PluginRuntimeSurfaceLaunchDescriptor; failed?: boolean };
 
 /** Only presentation is selected here. The backend retains all Session state. */
-export function AgentSessionViewHost({ sessionId, children, onDraftCreated }: {
+export function AgentSessionViewHost(props: {
+  sessionId: string; children: React.ReactNode; onDraftCreated?: (draftId: string) => void;
+}) {
+  const available = useAgentUiAvailable();
+  return available ? <ExperimentalAgentSessionViewHost {...props} /> : <>{props.children}</>;
+}
+
+function ExperimentalAgentSessionViewHost({ sessionId, children, onDraftCreated }: {
   sessionId: string; children: React.ReactNode; onDraftCreated?: (draftId: string) => void;
 }) {
   const { t } = useTranslation();
+  const updateBindingCache = useAgentUiBindingCache();
   const { data: choices = [], error: catalogError, isLoading: catalogLoading, mutate } = useSWR(
     'agent-catalog/ui/agent-session', () => agentPlatform.agentUiContributions.invoke()
   );
@@ -63,9 +73,6 @@ export function AgentSessionViewHost({ sessionId, children, onDraftCreated }: {
     choice.expected_release_digest === selected.expected_release_digest);
   const remembered = preference?.binding.selection;
   const rememberedAvailable = !remembered || choices.some(choice => choiceKey(choice) === choiceKey(remembered));
-  // An empty server catalog includes hosts where experimental Agent UI is off.
-  // Keep recovery for saved/active views, but do not advertise unavailable setup.
-  const showViewControls = choices.length > 0 || !!selected || !!remembered || !!catalogError || !!preferenceError;
 
   useEffect(() => {
     // Resolve once per route mount. A refresh/late save must not replace a view
@@ -126,6 +133,7 @@ export function AgentSessionViewHost({ sessionId, children, onDraftCreated }: {
       const next = await agentPlatform.putPresetUiBinding.invoke({ preset_id: preference.preset_id, request: {
         expected_binding_version: preference.binding.binding_version, selection,
       } });
+      await updateBindingCache(next);
       if (!mounted.current) return;
       await refreshPreference(next, false);
       if (!mounted.current) return;
@@ -159,7 +167,7 @@ export function AgentSessionViewHost({ sessionId, children, onDraftCreated }: {
   };
 
   return <section className={styles.viewHost} aria-label={t('agentSettings.view.title')}>
-    {showViewControls && <div className={styles.viewControls}>
+    <div className={styles.viewControls}>
       <label htmlFor='agent-session-view-choice'>{t('agentSettings.view.title')}</label>
       <select id='agent-session-view-choice' value={candidate} onChange={event => setCandidate(event.target.value)}>
         <option value=''>{t('agentSettings.view.choose')}</option>
@@ -173,11 +181,11 @@ export function AgentSessionViewHost({ sessionId, children, onDraftCreated }: {
         if (choice) void remember(choice);
       }}>{t('agentSettings.view.remember')}</Button>
       <Button disabled={!remembered || savingPreference} onClick={() => void remember(null)}>{t('agentSettings.view.clearDefault')}</Button>
-      {onDraftCreated && choices.length > 0 && <Button loading={creatingTemplate} disabled={creatingTemplate} onClick={() => void createTemplate()}>{t('agentSettings.view.createTemplate')}</Button>}
+      {onDraftCreated && <Button loading={creatingTemplate} disabled={creatingTemplate} onClick={() => void createTemplate()}>{t('agentSettings.view.createTemplate')}</Button>}
       <p className={styles.viewHint}>{t('agentSettings.view.consent')}</p>
       {preference && <p className={styles.viewHint}>{t('agentSettings.view.defaultConsent', { name: preference.display_name })}</p>}
       {selected && <span>{t('agentSettings.view.current', { name: selected.display_name })}</span>}
-    </div>}
+    </div>
     {catalogError && <Alert type='warning' content={t('agentSettings.view.catalogFailed')} />}
     {preferenceError && <Alert type='warning' content={t('agentSettings.view.defaultFailed')} />}
     {saveError && <Alert type='warning' content={t('agentSettings.view.defaultSaveFailed')} />}

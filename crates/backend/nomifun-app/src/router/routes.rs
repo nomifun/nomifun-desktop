@@ -59,8 +59,6 @@ use super::model_failover::{ModelFailoverRouterState, model_failover_routes};
 use super::state::{ModuleStates, try_build_module_states, build_ws_state};
 use super::trace::with_access_log;
 
-#[path = "plugin_ui_events.rs"]
-mod plugin_ui_events;
 
 struct GatewayCatalogAdmission {
     control_plane: Arc<AgentControlPlane>,
@@ -298,18 +296,6 @@ pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router>
         tokio::select! {
             _ = shutdown.cancelled() => {}
             _ = forward_user_events(user_event_rx, ws_manager) => {}
-        }
-    }));
-    // Independent read-only observer: slow view projection cannot delay the
-    // normal conversation stream. It shares the bus and existing Surface grants.
-    let view_events = services.event_bus.subscribe_user();
-    let view_manager = services.ws_manager.clone();
-    let view_application = services.plugin_runtime.clone();
-    let shutdown = services.background_shutdown.clone();
-    services.register_background_task(tokio::spawn(async move {
-        tokio::select! {
-            _ = shutdown.cancelled() => {}
-            _ = plugin_ui_events::forward(view_events, view_manager, view_application) => {}
         }
     }));
     match services.knowledge_service.drain_pending_tree_events().await {

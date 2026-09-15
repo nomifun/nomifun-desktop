@@ -6,7 +6,6 @@
 
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
-import { createPluginAgentSessionStreamRelay } from '@/common/utils/pluginAgentSessionStream';
 import type {
   PluginRuntimeBridgeKvRequest,
   PluginRuntimeBridgeRequest,
@@ -184,7 +183,6 @@ const PluginRuntimeSurfacePanel: React.FC<PluginRuntimeSurfacePanelProps> = ({
   const bridgePortRef = useRef<MessagePort | null>(null);
   const inFlightCallsRef = useRef<Set<string> | null>(null);
   const handshakeCleanupRef = useRef<(() => void) | null>(null);
-  const streamCleanupRef = useRef<(() => void) | null>(null);
   const closingRef = useRef(closing);
   const assetPath = useMemo(
     () => pluginRuntimeSurfaceAssetPath(descriptor),
@@ -217,8 +215,6 @@ const PluginRuntimeSurfacePanel: React.FC<PluginRuntimeSurfacePanelProps> = ({
 
   const closeBridge = useCallback(() => {
     clearHandshake();
-    streamCleanupRef.current?.();
-    streamCleanupRef.current = null;
     const port = bridgePortRef.current;
     bridgePortRef.current = null;
     if (port) {
@@ -241,21 +237,10 @@ const PluginRuntimeSurfacePanel: React.FC<PluginRuntimeSurfacePanelProps> = ({
       const channel = new MessageChannel();
       const hostPort = channel.port1;
       const inFlightCalls = new Set<string>();
-      const stream = createPluginAgentSessionStreamRelay(hostPort, descriptor);
-      const stopEvents = ipcBridge.pluginRuntimes.agentSessionStream.on(value => {
-        if (!closingRef.current) stream.stream(value);
-      });
-      const resync = () => { if (!closingRef.current) stream.resync(); };
-      const stopResync = ipcBridge.pluginRuntimes.agentSessionResync.on(resync);
-      const stopReconnect = ipcBridge.pluginRuntimes.reconnected.on(resync);
-      streamCleanupRef.current = () => {
-        stream.close(); stopEvents(); stopResync(); stopReconnect();
-      };
       bridgePortRef.current = hostPort;
       inFlightCallsRef.current = inFlightCalls;
       hostPort.onmessage = (event: MessageEvent<unknown>) => {
         if (bridgePortRef.current !== hostPort) return;
-        if (stream.receive(event.data)) return;
         const raw = asObject(event.data);
         const request = parseBridgeRequest(event.data);
         const rawCallId =

@@ -6994,19 +6994,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nomifun-plugin-sdk"
-version = "0.7.6"
-dependencies = [
- "async-trait",
- "hex",
- "nomifun-agent-contracts",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "nomifun-public"
 version = "0.7.6"
 dependencies = [
