@@ -54,7 +54,7 @@ const DEFAULT_EDIT_DRAFT: CreativeAssetEditDraft = {
 const DEFAULT_RENAME_DRAFT: CreativeCollectionRenameDraft = { from: '', to: '' };
 
 const popupContainer = (): HTMLElement =>
-  document.getElementById('creative-studio-portal-root') ?? document.body;
+  document.getElementById('resource-page-portal-root') ?? document.body;
 
 const errorText = (reason: unknown): string =>
   reason instanceof Error ? reason.message : String(reason);

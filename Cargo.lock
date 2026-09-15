@@ -6119,6 +6119,7 @@ dependencies = [
  "nomifun-chat-model-broker",
  "nomifun-coding-engine",
  "nomifun-common",
+ "nomifun-creation",
  "nomifun-db",
  "nomifun-engine-core",
  "nomifun-js-host",
@@ -6473,6 +6474,7 @@ dependencies = [
  "nomifun-api-types",
  "nomifun-auth",
  "nomifun-common",
+ "nomifun-creation",
  "nomifun-db",
  "nomifun-file",
  "nomifun-knowledge",
@@ -6928,6 +6930,7 @@ version = "0.7.6"
 dependencies = [
  "nomi-process-runtime",
  "reqwest 0.12.28",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

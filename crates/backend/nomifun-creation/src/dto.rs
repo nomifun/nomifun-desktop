@@ -17,9 +17,11 @@ use nomifun_common::generate_id;
 /// Canonical persisted task state used by the service and tagged wire adapter.
 #[derive(Debug, Clone, Serialize)]
 pub struct CreationTask {
+    pub conversation_id: Option<String>,
+    pub message_id: Option<String>,
     pub creation_task_id: String,
     pub canvas_id: Option<String>,
-    pub workbench_kind: Option<String>,
+
     pub template_id: Option<String>,
     pub template_run_id: Option<String>,
     pub template_step_id: Option<String>,
@@ -97,17 +99,25 @@ impl TryFrom<CreationTaskRow> for CreationTask {
                 row.creation_task_id
             )));
         }
-        match (
+        let conversation_owner = row.conversation_id.is_some() && row.message_id.is_some();
+        if row.conversation_id.is_some() != row.message_id.is_some() {
+            return Err(AppError::Internal("creation task has an incomplete conversation owner".into()));
+        }
+        if conversation_owner {
+            nomifun_common::ConversationId::parse(row.conversation_id.as_deref().unwrap()).map_err(|e| corrupt_id("conversation_id", e))?;
+            nomifun_common::MessageId::parse(row.message_id.as_deref().unwrap()).map_err(|e| corrupt_id("message_id", e))?;
+            if row.project_id.is_some() || row.node_id.is_some() || row.template_id.is_some() || row.template_run_id.is_some() || row.template_step_id.is_some() {
+                return Err(AppError::Internal("creation task has multiple owners".into()));
+            }
+        } else { match (
             row.project_id.as_ref(),
-            row.workbench_kind.as_deref(),
             row.template_id.as_ref(),
             row.template_run_id.as_ref(),
             row.template_step_id.as_ref(),
             row.node_id.as_ref(),
         ) {
-            (Some(_), None, None, None, None, Some(_))
-            | (_, Some("image" | "video" | "audio"), None, None, None, None)
-            | (None, None, Some(_), Some(_), Some(_), None) => {}
+            (Some(_), None, None, None, Some(_))
+            | (None, Some(_), Some(_), Some(_), None) => {}
             _ => {
                 return Err(AppError::Internal(format!(
                     "creation task {} does not have one canonical Creative Studio owner",
@@ -115,9 +125,10 @@ impl TryFrom<CreationTaskRow> for CreationTask {
                 )));
             }
         }
+        }
         if row.deleted_at.is_some_and(|deleted_at| {
             deleted_at < row.submitted_at
-                || row.workbench_kind.is_none()
+                || !conversation_owner
                 || !matches!(row.status.as_str(), "failed" | "canceled" | "succeeded")
         }) {
             return Err(AppError::Internal(format!(
@@ -127,10 +138,11 @@ impl TryFrom<CreationTaskRow> for CreationTask {
         }
 
         Ok(Self {
+            conversation_id: row.conversation_id,
+            message_id: row.message_id,
             creation_task_id: row.creation_task_id,
             // The repository stores the canvas owner in its project_id column.
             canvas_id: row.project_id,
-            workbench_kind: row.workbench_kind,
             template_id: row.template_id,
             template_run_id: row.template_run_id,
             template_step_id: row.template_step_id,
@@ -156,12 +168,10 @@ impl TryFrom<CreationTaskRow> for CreationTask {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CreativeCreationTaskOwner {
+    ConversationTurn { conversation_id: String, message_id: String },
     CanvasNode {
         canvas_id: String,
         node_id: String,
-    },
-    StandaloneWorkbench {
-        workbench_kind: String,
     },
     TemplateStep {
         template_id: String,
@@ -193,56 +203,26 @@ pub struct CreativeCreationTask {
     pub deleted_at: Option<TimestampMs>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct CreativeCreationTaskPage {
-    pub items: Vec<CreativeCreationTask>,
-    pub next_cursor: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CreativeCreationTaskRetireResult {
-    pub retired_task_ids: Vec<String>,
-}
-
-impl CreativeCreationTaskPage {
-    pub fn try_new(
-        tasks: Vec<CreationTask>,
-        next_cursor: Option<String>,
-    ) -> Result<Self, AppError> {
-        Ok(Self {
-            items: tasks
-                .into_iter()
-                .map(CreativeCreationTask::try_from)
-                .collect::<Result<_, _>>()?,
-            next_cursor,
-        })
-    }
-}
-
 impl TryFrom<CreationTask> for CreativeCreationTask {
     type Error = AppError;
 
     fn try_from(task: CreationTask) -> Result<Self, Self::Error> {
-        let owner = match (
+        let owner = if let (Some(conversation_id), Some(message_id)) = (task.conversation_id, task.message_id) {
+            CreativeCreationTaskOwner::ConversationTurn { conversation_id, message_id }
+        } else { match (
             task.canvas_id,
-            task.workbench_kind,
             task.template_id,
             task.template_run_id,
             task.template_step_id,
             task.node_id,
         ) {
-            (Some(canvas_id), None, None, None, None, Some(node_id)) => {
+            (Some(canvas_id), None, None, None, Some(node_id)) => {
                 CreativeCreationTaskOwner::CanvasNode {
                     canvas_id,
                     node_id,
                 }
             }
-            (_, Some(workbench_kind), None, None, None, None) => {
-                CreativeCreationTaskOwner::StandaloneWorkbench {
-                    workbench_kind,
-                }
-            }
-            (None, None, Some(template_id), Some(template_run_id), Some(template_step_id), None) => {
+            (None, Some(template_id), Some(template_run_id), Some(template_step_id), None) => {
                 CreativeCreationTaskOwner::TemplateStep {
                     template_id,
                     template_run_id,
@@ -255,14 +235,18 @@ impl TryFrom<CreationTask> for CreativeCreationTask {
                     task.creation_task_id
                 )));
             }
-        };
+        }};
+        let mut params = task.params;
+        if let Some(object) = params.as_object_mut() {
+            object.retain(|key, _| !key.starts_with("_nomifun"));
+        }
         Ok(Self {
             creation_task_id: task.creation_task_id,
             owner,
             provider_id: task.provider_id,
             model: task.model,
             capability: task.capability,
-            params: task.params,
+            params,
             inputs: task.inputs,
             status: task.status,
             error: task.error,
@@ -292,9 +276,11 @@ mod tests {
         let provider_id = ProviderId::new().into_string();
         let asset_id = WorkshopAssetId::new().into_string();
         let row = CreationTaskRow {
+            conversation_id: None,
+            message_id: None,
             creation_task_id: creation_task_id.clone(),
             project_id: Some(canvas_id.clone()),
-            workbench_kind: None,
+
             template_id: None,
             template_run_id: None,
             template_step_id: None,
@@ -334,63 +320,15 @@ mod tests {
         assert!(canonical["owner"].get("project_id").is_none());
     }
 
-    #[test]
-    fn standalone_owner_and_ordered_inputs_round_trip_without_guessing() {
-        let input_asset_id = WorkshopAssetId::new().into_string();
-        let row = CreationTaskRow {
-            creation_task_id: generate_id(),
-            project_id: None,
-            workbench_kind: Some("video".into()),
-            template_id: None,
-            template_run_id: None,
-            template_step_id: None,
-            node_id: None,
-            provider_id: ProviderId::new().into_string(),
-            model: "video-model".into(),
-            capability: "i2v".into(),
-            params: r#"{"prompt":"Aurora","seconds":5}"#.into(),
-            input_bindings: Some(
-                serde_json::json!([{
-                    "asset_id": input_asset_id,
-                    "kind": "image",
-                    "role": "first_frame"
-                }])
-                .to_string(),
-            ),
-            status: "failed".into(),
-            error: Some(r#"{"kind":"provider_error","message":"failed"}"#.into()),
-            result_asset_ids: "[]".into(),
-            remote_task_id: None,
-            attempt: 1,
-            submitted_at: 1,
-            started_at: Some(2),
-            finished_at: Some(3),
-            deleted_at: Some(3),
-        };
-        let task = CreationTask::try_from(row).unwrap();
-        assert_eq!(task.inputs.as_ref().unwrap()[0].asset_id, input_asset_id);
-        let page = CreativeCreationTaskPage::try_new(
-            vec![task],
-            Some("3:0190f5fe-7c00-7a00-8000-000000000001".into()),
-        )
-        .unwrap();
-        let wire = serde_json::to_value(page).unwrap();
-        assert_eq!(wire["items"][0]["owner"]["kind"], "standalone_workbench");
-        assert!(wire["items"][0]["owner"].get("project_id").is_none());
-        assert_eq!(wire["items"][0]["owner"]["workbench_kind"], "video");
-        assert_eq!(wire["items"][0]["inputs"][0]["asset_id"], input_asset_id);
-        assert_eq!(wire["items"][0]["inputs"][0]["kind"], "image");
-        assert_eq!(wire["items"][0]["inputs"][0]["role"], "first_frame");
-        assert_eq!(wire["items"][0]["deleted_at"], 3);
-        assert!(wire["next_cursor"].as_str().is_some());
-    }
 
     #[test]
     fn succeeded_without_artifacts_fails_closed() {
         let row = CreationTaskRow {
+            conversation_id: None,
+            message_id: None,
             creation_task_id: generate_id(),
             project_id: Some(CreativeStudioCanvasId::new().into_string()),
-            workbench_kind: None,
+
             template_id: None,
             template_run_id: None,
             template_step_id: None,
@@ -427,9 +365,11 @@ mod tests {
             "0190f5fe-7c00-7a00-8000-000000000001 ",
         ] {
             let row = CreationTaskRow {
+                conversation_id: None,
+                message_id: None,
                 creation_task_id: creation_task_id.into(),
                 project_id: Some(CreativeStudioCanvasId::new().into_string()),
-                workbench_kind: None,
+
                 template_id: None,
                 template_run_id: None,
                 template_step_id: None,

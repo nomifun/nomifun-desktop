@@ -40,7 +40,8 @@ fn required_chat_features<'a>(
         .into_iter()
         .filter_map(|capability_id| match capability_id {
             "llm.vision" => Some(ChatRouteFeature::ImageInput),
-            "web.search" => Some(ChatRouteFeature::WebSearch),
+            // Web search is an independently resolved tool, not a required
+            // serializer feature of the conversation's selected Chat model.
             _ => None,
         })
         .collect()
@@ -464,6 +465,7 @@ impl AgentControlPlane {
                 "select a model or provide an explicit route, not both"));
         }
         if uses_default_route
+            && !nomifun_agent_contracts::is_direct_creation_agent(seed.enabled_capabilities.iter().map(|capability| capability.id.as_ref()))
             && let Some(record) =
                 match request.model.as_ref() {
                     Some(model) => Some(
@@ -517,8 +519,11 @@ impl AgentControlPlane {
                 ).await else {
                     continue;
                 };
-                let existing = wire_cast(&revision.payload)?;
-                return editor_response(preset, Some(revision), existing, None);
+                // Payload equality is only a cache lookup. Re-run the formal
+                // compiler so bundled schema/provenance changes append a new
+                // immutable revision before this official template is launched.
+                self.refresh_session_configuration(owner, &preset, &revision, Some(template_key)).await?;
+                return self.editor(owner, preset.preset.preset_id.as_ref(), None).await;
             }
         }
         self.create_configuration_with_initial_revision(
@@ -564,6 +569,9 @@ impl AgentControlPlane {
         let _guard = self.template_launch_lock.lock().await;
         let source = self.owned_preset(owner, preset_id).await?;
         let revision = self.current_revision(&source).await?.ok_or_else(|| not_found("AgentPresetRevision"))?;
+        if nomifun_agent_contracts::is_direct_creation_agent(revision.payload.enabled_capabilities.iter().map(|selection| selection.capability.id.as_ref())) {
+            return self.resolve_agent_session_binding_locked(owner, preset_id).await;
+        }
         let source_snapshot = self.current_snapshot(Some(&revision)).await?;
         if source_snapshot.is_none() {
             return Err(ControlPlaneError::canonical("CAPABILITY_NOT_MATERIALIZED",
@@ -583,7 +591,7 @@ impl AgentControlPlane {
         payload.model_route_refs.insert(CHAT_MODEL_TASK.into(), route.primary.model_route_id.clone());
         payload.chat_route_records.insert(CHAT_MODEL_TASK.into(), route);
         if template_launch_payload_matches(&revision.payload, &payload, true) {
-            return self.resolve_agent_session_binding(owner, preset_id).await;
+            return self.resolve_agent_session_binding_locked(owner, preset_id).await;
         }
         for existing in self.store.list_presets(owner).await? {
             let Some((_saved, snapshot)) = self.reusable_session_configuration(
@@ -592,14 +600,14 @@ impl AgentControlPlane {
             if Some(snapshot.content.required_runtime_profile)
                 == source_snapshot.as_ref().map(|value| value.content.required_runtime_profile)
             {
-                return self.resolve_agent_session_binding(owner, existing.preset.preset_id.as_ref()).await;
+                return self.resolve_agent_session_binding_locked(owner, existing.preset.preset_id.as_ref()).await;
             }
         }
         let prepared = self.create_configuration_with_initial_revision(
             owner, AgentPresetId::from(Uuid::now_v7().to_string()), source.preset.display_name,
             source.preset.description, wire_cast(&payload)?, None, true, source_snapshot.as_ref(),
         ).await?;
-        self.resolve_agent_session_binding(owner, &prepared.preset.preset_id).await
+        self.resolve_agent_session_binding_locked(owner, &prepared.preset.preset_id).await
     }
 
     async fn resolve_default_chat_route(
@@ -659,7 +667,8 @@ impl AgentControlPlane {
         owner: &UserId,
         mut document: nomifun_api_types::AgentPresetDocumentDto,
     ) -> Result<nomifun_api_types::AgentPresetDocumentDto, ControlPlaneError> {
-        if document.model_route_refs.contains_key(CHAT_MODEL_TASK)
+        if nomifun_agent_contracts::is_direct_creation_agent(document.enabled_capabilities.iter().map(|selection| selection.capability.id.as_str()))
+            || document.model_route_refs.contains_key(CHAT_MODEL_TASK)
             || document.chat_route_records.contains_key(CHAT_MODEL_TASK)
         {
             return Ok(document);
@@ -1031,13 +1040,24 @@ impl AgentControlPlane {
     }
 
     /// Freeze the authenticated owner's current stable Preset revision into a
-    /// Session binding using only the persisted immutable Snapshot.
+    /// Session binding. Hidden compilation caches are refreshed before a new
+    /// binding; personal presets and historical bindings remain immutable.
     pub async fn resolve_agent_session_binding(
         &self,
         owner: &UserId,
         preset_id: &str,
     ) -> Result<AgentBindingValueDto, ControlPlaneError> {
-        let stored = self
+        let _guard = self.template_launch_lock.lock().await;
+        self.resolve_agent_session_binding_locked(owner, preset_id).await
+    }
+
+    /// The caller already owns template_launch_lock (including model variants).
+    async fn resolve_agent_session_binding_locked(
+        &self,
+        owner: &UserId,
+        preset_id: &str,
+    ) -> Result<AgentBindingValueDto, ControlPlaneError> {
+        let mut stored = self
             .store
             .get_preset(&AgentPresetId::from(preset_id.to_owned()))
             .await?
@@ -1048,6 +1068,12 @@ impl AgentControlPlane {
                 axum::http::StatusCode::FORBIDDEN,
                 "AgentPreset owner does not match the authenticated owner",
             ));
+        }
+        if stored.session_only && stored.preset.source == AgentPresetSource::User {
+            if let Some(revision) = self.current_revision(&stored).await? {
+                self.refresh_session_configuration(owner, &stored, &revision, None).await?;
+                stored = self.owned_preset(owner, preset_id).await?;
+            }
         }
         let stable = stored
             .preset
@@ -1374,6 +1400,34 @@ impl AgentControlPlane {
                 None
             }
         }
+    }
+
+    /// Revalidate an internal compilation cache without changing its payload.
+    /// The formal save path retains old immutable artifacts and reuses the
+    /// current revision when its materialized contracts are still exact.
+    async fn refresh_session_configuration(
+        &self,
+        owner: &UserId,
+        preset: &StoredPreset,
+        revision: &AgentPresetRevision,
+        template_key: Option<OfficialPresetKey>,
+    ) -> Result<(), ControlPlaneError> {
+        if !preset.session_only || preset.preset.source != AgentPresetSource::User {
+            return Err(ControlPlaneError::Wire("only internal session configurations may refresh during binding".into()));
+        }
+        self.save_revision(owner, preset.preset.preset_id.as_ref(), SaveAgentPresetRevisionRequest {
+            expected_current_revision: Some(wire_cast(&revision.reference)?),
+            draft: AgentPresetDraftDto {
+                preset_id: preset.preset.preset_id.as_ref().to_owned(),
+                display_name: preset.preset.display_name.clone(),
+                description: preset.preset.description.clone(),
+                source_template_key: template_key.map(|key| wire_cast(&key)).transpose()?,
+                current_revision: Some(wire_cast(&revision.reference)?),
+                document: wire_cast(&revision.payload)?,
+            },
+            reason: Some("Refresh internal session runtime contracts".into()),
+        }).await?;
+        Ok(())
     }
 
     async fn current_snapshot(
@@ -1880,24 +1934,24 @@ mod tests {
     }
 
     #[test]
-    fn selected_chat_route_must_satisfy_agent_model_features_and_protocol() {
-        let required = BTreeSet::from([ChatRouteFeature::WebSearch]);
-        let wrong_protocol = chat_route_with(
-            ChatRouteProtocol::OpenaiChat,
-            [ChatRouteFeature::WebSearch],
-        );
-        let error = ensure_chat_route_supports(&wrong_protocol, &required).unwrap_err();
-        assert_eq!(error.code().as_ref(), "MODEL_ROUTE_FEATURES_MISSING");
+    fn web_search_does_not_constrain_the_conversation_chat_route() {
+        let required = required_chat_features(["web.search", "creation.image", "citation.render"]);
+        assert!(required.is_empty());
+        ensure_chat_route_supports(&chat_route_with(ChatRouteProtocol::OpenaiChat, []), &required).unwrap();
+        assert_eq!(required_chat_features(["web.search", "llm.vision"]), BTreeSet::from([ChatRouteFeature::ImageInput]));
+    }
 
-        let missing_feature = chat_route_with(ChatRouteProtocol::OpenaiResponses, []);
+    #[test]
+    fn selected_chat_route_must_satisfy_direct_model_features() {
+        let required = required_chat_features(["llm.vision", "web.search"]);
+        assert_eq!(required, BTreeSet::from([ChatRouteFeature::ImageInput]));
+        let missing_feature = chat_route_with(ChatRouteProtocol::OpenaiChat, []);
         let error = ensure_chat_route_supports(&missing_feature, &required).unwrap_err();
         assert_eq!(error.code().as_ref(), "MODEL_ROUTE_FEATURES_MISSING");
-
-        let compatible = chat_route_with(
-            ChatRouteProtocol::OpenaiResponses,
-            [ChatRouteFeature::WebSearch],
-        );
-        ensure_chat_route_supports(&compatible, &required).unwrap();
+        for protocol in [ChatRouteProtocol::OpenaiChat, ChatRouteProtocol::OpenaiResponses] {
+            let compatible = chat_route_with(protocol, [ChatRouteFeature::ImageInput]);
+            ensure_chat_route_supports(&compatible, &required).unwrap();
+        }
     }
 
     #[tokio::test]
@@ -1933,6 +1987,14 @@ mod tests {
         id: &str,
         consumers: impl IntoIterator<Item = CapabilityConsumer>,
     ) -> (MaterializedCapability, CapabilityCatalogEntry) {
+        catalog_capability_with_schema(id, consumers, json!({"type":"object", "additionalProperties":false}))
+    }
+
+    fn catalog_capability_with_schema(
+        id: &str,
+        consumers: impl IntoIterator<Item = CapabilityConsumer>,
+        schema: serde_json::Value,
+    ) -> (MaterializedCapability, CapabilityCatalogEntry) {
         let package = PackageRef {
             id: PackageId::from(format!("test.{id}")),
             version: VersionString::from("1.0.0"),
@@ -1954,10 +2016,7 @@ mod tests {
             supported_surfaces: capability_surface_declarations(["desktop"], consumers),
             requires_runtime_features: Vec::new(),
             supported_platforms: vec![PlatformConstraint::Any],
-            config_schema: StrictJsonValue(json!({
-                "type": "object",
-                "additionalProperties": false
-            })),
+            config_schema: StrictJsonValue(schema),
             contributions: CapabilityContributions::default(),
         };
         let contract_digest = digest_payload(&manifest).unwrap();
@@ -2088,6 +2147,36 @@ mod tests {
                 .collect::<Vec<String>>(),
             vec!["knowledge.search"]
         );
+    }
+
+    #[tokio::test]
+    async fn creation_template_and_session_binding_never_require_a_chat_model() {
+        // Generation providers and Chat routes may be absent; the professional
+        // Agent's bundled capabilities must still exist in the host registry.
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control_plane = template_control_plane(store.clone(), OfficialPresetKey::CreativeStudioDefault, false);
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let created = control_plane.create_from_template(&owner, "creative-studio.default", CreateAgentPresetFromTemplateRequest {
+            model: None, reuse_existing: true, display_name: "Creative".into(), description: None,
+            model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new(),
+        }).await.unwrap();
+        assert!(created.draft.document.chat_route_records.is_empty());
+        assert!(created.draft.document.model_route_refs.is_empty());
+        let ignored = nomifun_api_types::AgentChatModelSelectionDto { provider_id: "unconfigured".into(), model: "unconfigured".into() };
+        let binding = tokio::time::timeout(std::time::Duration::from_secs(5),
+            control_plane.resolve_agent_session_binding_with_model(&owner, &created.preset.preset_id, Some(&ignored))).await.unwrap().unwrap();
+        assert_eq!(binding.preset_revision_ref.preset_id, created.preset.preset_id);
+        assert_eq!(Some(binding.preset_revision_ref.clone()), created.preset.current_stable_revision);
+        let repeated = control_plane.create_from_template(&owner, "creative-studio.default", CreateAgentPresetFromTemplateRequest {
+            model: None, reuse_existing: true, display_name: "Creative".into(), description: None,
+            model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new(),
+        }).await.unwrap();
+        assert_eq!(repeated.preset.current_stable_revision, created.preset.current_stable_revision);
+        assert!(repeated.draft.document.chat_route_records.is_empty());
+        assert!(repeated.draft.document.model_route_refs.is_empty());
+        let reference: PresetRevisionRef = wire_cast(&binding.preset_revision_ref).unwrap();
+        let snapshot = store.get_snapshot(&reference).await.unwrap().unwrap();
+        assert_eq!(snapshot.content.enabled_capabilities.len(), 8);
     }
 
     #[tokio::test]
@@ -2247,6 +2336,99 @@ mod tests {
         assert!(fresh.draft.document.instructions.is_empty());
         let preserved = control_plane.editor(&owner, &original.preset.preset_id, None).await.unwrap();
         assert_eq!(preserved.draft.document.instructions, "User-specific behavior");
+    }
+
+    fn general_template_control_plane(store: Arc<InMemoryControlPlaneStore>, updated_schema: bool) -> AgentControlPlane {
+        template_control_plane(store, OfficialPresetKey::AssistantGeneral, updated_schema)
+    }
+
+    fn template_control_plane(store: Arc<InMemoryControlPlaneStore>, key: OfficialPresetKey, updated_schema: bool) -> AgentControlPlane {
+        let templates = OfficialTemplateCatalog::load().unwrap();
+        let mut registry = MaterializedRegistry::empty();
+        let mut catalog = CatalogSnapshot::default();
+        for selected in &templates.seed(key).unwrap().enabled_capabilities {
+            let schema = if selected.id.as_ref() == "creation.image" && updated_schema {
+                json!({"type":"object", "additionalProperties":false, "properties":{"model_selection":{"type":"object"}}})
+            } else { json!({"type":"object", "additionalProperties":false}) };
+            let (capability, entry) = catalog_capability_with_schema(selected.id.as_ref(), [CapabilityConsumer::Agent], schema);
+            registry.capabilities.insert(selected.id.clone(), capability.clone());
+            catalog.capabilities.push(capability);
+            catalog.formal_capability_entries.insert(entry.capability.clone(), entry);
+        }
+        let compiler = test_compiler(&templates).with_materialized_registry(Arc::new(registry), CompilerEnvironment {
+            resolver_version: VersionString::from("1.0.0"), required_runtime_protocol_version: VersionString::from("1.0.0"),
+            required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
+            runtime_feature_inventory_digest: DigestHex::from("runtime-features"), available_runtime_features: BTreeSet::new(),
+            installation_role_bindings: BTreeMap::new(), canonical_schema_manifest_digest: DigestHex::from("schema"),
+            target_contribution_manifest_digest: DigestHex::from("contributions"), host_target: RuntimeTarget::from("test"),
+            host_surface: "desktop".into(), availability_evidence_revision: "fixture".into(),
+        });
+        AgentControlPlane::new(store, Arc::new(StaticCatalogProvider::new(catalog)), templates, compiler)
+    }
+
+    #[tokio::test]
+    async fn official_reuse_recompiles_changed_contracts_and_preserves_historical_artifacts() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let old_control = general_template_control_plane(store.clone(), false);
+        let old = old_control.create_from_template(&owner, "assistant.general", official_launch_request(true)).await.unwrap();
+        let old_ref: PresetRevisionRef = wire_cast(old.preset.current_stable_revision.as_ref().unwrap()).unwrap();
+        let old_revision = store.get_revision(&old_ref).await.unwrap().unwrap();
+        let old_snapshot = store.get_snapshot(&old_ref).await.unwrap().unwrap();
+        let explicit = old_control.create_from_template(&owner, "assistant.general", official_launch_request(false)).await.unwrap();
+        let control = general_template_control_plane(store.clone(), true);
+        let refreshed = control.create_from_template(&owner, "assistant.general", official_launch_request(true)).await.unwrap();
+        let new_ref: PresetRevisionRef = wire_cast(refreshed.preset.current_stable_revision.as_ref().unwrap()).unwrap();
+        assert_eq!(new_ref.preset_id, old_ref.preset_id);
+        assert_eq!(new_ref.revision, old_ref.revision + 1);
+        let new_revision = store.get_revision(&new_ref).await.unwrap().unwrap();
+        let new_snapshot = store.get_snapshot(&new_ref).await.unwrap().unwrap();
+        assert_eq!(new_revision.payload, old_revision.payload, "only runtime contracts changed");
+        assert_ne!(new_revision.contribution_locks, old_revision.contribution_locks);
+        assert_ne!(new_snapshot.snapshot_ref, old_snapshot.snapshot_ref);
+        assert_eq!(store.get_revision(&old_ref).await.unwrap().unwrap(), old_revision);
+        assert_eq!(store.get_snapshot(&old_ref).await.unwrap().unwrap(), old_snapshot);
+        let stable = control.create_from_template(&owner, "assistant.general", official_launch_request(true)).await.unwrap();
+        assert_eq!(stable.preset.current_stable_revision, refreshed.preset.current_stable_revision, "current contracts must not create redundant revisions");
+        let personal = control.editor(&owner, &explicit.preset.preset_id, None).await.unwrap();
+        assert_eq!(personal.preset.current_stable_revision, explicit.preset.current_stable_revision, "explicit personal copies retain their chosen immutable revision");
+        assert_eq!(store.list_presets(&owner).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn session_binding_refreshes_internal_cache_without_template_identity_or_payload_changes() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let old_control = general_template_control_plane(store.clone(), false);
+        let internal = old_control.create_from_template(&owner, "assistant.general", official_launch_request(true)).await.unwrap();
+        // An internal model variant may have user-specific content. Refresh
+        // exactly that payload; never infer or apply an official template.
+        let mut draft = internal.draft;
+        draft.document.instructions = "Keep this exact user-selected behavior".into();
+        let saved = old_control.save_revision(&owner, &internal.preset.preset_id, SaveAgentPresetRevisionRequest {
+            expected_current_revision: draft.current_revision.clone(), draft, reason: None,
+        }).await.unwrap();
+        let old_ref: PresetRevisionRef = wire_cast(&saved.revision.reference).unwrap();
+        let old_revision = store.get_revision(&old_ref).await.unwrap().unwrap();
+        let old_snapshot = store.get_snapshot(&old_ref).await.unwrap().unwrap();
+        let personal = old_control.create_from_template(&owner, "assistant.general", official_launch_request(false)).await.unwrap();
+        let control = general_template_control_plane(store.clone(), true);
+        let binding = tokio::time::timeout(std::time::Duration::from_secs(5),
+            control.resolve_agent_session_binding_with_model(&owner, &internal.preset.preset_id, None)).await.unwrap().unwrap();
+        let new_ref: PresetRevisionRef = wire_cast(&binding.preset_revision_ref).unwrap();
+        assert_eq!(new_ref.preset_id, old_ref.preset_id);
+        assert_eq!(new_ref.revision, old_ref.revision + 1);
+        let refreshed = store.get_revision(&new_ref).await.unwrap().unwrap();
+        let snapshot = store.get_snapshot(&new_ref).await.unwrap().unwrap();
+        assert_eq!(refreshed.payload, old_revision.payload);
+        assert_eq!(snapshot.content.required_runtime_profile, old_snapshot.content.required_runtime_profile);
+        assert_ne!(refreshed.contribution_locks, old_revision.contribution_locks);
+        assert_eq!(store.get_revision(&old_ref).await.unwrap().unwrap(), old_revision);
+        assert_eq!(store.get_snapshot(&old_ref).await.unwrap().unwrap(), old_snapshot);
+        let again = control.resolve_agent_session_binding(&owner, &internal.preset.preset_id).await.unwrap();
+        assert_eq!(again.preset_revision_ref, binding.preset_revision_ref);
+        let untouched = control.resolve_agent_session_binding(&owner, &personal.preset.preset_id).await.unwrap();
+        assert_eq!(Some(untouched.preset_revision_ref), personal.preset.current_stable_revision);
     }
 
     #[tokio::test]

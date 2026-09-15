@@ -363,6 +363,7 @@ fn test_session_projection_from_response(
 
 fn test_send_message_request(message: CronTurnMessage) -> SendMessageRequest {
     SendMessageRequest {
+        preset_id: None,
         content: message.content,
         files: message.files,
         inject_skills: message.inject_skills,

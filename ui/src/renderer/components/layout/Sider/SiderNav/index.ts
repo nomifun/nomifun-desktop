@@ -16,4 +16,3 @@ export { default as SiderRequirementsEntry } from './SiderRequirementsEntry';
 export { default as SiderScheduledEntry } from './SiderScheduledEntry';
 export { default as SiderSearchEntry } from './SiderSearchEntry';
 export { default as SiderSectionHeader } from './SiderSectionHeader';
-export { default as SiderCreativeStudioEntry } from './SiderCreativeStudioEntry';

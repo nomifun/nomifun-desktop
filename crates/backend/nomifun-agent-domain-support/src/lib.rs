@@ -1200,7 +1200,6 @@ const CUSTOMER: &[&str] = &["customer"];
 const ROBOT: &[&str] = &["robot"];
 const CANVAS: &[&str] = &["canvas"];
 const ASSET_LIBRARY: &[&str] = &["asset_library"];
-const GENERATION_PROVIDER: &[&str] = &["generation_provider"];
 const PLUGIN: &[&str] = &["plugin"];
 const MCP_SERVER: &[&str] = &["mcp_server"];
 
@@ -1359,12 +1358,13 @@ const ROBOT_CAPABILITIES: [CapabilitySpec; 6] = [
     CapabilitySpec::tool("robot.motion", EffectClass::Physical, ROBOT),
     CapabilitySpec::tool("robot.device_tools", EffectClass::Physical, ROBOT),
 ];
-const CREATION_CAPABILITIES: [CapabilitySpec; 5] = [
-    CapabilitySpec::tool("creation.text", EffectClass::WriteDurable, GENERATION_PROVIDER),
-    CapabilitySpec::tool("creation.image", EffectClass::WriteDurable, GENERATION_PROVIDER),
-    CapabilitySpec::tool("creation.image_edit", EffectClass::WriteDurable, GENERATION_PROVIDER),
-    CapabilitySpec::tool("creation.video", EffectClass::WriteDurable, GENERATION_PROVIDER),
-    CapabilitySpec::tool("creation.audio", EffectClass::WriteDurable, GENERATION_PROVIDER),
+const CREATION_CAPABILITIES: [CapabilitySpec; 6] = [
+    CapabilitySpec::tool("creation.text", EffectClass::WriteDurable, &[]),
+    CapabilitySpec::tool("creation.image", EffectClass::WriteDurable, &[]),
+    CapabilitySpec::tool("creation.image_edit", EffectClass::WriteDurable, &[]),
+    CapabilitySpec::tool("creation.video", EffectClass::WriteDurable, &[]),
+    CapabilitySpec::tool("creation.audio", EffectClass::WriteDurable, &[]),
+    CapabilitySpec::tool("creation.music", EffectClass::WriteDurable, &[]),
 ];
 const WORKSHOP_CAPABILITIES: [CapabilitySpec; 5] = [
     CapabilitySpec::tool("workshop.canvas.read", EffectClass::ReadSensitive, CANVAS),

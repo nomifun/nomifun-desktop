@@ -5,6 +5,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { spyOn } from 'bun:test';
 import i18next from 'i18next';
 import React, { useCallback, useState } from 'react';
 import { initReactI18next } from 'react-i18next';
@@ -23,6 +24,7 @@ import {
   parseProviderId,
 } from '@/common/types/ids';
 import { BackendHttpError } from '@/common/adapter/httpBridge';
+import { agentPlatform } from '@/common/adapter/ipcBridge';
 import { serializeCreativeStudioAgentHistory } from '../../../agent/adapters';
 import type {
   CreativeStudioAgentChatPort,
@@ -676,6 +678,10 @@ const verifyCompletedTurnRecoveryAfterLegacyFenceLoss = async (): Promise<void> 
 };
 
 const run = async (): Promise<void> => {
+  // The panel includes the product Agent binding selector. Keep its options
+  // query local while this fixture exercises transcript/turn reconciliation.
+  const bindingOptions = spyOn(agentPlatform.productBindingOptions, 'invoke')
+    .mockRejectedValue(new Error('Agent options are unavailable in this transcript fixture'));
   const originalConsoleError = console.error;
   console.error = (...args: unknown[]) => {
     if (
@@ -696,6 +702,7 @@ const run = async (): Promise<void> => {
     await verifyCompletedTurnRecoveryAfterLegacyFenceLoss();
     await flushReact();
   } finally {
+    bindingOptions.mockRestore();
     console.error = originalConsoleError;
   }
 };

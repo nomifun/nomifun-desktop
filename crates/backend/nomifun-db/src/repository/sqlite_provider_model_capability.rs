@@ -303,3 +303,28 @@ impl IProviderModelCapabilityRepository for SqliteProviderModelCapabilityReposit
         Ok(result.rows_affected() > 0)
     }
 }
+
+#[cfg(test)]
+mod music_tests {
+    use super::*;
+    use crate::{IProviderModelRepository, NewProviderModel, SqliteProviderModelRepository};
+
+    #[tokio::test]
+    async fn music_catalog_round_trip_keeps_speech_a_separate_capability() {
+        let db = crate::init_database_memory().await.unwrap();
+        let provider = nomifun_common::ProviderId::new().into_string();
+        sqlx::query("INSERT INTO providers (provider_id,platform,name,base_url,auth_scheme,credentials_encrypted,enabled,created_at,updated_at) VALUES (?,'minimax','Media','https://example.invalid','bearer','',1,0,0)")
+            .bind(&provider).execute(db.pool()).await.unwrap();
+        let models = SqliteProviderModelRepository::new(db.pool().clone());
+        for (model, task, protocol) in [("music-2.5", "music_generation", "minimax.music"), ("speech-02-hd", "speech_synthesis", "minimax.tts")] {
+            let revision: i64 = sqlx::query_scalar("SELECT config_revision FROM providers WHERE provider_id=?")
+                .bind(&provider).fetch_one(db.pool()).await.unwrap();
+            let capabilities = [NewProviderModelCapability { task, protocol, traits: "[]", connection_role: "default", provider_params: "{}", ..Default::default() }];
+            models.save(&provider, revision, &NewProviderModel { model, enabled: true, capabilities: &capabilities, ..Default::default() }).await.unwrap();
+        }
+        let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+        assert_eq!(capabilities.get(&provider,"music-2.5","music_generation").await.unwrap().unwrap().protocol,"minimax.music");
+        assert!(capabilities.get(&provider,"music-2.5","speech_synthesis").await.unwrap().is_none());
+        assert!(capabilities.get(&provider,"speech-02-hd","speech_synthesis").await.unwrap().is_some());
+    }
+}

@@ -9,10 +9,8 @@ import { describe, expect, test } from 'bun:test';
 import type { CreativeAsset } from '../../assets';
 import type { CreativeCanvasNode } from '../../domain';
 import type { CreativeTask, CreativeTaskReference } from '../../tasks';
-import type {
-  CreativeWorkbenchRuntimeListener,
-  CreativeWorkbenchRuntimeSnapshot,
-} from '../../workbenches/runtime';
+import type { CanvasGenerationRuntimeListener, CanvasGenerationRuntimeSnapshot } from '../generation';
+
 import {
   canvasReducer,
   createInitialCanvasState,
@@ -139,7 +137,7 @@ const editorHarness = (node = configNode()) => {
   return { editor, events, pending: () => pending, state: () => state };
 };
 
-const IDLE_SNAPSHOT: CreativeWorkbenchRuntimeSnapshot = {
+const IDLE_SNAPSHOT: CanvasGenerationRuntimeSnapshot = {
   state: 'idle',
   entries: [],
   submissionFailures: [],
@@ -270,10 +268,10 @@ describe('canvas image mask edit runtime integration', () => {
   });
 
   test('resolves admission independently from the long-running worker promise', async () => {
-    const listeners = new Set<CreativeWorkbenchRuntimeListener>();
+    const listeners = new Set<CanvasGenerationRuntimeListener>();
     let snapshot = IDLE_SNAPSHOT;
     const controller = {
-      subscribe(listener: CreativeWorkbenchRuntimeListener) {
+      subscribe(listener: CanvasGenerationRuntimeListener) {
         listeners.add(listener);
         listener(snapshot);
         return () => listeners.delete(listener);
@@ -281,7 +279,7 @@ describe('canvas image mask edit runtime integration', () => {
     };
     const worker = {
       finish: null as
-        ((value: CreativeWorkbenchRuntimeSnapshot) => void) | null,
+        ((value: CanvasGenerationRuntimeSnapshot) => void) | null,
     };
     const admission = waitForCanvasImageMaskEditAdmission({
       controller,
@@ -314,9 +312,9 @@ describe('canvas image mask edit runtime integration', () => {
   });
 
   test('returns the exact retry slot when submission outcome is unresolved', async () => {
-    const listeners = new Set<CreativeWorkbenchRuntimeListener>();
+    const listeners = new Set<CanvasGenerationRuntimeListener>();
     const controller = {
-      subscribe(listener: CreativeWorkbenchRuntimeListener) {
+      subscribe(listener: CanvasGenerationRuntimeListener) {
         listeners.add(listener);
         listener(IDLE_SNAPSHOT);
         return () => listeners.delete(listener);
@@ -338,7 +336,7 @@ describe('canvas image mask edit runtime integration', () => {
       idempotencyKey: TASK_ID,
       start: async () => {
         queueMicrotask(() => {
-          const snapshot: CreativeWorkbenchRuntimeSnapshot = {
+          const snapshot: CanvasGenerationRuntimeSnapshot = {
             ...IDLE_SNAPSHOT,
             state: 'request_error',
             requestError: failure,

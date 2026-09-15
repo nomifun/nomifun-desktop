@@ -464,15 +464,41 @@ pub(crate) fn build_video_submit_body(
 ) -> Result<Value, InvokeError> {
     validate_ark_video_model(model)?;
     let mut content = vec![json!({"type": "text", "text": req.prompt})];
-    if let Some(input) = req.inputs.first() {
+    let first = req.inputs.iter().filter(|input| input.role == "first_frame").count();
+    let last = req.inputs.iter().filter(|input| input.role == "last_frame").count();
+    let references = req.inputs.iter().filter(|input| matches!(input.role.as_str(), "reference" | "reference_image")).count();
+    if first > 1 || last > 1 || (last > 0 && first != 1) || (references > 0 && first + last > 0) {
+        return Err(InvokeError::new(InvokeErrorKind::InvalidParams, "Ark video requires one first frame with an optional last frame, or separate reference images; these modes cannot be mixed"));
+    }
+    let max_references = if model.contains("seedance-2-") { 9 } else { 4 };
+    if references > max_references {
+        return Err(InvokeError::new(InvokeErrorKind::InvalidParams, format!("Ark video accepts at most {max_references} reference images for this model")));
+    }
+    for input in &req.inputs {
+        let role = match input.role.as_str() {
+            "first_frame" => "first_frame",
+            "last_frame" => "last_frame",
+            "reference" | "reference_image" => "reference_image",
+            _ => return Err(InvokeError::new(InvokeErrorKind::InvalidParams, "unsupported Ark video input role")),
+        };
+        if !input.mime.starts_with("image/") || input.bytes.is_empty() {
+            return Err(InvokeError::new(InvokeErrorKind::InvalidParams, "Ark video frame/reference must contain image bytes"));
+        }
         content.push(json!({
             "type": "image_url",
+            "role": role,
             "image_url": { "url": format!("data:{};base64,{}", input.mime, encode_b64(&input.bytes)) }
         }));
     }
     let mut body = json!({ "model": model, "content": content });
     if let Some(size) = &req.size {
         apply_ark_video_size(&mut body, size)?;
+    }
+    if let Some(resolution) = &req.resolution {
+        if !matches!(resolution.as_str(), "480p" | "720p" | "1080p") {
+            return Err(InvokeError::new(InvokeErrorKind::InvalidParams, "Ark video resolution must be 480p, 720p or 1080p"));
+        }
+        body["resolution"] = json!(resolution);
     }
     if let Some(seconds) = req.seconds {
         body["duration"] = json!(seconds);
@@ -580,6 +606,7 @@ mod tests {
             prompt: "combine image one and image two".into(),
             count: 1,
             size: Some("2048x2048".into()),
+            quality: None,
             inputs,
             extra: json!({"watermark": false}),
         })
@@ -599,6 +626,7 @@ mod tests {
             prompt: "a wave".into(),
             seconds,
             size: size.map(str::to_string),
+            resolution: None,
             inputs,
             extra: json!({}),
         })
@@ -609,6 +637,17 @@ mod tests {
     }
 
     // -- pure body/status fixtures ---------------------------------------------
+
+    #[test]
+    fn typed_resolution_remains_separate_from_aspect_ratio() {
+        let TaskRequest::VideoGeneration(mut req) = video_request(Some("16:9"), Some(5), vec![]) else { unreachable!() };
+        req.resolution = Some("1080p".into());
+        let body = build_video_submit_body("doubao-seedance-1-0-pro-250528", &req).unwrap();
+        assert_eq!(body["ratio"], "16:9");
+        assert_eq!(body["resolution"], "1080p");
+        req.resolution = Some("4k".into());
+        assert!(build_video_submit_body("doubao-seedance-1-0-pro-250528", &req).is_err());
+    }
 
     #[test]
     fn video_body_uses_current_top_level_parameters() {
@@ -638,18 +677,35 @@ mod tests {
     }
 
     #[test]
-    fn video_body_appends_first_input_as_data_uri_image() {
+    fn video_body_preserves_first_and_last_frames_as_distinct_roles() {
         // "aGk=" is base64("hi").
         let inputs = vec![
             InputAsset { id: None, role: "first_frame".into(), bytes: b"hi".to_vec(), mime: "image/png".into() },
-            InputAsset { id: None, role: "extra".into(), bytes: b"nope".to_vec(), mime: "image/png".into() },
+            InputAsset { id: None, role: "last_frame".into(), bytes: b"bye".to_vec(), mime: "image/png".into() },
         ];
         let TaskRequest::VideoGeneration(req) = video_request(None, None, inputs) else { unreachable!() };
         let body = build_video_submit_body("doubao-seedance-2-0-mini-260615", &req).unwrap();
         let content = body["content"].as_array().unwrap();
-        assert_eq!(content.len(), 2, "only the first input asset is attached");
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[1]["role"], "first_frame");
+        assert_eq!(content[2]["role"], "last_frame");
+        assert_eq!(content[2]["image_url"]["url"], "data:image/png;base64,Ynll");
         assert_eq!(content[1]["type"], "image_url");
         assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,aGk=");
+    }
+
+    #[test]
+    fn video_body_rejects_lost_or_mixed_reference_roles() {
+        for roles in [vec!["last_frame"], vec!["first_frame", "first_frame"], vec!["first_frame", "reference"], vec!["extra"]] {
+            let inputs = roles.iter().map(|role| image_input(role, "image/png", b"frame")).collect();
+            let TaskRequest::VideoGeneration(req) = video_request(None, None, inputs) else { unreachable!() };
+            assert_eq!(build_video_submit_body("doubao-seedance-2-0-mini-260615", &req).unwrap_err().kind, InvokeErrorKind::InvalidParams);
+        }
+        let inputs = vec![image_input("reference", "image/png", b"a"), image_input("reference", "image/png", b"b")];
+        let TaskRequest::VideoGeneration(req) = video_request(None, None, inputs) else { unreachable!() };
+        let body = build_video_submit_body("doubao-seedance-2-0-mini-260615", &req).unwrap();
+        assert_eq!(body["content"][1]["role"], "reference_image");
+        assert_eq!(body["content"][2]["role"], "reference_image");
     }
 
     #[test]
@@ -998,7 +1054,7 @@ mod tests {
             .and(body_partial_json(json!({
                 "content": [
                     {"type": "text", "text": "a wave"},
-                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGk="}},
+                    {"type": "image_url", "role": "first_frame", "image_url": {"url": "data:image/png;base64,aGk="}},
                 ],
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "cgt-2"})))

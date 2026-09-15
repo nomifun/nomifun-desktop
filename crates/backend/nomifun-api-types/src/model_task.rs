@@ -32,6 +32,8 @@ pub enum ModelTask {
     ImageEdit,
     /// Video generation from text and/or image input.
     VideoGeneration,
+    /// Music composition (instrumental or vocals), distinct from TTS.
+    MusicGeneration,
     /// Text-to-speech synthesis (TTS).
     SpeechSynthesis,
     /// Speech-to-text recognition or transcription (ASR).
@@ -161,6 +163,7 @@ fn verified_provider_profile(
             | "minimax-hailuo-02" => Some((vec![VideoGeneration], vec![])),
             "image-01" | "image-01-live" => Some((vec![ImageGeneration], vec![])),
             "speech-2.8-hd" | "speech-2.8-turbo" => Some((vec![SpeechSynthesis], vec![])),
+            "music-3.0" | "music-2.6" => Some((vec![MusicGeneration], vec![])),
             _ => None,
         },
         "openai" => match base.as_str() {

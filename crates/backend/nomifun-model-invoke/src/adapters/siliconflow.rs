@@ -662,6 +662,7 @@ mod tests {
             prompt: "a wave".into(),
             seconds: Some(5),
             size: Some("1280x720".into()),
+            resolution: None,
             inputs: vec![image_input(b"hi")],
             extra: json!({"negative_prompt": "blur", "seed": 9}),
         })
@@ -883,6 +884,7 @@ mod tests {
             prompt: "add a hat".into(),
             count: 1,
             size: Some("1024x1024".into()),
+            quality: None,
             inputs: vec![image_input(b"hi"), image_input(b"two")],
             extra: json!({"num_inference_steps": 22}),
         });
@@ -901,6 +903,7 @@ mod tests {
             prompt: "merge".into(),
             count: 1,
             size: None,
+            quality: None,
             inputs: vec![
                 image_input(b"one"),
                 image_input(b"two"),

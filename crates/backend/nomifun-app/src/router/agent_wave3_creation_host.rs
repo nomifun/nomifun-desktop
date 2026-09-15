@@ -2,52 +2,46 @@
 //!
 //! The adapter is intentionally thin: Wave 3 owns the strict action DTOs,
 //! `CreationService` owns validation, durable idempotency and task execution,
-//! and the frozen `generation_provider` binding owns provider/model selection.
-//! No success result is emitted until the service has returned the row written
+//! and task-specific defaults select an exact provider/model at admission.
+//! The Tool returns the actual durable task status immediately after the row is written
 //! by `ICreationTaskRepository::get_or_create_creative_task`.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use nomifun_agent_contracts::StrictJsonValue;
 use nomifun_agent_domain_wave3::{
-    CreationAudioRequest, CreationImageEditRequest, CreationImageRequest,
-    CreationTaskTarget, CreationTextRequest, CreationVideoRequest,
-    CreationWorkbenchKind, Wave3CapabilityOperation, Wave3HostContext,
+    CreationAudioRequest, CreationImageEditRequest, CreationImageRequest, CreationMusicRequest,
+    CreationModelSelection, CreationTaskTarget, CreationTextRequest, CreationVideoRequest,
+    Wave3CapabilityOperation, Wave3HostContext,
     Wave3HostPort, Wave3HostPortError, Wave3HostRequest,
-    generation_provider_selection,
 };
 use nomifun_common::AppError;
 use nomifun_creation::{
     CreationInput, CreationInputKind, CreationService, CreativeTaskOwner,
-    NewCreationTask, StandaloneWorkbenchKind,
+    NewCreationTask,
 };
-use nomifun_workshop::WorkshopService;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-const CREATION_POLL_INTERVAL: Duration = Duration::from_millis(200);
-const CREATION_WAIT_LIMIT: Duration = Duration::from_secs(300);
-const WAVE3_CREATION_FAILED: &str = "WAVE3_CREATION_FAILED";
-const WAVE3_CREATION_CANCELED: &str = "WAVE3_CREATION_CANCELED";
-const WAVE3_CREATION_TIMEOUT_CANCELED: &str = "WAVE3_CREATION_TIMEOUT_CANCELED";
-const WAVE3_CREATION_OUTCOME_UNKNOWN: &str = "WAVE3_CREATION_OUTCOME_UNKNOWN";
-
 #[derive(Clone)]
 pub(crate) struct Wave3CreationHost {
     creation: Arc<CreationService>,
-    workshop: Arc<WorkshopService>,
+    invoke: Arc<nomifun_model_invoke::ModelInvokeService>,
+    pool: nomifun_db::SqlitePool,
+    owner_id: Arc<str>,
 }
 
 impl Wave3CreationHost {
     pub(crate) fn new(
         creation: Arc<CreationService>,
-        workshop: Arc<WorkshopService>,
+        invoke: Arc<nomifun_model_invoke::ModelInvokeService>,
+        pool: nomifun_db::SqlitePool,
+        owner_id: Arc<str>,
     ) -> Self {
-        Self { creation, workshop }
+        Self { creation, invoke, pool, owner_id }
     }
 
     /// Erase the concrete adapter for `Wave3OwnerBindings::with_creation`.
@@ -69,16 +63,38 @@ impl Wave3HostPort for Wave3CreationHost {
     > {
         Box::pin(async move {
             request.validate()?;
-            self.workshop
-                .require_creative_studio_owner(&request.context.principal.principal_id)
-                .await
-                .map_err(map_creation_error)?;
-            let provider = generation_provider_selection(&request.context)?;
+            if request.context.principal.principal_kind != "user" || request.context.principal.principal_id != self.owner_id.as_ref() {
+                return Err(Wave3HostPortError::invalid_request("generation owner does not match the authenticated installation owner"));
+            }
+            let model_task = capability_model_task(request.context.capability_id.as_ref())?;
             let creation_task_id = stable_creation_task_id(&request.context);
+            let model_selection = request.operation.model_selection().cloned();
             let (owner, mut task) = map_creation_operation(request.operation)?;
+            self.validate_task_owner(&request.context, &owner).await?;
+            match self.creation.get_task(&creation_task_id).await {
+                Ok(existing) => {
+                    let owner_matches = match &owner {
+                        CreativeTaskOwner::ConversationTurn { conversation_id, message_id } => existing.conversation_id.as_ref() == Some(conversation_id) && existing.message_id.as_ref() == Some(message_id),
+                        CreativeTaskOwner::CanvasNode { canvas_id, node_id } => existing.canvas_id.as_ref() == Some(canvas_id) && existing.node_id.as_ref() == Some(node_id),
+                        CreativeTaskOwner::TemplateStep { template_id, template_run_id, template_step_id } => existing.template_id.as_ref() == Some(template_id) && existing.template_run_id.as_ref() == Some(template_run_id) && existing.template_step_id.as_ref() == Some(template_step_id),
+                    };
+                    if !owner_matches || existing.capability != task.capability { return Err(Wave3HostPortError::invalid_request("generation replay owner or capability differs")); }
+                    validate_replay_model(model_selection.as_ref(), &existing.provider_id, &existing.model)?;
+                    let request_matches = existing.params.as_object().is_some_and(|params| {
+                        let unfrozen = params.iter().filter(|(key, _)| !key.starts_with("_nomifun_")).map(|(key, value)| (key.clone(), value.clone())).collect::<Map<_, _>>();
+                        unfrozen == task.params
+                    });
+                    if !request_matches || existing.inputs.as_deref().unwrap_or_default() != task.inputs.as_slice() { return Err(Wave3HostPortError::invalid_request("generation replay input differs from the accepted task")); }
+
+                    return Ok(StrictJsonValue(json!({"creation_task_id": existing.creation_task_id, "status": existing.status, "result_asset_ids": existing.result_asset_ids})));
+                }
+                Err(AppError::NotFound(_)) => {}
+                Err(error) => return Err(map_creation_error(error)),
+            }
+            let provider = self.resolve_model(model_task, model_selection.as_ref()).await?;
             task.params.insert(
                 "_nomifun_connection_config_ref".into(),
-                Value::String(provider.connection_config_ref.as_ref().to_owned()),
+                Value::String(format!("provider:{}@{}", provider.provider_id, provider.config_revision)),
             );
             task.params.insert(
                 "_nomifun_provider_config_revision".into(),
@@ -99,7 +115,6 @@ impl Wave3HostPort for Wave3CreationHost {
                 )
                 .await
                 .map_err(map_creation_error)?;
-            let persisted = self.wait_for_terminal(persisted).await?;
 
             Ok(StrictJsonValue(json!({
                 "creation_task_id": persisted.creation_task_id,
@@ -111,81 +126,51 @@ impl Wave3HostPort for Wave3CreationHost {
 }
 
 impl Wave3CreationHost {
-    async fn wait_for_terminal(
-        &self,
-        mut task: nomifun_creation::CreationTask,
-    ) -> Result<nomifun_creation::CreationTask, Wave3HostPortError> {
-        let started = Instant::now();
-        loop {
-            match task.status.as_str() {
-                "succeeded" => return Ok(task),
-                "failed" => {
-                    return Err(Wave3HostPortError::new(
-                        WAVE3_CREATION_FAILED,
-                        creation_failure_message(&task),
-                    ));
-                }
-                "canceled" => {
-                    return Err(Wave3HostPortError::new(
-                        WAVE3_CREATION_CANCELED,
-                        format!("creation task {} was canceled", task.creation_task_id),
-                    ));
-                }
-                "queued" | "running" => {}
-                status => {
-                    return Err(Wave3HostPortError::new(
-                        WAVE3_CREATION_OUTCOME_UNKNOWN,
-                        format!(
-                            "creation task {} has unknown status {status}",
-                            task.creation_task_id
-                        ),
-                    ));
-                }
+    async fn resolve_model(&self, task: nomifun_api_types::ModelTask, selection: Option<&CreationModelSelection>) -> Result<nomifun_model_invoke::ResolvedTaskConfig, Wave3HostPortError> {
+        let result = if let Some(selection) = selection {
+            let model = nomifun_model_invoke::ModelRef { provider_id: selection.provider_id.clone(), model: selection.model.clone() };
+            match self.invoke.validate(&model, task).await {
+                Ok(()) => self.invoke.resolve_task_config(&model, task).await,
+                Err(error) => Err(error),
             }
-            if started.elapsed() >= CREATION_WAIT_LIMIT {
-                return match self.creation.cancel_task(&task.creation_task_id).await {
-                    Ok(canceled) if canceled.status == "canceled" => Err(Wave3HostPortError::new(
-                        WAVE3_CREATION_TIMEOUT_CANCELED,
-                        format!(
-                            "creation task {} timed out and was durably canceled",
-                            canceled.creation_task_id
-                        ),
-                    )),
-                    Ok(completed) if completed.status == "succeeded" => Ok(completed),
-                    Ok(completed) if completed.status == "failed" => Err(
-                        Wave3HostPortError::new(WAVE3_CREATION_FAILED, creation_failure_message(&completed)),
-                    ),
-                    Ok(observed) => Err(Wave3HostPortError::new(
-                        WAVE3_CREATION_OUTCOME_UNKNOWN,
-                        format!(
-                            "creation task {} timed out; cancellation returned {}. Observe the task before retrying",
-                            observed.creation_task_id, observed.status
-                        ),
-                    )),
-                    Err(error) => Err(Wave3HostPortError::new(
-                        WAVE3_CREATION_OUTCOME_UNKNOWN,
-                        format!(
-                            "creation task {} timed out and cancellation could not be confirmed: {error}. Observe the task before retrying",
-                            task.creation_task_id
-                        ),
-                    )),
-                };
+        } else {
+            self.invoke.resolve_default_task_model(task, &nomifun_db::SqliteClientPreferenceRepository::new(self.pool.clone())).await
+        };
+        result.map_err(|error| Wave3HostPortError::new("GENERATION_MODEL_UNAVAILABLE", error.to_string()))
+    }
+
+    async fn validate_task_owner(&self, context: &Wave3HostContext, owner: &CreativeTaskOwner) -> Result<(), Wave3HostPortError> {
+        if let CreativeTaskOwner::ConversationTurn { conversation_id, message_id } = owner {
+            if conversation_id != context.agent_session_id.as_ref() {
+                return Err(Wave3HostPortError::invalid_request("generation target must be the current conversation"));
             }
-            tokio::time::sleep(CREATION_POLL_INTERVAL).await;
-            task = self
-                .creation
-                .get_task(&task.creation_task_id)
-                .await
-                .map_err(map_creation_error)?;
+            let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversation_delivery_receipts r JOIN messages m ON m.message_id = r.projected_message_id WHERE r.conversation_id = ? AND r.user_id = ? AND r.message_id = ? AND r.kind = 'turn' AND r.status = 'accepted' AND m.conversation_id = r.conversation_id AND m.position = 'right')")
+                .bind(conversation_id).bind(context.principal.principal_id.as_str()).bind(message_id)
+                .fetch_one(&self.pool).await.map_err(|error| Wave3HostPortError::invalid_request(error.to_string()))?;
+            if !exists { return Err(Wave3HostPortError::invalid_request("generation target must reference the admitted current user turn")); }
         }
+        Ok(())
     }
 }
 
-fn creation_failure_message(task: &nomifun_creation::CreationTask) -> String {
-    task.error
-        .as_ref()
-        .map(Value::to_string)
-        .unwrap_or_else(|| format!("creation task {} failed", task.creation_task_id))
+fn validate_replay_model(selection: Option<&CreationModelSelection>, provider_id: &str, model: &str) -> Result<(), Wave3HostPortError> {
+    if selection.is_some_and(|selection| selection.provider_id != provider_id || selection.model != model) {
+        return Err(Wave3HostPortError::invalid_request("generation replay model differs from the accepted task"));
+    }
+    Ok(())
+}
+
+fn capability_model_task(capability: &str) -> Result<nomifun_api_types::ModelTask, Wave3HostPortError> {
+    use nomifun_api_types::ModelTask;
+    Ok(match capability {
+        "creation.text" => ModelTask::Chat,
+        "creation.image" => ModelTask::ImageGeneration,
+        "creation.image_edit" => ModelTask::ImageEdit,
+        "creation.video" => ModelTask::VideoGeneration,
+        "creation.music" => ModelTask::MusicGeneration,
+        "creation.audio" => ModelTask::SpeechSynthesis,
+        _ => return Err(Wave3HostPortError::invalid_request("unsupported generation capability")),
+    })
 }
 
 struct MappedCreationTask {
@@ -214,6 +199,10 @@ fn map_creation_operation(
             let owner = map_target(request.target.clone());
             Ok((owner, map_video(request)))
         }
+        Wave3CapabilityOperation::CreationMusic(request) => {
+            let owner = map_target(request.target.clone());
+            Ok((owner, map_music(request)))
+        }
         Wave3CapabilityOperation::CreationAudio(request) => {
             let owner = map_target(request.target.clone());
             Ok((owner, map_audio(request)))
@@ -227,17 +216,9 @@ fn map_creation_operation(
 
 fn map_target(target: CreationTaskTarget) -> CreativeTaskOwner {
     match target {
+        CreationTaskTarget::ConversationTurn { conversation_id, message_id } => CreativeTaskOwner::ConversationTurn { conversation_id, message_id },
         CreationTaskTarget::CanvasNode { canvas_id, node_id } => {
             CreativeTaskOwner::CanvasNode { canvas_id, node_id }
-        }
-        CreationTaskTarget::StandaloneWorkbench { workbench_kind } => {
-            CreativeTaskOwner::StandaloneWorkbench {
-                workbench_kind: match workbench_kind {
-                    CreationWorkbenchKind::Image => StandaloneWorkbenchKind::Image,
-                    CreationWorkbenchKind::Video => StandaloneWorkbenchKind::Video,
-                    CreationWorkbenchKind::Audio => StandaloneWorkbenchKind::Audio,
-                },
-            }
         }
         CreationTaskTarget::TemplateStep {
             template_id,
@@ -297,6 +278,7 @@ fn map_image_edit(request: CreationImageEditRequest) -> MappedCreationTask {
         ("count".to_owned(), json!(request.count)),
     ]);
     insert_optional(&mut params, "size", request.size);
+    insert_optional(&mut params, "quality", request.quality);
     MappedCreationTask {
         capability: if uses_mask { "inpaint" } else { "i2i" }.to_owned(),
         params,
@@ -329,11 +311,20 @@ fn map_video(request: CreationVideoRequest) -> MappedCreationTask {
         params.insert("seconds".to_owned(), json!(seconds));
     }
     insert_optional(&mut params, "size", request.size);
+    insert_optional(&mut params, "resolution", request.resolution);
+    params.insert("count".to_owned(), json!(request.count));
     MappedCreationTask {
         capability: if has_input { "i2v" } else { "t2v" }.to_owned(),
         params,
         inputs,
     }
+}
+
+fn map_music(request: CreationMusicRequest) -> MappedCreationTask {
+    let mut params = Map::from_iter([("prompt".to_owned(), json!(request.prompt)), ("instrumental".to_owned(), json!(request.instrumental))]);
+    insert_optional(&mut params, "lyrics", request.lyrics);
+    insert_optional(&mut params, "format", request.format);
+    MappedCreationTask { capability: "music".to_owned(), params, inputs: Vec::new() }
 }
 
 fn map_audio(request: CreationAudioRequest) -> MappedCreationTask {
@@ -388,203 +379,154 @@ fn map_creation_error(error: AppError) -> Wave3HostPortError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
-
-    use nomifun_agent_contracts::{
-        ActionId, AgentSessionId, CapabilityId, ConnectionConfigRef, CorrelationId,
-        IdempotencyKey, OperationId, PrincipalRef, ResolvedSnapshotRef,
-        ResourceBindingId, ResourceId, ResourceKind, ScopeKey,
-        TypedResourceBinding,
-    };
-    use nomifun_common::{ProviderId, UserId, generate_id};
-    use nomifun_db::{
-        SqliteCreationTaskRepository, SqliteWorkshopRepository,
-        init_database_memory_with_owner,
-    };
-
+    use nomifun_agent_contracts::{ActionId, AgentSessionId, CapabilityId, CorrelationId, IdempotencyKey, OperationId, PrincipalRef, ResolvedSnapshotRef, ScopeKey};
+    use nomifun_common::{UserId, generate_id};
+    use nomifun_db::{SqliteCreationTaskRepository, init_database_memory_with_owner};
     use super::*;
 
-    async fn seed_image_provider(database: &nomifun_db::Database) -> String {
-        let provider_id = ProviderId::new().into_string();
-        sqlx::query(
-            "INSERT INTO providers \
-                (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
-                 created_at, updated_at) \
-             VALUES (?, 'openai', 'Wave 3 Creation Test', 'https://example.invalid', \
-                 'bearer', '', 1, 0, 0)",
-        )
-        .bind(&provider_id)
-        .execute(database.pool())
-        .await
-        .expect("seed provider");
-        sqlx::query(
-            "INSERT INTO provider_models \
-                (provider_id, model, enabled, sort_order, description, created_at, updated_at) \
-             VALUES (?, 'image-model-v1', 1, 0, NULL, 0, 0)",
-        )
-        .bind(&provider_id)
-        .execute(database.pool())
-        .await
-        .expect("seed model");
-        sqlx::query(
-            "INSERT INTO provider_model_capabilities \
-                (provider_id, model, task, traits, protocol, connection_role, \
-                 provider_params, created_at, updated_at) \
-             VALUES (?, 'image-model-v1', 'image_generation', '[]', \
-                 'openai.images', 'default', '{}', 0, 0)",
-        )
-        .bind(&provider_id)
-        .execute(database.pool())
-        .await
-        .expect("seed capability");
-        provider_id
+    fn context(owner: &str) -> Wave3HostContext {
+        Wave3HostContext {
+            principal: PrincipalRef { principal_kind: "user".into(), principal_id: owner.into() },
+            agent_session_id: AgentSessionId::from(generate_id()), operation_id: OperationId::from("effect"),
+            idempotency_key: IdempotencyKey::from("stable-effect"), correlation_id: CorrelationId::from("turn"),
+            resolved_snapshot_ref: ResolvedSnapshotRef { snapshot_id: generate_id().into(), snapshot_digest: "a".repeat(64).into() },
+            registry_generation: 1, capability_id: CapabilityId::from("creation.image"), action_id: ActionId::from("creation.image.invoke"),
+            state_scope_key: ScopeKey::from("session:test"), resource_bindings: vec![],
+        }
     }
 
-    fn image_request(
-        owner_id: &str,
-        provider_id: &str,
-        config_revision: i64,
-        idempotency_key: &str,
-    ) -> Wave3HostRequest {
-        Wave3HostRequest {
-            context: Wave3HostContext {
-                principal: PrincipalRef {
-                    principal_kind: "user".to_owned(),
-                    principal_id: owner_id.to_owned(),
-                },
-                agent_session_id: AgentSessionId::from(generate_id()),
-                operation_id: OperationId::from("wave3-creation-operation"),
-                idempotency_key: IdempotencyKey::from(idempotency_key.to_owned()),
-                correlation_id: CorrelationId::from("wave3-creation-correlation"),
-                resolved_snapshot_ref: ResolvedSnapshotRef {
-                    snapshot_id: "wave3-creation-snapshot".into(),
-                    snapshot_digest: "a".repeat(64).into(),
-                },
-                registry_generation: 1,
-                capability_id: CapabilityId::from("creation.image"),
-                action_id: ActionId::from("creation.image.invoke"),
-                state_scope_key: ScopeKey::from("session:wave3-creation"),
-                resource_bindings: vec![TypedResourceBinding {
-                    binding_id: ResourceBindingId::from("generation-provider"),
-                    resource_kind: ResourceKind::from("generation_provider"),
-                    resource_id: ResourceId::from(provider_id.to_owned()),
-                    owner_id: owner_id.to_owned(),
-                    operations: BTreeSet::from(["image".to_owned()]),
-                    connection_config_ref: Some(ConnectionConfigRef::from(format!(
-                        "provider:{provider_id}@{config_revision}"
-                    ))),
-                    typed_parameters: BTreeMap::from([(
-                        "model.creation.image".to_owned(),
-                        "image-model-v1".to_owned(),
-                    )]),
-                }],
-            },
-            operation: Wave3CapabilityOperation::CreationImage(CreationImageRequest {
-                target: CreationTaskTarget::StandaloneWorkbench {
-                    workbench_kind: CreationWorkbenchKind::Image,
-                },
-                prompt: "a real persisted image task".to_owned(),
-                count: 1,
-                size: Some("1024x1024".to_owned()),
-                quality: None,
-            }),
+    fn host(pool: nomifun_db::SqlitePool, owner: &str) -> Wave3CreationHost {
+        let invoke = Arc::new(nomifun_model_invoke::ModelInvokeService::new(
+            Arc::new(nomifun_db::SqliteProviderRepository::new(pool.clone())),
+            Arc::new(nomifun_db::SqliteProviderModelRepository::new(pool.clone())),
+            Arc::new(nomifun_db::SqliteProviderModelCapabilityRepository::new(pool.clone())),
+            Arc::new(nomifun_db::SqliteProviderConnectionRepository::new(pool.clone())),
+            [0; 32], reqwest::Client::new(), nomifun_model_invoke::AdapterRegistry::new(nomifun_model_invoke::default_adapters()),
+        ));
+        Wave3CreationHost::new(CreationService::new(Arc::new(SqliteCreationTaskRepository::new(pool.clone()))), invoke, pool, Arc::from(owner))
+    }
+
+    async fn configured_media_models(pool: &nomifun_db::SqlitePool) -> std::collections::BTreeMap<&'static str, Vec<CreationModelSelection>> {
+        use nomifun_db::{CreateProviderParams, IProviderRepository, NewProviderModel, NewProviderModelCapability};
+        let providers = nomifun_db::SqliteProviderRepository::new(pool.clone());
+        let encrypted = nomifun_common::encrypt_string(r#"{"api_keys":["host-test-key"]}"#, &[0; 32]).unwrap();
+        let mut result = std::collections::BTreeMap::new();
+        for (capability, task, protocol, platform) in [
+            ("creation.image", "image_generation", "openai.images", "openai"),
+            ("creation.image_edit", "image_edit", "openai.images", "openai"),
+            ("creation.video", "video_generation", "openai.videos", "openai"),
+            ("creation.music", "music_generation", "minimax.music", "minimax"),
+            ("creation.audio", "speech_synthesis", "openai.audio_speech", "openai"),
+        ] {
+            let mut candidates = Vec::new();
+            for suffix in ["first", "second"] {
+                let selection = CreationModelSelection { provider_id: generate_id(), model: format!("{task}-{suffix}") };
+                providers.create(CreateProviderParams { provider_id: Some(&selection.provider_id), platform, name: &selection.model,
+                    base_url: "https://example.com/v1", auth_scheme: "bearer", credentials_encrypted: &encrypted,
+                    enabled: true, bedrock_config: None, sort_order: None,
+                }, &NewProviderModel { model: &selection.model, enabled: true, sort_order: 0, description: None,
+                    capabilities: &[NewProviderModelCapability { task, protocol, traits: "[]", connection_role: "default", provider_params: "{}", ..Default::default() }],
+                }, &[]).await.unwrap();
+                candidates.push(selection);
+            }
+            result.insert(capability, candidates);
+        }
+        result
+    }
+
+    #[tokio::test]
+    async fn exact_model_selection_supports_every_media_task_without_an_ambiguous_default() {
+        let owner = UserId::new(); let database = init_database_memory_with_owner(owner.clone()).await.unwrap();
+        let host = host(database.pool().clone(), owner.as_str());
+        let models = configured_media_models(database.pool()).await;
+        for (capability, candidates) in &models {
+            let task = capability_model_task(capability).unwrap();
+            assert!(host.resolve_model(task, None).await.is_err(), "multiple {capability} models must not select by order");
+            let selected = &candidates[1];
+            let mut input = json!({"target":{"kind":"canvas_node", "canvas_id":generate_id(), "node_id":generate_id()},
+                "model_selection":{"provider_id":selected.provider_id,"model":selected.model}});
+            if *capability == "creation.audio" { input["text"] = json!("speak"); } else { input["prompt"] = json!("create"); }
+            if *capability == "creation.image_edit" { input["inputs"] = json!([{"asset_id":generate_id(),"role":"reference"}]); }
+            let operation = nomifun_agent_domain_wave3::operation_from_input(&CapabilityId::from(*capability), StrictJsonValue(input)).unwrap();
+            let resolved = host.resolve_model(task, operation.model_selection()).await.unwrap();
+            assert_eq!(resolved.provider_id, selected.provider_id);
+            assert_eq!(resolved.model, selected.model);
+            assert_eq!(resolved.task, task);
+            let wrong = &models[if *capability == "creation.image" { "creation.video" } else { "creation.image" }][0];
+            assert!(host.resolve_model(task, Some(wrong)).await.is_err(), "a model for another task cannot be promoted to {capability}");
+            sqlx::query("UPDATE provider_models SET enabled=0 WHERE provider_id=? AND model=?")
+                .bind(&selected.provider_id).bind(&selected.model).execute(database.pool()).await.unwrap();
+            assert!(host.resolve_model(task, Some(selected)).await.is_err(), "disabled models cannot be invoked through explicit selection");
         }
     }
 
     #[tokio::test]
-    async fn image_creation_returns_only_after_real_repository_insert_and_replays_one_row() {
-        let owner_id = UserId::new();
-        let database = init_database_memory_with_owner(owner_id.clone())
-            .await
-            .expect("database");
-        let provider_id = seed_image_provider(&database).await;
-        let config_revision: i64 =
-            sqlx::query_scalar("SELECT config_revision FROM providers WHERE provider_id = ?")
-                .bind(&provider_id)
-                .fetch_one(database.pool())
-                .await
-                .expect("provider revision");
-        let repo = Arc::new(SqliteCreationTaskRepository::new(database.pool().clone()));
-        let data_dir = tempfile::tempdir().expect("data dir");
-        let workshop = WorkshopService::start(
-            data_dir.path(),
-            Arc::new(SqliteWorkshopRepository::new(database.pool().clone())),
-        );
-        let host = Wave3CreationHost::new(CreationService::new(repo), workshop);
-        let session_id = AgentSessionId::from(generate_id());
-        let mut request = image_request(
-            owner_id.as_str(),
-            &provider_id,
-            config_revision,
-            "opaque-agent-effect-key",
-        );
-        request.context.agent_session_id = session_id.clone();
-        let task_id = stable_creation_task_id(&request.context);
+    async fn kernel_model_arguments_persist_exact_selection_and_replay_cannot_switch_models() {
+        let owner = UserId::new(); let database = init_database_memory_with_owner(owner.clone()).await.unwrap();
+        let host = host(database.pool().clone(), owner.as_str());
+        let models = configured_media_models(database.pool()).await;
+        let selected = &models["creation.image"][1];
+        let canvas_id = generate_id(); let node_id = generate_id();
+        let document = json!({"schema":"nomifun.creative-studio/v1", "projectId":canvas_id});
+        sqlx::query("INSERT INTO creative_studio_projects(project_id,title,document_json,created_at,updated_at) VALUES (?,'Model selection',?,0,0)")
+            .bind(&canvas_id).bind(document.to_string()).execute(database.pool()).await.unwrap();
+        let input = json!({"target":{"kind":"canvas_node","canvas_id":canvas_id,"node_id":node_id},
+            "prompt":"a cat", "count":1, "model_selection":{"provider_id":selected.provider_id,"model":selected.model}});
+        let request = Wave3HostRequest { context: context(owner.as_str()), operation: nomifun_agent_domain_wave3::operation_from_input(&"creation.image".into(), StrictJsonValue(input.clone())).unwrap() };
+        let receipt = host.invoke(request.clone()).await.unwrap();
+        let task_id = receipt.0["creation_task_id"].as_str().unwrap();
+        let task = host.creation.get_task(task_id).await.unwrap();
+        assert_eq!(task.provider_id, selected.provider_id); assert_eq!(task.model, selected.model);
+        assert!(task.params["_nomifun_provider_config_revision"].is_number());
+        assert!(task.params.get("model_selection").is_none(), "selection is not a provider request parameter");
+        sqlx::query("UPDATE providers SET enabled=0 WHERE provider_id=?").bind(&selected.provider_id).execute(database.pool()).await.unwrap();
+        assert_eq!(host.invoke(request.clone()).await.unwrap().0["creation_task_id"], task_id, "accepted replays retain their frozen model after retirement");
+        let mut changed = input;
+        changed["model_selection"] = json!({"provider_id":models["creation.image"][0].provider_id, "model":models["creation.image"][0].model});
+        let changed = Wave3HostRequest { context: request.context, operation: nomifun_agent_domain_wave3::operation_from_input(&"creation.image".into(), StrictJsonValue(changed)).unwrap() };
+        assert!(host.invoke(changed).await.unwrap_err().message.contains("replay model differs"));
+    }
 
-        let first = host
-            .invoke(request.clone())
-            .await
-            .expect_err("unconfigured provider must be a non-success Tool result");
-        let retry = host.invoke(request).await.expect_err("idempotent failed replay");
-        assert_eq!(first.code, WAVE3_CREATION_FAILED);
-        assert_eq!(retry.code, first.code);
-        let row: (String, String, String, String, String) = sqlx::query_as(
-            "SELECT creation_task_id, provider_id, model, capability, workbench_kind \
-             FROM creation_tasks WHERE creation_task_id = ?",
-        )
-        .bind(&task_id)
-        .fetch_one(database.pool())
-        .await
-        .expect("repository side effect");
-        assert_eq!(row.1, provider_id);
-        assert_eq!(row.2, "image-model-v1");
-        assert_eq!(row.3, "t2i");
-        assert_eq!(row.4, "image");
-
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM creation_tasks WHERE creation_task_id = ?",
-        )
-        .bind(&row.0)
-        .fetch_one(database.pool())
-        .await
-        .expect("task count");
-        assert_eq!(count, 1, "retry must not manufacture a second task");
+    #[test]
+    fn media_mapping_preserves_quality_resolution_count_and_music_semantics() {
+        let target = CreationTaskTarget::ConversationTurn { conversation_id: generate_id(), message_id: generate_id() };
+        let (_, image) = map_creation_operation(Wave3CapabilityOperation::CreationImageEdit(CreationImageEditRequest {
+            model_selection: None,
+            target: target.clone(), prompt: "edit".into(), inputs: vec![], count: 2, size: None, quality: Some("high".into()),
+        })).unwrap();
+        assert_eq!(image.params["quality"], "high");
+        let (_, video) = map_creation_operation(Wave3CapabilityOperation::CreationVideo(CreationVideoRequest {
+            model_selection: None,
+            target: target.clone(), prompt: "video".into(), count: 1, size: Some("16:9".into()), resolution: Some("1080p".into()), seconds: Some(8), first_frame_asset_id: None, last_frame_asset_id: None,
+        })).unwrap();
+        assert_eq!(video.params["resolution"], "1080p"); assert_eq!(video.params["count"], 1);
+        let (_, music) = map_creation_operation(Wave3CapabilityOperation::CreationMusic(CreationMusicRequest {
+            model_selection: None,
+            target, prompt: "music".into(), lyrics: None, instrumental: true, format: Some("mp3".into()),
+        })).unwrap();
+        assert_eq!(music.capability, "music"); assert_eq!(music.params["instrumental"], true);
+        assert_ne!(capability_model_task("creation.music").unwrap(), capability_model_task("creation.audio").unwrap());
     }
 
     #[tokio::test]
-    async fn missing_bound_model_fails_before_any_repository_side_effect() {
-        let owner_id = UserId::new();
-        let database = init_database_memory_with_owner(owner_id.clone())
-            .await
-            .expect("database");
-        let provider_id = seed_image_provider(&database).await;
-        let config_revision: i64 =
-            sqlx::query_scalar("SELECT config_revision FROM providers WHERE provider_id = ?")
-                .bind(&provider_id)
-                .fetch_one(database.pool())
-                .await
-                .expect("provider revision");
-        let repo = Arc::new(SqliteCreationTaskRepository::new(database.pool().clone()));
-        let data_dir = tempfile::tempdir().expect("data dir");
-        let workshop = WorkshopService::start(
-            data_dir.path(),
-            Arc::new(SqliteWorkshopRepository::new(database.pool().clone())),
-        );
-        let host = Wave3CreationHost::new(CreationService::new(repo), workshop);
-        let mut request = image_request(
-            owner_id.as_str(),
-            &provider_id,
-            config_revision,
-            "missing-model-key",
-        );
-        request.context.resource_bindings[0].typed_parameters.clear();
+    async fn missing_generation_model_and_foreign_owner_fail_before_task_persistence() {
+        let owner = UserId::new(); let database = init_database_memory_with_owner(owner.clone()).await.unwrap();
+        let host = host(database.pool().clone(), owner.as_str());
+        let request = Wave3HostRequest { context: context(owner.as_str()), operation: Wave3CapabilityOperation::CreationImage(CreationImageRequest {
+            model_selection: None,
+            target: CreationTaskTarget::CanvasNode { canvas_id: generate_id(), node_id: generate_id() }, prompt: "image".into(), count: 1, size: None, quality: None,
+        }) };
+        let error = host.invoke(request.clone()).await.unwrap_err(); assert_eq!(error.code, "GENERATION_MODEL_UNAVAILABLE");
+        let mut foreign = request; foreign.context.principal.principal_id = UserId::new().to_string();
+        assert!(host.invoke(foreign).await.is_err());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM creation_tasks").fetch_one(database.pool()).await.unwrap(); assert_eq!(count, 0);
+    }
 
-        let error = host.invoke(request).await.expect_err("model is required");
-        assert_eq!(error.code, "WAVE3_RESOURCE_BINDING_INVALID");
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM creation_tasks")
-            .fetch_one(database.pool())
-            .await
-            .expect("task count");
-        assert_eq!(count, 0);
+    #[tokio::test]
+    async fn conversation_generation_cannot_target_another_session_or_unadmitted_message() {
+        let owner = UserId::new(); let database = init_database_memory_with_owner(owner.clone()).await.unwrap();
+        let host = host(database.pool().clone(), owner.as_str()); let context = context(owner.as_str());
+        assert!(host.validate_task_owner(&context, &CreativeTaskOwner::ConversationTurn { conversation_id: generate_id(), message_id: generate_id() }).await.is_err());
+        assert!(host.validate_task_owner(&context, &CreativeTaskOwner::ConversationTurn { conversation_id: context.agent_session_id.as_ref().to_owned(), message_id: generate_id() }).await.is_err());
     }
 }

@@ -22,15 +22,9 @@ import {
   type CreativeTask,
   type CreativeTaskReference,
 } from '../../tasks';
-import type { AudioWorkbenchFieldSupport } from '../../workbenches/audio';
-import {
-  prepareAudioWorkbenchRun,
-  resolveExactWorkbenchModel,
-  workbenchResumeRequestsFromDocument,
-  type CreativeWorkbenchReferences,
-  type CreativeWorkbenchResumeRequest,
-  type PreparedCreativeWorkbenchRun,
-} from '../../workbenches/runtime';
+import type { SpeechGenerationFieldSupport } from '@renderer/creation/parameters/speech';
+import { prepareCanvasAudioRun, canvasResumeRequestsFromDocument, type GenerationReferences, type CanvasGenerationResumeRequest, type PreparedCanvasGenerationRun } from '../generation';
+import { resolveExactGenerationModel } from '@renderer/creation/modelSelection';
 import { validateCanvasConnection, type CanvasState } from '../core';
 import { nextCanvasImageTaskPosition } from './imageTaskCanvasLayout';
 import {
@@ -66,7 +60,7 @@ export interface CanvasAudioComposeTaskSummary {
 export interface PreparedCanvasAudioCompose {
   configNode: ConfigNode;
   connection: Omit<CreativeCanvasConnection, 'id'>;
-  plan: PreparedCreativeWorkbenchRun;
+  plan: PreparedCanvasGenerationRun;
 }
 
 export const DEFAULT_CANVAS_AUDIO_COMPOSE_SETTINGS: CanvasAudioComposeSettings = {
@@ -81,7 +75,7 @@ export const DEFAULT_CANVAS_AUDIO_COMPOSE_DRAFT: CanvasAudioComposeDraft = {
 };
 
 export interface CanvasAudioComposeProtocolProfile {
-  fieldSupport: AudioWorkbenchFieldSupport;
+  fieldSupport: SpeechGenerationFieldSupport;
   voiceRequired: boolean;
   maxTextLength: number;
 }
@@ -89,7 +83,7 @@ export interface CanvasAudioComposeProtocolProfile {
 const fields = (
   voice: boolean,
   format: boolean
-): AudioWorkbenchFieldSupport => ({
+): SpeechGenerationFieldSupport => ({
   voice,
   format,
   speed: false,
@@ -142,7 +136,7 @@ export function canvasAudioComposeProtocolProfile(
 
 export function canvasAudioComposeFieldSupport(
   protocol: string
-): AudioWorkbenchFieldSupport {
+): SpeechGenerationFieldSupport {
   return canvasAudioComposeProtocolProfile(protocol).fieldSupport;
 }
 
@@ -388,7 +382,7 @@ export function prepareCanvasAudioCompose(input: {
   sourceAsset: CreativeAsset | null;
   catalog: CreativeModelCatalogSnapshot;
   model: CreativeModelSelectionRef;
-  references: CreativeWorkbenchReferences;
+  references: GenerationReferences;
   prompt: string;
   settings: Omit<CanvasAudioComposeSettings, 'model'>;
 }): PreparedCanvasAudioCompose {
@@ -425,7 +419,7 @@ export function prepareCanvasAudioCompose(input: {
     );
   }
 
-  const resolved = resolveExactWorkbenchModel(
+  const resolved = resolveExactGenerationModel(
     input.catalog,
     input.model,
     'speech_synthesis'
@@ -452,7 +446,7 @@ export function prepareCanvasAudioCompose(input: {
     input.viewportSize,
     { position: configPosition, locked: true }
   );
-  const plan = prepareAudioWorkbenchRun({
+  const plan = prepareCanvasAudioRun({
     catalog: input.catalog,
     canvasId: input.projectId,
     nodeId: base.id,
@@ -518,11 +512,11 @@ export function prepareCanvasAudioCompose(input: {
 
 export function canvasAudioComposeResumeRequests(
   document: CreativeProjectDocument
-): CreativeWorkbenchResumeRequest[] {
+): CanvasGenerationResumeRequest[] {
   const owners = new Set(
     document.nodes.filter(isCanvasAudioComposeConfig).map((node) => node.id)
   );
-  return workbenchResumeRequestsFromDocument(document).filter(
+  return canvasResumeRequestsFromDocument(document).filter(
     (request) =>
       request.reference.owner.kind === 'canvas_node' &&
       owners.has(request.reference.owner.nodeId)

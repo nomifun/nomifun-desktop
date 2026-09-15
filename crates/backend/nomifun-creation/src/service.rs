@@ -23,14 +23,13 @@ use nomifun_common::{
 #[cfg(test)]
 use nomifun_common::generate_id;
 use nomifun_db::{
-    CreateCreativeTaskParams, CreationTaskPageCursorRef, CreationTaskRow, CreativeTaskOwnerRef,
-    ICreationTaskRepository, ListStandaloneWorkbenchTasksParams,
-    RetireStandaloneWorkbenchTasksParams, UpdateCreationTaskParams,
+    CreateCreativeTaskParams, CreationTaskRow, CreativeTaskOwnerRef,
+    ICreationTaskRepository, UpdateCreationTaskParams,
 };
 use nomifun_model_invoke::{
     ImageEditRequest, ImageGenRequest, InputAsset, InvokeErrorKind, JobHandle,
     MAX_ARTIFACT_BYTES, ModelInvokeService, ModelRef, ProducedAsset, ProducedData, TaskOutcome,
-    TaskRequest, TaskResult, TtsRequest, VideoGenRequest,
+    TaskRequest, TaskResult, TtsRequest, VideoGenRequest, MusicGenRequest,
 };
 use nomifun_net::egress::{SafeHttpClient, SafeHttpError, SafeHttpErrorKind, redacted_url};
 use serde::Serialize;
@@ -43,8 +42,7 @@ use tokio_util::sync::CancellationToken;
 use crate::artifact::{reconcile_mime, validate_for_capability};
 use crate::dto::CreationTask;
 use crate::types::{
-    CreationError, CreationInput, CreationInputKind, MediaCapability, StandaloneWorkbenchKind,
-    TaskStatus,
+    CreationError, CreationInput, CreationInputKind, MediaCapability, TaskStatus,
 };
 
 /// Default per-provider in-flight cap (信号量).
@@ -267,6 +265,7 @@ fn request_extra(params: &Value, consumed: &[&str]) -> Value {
         return params.clone();
     };
     let mut extra = object.clone();
+    extra.retain(|key, _| !key.starts_with("_nomifun") && !key.starts_with("nomifun"));
     for key in consumed {
         extra.remove(*key);
     }
@@ -278,10 +277,9 @@ fn request_extra(params: &Value, consumed: &[&str]) -> Value {
         "userPrompt",
         "referenceWidth",
         "referenceHeight",
-        "nomifunStandaloneWorkbench",
-        "nomifunRetrySlot",
         PINNED_CONNECTION_REF_PARAM,
         PINNED_PROVIDER_REVISION_PARAM,
+        "_nomifun_creation_agent",
     ] {
         extra.remove(key);
     }
@@ -320,6 +318,7 @@ fn cap_to_task_request(
         }),
         MediaCapability::I2i | MediaCapability::Inpaint => TaskRequest::ImageEdit(ImageEditRequest {
             prompt: param_prompt(params),
+            quality: param_str(params, "quality"),
             count: param_count(params)?,
             size: param_size(params),
             inputs,
@@ -329,6 +328,7 @@ fn cap_to_task_request(
                     "prompt",
                     "count",
                     "n",
+                    "quality",
                     "width",
                     "height",
                     "size",
@@ -339,12 +339,13 @@ fn cap_to_task_request(
         }),
         MediaCapability::T2v | MediaCapability::I2v => TaskRequest::VideoGeneration(VideoGenRequest {
             prompt: param_prompt(params),
+            resolution: param_str(params, "resolution"),
             seconds: param_seconds(params)?,
-            size: param_size(params),
+            size: param_size(params).or_else(|| param_str(params, "aspect").filter(|aspect| !aspect.eq_ignore_ascii_case("auto"))),
             inputs,
             extra: request_extra(
                 params,
-                &["prompt", "seconds", "width", "height", "size", "resolution", "aspect"],
+                &["prompt", "seconds", "width", "height", "size", "resolution", "aspect", "count", "n"],
             ),
         }),
         MediaCapability::V2v => {
@@ -353,6 +354,13 @@ fn cap_to_task_request(
                 "video-to-video (v2v) is not supported by any protocol adapter",
             ));
         }
+        MediaCapability::Music => TaskRequest::MusicGeneration(MusicGenRequest {
+            prompt: param_prompt(params),
+            lyrics: param_str(params, "lyrics"),
+            instrumental: params.get("instrumental").and_then(Value::as_bool).unwrap_or(true),
+            format: param_str(params, "format"),
+            extra: request_extra(params, &["prompt", "lyrics", "instrumental", "format"]),
+        }),
         MediaCapability::Tts => TaskRequest::SpeechSynthesis(TtsRequest {
             text: param_prompt(params),
             voice: param_str(params, "voice"),
@@ -394,6 +402,16 @@ fn required_artifact_count(
     ) {
         Ok(param_count(params)? as usize)
     } else {
+        if matches!(capability, MediaCapability::T2v | MediaCapability::I2v | MediaCapability::V2v) {
+            for field in ["count", "n"] {
+                if params.get(field).is_some_and(|value| value.as_u64() != Some(1)) {
+                    return Err(CreationError::new(
+                        "invalid_params",
+                        format!("params.{field} must be 1: each video task produces one clip; submit separate tasks for multiple clips"),
+                    ));
+                }
+            }
+        }
         Ok(1)
     }
 }
@@ -409,64 +427,15 @@ pub struct NewCreationTask {
     pub inputs: Vec<CreationInput>,
 }
 
-pub const DEFAULT_STANDALONE_TASK_PAGE_LIMIT: usize = 30;
-pub const MAX_STANDALONE_TASK_PAGE_LIMIT: usize = 100;
-
-#[derive(Debug, Clone)]
-pub struct StandaloneWorkbenchTaskPage {
-    pub items: Vec<CreationTask>,
-    pub next_cursor: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StandaloneTaskPageCursor {
-    submitted_at: i64,
-    creation_task_id: String,
-}
-
-fn parse_standalone_task_cursor(raw: &str) -> Result<StandaloneTaskPageCursor, AppError> {
-    let (timestamp, task_id) = raw.split_once(':').ok_or_else(|| {
-        AppError::BadRequest(
-            "cursor must be '<submitted_at>:<creation_task_uuidv7>'".into(),
-        )
-    })?;
-    if timestamp.is_empty() || task_id.is_empty() || task_id.contains(':') {
-        return Err(AppError::BadRequest(
-            "cursor must contain exactly one timestamp/task separator".into(),
-        ));
-    }
-    let submitted_at = timestamp.parse::<i64>().map_err(|_| {
-        AppError::BadRequest("cursor submitted_at must be a canonical non-negative integer".into())
-    })?;
-    if submitted_at < 0 || submitted_at.to_string() != timestamp {
-        return Err(AppError::BadRequest(
-            "cursor submitted_at must be a canonical non-negative integer".into(),
-        ));
-    }
-    let creation_task_id = CreationTaskId::parse(task_id)
-        .map_err(|error| AppError::BadRequest(format!("invalid cursor task id: {error}")))?
-        .into_string();
-    Ok(StandaloneTaskPageCursor {
-        submitted_at,
-        creation_task_id,
-    })
-}
-
-fn encode_standalone_task_cursor(task: &CreationTaskRow) -> String {
-    format!("{}:{}", task.submitted_at, task.creation_task_id)
-}
-
 /// Canonical Creative Studio task owner. The API accepts this tagged union and
 /// persists exactly one branch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CreativeTaskOwner {
+    ConversationTurn { conversation_id: String, message_id: String },
     CanvasNode {
         canvas_id: String,
         node_id: String,
-    },
-    StandaloneWorkbench {
-        workbench_kind: StandaloneWorkbenchKind,
     },
     TemplateStep {
         template_id: String,
@@ -478,6 +447,10 @@ pub enum CreativeTaskOwner {
 impl CreativeTaskOwner {
     fn normalize(self) -> Result<Self, AppError> {
         match self {
+            Self::ConversationTurn { conversation_id, message_id } => Ok(Self::ConversationTurn {
+                conversation_id: nomifun_common::ConversationId::parse(conversation_id).map_err(|e| AppError::BadRequest(e.to_string()))?.into_string(),
+                message_id: nomifun_common::MessageId::parse(message_id).map_err(|e| AppError::BadRequest(e.to_string()))?.into_string(),
+            }),
             Self::CanvasNode {
                 canvas_id,
                 node_id,
@@ -489,9 +462,6 @@ impl CreativeTaskOwner {
                     .map_err(|error| AppError::BadRequest(format!("invalid node_id: {error}")))?
                     .into_string(),
             }),
-            Self::StandaloneWorkbench { workbench_kind } => {
-                Ok(Self::StandaloneWorkbench { workbench_kind })
-            }
             Self::TemplateStep {
                 template_id,
                 template_run_id,
@@ -516,6 +486,7 @@ impl CreativeTaskOwner {
 
     fn as_repository_owner(&self) -> CreativeTaskOwnerRef<'_> {
         match self {
+            Self::ConversationTurn { conversation_id, message_id } => CreativeTaskOwnerRef::ConversationTurn { conversation_id, message_id },
             Self::CanvasNode {
                 canvas_id,
                 node_id,
@@ -524,11 +495,6 @@ impl CreativeTaskOwner {
                 project_id: canvas_id,
                 node_id,
             },
-            Self::StandaloneWorkbench { workbench_kind } => {
-                CreativeTaskOwnerRef::StandaloneWorkbench {
-                    workbench_kind: workbench_kind.as_str(),
-                }
-            }
             Self::TemplateStep {
                 template_id,
                 template_run_id,
@@ -597,43 +563,20 @@ impl PreparedCreationTask {
         owner: CreativeTaskOwner,
         submitted_at: i64,
     ) -> WorkerJob {
-        let (
-            canvas_id,
-            workbench_kind,
-            template_id,
-            template_run_id,
-            template_step_id,
-            node_id,
-        ) = match owner {
-            CreativeTaskOwner::CanvasNode {
-                canvas_id,
-                node_id,
-            } => (Some(canvas_id), None, None, None, None, Some(node_id)),
-            CreativeTaskOwner::StandaloneWorkbench { workbench_kind } => (
-                None,
-                Some(workbench_kind),
-                None,
-                None,
-                None,
-                None,
-            ),
-            CreativeTaskOwner::TemplateStep {
-                template_id,
-                template_run_id,
-                template_step_id,
-            } => (
-                None,
-                None,
-                Some(template_id),
-                Some(template_run_id),
-                Some(template_step_id),
-                None,
-            ),
+        let (conversation_id, message_id) = match &owner {
+            CreativeTaskOwner::ConversationTurn { conversation_id, message_id } => (Some(conversation_id.clone()), Some(message_id.clone())),
+            _ => (None, None),
+        };
+        let (canvas_id, template_id, template_run_id, template_step_id, node_id) = match owner {
+            CreativeTaskOwner::ConversationTurn { .. } => (None, None, None, None, None),
+            CreativeTaskOwner::CanvasNode { canvas_id, node_id } => (Some(canvas_id), None, None, None, Some(node_id)),
+            CreativeTaskOwner::TemplateStep { template_id, template_run_id, template_step_id } => (None, Some(template_id), Some(template_run_id), Some(template_step_id), None),
         };
         WorkerJob {
+            conversation_id,
+            message_id,
             creation_task_id,
             canvas_id,
-            workbench_kind,
             template_id,
             template_run_id,
             template_step_id,
@@ -750,9 +693,11 @@ pub trait AssetSource: Send + Sync {
 
 /// The persisted fields a worker needs to run (or resume) one task.
 struct WorkerJob {
+    conversation_id: Option<String>,
+    message_id: Option<String>,
     creation_task_id: String,
     canvas_id: Option<String>,
-    workbench_kind: Option<StandaloneWorkbenchKind>,
+
     template_id: Option<String>,
     template_run_id: Option<String>,
     template_step_id: Option<String>,
@@ -997,15 +942,6 @@ impl CreationService {
         // state only for a brand-new key. Skipping the eager provider lookup
         // here keeps an exact historical replay readable after retirement.
         let prepared = self.prepare_task(req).await?;
-        if let CreativeTaskOwner::StandaloneWorkbench { workbench_kind, .. } = &owner
-            && !workbench_kind.accepts_capability(prepared.capability)
-        {
-            return Err(AppError::BadRequest(format!(
-                "standalone {} workbench cannot own capability {}",
-                workbench_kind.as_str(),
-                prepared.capability.as_str()
-            )));
-        }
         if prepared.model.trim() != prepared.model {
             return Err(AppError::BadRequest(
                 "Creative Studio model must be already normalized".into(),
@@ -1072,6 +1008,62 @@ impl CreationService {
             .try_into()
     }
 
+    /// Freeze the selected connection revision before accepting a new user
+    /// submission. Replays use their persisted snapshot and do not call this.
+    pub async fn capture_model_config(&self, request: &mut NewCreationTask) -> Result<(), AppError> {
+        let Some(invoke) = &self.invoke else { return Ok(()); };
+        let capability = MediaCapability::parse(&request.capability).ok_or_else(|| AppError::BadRequest("Unsupported generation capability".into()))?;
+        let task = cap_to_task_request(capability, &request.params, Vec::new())
+            .map_err(|error| AppError::BadRequest(error.message))?.task();
+        let selected = invoke.resolve_task_config(&ModelRef { provider_id: request.provider_id.clone(), model: request.model.clone() }, task).await
+            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+        let params = request.params.as_object_mut().ok_or_else(|| AppError::BadRequest("Generation parameters must be an object".into()))?;
+        params.insert(PINNED_CONNECTION_REF_PARAM.into(), Value::String(format!("provider:{}@{}", selected.provider_id, selected.config_revision)));
+        params.insert(PINNED_PROVIDER_REVISION_PARAM.into(), Value::from(selected.config_revision));
+        Ok(())
+    }
+
+    /// Persist an explicitly attached reference in the existing asset library.
+    /// The caller owns file access; generation only receives validated bytes.
+    pub async fn import_reference(&self, bytes: Vec<u8>, mime: String, origin: Value, in_library: bool) -> Result<CreationInput, AppError> {
+        let mime = crate::validate_artifact_payload(&bytes, &mime)
+            .map_err(|error| AppError::BadRequest(error.message))?;
+        let kind = if mime.starts_with("image/") { CreationInputKind::Image }
+            else if mime.starts_with("video/") { CreationInputKind::Video }
+            else if mime.starts_with("audio/") { CreationInputKind::Audio }
+            else { return Err(AppError::BadRequest("Choose an image, video or audio reference".into())); };
+        let sink = self.asset_sink.as_ref().ok_or_else(|| AppError::Internal("Asset storage is unavailable".into()))?;
+        let asset_id = sink.persist(PersistAsset { bytes, mime, origin, in_library }).await
+            .map_err(|error| AppError::Internal(error.message))?;
+        Ok(CreationInput { asset_id, kind, role: "reference".into() })
+    }
+
+    pub async fn list_conversation_tasks(&self, conversation_id: &str) -> Result<Vec<CreationTask>, AppError> {
+        nomifun_common::ConversationId::parse(conversation_id).map_err(|e| AppError::BadRequest(e.to_string()))?;
+        self.repo.list_conversation_tasks(conversation_id).await?.into_iter().map(CreationTask::try_from).collect()
+    }
+
+    pub async fn conversation_message_creation_references(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<Option<Value>, AppError> {
+        nomifun_common::ConversationId::parse(conversation_id).map_err(|e| AppError::BadRequest(e.to_string()))?;
+        nomifun_common::MessageId::parse(message_id).map_err(|e| AppError::BadRequest(e.to_string()))?;
+        Ok(self.repo.conversation_message_creation_references(conversation_id, message_id).await?)
+    }
+
+    /// Called under the conversation's existing deletion/reset admission fence.
+    /// Keep terminal task provenance so saved materials survive transcript deletion.
+    pub async fn cancel_conversation_tasks(&self, conversation_id: &str) -> Result<(), AppError> {
+        for task in self.repo.list_conversation_tasks(conversation_id).await? {
+            if matches!(task.status.as_str(), "queued" | "running") {
+                self.cancel_task(&task.creation_task_id).await?;
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     async fn create_test_task(
         self: &Arc<Self>,
@@ -1104,149 +1096,7 @@ impl CreationService {
         rows.pop().expect("one task row remains after artifact audit").try_into()
     }
 
-    pub async fn list_standalone_workbench_tasks(
-        &self,
-        workbench_kind: StandaloneWorkbenchKind,
-        active_only: bool,
-        limit: Option<usize>,
-        cursor: Option<&str>,
-    ) -> Result<StandaloneWorkbenchTaskPage, AppError> {
-        let limit = limit.unwrap_or(DEFAULT_STANDALONE_TASK_PAGE_LIMIT);
-        if !(1..=MAX_STANDALONE_TASK_PAGE_LIMIT).contains(&limit) {
-            return Err(AppError::BadRequest(format!(
-                "limit must be between 1 and {MAX_STANDALONE_TASK_PAGE_LIMIT}"
-            )));
-        }
-        let cursor = cursor.map(parse_standalone_task_cursor).transpose()?;
-        let mut rows = self
-            .repo
-            .list_standalone_workbench_tasks_page(ListStandaloneWorkbenchTasksParams {
-                workbench_kind: workbench_kind.as_str(),
-                active_only,
-                before: cursor.as_ref().map(|cursor| CreationTaskPageCursorRef {
-                    submitted_at: cursor.submitted_at,
-                    creation_task_id: &cursor.creation_task_id,
-                }),
-                limit,
-            })
-            .await?;
-        let has_more = rows.len() > limit;
-        rows.truncate(limit);
-        for row in &rows {
-            let exact_owner = row.workbench_kind.as_deref() == Some(workbench_kind.as_str())
-                && row.node_id.is_none()
-                && row.template_id.is_none()
-                && row.template_run_id.is_none()
-                && row.template_step_id.is_none();
-            let capability_matches = MediaCapability::parse(&row.capability)
-                .is_some_and(|capability| workbench_kind.accepts_capability(capability));
-            if !exact_owner || !capability_matches {
-                return Err(AppError::Internal(format!(
-                    "standalone task {} escaped its exact owner/capability scope",
-                    row.creation_task_id
-                )));
-            }
-        }
-        let next_cursor = has_more && !rows.is_empty();
-        let encoded_cursor = next_cursor
-            .then(|| rows.last().map(encode_standalone_task_cursor))
-            .flatten();
-        let rows = self.audit_rows_for_output(rows).await?;
-        let items = rows
-            .into_iter()
-            .map(CreationTask::try_from)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(StandaloneWorkbenchTaskPage {
-            items,
-            next_cursor: encoded_cursor,
-        })
-    }
 
-    pub async fn retire_standalone_workbench_tasks(
-        &self,
-        workbench_kind: StandaloneWorkbenchKind,
-        task_ids: &[String],
-    ) -> Result<Vec<String>, AppError> {
-        if task_ids.is_empty() || task_ids.len() > 100 {
-            return Err(AppError::BadRequest(
-                "retire requires between 1 and 100 task_ids".into(),
-            ));
-        }
-        let mut seen = HashSet::with_capacity(task_ids.len());
-        for task_id in task_ids {
-            CreationTaskId::parse(task_id).map_err(|error| {
-                AppError::BadRequest(format!("invalid retire task id {task_id:?}: {error}"))
-            })?;
-            if !seen.insert(task_id.as_str()) {
-                return Err(AppError::BadRequest(format!(
-                    "retire task_ids contains duplicate {task_id}"
-                )));
-            }
-        }
-
-        let mut rows = Vec::with_capacity(task_ids.len());
-        for task_id in task_ids {
-            let row = self
-                .repo
-                .get_task(task_id)
-                .await?
-                .ok_or_else(|| AppError::NotFound(format!("creation task {task_id} not found")))?;
-            let exact_owner = row.workbench_kind.as_deref() == Some(workbench_kind.as_str())
-                && row.node_id.is_none()
-                && row.template_id.is_none()
-                && row.template_run_id.is_none()
-                && row.template_step_id.is_none();
-            let capability_matches = MediaCapability::parse(&row.capability)
-                .is_some_and(|capability| workbench_kind.accepts_capability(capability));
-            if !exact_owner || !capability_matches {
-                return Err(AppError::Conflict(format!(
-                    "creation task {task_id} does not belong to the requested standalone workbench owner"
-                )));
-            }
-            if matches!(row.status.as_str(), "queued" | "running") {
-                return Err(AppError::Conflict(format!(
-                    "live creation task {task_id} cannot be retired"
-                )));
-            }
-            if !matches!(row.status.as_str(), "failed" | "canceled" | "succeeded") {
-                return Err(AppError::Conflict(format!(
-                    "creation task {task_id} is not in a supported terminal state"
-                )));
-            }
-            rows.push(row);
-        }
-        let deleted_at = rows
-            .iter()
-            .map(|row| row.submitted_at)
-            .max()
-            .unwrap_or_default()
-            .max(now_ms());
-        let rows = self.audit_rows_for_output(rows).await?;
-        for row in rows {
-            CreationTask::try_from(row)?;
-        }
-        let retired = self
-            .repo
-            .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
-                workbench_kind: workbench_kind.as_str(),
-                task_ids,
-                deleted_at,
-            })
-            .await?;
-        if retired.len() != task_ids.len() {
-            return Err(AppError::Internal(
-                "retirement returned an incomplete task batch".into(),
-            ));
-        }
-        for (expected, row) in task_ids.iter().zip(&retired) {
-            if row.creation_task_id != *expected || row.deleted_at.is_none() {
-                return Err(AppError::Internal(
-                    "retirement returned a reordered or untombstoned task".into(),
-                ));
-            }
-        }
-        Ok(task_ids.to_vec())
-    }
 
     /// Cancel a task. Terminal tasks are returned unchanged (idempotent); a live
     /// task moves to `canceled` and its worker is signalled to abort in-flight.
@@ -1264,9 +1114,9 @@ impl CreationService {
         }
         // Write the terminal status FIRST, then cancel the token so the worker's
         // finalize sees `Canceled` and won't overwrite it.
-        let updated = self
+        let canceled = self
             .repo
-            .update_task(
+            .update_task_if_live(
                 creation_task_id,
                 UpdateCreationTaskParams {
                     status: Some(TaskStatus::Canceled.as_str()),
@@ -1275,10 +1125,12 @@ impl CreationService {
                 },
             )
             .await?;
-        if let Some(token) = self.inflight.lock().unwrap().get(creation_task_id) {
-            token.cancel();
+        if canceled {
+            if let Some(token) = self.inflight.lock().unwrap().get(creation_task_id) {
+                token.cancel();
+            }
         }
-        updated.try_into()
+        self.get_task(creation_task_id).await
     }
 
     fn artifact_manifest(row: &CreationTaskRow) -> (TaskArtifactManifest, Option<TaskArtifactIssue>) {
@@ -1496,12 +1348,10 @@ impl CreationService {
                 match prepared {
                     Ok((capability, params, required_artifact_count)) => {
                         self.spawn(WorkerJob {
+                            conversation_id: row.conversation_id,
+                            message_id: row.message_id,
                             creation_task_id: row.creation_task_id.clone(),
                             canvas_id: row.project_id,
-                            workbench_kind: row
-                                .workbench_kind
-                                .as_deref()
-                                .and_then(StandaloneWorkbenchKind::parse),
                             template_id: row.template_id,
                             template_run_id: row.template_run_id,
                             template_step_id: row.template_step_id,
@@ -2221,14 +2071,14 @@ fn build_origin(job: &WorkerJob) -> Value {
             Value::String(job.creation_task_id.as_str().to_owned()),
         ),
     ]);
+    if let Some(conversation_id) = &job.conversation_id {
+        origin.insert("conversation_id".into(), Value::String(conversation_id.clone()));
+    }
+    if let Some(message_id) = &job.message_id {
+        origin.insert("message_id".into(), Value::String(message_id.clone()));
+    }
     if let Some(canvas_id) = &job.canvas_id {
         origin.insert("canvas_id".into(), Value::String(canvas_id.clone()));
-    }
-    if let Some(workbench_kind) = job.workbench_kind {
-        origin.insert(
-            "workbench_kind".into(),
-            Value::String(workbench_kind.as_str().to_owned()),
-        );
     }
     if let Some(template_id) = &job.template_id {
         origin.insert("template_id".into(), Value::String(template_id.clone()));
@@ -3196,243 +3046,7 @@ mod tests {
         assert_eq!(adapter.submit_calls.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
-    async fn standalone_task_page_is_owner_scoped_cursor_strict_and_audited() {
-        let db = nomifun_db::init_database_memory().await.unwrap();
-        let provider_id = seed_provider(db.pool(), "openai", "openai.videos").await;
-        let _canvas_id = seed_service_test_canvas(db.pool()).await;
-        let repo = SqliteCreationTaskRepository::new(db.pool().clone());
-        let mut task_ids = Vec::new();
-        for submitted_at in [200, 100] {
-            let task_id = CreationTaskId::new().into_string();
-            let fingerprint = json!({"task": task_id}).to_string();
-            repo.get_or_create_creative_task(CreateCreativeTaskParams {
-                creation_task_id: &task_id,
-                owner: CreativeTaskOwnerRef::StandaloneWorkbench {
-                    workbench_kind: "video",
-                },
-                provider_id: &provider_id,
-                model: "test-model",
-                capability: "t2v",
-                params: r#"{"prompt":"Aurora","seconds":5}"#,
-                input_bindings: "[]",
-                request_fingerprint: &fingerprint,
-                status: "queued",
-                submitted_at,
-            })
-            .await
-            .unwrap();
-            repo.update_task(
-                &task_id,
-                UpdateCreationTaskParams {
-                    status: Some("failed"),
-                    error: Some(Some(r#"{"kind":"provider_error","message":"fixture"}"#)),
-                    finished_at: Some(Some(submitted_at + 1)),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-            task_ids.push(task_id);
-        }
-        let service = CreationService::new(Arc::new(repo.clone()));
 
-        let first = service
-            .list_standalone_workbench_tasks(
-                StandaloneWorkbenchKind::Video,
-                false,
-                Some(1),
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(first.items.len(), 1);
-        assert_eq!(first.items[0].creation_task_id, task_ids[0]);
-        let cursor = first.next_cursor.expect("one more row requires a cursor");
-
-        let second = service
-            .list_standalone_workbench_tasks(
-                StandaloneWorkbenchKind::Video,
-                false,
-                Some(1),
-                Some(&cursor),
-            )
-            .await
-            .unwrap();
-        assert_eq!(second.items.len(), 1);
-        assert_eq!(second.items[0].creation_task_id, task_ids[1]);
-        assert!(second.next_cursor.is_none());
-        assert!(
-            service
-                .list_standalone_workbench_tasks(
-                    StandaloneWorkbenchKind::Image,
-                    false,
-                    None,
-                    None,
-                )
-                .await
-                .unwrap()
-                .items
-                .is_empty()
-        );
-        for invalid in ["", "01:bad", "-1:0190f5fe-7c00-7a00-8000-000000000001"] {
-            assert!(matches!(
-                service
-                    .list_standalone_workbench_tasks(
-                        StandaloneWorkbenchKind::Video,
-                        false,
-                        None,
-                        Some(invalid),
-                    )
-                    .await,
-                Err(AppError::BadRequest(_))
-            ));
-        }
-
-        let retired = service
-            .retire_standalone_workbench_tasks(
-                StandaloneWorkbenchKind::Video,
-                &[task_ids[0].clone()],
-            )
-            .await
-            .unwrap();
-        assert_eq!(retired, vec![task_ids[0].clone()]);
-        let direct = service.get_task(&task_ids[0]).await.unwrap();
-        let first_deleted_at = direct.deleted_at.expect("direct GET exposes tombstone");
-        assert!(
-            service
-                .list_standalone_workbench_tasks(
-                    StandaloneWorkbenchKind::Video,
-                    false,
-                    None,
-                    None,
-                )
-                .await
-                .unwrap()
-                .items
-                .iter()
-                .all(|task| task.creation_task_id != task_ids[0])
-        );
-        service
-            .retire_standalone_workbench_tasks(
-                StandaloneWorkbenchKind::Video,
-                &[task_ids[0].clone()],
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            service.get_task(&task_ids[0]).await.unwrap().deleted_at,
-            Some(first_deleted_at),
-            "idempotent retire preserves the first tombstone timestamp"
-        );
-
-        let corrupt_id = CreationTaskId::new().into_string();
-        let fingerprint = json!({"task": corrupt_id}).to_string();
-        repo.get_or_create_creative_task(CreateCreativeTaskParams {
-            creation_task_id: &corrupt_id,
-            owner: CreativeTaskOwnerRef::StandaloneWorkbench {
-                workbench_kind: "video",
-            },
-            provider_id: &provider_id,
-            model: "test-model",
-            capability: "t2v",
-            params: r#"{"prompt":"missing output","seconds":5}"#,
-            input_bindings: "[]",
-            request_fingerprint: &fingerprint,
-            status: "queued",
-            submitted_at: 300,
-        })
-        .await
-        .unwrap();
-        let missing_asset = WorkshopAssetId::new().into_string();
-        let result_ids = serde_json::to_string(&[missing_asset]).unwrap();
-        repo.update_task(
-            &corrupt_id,
-            UpdateCreationTaskParams {
-                status: Some("succeeded"),
-                result_asset_ids: Some(&result_ids),
-                finished_at: Some(Some(301)),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-        assert!(
-            service
-                .retire_standalone_workbench_tasks(
-                    StandaloneWorkbenchKind::Video,
-                    &[corrupt_id.clone()],
-                )
-                .await
-                .is_err(),
-            "retirement must not hide a succeeded task before artifact audit"
-        );
-        assert!(repo.get_task(&corrupt_id).await.unwrap().unwrap().deleted_at.is_none());
-    }
-
-    #[tokio::test]
-    async fn standalone_active_page_excludes_every_terminal_status() {
-        let db = nomifun_db::init_database_memory().await.unwrap();
-        let provider_id = seed_provider(db.pool(), "openai", "openai.images").await;
-        let _canvas_id = seed_service_test_canvas(db.pool()).await;
-        let repo = SqliteCreationTaskRepository::new(db.pool().clone());
-        let queued_id = CreationTaskId::new().into_string();
-        let failed_id = CreationTaskId::new().into_string();
-        for (task_id, submitted_at) in [(&queued_id, 20), (&failed_id, 10)] {
-            let fingerprint = json!({"task": task_id}).to_string();
-            repo.get_or_create_creative_task(CreateCreativeTaskParams {
-                creation_task_id: task_id,
-                owner: CreativeTaskOwnerRef::StandaloneWorkbench {
-                    workbench_kind: "image",
-                },
-                provider_id: &provider_id,
-                model: "test-model",
-                capability: "t2i",
-                params: r#"{"prompt":"Aurora"}"#,
-                input_bindings: "[]",
-                request_fingerprint: &fingerprint,
-                status: "queued",
-                submitted_at,
-            })
-            .await
-            .unwrap();
-        }
-        repo.update_task(
-            &failed_id,
-            UpdateCreationTaskParams {
-                status: Some("failed"),
-                error: Some(Some(r#"{"kind":"provider_error","message":"fixture"}"#)),
-                finished_at: Some(Some(11)),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-        let service = CreationService::new(Arc::new(repo));
-
-        let active = service
-            .list_standalone_workbench_tasks(
-                StandaloneWorkbenchKind::Image,
-                true,
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(active.items.len(), 1);
-        assert_eq!(active.items[0].creation_task_id, queued_id);
-
-        let all = service
-            .list_standalone_workbench_tasks(
-                StandaloneWorkbenchKind::Image,
-                false,
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(all.items.len(), 2);
-    }
 
     #[tokio::test]
     async fn creative_template_task_runs_with_exact_owner_and_provenance() {
@@ -3950,6 +3564,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_task_rejects_video_batch_count_before_persistence_or_provider_execution() {
+        let adapter = MockAdapter::sync("openai.images");
+        let h = harness(adapter.clone(), "openai").await;
+        for capability in ["t2v", "i2v", "v2v"] {
+            for params in [
+                json!({"count": 2}), json!({"n": 2}), json!({"count": 0}),
+                json!({"count": -1}), json!({"count": "1"}), json!({"count": 1.5}),
+                json!({"count": 1, "n": 2}), json!({"count": null}),
+            ] {
+                let mut task = new_task(&h.provider_id, capability);
+                task.params = params;
+                let error = h.svc.create_test_task(task).await.unwrap_err();
+                assert!(matches!(error, AppError::BadRequest(ref message) if message.contains("each video task produces one clip")));
+            }
+        }
+        assert_eq!(adapter.submit_calls.load(Ordering::SeqCst), 0);
+        assert!(h.svc.repo.list_all_tasks().await.unwrap().is_empty());
+        for capability in [MediaCapability::T2v, MediaCapability::I2v, MediaCapability::V2v] {
+            for params in [json!({}), json!({"count": 1}), json!({"n": 1}), json!({"count": 1, "n": 1})] {
+                assert_eq!(required_artifact_count(capability, &params).unwrap(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn missing_provider_conflicts_before_task_persistence() {
         let h = harness(MockAdapter::sync("openai.images"), "openai").await;
         let missing_provider = ProviderId::new().into_string();
@@ -4414,9 +4053,11 @@ mod tests {
         let node_id = CreativeStudioNodeId::new().into_string();
         let provider_id = ProviderId::new().into_string();
         let job = WorkerJob {
+            conversation_id: None,
+            message_id: None,
             creation_task_id: creation_task_id.clone(),
             canvas_id: Some(canvas_id.clone()),
-            workbench_kind: None,
+
             template_id: None,
             template_run_id: None,
             template_step_id: None,
@@ -4449,9 +4090,11 @@ mod tests {
     #[test]
     fn build_origin_omits_absent_owner_branch_ids_instead_of_writing_null() {
         let job = WorkerJob {
+            conversation_id: None,
+            message_id: None,
             creation_task_id: CreationTaskId::new().into_string(),
             canvas_id: None,
-            workbench_kind: None,
+
             template_id: Some(CreativeStudioTemplateId::new().into_string()),
             template_run_id: Some(CreativeStudioTemplateRunId::new().into_string()),
             template_step_id: Some(CreativeStudioTemplateStepId::new().into_string()),
@@ -4471,32 +4114,6 @@ mod tests {
         assert!(!origin.as_object().unwrap().contains_key("node_id"));
     }
 
-    #[test]
-    fn build_origin_carries_exact_standalone_workbench_branch() {
-        let job = WorkerJob {
-            creation_task_id: CreationTaskId::new().into_string(),
-            canvas_id: None,
-            workbench_kind: Some(StandaloneWorkbenchKind::Video),
-            template_id: None,
-            template_run_id: None,
-            template_step_id: None,
-            node_id: None,
-            provider_id: ProviderId::new().into_string(),
-            model: "video-model".into(),
-            capability: MediaCapability::I2v,
-            params: json!({"prompt": "Aurora", "seconds": 5}),
-            required_artifact_count: 1,
-            inputs: vec![],
-            submitted_at: 1,
-            remote_task_id: None,
-        };
-
-        let origin = build_origin(&job);
-        assert!(origin.get("canvas_id").is_none());
-        assert_eq!(origin["workbench_kind"], "video");
-        assert!(origin.get("node_id").is_none());
-        assert!(origin.get("template_id").is_none());
-    }
 
     // ---- param helpers (ported verbatim from the retired adapters/mod.rs) ----
 
@@ -4562,6 +4179,7 @@ mod tests {
             match cap_to_task_request(cap, &params, vec![input.clone()]).unwrap() {
                 TaskRequest::ImageEdit(r) => {
                     assert_eq!(r.count, 2);
+                    assert_eq!(r.quality.as_deref(), Some("high"));
                     assert_eq!(r.inputs.len(), 1);
                     assert_eq!(r.inputs[0].role, "mask");
                     assert!(r.extra.get("aspect").is_none());
@@ -4576,7 +4194,7 @@ mod tests {
                     assert_eq!(r.size.as_deref(), Some("512x512"));
                     assert_eq!(
                         r.extra,
-                        json!({"count": 2, "quality": "high", "voice": "alloy", "system": "be brief"})
+                        json!({"quality": "high", "voice": "alloy", "system": "be brief"})
                     );
                 }
                 _ => panic!("{cap:?} must map to VideoGeneration"),
@@ -4602,6 +4220,17 @@ mod tests {
                 assert_eq!(r.voice.as_deref(), Some("alloy"));
             }
             _ => panic!("tts must map to SpeechSynthesis"),
+        }
+        let music = json!({"prompt":"Warm piano", "instrumental":false, "lyrics":"A new day", "format":"mp3", "_nomifun_creation_request":{"private":"receipt"}});
+        match cap_to_task_request(MediaCapability::Music, &music, vec![]).unwrap() {
+            TaskRequest::MusicGeneration(r) => {
+                assert_eq!(r.prompt, "Warm piano");
+                assert_eq!(r.lyrics.as_deref(), Some("A new day"));
+                assert!(!r.instrumental);
+                assert_eq!(r.format.as_deref(), Some("mp3"));
+                assert_eq!(r.extra, json!({}));
+            }
+            _ => panic!("music must map to MusicGeneration rather than speech"),
         }
         let Err(text_error) = cap_to_task_request(MediaCapability::Text, &params, vec![]) else {
             panic!("text must never map to a media invocation request");
@@ -4638,6 +4267,7 @@ mod tests {
         };
         assert_eq!(request.size.as_deref(), Some("1920x1080"));
         assert_eq!(request.seconds, Some(5));
+        assert_eq!(request.resolution.as_deref(), Some("1080p"));
         assert_eq!(
             request.extra,
             json!({})
@@ -4655,6 +4285,7 @@ mod tests {
             panic!("t2v must map to VideoGeneration");
         };
         assert!(request.size.is_none());
+        assert_eq!(request.resolution.as_deref(), Some("1080p"));
         assert_eq!(request.extra, json!({}));
     }
 

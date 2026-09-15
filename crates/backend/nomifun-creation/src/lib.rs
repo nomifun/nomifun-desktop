@@ -21,8 +21,7 @@ pub mod state;
 
 pub use artifact::validate_artifact_payload;
 pub use dto::{
-    CreationTask, CreativeCreationTask, CreativeCreationTaskOwner, CreativeCreationTaskPage,
-    CreativeCreationTaskRetireResult,
+    CreationTask, CreativeCreationTask, CreativeCreationTaskOwner,
 };
 pub use routes::creation_routes;
 pub use service::{
@@ -33,6 +32,6 @@ pub use service::{
 };
 pub use state::CreationRouterState;
 pub use types::{
-    CreationError, CreationInput, CreationInputKind, MediaCapability, StandaloneWorkbenchKind,
+    ConversationCreationReference, CreationError, CreationInput, CreationInputKind, MediaCapability,
     TaskStatus,
 };

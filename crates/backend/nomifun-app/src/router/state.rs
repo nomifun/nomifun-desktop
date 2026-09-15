@@ -988,11 +988,17 @@ async fn build_nomi_core_agent_api_state(
     .with_default_chat_route_resolver(Arc::new(
         NomiCoreDefaultChatRouteResolver::new(services.database.pool().clone()),
     )));
+    let resource_bindings = super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry::product(services)
+        .map_err(|error| {
+            anyhow::anyhow!("{}: {}", error.code(), error.message())
+        })?;
     let product_agent_resolver = Arc::new(
         super::nomi_core_session::NomiCoreProductAgentResolver::new(
             Arc::clone(&control_plane),
             Arc::clone(&services.authoritative_user_id),
             services.database.pool().clone(),
+            Arc::clone(&services.runtime_engines),
+            resource_bindings.clone(),
         ),
     );
     conversation_owner
@@ -1005,10 +1011,6 @@ async fn build_nomi_core_agent_api_state(
         Arc::new(nomifun_db::SqliteMcpServerRepository::new(
             services.database.pool().clone(),
         ));
-    let resource_bindings = super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry::product(services)
-        .map_err(|error| {
-            anyhow::anyhow!("{}: {}", error.code(), error.message())
-        })?;
     services.runtime_engines.register_restart_recovery(&super::coding_runtime_host::descriptor(),
         Arc::new(super::coding_runtime_recovery::CodingRestartRecovery::new(services.database.pool().clone())))?;
     let engine_sessions = Arc::new(super::engine_session_host::EngineSessionHost::new(
@@ -1225,6 +1227,7 @@ fn build_nomi_core_conversation_owner(services: &AppServices) -> ConversationSer
         services.execution_conversation_boundary.clone(),
     )
     .with_runtime_state(services.conversation_runtime_state.clone());
+    conversation_service.with_creation_service(services.creation_service.clone());
     conversation_service.with_background_task_registrar(
         services.background_tasks.clone()
             as Arc<dyn nomifun_conversation::BackgroundTaskRegistrar>,

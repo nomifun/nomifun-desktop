@@ -539,7 +539,7 @@ const CreativeImageMaskEditDialog: React.FC<
     closable={!props.busy && !props.retryLocked}
     unmountOnExit
     getPopupContainer={() =>
-      document.getElementById("creative-studio-portal-root") ?? document.body
+      document.getElementById("resource-page-portal-root") ?? document.body
     }
     onCancel={props.onClose}
   >

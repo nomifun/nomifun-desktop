@@ -596,6 +596,7 @@ mod tests {
             prompt: "add a hat".into(),
             count: 1,
             size: None,
+            quality: None,
             inputs: vec![InputAsset { id: None, role: "image".into(), bytes: b"hi".to_vec(), mime: "image/png".into() }],
             extra: json!({}),
         });

@@ -22,6 +22,7 @@ import LocalImageView from '@renderer/components/media/LocalImageView';
 import NomiSendBox from './NomiSendBox';
 import { useNomiMessage } from './useNomiMessage';
 import type { NomiModelSelection } from './useNomiModelSelection';
+import { ConversationCreationTasksProvider } from '@/renderer/creation/ConversationCreationTasks';
 
 const NomiChat: React.FC<{
   conversation_id: ConversationId;
@@ -104,6 +105,7 @@ const NomiChat: React.FC<{
   return (
     <ConversationProvider value={conversationValue}>
       <ConversationArtifactProvider conversation_id={conversation_id}>
+        <ConversationCreationTasksProvider conversationId={conversation_id}>
         <div className='flex-1 flex flex-col px-20px min-h-0'>
           <FlexFullContainer>
             <MessageList
@@ -129,6 +131,7 @@ const NomiChat: React.FC<{
             />
           )}
         </div>
+        </ConversationCreationTasksProvider>
       </ConversationArtifactProvider>
     </ConversationProvider>
   );

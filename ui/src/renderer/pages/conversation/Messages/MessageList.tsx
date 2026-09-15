@@ -5,6 +5,7 @@
  */
 
 import type { IConversationArtifact } from '@/common/adapter/ipcBridge';
+import { ConversationCreationTaskCards } from '@/renderer/creation/ConversationCreationTasks';
 import type {
   IMessageText,
   IMessageToolCall,
@@ -1501,7 +1502,7 @@ const MessageList: React.FC<{
             <div ref={handleContentRef} data-testid='message-list-content' style={{ overflowAnchor: 'none' }}>
               <div className='h-10px' />
               {displayList.map((item, index) => (
-                <React.Fragment key={item.id}>{renderItem(index, item)}</React.Fragment>
+                <React.Fragment key={item.id}>{renderItem(index, item)}{'position' in item && item.position === 'right' && 'msg_id' in item && item.msg_id ? <ConversationCreationTaskCards messageId={item.msg_id} /> : null}</React.Fragment>
               ))}
               <div className='h-20px' />
             </div>

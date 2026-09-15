@@ -1,5 +1,4 @@
 import { ipcBridge } from '@/common';
-import type { IProvider } from '@/common/config/storage';
 import { creativeStudioCanvasApi } from '@/renderer/pages/creativeStudio/services/canvasApi';
 import { Button, Select, Spin } from '@arco-design/web-react';
 import { LinkOne } from '@icon-park/react';
@@ -37,22 +36,6 @@ export type AgentResourceInventoryLoader = (
 ) => Promise<AgentResourceInventory>;
 
 const emptyInventory = (): AgentResourceInventory => ({ options: {}, errors: {} });
-
-const generationTasks = (capabilityIds: ReadonlySet<string>): string[] => {
-  const mapping: Record<string, string> = {
-    'creation.text': 'chat',
-    'creation.image': 'image_generation',
-    'creation.image_edit': 'image_edit',
-    'creation.video': 'video_generation',
-    'creation.audio': 'speech_synthesis',
-  };
-  return [...new Set([...capabilityIds].flatMap((id) => mapping[id] ? [mapping[id]] : []))];
-};
-
-const providerSupportsTasks = (provider: IProvider, tasks: readonly string[]): boolean =>
-  provider.enabled !== false && tasks.every((task) =>
-    provider.models.some((model) => model.enabled && model.capabilities.some((capability) => capability.task === task))
-  );
 
 export const loadAgentResourceInventory: AgentResourceInventoryLoader = async (kinds, capabilityIds) => {
   const options: AgentResourceInventory['options'] = {};
@@ -102,11 +85,6 @@ export const loadAgentResourceInventory: AgentResourceInventoryLoader = async (k
     const rows = await creativeStudioCanvasApi.listCanvases();
     options.canvas = rows.map((row) => ({ value: row.canvasId, label: row.title }));
   }});
-  if (wanted.has('generation_provider')) jobs.push({ kinds: ['generation_provider'], run: async () => {
-    const tasks = generationTasks(capabilityIds);
-    const rows = await ipcBridge.mode.listProviders.invoke();
-    options.generation_provider = rows.filter((row) => providerSupportsTasks(row, tasks)).map((row) => ({ value: row.id, label: row.name, description: row.platform }));
-  }});
   if (wanted.has('plugin')) jobs.push({ kinds: ['plugin'], run: async () => {
     const rows = (await ipcBridge.pluginRuntimes.library.invoke()).plugins;
     options.plugin = rows.filter((row) => row.lifecycle === 'enabled' && row.surface_available).map((row) => ({ value: row.plugin_id, label: row.display_name, description: row.description }));
@@ -129,7 +107,6 @@ const routeForKind = (kind: UserAgentResourceKind, value: AgentResourceSelection
   if (kind === 'knowledge_base') return value.customer ? `/customer-service/${value.customer}` : '/knowledge';
   if (kind === 'mcp_server') return '/mcp';
   if (kind === 'canvas') return '/creative-studio/canvases';
-  if (kind === 'generation_provider') return '/models';
   if (kind === 'plugin') return '/plugins';
   return '/guid';
 };

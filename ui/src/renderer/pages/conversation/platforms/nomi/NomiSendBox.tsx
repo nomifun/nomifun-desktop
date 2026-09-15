@@ -74,6 +74,12 @@ import type { NomiModelSelection } from './useNomiModelSelection';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { evaluateNomiVisionSend } from './nomiVisionSendGuard';
 import { steerOrQueue } from './steerOrQueue';
+import CreationControls, { CreationReferences } from '@/renderer/creation/CreationControls';
+import { useCreationComposer } from '@/renderer/creation/CreationComposerContext';
+import { useGenerationModel } from '@/renderer/creation/useGenerationModel';
+import { buildCreationRequest, creationAttempt, acknowledgeCreationAttempt } from '@/renderer/creation/submission';
+import { creationTasksKey, submitCreation } from '@/renderer/creation/client';
+import { mutate as mutateSWR } from 'swr';
 
 const useNomiSendBoxDraft = getSendBoxDraftHook('nomi', {
   _type: 'nomi',
@@ -302,6 +308,22 @@ const NomiSendBox: React.FC<{
     typeof tokenUsage?.context_tokens === 'number';
 
   const { atPath, uploadFile, setAtPath, setUploadFile, content, setContent } = useSendBoxDraft(conversation_id);
+  const creation = useCreationComposer();
+  const generation = useGenerationModel(creation, collectSelectedFiles(uploadFile, atPath));
+  const [creationSubmitting, setCreationSubmitting] = useState(false);
+  const creationSubmittingRef = useRef(false);
+  const isCreating = Boolean(creation?.draft.mode);
+  useEffect(() => {
+    if (creation?.draft.pendingPrompt === undefined) return;
+    setContent(creation.draft.pendingPrompt);
+    creation.update(draft => ({ ...draft, pendingPrompt: undefined }));
+  }, [creation?.draft.pendingPrompt, creation?.update, setContent]);
+
+  useEffect(() => {
+    if (!creation?.draft.pendingFiles) return;
+    setUploadFile(previous => Array.from(new Set([...previous, ...creation.draft.pendingFiles!])));
+    creation.update(draft => ({ ...draft, pendingFiles: undefined }));
+  }, [creation?.draft.pendingFiles, creation?.update, setUploadFile]);
 
   const handleContentChange = useCallback(
     (val: string) => {
@@ -319,7 +341,7 @@ const NomiSendBox: React.FC<{
   }, [conversation_id]);
 
   useEffect(() => {
-    if (!conversation_id) return;
+    if (!conversation_id || isCreating) return;
     let cancelled = false;
     setAgentWarmed(false);
     void warmupConversationForPassiveMount(conversation_id)
@@ -332,7 +354,7 @@ const NomiSendBox: React.FC<{
         if (!cancelled) Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
       });
     return () => { cancelled = true; };
-  }, [conversation_id, t]);
+  }, [conversation_id, isCreating, t]);
 
   const slash_commands = useSlashCommands(conversation_id, {
     conversation_type: 'nomi',
@@ -395,9 +417,10 @@ const NomiSendBox: React.FC<{
         input,
         files,
         capability_selection,
+        preset_id,
         initialOnly = false,
       }: Pick<ConversationCommandQueueItem, 'input' | 'files'> &
-        Partial<Pick<ConversationCommandQueueItem, 'id' | 'capability_selection'>> & {
+        Partial<Pick<ConversationCommandQueueItem, 'id' | 'capability_selection' | 'preset_id'>> & {
           initialOnly?: boolean;
         },
       execution?: ConversationCommandQueueExecution,
@@ -434,6 +457,7 @@ const NomiSendBox: React.FC<{
           files,
           idempotency_key: id,
           initial_only: initialOnly,
+          preset_id,
         });
         if (execution && !execution.isCurrent()) return;
         msg_id = res.msg_id;
@@ -585,6 +609,35 @@ const NomiSendBox: React.FC<{
 
   const onSendHandler = async (message: string) => {
     const filesToSend = collectSelectedFiles(uploadFile, atPath);
+    if (creation?.draft.mode) {
+      if (creationSubmittingRef.current) throw new Error('任务正在提交');
+      if (!generation.ready || creation.preparing) throw new Error('请先选择可用的生成模型');
+      creationSubmittingRef.current = true;
+      setCreationSubmitting(true);
+      const submittedReferences = creation.draft.references;
+      try {
+        const presetId = await creation.resolvePreset?.() ?? creation.presetId;
+        if (!presetId) throw new Error('请选择可用的创意 Agent');
+        const request = buildCreationRequest(creation.draft, message, presetId, filesToSend, generation.selected);
+        const key = creationAttempt(conversation_id, request);
+        const receipt = await submitCreation(conversation_id, request, key);
+        addOrUpdateMessage({ id: uuid(), msg_id: receipt.message_id, type: 'text', position: 'right', conversation_id, content: { content: message }, created_at: Date.now() });
+        acknowledgeCreationAttempt(conversation_id, key);
+        // A failed status refresh cannot turn a successful admission into a retry.
+        void mutateSWR(creationTasksKey(conversation_id), (previous: typeof receipt.tasks | undefined) => [...(previous || []).filter(task => !receipt.tasks.some(next => next.creation_task_id === task.creation_task_id)), ...receipt.tasks], { revalidate: true }).catch(() => {});
+        if (request.files?.length && contentRef.current === message) {
+          setUploadFile(previous => previous.filter(file => !request.files!.includes(file)));
+          setAtPath(atPathRef.current.filter(item => !request.files!.includes(typeof item === 'string' ? item : item.path)));
+        }
+        creation.update(draft => request.inputs.length && draft.references === submittedReferences ? { ...draft, references: draft.references.filter(ref => !request.inputs.some(input => input.asset_id === ref.asset_id)) } : draft);
+        emitter.emit('chat.history.refresh');
+      } catch (error) {
+        Message.error(error instanceof Error ? error.message : String(error));
+        throw error;
+      } finally { creationSubmittingRef.current = false; setCreationSubmitting(false); }
+      return;
+    }
+    const presetId = await creation?.resolvePreset?.() ?? creation?.presetId;
     if (!canSendFiles(filesToSend)) return;
     clearFiles();
     emitter.emit('nomi.selected.file.clear');
@@ -596,7 +649,7 @@ const NomiSendBox: React.FC<{
         hasPendingCommands,
       })
     ) {
-      enqueue({ input: message, files: filesToSend, capability_selection: currentCapabilitySelection });
+      enqueue({ input: message, files: filesToSend, capability_selection: currentCapabilitySelection, preset_id: presetId });
       return;
     }
 
@@ -604,6 +657,7 @@ const NomiSendBox: React.FC<{
       input: message,
       files: filesToSend,
       capability_selection: currentCapabilitySelection,
+      preset_id: presetId,
     });
   };
 
@@ -874,7 +928,7 @@ const NomiSendBox: React.FC<{
   };
 
   return (
-    <div className='max-w-800px w-full mx-auto flex flex-col mt-auto mb-16px'>
+    <div className={`${isCreating ? '' : 'max-w-800px'} w-full mx-auto flex flex-col mt-auto mb-16px`}>
       <CommandQueuePanel
         items={queuedCommands}
         paused={isQueuePaused}
@@ -914,10 +968,12 @@ const NomiSendBox: React.FC<{
           emitter.emit('nomi.selected.file', items);
           setAtPath(items);
         }}
-        loading={isBusy}
-        disabled={!current_model?.use_model || modelSelectionDisabled}
+        loading={isCreating ? creationSubmitting : isBusy}
+        disabled={isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing}
+        preserveDraftUntilAccepted={Boolean(creation)}
+        skipChatWarmup={isCreating}
         placeholder={
-          current_model?.use_model
+          isCreating ? '描述你想创作的内容，可添加参考素材…' : current_model?.use_model
             ? t('agent.sendbox.placeholder', {
                 backend: agent_name || 'Nomi',
                 defaultValue: `Send message to {{backend}}...`,
@@ -939,6 +995,7 @@ const NomiSendBox: React.FC<{
             showLoadedCapabilities={false}
           />
         }
+        creationTools={creation ? <CreationControls prompt={content} onPromptChange={setContent} files={collectSelectedFiles(uploadFile, atPath)} /> : undefined}
         rightTools={
           (
             <div
@@ -955,21 +1012,24 @@ const NomiSendBox: React.FC<{
                 />
               )}
               {agentSelectorNode}
-              <Tooltip content={modelSelectionHint} disabled={!modelSelectionHint}>
-                <span className='inline-flex min-w-0'>
-                  <NomiModelSelector
-                    selection={modelSelection}
-                    disabled={modelSelectionDisabled}
-                    className='nomi-sendbox-model-btn'
-                  />
-                </span>
-              </Tooltip>
+              {!isCreating && (
+                <Tooltip content={modelSelectionHint} disabled={!modelSelectionHint}>
+                  <span className='inline-flex min-w-0'>
+                    <NomiModelSelector
+                      selection={modelSelection}
+                      disabled={modelSelectionDisabled}
+                      className='nomi-sendbox-model-btn'
+                    />
+                  </span>
+                </Tooltip>
+              )}
               {extraRightTools}
             </div>
           )
         }
         prefix={
           <>
+            <CreationReferences />
             {uploadFile.length > 0 && (
               <HorizontalFileList>
                 {uploadFile.map((path) => (
@@ -1013,11 +1073,11 @@ const NomiSendBox: React.FC<{
         }
         onSend={onSendHandler}
         onSteer={onSteerHandler}
-        steerAvailable
-        onEditResubmit={handleEditResubmit}
+        steerAvailable={!isCreating}
+        onEditResubmit={isCreating ? undefined : handleEditResubmit}
         slash_commands={slash_commands}
         onSlashBuiltinCommand={onSlashBuiltinCommand}
-        allowSendWhileLoading
+        allowSendWhileLoading={!isCreating}
       />
     </div>
   );

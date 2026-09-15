@@ -101,7 +101,7 @@ describe('Guid workbench Agent launch behavior', () => {
     ).toBe(true);
   });
 
-  test('keeps session model selection visible and independent from Agent identity', () => {
+  test('keeps ordinary session model selection independent from Agent identity', () => {
     const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
     const actionRow = readSource(
       new URL('./components/GuidActionRow.tsx', import.meta.url)
@@ -165,7 +165,7 @@ describe('Guid workbench Agent launch behavior', () => {
         model_route_refs: {},
         chat_route_records: {},
         reuse_existing: true,
-        ...(model
+          ...(model && template.template_key !== 'creative-studio.default'
           ? { model: { provider_id: model.id, model: model.use_model } }
           : {}),
       },

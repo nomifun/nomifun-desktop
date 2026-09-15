@@ -109,7 +109,6 @@ describe('CreativeAssetClient', () => {
       model: undefined,
       providerId: '0190f5fe-7c00-7a00-8000-000000000002',
       params: undefined,
-      workbenchKind: undefined,
       canvasId: '0190f5fe-7c00-7a00-8000-000000000003',
       nodeId: '0190f5fe-7c00-7a00-8000-000000000004',
       generationTaskId: '0190f5fe-7c00-7a00-8000-000000000005',
@@ -122,18 +121,19 @@ describe('CreativeAssetClient', () => {
     });
   });
 
-  test('keeps legacy standalone project provenance inert', () => {
+  test('maps the exact conversation and turn that produced a saved material', () => {
     const asset = mapWorkshopAsset(
       assetDto({
         origin: {
-          workbench_kind: 'image',
-          project_id: '0190f5fe-7c00-7a00-8000-000000000003',
+          conversation_id: '0190f5fe-7c00-7a00-8000-000000000003',
+          message_id: '0190f5fe-7c00-7a00-8000-000000000004',
           creation_task_id: '0190f5fe-7c00-7a00-8000-000000000005',
         },
       })
     );
 
-    expect(asset.origin?.workbenchKind).toBe('image');
+    expect(asset.origin?.conversationId).toBe('0190f5fe-7c00-7a00-8000-000000000003');
+    expect(asset.origin?.messageId).toBe('0190f5fe-7c00-7a00-8000-000000000004');
     expect(asset.origin?.canvasId).toBeUndefined();
   });
 

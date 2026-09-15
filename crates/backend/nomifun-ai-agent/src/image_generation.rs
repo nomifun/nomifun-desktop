@@ -1,32 +1,29 @@
 //! Native, catalog-backed image generation for ordinary Nomi conversations.
 //!
-//! This is a direct consumer of `nomifun-model-invoke`; Creative Workshop is a
-//! peer product and is not part of the conversation capability path.
+//! Model selection uses the shared catalog; durable generation is owned by CreationService.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::Engine as _;
-use nomifun_api_types::{CapabilityHealth, HealthStatus, ModelTask};
+use nomifun_api_types::ModelTask;
 use nomifun_common::AppError;
 use nomifun_db::IClientPreferenceRepository;
 use nomifun_model_invoke::{
-    ImageGenRequest, MaterializeLimits, ModelInvokeService, ModelRef, TaskOutcome, TaskRequest,
-    TaskResult,
+    ImageGenRequest, ModelInvokeService, ModelRef,
 };
 use nomi_providers::LlmProvider;
 use nomi_protocol::events::ToolCategory;
 use nomi_tools::Tool;
 use nomi_types::llm::{LlmEvent, LlmRequest};
 use nomi_types::message::{ContentBlock, Message, Role, StopReason};
-use nomi_types::tool::{JsonSchema, ToolImage, ToolResult};
+use nomi_types::tool::{JsonSchema, ToolResult};
+use nomifun_creation::{CreationService, CreativeTaskOwner, NewCreationTask};
+use sha2::{Digest, Sha256};
+use crate::capability::backend_output_sink::BackendOutputSink;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use crate::artifact_store::{
-    MAX_INLINE_ARTIFACT_BYTES, MAX_INLINE_IMAGE_BATCH_BYTES, MAX_INLINE_IMAGE_COUNT,
-};
+use crate::artifact_store::MAX_INLINE_IMAGE_COUNT;
 
 pub const IMAGE_GEN_TOOL_NAME: &str = "image_gen";
 pub const IMAGE_GENERATION_DEFAULT_MODEL_KEY: &str = "models.default.imageGeneration";
@@ -34,20 +31,12 @@ pub const IMAGE_GENERATION_DEFAULT_MODEL_KEY: &str = "models.default.imageGenera
 const MAX_PROMPT_CHARS: usize = 32_000;
 const MAX_OPTION_CHARS: usize = 1_000;
 const MAX_IMAGE_COUNT: u32 = MAX_INLINE_IMAGE_COUNT as u32;
-// Keep decoded batch bytes bounded well below count * per-item: ToolImage
-// base64 plus ArtifactStore's verification decode otherwise multiplies the
-// peak resident memory for an eight-image response.
-const MAX_MATERIALIZED_BATCH_BYTES: u64 = MAX_INLINE_IMAGE_BATCH_BYTES as u64;
 const MAX_EXPOSED_CANDIDATES: usize = 8;
 const MAX_EXPOSED_ID_CHARS: usize = 96;
-const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
-const DEFAULT_TOTAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const IMAGE_INTENT_TIMEOUT: Duration = Duration::from_secs(20);
 const IMAGE_INTENT_MAX_OUTPUT_BYTES: usize = 2 * 1024;
 const IMAGE_INTENT_MAX_HISTORY_CHARS: usize = 4_000;
-// Session refreshes/builds must not reset selection to candidate zero. The
-// candidate vector is session-local, while the fair-start cursor is process-wide.
-static IMAGE_MODEL_ROUND_ROBIN: AtomicUsize = AtomicUsize::new(0);
+
 
 /// Typed routing decision produced either by a high-confidence host shortcut
 /// or by the isolated, no-tool conversation-model pass.
@@ -308,7 +297,6 @@ impl ImageGenerationCapability {
         select_candidate(
             self.candidates.as_slice(),
             self.default_model.as_ref(),
-            &IMAGE_MODEL_ROUND_ROBIN,
             provider_id,
             model,
         )
@@ -318,7 +306,6 @@ impl ImageGenerationCapability {
 fn select_candidate(
     candidates: &[ModelRef],
     default_model: Option<&ModelRef>,
-    round_robin: &AtomicUsize,
     provider_id: Option<&str>,
     model: Option<&str>,
 ) -> Result<ModelRef, ImageGenerationSelectionError> {
@@ -349,8 +336,10 @@ fn select_candidate(
             if candidates.is_empty() {
                 return Err(ImageGenerationSelectionError::NoCandidates);
             }
-            let index = round_robin.fetch_add(1, Ordering::Relaxed) % candidates.len();
-            return Ok(candidates[index].clone());
+            return match candidates {
+                [candidate] => Ok(candidate.clone()),
+                _ => Err(ImageGenerationSelectionError::Ambiguous { selector, candidates: candidate_catalog(candidates) }),
+            };
         }
     };
     match matches.as_slice() {
@@ -409,35 +398,37 @@ struct PreferredModel {
 /// turn refresh must never spend an upstream generation request.
 #[async_trait::async_trait]
 pub(crate) trait ImageGenerationToolDiscovery: Send + Sync {
-    async fn discover_tool(&self) -> Result<Option<Box<dyn Tool>>, AppError>;
+    async fn discover_tool(&self, turn: Option<(&str, Arc<BackendOutputSink>)>) -> Result<Option<Box<dyn Tool>>, AppError>;
 }
 
 pub(crate) struct CatalogImageGenerationToolDiscovery {
     client_prefs: Option<Arc<dyn IClientPreferenceRepository>>,
     invoke: Arc<ModelInvokeService>,
+    creation: Arc<CreationService>,
+    conversation_id: String,
 }
 
 impl CatalogImageGenerationToolDiscovery {
     pub(crate) fn new(
         client_prefs: Option<Arc<dyn IClientPreferenceRepository>>,
         invoke: Arc<ModelInvokeService>,
+        creation: Arc<CreationService>,
+        conversation_id: String,
     ) -> Self {
-        Self {
-            client_prefs,
-            invoke,
-        }
+        Self { client_prefs, invoke, creation, conversation_id }
     }
 }
 
 #[async_trait::async_trait]
 impl ImageGenerationToolDiscovery for CatalogImageGenerationToolDiscovery {
-    async fn discover_tool(&self) -> Result<Option<Box<dyn Tool>>, AppError> {
+    async fn discover_tool(&self, turn: Option<(&str, Arc<BackendOutputSink>)>) -> Result<Option<Box<dyn Tool>>, AppError> {
+        let Some((message_id, sink)) = turn else { return Ok(None); };
         Ok(discover_image_generation_capability(
             self.client_prefs.clone(),
             self.invoke.clone(),
         )
         .await?
-        .map(|capability| Box::new(ImageGenerationTool::new(capability)) as Box<dyn Tool>))
+        .map(|capability| Box::new(ImageGenerationTool::new(capability, self.creation.clone(), self.conversation_id.clone(), message_id.to_owned(), sink)) as Box<dyn Tool>))
     }
 }
 
@@ -448,49 +439,17 @@ pub async fn discover_image_generation_capability(
     client_prefs: Option<Arc<dyn IClientPreferenceRepository>>,
     invoke: Arc<ModelInvokeService>,
 ) -> Result<Option<ImageGenerationCapability>, AppError> {
-    let capabilities = invoke.provider_model_capability_repo().list().await?;
-    let mut candidates = Vec::new();
-    for capability in capabilities {
-        if capability.task != "image_generation"
-            || capability_is_unhealthy(capability.health.as_deref())
-        {
-            continue;
-        }
-        let model = ModelRef {
-            provider_id: capability.provider_id,
-            model: capability.model,
-        };
-        if let Err(error) = invoke.validate(&model, ModelTask::ImageGeneration).await {
-            if error.is_catalog_failure() {
-                return Err(AppError::Internal(format!(
-                    "failed to verify image-generation catalog candidate: {error}"
-                )));
-            }
-            tracing::debug!(
-                provider_id = %model.provider_id,
-                model = %model.model,
-                error_kind = ?error.kind,
-                "image-generation model excluded because local invoke validation failed"
-            );
-            continue;
-        }
-        candidates.push(model);
-    }
+    let candidates = invoke.available_task_models(ModelTask::ImageGeneration).await
+        .map_err(|error| AppError::Internal(format!("failed to verify image-generation catalog: {error}")))?;
     if candidates.is_empty() {
         return Ok(None);
     }
 
-    let default_model = read_default_model(client_prefs.as_deref())
-        .await?
-        .and_then(|preferred| {
-            candidates
-                .iter()
-                .find(|candidate| {
-                    candidate.provider_id == preferred.provider_id
-                        && candidate.model == preferred.model
-                })
-                .cloned()
-        });
+    let default_model = match read_default_model(client_prefs.as_deref()).await? {
+        Some(preferred) => Some(candidates.iter().find(|candidate| candidate.provider_id == preferred.provider_id && candidate.model == preferred.model).cloned()
+            .ok_or_else(|| AppError::BadRequest("The configured image default is unavailable; update it in model settings".into()))?),
+        None => None,
+    };
     Ok(Some(ImageGenerationCapability {
         invoke,
         candidates: Arc::new(candidates),
@@ -507,146 +466,88 @@ async fn read_default_model(
     let rows = repo
         .get_by_keys(&[IMAGE_GENERATION_DEFAULT_MODEL_KEY])
         .await?;
-    Ok(rows
-        .into_iter()
-        .find(|row| row.key == IMAGE_GENERATION_DEFAULT_MODEL_KEY)
-        .and_then(|row| serde_json::from_str::<PreferredModel>(&row.value).ok())
-        .filter(|preferred| {
-            !preferred.provider_id.trim().is_empty()
-                && preferred.provider_id.trim() == preferred.provider_id
-                && !preferred.model.trim().is_empty()
-                && preferred.model.trim() == preferred.model
-        }))
+    rows.into_iter().find(|row| row.key == IMAGE_GENERATION_DEFAULT_MODEL_KEY).map(|row| {
+        let preferred: PreferredModel = serde_json::from_str(&row.value).map_err(|_| AppError::BadRequest("The saved image default is malformed".into()))?;
+        if preferred.provider_id.trim().is_empty() || preferred.provider_id.trim() != preferred.provider_id || preferred.model.trim().is_empty() || preferred.model.trim() != preferred.model {
+            return Err(AppError::BadRequest("The saved image default is malformed".into()));
+        }
+        Ok(preferred)
+    }).transpose()
 }
 
-fn capability_is_unhealthy(raw_health: Option<&str>) -> bool {
-    raw_health
-        .and_then(|raw| serde_json::from_str::<CapabilityHealth>(raw).ok())
-        .is_some_and(|health| health.status == HealthStatus::Unhealthy)
-}
-
-/// Native agent tool that generates and returns a complete image batch.
+/// Native conversation adapter: submit one durable task and return immediately.
+/// The worker owns provider execution, downloads, materialization and retries.
 pub struct ImageGenerationTool {
     capability: ImageGenerationCapability,
     description: String,
-    poll_interval: Duration,
-    total_timeout: Duration,
-    materialize_limits: MaterializeLimits,
+    creation: Arc<CreationService>,
+    conversation_id: String,
+    message_id: String,
+    sink: Arc<BackendOutputSink>,
 }
 
 impl ImageGenerationTool {
-    pub fn new(capability: ImageGenerationCapability) -> Self {
-        let candidates = candidate_catalog(capability.candidates());
+    pub(crate) fn new(capability: ImageGenerationCapability, creation: Arc<CreationService>, conversation_id: String, message_id: String, sink: Arc<BackendOutputSink>) -> Self {
         let description = format!(
-            "Generate real images with one of {} configured local image-generation model(s): {candidates}. Use this for ordinary image creation. The caller may specify both IDs, or a single provider/model only when it uniquely identifies one candidate. Never use Browser or a third-party image website unless the user explicitly requested an external website. A successful call returns actual image bytes; do not claim success until artifact delivery is verified.",
-            capability.candidate_count(),
+            "Submit an image-generation task using configured models: {}. The default model is used when configured; otherwise supply an exact provider_id and model if multiple candidates exist. A successful call acknowledges a durable background task, not a completed image. Tell the user generation was submitted and the conversation task card will update. Never use an external website unless explicitly requested.",
+            candidate_catalog(capability.candidates()),
         );
-        Self {
-            capability,
-            description,
-            poll_interval: DEFAULT_POLL_INTERVAL,
-            total_timeout: DEFAULT_TOTAL_TIMEOUT,
-            materialize_limits: MaterializeLimits {
-                max_assets: MAX_INLINE_IMAGE_COUNT,
-                max_bytes_per_asset: MAX_INLINE_ARTIFACT_BYTES as u64,
-                max_total_bytes: MAX_MATERIALIZED_BATCH_BYTES,
-                download_timeout: Duration::from_secs(30),
-                total_timeout: Duration::from_secs(2 * 60),
-            },
-        }
-    }
-
-    #[cfg(test)]
-    fn with_timing(mut self, poll_interval: Duration, total_timeout: Duration) -> Self {
-        self.poll_interval = poll_interval;
-        self.total_timeout = total_timeout;
-        self
+        Self { capability, description, creation, conversation_id, message_id, sink }
     }
 
     async fn execute_inner(&self, input: Value) -> Result<ToolResult, String> {
-        let parsed = ParsedImageRequest::parse(&self.capability, &input)?;
-        let selected = parsed.model.clone();
-        // Close the session-discovery TOCTOU window before any billable call.
-        self.capability
-            .invoke
-            .validate(&selected, ModelTask::ImageGeneration)
-            .await
-            .map_err(|error| format!("selected image model is no longer available: {error}"))?;
-
-        let request = TaskRequest::ImageGeneration(parsed.request);
-        let deadline = tokio::time::Instant::now() + self.total_timeout;
-        let operation = async {
-            let (mut outcome, context) = self
-                .capability
-                .invoke
-                .invoke_with_context(&selected, request.clone())
-                .await?;
-            loop {
-                match outcome {
-                    TaskOutcome::Done(result) => break Ok((result, context)),
-                    TaskOutcome::Pending(job) => {
-                        tokio::time::sleep(self.poll_interval).await;
-                        outcome = self
-                            .capability
-                            .invoke
-                            .poll_with_context(&context, request.clone(), &job)
-                            .await?;
-                    }
+        let scope = self.sink.native_creation_task_scope(&self.conversation_id)?;
+        let key = image_task_id(&self.conversation_id, &self.message_id, &input)?;
+        match self.creation.get_task(&key).await {
+            Ok(task) => {
+                if task.conversation_id.as_deref() != Some(self.conversation_id.as_str()) || task.message_id.as_deref() != Some(self.message_id.as_str()) || task.capability != "t2i" {
+                    return Err("image task replay has a different owner or capability".into());
                 }
+                self.sink.register_native_creation_task(&scope, &task.creation_task_id)?;
+                return Ok(ToolResult::text(json!({"creation_task_id": task.creation_task_id, "status": task.status, "result_asset_ids": task.result_asset_ids}).to_string()));
             }
-        };
-        let (result, invocation_context) = tokio::time::timeout_at(deadline, operation)
-            .await
-            .map_err(|_| {
-                format!(
-                    "image generation and materialization timed out after {} seconds",
-                    self.total_timeout.as_secs()
-                )
-            })?
-            .map_err(|error: nomifun_model_invoke::InvokeError| error.to_string())?;
-        let assets = match result {
-            TaskResult::Assets(assets) if assets.len() >= parsed.expected_count as usize => assets
-                .into_iter()
-                .take(parsed.expected_count as usize)
-                .collect(),
-            TaskResult::Assets(assets) => {
-                return Err(format!(
-                    "image model produced {} image candidate(s), expected at least {}",
-                    assets.len(),
-                    parsed.expected_count
-                ));
-            }
-            _ => return Err("image model completed without an image asset result".to_owned()),
-        };
-
-        // Materialize every member before constructing any ToolImage. A failure
-        // on member N therefore cannot publish members 0..N as partial success.
-        let materialized = self
-            .capability
-            .invoke
-            .materialize_assets_for_invocation(&invocation_context, assets, self.materialize_limits);
-        let materialized = tokio::time::timeout_at(deadline, materialized)
-            .await
-            .map_err(|_| {
-                format!(
-                    "image generation and materialization timed out after {} seconds",
-                    self.total_timeout.as_secs()
-                )
-            })?
-            .map_err(|error| format!("image materialization failed: {error}"))?;
-        let mut images = Vec::with_capacity(materialized.len());
-        for asset in materialized {
-            let media_type = detected_image_mime(&asset.bytes, asset.mime.as_deref())?;
-            images.push(ToolImage {
-                media_type,
-                data: base64::engine::general_purpose::STANDARD.encode(asset.bytes),
-            });
+            Err(AppError::NotFound(_)) => {}
+            Err(error) => return Err(error.to_string()),
         }
-        Ok(ToolResult::text(
-            "Image bytes were generated. Artifact delivery must be persisted and verified before reporting success.",
-        )
-        .with_images(images))
+        let parsed = ParsedImageRequest::parse(&self.capability, &input)?;
+        let selected = parsed.model;
+        let resolved = self.capability.invoke.resolve_task_config(&selected, ModelTask::ImageGeneration)
+            .await.map_err(|error| format!("selected image model is no longer available: {error}"))?;
+        let mut params = parsed.request.extra.as_object().cloned().unwrap_or_default();
+        params.insert("prompt".into(), json!(parsed.request.prompt));
+        params.insert("count".into(), json!(parsed.request.count));
+        if let Some(value) = parsed.request.size { params.insert("size".into(), json!(value)); }
+        if let Some(value) = parsed.request.quality { params.insert("quality".into(), json!(value)); }
+        params.insert("_nomifun_connection_config_ref".into(), json!(format!("provider:{}@{}", selected.provider_id, resolved.config_revision)));
+        params.insert("_nomifun_provider_config_revision".into(), json!(resolved.config_revision));
+        let task = self.creation.create_creative_task(
+            CreativeTaskOwner::ConversationTurn { conversation_id: self.conversation_id.clone(), message_id: self.message_id.clone() },
+            key,
+            NewCreationTask { provider_id: selected.provider_id, model: selected.model, capability: "t2i".into(), params: Value::Object(params), inputs: Vec::new() },
+        ).await.map_err(|error| error.to_string())?;
+        self.sink.register_native_creation_task(&scope, &task.creation_task_id)?;
+        Ok(ToolResult::text(json!({
+            "creation_task_id": task.creation_task_id,
+            "status": task.status,
+            "result_asset_ids": task.result_asset_ids,
+            "message": "Image generation was submitted. Follow progress in the conversation task card; do not report an unfinished task as a completed image."
+        }).to_string()))
     }
+}
+
+/// Stable per-user-turn idempotency across tool retries and process restarts.
+/// Timestamp bytes come from the admitted UUIDv7 message, never a new clock read.
+fn image_task_id(conversation_id: &str, message_id: &str, input: &Value) -> Result<String, String> {
+    let message = uuid::Uuid::parse_str(message_id).map_err(|_| "image generation requires an admitted message UUID".to_owned())?;
+    if message.get_version_num() != 7 { return Err("image generation requires an admitted UUIDv7 message".into()); }
+    let payload = json!(["nomifun.native-image-task.v1", conversation_id, message_id, input]);
+    let digest = Sha256::digest(nomifun_agent_contracts::canonical_json_bytes(&payload).map_err(|error| error.to_string())?);
+    let mut bytes = [0u8; 16];
+    bytes[..6].copy_from_slice(&message.as_bytes()[..6]);
+    bytes[6..].copy_from_slice(&digest[..10]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x70;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(uuid::Uuid::from_bytes(bytes).to_string())
 }
 
 #[async_trait::async_trait]
@@ -712,7 +613,6 @@ impl Tool for ImageGenerationTool {
 struct ParsedImageRequest {
     model: ModelRef,
     request: ImageGenRequest,
-    expected_count: u32,
 }
 
 impl ParsedImageRequest {
@@ -776,7 +676,6 @@ impl ParsedImageRequest {
                 quality,
                 extra: Value::Object(extra),
             },
-            expected_count: count,
         })
     }
 }
@@ -845,41 +744,11 @@ fn optional_string(
     Ok(Some(trimmed.to_owned()))
 }
 
-fn detected_image_mime(bytes: &[u8], declared: Option<&str>) -> Result<String, String> {
-    let format = image::guess_format(bytes)
-        .map_err(|error| format!("generated artifact is not a recognized image: {error}"))?;
-    let detected = match format {
-        image::ImageFormat::Png => "image/png",
-        image::ImageFormat::Jpeg => "image/jpeg",
-        image::ImageFormat::WebP => "image/webp",
-        image::ImageFormat::Gif => "image/gif",
-        other => return Err(format!("generated image format {other:?} is not supported")),
-    };
-    if let Some(declared) = declared
-        .and_then(|mime| mime.split(';').next())
-        .map(str::trim)
-        .filter(|mime| !mime.is_empty())
-        .filter(|mime| !matches!(*mime, "application/octet-stream" | "binary/octet-stream"))
-    {
-        let declared = if declared.eq_ignore_ascii_case("image/jpg") {
-            "image/jpeg"
-        } else {
-            declared
-        };
-        if !declared.eq_ignore_ascii_case(detected) {
-            return Err(format!(
-                "generated image MIME mismatch: declared {declared:?}, detected {detected:?}"
-            ));
-        }
-    }
-    Ok(detected.to_owned())
-}
-
 /// Session prompt fragment for the native image-generation boundary.
 pub fn image_generation_prompt(capability: Option<&ImageGenerationCapability>) -> String {
     let _ = capability;
     format!(
-        "Native image-model availability is refreshed by the host before every turn. When the `{IMAGE_GEN_TOOL_NAME}` schema is present, use it for an ordinary image-generation request and never Browser, web search, or a third-party generator. When it is absent, do not use Browser and never pretend an image was generated; the host will direct the user to Model Management (nomifun://model-management/image). Browser/external generation is allowed only when the user explicitly asks for it. Never say an image was generated successfully until the turn has a verified image artifact receipt."
+        "Native image-model availability is refreshed by the host before every turn. Use `{IMAGE_GEN_TOOL_NAME}` for a new text-to-image request when its schema is present. For edits to an existing image use the declared creation.image_edit tool with exact asset IDs from conversation task context. For image-to-video, music, or speech follow-ups use the corresponding declared creation.video, creation.music, or creation.audio tool. Only use declared native or PlatformBuiltin creation tools for these requests, never Browser, web search, or a third-party generator. If no applicable tool/model exists, explain the missing capability and direct the user to Model Management (nomifun://model-management/image); never substitute a new image for an edit or a video task. Browser/external generation is allowed only when the user explicitly asks for it. A native task acceptance means background work was submitted; report its actual status and let the conversation task card display completion. Never claim an unfinished task already produced an image."
     )
 }
 
@@ -1190,27 +1059,8 @@ fn ascii_words(text: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use nomifun_common::encrypt_string;
-    use nomifun_db::{
-        CreateProviderParams, DbError, IClientPreferenceRepository, IProviderRepository,
-        NewProviderModel, NewProviderModelCapability, SqliteProviderConnectionRepository,
-        SqliteProviderModelCapabilityRepository, SqliteProviderModelRepository,
-        SqliteProviderRepository, init_database_memory,
-    };
-    use nomifun_model_invoke::{
-        AdapterRegistry, InvokeError, JobHandle, ProducedAsset, ProducedData, ProtocolAdapter,
-        ResolvedCall,
-    };
+    use nomifun_db::{DbError, IClientPreferenceRepository};
     use nomi_providers::ProviderError;
-
-    const TEST_KEY: [u8; 32] = [0x42; 32];
-    const TEST_PNG: &[u8] = &[
-        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, b'I', b'H', b'D',
-        b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00,
-        0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0a, b'I', b'D', b'A', b'T', 0x78, 0x9c,
-        0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00,
-        0x00, 0x00, b'I', b'E', b'N', b'D', 0xae, 0x42, 0x60, 0x82,
-    ];
 
     struct FailingPreferenceRepository;
 
@@ -1275,162 +1125,6 @@ mod tests {
         async fn delete_keys(&self, _keys: &[&str]) -> Result<(), DbError> {
             Err(DbError::Init("preference database unavailable".to_owned()))
         }
-    }
-
-    #[derive(Clone, Copy)]
-    enum FakeImageMode {
-        PendingThenValid,
-        PendingForever,
-        DoneWithInvalidSecond,
-    }
-
-    struct FakeImageAdapter {
-        mode: FakeImageMode,
-        polls: Arc<AtomicUsize>,
-    }
-
-    impl FakeImageAdapter {
-        fn valid_result() -> TaskResult {
-            TaskResult::Assets(vec![ProducedAsset {
-                data: ProducedData::Bytes(TEST_PNG.to_vec()),
-                mime: Some("image/png".to_owned()),
-            }])
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ProtocolAdapter for FakeImageAdapter {
-        fn id(&self) -> &'static str {
-            "openai.images"
-        }
-
-        fn supports(&self, task: ModelTask) -> bool {
-            task == ModelTask::ImageGeneration
-        }
-
-        async fn submit(
-            &self,
-            _http: &reqwest::Client,
-            _call: &ResolvedCall,
-        ) -> Result<TaskOutcome, InvokeError> {
-            Ok(match self.mode {
-                FakeImageMode::PendingThenValid | FakeImageMode::PendingForever => {
-                    TaskOutcome::Pending(JobHandle {
-                        adapter_id: self.id().to_owned(),
-                        config_revision: 0,
-                        remote_id: "image-job-1".to_owned(),
-                        poll_state: json!({}),
-                    })
-                }
-                FakeImageMode::DoneWithInvalidSecond => {
-                    TaskOutcome::Done(TaskResult::Assets(vec![
-                        ProducedAsset {
-                            data: ProducedData::Bytes(TEST_PNG.to_vec()),
-                            mime: Some("image/png".to_owned()),
-                        },
-                        ProducedAsset {
-                            data: ProducedData::Bytes(b"<html>not an image</html>".to_vec()),
-                            mime: Some("image/png".to_owned()),
-                        },
-                    ]))
-                }
-            })
-        }
-
-        async fn poll(
-            &self,
-            _http: &reqwest::Client,
-            _call: &ResolvedCall,
-            _job: &JobHandle,
-        ) -> Result<TaskOutcome, InvokeError> {
-            self.polls.fetch_add(1, Ordering::Relaxed);
-            Ok(match self.mode {
-                FakeImageMode::PendingForever => TaskOutcome::Pending(JobHandle {
-                    adapter_id: self.id().to_owned(),
-                    config_revision: 0,
-                    remote_id: "image-job-1".to_owned(),
-                    poll_state: json!({}),
-                }),
-                FakeImageMode::PendingThenValid | FakeImageMode::DoneWithInvalidSecond => {
-                    TaskOutcome::Done(Self::valid_result())
-                }
-            })
-        }
-    }
-
-    async fn fake_capability(
-        mode: FakeImageMode,
-    ) -> (ImageGenerationCapability, Arc<AtomicUsize>) {
-        let database = init_database_memory().await.unwrap();
-        let pool = database.pool().clone();
-        let provider_repo = Arc::new(SqliteProviderRepository::new(pool.clone()));
-        let model_repo = Arc::new(SqliteProviderModelRepository::new(pool.clone()));
-        let capability_repo = Arc::new(SqliteProviderModelCapabilityRepository::new(
-            pool.clone(),
-        ));
-        let connection_repo = Arc::new(SqliteProviderConnectionRepository::new(pool));
-        let encrypted = encrypt_string(r#"{"api_keys":["sk-test"]}"#, &TEST_KEY).unwrap();
-        let capabilities = [NewProviderModelCapability {
-            task: "image_generation",
-            traits: "[]",
-            protocol: "openai.images",
-            connection_role: "default",
-            endpoint: Some("/images/generations"),
-            provider_params: "{}",
-            ..Default::default()
-        }];
-        let (provider, _) = provider_repo
-            .create(
-                CreateProviderParams {
-                    provider_id: None,
-                    platform: "openai",
-                    name: "Image Tool Test",
-                    base_url: "https://unused.example",
-                    auth_scheme: "bearer",
-                    credentials_encrypted: &encrypted,
-                    enabled: true,
-                    bedrock_config: None,
-                    sort_order: None,
-                },
-                &NewProviderModel {
-                    model: "test-image-model",
-                    enabled: true,
-                    sort_order: 0,
-                    description: None,
-                    capabilities: &capabilities,
-                },
-                &[],
-            )
-            .await
-            .unwrap();
-        let polls = Arc::new(AtomicUsize::new(0));
-        let adapter: Arc<dyn ProtocolAdapter> = Arc::new(FakeImageAdapter {
-            mode,
-            polls: Arc::clone(&polls),
-        });
-        let invoke = Arc::new(ModelInvokeService::new(
-            provider_repo,
-            model_repo,
-            capability_repo,
-            connection_repo,
-            TEST_KEY,
-            reqwest::Client::new(),
-            AdapterRegistry::new(vec![adapter]),
-        ));
-        // The test service owns cloned pool handles; keep the Database wrapper
-        // from closing its in-memory backing store before tool execution.
-        std::mem::forget(database);
-        (
-            ImageGenerationCapability {
-                invoke,
-                candidates: Arc::new(vec![ModelRef {
-                    provider_id: provider.provider_id,
-                    model: "test-image-model".to_owned(),
-                }]),
-                default_model: None,
-            },
-            polls,
-        )
     }
 
     #[test]
@@ -1633,21 +1327,11 @@ mod tests {
     }
 
     #[test]
-    fn image_mime_detection_rejects_non_images_and_mismatch() {
-        const PNG_PREFIX: &[u8] = &[
-            0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, b'I', b'H', b'D', b'R',
-        ];
-        assert_eq!(detected_image_mime(PNG_PREFIX, None).unwrap(), "image/png");
-        assert!(detected_image_mime(PNG_PREFIX, Some("text/html")).is_err());
-        assert!(detected_image_mime(b"<html>", Some("image/png")).is_err());
-    }
-
-    #[test]
     fn prompt_for_absent_capability_is_deterministic_and_forbids_browser() {
         let prompt = image_generation_prompt(None);
         assert!(prompt.contains("nomifun://model-management/image"));
-        assert!(prompt.contains("do not use Browser"));
-        assert!(prompt.contains("never pretend"));
+        assert!(prompt.contains("never Browser"));
+        assert!(prompt.contains("Never claim an unfinished task"));
     }
 
     #[tokio::test]
@@ -1673,46 +1357,39 @@ mod tests {
     fn selection_precedence_and_unique_partial_selection_are_deterministic() {
         let candidates = vec![model("p1", "m1"), model("p1", "m2"), model("p2", "m1")];
         let default = model("p1", "m2");
-        let cursor = AtomicUsize::new(0);
 
         assert_model(
-            select_candidate(&candidates, Some(&default), &cursor, Some("p2"), Some("m1"))
+            select_candidate(&candidates, Some(&default), Some("p2"), Some("m1"))
                 .unwrap(),
             "p2",
             "m1",
         );
         assert_model(
-            select_candidate(&candidates, Some(&default), &cursor, Some("p2"), None).unwrap(),
+            select_candidate(&candidates, Some(&default), Some("p2"), None).unwrap(),
             "p2",
             "m1",
         );
         assert_model(
-            select_candidate(&candidates, Some(&default), &cursor, None, Some("m2")).unwrap(),
+            select_candidate(&candidates, Some(&default), None, Some("m2")).unwrap(),
             "p1",
             "m2",
         );
         assert_model(
-            select_candidate(&candidates, Some(&default), &cursor, None, None).unwrap(),
+            select_candidate(&candidates, Some(&default), None, None).unwrap(),
             "p1",
             "m2",
         );
         assert!(matches!(
-            select_candidate(&candidates, None, &cursor, Some("p1"), None),
+            select_candidate(&candidates, None, Some("p1"), None),
             Err(ImageGenerationSelectionError::Ambiguous { .. })
         ));
         assert!(matches!(
-            select_candidate(&candidates, None, &cursor, None, Some("m1")),
+            select_candidate(&candidates, None, None, Some("m1")),
             Err(ImageGenerationSelectionError::Ambiguous { .. })
         ));
 
-        let round_robin = AtomicUsize::new(0);
-        for (provider, model_name) in [("p1", "m1"), ("p1", "m2"), ("p2", "m1"), ("p1", "m1")] {
-            assert_model(
-                select_candidate(&candidates, None, &round_robin, None, None).unwrap(),
-                provider,
-                model_name,
-            );
-        }
+        assert!(matches!(select_candidate(&candidates, None, None, None), Err(ImageGenerationSelectionError::Ambiguous { .. })));
+        assert_model(select_candidate(&candidates[..1], None, None, None).unwrap(), "p1", "m1");
     }
 
     #[test]
@@ -1729,76 +1406,14 @@ mod tests {
         assert!(prompt.contains("Avoid: \"text, watermark\""));
     }
 
-    #[tokio::test]
-    async fn native_tool_polls_pending_job_and_returns_real_image_bytes() {
-        let (capability, polls) = fake_capability(FakeImageMode::PendingThenValid).await;
-        let tool = ImageGenerationTool::new(capability)
-            .with_timing(Duration::from_millis(1), Duration::from_secs(1));
-        let result = tool.execute(json!({"prompt": "a fox"})).await;
-
-        assert!(!result.is_error, "{}", result.content);
-        assert_eq!(polls.load(Ordering::Relaxed), 1);
-        assert_eq!(result.images.len(), 1);
-        assert_eq!(result.images[0].media_type, "image/png");
-        assert_eq!(
-            base64::engine::general_purpose::STANDARD
-                .decode(&result.images[0].data)
-                .unwrap(),
-            TEST_PNG
-        );
-    }
-
-    #[tokio::test]
-    async fn native_tool_never_exposes_a_partial_image_batch() {
-        let (capability, _polls) = fake_capability(FakeImageMode::DoneWithInvalidSecond).await;
-        let tool = ImageGenerationTool::new(capability);
-        let result = tool
-            .execute(json!({"prompt": "two foxes", "count": 2}))
-            .await;
-
-        assert!(result.is_error);
-        assert!(result.images.is_empty());
-        assert!(result.content.contains("not a recognized image"));
-    }
-
-    #[tokio::test]
-    async fn native_tool_truncates_unrequested_provider_extras() {
-        let (capability, _polls) = fake_capability(FakeImageMode::DoneWithInvalidSecond).await;
-        let tool = ImageGenerationTool::new(capability);
-        let result = tool.execute(json!({"prompt": "one fox", "count": 1})).await;
-
-        assert!(!result.is_error, "{}", result.content);
-        assert_eq!(result.images.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn native_tool_has_one_deadline_for_pending_work() {
-        let (capability, _polls) = fake_capability(FakeImageMode::PendingForever).await;
-        let tool = ImageGenerationTool::new(capability)
-            .with_timing(Duration::from_millis(1), Duration::from_millis(10));
-        let result = tool.execute(json!({"prompt": "a fox"})).await;
-
-        assert!(result.is_error);
-        assert!(result.images.is_empty());
-        assert!(result.content.contains("timed out"));
-    }
-
-    #[tokio::test]
-    async fn native_tool_materialization_budget_matches_persistence_and_memory_contracts() {
-        let (capability, _polls) = fake_capability(FakeImageMode::PendingThenValid).await;
-        let tool = ImageGenerationTool::new(capability);
-
-        assert_eq!(
-            tool.materialize_limits.max_bytes_per_asset,
-            MAX_INLINE_ARTIFACT_BYTES as u64
-        );
-        assert_eq!(
-            tool.materialize_limits.max_total_bytes,
-            MAX_MATERIALIZED_BATCH_BYTES
-        );
-        assert!(
-            tool.materialize_limits.max_total_bytes
-                < tool.materialize_limits.max_bytes_per_asset * u64::from(MAX_IMAGE_COUNT)
-        );
+    #[test]
+    fn task_id_is_stable_and_bound_to_message_model_and_parameters() {
+        let message = uuid::Uuid::now_v7().to_string();
+        let first = image_task_id("conversation", &message, &json!({"prompt":"fox"})).unwrap();
+        assert_eq!(first, image_task_id("conversation", &message, &json!({"prompt":"fox"})).unwrap());
+        assert_ne!(first, image_task_id("conversation", &message, &json!({"prompt":"cat"})).unwrap());
+        assert_ne!(first, image_task_id("conversation", &uuid::Uuid::now_v7().to_string(), &json!({"prompt":"fox"})).unwrap());
+        assert_eq!(uuid::Uuid::parse_str(&first).unwrap().get_version_num(), 7);
+        assert!(image_task_id("conversation", "unadmitted", &json!({})).is_err());
     }
 }

@@ -265,7 +265,7 @@ const TemplateAgentDraftModal: React.FC<TemplateAgentDraftModalProps> = ({
       maskClosable={!generating}
       closable={!generating}
       getPopupContainer={() =>
-        document.getElementById('creative-studio-portal-root') ?? document.body
+        document.getElementById('resource-page-portal-root') ?? document.body
       }
       onCancel={() => !generating && onClose()}
     >
@@ -329,7 +329,7 @@ const TemplateAgentDraftModal: React.FC<TemplateAgentDraftModalProps> = ({
             onOpenModelSettings={onOpenModelSettings}
             getPopupContainer={() =>
               modalContentRef.current ??
-              document.getElementById('creative-studio-portal-root') ??
+              document.getElementById('resource-page-portal-root') ??
               document.body
             }
           />

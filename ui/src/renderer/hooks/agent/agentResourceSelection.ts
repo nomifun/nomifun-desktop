@@ -16,7 +16,6 @@ export const USER_AGENT_RESOURCE_KINDS = [
   'robot',
   'mcp_server',
   'canvas',
-  'generation_provider',
   'plugin',
 ] as const;
 
