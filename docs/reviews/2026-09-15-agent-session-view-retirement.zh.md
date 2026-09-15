@@ -148,4 +148,9 @@ service_application retired_agent_view、historical_agent_view、service_process
   未回收 leader 保持 session 身份有效，完整扫描证实所有成员已停止后才清理并确认终态；
   250 ms 内无法证明时保留 Pending，由原 cleanup 路径重试。
 - **限制**：宿主突然死亡后的独立 job 仍未补完整证明，刻意 setsid 脱离会话不在本次扩展范围。
-  现有 parent-death 2 项通过不能升级为这些新增场景通过；修复后包内退出仍需实际重测。
+  现有 parent-death 2 项通过不能升级为这些新增场景通过。
+
+最终 `d6a2e5386` 本地包已构建；2026-09-16 解锁后的标准会话、普通 App、Command-Q 活动
+终端及独立 job 回收均通过，退出 0、四个 PID 消失、七个端口关闭、旧绑定不变。
+最新 SHA-256、严格签名失败和剩余平台限制统一见
+[macOS 制品复核](../specs/2026-09-06-coding-agent-runtime-internalization/MACOS-PLUGIN-RETIREMENT-DELIVERY.zh.md)。

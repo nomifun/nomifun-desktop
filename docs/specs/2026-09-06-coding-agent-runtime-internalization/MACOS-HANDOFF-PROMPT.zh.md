@@ -1,5 +1,7 @@
 # macOS 多 Engine 接手 Prompt
 
+> 最新会话页替换移除、macOS 终端修复与本地制品见
+> [MACOS-PLUGIN-RETIREMENT-DELIVERY.zh.md](MACOS-PLUGIN-RETIREMENT-DELIVERY.zh.md)。
 > 2026-09-15 当前接续结果见 [MACOS-REVALIDATION-2026-09-15.zh.md](MACOS-REVALIDATION-2026-09-15.zh.md)。
 > 下文 Windows CONFLICT、旧门禁失败和授权描述保留为历史阶段上下文；本轮用户要求后续修改不得推送，实际仅本地提交。
 
