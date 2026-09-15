@@ -1,5 +1,10 @@
 # CAR 阶段状态
 
+> 2026-09-15 当前 HEAD 复核：同步 `70c28b5de`，测试 fixture 修复提交 `6125f1a64`；
+> 当前 `bun run check` 已通过，原生开发、DMG 内 Nomi/Coding 交互与活动终端 Command-Q 回收通过。
+> 新 arm64 DMG 已生成；严格 bundle 签名失败，当前真实 StepFun 测试缺安全提供的凭据。
+> 未 push / Release / 更新发布。详见 [MACOS-REVALIDATION-2026-09-15.zh.md](MACOS-REVALIDATION-2026-09-15.zh.md)。
+
 > 2026-09-15 最终 macOS 接续：真实双引擎八阶段、独立真实压缩和活动进程取消均有通过证据。
 > 解锁后补齐开发窗口与当前 DMG 内双引擎发送、官方模板保存、旧 Session 不改绑及 Command-Q 活动终端回收。
 > 本地开发/交付基线收尾完成；严格签名、旧术语门禁仍失败，Coding 重试不支持 rewind，其余未验证项明确保留。
