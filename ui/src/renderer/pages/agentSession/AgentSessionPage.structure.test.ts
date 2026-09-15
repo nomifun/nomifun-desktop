@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
-const page = readFileSync(new URL('./AgentSessionPage.tsx', import.meta.url), 'utf8');
+const page = readFileSync(new URL('./BuiltinAgentSessionPage.tsx', import.meta.url), 'utf8');
 const bridge = readFileSync(new URL('../../../common/adapter/ipcBridge.ts', import.meta.url), 'utf8');
 const agentModel = readFileSync(new URL('../agentSettings/model.ts', import.meta.url), 'utf8');
 const card = readFileSync(new URL('./SessionProjectionCard.tsx', import.meta.url), 'utf8');

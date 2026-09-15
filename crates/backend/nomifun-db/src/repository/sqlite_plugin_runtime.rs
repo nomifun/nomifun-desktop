@@ -1053,7 +1053,7 @@ fn canonical_service_test_receipt(
             ));
         }
     }
-    if receipt.host_target != receipt.runtime.runtime_target
+    if receipt.host_target != receipt.runtime.target()
         || receipt.host_protocol_version.as_ref() != PLUGIN_SERVICE_HOST_PROTOCOL_VERSION
         || receipt.sdk_contract_version.as_ref() != PLUGIN_SERVICE_SDK_CONTRACT_VERSION
         || receipt.test_contract_version.as_ref() != PLUGIN_SERVICE_TEST_CONTRACT_VERSION
@@ -1069,7 +1069,7 @@ fn canonical_service_test_receipt(
         (receipt.release.release_digest.as_ref(), "receipt.release_digest"),
         (receipt.service_run_key.as_ref(), "receipt.service_run_key"),
         (
-            receipt.runtime.runtime_executable_digest.as_ref(),
+            receipt.runtime.executable_digest().as_ref(),
             "receipt.runtime.runtime_executable_digest",
         ),
         (
@@ -5365,6 +5365,9 @@ impl IPluginRuntimeRepository for SqlitePluginRuntimeRepository {
         validate_uuid(&params.owner_user_id, "owner_user_id")?;
         validate_uuid(&params.plugin_product_id, "plugin_product_id")?;
         validate_uuid(&params.surface_session_id, "surface_session_id")?;
+        if let Some(id) = &params.conversation_id {
+            validate_uuid(id, "conversation_id")?;
+        }
         validate_uuid(
             &params.expected_active_release_id,
             "expected_active_release_id",
@@ -5385,6 +5388,14 @@ impl IPluginRuntimeRepository for SqlitePluginRuntimeRepository {
         let mut tx = self.pool.begin().await?;
         let product =
             lock_product_for_update(&mut tx, &params.owner_user_id, &params.plugin_product_id).await?;
+        if let Some(id) = &params.conversation_id {
+            let owned: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM conversations WHERE conversation_id = ? AND user_id = ?)",
+            ).bind(id).bind(&params.owner_user_id).fetch_one(&mut *tx).await?;
+            if !owned {
+                return Err(conflict("Plugin Surface Session grant target is not owned"));
+            }
+        }
         if product.lifecycle != "enabled"
             || product.product_revision != params.expected_product_revision
             || product.pointer_revision != params.expected_pointer_revision
@@ -5416,8 +5427,8 @@ impl IPluginRuntimeRepository for SqlitePluginRuntimeRepository {
             "INSERT INTO plugin_surface_sessions (
                 surface_session_id, plugin_product_id, owner_user_id, generation,
                 capability_digest, active_release_id, active_release_digest,
-                active_release_epoch, issued_at_ms
-             ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
+                active_release_epoch, issued_at_ms, conversation_id
+             ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(plugin_product_id) DO UPDATE SET
                 surface_session_id = excluded.surface_session_id,
                 owner_user_id = excluded.owner_user_id,
@@ -5426,7 +5437,8 @@ impl IPluginRuntimeRepository for SqlitePluginRuntimeRepository {
                 active_release_id = excluded.active_release_id,
                 active_release_digest = excluded.active_release_digest,
                 active_release_epoch = excluded.active_release_epoch,
-                issued_at_ms = excluded.issued_at_ms
+                issued_at_ms = excluded.issued_at_ms,
+                conversation_id = excluded.conversation_id
              WHERE plugin_surface_sessions.owner_user_id = excluded.owner_user_id
                AND plugin_surface_sessions.generation < 9223372036854775807",
         )
@@ -5438,6 +5450,7 @@ impl IPluginRuntimeRepository for SqlitePluginRuntimeRepository {
         .bind(&params.expected_active_release_digest)
         .bind(params.expected_active_release_epoch)
         .bind(params.issued_at_ms)
+        .bind(&params.conversation_id)
         .execute(&mut *tx)
         .await
         .map_err(query_error)?;
@@ -5494,6 +5507,35 @@ impl IPluginRuntimeRepository for SqlitePluginRuntimeRepository {
         .bind(&params.expected_active_release_digest)
         .bind(params.expected_active_release_epoch)
         .fetch_optional(&self.pool)
+        .await
+        .map_err(DbError::Query)
+    }
+
+    async fn agent_surface_sessions(
+        &self,
+        owner_user_id: &str,
+        conversation_id: &str,
+    ) -> Result<Vec<PluginRuntimeSurfaceSessionRow>, DbError> {
+        validate_uuid(owner_user_id, "owner_user_id")?;
+        validate_uuid(conversation_id, "conversation_id")?;
+        sqlx::query_as::<_, PluginRuntimeSurfaceSessionRow>(
+            "SELECT session.* FROM plugin_surface_sessions session
+             JOIN plugin_products product
+               ON product.plugin_product_id = session.plugin_product_id
+              AND product.owner_user_id = session.owner_user_id
+             JOIN conversations conversation
+               ON conversation.conversation_id = session.conversation_id
+              AND conversation.user_id = session.owner_user_id
+             WHERE session.owner_user_id = ? AND session.conversation_id = ?
+               AND product.lifecycle = 'enabled'
+               AND product.active_release_id = session.active_release_id
+               AND product.active_release_digest = session.active_release_digest
+               AND product.active_release_epoch = session.active_release_epoch
+             ORDER BY session.surface_session_id",
+        )
+        .bind(owner_user_id)
+        .bind(conversation_id)
+        .fetch_all(&self.pool)
         .await
         .map_err(DbError::Query)
     }

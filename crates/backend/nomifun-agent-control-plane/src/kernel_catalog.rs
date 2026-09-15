@@ -83,12 +83,12 @@ pub fn materialize_catalog_snapshot(
     registry: &nomifun_agent_kernel::MaterializedRegistry,
     unavailable_capabilities: &BTreeMap<CapabilityId, nomifun_agent_contracts::CanonicalErrorCode>,
 ) -> Result<CatalogSnapshot, ControlPlaneError> {
-    materialize_catalog_snapshot_with_miniapps(registry, unavailable_capabilities, Vec::new())
+    materialize_catalog_snapshot_with_plugin_products(registry, unavailable_capabilities, Vec::new())
 }
 
 /// Compatibility name: publications use the unified Plugin Product contract.
 /// Catalog availability is not a Session permission grant.
-pub fn materialize_catalog_snapshot_with_miniapps(
+pub fn materialize_catalog_snapshot_with_plugin_products(
     registry: &nomifun_agent_kernel::MaterializedRegistry,
     unavailable_capabilities: &BTreeMap<CapabilityId, nomifun_agent_contracts::CanonicalErrorCode>,
     plugin_product_publications: Vec<nomifun_agent_contracts::PluginProductCapabilityCatalogPublication>,
@@ -148,6 +148,8 @@ pub fn materialize_catalog_snapshot_with_miniapps(
         })
         .collect();
     let snapshot = CatalogSnapshot {
+        role_contracts: registry.role_contracts.values().cloned().collect(),
+        role_providers: registry.role_providers.values().cloned().collect(),
         capabilities: registry.capabilities.values().cloned().collect(),
         formal_capability_entries,
         plugin_product_publications: plugin_product_publication_map,
@@ -177,7 +179,7 @@ impl KernelCatalogProvider {
     }
 
     /// Compatibility name for the unified Plugin Product publication source.
-    pub fn with_miniapp_publication_source(
+    pub fn with_plugin_product_publication_source(
         mut self,
         source: Arc<dyn PluginProductCatalogPublicationSource>,
     ) -> Self {
@@ -233,7 +235,7 @@ impl CatalogProvider for KernelCatalogProvider {
             .map(|source| source.publications())
             .transpose()?
             .unwrap_or_default();
-        materialize_catalog_snapshot_with_miniapps(
+        materialize_catalog_snapshot_with_plugin_products(
             &registry,
             &unavailable_capabilities,
             plugin_product_publications,

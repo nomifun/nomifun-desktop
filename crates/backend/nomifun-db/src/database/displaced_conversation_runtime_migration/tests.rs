@@ -207,7 +207,7 @@ async fn upstream_prefix_and_fresh_database_keep_canonical_095() {
 }
 
 #[tokio::test]
-async fn git_extension_preserves_the_miniapp_persistent_owner_codec() {
+async fn git_extension_preserves_the_plugin_product_persistent_owner_codec() {
     let pool = prefix(102).await;
     seed_evidence(&pool).await;
     sqlx::query("UPDATE conversations SET status = 'running', admission_epoch = 1, \

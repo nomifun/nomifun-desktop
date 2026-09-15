@@ -175,12 +175,21 @@ impl PluginRuntimeServiceModuleResolver for PluginRuntimeServiceModuleRegistry {
             .spec
             .validate()
             .map_err(PluginRuntimePlatformError::Contract)?;
-        self.resolve_exact(
+        let path = self.resolve_exact(
             &launch.spec.plugin_product_id,
             &launch.spec.release.release_digest,
             &launch.spec.service_module_digest,
         )
-        .await
+        .await?;
+        let expected = match &launch.spec.runtime {
+            nomifun_agent_contracts::PluginServiceRuntimeFingerprint::Node { .. } => "main.mjs",
+            nomifun_agent_contracts::PluginServiceRuntimeFingerprint::Native { native_target, .. } =>
+                Path::new(native_target.entrypoint()).file_name().and_then(|s| s.to_str()).expect("fixed native entrypoint"),
+        };
+        if path.file_name().and_then(|name| name.to_str()) != Some(expected) {
+            return Err(PluginRuntimePlatformError::InvalidState("Service entrypoint does not match execution backend".into()));
+        }
+        Ok(path)
     }
 }
 
@@ -252,7 +261,7 @@ fn validate_module_path(
             "Plugin Service module path escaped the registry root".into(),
         ));
     }
-    if canonical.file_name().and_then(|name| name.to_str()) != Some("main.mjs")
+    if !matches!(canonical.file_name().and_then(|name| name.to_str()), Some("main.mjs" | "plugin.exe" | "plugin"))
         || canonical
             .parent()
             .and_then(Path::file_name)
@@ -264,6 +273,9 @@ fn validate_module_path(
         )));
     }
 
+    if metadata.len() > 256 * 1024 * 1024 {
+        return Err(PluginRuntimePlatformError::InvalidState("Service module exceeds 256 MiB".into()));
+    }
     let bytes = fs::read(&canonical).map_err(|error| {
         PluginRuntimePlatformError::Runtime(format!(
             "Plugin Service module cannot be read: {error}"
@@ -354,7 +366,7 @@ mod tests {
                 nomifun_agent_contracts::PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
             sdk_contract_version:
                 nomifun_agent_contracts::PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
-            runtime: nomifun_agent_contracts::PluginServiceRuntimeFingerprint {
+            runtime: nomifun_agent_contracts::PluginServiceRuntimeFingerprint::Node {
                 runtime_installation_id: RuntimeInstallationId::from("node-installation"),
                 runtime_target: RuntimeTarget::from("windows-x86_64"),
                 runtime_executable_digest: digest("node"),

@@ -24,7 +24,10 @@ export interface PluginRuntimeDraft {
   description: string;
   html: string;
   service_source: string | null;
-  source_manifest?: { actions?: Array<{ id: string; name: string; description: string }> } | null;
+  source_manifest?: {
+    actions?: Array<{ id: string; name: string; description: string }>;
+    agent_view?: { name: string; description: string };
+  } | null;
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
   status:
     | 'generating'
@@ -62,6 +65,9 @@ export const pluginRuntimeProduct = {
     '/api/plugins/workspace',
   ),
   drafts: httpGet<PluginRuntimeDraft[], void>('/api/plugins/drafts'),
+  agentSessionTemplate: httpPost<PluginRuntimeDraft, void>(
+    '/api/plugins/drafts/from-template/agent-session-view',
+  ),
   draft: httpGet<PluginRuntimeDraft, { id: string }>(({ id }) => draftPath(id)),
   generate: httpPost<PluginRuntimeDraft, PluginRuntimeGenerateRequest>(
     '/api/plugins/authoring',

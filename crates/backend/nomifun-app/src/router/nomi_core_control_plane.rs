@@ -23,6 +23,33 @@ use nomifun_common::UserId as CommonUserId;
 use serde::{Deserialize, Serialize};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 
+/// Host rollout affects only the Agent page picker, never the shared Catalog
+/// publication: its digest is also frozen into executable Tool snapshots.
+pub(super) fn control_plane_router_without_legacy_skills(
+    control_plane: std::sync::Arc<nomifun_agent_control_plane::AgentControlPlane>,
+) -> axum::Router {
+    nomifun_agent_control_plane::control_plane_router_without_legacy_skills(control_plane)
+        .route_layer(axum::middleware::from_fn(agent_ui_catalog_admission))
+}
+
+async fn agent_ui_catalog_admission(
+    axum::Extension(_owner): axum::Extension<nomifun_agent_control_plane::AuthenticatedOwner>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if request.method() == axum::http::Method::GET
+        && request.extensions().get::<axum::extract::MatchedPath>()
+            .is_some_and(|path| path.as_str() == "/api/agent-catalog/ui/agent-session")
+        && !super::plugin_product::agent_ui_admission::enabled()
+    {
+        return axum::Json(nomifun_api_types::ApiResponse::ok(
+            Vec::<nomifun_api_types::AgentUiContributionDto>::new(),
+        )).into_response();
+    }
+    next.run(request).await
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -434,6 +461,45 @@ async fn remote_row(
         })
     })
     .transpose()
+}
+
+#[async_trait]
+impl nomifun_agent_control_plane::AgentUiBindingStore for NomiCoreControlPlaneStore {
+    async fn load(&self, owner: &UserId, preset: &AgentPresetId)
+        -> Result<nomifun_api_types::AgentUiBindingDto, ControlPlaneError> {
+        let value: Option<String> = sqlx::query_scalar(
+            "SELECT ui_binding_json FROM nomi_agent_presets WHERE preset_id = ? AND owner_user_id = ? AND retired_at_ms IS NULL",
+        ).bind(preset.as_ref()).bind(owner.as_ref()).fetch_optional(&self.pool).await.map_err(sql)?;
+        decode(&value.ok_or_else(|| not_found("AgentPreset"))?, "Agent UI binding")
+    }
+
+    async fn put(&self, owner: &UserId, preset: &AgentPresetId,
+        selection: Option<nomifun_api_types::AgentUiContributionDto>, expected_version: u64)
+        -> Result<nomifun_api_types::AgentUiBindingDto, ControlPlaneError> {
+        if selection.is_some() && !super::plugin_product::agent_ui_admission::enabled() {
+            return Err(ControlPlaneError::canonical(
+                "AGENT_UI_CHOICE_UNAVAILABLE", StatusCode::UNPROCESSABLE_ENTITY,
+                super::plugin_product::agent_ui_admission::DISABLED_MESSAGE,
+            ));
+        }
+        let expected = i64::try_from(expected_version).ok().filter(|version| *version < i64::MAX)
+            .ok_or_else(|| ControlPlaneError::canonical("AGENT_UI_BINDING_VERSION_CONFLICT", StatusCode::CONFLICT, "invalid or exhausted page binding version"))?;
+        let binding = nomifun_api_types::AgentUiBindingDto { binding_version: expected_version + 1, selection };
+        let plugin = binding.selection.as_ref().map(|selection| selection.plugin_id.as_str());
+        // The same statement checks live preset ownership, product ownership and
+        // CAS. No snapshot, Session or execution revision is rewritten.
+        let changed = sqlx::query(
+            "UPDATE nomi_agent_presets SET ui_binding_json = ? WHERE preset_id = ? AND owner_user_id = ?
+             AND retired_at_ms IS NULL AND json_extract(ui_binding_json, '$.binding_version') = ?
+             AND (? IS NULL OR EXISTS (SELECT 1 FROM plugin_products WHERE plugin_product_id = ? AND owner_user_id = ?))",
+        ).bind(wire(&binding)?).bind(preset.as_ref()).bind(owner.as_ref()).bind(expected)
+            .bind(plugin).bind(plugin).bind(owner.as_ref()).execute(&self.pool).await.map_err(sql)?;
+        if changed.rows_affected() != 1 {
+            return Err(ControlPlaneError::canonical("AGENT_UI_BINDING_VERSION_CONFLICT", StatusCode::CONFLICT,
+                "page choice or ownership changed; reload before saving"));
+        }
+        Ok(binding)
+    }
 }
 
 #[async_trait]
@@ -956,6 +1022,8 @@ mod tests {
             preset_id: PRESET_ID.into(), revision: 1, revision_digest: "a".repeat(64).into(),
         };
         let content = nomifun_agent_contracts::ResolvedSnapshotContent {
+            context_order: Vec::new(),
+            middleware_order: Vec::new(),
             schema_version: "1.0.0".into(), resolver_version: "1.0.0".into(),
             preset_revision_ref: reference.clone(),
             required_runtime_protocol_version: "1.0.0".into(),

@@ -8,6 +8,7 @@ import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import AgentPresetEditor from './AgentPresetEditor';
+import AgentRoleDefaults from './AgentRoleDefaults';
 import AgentPresetLibrary from './AgentPresetLibrary';
 import OfficialTemplateOverview from './OfficialTemplateOverview';
 import { useAgentSettingsController } from './useAgentSettingsController';
@@ -135,6 +136,7 @@ const AgentSettingsPage: React.FC = () => {
         <div className={styles.workspace}>
           {!collapsed && (narrow ? <div className={styles.siderOverlay}><button className={styles.siderBackdrop} aria-label={t('agentSettings.workbench.hideList')} onClick={collapse} />{libraryPanel}</div> : libraryPanel)}
           <div className={styles.mainArea}>
+          <div className={styles.defaultsToolbar}><AgentRoleDefaults catalog={controller.catalog} /></div>
 
           {selectedTemplate ? (
             <OfficialTemplateOverview

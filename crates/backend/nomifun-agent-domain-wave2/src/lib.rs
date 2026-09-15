@@ -1822,6 +1822,8 @@ fn build_capability(
         contributions: CapabilityContributions {
             actions,
             context_schema_refs,
+            context_phase: Default::default(),
+            ui_slot: None,
             event_schema_refs,
             resource_kinds: definition
                 .resource_kinds
@@ -2538,6 +2540,7 @@ fn role_providers_for_package(
         members.insert(
             member.capability.id.clone(),
             RoleProviderMemberContribution {
+                implementation: None,
                 supported_platforms: supported_platforms.clone(),
                 required_resource_kinds,
             },
@@ -3026,6 +3029,8 @@ mod tests {
         let action = action_id(capability_id).expect("workspace action");
         let payload = AgentPresetRevisionPayload {
             runtime_engine: None,
+            context_order: Vec::new(),
+            middleware_order: Vec::new(),
             schema_version: VersionString::from(CONTRACT_VERSION),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
@@ -3442,6 +3447,8 @@ mod tests {
         let revision = |overrides: BTreeMap<ExecutionRoleId, RoleProviderSelection>| {
             let payload = AgentPresetRevisionPayload {
                 runtime_engine: None,
+                context_order: Vec::new(),
+                middleware_order: Vec::new(),
                 schema_version: VersionString::from(CONTRACT_VERSION),
                 model_route_refs: BTreeMap::new(),
                 chat_route_records: BTreeMap::new(),

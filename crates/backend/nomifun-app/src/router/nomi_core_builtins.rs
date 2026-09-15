@@ -41,6 +41,7 @@ pub(crate) async fn build(services: &AppServices) -> anyhow::Result<NomiCoreBuil
     let mut registrations = nomifun_agent_domain_support::registrations(
         nomifun_agent_domain_support::c7_package_specs(),
     )?;
+    registrations.push(super::nomi_core_tool_discovery::registration()?);
 
     let wave1 = super::agent_wave1_host::wave1_registrations_for_nomi_core(
         Arc::clone(&services.companion_service),

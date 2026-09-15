@@ -142,6 +142,9 @@ import type {
 import type {
   AgentBindingRecord,
   RuntimeEngineDescriptor,
+  AgentCatalogResponse,
+  InstallationRoleBinding,
+  PutAgentRoleDefaultRequest,
   AgentBindingValue,
   AgentPresetId,
   AgentPresetEditorResponse,
@@ -338,7 +341,6 @@ import type {
   CreatePluginRuntimeProjectRequest,
   GetPluginRuntimeSourceFileRequest,
   PluginRuntimeLibraryResponse,
-  PluginRuntimeKvResponse,
   PluginRuntimeOperationSummary,
   PluginRuntimeSourceFile,
   PluginRuntimeSurfaceBridgeRequest,
@@ -465,7 +467,12 @@ export interface IAgentSessionMessageProjection {
   first_seq: number;
   last_seq: number;
   presentation_intent: string;
-  projection: IAgentSessionProjectionDocument;
+  /** Source-authored kind, e.g. text/tool_call/plan; absent for event projections. */
+  message_type?: string;
+  /** Message lifecycle, not a turn outcome or artifact receipt. */
+  message_status?: string;
+  /** Source payload: narrow by message_type or the event projection contract before rendering. */
+  projection: unknown;
   semantic_digest: string;
 }
 
@@ -634,6 +641,18 @@ const fromRevokedInstallationToken = (): RevokeInstallationTokenResponse => ({
 });
 
 export const agentPlatform = {
+  agentUiContributions: httpGet<import('../types/pluginRuntimePlatform').AgentUiContribution[], void>('/api/agent-catalog/ui/agent-session'),
+  presetUiBinding: httpGet<import('../types/pluginRuntimePlatform').AgentPresetUiBinding, { preset_id: string }>(
+    params => `/api/agent-presets/${encodeURIComponent(params.preset_id)}/ui-binding`
+  ),
+  putPresetUiBinding: httpPut<import('../types/pluginRuntimePlatform').AgentPresetUiBinding, {
+    preset_id: string; request: import('../types/pluginRuntimePlatform').PutAgentUiBindingRequest;
+  }>(params => `/api/agent-presets/${encodeURIComponent(params.preset_id)}/ui-binding`, params => params.request),
+  roleDefaults: httpGet<InstallationRoleBinding[], void>('/api/agent-role-defaults'),
+  putRoleDefault: httpPut<InstallationRoleBinding, PutAgentRoleDefaultRequest>(
+    params => `/api/agent-role-defaults/${encodeURIComponent(params.selection.role.key.role_id)}`
+  ),
+  catalog: httpGet<AgentCatalogResponse, void>('/api/agent-catalog'),
   library: httpGet<AgentPresetLibraryResponse, void>(
     '/api/agent-preset-templates?source=official'
   ),
@@ -736,6 +755,9 @@ export const agentPlatform = {
     list: httpGet<RuntimeEngineDescriptor[], void>('/api/runtime-engines'),
   },
   sessions: {
+    uiBinding: httpGet<import('../types/pluginRuntimePlatform').AgentPresetUiBinding, { agent_session_id: string }>(
+      params => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/ui-binding`
+    ),
     create: httpPost<CreateAgentSessionResponse, CreateAgentSessionRequest>(
       '/api/agent-sessions'
     ),
@@ -2294,6 +2316,9 @@ const fromApiPluginRuntimeSourceFile = (
 });
 
 export const pluginRuntimes = {
+  agentSessionStream: wsEmitter<import('../types/pluginRuntimePlatform').PluginAgentSessionStream>('plugin.agent-session.stream'),
+  agentSessionResync: wsEmitter<unknown>('plugin.agent-session.resync-required'),
+  reconnected: wsEmitter<undefined>('ws.reconnected'),
   library: withResponseMap(
     httpGet<PluginRuntimeLibraryResponse, void>('/api/plugins/runtimes'),
     fromApiPluginRuntimeLibrary
@@ -2461,7 +2486,7 @@ export const pluginRuntimes = {
     ({ plugin_id }) =>
       `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/surface/close`
   ),
-  bridge: httpPost<PluginRuntimeKvResponse, PluginRuntimeSurfaceBridgeRequest>(
+  bridge: httpPost<unknown, PluginRuntimeSurfaceBridgeRequest>(
     ({ plugin_id }) =>
       `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/surface/bridge`,
     ({ plugin_id: _pluginId, ...request }) => request

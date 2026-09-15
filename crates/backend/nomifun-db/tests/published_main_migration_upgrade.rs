@@ -49,6 +49,9 @@ async fn verify_main_upgrade(head: i64) {
     let path = root.path().join("published-main.db");
     let (pool, asset) = released_main(&path, head).await;
     let before = ledger(&pool).await;
+    assert_eq!(before.iter().map(|row| row.0).collect::<Vec<_>>(),
+        MIGRATOR.iter().filter(|migration| migration.version <= 58)
+            .map(|migration| migration.version).chain(59..=head).collect::<Vec<_>>());
     pool.close().await;
     let probe = open(&path, true).await;
     assert_eq!(inspect_supported_migration_lineage(&probe).await.unwrap(), MigrationLineageStatus::UpgradeRequired);
@@ -59,9 +62,12 @@ async fn verify_main_upgrade(head: i64) {
     assert_eq!(inspect_supported_migration_lineage(db.pool()).await.unwrap(), MigrationLineageStatus::Current);
     let after = ledger(db.pool()).await;
     assert_eq!(after.len(), MIGRATOR.iter().count());
-    assert_eq!(&after[..58], &before[..58]);
-    for original in before.iter().skip(58) {
-        let canonical = if original.0 == 59 { 73 } else { 74 };
+    for original in &before {
+        let canonical = match original.0 {
+            59 => 73,
+            60 => 74,
+            version => version,
+        };
         let moved = after.iter().find(|row| row.0 == canonical).unwrap();
         assert_eq!((&moved.1, &moved.2, &moved.3), (&original.1, &original.2, &original.3));
     }
@@ -126,4 +132,50 @@ async fn edited_main_checksum_is_rejected_without_ledger_reconciliation() {
     let pool = open(&path, true).await;
     assert_eq!(ledger(&pool).await, before);
     pool.close().await;
+}
+
+#[tokio::test]
+async fn malformed_published_prefixes_fail_before_any_schema_or_ledger_write() {
+    for (case, mutation) in [
+        ("missing common migration", "DELETE FROM _sqlx_migrations WHERE version=28"),
+        ("missing published 059", "DELETE FROM _sqlx_migrations WHERE version=59"),
+        ("occupied retired gap", "UPDATE _sqlx_migrations SET version=27 WHERE version=28"),
+        ("unknown extra version", "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) VALUES (61, 'unknown', 1, zeroblob(48), 0)"),
+        ("occupied relocation target", "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) VALUES (73, 'occupied', 1, zeroblob(48), 0)"),
+        ("failed common migration", "UPDATE _sqlx_migrations SET success=0 WHERE version=58"),
+        ("unknown common checksum", "UPDATE _sqlx_migrations SET checksum=zeroblob(48) WHERE version=58"),
+        ("unknown published checksum", "UPDATE _sqlx_migrations SET checksum=zeroblob(48) WHERE version=59"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("malformed-main.db");
+        let (pool, asset) = released_main(&path, 60).await;
+        sqlx::query(mutation).execute(&pool).await.unwrap();
+        let before = ledger(&pool).await;
+        let before_success: Vec<(i64, bool)> = sqlx::query_as(
+            "SELECT version, success FROM _sqlx_migrations ORDER BY version"
+        ).fetch_all(&pool).await.unwrap();
+        let before_schema: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT name, sql FROM sqlite_schema ORDER BY name"
+        ).fetch_all(&pool).await.unwrap();
+        assert!(inspect_supported_migration_lineage(&pool).await.is_err(), "{case}");
+        assert_eq!(ledger(&pool).await, before, "read-only inspection: {case}");
+        pool.close().await;
+
+        assert!(init_database(&path).await.is_err(), "{case}");
+        let pool = open(&path, true).await;
+        assert_eq!(ledger(&pool).await, before, "ledger: {case}");
+        let after_success: Vec<(i64, bool)> = sqlx::query_as(
+            "SELECT version, success FROM _sqlx_migrations ORDER BY version"
+        ).fetch_all(&pool).await.unwrap();
+        assert_eq!(after_success, before_success, "success flags: {case}");
+        let after_schema: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT name, sql FROM sqlite_schema ORDER BY name"
+        ).fetch_all(&pool).await.unwrap();
+        assert_eq!(after_schema, before_schema, "no partial DDL: {case}");
+        let row: (String, i64) = sqlx::query_as(
+            "SELECT title, deleted_at FROM workshop_assets WHERE asset_id=?"
+        ).bind(&asset).fetch_one(&pool).await.unwrap();
+        assert_eq!(row, ("pending deletion history".into(), 15), "data: {case}");
+        pool.close().await;
+    }
 }

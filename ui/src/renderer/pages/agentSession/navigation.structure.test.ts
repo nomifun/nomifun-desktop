@@ -63,9 +63,11 @@ describe('Agent navigation', () => {
 
   test('new AgentSession pages contain no legacy chat-container fallback', () => {
     const page = read(new URL('./AgentSessionPage.tsx', import.meta.url));
+    const builtin = read(new URL('./BuiltinAgentSessionPage.tsx', import.meta.url));
     const model = read(new URL('./model.ts', import.meta.url));
     const legacyType = 'Conver' + 'sation';
     expect(page.includes(legacyType)).toBe(false);
+    expect(builtin.includes(legacyType)).toBe(false);
     expect(model.includes(legacyType)).toBe(false);
   });
 });

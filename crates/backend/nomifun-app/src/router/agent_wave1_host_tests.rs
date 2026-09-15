@@ -6,7 +6,7 @@ use nomifun_agent_contracts::{
     CapabilityRef, CapabilitySelection, CorrelationId, DigestHex, IdempotencyKey, OperationId,
     PluginStateEntry, PresetRevisionRef, ResourceBindingId, ResourceId, ResourceKind,
     RuntimeProfileKind, RuntimeTarget, ScopeKey, StateKey, StrictJsonValue, TypedResourceBinding,
-    UserId, VersionString,
+    UserId, VersionString, digest_bytes,
 };
 use nomifun_agent_kernel::{
     ActiveCapabilitySetSnapshot, AgentPresetCompiler, CapabilityAccessRequest,
@@ -202,6 +202,8 @@ fn compile_wave1_snapshot_for_registry(
         })
         .collect();
     let payload = AgentPresetRevisionPayload {
+        context_order: Vec::new(),
+        middleware_order: Vec::new(),
         runtime_engine: None,
         schema_version: VersionString::from(CONTRACT_VERSION),
         model_route_refs: BTreeMap::new(),

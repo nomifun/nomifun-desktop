@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Agent Session reference</title>
+  <style>
+    :root { color-scheme: light dark; font: 15px/1.5 system-ui, sans-serif; }
+    body { margin: 0; padding: 20px; }
+    main { max-width: 1000px; margin: auto; }
+    h1 { font-size: 22px; margin: 0; }
+    .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 12px 0; }
+    button, textarea { font: inherit; padding: 8px 12px; border: 1px solid #888; border-radius: 6px; }
+    button { cursor: pointer; }
+    button:disabled { cursor: default; opacity: .5; }
+    textarea { display: block; width: 100%; box-sizing: border-box; resize: vertical; min-height: 90px; }
+    article { margin: 12px 0; padding: 12px; border: 1px solid #888; border-radius: 6px; }
+    article p { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; }
+    article summary { cursor: pointer; margin-top: 8px; }
+    article li { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .tool { border-inline-start: 2px solid #888; padding-inline-start: 12px; margin-top: 10px; }
+    .hint { opacity: .8; }
+    #error { color: light-dark(#a41919, #ffb4b4); }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+<main>
+  <h1 id="title">Agent Session reference</h1>
+  <p class="hint">This editable page uses the existing Session. It never runs an Agent of its own.</p>
+  <p id="connection" role="status">Connecting…</p>
+  <p id="error" role="alert"></p>
+  <div class="controls" aria-label="History pages">
+    <button id="refresh" disabled>Refresh current page</button>
+    <button id="previous" disabled>Previous page</button>
+    <span id="page">Page 1</span>
+    <button id="next" disabled>Next page</button>
+  </div>
+  <p class="hint">Persisted history only, 50 records per page. In-progress records can change. Live events trigger a refresh; unpersisted tokens are not replayed. Use Next page to reach later messages.</p>
+  <section id="history" aria-label="Persisted messages"></section>
+  <p class="hint">Text, notices, thinking, plans, tool summaries and Agent status use source-authored message types. Tool status is not proof that a turn or artifact delivery committed. This page does not approve permissions, execute displayed commands, or open artifact links.</p>
+  <form id="composer">
+    <label for="input">Message</label>
+    <textarea id="input" placeholder="Write a message" maxlength="32000" disabled></textarea>
+    <div class="controls">
+      <button id="send" type="submit" disabled>Send</button>
+      <button id="retry" type="button" hidden disabled>Retry same request</button>
+      <label id="abandonWarning" hidden><input id="acknowledge" type="checkbox"> I checked history; the earlier send may have succeeded.</label>
+      <button id="abandon" type="button" hidden disabled>Keep text, abandon retry</button>
+      <button id="cancel" type="button" disabled>Cancel current turn</button>
+    </div>
+  </form>
+  <p id="draftStatus" role="status" data-state="loading">Waiting for authorized Session identity…</p>
+  <div id="draftRecovery" class="controls" hidden>
+    <label><input id="restoreAcknowledge" type="checkbox"> I copied local text and checked history; replacing recovery data can lose the previous retry identity.</label>
+    <button id="restoreDraft" disabled>Reload saved draft (replace local input)</button>
+    <button id="resetDraft" disabled>Discard saved recovery data (keep local text)</button>
+  </div>
+  <p id="command" role="status"></p>
+  <p class="hint">Draft text and pending request identity are saved in this plugin's private storage, separately for each Session (up to 32,000 characters). Wait for “Draft saved” before changing views; offline or unconfirmed edits remain local. Restoring a pending request never sends it automatically. These records are not Session history and remain plugin data until cleared; use the host's built-in view for attachments, fork/delete and other unsupported controls.</p>
+</main>
+<script>
+(() => {
+  'use strict';
+  const el = id => document.getElementById(id);
+  const sdk = window.nomi;
+  if (!sdk || sdk.preview || !sdk.agentSession) {
+    el('connection').textContent = 'Preview only. Save this plugin, return to an Agent Session, refresh its view list and explicitly select this view. Preview has no Session access.';
+    return;
+  }
+  const api = sdk.agentSession;
+  const limit = 50;
+  const pages = [0];
+  let snapshot = null, nextCursor = 0, hasNext = false;
+  let disposed = false, loading = false, dirty = false, timer = null, failed = false;
+  let busy = false, pending = null;
+  let draftKey = null, draftSession = null, draftLoaded = false, draftLoading = false;
+  let draftBlocked = false, revisionKnown = false, revision = null, saved = null;
+  let draftTimer = null, writing = null;
+  const running = () => ['running', 'opening'].includes(snapshot?.head?.status);
+  const writable = () => snapshot?.head?.status === 'ready' &&
+    snapshot?.continuation?.history_read_only !== true && snapshot?.continuation?.can_continue_same_session !== false;
+
+  function controls() {
+    el('refresh').disabled = loading || disposed;
+    el('previous').disabled = loading || !snapshot || pages.length === 1;
+    el('next').disabled = loading || !snapshot || !hasNext;
+    el('input').disabled = !snapshot || !draftLoaded || draftLoading || busy || !!pending;
+    el('send').disabled = loading || !writable() || !draftLoaded || draftLoading || draftBlocked || busy || !!pending || !el('input').value.trim();
+    el('retry').hidden = el('abandon').hidden = el('abandonWarning').hidden = !pending || busy;
+    // Retrying the same immutable intent is explicit. A running Session may
+    // already contain it; only the host can resolve its idempotency identity.
+    el('retry').disabled = !snapshot || draftBlocked || draftLoading || busy;
+    el('abandon').disabled = draftBlocked || draftLoading || busy || !el('acknowledge').checked;
+    el('cancel').disabled = !running() || busy;
+    el('draftRecovery').hidden = !draftBlocked;
+    const canRecover = !disposed && !!snapshot && !draftLoading && !busy && !writing && el('restoreAcknowledge').checked;
+    el('restoreDraft').disabled = !canRecover;
+    el('resetDraft').disabled = !canRecover || !revisionKnown;
+  }
+
+  function composer() {
+    return { version: 1, session_id: draftSession, text: el('input').value, pending };
+  }
+
+  function draftNotice(state, text) {
+    el('draftStatus').dataset.state = state;
+    el('draftStatus').textContent = text;
+  }
+
+  function blockDraft() {
+    draftBlocked = true;
+    clearTimeout(draftTimer); draftTimer = null;
+    el('restoreAcknowledge').checked = false;
+    draftNotice('error', 'Draft storage is unavailable, changed, or has an unconfirmed write. Local input is retained. Sending and saving are paused; copy text and explicitly reconcile below.');
+    controls();
+  }
+
+  function validComposer(value) {
+    return value && value.version === 1 && value.session_id === draftSession &&
+      typeof value.text === 'string' && value.text.length <= 32000 &&
+      (value.pending === null || (value.pending && typeof value.pending.key === 'string' &&
+        value.pending.key.trim() && new TextEncoder().encode(value.pending.key).length <= 256 &&
+        typeof value.pending.input?.content === 'string' && value.pending.input.content.length > 0 &&
+        value.pending.input.content === value.text.trim() && Object.keys(value.pending.input).length === 1));
+  }
+
+  async function loadDraft() {
+    if (disposed || !draftKey || draftLoading || writing || busy) return;
+    draftLoading = true; revisionKnown = false; controls();
+    draftNotice('loading', 'Reading saved draft; no request will be sent.');
+    try {
+      const record = await sdk.storage.read(draftKey);
+      if (disposed) return;
+      revision = record.revision; revisionKnown = true;
+      const value = record.value ?? { version: 1, session_id: draftSession, text: '', pending: null };
+      if (!validComposer(value)) throw new Error('Unsupported recovery data');
+      el('input').value = value.text;
+      pending = value.pending === null ? null : { input: { content: value.pending.input.content }, key: value.pending.key };
+      saved = JSON.stringify(composer());
+      draftLoaded = true; draftBlocked = false;
+      el('acknowledge').checked = false;
+      draftNotice('saved', pending ? 'Saved pending request restored. Check history; retry only if you choose. Nothing was sent.' : 'Draft saved. Changes will be saved automatically.');
+      if (pending) el('command').textContent = 'A previous send may have been accepted. Restoring this draft never automatically resends it.';
+    } catch {
+      if (!disposed) blockDraft();
+    } finally {
+      draftLoading = false;
+      if (!disposed) controls();
+    }
+  }
+
+  async function writeComposer(value) {
+    const result = await sdk.storage.compareAndSwap(draftKey, revision, value);
+    if (disposed) throw new Error('Page closed');
+    if (!result.applied) throw new Error('Draft changed');
+    revision = result.revision;
+    saved = JSON.stringify(value);
+  }
+
+  async function flushDraft() {
+    clearTimeout(draftTimer); draftTimer = null;
+    // Coalesce edits through one CAS at a time. A send waits for the latest
+    // immutable intent, not merely an older autosave already in flight.
+    while (!disposed && !draftBlocked && draftLoaded && saved !== JSON.stringify(composer())) {
+      if (!writing) {
+        draftNotice('saving', 'Saving draft…');
+        writing = writeComposer(composer()).catch(error => {
+          if (!disposed) blockDraft();
+          throw error;
+        }).finally(() => { writing = null; if (!disposed) controls(); });
+      }
+      await writing;
+    }
+    if (disposed || draftBlocked || !draftLoaded) throw new Error('Draft is not durably saved');
+    draftNotice('saved', pending ? 'Pending request identity saved. No automatic resend.' : 'Draft saved.');
+  }
+
+  function draftChanged() {
+    controls();
+    if (!draftLoaded || draftBlocked || disposed) return;
+    clearTimeout(draftTimer);
+    draftNotice('dirty', 'Unsaved changes; keep this page open until the draft is saved.');
+    draftTimer = setTimeout(() => { draftTimer = null; void flushDraft().catch(() => {}); }, 400);
+  }
+
+  function paragraph(parent, value) {
+    if (typeof value !== 'string' || !value) return false;
+    const text = document.createElement('p');
+    text.textContent = value;
+    parent.append(text);
+    return true;
+  }
+
+  function details(parent, title, value) {
+    if (typeof value !== 'string' || !value) return;
+    const detail = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = title;
+    detail.append(summary);
+    paragraph(detail, value);
+    parent.append(detail);
+  }
+
+  const states = {
+    running: 'Running', completed: 'Completed', error: 'Error', pending: 'Pending',
+    in_progress: 'In progress', cancelled: 'Cancelled', canceled: 'Cancelled',
+    thinking: 'Thinking', done: 'Done',
+    Executing: 'Running', Success: 'Completed', Error: 'Error', Canceled: 'Cancelled', Pending: 'Pending',
+    connecting: 'Connecting', connected: 'Connected', authenticated: 'Authenticated',
+    session_active: 'Session active', preparing: 'Preparing', prepared: 'Prepared', disconnected: 'Disconnected',
+  };
+  const statusText = value => typeof value === 'string' && Object.hasOwn(states, value) ? states[value] : 'Unknown status';
+  const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+  function tool(parent, value, messageStatus) {
+    if (!object(value)) return false;
+    const heading = document.createElement('strong');
+    heading.textContent = typeof value.name === 'string' && value.name ? 'Tool: ' + value.name : 'Tool action';
+    parent.append(heading);
+    paragraph(parent, 'Status: ' + statusText(messageStatus === 'error' ? 'error' : value.status));
+    paragraph(parent, value.description);
+    paragraph(parent, value.error);
+    details(parent, 'Output (plain text)', typeof value.output === 'string' ? value.output : value.result_display);
+    if ((Array.isArray(value.artifacts) && value.artifacts.length) || object(value.result_display)) {
+      paragraph(parent, 'Artifact or structured output recorded. Use the host artifact controls to inspect it; this page does not verify or open it.');
+    }
+    return true;
+  }
+
+  function renderHistory(messages) {
+    const fragment = document.createDocumentFragment();
+    for (const message of messages) {
+      if (message.hidden === true || message.projection?.hidden === true) continue;
+      const record = document.createElement('article');
+      const label = document.createElement('strong');
+      const doc = message.projection;
+      const intent = message.presentation_intent;
+      const kind = message.message_type;
+      let rendered = false;
+      record.append(label);
+      // Only the source type selects a structured renderer. Field names, tool
+      // arguments and left/right position cannot turn arbitrary JSON into UI.
+      if (kind === 'text' || kind == null) {
+        label.textContent = intent === 'right' || doc?.state === 'accepted' ? 'You' :
+          intent === 'left' || intent === 'message' ? 'Agent' : 'Session record';
+        const content = typeof doc === 'string' ? doc : doc?.content;
+        rendered = typeof content === 'string';
+        if (rendered) paragraph(record, content || 'No text content.');
+      } else if (kind === 'tips') {
+        label.textContent = doc?.type === 'error' ? 'Error notice' : doc?.type === 'warning' ? 'Warning' : doc?.type === 'success' ? 'Success notice' : 'Notice';
+        rendered = paragraph(record, doc?.content);
+      } else if (kind === 'thinking') {
+        label.textContent = 'Thinking';
+        paragraph(record, 'Status: ' + statusText(message.message_status === 'error' ? 'error' : doc?.status));
+        details(record, 'Thinking text', doc?.content);
+        rendered = typeof doc?.content === 'string';
+      } else if (kind === 'plan' && Array.isArray(doc?.entries)) {
+        label.textContent = 'Plan';
+        const list = document.createElement('ol');
+        for (const entry of doc.entries) {
+          const item = document.createElement('li');
+          item.textContent = typeof entry?.content === 'string' ? statusText(entry.status) + ': ' + entry.content : 'Unsupported plan entry';
+          list.append(item);
+        }
+        record.append(list);
+        if (!doc.entries.length) paragraph(record, 'No plan entries.');
+        rendered = true;
+      } else if (kind === 'tool_call') {
+        label.remove();
+        rendered = tool(record, doc, message.message_status);
+      } else if (kind === 'tool_group' && Array.isArray(doc)) {
+        label.textContent = 'Tool group';
+        for (const value of doc) {
+          const item = document.createElement('section');
+          item.className = 'tool';
+          if (!tool(item, value, message.message_status)) paragraph(item, 'Unsupported tool record');
+          record.append(item);
+        }
+        if (!doc.length) paragraph(record, 'No tool entries.');
+        rendered = true;
+      } else if (kind === 'agent_status') {
+        label.textContent = 'Agent status';
+        paragraph(record, doc?.agent_name);
+        rendered = paragraph(record, statusText(doc?.status));
+      }
+      if (!rendered) {
+        if (!record.contains(label)) record.prepend(label);
+        label.textContent = 'Session record';
+        paragraph(record, 'Unsupported record. Open the built-in view for supported details.');
+      }
+      fragment.append(record);
+    }
+    const empty = !fragment.childNodes.length;
+    el('history').replaceChildren(fragment);
+    if (empty) el('history').textContent = 'No visible persisted messages on this page.';
+    el('page').textContent = 'Page ' + pages.length;
+  }
+
+  function schedule(delay) {
+    if (disposed || failed || timer !== null) return;
+    timer = setTimeout(() => { timer = null; void refresh(); }, delay);
+  }
+
+  async function refresh() {
+    if (disposed) return;
+    if (loading) { dirty = true; return; }
+    clearTimeout(timer); timer = null;
+    loading = true; failed = false; controls();
+    const after = pages[pages.length - 1];
+    try {
+      const value = await api.observe({ after_seq: after, limit });
+      if (disposed) return;
+      const cursor = value?.next_cursor?.seq;
+      if (!Array.isArray(value?.messages) || value.messages.length > limit ||
+          !Number.isSafeInteger(cursor) || cursor < after ||
+          (value.messages.length > 0 && cursor === after) || !value?.head?.status) {
+        throw new Error('Invalid observation');
+      }
+      const sessionId = value.session?.agent_session_id;
+      if (typeof sessionId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(sessionId) ||
+          (draftSession !== null && draftSession !== sessionId)) throw new Error('Session identity changed');
+      snapshot = value;
+      nextCursor = cursor;
+      hasNext = value.messages.length === limit && cursor > after;
+      el('title').textContent = value.session?.metadata?.title || 'Agent Session';
+      el('connection').textContent = 'Session: ' + value.head.status + ' — persisted history';
+      el('error').textContent = '';
+      // Re-read and replace the page: persisted rows may change in place.
+      // Never merge token events with this snapshot using unrelated cursors.
+      renderHistory(value.messages);
+      if (draftSession === null) {
+        draftSession = sessionId;
+        draftKey = 'agent-session/composer/v1/' + sessionId;
+        await loadDraft();
+      } else if (draftLoaded && !draftBlocked && !busy && !writing && saved !== JSON.stringify(composer())) {
+        draftChanged();
+      }
+    } catch {
+      if (disposed) return;
+      failed = true; snapshot = null;
+      clearTimeout(draftTimer); draftTimer = null;
+      el('history').replaceChildren();
+      el('connection').textContent = 'Session unavailable';
+      el('error').textContent = 'History refresh failed or access changed. Automatic refresh is paused. To grant access, open an Agent Session, refresh its view list and explicitly select this plugin. Otherwise refresh here or return to the built-in view. No message was resent.';
+    } finally {
+      loading = false;
+      if (!disposed) {
+        controls();
+        schedule(dirty ? 1000 : running() ? 1500 : 5000);
+        dirty = false;
+      }
+    }
+  }
+
+  async function send(retry) {
+    if (disposed || busy || !snapshot || !draftLoaded || draftLoading || draftBlocked) return;
+    if (!retry) {
+      if (loading || pending || !writable() || !el('input').value.trim()) return;
+      // This random value is an idempotency nonce, not a business entity ID.
+      pending = { input: { content: el('input').value.trim() }, key: crypto.randomUUID() };
+      el('acknowledge').checked = false;
+    }
+    if (!pending) return;
+    busy = true; controls();
+    el('command').textContent = 'Saving request identity before sending…';
+    let attempted = false, accepted = false;
+    const intent = pending, originalText = el('input').value;
+    try {
+      await flushDraft();
+      if (disposed) return;
+      attempted = true;
+      el('command').textContent = 'Sending…';
+      await api.turn(pending.input, pending.key);
+      if (disposed) return;
+      accepted = true;
+      pending = null; el('input').value = '';
+      await flushDraft();
+      el('command').textContent = 'Request accepted. Refreshing persisted history; the reply may be on a later page.';
+    } catch {
+      if (disposed) return;
+      if (accepted) {
+        pending = intent; el('input').value = originalText;
+        el('command').textContent = 'Request accepted, but clearing saved recovery data was not confirmed. Check history and reconcile storage before another send; no automatic retry.';
+      } else {
+        el('command').textContent = attempted ? 'Send result is unconfirmed. Check history before retrying. Retry same request retains the original text and idempotency key; nothing is resent automatically.' : 'Request was not sent: saving its recovery identity was not confirmed. Copy text and reconcile storage.';
+      }
+    } finally {
+      busy = false;
+      if (!disposed) { controls(); void refresh(); }
+    }
+  }
+
+  el('composer').addEventListener('submit', event => { event.preventDefault(); void send(false); });
+  el('input').addEventListener('input', draftChanged);
+  el('acknowledge').addEventListener('change', controls);
+  el('retry').addEventListener('click', () => void send(true));
+  el('abandon').addEventListener('click', async () => {
+    if (!pending || busy || draftBlocked || !el('acknowledge').checked) return;
+    busy = true;
+    const previous = pending;
+    pending = null;
+    controls();
+    try {
+      await flushDraft();
+      if (!disposed) el('command').textContent = 'Retry identity abandoned. Text retained; no new request sent.';
+    } catch {
+      if (!disposed) pending = previous;
+    } finally { busy = false; if (!disposed) controls(); }
+  });
+  el('restoreAcknowledge').addEventListener('change', controls);
+  el('restoreDraft').addEventListener('click', () => {
+    if (!el('restoreDraft').disabled) void loadDraft();
+  });
+  el('resetDraft').addEventListener('click', async () => {
+    if (el('resetDraft').disabled) return;
+    busy = true; controls();
+    try {
+      // Explicitly abandon only this plugin's recovery record, never history.
+      // CAS still prevents overwriting a concurrently replaced record.
+      await writeComposer({ version: 1, session_id: draftSession, text: el('input').value, pending: null });
+      if (disposed) return;
+      pending = null; draftLoaded = true; draftBlocked = false;
+      draftNotice('saved', 'Draft saved. Previous retry identity discarded; no request sent.');
+    } catch { if (!disposed) blockDraft(); }
+    finally { busy = false; if (!disposed) controls(); }
+  });
+  el('refresh').addEventListener('click', () => void refresh());
+  el('previous').addEventListener('click', () => {
+    if (loading || pages.length === 1) return;
+    pages.pop(); void refresh();
+  });
+  el('next').addEventListener('click', () => {
+    if (loading || !hasNext) return;
+    pages.push(nextCursor); void refresh();
+  });
+  el('cancel').addEventListener('click', async () => {
+    if (busy || !running() || disposed) return;
+    busy = true; controls();
+    try {
+      await api.cancel();
+      if (!disposed) el('command').textContent = 'Cancellation requested. Session status will be refreshed.';
+    } catch {
+      if (!disposed) el('command').textContent = 'Cancellation result is unconfirmed. Refresh to check the current Session; cancellation is not retried automatically.';
+    } finally {
+      busy = false;
+      if (!disposed) { controls(); void refresh(); }
+    }
+  });
+  const unsubscribe = api.subscribe(event => {
+    if (disposed || failed || (event.kind === 'stream' && event.event?.hidden === true)) return;
+    if (event.kind === 'resync_required') el('connection').textContent = 'Rechecking persisted history; no token replay or automatic resend.';
+    // A single scheduled refresh, not one request per token. Existing polling
+    // also covers missed terminals/cancellation notifications.
+    if (loading) dirty = true;
+    else schedule(1000);
+  });
+  window.addEventListener('beforeunload', event => {
+    if (draftBlocked || writing || draftTimer !== null) { event.preventDefault(); event.returnValue = ''; }
+  });
+  window.addEventListener('pagehide', () => {
+    disposed = true; clearTimeout(timer); timer = null;
+    clearTimeout(draftTimer); draftTimer = null; unsubscribe();
+  }, { once: true });
+  void refresh();
+})();
+</script>
+</body>
+</html>

@@ -171,6 +171,8 @@ pub(crate) fn reduce_message_projection(
         first_seq,
         last_seq: event.seq,
         presentation_intent,
+        message_type: None,
+        message_status: None,
         projection: serde_json::to_value(document)?,
         semantic_digest,
     })

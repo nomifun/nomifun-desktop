@@ -4901,6 +4901,11 @@ impl IConversationRepository for SqliteConversationRepository {
         .await?;
 
         // Registry-owned CASCADE references. Delete grandchildren first.
+        // A view grant must never outlive its Session or be rebound by ID reuse.
+        sqlx::query("DELETE FROM plugin_surface_sessions WHERE conversation_id = ?")
+            .bind(conversation_id)
+            .execute(&mut *tx)
+            .await?;
         let deleted_cron_job_ids = sqlx::query_scalar::<_, String>(
             "SELECT cron_job_id FROM cron_jobs \
              WHERE conversation_id = ? \

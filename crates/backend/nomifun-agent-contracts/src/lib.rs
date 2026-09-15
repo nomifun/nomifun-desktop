@@ -6,6 +6,8 @@
 
 pub mod closure;
 pub mod catalog;
+pub mod chat_model;
+pub mod chat_provider_reasoning;
 pub mod deletion;
 pub mod digest;
 pub mod event;
@@ -13,7 +15,9 @@ pub mod engine_features;
 pub mod impact;
 pub mod manifest;
 pub mod plugin_runtime;
+pub mod plugin_native;
 pub mod model_route;
+pub mod model_middleware;
 pub mod package;
 pub mod plugin_n1;
 pub mod preset;
@@ -36,6 +40,7 @@ pub use engine_features::*;
 pub use impact::*;
 pub use manifest::*;
 pub use plugin_runtime::*;
+pub use plugin_native::*;
 pub use model_route::*;
 pub use package::*;
 pub use plugin_n1::*;

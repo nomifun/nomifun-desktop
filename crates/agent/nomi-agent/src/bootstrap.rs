@@ -426,6 +426,7 @@ pub struct AgentBootstrap {
     provider: Option<Arc<dyn LlmProvider>>,
     resume_session: Option<Session>,
     extra_skill_dirs: Vec<PathBuf>,
+    host_skills: Vec<Arc<crate::host_skills::HostSkill>>,
     goal: Option<crate::goal::runtime::GoalSpec>,
     /// Host composition switch for embedded AgentExecution. CLI
     /// and standalone embeddings default to installing it; backend sessions
@@ -459,6 +460,7 @@ impl AgentBootstrap {
             provider: None,
             resume_session: None,
             extra_skill_dirs: Vec::new(),
+            host_skills: Vec::new(),
             goal: None,
             install_embedded_agent_execution: true,
             persistent_login_key: None,
@@ -525,6 +527,12 @@ impl AgentBootstrap {
     /// Add extra directories to scan for skills.
     pub fn extra_skill_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
         self.extra_skill_dirs = dirs;
+        self
+    }
+
+    /// Exact host-resolved Skills; never rediscovered by directory name.
+    pub fn host_skills(mut self, skills: Vec<Arc<crate::host_skills::HostSkill>>) -> Self {
+        self.host_skills = skills;
         self
     }
 
@@ -697,7 +705,10 @@ impl AgentBootstrap {
         };
         let has_mcp = mcp_manager.is_some();
 
-        let skills = if tool_free {
+        if tool_free && !self.host_skills.is_empty() {
+            anyhow::bail!("selected hosted Skills require the Skill tool in the Session policy");
+        }
+        let mut skills = if tool_free {
             Vec::new()
         } else {
             nomi_skills::loader::load_all_skills(
@@ -709,6 +720,7 @@ impl AgentBootstrap {
             .await
         };
 
+        crate::host_skills::merge_host_skills(&mut skills, &self.host_skills);
         let mut prompt_cache = crate::context::SystemPromptCache::new();
         if !tool_free {
             let agents_snapshot = crate::agents_md::resolve_agents_md(
@@ -802,16 +814,17 @@ impl AgentBootstrap {
         let skill_invocation_runner = local_invocation_runner.as_ref().map(|runner| {
             Arc::clone(runner) as Arc<dyn nomi_types::agent::AgentInvocationRunner>
         });
-        registry.register(Box::new(
-            crate::skill_tool::SkillTool::with_invocation_runner(
-                skills_arc,
-                cwd.to_string(),
-                skill_checker,
-                None,
-                skill_invocation_runner,
-            )
-            .with_process_supervisor(Arc::clone(&process_supervisor)),
-        ));
+        let skill_tool = crate::skill_tool::SkillTool::with_invocation_runner(
+            skills_arc,
+            cwd.to_string(),
+            skill_checker,
+            None,
+            skill_invocation_runner,
+        )
+        .with_host_skills(&self.host_skills)
+        .with_process_supervisor(Arc::clone(&process_supervisor));
+        let host_skill_commands = skill_tool.host_commands();
+        registry.register(Box::new(skill_tool));
         if let Some(runner) = local_invocation_runner {
             // A saved Preset owns initial/on-demand placement. Standalone
             // sessions retain the usual deferred delegation tool.
@@ -1017,6 +1030,8 @@ impl AgentBootstrap {
             registry.retain_named(&allowed_tools);
         }
 
+        anyhow::ensure!(host_skill_commands.is_empty() || registry.get("Skill").is_some(),
+            "Hosted Skills require Skill in the Session tool policy");
         let mut engine = if let Some(session) = self.resume_session {
             AgentEngine::resume_with_provider(
                 provider.clone(),
@@ -1035,6 +1050,9 @@ impl AgentBootstrap {
                 cwd_path.to_path_buf(),
             )
         };
+        for command in host_skill_commands {
+            engine.register_command(command)?;
+        }
         if ssh_backend.is_some() {
             engine.set_remote_completion_evidence();
         }

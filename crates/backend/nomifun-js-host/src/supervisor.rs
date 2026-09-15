@@ -31,6 +31,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::JavaScriptHostError;
+use crate::dependencies::{ExtensionHostDependencyCaller, PendingDependencies, parent_closed};
 use crate::outbound::OutboundQueue;
 
 const HOST_SERVICE_UNAVAILABLE: &str = "HOST_SERVICE_UNAVAILABLE";
@@ -318,6 +319,10 @@ pub struct HostRequestHandle {
 }
 
 impl HostRequestHandle {
+    /// Dropping this wait (or the handle) withdraws interest in the result.
+    /// The generation sends cooperative cancellation for Tool/Context work;
+    /// it retains the original request until completion or its watchdog deadline.
+    /// Cancellation never rolls back already committed effects.
     pub async fn wait(self) -> Result<PluginHostSuccess, JavaScriptHostError> {
         self.response
             .await
@@ -345,6 +350,15 @@ impl JavaScriptHostInstanceId {
 
 #[async_trait]
 pub trait ExtensionHostDemandPort: Send + Sync {
+    async fn invoke_with_dependencies(
+        &self,
+        mount: MountLoadDemand,
+        contribution: PluginHostContributionRef,
+        action_id: ActionId,
+        input: StrictJsonValue,
+        dependencies: Arc<dyn ExtensionHostDependencyCaller>,
+    ) -> Result<StrictJsonValue, JavaScriptHostError>;
+
     async fn invoke_demand(
         &self,
         mount: MountLoadDemand,
@@ -358,6 +372,8 @@ pub trait ExtensionHostDemandPort: Send + Sync {
         mount: MountLoadDemand,
         contribution: PluginHostContributionRef,
         schema_ref: CanonicalSchemaRef,
+        input: nomifun_agent_contracts::ContextContributionInput,
+        dependencies: Option<Arc<dyn ExtensionHostDependencyCaller>>,
     ) -> Result<StrictJsonValue, JavaScriptHostError>;
 
     async fn acquire_resource_demand(
@@ -590,18 +606,39 @@ impl ExtensionHostSupervisor {
         contribution: PluginHostContributionRef,
         schema_ref: CanonicalSchemaRef,
     ) -> Result<StrictJsonValue, JavaScriptHostError> {
+        self.contribute_context_with_input(contribution, schema_ref, Default::default()).await
+    }
+
+    pub async fn contribute_context_with_input(
+        &self,
+        contribution: PluginHostContributionRef,
+        schema_ref: CanonicalSchemaRef,
+        input: nomifun_agent_contracts::ContextContributionInput,
+    ) -> Result<StrictJsonValue, JavaScriptHostError> {
+        self.contribute_context_scoped(contribution, schema_ref, input, None).await
+    }
+
+    async fn contribute_context_scoped(
+        &self,
+        contribution: PluginHostContributionRef,
+        schema_ref: CanonicalSchemaRef,
+        input: nomifun_agent_contracts::ContextContributionInput,
+        dependencies: Option<Arc<dyn ExtensionHostDependencyCaller>>,
+    ) -> Result<StrictJsonValue, JavaScriptHostError> {
         let handle = self
             .resident_generation_for(&contribution)
             .await?;
         match handle
-            .request(
+            .request_with_dependencies(
                 &self.contract,
                 PluginHostRequest::ContextContribute {
                     contribution,
                     schema_ref,
+                    input,
                 },
                 None,
                 self.config.limits.request_timeout,
+                dependencies,
             )
             .await?
             .wait()
@@ -619,12 +656,14 @@ impl ExtensionHostSupervisor {
         mount: MountLoadDemand,
         contribution: PluginHostContributionRef,
         schema_ref: CanonicalSchemaRef,
+        input: nomifun_agent_contracts::ContextContributionInput,
+        dependencies: Option<Arc<dyn ExtensionHostDependencyCaller>>,
     ) -> Result<StrictJsonValue, JavaScriptHostError> {
         if mount.context.target != contribution.target {
             return Err(JavaScriptHostError::TargetMismatch);
         }
         self.load_mount(mount).await?;
-        self.contribute_context(contribution, schema_ref).await
+        self.contribute_context_scoped(contribution, schema_ref, input, dependencies).await
     }
 
     pub async fn acquire_resource(
@@ -930,6 +969,32 @@ impl ExtensionHostSupervisor {
 
 #[async_trait]
 impl ExtensionHostDemandPort for ExtensionHostSupervisor {
+    async fn invoke_with_dependencies(
+        &self,
+        mount: MountLoadDemand,
+        contribution: PluginHostContributionRef,
+        action_id: ActionId,
+        input: StrictJsonValue,
+        dependencies: Arc<dyn ExtensionHostDependencyCaller>,
+    ) -> Result<StrictJsonValue, JavaScriptHostError> {
+        if mount.context.target != contribution.target {
+            return Err(JavaScriptHostError::TargetMismatch);
+        }
+        self.load_mount(mount).await?;
+        let handle = self.resident_generation_for(&contribution).await?;
+        let result = handle.request_with_dependencies(
+            &self.contract,
+            PluginHostRequest::CapabilityInvoke { contribution, action_id, input },
+            None,
+            self.config.limits.request_timeout,
+            Some(dependencies),
+        ).await?.wait().await?;
+        match result {
+            PluginHostSuccess::Value(value) => Ok(value),
+            _ => Err(JavaScriptHostError::Contract("CapabilityInvoke returned a non-value success".into())),
+        }
+    }
+
     async fn invoke_demand(
         &self,
         mount: MountLoadDemand,
@@ -952,12 +1017,16 @@ impl ExtensionHostDemandPort for ExtensionHostSupervisor {
         mount: MountLoadDemand,
         contribution: PluginHostContributionRef,
         schema_ref: CanonicalSchemaRef,
+        input: nomifun_agent_contracts::ContextContributionInput,
+        dependencies: Option<Arc<dyn ExtensionHostDependencyCaller>>,
     ) -> Result<StrictJsonValue, JavaScriptHostError> {
         ExtensionHostSupervisor::contribute_context_demand(
             self,
             mount,
             contribution,
             schema_ref,
+            input,
+            dependencies,
         )
         .await
     }
@@ -1021,6 +1090,17 @@ impl GenerationHandle {
         module_path: Option<PathBuf>,
         timeout: Duration,
     ) -> Result<HostRequestHandle, JavaScriptHostError> {
+        self.request_with_dependencies(contract, request, module_path, timeout, None).await
+    }
+
+    async fn request_with_dependencies(
+        &self,
+        contract: &PluginN1ContractManifest,
+        request: PluginHostRequest,
+        module_path: Option<PathBuf>,
+        timeout: Duration,
+        dependencies: Option<Arc<dyn ExtensionHostDependencyCaller>>,
+    ) -> Result<HostRequestHandle, JavaScriptHostError> {
         let deadline = Instant::now() + timeout;
         let _admission = tokio::time::timeout_at(deadline, self.admission.read())
             .await
@@ -1061,6 +1141,7 @@ impl GenerationHandle {
             module_path,
             deadline,
             reply,
+            dependencies,
         });
         Ok(HostRequestHandle {
             host_generation: self.generation,
@@ -1119,6 +1200,7 @@ enum ActorCommand {
         envelope: Box<PluginHostRequestEnvelope>,
         module_path: Option<PathBuf>,
         deadline: Instant,
+        dependencies: Option<Arc<dyn ExtensionHostDependencyCaller>>,
         reply: oneshot::Sender<
             Result<PluginHostSuccess, JavaScriptHostError>,
         >,
@@ -1138,6 +1220,16 @@ struct PendingRequest {
     envelope: PluginHostRequestEnvelope,
     deadline: Instant,
     reply: PendingReply,
+    cancellation_requested: bool,
+    dependencies: Option<PendingDependencies>,
+}
+
+fn supports_cooperative_cancellation(request: &PluginHostRequest) -> bool {
+    matches!(
+        request,
+        PluginHostRequest::CapabilityInvoke { .. }
+            | PluginHostRequest::ContextContribute { .. }
+    )
 }
 
 enum PendingReply {
@@ -1459,6 +1551,11 @@ impl GenerationActor {
         watchdog.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
+            // Completion of a cancellation frees its reserved lane immediately;
+            // the watchdog also wakes an otherwise idle, abandoned request.
+            if let Some(exit) = self.cancel_abandoned_request().await {
+                return exit;
+            }
             tokio::select! {
                 result = self.outbound.write_next(&mut self.stdin), if !self.outbound.is_empty() => {
                     match result {
@@ -1559,7 +1656,14 @@ impl GenerationActor {
                 module_path,
                 deadline,
                 reply,
+                dependencies,
             } => {
+                // Do not start abandoned work still waiting for admission.
+                // Mount loads can have coalesced waiters; resource lifecycle
+                // requests transfer cleanup responsibility and must still run.
+                if reply.is_closed() && supports_cooperative_cancellation(&envelope.request) {
+                    return None;
+                }
                 if !self.accepting {
                     let _ = reply.send(Err(JavaScriptHostError::HostStopping {
                         generation: self.generation,
@@ -1643,6 +1747,12 @@ impl GenerationActor {
                     let _ = reply.send(Err(error));
                     return None;
                 }
+                if let PluginHostRequest::RequestCancel { target_request_id } = &envelope.request
+                    && let Some(target) = self.pending.get_mut(target_request_id)
+                {
+                    target.cancellation_requested = true;
+                    if let Some(scope) = &target.dependencies { scope.close(); }
+                }
                 self.pending.insert(
                     request_id,
                     PendingRequest {
@@ -1652,6 +1762,8 @@ impl GenerationActor {
                             reply,
                             coalesced: Vec::new(),
                         },
+                        cancellation_requested: false,
+                        dependencies: dependencies.map(PendingDependencies::new),
                     },
                 );
                 None
@@ -1709,11 +1821,64 @@ impl GenerationActor {
                         envelope,
                         deadline,
                         reply: PendingReply::Stop(reply),
+                        cancellation_requested: false,
+                        dependencies: None,
                     },
                 );
                 None
             }
         }
+    }
+
+    async fn cancel_abandoned_request(&mut self) -> Option<ActorExit> {
+        // Close callbacks even when the reserved cancellation lane is busy.
+        for pending in self.pending.values() {
+            if matches!(&pending.reply, PendingReply::Request { reply, coalesced }
+                if reply.is_closed() && coalesced.iter().all(|reply| reply.is_closed()))
+                && let Some(scope) = &pending.dependencies
+            { scope.close(); }
+        }
+        // Reuse the existing bounded cancellation lane. If it is occupied (or
+        // the outbound queue is full), retry after Actor progress without
+        // extending the original deadline or spawning a detached sender.
+        let abandoned = self.pending.values().filter(|pending| {
+            !pending.cancellation_requested
+                && supports_cooperative_cancellation(&pending.envelope.request)
+                && matches!(&pending.reply, PendingReply::Request { reply, coalesced }
+                    if reply.is_closed() && coalesced.iter().all(|reply| reply.is_closed()))
+        }).min_by_key(|pending| pending.deadline);
+        let Some(pending) = abandoned else {
+            return None;
+        };
+        let deadline = pending.deadline;
+        let request = PluginHostRequest::RequestCancel {
+            target_request_id: pending.envelope.request_id.clone(),
+        };
+        if !self.has_request_capacity(&request) {
+            return None;
+        }
+        let envelope = PluginHostRequestEnvelope {
+            protocol_version: VersionString::from(JAVASCRIPT_HOST_PROTOCOL_VERSION),
+            host_kind: self.host_kind,
+            host_generation: self.generation,
+            request_id: CorrelationId::from(Uuid::now_v7().to_string()),
+            direction: JavaScriptHostMessageDirection::HostToJavaScript,
+            request,
+        };
+        if envelope.validate(&self.contract).is_err() {
+            return Some(ActorExit::Failed(
+                "Host cancellation violates its contract".into(),
+            ));
+        }
+        let (reply, _response) = oneshot::channel();
+        self.handle_command(ActorCommand::Submit {
+            envelope: Box::new(envelope),
+            module_path: None,
+            deadline,
+            reply,
+            dependencies: None,
+        })
+        .await
     }
 
     async fn handle_frame(
@@ -1748,6 +1913,7 @@ impl GenerationActor {
                 // original/coalesced waiters remain available to fail_all.
                 let pending = self.pending.remove(&response.request_id)
                     .expect("response was validated against this pending request");
+                if let Some(scope) = &pending.dependencies { scope.close(); }
                 match pending.reply {
                     PendingReply::Request { reply, coalesced } => {
                         let result = response_result(
@@ -1836,6 +2002,36 @@ impl GenerationActor {
                         }),
                         Instant::now() + self.limits.shutdown_timeout,
                     )?;
+                    return Ok(None);
+                }
+                if let PluginHostRequest::DependencyInvoke { parent_request_id, call, .. } = &request.request {
+                    let parent = self.pending.get(parent_request_id).filter(|parent| {
+                        !parent.cancellation_requested
+                            && parent.deadline > Instant::now()
+                            && matches!(&parent.reply, PendingReply::Request { reply, .. } if !reply.is_closed())
+                            && matches!(&parent.envelope.request, PluginHostRequest::CapabilityInvoke { contribution, .. }
+                                | PluginHostRequest::ContextContribute { contribution, .. }
+                                if contribution.target == mount.target)
+                    });
+                    let scoped = parent.and_then(|parent| parent.dependencies.as_ref().map(|scope| {
+                        (Arc::clone(&scope.caller), scope.subscribe(), parent.deadline)
+                    }));
+                    let Some((caller, mut open, deadline)) = scoped else {
+                        self.respond_to_service(request, parent_closed(), Instant::now() + self.limits.request_timeout)?;
+                        return Ok(None);
+                    };
+                    let call = call.clone();
+                    self.service_tasks.spawn(async move {
+                        let response = if !*open.borrow() { parent_closed() } else {
+                            tokio::select! {
+                                biased;
+                                _ = open.changed() => parent_closed(),
+                                _ = tokio::time::sleep_until(deadline) => parent_closed(),
+                                result = caller.invoke(call) => result,
+                            }
+                        };
+                        Ok((request, response, deadline))
+                    });
                     return Ok(None);
                 }
                 let services = Arc::clone(&self.services);
@@ -2018,7 +2214,8 @@ fn response_result(
 
 fn host_service_mount_handle(request: &PluginHostRequest) -> Option<&str> {
     match request {
-        PluginHostRequest::CredentialResolve {
+        PluginHostRequest::DependencyInvoke { mount_handle_id, .. }
+        | PluginHostRequest::CredentialResolve {
             mount_handle_id, ..
         }
         | PluginHostRequest::StateGet {

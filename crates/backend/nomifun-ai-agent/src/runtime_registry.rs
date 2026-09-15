@@ -114,6 +114,19 @@ pub trait AgentRuntimeRegistry: Send + Sync {
     /// Get an existing runtime by conversation ID.
     fn get_runtime(&self, conversation_id: &str) -> Option<AgentRuntimeHandle>;
 
+    /// Query commands without creating a runtime or acquiring turn authority.
+    /// Callers authenticate conversation ownership before entering this seam.
+    async fn get_slash_commands(
+        &self,
+        _owner_id: &str,
+        conversation_id: &str,
+    ) -> Result<Vec<nomifun_api_types::SlashCommandItem>, AppError> {
+        match self.get_runtime(conversation_id) {
+            Some(runtime) => runtime.get_slash_commands().await,
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Get an existing runtime or create one if none exists.
     ///
     /// Concurrent callers with the same `conversation_id` block on a shared
@@ -1643,6 +1656,23 @@ impl AgentRuntimeRegistry for InMemoryAgentRuntimeRegistry {
         self.initialized_runtime(conversation_id)
     }
 
+    async fn get_slash_commands(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+    ) -> Result<Vec<nomifun_api_types::SlashCommandItem>, AppError> {
+        if let Some(runtime) = self.get_runtime(conversation_id) {
+            return runtime.get_slash_commands().await;
+        }
+        match self.plugin_tool_session_provider.get() {
+            Some(provider) => provider.discover_skill_commands(crate::NomiPluginToolSessionRequest {
+                owner_id: owner_id.to_owned(),
+                conversation_id: conversation_id.to_owned(),
+            }).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
     async fn get_or_create_runtime(
         &self,
         conversation_id: &str,
@@ -2003,6 +2033,17 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::NomiPluginToolSessionProvider for CountingPluginToolProvider {
+        async fn discover_skill_commands(
+            &self,
+            request: crate::NomiPluginToolSessionRequest,
+        ) -> Result<Vec<nomifun_api_types::SlashCommandItem>, AppError> {
+            assert_eq!(request.owner_id, "0190f5fe-7c00-7a00-8000-000000000001");
+            assert_eq!(request.conversation_id, "conv-plugin-provider");
+            Ok(vec![nomifun_api_types::SlashCommandItem {
+                command: "skill:test.package.guide".into(), description: "Package guide".into(),
+            }])
+        }
+
         async fn resolve(
             &self,
             request: crate::NomiPluginToolSessionRequest,
@@ -2801,6 +2842,28 @@ mod tests {
             crate::plugin_tools::current_nomi_plugin_tool_session().is_none(),
             "the exact session must not escape the factory task scope"
         );
+    }
+
+    #[tokio::test]
+    async fn cold_commands_do_not_materialize_session_or_create_runtime() {
+        let registry = make_registry();
+        assert!(registry.get_slash_commands("owner", "cold").await.unwrap().is_empty());
+        let calls = Arc::new(AtomicUsize::new(0));
+        registry.install_nomi_plugin_tool_session_provider(Arc::new(CountingPluginToolProvider {
+            calls: calls.clone(),
+        })).unwrap();
+        let commands = registry.get_slash_commands(
+            "0190f5fe-7c00-7a00-8000-000000000001", "conv-plugin-provider",
+        ).await.unwrap();
+        assert_eq!(commands[0].command, "skill:test.package.guide");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(registry.active_runtime_count(), 0);
+        registry.get_or_create_runtime("conv-plugin-provider", make_runtime_options("conv-plugin-provider"))
+            .await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(registry.get_slash_commands(
+            "0190f5fe-7c00-7a00-8000-000000000001", "conv-plugin-provider",
+        ).await.unwrap().is_empty(), "live runtime catalog replaces cold suggestions, even when empty");
     }
 
     #[tokio::test]

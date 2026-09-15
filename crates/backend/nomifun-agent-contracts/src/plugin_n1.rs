@@ -74,6 +74,7 @@ pub enum JavaScriptHostMethod {
     MountLoad,
     MountUnload,
     CapabilityInvoke,
+    DependencyInvoke,
     ContextContribute,
     ResourceAcquire,
     ResourceRelease,
@@ -107,10 +108,11 @@ pub enum JavaScriptHostMessageDirection {
 }
 
 impl JavaScriptHostMethod {
-    pub const EXTENSION_HOST: [Self; 13] = [
+    pub const EXTENSION_HOST: [Self; 14] = [
         Self::MountLoad,
         Self::MountUnload,
         Self::CapabilityInvoke,
+        Self::DependencyInvoke,
         Self::ContextContribute,
         Self::ResourceAcquire,
         Self::ResourceRelease,
@@ -123,7 +125,7 @@ impl JavaScriptHostMethod {
         Self::HostShutdown,
     ];
 
-    pub const CANDIDATE_TEST_HOST: [Self; 13] = Self::EXTENSION_HOST;
+    pub const CANDIDATE_TEST_HOST: [Self; 14] = Self::EXTENSION_HOST;
 
     pub const BUILD_HOST: [Self; 3] = [
         Self::BuildExecute,
@@ -782,6 +784,16 @@ impl PluginMountRuntimeContext {
     }
 }
 
+/// Invocation-local input, never an ownership or resource grant.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PluginDependencyCall {
+    pub capability_id: crate::CapabilityId,
+    pub action_id: ActionId,
+    pub call_key: String,
+    pub input: StrictJsonValue,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum PluginHostRequest {
@@ -796,9 +808,16 @@ pub enum PluginHostRequest {
         action_id: ActionId,
         input: StrictJsonValue,
     },
+    DependencyInvoke {
+        mount_handle_id: String,
+        parent_request_id: CorrelationId,
+        call: PluginDependencyCall,
+    },
     ContextContribute {
         contribution: PluginHostContributionRef,
         schema_ref: CanonicalSchemaRef,
+        #[serde(default, skip_serializing_if = "crate::ContextContributionInput::is_session_start")]
+        input: crate::ContextContributionInput,
     },
     ResourceAcquire {
         contribution: PluginHostContributionRef,
@@ -850,6 +869,7 @@ impl PluginHostRequest {
             Self::CapabilityInvoke { .. } => {
                 JavaScriptHostMethod::CapabilityInvoke
             }
+            Self::DependencyInvoke { .. } => JavaScriptHostMethod::DependencyInvoke,
             Self::ContextContribute { .. } => {
                 JavaScriptHostMethod::ContextContribute
             }
@@ -876,7 +896,8 @@ impl PluginHostRequest {
 
     pub const fn direction(&self) -> JavaScriptHostMessageDirection {
         match self {
-            Self::CredentialResolve { .. }
+            Self::DependencyInvoke { .. }
+            | Self::CredentialResolve { .. }
             | Self::StateGet { .. }
             | Self::StateSet { .. }
             | Self::StateDelete { .. }
@@ -2895,6 +2916,18 @@ fn validate_host_request(
     request: &PluginHostRequest,
 ) -> Result<(), PluginN1ContractError> {
     match request {
+        PluginHostRequest::DependencyInvoke { mount_handle_id, parent_request_id, call } => {
+            validate_nonempty(mount_handle_id, "mount_handle_id")?;
+            validate_nonempty(parent_request_id.as_ref(), "parent_request_id")?;
+            validate_nonempty(call.capability_id.as_ref(), "capability_id")?;
+            validate_nonempty(call.action_id.as_ref(), "action_id")?;
+            if call.call_key.trim().is_empty() || call.call_key.len() > 128 {
+                return Err(PluginN1ContractError::InvalidField {
+                    field: "call_key", reason: "call_key must contain 1..128 UTF-8 bytes".into(),
+                });
+            }
+            Ok(())
+        }
         PluginHostRequest::MountLoad { context } => context.validate(),
         PluginHostRequest::MountUnload { target } => target.validate(),
         PluginHostRequest::CapabilityInvoke {
@@ -2908,8 +2941,12 @@ fn validate_host_request(
         PluginHostRequest::ContextContribute {
             contribution,
             schema_ref,
+            input,
         } => {
             contribution.validate()?;
+            input.validate().map_err(|reason| PluginN1ContractError::InvalidField {
+                field: "context_input", reason,
+            })?;
             validate_nonempty(schema_ref.as_ref(), "schema_ref")
         }
         PluginHostRequest::ResourceAcquire {
@@ -2994,7 +3031,8 @@ fn validate_host_response(
                 | PluginHostRequest::HostShutdown,
             PluginHostSuccess::Ack
         ) | (
-            PluginHostRequest::CapabilityInvoke { .. }
+            PluginHostRequest::DependencyInvoke { .. }
+                | PluginHostRequest::CapabilityInvoke { .. }
                 | PluginHostRequest::ContextContribute { .. },
             PluginHostSuccess::Value(_)
         ) | (
@@ -3070,15 +3108,6 @@ fn validate_package_contributions(
     package: &PackageRef,
     contributions: &PackageContributions,
 ) -> Result<(), PluginN1ContractError> {
-    if !contributions.role_contracts.is_empty()
-        || !contributions.role_providers.is_empty()
-    {
-        return Err(PluginN1ContractError::InvalidField {
-            field: "contributions",
-            reason: "Plugin Package v1 cannot publish Role contracts or Role providers"
-                .into(),
-        });
-    }
     if contributions.capabilities.is_empty()
         && contributions.skills.is_empty()
         && contributions.mcp_tools.is_empty()
@@ -3098,6 +3127,15 @@ fn validate_package_contributions(
             "capability.contribution_id",
         )?;
         validate_nonempty(capability.version.as_ref(), "capability.version")?;
+        if !capability.contributions.context_phase.is_session_start()
+            && (capability.kind != crate::CapabilityKind::ContextContributor
+                || !capability.supports_consumer(crate::CapabilityConsumer::Agent))
+        {
+            return Err(PluginN1ContractError::InvalidField {
+                field: "capability.context_phase",
+                reason: "before_turn requires an Agent ContextContributor".into(),
+            });
+        }
         if capability.package != *package {
             return Err(PluginN1ContractError::InvalidField {
                 field: "capability.package",
@@ -3195,6 +3233,8 @@ fn validate_package_contributions(
         }
     }
 
+    validate_package_roles(package, contributions)?;
+
     let mut skill_ids = BTreeSet::new();
     for skill in &contributions.skills {
         validate_nonempty(skill.id.as_ref(), "skill.id")?;
@@ -3260,6 +3300,58 @@ fn validate_package_contributions(
                 reason: "MCP mapping must reference an exact Tool capability in this Package"
                     .into(),
             });
+        }
+    }
+    Ok(())
+}
+
+fn validate_package_roles(
+    package: &PackageRef,
+    contributions: &PackageContributions,
+) -> Result<(), PluginN1ContractError> {
+    let invalid = |reason: &str| PluginN1ContractError::InvalidField {
+        field: "contributions.roles",
+        reason: reason.into(),
+    };
+    let exact_capability = |reference: &CapabilityRef| contributions.capabilities.iter()
+        .find(|capability| capability.id == reference.id && capability.version == reference.version);
+    let mut role_ids = BTreeSet::new();
+    let mut facade_ids = BTreeSet::new();
+    for contract in &contributions.role_contracts {
+        if !contract.key.role_id.as_ref().starts_with(&format!("{}.", package.id.as_ref()))
+            || !role_ids.insert(contract.key.role_id.clone())
+        {
+            return Err(invalid("user Role contracts must have unique IDs in their Package namespace"));
+        }
+        validate_nonempty(contract.key.contract_version.as_ref(), "role.contract_version")?;
+        if !contract.members.iter().any(|member| member.requirement == crate::RoleMemberRequirement::Required) {
+            return Err(invalid("Role contract must have a required member"));
+        }
+        for member in &contract.members {
+            let capability = exact_capability(&member.capability)
+                .ok_or_else(|| invalid("Role contract member must reference an exact capability in this Package"))?;
+            if !facade_ids.insert(member.capability.id.clone())
+                || digest_payload(capability)? != member.capability_manifest_digest
+            {
+                return Err(invalid("Role member identity or manifest digest is invalid"));
+            }
+        }
+    }
+    let mut providers = BTreeSet::new();
+    for provider in &contributions.role_providers {
+        validate_nonempty(provider.role.key.role_id.as_ref(), "role.role_id")?;
+        validate_nonempty(provider.role.key.contract_version.as_ref(), "role.contract_version")?;
+        validate_digest(&provider.role.contract_digest, "role.contract_digest")?;
+        if !providers.insert(provider.role.key.role_id.clone()) || provider.members.is_empty() {
+            return Err(invalid("Role provider must be unique and declare members"));
+        }
+        for (member_id, member) in &provider.members {
+            validate_nonempty(member_id.as_ref(), "role.member_id")?;
+            let implementation = member.implementation.as_ref()
+                .ok_or_else(|| invalid("JavaScript Role members require an explicit implementation capability"))?;
+            if exact_capability(implementation).is_none() || facade_ids.contains(&implementation.id) {
+                return Err(invalid("Role implementation must be an exact direct capability in this Package"));
+            }
         }
     }
     Ok(())
@@ -3352,6 +3444,29 @@ fn validate_git_commit(value: &str) -> Result<(), PluginN1ContractError> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    #[test]
+    fn dependency_call_wire_is_bounded_and_contains_no_caller_authority() {
+        let call = super::PluginDependencyCall {
+            capability_id: "fixture.child".into(), action_id: "run".into(), call_key: "one".into(),
+            input: super::StrictJsonValue(json!({})),
+        };
+        let mut request = super::PluginHostRequest::DependencyInvoke {
+            mount_handle_id: "fixture-mount".into(), parent_request_id: "parent".into(), call: call.clone(),
+        };
+        assert!(super::validate_host_request(&request).is_ok());
+        assert_eq!(request.direction(), super::JavaScriptHostMessageDirection::JavaScriptToHost);
+        assert!(!super::JavaScriptHostMethod::BUILD_HOST.contains(&request.method()));
+        for key in [String::new(), " ".into(), "界".repeat(43)] {
+            if let super::PluginHostRequest::DependencyInvoke { call, .. } = &mut request { call.call_key = key; }
+            assert!(super::validate_host_request(&request).is_err());
+        }
+        for field in ["owner", "session_id", "snapshot_ref", "resource_binding_ids"] {
+            let mut value = serde_json::to_value(&call).unwrap();
+            value[field] = json!("forged");
+            assert!(serde_json::from_value::<super::PluginDependencyCall>(value).is_err());
+        }
+    }
 
     use super::*;
     use crate::{
@@ -3482,6 +3597,71 @@ mod tests {
         }
     }
 
+    fn role_manifest() -> PluginPackageV1Manifest {
+        let mut manifest = manifest();
+        let implementation = manifest.package.contributions.capabilities[0].clone();
+        let mut facade = implementation.clone();
+        facade.id = "example.csv.facade".into();
+        facade.contribution_id = "capability:example.csv.facade".into();
+        let contract = crate::RoleContractManifest {
+            key: crate::RoleContractKey { role_id: "example.csv.reader".into(), contract_version: "1.0.0".into() },
+            members: vec![crate::RoleMemberContract {
+                capability: CapabilityRef { id: facade.id.clone(), version: facade.version.clone() },
+                capability_manifest_digest: digest_payload(&facade).unwrap(),
+                requirement: crate::RoleMemberRequirement::Required,
+            }],
+            serialized_target_resource_kind: None,
+        };
+        manifest.package.contributions.role_providers.push(crate::RoleProviderContribution {
+            role: crate::ExactRoleContractRef { key: contract.key.clone(), contract_digest: digest_payload(&contract).unwrap() },
+            display: implementation.display.clone(),
+            members: BTreeMap::from([(facade.id.clone(), crate::RoleProviderMemberContribution {
+                implementation: Some(CapabilityRef { id: implementation.id, version: implementation.version }),
+                supported_platforms: vec![PlatformConstraint::Any], required_resource_kinds: BTreeSet::new(),
+            })]),
+        });
+        manifest.package.contributions.capabilities.push(facade);
+        manifest.package.contributions.role_contracts.push(contract);
+        manifest
+    }
+
+    #[test]
+    fn user_role_contract_and_explicit_implementation_are_valid() {
+        role_manifest().validate().unwrap();
+        let mut manifest = role_manifest();
+        // A Package may implement an external/system contract without owning it.
+        manifest.package.contributions.role_contracts.clear();
+        manifest.package.contributions.role_providers[0].role.key.role_id = "system.csv.reader".into();
+        manifest.validate().unwrap();
+    }
+
+    #[test]
+    fn user_role_mapping_requires_exact_direct_owned_capability() {
+        for implementation in [
+            None,
+            Some(CapabilityRef { id: "another.package.read".into(), version: "1.0.0".into() }),
+            Some(CapabilityRef { id: "example.csv.read".into(), version: "2.0.0".into() }),
+            Some(CapabilityRef { id: "example.csv.facade".into(), version: "1.0.0".into() }),
+        ] {
+            let mut manifest = role_manifest();
+            manifest.package.contributions.role_providers[0].members.values_mut().next().unwrap().implementation = implementation;
+            assert!(manifest.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn user_role_cannot_claim_system_namespace_or_stale_facade_digest() {
+        let mut namespace = role_manifest();
+        namespace.package.contributions.role_contracts[0].key.role_id = "system.csv.reader".into();
+        assert!(namespace.validate().is_err());
+        let mut digest_mismatch = role_manifest();
+        digest_mismatch.package.contributions.role_contracts[0].members[0].capability_manifest_digest = digest('a');
+        assert!(digest_mismatch.validate().is_err());
+        let mut no_required = role_manifest();
+        no_required.package.contributions.role_contracts[0].members[0].requirement = crate::RoleMemberRequirement::Optional;
+        assert!(no_required.validate().is_err());
+    }
+
     fn candidate() -> PluginReadyCandidate {
         PluginReadyCandidate::new(
             PluginCandidateId::from("candidate-1"),
@@ -3579,6 +3759,16 @@ mod tests {
                 field: "entrypoint.digest"
             })
         ));
+    }
+
+    #[test]
+    fn before_turn_context_phase_cannot_be_declared_by_a_tool() {
+        let mut manifest = manifest();
+        manifest.package.contributions.capabilities[0].contributions.context_phase =
+            crate::ContextContributionPhase::BeforeTurn;
+        assert!(matches!(manifest.validate(), Err(PluginN1ContractError::InvalidField {
+            field: "capability.context_phase", ..
+        })));
     }
 
     #[test]

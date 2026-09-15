@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::plugin_n1::CredentialSlotDeclaration;
+use crate::{NativePluginTarget, PluginServiceExecution};
 use crate::{
     ArtifactEnvelope, ArtifactId, CanonicalErrorCode, CanonicalSchemaRef,
     DigestHex, JavaScriptBuildProfile, LocalizedMetadata, OperationId,
@@ -132,6 +133,8 @@ pub enum PluginServiceLifecycle {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PluginServiceReleaseDescriptor {
+    #[serde(default, skip_serializing_if = "PluginServiceExecution::is_node")]
+    pub execution: PluginServiceExecution,
     pub entrypoint: String,
     pub module_digest: DigestHex,
     pub lifecycle: PluginServiceLifecycle,
@@ -144,11 +147,11 @@ pub struct PluginServiceReleaseDescriptor {
 }
 
 impl PluginServiceReleaseDescriptor {
-    fn validate(&self) -> Result<(), PluginRuntimeContractError> {
-        if self.entrypoint != "service/main.mjs" {
+    pub fn validate(&self) -> Result<(), PluginRuntimeContractError> {
+        if self.entrypoint != self.execution.entrypoint() {
             return Err(invalid(
                 "service.entrypoint",
-                "Plugin Product Service entrypoint must be service/main.mjs",
+                "Service entrypoint does not match its declared execution backend",
             ));
         }
         validate_digest(&self.module_digest, "service.module_digest")?;
@@ -420,7 +423,7 @@ impl PluginReleaseV1Manifest {
                 ));
             }
         } else if !self.migrations.is_empty()
-            || !self.contributions.capabilities.is_empty()
+            || self.contributions.capabilities.iter().any(|capability| capability.kind != crate::CapabilityKind::UiContribution)
             || !self.contributions.mcp_tools.is_empty()
             || !self.contributions.role_contracts.is_empty()
             || !self.contributions.role_providers.is_empty()
@@ -471,6 +474,9 @@ impl PluginReleaseV1Manifest {
             &self.contribution_package,
             &self.contributions,
         )?;
+        if self.ui.is_none() && self.contributions.capabilities.iter().any(|capability| capability.contributions.ui_slot.is_some()) {
+            return Err(invalid("contributions.ui_slot", "A UI contribution requires release UI bytes"));
+        }
         validate_release_schema_registry(&self.contributions, &self.schemas)?;
         let contribution_resource_kinds = self
             .contributions
@@ -617,10 +623,10 @@ impl PluginReleaseArtifactV1 {
                     }
                     ui_entrypoint_digest = Some(&file.digest);
                 }
-            } else if path == "service/main.mjs" {
+            } else if self.manifest.payload.service.as_ref().is_some_and(|service| path == service.entrypoint) {
                 if file.size_bytes == 0 {
                     return Err(invalid(
-                        "files.service/main.mjs",
+                        "files.service.entrypoint",
                         "Plugin Product Service entrypoint must not be empty",
                     ));
                 }
@@ -628,7 +634,7 @@ impl PluginReleaseArtifactV1 {
             } else {
                 return Err(invalid(
                     "files.normalized_relative_path",
-                    "plugin-release-v1 permits ui/** and optional service/main.mjs only",
+                    "plugin-release-v1 permits ui/** and the exact declared Service entrypoint only",
                 ));
             }
             previous = Some(path);
@@ -649,13 +655,13 @@ impl PluginReleaseArtifactV1 {
             (Some(_), None) => {
                 return Err(invalid(
                     "files",
-                    "Service manifest requires service/main.mjs",
+                    "Service manifest requires its exact declared entrypoint",
                 ));
             }
             (None, Some(_)) => {
                 return Err(invalid(
                     "files",
-                    "UI-only manifest cannot carry service/main.mjs",
+                    "UI-only manifest cannot carry a Service entrypoint",
                 ));
             }
             (Some(_), Some(_)) => {
@@ -1536,25 +1542,49 @@ impl PluginServiceStorageDescriptor {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct PluginServiceRuntimeFingerprint {
-    pub runtime_installation_id: RuntimeInstallationId,
-    pub runtime_target: RuntimeTarget,
-    pub runtime_executable_digest: DigestHex,
-    pub node_version: VersionString,
+#[serde(untagged)]
+pub enum PluginServiceRuntimeFingerprint {
+    Node {
+        runtime_installation_id: RuntimeInstallationId,
+        runtime_target: RuntimeTarget,
+        runtime_executable_digest: DigestHex,
+        node_version: VersionString,
+    },
+    Native {
+        native_target: NativePluginTarget,
+        native_executable_digest: DigestHex,
+    },
 }
 
 impl PluginServiceRuntimeFingerprint {
     fn validate(&self) -> Result<(), PluginRuntimeContractError> {
+        let Self::Node { runtime_installation_id, runtime_target, runtime_executable_digest, node_version } = self else {
+            return validate_digest(self.executable_digest(), "runtime.native_executable_digest");
+        };
         validate_nonempty(
-            self.runtime_installation_id.as_ref(),
+            runtime_installation_id.as_ref(),
             "runtime.runtime_installation_id",
         )?;
-        validate_nonempty(self.runtime_target.as_ref(), "runtime.runtime_target")?;
+        validate_nonempty(runtime_target.as_ref(), "runtime.runtime_target")?;
         validate_digest(
-            &self.runtime_executable_digest,
+            runtime_executable_digest,
             "runtime.runtime_executable_digest",
         )?;
-        validate_nonempty(self.node_version.as_ref(), "runtime.node_version")
+        validate_nonempty(node_version.as_ref(), "runtime.node_version")
+    }
+
+    pub fn executable_digest(&self) -> &DigestHex {
+        match self {
+            Self::Node { runtime_executable_digest, .. } => runtime_executable_digest,
+            Self::Native { native_executable_digest, .. } => native_executable_digest,
+        }
+    }
+
+    pub fn target(&self) -> RuntimeTarget {
+        match self {
+            Self::Node { runtime_target, .. } => runtime_target.clone(),
+            Self::Native { native_target, .. } => native_target.as_str().into(),
+        }
     }
 }
 
@@ -1707,6 +1737,9 @@ impl ResolvedPluginServiceSpec {
             "sdk_contract_version",
         )?;
         self.runtime.validate()?;
+        if matches!(&self.runtime, PluginServiceRuntimeFingerprint::Native { native_executable_digest, .. } if native_executable_digest != &self.service_module_digest) {
+            return Err(invalid("runtime.native_executable_digest", "Native runtime must be the exact release executable"));
+        }
         validate_digest(&self.config_schema_digest, "config_schema_digest")?;
         validate_digest(&self.config_snapshot_digest, "config_snapshot_digest")?;
         validate_digest(
@@ -1885,6 +1918,10 @@ impl PluginBridgeSession {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "target", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PluginBridgeTarget {
+    /// A host-selected Session, never an arbitrary Session ID supplied by the frame.
+    AgentSession {
+        request: PluginAgentSessionRequest,
+    },
     HostKv {
         request: PluginBridgeKvRequest,
     },
@@ -1914,6 +1951,35 @@ pub enum PluginBridgeKvRequest {
         #[serde(skip_serializing_if = "Option::is_none")]
         value: Option<StrictJsonValue>,
     },
+}
+
+/// Public UI commands. The Surface grant supplies identity and scope separately.
+/// Observe is a durable message projection, not a replayable token event stream.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PluginAgentSessionRequest {
+    Observe { after_seq: u64, limit: u32 },
+    Turn { input: StrictJsonValue, idempotency_key: String },
+    // Empty struct variant keeps serde's unknown-field rejection active.
+    Cancel {},
+}
+
+impl PluginAgentSessionRequest {
+    pub fn validate(&self) -> Result<(), PluginRuntimeContractError> {
+        match self {
+            Self::Observe { limit, .. } if !(1..=200).contains(limit) => {
+                Err(invalid("limit", "Session page limit must be between 1 and 200"))
+            }
+            Self::Turn { input, idempotency_key } => {
+                validate_nonempty(idempotency_key, "idempotency_key")?;
+                if idempotency_key.len() > 256 || !input.0.is_object() {
+                    return Err(invalid("input", "Session turn requires an object and a key of at most 256 bytes"));
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 impl PluginBridgeKvRequest {
@@ -1951,6 +2017,7 @@ impl PluginBridgeRequest {
             return Err(PluginRuntimeContractError::StaleBridgeSession);
         }
         match &self.target {
+            PluginBridgeTarget::AgentSession { request } => request.validate(),
             PluginBridgeTarget::HostKv { request } => request.validate(),
             PluginBridgeTarget::Service { method, payload } => {
                 if session.service_run_key.is_none() {
@@ -2069,7 +2136,7 @@ impl PluginServiceTestReceipt {
         }
         self.runtime.validate()?;
         validate_nonempty(self.host_target.as_ref(), "host_target")?;
-        if self.host_target != self.runtime.runtime_target {
+        if self.host_target != self.runtime.target() {
             return Err(invalid(
                 "host_target",
                 "Service Test target must equal the selected Runtime target",
@@ -2964,6 +3031,23 @@ fn validate_contributions(
     let mut capability_ids = BTreeSet::new();
     let mut contribution_ids = BTreeSet::new();
     for capability in &contributions.capabilities {
+        crate::model_middleware::validate_manifest(capability)
+            .map_err(|reason| invalid("contributions.before_model", reason))?;
+        if capability.kind == crate::CapabilityKind::UiContribution || capability.contributions.ui_slot.is_some() {
+            if capability.kind != crate::CapabilityKind::UiContribution
+                || capability.contributions.ui_slot.is_none()
+                || capability.supported_consumers().map_err(|reason| invalid("capability.supported_surfaces", reason))? != BTreeSet::from([crate::CapabilityConsumer::Ui])
+                || !capability.requires.is_empty() || !capability.conflicts.is_empty()
+                || !capability.requires_runtime_features.is_empty()
+                || !capability.contributions.actions.is_empty()
+                || !capability.contributions.context_schema_refs.is_empty()
+                || !capability.contributions.event_schema_refs.is_empty()
+                || !capability.contributions.resource_kinds.is_empty()
+                || !capability.contributions.host_ports.is_empty()
+            {
+                return Err(invalid("contributions.ui_slot", "UI contributions declare a UI-only slot; executable dependencies and host resources require their own supported consumer"));
+            }
+        }
         validate_nonempty(capability.id.as_ref(), "capability.id")?;
         validate_nonempty(
             capability.contribution_id.as_ref(),
@@ -3075,6 +3159,7 @@ mod tests {
                 .find(|file| file.normalized_relative_path == "service/main.mjs")
                 .unwrap();
             PluginServiceReleaseDescriptor {
+                execution: Default::default(),
                 entrypoint: "service/main.mjs".into(),
                 module_digest: service.digest.clone(),
                 lifecycle: PluginServiceLifecycle::OnDemand,
@@ -3121,6 +3206,51 @@ mod tests {
             },
             contributions: PackageContributions::default(),
             migrations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn native_release_requires_exact_target_entrypoint_and_keeps_node_default_bytes() {
+        let mut files = vec![release_file("ui/index.html", "ui"), release_file("service/main.mjs", "service")];
+        let mut manifest = manifest(&files, true);
+        let node = manifest.service.as_ref().unwrap();
+        let serialized = serde_json::to_value(node).unwrap();
+        assert!(serialized.get("execution").is_none());
+        assert_eq!(serde_json::from_value::<PluginServiceReleaseDescriptor>(serialized).unwrap(), *node);
+        let service = manifest.service.as_mut().unwrap();
+        service.execution = PluginServiceExecution::Native { target: NativePluginTarget::WindowsX64 };
+        assert!(service.validate().is_err());
+        service.entrypoint = "service/plugin.exe".into();
+        assert!(service.validate().is_ok());
+        assert!(PluginReleaseArtifactV1::new("native".into(), manifest.clone(), files.clone()).is_err());
+        files[1].normalized_relative_path = "service/plugin.exe".into();
+        let artifact = PluginReleaseArtifactV1::new("native".into(), manifest, files).unwrap();
+        assert!(artifact.validate().is_ok());
+    }
+
+    #[test]
+    fn before_model_publication_requires_real_middleware_kind_and_exact_contract() {
+        let files = vec![release_file("ui/index.html", "ui"), release_file("service/main.mjs", "service")];
+        let mut manifest = manifest_with_tool(&files);
+        let capability = &mut manifest.contributions.capabilities[0];
+        capability.kind = CapabilityKind::TurnMiddleware;
+        capability.contributions = CapabilityContributions {
+            actions: vec![crate::model_middleware::action()], ..Default::default()
+        };
+        capability.supported_surfaces = capability_surface_declarations(
+            ["desktop", "headless"], [CapabilityConsumer::Agent, CapabilityConsumer::PluginService]);
+        assert!(validate_contributions(&manifest.contribution_package, &manifest.contributions).is_ok());
+        for mutation in 0..5 {
+            let mut invalid_manifest = manifest.clone();
+            let c = &mut invalid_manifest.contributions.capabilities[0];
+            match mutation {
+                0 => c.kind = CapabilityKind::Tool,
+                1 => c.contributions.actions[0].presentation = ToolPresentationKind::FunctionTool,
+                2 => c.contributions.actions[0].output_schema = "schema://wrong@1".into(),
+                3 => { c.contributions.resource_kinds.insert("native.object".into()); },
+                _ => c.supported_surfaces = capability_surface_declarations(["desktop"], [CapabilityConsumer::Ui]),
+            }
+            assert!(validate_contributions(&invalid_manifest.contribution_package, &invalid_manifest.contributions).is_err(), "mutation {mutation}");
         }
     }
 
@@ -3247,7 +3377,7 @@ mod tests {
     }
 
     fn runtime() -> PluginServiceRuntimeFingerprint {
-        PluginServiceRuntimeFingerprint {
+        PluginServiceRuntimeFingerprint::Node {
             runtime_installation_id: RuntimeInstallationId::from("runtime-1"),
             runtime_target: RuntimeTarget::from("windows-x86_64"),
             runtime_executable_digest: digest("node"),
@@ -3326,6 +3456,37 @@ mod tests {
             contract.bridge_transports,
             BTreeSet::from([PluginBridgeTransport::MessageChannelV1])
         );
+    }
+
+    #[test]
+    fn agent_view_requires_html_ui_only_slot_and_no_unconsumed_execution_graph() {
+        let mut view = artifact(false).manifest.payload;
+        let mut cap = artifact_with_tool().manifest.payload.contributions.capabilities[0].clone();
+        cap.id = "plugin.example.ui.agent-session".into();
+        cap.contribution_id = "capability:plugin.example.ui.agent-session".into();
+        cap.kind = CapabilityKind::UiContribution;
+        cap.supported_surfaces = capability_surface_declarations(["desktop"], [CapabilityConsumer::Ui]);
+        cap.contributions = CapabilityContributions { ui_slot: Some(crate::UiContributionSlot::AgentSession), ..Default::default() };
+        view.contributions.capabilities.push(cap.clone());
+        view.validate().unwrap();
+        let mut combined = artifact_with_tool().manifest.payload;
+        combined.contributions.capabilities.push(cap);
+        combined.validate().unwrap();
+        let mut missing_html = combined.clone();
+        missing_html.ui = None;
+        assert!(missing_html.validate().is_err());
+        let mut wrong_kind = view.clone();
+        wrong_kind.contributions.capabilities[0].kind = CapabilityKind::Tool;
+        assert!(wrong_kind.validate().is_err());
+        let mut wrong_consumer = view.clone();
+        wrong_consumer.contributions.capabilities[0].supported_surfaces = capability_surface_declarations(["desktop"], [CapabilityConsumer::Ui, CapabilityConsumer::Agent]);
+        assert!(wrong_consumer.validate().is_err());
+        let mut no_slot = view.clone();
+        no_slot.contributions.capabilities[0].contributions.ui_slot = None;
+        assert!(no_slot.validate().is_err());
+        let mut unused_graph = view.clone();
+        unused_graph.contributions.capabilities[0].requires.push(crate::CapabilityRef { id: "another.tool".into(), version: "1.0.0".into() });
+        assert!(unused_graph.validate().is_err());
     }
 
     #[test]
@@ -3681,6 +3842,35 @@ mod tests {
     }
 
     #[test]
+    fn agent_session_bridge_validates_commands_without_accepting_identity() {
+        for command in [
+            json!({"operation": "observe", "after_seq": 0, "limit": 200}),
+            json!({"operation": "turn", "input": {"content": "hello"}, "idempotency_key": "stable"}),
+            json!({"operation": "cancel"}),
+        ] {
+            let request: PluginAgentSessionRequest = serde_json::from_value(command.clone()).unwrap();
+            request.validate().unwrap();
+            for field in ["agent_session_id", "owner_user_id", "conversation_id", "extra"] {
+                let mut spoofed = command.clone();
+                spoofed[field] = json!("forged");
+                assert!(serde_json::from_value::<PluginAgentSessionRequest>(spoofed).is_err(), "{field}: {command}");
+            }
+        }
+        for command in [
+            json!({"operation": "observe", "after_seq": 0, "limit": 0}),
+            json!({"operation": "observe", "after_seq": 0, "limit": 201}),
+            json!({"operation": "turn", "input": [], "idempotency_key": "stable"}),
+            json!({"operation": "turn", "input": {}, "idempotency_key": " "}),
+            json!({"operation": "turn", "input": {}, "idempotency_key": "字".repeat(86)}),
+        ] {
+            let request: PluginAgentSessionRequest = serde_json::from_value(command).unwrap();
+            assert!(request.validate().is_err());
+        }
+        let target = json!({"target": "agent_session", "request": {"operation": "cancel"}, "agent_session_id": "forged"});
+        assert!(serde_json::from_value::<PluginBridgeTarget>(target).is_err());
+    }
+
+    #[test]
     fn host_kv_handle_cannot_cross_owner() {
         let request = PluginKvRequest::Get {
             handle: PluginKvHandleDescriptor {
@@ -3821,7 +4011,7 @@ mod tests {
             outcome: PluginServiceTestOutcome::Passed,
             error_code: None,
             runtime: spec.runtime.clone(),
-            host_target: spec.runtime.runtime_target.clone(),
+            host_target: spec.runtime.target(),
             host_protocol_version: PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
             sdk_contract_version: PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
             test_contract_version: PLUGIN_SERVICE_TEST_CONTRACT_VERSION.into(),

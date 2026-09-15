@@ -1,4 +1,6 @@
 use super::*;
+#[path = "tests_agent_ui.rs"]
+mod agent_ui;
 use nomifun_db::{
     SqlitePluginRuntimeRepository, SqliteProviderConnectionRepository,
     SqliteProviderModelCapabilityRepository, SqliteProviderModelRepository,
@@ -7,7 +9,7 @@ use nomifun_db::{
 
 const HTML: &str = "<!doctype html><html><head><title>Tasks</title></head><body><input aria-label='Task'><button>Add task</button><script>document.querySelector('button').onclick=()=>document.body.dataset.clicked='yes';</script></body></html>";
 
-async fn fixture() -> (
+pub(super) async fn fixture() -> (
     nomifun_db::Database,
     tempfile::TempDir,
     PluginProductService,

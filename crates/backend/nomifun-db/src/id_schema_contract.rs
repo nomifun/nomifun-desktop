@@ -86,6 +86,7 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "idmm_action_reservations",
     "idmm_interventions",
     "installation_identity",
+    "installation_role_bindings",
     "instance_access_token",
     "javascript_runtime_selection",
     "knowledge_bases",
@@ -245,6 +246,7 @@ const UUIDV7_MANAGED_VALUE_COLUMNS: &[(&str, &str)] = &[
 /// opaque remote handles rather than relational links. Every other physical
 /// `_id` column must be present in [`LOGICAL_REFERENCES`].
 const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
+    ("installation_role_bindings", "role_id"),
     ("agent_metadata", "agent_id"),
     ("agent_metadata", "yolo_id"),
     ("agent_execution_attempts", "attempt_id"),
@@ -716,6 +718,7 @@ macro_rules! protocol_uuidv7_ref {
 /// entries are deliberate cross-store references; the database audit reports
 /// them as externally owned instead of pretending SQLite can verify them.
 pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
+    external_ref!("installation_role_bindings", "provider_mount_id", Text, false, Opaque, "idx_installation_role_bindings_provider_mount", KeepHistory),
     text_ref!("conversations", "user_id" => "users", "user_id", false, "idx_conversations_user_id", Cascade),
     opaque_text_ref!("conversations", "active_turn_operation_id" => "conversation_delivery_receipts", "operation_id", true, "idx_conversations_active_turn_operation", Restrict)
         .with_parent_predicate("parent.kind = 'turn' AND parent.status = 'accepted'")
@@ -794,6 +797,8 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
              AND parent.plugin_product_id = child.plugin_product_id",
         ),
     text_ref!("plugin_surface_sessions", "owner_user_id" => "users", "user_id", false, "idx_plugin_surface_sessions_owner_user_id", Cascade),
+    text_ref!("plugin_surface_sessions", "conversation_id" => "conversations", "conversation_id", true, "idx_plugin_surface_sessions_conversation_id", Cascade)
+        .with_aggregate_scope("parent.user_id = child.owner_user_id"),
     text_ref!("plugin_surface_sessions", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_surface_sessions_plugin_product_id", Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
     text_ref!("plugin_surface_sessions", "active_release_id" => "plugin_releases", "release_id", false, "idx_plugin_surface_sessions_active_release_id", Restrict)
@@ -1099,6 +1104,13 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
 /// each entry yields one column named `value`, including one row per array
 /// element where necessary.
 pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
+    // Keep a withdrawn/deleted page choice visible for explicit user repair.
+    // It is not a live Surface grant and never authorizes a missing product.
+    json_text_ref!(
+        "nomi_agent_presets", "ui_binding_json", "$.selection.plugin_id",
+        "SELECT json_extract(ui_binding_json, '$.selection.plugin_id') AS value FROM nomi_agent_presets" =>
+        "plugin_products", "plugin_product_id", "idx_nomi_agent_presets_ui_plugin", KeepHistory, AllowMissingHistoricalParent
+    ),
     json_text_ref!(
         "conversations", "model", "$.provider_id",
         "SELECT json_extract(model, '$.provider_id') AS value FROM conversations WHERE model IS NOT NULL" =>
@@ -1431,6 +1443,7 @@ pub(crate) async fn validate_id_value_contract(pool: &SqlitePool) -> Result<(), 
 /// the dataset rather than rewrite IDs.
 pub async fn validate_id_data_contract(pool: &SqlitePool) -> Result<(), DbError> {
     validate_id_value_contract(pool).await?;
+    validate_agent_ui_binding_scope(pool).await?;
     validate_plugin_kv_tombstone_values(pool).await?;
     validate_workshop_asset_origin_values(pool).await?;
     validate_creation_task_result_asset_ids(pool).await?;
@@ -1455,6 +1468,23 @@ pub async fn validate_id_data_contract(pool: &SqlitePool) -> Result<(), DbError>
     Err(DbError::Init(format!(
         "v3 ID data contract audit failed: {details}"
     )))
+}
+
+/// KEEP_HISTORY permits a removed product, not a reference to another owner.
+/// JSON references use the registry for identity/index/delete semantics and
+/// this aggregate check for restore/import scope validation.
+async fn validate_agent_ui_binding_scope(pool: &SqlitePool) -> Result<(), DbError> {
+    let invalid: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM nomi_agent_presets preset JOIN plugin_products plugin
+         ON plugin.plugin_product_id = json_extract(preset.ui_binding_json, '$.selection.plugin_id')
+         WHERE preset.owner_user_id <> plugin.owner_user_id",
+    ).fetch_one(pool).await?;
+    if invalid != 0 {
+        return Err(DbError::Init(format!(
+            "Agent UI binding contains {invalid} cross-owner plugin reference(s)"
+        )));
+    }
+    Ok(())
 }
 
 async fn require_plugin_kv_tombstone_schema(pool: &SqlitePool) -> Result<(), DbError> {

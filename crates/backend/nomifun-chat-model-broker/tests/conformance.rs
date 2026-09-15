@@ -27,6 +27,34 @@ use nomifun_chat_model_broker::{
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+#[test]
+fn broker_reexports_the_exact_canonical_chat_types_and_wire_values() {
+    use nomifun_agent_contracts::chat_model as canonical;
+
+    let request = basic_request(&route(ChatProtocol::OpenaiChat, "shared-contract", 1));
+    let expected = serde_json::to_value(&request).unwrap();
+    // These assignments must compile without conversion: the old broker path
+    // and the shared contract path name the same types, not matching copies.
+    let canonical_request: canonical::ChatModelRequest = request;
+    canonical_request.validate().unwrap();
+    let broker_request: ChatModelRequest = canonical_request;
+    assert_eq!(serde_json::to_value(&broker_request).unwrap(), expected);
+    let decoded: canonical::ChatModelRequest = serde_json::from_value(expected).unwrap();
+    assert_eq!(decoded, broker_request);
+
+    let event: canonical::ChatModelEvent = ChatModelEvent::OutputTextDelta { text: "increment".into() };
+    assert_eq!(serde_json::to_value(&event).unwrap(), serde_json::json!({
+        "type": "output_text_delta", "text": "increment"
+    }));
+    let broker_event: ChatModelEvent = event;
+    assert!(broker_event.is_semantic_output());
+    assert!(!broker_event.is_terminal());
+    let error: canonical::ChatModelError = ChatModelError::protocol_violation("invalid event");
+    let broker_error: ChatModelError = error;
+    assert_eq!(broker_error.retry, ChatRetryDirective::Never);
+    assert_eq!(canonical::CHAT_MODEL_CONTRACT_VERSION, "chat-model-v1");
+}
+
 enum TransportScript {
     OpenError(ChatModelError),
     Frames(Vec<Result<ProviderWireFrame, ChatModelError>>),

@@ -32,6 +32,7 @@
     "test:desktop": "bun scripts/test-rust.mjs desktop",
     "test:browser": "bun scripts/test-rust.mjs browser",
     "test:ui": "bun test --cwd ui",
+    "test:agent-view-template": "node --test ui/src/renderer/pages/agentSession/AgentSessionTemplate.node.ts crates/backend/nomifun-plugin-platform/tests/product_sdk.test.mjs",
     "test:nomi-core-live-provider": "bun scripts/validation/run-nomi-core-live-provider-smoke.mjs",
     "check": "bun run typecheck && bun run check:desktop-ui-boundary && bun run check:i18n && bun run check:theme && bun run check:icons && bun run check:dead-css && bun run check:windows-installer && bun run check:creative-studio-retirement && bun run check:process-runtime-boundary && bun run check:browser-platform-boundary && bun run check:automation-session-boundary && bun run check:agent-vocabulary && bun run help --check",
     "typecheck": "bun run --filter=./ui typecheck",

@@ -32,6 +32,7 @@ const emptyCatalog: AgentCatalogResponse = {
   capabilities: [],
   skills: [],
   mcp_tools: [],
+  roles: [],
 };
 
 export function useAgentSettingsController() {
@@ -59,14 +60,11 @@ export function useAgentSettingsController() {
     setLoading(true);
     setError(null);
     try {
-      const [nextLibrary, capabilities, skills, mcpTools] =
+      const [nextLibrary, nextCatalog] =
         await Promise.all([
           agentPlatform.library.invoke(),
-          agentPlatform.capabilities.invoke(),
-          agentPlatform.skills.invoke(),
-          agentPlatform.mcpTools.invoke(),
+          agentPlatform.catalog.invoke(),
         ]);
-      const nextCatalog = { capabilities, skills, mcp_tools: mcpTools };
       setLibrary(nextLibrary);
       // A selector on another route may be unmounted. Revalidation alone
       // does not refresh that cache, so publish this authoritative response

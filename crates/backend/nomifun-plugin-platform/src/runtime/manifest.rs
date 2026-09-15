@@ -18,6 +18,8 @@ pub const PLUGIN_RUNTIME_MANIFEST_PATH: &str = "nomifun.plugin.json";
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PluginRuntimeSourceManifest {
+    /// Explicit opt-in; an ordinary HTML page is not an Agent view.
+    pub agent_view: Option<PluginAgentViewSource>,
     pub actions: Vec<PluginActionSource>,
     pub lifecycle: Option<nomifun_agent_contracts::PluginServiceLifecycle>,
     pub contributions: PackageContributions,
@@ -29,9 +31,36 @@ pub struct PluginRuntimeSourceManifest {
     pub uses_private_database: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginAgentViewSource {
+    pub name: String,
+    pub description: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_view_is_explicit_ui_only_and_can_coexist_with_actions() {
+        let package = PackageRef { id: "plugin.example".into(), version: "1.0.0".into() };
+        let mut plain = PluginRuntimeSourceManifest::default();
+        plain.materialize_actions(&package).unwrap();
+        assert!(plain.contributions.capabilities.is_empty());
+        let mut view = PluginRuntimeSourceManifest::parse(br#"{"agent_view":{"name":"My view","description":"My Agent page"},"actions":[{"id":"echo","name":"Echo","description":"Echo","input_schema":{"type":"object"},"output_schema":{"type":"object"},"effect":"pure"}]}"#).unwrap();
+        view.materialize_actions(&package).unwrap();
+        assert_eq!(view.contributions.capabilities.len(), 2);
+        let cap = &view.contributions.capabilities[0];
+        assert_eq!(cap.id.as_ref(), "plugin.example.ui.agent-session");
+        assert_eq!(cap.kind, CapabilityKind::UiContribution);
+        assert_eq!(cap.supported_consumers().unwrap(), std::collections::BTreeSet::from([CapabilityConsumer::Ui]));
+        assert_eq!(cap.contributions.ui_slot, Some(nomifun_agent_contracts::UiContributionSlot::AgentSession));
+        assert!(cap.contributions.actions.is_empty());
+        assert_eq!(view.contributions.capabilities[1].kind, CapabilityKind::Tool);
+        view.agent_view.as_mut().unwrap().name = " ".into();
+        assert!(view.materialize_actions(&package).is_err());
+    }
 
     #[test]
     fn actions_bind_to_the_plugin_package_and_schema_digests() {
@@ -66,6 +95,22 @@ impl PluginRuntimeSourceManifest {
     }
 
     pub fn materialize_actions(&mut self, package: &PackageRef) -> Result<(), String> {
+        if let Some(view) = &self.agent_view {
+            if view.name.trim().is_empty() || view.description.trim().is_empty() {
+                return Err("Agent view requires a name and description".into());
+            }
+            let id = format!("{}.ui.agent-session", package.id.as_ref());
+            self.contributions.capabilities.push(CapabilityManifest {
+                id: id.clone().into(), contribution_id: format!("capability:{id}").into(),
+                version: package.version.clone(), kind: CapabilityKind::UiContribution, package: package.clone(),
+                display: LocalizedMetadata { name: view.name.clone(), description: view.description.clone(), localized_names: BTreeMap::new(), localized_descriptions: BTreeMap::new() },
+                requires: vec![], conflicts: vec![], requires_runtime_features: vec![],
+                supported_surfaces: capability_surface_declarations(["desktop"], [CapabilityConsumer::Ui]),
+                supported_platforms: vec![PlatformConstraint::Any],
+                config_schema: StrictJsonValue(serde_json::json!({"type":"object", "additionalProperties":false})),
+                contributions: CapabilityContributions { ui_slot: Some(nomifun_agent_contracts::UiContributionSlot::AgentSession), ..Default::default() },
+            });
+        }
         let mut ids = std::collections::BTreeSet::new();
         for action in &self.actions {
             if action.id.is_empty() || action.id.len() > 96

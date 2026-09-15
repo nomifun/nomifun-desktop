@@ -27,10 +27,11 @@ use nomi_tools::{Tool, ToolExecutionContext};
 /// system prompt in Phase 9; this tool's `description()` returns a fixed string.
 pub struct SkillTool {
     skills: Arc<Vec<SkillMetadata>>,
+    host_skills: HashMap<String, Arc<crate::host_skills::HostSkill>>,
     /// Working directory for shell command execution inside skill content.
     cwd: String,
     /// Permission checker for skill-level deny/allow rules.
-    checker: SkillPermissionChecker,
+    checker: Arc<SkillPermissionChecker>,
     /// Session ID passed to prepare_inline_content for ${NOMI_SESSION_ID} substitution.
     /// None if sessions are disabled or not yet initialised.
     session_id: Option<String>,
@@ -51,9 +52,10 @@ impl SkillTool {
     ) -> Self {
         Self {
             skills,
+            host_skills: HashMap::new(),
             shell: SupervisedShell::standalone(std::path::PathBuf::from(&cwd)),
             cwd,
-            checker,
+            checker: Arc::new(checker),
             session_id: None,
             invocation_runner: None,
             delegated_effects: Mutex::new(HashMap::new()),
@@ -69,9 +71,10 @@ impl SkillTool {
     ) -> Self {
         Self {
             skills,
+            host_skills: HashMap::new(),
             shell: SupervisedShell::standalone(std::path::PathBuf::from(&cwd)),
             cwd,
-            checker,
+            checker: Arc::new(checker),
             session_id,
             invocation_runner: None,
             delegated_effects: Mutex::new(HashMap::new()),
@@ -88,13 +91,35 @@ impl SkillTool {
     ) -> Self {
         Self {
             skills,
+            host_skills: HashMap::new(),
             shell: SupervisedShell::standalone(std::path::PathBuf::from(&cwd)),
             cwd,
-            checker,
+            checker: Arc::new(checker),
             session_id,
             invocation_runner,
             delegated_effects: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn with_host_skills(mut self, skills: &[Arc<crate::host_skills::HostSkill>]) -> Self {
+        self.host_skills = skills.iter().map(|skill| (skill.metadata().name.clone(), skill.clone())).collect();
+        self
+    }
+
+    pub(crate) fn host_commands(&self) -> Vec<Arc<dyn crate::commands::SlashCommand>> {
+        let mut skills: Vec<_> = self.host_skills.values().cloned().collect();
+        skills.sort_by(|left, right| left.metadata().name.cmp(&right.metadata().name));
+        skills
+            .into_iter()
+            .map(|skill| {
+                Arc::new(crate::host_skills::HostSkillCommand {
+                    name: skill.command_name(),
+                    skill,
+                    checker: Arc::clone(&self.checker),
+                    session_id: self.session_id.clone(),
+                }) as Arc<dyn crate::commands::SlashCommand>
+            })
+            .collect()
     }
 
     pub fn with_process_supervisor(
@@ -161,6 +186,27 @@ impl SkillTool {
         }
 
         let args = input["args"].as_str();
+
+        if input.get("resource").is_some_and(|value| !value.is_string()) {
+            return ToolResult { content: "Skill resource must be a string".into(), is_error: true, images: Vec::new() };
+        }
+
+        if let Some(hosted) = self.host_skills.get(&skill.name) {
+            if skill.disable_model_invocation {
+                return ToolResult {
+                    content: format!("Skill '{}' does not allow model invocation", skill.name),
+                    is_error: true,
+                    images: Vec::new(),
+                };
+            }
+            return match hosted.read(args, input["resource"].as_str(), self.session_id.as_deref()).await {
+                Ok(content) => ToolResult { content, is_error: false, images: Vec::new() },
+                Err(content) => ToolResult { content, is_error: true, images: Vec::new() },
+            };
+        }
+        if input.get("resource").is_some() {
+            return ToolResult { content: "resource reads require an exact hosted Skill".into(), is_error: true, images: Vec::new() };
+        }
 
         match skill.execution_context {
             ExecutionContext::Inline => {
@@ -263,6 +309,10 @@ impl Tool for SkillTool {
                 "args": {
                     "type": "string",
                     "description": "Optional arguments for the skill"
+                },
+                "resource": {
+                    "type": "string",
+                    "description": "For a hosted package Skill, read one exact declared resource path instead of the body"
                 }
             },
             "required": ["skill"]
@@ -295,6 +345,9 @@ impl Tool for SkillTool {
     }
 
     fn may_have_workspace_side_effects(&self, input: &Value) -> bool {
+        if input["skill"].as_str().is_some_and(|name| self.host_skills.contains_key(name.trim_start_matches('/'))) {
+            return false;
+        }
         input["skill"]
             .as_str()
             .and_then(|name| self.find_skill(name))

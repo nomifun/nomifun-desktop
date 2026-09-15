@@ -18,6 +18,7 @@ use crate::contracts::{
 use crate::ports::{
     ChatCausalityGate, ChatRouteResolver, CredentialTarget, ProviderCredentialStore,
 };
+use crate::provider_reasoning::ProviderReasoningRoute;
 
 const BROKER_STREAM_CAPACITY: usize = 64;
 const MAX_BUFFERED_PRE_SEMANTIC_EVENTS: usize = 32;

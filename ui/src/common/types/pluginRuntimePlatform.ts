@@ -376,6 +376,31 @@ export interface RetryPluginRuntimeServiceRequest {
 
 export interface OpenPluginRuntimeSurfaceRequest {
   plugin_id: PluginRuntimeId;
+  /** Explicit host UI grant; the frame cannot select/change this identity. */
+  agent_session?: {
+    agent_session_id: string;
+    expected_release_digest: string;
+    ui_capability?: { id: string; version: string };
+  };
+}
+
+export interface AgentUiContribution {
+  capability: { id: string; version: string };
+  plugin_id: PluginRuntimeId;
+  expected_release_digest: string;
+  display_name: string;
+  description: string;
+}
+
+export interface AgentPresetUiBinding {
+  preset_id: string;
+  display_name: string;
+  binding: { binding_version: number; selection: AgentUiContribution | null };
+}
+
+export interface PutAgentUiBindingRequest {
+  expected_binding_version: number;
+  selection: AgentUiContribution | null;
 }
 
 export interface PluginRuntimeSurfaceLaunchDescriptor {
@@ -389,6 +414,14 @@ export interface PluginRuntimeSurfaceLaunchDescriptor {
   surface_capability: string;
   ui_entrypoint: string;
   kind: PluginRuntimeKind;
+}
+
+/** Live projection, scoped by a host-issued view identity; never a replay log. */
+export interface PluginAgentSessionStream {
+  plugin_id: PluginRuntimeId;
+  surface_session_id: string;
+  surface_generation: number;
+  event: Record<string, unknown>;
 }
 
 export interface ClosePluginRuntimeSurfaceRequest {
@@ -412,6 +445,10 @@ export interface PluginRuntimeBridgeRequest {
   call_id: string;
   target:
     | {
+        target: 'agent_session';
+        request: PluginAgentSessionRequest;
+      }
+    | {
         target: 'host_kv';
         request: PluginRuntimeBridgeKvRequest;
       }
@@ -421,6 +458,12 @@ export interface PluginRuntimeBridgeRequest {
         payload: Record<string, unknown>;
       };
 }
+
+/** Observe returns durable message history, not a replayable token stream. */
+export type PluginAgentSessionRequest =
+  | { operation: 'observe'; after_seq: number; limit: number }
+  | { operation: 'turn'; input: Record<string, unknown>; idempotency_key: string }
+  | { operation: 'cancel' };
 
 export type PluginRuntimeKvResponse =
   | { outcome: 'value'; value?: unknown; revision?: number }

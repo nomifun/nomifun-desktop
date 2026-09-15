@@ -17,8 +17,8 @@ export interface SlashCommandListAvailabilityInput {
  *
  * Slash commands are supported by the nomi agent type. The backend's
  * `/slash-commands` endpoint returns an empty list for other agent types
- * for a runtime without a slash-command catalog, so calling it there is waste
- * (and additionally 404s when the agent has not been warmed up yet).
+ * for a runtime without a slash-command catalog. Nomi also supports read-only
+ * discovery of selected package Skill commands before runtime warmup.
  *
  * @param input - Conversation type and status information
  * @returns true if slash commands should be enabled

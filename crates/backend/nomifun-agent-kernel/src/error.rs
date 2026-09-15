@@ -240,6 +240,8 @@ pub enum KernelError {
         skill_id: SkillId,
         version: VersionString,
     },
+    #[error("skill {skill_id:?} is unavailable to the Agent on surface {surface}")]
+    SkillUnavailableOnSurface { skill_id: SkillId, surface: String },
     #[error("capability {capability_id:?} is unavailable on surface {surface}")]
     CapabilityUnavailableOnSurface {
         capability_id: CapabilityId,
@@ -352,6 +354,7 @@ impl KernelError {
                 CAPABILITY_NOT_ACTIVE
             }
             Self::CapabilityUnavailableOnPlatform { .. }
+            | Self::SkillUnavailableOnSurface { .. }
             | Self::CapabilityUnavailableOnSurface { .. } => CAPABILITY_UNAVAILABLE_ON_PLATFORM,
             Self::ResourceOwnerMismatch { .. } => RESOURCE_OWNER_MISMATCH,
             Self::ResourceBindingMissing { .. }

@@ -87,6 +87,9 @@ computer-use = ["nomi-agent/computer-use"]
 browser-use = ["nomi-agent/browser-use", "dep:nomi-browser", "dep:nomifun-browser-platform"]
 
 [dev-dependencies]
+nomifun-js-host.workspace = true
+nomifun-js-kernel-adapter.workspace = true
+nomifun-js-runtime.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tracing-subscriber.workspace = true
 nomifun-common.workspace = true

@@ -1035,6 +1035,10 @@ impl NomiAgentManager {
             .as_ref()
             .map(|session| session.context_contributors().to_vec())
             .unwrap_or_default();
+        let model_middleware = plugin_tool_session.as_ref()
+            .map(|session| session.model_middleware()).transpose()
+            .map_err(|error| AppError::Internal(format!("Nomi before_model assembly failed: {error}")))?
+            .unwrap_or_default();
         let session_control_sink = plugin_tool_session
             .as_ref()
             .and_then(crate::NomiPluginToolSession::session_control_sink);
@@ -1271,6 +1275,7 @@ impl NomiAgentManager {
         let distill_cfg = Arc::new(config.clone());
 
         let mut bootstrap = AgentBootstrap::new(config, &workspace, sink)
+            .host_skills(plugin_tool_session.as_ref().map(|session| session.package_skills().to_vec()).unwrap_or_default())
             .goal(goal_spec)
             .install_embedded_agent_execution(
                 config_extra.install_embedded_agent_execution,
@@ -1512,6 +1517,9 @@ impl NomiAgentManager {
         }
         for contributor in hosted_context_contributors {
             engine.register_context_contributor(contributor);
+        }
+        for middleware in model_middleware {
+            engine.register_model_middleware(middleware);
         }
         if let Some(sink) = session_control_sink {
             let controls: [(&str, Box<dyn nomi_tools::Tool>); 3] = [
@@ -2493,6 +2501,10 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                         &source_message_id,
                         image_tool_allowlist.as_ref(),
                         Some(&mut completion_context),
+                        // Only the accepted user's text may select a command;
+                        // knowledge decoration cannot select one, and steering
+                        // race-tail passes cannot replay the root Skill.
+                        Some(if race_tail_reruns == 0 { &data.content } else { "" }),
                     ) => res,
                 };
 

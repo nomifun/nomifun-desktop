@@ -12,6 +12,9 @@ use tempfile::TempDir;
 
 struct UnusedRuntime;
 
+#[path = "plugin_runtime_dependency_tests.rs"]
+mod dependencies;
+
 struct ReadOnlySelection(nomifun_js_runtime::VersionedRuntimeSelection);
 
 #[async_trait]

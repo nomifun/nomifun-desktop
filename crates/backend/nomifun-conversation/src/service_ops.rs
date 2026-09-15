@@ -1,7 +1,7 @@
 //! Agent-session operations on ConversationService.
 //!
 //! These forward to the active AgentRuntimeHandle (via `self.runtime_handle(id)`) for
-//! model/slash-commands/side-question queries,
+//! model/side-question queries (cold command discovery lives in service.rs),
 //! plus workspace browsing that needs the conversations.extra.workspace
 //! field.
 //!
@@ -10,7 +10,7 @@
 
 use nomifun_api_types::{
     GetModelInfoResponse, SetModelRequest, SideQuestionRequest,
-    SideQuestionResponse, SlashCommandItem, WorkspaceBrowseQuery, WorkspaceEntry,
+    SideQuestionResponse, WorkspaceBrowseQuery, WorkspaceEntry,
 };
 use nomifun_common::AppError;
 use nomifun_file::list_workspace_level;
@@ -19,7 +19,7 @@ use nomifun_db::models::ConversationRow;
 use crate::service::ConversationService;
 
 impl ConversationService {
-    async fn require_owned_conversation(
+    pub(crate) async fn require_owned_conversation(
         &self,
         user_id: &str,
         conversation_id: &str,
@@ -73,18 +73,6 @@ impl ConversationService {
             }
         };
         runtime.set_model(&req.model_id).await
-    }
-
-    // ── Slash commands ──────────────────────────────────────────────
-
-    pub async fn get_slash_commands(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-    ) -> Result<Vec<SlashCommandItem>, AppError> {
-        self.require_owned_conversation(user_id, conversation_id)
-            .await?;
-        self.runtime_handle(conversation_id)?.get_slash_commands().await
     }
 
     // ── Side question ───────────────────────────────────────────────

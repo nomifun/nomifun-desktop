@@ -42,6 +42,9 @@ use uuid::Uuid;
 
 const LOCAL_TRUST_SECRET: &str = "official-preset-catalog-integrity";
 
+#[path = "official_preset_catalog_integrity/skill_discovery.rs"]
+mod skill_discovery;
+
 #[tokio::test]
 async fn every_published_official_preset_stays_available_after_plugin_catalog_refresh() {
     let root = tempfile::tempdir().expect("allocate isolated product root");

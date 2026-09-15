@@ -172,6 +172,9 @@ fn project_internal(
             .content
             .skill_locks
             .iter()
+            // Package Skills arrive through the typed runtime Session, never
+            // through legacy directory/name resolution.
+            .filter(|lock| lock.contribution_lock.source_kind != nomifun_agent_contracts::ContributionSourceKind::PluginMount)
             .map(|lock| lock.skill.id.as_ref().to_owned())
             .collect(),
     )?;
@@ -416,6 +419,7 @@ pub(crate) fn nomi_capability_projection(
     capability_id: &str,
 ) -> Result<NomiCapabilityProjection, AppError> {
     let projection = match capability_id {
+        nomifun_ai_agent::tool_discovery::CAPABILITY_ID => NomiCapabilityProjection::Tools(&["ToolSearch"]),
         // Native filesystem family.
         "fs.read" => NomiCapabilityProjection::Tools(&["Read"]),
         "fs.search" => NomiCapabilityProjection::Tools(&["Grep", "Glob"]),
@@ -932,6 +936,8 @@ mod tests {
     ) {
         let payload = AgentPresetRevisionPayload {
             runtime_engine: None,
+            context_order: Vec::new(),
+            middleware_order: Vec::new(),
             schema_version: "1.0.0".into(),
             model_route_refs: BTreeMap::from([(CHAT_TASK.into(), "route-1".into())]),
             chat_route_records: BTreeMap::from([(CHAT_TASK.into(), route())]),
@@ -972,6 +978,8 @@ mod tests {
             reason: None,
         };
         let content = ResolvedSnapshotContent {
+            context_order: Vec::new(),
+            middleware_order: Vec::new(),
             schema_version: "1.0.0".into(),
             resolver_version: "1.0.0".into(),
             preset_revision_ref: reference.clone(),
@@ -1002,6 +1010,10 @@ mod tests {
                 },
                 body_digest: DIGEST.into(),
                 required_capabilities: BTreeSet::new(),
+                contribution_lock: resolved_capability("fs.read").contribution_lock,
+                resolved_mount_id: "fixture".into(),
+                resolved_source: resolved_capability("fs.read").resolved_source,
+                target_artifact_digest: DIGEST.into(),
             }],
             mcp_tool_locks: Vec::new(),
             resolved_role_providers: BTreeMap::new(),
@@ -1056,6 +1068,8 @@ mod tests {
             "capability:{id}"
         ));
         ResolvedCapability {
+            consumption: Default::default(),
+            dependency_refs: Vec::new(),
             capability: CapabilityRef {
                 id: capability_id.clone(),
                 version: "1.0.0".into(),

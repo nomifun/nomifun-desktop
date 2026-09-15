@@ -120,6 +120,13 @@ fn javascript_and_typescript_scaffolds_are_distinct_fixed_inputs() {
     assert!(sdk.contains("type PluginActivationContext"));
     assert!(sdk.contains("resolve(slotKey: string): Promise<string>"));
     assert!(sdk.contains("compareAndSwap"));
+    assert!(sdk.contains("type PluginToolInvocation"));
+    assert!(sdk.contains("type PluginContextContribution"));
+    assert!(sdk.contains("source_message_id: string"));
+    assert!(sdk.contains("invoke(call: PluginDependencyCall): Promise<PluginJson>"));
+    let mount_sdk = sdk.split("type PluginSdk").nth(1).unwrap()
+        .split("type PluginActivationContext").next().unwrap();
+    assert!(!mount_sdk.contains("dependencies"), "dependency authority must not be Mount-scoped");
 }
 
 #[test]

@@ -70,7 +70,7 @@ community crate 形成依赖环。此处使用 app example，Cargo example 是�
 
 ## 明确边界
 
-- 文本输入最多 4096 UTF-8 字节；附件、Skills、MCP、MiniApps、Plugin、按需激活、
+- 文本输入最多 4096 UTF-8 字节；附件、Skills、MCP、Plugin、按需激活、
   文件写入、命令执行和 steering 均不支持，显式拒绝，不静默忽略。
 - 最多八次模型请求；每次 120 秒截止、8192 个事件、256 KiB 流序列化预算、16 KiB 文本。
   工具调用增量与完成内容不一致、重复 ID、不完整 EOF、拒绝或输出耗尽均失败关闭。

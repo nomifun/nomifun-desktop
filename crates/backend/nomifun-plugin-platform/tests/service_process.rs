@@ -75,6 +75,12 @@ export async function start(context) {
 
 const INVALID_SERVICE_MODULE: &str = "export const value = 1;\n";
 
+#[path = "service_process/cancellation.rs"]
+mod cancellation;
+
+#[path = "service_process/streaming.rs"]
+mod streaming;
+
 fn node_executable() -> Option<PathBuf> {
     let discovered = which::which("node").ok()?;
     std::fs::canonicalize(discovered).ok()
@@ -92,7 +98,7 @@ fn runtime_fingerprint(node: &Path) -> PluginServiceRuntimeFingerprint {
         .trim()
         .trim_start_matches('v')
         .to_owned();
-    PluginServiceRuntimeFingerprint {
+    PluginServiceRuntimeFingerprint::Node {
         runtime_installation_id: RuntimeInstallationId::from(format!(
             "test-node-{}",
             &digest_bytes(&bytes).as_ref()[..16]
@@ -212,6 +218,7 @@ async fn invoke(
                 call_id: PluginBridgeCallId::from(call_id),
                 method: method.to_owned(),
                 payload: StrictJsonValue(payload),
+                events: None,
             },
             cancellation,
         )
@@ -363,7 +370,9 @@ async fn node_path_alias_is_resolved_once_and_still_requires_the_selected_digest
     process.stop().await;
 
     let mut wrong = spec;
-    wrong.runtime.runtime_executable_digest = digest_bytes(b"different executable");
+    if let PluginServiceRuntimeFingerprint::Node { runtime_executable_digest, .. } = &mut wrong.runtime {
+        *runtime_executable_digest = digest_bytes(b"different executable");
+    }
     let error = factory.start(PluginRuntimeServiceLaunch {
         spec: wrong,
         host_generation: 2,

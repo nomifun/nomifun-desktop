@@ -559,6 +559,9 @@ pub(crate) async fn try_build_module_states(
         )
         .await
         .map_err(|error| anyhow::anyhow!("Nomi-core Agent/Plugin platform composition failed: {error:#}"))?;
+    services.plugin_runtime.install_agent_session_port(Arc::new(
+        super::nomi_core_session::NomiCorePluginUiSessions::new(&conversation_owner),
+    )).await;
     let javascript_runtime =
         super::javascript_runtime::build_javascript_runtime_state(
             javascript_runtime_foundation,
@@ -582,11 +585,12 @@ pub(crate) async fn try_build_module_states(
         .map_err(|error| anyhow::anyhow!("Plugin Service managed storage composition failed: {error}"))?,
     );
     let service_runtime = Arc::new(
-        nomifun_plugin_platform::runtime::ProductionPluginRuntimeServiceRuntimeBinding::new_with_storage(
+        nomifun_plugin_platform::runtime::ProductionPluginRuntimeServiceRuntimeBinding::new_with_storage_and_native_policy(
             runtime_authority,
             service_registry,
             Some(service_storage),
             nomifun_plugin_platform::runtime::DEFAULT_MAX_ACTIVE_SERVICE_HOSTS,
+            std::env::var("NOMIFUN_ALLOW_NATIVE_PLUGINS").as_deref() == Ok("1"),
         )
         .map_err(|error| anyhow::anyhow!("Plugin Service runtime composition failed: {error}"))?,
     );
@@ -915,7 +919,7 @@ async fn build_nomi_core_agent_api_state(
     let catalog = Arc::new(
         KernelCatalogProvider::new(Arc::clone(&kernel))
             .with_unavailable_capabilities(unavailable_capabilities)
-            .with_miniapp_publication_source(plugin_catalog),
+            .with_plugin_product_publication_source(plugin_catalog),
     );
     let plugin = super::plugin_platform::build_nomi_core_plugin_state(
         services.database.pool().clone(),
@@ -966,18 +970,26 @@ async fn build_nomi_core_agent_api_state(
             }
             runtime_engines.validate_agent(payload, snapshot)
                 .map(|_| ()).map_err(|error| error.to_string())
-        });
+        })
+        .with_consumer_validator(super::nomi_core_tool_discovery::validate_snapshot);
     // Both official engines consume the same frozen enabled-capability ceiling.
     // Saving a new revision, not an in-turn activation, changes that selection.
+    // The Nomi engine exposes its existing session-scoped ToolSearch activation
+    // boundary. AgentPreset on-demand capabilities are projected onto that
+    // deferred tool set instead of being rejected by the control plane.
     let store = Arc::new(NomiCoreControlPlaneStore::new(
         services.database.pool().clone(),
     ));
     let control_plane = Arc::new(AgentControlPlane::new(
-        store,
+        store.clone(),
         catalog,
         templates,
         compiler,
     )
+    .with_ui_binding_store(store)
+    .with_installation_role_binding_store(Arc::new(
+        super::nomi_core_role_defaults::NomiCoreRoleBindingStore::new(services.database.pool().clone()),
+    ))
     .with_default_chat_route_resolver(Arc::new(
         NomiCoreDefaultChatRouteResolver::new(services.database.pool().clone()),
     )));
@@ -1008,7 +1020,7 @@ async fn build_nomi_core_agent_api_state(
         &conversation_owner, Arc::clone(&control_plane), &services.runtime_engines, services.database.pool().clone(), services.encryption_key,
         super::engine_kernel_session::EngineKernelAssembly {
             kernel: Arc::clone(&kernel), environment: environment.clone(), wave2: Arc::clone(&builtin_plan.wave2_owner),
-            miniapp: super::engine_miniapp_tools::MiniAppOwner {
+            plugin_product: super::engine_plugin_product_tools::PluginProductOwner {
                 application: Arc::clone(&services.plugin_runtime),
                 receipts: super::hosted_effect_receipts::HostedEffectReceipts::new(services.database.pool().clone()),
             },
