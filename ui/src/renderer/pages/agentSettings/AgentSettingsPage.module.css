@@ -29,27 +29,26 @@
 .libraryTabs button span { font-size: 10px; color: var(--color-text-3); }
 .libraryBody { overflow-y: auto; min-height: 0; padding: 0 10px 14px; }
 .libraryHint { padding: 0 5px; margin: 0 0 12px; color: var(--agent-muted); font-size: 11px; line-height: 1.6; }
-.libraryList { display: flex; flex-direction: column; gap: 6px; }
-.libraryRow, .libraryPersonalRow { display: flex; align-items: center; gap: 11px; width: 100%; min-height: 66px; box-sizing: border-box; border: 1px solid transparent; border-radius: 10px; background: transparent; color: var(--color-text-1); text-align: left; }
-.libraryRow { padding: 10px 11px; cursor: pointer; }
+.libraryList { display: flex; flex-direction: column; gap: 3px; }
+.libraryRow, .libraryPersonalRow { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 50px; box-sizing: border-box; border: 1px solid transparent; border-radius: 10px; background: transparent; color: var(--color-text-1); text-align: left; }
+.libraryRow { padding: 6px 9px; cursor: pointer; }
 .libraryRow:hover, .libraryPersonalRow:hover { background: var(--color-fill-1); }
 .libraryRowActive { background: rgba(var(--primary-6), .06); border-color: rgba(var(--primary-6), .2); }
 .libraryRowActive:hover { background: rgba(var(--primary-6), .06); }
-.librarySelect { min-width: 0; display: flex; align-items: center; gap: 11px; flex: 1; min-height: 64px; border: 0; padding: 10px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
-.libraryIcon { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; flex: 0 0 34px; border-radius: 10px; background: var(--color-fill-2); color: var(--color-text-2); }
+.librarySelect { min-width: 0; display: flex; align-items: center; gap: 9px; flex: 1; min-height: 48px; border: 0; padding: 6px 9px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.libraryIcon { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; flex: 0 0 30px; border-radius: 8px; background: var(--color-fill-2); color: var(--color-text-2); }
 .libraryRowActive .libraryIcon { background: var(--color-bg-2); color: rgb(var(--primary-6)); }
-.libraryCopy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.libraryCopy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
 .libraryName { font-size: 13px; font-weight: 600; line-height: 1.45; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .libraryMeta { font-size: 11px; line-height: 1.5; color: var(--agent-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rowAction { flex-shrink: 0; margin-right: 4px; }
 .libraryEmpty { display: flex; flex-direction: column; align-items: center; gap: 13px; padding: 38px 13px; text-align: center; color: var(--agent-muted); font-size: 12px; line-height: 1.65; }
 .libraryEmpty strong { font-size: 12px; font-weight: 400; }
-.editorHeader { display: flex; align-items: center; gap: 14px; padding: 16px 24px 14px; flex-shrink: 0; }
-.agentAvatar { display: inline-flex; align-items: center; justify-content: center; width: 48px; height: 48px; flex: 0 0 48px; border-radius: 14px; background: rgba(var(--primary-6), .06); color: rgb(var(--primary-6)); border: 1px solid rgba(var(--primary-6), .08); }
+.editorHeader { display: flex; align-items: center; gap: 14px; padding: 12px 24px 10px; flex-shrink: 0; }
 .editorHeaderCopy { min-width: 0; flex: 1; }
 .headerEyebrow { margin-bottom: 4px; color: var(--agent-muted); font-size: 10px; letter-spacing: .035em; }
-.editorHeader h2 { margin: 0; color: var(--color-text-1); font-size: 20px; font-weight: 600; line-height: 1.45; overflow-wrap: anywhere; }
-.editorHeader p { margin: 5px 0 0; color: var(--agent-muted); font-size: 12px; line-height: 1.6; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.editorHeader h2 { margin: 0; color: var(--color-text-1); font-size: 16px; font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
+.editorHeader p { margin: 3px 0 0; color: var(--agent-muted); font-size: 12px; line-height: 1.6; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .editorTabs { display: flex; flex-shrink: 0; align-items: center; gap: 24px; padding: 0 24px; border-bottom: 1px solid var(--agent-border); overflow-x: auto; }
 .editorTabs > button, .editorTabs > span { display: inline-flex; align-items: center; position: relative; flex-shrink: 0; min-height: 43px; padding: 0 0 11px; box-sizing: border-box; border: 0; background: transparent; color: var(--color-text-3); font-size: 13px; cursor: pointer; }
 .editorTabs .activeTab { color: rgb(var(--primary-6)); font-weight: 600; }
@@ -105,7 +104,7 @@
 .library button:focus-visible, .editorTabs button:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: -2px; }
 @media (max-width: 1100px) {
 
-  .editorHeader { padding: 18px; }
+  .editorHeader { padding: 12px 18px 10px; }
   .editorTabs { padding: 0 18px; gap: 19px; }
   .editorBody { padding: 18px; }
   .actionBar { padding: 13px 16px; gap: 10px; }
