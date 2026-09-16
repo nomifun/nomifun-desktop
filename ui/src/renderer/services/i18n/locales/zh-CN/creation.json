@@ -1,0 +1,10 @@
+{
+  "mode": { "chat": "日常对话", "image": "图像创作", "video": "视频创作", "music": "音乐创作" },
+  "scene": {
+    "trigger": "使用场景：{{scene}}，展开全部场景",
+    "title": "这次，想做点什么？",
+    "description": { "chat": "提问、讨论与日常协助", "image": "把想法变成画面", "video": "把创意变成动态内容", "music": "创作旋律与歌曲" },
+    "discovery": "也可以创作图像、视频和音乐",
+    "dismissHint": "不再显示场景提示"
+  }
+}

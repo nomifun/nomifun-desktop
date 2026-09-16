@@ -18,14 +18,12 @@ export type GuidInputResult = {
   setFiles: React.Dispatch<React.SetStateAction<string[]>>;
   dir: string;
   setDir: React.Dispatch<React.SetStateAction<string>>;
-  isInputFocused: boolean;
   loading: boolean;
   setLoading: React.Dispatch<React.SetStateAction<boolean>>;
   handleFilesPasted: (pastedFiles: FileMetadata[]) => void;
   handleFilesUploaded: (uploadedPaths: string[]) => void;
   handleRemoveFile: (targetPath: string) => void;
   handleTextareaFocus: () => void;
-  handleTextareaBlur: () => void;
   onPaste: ReturnType<typeof usePasteService>['onPaste'];
   isFileDragging: boolean;
   dragHandlers: ReturnType<typeof useDragUpload>['dragHandlers'];
@@ -42,7 +40,6 @@ export const useGuidInput = ({ locationState }: UseGuidInputOptions): GuidInputR
   const [input, setInput] = useGuidDraftState('input', '');
   const [files, setFiles] = useGuidDraftState<string[]>('files', []);
   const [dir, setDir] = useGuidDraftState('workspace', '');
-  const [isInputFocused, setIsInputFocused] = useState(false);
   const [loading, setLoading] = useState(false);
 
   // Read workspace from location.state (passed from tabs add button)
@@ -101,12 +98,7 @@ export const useGuidInput = ({ locationState }: UseGuidInputOptions): GuidInputR
 
   const handleTextareaFocus = useCallback(() => {
     onFocus();
-    setIsInputFocused(true);
   }, [onFocus]);
-
-  const handleTextareaBlur = useCallback(() => {
-    setIsInputFocused(false);
-  }, []);
 
   return {
     input,
@@ -115,14 +107,12 @@ export const useGuidInput = ({ locationState }: UseGuidInputOptions): GuidInputR
     setFiles,
     dir,
     setDir,
-    isInputFocused,
     loading,
     setLoading,
     handleFilesPasted,
     handleFilesUploaded,
     handleRemoveFile,
     handleTextareaFocus,
-    handleTextareaBlur,
     onPaste,
     isFileDragging,
     dragHandlers,

@@ -15,7 +15,7 @@ import dayjs from 'dayjs';
 import type { TProviderWithModel } from '@/common/config/storage';
 import type { ConversationId, ProviderId } from '@/common/types/ids';
 import { useModelsForTask } from '@renderer/hooks/agent/useModelsForTask';
-import GuidModelSelector from '@renderer/pages/guid/components/GuidModelSelector';
+import ChatModelSelector from '@renderer/components/chat/ChatModelSelector';
 import { WorkspaceFolderSelect } from '@renderer/components/workspace';
 import type { AgentMetadata } from '@renderer/utils/model/agentTypes';
 import { createCronSchedule, getCurrentCronTimeZone } from '@renderer/pages/cron/cronUtils';
@@ -787,11 +787,13 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
 
   const modelFormItem = showModelSelector ? (
     <FormItem label={t('cron.page.form.model')}>
-      <GuidModelSelector
-        isProviderModelMode={isProviderModelMode}
-        modelList={filteredProviders}
-        current_model={geminiCurrentModel}
-        setCurrentModel={handleGeminiModelSelect}
+      <ChatModelSelector
+        providers={filteredProviders}
+        currentModel={geminiCurrentModel}
+        getAvailableModels={provider => filteredGroups.find(group => group.provider.id === provider.id)?.models ?? []}
+        onSelectModel={(provider, model) => handleGeminiModelSelect({ ...provider, use_model: model })}
+        disabled={!isProviderModelMode}
+        readOnlyLabel={!isProviderModelMode ? t('conversation.welcome.useCliModel') : undefined}
       />
     </FormItem>
   ) : null;

@@ -19,6 +19,7 @@ import requirements from './requirements.json';
 import idmm from './idmm.json';
 import starOffice from './starOffice.json';
 import guid from './guid.json';
+import creation from './creation.json';
 import agent from './agent.json';
 import terminal from './terminal.json';
 import webhook from './webhook.json';
@@ -55,6 +56,7 @@ export default {
   idmm,
   starOffice,
   guid,
+  creation,
   agent,
   terminal,
   webhook,

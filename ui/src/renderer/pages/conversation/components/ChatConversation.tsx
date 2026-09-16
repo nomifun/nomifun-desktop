@@ -22,15 +22,14 @@ import { getConversationRuntimeAuthority, isConversationProcessing } from '@/ren
 import NomiChat from '../platforms/nomi/NomiChat';
 import { useNomiModelSelection } from '../platforms/nomi/useNomiModelSelection';
 import CompanionChatPanel from '@/renderer/pages/nomi/companion/CompanionChatPanel';
-import GuidCollaboratorSelector from '@/renderer/pages/guid/components/GuidCollaboratorSelector';
+import CollaborationComposerControl from '@/renderer/components/collaboration/CollaborationComposerControl';
+import { buildConversationModelPool } from '@/renderer/components/collaboration/conversationModelPool';
 import {
   toAppliedCollaborationTemplate,
   type AppliedCollaborationTemplate,
 } from '@/renderer/components/collaboration/collaborationTemplateModel';
-import CollaborationPolicyControl, {
-  type CollaborationPolicyValue,
-} from '@/renderer/components/collaboration/CollaborationPolicyControl';
-import type { TExecutionModelPool, TExecutionModelRef } from '@/common/types/agentExecution/agentExecutionTypes';
+import type { CollaborationPolicyValue } from '@/renderer/components/collaboration/CollaborationPolicyControl';
+import type { TExecutionModelRef } from '@/common/types/agentExecution/agentExecutionTypes';
 import { ExecutionProvider } from '../execution/ExecutionContext';
 import ExecutionConversationLayout from '../execution/ExecutionConversationLayout';
 import ReadOnlyConversationView from '../execution/ReadOnlyConversationView';
@@ -63,21 +62,7 @@ const hasLoadedSkill = (conversation: TChatConversation | undefined, skillName: 
 const sshHostIdOf = (conversation: TChatConversation | undefined): SshHostId | undefined =>
   (conversation?.extra as { ssh_host_id?: SshHostId } | undefined)?.ssh_host_id;
 
-const buildConversationModelPool = (
-  mainRef: TExecutionModelRef | null,
-  collaborators: TExecutionModelRef[],
-): TExecutionModelPool | null => {
-  if (!mainRef?.provider_id || !mainRef.model) return null;
-  const seen = new Set<string>();
-  const models = [mainRef, ...collaborators].filter((candidate) => {
-    if (!candidate.provider_id || !candidate.model) return false;
-    const key = `${candidate.provider_id}\u0000${candidate.model}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-  return models.length === 1 ? { mode: 'single', model: models[0] } : { mode: 'range', models };
-};
+
 
 type NomiConversation = Extract<TChatConversation, { type: 'nomi' }>;
 
@@ -336,7 +321,7 @@ const NomiConversationPanel: React.FC<{
   // toolbar entry. Their existing callbacks stay independent so this remains
   // a presentation-only merge.
   const collaborationControlNode = (
-    <GuidCollaboratorSelector
+    <CollaborationComposerControl
       value={activeCollaborators}
       onChange={onCollaboratorsChange}
       mainModel={mainModelRef}
@@ -344,18 +329,9 @@ const NomiConversationPanel: React.FC<{
       workDir={conversation.extra?.workspace}
       onTemplateApply={(template) => void persistCollaborationTemplate(template)}
       onTemplateClear={() => void persistCollaborationTemplate(null)}
-      className='nomi-sendbox-model-btn nomi-sendbox-collaboration-btn'
-      triggerLabel={t('collaboration.policy.button', { defaultValue: 'Collaboration' })}
-      triggerActive={collaborationPolicy.delegationPolicy !== 'disabled'}
-      panelFooter={
-        <CollaborationPolicyControl
-          runtimeType={conversation.type}
-          delegationPolicy={collaborationPolicy.delegationPolicy}
-          decisionPolicy={collaborationPolicy.decisionPolicy}
-          onChange={onCollaborationPolicyChange}
-          embedded
-        />
-      }
+      policy={collaborationPolicy}
+      onPolicyChange={onCollaborationPolicyChange}
+      runtimeType={conversation.type}
     />
   );
 
@@ -512,7 +488,6 @@ const NomiConversationPanel: React.FC<{
   const currentAgentLabel = selectedAgentLabel ?? presetPresetInfo?.name ?? 'Agent';
   const agentSelectorNode = (
     <GuidAgentSelector
-      compact
       disabled={agentSwitching}
       presets={executableAgentPresets}
       officialTemplates={agentLibrary?.official_templates ?? []}
