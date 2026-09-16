@@ -46,6 +46,15 @@ impl NomiCoreControlPlaneStore {
     pub(crate) fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
+
+    async fn begin_write_transaction(&self) -> Result<Transaction<'static, Sqlite>, ControlPlaneError> {
+        // Reserve SQLite's writer slot before reading the version/owner that
+        // will be validated and updated. Deferred read->write promotion can
+        // return SQLITE_BUSY immediately despite the configured busy timeout.
+        // Keep the existing CAS checks inside this same transaction; no HTTP
+        // mutation or post-commit work is replayed.
+        self.pool.begin_with("BEGIN IMMEDIATE").await.map_err(sql)
+    }
 }
 
 fn wire<T: Serialize>(value: &T) -> Result<String, ControlPlaneError> {
@@ -504,7 +513,7 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
     }
 
     async fn insert_preset(&self, preset: StoredPreset) -> Result<(), ControlPlaneError> {
-        let mut tx = self.pool.begin().await.map_err(sql)?;
+        let mut tx = self.begin_write_transaction().await?;
         insert_preset_tx(&mut tx, &preset, now_ms()).await?;
         tx.commit().await.map_err(sql)
     }
@@ -516,7 +525,7 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         snapshot: ResolvedSnapshotEnvelope,
     ) -> Result<StoredPreset, ControlPlaneError> {
         validate_revision_snapshot(&preset, &revision, &snapshot)?;
-        let mut tx = self.pool.begin().await.map_err(sql)?;
+        let mut tx = self.begin_write_transaction().await?;
         insert_preset_tx(&mut tx, &preset, revision.created_at_ms).await?;
         insert_revision_tx(&mut tx, &revision, &snapshot).await?;
         tx.commit().await.map_err(sql)?;
@@ -549,7 +558,7 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         owner: &UserId,
         preset_id: &AgentPresetId,
     ) -> Result<(), ControlPlaneError> {
-        let mut tx = self.pool.begin().await.map_err(sql)?;
+        let mut tx = self.begin_write_transaction().await?;
         let row: Option<(String, String, Option<i64>)> = sqlx::query_as(
             "SELECT owner_user_id, source_kind, retired_at_ms \
              FROM nomi_agent_presets WHERE preset_id = ?",
@@ -648,7 +657,7 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
                 "ResolvedSnapshot does not bind the appended Preset revision",
             ));
         }
-        let mut tx = self.pool.begin().await.map_err(sql)?;
+        let mut tx = self.begin_write_transaction().await?;
         let current = current_revision_ref_tx(&mut tx, &revision.reference.preset_id).await?;
         if current.as_ref() != expected_current {
             return Err(conflict(
@@ -737,7 +746,7 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         binding: StoredAgentBinding,
         expected_binding_version: Option<u64>,
     ) -> Result<StoredAgentBinding, ControlPlaneError> {
-        let mut tx = self.pool.begin().await.map_err(sql)?;
+        let mut tx = self.begin_write_transaction().await?;
         let existing: Option<(String, String)> = sqlx::query_as(
             "SELECT owner_user_id, agent_binding_json FROM nomi_agent_bindings \
              WHERE target_kind = ? AND target_id = ?",
@@ -831,7 +840,7 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         let digest = digest_payload(&binding.agent_binding)
             .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
         let now = now_ms();
-        let mut tx = self.pool.begin().await.map_err(sql)?;
+        let mut tx = self.begin_write_transaction().await?;
         let preset_owner: Option<String> = sqlx::query_scalar(
             "SELECT owner_user_id FROM nomi_agent_presets \
              WHERE preset_id = ? AND retired_at_ms IS NULL",
@@ -896,7 +905,7 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         .ok_or_else(|| not_found("ResolvedSnapshot"))?;
         let digest = digest_payload(&binding.agent_binding)
             .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
-        let mut tx = self.pool.begin().await.map_err(sql)?;
+        let mut tx = self.begin_write_transaction().await?;
         let preset_owner: Option<String> = sqlx::query_scalar(
             "SELECT owner_user_id FROM nomi_agent_presets \
              WHERE preset_id = ? AND retired_at_ms IS NULL",
@@ -957,6 +966,10 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "nomi_core_control_plane_concurrency_tests.rs"]
+mod concurrency_tests;
 
 #[cfg(test)]
 mod tests {

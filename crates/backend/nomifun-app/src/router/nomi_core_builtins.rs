@@ -24,6 +24,44 @@ use nomifun_agent_domain_wave4::Wave4TurnMiddlewareHostPort;
 
 use crate::services::AppServices;
 
+#[cfg(all(test,feature="browser-use"))]
+mod local_search_binding_tests {
+    use super::*;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    #[ignore="requires NOMIFUN_SEARCH_CHROME; local probe only, no public search"]
+    async fn admitted_runtime_reaches_the_real_http_catalog() {
+        let chrome=std::path::PathBuf::from(std::env::var_os("NOMIFUN_SEARCH_CHROME").expect("Chromium binary"));
+        let product=nomi_browser_engine::headless_page::probe_runtime(chrome.clone()).await.unwrap();
+        let mut host=crate::DesktopHostServices::default();
+        host.set_browser_release(chrome,product).await.unwrap();
+        let expected=host.local_web_search.as_ref().unwrap().binding().clone();
+        let root=tempfile::tempdir().unwrap();
+        let services=AppServices::try_from_config_with_host(nomifun_db::init_database_memory().await.unwrap(),&crate::AppConfig {
+            data_dir:root.path().join("data"),work_dir:root.path().join("work"),
+            auth_policy:nomifun_auth::AuthPolicy::TrustLocalToken,
+            local_trust_secret:Some(Arc::from("local-search-binding-test")),..Default::default()
+        },host).await
+            .unwrap_or_else(|_|panic!("isolated application startup failed"));
+        let plan=build(&services).await.unwrap();
+        let registration=plan.registrations.iter().find(|registration|registration.metadata.manifest.payload.package_id.as_ref()==nomifun_agent_domain_wave1::LOCAL_WEBSEARCH_PACKAGE_ID).unwrap();
+        let manifest=&registration.metadata.manifest.payload.contributions.capabilities[0];
+        assert_eq!(nomifun_ai_agent::local_web_search::binding_from_manifest(manifest).unwrap(),Some(expected));
+        let router=crate::compatibility::create_router(&services).await;
+        let response=router.oneshot(axum::http::Request::builder().uri("/api/capabilities")
+            .header("x-nomi-local-trust","local-search-binding-test").body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(),axum::http::StatusCode::OK);
+        let body=axum::body::to_bytes(response.into_body(),512*1024).await.unwrap();
+        let catalog:serde_json::Value=serde_json::from_slice(&body).unwrap();
+        let local=catalog["data"].as_array().unwrap().iter().find(|entry|entry["capability"]["id"]=="nomi_local_websearch").unwrap();
+        assert_eq!(local["materialization_state"],"materialized");
+        assert_eq!(local["required_resource_kinds"],serde_json::json!([]));
+        services.shutdown_browser_platform().await.unwrap();
+        services.database.close().await;
+    }
+}
+
 pub(crate) struct NomiCoreBuiltinPlan {
     pub registrations: Vec<PluginRegistration>,
     pub tool_capability_ids: BTreeSet<CapabilityId>,
@@ -37,6 +75,49 @@ pub(crate) struct NomiCoreBuiltinPlan {
     pub robot_owner: Option<Arc<super::nomi_core_robot::NomiCoreRobotWave4Owner>>,
 }
 
+#[cfg(feature = "browser-use")]
+fn bind_system_browser(
+    registrations: &mut [PluginRegistration],
+    binding: nomifun_browser_platform::system_browser::SystemBrowserBinding,
+) -> anyhow::Result<()> {
+    use nomifun_browser_platform::system_browser::{BINDING_ANNOTATION, TOOL_NAME};
+    let registration = registrations.iter_mut().find(|entry|
+        entry.metadata.manifest.payload.package_id.as_ref() == nomifun_agent_domain_wave1::SYSTEM_BROWSER_PACKAGE_ID)
+        .ok_or_else(|| anyhow::anyhow!("System browser package is missing"))?;
+    let mut manifest = registration.metadata.manifest.payload.clone();
+    let capability = manifest.contributions.capabilities.iter_mut().find(|capability| capability.id.as_ref() == TOOL_NAME)
+        .ok_or_else(|| anyhow::anyhow!("System browser capability is missing"))?;
+    capability.config_schema.0.as_object_mut().ok_or_else(|| anyhow::anyhow!("System browser schema must be an object"))?
+        .insert(BINDING_ANNOTATION.into(), serde_json::to_value(binding)?);
+    registration.metadata.manifest = nomifun_agent_contracts::ArtifactEnvelope::new(manifest)?;
+    Ok(())
+}
+
+#[cfg(all(test, feature = "browser-use"))]
+mod system_browser_binding_tests {
+    use super::*;
+    use nomifun_browser_platform::system_browser::{BINDING_ANNOTATION, SystemBrowserBinding};
+
+    #[test]
+    fn binding_annotation_is_injected_only_into_the_system_browser_package() {
+        let mut registrations = nomifun_agent_domain_wave1::registrations().unwrap();
+        let binding = SystemBrowserBinding { schema_version: 1, runtime_digest: "a".repeat(64) };
+        bind_system_browser(&mut registrations, binding.clone()).unwrap();
+        for registration in registrations {
+            assert!(registration.metadata.manifest.verify().unwrap());
+            for manifest in &registration.metadata.manifest.payload.contributions.capabilities {
+                let annotation = manifest.config_schema.0.get(BINDING_ANNOTATION);
+                if manifest.id.as_ref() == nomifun_agent_domain_wave1::NOMI_SYSTEM_BROWSER {
+                    assert_eq!(serde_json::from_value::<SystemBrowserBinding>(annotation.unwrap().clone()).unwrap(), binding);
+                    assert!(super::super::nomi_core_agent_projection::native_capability_available(manifest));
+                } else {
+                    assert!(annotation.is_none(), "System-browser authority cannot be copied onto another capability");
+                }
+            }
+        }
+    }
+}
+
 pub(crate) async fn build(services: &AppServices) -> anyhow::Result<NomiCoreBuiltinPlan> {
     let mut registrations = nomifun_agent_domain_support::registrations(
         nomifun_agent_domain_support::c7_package_specs(),
@@ -48,6 +129,22 @@ pub(crate) async fn build(services: &AppServices) -> anyhow::Result<NomiCoreBuil
         services.database.pool().clone(),
     )?;
     replace_package_registrations(&mut registrations, wave1);
+    #[cfg(feature = "browser-use")]
+    if let Some(provider) = services.system_browser.as_ref() {
+        bind_system_browser(&mut registrations,
+            nomifun_browser_platform::system_browser::SystemBrowserHost::binding(provider.as_ref()))?;
+    }
+    #[cfg(feature = "browser-use")]
+    if let Some(provider)=services.local_web_search.as_ref() {
+        for registration in &mut registrations {
+            let mut manifest=registration.metadata.manifest.payload.clone();
+            if let Some(capability)=manifest.contributions.capabilities.iter_mut().find(|capability|capability.id.as_ref()==nomifun_ai_agent::local_web_search::TOOL_NAME) {
+                capability.config_schema.0.as_object_mut().ok_or_else(||anyhow::anyhow!("Local search schema must be an object"))?
+                    .insert(nomifun_ai_agent::local_web_search::BINDING_ANNOTATION.into(),serde_json::to_value(provider.binding())?);
+                registration.metadata.manifest=nomifun_agent_contracts::ArtifactEnvelope::new(manifest)?;
+            }
+        }
+    }
     let wave1_tools = [
         nomifun_agent_domain_wave1::MEMORY_COMPANION_WRITE,
         nomifun_agent_domain_wave1::MEMORY_COMPANION_MERGE,
@@ -61,10 +158,21 @@ pub(crate) async fn build(services: &AppServices) -> anyhow::Result<NomiCoreBuil
     )]);
 
     let wave2_owner = super::nomi_core_wave2::action_host_port(services);
-    let wave2 = nomifun_agent_domain_wave2::registrations_with_host_port(
-        wave2_owner.clone(),
-    )
+    let mut wave2_ports=nomifun_agent_domain_wave2::Wave2RoleHostPorts::with_actions(wave2_owner.clone());
+    #[cfg(feature="browser-use")]
+    if let Some(runtime)=services.headless_render.as_ref() {
+        wave2_ports.browser_operation_tools=super::knowledge_browser::RenderRoleHost::new(runtime.clone(),services.authoritative_user_id.as_ref());
+    }
+    let mut wave2 = nomifun_agent_domain_wave2::registrations_with_role_host_ports(wave2_ports)
     .map_err(anyhow::Error::msg)?;
+    #[cfg(feature="browser-use")]
+    if let Some(runtime)=services.headless_render.as_ref() {
+        if let Some(browser)=wave2.iter_mut().find(|registration|registration.metadata.manifest.payload.package_id.as_ref()==nomifun_agent_domain_wave2::BROWSER_PACKAGE_ID) {
+            let digest=nomifun_agent_contracts::digest_payload(&runtime.binding())?;
+            browser.metadata.source.source_digest=Some(digest.clone());
+            browser.metadata.context.source.source_digest=Some(digest);
+        }
+    }
     replace_package_registrations(&mut registrations, wave2);
     let mcp_registrations = super::nomi_core_mcp_catalog::load_registrations(
         &nomifun_db::SqliteMcpServerRepository::new(services.database.pool().clone()),

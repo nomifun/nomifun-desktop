@@ -366,6 +366,12 @@ impl MemoryImportTransaction<'_> {
 }
 
 impl CompanionStore {
+    /// App teardown closes the shared pool even if cached consumers retain a clone.
+    /// Idempotent; waits for in-flight connections to return before releasing files.
+    pub(crate) async fn close(&self) {
+        self.pool.close().await;
+    }
+
     /// Validate and stage a complete memory-bundle merge in one SQLite
     /// transaction. No row is visible to other connections until the returned
     /// transaction is committed.
@@ -4047,6 +4053,27 @@ impl CompanionStore {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn shutdown_releases_disk_store_with_retained_clones() {
+        let root = tempfile::tempdir().unwrap();
+        let store = super::CompanionStore::open(root.path(), None).await.unwrap();
+        let retained = store.clone();
+        sqlx::query("SELECT 1").execute(&retained.pool).await.unwrap();
+        store.close().await;
+        assert!(sqlx::query("SELECT 1").execute(&retained.pool).await.is_err());
+        retained.close().await;
+        // Require actual file release while clones remain alive. SQLx's SQLite
+        // worker may finish its final close just after the pool future resolves.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match std::fs::remove_dir_all(root.path()) {
+                Ok(()) => break,
+                Err(error) if tokio::time::Instant::now() >= deadline => panic!("store files remained open: {error}"),
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+            }
+        }
+    }
+
     use super::*;
 
     fn companion_fixture(sequence: u64) -> String {

@@ -21,12 +21,12 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chromiumoxide::types::{CallId, Error as CdpError};
 use serde::Deserialize;
-use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 /// 根（browser）session 在注册表里的 key。CDP 根连接的消息无 `sessionId` 字段，
 /// 我们用一个固定哨兵 key 统一登记，避免 `Option<String>` 在两处分叉。
@@ -46,45 +46,14 @@ const EVENT_CHANNEL_CAPACITY: usize = 256;
 pub(crate) const RELIABLE_EVENT_CAPACITY: usize = 256;
 const RELIABLE_EVENT_BYTE_CAPACITY: usize = 16 * 1024 * 1024;
 /// Aggregate reliable-queue payload retained by one Chromium Host/connection.
-/// Every reliable copy, including task-attributed copies, is charged here.
+/// Every reliable event copy is charged here.
 #[doc(hidden)]
 pub const RELIABLE_HOST_EVENT_CAPACITY: usize = 512;
 #[doc(hidden)]
 pub const RELIABLE_HOST_EVENT_BYTE_CAPACITY: usize = 4 * 1024 * 1024;
-/// Cross-Host aggregate retained by a trusted task's temporary act consumers.
-/// Host-owned router/firewall/download subscribers are not assigned to one
-/// task on shared Primary/Anonymous Hosts. Their separate 4 MiB Host bound,
-/// combined with the platform's hard 32-Lane/task limit (one Host per Isolated
-/// Lane), caps the fixed-Host component for one fully isolated task at
-/// 128 MiB. Temporary act copies have this independent 128 MiB task authority,
-/// giving a conservative 256 MiB structural retained-payload ceiling. Changing
-/// Host/Lane ids cannot mint extra act capacity.
-#[doc(hidden)]
-pub const RELIABLE_TASK_EVENT_CAPACITY: usize = 4_096;
-#[doc(hidden)]
-pub const RELIABLE_TASK_EVENT_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
-#[doc(hidden)]
-pub const RELIABLE_TASK_SUBSCRIBER_CAPACITY: usize = 64;
 const MAX_RELIABLE_SUBSCRIBERS: usize = 256;
 const MAX_BROADCAST_SUBSCRIPTIONS: usize = 2_048;
 const MAX_LIVE_SESSIONS: usize = 4_096;
-/// A worker/OOPIF burst from one trusted Lane must stay far below the Host's
-/// final 4,096-session fuse. Top-level pages have a separate tab authority.
-#[doc(hidden)]
-pub const MAX_AUXILIARY_SESSIONS_PER_LANE: usize = 64;
-/// Multiple Lanes owned by one task share this aggregate authority. Changing a
-/// Lane id therefore cannot mint more worker/service-worker capacity.
-#[doc(hidden)]
-pub const MAX_AUXILIARY_SESSIONS_PER_TASK_FAMILY: usize = 256;
-/// Root-attached service/shared workers do not carry trustworthy Lane lineage.
-/// They are deliberately charged to one small Host bucket instead of guessing
-/// an owner from attacker-controlled URL/title fields.
-#[doc(hidden)]
-pub const MAX_UNATTRIBUTED_AUXILIARY_SESSIONS_PER_HOST: usize = 64;
-/// An attached page can briefly precede the Host target router's trusted
-/// nonce/opener decision. Pending entries are bounded independently so that
-/// this attribution window cannot be used to approach the Host fuse.
-const MAX_PENDING_SESSION_AUTHORITIES: usize = 64;
 const MAX_PENDING_CALLBACKS_PER_SESSION: usize = 1_024;
 const MAX_PENDING_CALLBACKS_PER_CONNECTION: usize = 4_096;
 const DEAD_SESSION_CAPACITY: usize = 1_024;
@@ -120,39 +89,10 @@ pub enum TransportError {
 /// 一次命令调用的结果：成功 `result` 的 JSON，或失败的 [`TransportError`]。
 pub type CommandResult = Result<serde_json::Value, TransportError>;
 
-/// Host-only authority attached to a CDP session. Both fields originate in the
-/// Lane/router configuration; neither is deserialized from model/tool input.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TaskSessionAuthority {
-    pub(crate) task_resource_family_key: String,
-    pub(crate) lane_id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum SessionResourceScope {
-    /// Diagnostic/legacy connections without a Host target router retain their
-    /// historical behavior and are still protected by the Host-global fuse.
-    LegacyUnscoped,
-    /// A top-level page (or a child delivered in the same short race window)
-    /// remains paused until trusted nonce/opener/parent authority resolves it.
-    PendingAuthority {
-        parent_session_id: Option<String>,
-    },
-    /// Exact task-family and Lane attribution.
-    Task(TaskSessionAuthority),
-    /// Root service/shared workers cannot always be mapped to one Lane. This
-    /// explicit state is intentionally not presented as precise attribution.
-    HostUnattributedAuxiliary,
-}
-
-/// Decision consumed by the transport attach worker before it releases a
-/// target from `waitForDebuggerOnStart`.
+/// Transport registration only. Run/tab authorization belongs to the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TaskSessionAdmission {
-    Admitted,
-    PendingAuthority,
-    Rejected,
-}
+pub(crate) enum SessionAdmission { Admitted, Rejected }
+
 
 /// 单个 CDP session 的状态：登记在 [`SessionRegistry`] 内。
 ///
@@ -165,10 +105,8 @@ pub struct Session {
     /// target 类型（`page` / `iframe` / `service_worker` / `browser`…），来自
     /// `attachedToTarget` 的 `targetInfo.type`；根 session 为 `browser`。
     pub target_type: String,
-    /// Target identity and host-only resource attribution. These are private so
-    /// callers cannot manufacture authority by mutating a Session value.
+    /// Identity learned from the complete browser attach envelope.
     target_id: Option<String>,
-    resource_scope: SessionResourceScope,
     /// 进行中的命令：CallId → 等待结果的 oneshot 发送端。
     callbacks: HashMap<CallId, oneshot::Sender<CommandResult>>,
     /// target 崩溃（粘性）。
@@ -183,7 +121,6 @@ impl Session {
             session_id: session_id.into(),
             target_type: target_type.into(),
             target_id: None,
-            resource_scope: SessionResourceScope::LegacyUnscoped,
             callbacks: HashMap::new(),
             crashed: false,
             closed: false,
@@ -276,7 +213,6 @@ fn approximate_json_heap_bytes(value: &serde_json::Value) -> usize {
 struct ReliableQueueSlot {
     _subscriber: ReliableQueueReservation,
     _host: ReliableQueueReservation,
-    _task: Option<ReliableQueueReservation>,
 }
 
 #[derive(Debug)]
@@ -337,108 +273,11 @@ impl Drop for ReliableQueueReservation {
     }
 }
 
-/// Opaque task-wide temporary-act reliable-event authority. Production construction is
-/// keyed only from the trusted Lane configuration after the Host has applied
-/// standalone/platform ownership rules; it is never accepted from tool input.
-pub(crate) struct ReliableEventTaskBudget {
-    queue: Arc<ReliableQueueBudget>,
-    subscribers: AtomicUsize,
-    subscriber_limit: usize,
-}
-
-impl ReliableEventTaskBudget {
-    pub(crate) fn for_trusted_task(task_resource_key: &str) -> Arc<Self> {
-        debug_assert!(!task_resource_key.trim().is_empty());
-        static BY_TRUSTED_TASK: OnceLock<Mutex<HashMap<String, Weak<ReliableEventTaskBudget>>>> =
-            OnceLock::new();
-        let budgets = BY_TRUSTED_TASK.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut budgets = budgets
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        budgets.retain(|_, budget| budget.strong_count() > 0);
-        if let Some(existing) = budgets.get(task_resource_key).and_then(Weak::upgrade) {
-            return existing;
-        }
-        let budget = Self::new_with_limits(
-            RELIABLE_TASK_EVENT_CAPACITY,
-            RELIABLE_TASK_EVENT_BYTE_CAPACITY,
-            RELIABLE_TASK_SUBSCRIBER_CAPACITY,
-        );
-        budgets.insert(task_resource_key.to_owned(), Arc::downgrade(&budget));
-        budget
-    }
-
-    /// Direct legacy `from_launched` callers have one Host and no trusted
-    /// cross-Host task identity, so they receive one non-shareable authority.
-    #[cfg(test)]
-    pub(crate) fn new_opaque() -> Arc<Self> {
-        Self::new_with_limits(
-            RELIABLE_TASK_EVENT_CAPACITY,
-            RELIABLE_TASK_EVENT_BYTE_CAPACITY,
-            RELIABLE_TASK_SUBSCRIBER_CAPACITY,
-        )
-    }
-
-    fn new_with_limits(
-        event_limit: usize,
-        byte_limit: usize,
-        subscriber_limit: usize,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            queue: ReliableQueueBudget::new(event_limit, byte_limit),
-            subscribers: AtomicUsize::new(0),
-            subscriber_limit,
-        })
-    }
-
-    fn try_reserve_subscriber(
-        self: &Arc<Self>,
-    ) -> Option<ReliableTaskSubscriberReservation> {
-        if !try_reserve(&self.subscribers, 1, self.subscriber_limit) {
-            return None;
-        }
-        Some(ReliableTaskSubscriberReservation {
-            budget: Arc::clone(self),
-        })
-    }
-
-    #[cfg(test)]
-    fn counts(&self) -> (usize, usize, usize) {
-        let (events, bytes) = self.queue.counts();
-        (events, bytes, self.subscribers.load(Ordering::Acquire))
-    }
-}
-
-struct ReliableTaskSubscriberReservation {
-    budget: Arc<ReliableEventTaskBudget>,
-}
-
-impl Drop for ReliableTaskSubscriberReservation {
-    fn drop(&mut self) {
-        self.budget.subscribers.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
-/// Receiver used only by task-scoped temporary control subscriptions.  Its
-/// subscriber permit is returned synchronously when cancellation drops it;
-/// queued event permits are independently returned as their events are
-/// received/dropped.
-pub(crate) struct ReliableTaskEventReceiver {
-    receiver: mpsc::UnboundedReceiver<CdpEvent>,
-    _subscriber: ReliableTaskSubscriberReservation,
-}
-
-impl ReliableTaskEventReceiver {
-    pub(crate) async fn recv(&mut self) -> Option<CdpEvent> {
-        self.receiver.recv().await
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReliableBudgetScope {
     Subscriber,
     Host,
-    Task,
 }
 
 impl ReliableBudgetScope {
@@ -454,20 +293,15 @@ impl ReliableBudgetScope {
                 RELIABLE_HOST_EVENT_CAPACITY,
                 RELIABLE_HOST_EVENT_BYTE_CAPACITY,
             ),
-            Self::Task => (
-                "task aggregate",
-                RELIABLE_TASK_EVENT_CAPACITY,
-                RELIABLE_TASK_EVENT_BYTE_CAPACITY,
-            ),
         }
     }
 }
 
+#[derive(Clone)]
 struct ReliableSubscriber {
     sender: mpsc::UnboundedSender<CdpEvent>,
     subscriber_budget: Arc<ReliableQueueBudget>,
     host_budget: Arc<ReliableQueueBudget>,
-    task_budget: Option<Arc<ReliableEventTaskBudget>>,
 }
 
 impl ReliableSubscriber {
@@ -490,23 +324,12 @@ impl ReliableSubscriber {
             .host_budget
             .try_reserve(bytes)
             .ok_or(ReliableSendError::Full(ReliableBudgetScope::Host))?;
-        let task = self
-            .task_budget
-            .as_ref()
-            .map(|budget| {
-                budget
-                    .queue
-                    .try_reserve(bytes)
-                    .ok_or(ReliableSendError::Full(ReliableBudgetScope::Task))
-            })
-            .transpose()?;
 
         let mut event = event.clone();
         debug_assert!(event.reliable_slot.is_none());
         event.reliable_slot = Some(Arc::new(ReliableQueueSlot {
             _subscriber: subscriber,
             _host: host,
-            _task: task,
         }));
         self.sender
             .send(event)
@@ -582,7 +405,6 @@ pub struct SessionRegistry {
     inner: Mutex<RegistryInner>,
     fatal: watch::Sender<Option<TransportError>>,
     reliable_host_budget: Arc<ReliableQueueBudget>,
-    authority_changed: Notify,
 }
 
 struct RegistryInner {
@@ -591,13 +413,6 @@ struct RegistryInner {
     /// Target-to-session routing for lifecycle events such as
     /// `Target.targetCrashed`, whose payload has a targetId but no sessionId.
     target_sessions: HashMap<String, String>,
-    /// Enabled only by HostTargetRouter construction. Once enabled, production
-    /// attach handling may not fall back to unscoped double-registration.
-    task_session_routing_enabled: bool,
-    task_family_auxiliary_sessions: HashMap<String, usize>,
-    lane_auxiliary_sessions: HashMap<(String, String), usize>,
-    unattributed_auxiliary_sessions: usize,
-    pending_session_authorities: usize,
     /// 事件订阅：(method, Option<session>) → broadcast 发送端。
     subscriptions: HashMap<SubKey, broadcast::Sender<CdpEvent>>,
     /// Security/lifecycle control events must never be dropped merely because
@@ -616,164 +431,10 @@ struct RegistryInner {
 }
 
 impl RegistryInner {
-    fn session_admission(&self, session_id: &str) -> TaskSessionAdmission {
-        match self.sessions.get(session_id).map(|session| &session.resource_scope) {
-            Some(SessionResourceScope::PendingAuthority { .. }) => {
-                TaskSessionAdmission::PendingAuthority
-            }
-            Some(_) => TaskSessionAdmission::Admitted,
-            None => TaskSessionAdmission::Rejected,
-        }
-    }
-
-    fn task_auxiliary_capacity_available(&self, authority: &TaskSessionAuthority) -> bool {
-        let family_count = self
-            .task_family_auxiliary_sessions
-            .get(&authority.task_resource_family_key)
-            .copied()
-            .unwrap_or(0);
-        let lane_key = (
-            authority.task_resource_family_key.clone(),
-            authority.lane_id.clone(),
-        );
-        let lane_count = self
-            .lane_auxiliary_sessions
-            .get(&lane_key)
-            .copied()
-            .unwrap_or(0);
-        family_count < MAX_AUXILIARY_SESSIONS_PER_TASK_FAMILY
-            && lane_count < MAX_AUXILIARY_SESSIONS_PER_LANE
-    }
-
-    fn reserve_task_auxiliary(&mut self, authority: &TaskSessionAuthority) -> bool {
-        if !self.task_auxiliary_capacity_available(authority) {
-            return false;
-        }
-        let family_count = self
-            .task_family_auxiliary_sessions
-            .get(&authority.task_resource_family_key)
-            .copied()
-            .unwrap_or(0);
-        let lane_key = (
-            authority.task_resource_family_key.clone(),
-            authority.lane_id.clone(),
-        );
-        let lane_count = self
-            .lane_auxiliary_sessions
-            .get(&lane_key)
-            .copied()
-            .unwrap_or(0);
-        self.task_family_auxiliary_sessions.insert(
-            authority.task_resource_family_key.clone(),
-            family_count + 1,
-        );
-        self.lane_auxiliary_sessions.insert(lane_key, lane_count + 1);
-        true
-    }
-
-    fn bind_session_to_authority(
-        &mut self,
-        session_id: &str,
-        authority: &TaskSessionAuthority,
-    ) -> Result<TaskSessionAdmission, TransportError> {
-        let Some(mut session) = self.sessions.remove(session_id) else {
-            return Ok(TaskSessionAdmission::Rejected);
-        };
-        if let SessionResourceScope::Task(existing) = &session.resource_scope {
-            if existing != authority {
-                self.sessions.insert(session_id.to_owned(), session);
-                return Err(TransportError::Protocol(format!(
-                    "refused to transfer CDP session {session_id} between trusted task/Lane authorities"
-                )));
-            }
-            self.sessions.insert(session_id.to_owned(), session);
-            return Ok(TaskSessionAdmission::Admitted);
-        }
-
-        let auxiliary = is_auxiliary_target_type(&session.target_type);
-        if auxiliary && !self.task_auxiliary_capacity_available(authority) {
-            self.sessions.insert(session_id.to_owned(), session);
-            self.remove_session(session_id, TransportError::SessionClosed);
-            self.remember_dead_session(session_id, false);
-            return Ok(TaskSessionAdmission::Rejected);
-        }
-
-        self.release_session_scope(&session.target_type, &session.resource_scope);
-        if auxiliary {
-            let reserved = self.reserve_task_auxiliary(authority);
-            debug_assert!(reserved, "capacity was checked under the same registry lock");
-        }
-        session.resource_scope = SessionResourceScope::Task(authority.clone());
-        self.sessions.insert(session_id.to_owned(), session);
-        Ok(TaskSessionAdmission::Admitted)
-    }
-
-    fn resolve_pending_parent_authority(
-        &mut self,
-        session_id: &str,
-    ) -> Result<TaskSessionAdmission, TransportError> {
-        let parent_session_id = self.sessions.get(session_id).and_then(|session| {
-            if let SessionResourceScope::PendingAuthority { parent_session_id } =
-                &session.resource_scope
-            {
-                parent_session_id.clone()
-            } else {
-                None
-            }
-        });
-        let Some(parent_session_id) = parent_session_id else {
-            return Ok(self.session_admission(session_id));
-        };
-        let authority = self
-            .sessions
-            .get(&parent_session_id)
-            .and_then(|session| match &session.resource_scope {
-                SessionResourceScope::Task(authority) => Some(authority.clone()),
-                _ => None,
-            });
-        match authority {
-            Some(authority) => self.bind_session_to_authority(session_id, &authority),
-            None => Ok(self.session_admission(session_id)),
-        }
-    }
-
-    fn release_task_auxiliary(&mut self, authority: &TaskSessionAuthority) {
-        decrement_or_remove(
-            &mut self.task_family_auxiliary_sessions,
-            &authority.task_resource_family_key,
-        );
-        decrement_or_remove(
-            &mut self.lane_auxiliary_sessions,
-            &(
-                authority.task_resource_family_key.clone(),
-                authority.lane_id.clone(),
-            ),
-        );
-    }
-
-    fn release_session_scope(&mut self, target_type: &str, scope: &SessionResourceScope) {
-        match scope {
-            SessionResourceScope::PendingAuthority { .. } => {
-                self.pending_session_authorities =
-                    self.pending_session_authorities.saturating_sub(1);
-            }
-            SessionResourceScope::Task(authority)
-                if is_auxiliary_target_type(target_type) =>
-            {
-                self.release_task_auxiliary(authority);
-            }
-            SessionResourceScope::HostUnattributedAuxiliary => {
-                self.unattributed_auxiliary_sessions =
-                    self.unattributed_auxiliary_sessions.saturating_sub(1);
-            }
-            SessionResourceScope::LegacyUnscoped | SessionResourceScope::Task(_) => {}
-        }
-    }
 
     fn remove_session(&mut self, session_id: &str, error: TransportError) {
         if let Some(mut session) = self.sessions.remove(session_id) {
             let callback_count = session.callbacks.len();
-            self.release_session_scope(&session.target_type, &session.resource_scope);
             for (_id, tx) in session.callbacks.drain() {
                 let _ = tx.send(Err(error.clone()));
             }
@@ -857,31 +518,9 @@ impl RegistryInner {
         self.subscriptions.clear();
         self.reliable_subscriptions.clear();
         self.target_sessions.clear();
-        self.task_family_auxiliary_sessions.clear();
-        self.lane_auxiliary_sessions.clear();
-        self.unattributed_auxiliary_sessions = 0;
-        self.pending_session_authorities = 0;
     }
 }
 
-fn decrement_or_remove<K>(counts: &mut HashMap<K, usize>, key: &K)
-where
-    K: std::hash::Hash + Eq,
-{
-    let remove = if let Some(count) = counts.get_mut(key) {
-        *count = count.saturating_sub(1);
-        *count == 0
-    } else {
-        false
-    };
-    if remove {
-        counts.remove(key);
-    }
-}
-
-fn is_auxiliary_target_type(target_type: &str) -> bool {
-    !matches!(target_type, "page" | "browser")
-}
 
 impl Default for SessionRegistry {
     fn default() -> Self {
@@ -902,11 +541,6 @@ impl SessionRegistry {
             inner: Mutex::new(RegistryInner {
                 sessions,
                 target_sessions: HashMap::new(),
-                task_session_routing_enabled: false,
-                task_family_auxiliary_sessions: HashMap::new(),
-                lane_auxiliary_sessions: HashMap::new(),
-                unattributed_auxiliary_sessions: 0,
-                pending_session_authorities: 0,
                 subscriptions: HashMap::new(),
                 reliable_subscriptions: HashMap::new(),
                 dead_sessions: VecDeque::new(),
@@ -918,315 +552,79 @@ impl SessionRegistry {
                 RELIABLE_HOST_EVENT_CAPACITY,
                 RELIABLE_HOST_EVENT_BYTE_CAPACITY,
             ),
-            authority_changed: Notify::new(),
         }
     }
 
-    /// 登记一个新子 session（attachedToTarget 时调）。重复登记同 id 直接覆盖刷新
-    /// （CDP 可能对同 target 多次 attach；新封套以最新 targetInfo 为准）。
+
+    /// Idempotent registration for an explicit attach response. This cannot
+    /// revive a retired session or change an existing session's target type.
     pub fn register_session(&self, session_id: impl Into<String>, target_type: impl Into<String>) {
         let session_id = session_id.into();
         let target_type = target_type.into();
         if let Err(error) = validate_cdp_identifier("session id", &session_id)
-        .and_then(|()| {
-            validate_text_bound("target type", &target_type, MAX_CDP_TARGET_TYPE_BYTES)
-        }) {
-            self.poison_connection(error);
+            .and_then(|()| validate_text_bound("target type", &target_type, MAX_CDP_TARGET_TYPE_BYTES)) {
+            self.poison_connection(error); return;
+        }
+        let mut state = self.inner.lock().unwrap();
+        if state.connection_closed || state.dead_error(&session_id).is_some() { return; }
+        if let Some(existing) = state.sessions.get(&session_id) {
+            if existing.target_type != target_type {
+                self.poison_connection_locked(&mut state, TransportError::Protocol("CDP session registration changed target type".into()));
+            }
             return;
         }
-        let mut g = self.inner.lock().unwrap();
-        if g.connection_closed {
+        if state.sessions.len() >= MAX_LIVE_SESSIONS {
+            self.poison_connection_locked(&mut state, TransportError::Protocol(format!("live CDP session limit exceeded ({MAX_LIVE_SESSIONS})")));
             return;
         }
-        if g.task_session_routing_enabled {
-            // Production attach events were already atomically admitted by
-            // register_attached in the read loop. Never let a later legacy
-            // register call resurrect a quota-rejected session or mutate the
-            // target type used by its charged resource scope.
-            return;
-        }
-        if !g.sessions.contains_key(&session_id) && g.sessions.len() >= MAX_LIVE_SESSIONS {
-            self.poison_connection_locked(
-                &mut g,
-                TransportError::Protocol(format!(
-                    "live CDP session limit exceeded ({MAX_LIVE_SESSIONS})"
-                )),
-            );
-            return;
-        }
-        g.clear_dead_session(&session_id);
-        g.sessions
-            .entry(session_id.clone())
-            .and_modify(|s| {
-                s.target_type = target_type.clone();
-                s.closed = false;
-                s.crashed = false;
-            })
-            .or_insert_with(|| Session::new(session_id, target_type));
+        state.sessions.insert(session_id.clone(), Session::new(session_id, target_type));
     }
 
-    /// Atomically records all routing facts carried by
-    /// `Target.attachedToTarget`. The read loop calls this before broadcasting
-    /// the event, so other subscribers cannot race their first session command
-    /// against a separate attach worker.
+    /// Record the full attach envelope before publishing its event. Parent and
+    /// opener strings are bounded metadata, never a source of run authority.
     pub(crate) fn register_attached(
-        &self,
-        parent_session_id: &str,
-        session_id: impl Into<String>,
-        target_id: impl Into<String>,
-        target_type: impl Into<String>,
-        opener_target_id: Option<&str>,
-    ) -> TaskSessionAdmission {
+        &self, parent_session_id: &str, session_id: impl Into<String>, target_id: impl Into<String>,
+        target_type: impl Into<String>, opener_target_id: Option<&str>,
+    ) -> SessionAdmission {
         let session_id = session_id.into();
         let target_id = target_id.into();
         let target_type = target_type.into();
-        if let Err(error) = validate_cdp_identifier("session id", &session_id)
-        .and_then(|()| validate_cdp_identifier("target id", &target_id))
-        .and_then(|()| validate_cdp_identifier("parent session id", parent_session_id))
-        .and_then(|()| {
-            opener_target_id.map_or(Ok(()), |opener_target_id| {
-                validate_cdp_identifier("opener target id", opener_target_id)
-            })
-        })
-        .and_then(|()| {
-            validate_text_bound("target type", &target_type, MAX_CDP_TARGET_TYPE_BYTES)
-        }) {
-            self.poison_connection(error);
-            return TaskSessionAdmission::Rejected;
+        let validation = validate_cdp_identifier("session id", &session_id)
+            .and_then(|()| validate_cdp_identifier("target id", &target_id))
+            .and_then(|()| validate_cdp_identifier("parent session id", parent_session_id))
+            .and_then(|()| opener_target_id.map_or(Ok(()), |id| validate_cdp_identifier("opener target id", id)))
+            .and_then(|()| validate_text_bound("target type", &target_type, MAX_CDP_TARGET_TYPE_BYTES));
+        if let Err(error) = validation { self.poison_connection(error); return SessionAdmission::Rejected; }
+        let mut state = self.inner.lock().unwrap();
+        if state.connection_closed { return SessionAdmission::Rejected; }
+        if state.target_sessions.get(&target_id).is_some_and(|id| id != &session_id) {
+            self.poison_connection_locked(&mut state, TransportError::Protocol("CDP target attached through multiple live sessions".into()));
+            return SessionAdmission::Rejected;
         }
-        let mut g = self.inner.lock().unwrap();
-        if g.connection_closed {
-            return TaskSessionAdmission::Rejected;
-        }
-
-        // This engine never intentionally multi-attaches one target. Allowing
-        // a second live session to overwrite the target->session map would
-        // make a later targetDestroyed event retire only the newest alias and
-        // strand the older session/quota forever. Treat that protocol shape as
-        // Host-fatal instead of weakening authoritative absence cleanup.
-        if let Some(existing_session_id) = g.target_sessions.get(&target_id)
-            && existing_session_id != &session_id
-        {
-            let error = TransportError::Protocol(format!(
-                "CDP target {target_id} was attached through multiple live sessions"
-            ));
-            self.poison_connection_locked(&mut g, error);
-            return TaskSessionAdmission::Rejected;
-        }
-
-        // Idempotent duplicate delivery must never charge a second slot or
-        // weaken an authority already established by the Host router.
-        if let Some(session) = g.sessions.get(&session_id)
-            && (session.target_id.as_deref() != Some(target_id.as_str())
-                || session.target_type != target_type)
-        {
-            let error = TransportError::Protocol(format!(
-                "duplicate CDP session {session_id} changed target identity or type"
-            ));
-            self.poison_connection_locked(&mut g, error);
-            return TaskSessionAdmission::Rejected;
-        }
-        if let Some(session) = g.sessions.get_mut(&session_id) {
-            session.closed = false;
-            session.crashed = false;
-            g.target_sessions
-                .retain(|_, mapped_session| mapped_session != &session_id);
-            g.target_sessions.insert(target_id, session_id.clone());
-            return g.session_admission(&session_id);
-        }
-
-        // Unlike the legacy direct registration API, attached-target overflow
-        // is local: leave the new session absent so the attach worker closes
-        // exactly that target. The 4,096 value remains the final Host fuse, but
-        // it no longer poisons healthy sibling sessions merely because a new
-        // target was refused.
-        if g.sessions.len() >= MAX_LIVE_SESSIONS {
-            return TaskSessionAdmission::Rejected;
-        }
-
-        let inherited_authority = g
-            .sessions
-            .get(parent_session_id)
-            .and_then(|session| match &session.resource_scope {
-                SessionResourceScope::Task(authority) => Some(authority.clone()),
-                _ => None,
-            })
-            .or_else(|| {
-                opener_target_id
-                    .and_then(|target_id| g.target_sessions.get(target_id))
-                    .and_then(|session_id| g.sessions.get(session_id))
-                    .and_then(|session| match &session.resource_scope {
-                        SessionResourceScope::Task(authority) => Some(authority.clone()),
-                        _ => None,
-                    })
-            });
-        let pending_parent = (!parent_session_id.is_empty())
-            .then(|| g.sessions.get(parent_session_id))
-            .flatten()
-            .and_then(|session| {
-                matches!(
-                    session.resource_scope,
-                    SessionResourceScope::PendingAuthority { .. }
-                )
-                .then(|| parent_session_id.to_owned())
-            });
-
-        let resource_scope = if !g.task_session_routing_enabled {
-            SessionResourceScope::LegacyUnscoped
-        } else if let Some(authority) = inherited_authority {
-            if is_auxiliary_target_type(&target_type) && !g.reserve_task_auxiliary(&authority) {
-                return TaskSessionAdmission::Rejected;
+        if let Some(existing) = state.sessions.get(&session_id) {
+            // A response-only registration may acquire its full metadata when
+            // the event arrives. Established identity can never be replaced.
+            if existing.target_type != target_type || existing.target_id.as_ref().is_some_and(|id| id != &target_id) {
+                self.poison_connection_locked(&mut state, TransportError::Protocol("duplicate CDP session changed target identity or type".into()));
+                return SessionAdmission::Rejected;
             }
-            SessionResourceScope::Task(authority)
-        } else if pending_parent.is_some() || target_type == "page" {
-            if g.pending_session_authorities >= MAX_PENDING_SESSION_AUTHORITIES {
-                return TaskSessionAdmission::Rejected;
-            }
-            g.pending_session_authorities += 1;
-            SessionResourceScope::PendingAuthority {
-                parent_session_id: pending_parent,
-            }
-        } else {
-            // A root service/shared worker has no trustworthy Lane signal. Do
-            // not guess from URL/title: admit only into the explicit Host bucket.
-            if g.unattributed_auxiliary_sessions
-                >= MAX_UNATTRIBUTED_AUXILIARY_SESSIONS_PER_HOST
-            {
-                return TaskSessionAdmission::Rejected;
-            }
-            g.unattributed_auxiliary_sessions += 1;
-            SessionResourceScope::HostUnattributedAuxiliary
-        };
-
-        g.clear_dead_session(&session_id);
-        let admission = match &resource_scope {
-            SessionResourceScope::PendingAuthority { .. } => {
-                TaskSessionAdmission::PendingAuthority
-            }
-            _ => TaskSessionAdmission::Admitted,
-        };
-        let mut session = Session::new(session_id.clone(), target_type);
+        } else if state.sessions.len() >= MAX_LIVE_SESSIONS {
+            self.poison_connection_locked(&mut state, TransportError::Protocol(format!("live CDP session limit exceeded ({MAX_LIVE_SESSIONS})")));
+            return SessionAdmission::Rejected;
+        }
+        state.clear_dead_session(&session_id);
+        let session = state.sessions.entry(session_id.clone()).or_insert_with(|| Session::new(&session_id, target_type));
         session.target_id = Some(target_id.clone());
-        session.resource_scope = resource_scope;
-        g.sessions.insert(session_id.clone(), session);
-        g.target_sessions
-            .retain(|_, mapped_session| mapped_session != &session_id);
-        g.target_sessions.insert(target_id, session_id);
-        drop(g);
-        self.authority_changed.notify_waiters();
-        admission
+        session.closed = false;
+        session.crashed = false;
+        state.target_sessions.insert(target_id, session_id);
+        SessionAdmission::Admitted
     }
 
-    /// Activates trusted task/Lane admission for this Host connection. The
-    /// HostTargetRouter calls this once during construction, before auto-attach
-    /// can release any renderer target.
-    pub(crate) fn enable_task_session_quota_routing(&self) {
-        self.inner.lock().unwrap().task_session_routing_enabled = true;
-    }
-
-    pub(crate) fn task_session_quota_routing_enabled(&self) -> bool {
-        self.inner.lock().unwrap().task_session_routing_enabled
-    }
-
-    /// Atomically binds a page session to trusted Host-side authority. Pending
-    /// child workers inherit this authority when the transport reaches their
-    /// attach event; no URL/title/model field participates in the decision.
-    pub(crate) fn claim_task_session_authority(
-        &self,
-        session_id: &str,
-        task_resource_family_key: &str,
-        lane_id: &str,
-    ) -> Result<TaskSessionAdmission, TransportError> {
-        validate_cdp_identifier("task resource family key", task_resource_family_key)?;
-        validate_cdp_identifier("task session Lane id", lane_id)?;
-        let authority = TaskSessionAuthority {
-            task_resource_family_key: task_resource_family_key.to_owned(),
-            lane_id: lane_id.to_owned(),
-        };
-        let mut g = self.inner.lock().unwrap();
-        if g.connection_closed {
-            return Err(TransportError::Closed);
-        }
-        let admission = g.bind_session_to_authority(session_id, &authority)?;
-        drop(g);
-        self.authority_changed.notify_waiters();
-        Ok(admission)
-    }
-
-    /// Waits only for the short trusted-router correlation window. Timeout is
-    /// a local rejection: the exact new target is closed by the attach worker,
-    /// while sibling sessions remain registered and routable.
-    pub(crate) async fn wait_for_task_session_admission(
-        &self,
-        session_id: &str,
-        timeout: Duration,
-    ) -> TaskSessionAdmission {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            let notified = self.authority_changed.notified();
-            let admission = {
-                let mut g = self.inner.lock().unwrap();
-                g.resolve_pending_parent_authority(session_id)
-                    .unwrap_or(TaskSessionAdmission::Rejected)
-            };
-            if admission != TaskSessionAdmission::PendingAuthority {
-                return admission;
-            }
-            if tokio::time::timeout_at(deadline, notified).await.is_err() {
-                let mut g = self.inner.lock().unwrap();
-                let admission = g
-                    .resolve_pending_parent_authority(session_id)
-                    .unwrap_or(TaskSessionAdmission::Rejected);
-                if admission == TaskSessionAdmission::PendingAuthority {
-                    g.remove_session(session_id, TransportError::SessionClosed);
-                    g.remember_dead_session(session_id, false);
-                    drop(g);
-                    self.authority_changed.notify_waiters();
-                    return TaskSessionAdmission::Rejected;
-                }
-                return admission;
-            }
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn task_session_authority(
-        &self,
-        session_id: &str,
-    ) -> Option<TaskSessionAuthority> {
-        self.inner
-            .lock()
-            .unwrap()
-            .sessions
-            .get(session_id)
-            .and_then(|session| match &session.resource_scope {
-                SessionResourceScope::Task(authority) => Some(authority.clone()),
-                _ => None,
-            })
-    }
-
-    #[cfg(test)]
-    fn task_session_quota_counts(
-        &self,
-        task_resource_family_key: &str,
-        lane_id: &str,
-    ) -> (usize, usize, usize, usize) {
-        let g = self.inner.lock().unwrap();
-        (
-            g.task_family_auxiliary_sessions
-                .get(task_resource_family_key)
-                .copied()
-                .unwrap_or(0),
-            g.lane_auxiliary_sessions
-                .get(&(
-                    task_resource_family_key.to_owned(),
-                    lane_id.to_owned(),
-                ))
-                .copied()
-                .unwrap_or(0),
-            g.unattributed_auxiliary_sessions,
-            g.pending_session_authorities,
-        )
+    pub(crate) fn attached_session_matches(&self, session_id: &str, target_id: &str, target_type: &str) -> bool {
+        let state = self.inner.lock().unwrap();
+        !state.connection_closed && state.sessions.get(session_id).is_some_and(|session|
+            !session.is_dead() && session.target_id.as_deref() == Some(target_id) && session.target_type == target_type)
     }
 
     /// 该 session 当前是否已登记。
@@ -1404,68 +802,50 @@ impl SessionRegistry {
                     RELIABLE_EVENT_BYTE_CAPACITY,
                 ),
                 host_budget: Arc::clone(&self.reliable_host_budget),
-                task_budget: None,
             });
         rx
     }
 
-    /// Register a temporary reliable consumer owned by one trusted task.
-    /// Its queued copies are charged to subscriber + Host + task budgets.
-    pub(crate) fn subscribe_reliable_for_task(
+    /// One ordered reliable queue for a bounded set of methods. All method
+    /// registrations share the same sender and subscriber budget, so alternating
+    /// event kinds cannot multiply retained capacity. Registration slots still
+    /// count against the existing metadata bound. Duplicate methods are ignored.
+    pub fn subscribe_reliable_sequence(
         &self,
-        method: impl Into<String>,
+        methods: &[&str],
         session_id: Option<&str>,
-        task_budget: &Arc<ReliableEventTaskBudget>,
-    ) -> Result<ReliableTaskEventReceiver, TransportError> {
-        let method = method.into();
-        if let Err(error) = validate_text_bound("method", &method, MAX_CDP_METHOD_BYTES).and_then(
-            |()| {
-                session_id.map_or(Ok(()), |session_id| {
-                    validate_cdp_identifier("subscription session id", session_id)
-                })
-            },
-        ) {
-            self.poison_connection(error.clone());
-            return Err(error);
+    ) -> mpsc::UnboundedReceiver<CdpEvent> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let validation = (|| {
+            if methods.is_empty() || methods.len() > 16 {
+                return Err(TransportError::Protocol("reliable event sequence requires 1..16 methods".into()));
+            }
+            for method in methods {
+                if method.is_empty() { return Err(TransportError::Protocol("empty reliable event method".into())); }
+                validate_text_bound("method", method, MAX_CDP_METHOD_BYTES)?;
+            }
+            if let Some(session) = session_id { validate_cdp_identifier("subscription session id", session)?; }
+            Ok(())
+        })();
+        if let Err(error) = validation { self.poison_connection(error); return receiver; }
+        let methods: std::collections::BTreeSet<_> = methods.iter().copied().collect();
+        let mut state = self.inner.lock().unwrap();
+        if state.connection_closed { return receiver; }
+        state.prune_subscriptions();
+        if state.reliable_subscriber_count().saturating_add(methods.len()) > MAX_RELIABLE_SUBSCRIBERS {
+            self.poison_connection_locked(&mut state, TransportError::Protocol("reliable event subscription limit exceeded".into()));
+            return receiver;
         }
-        let key: SubKey = (method, session_id.map(str::to_owned));
-        let (tx, rx) = mpsc::unbounded_channel();
-        let mut g = self.inner.lock().unwrap();
-        if g.connection_closed {
-            return Err(TransportError::Closed);
-        }
-        g.prune_subscriptions();
-        if g.reliable_subscriber_count() >= MAX_RELIABLE_SUBSCRIBERS {
-            let error = TransportError::Protocol(format!(
-                "reliable CDP subscriber limit exceeded ({MAX_RELIABLE_SUBSCRIBERS})"
-            ));
-            self.poison_connection_locked(&mut g, error.clone());
-            return Err(error);
-        }
-        let Some(subscriber_reservation) = task_budget.try_reserve_subscriber() else {
-            let error = TransportError::Protocol(format!(
-                "reliable CDP task subscriber limit exceeded ({RELIABLE_TASK_SUBSCRIBER_CAPACITY})"
-            ));
-            self.poison_connection_locked(&mut g, error.clone());
-            return Err(error);
+        let subscriber = ReliableSubscriber {
+            sender, subscriber_budget: ReliableQueueBudget::new(RELIABLE_EVENT_CAPACITY, RELIABLE_EVENT_BYTE_CAPACITY),
+            host_budget: Arc::clone(&self.reliable_host_budget),
         };
-        g.reliable_subscriptions
-            .entry(key)
-            .or_default()
-            .push(ReliableSubscriber {
-                sender: tx,
-                subscriber_budget: ReliableQueueBudget::new(
-                    RELIABLE_EVENT_CAPACITY,
-                    RELIABLE_EVENT_BYTE_CAPACITY,
-                ),
-                host_budget: Arc::clone(&self.reliable_host_budget),
-                task_budget: Some(Arc::clone(task_budget)),
-            });
-        Ok(ReliableTaskEventReceiver {
-            receiver: rx,
-            _subscriber: subscriber_reservation,
-        })
+        for method in methods {
+            state.reliable_subscriptions.entry((method.to_owned(), session_id.map(str::to_owned))).or_default().push(subscriber.clone());
+        }
+        receiver
     }
+
 
     /// Whether a live lossless subscriber exists for `method` (exact-session
     /// or wildcard). The transport uses this as the `Fetch.enable` arming gate
@@ -1771,17 +1151,14 @@ impl SessionRegistry {
     /// 使等待中的 `send` 立即解除（绝不悬挂）。粘性：之后该 session 上 `send` 短路。
     pub fn fail_session(&self, session_id: &str, crashed: bool) {
         let mut g = self.inner.lock().unwrap();
+        let crashed = crashed || matches!(g.dead_error(session_id), Some(TransportError::SessionCrashed));
         let error = if crashed {
             TransportError::SessionCrashed
         } else {
             TransportError::SessionClosed
         };
         g.remove_session(session_id, error);
-        if crashed {
-            g.remember_dead_session(session_id, true);
-        }
-        drop(g);
-        self.authority_changed.notify_waiters();
+        g.remember_dead_session(session_id, crashed);
     }
 
     /// 标记整个连接关闭（WS 断开）：drain 所有 session 的所有挂起回调为 `Closed`，
@@ -2062,250 +1439,33 @@ mod tests {
         assert_eq!(reg.reliable_host_budget.counts(), (0, 0));
     }
 
+
     #[tokio::test]
-    async fn task_event_token_stays_charged_after_recv_until_the_event_is_dropped() {
-        let reg = SessionRegistry::new();
-        let task = ReliableEventTaskBudget::new_with_limits(8, 1024 * 1024, 2);
-        let mut receiver = reg
-            .subscribe_reliable_for_task("Target.targetCrashed", None, &task)
-            .expect("task-scoped subscription");
-        reg.dispatch_message(r#"{"method":"Target.targetCrashed","params":{"targetId":"T1"}}"#)
-            .unwrap();
-        assert_eq!(task.counts().0, 1);
-        assert_eq!(reg.reliable_host_budget.counts().0, 1);
-
-        let event = receiver.recv().await.expect("queued event");
-        assert_eq!(
-            task.counts().0,
-            1,
-            "recv transfers the token to the consumer; it does not release early"
-        );
+    async fn reliable_event_stays_charged_after_recv_until_dropped() {
+        let registry = SessionRegistry::new();
+        let mut receiver = registry.subscribe_reliable("Target.targetCrashed", None);
+        registry.dispatch_message(r#"{"method":"Target.targetCrashed","params":{"targetId":"fixture"}}"#).unwrap();
+        assert_eq!(registry.reliable_host_budget.counts().0, 1);
+        let event = receiver.recv().await.unwrap();
+        assert_eq!(registry.reliable_host_budget.counts().0, 1);
+        drop(receiver);
+        assert_eq!(registry.reliable_host_budget.counts().0, 1);
         drop(event);
-        assert_eq!(task.counts(), (0, 0, 1));
-        assert_eq!(reg.reliable_host_budget.counts(), (0, 0));
-        drop(receiver);
-        assert_eq!(task.counts(), (0, 0, 0));
+        assert_eq!(registry.reliable_host_budget.counts(), (0, 0));
     }
 
     #[test]
-    fn dropped_task_receiver_returns_queued_events_and_subscriber_permit() {
-        let reg = SessionRegistry::new();
-        let task = ReliableEventTaskBudget::new_with_limits(8, 1024 * 1024, 2);
-        let receiver = reg
-            .subscribe_reliable_for_task("Target.targetCrashed", None, &task)
-            .expect("task-scoped subscription");
-        reg.dispatch_message(r#"{"method":"Target.targetCrashed","params":{"targetId":"T1"}}"#)
-            .unwrap();
-        assert_eq!(task.counts().0, 1);
-
-        // Tokio drops every queued value synchronously with the receiver.
-        // The wrapper independently returns the active-subscriber permit.
-        drop(receiver);
-        assert_eq!(task.counts(), (0, 0, 0));
-        assert_eq!(reg.reliable_host_budget.counts(), (0, 0));
-    }
-
-    #[test]
-    fn fixed_host_subscriptions_never_charge_a_task_authority() {
-        let reg = SessionRegistry::new();
-        let task = ReliableEventTaskBudget::new_opaque();
-        let fixed = reg.subscribe_reliable("Browser.downloadWillBegin", None);
-        reg.dispatch_message(
-            r#"{"method":"Browser.downloadWillBegin","params":{"guid":"G1"}}"#,
-        )
-        .unwrap();
-
-        assert_eq!(task.counts(), (0, 0, 0));
-        assert_eq!(reg.reliable_host_budget.counts().0, 1);
-        drop(fixed);
-        assert_eq!(reg.reliable_host_budget.counts(), (0, 0));
-    }
-
-    #[test]
-    fn trusted_task_authority_is_shared_across_hosts_but_not_across_tasks() {
-        static NEXT_TEST_TASK: AtomicUsize = AtomicUsize::new(1);
-        let suffix = NEXT_TEST_TASK.fetch_add(1, Ordering::Relaxed);
-        let key = format!("reliable-budget-test-task-{suffix}");
-        let same_host_or_lane = ReliableEventTaskBudget::for_trusted_task(&key);
-        let isolated_host = ReliableEventTaskBudget::for_trusted_task(&key);
-        let sibling_task =
-            ReliableEventTaskBudget::for_trusted_task(&format!("{key}-sibling"));
-
-        assert!(Arc::ptr_eq(&same_host_or_lane, &isolated_host));
-        assert!(!Arc::ptr_eq(&same_host_or_lane, &sibling_task));
-    }
-
-    #[test]
-    fn trusted_task_weak_registry_reclaims_drop_debt_without_aba_resurrection() {
-        static NEXT_TEST_TASK: AtomicUsize = AtomicUsize::new(1);
-        let suffix = NEXT_TEST_TASK.fetch_add(1, Ordering::Relaxed);
-        let key = format!("reliable-budget-drop-aba-{suffix}");
-        let reg = SessionRegistry::new();
-        let original = ReliableEventTaskBudget::for_trusted_task(&key);
-        let original_weak = Arc::downgrade(&original);
-        let receiver = reg
-            .subscribe_reliable_for_task("Target.targetCrashed", None, &original)
-            .unwrap();
-        drop(original);
-        assert!(
-            original_weak.upgrade().is_some(),
-            "live subscriber authority must keep the exact generation pinned"
-        );
-
-        drop(receiver);
-        // The registry sender is now closed; normal subscription maintenance
-        // drops its final task-budget Arc and therefore the old generation.
-        assert!(!reg.has_reliable_subscriber("Target.targetCrashed"));
-        assert!(original_weak.upgrade().is_none());
-
-        let replacement = ReliableEventTaskBudget::for_trusted_task(&key);
-        assert_eq!(replacement.counts(), (0, 0, 0));
-        assert!(
-            original_weak.upgrade().is_none(),
-            "reusing the trusted key must never revive an old/debited authority"
-        );
-    }
-
-    #[test]
-    fn task_aggregate_overflow_poisons_only_the_host_that_observed_it() {
-        let task = ReliableEventTaskBudget::new_with_limits(4, 1024 * 1024, 4);
-        let host_a = SessionRegistry::new();
-        let host_b = SessionRegistry::new();
-        let receiver_a = host_a
-            .subscribe_reliable_for_task("Target.targetCrashed", None, &task)
-            .unwrap();
-        let receiver_b = host_b
-            .subscribe_reliable_for_task("Target.targetCrashed", None, &task)
-            .unwrap();
-
-        for index in 0..2 {
-            host_a
-                .dispatch_message(&format!(
-                    r#"{{"method":"Target.targetCrashed","params":{{"host":"a","index":{index}}}}}"#
-                ))
-                .unwrap();
-            host_b
-                .dispatch_message(&format!(
-                    r#"{{"method":"Target.targetCrashed","params":{{"host":"b","index":{index}}}}}"#
-                ))
-                .unwrap();
+    fn dropping_reliable_receiver_returns_all_queued_event_charges() {
+        let registry = SessionRegistry::new();
+        let receiver = registry.subscribe_reliable("Target.targetCrashed", None);
+        for _ in 0..3 {
+            registry.dispatch_message(r#"{"method":"Target.targetCrashed","params":{"targetId":"fixture"}}"#).unwrap();
         }
-        let error = host_b
-            .dispatch_message(
-                r#"{"method":"Target.targetCrashed","params":{"host":"b","overflow":true}}"#,
-            )
-            .expect_err("fifth cross-Host copy exceeds the trusted task budget");
-        assert!(error.to_string().contains("task aggregate"));
-        assert!(host_b.is_connection_closed());
-        assert!(
-            !host_a.is_connection_closed(),
-            "task saturation must not globally poison sibling Host connections"
-        );
-        assert_eq!(task.counts().0, 4);
-
-        drop(receiver_b);
-        assert_eq!(task.counts().0, 2);
-        drop(receiver_a);
-        assert_eq!(task.counts(), (0, 0, 0));
-        assert_eq!(host_a.reliable_host_budget.counts(), (0, 0));
-        assert_eq!(host_b.reliable_host_budget.counts(), (0, 0));
-    }
-
-    #[test]
-    fn failed_task_reservation_rolls_back_subscriber_and_host_layers() {
-        let reg = SessionRegistry::new();
-        let task = ReliableEventTaskBudget::new_with_limits(0, 1024, 1);
-        let receiver = reg
-            .subscribe_reliable_for_task("Target.targetCrashed", None, &task)
-            .unwrap();
-        let error = reg
-            .dispatch_message(
-                r#"{"method":"Target.targetCrashed","params":{"targetId":"T1"}}"#,
-            )
-            .expect_err("zero-sized task queue rejects its first event");
-        assert!(error.to_string().contains("task aggregate"));
-        assert_eq!(task.counts(), (0, 0, 1));
-        assert_eq!(reg.reliable_host_budget.counts(), (0, 0));
+        assert_eq!(registry.reliable_host_budget.counts().0, 3);
         drop(receiver);
-        assert_eq!(task.counts(), (0, 0, 0));
-    }
-
-    #[test]
-    fn task_subscriber_admission_is_cross_host_bounded_and_raii_released() {
-        let task = ReliableEventTaskBudget::new_with_limits(
-            RELIABLE_TASK_EVENT_CAPACITY,
-            RELIABLE_TASK_EVENT_BYTE_CAPACITY,
-            RELIABLE_TASK_SUBSCRIBER_CAPACITY,
-        );
-        let hosts = (0..=RELIABLE_TASK_SUBSCRIBER_CAPACITY)
-            .map(|_| SessionRegistry::new())
-            .collect::<Vec<_>>();
-        let receivers = hosts[..RELIABLE_TASK_SUBSCRIBER_CAPACITY]
-            .iter()
-            .map(|host| {
-                host.subscribe_reliable_for_task("Target.targetCrashed", None, &task)
-                    .expect("subscriber within cross-Host task cap")
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(task.counts().2, RELIABLE_TASK_SUBSCRIBER_CAPACITY);
-
-        let error = hosts[RELIABLE_TASK_SUBSCRIBER_CAPACITY]
-            .subscribe_reliable_for_task("Target.targetCrashed", None, &task)
-            .err()
-            .expect("subscriber N+1 must be rejected");
-        assert!(error.to_string().contains("task subscriber limit"));
-        assert!(hosts[RELIABLE_TASK_SUBSCRIBER_CAPACITY].is_connection_closed());
-        assert!(hosts[..RELIABLE_TASK_SUBSCRIBER_CAPACITY]
-            .iter()
-            .all(|host| !host.is_connection_closed()));
-
-        drop(receivers);
-        assert_eq!(task.counts(), (0, 0, 0));
-    }
-
-    #[test]
-    fn isolated_host_math_bounds_fixed_plus_dynamic_task_queues_at_default_and_max_lanes() {
-        // Must stay aligned with
-        // `nomifun_browser_platform::MAX_TASK_OPEN_LANES`. Isolated mode maps
-        // every Lane to a distinct HostKey, so this is also its Host maximum.
-        const DEFAULT_ISOLATED_HOSTS: usize = 4;
-        const MAX_ISOLATED_HOSTS: usize = 32;
-        const MIB: usize = 1024 * 1024;
-        let default_fixed_host_ceiling =
-            DEFAULT_ISOLATED_HOSTS * RELIABLE_HOST_EVENT_BYTE_CAPACITY;
-        let max_fixed_host_ceiling =
-            MAX_ISOLATED_HOSTS * RELIABLE_HOST_EVENT_BYTE_CAPACITY;
-        assert_eq!(
-            default_fixed_host_ceiling,
-            16 * MIB,
-            "four isolated Hosts retain at most 16 MiB of Host-owned copies"
-        );
-        assert_eq!(
-            max_fixed_host_ceiling,
-            RELIABLE_TASK_EVENT_BYTE_CAPACITY,
-            "32 isolated Hosts retain at most 128 MiB of Host-owned copies"
-        );
-        assert_eq!(
-            RELIABLE_TASK_EVENT_BYTE_CAPACITY,
-            128 * MIB,
-            "temporary act copies are independently bounded across all Hosts"
-        );
-        assert_eq!(
-            default_fixed_host_ceiling + RELIABLE_TASK_EVENT_BYTE_CAPACITY,
-            144 * MIB,
-            "default four-Host conservative fixed + dynamic task ceiling"
-        );
-        assert_eq!(
-            max_fixed_host_ceiling + RELIABLE_TASK_EVENT_BYTE_CAPACITY,
-            256 * MIB,
-            "maximum 32-Host conservative fixed + dynamic task ceiling"
-        );
-        assert_eq!(
-            MAX_ISOLATED_HOSTS * RELIABLE_HOST_EVENT_CAPACITY
-                + RELIABLE_TASK_EVENT_CAPACITY,
-            20_480,
-            "event-count structural ceiling is finite too"
-        );
+        assert_eq!(registry.reliable_host_budget.counts(), (0, 0));
+        assert!(!registry.has_reliable_subscriber("Target.targetCrashed"));
+        assert!(!registry.is_connection_closed());
     }
 
     #[test]
@@ -2726,6 +1886,47 @@ mod tests {
     }
 
     /// success 回包缺省 result（null）→ Ok(Null)，不报错。
+    #[test]
+    fn late_direct_registration_cannot_revive_a_retired_session() {
+        for crashed in [false, true] {
+            let registry = SessionRegistry::new();
+            registry.register_session("page", "page");
+            registry.fail_session("page", crashed);
+            registry.register_session("page", "page");
+            assert!(!registry.has_session("page"));
+            assert_eq!(registry.register_attached(ROOT_SESSION, "page", "target", "page", None), SessionAdmission::Admitted);
+            assert!(registry.attached_session_matches("page", "target", "page"));
+        }
+    }
+
+    #[test]
+    fn attach_enriches_response_metadata_but_cannot_replace_identity() {
+        let registry = SessionRegistry::new();
+        registry.register_session("page", "page");
+        assert_eq!(registry.register_attached(ROOT_SESSION, "page", "target", "page", None), SessionAdmission::Admitted);
+        assert_eq!(registry.register_attached(ROOT_SESSION, "page", "target", "page", None), SessionAdmission::Admitted);
+        assert_eq!(registry.register_attached(ROOT_SESSION, "page", "another", "page", None), SessionAdmission::Rejected);
+        assert!(registry.is_connection_closed());
+    }
+
+    #[test]
+    fn duplicate_target_session_alias_is_connection_fatal() {
+        let registry = SessionRegistry::new();
+        assert_eq!(registry.register_attached(ROOT_SESSION, "first", "target", "page", None), SessionAdmission::Admitted);
+        assert_eq!(registry.register_attached(ROOT_SESSION, "second", "target", "page", None), SessionAdmission::Rejected);
+        assert!(registry.is_connection_closed());
+    }
+
+    #[test]
+    fn attached_sessions_obey_the_connection_fuse_without_task_or_lane_keys() {
+        let registry = SessionRegistry::new();
+        for index in 0..MAX_LIVE_SESSIONS-1 {
+            assert_eq!(registry.register_attached(ROOT_SESSION, format!("session-{index}"), format!("target-{index}"), "worker", None), SessionAdmission::Admitted);
+        }
+        assert_eq!(registry.register_attached(ROOT_SESSION, "overflow", "overflow", "worker", None), SessionAdmission::Rejected);
+        assert!(registry.is_connection_closed());
+    }
+
     #[tokio::test]
     async fn response_without_result_is_ok_null() {
         let reg = SessionRegistry::new();
@@ -2735,306 +1936,4 @@ mod tests {
         assert_eq!(rx.await.unwrap().unwrap(), serde_json::Value::Null);
     }
 
-    fn attach_and_claim_page(
-        reg: &SessionRegistry,
-        session_id: &str,
-        target_id: &str,
-        family: &str,
-        lane: &str,
-    ) {
-        assert_eq!(
-            reg.register_attached(ROOT_SESSION, session_id, target_id, "page", None),
-            TaskSessionAdmission::PendingAuthority
-        );
-        assert_eq!(
-            reg.claim_task_session_authority(session_id, family, lane)
-                .unwrap(),
-            TaskSessionAdmission::Admitted
-        );
-    }
-
-    #[test]
-    fn hostile_worker_family_and_lane_quotas_do_not_kill_siblings() {
-        let reg = SessionRegistry::new();
-        reg.enable_task_session_quota_routing();
-
-        // Four Lanes fill one task family's aggregate 256 auxiliary slots.
-        for lane_index in 0..4 {
-            let lane = format!("lane-a-{lane_index}");
-            let page_session = format!("page-a-{lane_index}");
-            let page_target = format!("target-page-a-{lane_index}");
-            attach_and_claim_page(&reg, &page_session, &page_target, "family-a", &lane);
-            for worker_index in 0..MAX_AUXILIARY_SESSIONS_PER_LANE {
-                assert_eq!(
-                    reg.register_attached(
-                        &page_session,
-                        format!("worker-a-{lane_index}-{worker_index}"),
-                        format!("target-worker-a-{lane_index}-{worker_index}"),
-                        "worker",
-                        None,
-                    ),
-                    TaskSessionAdmission::Admitted
-                );
-            }
-            assert_eq!(
-                reg.task_session_quota_counts("family-a", &lane).1,
-                MAX_AUXILIARY_SESSIONS_PER_LANE
-            );
-        }
-        assert_eq!(
-            reg.task_session_quota_counts("family-a", "lane-a-0").0,
-            MAX_AUXILIARY_SESSIONS_PER_TASK_FAMILY
-        );
-
-        attach_and_claim_page(
-            &reg,
-            "page-a-overflow",
-            "target-page-a-overflow",
-            "family-a",
-            "lane-a-overflow",
-        );
-        assert_eq!(
-            reg.register_attached(
-                "page-a-overflow",
-                "worker-a-overflow",
-                "target-worker-a-overflow",
-                "service_worker",
-                None,
-            ),
-            TaskSessionAdmission::Rejected
-        );
-        assert!(!reg.has_session("worker-a-overflow"));
-
-        // The old attach worker's second register call cannot resurrect it.
-        reg.register_session("worker-a-overflow", "service_worker");
-        assert!(!reg.has_session("worker-a-overflow"));
-
-        // A session initially admitted only to the conservative root bucket
-        // may later receive trusted lineage. If that family is already full,
-        // rejection must drain every retained callback/subscription/mapping.
-        assert_eq!(
-            reg.register_attached(
-                ROOT_SESSION,
-                "migrating-sw",
-                "migrating-sw-target",
-                "service_worker",
-                None,
-            ),
-            TaskSessionAdmission::Admitted
-        );
-        let mut callback = reg.register_command("migrating-sw", call(77)).unwrap();
-        let mut broadcast = reg.subscribe("Runtime.consoleAPICalled", Some("migrating-sw"));
-        let mut reliable =
-            reg.subscribe_reliable("Runtime.exceptionThrown", Some("migrating-sw"));
-        assert_eq!(
-            reg.claim_task_session_authority("migrating-sw", "family-a", "lane-a-overflow")
-                .unwrap(),
-            TaskSessionAdmission::Rejected
-        );
-        assert_eq!(
-            callback.try_recv().unwrap(),
-            Err(TransportError::SessionClosed)
-        );
-        assert!(matches!(
-            broadcast.try_recv(),
-            Err(broadcast::error::TryRecvError::Closed)
-        ));
-        assert!(matches!(
-            reliable.try_recv(),
-            Err(mpsc::error::TryRecvError::Disconnected)
-        ));
-        {
-            let state = reg.inner.lock().unwrap();
-            assert!(!state.sessions.contains_key("migrating-sw"));
-            assert!(!state
-                .target_sessions
-                .contains_key("migrating-sw-target"));
-            assert!(state.subscriptions.keys().all(|(_, session)| {
-                session.as_deref() != Some("migrating-sw")
-            }));
-            assert!(state.reliable_subscriptions.keys().all(|(_, session)| {
-                session.as_deref() != Some("migrating-sw")
-            }));
-        }
-
-        // A sibling task family remains fully routable on the same Host.
-        attach_and_claim_page(
-            &reg,
-            "page-b",
-            "target-page-b",
-            "family-b",
-            "lane-b",
-        );
-        assert_eq!(
-            reg.register_attached(
-                "page-b",
-                "worker-b",
-                "target-worker-b",
-                "worker",
-                None,
-            ),
-            TaskSessionAdmission::Admitted
-        );
-        assert!(reg.has_session("worker-b"));
-        assert!(!reg.is_connection_closed());
-
-        // Detach refunds the exact family/Lane charge.
-        reg.fail_session("worker-a-0-0", false);
-        assert_eq!(
-            reg.register_attached(
-                "page-a-overflow",
-                "worker-a-after-refund",
-                "target-worker-a-after-refund",
-                "worker",
-                None,
-            ),
-            TaskSessionAdmission::Admitted
-        );
-    }
-
-    #[test]
-    fn hostile_root_service_workers_use_bounded_unattributed_bucket() {
-        let reg = SessionRegistry::new();
-        reg.enable_task_session_quota_routing();
-
-        for index in 0..MAX_UNATTRIBUTED_AUXILIARY_SESSIONS_PER_HOST {
-            assert_eq!(
-                reg.register_attached(
-                    ROOT_SESSION,
-                    format!("root-sw-{index}"),
-                    format!("root-sw-target-{index}"),
-                    "service_worker",
-                    None,
-                ),
-                TaskSessionAdmission::Admitted
-            );
-        }
-        assert_eq!(
-            reg.register_attached(
-                ROOT_SESSION,
-                "root-sw-overflow",
-                "root-sw-target-overflow",
-                "service_worker",
-                None,
-            ),
-            TaskSessionAdmission::Rejected
-        );
-        assert_eq!(
-            reg.task_session_quota_counts("unused", "unused").2,
-            MAX_UNATTRIBUTED_AUXILIARY_SESSIONS_PER_HOST
-        );
-        assert!(!reg.has_session("root-sw-overflow"));
-        assert!(!reg.is_connection_closed());
-
-        reg.dispatch_message(
-            r#"{"method":"Target.targetDestroyed","params":{"targetId":"root-sw-target-0"}}"#,
-        )
-        .unwrap();
-        // Duplicate authoritative absence is intentionally idempotent: it
-        // must neither underflow the bucket nor retire another session.
-        reg.dispatch_message(
-            r#"{"method":"Target.targetDestroyed","params":{"targetId":"root-sw-target-0"}}"#,
-        )
-        .unwrap();
-        assert!(!reg.has_session("root-sw-0"));
-        assert_eq!(
-            reg.task_session_quota_counts("unused", "unused").2,
-            MAX_UNATTRIBUTED_AUXILIARY_SESSIONS_PER_HOST - 1
-        );
-        assert_eq!(
-            reg.register_attached(
-                ROOT_SESSION,
-                "root-sw-after-refund",
-                "root-sw-target-after-refund",
-                "shared_worker",
-                None,
-            ),
-            TaskSessionAdmission::Admitted
-        );
-    }
-
-    #[test]
-    fn hostile_target_session_alias_cannot_create_destroyed_event_ghost() {
-        let reg = SessionRegistry::new();
-        reg.enable_task_session_quota_routing();
-
-        assert_eq!(
-            reg.register_attached(
-                ROOT_SESSION,
-                "original-worker-session",
-                "shared-target-id",
-                "service_worker",
-                None,
-            ),
-            TaskSessionAdmission::Admitted
-        );
-        assert_eq!(
-            reg.register_attached(
-                ROOT_SESSION,
-                "alias-worker-session",
-                "shared-target-id",
-                "service_worker",
-                None,
-            ),
-            TaskSessionAdmission::Rejected
-        );
-
-        assert!(reg.is_connection_closed());
-        assert!(!reg.has_session("original-worker-session"));
-        assert!(!reg.has_session("alias-worker-session"));
-        assert_eq!(reg.task_session_quota_counts("unused", "unused").2, 0);
-    }
-
-    #[tokio::test]
-    async fn child_worker_waits_for_trusted_parent_authority_then_inherits_it() {
-        let reg = SessionRegistry::new();
-        reg.enable_task_session_quota_routing();
-        assert_eq!(
-            reg.register_attached(ROOT_SESSION, "pending-page", "pending-target", "page", None),
-            TaskSessionAdmission::PendingAuthority
-        );
-        assert_eq!(
-            reg.register_attached(
-                "pending-page",
-                "pending-worker",
-                "pending-worker-target",
-                "worker",
-                None,
-            ),
-            TaskSessionAdmission::PendingAuthority
-        );
-        assert_eq!(reg.task_session_quota_counts("family", "lane").3, 2);
-
-        reg.claim_task_session_authority("pending-page", "family", "lane")
-            .unwrap();
-        assert_eq!(
-            reg.wait_for_task_session_admission("pending-worker", Duration::from_millis(10))
-                .await,
-            TaskSessionAdmission::Admitted
-        );
-        assert_eq!(
-            reg.task_session_authority("pending-worker"),
-            Some(TaskSessionAuthority {
-                task_resource_family_key: "family".into(),
-                lane_id: "lane".into(),
-            })
-        );
-        assert_eq!(reg.task_session_quota_counts("family", "lane"), (1, 1, 0, 0));
-    }
-
-    #[tokio::test]
-    async fn unresolved_page_authority_times_out_locally_without_host_poison() {
-        let reg = SessionRegistry::new();
-        reg.enable_task_session_quota_routing();
-        reg.register_attached(ROOT_SESSION, "unknown-page", "unknown-target", "page", None);
-
-        assert_eq!(
-            reg.wait_for_task_session_admission("unknown-page", Duration::from_millis(1))
-                .await,
-            TaskSessionAdmission::Rejected
-        );
-        assert!(!reg.has_session("unknown-page"));
-        assert!(!reg.is_connection_closed());
-        assert_eq!(reg.task_session_quota_counts("unused", "unused").3, 0);
-    }
 }

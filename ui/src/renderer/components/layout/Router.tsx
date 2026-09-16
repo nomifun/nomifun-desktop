@@ -14,7 +14,6 @@ const ModelHubPage = React.lazy(() => import('@renderer/pages/modelHub'));
 const McpPage = React.lazy(() => import('@renderer/pages/mcp'));
 const PluginWorkbenchPage = React.lazy(() => import('@renderer/pages/plugins'));
 const OpenCapabilitiesPage = React.lazy(() => import('@renderer/pages/openCapabilities'));
-const BrowserPage = React.lazy(() => import('@renderer/pages/browser'));
 const SystemSettings = React.lazy(() => import('@renderer/pages/settings/SystemSettings'));
 const ExecutionEngineSettings = React.lazy(() => import('@renderer/pages/settings/AgentSettings'));
 const SshHostSettings = React.lazy(() => import('@renderer/pages/settings/SshHostSettings'));
@@ -171,7 +170,6 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/mcp' element={withRouteFallback(McpPage)} />
             <Route path='/plugins' element={withRouteFallback(PluginWorkbenchPage)} />
             <Route path='/open-capabilities' element={withRouteFallback(OpenCapabilitiesPage)} />
-            <Route path='/browser' element={withRouteFallback(BrowserPage)} />
             <Route path='/skills' element={withRouteFallback(SkillsSettingsPage)} />
             {/* Session section — the secondary sidebar (ContentSider) persists across these routes */}
             <Route element={<SessionShellRoute />}>
@@ -191,7 +189,6 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/settings/execution-engines' element={withRouteFallback(ExecutionEngineSettings)} />
             <Route path='/settings/ssh-hosts' element={withRouteFallback(SshHostSettings)} />
             <Route path='/settings/agent-runtime' element={<Navigate to='/settings/execution-engines' replace />} />
-            <Route path='/settings/browser-use' element={<Navigate to='/browser?tab=settings' replace />} />
             <Route path='/settings/computer-use' element={withRouteFallback(SystemSettings)} />
             <Route path='/settings/about' element={withRouteFallback(SystemSettings)} />
             <Route path='/settings/webhook' element={<Navigate to='/requirements/extensions?tab=notify' replace />} />

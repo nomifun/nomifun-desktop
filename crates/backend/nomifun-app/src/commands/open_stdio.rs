@@ -8,8 +8,9 @@
 //! mis-handles paths and surfaces "Windows cannot find 'X'" dialogs.
 //!
 //! Web URLs (http/https) deliberately fail closed: this is an Agent surface,
-//! and Agent-initiated web opens belong to the managed Browser Hub rather than
-//! the operating-system browser (`ShellService::launch` enforces the policy).
+//! and Agent-initiated web opens require an explicitly selected Browser
+//! capability rather than the operating-system browser (`ShellService::launch`
+//! enforces the policy).
 //!
 //! Unlike the requirement/gateway bridges this is STATELESS: opening is a pure
 //! local OS call (`open::that_detached` via `ShellService::launch`), so there is
@@ -136,7 +137,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn web_urls_fail_closed_toward_the_managed_browser() {
+    async fn web_urls_fail_closed_toward_the_selected_browser_capability() {
         let result = test_server()
             .open(Parameters(OpenParams {
                 target: "https://example.com".to_string(),
@@ -147,8 +148,8 @@ mod tests {
         assert_eq!(result.is_error, Some(true));
         let rendered = serde_json::to_string(&result).unwrap();
         assert!(
-            rendered.contains("browser navigate"),
-            "must steer the agent to the managed Browser: {rendered}"
+            rendered.contains("selected conversation Browser or system-browser capability"),
+            "must steer the agent to its selected Browser capability: {rendered}"
         );
     }
 

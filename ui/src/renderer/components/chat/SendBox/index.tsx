@@ -46,6 +46,7 @@ import { getConversationInputHistory, isCaretOnFirstLine } from '@/renderer/util
 import PinnedPlan from '@renderer/pages/conversation/Messages/components/PinnedPlan';
 import { derivePinnedPlan } from '@renderer/pages/conversation/Messages/components/pinnedPlanModel';
 import Composer, { ComposerSendButton } from '../Composer';
+import { StopButtonPortal } from './StopButtonPortal';
 
 const constVoid = (): void => undefined;
 // 临界值：超过该字符数直接切换至多行模式，避免为超长文本做昂贵的宽度测量
@@ -1336,6 +1337,7 @@ const SendBox: React.FC<{
   const sendButton = <ComposerSendButton disabled={isButtonDisabled} onClick={sendMessageHandler} />;
 
   const stopButton = (
+    <StopButtonPortal>
     <Button
       shape='circle'
       type='secondary'
@@ -1345,7 +1347,10 @@ const SendBox: React.FC<{
       icon={<div className='mx-auto size-12px bg-6'></div>}
       onClick={stopHandler}
       data-testid='sendbox-stop-btn'
+      aria-label={t(isStopping ? 'conversation.stop.stopping' : 'conversation.stop.button')}
+      title={t(isStopping ? 'conversation.stop.stopping' : 'conversation.stop.button')}
     ></Button>
+    </StopButtonPortal>
   );
 
   // Secondary "steer now" action — interjects the draft into the running turn
@@ -1357,6 +1362,7 @@ const SendBox: React.FC<{
       disabled={isButtonDisabled}
       className='send-button-custom sendbox-steer-button'
       title={t('conversation.steer.button')}
+      aria-label={t('conversation.steer.button')}
       icon={<Lightning theme='filled' size='14' fill='white' strokeWidth={5} />}
       onClick={() => {
         steerMessageHandler();

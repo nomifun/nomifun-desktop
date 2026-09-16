@@ -938,7 +938,7 @@ mod tests {
     #[tokio::test]
     async fn edit_server_updates_builtin_flag() {
         let svc = make_service();
-        let created = svc.add_server(stdio_create_req("chrome-devtools")).await.unwrap();
+        let created = svc.add_server(stdio_create_req("builtin-fixture")).await.unwrap();
         assert!(!created.builtin);
 
         let updated = svc
@@ -1063,11 +1063,11 @@ mod tests {
     async fn add_server_rejects_overriding_builtin_name() {
         let svc = make_service();
         svc.add_server(CreateMcpServerRequest {
-            name: "chrome-devtools".into(),
+            name: "builtin-fixture".into(),
             description: Some("builtin".into()),
             transport: McpTransport::Stdio {
                 command: "npx".into(),
-                args: vec!["-y".into(), "chrome-devtools-mcp@latest".into()],
+                args: vec!["-y".into(), "builtin-fixture@latest".into()],
                 env: HashMap::new(),
             },
             original_json: None,
@@ -1076,7 +1076,7 @@ mod tests {
         .await
         .unwrap();
 
-        let err = svc.add_server(stdio_create_req("chrome-devtools")).await.unwrap_err();
+        let err = svc.add_server(stdio_create_req("builtin-fixture")).await.unwrap_err();
         assert!(matches!(err, McpError::Conflict(_)));
     }
 
@@ -1084,11 +1084,11 @@ mod tests {
     async fn add_server_rejects_overriding_builtin_name_even_with_builtin_payload() {
         let svc = make_service();
         svc.add_server(CreateMcpServerRequest {
-            name: "chrome-devtools".into(),
+            name: "builtin-fixture".into(),
             description: Some("builtin".into()),
             transport: McpTransport::Stdio {
                 command: "npx".into(),
-                args: vec!["-y".into(), "chrome-devtools-mcp@latest".into()],
+                args: vec!["-y".into(), "builtin-fixture@latest".into()],
                 env: HashMap::new(),
             },
             original_json: None,
@@ -1099,7 +1099,7 @@ mod tests {
 
         let err = svc
             .add_server(CreateMcpServerRequest {
-                name: "chrome-devtools".into(),
+                name: "builtin-fixture".into(),
                 description: Some("malicious override".into()),
                 transport: McpTransport::Http {
                     url: "https://example.com/mcp".into(),
@@ -1117,11 +1117,11 @@ mod tests {
     async fn batch_import_skips_reserved_builtin_name() {
         let svc = make_service();
         svc.add_server(CreateMcpServerRequest {
-            name: "chrome-devtools".into(),
+            name: "builtin-fixture".into(),
             description: Some("builtin".into()),
             transport: McpTransport::Stdio {
                 command: "npx".into(),
-                args: vec!["-y".into(), "chrome-devtools-mcp@latest".into()],
+                args: vec!["-y".into(), "builtin-fixture@latest".into()],
                 env: HashMap::new(),
             },
             original_json: None,
@@ -1134,7 +1134,7 @@ mod tests {
             .batch_import(BatchImportMcpServersRequest {
                 servers: vec![
                     ImportMcpServerRequest {
-                        name: "chrome-devtools".into(),
+                        name: "builtin-fixture".into(),
                         description: Some("imported".into()),
                         transport: McpTransport::Http {
                             url: "https://example.com/mcp".into(),

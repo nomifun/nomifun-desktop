@@ -9,11 +9,12 @@ import type { I18nKey } from '@/renderer/services/i18n/i18n-keys';
 /**
  * P3-N1 桌宠气泡浏览器动作 narration。
  *
- * 后端自研 browser-use 引擎的 `Browser` 工具经标准 `tool_call` 通道上桌宠气泡，
+ * 会话内嵌 `Browser` 工具经标准 `tool_call` 通道上桌宠气泡，
  * 但流式事件里 `description` 恒为 `None`（见 backend_output_sink），气泡过去只能压
  * 通用占位 `usingTools`，把具体动作（navigate/click/type…）和参数（url/ref/text）全
  * 丢弃。本模块复用裁决 ⑧——参照后端 `BrowserTool::describe`（tool.rs:1160）的人读
- * narration，在前端按 `args.action` 合成一条具体文案的 i18n key + 参数，替代通用占位。
+ * narration，在前端按 v2 `operation` 及嵌套的 `action.action` 合成一条
+ * 具体文案的 i18n key + 参数，替代通用占位。
  *
  * 只特化 `Browser` 工具；其它工具返回 `null`，调用方维持原 `usingTools` 占位与
  * 消散/stall 安全网行为不变。
@@ -47,7 +48,7 @@ const friendlyHost = (raw: string): string => {
 const truncate = (s: string, max: number): string =>
   s.length > max ? `${s.slice(0, max)}…` : s;
 
-/** 从三种工具事件数据形状里抽出 `{ name, args }`（args 含 action/url/ref/text…）。 */
+/** 从三种工具事件数据形状里抽出 `{ name, args }`。 */
 const extractNameAndArgs = (
   data: unknown
 ): { name: string; args: Record<string, unknown> } | null => {
@@ -88,6 +89,13 @@ const extractNameAndArgs = (
 const str = (args: Record<string, unknown>, key: string): string =>
   typeof args[key] === 'string' ? (args[key] as string) : '';
 
+const record = (args: Record<string, unknown>, key: string): Record<string, unknown> => {
+  const value = args[key];
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+};
+
 /**
  * 解析浏览器动作 → 气泡 narration（i18n key + 参数）。
  *
@@ -99,59 +107,37 @@ export const browserNarrationFor = (data: unknown): BrowserNarration | null => {
   if (!extracted || extracted.name !== BROWSER_TOOL_NAME) return null;
 
   const { args } = extracted;
-  const action = str(args, 'action');
+  const operation = str(args, 'operation');
 
-  switch (action) {
-    case 'navigate':
-    case 'open_link_new_tab': {
+  switch (operation) {
+    case 'navigate': {
       const host = friendlyHost(str(args, 'url'));
       return host
         ? { key: 'nomi.companion.browser.navigate', params: { host } }
         : { key: 'nomi.companion.browser.busy', params: {} };
     }
-    case 'click':
-      return { key: 'nomi.companion.browser.click', params: {} };
-    case 'type':
-    case 'set_value':
-      return { key: 'nomi.companion.browser.type', params: {} };
     case 'observe':
       return { key: 'nomi.companion.browser.observe', params: {} };
     case 'screenshot':
       return { key: 'nomi.companion.browser.screenshot', params: {} };
-    case 'extract':
-    case 'get_page_text':
+    case 'diagnostics':
       return { key: 'nomi.companion.browser.read', params: {} };
-    case 'search_page':
-    case 'scroll_to_text':
-    case 'find_elements': {
-      const q = truncate(str(args, 'query') || str(args, 'text') || str(args, 'selector'), 30);
-      return q
-        ? { key: 'nomi.companion.browser.search', params: { query: q } }
-        : { key: 'nomi.companion.browser.busy', params: {} };
-    }
     case 'download':
-    case 'save_as_pdf':
       return { key: 'nomi.companion.browser.download', params: {} };
-    case 'scroll':
-    case 'press_key':
-    case 'hover':
-    case 'select_option':
-    case 'wait':
-    case 'wait_for':
-    case 'back':
-    case 'forward':
-    case 'reload':
-    case 'tabs':
-    case 'switch_tab':
-    case 'close_tab':
-    case 'switch_frame':
-    case 'cursor':
-    case 'get_dropdown_options':
-    case 'upload_file':
-    case 'capabilities':
-    case 'evaluate':
+    case 'act': {
+      switch (str(record(args, 'action'), 'action')) {
+        case 'click':
+          return { key: 'nomi.companion.browser.click', params: {} };
+        case 'type':
+        case 'press':
+        case 'select':
+          return { key: 'nomi.companion.browser.type', params: {} };
+        default:
+          return { key: 'nomi.companion.browser.busy', params: {} };
+      }
+    }
     default:
-      // 其余动作（含未知/缺 action）→ 一句通用「正在浏览网页…」，仍比 usingTools 具体。
+      // Tab/dialog/upload/evaluate 及未知操作使用通用「正在浏览网页…」。
       return { key: 'nomi.companion.browser.busy', params: {} };
   }
 };

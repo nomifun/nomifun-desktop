@@ -844,10 +844,7 @@ async fn build_nomi_core_agent_api_state(
             capability
                 .manifest
                 .supports_consumer(CapabilityConsumer::Agent)
-                && super::nomi_core_agent_projection::nomi_capability_projection(
-                    capability.manifest.id.as_ref(),
-                )
-                .is_ok()
+                && super::nomi_core_agent_projection::native_capability_available(&capability.manifest)
                 && !approved_platform_builtin_capability_ids
                     .contains(&capability.manifest.id)
         })
@@ -900,11 +897,7 @@ async fn build_nomi_core_agent_api_state(
             {
                 return None;
             }
-            super::nomi_core_agent_projection::nomi_capability_projection(
-                capability.manifest.id.as_ref(),
-            )
-            .err()
-            .map(|_| {
+            (!super::nomi_core_agent_projection::native_capability_available(&capability.manifest)).then(|| {
                 (
                     capability.manifest.id.clone(),
                     CanonicalErrorCode::from("CAPABILITY_UNAVAILABLE"),
@@ -930,6 +923,11 @@ async fn build_nomi_core_agent_api_state(
     )
     .await?;
     let plugin_state = plugin.router.clone();
+    #[cfg(feature="browser-use")]
+    if services.headless_render.is_some() {
+        services.knowledge_service.set_browser_render_content_port(
+            super::knowledge_browser::KnowledgeBrowserPort::bind(kernel.clone(),services.authoritative_user_id.as_ref())?);
+    }
     let mcp_catalog_publisher = plugin.mcp_catalog_publisher(
         Arc::new(nomifun_db::SqliteMcpServerRepository::new(services.database.pool().clone())),
         Arc::clone(&builtin_plan.wave2_owner),
@@ -939,17 +937,23 @@ async fn build_nomi_core_agent_api_state(
 
     let schema_digest = digest_payload(&fresh_v4_schema_manifest_payload())?;
     let seed = official_preset_seed_manifest_payload();
+    #[cfg(feature = "browser-use")]
+    let installation_role_bindings = crate::browser_workspace_provider::installation_binding(
+        &materialized, services.browser_workspaces.is_some(),
+    )?;
+    #[cfg(not(feature = "browser-use"))]
+    let installation_role_bindings = Default::default();
     let environment = CompilerEnvironment {
         resolver_version: VersionString::from(CONTRACT_VERSION),
         required_runtime_protocol_version: VersionString::from(CONTRACT_VERSION),
         required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
         runtime_feature_inventory_digest: feature_digest.clone(),
         available_runtime_features: feature_inventory.runtime_features.clone(),
-        installation_role_bindings: Default::default(),
+        installation_role_bindings,
         canonical_schema_manifest_digest: schema_digest.clone(),
         target_contribution_manifest_digest: seed.target_first_party_contribution_digest.clone(),
         host_target: nomi_core_runtime_target(),
-        host_surface: if cfg!(feature = "computer-use") {
+        host_surface: if cfg!(any(feature = "browser-use", feature = "computer-use")) {
             "desktop".to_owned()
         } else {
             "headless".to_owned()
@@ -983,7 +987,8 @@ async fn build_nomi_core_agent_api_state(
         compiler,
     )
     .with_installation_role_binding_store(Arc::new(
-        super::nomi_core_role_defaults::NomiCoreRoleBindingStore::new(services.database.pool().clone()),
+        super::nomi_core_role_defaults::NomiCoreRoleBindingStore::new(services.database.pool().clone())
+            .with_host_bindings(environment.installation_role_bindings.clone()),
     ))
     .with_default_chat_route_resolver(Arc::new(
         NomiCoreDefaultChatRouteResolver::new(services.database.pool().clone()),
@@ -1056,6 +1061,9 @@ async fn build_nomi_core_agent_api_state(
     let remote_repository: Arc<dyn IRemoteBindingRepository> = Arc::new(
         SqliteRemoteBindingRepository::new(services.database.pool().clone()),
     );
+    // Pending rendered sources must not run against the default unavailable
+    // port before the canonical Kernel/Provider composition is ready.
+    services.spawn_knowledge_resume_task();
     Ok((
         NomiCoreAgentApiState::new(
             conversation_owner,
@@ -1271,10 +1279,12 @@ fn build_nomi_core_conversation_owner(services: &AppServices) -> ConversationSer
         conversation_service.with_delete_hook(hook);
     }
     #[cfg(feature = "browser-use")]
-    if let Some(hub) = services.browser_session_hub.clone() {
-        conversation_service.with_delete_hook(Arc::new(
-            BrowserLaneConversationCascade { hub },
-        ));
+    if let Some(workspaces) = services.browser_workspaces.clone() {
+        conversation_service.with_before_delete_hook(Arc::new(BrowserWorkspaceConversationCascade { workspaces }));
+    }
+    #[cfg(feature = "browser-use")]
+    if let Some(service) = services.system_browser.clone() {
+        conversation_service.with_before_delete_hook(Arc::new(SystemBrowserConversationCascade { service }));
     }
 
     conversation_service
@@ -2186,27 +2196,34 @@ struct ConversationTerminalCascade {
     terminals: Arc<nomifun_terminal::TerminalService>,
 }
 
-/// Conversation deletion is an authority boundary of its own. Runtime
-/// termination normally drops the native owner lease, but Gateway/ACP/remote
-/// lanes may outlive that particular runtime object. Close every Hub lane
-/// attributed to the deleted conversation as a separate idempotent cascade.
 #[cfg(feature = "browser-use")]
-struct BrowserLaneConversationCascade {
-    hub: Arc<nomifun_browser_platform::BrowserSessionHub>,
+struct BrowserWorkspaceConversationCascade {
+    workspaces: Arc<nomifun_browser_platform::workspace::BrowserWorkspaceService>,
+}
+
+#[cfg(feature = "browser-use")]
+struct SystemBrowserConversationCascade {
+    service: Arc<crate::system_browser::SystemBrowserService>,
+}
+#[cfg(feature = "browser-use")]
+#[async_trait::async_trait]
+impl nomifun_common::BeforeConversationDelete for SystemBrowserConversationCascade {
+    async fn before_conversation_delete(&self, user_id: &str, conversation_id: &str) -> Result<(), AppError> {
+        if let Some(snapshot) = self.service.snapshot(user_id, conversation_id) {
+            self.service.disconnect(user_id, conversation_id, &snapshot.incarnation).await
+                .map_err(|_| AppError::Internal("System browser disconnect must complete before deleting the conversation".into()))?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(feature = "browser-use")]
 #[async_trait::async_trait]
-impl OnConversationDelete for BrowserLaneConversationCascade {
-    async fn on_conversation_deleted(&self, _user_id: &str, conversation_id: &str) {
-        if let Err(error) = self.hub.close_conversation(conversation_id).await {
-            tracing::warn!(
-                conversation_id,
-                code = ?error.code,
-                retryable = error.retryable,
-                "failed to close browser lanes during conversation deletion"
-            );
-        }
+impl nomifun_common::BeforeConversationDelete for BrowserWorkspaceConversationCascade {
+    async fn before_conversation_delete(&self, user_id: &str, conversation_id: &str) -> Result<(), AppError> {
+        self.workspaces.close(&nomifun_browser_platform::runtime::BrowserWorkspaceKey {
+            user_id: user_id.into(), conversation_id: conversation_id.into(),
+        }).await.map_err(|error| AppError::Internal(format!("Conversation browser cleanup failed: {error}")))
     }
 }
 

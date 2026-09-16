@@ -11,6 +11,8 @@ test executable.
 Usage:
   powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -Setup
   powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1
+  powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -Browser
+  powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -BrowserGui -DataDir C:/new-disposable-gui-data
   powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -Delete
 #>
 
@@ -18,6 +20,9 @@ Usage:
 param(
   [switch]$Setup,
   [switch]$Delete,
+  [switch]$Browser,
+  [switch]$BrowserGui,
+  [string]$DataDir,
   [string]$TargetName = 'NomiFun/StepFun/LiveProvider'
 )
 
@@ -25,6 +30,9 @@ $ErrorActionPreference = 'Stop'
 
 if ($Setup -and $Delete) {
   throw 'Setup and Delete cannot be used together.'
+}
+if ($BrowserGui -and ($Browser -or [string]::IsNullOrWhiteSpace($DataDir) -or -not [IO.Path]::IsPathRooted($DataDir) -or (Test-Path -LiteralPath $DataDir))) {
+  throw 'BrowserGui requires a new absolute DataDir and cannot be combined with Browser.'
 }
 
 if (-not ('NomiFunCredentialManager' -as [type])) {
@@ -192,7 +200,13 @@ if ([string]::IsNullOrWhiteSpace($credential)) {
 
 try {
   $env:NOMIFUN_LIVE_STEPFUN_API_KEY = $credential
-  & bun run test:nomi-core-live-provider
+  if ($BrowserGui) {
+    & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --browser-gui --data-dir $DataDir
+  } elseif ($Browser) {
+    & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --browser
+  } else {
+    & bun run test:nomi-core-live-provider
+  }
   $exitCode = $LASTEXITCODE
 }
 finally {

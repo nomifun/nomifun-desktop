@@ -576,6 +576,8 @@
     "reviewDelivery": "Review delivery"
   },
   "stop": {
+    "button": "Stop Agent",
+    "stopping": "Stopping Agent…",
     "failed": "Failed to stop the current task. Please try again."
   },
   "editMessage": {

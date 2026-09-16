@@ -1,0 +1,51 @@
+<!doctype html><meta charset="utf-8"><title>Native popup fixture</title>
+<style>body{font:16px sans-serif;margin:40px}button{display:block;padding:12px;margin:12px}</style>
+<button id="open">Open real popup</button>
+<button id="blank">Open writable blank popup</button>
+<button id="burst">Open bounded popup burst</button>
+<button id="unique">Open unique popup</button>
+<button id="spa">Push SPA route</button>
+<button id="geo">Request geolocation</button><output id="permission">Not requested</output>
+<button id="diagnostics">Produce browser diagnostics</button>
+<label for="background-input">Background text input</label><input id="background-input" autocomplete="off">
+<canvas id="visual-probe" width="64" height="64" style="position:absolute;right:30px;top:30px" aria-label="Screenshot color probe"></canvas>
+<script>
+  window.popupNonce=crypto.randomUUID();
+  window.popupMessages=[];
+  window.popupCounter=0;
+  const visual=document.getElementById('visual-probe').getContext('2d');
+  visual.fillStyle='#e02040';visual.fillRect(0,0,32,64);
+  visual.fillStyle='#2070e0';visual.fillRect(32,0,32,64);
+  window.backgroundInputEvents=[];
+  for (const type of ['keydown','keyup','beforeinput','input']) {
+    document.getElementById('background-input').addEventListener(type,event=>{
+      backgroundInputEvents.push({type:event.type,key:event.key,trusted:event.isTrusted});
+    });
+  }
+  document.getElementById('diagnostics').onclick=()=>{
+    window.diagnosticGetterCalls=0;
+    console.error('nomi-native-console', {get sensitive(){window.diagnosticGetterCalls++;return 'not-read'}});
+    setTimeout(()=>{throw new Error('nomi-native-page-error')},0);
+    fetch('http://127.0.0.1:1/native-diagnostics?token=not-in-metadata').catch(()=>{});
+  };
+  document.cookie='nomi_popup=shared-profile;path=/';
+  document.getElementById('open').onclick=()=>{
+    const previous=window.lastPopup;
+    window.lastPopup=window.open('/popup-child','nomi-popup');
+    window.popupReused=!!previous && previous===lastPopup;
+  };
+  document.getElementById('unique').onclick=()=>{window.lastPopup=window.open('/popup-child','nomi-popup-'+(++popupCounter))};
+  document.getElementById('spa').onclick=event=>{window.spaClickTrusted=event.isTrusted;history.pushState({native:true},'', '/spa-route?step=1#native')};
+  document.getElementById('geo').onclick=()=>navigator.geolocation.getCurrentPosition(
+    ()=>{window.geoResult='allowed';document.getElementById('permission').textContent=geoResult},
+    error=>{window.geoResult='denied-'+error.code;document.getElementById('permission').textContent=geoResult});
+  document.getElementById('blank').onclick=()=>{
+    window.blankPopup=window.open('about:blank','nomi-blank');
+    blankPopup.document.write('<!doctype html><title>Written popup</title><h1 id="written">Written by opener</h1>');
+    blankPopup.document.close();
+  };
+  document.getElementById('burst').onclick=()=>{for(let i=0;i<12;i++)window.open('about:blank','burst-'+i)};
+  addEventListener('message',event=>{
+    if(event.data?.nomiPopup) popupMessages.push({data:event.data,sameProxy:event.source===lastPopup});
+  });
+</script>

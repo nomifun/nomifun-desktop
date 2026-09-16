@@ -1,0 +1,16 @@
+<!doctype html><meta charset="utf-8"><title>Native frame uploads</title>
+<style>body{font:16px system-ui;margin:16px}button{display:block;padding:6px;font:inherit}iframe{width:470px;height:260px;border:2px solid #888;margin:8px}</style>
+<h1>Native frame file input fixture</h1>
+<button id="delegate">Choose in child frame</button>
+<iframe id="cross" src="http://localhost:__PORT__/upload-child-cross"></iframe>
+<iframe id="same" src="http://127.0.0.1:__PORT__/upload-child-same"></iframe>
+<script>
+window.frameFiles=[];window.frameReady=[];window.frameNonces={};window.framePickPoints={};
+document.getElementById('delegate').onclick=event=>document.getElementById('same').contentWindow.pickFromParent(event.isTrusted);
+addEventListener('message',event=>{
+  if(![document.getElementById('cross').contentWindow,document.getElementById('same').contentWindow].includes(event.source))return;
+  if(!['http://localhost:__PORT__','http://127.0.0.1:__PORT__'].includes(event.origin))return;
+  if(event.data?.kind==='ready'){frameReady.push(event.data.level);frameNonces[event.data.level]=event.data.nonce;framePickPoints[event.data.level]=event.data.pickPoint;}
+  if(event.data?.kind==='file')frameFiles.push(event.data);
+});
+</script>

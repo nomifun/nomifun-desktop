@@ -529,7 +529,6 @@
       "observe": "{{name}} is looking at the page…",
       "screenshot": "{{name}} is taking a screenshot…",
       "read": "{{name}} is reading the page…",
-      "search": "{{name}} is searching the page for \"{{query}}\"…",
       "download": "{{name}} is downloading a file…",
       "busy": "{{name}} is browsing the web…"
     },

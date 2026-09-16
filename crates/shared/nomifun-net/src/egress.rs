@@ -15,9 +15,21 @@ use std::time::Duration;
 use reqwest::header::{HeaderMap, LOCATION};
 use url::{Host, Url};
 
+#[path = "public_dns.rs"]
+mod public_dns;
+
 const DNS_TIMEOUT: Duration = Duration::from_secs(15);
 const DNS_RESPONSE_LIMIT: usize = 64 * 1024;
 const PUBLIC_DNS_ENDPOINT: &str = "https://cloudflare-dns.com/dns-query";
+
+/// Fingerprint the compiled egress implementation used by exact runtime bindings.
+pub fn implementation_digest() -> String {
+    use sha2::{Digest,Sha256};
+    let mut digest=Sha256::new();
+    digest.update(include_bytes!("egress.rs"));
+    digest.update(include_bytes!("public_dns.rs"));
+    format!("{:x}",digest.finalize())
+}
 
 /// Why an untrusted outbound request was rejected or failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +100,7 @@ pub struct SafeHttpClient {
     overflow: BodyOverflowPolicy,
     allow_private: bool,
     user_agent: String,
+    public_dns: Option<std::sync::Arc<public_dns::Resolver>>,
 }
 
 impl SafeHttpClient {
@@ -99,6 +112,7 @@ impl SafeHttpClient {
             overflow: BodyOverflowPolicy::Reject,
             allow_private: false,
             user_agent: "NomiFun-SafeHttp/1.0".to_owned(),
+            public_dns: None,
         }
     }
 
@@ -114,6 +128,16 @@ impl SafeHttpClient {
 
     pub fn user_agent(mut self, user_agent: impl Into<String>) -> Self {
         self.user_agent = user_agent.into();
+        self
+    }
+
+    /// Resolve through the fixed public HTTPS resolver before applying the
+    /// same public-address checks and socket pinning. This is an explicit
+    /// host policy, never a fallback after a rejected system DNS response.
+    /// Only the caller's allowlisted public names leave through DoH, never
+    /// arbitrary user URLs, internal names, paths, cookies or query strings.
+    pub fn with_public_dns_for_hosts(mut self, hosts: impl IntoIterator<Item=String>) -> Self {
+        self.public_dns=Some(std::sync::Arc::new(public_dns::Resolver::new(hosts)));
         self
     }
 
@@ -134,9 +158,33 @@ impl SafeHttpClient {
             })?
     }
 
+    /// Fetch exactly one validated, DNS-pinned hop. Redirects are returned to
+    /// the caller, so a browser broker can validate each new origin itself.
+    /// Headers belong to the caller's isolated request; no shared cookie jar,
+    /// system proxy, credentials, or redirect header forwarding is installed.
+    pub async fn get_once(&self, raw_url: &str, headers: HeaderMap) -> Result<SafeHttpResponse, SafeHttpError> {
+        let url = parse_untrusted_url(raw_url)?;
+        tokio::time::timeout(self.timeout, async {
+            let addrs = resolve_validated(&url, self.allow_private, self.public_dns.as_deref()).await?;
+            let response = self.send_with_headers(&url, &addrs, headers).await?;
+            self.finish_response(url, response).await
+        }).await.map_err(|_| SafeHttpError::new(SafeHttpErrorKind::Timeout, "safe HTTP request timed out"))?
+    }
+
+    async fn finish_response(&self, url: Url, response: reqwest::Response) -> Result<SafeHttpResponse, SafeHttpError> {
+        if self.overflow == BodyOverflowPolicy::Reject
+            && response.content_length().is_some_and(|length|length>self.max_body_bytes as u64) {
+            return Err(SafeHttpError::new(SafeHttpErrorKind::BodyTooLarge, "safe HTTP response exceeds its body limit"));
+        }
+        let status = response.status();
+        let headers = response.headers().clone();
+        let (body,truncated) = self.read_body(response,&url).await?;
+        Ok(SafeHttpResponse {final_url:url,status,headers,body,truncated})
+    }
+
     async fn get_url(&self, mut url: Url) -> Result<SafeHttpResponse, SafeHttpError> {
         for hop in 0..=self.max_redirects {
-            let addrs = resolve_validated(&url, self.allow_private).await?;
+            let addrs = resolve_validated(&url, self.allow_private, self.public_dns.as_deref()).await?;
             let response = self.send(&url, &addrs).await?;
             let status = response.status();
 
@@ -206,6 +254,15 @@ impl SafeHttpClient {
         url: &Url,
         addrs: &[SocketAddr],
     ) -> Result<reqwest::Response, SafeHttpError> {
+        self.send_with_headers(url,addrs,HeaderMap::new()).await
+    }
+
+    async fn send_with_headers(
+        &self,
+        url: &Url,
+        addrs: &[SocketAddr],
+        headers: HeaderMap,
+    ) -> Result<reqwest::Response, SafeHttpError> {
         // A proxy can resolve the target independently and defeat DNS pinning.
         // Untrusted fetches therefore always connect directly.
         let mut builder = reqwest::Client::builder()
@@ -223,6 +280,7 @@ impl SafeHttpClient {
         client
             .get(url.clone())
             .header(reqwest::header::USER_AGENT, &self.user_agent)
+            .headers(headers)
             .send()
             .await
             .map_err(|error| {
@@ -344,18 +402,16 @@ fn validate_url(url: Url) -> Result<Url, SafeHttpError> {
 /// System DNS and optional public DNS recovery are each bounded to 15 seconds.
 pub async fn validate_untrusted_url(raw: &str, allow_private: bool) -> Result<Url, SafeHttpError> {
     let url = parse_untrusted_url(raw)?;
-    tokio::time::timeout(DNS_TIMEOUT, resolve_validated(&url, allow_private))
-        .await
-        .map_err(|_| {
-            SafeHttpError::new(SafeHttpErrorKind::Timeout, "DNS validation timed out")
-        })??;
+    resolve_validated(&url, allow_private, None).await?;
     Ok(url)
 }
 
 async fn resolve_validated(
     url: &Url,
     allow_private: bool,
+    public_dns: Option<&public_dns::Resolver>,
 ) -> Result<Vec<SocketAddr>, SafeHttpError> {
+    let allow_private=allow_private && public_dns.is_none();
     let host = url
         .host_str()
         .ok_or_else(|| SafeHttpError::new(SafeHttpErrorKind::InvalidUrl, "URL has no host"))?;
@@ -372,19 +428,20 @@ async fn resolve_validated(
         return Ok(vec![SocketAddr::new(literal, port)]);
     }
 
-    let mut addrs: Vec<SocketAddr> =
-        tokio::time::timeout(DNS_TIMEOUT, tokio::net::lookup_host((host, port)))
-            .await
-            .map_err(|_| {
-                SafeHttpError::new(SafeHttpErrorKind::Timeout, "DNS resolution timed out")
-            })?
-            .map_err(|error| {
-                SafeHttpError::new(
-                    SafeHttpErrorKind::Dns,
-                    format!("DNS resolution failed for {host}: {error}"),
-                )
-            })?
-            .collect();
+    let mut addrs: Vec<SocketAddr> = if let Some(resolver)=public_dns {
+        resolver.resolve(host,port).await?
+    } else { tokio::time::timeout(
+        DNS_TIMEOUT, tokio::net::lookup_host((host, port)),
+    )
+        .await
+        .map_err(|_| SafeHttpError::new(SafeHttpErrorKind::Timeout, "DNS resolution timed out"))?
+        .map_err(|error| {
+            SafeHttpError::new(
+                SafeHttpErrorKind::Dns,
+                format!("DNS resolution failed for {host}: {error}"),
+            )
+        })?
+        .collect() };
     addrs.sort_unstable();
     addrs.dedup();
     if addrs.is_empty() {
@@ -397,7 +454,7 @@ async fn resolve_validated(
         host,
         addrs,
         allow_private,
-        !allow_private && crate::proxy::domain_uses_detected_proxy(url),
+        public_dns.is_none() && !allow_private && crate::proxy::domain_uses_detected_proxy(url),
         || recover_public_dns(host, port),
     )
     .await
@@ -691,7 +748,7 @@ mod tests {
             "http://127.0.0.1/file",
         ] {
             assert_eq!(
-                resolve_validated(&Url::parse(raw).unwrap(), false)
+                resolve_validated(&Url::parse(raw).unwrap(), false, None)
                     .await
                     .unwrap_err()
                     .kind(),
@@ -762,10 +819,7 @@ mod tests {
             ("http://[::1]:8080/", "[::1]:8080"),
         ] {
             let url = Url::parse(raw).unwrap();
-            assert_eq!(
-                resolve_validated(&url, true).await.unwrap(),
-                vec![expected.parse::<SocketAddr>().unwrap()]
-            );
+            assert_eq!(resolve_validated(&url, true, None).await.unwrap(), vec![expected.parse::<SocketAddr>().unwrap()]);
         }
     }
 
@@ -814,14 +868,15 @@ mod tests {
         assert!(!error.to_string().contains("fixture-secret"));
     }
 
-    async fn one_response(response: &'static [u8]) -> (String, tokio::task::JoinHandle<usize>) {
+    async fn one_response(response: &[u8]) -> (String, tokio::task::JoinHandle<usize>) {
+        let response = response.to_vec();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0u8; 2048];
             let read = stream.read(&mut request).await.unwrap();
-            stream.write_all(response).await.unwrap();
+            stream.write_all(&response).await.unwrap();
             read
         });
         (format!("http://{address}/artifact"), task)
@@ -894,6 +949,37 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn one_hop_returns_redirect_without_connecting_to_its_target() {
+        let destination = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = destination.local_addr().unwrap();
+        let response = format!("HTTP/1.1 302 Found\r\nLocation: http://{address}/not-followed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let (url, server) = one_response(response.as_bytes()).await;
+        let result = SafeHttpClient::new(Duration::from_secs(1),32)
+            .allow_private_for_tests().get_once(&url, HeaderMap::new()).await.unwrap();
+        assert_eq!(result.status,StatusCode::FOUND);
+        assert_eq!(result.final_url.as_str(),url);
+        assert!(result.headers.contains_key(LOCATION));
+        assert!(server.await.unwrap()>0);
+        assert!(tokio::time::timeout(Duration::from_millis(50), destination.accept()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn one_hop_keeps_private_network_denied() {
+        let error = SafeHttpClient::new(Duration::from_secs(1),32)
+            .get_once("http://127.0.0.1:12345/", HeaderMap::new()).await.unwrap_err();
+        assert_eq!(error.kind(),SafeHttpErrorKind::ForbiddenTarget);
+    }
+
+    #[tokio::test]
+    async fn public_resolution_never_enables_private_test_targets() {
+        for url in ["http://127.0.0.1/","https://198.18.0.21/","http://[::1]/"] {
+            let error=SafeHttpClient::new(Duration::from_secs(1),32).allow_private_for_tests().with_public_dns_for_hosts(["www.bing.com".to_owned()])
+                .get_once(url,HeaderMap::new()).await.unwrap_err();
+            assert_eq!(error.kind(),SafeHttpErrorKind::ForbiddenTarget);
+        }
     }
 
     #[tokio::test]

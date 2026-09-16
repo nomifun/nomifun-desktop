@@ -57,9 +57,10 @@
         ]
       },
       {
-        "path": "crates/backend/nomifun-ai-agent/src/browser_fetcher.rs",
+        "path": "crates/backend/nomifun-knowledge/src/source_url.rs",
         "symbols": [
-          "BrowserFetcher"
+          "BrowserRenderContentPort",
+          "rendered_content_to_page"
         ]
       },
       {
@@ -764,6 +765,7 @@
     "evidence_complete": false,
     "notes": [
       "C0 inventory only; this manifest does not migrate or delete production code.",
+      "The unreachable Hub-backed knowledge fetcher has been physically removed; canonical render-content Provider composition is still required and is not proven by this inventory.",
       "Knowledge and AgentExecution outbox contracts are reusable evidence, not automatic proof for other domains."
     ]
   }

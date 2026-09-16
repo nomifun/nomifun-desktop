@@ -1,0 +1,11 @@
+<!doctype html><meta charset="utf-8"><title>Native popup child</title>
+<h1>Real popup child</h1>
+<button id="reply">Reply from popup</button>
+<button id="close">Close this popup</button>
+<script>
+  window.popupDocumentNonce=crypto.randomUUID();
+  window.popupProof={nomiPopup:true,hasOpener:!!opener,cookie:document.cookie,nonce:opener?.popupNonce,ownTop:top===window};
+  opener?.postMessage(popupProof,location.origin);
+  document.getElementById('reply').onclick=event=>opener?.postMessage({nomiPopup:true,interaction:true,trusted:event.isTrusted},location.origin);
+  document.getElementById('close').onclick=event=>{window.closeClickTrusted=event.isTrusted;window.close();};
+</script>

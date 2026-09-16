@@ -10,6 +10,48 @@
     "packages": [
       {
         "package": {
+          "id": "nomifun.system-browser",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.system-browser"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "nomi_system_browser",
+              "version": "1.0.0"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.local-websearch",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.local-websearch"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "nomi_local_websearch",
+              "version": "1.0.0"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
           "id": "nomifun.model-media",
           "version": "1.0.0"
         },
@@ -643,13 +685,6 @@
         "capabilities": [
           {
             "capability": {
-              "id": "browser.identity",
-              "version": "1.0.0"
-            },
-            "kind": "resource_provider"
-          },
-          {
-            "capability": {
               "id": "browser.observe",
               "version": "1.0.0"
             },
@@ -696,20 +731,6 @@
               "version": "1.0.0"
             },
             "kind": "tool"
-          },
-          {
-            "capability": {
-              "id": "browser.site_memory",
-              "version": "1.0.0"
-            },
-            "kind": "context_contributor"
-          },
-          {
-            "capability": {
-              "id": "browser.takeover",
-              "version": "1.0.0"
-            },
-            "kind": "tool"
           }
         ],
         "skills": [],
@@ -718,7 +739,7 @@
           {
             "key": {
               "role_id": "system.browser_use",
-              "contract_version": "1.0.0"
+              "contract_version": "2.0.0"
             },
             "members": [
               {
@@ -726,7 +747,7 @@
                   "id": "browser.observe",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "87bdd2b93c530c1884ac4b18530557f7655c25beff223da039526929cd49f4a1",
+                "capability_manifest_digest": "a29d4af00f34f37b29a50e23535dc9df3955f8aa678deb25702b4c3afb09777d",
                 "requirement": "required"
               },
               {
@@ -734,7 +755,7 @@
                   "id": "browser.navigate",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "a90aa2d2eb5958decae013222624026927c6f91687ce7288dd84f50515d575f1",
+                "capability_manifest_digest": "7833baae893f7421245daa3b437ea46e36d37658041cb82f594830d2a7d126df",
                 "requirement": "required"
               },
               {
@@ -742,23 +763,15 @@
                   "id": "browser.act",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "f37a29b8d4a16ffe0644c27e1b8cca3bd2ff1d205ac662db7961997e1a9cae90",
+                "capability_manifest_digest": "8312476443273f9f24be24b82bc69dddd97e84382722ab1557cdaa247bd37354",
                 "requirement": "required"
-              },
-              {
-                "capability": {
-                  "id": "browser.identity",
-                  "version": "1.0.0"
-                },
-                "capability_manifest_digest": "e38f0ef1f6d4429c15fcb38a0cc42def957461ded0d1f118a36a984637fe05ea",
-                "requirement": "optional"
               },
               {
                 "capability": {
                   "id": "browser.render_content",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "e7860d2176e52993f8dc60e98d04121471f351f01391ac7b259cf1d03fe4f27c",
+                "capability_manifest_digest": "20ca337897fcf5037a958349d48721065090d16a839f82626c5c25a0843b73f8",
                 "requirement": "optional"
               },
               {
@@ -766,7 +779,7 @@
                   "id": "browser.download",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "44f50cfa330681f8fd95037a43762d198ef29eed1a135b3d4da6d4f5b9190766",
+                "capability_manifest_digest": "d6195364c7c792960c3c38632b35b3bce97a4dd83eb072c78678176bdee8fe20",
                 "requirement": "optional"
               },
               {
@@ -774,7 +787,7 @@
                   "id": "browser.upload",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "10a35832ba8da747622c80397a0825200f7450e5349bad400632bf3414250c9c",
+                "capability_manifest_digest": "d951bbab2f7c97dde605f081f152e9bf065dfd56c5c4953d79a9a43c4b311fa2",
                 "requirement": "optional"
               },
               {
@@ -782,23 +795,7 @@
                   "id": "browser.evaluate",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "abbdfe6046ceaa515c4467c75b045fc6fa4656a046cb527a59ed28b064c126ce",
-                "requirement": "optional"
-              },
-              {
-                "capability": {
-                  "id": "browser.site_memory",
-                  "version": "1.0.0"
-                },
-                "capability_manifest_digest": "596f2c4ca4b5267353532b54a8836efc2a914a4910e1c95275da5a8e27df8f75",
-                "requirement": "optional"
-              },
-              {
-                "capability": {
-                  "id": "browser.takeover",
-                  "version": "1.0.0"
-                },
-                "capability_manifest_digest": "41bd9db2a90ea65a3ad3969614db060f70ff0a90d7655522f66ae7f9f79b46fd",
+                "capability_manifest_digest": "8f7f3cf7f3ba769bcaf7e0d257e7e90df8bf375180b63b35c8f4373e7740c38d",
                 "requirement": "optional"
               }
             ]
@@ -809,9 +806,9 @@
             "role": {
               "key": {
                 "role_id": "system.browser_use",
-                "contract_version": "1.0.0"
+                "contract_version": "2.0.0"
               },
-              "contract_digest": "6615d03597428b3456ae35da561b7a2ffbd590231433d0d94d41e79f26a555e3"
+              "contract_digest": "bae61f165d620d17ab9df4c245d207c1f465e6ed46603e7c36af1d63b2ecc8f9"
             },
             "display": {
               "name": "Browser Use",
@@ -833,9 +830,7 @@
                     ]
                   }
                 ],
-                "required_resource_kinds": [
-                  "browser"
-                ]
+                "required_resource_kinds": []
               },
               "browser.download": {
                 "supported_platforms": [
@@ -852,9 +847,7 @@
                     ]
                   }
                 ],
-                "required_resource_kinds": [
-                  "browser"
-                ]
+                "required_resource_kinds": []
               },
               "browser.evaluate": {
                 "supported_platforms": [
@@ -871,28 +864,7 @@
                     ]
                   }
                 ],
-                "required_resource_kinds": [
-                  "browser"
-                ]
-              },
-              "browser.identity": {
-                "supported_platforms": [
-                  {
-                    "constraint": "targets",
-                    "host_targets": [
-                      "aarch64-apple-darwin",
-                      "x86_64-apple-darwin",
-                      "x86_64-pc-windows-msvc",
-                      "x86_64-unknown-linux-gnu"
-                    ],
-                    "host_surfaces": [
-                      "desktop"
-                    ]
-                  }
-                ],
-                "required_resource_kinds": [
-                  "browser"
-                ]
+                "required_resource_kinds": []
               },
               "browser.navigate": {
                 "supported_platforms": [
@@ -909,9 +881,7 @@
                     ]
                   }
                 ],
-                "required_resource_kinds": [
-                  "browser"
-                ]
+                "required_resource_kinds": []
               },
               "browser.observe": {
                 "supported_platforms": [
@@ -928,9 +898,7 @@
                     ]
                   }
                 ],
-                "required_resource_kinds": [
-                  "browser"
-                ]
+                "required_resource_kinds": []
               },
               "browser.render_content": {
                 "supported_platforms": [
@@ -947,47 +915,7 @@
                     ]
                   }
                 ],
-                "required_resource_kinds": [
-                  "browser"
-                ]
-              },
-              "browser.site_memory": {
-                "supported_platforms": [
-                  {
-                    "constraint": "targets",
-                    "host_targets": [
-                      "aarch64-apple-darwin",
-                      "x86_64-apple-darwin",
-                      "x86_64-pc-windows-msvc",
-                      "x86_64-unknown-linux-gnu"
-                    ],
-                    "host_surfaces": [
-                      "desktop"
-                    ]
-                  }
-                ],
-                "required_resource_kinds": [
-                  "browser"
-                ]
-              },
-              "browser.takeover": {
-                "supported_platforms": [
-                  {
-                    "constraint": "targets",
-                    "host_targets": [
-                      "aarch64-apple-darwin",
-                      "x86_64-apple-darwin",
-                      "x86_64-pc-windows-msvc",
-                      "x86_64-unknown-linux-gnu"
-                    ],
-                    "host_surfaces": [
-                      "desktop"
-                    ]
-                  }
-                ],
-                "required_resource_kinds": [
-                  "browser"
-                ]
+                "required_resource_kinds": []
               },
               "browser.upload": {
                 "supported_platforms": [
@@ -1004,9 +932,7 @@
                     ]
                   }
                 ],
-                "required_resource_kinds": [
-                  "browser"
-                ]
+                "required_resource_kinds": []
               }
             }
           }
@@ -1762,5 +1688,5 @@
       }
     ]
   },
-  "payload_digest": "60e05105cf82aa55a8fd6a428b836e29e6ea18a0cef02eabfd91799fcb443868"
+  "payload_digest": "be13bb95cf0bf1fca71ebe13d4d5f8f956f00ee0134614946b8f6009a4293bb3"
 }

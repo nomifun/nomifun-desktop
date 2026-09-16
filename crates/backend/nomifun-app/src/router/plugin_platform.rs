@@ -2405,11 +2405,7 @@ impl NomiCorePluginRegistryPublisher {
                     .supports_consumer(CapabilityConsumer::Agent)
             })
             .filter_map(|capability| {
-                let native =
-                    super::nomi_core_agent_projection::nomi_capability_projection(
-                        capability.manifest.id.as_ref(),
-                    )
-                    .is_ok();
+                let native = super::nomi_core_agent_projection::native_capability_available(&capability.manifest);
                 let dynamic = capability.source.source_kind
                     == nomifun_agent_contracts::PluginSourceKind::ManagedLocal
                     && capability.contribution_lock.source_kind
@@ -2423,7 +2419,7 @@ impl NomiCorePluginRegistryPublisher {
                     || (capability.source.source_kind == nomifun_agent_contracts::PluginSourceKind::Bundled
                         && capability.contribution_lock.source_kind == nomifun_agent_contracts::ContributionSourceKind::McpBinding
                         && super::nomi_core_mcp_catalog::is_product_tool(capability.manifest.id.as_ref()));
-                (!native && !builtin && (!dynamic || !runtime_available)).then(|| {
+                (!agent_executor_available(capability.manifest.id.as_ref(), native, builtin, dynamic, runtime_available)).then(|| {
                     (
                         capability.manifest.id.clone(),
                         CanonicalErrorCode::from(AGENT_EXECUTOR_UNAVAILABLE),
@@ -2517,8 +2513,22 @@ async fn resolve_mount_data_dir(
     Ok(resolved)
 }
 
+/// A bundled system-browser declaration is usable only with its exact native
+/// host binding. Generic builtin/dynamic Tool approval cannot grant it.
+fn agent_executor_available(id: &str, native: bool, builtin: bool, dynamic: bool, runtime: bool) -> bool {
+    if id == "nomi_system_browser" { native } else { native || builtin || (dynamic && runtime) }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn system_browser_cannot_borrow_generic_builtin_or_dynamic_availability() {
+        assert!(!super::agent_executor_available("nomi_system_browser", false, true, true, true));
+        assert!(super::agent_executor_available("nomi_system_browser", true, false, false, false));
+        assert!(super::agent_executor_available("fs.read", false, true, false, false));
+        assert!(super::agent_executor_available("plugin.tool", false, false, true, true));
+        assert!(!super::agent_executor_available("plugin.tool", false, false, true, false));
+    }
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
 

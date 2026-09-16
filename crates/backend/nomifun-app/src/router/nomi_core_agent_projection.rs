@@ -428,6 +428,8 @@ pub(crate) fn nomi_capability_projection(
     capability_id: &str,
 ) -> Result<NomiCapabilityProjection, AppError> {
     let projection = match capability_id {
+        "nomi_local_websearch" if cfg!(feature="browser-use") => NomiCapabilityProjection::Tools(&["nomi_local_websearch"]),
+        "nomi_system_browser" if cfg!(feature="browser-use") => NomiCapabilityProjection::Tools(&["nomi_system_browser"]),
         nomifun_ai_agent::tool_discovery::CAPABILITY_ID => NomiCapabilityProjection::Tools(&["ToolSearch"]),
         "creation.image" => NomiCapabilityProjection::Tools(&["image_gen"]),
         // Native filesystem family.
@@ -544,26 +546,12 @@ pub(crate) fn nomi_capability_projection(
 
         // Browser is one native tool with an action discriminator. The
         // compile-time feature is part of the host availability contract.
-        "browser.identity" => {
-            if cfg!(feature = "browser-use") {
-                NomiCapabilityProjection::HostOnly {
-                    browser: true,
-                    computer: false,
-                }
-            } else {
-                return Err(unsupported(
-                    "capability",
-                    "browser.identity has no Browser owner in this build",
-                ));
-            }
-        }
         "browser.observe"
         | "browser.navigate"
         | "browser.act"
         | "browser.download"
         | "browser.upload"
-        | "browser.evaluate"
-        | "browser.takeover" => {
+        | "browser.evaluate" => {
             if cfg!(feature = "browser-use") {
                 NomiCapabilityProjection::BrowserTools
             } else {
@@ -594,6 +582,34 @@ pub(crate) fn nomi_capability_projection(
         }
     };
     Ok(projection)
+}
+
+/// Semantic projection alone never makes an unbound local runtime available.
+pub(crate) fn native_capability_available(manifest:&nomifun_agent_contracts::CapabilityManifest)->bool {
+    if manifest.id.as_ref() == "nomi_system_browser" {
+        #[cfg(feature = "browser-use")]
+        {
+            use nomifun_browser_platform::system_browser::{BINDING_ANNOTATION, SystemBrowserBinding};
+            let binding = manifest.config_schema.0.get(BINDING_ANNOTATION)
+                .and_then(|value| serde_json::from_value::<SystemBrowserBinding>(value.clone()).ok());
+            return manifest.package.id.as_ref() == nomifun_agent_domain_wave1::SYSTEM_BROWSER_PACKAGE_ID
+                && manifest.package.version.as_ref() == "1.0.0"
+                && manifest.version.as_ref() == "1.0.0"
+                && manifest.kind == nomifun_agent_contracts::CapabilityKind::Tool
+                && binding.is_some_and(|binding| binding.schema_version == 1
+                    && binding.runtime_digest.len() == 64
+                    && binding.runtime_digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        }
+        #[cfg(not(feature = "browser-use"))]
+        { return false; }
+    }
+    if manifest.id.as_ref()=="nomi_local_websearch" {
+        #[cfg(feature="browser-use")]
+        {return nomifun_ai_agent::local_web_search::binding_from_manifest(manifest).ok().flatten().is_some();}
+        #[cfg(not(feature="browser-use"))]
+        {return false;}
+    }
+    nomi_capability_projection(manifest.id.as_ref()).is_ok()
 }
 
 /// Validate all capability selections against the concrete Nomi projection.
@@ -712,14 +728,12 @@ fn is_native_nomi_capability(capability_id: &str) -> bool {
             | "memory.project.write"
             | "memory.project.distill"
             | "llm.vision"
-            | "browser.identity"
             | "browser.observe"
             | "browser.navigate"
             | "browser.act"
             | "browser.download"
             | "browser.upload"
             | "browser.evaluate"
-            | "browser.takeover"
             | "a11y.observe"
             | "computer.observe"
             | "computer.input"
@@ -1449,6 +1463,46 @@ mod tests {
             nomi_capability_projection("citation.render").unwrap(),
             NomiCapabilityProjection::Tools(&["citation_render"])
         );
+    }
+
+    #[test]
+    fn local_search_does_not_require_a_native_search_model_route_or_grant_browser_tools() {
+        let mut local = fixture();
+        local.2.payload.enabled_capabilities = vec![capability("nomi_local_websearch", true)];
+        refresh_fixture_identity(&mut local);
+        validate_nomi_capability_projection(&local.2).expect("local search is an ordinary exact Tool, not a model-native feature");
+        let result=project(input(&local)).expect("defer ordinary Tool registration to the exact Session owner");
+        assert_eq!(result.request.extra["allowed_tools"],if cfg!(feature="browser-use"){json!(["nomi_local_websearch"])}else{json!([])});
+    }
+
+    #[test]
+    fn system_browser_projects_only_its_independent_tool() {
+        let mut selected = fixture();
+        selected.2.payload.enabled_capabilities = vec![capability("nomi_system_browser", true)];
+        refresh_fixture_identity(&mut selected);
+        validate_nomi_capability_projection(&selected.2).unwrap();
+        let result = project(input(&selected)).unwrap();
+        assert_eq!(result.request.extra["allowed_tools"],
+            if cfg!(feature = "browser-use") { json!(["nomi_system_browser"]) } else { json!([]) });
+    }
+
+    #[test]
+    #[cfg(feature = "browser-use")]
+    fn system_browser_requires_its_own_strict_binding() {
+        use nomifun_browser_platform::system_browser::BINDING_ANNOTATION;
+        let registration = nomifun_agent_domain_wave1::registrations().unwrap().into_iter()
+            .find(|entry| entry.metadata.manifest.payload.package_id.as_ref() == nomifun_agent_domain_wave1::SYSTEM_BROWSER_PACKAGE_ID).unwrap();
+        let mut manifest = registration.metadata.manifest.payload.contributions.capabilities[0].clone();
+        assert!(!native_capability_available(&manifest));
+        for value in [json!({"schema_version":2,"runtime_digest":DIGEST}), json!({"schema_version":1,"runtime_digest":"bad"}),
+            json!({"schema_version":1,"runtime_digest":DIGEST,"extra":true})] {
+            manifest.config_schema.0[BINDING_ANNOTATION] = value;
+            assert!(!native_capability_available(&manifest));
+        }
+        manifest.config_schema.0[BINDING_ANNOTATION] = json!({"schema_version":1,"runtime_digest":DIGEST});
+        assert!(native_capability_available(&manifest));
+        manifest.package.id = "nomifun.local-websearch".into();
+        assert!(!native_capability_available(&manifest));
     }
 
     #[test]

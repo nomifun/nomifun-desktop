@@ -51,8 +51,8 @@ impl ShellService {
     ///
     /// Every production caller is an Agent surface (the `nomifun-open` MCP
     /// server), so web URLs fail closed here: an Agent-initiated `http/https`
-    /// open through the OS browser would bypass the managed Browser Hub's
-    /// approval, egress and lifecycle policies. Trusted user-clicked links use
+    /// open through the OS browser would bypass the explicitly selected
+    /// Browser capability and its run ownership. Trusted user-clicked links use
     /// [`Self::open_external`] instead.
     pub async fn launch(&self, target: &str, app: Option<&str>) -> Result<(), ShellError> {
         validate_launch_target(target)?;
@@ -318,9 +318,8 @@ fn validate_agent_launch_is_not_web(target: &str) -> Result<(), ShellError> {
     if lower.contains("http:") || lower.contains("https:") {
         return Err(ShellError::InvalidTarget(format!(
             "opening web URLs through the operating-system browser is not available to Agent \
-             tools ({target:?}). Use the managed Browser tool (browser navigate) to read or \
-             interact with web pages; the user can foreground a running Primary browser lane \
-             from the Browser management page when a visible window is needed."
+             tools ({target:?}). Use the selected conversation Browser or system-browser \
+             capability to read or interact with web pages."
         )));
     }
     Ok(())
@@ -608,7 +607,7 @@ mod tests {
     #[tokio::test]
     async fn launch_fails_closed_on_agent_web_targets() {
         // Agent-facing launch must not open web pages through the OS browser;
-        // that path belongs to the managed Browser Hub. Scheme-only forms and
+        // that path belongs to an explicitly selected Browser capability. Scheme-only forms and
         // wrapper protocols forwarding to a web URL are the same bypass.
         let svc = ShellService::new(Arc::new(NoopSystemOpener));
         for target in [

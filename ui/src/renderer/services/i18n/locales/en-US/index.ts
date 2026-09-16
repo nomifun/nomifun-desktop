@@ -33,7 +33,7 @@ import modelFailover from './modelFailover.json';
 import agentExecution from './agentExecution.json';
 import collaboration from './collaboration.json';
 import creativeStudio from './creativeStudio.json';
-import browser from './browser.json';
+import browserWorkspace from './browserWorkspace.json';
 import ssh from './ssh.json';
 import pluginRuntime from './pluginRuntime.json';
 import agentSettings from './agentSettings.json';
@@ -70,7 +70,7 @@ export default {
   agentExecution,
   collaboration,
   creativeStudio,
-  browser,
+  browserWorkspace,
   ssh,
   pluginRuntime,
   agentSettings,

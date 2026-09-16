@@ -17,6 +17,7 @@ import remarkMath from 'remark-math';
 import 'katex/dist/katex.min.css';
 
 import { openExternalUrl } from '@/renderer/utils/platform';
+import { useBrowserLink } from '@/renderer/pages/conversation/Browser/BrowserLinkContext';
 import classNames from 'classnames';
 import React, { useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -78,6 +79,7 @@ const MarkdownView: React.FC<MarkdownViewProps> = React.memo(
   }) => {
     const { t } = useTranslation();
     const navigate = useNavigate();
+    const openBrowserLink = useBrowserLink();
 
     const normalizedChildren = useMemo(() => {
       if (typeof childrenProp === 'string') {
@@ -99,11 +101,12 @@ const MarkdownView: React.FC<MarkdownViewProps> = React.memo(
         }
         const externalHref = e.currentTarget.href;
         if (!externalHref) return;
+        if (openBrowserLink(externalHref)) return;
         openExternalUrl(externalHref).catch((error: unknown) => {
           console.error(t('messages.openLinkFailed'), error);
         });
       },
-      [navigate, t]
+      [navigate, t, openBrowserLink]
     );
 
     // Memoize components so React preserves component identity across re-renders.

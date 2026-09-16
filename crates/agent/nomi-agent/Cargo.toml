@@ -10,10 +10,6 @@ repository.workspace = true
 # Desktop control (screenshots, synthetic input). Gated because xcap/enigo
 # pull native display-server libraries that headless hosts must not require.
 computer-use = ["dep:nomi-computer"]
-# Browser automation (in-process self-hosted CDP engine). Gated because it pulls
-# the chromiumoxide CDP stack + a managed/connected Chromium; headless hosts that
-# never drive a browser must not require it.
-browser-use = ["dep:nomi-browser", "dep:base64"]
 
 [dependencies]
 nomi-types.workspace     = true
@@ -29,11 +25,6 @@ nomi-redact.workspace    = true
 nomi-process-runtime.workspace = true
 nomifun-common.workspace = true
 nomi-computer = { workspace = true, optional = true }
-nomi-browser = { workspace = true, optional = true }
-# Used only by the browser-use SessionVisualLocator adapter (base64-encode the
-# screenshot PNG into a ContentBlock::Image for the vision model). Optional →
-# pulled in only with the browser-use feature.
-base64 = { workspace = true, optional = true }
 
 tracing.workspace     = true
 tokio.workspace       = true

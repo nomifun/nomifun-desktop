@@ -529,7 +529,6 @@
       "observe": "{{name}} 正在看页面…",
       "screenshot": "{{name}} 正在截屏…",
       "read": "{{name}} 正在读取页面内容…",
-      "search": "{{name}} 正在页面里找「{{query}}」…",
       "download": "{{name}} 正在下载文件…",
       "busy": "{{name}} 正在浏览网页…"
     },

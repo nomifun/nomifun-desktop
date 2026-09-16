@@ -488,10 +488,8 @@ pub struct DesktopServer {
     /// server prevents a listener failure from dropping the environment lock
     /// or long-lived services before cleanup has been verified.
     _keep_alive: DesktopKeepAlive,
-    /// Shared process-wide Gateway/Browser shutdown authority. Desktop
-    /// exit/restart always stops the Gateway; browser-enabled builds also stop
-    /// ACP browser ingress and then join the same Hub shutdown flight used by
-    /// services/server cleanup.
+    /// Shared process-wide Gateway shutdown authority. Desktop exit/restart
+    /// joins the same ingress shutdown flight used by services/server cleanup.
     browser_platform_shutdown: Option<crate::services::BrowserPlatformShutdown>,
     /// The first unexpected listener failure is delivered to the desktop
     /// backend thread, which then drops [`DesktopKeepAlive`] and exits the
@@ -643,6 +641,35 @@ async fn cleanup_start_failure(
     }
 }
 
+/// Native host dependencies are injected before the backend router is built.
+/// Headless hosts leave these absent; no fallback creates a hidden second browser.
+#[derive(Default)]
+pub struct DesktopHostServices {
+    /// Pinned installed release; live protocol admission happens before use.
+    #[cfg(feature = "browser-use")]
+    pub local_web_search: Option<Arc<nomifun_ai_agent::local_web_search::BrowserSearchProvider>>,
+    #[cfg(feature = "browser-use")]
+    pub headless_render: Option<Arc<crate::headless_render::HeadlessRenderRuntime>>,
+    #[cfg(feature = "browser-use")]
+    pub browser_workspaces: Option<Arc<nomifun_browser_platform::workspace::BrowserWorkspaceService>>,
+    #[cfg(feature = "browser-use")]
+    pub system_browser: Option<Arc<crate::system_browser::SystemBrowserService>>,
+}
+
+#[cfg(feature = "browser-use")]
+impl DesktopHostServices {
+    /// Trusted shell metadata only. The runtime is launched and its product
+    /// rechecked only when a selected search or admitted render actually runs.
+    pub async fn set_browser_release(&mut self, path:PathBuf, product:String) -> Result<()> {
+        let provider=nomifun_ai_agent::local_web_search::BrowserSearchProvider::from_installed_release(path.clone(),"en-US".into(),product.clone()).await?;
+        let render=crate::headless_render::HeadlessRenderRuntime::from_installed_release(path,product).await?;
+        anyhow::ensure!(render.binding()["browser_binary_digest"].as_str()==Some(provider.binding().browser_binary_digest.as_str()),"Browser release changed during admission");
+        self.local_web_search=Some(Arc::new(provider));
+        self.headless_render=Some(render);
+        Ok(())
+    }
+}
+
 impl DesktopServer {
     /// Boot the embedded backend under `TrustLocalToken`, bind the permanent
     /// loopback listener, and spawn its serve task. Returns the shared handle
@@ -670,6 +697,7 @@ impl DesktopServer {
             spa_dir,
             dev_frontend_url,
             webui_asset_source,
+            DesktopHostServices::default(),
             |_| Ok(()),
         )
         .await
@@ -687,6 +715,7 @@ impl DesktopServer {
         spa_dir: Option<PathBuf>,
         dev_frontend_url: Option<String>,
         webui_asset_source: Option<WebUiAssetSource>,
+        host_services: DesktopHostServices,
     ) -> std::result::Result<
         (Arc<DesktopServer>, DesktopKeepAlive),
         DesktopStartError,
@@ -699,6 +728,7 @@ impl DesktopServer {
             spa_dir,
             dev_frontend_url,
             webui_asset_source,
+            host_services,
             |_| Ok(()),
         )
         .await
@@ -715,6 +745,7 @@ impl DesktopServer {
         spa_dir: Option<PathBuf>,
         dev_frontend_url: Option<String>,
         webui_asset_source: Option<WebUiAssetSource>,
+        host_services: DesktopHostServices,
         register: impl FnOnce(&Arc<crate::RuntimeEngineHost>) -> Result<(), nomifun_common::AppError> + Send,
     ) -> std::result::Result<
         (Arc<DesktopServer>, DesktopKeepAlive),
@@ -739,7 +770,7 @@ impl DesktopServer {
         let database = bootstrap::init_data_layer(&config)
             .await
             .map_err(DesktopStartError::verified)?;
-        let services = match AppServices::try_from_config(database, &config).await {
+        let services = match AppServices::try_from_config_with_host(database, &config, host_services).await {
             Ok(services) => services,
             Err(failure) => {
                 let (error, cleanup_error, authority) = failure.into_parts();
@@ -901,6 +932,17 @@ impl DesktopServer {
     /// The loopback port the webview connects to (`window.__backendPort`).
     pub fn loopback_port(&self) -> u16 {
         self.loopback_port
+    }
+
+    /// Trusted desktop Surface commands can attach only a workspace already
+    /// authorized by the Conversation API or the Agent factory.
+    #[cfg(feature = "browser-use")]
+    pub async fn browser_workspace_for_local_surface(&self, conversation_id: &str) -> Result<Arc<nomifun_browser_platform::workspace::BrowserWorkspace>> {
+        let services = self._keep_alive.services().ok_or_else(|| anyhow::anyhow!("Native browser is unavailable."))?;
+        let workspaces = services.browser_workspaces.as_ref().ok_or_else(|| anyhow::anyhow!("Native browser is unavailable."))?;
+        workspaces.get(&nomifun_browser_platform::runtime::BrowserWorkspaceKey {
+            user_id: services.authoritative_user_id.to_string(), conversation_id: conversation_id.into(),
+        }).await.ok_or_else(|| anyhow::anyhow!("Conversation browser is not available."))
     }
 
     /// Keep the robot endpoint advertiser in step with the LAN listener.
@@ -1211,8 +1253,9 @@ impl DesktopServer {
 
         // Do not close the shared database after an earlier cleanup failure.
         // Terminal cleanup intentionally preserves durable rows on failure and
-        // BrowserSessionHub retains Host authority for an explicit retry; closing
-        // the shared pool here would make both retries fail for the wrong reason.
+        // browser owners retain their exact cleanup authority for an explicit
+        // retry; closing the shared pool here would make both retries fail for
+        // the wrong reason.
         // The database is therefore closed only after listeners, terminals, and
         // every explicit Host shutdown have all completed successfully.
         if errors.is_empty() {
@@ -1615,8 +1658,8 @@ impl DesktopServer {
     /// Synchronously perform the complete application shutdown on the backend
     /// runtime. This is called from the Tauri main thread, so it schedules the
     /// async single-flight cleanup and waits without calling `Handle::block_on`.
-    /// Cleanup is ordered: listeners, terminal sessions, BrowserSessionHub,
-    /// then the database.
+    /// Cleanup is ordered: listeners, terminal sessions, browser owners, then
+    /// the database.
     pub fn shutdown_all_blocking(self: &Arc<Self>) -> anyhow::Result<()> {
         if self.shutdown_success.get().is_some() {
             tracing::info!(

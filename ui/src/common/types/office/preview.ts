@@ -17,8 +17,7 @@ export type PreviewContentType =
   | 'ppt'
   | 'word'
   | 'excel'
-  | 'image'
-  | 'url';
+  | 'image';
 
 export interface PreviewHistoryTarget {
   contentType: PreviewContentType;

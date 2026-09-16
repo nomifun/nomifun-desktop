@@ -8,11 +8,6 @@ export type GuidAgentSelectionPreference =
   | { kind: 'template'; templateKey: OfficialPresetKey }
   | { kind: 'preset'; presetId: AgentPresetId };
 
-// `auto` (default), `headless` and `external` are the three supported user
-// policies; `embedded` remains in the read type only so installations can
-// migrate the removed viewer's persisted value. New product code persists only
-// `auto`, `headless` or `external`.
-export type BrowserDisplayMode = 'embedded' | 'external' | 'headless' | 'auto';
 
 export type ConfigKeyMap = {
   'google.config': {
@@ -64,50 +59,6 @@ export type ConfigKeyMap = {
   // Desktop control (computer-use): gates the nomi engine's Computer tool
   // (observe/click/type/launch). Read by the backend agent factory per session.
   'agent.computerUse': boolean | undefined;
-  // Browser control (browser-use): gates the nomi engine's built-in browser
-  // tools (native CDP engine). ON by default on browser-use (desktop) builds; it
-  // opens an isolated managed Chrome / Edge instance. Routine work is silent
-  // and headless unless the installation owner explicitly selects `external`.
-  // Read by the backend agent factory per session.
-  'agent.browserUse': boolean | undefined;
-  // Application-level browser default visibility policy. New installs persist
-  // `auto` (the host resolves visibility per lane, staying silent for routine
-  // work); the user may pin `headless` (never visible) or `external`
-  // (default-visible Primary). Historical `embedded`, unversioned, and legacy
-  // `agent.browserUse.silent` state all fail closed to `auto`, which still
-  // launches silently. Agent tool input can only declare intent, never select
-  // the mode.
-  'agent.browserUse.displayMode': BrowserDisplayMode | undefined;
-  // Lineage marker for an explicit visibility policy. Only the current version
-  // plus a valid displayMode is authoritative as a local fallback; a v2 marker
-  // is still recognized so an explicit `external` survives migration. The live
-  // owner API remains authoritative.
-  'agent.browserUse.displayModeVersion': 2 | 3 | undefined;
-  // Legacy compatibility read only. New settings code must not write this key.
-  // Visibility migration no longer derives an external window from this key.
-  // Elastic crawl/replica/isolated hosts choose headless execution internally.
-  'agent.browserUse.silent': boolean | undefined;
-  // Browser source (browser-use sub-setting, orthogonal to silent): 'managed' =
-  // bundled/downloaded Chrome for Testing; 'system' (default) = the user's
-  // installed Chrome/Edge binary (still an isolated profile — never the real
-  // profile). Read by the backend agent factory per session.
-  'agent.browserUse.source': 'managed' | 'system' | undefined;
-  // Persistent login (browser-use sub-setting): keeps cookies/storage across
-  // sessions in an encrypted vault. ON by default. When on, evaluate full-power
-  // mode is blocked (security mutex). Read by the backend browser engine.
-  'agent.browserUse.persistentLogin': boolean | undefined;
-  // Full-power browser evaluate mode: unlocks arbitrary page-script evaluation.
-  // OFF by default and mutually exclusive with persistent login on the backend.
-  'agent.browserUse.fullPower': boolean | undefined;
-  // Site memory (browser-use sub-setting): persists per-site interaction hints to
-  // disk + injects them into the agent's context. OFF by default (opt-in,
-  // privacy-relevant). Read by the backend browser factory.
-  'agent.browserUse.siteMemory': boolean | undefined;
-  // Visual fallback (browser-use sub-setting): when DOM/aria anchoring fails, the
-  // agent screenshots the page and asks the vision model to locate the target, then
-  // clicks the mapped point. OFF by default (opt-in, vision-token cost). Read by the
-  // backend agent factory.
-  'agent.browserUse.visualFallback': boolean | undefined;
   'channels.telegram.agent':
     | { agent_type: string; backend?: string; name?: string }
     | undefined;

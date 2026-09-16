@@ -12,6 +12,8 @@ const TEMP_WORKSPACE_ID_EXTRA_KEY: &str = "temp_workspace_id";
 pub(super) struct FactoryContext {
     pub conversation_id: String,
     pub workspace: String,
+    #[cfg(feature = "browser-use")]
+    pub is_temporary_workspace: bool,
 }
 
 impl FactoryContext {
@@ -24,12 +26,12 @@ impl FactoryContext {
         // backend-managed workspace. Always rebase that workspace under this
         // installation's current `work_dir`; the persisted absolute workspace
         // may point at the source installation after restore/import.
-        let workspace = if options
+        let is_temporary_workspace = options
             .extra
             .get(TEMP_WORKSPACE_ID_EXTRA_KEY)
             .is_some()
-            || options.workspace.trim().is_empty()
-        {
+            || options.workspace.trim().is_empty();
+        let workspace = if is_temporary_workspace {
             let temp_workspace_id = temp_workspace_id_for_options(options)?;
             let dir = deps
                 .work_dir
@@ -45,6 +47,8 @@ impl FactoryContext {
         Ok(Self {
             conversation_id,
             workspace,
+            #[cfg(feature = "browser-use")]
+            is_temporary_workspace,
         })
     }
 }

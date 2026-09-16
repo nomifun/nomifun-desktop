@@ -57,11 +57,10 @@ nomi-mcp.workspace = true
 nomi-providers.workspace = true
 nomi-memory.workspace = true
 nomi-redact.workspace = true
-# Rendering page-fetch backend for knowledge URL sources. This adapter consumes
-# the application-owned Browser Session Hub while the knowledge crate remains
-# independent of the browser platform.
+# Native Workspace contracts and isolated local-search engine. Knowledge uses
+# its own typed port; the legacy BrowserTool/Hub adapter is not a dependency.
 nomifun-browser-platform = { workspace = true, optional = true }
-nomi-browser = { workspace = true, optional = true }
+nomi-browser-engine = { workspace = true, optional = true }
 chrono.workspace = true
 uuid.workspace = true
 tokio-util = { version = "0.7", features = ["compat"] }
@@ -85,9 +84,10 @@ test-support = []
 # Desktop control tools for the nomi engine (desktop host only).
 computer-use = ["nomi-agent/computer-use"]
 # Browser-automation tools for the nomi engine (desktop host only).
-browser-use = ["nomi-agent/browser-use", "dep:nomi-browser", "dep:nomifun-browser-platform"]
+browser-use = ["dep:nomifun-browser-platform", "dep:nomi-browser-engine"]
 
 [dev-dependencies]
+nomifun-agent-domain-wave1.workspace = true
 nomifun-js-host.workspace = true
 nomifun-js-kernel-adapter.workspace = true
 nomifun-js-runtime.workspace = true

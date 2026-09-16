@@ -22,7 +22,6 @@ import PDFPreview from '../viewers/PDFViewer';
 import OfficeDocPreview from '../viewers/OfficeDocViewer';
 import PptViewer from '../viewers/PptViewer';
 import TextEditor from '../editors/TextEditor';
-import URLViewer from '../viewers/URLViewer';
 import {
   PreviewTabs,
   PreviewToolbar,
@@ -604,9 +603,6 @@ const PreviewPanel: React.FC = () => {
           workspace={metadata?.workspace}
         />
       );
-    } else if (content_type === 'url') {
-      // URL 预览模式 / URL preview mode
-      return <URLViewer url={content} title={metadata?.title} />;
     }
 
     return null;
@@ -649,8 +645,7 @@ const PreviewPanel: React.FC = () => {
           onClosePanel={closePreview}
         />
 
-        {/* 工具栏（URL 类型不显示工具栏，因为不需要下载/编辑等功能）/ Toolbar (hidden for URL type as it doesn't need download/edit features) */}
-        {content_type !== 'url' && (
+        {/* Document preview toolbar */}
           <PreviewToolbar
             content_type={content_type}
             isMarkdown={isMarkdown}
@@ -683,7 +678,6 @@ const PreviewPanel: React.FC = () => {
             leftExtra={toolbarExtras?.left}
             rightExtra={toolbarExtras?.right}
           />
-        )}
 
         {metadata?.truncated && (
           <div className='sticky top-0 z-1 px-16px py-10px text-12px bg-warning-1 text-warning-7 border-b border-b-solid border-warning-3'>

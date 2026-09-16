@@ -148,40 +148,9 @@ pub struct NomiResolvedConfig {
     pub bedrock_config: Option<nomi_config::config::BedrockConfig>,
     /// Enable the Computer tool (screen/mouse/keyboard control).
     pub computer_use: bool,
-    /// Enable Browser tools backed by a main-process `BrowserLaneClient`.
-    /// This runtime never owns Chromium or a browser profile.
-    pub browser_use: bool,
-    /// **浏览器来源 LIVE 值**（Browser Host 可执行文件偏好，与 silent 正交）。`"managed"` =
-    /// 内置/下载 CfT；`"system"`（默认）= 系统 Chrome/Edge 本体优先（未探到回退 managed）。
-    /// 工厂经 `read_string_pref` LIVE 读 `agent.browserUse.source`（host_default=`"system"`）。
-    /// 主进程 `BrowserSessionHub` 仍是唯一 Host/profile owner：Primary 使用应用管理的稳定
-    /// profile，Crawl Host 使用临时 profile，runtime 不拥有独立 Chromium。
-    pub browser_source: String,
-    /// **F1-sec: browser-use evaluate「全权模式」LIVE 值**（裁决⑨，default-deny）。`true` 当且仅当
-    /// 用户在 System Settings 显式 opt-in（`client_preferences` `agent.browserUse.fullPower`，工厂经
-    /// `read_bool_pref` 范式 LIVE 读）。`false`（默认）→ 引擎 `evaluate` 动作返 `Unsupported`。
-    pub browser_full_power: bool,
-    /// **SD-6: browser-use 持久登录 LIVE 值**（DESIGN §16/§27 互斥约束）。`true`（产品默认）→ 与全权
-    /// 互斥（evaluate 在两者皆 true 时 Blocked）。工厂经 `read_bool_pref` 范式 LIVE 读
-    /// `agent.browserUse.persistentLogin`（host_default=true）。`false` → 互斥不生效（evaluate 仅受
-    /// full_power 开关控制）。代码级 Default = `false`（与 full_power 同范式 default-deny 基线）。
-    pub browser_persistent_login: bool,
-    /// **P7A site-memory LIVE 值**（opt-in，隐私相关）。`true` → bootstrap 给 Hub-backed
-    /// Browser tool adapter 注入文件型 `SiteMemorySink`（跨会话记住站点结构 + 向 observe
-    /// 注入 hints）。工厂经 `read_bool_pref` 范式 LIVE 读 `agent.browserUse.siteMemory`
-    /// （host_default=**false**=OFF）。`false`（默认）→ 不挂 sink，零行为变化。
-    pub browser_site_memory: bool,
-    /// **P7B visual-fallback LIVE 值**（opt-in，有 token 成本）。`true` → bootstrap 给
-    /// Hub-backed Browser tool adapter 注入会话模型的 `VisualLocator`：DOM/aria 锚定失败
-    /// （ref stale/detached）时截图交视觉模型按描述定位再点。工厂经 `read_bool_pref` 范式
-    /// LIVE 读 `agent.browserUse.visualFallback`（host_default=**false**=OFF）。`false`
-    /// （默认）→ 不注入 locator，适配层保持 Unavailable（零行为变化）。
-    pub browser_visual_fallback: bool,
     /// Opt-in goal-driven continuation (objective + auto-continuation cap).
     /// `None` (default) = normal one-shot turn behavior.
     pub goal: Option<nomi_agent::goal::runtime::GoalSpec>,
-    /// Machine-bound key used for encrypted persistent-browser-login snapshots.
-    pub persistent_login_key: Option<[u8; 32]>,
     /// Stable identity of the owning conversation instance (the conversation
     /// row's `created_at`, stringified). Persisted Nomi runtimes always provide
     /// it; probe-only runtimes may leave it absent because they do not resume a

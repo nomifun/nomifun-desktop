@@ -1,6 +1,7 @@
 import { useState, type ComponentProps, type HTMLAttributes, type ReactNode, type Ref } from 'react';
 import { Button, Input } from '@arco-design/web-react';
 import { ArrowUp } from '@icon-park/react';
+import { useTranslation } from 'react-i18next';
 import { useInputFocusRing } from '@/renderer/hooks/chat/useInputFocusRing';
 import { useCompositionInput } from '@/renderer/hooks/chat/useCompositionInput';
 import UploadProgressBar from '@/renderer/components/media/UploadProgressBar';
@@ -103,8 +104,9 @@ export function ComposerSendButton({ disabled, loading, onClick, icon, title, te
   title?: string;
   testId?: string;
 }) {
+  const { t } = useTranslation();
   return <Button shape='circle' type='primary' disabled={disabled} loading={loading}
-    className='send-button-custom' title={title} aria-label={title}
+    className='send-button-custom' title={title} aria-label={title ?? t('common.send')}
     icon={icon ?? <ArrowUp theme='filled' size='14' fill='currentColor' strokeWidth={5} />}
     onClick={onClick} data-testid={testId} data-composer-action='send' />;
 }

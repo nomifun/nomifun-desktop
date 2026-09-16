@@ -15,8 +15,8 @@
  *   - In the WebUI browser       → providers return a web-safe fallback and
  *                                  emitters are inert (no transport, no throw).
  *
- * Operations with no Tauri equivalent (Chrome DevTools Protocol, GPU-process
- * recovery, devtools open/close, renderer-log piping, WebUI-server lifecycle,
+ * Operations with no Tauri equivalent (GPU-process recovery,
+ * WebUI-server lifecycle,
  * close-to-tray window behavior) are intentionally DEGRADED to safe stubs here
  * — marked `DEGRADE_STUB`. They no longer depend on the deleted `@/platform`
  * bridge. Each carries a TODO if a real Tauri port is wanted later.

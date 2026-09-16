@@ -221,6 +221,12 @@ pub struct CompanionService {
 }
 
 impl CompanionService {
+    /// Host shutdown only, after ingress and background consumers have stopped.
+    /// This closes the separate memory database without deleting any data.
+    pub async fn close_storage(&self) {
+        self.store.close().await;
+    }
+
     /// Installation owner whose persistent Companion dataset this service
     /// instance controls. Agent adapters use it to reject a forged resource
     /// binding before resolving any Companion identity.

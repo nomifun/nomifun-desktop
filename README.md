@@ -361,13 +361,13 @@ Pull the knowledge scattered across your system into one managed, trackable plac
 Self-built, **in-process Rust** — no Playwright, no Node, no third-party automation daemon. More capable, faster, and far cheaper on tokens, with fine-grained control and fully open source for you to extend.
 
 - **Computer use** — accessibility tree + Set-of-Marks overlay + OCR, steering the model to act on real UI elements instead of guessing pixels. macOS (AXUIElement + Vision OCR) and Windows (UI Automation) are complete; Linux (AT-SPI2) is partial.
-- **Browser use** — a main-process `BrowserSessionHub` owns managed Chromium Hosts and addressable Browser Lanes. The built-in agent, the Gateway, and parallel AgentExecution attempts all enter the same platform instead of launching private browsers.
-- **Status and lifecycle browser management** — the **Browser** page reports conversations, runtimes, Lanes, tabs, URLs, identity mode, capacity, queue position, pressure, resource estimates, and failures. Within that management boundary, a user can explicitly foreground an already-running Primary Lane; the page still does not embed a preview or expose page input or takeover controls.
-- **Shared live login identity** — ordinary interactive Lanes use an application-managed Primary profile and see live shared login state. Public crawls use an anonymous identity with no Primary cookies or site storage, while explicitly isolated work gets a separate identity. NomiFun never opens the user's real Chrome or Edge profile.
-- **Bounded, observable concurrency** — different Lanes can run concurrently while each Lane remains strictly serialized. When safe capacity is exhausted, callers and the UI receive queue position, pressure reason, and recommended concurrency rather than an apparently ready handle blocked by a hidden global lock.
-- **Quiet by default, foreground on request** — ordinary Primary Agent work uses a real headful managed Chromium window that starts minimized in the background and does not pop up or steal focus. **Open browser in foreground** restores that same window and active target for a running Primary Lane; explicit sign-in flows foreground it automatically. NomiFun retains lifecycle authority, including user closes, owner revocation, and managed process-tree cleanup.
-- **Agent-only interaction** — page navigation and input remain owned by the executing agent. Browser approvals still enforce the existing danger × surface policy, without a separate viewer takeover path.
-- **Guarded by design** — every action carries a danger × surface approval matrix; irreversible actions wait for explicit confirmation.
+- **A real browser inside the conversation** — on Windows today, the desktop embeds native WebView2 in the conversation work surface; a future macOS backend will follow the same contract and Linux is deferred. The user and the Agent see and operate the same live page, with real tabs, navigation, forms, history, site storage, sign-in state, WebSocket, and HMR — never an iframe, video stream, or sequence of screenshots.
+- **One simple input rule** — while the Agent is running, browser input belongs to the Agent and the user watches the real interaction. When the turn ends, the user can operate the page directly. There is no pause-and-take-control workflow.
+- **Frontend testing without a separate test product** — an enabled Agent can observe rendered elements and use real mouse, keyboard, drag, upload, download, and dialog interactions to test an app it is building. There is no Browser console, problem list, test-step panel, or special test mode.
+- **Conversation-owned state** — each persistent conversation has its own browser profile and tabs. The Browser opens from that conversation rather than a global management page or Browser settings center; site data and downloads stay in the small in-context browser menu.
+- **Optional local web search** — `nomi_local_websearch` gives models without provider-native search a separate, selectable public-web search tool. It runs in an isolated background browser and never reads conversation tabs or sign-in state.
+- **Optional system-browser connection** — `nomi_system_browser` is a separate selectable capability for an already-running, signed-in Chrome on Windows. The user explicitly authorizes tabs for the conversation; NomiFun does not import profiles or move credentials into the embedded browser.
+- **No hidden interactive fallback** — isolated headless Chromium is reserved for local search and content rendering. Interactive Browser work always targets the native conversation surface, and failure to create that surface is reported instead of silently switching engines.
 
 > ℹ️ Computer/browser control ship with the **desktop app**. The headless web/server host omits them by design.
 
@@ -723,7 +723,7 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run check:creative-studio-retirement` | 扫描 tracked 源码，阻止旧创意工坊页面、路由、API、翻译与 Gateway 标记回流 |
 | `bun run check:creative-studio-retirement:dist` | 在 UI production build 后扫描 ui/dist，阻止旧创意工坊标记进入发布产物 |
 | `bun run check:process-runtime-boundary` | Enforce the supervised process runtime boundary and exact hand-off allowlist. |
-| `bun run check:browser-platform-boundary` | Enforce the single BrowserSessionHub ownership boundary and reject private browser launch paths. |
+| `bun run check:browser-platform-boundary` | Enforce native conversation Browser ownership, isolated background-browser boundaries, and retirement of legacy browser paths. |
 | `bun run check:agent-vocabulary` | Enforce AgentExecution as the only active collaboration aggregate and permit only exact migration fences. |
 | `bun run check` | 聚合静态检查：typecheck + i18n + 主题/图标/dead-CSS + Windows 安装器 + 创意工坊退役 + 进程/浏览器边界 + Agent 词汇 + 脚本登记 |
 | `bun run typecheck` | 前端 TypeScript 类型检查（tsc --noEmit） |

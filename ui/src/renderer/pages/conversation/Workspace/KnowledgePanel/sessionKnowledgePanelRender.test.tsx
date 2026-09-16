@@ -11,7 +11,7 @@
  * real component through React with the real Arco `Tree` and the real locale
  * bundle, because a `fieldNames` mismatch or a bad root shape produces perfectly
  * valid-looking source and an empty tree. Mirrors the
- * `pages/browser/BrowserPresentation.test.tsx` approach (renderToStaticMarkup +
+ * Server markup rendering approach (renderToStaticMarkup +
  * a local i18n instance) — there is no testing-library in this repo.
  */
 

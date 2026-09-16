@@ -13,8 +13,6 @@ import { cleanupSiderTooltips, getSiderTooltipProps } from '@renderer/utils/ui/s
 import { useAuth } from '@renderer/hooks/context/AuthContext';
 import { blurActiveElement } from '@renderer/utils/ui/focus';
 import { isDesktopShell } from '@renderer/utils/platform';
-import { useBrowserOverview } from '@renderer/pages/browser/useBrowserInventory';
-import { parseSessionRoute } from '@renderer/utils/routes/sessionRoute';
 import { CANVASES_PATH, MATERIALS_PATH, PROMPTS_PATH, TEMPLATES_PATH } from '@renderer/pages/creativeStudio/app/resourceRoutes';
 import { FileText, FullScreen, PageTemplate } from '@icon-park/react';
 import SiderResourceEntry from './SiderNav/SiderResourceEntry';
@@ -23,7 +21,6 @@ import { readCanvasResumeLocation, rememberCanvasResumeLocation } from '@rendere
 import {
   SiderAssetLibraryEntry,
   SiderAgentEntry,
-  SiderBrowserEntry,
   SiderSkillsEntry,
   SiderConversationEntry,
   SiderCustomerServiceEntry,
@@ -56,7 +53,7 @@ interface SiderProps {
  * by small-text section headers (`SiderSectionHeader`): 常用 (会话 / 桌面伙伴),
  * 数据空间 (知识库), 自动化 (定时任务 / 需求平台),
  * 增强工具 (设定 / Skill / MCP), 服务 (客服), and a bottom-pinned 设置 group
- * (浏览器管理 + 模型管理 + the footer). Execution engines live as an
+ * (模型管理 + the footer). Execution engines live as an
  * independent tab inside Settings rather than being mixed into model
  * management.
  */
@@ -64,11 +61,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const { t } = useTranslation();
   const location = useLocation();
   const { pathname, search, hash } = location;
-  const {
-    overview: browserOverview,
-    transient: browserOverviewTransient,
-    retry: retryBrowserOverview,
-  } = useBrowserOverview();
 
   const navigate = useNavigate();
   const { logout, status } = useAuth();
@@ -118,17 +110,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
 
   const handleConversationClick = () =>
     navTo('/guid');
-  const handleBrowserClick = () => {
-    if (browserOverviewTransient) {
-      void retryBrowserOverview();
-    }
-    const currentSession = parseSessionRoute(pathname);
-    if (currentSession?.kind === 'conversation') {
-      navTo(`/browser?conversation_id=${encodeURIComponent(currentSession.id)}`);
-      return;
-    }
-    navTo(pathname === '/browser' && search ? `/browser${search}` : '/browser');
-  };
   const handleScheduledClick = () => navTo('/scheduled');
   const handleRequirementsClick = () => navTo('/requirements');
   const handleKnowledgeClick = () => navTo('/knowledge');
@@ -319,18 +300,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
         <>
             {/* 设置 — section label; the enclosing border-t already separates this region when collapsed */}
             <SiderSectionHeader label={t('common.siderSection.settings')} collapsed={collapsed} collapsedRule={false} />
-            {/* Unified Browser management — keep the entry reachable when Browser Use is
-                disabled so the user can open Settings and turn it back on. */}
-            {(isDesktopShell() || browserOverview?.supported !== false) && (
-              <SiderBrowserEntry
-                isActive={pathname === '/browser'}
-                collapsed={collapsed}
-                runningCount={browserOverview?.running_lanes ?? 0}
-                queuedCount={browserOverview?.queued_lanes ?? 0}
-                siderTooltipProps={siderTooltipProps}
-                onClick={handleBrowserClick}
-              />
-            )}
             <SiderModelHubEntry
               isActive={pathname.startsWith('/models')}
               collapsed={collapsed}

@@ -1,0 +1,7 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Native popup dialog fixture</title>
+<script>window.popupAnswer=confirm('Popup initial confirmation');window.popupLoaded=true;</script>
+<p>Popup document loaded.</p>
+<p>Confirmation result: <output id="popup-result"></output></p>
+<script>document.getElementById('popup-result').textContent=String(window.popupAnswer);</script>

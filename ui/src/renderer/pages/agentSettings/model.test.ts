@@ -61,6 +61,27 @@ const capability = (
 });
 
 describe('Agent Settings capability authoring model', () => {
+  test('explains developer scripts separately from real user input', () => {
+    const copy = capabilityProductCopy(capability('browser.evaluate'), 'zh-CN');
+    expect(copy.name).toBe('浏览器开发者脚本');
+    expect(copy.description).toContain('localhost');
+    expect(copy.description).toContain('不是模拟用户操作');
+    expect(copy.description).toContain('不会自动撤销');
+  });
+  test('explains browser downloads without personal-folder or automatic-open authority', () => {
+    const download = capabilityProductCopy(capability('browser.download'), 'zh-CN');
+    expect(download.name).toBe('下载网页文件');
+    expect(download.description).toContain('授权工作区');
+    expect(download.description).toContain('不自动打开');
+    expect(download.description).toContain('阻止可执行文件');
+  });
+  test('explains browser upload transmission and its workspace boundary', () => {
+    const upload = capabilityProductCopy(capability('browser.upload'), 'zh-CN');
+    expect(upload.name).toBe('上传工作区文件');
+    expect(upload.description).toContain('发送给网页');
+    expect(upload.description).toContain('工作区外文件');
+    expect(upload.description).toContain('标准文件输入控件');
+  });
   test('turns placeholder catalog metadata into product-facing capability copy', () => {
     const placeholder = {
       ...capability('knowledge.search', ['knowledge_base']),

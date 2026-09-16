@@ -55,7 +55,7 @@ describe('GuidPage advanced controls', () => {
   test('shows a visible error when selected Preset capabilities cannot be resolved', () => {
     const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
 
-    expect(page.includes("import { Alert, ConfigProvider } from '@arco-design/web-react';")).toBe(
+    expect(page.includes("import { Alert, Button, ConfigProvider } from '@arco-design/web-react';")).toBe(
       true
     );
     expect(

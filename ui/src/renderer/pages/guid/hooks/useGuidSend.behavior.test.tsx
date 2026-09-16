@@ -259,6 +259,41 @@ afterEach(() => {
 });
 
 describe('useGuidSend HTTP behavior', () => {
+  test('browser entry creates an idle session without transmitting the draft or starting automation', async () => {
+    resetBrowserStorage();
+    const calls = installFetchRecorder();
+    const navigations: string[] = [];
+    let advancedCalls = 0;
+    const hook = renderHook(() => useGuidSend({
+      ...createDeps({ selection: { kind: 'template', templateKey: 'chat.minimal' }, navigations, workspaceEnabled: false }),
+      selectedTemplate: TEMPLATE,
+      autoWork: { enabled: true, tag: 'do-not-start' },
+      applyAdvancedConfig: async () => { advancedCalls++; },
+    }));
+    await act(async () => { await hook.result.current.handleSend('browser'); });
+    expect(calls).toHaveLength(3);
+    expect(calls[1]).toMatchObject({ method: 'POST', url: '/api/agent-sessions', body: { title: 'browserWorkspace.title' } });
+    expect(calls.some(call => call.url.includes('/turns') || call.url.includes('/messages'))).toBe(false);
+    expect(advancedCalls).toBe(0);
+    const target = conversationTarget(parseConversationId(PRESET_CONVERSATION_ID));
+    expect(sessionStorage.getItem(sessionStorageKey('initial-browser-open', target))).toBe('true');
+    expect(sessionStorage.getItem(sessionStorageKey('initial-message-nomi', target))).toBeNull();
+    expect(JSON.parse(sessionStorage.getItem(creationDraftStorageKey(PRESET_CONVERSATION_ID))!)).toMatchObject({
+      selectedAgent: { kind: 'template', templateKey: 'chat.minimal' },
+      presetId: PRESET_ID,
+      mode: null,
+    });
+    expect(navigations).toEqual([`/conversation/${PRESET_CONVERSATION_ID}`]);
+  });
+
+  test('browser entry is available for an empty draft but still requires a resolved model and Agent', () => {
+    const hook = renderHook(() => useGuidSend(createDeps({input: '', selection: {kind: 'preset', presetId: PRESET_ID}, selectedPreset: PRESET})));
+    expect(hook.result.current.isButtonDisabled).toBe(true);
+    expect(hook.result.current.isBrowserButtonDisabled).toBe(false);
+    const unavailable = renderHook(() => useGuidSend(createDeps({input: '', currentModel: null, selection: {kind: 'preset', presetId: PRESET_ID}, selectedPreset: PRESET})));
+    expect(unavailable.result.current.isBrowserButtonDisabled).toBe(true);
+  });
+
   test('launches the selected Agent without a composer-owned runtime override', async () => {
     resetBrowserStorage();
     const calls = installFetchRecorder();
