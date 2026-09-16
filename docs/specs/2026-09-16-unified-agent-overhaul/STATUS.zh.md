@@ -2,7 +2,7 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-17
-> 当前阶段：Wave 0 / UARC-001 ready
+> 当前阶段：Wave 0 / UARC-001 active
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > 当前主机：Windows
@@ -46,7 +46,7 @@
 | Task | 状态 | Owner | Windows | macOS | 说明 |
 | --- | --- | --- | --- | --- | --- |
 | `UARC-000` | windows_verified | Integration | verified | n/a | barrier `2147863da`；26/26 文件归属，基线 gate 通过 |
-| `UARC-001` | ready | Integration | pending | pending | 在 UARC-000 barrier 上生成机器可读 inventory |
+| `UARC-001` | active | Integration | pending | pending | 在 UARC-000 barrier 上生成机器可读 inventory 与 boundary self-test |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -96,8 +96,8 @@
 
 ## 8. Next ready tasks
 
-1. `UARC-001`：在 barrier `2147863da` 上生成 reachability/test/platform inventory。
-2. 完成 Wave 0 后串行执行 `UARC-010`。
+1. `UARC-001`：生成 reachability/test/storage/platform inventory 与 timing baseline。
+2. 完成 UARC-001 gate 后串行执行 `UARC-010`。
 
 ## 9. 状态更新模板
 
@@ -146,3 +146,17 @@
 - Not run: Rust/native/package gates, because UARC-000 changed no Rust/native/package implementation.
 - Remaining/blocker: none for UARC-000. External Mac host remains a later platform prerequisite, not a Wave 0 blocker.
 - Next ready tasks: `UARC-001` only; no Feature task is released.
+
+### 2026-09-17 UARC-001 started
+
+- Barrier/source: UARC-000 closeout `6b09b4094`; frozen content barrier `2147863da`.
+- Owner/write set: Integration; `docs/specs/2026-09-16-unified-agent-overhaul/**` and `scripts/check-uarc-boundary.mjs` only.
+- Changed: task claimed; inventory schema and existing boundary-script conventions are being inspected.
+- Deleted: none planned.
+- Retained + reason: existing focused boundary scripts remain separate domain gates; UARC boundary inventory will aggregate facts without replacing them.
+- Tests: pending inventory self-test and timed baseline commands.
+- Windows: active.
+- macOS: pending inventory only; no Mac host evidence claimed.
+- Not run: implementation gates pending inventory construction.
+- Remaining/blocker: enumerate production legacy reachability, storage ownership, test costs and macOS-only work. No blocker.
+- Next ready tasks: none until UARC-001 gate; then `UARC-010`.

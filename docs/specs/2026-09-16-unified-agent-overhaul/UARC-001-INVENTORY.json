@@ -1,0 +1,294 @@
+{
+  "schema_version": "1.0.0",
+  "inventory_kind": "uarc-baseline-inventory",
+  "updated_on": "2026-09-17",
+  "source": {
+    "branch": "rf/agent-capability-platform-v2",
+    "source_commit": "877b1a751536e40a3185c31790e6e63e86c6fa32",
+    "barrier_commit": "6b09b4094e36c722bb14544e9671e340baafd48c",
+    "host_platform": "windows"
+  },
+  "production_scope": {
+    "roots": ["apps", "crates", "ui/src/common", "ui/src/renderer"],
+    "excluded_prefixes": [
+      "crates/backend/nomifun-agent-contracts/contracts/generated/",
+      "crates/backend/nomifun-agent-contracts/contracts/historical/"
+    ],
+    "excluded_fragments": ["/tests/", "/test/", "/examples/", "/benches/", "/fixtures/", "/snapshots/"]
+  },
+  "legacy_reachability": [
+    {
+      "id": "runtime.multi_family_literals",
+      "description": "The Coding Runtime family remains reachable beside the official Nomi family.",
+      "owner_tasks": ["UARC-013", "UARC-020", "UARC-052"],
+      "completion_requirement": "zero_production_references",
+      "matcher": { "kind": "literal", "terms": ["nomifun.coding"] },
+      "baseline": { "match_count": 27, "file_count": 10, "files_digest": "c5684979db5181ac77fd0098b1ff63759415c60d9a585e5dfd76909393bf5b57" }
+    },
+    {
+      "id": "runtime.preset_selector",
+      "description": "Preset and Session metadata still select or persist a Runtime engine.",
+      "owner_tasks": ["UARC-014", "UARC-050", "UARC-052"],
+      "completion_requirement": "zero_production_references",
+      "matcher": { "kind": "regex", "pattern": "\\bruntime_engine(?:_binding)?\\b", "flags": "" },
+      "baseline": { "match_count": 45, "file_count": 24, "files_digest": "36bc60b561ea32172b67d0421d4b4e94a3abaca9385b7ba6f0fc553ebf953846" }
+    },
+    {
+      "id": "runtime.old_nomi_loop_paths",
+      "description": "The legacy Nomi manager/factory and legacy nomi-agent implementation still exist.",
+      "owner_tasks": ["UARC-013", "UARC-052"],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "paths",
+        "paths": [
+          "crates/backend/nomifun-ai-agent/src/factory/nomi.rs",
+          "crates/backend/nomifun-ai-agent/src/manager/nomi/",
+          "crates/agent/nomi-agent/src/"
+        ]
+      },
+      "baseline": { "match_count": 62, "file_count": 62, "files_digest": "037e3bdc25a38272ebc4f0a02e01bb27fae986caff5fee6b836278fc7e88fdb1" }
+    },
+    {
+      "id": "runtime.multi_runtime_infrastructure_paths",
+      "description": "Family catalogs, registries and Coding-specific host paths remain in production.",
+      "owner_tasks": ["UARC-013", "UARC-020", "UARC-052"],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "paths",
+        "paths": [
+          "crates/backend/nomifun-ai-agent/src/runtime_catalog.rs",
+          "crates/backend/nomifun-ai-agent/src/runtime_registry.rs",
+          "crates/backend/nomifun-ai-agent/src/runtime_registry_acquisition.rs",
+          "crates/backend/nomifun-ai-agent/src/runtime_registry_shutdown.rs",
+          "crates/backend/nomifun-ai-agent/src/coding_runtime.rs",
+          "crates/backend/nomifun-app/src/router/runtime_engines.rs",
+          "crates/backend/nomifun-app/src/router/coding_runtime_host.rs",
+          "crates/backend/nomifun-app/src/router/coding_runtime_history.rs",
+          "crates/backend/nomifun-app/src/router/coding_runtime_recovery.rs"
+        ]
+      },
+      "baseline": { "match_count": 9, "file_count": 9, "files_digest": "e67b98e6c6dd2e6e5daa69147e0221902585c0d5705becd2b43b88115bc0f98a" }
+    },
+    {
+      "id": "runtime.compatibility_branches",
+      "description": "Nomi-specific handle downcasts and recovery/session branching remain reachable.",
+      "owner_tasks": ["UARC-013", "UARC-052"],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "regex",
+        "pattern": "AgentRuntimeHandle\\s*::\\s*Nomi|(?:binding_)?uses_nomi_(?:session|recovery)",
+        "flags": ""
+      },
+      "baseline": { "match_count": 28, "file_count": 9, "files_digest": "bad092e7f8f4f6b6adf1a6e6dcb683019effb798de763331eca290e83315d8d5" }
+    },
+    {
+      "id": "capability.legacy_projection_paths",
+      "description": "Nomi/Coding handwritten capability projections and the 136-ID catalog remain active inputs.",
+      "owner_tasks": ["UARC-010", "UARC-014", "UARC-053"],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "paths",
+        "paths": [
+          "crates/backend/nomifun-app/src/router/nomi_core_agent_projection.rs",
+          "crates/backend/nomifun-app/src/router/coding_tool_surface.rs",
+          "crates/backend/nomifun-agent-contracts/contracts/target-packages/target-first-party-contributions.v1.json",
+          "crates/backend/nomifun-agent-contracts/contracts/presets/official-preset-seed-manifest.payload.json"
+        ]
+      },
+      "baseline": { "match_count": 4, "file_count": 4, "files_digest": "54ce8908e046b0771deb747cb294d10f885c253a8a3741baffb641fc7687f5ae" }
+    },
+    {
+      "id": "capability.legacy_authoring_ids",
+      "description": "All 136 old first-party capability IDs are inventoried across active production sources.",
+      "owner_tasks": ["UARC-010", "UARC-014", "UARC-021", "UARC-022", "UARC-030", "UARC-031", "UARC-032", "UARC-033", "UARC-034", "UARC-040", "UARC-042", "UARC-053"],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "catalog_ids",
+        "catalog_path": "crates/backend/nomifun-agent-contracts/contracts/target-packages/target-first-party-contributions.v1.json"
+      },
+      "baseline": { "match_count": 2595, "file_count": 166, "files_digest": "a9a32f16e11be780fb04c086a2f3a0a88ba7c8ac33602b985c4892eb33cd4d78", "catalog_item_count": 136 }
+    },
+    {
+      "id": "store.legacy_agent_tables",
+      "description": "Conversation, Message and split Runtime/effect tables remain the Agent fact chain.",
+      "owner_tasks": ["UARC-011", "UARC-012", "UARC-051", "UARC-054"],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "regex",
+        "pattern": "\\b(?:conversation_delivery_receipts|conversation_runtime_events|conversation_mcp_effects|conversation_hosted_effects|conversation_git_effects)\\b|\\b(?:FROM|INTO|UPDATE|JOIN|TABLE|REFERENCES)\\s+(?:IF\\s+(?:NOT\\s+)?EXISTS\\s+)?(?:conversations|messages)\\b",
+        "flags": "i",
+        "include_paths": [
+          "crates/backend/nomifun-db/",
+          "crates/backend/nomifun-conversation/",
+          "crates/backend/nomifun-app/src/router/"
+        ]
+      },
+      "baseline": { "match_count": 548, "file_count": 51, "files_digest": "6c346c35075a2aea19fe0248c34f3fed2457b9e3d6ba2fc35b17e7be6885fc40" }
+    },
+    {
+      "id": "store.private_nomi_transcript",
+      "description": "The filesystem Nomi transcript/index remains a second Session authority.",
+      "owner_tasks": ["UARC-011", "UARC-052", "UARC-054"],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "regex",
+        "pattern": "nomi-sessions|NomiSessionPersistence|nomi_session_persistence",
+        "flags": ""
+      },
+      "baseline": { "match_count": 44, "file_count": 8, "files_digest": "13c65402b816aba35a047cf3f0fd5b55daa5705c54121a25e1f28c11642a9883" }
+    },
+    {
+      "id": "store.fresh_v4_parallel_root_and_schema",
+      "description": "Fresh-v4 root coordination and its session_events/session_payloads schema remain parallel to the target canonical Agent Store.",
+      "owner_tasks": ["UARC-011", "UARC-012", "UARC-054"],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "regex",
+        "pattern": "fresh[-_]?v4|\\bsession_events\\b|\\bsession_payloads\\b|nomifun-v4\\.db|nomifun-v4-root",
+        "flags": "i",
+        "include_paths": ["crates/backend/nomifun-agent-session/src/", "crates/backend/nomifun-v4-root/src/"]
+      },
+      "baseline": { "match_count": 470, "file_count": 9, "files_digest": "952d2649527f0e7c42a7328cf039f82bf6129e7e8a369fe790c7c3aaa7c4c15a" }
+    },
+    {
+      "id": "automation.agent_idmm_surface",
+      "description": "Agent sessions still expose a separate IDMM supervisor, storage and UI.",
+      "owner_tasks": ["UARC-033", "UARC-053"],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "paths",
+        "paths": [
+          "crates/backend/nomifun-idmm/src/",
+          "crates/backend/nomifun-db/src/models/idmm_intervention.rs",
+          "crates/backend/nomifun-db/src/repository/sqlite_idmm_intervention.rs",
+          "ui/src/renderer/pages/conversation/components/IdmmControl.tsx",
+          "ui/src/renderer/pages/conversation/components/IdmmInterventionRow.tsx",
+          "ui/src/renderer/pages/guid/hooks/useGuidAdvancedConfig.ts"
+        ]
+      },
+      "baseline": { "match_count": 20, "file_count": 20, "files_digest": "75f8431470b9789dba6c8e56d32c06511dadd00bf1c2ea5e4bc4441745363b09" }
+    },
+    {
+      "id": "automation.autowork_parallel_receipts",
+      "description": "AutoWork still owns Conversation receipt polling, attempts and recovery instead of AgentExecution receipts.",
+      "owner_tasks": ["UARC-033", "UARC-051"],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "regex",
+        "pattern": "AutoWorkSessionPort|conversation_delivery_receipts|owner_conversation_id|attempt_count",
+        "flags": "",
+        "include_paths": [
+          "crates/backend/nomifun-requirement/src/",
+          "crates/backend/nomifun-db/migrations/"
+        ]
+      },
+      "baseline": { "match_count": 202, "file_count": 24, "files_digest": "f7d3932a1098cf68922b55d4e5554a8ed0aebd2931ab1df5a428320c32b7bb19" }
+    },
+    {
+      "id": "browser.dedicated_session_entry",
+      "description": "Browser remains a dedicated Conversation entry/resource identity.",
+      "owner_tasks": ["UARC-040", "UARC-041", "UARC-053"],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "regex",
+        "pattern": "initial-browser-open|会话浏览器|BrowserWorkspaceKey|launch\\(\\s*['\"]browser['\"]\\s*\\)|/api/conversations/[^'\"\\s]*/browser",
+        "flags": ""
+      },
+      "baseline": { "match_count": 40, "file_count": 13, "files_digest": "3430f7b02c74cc91a43fb87270579adb3735bcea69fadc93a770df5d9ef6e77a" }
+    }
+  ],
+  "storage_ownership": [
+    {
+      "id": "agent_session_chain",
+      "current_facts": ["conversations", "messages", "conversation_delivery_receipts", "conversation_runtime_events"],
+      "target_owner": "canonical Agent Store",
+      "target_facts": ["agent_sessions", "agent_turns", "agent_events", "agent_messages", "agent_payloads"],
+      "owner_tasks": ["UARC-011", "UARC-012", "UARC-051"]
+    },
+    {
+      "id": "agent_effect_chain",
+      "current_facts": ["conversation_mcp_effects", "conversation_hosted_effects", "conversation_git_effects", "domain-specific receipts"],
+      "target_owner": "canonical Agent Store plus Domain owner semantics",
+      "target_facts": ["agent_effects"],
+      "owner_tasks": ["UARC-011", "UARC-051", "UARC-054"]
+    },
+    {
+      "id": "runtime_checkpoint_chain",
+      "current_facts": ["nomi-sessions/index.json", "Nomi private transcript", "Fresh-v4 checkpoint root"],
+      "target_owner": "Unified Runtime derived checkpoint store",
+      "target_facts": ["runtime-checkpoints/<session-id>/<digest>", "canonical DB rebuild cursor"],
+      "owner_tasks": ["UARC-011", "UARC-020", "UARC-052", "UARC-054"]
+    },
+    {
+      "id": "execution_automation_chain",
+      "current_facts": ["AgentExecution attempts", "AutoWork attempt_count", "Conversation receipt polling", "IDMM interventions"],
+      "target_owner": "AgentExecution attempts plus canonical Agent Turn receipt",
+      "target_facts": ["agent_execution_attempts.agent_session_id", "agent_turns", "agent_events"],
+      "owner_tasks": ["UARC-012", "UARC-033", "UARC-051"]
+    }
+  ],
+  "timing_baseline": [
+    { "command": "bun run typecheck", "wall_time_ms": 17842, "exit_code": 0, "sample": "warm-single-run", "host": "windows" },
+    { "command": "bun test --cwd ui <UARC-000 focused settings/navigation tests>", "wall_time_ms": 2379, "exit_code": 0, "sample": "warm-single-run", "host": "windows" },
+    { "command": "bun run check:i18n", "wall_time_ms": 275, "exit_code": 0, "sample": "warm-single-run", "host": "windows" },
+    { "command": "bun run check:desktop-ui-boundary", "wall_time_ms": 333, "exit_code": 0, "sample": "warm-single-run", "host": "windows" },
+    { "command": "bun run check", "wall_time_ms": 45319, "exit_code": 0, "sample": "warm-single-run", "host": "windows" },
+    { "command": "bun scripts/check-uarc-boundary.mjs --self-test", "wall_time_ms": 2591, "exit_code": 0, "sample": "warm-single-run", "host": "windows" },
+    { "command": "cargo test -p nomifun-agent-contracts --lib", "wall_time_ms": 32550, "exit_code": 0, "sample": "incremental-single-run", "host": "windows", "tests_passed": 101 },
+    { "command": "cargo test -p nomifun-agent-kernel --lib", "wall_time_ms": 26235, "exit_code": 0, "sample": "incremental-single-run", "host": "windows", "tests_passed": 58 },
+    { "command": "cargo test -p nomifun-agent-session --lib", "wall_time_ms": 21488, "exit_code": 0, "sample": "incremental-single-run", "host": "windows", "tests_passed": 25 },
+    { "command": "cargo test -p nomifun-engine-core --lib", "wall_time_ms": 19303, "exit_code": 0, "sample": "incremental-single-run", "host": "windows", "tests_passed": 14 },
+    { "command": "cargo test -p nomifun-browser-platform --lib", "wall_time_ms": 8724, "exit_code": 0, "sample": "incremental-single-run", "host": "windows", "tests_passed": 50 },
+    { "command": "cargo test -p nomi-process-runtime --lib -- --test-threads=1", "wall_time_ms": 3748, "exit_code": 0, "sample": "warm-single-run", "host": "windows", "tests_passed": 119 },
+    { "command": "cargo test -p nomifun-terminal --lib -- --test-threads=1", "wall_time_ms": 93162, "exit_code": 0, "sample": "incremental-single-run", "host": "windows", "tests_passed": 134 }
+  ],
+  "baseline_anomalies": [
+    {
+      "id": "windows.process_runtime.parallel_test_hang",
+      "owner_task": "UARC-021",
+      "state": "open",
+      "command": "cargo test -p nomi-process-runtime --lib",
+      "observed": "The default parallel run completed compilation and most tests, then emitted five ConPTY serial-group over-60-second warnings and made no further progress; it was interrupted after more than 210 seconds.",
+      "control": "The panic/quarantine case passed alone, and all 119 library tests passed with --test-threads=1 in 3.30 seconds after compilation.",
+      "completion_requirement": "Make the default parallel library gate deterministic or explicitly codify a justified serial crate gate without masking a product cleanup failure."
+    }
+  ],
+  "macos_gaps": [
+    {
+      "id": "macos.browser_product_resource",
+      "owner_task": "UARC-061",
+      "state": "pending",
+      "required_evidence": [
+        "production CEF host injection into the Browser Resource provider",
+        "child NSView Retina bounds, focus, keyboard and physical IME",
+        "popup, dialog, permission, user picker, upload and download lifecycle",
+        "renderer crash, resource teardown, helper shutdown and Command-Q cleanup",
+        "CEF framework/helper bundle structure and signing order"
+      ]
+    },
+    {
+      "id": "macos.process_pty_computer",
+      "owner_task": "UARC-062",
+      "state": "pending",
+      "required_evidence": [
+        "process group/generation timeout, cancel and descendant cleanup",
+        "PTY stdin, resize, UTF-8 locale, TUI output and IME",
+        "TCC Screen Recording and Accessibility denied/granted projections",
+        "Retina screenshot coordinates and Command/Option/Control input",
+        "Command-Q cleanup without orphan processes"
+      ]
+    },
+    {
+      "id": "macos.full_product_package",
+      "owner_task": "UARC-063",
+      "state": "pending",
+      "required_evidence": [
+        "shared Rust/UI/core/desktop gates on the final source commit",
+        "880x600 and wide product UI, Retina, focus and IME matrix",
+        "unsigned arm64 app and DMG architecture/resource/startup inspection",
+        "native Browser, Computer, Terminal and unified Agent lifecycle matrix",
+        "Developer ID and notarization result when credentials are available"
+      ]
+    }
+  ]
+}
