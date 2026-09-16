@@ -1,5 +1,5 @@
 //! Explicit localhost developer expressions. Never used as an input fallback.
-use super::windows;
+use super::native::{self, View};
 use nomifun_browser_platform::{run_guard::RunAdmissionError, runtime::*};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -14,12 +14,12 @@ fn local_origin(raw: &str) -> Result<String, WorkspaceError> {
     Ok(url.origin().ascii_serialization())
 }
 
-async fn cdp(view: &tauri::Webview, method: &str, params: Value) -> Result<Value, WorkspaceError> {
-    windows::protocol_call(view, method, params).await.map_err(|_| WorkspaceError::NativeCommandFailed)
+async fn cdp(view: &View, method: &str, params: Value) -> Result<Value, WorkspaceError> {
+    native::protocol_call(view, method, params).await.map_err(|_| WorkspaceError::NativeCommandFailed)
 }
 
 pub(super) async fn run(
-    view: &tauri::Webview,
+    view: &View,
     metadata: Arc<Mutex<BrowserTabSnapshot>>,
     request: BrowserEvaluation,
     cancel: &CancellationToken,

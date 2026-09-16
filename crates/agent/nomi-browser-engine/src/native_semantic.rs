@@ -129,7 +129,7 @@ pub const PREPARE_SELECT: &str = r#"function(ref, labels) {
     const previous_key=next_key==='ArrowDown' ? 'ArrowUp' : (next_key==='ArrowLeft' ? 'ArrowRight' : 'ArrowLeft');
     const signature = option => JSON.stringify([name(option),option.value,!!disabled(option),hidden(option)]);
     this.__nomiSelect = {el,options,multiple:el.multiple,size:el.size,writingMode,signature,signatures:options.map(signature)};
-    return {multiple:el.multiple,enabled_indices,selected_indices,desired_indices,next_key,previous_key,reset_selection};
+    return {multiple:el.multiple,menu_list:!listbox,typeahead_label:!listbox ? options[desired_indices[0]].label.trimStart() : '',enabled_indices,selected_indices,desired_indices,next_key,previous_key,reset_selection};
 }"#;
 
 pub const SELECT_NODE: &str = r#"function() { return this.__nomiSelect?.el; }"#;
@@ -148,14 +148,15 @@ pub const SELECT_STATE: &str = r#"function() {
 
 // Observe completion of the actual trusted key event. A page that cancels an
 // arrow key must not make the driver toggle an option at an assumed new position.
-pub const ARM_SELECT_KEY: &str = r#"function() {
+pub const ARM_SELECT_KEY: &str = r#"function(eventType='keydown') {
+    if (!['keydown','keypress'].includes(eventType)) return false;
     const plan=this.__nomiSelect;
     if (!plan?.el?.isConnected) return false;
     plan.cleanup?.();
     plan.keyEvent=undefined;
     const listener=event=>{ plan.keyEvent=event; };
-    plan.cleanup=()=>plan.el.removeEventListener('keydown',listener,true);
-    plan.el.addEventListener('keydown',listener,{capture:true,once:true,passive:true});
+    plan.cleanup=()=>plan.el.removeEventListener(eventType,listener,true);
+    plan.el.addEventListener(eventType,listener,{capture:true,once:true,passive:true});
     return true;
 }"#;
 

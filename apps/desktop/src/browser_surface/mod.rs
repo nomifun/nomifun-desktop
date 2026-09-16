@@ -6,5 +6,11 @@ pub(crate) mod commands;
 pub(crate) mod host;
 #[cfg(windows)]
 pub(crate) mod windows;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) mod automation;
+#[cfg(windows)]
+pub(crate) use windows as native;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::native;

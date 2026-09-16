@@ -1,4 +1,5 @@
 //! Explicit, bounded PNG viewport capture. No continuous frame stream.
+use super::native::{self, View};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use nomifun_browser_platform::runtime::{BrowserScreenshot, BrowserTabTarget, WorkspaceError};
 use serde_json::{Value, json};
@@ -13,11 +14,13 @@ const MAX_ENCODED: usize = 3 * 1024 * 1024;
 
 /// Rendering and native HWND visibility are separate. A hidden child may need
 /// its compositor running to produce pixels; never show or focus the HWND.
+#[cfg(windows)]
 struct RenderLease {
-    view: tauri::Webview,
+    view: View,
     restore_hidden: bool,
     rendering: Arc<AtomicBool>,
 }
+#[cfg(windows)]
 impl Drop for RenderLease {
     fn drop(&mut self) {
         self.rendering.store(false, Ordering::Release);
@@ -28,9 +31,10 @@ impl Drop for RenderLease {
         }
     }
 }
+#[cfg(windows)]
 impl RenderLease {
     async fn start(
-        view: &tauri::Webview,
+        view: &View,
         rendering: Arc<AtomicBool>,
     ) -> Result<Self, WorkspaceError> {
         let mut lease = Self {
@@ -83,6 +87,22 @@ impl RenderLease {
     }
 }
 
+// CEF capture reads the same native page's compositor without showing or
+// focusing its NSView. Native fixture acceptance covers hidden capture.
+#[cfg(target_os = "macos")]
+struct RenderLease { rendering: Arc<AtomicBool> }
+#[cfg(target_os = "macos")]
+impl Drop for RenderLease { fn drop(&mut self) { self.rendering.store(false, Ordering::Release); } }
+#[cfg(target_os = "macos")]
+impl RenderLease {
+    async fn start(view: &View, rendering: Arc<AtomicBool>) -> Result<Self, WorkspaceError> {
+        if view.page.protocol.is_closed() { return Err(WorkspaceError::NativeCommandFailed); }
+        rendering.store(true, Ordering::Release);
+        Ok(Self { rendering })
+    }
+    async fn finish(&mut self) -> Result<(), WorkspaceError> { self.rendering.store(false, Ordering::Release); Ok(()) }
+}
+
 fn geometry(metrics: &Value) -> Result<(f64, f64, f64, f64, f64), WorkspaceError> {
     let viewport = &metrics["cssVisualViewport"];
     let numbers: Option<Vec<f64>> = ["pageX", "pageY", "clientWidth", "clientHeight", "zoom"]
@@ -133,8 +153,8 @@ fn capture_scale(width: f64, height: f64, density: f64) -> Result<f64, Workspace
     Ok((f64::from(MAX_EDGE) / (width.max(height) * density)).min(1.0))
 }
 
-async fn pixel_density(view: &tauri::Webview) -> Result<f64, WorkspaceError> {
-    let tree = super::windows::protocol_call(view, "Page.getFrameTree", json!({}))
+async fn pixel_density(view: &View) -> Result<f64, WorkspaceError> {
+    let tree = native::protocol_call(view, "Page.getFrameTree", json!({}))
         .await
         .map_err(|_| WorkspaceError::NativeCommandFailed)?;
     let frame = tree["frameTree"]["frame"]["id"]
@@ -142,7 +162,7 @@ async fn pixel_density(view: &tauri::Webview) -> Result<f64, WorkspaceError> {
         .ok_or(WorkspaceError::NativeCommandFailed)?;
     // A fixed, host-owned read in an isolated world: page scripts cannot spoof
     // window.devicePixelRatio here, and the model cannot supply an expression.
-    let world = super::windows::protocol_call(
+    let world = native::protocol_call(
         view,
         "Page.createIsolatedWorld",
         json!({"frameId":frame,"worldName":"nomifun-viewport-capture"}),
@@ -152,7 +172,7 @@ async fn pixel_density(view: &tauri::Webview) -> Result<f64, WorkspaceError> {
     let context = world["executionContextId"]
         .as_i64()
         .ok_or(WorkspaceError::NativeCommandFailed)?;
-    let result = super::windows::protocol_call(
+    let result = native::protocol_call(
         view,
         "Runtime.evaluate",
         json!({"expression":"window.devicePixelRatio","contextId":context,"returnByValue":true}),
@@ -165,7 +185,7 @@ async fn pixel_density(view: &tauri::Webview) -> Result<f64, WorkspaceError> {
 }
 
 pub(super) async fn capture(
-    view: &tauri::Webview,
+    view: &View,
     target: BrowserTabTarget,
     cancel: &CancellationToken,
     active: Arc<AtomicBool>,
@@ -180,14 +200,14 @@ pub(super) async fn capture(
 }
 
 async fn capture_rendered(
-    view: &tauri::Webview,
+    view: &View,
     target: BrowserTabTarget,
     cancel: &CancellationToken,
 ) -> Result<BrowserScreenshot, WorkspaceError> {
     if cancel.is_cancelled() {
         return Err(nomifun_browser_platform::run_guard::RunAdmissionError::Cancelled.into());
     }
-    let metrics = super::windows::protocol_call(view, "Page.getLayoutMetrics", json!({}))
+    let metrics = native::protocol_call(view, "Page.getLayoutMetrics", json!({}))
         .await
         .map_err(|_| WorkspaceError::NativeCommandFailed)?;
     let (x, y, width, height, zoom) = geometry(&metrics)?;
@@ -199,7 +219,7 @@ async fn capture_rendered(
     // CDP's capture clip is in zoomed viewport units. DPR already includes
     // browser zoom for the output pixel budget; apply zoom to the clip only.
     // Scale the capture, not the page layout. Native completion is always awaited.
-    let mut result = super::windows::protocol_call(
+    let mut result = native::protocol_call(
         view,
         "Page.captureScreenshot",
         json!({"format":"png","captureBeyondViewport":false,"fromSurface":true,
@@ -210,7 +230,7 @@ async fn capture_rendered(
     if cancel.is_cancelled() {
         return Err(nomifun_browser_platform::run_guard::RunAdmissionError::Cancelled.into());
     }
-    let after = super::windows::protocol_call(view, "Page.getLayoutMetrics", json!({}))
+    let after = native::protocol_call(view, "Page.getLayoutMetrics", json!({}))
         .await
         .map_err(|_| WorkspaceError::NativeCommandFailed)?;
     if geometry(&after)? != (x, y, width, height, zoom) || pixel_density(view).await? != density {

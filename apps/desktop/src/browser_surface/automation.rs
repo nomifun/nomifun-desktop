@@ -1,6 +1,7 @@
 //! Per-tab semantic observation and browser input. No page-synthetic input fallback.
 
-use super::windows;
+use super::native;
+use native::View;
 use nomi_browser_engine::{
     input::{KeyChord, parse_key_combo},
     native_semantic,
@@ -15,6 +16,10 @@ mod semantic_frames;
 #[derive(serde::Deserialize)]
 struct SelectPlan {
     multiple: bool,
+    #[cfg(target_os = "macos")]
+    menu_list: bool,
+    #[cfg(target_os = "macos")]
+    typeahead_label: String,
     enabled_indices: Vec<usize>,
     selected_indices: Vec<usize>,
     desired_indices: Vec<usize>,
@@ -32,7 +37,7 @@ enum AgentFocus {
 }
 
 pub(super) struct TabAutomation {
-    frames: Option<windows::frames::FrameSessions>,
+    frames: Option<native::frames::FrameSessions>,
     semantic: semantic_frames::SemanticFrames,
     observation: u64,
     observed_target: Option<BrowserTabTarget>,
@@ -61,8 +66,8 @@ impl Default for TabAutomation {
     }
 }
 
-async fn cdp(view: &tauri::Webview, method: &str, params: Value) -> Result<Value, WorkspaceError> {
-    windows::protocol_call(view, method, params)
+async fn cdp(view: &View, method: &str, params: Value) -> Result<Value, WorkspaceError> {
+    native::protocol_call(view, method, params)
         .await
         .map_err(|_| WorkspaceError::NativeCommandFailed)
 }
@@ -133,7 +138,7 @@ impl TabAutomation {
     /// Keep the owned page active while the Agent works, even when its native
     /// surface is hidden. This is browser lifecycle emulation, not OS focus or
     /// synthetic DOM input. Restore it at the run boundary, not after each key.
-    pub async fn activate_for_agent(&mut self, view: &tauri::Webview, cancel: &CancellationToken) -> Result<(), WorkspaceError> {
+    pub async fn activate_for_agent(&mut self, view: &View, cancel: &CancellationToken) -> Result<(), WorkspaceError> {
         check_cancel(cancel)?;
         if self.agent_focus != AgentFocus::Active {
             // Retain cleanup responsibility even if the protocol result is lost.
@@ -147,7 +152,7 @@ impl TabAutomation {
         check_cancel(cancel)
     }
 
-    pub async fn settle_agent(&mut self, view: &tauri::Webview) -> Result<(), WorkspaceError> {
+    pub async fn settle_agent(&mut self, view: &View) -> Result<(), WorkspaceError> {
         let input = self.release(view).await;
         let chooser=if let Some(frames)=self.frames.as_mut() {
             frames.set_file_chooser_interception(false).await.map_err(|_|WorkspaceError::NativeCommandFailed)
@@ -165,10 +170,10 @@ impl TabAutomation {
         input.and(chooser).and(focus)
     }
 
-    pub async fn initialize_frames(&mut self, view: &tauri::Webview) -> Result<(), WorkspaceError> {
+    pub async fn initialize_frames(&mut self, view: &View) -> Result<(), WorkspaceError> {
         if self.frames.is_none() {
             self.frames = Some(
-                windows::frames::FrameSessions::connect(view)
+                native::frames::FrameSessions::connect(view)
                     .await
                     .map_err(|_| WorkspaceError::NativeCommandFailed)?,
             );
@@ -176,20 +181,20 @@ impl TabAutomation {
         Ok(())
     }
 
-    pub async fn configure_file_choosers(&mut self, view: &tauri::Webview, locked: bool) -> Result<(), WorkspaceError> {
+    pub async fn configure_file_choosers(&mut self, view: &View, locked: bool) -> Result<(), WorkspaceError> {
         self.initialize_frames(view).await?;
         self.frames.as_mut().ok_or(WorkspaceError::NativeCommandFailed)?
             .set_file_chooser_interception(locked).await.map_err(|_|WorkspaceError::NativeCommandFailed)
     }
 
-    pub(crate) async fn user_file_route(&mut self, view: &tauri::Webview, choice: &windows::file_chooser::Choice) -> Result<windows::frames::OwnedFrameRoute, String> {
+    pub(crate) async fn user_file_route(&mut self, view: &View, choice: &native::file_chooser::Choice) -> Result<native::frames::OwnedFrameRoute, String> {
         self.initialize_frames(view).await.map_err(|error|error.to_string())?;
         self.frames.as_mut().ok_or("Browser frame owner is unavailable")?.chooser_route(&choice.frame,&choice.session).await
     }
 
     async fn selection_state(
         &self,
-        view: &tauri::Webview,
+        view: &View,
         require_focus: bool,
     ) -> Result<Vec<usize>, WorkspaceError> {
         let state = self
@@ -212,7 +217,7 @@ impl TabAutomation {
 
     async fn select_options(
         &mut self,
-        view: &tauri::Webview,
+        view: &View,
         plan: SelectPlan,
         cancel: &CancellationToken,
     ) -> Result<(), WorkspaceError> {
@@ -231,6 +236,13 @@ impl TabAutomation {
             .await?;
         if self.selection_state(view, true).await? != selected {
             return Err(WorkspaceError::ActionInterrupted);
+        }
+        #[cfg(target_os = "macos")]
+        if plan.menu_list {
+            // Cocoa menu-list selects open an OS popup on arrow keys. Use the
+            // browser's native type-ahead selection instead, without opening a
+            // separate menu or assigning selected/value in page JavaScript.
+            return self.select_typeahead(view, &plan, cancel).await;
         }
         if plan.multiple {
             if plan.reset_selection {
@@ -309,9 +321,35 @@ impl TabAutomation {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
+    async fn select_typeahead(&mut self, view: &View, plan: &SelectPlan, cancel: &CancellationToken) -> Result<(), WorkspaceError> {
+        if plan.typeahead_label.is_empty() || plan.typeahead_label.chars().count() > 512 { return Err(WorkspaceError::UnsupportedAction); }
+        // Blink's type-ahead buffer expires after 1 s. Do not alter focus or
+        // call private renderer test hooks to reset an earlier user's buffer.
+        tokio::select! { biased;
+            _ = cancel.cancelled() => return Err(RunAdmissionError::Cancelled.into()),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(1100)) => {}
+        }
+        if self.selection_state(view, true).await? != plan.selected_indices { return Err(WorkspaceError::ActionInterrupted); }
+        for character in plan.typeahead_label.chars() {
+            check_cancel(cancel)?;
+            self.selection_state(view, true).await?;
+            if self.call(view, native_semantic::ARM_SELECT_KEY, vec![json!("keypress")]).await? != true { return Err(WorkspaceError::ActionInterrupted); }
+            let text = character.to_string();
+            let chord = parse_key_combo(&text).unwrap_or(KeyChord { key: text.clone(), code: String::new(), vk: 0, modifiers: 0 });
+            self.keys.push(chord.clone());
+            cdp(view, "Input.dispatchKeyEvent", json!({"type":"keyDown","key":text,"code":chord.code,"windowsVirtualKeyCode":chord.vk,"modifiers":0,"text":text,"unmodifiedText":text})).await?;
+            cdp(view, "Input.dispatchKeyEvent", json!({"type":"keyUp","key":text,"code":chord.code,"windowsVirtualKeyCode":chord.vk,"modifiers":0})).await?;
+            self.keys.pop();
+            if self.call(view, native_semantic::SELECT_KEY_ACCEPTED, vec![]).await? != true { return Err(WorkspaceError::ActionInterrupted); }
+            if self.selection_state(view, true).await? == plan.desired_indices { return Ok(()); }
+        }
+        Err(WorkspaceError::ActionInterrupted)
+    }
+
     async fn select_key(
         &mut self,
-        view: &tauri::Webview,
+        view: &View,
         key: &str,
         expected: &[usize],
         cancel: &CancellationToken,
@@ -341,7 +379,7 @@ impl TabAutomation {
         Ok(())
     }
 
-    fn frame_sessions(&self) -> Result<&windows::frames::FrameSessions, WorkspaceError> {
+    fn frame_sessions(&self) -> Result<&native::frames::FrameSessions, WorkspaceError> {
         self.frames
             .as_ref()
             .ok_or(WorkspaceError::NativeCommandFailed)
@@ -349,7 +387,7 @@ impl TabAutomation {
 
     async fn call(
         &self,
-        view: &tauri::Webview,
+        view: &View,
         function: &str,
         args: Vec<Value>,
     ) -> Result<Value, WorkspaceError> {
@@ -360,7 +398,7 @@ impl TabAutomation {
 
     async fn focused(
         &self,
-        view: &tauri::Webview,
+        view: &View,
         reference: &BrowserElementRef,
     ) -> Result<bool, WorkspaceError> {
         Ok(self
@@ -379,7 +417,7 @@ impl TabAutomation {
 
     pub async fn observe(
         &mut self,
-        view: &tauri::Webview,
+        view: &View,
         target: BrowserTabTarget,
         cancel: &CancellationToken,
     ) -> Result<BrowserObservation, WorkspaceError> {
@@ -422,7 +460,7 @@ impl TabAutomation {
 
     async fn locate(
         &self,
-        view: &tauri::Webview,
+        view: &View,
         reference: &BrowserElementRef,
         editable: bool,
     ) -> Result<(f64, f64), WorkspaceError> {
@@ -434,7 +472,7 @@ impl TabAutomation {
 
     async fn move_to(
         &mut self,
-        view: &tauri::Webview,
+        view: &View,
         point: (f64, f64),
     ) -> Result<(), WorkspaceError> {
         self.point = point;
@@ -454,7 +492,7 @@ impl TabAutomation {
 
     async fn down(
         &mut self,
-        view: &tauri::Webview,
+        view: &View,
         button: BrowserMouseButton,
         click_count: u8,
     ) -> Result<(), WorkspaceError> {
@@ -464,7 +502,7 @@ impl TabAutomation {
         Ok(())
     }
 
-    async fn up(&mut self, view: &tauri::Webview) -> Result<(), WorkspaceError> {
+    async fn up(&mut self, view: &View) -> Result<(), WorkspaceError> {
         let Some((button, click_count)) = self.pressed else {
             return Ok(());
         };
@@ -473,17 +511,25 @@ impl TabAutomation {
         Ok(())
     }
 
-    async fn key(&mut self, view: &tauri::Webview, keys: &str) -> Result<(), WorkspaceError> {
+    async fn key(&mut self, view: &View, keys: &str) -> Result<(), WorkspaceError> {
         let chord = parse_key_combo(keys).map_err(|_| WorkspaceError::UnsupportedAction)?;
         let text = nomi_browser_engine::input::chord_text(&chord).unwrap_or_default();
         self.keys.push(chord.clone());
-        cdp(view,"Input.dispatchKeyEvent",json!({"type":"keyDown","key":chord.key,"code":chord.code,"windowsVirtualKeyCode":chord.vk,"modifiers":chord.modifiers,"text":text})).await?;
+        let params = json!({"type":"keyDown","key":chord.key,"code":chord.code,"windowsVirtualKeyCode":chord.vk,"modifiers":chord.modifiers,"text":text});
+        #[cfg(target_os = "macos")]
+        let params = {
+            let mut params = params;
+            let commands = nomi_browser_engine::input::mac_editing_commands(&chord.code, chord.modifiers);
+            if !commands.is_empty() { params["commands"] = json!(commands); }
+            params
+        };
+        cdp(view,"Input.dispatchKeyEvent",params).await?;
         cdp(view,"Input.dispatchKeyEvent",json!({"type":"keyUp","key":chord.key,"code":chord.code,"windowsVirtualKeyCode":chord.vk,"modifiers":chord.modifiers})).await?;
         self.keys.pop();
         Ok(())
     }
 
-    pub async fn release(&mut self, view: &tauri::Webview) -> Result<(), WorkspaceError> {
+    pub async fn release(&mut self, view: &View) -> Result<(), WorkspaceError> {
         // Run admission and terminal cleanup both call release. Refs from a
         // prior turn cannot become valid merely because the document survived.
         self.observed_target = None;
@@ -513,7 +559,7 @@ impl TabAutomation {
         Ok(())
     }
 
-    pub async fn upload(&mut self,view:&tauri::Webview,element:BrowserElementRef,files:&nomifun_browser_platform::uploads::PreparedBrowserUpload,cancel:&CancellationToken)->Result<(),WorkspaceError> {
+    pub async fn upload(&mut self,view:&View,element:BrowserElementRef,files:&nomifun_browser_platform::uploads::PreparedBrowserUpload,cancel:&CancellationToken)->Result<(),WorkspaceError> {
         check_cancel(cancel)?;
         self.semantic.activate(&element.ref_id)?;
         let point=self.locate(view,&element,false).await?;
@@ -522,7 +568,7 @@ impl TabAutomation {
         let result=async { if self.semantic.is_file_input(view,self.frame_sessions()?,&element.ref_id).await? {
             self.semantic.upload_files(view,self.frame_sessions()?,&element.ref_id,files,cancel).await
         } else {
-            let mut chooser=windows::file_chooser::FileChooser::listen(view).await?;
+            let mut chooser=native::file_chooser::FileChooser::listen(view).await?;
             self.frames.as_mut().ok_or(WorkspaceError::StaleObservation)?.set_file_chooser_interception(true).await.map_err(|_|WorkspaceError::NativeCommandFailed)?;
             chooser.arm();
             async {
@@ -542,7 +588,7 @@ impl TabAutomation {
 
     pub async fn act(
         &mut self,
-        view: &tauri::Webview,
+        view: &View,
         action: BrowserAction,
         cancel: &CancellationToken,
     ) -> Result<(), WorkspaceError> {
