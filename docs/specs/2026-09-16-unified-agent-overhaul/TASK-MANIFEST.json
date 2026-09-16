@@ -211,7 +211,7 @@
       "status": "active",
       "depends_on": ["UARC-014"],
       "lane": "feature-workspace",
-      "write_set": ["crates/backend/nomifun-agent-domain-wave2/**", "crates/backend/nomifun-file/**", "crates/shared/nomi-process-runtime/**", "crates/backend/nomifun-app/src/router/agent_wave2_host.rs", "crates/backend/nomifun-app/src/router/engine_kernel_session.rs", "crates/backend/nomifun-app/src/router/nomi_core_wave2.rs", "crates/backend/nomifun-app/src/router/*workspace*", "crates/backend/nomifun-app/src/router/*process*", "crates/backend/nomifun-app/src/router/*git*"],
+      "write_set": ["crates/backend/nomifun-agent-domain-wave2/**", "crates/backend/nomifun-file/**", "crates/shared/nomi-process-runtime/**", "crates/backend/nomifun-app/src/router/agent_wave2_host.rs", "crates/backend/nomifun-app/src/router/engine_kernel_session.rs", "crates/backend/nomifun-app/src/router/hosted_effect_receipts.rs", "crates/backend/nomifun-app/src/router/nomi_core_wave2.rs", "crates/backend/nomifun-app/src/router/*workspace*", "crates/backend/nomifun-app/src/router/*process*", "crates/backend/nomifun-app/src/router/*git*"],
       "delete_set": ["fs.* one-capability-per-action registrations", "vcs.* fragmented registrations", "process.session/terminal.pty/workspace.bind authoring capabilities"],
       "retained_set": ["Domain owners", "atomic file operations", "process tree cleanup", "Git effect receipts"],
       "ui_surface": [],
