@@ -625,12 +625,11 @@
         "nodeConstructionFailed": "The video result could not be turned into a video node.",
         "nodeMissing": "The video node no longer exists.",
         "nonTerminalRemovalRejected": "Cannot remove a video task that has not reached a terminal state from the pending list.",
-        "referenceContract": "I2V requires exactly one image reference with role=reference.",
+        "referenceContract": "Image-to-video requires valid image references.",
         "resolutionUnsupported": "This video-generation mode does not support the {{resolution}} resolution.",
         "resultRequiresEmptyNode": "T2V/I2V results can only be written to an empty video node.",
         "resultResolutionFailed": "The video task result could not be resolved to the corresponding video asset.",
         "reusedInputAsset": "The video task returned an input asset as its result, so the result was not written to the canvas.",
-        "singleImageReferenceRequired": "I2V currently supports only one directly connected image asset.",
         "sourceOccupied": "The empty video node was linked to another asset before the task finished, so it was not overwritten.",
         "sourceRemoved": "The video source node was removed before the result could be written.",
         "terminalSettlementRequired": "Terminal video task states must be written to the canvas through settlement.",
@@ -1171,6 +1170,8 @@
       "t2vPromptPlaceholder": "Describe the video content, action, and camera work you want to create",
       "textToVideo": "Text to video",
       "unsupportedMessage": "This node cannot generate video directly. Select an empty video node or add an image reference to it.",
+      "keyframeOrder": "Keyframes · Connection order",
+      "singleImageModel": "This model supports one reference image. Remove connections or choose a multi-image model.",
       "unsupportedMode": "This node does not support video generation"
     },
     "templates": {

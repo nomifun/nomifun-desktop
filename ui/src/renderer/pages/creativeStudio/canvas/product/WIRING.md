@@ -177,11 +177,14 @@ transport-ambiguous create keeps the same config and idempotency key for safe
 retry; only an authoritative 404 may clear an orphaned pending reference.
 
 The video runtime owns only `video-node-compose`. It accepts an empty video
-node as exact `video_generation` / `t2v`, or the same empty node with exactly
-one directly connected real image as `i2v`. It maps 720p/1080p and the supported
+node as exact `video_generation` / `t2v`, or the same empty node with directly
+connected real images as `i2v`. References are deduplicated and ordered by
+connection order, shown in that order and preserved through task recovery.
+Agnes sends multiple images as ordered `extra_body.image` keyframes; other
+adapters retain their own input limits. It maps 720p/1080p and the supported
 aspect ratios to concrete width/height, fixes repeat to one, keeps canvas owner
 identity in `config.data.operation`, and never forwards local metadata through
-provider parameters. V2V, multiple/first-last-frame references, audio/video
+provider parameters. V2V, explicit first/last-frame role controls, audio/video
 references, and provider-specific camera controls stay explicitly unavailable.
 
 The audio runtime owns only `audio-node-compose`. Its first deliverable accepts

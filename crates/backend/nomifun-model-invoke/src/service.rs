@@ -750,8 +750,8 @@ fn validate_typed_task_controls(protocol: &str, request: &TaskRequest) -> Result
             }
             TaskRequest::VideoGeneration(request) if !request.inputs.is_empty() => {
                 let supported = match protocol {
-                    "ark.video_jobs" | "xai.video_jobs" | "openai.videos" => true,
-                    "agnes.video_jobs" | "siliconflow.video_jobs" => request.inputs.len() == 1 && matches!(request.inputs[0].role.as_str(), "first_frame" | "reference" | "image"),
+                    "ark.video_jobs" | "xai.video_jobs" | "openai.videos" | "agnes.video_jobs" => true,
+                    "siliconflow.video_jobs" => request.inputs.len() == 1 && matches!(request.inputs[0].role.as_str(), "first_frame" | "reference" | "image"),
                     _ => false,
                 };
                 if !supported {
@@ -788,7 +788,9 @@ mod tests {
         for (protocol, roles, valid) in [
             ("siliconflow.video_jobs", vec!["first_frame"], true),
             ("siliconflow.video_jobs", vec!["first_frame", "last_frame"], false),
-            ("agnes.video_jobs", vec!["last_frame"], false),
+            // Agnes validates ordered keyframe roles in its adapter.
+            ("agnes.video_jobs", vec!["reference", "reference", "reference"], true),
+            ("agnes.video_jobs", vec!["first_frame", "last_frame"], true),
             ("zhipu.video_jobs", vec!["first_frame"], false),
         ] {
             let request = TaskRequest::VideoGeneration(VideoGenRequest {

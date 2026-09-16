@@ -3384,19 +3384,22 @@ const CreativeCanvasProductRoute: React.FC = () => {
             })
           );
         }
-        const reference =
+        const references =
           mode.kind === 'i2v'
-            ? (knownAssetsRef.current.get(mode.assetId) ??
-              (await creativeAssetClient.get(mode.assetId)))
-            : null;
-        if (reference && reference.kind !== 'image') {
+            ? await Promise.all(
+                mode.assetIds.map((id) =>
+                  knownAssetsRef.current.get(id) ?? creativeAssetClient.get(id)
+                )
+              )
+            : [];
+        if (references.some((reference) => reference.kind !== 'image')) {
           throw new Error(
             t('creativeStudio.canvas.errors.videoReferenceResolutionFailed', {
               defaultValue: 'I2V 引用没有解析为真实图片素材。',
             })
           );
         }
-        if (reference) {
+        for (const reference of references) {
           knownAssetsRef.current = new Map(knownAssetsRef.current).set(
             reference.id,
             reference
@@ -3416,7 +3419,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
           currentSource.data.assetId !== null ||
           currentMode.kind !== mode.kind ||
           (mode.kind === 'i2v' &&
-            (currentMode.kind !== 'i2v' || currentMode.assetId !== mode.assetId))
+            (currentMode.kind !== 'i2v' ||
+              currentMode.assetIds.length !== mode.assetIds.length ||
+              currentMode.assetIds.some((id, index) => id !== mode.assetIds[index])))
         ) {
           throw new Error(
             t('creativeStudio.canvas.errors.videoSourceChangedBeforeTask', {
@@ -3451,18 +3456,14 @@ const CreativeCanvasProductRoute: React.FC = () => {
             task: 'video_generation',
             capability: mode.kind === 'i2v' ? 'i2v' : 't2v',
           },
-          references: reference
-            ? {
-                assets: [reference],
-                bindings: [
-                  {
-                    assetId: reference.id,
-                    kind: 'image',
-                    role: 'reference',
-                  },
-                ],
-              }
-            : { assets: [], bindings: [] },
+          references: {
+            assets: references,
+            bindings: references.map((reference) => ({
+              assetId: reference.id,
+              kind: 'image' as const,
+              role: 'reference' as const,
+            })),
+          },
           prompt,
           settings: {
             resolution: settings.resolution,
@@ -4795,10 +4796,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
                             }
                           : null,
                     };
-                    const referenceAsset =
-                      mode.kind === 'i2v'
-                        ? knownAssetsById.get(mode.assetId) ?? null
-                        : null;
                     const singleSelected =
                       selected && canvasState?.selection.nodeIds.length === 1;
                     const retrySubmission =
@@ -4810,23 +4807,27 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           <CreativeCanvasVideoComposer
                             nodeId={node.id}
                             mode={mode.kind}
-                            reference={
+                            references={
                               mode.kind === 'i2v'
-                                ? {
-                                    name:
-                                      referenceAsset?.title ??
-                                      t('creativeStudio.canvas.video.connectedImage', {
-                                        defaultValue: '已连接图片',
-                                      }),
-                                    previewUrl:
-                                      referenceAsset?.thumbnailUrl ??
-                                      referenceAsset?.originalUrl ??
-                                      creativeAssetClient.url(mode.assetId),
-                                    originalUrl:
-                                      referenceAsset?.originalUrl ??
-                                      creativeAssetClient.url(mode.assetId),
-                                  }
-                                : null
+                                ? mode.assetIds.map((assetId) => {
+                                    const referenceAsset = knownAssetsById.get(assetId);
+                                    return {
+                                      assetId,
+                                      name:
+                                        referenceAsset?.title ??
+                                        t('creativeStudio.canvas.video.connectedImage', {
+                                          defaultValue: '已连接图片',
+                                        }),
+                                      previewUrl:
+                                        referenceAsset?.thumbnailUrl ??
+                                        referenceAsset?.originalUrl ??
+                                        creativeAssetClient.url(assetId),
+                                      originalUrl:
+                                        referenceAsset?.originalUrl ??
+                                        creativeAssetClient.url(assetId),
+                                    };
+                                })
+                                : []
                             }
                             initialPrompt={composeDraft.prompt}
                             settings={composeSettings}

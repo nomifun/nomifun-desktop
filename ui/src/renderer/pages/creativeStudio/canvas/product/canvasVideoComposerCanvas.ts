@@ -65,7 +65,7 @@ export interface PreparedCanvasVideoCompose {
 
 export type CanvasVideoComposeMode =
   | { kind: 't2v' }
-  | { kind: 'i2v'; assetId: string }
+  | { kind: 'i2v'; assetIds: string[] }
   | { kind: 'unsupported'; message: string };
 
 export const DEFAULT_CANVAS_VIDEO_COMPOSE_SETTINGS: CanvasVideoComposeSettings = {
@@ -273,7 +273,12 @@ export function canvasVideoComposeMode(
       .filter((connection) => connection.targetNodeId === sourceNodeId)
       .map((connection) => connection.sourceNodeId)
   );
-  const incoming = document.nodes.filter((node) => incomingIds.has(node.id));
+  // Keyframes follow connection order, independent of node creation/z-order.
+  const nodesById = new Map(document.nodes.map((node) => [node.id, node]));
+  const incoming = [...incomingIds].flatMap((id) => {
+    const node = nodesById.get(id);
+    return node ? [node] : [];
+  });
   if (
     incoming.some(
       (node) =>
@@ -297,17 +302,8 @@ export function canvasVideoComposeMode(
       )
     ),
   ];
-  if (imageAssetIds.length > 1) {
-    return {
-      kind: 'unsupported',
-      message: creativeStudioProductText(
-        'creativeStudio.canvas.errors.video.singleImageReferenceRequired',
-        '当前 I2V 只支持一张直接连接的真实图片。'
-      ),
-    };
-  }
   return imageAssetIds[0]
-    ? { kind: 'i2v', assetId: imageAssetIds[0] }
+    ? { kind: 'i2v', assetIds: imageAssetIds }
     : { kind: 't2v' };
 }
 
@@ -399,20 +395,19 @@ export function prepareCanvasVideoCompose(input: {
     );
   }
   if (input.operation.capability === 'i2v') {
-    const asset = input.references.assets[0];
-    const binding = input.references.bindings[0];
     if (
-      input.references.assets.length !== 1 ||
-      input.references.bindings.length !== 1 ||
-      asset?.kind !== 'image' ||
-      binding?.kind !== 'image' ||
-      binding.role !== 'reference' ||
-      binding.assetId !== asset.id
+      input.references.assets.length === 0 ||
+      input.references.bindings.length !== input.references.assets.length ||
+      input.references.assets.some((asset) => asset.kind !== 'image') ||
+      input.references.bindings.some((binding) =>
+        binding.kind !== 'image' || binding.role !== 'reference' ||
+        !input.references.assets.some((asset) => asset.id === binding.assetId)
+      )
     ) {
       throw new Error(
         creativeStudioProductText(
           'creativeStudio.canvas.errors.video.referenceContract',
-          '当前 i2v 只支持一张 role=reference 的真实图片引用。'
+          '图生视频需要有效的图片引用。'
         )
       );
     }
