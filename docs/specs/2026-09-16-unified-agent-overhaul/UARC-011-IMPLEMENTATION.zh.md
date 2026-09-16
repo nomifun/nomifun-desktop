@@ -1,6 +1,7 @@
 # UARC-011 Canonical Agent Store baseline 实施记录
 
 > 开始 barrier：`dd2c098dab8bc13bc8693719953f9864498360d4`
+> 实现提交：`fa164520f72a053e8e244721cb9682bc58b1269b`
 > 数据代际：Agent Store generation 5
 > 平台：共享 SQLite/schema；Windows 执行工程验证
 
