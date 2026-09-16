@@ -6,6 +6,7 @@
 
 import type { CreativeAsset } from '../../assets';
 import type {
+  CreativeImagePromptMention,
   CreativeCanvasConnection,
   CreativeCanvasNode,
   CreativeGenerationStatus,
@@ -48,6 +49,7 @@ export interface CanvasVideoComposeSettings {
 
 export interface CanvasVideoComposeDraft {
   prompt: string;
+  mentions?: CreativeImagePromptMention[];
   settings: CanvasVideoComposeSettings;
 }
 
@@ -171,6 +173,7 @@ export function canvasVideoComposeDraftFromState(
   if (persisted) {
     return {
       prompt: persisted.prompt,
+      mentions: structuredClone(persisted.mentions ?? []),
       settings: {
         model: persisted.model
           ? {
@@ -205,6 +208,7 @@ export function withCanvasVideoComposeDraft(
       ...node.data,
       composer: {
         prompt: draft.prompt,
+        ...(draft.mentions?.length ? { mentions: structuredClone(draft.mentions) } : {}),
         model: draft.settings.model ? { ...draft.settings.model } : null,
         resolution: draft.settings.resolution,
         aspectRatio: draft.settings.aspectRatio,

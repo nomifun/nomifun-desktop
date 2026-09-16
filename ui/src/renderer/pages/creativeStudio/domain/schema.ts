@@ -189,6 +189,7 @@ export interface CreativeVideoNodeData {
 
 export interface CreativeVideoComposerDraft {
   prompt: string;
+  mentions?: CreativeImagePromptMention[];
   model: CreativeComposerModel | null;
   resolution: string;
   aspectRatio: string;

@@ -10,7 +10,7 @@ import type { IProvider, ModelTask } from '@/common/config/storage';
 import type { ProviderId } from '@/common/types/ids';
 
 import type { CreativeAsset } from '../../assets';
-import { createEmptyCreativeProjectDocument } from '../../domain';
+import { createEmptyCreativeProjectDocument, parseCreativeProjectDocument } from '../../domain';
 import type { CreativeTask } from '../../tasks';
 import type { GenerationReferences, CanvasVideoOperation } from '../generation';
 
@@ -175,6 +175,27 @@ const taskFor = (
 });
 
 describe('canvas video composer product model', () => {
+  test('restores video mention identity after document round-trip without aliasing the editor draft', () => {
+    const source = testNode('video', 1);
+    const draft = {
+      prompt: '🎬 @图片1 动起来',
+      mentions: [{
+        id: 'video-mention', sourceNodeId: testUuid(10), fallbackLabel: '图片1', start: 3, end: 7,
+      }],
+      settings: { model: null, resolution: '1080p', aspectRatio: '16:9', seconds: 5 },
+    };
+    const persisted = withCanvasVideoComposeDraft(source, draft);
+    const document = parseCreativeProjectDocument({
+      ...createEmptyCreativeProjectDocument(testUuid(404)), nodes: [persisted],
+    });
+    const restored = canvasVideoComposeDraftFromState(createInitialCanvasState({ document }), source.id);
+    expect(restored).toEqual(draft);
+    restored.mentions![0]!.fallbackLabel = 'mutated';
+    expect(persisted.data.composer?.mentions?.[0]?.fallbackLabel).toBe('图片1');
+    const cleared = withCanvasVideoComposeDraft(persisted, { ...draft, prompt: '', mentions: [] });
+    expect(cleared.data.composer?.mentions ?? []).toEqual([]);
+  });
+
   test('prepares exact t2v owner, protocol parameters and source edge', () => {
     const { document, prepared, source } = prepareFixture();
 
@@ -439,6 +460,7 @@ describe('canvas video composer product model', () => {
       )
     ).toEqual({
       prompt: '尚未提交的竖屏草稿',
+      mentions: [],
       settings: {
         model: { providerId: PROVIDER_ID, model: 'video-v1' },
         resolution: '720p',

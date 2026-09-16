@@ -627,6 +627,28 @@ describe('Creative Studio v1 document contract', () => {
     });
     expect(oldParsed.nodes[0].type === 'video' && oldParsed.nodes[0].data.composer).toBeNull();
 
+    const mentioned = structuredClone(video);
+    if (mentioned.type !== 'video' || !mentioned.data.composer) throw new Error('expected video');
+    mentioned.data.composer.prompt = '🎬 @图片1 动起来';
+    mentioned.data.composer.mentions = [{
+      id: 'mention-video', sourceNodeId: 'source-image', fallbackLabel: '图片1', start: 3, end: 7,
+    }];
+    const documentWithMention = {
+      ...createEmptyCreativeProjectDocument(PROJECT_ID), nodes: [mentioned],
+    };
+    // A disconnected binding survives persistence so the UI can show its error.
+    expect(parseCreativeProjectDocument(documentWithMention).nodes[0]).toEqual(mentioned);
+    for (const mentions of [
+      [{ ...mentioned.data.composer.mentions[0], start: 2 }],
+      [mentioned.data.composer.mentions[0], { ...mentioned.data.composer.mentions[0], id: 'overlap' }],
+      [mentioned.data.composer.mentions[0], mentioned.data.composer.mentions[0]],
+    ]) {
+      expect(() => parseCreativeProjectDocument({
+        ...documentWithMention,
+        nodes: [{ ...mentioned, data: { ...mentioned.data, composer: { ...mentioned.data.composer, mentions } } }],
+      })).toThrow();
+    }
+
     const invalid = structuredClone(video);
     if (invalid.type !== 'video' || !invalid.data.composer) {
       throw new Error('fixture must contain a video composer');

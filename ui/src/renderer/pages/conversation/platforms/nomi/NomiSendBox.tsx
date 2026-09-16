@@ -9,6 +9,7 @@ import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { ipcBridge } from '@/common';
 import { uuid, uuidv7 } from '@/common/utils';
 import CommandQueuePanel from '@/renderer/components/chat/CommandQueuePanel';
+import contentStyles from '../../components/ConversationContentColumn.module.css';
 import SessionCapabilityPicker, {
   buildSessionCapabilitySelection,
   draftFromSessionCapabilitySelection,
@@ -927,7 +928,7 @@ const NomiSendBox: React.FC<{
   };
 
   return (
-    <div className={`${isCreating ? '' : 'max-w-800px'} w-full mx-auto flex flex-col mt-auto mb-16px`}>
+    <div className={`${contentStyles.column} ${contentStyles.composer} flex flex-col mt-auto mb-16px`}>
       <CommandQueuePanel
         items={queuedCommands}
         paused={isQueuePaused}
