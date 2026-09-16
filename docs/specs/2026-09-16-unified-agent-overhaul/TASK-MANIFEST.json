@@ -96,7 +96,7 @@
       "id": "UARC-001",
       "title": "Create reachability, timing, storage and platform inventory",
       "wave": "W0",
-      "status": "ready",
+      "status": "active",
       "depends_on": ["UARC-000"],
       "lane": "integration",
       "write_set": ["docs/specs/2026-09-16-unified-agent-overhaul/**", "scripts/check-uarc-boundary.mjs"],
