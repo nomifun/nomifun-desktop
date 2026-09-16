@@ -6484,6 +6484,14 @@ fn build_plugin_catalog_publication(
 ) -> Result<PluginProductCapabilityCatalogPublication, PluginRuntimeApplicationError> {
     let mut capabilities = Vec::with_capacity(contributions.capabilities.len());
     for manifest in &contributions.capabilities {
+        if nomifun_agent_contracts::is_retired_extension_authoring_capability(
+            manifest.id.as_ref(),
+        ) {
+            return Err(PluginRuntimeApplicationError::Invalid(format!(
+                "capability {} is a retired extension authoring identity",
+                manifest.id.as_ref()
+            )));
+        }
         let consumers = manifest
             .supported_consumers()
             .map_err(PluginRuntimeApplicationError::Invalid)?;

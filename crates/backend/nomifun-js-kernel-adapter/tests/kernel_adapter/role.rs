@@ -439,6 +439,7 @@ fn invoke_request(
         principal: owner.clone(),
         session_owner: owner.clone(),
         agent_session_id: "fixture-session".into(),
+        turn_id: "fixture-turn".into(),
         operation_id: "role-tool-operation".into(),
         idempotency_key: "role-tool-key".into(),
         correlation_id: "role-tool-correlation".into(),

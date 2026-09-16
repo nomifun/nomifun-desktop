@@ -2147,12 +2147,12 @@ impl KernelNomiPluginToolSession {
             &state_scope_key,
         )?;
         if compiled.content().enabled_capabilities.iter().any(|capability| {
-            nomifun_mcp::is_retired_mcp_authoring_capability(
+            nomifun_agent_contracts::is_retired_extension_authoring_capability(
                 capability.capability.id.as_ref(),
             )
         }) {
             return Err(NomiPluginToolError::Contract(
-                "retired broad MCP capabilities cannot enter a Runtime Session".into(),
+                "retired Skill/MCP authoring capabilities cannot enter a Runtime Session".into(),
             ));
         }
         let registry = kernel.snapshot()?;
@@ -2627,6 +2627,7 @@ async fn assemble_initial_capability_context(
                     principal: owner.clone(),
                     session_owner: owner.clone(),
                     agent_session_id: agent_session_id.clone(),
+                    turn_id: None,
                     operation_id: operation_id.clone(),
                     correlation_id: CorrelationId::from(format!(
                         "{}:context",
@@ -3182,6 +3183,7 @@ impl KernelNomiPluginToolInvoker {
                     principal: self.owner.clone(),
                     session_owner: self.owner.clone(),
                     agent_session_id: self.agent_session_id.clone(),
+                    turn_id: request.operation_id.clone(),
                     operation_id: request.operation_id,
                     idempotency_key: request.idempotency_key,
                     correlation_id: request.correlation_id,

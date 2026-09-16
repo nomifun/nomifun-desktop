@@ -394,6 +394,7 @@ fn access(
         principal: owner.clone(),
         session_owner: owner.clone(),
         agent_session_id: AgentSessionId::from("fixture-session"),
+        turn_id: None,
         operation_id: OperationId::from(format!(
             "fixture-access:{}",
             capability_id.as_ref()
@@ -548,6 +549,7 @@ async fn one_kernel_registry_dispatches_javascript_tool_context_and_resource() {
                 principal: owner.clone(),
                 session_owner: owner.clone(),
                 agent_session_id: AgentSessionId::from("fixture-session"),
+                turn_id: OperationId::from("fixture-turn"),
                 operation_id: OperationId::from("fixture-tool-operation"),
                 idempotency_key: IdempotencyKey::from("fixture-tool-key"),
                 correlation_id: CorrelationId::from("fixture-tool-correlation"),
@@ -679,6 +681,7 @@ async fn one_kernel_registry_dispatches_javascript_tool_context_and_resource() {
                 principal: owner.clone(),
                 session_owner: owner,
                 agent_session_id: AgentSessionId::from("fixture-session"),
+                turn_id: OperationId::from("fixture-turn"),
                 operation_id: OperationId::from("fixture-release-count"),
                 idempotency_key: IdempotencyKey::from("fixture-release-count-key"),
                 correlation_id: CorrelationId::from(

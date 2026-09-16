@@ -247,6 +247,7 @@ async fn installed_discovery_is_selectable_and_saved_provider_is_used_without_fa
         let key = uuid::Uuid::now_v7().to_string();
         let result = kernel.invoke_shared(compiled.clone(), &active, CapabilityInvocationRequest {
             principal: principal.clone(), session_owner: principal.clone(), agent_session_id: "discovery-session".into(),
+            turn_id: key.clone().into(),
             operation_id: key.clone().into(), idempotency_key: key.clone().into(), correlation_id: key.into(),
             resolved_snapshot_ref: compiled.snapshot_ref().clone(), active_set_generation: active.generation,
             capability_id: CAPABILITY_ID.into(), action_id: discovery::ACTION_ID.into(), resource_binding_ids: BTreeSet::new(), state_scope_key: "session:discovery-session".into(),
