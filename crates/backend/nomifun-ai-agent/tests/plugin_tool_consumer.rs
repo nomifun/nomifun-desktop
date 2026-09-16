@@ -691,9 +691,8 @@ fn revision_with_capabilities(
     materialized: &nomifun_agent_kernel::MaterializedRegistry,
 ) -> AgentPresetRevision {
     let tool = selection(AGENT_TOOL, &[AGENT_ACTION, HIDDEN_ACTION]);
-    let ui = selection(UI_ONLY_TOOL, &[UI_ONLY_ACTION]);
     let context = selection(CONTEXT_CAPABILITY, &[]);
-    let enabled_capabilities = vec![ui, tool, context];
+    let enabled_capabilities = vec![tool, context];
     let mut revision = AgentPresetRevision {
         reference: PresetRevisionRef {
             preset_id: AgentPresetId::from(
@@ -715,7 +714,7 @@ fn revision_with_capabilities(
             instructions: String::new(),
             starter_prompts: Vec::new(),
         },
-        contribution_locks: [AGENT_TOOL, UI_ONLY_TOOL, CONTEXT_CAPABILITY]
+        contribution_locks: [AGENT_TOOL, CONTEXT_CAPABILITY]
             .into_iter()
             .map(|id| {
                 materialized
@@ -1411,7 +1410,7 @@ async fn non_agent_tool_non_tool_and_hidden_actions_never_register() {
     );
     let materialized = kernel.replace_all(vec![registration]).unwrap();
     let compiled = compile(&materialized);
-    assert!(compiled
+    assert!(!compiled
         .content()
         .enabled_capabilities
         .iter()
@@ -1565,7 +1564,7 @@ fn plugin_product_fixture() -> (
         description: Some("Plugin fixture action".to_owned()),
         actions: vec![action],
         required_resource_kinds: BTreeSet::new(),
-        action_allowlist: BTreeSet::new(),
+        action_allowlist: BTreeSet::from([ActionId::from("plugin.fixture.echo.invoke")]),
     };
     let schemas = Arc::new(PluginProductSchemaMap {
         schemas: BTreeMap::from([(input_ref, StrictJsonValue(input_schema))]),
@@ -1576,6 +1575,11 @@ fn plugin_product_fixture() -> (
 fn compile_plugin_product_fixture(
     capability: &nomifun_agent_contracts::ResolvedCapability,
 ) -> nomifun_agent_kernel::CompiledSnapshot {
+    let mut capability = capability.clone();
+    let [action] = capability.actions.as_slice() else {
+        panic!("Plugin Product fixture requires one exact Action");
+    };
+    capability.action_allowlist = BTreeSet::from([action.action_id.clone()]);
     let selection = CapabilitySelection {
         capability: capability.capability.clone(),
         action_allowlist: capability.action_allowlist.clone(),
@@ -1623,7 +1627,7 @@ fn compile_plugin_product_fixture(
             availability_evidence_revision: "plugin-tool-test".to_owned(),
         },
         CompileRequest {
-            plugin_product_capabilities: vec![capability.clone()],
+            plugin_product_capabilities: vec![capability],
             revision,
             principal: owner(),
             scene: "chat".to_owned(),

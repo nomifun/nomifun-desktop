@@ -260,7 +260,7 @@ async fn context_order_cannot_select_tools_or_unselected_capabilities() {
     assert!(
         error
             .to_string()
-            .contains("must be an Agent ContextContributor")
+            .contains("must publish Agent Context")
     );
 }
 #[async_trait]

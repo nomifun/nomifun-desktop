@@ -65,8 +65,7 @@ pub fn action() -> CapabilityActionDescriptor {
 }
 
 pub fn supports(manifest: &CapabilityManifest) -> bool {
-    manifest.kind == CapabilityKind::Tool
-        && manifest.supports_consumer(CapabilityConsumer::Agent)
+    manifest.supports_consumer(CapabilityConsumer::Agent)
         && manifest.contributions.actions == [action()]
 }
 
@@ -176,7 +175,7 @@ fn selected_capability<'a>(
             if current.manifest.contributions.actions == [action()] && !supports(&current.manifest)
             {
                 return Err(crate::NomiPluginToolError::Contract(
-                    "Discovery capability must be an Agent Tool contribution".into(),
+                    "Discovery capability must publish the exact Agent discovery Action".into(),
                 ));
             }
             &current.manifest.contributions.actions
