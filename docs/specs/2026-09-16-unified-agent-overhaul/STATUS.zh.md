@@ -2,15 +2,17 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-17
-> 当前阶段：Wave 0 / UARC-000 active
+> 当前阶段：Wave 0 / UARC-001 ready
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
+> UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > 当前主机：Windows
 > Initiative 状态：`active / baseline freeze`
 
 ## 1. 当前事实
 
-- source HEAD 上继承的 dirty worktree 有 21 个 Git 状态条目，展开目录后为 26 个实际文件；已逐文件归属，详见
-  [UARC-000 工作树冻结清单](UARC-000-WORKTREE-INVENTORY.zh.md)。尚未形成 UARC barrier commit。
+- source HEAD 上继承的 21 个 Git 状态条目（展开为 26 个实际文件）已逐文件归属并冻结到
+  `2147863da396835240296ec0a9b865200050b438`；详见
+  [UARC-000 工作树冻结清单](UARC-000-WORKTREE-INVENTORY.zh.md)。
 - 已完成三份目标设计和 Browser 历史文档纠正；这些是实施输入，不是生产完成证据。
 - 先前实现的“执行引擎设置页”仍按 Nomi/Coding 双 Runtime 展示，与最新单 Runtime 决定不完全一致；
   归属 `UARC-050`，不能作为最终 UI 直接交付，也不能未经检查删除。
@@ -43,8 +45,8 @@
 
 | Task | 状态 | Owner | Windows | macOS | 说明 |
 | --- | --- | --- | --- | --- | --- |
-| `UARC-000` | active | Integration | pending | n/a | 26 个继承文件已逐项归属；基线检查进行中 |
-| `UARC-001` | planned | Integration | pending | pending | 等待 UARC-000 |
+| `UARC-000` | windows_verified | Integration | verified | n/a | barrier `2147863da`；26/26 文件归属，基线 gate 通过 |
+| `UARC-001` | ready | Integration | pending | pending | 在 UARC-000 barrier 上生成机器可读 inventory |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -90,13 +92,12 @@
 
 - UARC 实施无产品决定 blocker。
 - macOS 任务需要可用 Mac 主机；在主机可用前状态保持 `pending`，不能标完成。
-- 当前 dirty worktree 尚未收口，禁止启动 Wave 1 或并行 Feature tasks。
+- UARC-000 已收口；Wave 1 和并行 Feature tasks 仍须等待 UARC-001 gate。
 
 ## 8. Next ready tasks
 
-1. `UARC-000`：完成最终基线检查、审查 staged diff 并生成 barrier。
-2. `UARC-001`：在 barrier 上生成 reachability/test/platform inventory。
-3. 完成 Wave 0 后串行执行 `UARC-010`。
+1. `UARC-001`：在 barrier `2147863da` 上生成 reachability/test/platform inventory。
+2. 完成 Wave 0 后串行执行 `UARC-010`。
 
 ## 9. 状态更新模板
 
@@ -131,3 +132,17 @@
 - Not run: Rust/native/package gates are outside UARC-000's documentation/settings checkpoint scope.
 - Remaining/blocker: stage and inspect the complete diff, rerun final whitespace validation, commit the barrier. No product blocker.
 - Next ready tasks: none until UARC-000 is integrated; then `UARC-001`.
+
+### 2026-09-17 UARC-000 integrated and gate complete
+
+- Barrier/source: source `877b1a751536e40a3185c31790e6e63e86c6fa32`; frozen barrier `2147863da396835240296ec0a9b865200050b438`.
+- Owner/write set: Integration; the inherited settings and design checkpoint is now immutable in Git.
+- Changed: preserved 14 design/review/Browser documents, 12 settings/UI files, and added exact ownership/gate records.
+- Deleted: only the two already-authorized legacy `AgentSettings` files; no UARC-000 cleanup deleted user work.
+- Retained + reason: Browser engine/CEF evidence and settings-page checkpoint remain inputs for their manifest owners.
+- Tests: `git diff --cached --check`; `bun run check`; 9 focused UI tests — all passed. Inventory coverage `26/26`.
+- Windows: verified for the UARC-000 documentation/settings baseline.
+- macOS: not applicable; existing CEF evidence is retained but not promoted to UARC product verification.
+- Not run: Rust/native/package gates, because UARC-000 changed no Rust/native/package implementation.
+- Remaining/blocker: none for UARC-000. External Mac host remains a later platform prerequisite, not a Wave 0 blocker.
+- Next ready tasks: `UARC-001` only; no Feature task is released.

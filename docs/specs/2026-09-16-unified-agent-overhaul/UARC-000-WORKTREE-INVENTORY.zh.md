@@ -4,6 +4,7 @@
 > 分支：`rf/agent-capability-platform-v2`
 > source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > upstream：`origin/rf/agent-capability-platform-v2`，开始时 ahead/behind 为 `0/0`
+> 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 
 ## 1. 冻结边界
 
@@ -97,3 +98,6 @@ bun run check
 
 逐文件清单与 dirty file set 的机器比较结果为 `26/26` 精确覆盖。最终 barrier 前重新运行
 `git diff --check`，审查 staged diff，并在状态台账记录提交。
+
+UARC-000 已由提交 `2147863da396835240296ec0a9b865200050b438` 冻结；该提交是后续 inventory
+和 Wave 1 基础工作的可复现内容 barrier。
