@@ -46,6 +46,7 @@ import {
   updateDocument,
 } from './model';
 import styles from './AgentSettingsPage.module.css';
+import { AgentEditorActionBar, AgentEditorActionButton } from './AgentEditorActionBar';
 
 type AgentPresetEditorProps = {
   editor: AgentPresetEditorResponse;
@@ -77,14 +78,13 @@ export const AgentConversationAction: React.FC<{
   const { t } = useTranslation();
 
   return (
-    <Button
-      type='primary'
-      icon={<MessageOne theme='outline' size='15' />}
+    <AgentEditorActionButton
+      icon={<MessageOne theme='outline' size={15} fill='currentColor' />}
       disabled={busy || !hasStableRevision || dirty}
       onClick={onClick}
     >
       {t('agentSettings.actions.startConversation')}
-    </Button>
+    </AgentEditorActionButton>
   );
 };
 
@@ -365,14 +365,14 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
         </Collapse>
       </section></div>}
     </div>
-    <footer className={styles.actionBar}>
+    <AgentEditorActionBar>
       <div className={styles.saveStatus}><span className={dirty || unavailableCount ? styles.statusWarningDot : styles.statusReadyDot} /><div><strong>{t(dirty ? 'agentSettings.workbench.pendingChanges' : 'agentSettings.workbench.savedHint')}</strong><span>{t(unavailableCount ? 'agentSettings.workbench.disabledSave' : needsChatModel ? 'agentSettings.workbench.modelNeeded' : 'agentSettings.workbench.saveHint')}</span></div></div>
       <div className={styles.actionButtons}>
         {dirty && onDiscard && <Button type='text' disabled={busy} onClick={onDiscard}>{t('agentSettings.workbench.resetChanges')}</Button>}
-        {dirty || !editor.preset.current_stable_revision ? <Button type='primary' icon={<Save theme='outline' size={15} />} loading={busyAction === 'save'} disabled={busy || unavailableCount > 0 || !draft.display_name.trim() || needsChatModel} onClick={onSave}>{t('common.save')}</Button> :
+        {dirty || !editor.preset.current_stable_revision ? <AgentEditorActionButton icon={<Save theme='outline' size={15} fill='currentColor' />} loading={busyAction === 'save'} disabled={busy || unavailableCount > 0 || !draft.display_name.trim() || needsChatModel} onClick={onSave}>{t('common.save')}</AgentEditorActionButton> :
           <AgentConversationAction hasStableRevision={Boolean(editor.preset.current_stable_revision)} dirty={dirty} busy={busy} onClick={() => onStartConversation(editor.preset)} />}
       </div>
-    </footer>
+    </AgentEditorActionBar>
   </main>;
 };
 

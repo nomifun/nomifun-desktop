@@ -50,7 +50,7 @@
 .editorHeader h2 { margin: 0; color: var(--color-text-1); font-size: 16px; font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
 .editorHeader p { margin: 3px 0 0; color: var(--agent-muted); font-size: 12px; line-height: 1.6; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .editorTabs { display: flex; flex-shrink: 0; align-items: center; gap: 24px; padding: 0 24px; border-bottom: 1px solid var(--agent-border); overflow-x: auto; }
-.editorTabs > button, .editorTabs > span { display: inline-flex; align-items: center; position: relative; flex-shrink: 0; min-height: 43px; padding: 0 0 11px; box-sizing: border-box; border: 0; background: transparent; color: var(--color-text-3); font-size: 13px; cursor: pointer; }
+.editorTabs > button, .editorTabs > span { display: inline-flex; align-items: center; position: relative; flex-shrink: 0; min-height: 32px; padding: 0 0 2px; box-sizing: border-box; border: 0; background: transparent; color: var(--color-text-3); font-size: 13px; cursor: pointer; }
 .editorTabs .activeTab { color: rgb(var(--primary-6)); font-weight: 600; }
 .activeTab::after { content: ''; position: absolute; height: 3px; border-radius: 2px 2px 0 0; left: 0; right: 0; bottom: 0; background: rgb(var(--primary-6)); }
 .editorBody { min-height: 0; flex: 1; overflow-y: auto; padding: 10px 22px 18px; background: var(--agent-surface); }
@@ -69,8 +69,15 @@
 .inlineNotice { margin: 16px 0; border-radius: 9px; }
 .inlineEmpty { padding: 20px 14px; border-radius: 9px; background: var(--color-fill-1); color: var(--agent-muted); font-size: 12px; line-height: 1.7; }
 .tagRow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.actionBar { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 15px 22px; border-top: 1px solid var(--agent-border); background: var(--agent-surface); }
-.actionBar :global(.arco-btn) { height: 36px; border-radius: 8px; font-size: 12px; }
+.actionBar { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 22px; border-top: 1px solid var(--agent-border); background: var(--agent-surface); }
+.actionBar :global(.arco-btn), .editorActionButton:global(.arco-btn) { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 8px; font-size: 12px; line-height: 1; }
+.actionBar :global(.arco-btn) > span, .editorActionButton:global(.arco-btn) > span { display: inline-flex; align-items: center; justify-content: center; }
+.actionBar :global(.arco-btn) > :global(.arco-icon) + span, .editorActionButton:global(.arco-btn) > :global(.arco-icon) + span { margin-left: 0; }
+.actionBar :global(.arco-btn) :global(.i-icon), .editorActionButton :global(.i-icon) { display: inline-flex; align-items: center; line-height: 1; }
+.editorActionButton:global(.arco-btn-secondary):not(:disabled) { color: rgb(var(--primary-6)); background: rgba(var(--primary-6), .08); border: 1px solid rgba(var(--primary-6), .14); }
+.editorActionButton:global(.arco-btn-secondary):not(:disabled):hover { background: rgba(var(--primary-6), .12); border-color: rgba(var(--primary-6), .22); }
+.editorActionButton:global(.arco-btn-secondary):not(:disabled):active { background: rgba(var(--primary-6), .16); }
+.editorActionButton:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: 2px; }
 .actionButtons { display: flex; align-items: center; gap: 9px; flex-shrink: 0; }
 .footerName { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--color-text-3); min-width: 0; }
 .footerName > span { flex-shrink: 0; }
