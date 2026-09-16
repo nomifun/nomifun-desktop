@@ -429,6 +429,7 @@ mod tests {
         cleanup_sessions: AtomicUsize,
         fail_cleanup: AtomicBool,
         pending_preparation: AtomicBool,
+        prepare_failure_at: AtomicUsize,
         block_cleanup: AtomicBool,
         cleanup_entered: tokio::sync::Notify,
         cleanup_release: tokio::sync::Semaphore,
@@ -443,6 +444,7 @@ mod tests {
                 cleanup_sessions: AtomicUsize::new(0),
                 fail_cleanup: AtomicBool::new(false),
                 pending_preparation: AtomicBool::new(false),
+                prepare_failure_at: AtomicUsize::new(usize::MAX),
                 entered: tokio::sync::Notify::new(),
                 block_cleanup: AtomicBool::new(false),
                 cleanup_entered: tokio::sync::Notify::new(),
@@ -467,6 +469,16 @@ mod tests {
             self.entered.notify_one();
             if self.pending_preparation.load(Ordering::Acquire) {
                 return std::future::pending().await;
+            }
+            // Model the production host's awaited receipt, recovery, model,
+            // attachment, history and context preparation boundaries.
+            for stage in 0..6 {
+                tokio::task::yield_now().await;
+                if self.prepare_failure_at.load(Ordering::Acquire) == stage {
+                    return Err(AppError::Conflict(format!(
+                        "pre-active preparation stage {stage} failed"
+                    )));
+                }
             }
             let route =
                 ChatRouteIdentity::new("preset@1", "agent_chat", ModelRouteId::from("route"), 1);
@@ -757,6 +769,46 @@ mod tests {
                 matches!(terminal(&mut events).await, AgentStreamEvent::Finish(data) if data.stop_reason == Some(TurnStopReason::Cancelled))
             );
             assert!(runtime.is_transport_healthy());
+            runtime.kill_and_wait(None).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_the_first_driver_poll_still_cleans_and_records_terminal() {
+        let host = Host::new();
+        let runtime = runtime(host.clone(), model(true, false));
+        let mut events = runtime.subscribe();
+        runtime.send_message(message()).await.unwrap();
+        runtime.cancel().await.unwrap();
+        assert!(matches!(
+            terminal(&mut events).await,
+            AgentStreamEvent::Finish(data)
+                if data.stop_reason == Some(TurnStopReason::Cancelled)
+        ));
+        assert_eq!(host.cleanup_turns.load(Ordering::Acquire), 1);
+        assert!(host.events.lock().unwrap().iter().any(|event|
+            matches!(event, CodingEngineEvent::TurnCancelled { .. })));
+        assert!(runtime.is_transport_healthy());
+        runtime.kill_and_wait(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn every_pre_active_preparation_failure_cleans_and_records_one_terminal() {
+        for stage in 0..6 {
+            let host = Host::new();
+            host.prepare_failure_at.store(stage, Ordering::Release);
+            let runtime = runtime(host.clone(), model(false, false));
+            let mut events = runtime.subscribe();
+            runtime.send_message(message()).await.unwrap();
+            assert!(matches!(terminal(&mut events).await, AgentStreamEvent::Error(_)));
+            assert_eq!(host.cleanup_turns.load(Ordering::Acquire), 1, "stage {stage}");
+            assert_eq!(
+                host.events.lock().unwrap().iter().filter(|event|
+                    matches!(event, CodingEngineEvent::TurnFailed { .. })).count(),
+                1,
+                "stage {stage}",
+            );
+            assert!(runtime.is_transport_healthy(), "stage {stage}");
             runtime.kill_and_wait(None).await.unwrap();
         }
     }
