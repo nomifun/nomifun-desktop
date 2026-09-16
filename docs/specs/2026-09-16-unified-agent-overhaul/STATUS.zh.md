@@ -2,14 +2,15 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-17
-> 当前阶段：Wave 1 / UARC-012 active
+> 当前阶段：Wave 1 / UARC-013 ready
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
 > UARC-010 实现提交：`c059728ae4395fcdf72df59a54b4e53e8b7562a1`
 > UARC-011 实现提交：`fa164520f72a053e8e244721cb9682bc58b1269b`
+> UARC-012 实现提交：`82954016810ed5fabe48248adc4952d2bd5f199e`
 > 当前主机：Windows
-> Initiative 状态：`active / baseline freeze`
+> Initiative 状态：`active / Wave 1 shared contracts`
 
 ## 1. 当前事实
 
@@ -22,8 +23,9 @@
 - 当前 Browser 仍是 Conversation-scoped BrowserWorkspace，Guid 仍会创建浏览器专属空 Session。
 - 当前源码已经包含 macOS 独立 CEF host、原生 fixture 与部分底层验证；生产注入、产品会话闭环和
   UARC 新 Browser Resource 模型适配仍未完成。UARC-061 必须复用这套基线，不得回退到 WKWebView。
-- 当前产品仍运行旧 Nomi/Coding 双 Runtime、旧 Agent Store 和旧 Capability IDs。
-- 当前没有本轮源码重构的 Windows 集成证据。
+- 当前产品仍运行旧 Nomi/Coding 双 Runtime 和旧 Capability IDs；canonical `/api/agent-sessions`
+  已切换 generation 5 Store，旧领域入口等待后续 wave/cutover 删除。
+- Wave 1 的 UARC-010/011/012 已有 Windows 定向集成证据；完整产品 gate 尚未运行。
 - 当前没有本轮源码重构的 macOS 编译、原生或打包证据。
 
 ## 2. 已确认产品决定
@@ -52,7 +54,8 @@
 | `UARC-001` | integrated | Integration | verified | pending | 机器 inventory/self-test/timing/platform gap 已完成；Mac gaps 保持 pending |
 | `UARC-010` | integrated | Integration | verified | n/a | Module 多 contribution、authoring policy、exact Action grant 已闭合 |
 | `UARC-011` | integrated | Integration | verified | n/a | generation 5 Store、main migration、effect ledger、reset gate 已闭合 |
-| `UARC-012` | active | Integration | pending | n/a | 单一 AgentSession owner 与 open/turn/steer/cancel/fork/delete API 实施中 |
+| `UARC-012` | integrated | Integration | verified | n/a | 单一 AgentSession owner、完整生命周期 API 与 exact receipt 已闭合 |
+| `UARC-013` | ready | Integration | pending | n/a | 单一官方 Nomi Runtime Driver 与 typed host ports |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -90,6 +93,9 @@
 | UARC-011 Contracts/Store | 105 + 27 passed | empty baseline, Turn/Event/Effect/Resource invariants |
 | UARC-011 DB reset/schema/migration | 3 + 20 + 5 passed | non-Agent preservation and main SQLite parity |
 | UARC-011 retained root consumer | 14 passed | temporary alias remains owned by `UARC-054` |
+| UARC-012 Store/Conversation | 27 + 335 passed | single owner、one-active-turn、exact replay、Fork ready 与 projection rebuild |
+| UARC-012 API/App boundary | 534 + 6 passed | lifecycle DTO、canonical route reachability 与 legacy-authority non-reentry |
+| UARC-012 App check/rustfmt/boundary | passed，3,032 files | main-pool composition and no UARC legacy growth |
 | Windows UARC full gate | not run | 否 |
 | macOS UARC shared compile | not run | 否 |
 | macOS native Browser/Computer/Process | not run | 否 |
@@ -114,13 +120,14 @@
   Wave 1，但最终 gate 前必须闭合。
 - UARC-010 后 Control Plane 有两项旧语义测试等待 `UARC-014`：kind-only Context 和 direct
   TurnMiddleware；这是已登记的串行迁移，不是恢复兼容的理由。
-- 当前 main DB 的旧 Conversation writers/readers 仍由 `UARC-051/054` 删除；generation 5 已在同库
-  安装但没有双写。Fresh-v4 root coordinator aliases 仅为 `UARC-054` 保留。
+- canonical `/api/agent-sessions` 已只写 generation 5；Cron/Channel/AutoWork/Companion/IDMM/
+  AgentExecution/Remote 的旧 Conversation writers/readers 仍由 `UARC-033/034/051/054` 迁移删除。
+  Fresh-v4 root coordinator aliases 仅为 `UARC-054` 保留。
 
 ## 8. Next ready tasks
 
-1. `UARC-012`：切换为单一 AgentSession owner 与 Turn API。
-2. UARC-012 barrier 后执行 `UARC-013`；不得提前启动 Feature tasks。
+1. `UARC-013`：将 canonical accepted Turn 接入唯一 Nomi Runtime Driver 与 typed host ports。
+2. Wave 1 全部收口前不得启动 Feature tasks。
 
 ## 9. 状态更新模板
 
@@ -267,3 +274,17 @@
 - Not run: no implementation gate yet.
 - Remaining/blocker: wire generation 5 Store into composition and route every Agent entrypoint through one receipt. No blocker.
 - Next ready tasks: none until UARC-012 barrier; then `UARC-013`.
+
+### 2026-09-17 UARC-012 integrated and gate complete
+
+- Barrier/source: UARC-011 closeout `9b62887a`; implementation `82954016810ed5fabe48248adc4952d2bd5f199e`.
+- Owner/write set: Integration; Agent Session Store, Conversation owner, API DTO, App router/composition, Cargo lock and UARC evidence.
+- Changed: generation 5 canonical owner; direct open/turn/steer/cancel/fork/delete; atomic accepted message plus Turn; exact replay; child-ready Fork; Store-backed events/messages/active capabilities.
+- Deleted: canonical AgentSession Conversation double-create/send/fork bridge, compatibility observation/message/event projections and `extra`-based Session authority.
+- Retained + reason: Conversation terminology and old domain ingress remain explicit projections/migration inputs for `UARC-033/034/051`; no new AgentSession route reads them.
+- Tests: Agent Session 27, Conversation 335, API Types 534 and App boundary 6 passed; App lib check, targeted rustfmt, UARC boundary scanner and whitespace checks passed.
+- Windows: verified for shared Store/API/composition behavior.
+- macOS: not applicable to this shared API task; later Mac native/runtime consumers remain pending.
+- Not run: full Wave 1 milestone gate waits for UARC-013/014; no UI/native/package gate was required by this non-UI task.
+- Remaining/blocker: no UARC-012 blocker. Durable accepted Turns deliberately have no legacy Runtime fallback; UARC-013 is the only next task that may consume them.
+- Next ready tasks: `UARC-013` only.
