@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Check, Close, Error, Loading, Lock, Unlock } from '@icon-park/react';
+import { Check, Close, Error, Loading, Lock, Unlock, FileText, Pic, VideoTwo, Voice, PanoramaHorizontal, Folder, SettingTwo } from '@icon-park/react';
 import classNames from 'classnames';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
@@ -76,6 +76,10 @@ const statusIcon = (status: CreativeGenerationStatus) => {
 };
 
 const finiteOr = (value: number, fallback: number) => (Number.isFinite(value) ? value : fallback);
+const NODE_ICONS = {
+  text: FileText, image: Pic, video: VideoTwo, audio: Voice,
+  panorama: PanoramaHorizontal, group: Folder, config: SettingTwo,
+};
 
 const CreativeNodeFrame: React.FC<CreativeNodeFrameProps> = ({
   node,
@@ -99,6 +103,7 @@ const CreativeNodeFrame: React.FC<CreativeNodeFrameProps> = ({
   onContextMenu,
 }) => {
   const { t } = useTranslation();
+  const TypeIcon = NODE_ICONS[node.type];
   const status = runtime?.status ?? 'idle';
   const statusLabels: CreativeNodeStatusLabels = {
     idle: t(DEFAULT_LABEL_KEYS.idle),
@@ -156,8 +161,13 @@ const CreativeNodeFrame: React.FC<CreativeNodeFrameProps> = ({
       {inputHandle ? <div className={styles.inputHandle}>{inputHandle}</div> : null}
       {outputHandle ? <div className={styles.outputHandle}>{outputHandle}</div> : null}
 
-      {status !== 'idle' || headerActions || onToggleLock || node.locked ? (
         <header className={styles.header}>
+          <span className={styles.nodeTitle} title={title} data-node-title>
+            <span className={styles.nodeTypeIcon} aria-hidden='true'>
+              <TypeIcon theme='outline' size={18} fill='currentColor' strokeWidth={3} />
+            </span>
+            <span className={styles.nodeName}>{title}</span>
+          </span>
           {status !== 'idle' ? (
             <span className={styles.status} data-status={status} title={runtime?.label ?? statusLabels[status]}>
               <span className={styles.statusIcon} aria-hidden='true'>
@@ -192,7 +202,6 @@ const CreativeNodeFrame: React.FC<CreativeNodeFrameProps> = ({
             </span>
           ) : null}
         </header>
-      ) : null}
 
       <div className={styles.body}>{children}</div>
 

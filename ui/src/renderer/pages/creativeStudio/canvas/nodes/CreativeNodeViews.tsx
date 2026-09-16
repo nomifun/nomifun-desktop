@@ -166,6 +166,7 @@ export const CreativeTextNode: React.FC<CreativeTextNodeProps> = ({
 
 interface CreativeAssetNodeProps<K extends 'image' | 'video' | 'audio' | 'panorama'>
   extends CreativeNodePresentationProps<K> {
+  onMediaSize?: (size: { width: number; height: number }) => void;
   asset?: CreativeNodeAssetPresentation | null;
   title?: string;
   emptyLabel?: string;
@@ -177,6 +178,7 @@ export const CreativeImageNode: React.FC<CreativeImageNodeProps> = ({
   asset,
   title,
   emptyLabel,
+  onMediaSize,
   ...props
 }) => {
   const { t } = useTranslation();
@@ -198,9 +200,10 @@ export const CreativeImageNode: React.FC<CreativeImageNodeProps> = ({
           kind='image'
           className={styles.imageMedia}
           src={asset?.originalSrc ?? asset?.src}
-          posterSrc={asset?.src}
+          posterSrc={node.data.naturalSize ? asset?.src : asset?.originalSrc ?? asset?.src}
           alt={asset?.alt ?? node.data.alt}
           fit={node.data.fit}
+          onImageSize={onMediaSize}
         />
       ) : (
         <EmptyMedia
@@ -219,6 +222,7 @@ export const CreativeVideoNode: React.FC<CreativeVideoNodeProps> = ({
   asset,
   title,
   emptyLabel,
+  onMediaSize,
   ...props
 }) => {
   const { t } = useTranslation();
@@ -242,6 +246,7 @@ export const CreativeVideoNode: React.FC<CreativeVideoNodeProps> = ({
           title={resolvedTitle}
           selected={props.selected}
           onActivate={nodeCallbacks(node, props).onActivate}
+          onMediaSize={onMediaSize}
         />
       ) : (
         <EmptyMedia
@@ -393,6 +398,8 @@ export const CreativeGroupNode: React.FC<CreativeGroupNodeProps> = ({
 };
 
 export type CreativeAnyNodeViewProps = CreativeNodePresentationProps<CreativeCanvasNodeKind> & {
+  title?: string;
+  onMediaSize?: (size: { width: number; height: number }) => void;
   asset?: CreativeNodeAssetPresentation | null;
   panoramaPreview?: React.ReactNode;
   groupContent?: React.ReactNode;

@@ -72,13 +72,13 @@ pub enum CreativeAgentOpResult {
 
 fn default_size(node_type: CreativeNodeType) -> (f64, f64) {
     match node_type {
-        CreativeNodeType::Image => (320.0, 240.0),
-        CreativeNodeType::Panorama => (360.0, 220.0),
-        CreativeNodeType::Text => (320.0, 180.0),
         CreativeNodeType::Config => (360.0, 300.0),
-        CreativeNodeType::Video => (360.0, 240.0),
-        CreativeNodeType::Audio => (360.0, 140.0),
-        CreativeNodeType::Group => (480.0, 360.0),
+        CreativeNodeType::Image
+        | CreativeNodeType::Panorama
+        | CreativeNodeType::Text
+        | CreativeNodeType::Video
+        | CreativeNodeType::Audio
+        | CreativeNodeType::Group => (320.0, 320.0),
     }
 }
 
@@ -395,6 +395,7 @@ mod tests {
             ],
         )
         .unwrap();
+        assert!(with_nodes.nodes.iter().all(|node| node.size.width == 320.0 && node.size.height == 320.0));
         let first = match &added[0] {
             CreativeAgentOpResult::NodeAdded { node_id } => node_id.clone(),
             other => panic!("unexpected result {other:?}"),

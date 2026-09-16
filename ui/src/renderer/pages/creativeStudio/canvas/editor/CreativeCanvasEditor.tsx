@@ -910,7 +910,8 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
           corner,
           stateRef.current.viewport,
           {
-            keepAspectRatio: event.shiftKey,
+            keepAspectRatio: event.shiftKey ||
+              ((node.type === 'image' || node.type === 'video') && Boolean(node.data.assetId)),
           }
         );
         if (!started.ok) return;

@@ -8,7 +8,7 @@
   flex-direction: column;
   overflow: visible;
   border: 2px solid var(--creative-canvas-node-stroke, var(--color-border-2));
-  border-radius: 24px;
+  border-radius: 10px;
   background: var(--creative-canvas-node-fill, var(--color-fill-3));
   box-shadow: none;
   color: var(--color-text-1);
@@ -62,8 +62,8 @@
 .header {
   position: absolute;
   top: -30px;
-  right: 12px;
-  left: 12px;
+  right: 0;
+  left: 0;
   z-index: 10;
   display: flex;
   min-height: 24px;
@@ -88,6 +88,47 @@
   color: var(--creative-node-accent);
   font-size: 10px;
   font-weight: 620;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nodeTitle {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text-3);
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 22px;
+  pointer-events: auto;
+  cursor: grab;
+}
+
+.nodeTypeIcon {
+  display: flex;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+
+/* IconPark wraps its SVG in an inline span; remove its baseline whitespace. */
+.nodeTypeIcon :global(.i-icon),
+.nodeTypeIcon :global(svg) {
+  display: block;
+  width: 18px;
+  height: 18px;
+  line-height: 0;
+}
+
+.nodeName {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
