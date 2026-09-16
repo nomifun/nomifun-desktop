@@ -271,6 +271,7 @@
         "additionalProperties": false,
         "properties": {
           "action_allowlist": {
+            "description": "Exact granted Action IDs. Empty means no Action authority, never all\nactions declared by the Module.",
             "items": {
               "type": "string"
             },
@@ -278,7 +279,8 @@
             "uniqueItems": true
           },
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/ExactVersionRef",
+            "description": "Exact Capability Module revision. The historical field name remains on\nthe v1 wire until AgentPreset vNext switches the outer document."
           }
         },
         "required": [
@@ -746,6 +748,7 @@
         "additionalProperties": false,
         "properties": {
           "action_allowlist": {
+            "description": "Exact granted Action IDs. Empty means no Action authority, never all\nactions declared by the Module.",
             "items": {
               "type": "string"
             },
@@ -753,7 +756,8 @@
             "uniqueItems": true
           },
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/ExactVersionRef",
+            "description": "Exact Capability Module revision. The historical field name remains on\nthe v1 wire until AgentPreset vNext switches the outer document."
           }
         },
         "required": [
@@ -1095,6 +1099,7 @@
         "additionalProperties": false,
         "properties": {
           "action_allowlist": {
+            "description": "Exact granted Action IDs. Empty means no Action authority, never all\nactions declared by the Module.",
             "items": {
               "type": "string"
             },
@@ -1102,7 +1107,8 @@
             "uniqueItems": true
           },
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/ExactVersionRef",
+            "description": "Exact Capability Module revision. The historical field name remains on\nthe v1 wire until AgentPreset vNext switches the outer document."
           }
         },
         "required": [
@@ -2719,6 +2725,16 @@
         ],
         "type": "string"
       },
+      "CapabilityAuthoringPolicy": {
+        "description": "Whether an Agent author may select a Capability Module directly.\n\n`CapabilityKind` remains a catalog presentation summary. It is not an\nauthorization switch and must not be used to infer Agent authorability.",
+        "enum": [
+          "direct",
+          "dependency_only",
+          "platform_managed",
+          "internal"
+        ],
+        "type": "string"
+      },
       "CapabilityCatalogAdmission": {
         "additionalProperties": false,
         "properties": {
@@ -2993,6 +3009,9 @@
       "admission": {
         "$ref": "#/$defs/CapabilityCatalogAdmission"
       },
+      "authoring_policy": {
+        "$ref": "#/$defs/CapabilityAuthoringPolicy"
+      },
       "availability": {
         "additionalProperties": false,
         "properties": {
@@ -3030,7 +3049,8 @@
         "type": "string"
       },
       "contribution_kind": {
-        "$ref": "#/$defs/CapabilityKind"
+        "$ref": "#/$defs/CapabilityKind",
+        "description": "Presentation summary only. Executable contributions come from the\nmanifest's action/context/event/resource sets."
       },
       "host_surfaces": {
         "items": {
@@ -3071,6 +3091,7 @@
       "provenance",
       "host_surfaces",
       "supported_consumers",
+      "authoring_policy",
       "contribution_kind",
       "availability",
       "admission"

@@ -263,6 +263,13 @@ pub enum KernelError {
         left: CapabilityId,
         right: CapabilityId,
     },
+    #[error("capability module {capability_id:?} is not directly authorable ({policy})")]
+    CapabilityNotAuthorable {
+        capability_id: CapabilityId,
+        policy: String,
+    },
+    #[error("capability module {capability_id:?} requires an explicit non-empty action grant")]
+    ActionGrantRequired { capability_id: CapabilityId },
     #[error("capability action {action_id:?} is not declared by {capability_id:?}")]
     ActionNotDeclared {
         capability_id: CapabilityId,

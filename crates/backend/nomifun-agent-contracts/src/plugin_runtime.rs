@@ -3001,6 +3001,9 @@ fn validate_contributions(
     let mut capability_ids = BTreeSet::new();
     let mut contribution_ids = BTreeSet::new();
     for capability in &contributions.capabilities {
+        capability
+            .validate_module_contract()
+            .map_err(|reason| invalid("capability.module", reason))?;
         crate::model_middleware::validate_manifest(capability)
             .map_err(|reason| invalid("contributions.before_model", reason))?;
         crate::tool_middleware::validate_manifest(capability)

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nomifun_agent_contracts::{
-    ActionId, AgentPresetRevision, CapabilityConsumer, CapabilityId,
+    ActionId, AgentPresetRevision, CapabilityAuthoringPolicy, CapabilityConsumer, CapabilityId,
     CapabilityOperationLock, CapabilityRef, CapabilitySelection,
     ContributionSourceKind, DigestHex, ExecutionRoleId, InstallationRoleBinding,
     ModelRouteId, OperationId, PlatformConstraint,
@@ -280,7 +280,13 @@ impl AgentPresetCompiler {
         if validate_conflicts(registry, &ceiling, &graph.roles, &external).is_err() {
             return false;
         }
-        let Ok(mut capabilities) = resolved_capabilities(registry, &ceiling, &graph.paths)
+        let direct = direct_selection_map(&revision.payload.enabled_capabilities)
+            .into_iter()
+            .filter(|(id, _)| registry.capability(id).is_some())
+            .collect::<BTreeMap<_, _>>();
+        let Ok(policies) = compile_authority_policies(registry, &direct, &ceiling)
+            else { return false; };
+        let Ok(mut capabilities) = resolved_capabilities(registry, &ceiling, &graph.paths, &policies)
             else { return false; };
         for capability in &mut capabilities {
             capability.consumption = if roots.contains(&capability.capability.id) {
@@ -332,12 +338,12 @@ impl AgentPresetCompiler {
         validate_direct_selections(registry, &initial_plugin_direct)?;
         for id in &request.revision.payload.context_order {
             let valid = registry.capability(id).is_some_and(|value| {
-                value.manifest.kind == nomifun_agent_contracts::CapabilityKind::ContextContributor
+                value.manifest.contributes_context()
                     && value.manifest.supports_consumer(CapabilityConsumer::Agent)
             });
             if !valid {
                 return Err(KernelError::InvalidPresetRevision {
-                    reason: format!("context_order capability {} must be an Agent ContextContributor", id.as_ref()),
+                    reason: format!("context_order capability {} must publish Agent Context", id.as_ref()),
                 });
             }
         }
@@ -388,6 +394,7 @@ impl AgentPresetCompiler {
             registry,
             &ceiling,
             &graph.paths,
+            &authority_policies,
         )?;
         for resolved in &mut enabled_capabilities {
             resolved.consumption = if direct_ids.contains(&resolved.capability.id) {
@@ -774,6 +781,16 @@ fn validate_direct_selections(
                 version: selection.capability.version.clone(),
             });
         }
+        let authoring = capability
+            .manifest
+            .authoring_policy()
+            .map_err(|reason| KernelError::InvalidPresetRevision { reason })?;
+        if authoring != CapabilityAuthoringPolicy::Direct {
+            return Err(KernelError::CapabilityNotAuthorable {
+                capability_id: capability.manifest.id.clone(),
+                policy: authoring.as_str().to_owned(),
+            });
+        }
         let declared_actions = capability
             .manifest
             .contributions
@@ -781,6 +798,11 @@ fn validate_direct_selections(
             .iter()
             .map(|action| action.action_id.clone())
             .collect::<BTreeSet<_>>();
+        if !declared_actions.is_empty() && selection.action_allowlist.is_empty() {
+            return Err(KernelError::ActionGrantRequired {
+                capability_id: capability.manifest.id.clone(),
+            });
+        }
         if let Some(action_id) = selection
             .action_allowlist
             .iter()
@@ -1037,8 +1059,11 @@ fn compile_authority_policies(
         let capability = &registry.capabilities[capability_id].manifest;
         let declared_actions = capability.contributions.actions.iter()
             .map(|action| action.action_id.clone()).collect::<BTreeSet<_>>();
-        let allowed_actions = initial_direct.get(capability_id)
-            .filter(|direct| !direct.action_allowlist.is_empty())
+        // Direct grants are exact. Dependency-only modules receive their
+        // declared actions solely for scoped dependency calls; they never
+        // become direct Snapshot contributions.
+        let allowed_actions = initial_direct
+            .get(capability_id)
             .map(|direct| direct.action_allowlist.clone())
             .unwrap_or(declared_actions);
         policies.insert(capability_id.clone(), CompiledCapabilityPolicy {
@@ -1054,11 +1079,17 @@ fn resolved_capabilities(
     registry: &MaterializedRegistry,
     capability_ids: &BTreeSet<CapabilityId>,
     paths: &BTreeMap<CapabilityId, Vec<CapabilityId>>,
+    policies: &BTreeMap<CapabilityId, CompiledCapabilityPolicy>,
 ) -> Result<Vec<ResolvedCapability>, KernelError> {
     capability_ids
         .iter()
         .map(|capability_id| {
             let capability = &registry.capabilities[capability_id];
+            let policy = policies.get(capability_id).ok_or_else(|| {
+                KernelError::CapabilityNotInPreset {
+                    capability_id: capability_id.clone(),
+                }
+            })?;
             Ok(ResolvedCapability {
                 consumption: Default::default(),
                 dependency_refs: Vec::new(),
@@ -1089,9 +1120,9 @@ fn resolved_capabilities(
                 catalog_digest: None,
                 display_name: None,
                 description: None,
-                actions: Vec::new(),
+                actions: capability.manifest.contributions.actions.clone(),
                 required_resource_kinds: capability.manifest.contributions.resource_kinds.clone(),
-                action_allowlist: BTreeSet::new(),
+                action_allowlist: policy.allowed_actions.clone(),
             })
         })
         .collect()
@@ -1113,16 +1144,7 @@ fn merge_plugin_product_authority_policies(
     initial: &[ResolvedCapability],
 ) -> Result<(), KernelError> {
     for capability in initial.iter() {
-        let declared_actions = capability
-            .actions
-            .iter()
-            .map(|action| action.action_id.clone())
-            .collect::<BTreeSet<_>>();
-        let allowed_actions = if capability.action_allowlist.is_empty() {
-            declared_actions
-        } else {
-            capability.action_allowlist.clone()
-        };
+        let allowed_actions = capability.action_allowlist.clone();
         if policies
             .insert(
                 capability.capability.id.clone(),
@@ -1692,9 +1714,10 @@ mod tests {
 
     #[test]
     fn middleware_order_still_rejects_duplicate_and_unselected_product_entries() {
-        let capability = plugin_product_capability(BTreeSet::new());
+        let granted = BTreeSet::from([ActionId::from(ACTION_ID)]);
+        let capability = plugin_product_capability(granted.clone());
         for order in [vec![CAPABILITY_ID, CAPABILITY_ID], vec!["plugin.unselected"]] {
-            let mut saved_revision = revision(BTreeSet::new(), capability.contribution_lock.clone());
+            let mut saved_revision = revision(granted.clone(), capability.contribution_lock.clone());
             saved_revision.payload.middleware_order = order.into_iter().map(Into::into).collect();
             saved_revision.reference.revision_digest = saved_revision.revision_digest().unwrap();
             let error = AgentPresetCompiler::compile(
@@ -1709,8 +1732,9 @@ mod tests {
 
     #[test]
     fn middleware_order_still_rejects_product_identity_drift() {
-        let capability = plugin_product_capability(BTreeSet::new());
-        let mut saved_revision = revision(BTreeSet::new(), capability.contribution_lock.clone());
+        let granted = BTreeSet::from([ActionId::from(ACTION_ID)]);
+        let capability = plugin_product_capability(granted.clone());
+        let mut saved_revision = revision(granted, capability.contribution_lock.clone());
         saved_revision.payload.middleware_order = vec![CAPABILITY_ID.into()];
         saved_revision.payload.enabled_capabilities[0].capability.version = "2.0.0".into();
         saved_revision.reference.revision_digest = saved_revision.revision_digest().unwrap();
@@ -1733,7 +1757,7 @@ mod tests {
         let action_allowlist = BTreeSet::from([ActionId::from(ACTION_ID)]);
         let capability = plugin_product_capability(action_allowlist.clone());
         let saved_revision = revision(
-            action_allowlist,
+            action_allowlist.clone(),
             capability.contribution_lock.clone(),
         );
         let compiled = AgentPresetCompiler::compile(
@@ -1761,10 +1785,10 @@ mod tests {
 
     #[test]
     fn compiler_freezes_enabled_plugin_product_and_rejects_lock_drift() {
-        let action_allowlist = BTreeSet::new();
+        let action_allowlist = BTreeSet::from([ActionId::from(ACTION_ID)]);
         let capability = plugin_product_capability(action_allowlist.clone());
         let saved_revision = revision(
-            action_allowlist,
+            action_allowlist.clone(),
             capability.contribution_lock.clone(),
         );
         let compiled = AgentPresetCompiler::compile(
@@ -1786,7 +1810,7 @@ mod tests {
         let mut drifted_lock = capability.contribution_lock.clone();
         drifted_lock.source_identity = "plugin-product:other".into();
         let drifted = revision(
-            BTreeSet::new(),
+            action_allowlist,
             drifted_lock,
         );
         let error = AgentPresetCompiler::compile(

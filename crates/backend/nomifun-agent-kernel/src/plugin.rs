@@ -691,9 +691,7 @@ impl PluginRegistration {
             .filter(|capability| !role_backed_capabilities.contains(&capability.id));
         let expected_handlers = direct_capabilities
             .clone()
-            .filter(|capability| {
-                capability.kind == nomifun_agent_contracts::CapabilityKind::Tool
-            })
+            .filter(|capability| capability.declares_actions())
             .map(|capability| capability.id.clone())
             .collect::<BTreeSet<_>>();
         let actual_handlers = self.handler_ids();
@@ -705,10 +703,7 @@ impl PluginRegistration {
         }
         let expected_context_factories = direct_capabilities
             .clone()
-            .filter(|capability| {
-                capability.kind
-                    == nomifun_agent_contracts::CapabilityKind::ContextContributor
-            })
+            .filter(|capability| capability.contributes_context())
             .map(|capability| capability.id.clone())
             .collect::<BTreeSet<_>>();
         let actual_context_factories = self.context_factory_ids();
@@ -770,7 +765,7 @@ impl PluginRegistration {
             return Err(KernelError::InvalidRegistration {
                 mount_id: metadata.mount_id.clone(),
                 reason: format!(
-                    "operation handler {} is not a declared direct Tool capability",
+                    "operation handler {} is not a declared direct Action module",
                     capability_id.as_ref()
                 ),
             });
@@ -793,9 +788,7 @@ impl PluginRegistration {
             .contributions
             .capabilities
             .iter()
-            .filter(|capability| {
-                capability.kind == nomifun_agent_contracts::CapabilityKind::Tool
-            })
+            .filter(|capability| capability.declares_actions())
             .map(|capability| capability.id.clone())
             .collect::<BTreeSet<_>>();
         let expected_role_action_handlers = role_members

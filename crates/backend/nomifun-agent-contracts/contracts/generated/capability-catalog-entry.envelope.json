@@ -27,6 +27,7 @@
       "agent",
       "gateway"
     ],
+    "authoring_policy": "direct",
     "contribution_kind": "tool",
     "typed_resource_kinds": [
       "knowledge_base"
@@ -44,5 +45,5 @@
       "admitted": true
     }
   },
-  "payload_digest": "06a4bca7e916f7fd7e6c7684eeb9d283bcada138746155938bb2e96f06a3cd88"
+  "payload_digest": "bafb3fedfc8006853d54b766b4df33b48083260689096c5818357a43844a0f00"
 }

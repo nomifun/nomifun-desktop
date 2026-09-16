@@ -7,8 +7,9 @@ use std::sync::{
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
     ActionId, AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, AgentSessionId,
-    ArtifactEnvelope, CapabilityActionDescriptor, CapabilityContributions, CapabilityId,
-    CapabilityKind, CapabilityManifest, CapabilityRef, CancellationDescriptor,
+    ArtifactEnvelope, CapabilityActionDescriptor, CapabilityAuthoringPolicy, CapabilityConsumer,
+    CapabilityContributions, CapabilityId, CapabilityKind, CapabilityManifest, CapabilityRef,
+    CancellationDescriptor,
     CanonicalSchemaRef, CorrelationId, DeclaredServiceViewDescriptor, DigestHex, EffectClass,
     ExactRoleContractRef, HostPortId, HostPortRef, IdempotencyKey,
     InProcessEntrypointMetadata, JavaScriptEntrypointMetadata, LocalizedMetadata,
@@ -27,7 +28,7 @@ use nomifun_agent_contracts::{
     ServiceHandleDescriptor, ServiceKeyRef,
     ServiceProvision, ServiceRequirement, SkillDefinition, SkillId, SkillRef, StrictJsonValue,
     ToolPresentationKind, TypedResourceBinding, UserId, ValidatedPluginConfig, VersionString,
-    ContributionSourceKind, digest_bytes, digest_payload,
+    ContributionSourceKind, capability_module_surface_declarations, digest_bytes, digest_payload,
 };
 use serde_json::json;
 
@@ -38,7 +39,8 @@ mod invocation_preflight_tests;
 mod dependency_call_tests;
 
 use crate::{
-    AgentPresetCompiler, CapabilityHandler, CapabilityInvocationContext,
+    AgentPresetCompiler, CapabilityContextContributionFactory,
+    CapabilityContextContributionRequest, CapabilityHandler, CapabilityInvocationContext,
     CapabilityInvocationRequest, CompileRequest, CompilerEnvironment,
     ContextContributionFactory, ContextContributionRequest, ContextContributionResult,
     HostPluginStateApi, InMemoryPluginStatePersistence, KernelError, KernelRegistry,
@@ -140,7 +142,11 @@ fn registration_for(
         display: display("Sample Echo", "Echo a message through the capability host."),
         requires: Vec::new(),
         conflicts: Vec::new(),
-        supported_surfaces: BTreeSet::from(["test".to_owned()]),
+        supported_surfaces: capability_module_surface_declarations(
+            ["test"],
+            [CapabilityConsumer::Agent],
+            CapabilityAuthoringPolicy::Direct,
+        ),
         requires_runtime_features: Vec::new(),
         supported_platforms: vec![PlatformConstraint::Any],
         config_schema: StrictJsonValue(json!({
@@ -512,7 +518,15 @@ fn role_capability(
         display: display("Sample Role Member", "Kernel operation admission fixture."),
         requires: Vec::new(),
         conflicts: Vec::new(),
-        supported_surfaces: BTreeSet::from(["test".to_owned()]),
+        supported_surfaces: capability_module_surface_declarations(
+            ["test"],
+            [CapabilityConsumer::Agent],
+            if kind == CapabilityKind::ResourceProvider {
+                CapabilityAuthoringPolicy::DependencyOnly
+            } else {
+                CapabilityAuthoringPolicy::Direct
+            },
+        ),
         requires_runtime_features: Vec::new(),
         supported_platforms: vec![PlatformConstraint::Any],
         config_schema,
@@ -711,6 +725,20 @@ impl ContextContributionFactory for SampleRoleContextFactory {
                 "operation_path": request.context.agent_session_id.is_none()
                     && request.context.resolved_snapshot_ref.is_none(),
                 "mount_id": request.context.mount.identity.mount_id,
+            }))),
+        })
+    }
+}
+
+#[async_trait]
+impl CapabilityContextContributionFactory for SampleRoleContextFactory {
+    async fn contribute(
+        &self,
+        request: CapabilityContextContributionRequest,
+    ) -> Result<ContextContributionResult, KernelError> {
+        Ok(ContextContributionResult {
+            value: Some(StrictJsonValue(json!({
+                "module_context": request.schema_ref.as_ref(),
             }))),
         })
     }
@@ -1197,25 +1225,28 @@ fn managed_skill_and_mcp_backed_capability_keep_exact_provenance() {
 }
 
 #[test]
-fn middleware_order_checks_registry_kind_and_consumer_not_action_contract() {
-    use nomifun_agent_contracts::{CapabilityConsumer, capability_surface_declarations};
-
-    for (kind, consumer, supported) in [
-        (CapabilityKind::TurnMiddleware, CapabilityConsumer::Agent, true),
-        (CapabilityKind::Tool, CapabilityConsumer::Agent, false),
-        (CapabilityKind::TurnMiddleware, CapabilityConsumer::Automation, false),
+fn middleware_order_does_not_make_dependency_only_middleware_authorable() {
+    for (kind, policy, expected_not_authorable) in [
+        (
+            CapabilityKind::TurnMiddleware,
+            CapabilityAuthoringPolicy::DependencyOnly,
+            true,
+        ),
+        (
+            CapabilityKind::Tool,
+            CapabilityAuthoringPolicy::Direct,
+            false,
+        ),
     ] {
         let mut registration = sample_registration("middleware:");
         let manifest = &mut registration.metadata.manifest.payload.contributions.capabilities[0];
         manifest.kind = kind;
-        manifest.supported_surfaces = capability_surface_declarations(["test"], [consumer]);
-        // Keep the sample's unrelated action/schema, not Nomi's before_model contract.
+        manifest.supported_surfaces = capability_module_surface_declarations(
+            ["test"],
+            [CapabilityConsumer::Agent],
+            policy,
+        );
         refresh_manifest(&mut registration);
-        if kind != CapabilityKind::Tool {
-            // The sample's Tool handler is not a TurnMiddleware execution adapter.
-            // Rebuild the registration so materialization still checks handler kinds.
-            registration = PluginRegistration::new(registration.metadata);
-        }
         let registry = KernelRegistry::new(
             MaterializationPolicy::stable_with_test_fixtures(VERSION),
             Arc::new(InMemoryPluginStatePersistence::new()),
@@ -1229,11 +1260,8 @@ fn middleware_order_checks_registry_kind_and_consumer_not_action_contract() {
             &compiler_environment(materialized.registry_digest.clone()),
             compile_request(revision, principal("middleware-owner")),
         );
-        if supported {
-            let compiled = result.expect("alternative Agent middleware contract should compile");
-            assert_eq!(compiled.content().middleware_order, vec![CapabilityId::from(SAMPLE_CAPABILITY)]);
-            assert_eq!(compiled.policy(&SAMPLE_CAPABILITY.into()).unwrap().allowed_actions,
-                BTreeSet::from([ActionId::from(SAMPLE_ACTION)]));
+        if expected_not_authorable {
+            assert!(matches!(result, Err(KernelError::CapabilityNotAuthorable { .. })));
         } else {
             assert!(matches!(result, Err(KernelError::InvalidPresetRevision { reason })
                 if reason.contains("must be an Agent TurnMiddleware")));
@@ -2285,6 +2313,120 @@ fn materializer_validates_entrypoint_contract_versions_by_kind() {
         registry.replace_all(vec![mismatched]),
         Err(KernelError::InvalidRegistration { reason, .. })
             if reason.contains("entrypoint host contract version")
+    ));
+}
+
+#[tokio::test]
+async fn module_freezes_multiple_contributions_and_exact_action_grant_without_widening() {
+    const SECOND_ACTION: &str = "sample.echo.inspect";
+    let mut registration = sample_registration("module:");
+    {
+        let module = &mut registration
+            .metadata
+            .manifest
+            .payload
+            .contributions
+            .capabilities[0];
+        let mut second = module.contributions.actions[0].clone();
+        second.action_id = ActionId::from(SECOND_ACTION);
+        module.contributions.actions.push(second);
+        module.contributions.context_schema_refs = vec![
+            CanonicalSchemaRef::from("schema://sample.echo/context-primary"),
+            CanonicalSchemaRef::from("schema://sample.echo/context-secondary"),
+        ];
+        module.contributions.event_schema_refs = vec![
+            CanonicalSchemaRef::from("schema://sample.echo/event-started"),
+            CanonicalSchemaRef::from("schema://sample.echo/event-finished"),
+        ];
+    }
+    registration
+        .add_capability_context_factory(
+            CapabilityId::from(SAMPLE_CAPABILITY),
+            Arc::new(SampleRoleContextFactory),
+        )
+        .unwrap();
+    refresh_manifest(&mut registration);
+
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let materialized = registry.replace_all(vec![registration]).unwrap();
+    let owner = principal("module-owner");
+    let compiled = AgentPresetCompiler::compile(
+        &materialized,
+        &compiler_environment(materialized.registry_digest.clone()),
+        compile_request(sample_revision(&owner.principal_id), owner.clone()),
+    )
+    .unwrap()
+    .with_target_resource_bindings(&owner, vec![resource_binding(&owner.principal_id)])
+    .unwrap();
+
+    let resolved = compiled
+        .resolved_capability(&CapabilityId::from(SAMPLE_CAPABILITY))
+        .expect("resolved module");
+    assert_eq!(resolved.actions.len(), 2);
+    assert_eq!(
+        resolved.action_allowlist,
+        BTreeSet::from([ActionId::from(SAMPLE_ACTION)])
+    );
+    assert_eq!(
+        compiled.policy(&CapabilityId::from(SAMPLE_CAPABILITY)).unwrap().allowed_actions,
+        BTreeSet::from([ActionId::from(SAMPLE_ACTION)])
+    );
+
+    let active = SessionCapabilityState::new(&compiled).snapshot().unwrap();
+    let mut widened = invocation(&compiled, owner, 0, "denied");
+    widened.action_id = ActionId::from(SECOND_ACTION);
+    assert!(matches!(
+        registry.preflight_invocation(&compiled, &active, &widened),
+        Err(KernelError::CapabilityNotInPreset { .. })
+    ));
+}
+
+#[test]
+fn compiler_rejects_implicit_action_authority_and_platform_managed_roots() {
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let materialized = registry.replace_all(vec![sample_registration("")]).unwrap();
+    let owner = principal("grant-owner");
+    let mut no_actions = sample_revision(&owner.principal_id);
+    no_actions.payload.enabled_capabilities[0].action_allowlist.clear();
+    no_actions.reference.revision_digest = no_actions.revision_digest().unwrap();
+    assert!(matches!(
+        AgentPresetCompiler::compile(
+            &materialized,
+            &compiler_environment(materialized.registry_digest.clone()),
+            compile_request(no_actions, owner.clone()),
+        ),
+        Err(KernelError::ActionGrantRequired { .. })
+    ));
+
+    let mut managed_registration = sample_registration("");
+    managed_registration.metadata.manifest.payload.contributions.capabilities[0]
+        .supported_surfaces = capability_module_surface_declarations(
+        ["test"],
+        [CapabilityConsumer::Agent],
+        CapabilityAuthoringPolicy::PlatformManaged,
+    );
+    refresh_manifest(&mut managed_registration);
+    let managed_registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let managed = managed_registry.replace_all(vec![managed_registration]).unwrap();
+    assert!(matches!(
+        AgentPresetCompiler::compile(
+            &managed,
+            &compiler_environment(managed.registry_digest.clone()),
+            compile_request(sample_revision(&owner.principal_id), owner),
+        ),
+        Err(KernelError::CapabilityNotAuthorable { .. })
     ));
 }
 

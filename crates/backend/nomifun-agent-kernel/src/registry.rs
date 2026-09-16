@@ -797,10 +797,10 @@ impl KernelRegistry {
                 .ok_or_else(|| KernelError::CapabilityNotInPreset {
                     capability_id: request.capability_id.clone(),
                 })?;
-            if capability.manifest.kind != CapabilityKind::ContextContributor {
+            if !capability.manifest.contributes_context() {
                 return Err(KernelError::CapabilityExecution {
                     reason: format!(
-                        "capability {} is not a ContextContributor",
+                        "capability module {} does not publish Context",
                         request.capability_id.as_ref()
                     ),
                 });
@@ -1604,10 +1604,10 @@ fn validate_operation_lock(
     request: &CapabilityOperationRequest,
 ) -> Result<(), KernelError> {
     let capability_id = &materialized.manifest.id;
-    if materialized.manifest.kind != CapabilityKind::Tool {
+    if !materialized.manifest.declares_actions() {
         return Err(KernelError::CapabilityExecution {
             reason: format!(
-                "capability {} is not a Tool",
+                "capability module {} does not publish Actions",
                 capability_id.as_ref()
             ),
         });
@@ -1893,60 +1893,17 @@ fn validate_role_exports(
             let has_operation_tool = operation_tool_handlers.contains_key(&key);
             let has_context = context_factories.contains_key(&key);
             let has_resource = resource_factories.contains_key(&key);
-            let expected = match capability.manifest.kind {
-                CapabilityKind::Tool => {
-                    if capability.manifest.contributions.actions.is_empty()
-                        || !capability.manifest.contributions.context_schema_refs.is_empty()
-                    {
-                        return Err(KernelError::InvalidRoleProvider {
-                            role_id: role_id.clone(),
-                            mount_id: mount_id.clone(),
-                            reason: format!(
-                                "tool member {} has malformed action/context declarations",
-                                capability_id.as_ref()
-                            ),
-                        });
-                    }
-                    (true, false, false)
-                }
-                CapabilityKind::ContextContributor => {
-                    if capability.manifest.contributions.actions.len() != 0
-                        || capability.manifest.contributions.context_schema_refs.is_empty()
-                    {
-                        return Err(KernelError::InvalidRoleProvider {
-                            role_id: role_id.clone(),
-                            mount_id: mount_id.clone(),
-                            reason: format!(
-                                "context member {} has malformed action/context declarations",
-                                capability_id.as_ref()
-                            ),
-                        });
-                    }
-                    (false, true, false)
-                }
-                CapabilityKind::ResourceProvider => {
-                    if !capability.manifest.contributions.actions.is_empty()
-                        || !capability.manifest.contributions.context_schema_refs.is_empty()
-                    {
-                        return Err(KernelError::InvalidRoleProvider {
-                            role_id: role_id.clone(),
-                            mount_id: mount_id.clone(),
-                            reason: format!(
-                                "resource member {} has malformed action/context declarations",
-                                capability_id.as_ref()
-                            ),
-                        });
-                    }
-                    (false, false, true)
-                }
-                _ => (false, false, false),
-            };
-            if has_operation_tool && capability.manifest.kind != CapabilityKind::Tool {
+            let expected = (
+                capability.manifest.declares_actions(),
+                capability.manifest.contributes_context(),
+                capability.manifest.kind == CapabilityKind::ResourceProvider,
+            );
+            if has_operation_tool && !capability.manifest.declares_actions() {
                 return Err(KernelError::InvalidRoleProvider {
                     role_id: role_id.clone(),
                     mount_id: mount_id.clone(),
                     reason: format!(
-                        "operation Tool export {} does not target a Tool capability",
+                        "operation Tool export {} does not target an Action module",
                         capability_id.as_ref()
                     ),
                 });
@@ -1956,9 +1913,8 @@ fn validate_role_exports(
                     role_id: role_id.clone(),
                     mount_id: mount_id.clone(),
                     reason: format!(
-                        "role member {} exports do not match its {:?} capability kind",
-                        capability_id.as_ref(),
-                        capability.manifest.kind
+                        "role member {} exports do not match its declared contribution sets",
+                        capability_id.as_ref()
                     ),
                 });
             }
@@ -2246,10 +2202,18 @@ fn resolve_role_member(
             capability_id: request.capability_id.clone(),
             version: nomifun_agent_contracts::VersionString::from("unknown"),
         })?;
-    if capability.manifest.kind != expected_kind {
+    let supports_expected = match expected_kind {
+        CapabilityKind::Tool => capability.manifest.declares_actions(),
+        CapabilityKind::ContextContributor => capability.manifest.contributes_context(),
+        CapabilityKind::ResourceProvider => {
+            capability.manifest.kind == CapabilityKind::ResourceProvider
+        }
+        _ => capability.manifest.kind == expected_kind,
+    };
+    if !supports_expected {
         return Err(KernelError::CapabilityExecution {
             reason: format!(
-                "{} is not a {:?} role member",
+                "{} does not publish the requested {:?} role contribution",
                 request.capability_id.as_ref(),
                 expected_kind
             ),
