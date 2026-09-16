@@ -7,6 +7,7 @@
 export * from './commands';
 export * from './document';
 export * from './geometry';
+export * from './mediaNodeSize';
 export * from './graph';
 export * from './reducer';
 export * from './types';

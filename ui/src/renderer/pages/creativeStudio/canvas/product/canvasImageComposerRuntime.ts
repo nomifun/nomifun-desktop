@@ -11,7 +11,7 @@ import {
   type CreativeTask,
   type CreativeTaskReference,
 } from '../../tasks';
-import { canvasCommands, validateCanvasConnection } from '../core';
+import { canvasCommands, canvasMediaNodeSize, validateCanvasConnection } from '../core';
 import type { CreativeCanvasEditorHandle } from '../editor';
 import {
   canvasImageComposeConfigForReference,
@@ -189,6 +189,7 @@ export async function settleCanvasImageComposeTask(input: {
           ? source
           : clearCanvasImageComposeDraftModel({
               ...source,
+              size: canvasMediaNodeSize(asset, source.size),
               data: {
                 ...source.data,
                 assetId: asset.id,
@@ -223,9 +224,8 @@ export async function settleCanvasImageComposeTask(input: {
             )
           );
         }
-        const created = creativeNodeFromHistoricalAsset(asset, state, input.viewportSize, {
-          position: canvasImageComposeResultPosition(state.document.nodes, config),
-        });
+        const created = creativeNodeFromHistoricalAsset(asset, state, input.viewportSize);
+        created.position = canvasImageComposeResultPosition(state.document.nodes, config, created.size);
         if (created.type !== 'image') {
           throw new Error(
             creativeStudioProductText(
