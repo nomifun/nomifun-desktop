@@ -1,28 +1,19 @@
 .header { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; min-width: 0; min-height: 36px; margin-bottom: 6px; }
 .agent { display: flex; align-items: center; min-width: 0; max-width: 100%; }
-.agent + .trigger { margin-left: 2px; }
-.trigger { display: inline-flex; align-items: center; flex: 0 0 auto; gap: 7px; min-height: 34px; padding: 7px 10px; border: 0; border-radius: 10px; background: color-mix(in srgb, rgb(var(--primary-6)) 8%, var(--bg-base)); color: rgb(var(--primary-6)); cursor: pointer; font: inherit; font-size: 12px; line-height: 20px; }
-.trigger:hover, .trigger[aria-expanded='true'] { background: color-mix(in srgb, rgb(var(--primary-6)) 13%, var(--bg-base)); }
-.trigger:disabled { opacity: .5; cursor: wait; }
-.trigger svg { flex-shrink: 0; }
-.label { min-width: 7em; text-align: left; white-space: nowrap; font-weight: 500; }
-.preview { display: inline-flex; align-items: center; gap: 8px; border-left: 1px solid var(--color-border-2); padding-left: 9px; margin-left: 2px; color: var(--text-secondary); }
-.menu { z-index: 1300; width: 350px; max-width: calc(100vw - 24px); max-height: calc(100vh - 24px); overflow-y: auto; box-sizing: border-box; padding: 12px; border: 1px solid var(--color-border-2); border-radius: 16px; background: var(--bg-base); color: var(--text-primary); box-shadow: 0 12px 38px rgb(0 0 0 / 12%); animation: scene-menu-enter 180ms ease-out; }
-.menuTitle { padding: 0 4px 8px; font-size: 12px; line-height: 20px; color: var(--text-secondary); }
-.options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
-.option { display: flex; flex-direction: column; gap: 5px; padding: 12px 10px; border: 1px solid transparent; border-radius: 10px; background: transparent; color: var(--text-primary); font: inherit; font-size: 13px; line-height: 20px; text-align: left; cursor: pointer; }
-.option:hover { background: var(--color-fill-2); }
-.option[aria-checked='true'] { background: color-mix(in srgb, rgb(var(--primary-6)) 8%, var(--bg-base)); color: rgb(var(--primary-6)); border-color: var(--color-border-2); }
-.optionTitle { display: flex; align-items: center; gap: 6px; font-weight: 500; }
-.optionTitle > span { flex-shrink: 0; }
-.check { margin-left: auto; opacity: 0; }
-.option[aria-checked='true'] .check { opacity: 1; }
-.description { color: var(--text-secondary); font-size: 12px; line-height: 18px; }
-.trigger:focus-visible, .option:focus-visible, .hint button:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: 2px; }
+.agent + .scenes { margin-left: 2px; }
+.scenes { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.sceneButton { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; height: 28px; padding: 0 8px; border: 0; border-radius: 5px; background: transparent; color: var(--color-text-1); cursor: pointer; font: inherit; font-size: 12px; line-height: 18px; transition: background 160ms ease, color 160ms ease; }
+.sceneButton:hover:not(:disabled) { background: var(--color-fill-2); color: var(--color-text-1); }
+.sceneButton[aria-pressed='true']:not(:disabled) { background: rgba(var(--primary-6), .08); color: rgb(var(--primary-6)); }
+.sceneButton:disabled { opacity: .5; cursor: wait; }
+.sceneIcon, .sceneIcon :global(.i-icon) { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; flex-shrink: 0; line-height: 1; }
+.sceneIcon svg { display: block; }
+.sceneLabel { max-width: 0; margin-left: 0; opacity: 0; overflow: hidden; white-space: nowrap; font-weight: 500; transition: max-width 180ms ease, margin-left 180ms ease, opacity 140ms ease; }
+.sceneButton[aria-pressed='true'] .sceneLabel, .sceneButton:hover:not(:disabled) .sceneLabel, .sceneButton:focus-visible .sceneLabel { max-width: 12em; margin-left: 6px; opacity: 1; }
+.sceneButton:focus-visible, .hint button:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: 2px; }
 .hintSlot { min-height: 32px; }
 .hint { display: flex; align-items: center; gap: 6px; padding: 7px 12px 0; font-size: 12px; line-height: 20px; color: var(--text-secondary); }
 .hint > :first-child { color: rgb(var(--primary-6)); }
 .hint button { display: inline-flex; flex-shrink: 0; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--text-secondary); cursor: pointer; }
 .hint button:hover { background: var(--color-fill-2); }
-@keyframes scene-menu-enter { from { opacity: 0; translate: 0 -5px; } to { opacity: 1; translate: 0 0; } }
-@media (prefers-reduced-motion: reduce) { .menu { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .sceneButton, .sceneLabel { transition: none; } }

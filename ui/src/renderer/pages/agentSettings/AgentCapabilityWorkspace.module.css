@@ -1,12 +1,12 @@
 .workspace { height:100%; min-height:0; display:flex; flex-direction:column; container-type:inline-size; color:var(--color-text-1); }
 .workspace, .workspace * { box-sizing:border-box; }
-.overview { display:flex; align-items:center; gap:14px; flex-shrink:0; padding:4px 0 16px; }
-.metrics { display:flex; align-items:center; gap:22px; }
-.metrics>span { display:flex; align-items:center; gap:8px; color:var(--color-text-3); font-size:12px; white-space:nowrap; }
-.metrics strong { color:var(--color-text-1); font-size:19px; font-weight:600; font-variant-numeric:tabular-nums; }
-.metrics i { width:6px; height:6px; background:rgb(var(--green-6)); border-radius:50%; }
+.overview { display:flex; align-items:center; gap:14px; flex-shrink:0; padding:4px 0 12px; }
+.metrics { display:flex; align-items:center; gap:18px; }
+.metrics>span { display:flex; align-items:baseline; gap:6px; line-height:20px; color:var(--color-text-3); font-size:12px; white-space:nowrap; }
+.metrics strong { color:var(--color-text-1); font-size:14px; font-weight:600; font-variant-numeric:tabular-nums; }
+.metrics i { align-self:center; width:6px; height:6px; background:rgb(var(--green-6)); border-radius:50%; }
 .guide { margin-left:auto; color:var(--color-text-3); font-size:11px; }
-.transfer { display:grid; grid-template-columns:minmax(0,1fr) 68px minmax(0,1fr); min-height:0; flex:1; }
+.transfer { display:grid; grid-template-columns:minmax(0,1fr) 60px minmax(0,1fr); min-height:0; flex:1; }
 .pane { display:flex; flex-direction:column; min-width:0; min-height:0; border:1px solid var(--color-border-2); border-radius:11px; overflow:hidden; background:var(--agent-surface); }
 .paneHeading { display:flex; align-items:center; gap:8px; justify-content:space-between; padding:15px 13px 12px; flex-shrink:0; }
 .paneHeading h3 { margin:0; display:flex; align-items:center; gap:8px; font-size:14px; font-weight:600; white-space:nowrap; }
@@ -32,24 +32,23 @@
 .resultToolbar :global(.arco-checkbox):nth-child(2) { margin-left:auto; }
 .resultToolbar>span { margin-left:auto; color:var(--color-text-3); font-size:10px; white-space:nowrap; }
 .rows { min-height:0; overflow-y:auto; flex:1; scrollbar-width:thin; }
-.row { display:flex; align-items:center; gap:9px; min-height:70px; padding:12px 11px; border-bottom:1px solid var(--color-border-1); }
-.row>:global(.arco-checkbox) { padding-left:0; flex-shrink:0; }
+.row { display:flex; align-items:center; gap:8px; min-height:58px; padding:8px 11px; border-bottom:1px solid var(--color-border-1); }
+.rowCheckbox { opacity:0; pointer-events:none; }
+.row:hover .rowCheckbox,.row:focus-within .rowCheckbox,.rowChecked .rowCheckbox { opacity:1; pointer-events:auto; }
+.rowActions :global(.arco-checkbox) { padding:0; flex-shrink:0; }
 .row:hover { background:var(--color-fill-1); }
 .rowChecked,.rowChecked:hover { background:rgba(var(--primary-6),.06); }
-.rowCopy { flex:1; min-width:0; display:flex; flex-direction:column; align-items:flex-start; gap:5px; padding:0; background:transparent; border:0; text-align:left; color:var(--color-text-1); cursor:pointer; }
-.rowCopy strong { font-size:13px; font-weight:500; line-height:1.5; overflow-wrap:anywhere; }
+.rowCopy { flex:1; min-width:0; display:flex; flex-direction:column; align-items:flex-start; gap:2px; padding:0; background:transparent; border:0; text-align:left; color:var(--color-text-1); cursor:pointer; }
+.rowCopy strong { font-size:13px; font-weight:500; line-height:1.4; overflow-wrap:anywhere; }
 .rowCopy:hover strong { color:rgb(var(--primary-6)); }
-.rowCopy>span { color:var(--color-text-3); font-size:11px; line-height:1.7; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }
-.rowActions { display:flex; align-items:center; gap:7px; flex-shrink:0; }
+.rowCopy>span { color:var(--color-text-3); font-size:11px; line-height:1.45; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }
+.rowActions { display:flex; align-items:center; gap:6px; flex-shrink:0; }
 .enabledState,.disabledState { display:inline-flex; align-items:center; gap:3px; font-size:11px; white-space:nowrap; }
 .enabledState { color:rgb(var(--green-6)); }.disabledState { color:var(--color-text-3); }
-.quickAction { display:flex; align-items:center; justify-content:center; width:24px; height:25px; padding:0; border:1px solid var(--color-border-2); border-radius:5px; background:var(--agent-surface); color:var(--color-text-2); cursor:pointer; }
-.quickAction:hover:not(:disabled) { color:rgb(var(--primary-6)); border-color:rgb(var(--primary-6)); }
-.quickAction:disabled { color:var(--color-text-4); background:transparent; border-color:transparent; cursor:default; }
 .paneFooter { display:flex; justify-content:space-between; align-items:center; gap:8px; min-height:35px; padding:0 12px; flex-shrink:0; border-top:1px solid var(--color-border-1); color:var(--color-text-3); font-size:11px; }
 .paneFooter button { background:none; border:0; padding:0; color:rgb(var(--primary-6)); font-size:11px; cursor:pointer; }
-.transferActions { display:flex; flex-direction:column; justify-content:center; align-items:center; gap:12px; padding:0 6px; }
-.transferActions>button { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:7px; width:56px; min-height:60px; border:1px solid var(--color-border-2); border-radius:8px; background:var(--agent-surface); font-size:11px; color:var(--color-text-2); cursor:pointer; }
+.transferActions { display:flex; flex-direction:column; justify-content:center; align-items:center; gap:8px; padding:0 6px; }
+.transferActions>button { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; width:48px; min-height:42px; padding:4px 2px; border:1px solid var(--color-border-2); border-radius:8px; background:var(--agent-surface); font-size:11px; color:var(--color-text-2); cursor:pointer; }
 .transferActions .moveIn:not(:disabled) { color:rgb(var(--primary-6)); background:rgba(var(--primary-6),.06); border-color:rgba(var(--primary-6),.25); }
 .transferActions>button:disabled { color:var(--color-text-4); background:var(--color-fill-1); cursor:default; }
 .transferActions small { font-size:10px; color:var(--color-text-3); }
@@ -59,7 +58,7 @@
 .empty h3 { font-size:13px; font-weight:500; margin:0; }.empty p { font-size:12px; line-height:1.7; margin:0; }
 .detail p { line-height:1.8; color:var(--color-text-2); }.detail dl { display:grid; grid-template-columns:90px minmax(0,1fr); gap:18px 12px; padding:15px 0; font-size:12px; }.detail dt { color:var(--color-text-3); }.detail dd { margin:0; overflow-wrap:anywhere; }.detail summary { color:var(--color-text-3); cursor:pointer; font-size:12px; }
 .workspace button:focus-visible { outline:2px solid rgb(var(--primary-6)); outline-offset:2px; }
-@container (max-width:1000px) { .paneHeading>span,.guide,.resultToolbar>span { display:none; }.categories { width:110px; padding:10px 4px; }.categories button { font-size:11px; gap:4px; }.categories :global(.i-icon) { display:none; }.rowActions { flex-direction:column; gap:5px; }.row { padding:11px 9px; gap:7px; }.resultToolbar { padding:0 9px; gap:5px; }.resultToolbar :global(.arco-checkbox) { font-size:10px; } }
-@container (max-width:680px) { .transfer { display:flex; flex-direction:column; gap:12px; flex:none; }.pane { height:380px; }.transferActions { flex-direction:row; }.transferActions>button { min-height:34px; width:120px; flex-direction:row; }.transferActions small { display:none; }.workspace { height:auto; }.rowActions { flex-direction:row; }.categories { width:115px; } }
+@container (max-width:1000px) { .paneHeading>span,.guide,.resultToolbar>span { display:none; }.categories { width:110px; padding:10px 4px; }.categories button { font-size:11px; gap:4px; }.categories :global(.i-icon) { display:none; }.rowActions { flex-direction:column; gap:5px; }.row { padding:8px 9px; gap:7px; }.resultToolbar { padding:0 9px; gap:5px; }.resultToolbar :global(.arco-checkbox) { font-size:10px; } }
+@container (max-width:680px) { .transfer { display:flex; flex-direction:column; gap:12px; flex:none; }.pane { height:380px; }.transferActions { flex-direction:row; }.transferActions>button { min-height:34px; width:88px; flex-direction:row; }.transferActions small { display:none; }.workspace { height:auto; }.rowActions { flex-direction:row; }.categories { width:115px; } }
 
 @container agent-editor (max-width:720px) { .workspace { height:auto; flex:none; } }

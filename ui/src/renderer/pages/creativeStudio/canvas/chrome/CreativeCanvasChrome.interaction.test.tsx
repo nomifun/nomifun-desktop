@@ -62,6 +62,16 @@ afterEach(() => {
   cleanup();
 });
 
+test('switching canvases discards the previous title edit even when names match', () => {
+  const props = baseProps({ canvasId: 'first', onRenameCanvas: async () => {} });
+  const view = render(withCanvasTestI18n(<CreativeCanvasChrome {...props} />));
+  fireEvent.doubleClick(view.getByRole('heading', { name: props.canvasTitle }));
+  fireEvent.change(view.getByRole('textbox'), { target: { value: 'Unsubmitted title' } });
+  view.rerender(withCanvasTestI18n(<CreativeCanvasChrome {...props} canvasId='second' />));
+  expect(view.queryByRole('textbox')).toBeNull();
+  expect(view.getByRole('heading', { name: props.canvasTitle })).toBeTruthy();
+});
+
 describe('CreativeCanvasChrome floating resource rail interaction', () => {
   test('does not mark a collapsed resource rail tab as active', () => {
     const { getByRole } = render(
