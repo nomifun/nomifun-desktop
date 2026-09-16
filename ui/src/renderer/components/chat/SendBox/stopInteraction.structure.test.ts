@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
 const source = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
+const composerSource = readFileSync(new URL('../Composer.tsx', import.meta.url), 'utf8');
 const platformSendBoxes = [
   '../../../pages/conversation/platforms/nomi/NomiSendBox.tsx',
 ].map((path) => ({ path, source: readFileSync(new URL(path, import.meta.url), 'utf8') }));
@@ -10,7 +11,8 @@ describe('SendBox stop interaction', () => {
   test('names the icon-only stop and send controls for keyboard and screen-reader users', () => {
     expect(source.includes("aria-label={t(isStopping ? 'conversation.stop.stopping' : 'conversation.stop.button')}")).toBe(true);
     expect(source.includes("title={t(isStopping ? 'conversation.stop.stopping' : 'conversation.stop.button')}")).toBe(true);
-    expect(source.includes("aria-label={t('common.send')}")).toBe(true);
+    expect(composerSource.includes("aria-label={title ?? t('common.send')}")).toBe(true);
+    expect(source.includes('<ComposerSendButton')).toBe(true);
     expect(source.includes("aria-label={t('conversation.steer.button')}")).toBe(true);
   });
 

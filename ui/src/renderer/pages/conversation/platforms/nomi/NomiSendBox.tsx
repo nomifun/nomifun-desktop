@@ -74,7 +74,8 @@ import type { NomiModelSelection } from './useNomiModelSelection';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { evaluateNomiVisionSend } from './nomiVisionSendGuard';
 import { steerOrQueue } from './steerOrQueue';
-import CreationControls from '@/renderer/creation/CreationControls';
+import CreationControls, { CreationModelSelector } from '@/renderer/creation/CreationControls';
+import { ComposerSceneHeader, SceneDiscoveryHint } from '@/renderer/creation/ComposerSceneSelector';
 import { useCreationComposer } from '@/renderer/creation/CreationComposerContext';
 import { useGenerationModel } from '@/renderer/creation/useGenerationModel';
 import { buildCreationRequest, creationAttempt, acknowledgeCreationAttempt } from '@/renderer/creation/submission';
@@ -959,6 +960,7 @@ const NomiSendBox: React.FC<{
             </SessionCapabilityPicker>
           )
         }
+        prefix={<ComposerSceneHeader agent={agentSelectorNode} />}
         data-testid='nomi-sendbox'
         showPinnedPlan
         value={content}
@@ -1012,7 +1014,7 @@ const NomiSendBox: React.FC<{
                   reasoningTokens={tokenUsage?.reasoning_tokens}
                 />
               )}
-              {agentSelectorNode}
+              {isCreating && <CreationModelSelector files={collectSelectedFiles(uploadFile, atPath)} />}
               {!isCreating && (
                 <Tooltip content={modelSelectionHint} disabled={!modelSelectionHint}>
                   <span className='inline-flex min-w-0'>
@@ -1042,6 +1044,7 @@ const NomiSendBox: React.FC<{
         onSlashBuiltinCommand={onSlashBuiltinCommand}
         allowSendWhileLoading={!isCreating}
       />
+      <SceneDiscoveryHint />
     </div>
   );
 };

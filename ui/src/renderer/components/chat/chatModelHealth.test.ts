@@ -7,7 +7,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { IProvider } from '@/common/config/storage';
 import { parseProviderId } from '@/common/types/ids';
-import { exactChatHealthDotColor } from './guidModelHealth';
+import { exactChatHealthDotColor } from './chatModelHealth';
 
 const MODEL = 'shared-model-id';
 const PROVIDER_A = parseProviderId('0190f5fe-7c00-7a00-8000-000000000201');

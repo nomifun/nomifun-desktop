@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Message, Popover } from '@arco-design/web-react';
-import { AddPicture, VideoTwo, Music, Down, ImageFiles, PageTemplate, MessageOne, Brain } from '@icon-park/react';
+import { Down, ImageFiles, PageTemplate, Brain } from '@icon-park/react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { creativeAssetClient } from '@/renderer/pages/creativeStudio/assets/client';
@@ -19,8 +19,7 @@ import { creationCount, creationMaxCount, creationParameterPolicy, creationVideo
 import ImageSizePicker from './parameters/ImageSizePicker';
 import { imageGenerationAspectRatioValue, imageGenerationResolutionLabel } from './parameters/image';
 
-const modeLabels = { image: '图片生成', video: '视频生成', music: '音乐生成' };
-const modeIcons = { image: AddPicture, video: VideoTwo, music: Music };
+const modeLabels = { image: '图像创作', video: '视频创作', music: '音乐创作' };
 
 export function CreationReferences({ startIndex = 0 }: { startIndex?: number }) {
   const creation = useCreationComposer();
@@ -56,21 +55,18 @@ export function CreationReferences({ startIndex = 0 }: { startIndex?: number }) 
 
 export default function CreationControls({ prompt, onPromptChange, files = [] }: { prompt: string; onPromptChange(value: string): void; files?: readonly string[] }) {
   const creation = useCreationComposer();
-  return creation ? <Controls prompt={prompt} onPromptChange={onPromptChange} files={files} creation={creation} /> : null;
+  return creation?.draft.mode ? <Controls key={creation.draft.mode} prompt={prompt} onPromptChange={onPromptChange} files={files} creation={creation} /> : null;
 }
 
 function Controls({ prompt, onPromptChange, files, creation }: { prompt: string; onPromptChange(value: string): void; files: readonly string[]; creation: NonNullable<ReturnType<typeof useCreationComposer>> }) {
-  const { t } = useTranslation();
   const navigate = useNavigate();
   const { draft, update } = creation;
   const mode = draft.mode || draft.lastMode;
   const model = useGenerationModel(creation, files);
   const picker = useCreativeAssetPickerDialog();
   const [busy, setBusy] = useState(false);
-  const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const params = draft.parameters[mode];
   const parameterPolicy = creationParameterPolicy(model.selected);
-  const label = (key: CreationMode) => t(`creation.mode.${key}`, { defaultValue: modeLabels[key] });
   const setParam = (key: string, value: string | number | boolean) => update(current => ({ ...current, parameters: { ...current.parameters, [mode]: { ...current.parameters[mode], [key]: value } } }));
   const pickAssets = async () => {
     try {
@@ -87,12 +83,6 @@ function Controls({ prompt, onPromptChange, files, creation }: { prompt: string;
     } catch (error) { Message.error(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(false); }
   };
-  const modeMenu = <div className={styles.modeMenu}>
-    <button type='button' className={styles.button} onClick={() => creation.exit()}><MessageOne size={15} />对话</button>
-    {(['image', 'video', 'music'] as const).map(key => { const Icon = modeIcons[key]; return <button type='button' className={styles.button} key={key} onClick={() => creation.selectMode(key)}><Icon size={15} />{label(key)}</button>; })}
-  </div>;
-  if (!draft.mode) return <span className={styles.controls}>{(['image', 'video', 'music'] as const).map(key => { const Icon = modeIcons[key]; return <button type='button' data-creation-mode={key} aria-label={label(key)} className={styles.button} key={key} onClick={() => creation.selectMode(key)}><Icon size={15} /><span className='sendbox-responsive-label'>{label(key)}</span></button>; })}</span>;
-  const Icon = modeIcons[mode];
   const sizes = model.sizePolicy.options.filter(option => !option.disabled);
   const selectedSize = sizes.find(option => (params.size !== undefined && option.requestSize === params.size) || (params.aspect !== undefined && option.value === params.aspect)) || sizes[0];
   const field = (name: string, key: string, values: Array<string | number>, fallback?: string | number) => <label className={styles.field}>{name}<select aria-label={name} value={String(params[key] ?? fallback ?? '')} onChange={event => setParam(key, typeof values[0] === 'number' ? Number(event.target.value) : event.target.value)}><option value=''>自动</option>{values.map(value => <option key={value} value={value}>{value}</option>)}</select></label>;
@@ -137,6 +127,26 @@ function Controls({ prompt, onPromptChange, files, creation }: { prompt: string;
       <button type='button' className={styles.button} onClick={() => navigate('/asset-library/templates')}><PageTemplate size={15} />模板工作台</button>
     </div>
   </div>;
+  return <span className={styles.controls}>
+    <Popover trigger='click' position='top' className={styles.parameterPopover} style={{ maxWidth: 'none' }} content={parameterPanel}><button type='button' className={styles.button} aria-label={`生成参数：${summary}`}><span className={styles.summaryShape} aria-hidden='true' /><span className='sendbox-responsive-label'>{summary}</span><Down size={12} className='sendbox-responsive-chevron' /></button></Popover>
+    {picker.dialog}
+  </span>;
+}
+
+/** Model selection stays in the same trailing toolbar position as the chat model. */
+export function CreationModelSelector({ files = [] }: { files?: readonly string[] }) {
+  const creation = useCreationComposer();
+  return creation?.draft.mode ? <GenerationModelSelector key={creation.draft.mode} creation={creation} files={files} /> : null;
+}
+
+function GenerationModelSelector({ creation, files }: { creation: NonNullable<ReturnType<typeof useCreationComposer>>; files: readonly string[] }) {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const { draft, update } = creation;
+  const mode = draft.mode || draft.lastMode;
+  const model = useGenerationModel(creation, files);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const label = (key: CreationMode) => t(`creation.mode.${key}`, { defaultValue: modeLabels[key] });
   const modelPanel = <div className={styles.modelPanel} data-testid='creation-model-panel'>
     {model.isLoading && <span className={styles.notice} role='status'>正在加载模型…</span>}
     {model.error && <span className={styles.notice} role='alert'>模型目录加载失败，请重试。</span>}
@@ -151,10 +161,7 @@ function Controls({ prompt, onPromptChange, files, creation }: { prompt: string;
       <button type='button' className={styles.button} onClick={() => { setModelMenuOpen(false); navigate('/models'); }}>配置生成模型</button>
     </div>
   </div>;
-  return <span className={styles.controls}>
-    <span className={styles.chip}><Popover trigger='click' className={styles.modePopover} content={modeMenu}><button type='button' className={styles.button} aria-label={label(mode)}><Icon size={15} /><span className='sendbox-responsive-label'>{label(mode)}</span><Down size={12} className='sendbox-responsive-chevron' /></button></Popover></span>
+  return (
     <Popover trigger='click' position='top' className={styles.parameterPopover} content={modelPanel} popupVisible={modelMenuOpen} onVisibleChange={setModelMenuOpen}><button type='button' className={`${styles.button} ${styles.model}`} aria-label='生成模型' aria-expanded={modelMenuOpen} title={model.selected ? `${model.selected.label} · ${model.selected.providerLabel}` : undefined}><Brain size={15} /><span className='sendbox-responsive-label'>{model.selected?.label || '选择模型'}</span><Down size={12} className='sendbox-responsive-chevron' /></button></Popover>
-    <Popover trigger='click' position='top' className={styles.parameterPopover} style={{ maxWidth: 'none' }} content={parameterPanel}><button type='button' className={styles.button} aria-label={`生成参数：${summary}`}><span className={styles.summaryShape} aria-hidden='true' /><span className='sendbox-responsive-label'>{summary}</span><Down size={12} className='sendbox-responsive-chevron' /></button></Popover>
-    {picker.dialog}
-  </span>;
+  );
 }

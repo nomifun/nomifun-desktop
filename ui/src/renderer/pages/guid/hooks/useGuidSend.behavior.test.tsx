@@ -18,6 +18,7 @@ import {
   parseAgentPresetId,
   parseConversationId,
   parseProviderId,
+  parseExecutionTemplateId,
 } from '@/common/types/ids';
 import { sessionStorageKey, setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 import { creationDraftStorageKey, emptyCreationDraft, useCreationDraft } from '@/renderer/creation/useCreationDraft';
@@ -98,6 +99,48 @@ const conversationProjection = (conversationId: string) => ({
     provider_id: PROVIDER_ID,
     model: MODEL.use_model,
   },
+});
+
+test('home collaboration settings are saved and reread before navigation and first-message handoff', async () => {
+  resetBrowserStorage();
+  const calls = installFetchRecorder();
+  const navigations: string[] = [];
+  const collaboration: NonNullable<GuidSendDeps['collaboration']> = {
+    execution_model_pool: { mode: 'range', models: [
+      { provider_id: PROVIDER_ID, model: MODEL.use_model },
+      { provider_id: PROVIDER_ID, model: 'reviewer' },
+    ] },
+    execution_template_id: parseExecutionTemplateId('0190f5fe-7c00-7a00-8000-000000000106'),
+    delegation_policy: 'prefer_parallel', decision_policy: 'ask_user',
+  };
+  const hook = renderHook(() => useGuidSend({
+    ...createDeps({ selection: { kind: 'preset', presetId: PRESET_ID }, selectedPreset: PRESET, workspaceEnabled: false, navigations }),
+    collaboration,
+  }));
+  await act(async () => { await hook.result.current.handleSend(); });
+  const patchIndex = calls.findIndex(call => call.method === 'PATCH');
+  expect(patchIndex).toBeGreaterThan(0);
+  expect(calls[patchIndex].body).toEqual(collaboration);
+  expect(calls[patchIndex + 1]).toMatchObject({ method: 'GET', url: `/api/conversations/${PRESET_CONVERSATION_ID}` });
+  expect(navigations).toEqual([`/conversation/${PRESET_CONVERSATION_ID}`]);
+  expect(readOnlyHandoff().input).toBe(INPUT);
+});
+
+test('a failed collaboration save never hands off an unconfigured first message', async () => {
+  resetBrowserStorage();
+  installFetchRecorder();
+  const fetchConfigured = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => init?.method === 'PATCH'
+    ? new Response(JSON.stringify({ success: false, error: 'Cannot save collaboration' }), { status: 503 })
+    : fetchConfigured(url, init)) as typeof fetch;
+  const navigations: string[] = [];
+  const hook = renderHook(() => useGuidSend({
+    ...createDeps({ selection: { kind: 'preset', presetId: PRESET_ID }, selectedPreset: PRESET, workspaceEnabled: false, navigations }),
+    collaboration: { execution_model_pool: { mode: 'single', model: { provider_id: PROVIDER_ID, model: MODEL.use_model } }, execution_template_id: null, delegation_policy: 'disabled', decision_policy: 'automatic' },
+  }));
+  await expect(hook.result.current.handleSend()).rejects.toThrow();
+  expect(navigations).toEqual([]);
+  expect(sessionStorage.getItem(sessionStorageKey('initial-message-nomi', conversationTarget(parseConversationId(PRESET_CONVERSATION_ID))))).toBeNull();
 });
 
 const installFetchRecorder = (): FetchCall[] => {
