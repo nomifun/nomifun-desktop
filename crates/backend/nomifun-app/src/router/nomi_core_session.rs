@@ -203,7 +203,7 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
         }
         let (binding, revision, snapshot) = self.control_plane.saved_binding_artifacts(&owner, &binding)
             .await.map_err(control_plane_error_to_app)?;
-        let target_engine = self.runtime_engines.validate_agent(&revision.payload, &snapshot)?;
+        let target_engine = self.runtime_engines.validate_agent(&snapshot)?;
         let editor = self.control_plane.editor(&owner, revision.reference.preset_id.as_ref(), Some(revision.reference.revision))
             .await.map_err(control_plane_error_to_app)?;
         let common_owner = nomifun_common::UserId::parse(owner_id.to_owned())
@@ -536,7 +536,7 @@ impl NomiCoreSessionOwner {
             let engine = match (super::runtime_engines::binding_from_extra(&request.extra)?, prior_engine) {
                 (Some(requested), Some(prior)) if requested != prior => return Err(AppError::Conflict("Creation replay requested a different Engine".into())),
                 (Some(engine), _) | (None, Some(engine)) => engine,
-                (None, None) => host.agent_binding(&revision.payload)?,
+                (None, None) => host.agent_binding()?,
             };
             host.catalog()?.validate_snapshot(&engine, &resolved)?;
             host.catalog()?.validate_session_extra(&engine, &request.extra)?;
@@ -767,9 +767,14 @@ impl NomiCorePluginToolSessionProvider {
                     .to_owned(),
             ));
         }
-        // Revalidate exact support on every Session load, including legacy
-        // unbound construction. Never let selected server aliases add tools.
-        super::runtime_engines::validate_nomi_snapshot(&snapshot)?;
+        // Revalidate the same contribution-driven consumer contract on every
+        // Session load. Runtime family identity never decides capability support.
+        let materialized = self
+            .kernel
+            .snapshot()
+            .map_err(|error| AppError::Conflict(error.to_string()))?;
+        super::nomi_core_tool_discovery::validate_snapshot(&materialized, &snapshot)
+            .map_err(control_plane_error_to_app)?;
         if snapshot.content.enabled_capabilities.iter()
             .any(|capability| capability.capability.id.as_ref() == "mcp.resource" || super::nomi_core_mcp_catalog::is_product_tool(capability.capability.id.as_ref())) {
             super::nomi_core_mcp_catalog::validate_session_selection(&snapshot, &binding.typed_resource_bindings, &response.extra)?;
@@ -5437,7 +5442,6 @@ async fn create_nomi_core_agent_session(
         )
         .await?;
     Ok(Json(ApiResponse::ok(CreateAgentSessionResponseDto {
-        runtime_engine_binding: None,
         agent_session_id: opened.session.agent_session_id.as_ref().to_owned(),
         agent_binding: binding,
         state: "ready".to_owned(),

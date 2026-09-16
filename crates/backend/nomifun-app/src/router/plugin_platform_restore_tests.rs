@@ -288,7 +288,7 @@ async fn persisted_defaults_refresh_saves_but_do_not_reselect_frozen_nomi_sessio
             store.clone(),
             catalog,
             templates.clone(),
-            PresetRevisionCompiler::new(templates)
+            PresetRevisionCompiler::new()
                 .with_canonical_registry(kernel.clone(), environment.clone()),
         )
         .with_installation_role_binding_store(Arc::new(NomiCoreRoleBindingStore::new(

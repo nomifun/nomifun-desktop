@@ -703,7 +703,6 @@ fn revision_with_capabilities(
             revision_digest: DigestHex::from(""),
         },
         payload: AgentPresetRevisionPayload {
-            runtime_engine: None,
             context_order: Vec::new(),
             middleware_order: Vec::new(),
             schema_version: VersionString::from(VERSION),
@@ -1582,7 +1581,6 @@ fn compile_plugin_product_fixture(
         action_allowlist: capability.action_allowlist.clone(),
     };
     let payload = AgentPresetRevisionPayload {
-        runtime_engine: None,
         context_order: Vec::new(),
         middleware_order: Vec::new(),
         schema_version: VersionString::from(VERSION),

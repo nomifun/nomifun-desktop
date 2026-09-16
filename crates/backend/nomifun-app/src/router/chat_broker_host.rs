@@ -1671,7 +1671,6 @@ mod tests {
 
     fn revision_payload(record: ChatRouteRecord) -> AgentPresetRevisionPayload {
         AgentPresetRevisionPayload {
-            runtime_engine: None,
             context_order: Vec::new(),
             middleware_order: Vec::new(),
             schema_version: "1.0.0".into(),

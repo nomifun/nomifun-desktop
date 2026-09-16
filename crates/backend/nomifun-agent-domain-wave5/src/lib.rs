@@ -2252,7 +2252,6 @@ mod tests {
     ) {
         let materialized = registry.snapshot().expect("registry snapshot");
         let payload = AgentPresetRevisionPayload {
-            runtime_engine: None,
             context_order: Vec::new(),
             middleware_order: Vec::new(),
             schema_version: VersionString::from(VERSION),

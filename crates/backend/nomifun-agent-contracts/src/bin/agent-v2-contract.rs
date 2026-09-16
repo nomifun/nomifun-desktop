@@ -9,7 +9,7 @@ use nomifun_agent_contracts::{
     AgentStoreSchemaManifestPayload,
     CandidateTestReceipt,
     CanonicalApiInventoryPayload, CanonicalErrorRegistryPayload, CanonicalV4SchemaManifestPayload,
-    CapabilityCatalogEntry, PlatformFeatureInventoryPayload,
+    CapabilityCatalogEntry, CapabilityRetirementManifest, PlatformFeatureInventoryPayload,
     ContractClosurePayload, ContractDigestLedgerPayload, ContributionLock,
     CredentialSlotBinding,
     D025FixtureContractReferencePayload, D025FixtureEnvelopeReference, D026OrderingOutcomeMatrix,
@@ -56,6 +56,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let generated = contracts.join("generated");
 
     let closure_path = contracts.join("closure/contract-closure.v1.json");
+    let retirement_path = contracts.join("closure/capability-retirement.v1.json");
     let inventory_path =
         contracts.join("target-packages/target-first-party-contributions.v1.json");
     let feature_path =
@@ -103,6 +104,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     let inventory: TargetPackageInventoryPayload = read_json(&inventory_path)?;
     validate_target_inventory(&inventory)?;
     let inventory_digest = digest_payload(&inventory)?;
+    let retirement: CapabilityRetirementManifest = read_json(&retirement_path)?;
+    retirement.validate(&inventory)?;
+    let retirement_digest = digest_payload(&retirement)?;
 
     let feature_inventory: PlatformFeatureInventoryPayload = read_json(&feature_path)?;
     feature_inventory.validate().map_err(|error| error.message)?;
@@ -306,6 +310,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         "capability_catalog_entry".to_owned(),
         catalog_entry_digest,
     );
+    digest_map.insert("capability_retirement".to_owned(), retirement_digest);
     digest_map.insert(
         "canonical_schema_manifest".to_owned(),
         canonical_manifest_digest,
@@ -664,6 +669,7 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
     add_schema::<PackageManifest>(&mut schemas, "package_manifest")?;
     add_schema::<PluginRegistrationMetadata>(&mut schemas, "plugin_registration")?;
     add_schema::<TargetPackageInventoryPayload>(&mut schemas, "target_package_inventory")?;
+    add_schema::<CapabilityRetirementManifest>(&mut schemas, "capability_retirement")?;
     add_schema::<ContributionLock>(&mut schemas, "contribution_lock")?;
     add_schema::<AgentPresetRevisionPayload>(&mut schemas, "agent_preset_revision_payload")?;
     add_schema::<AgentPresetRevisionDigestInput>(

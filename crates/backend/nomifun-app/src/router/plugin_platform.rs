@@ -2987,7 +2987,7 @@ export async function activate() {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let control_plane = AgentControlPlane::new(
             store.clone(), catalog, templates.clone(),
-            PresetRevisionCompiler::new(templates).with_canonical_registry(kernel.clone(), environment.clone()),
+            PresetRevisionCompiler::new().with_canonical_registry(kernel.clone(), environment.clone()),
         );
         let editor = control_plane.create_preset(&owner, nomifun_api_types::CreateAgentPresetRequest {
             display_name: "Installed Context consumer".into(), description: None, fork_from_revision: None, document: None,

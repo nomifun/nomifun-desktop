@@ -111,7 +111,7 @@ async fn installed_discovery_is_selectable_and_saved_provider_is_used_without_fa
         store.clone(),
         catalog,
         templates.clone(),
-        PresetRevisionCompiler::new(templates)
+        PresetRevisionCompiler::new()
             .with_canonical_registry(kernel.clone(), environment.clone())
             .with_consumer_validator(crate::router::nomi_core_tool_discovery::validate_snapshot),
     );

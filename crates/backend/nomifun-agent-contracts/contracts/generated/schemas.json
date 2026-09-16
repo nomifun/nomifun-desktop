@@ -158,17 +158,6 @@
           "persona": {
             "type": "string"
           },
-          "runtime_engine": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/AgentRuntimeEngineSelection"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Execution implementation belongs to the Agent revision, not the chat composer.\nOmission preserves the default Nomi behavior of older revisions and their digests."
-          },
           "schema_version": {
             "type": "string"
           },
@@ -200,72 +189,6 @@
           "instructions"
         ],
         "type": "object"
-      },
-      "AgentRuntimeEngineSelection": {
-        "additionalProperties": false,
-        "properties": {
-          "profile": {
-            "type": "string"
-          },
-          "selector": {
-            "$ref": "#/$defs/AgentRuntimeEngineSelector"
-          }
-        },
-        "required": [
-          "selector",
-          "profile"
-        ],
-        "type": "object"
-      },
-      "AgentRuntimeEngineSelector": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "build_digest": {
-                "type": "string"
-              },
-              "build_id": {
-                "type": "string"
-              },
-              "family_id": {
-                "type": "string"
-              },
-              "selection": {
-                "const": "exact",
-                "type": "string"
-              }
-            },
-            "required": [
-              "selection",
-              "family_id",
-              "build_id",
-              "build_digest"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "channel": {
-                "type": "string"
-              },
-              "family_id": {
-                "type": "string"
-              },
-              "selection": {
-                "const": "channel",
-                "type": "string"
-              }
-            },
-            "required": [
-              "selection",
-              "family_id",
-              "channel"
-            ],
-            "type": "object"
-          }
-        ]
       },
       "CapabilitySelection": {
         "additionalProperties": false,
@@ -635,17 +558,6 @@
           "persona": {
             "type": "string"
           },
-          "runtime_engine": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/AgentRuntimeEngineSelection"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Execution implementation belongs to the Agent revision, not the chat composer.\nOmission preserves the default Nomi behavior of older revisions and their digests."
-          },
           "schema_version": {
             "type": "string"
           },
@@ -677,72 +589,6 @@
           "instructions"
         ],
         "type": "object"
-      },
-      "AgentRuntimeEngineSelection": {
-        "additionalProperties": false,
-        "properties": {
-          "profile": {
-            "type": "string"
-          },
-          "selector": {
-            "$ref": "#/$defs/AgentRuntimeEngineSelector"
-          }
-        },
-        "required": [
-          "selector",
-          "profile"
-        ],
-        "type": "object"
-      },
-      "AgentRuntimeEngineSelector": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "build_digest": {
-                "type": "string"
-              },
-              "build_id": {
-                "type": "string"
-              },
-              "family_id": {
-                "type": "string"
-              },
-              "selection": {
-                "const": "exact",
-                "type": "string"
-              }
-            },
-            "required": [
-              "selection",
-              "family_id",
-              "build_id",
-              "build_digest"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "channel": {
-                "type": "string"
-              },
-              "family_id": {
-                "type": "string"
-              },
-              "selection": {
-                "const": "channel",
-                "type": "string"
-              }
-            },
-            "required": [
-              "selection",
-              "family_id",
-              "channel"
-            ],
-            "type": "object"
-          }
-        ]
       },
       "CapabilitySelection": {
         "additionalProperties": false,
@@ -1029,72 +875,6 @@
   },
   "agent_preset_revision_payload": {
     "$defs": {
-      "AgentRuntimeEngineSelection": {
-        "additionalProperties": false,
-        "properties": {
-          "profile": {
-            "type": "string"
-          },
-          "selector": {
-            "$ref": "#/$defs/AgentRuntimeEngineSelector"
-          }
-        },
-        "required": [
-          "selector",
-          "profile"
-        ],
-        "type": "object"
-      },
-      "AgentRuntimeEngineSelector": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "build_digest": {
-                "type": "string"
-              },
-              "build_id": {
-                "type": "string"
-              },
-              "family_id": {
-                "type": "string"
-              },
-              "selection": {
-                "const": "exact",
-                "type": "string"
-              }
-            },
-            "required": [
-              "selection",
-              "family_id",
-              "build_id",
-              "build_digest"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "channel": {
-                "type": "string"
-              },
-              "family_id": {
-                "type": "string"
-              },
-              "selection": {
-                "const": "channel",
-                "type": "string"
-              }
-            },
-            "required": [
-              "selection",
-              "family_id",
-              "channel"
-            ],
-            "type": "object"
-          }
-        ]
-      },
       "CapabilitySelection": {
         "additionalProperties": false,
         "properties": {
@@ -1348,17 +1128,6 @@
       },
       "persona": {
         "type": "string"
-      },
-      "runtime_engine": {
-        "anyOf": [
-          {
-            "$ref": "#/$defs/AgentRuntimeEngineSelection"
-          },
-          {
-            "type": "null"
-          }
-        ],
-        "description": "Execution implementation belongs to the Agent revision, not the chat composer.\nOmission preserves the default Nomi behavior of older revisions and their digests."
       },
       "schema_version": {
         "type": "string"
@@ -3180,6 +2949,67 @@
       "admission"
     ],
     "title": "CapabilityCatalogEntry",
+    "type": "object"
+  },
+  "capability_retirement": {
+    "$defs": {
+      "CapabilityRetirementRoute": {
+        "additionalProperties": false,
+        "properties": {
+          "disposition": {
+            "type": "string"
+          },
+          "owner_tasks": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "source_capability_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "source_package": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_package",
+          "source_capability_ids",
+          "disposition",
+          "target",
+          "owner_tasks"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "routes": {
+        "items": {
+          "$ref": "#/$defs/CapabilityRetirementRoute"
+        },
+        "type": "array"
+      },
+      "schema_version": {
+        "type": "string"
+      },
+      "source_inventory_digest": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "schema_version",
+      "source_inventory_digest",
+      "routes"
+    ],
+    "title": "CapabilityRetirementManifest",
     "type": "object"
   },
   "contribution_lock": {

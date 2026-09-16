@@ -210,7 +210,7 @@ async fn installed_heterogeneous_providers_freeze_private_graphs_across_save_ope
         store.clone(),
         catalog,
         templates.clone(),
-        PresetRevisionCompiler::new(templates)
+        PresetRevisionCompiler::new()
             .with_canonical_registry(kernel.clone(), environment.clone()),
     );
     let actor = owner.clone().into();

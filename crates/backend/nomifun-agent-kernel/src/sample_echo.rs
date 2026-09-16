@@ -865,7 +865,6 @@ fn role_operation_request(
 
 fn sample_revision(owner_id: &str) -> AgentPresetRevision {
     let payload = AgentPresetRevisionPayload {
-        runtime_engine: None,
         context_order: Vec::new(),
         middleware_order: Vec::new(),
         schema_version: VersionString::from(VERSION),
@@ -1264,7 +1263,7 @@ fn middleware_order_does_not_make_dependency_only_middleware_authorable() {
             assert!(matches!(result, Err(KernelError::CapabilityNotAuthorable { .. })));
         } else {
             assert!(matches!(result, Err(KernelError::InvalidPresetRevision { reason })
-                if reason.contains("must be an Agent TurnMiddleware")));
+                if reason.contains("must freeze a supported Agent middleware Action contribution")));
         }
     }
 }
@@ -1770,7 +1769,7 @@ async fn non_agent_role_operation_rejects_resource_binding_mismatch() {
 }
 
 #[test]
-fn coding_profile_freezes_the_exact_available_runtime_feature_set() {
+fn runtime_profile_cannot_inflate_capability_feature_requirements() {
     let materialized = KernelRegistry::new(
         MaterializationPolicy::stable_with_test_fixtures(VERSION),
         Arc::new(InMemoryPluginStatePersistence::new()),
@@ -1792,10 +1791,7 @@ fn coding_profile_freezes_the_exact_available_runtime_feature_set() {
         compile_request(revision.clone(), owner.clone()),
     )
     .unwrap();
-    assert_eq!(
-        coding.content().required_runtime_features,
-        coding_environment.available_runtime_features
-    );
+    assert!(coding.content().required_runtime_features.is_empty());
 
     let managed = AgentPresetCompiler::compile(
         &materialized,

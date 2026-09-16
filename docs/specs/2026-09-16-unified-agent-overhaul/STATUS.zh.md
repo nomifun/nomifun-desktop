@@ -2,7 +2,7 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-17
-> 当前阶段：Wave 1 / UARC-014 ready
+> 当前阶段：Wave 1 / UARC-014 active
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
@@ -58,7 +58,7 @@
 | `UARC-011` | integrated | Integration | verified | n/a | generation 5 Store、main migration、effect ledger、reset gate 已闭合 |
 | `UARC-012` | integrated | Integration | verified | n/a | 单一 AgentSession owner、完整生命周期 API 与 exact receipt 已闭合 |
 | `UARC-013` | integrated | Integration | verified | n/a | 单一官方 provider/factory、Driver lifecycle 与 typed host ports 已闭合 |
-| `UARC-014` | ready | Integration | pending | n/a | AgentPreset vNext Compiler 与通用 capability projection |
+| `UARC-014` | active | Integration | pending | n/a | AgentPreset vNext Compiler 与通用 capability projection 实施中 |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -324,3 +324,17 @@
 - Not run: full App transition is 455/515 because 60 old Capability fixtures await UARC-014/021/022; no Runtime test failed. Full Wave 1 gate waits for UARC-014.
 - Remaining/blocker: no UARC-013 blocker. Do not restore the deleted registration API or second family while migrating Compiler fixtures.
 - Next ready tasks: `UARC-014` only.
+
+### 2026-09-17 UARC-014 started
+
+- Barrier/source: UARC-013 closeout `e7babfd127c5e29d05a18e323243ae5b9b7765eb`.
+- Owner/write set: Integration; Control Plane, Kernel Compiler, Agent projection and exact contract/generated inputs identified by the call-graph audit.
+- Changed: task claimed; runtime selector fields, 136-ID seeds, handwritten Nomi/Coding mappings and stale empty-grant fixtures are under reachability audit.
+- Deleted: pending Runtime selector, old first-party authoring IDs and Runtime-family capability branches.
+- Retained + reason: preview compile, exact Snapshot locks, action/resource policies and typed diagnostics remain security/product contracts.
+- Tests: pending determinism, Snapshot-outside rejection, 136-ID retirement, preview diagnostics and Wave 1 transition gates.
+- Windows: active.
+- macOS: not applicable to this shared Compiler task; later platform consumers remain pending.
+- Not run: no UARC-014 implementation gate yet.
+- Remaining/blocker: replace stale fixtures and mappings without weakening exact Action grants. No blocker.
+- Next ready tasks: none until UARC-014 and the Wave 1 barrier complete.

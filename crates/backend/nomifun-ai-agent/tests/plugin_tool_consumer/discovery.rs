@@ -220,7 +220,6 @@ fn revision(
             revision_digest: "".into(),
         },
         payload: AgentPresetRevisionPayload {
-            runtime_engine: None,
             context_order: Vec::new(),
             middleware_order: Vec::new(),
             schema_version: VERSION.into(),

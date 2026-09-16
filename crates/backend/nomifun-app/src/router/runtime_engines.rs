@@ -77,8 +77,8 @@ impl RuntimeEngineHost {
             .ok_or_else(|| AppError::Conflict("official Runtime provider is not assembled".into()))
     }
 
-    /// Temporary call-site name retained inside the crate while UARC-014/052
-    /// remove the old catalog DTO and registry. It returns the single provider.
+    /// Temporary call-site name retained inside the crate until UARC-052
+    /// deletes the old runtime registry. It returns the single provider.
     pub(crate) fn catalog(&self) -> Result<&Arc<NomiRuntimeProvider>, AppError> {
         self.provider()
     }
@@ -93,128 +93,25 @@ impl RuntimeEngineHost {
         Ok(self.provider()?.binding())
     }
 
-    pub(crate) fn agent_binding(
-        &self,
-        payload: &nomifun_agent_contracts::AgentPresetRevisionPayload,
-    ) -> Result<RuntimeEngineBinding, AppError> {
-        if payload.runtime_engine.is_some() {
-            return Err(AppError::UnprocessableEntity(
-                "Agent Runtime selection is retired; every Agent uses the official Nomi Runtime"
-                    .into(),
-            ));
-        }
+    pub(crate) fn agent_binding(&self) -> Result<RuntimeEngineBinding, AppError> {
         self.default_binding()
     }
 
     pub(crate) fn validate_agent(
         &self,
-        payload: &nomifun_agent_contracts::AgentPresetRevisionPayload,
         snapshot: &nomifun_agent_contracts::ResolvedSnapshotEnvelope,
     ) -> Result<RuntimeEngineBinding, AppError> {
-        let binding = self.agent_binding(payload)?;
+        let binding = self.agent_binding()?;
         self.provider()?.validate_snapshot(&binding, snapshot)?;
         Ok(binding)
     }
 }
 
-/// Transitional admission for the source-integrated Driver. UARC-014 replaces
-/// the handwritten projection; importantly, this policy uses platform history
-/// and never opts into the retired private Nomi Session codec.
+/// Platform-only admission for the source-integrated Driver. Capability
+/// support comes from the compiled Snapshot and contribution consumers, never
+/// from a Runtime-family feature table. This policy also never opts into the
+/// retired private Nomi Session codec.
 struct NomiAdmission;
-
-pub(crate) fn validate_nomi_snapshot(
-    snapshot: &nomifun_agent_contracts::ResolvedSnapshotEnvelope,
-) -> Result<(), AppError> {
-    use nomifun_agent_contracts::{ContributionSourceKind, PluginSourceKind};
-    nomifun_ai_agent::tool_middleware::validate_selection(&snapshot.content)
-        .map_err(|error| AppError::Conflict(error.to_string()))?;
-    let selected = snapshot
-        .content
-        .enabled_capabilities
-        .iter()
-        .collect::<Vec<_>>();
-    let resources = selected
-        .iter()
-        .any(|entry| entry.capability.id.as_ref() == "mcp.resource");
-    if resources
-        && selected
-            .iter()
-            .any(|entry| entry.capability.id.as_ref() == "mcp.tool_proxy")
-    {
-        return Err(AppError::Conflict(
-            "MCP resources use the platform owner; select frozen MCP tools instead of the native all-tools proxy"
-                .into(),
-        ));
-    }
-    if resources
-        && selected.iter().any(|entry| {
-            entry.capability.id.as_ref() == "mcp.resource"
-                && (entry.contribution_lock.source_kind
-                    != ContributionSourceKind::PlatformBuiltin
-                    || entry.resolved_source.source_kind != PluginSourceKind::Bundled)
-        })
-    {
-        return Err(AppError::Conflict(
-            "MCP resources require their bundled platform owner".into(),
-        ));
-    }
-    if !selected.iter().any(|capability| {
-        super::nomi_core_mcp_catalog::is_product_tool(capability.capability.id.as_ref())
-    }) {
-        return Ok(());
-    }
-    for capability in &selected {
-        let id = capability.capability.id.as_ref();
-        if id == "mcp.tool_proxy" || (!resources && matches!(id, "mcp.connect" | "mcp.oauth")) {
-            return Err(AppError::Conflict(
-                "Choose either frozen per-tool MCP grants or native MCP capabilities, not both"
-                    .into(),
-            ));
-        }
-        if super::nomi_core_mcp_catalog::is_product_tool(id)
-            && (capability.contribution_lock.source_kind != ContributionSourceKind::McpBinding
-                || capability.resolved_source.source_kind != PluginSourceKind::Bundled
-                || !snapshot.content.mcp_tool_locks.iter().any(|lock| {
-                    lock.capability_id == capability.capability.id
-                        && lock.canonical_tool_key.as_ref() == id
-                        && lock.materialization_revision == 1
-                }))
-        {
-            return Err(AppError::Conflict(
-                "Nomi MCP tool requires exact bundled Snapshot mapping".into(),
-            ));
-        }
-        if capability.contribution_lock.source_kind == ContributionSourceKind::McpBinding
-            && !super::nomi_core_mcp_catalog::is_product_tool(id)
-        {
-            return Err(AppError::Conflict(
-                "Unsupported MCP mapping mixed with the product per-tool lane".into(),
-            ));
-        }
-    }
-    let servers = snapshot
-        .content
-        .mcp_tool_locks
-        .iter()
-        .map(|lock| &lock.server_id)
-        .collect::<std::collections::BTreeSet<_>>();
-    if servers.is_empty()
-        || servers.len() > super::nomi_core_mcp_catalog::MAX_SESSION_SERVERS
-        || snapshot.content.mcp_tool_locks.iter().any(|lock| {
-            !super::nomi_core_mcp_catalog::is_product_tool(lock.capability_id.as_ref())
-                || lock.canonical_tool_key.as_ref() != lock.capability_id.as_ref()
-                || lock.materialization_revision != 1
-                || !selected
-                    .iter()
-                    .any(|capability| capability.capability.id == lock.capability_id)
-        })
-    {
-        return Err(AppError::Conflict(
-            "Nomi per-tool MCP requires bounded exact servers and selected tool locks".into(),
-        ));
-    }
-    Ok(())
-}
 
 impl RuntimeEngineAdmission for NomiAdmission {
     fn supports_tool_hooks(&self, _binding: &RuntimeEngineBinding) -> bool {
@@ -230,7 +127,6 @@ impl RuntimeEngineAdmission for NomiAdmission {
         binding: &RuntimeEngineBinding,
         snapshot: &nomifun_agent_contracts::ResolvedSnapshotEnvelope,
     ) -> Result<(), AppError> {
-        validate_nomi_snapshot(snapshot)?;
         RuntimeEngineSupport::platform().validate_snapshot(binding, snapshot)
     }
 

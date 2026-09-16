@@ -967,22 +967,9 @@ async fn build_nomi_core_agent_api_state(
         availability_evidence_revision: "nomi-core-local-2026-09-04".to_owned(),
     };
     let templates = OfficialTemplateCatalog::load()?;
-    let runtime_engines = Arc::clone(&services.runtime_engines);
-    let compiler = PresetRevisionCompiler::new(templates.clone())
+    let compiler = PresetRevisionCompiler::new()
         .with_canonical_registry(Arc::clone(&kernel), environment.clone())
-        .with_runtime_validator(move |payload, snapshot| {
-            if payload.runtime_engine.is_none() {
-                return super::runtime_engines::validate_nomi_snapshot(snapshot).map_err(|error| error.to_string());
-            }
-            runtime_engines.validate_agent(payload, snapshot)
-                .map(|_| ()).map_err(|error| error.to_string())
-        })
         .with_consumer_validator(super::nomi_core_tool_discovery::validate_snapshot);
-    // Both official engines consume the same frozen enabled-capability ceiling.
-    // Saving a new revision, not an in-turn activation, changes that selection.
-    // The Nomi engine exposes its existing session-scoped ToolSearch activation
-    // boundary. AgentPreset on-demand capabilities are projected onto that
-    // deferred tool set instead of being rejected by the control plane.
     let store = Arc::new(NomiCoreControlPlaneStore::new(
         services.database.pool().clone(),
     ));

@@ -8,8 +8,33 @@ fn digest(fill: char) -> DigestHex {
     fill.to_string().repeat(64).into()
 }
 
+struct FixtureAdapter;
+
+#[async_trait::async_trait]
+impl nomifun_agent_kernel::CapabilityHandler for FixtureAdapter {
+    async fn invoke(
+        &self,
+        _context: nomifun_agent_kernel::CapabilityInvocationContext,
+        _input: StrictJsonValue,
+    ) -> Result<StrictJsonValue, nomifun_agent_kernel::KernelError> {
+        Ok(StrictJsonValue(serde_json::json!({})))
+    }
+}
+
+#[async_trait::async_trait]
+impl nomifun_agent_kernel::CapabilityContextContributionFactory for FixtureAdapter {
+    async fn contribute(
+        &self,
+        _request: nomifun_agent_kernel::CapabilityContextContributionRequest,
+    ) -> Result<nomifun_agent_kernel::ContextContributionResult, nomifun_agent_kernel::KernelError>
+    {
+        Ok(nomifun_agent_kernel::ContextContributionResult { value: None })
+    }
+}
+
 fn product() -> ResolvedCapability {
     let contribution_id = ContributionId::from("capability:fixture.middleware");
+    let action = model_middleware::action();
     ResolvedCapability {
         consumption: Default::default(),
         dependency_refs: Vec::new(),
@@ -52,9 +77,9 @@ fn product() -> ResolvedCapability {
         catalog_digest: Some(digest('d')),
         display_name: Some("Fixture middleware".into()),
         description: Some("Consumer boundary fixture".into()),
-        actions: vec![model_middleware::action()],
+        actions: vec![action.clone()],
         required_resource_kinds: BTreeSet::new(),
-        action_allowlist: BTreeSet::new(),
+        action_allowlist: BTreeSet::from([action.action_id]),
     }
 }
 
@@ -81,7 +106,6 @@ fn compile_selection(
             revision_digest: digest('0'),
         },
         payload: AgentPresetRevisionPayload {
-            runtime_engine: None,
             context_order: Vec::new(),
             middleware_order: if ordered {
                 vec![capability.id.clone()]
@@ -162,6 +186,18 @@ fn mount_snapshot(
     registration.metadata.source.source_kind = source_kind;
     registration.metadata.context.source.source_kind = source_kind;
     let manifest = &mut registration.metadata.manifest.payload.contributions.capabilities[0];
+    let has_action = action.is_some();
+    // CapabilityKind is only a catalog summary. Direct authoring and ordering
+    // follow the actual Action/Context contribution set.
+    manifest.kind = if has_action {
+        CapabilityKind::Tool
+    } else {
+        CapabilityKind::ContextContributor
+    };
+    let action_allowlist = action
+        .as_ref()
+        .map(|action| BTreeSet::from([action.action_id.clone()]))
+        .unwrap_or_default();
     if let Some(action) = action {
         manifest.contributions.actions = vec![action];
     } else {
@@ -170,6 +206,15 @@ fn mount_snapshot(
         ))];
     }
     registration.metadata.manifest = ArtifactEnvelope::new(registration.metadata.manifest.payload).unwrap();
+    if has_action {
+        registration
+            .add_capability_handler(ID.into(), Arc::new(FixtureAdapter))
+            .unwrap();
+    } else {
+        registration
+            .add_capability_context_factory(ID.into(), Arc::new(FixtureAdapter))
+            .unwrap();
+    }
     let mut policy = MaterializationPolicy::stable("1.0.0");
     policy.allowed_sources.insert(PluginSourceKind::ManagedLocal);
     let registry = KernelRegistry::new(policy, Arc::new(InMemoryPluginStatePersistence::new())).unwrap();
@@ -178,12 +223,16 @@ fn mount_snapshot(
     let snapshot = compile_selection(
         &materialized,
         CapabilityRef { id: registered.manifest.id.clone(), version: registered.manifest.version.clone() },
-        BTreeSet::new(), registered.contribution_lock.clone(), Vec::new(), ordered,
+        action_allowlist, registered.contribution_lock.clone(), Vec::new(), ordered,
     );
     snapshot.validate().unwrap();
     let resolved = &snapshot.content.enabled_capabilities[0];
     resolved.validate().unwrap();
-    assert!(resolved.actions.is_empty(), "Mount contracts must stay in the materialized manifest");
+    assert_eq!(
+        resolved.actions,
+        registered.manifest.contributions.actions,
+        "Generic compilation must freeze the exact materialized Action contract",
+    );
     assert_eq!(resolved.contribution_lock.source_kind,
         if source_kind == PluginSourceKind::ManagedLocal { ContributionSourceKind::PluginMount }
         else { ContributionSourceKind::PlatformBuiltin });
@@ -198,9 +247,14 @@ fn registered_mount_and_bundled_hooks_are_rejected_even_without_middleware_order
                 let (registry, snapshot) = mount_snapshot(Some(action.clone()), source, ordered);
                 if !ordered {
                     assert!(snapshot.content.middleware_order.is_empty());
-                    // Snapshot-only selection cannot see this non-Product action.
-                    nomifun_ai_agent::tool_middleware::validate_selection(&snapshot.content).unwrap();
-                    model_middleware::validate_selection(&snapshot.content).unwrap();
+                    // Middleware ordering is optional, but the frozen Action
+                    // contract remains visible and must still fail closed at
+                    // the consumer boundary for non-Product sources.
+                    assert!(
+                        nomifun_ai_agent::tool_middleware::validate_selection(&snapshot.content)
+                            .is_err()
+                            || model_middleware::validate_selection(&snapshot.content).is_err()
+                    );
                 }
                 let error = validate_snapshot(&registry, &snapshot).unwrap_err();
                 assert!(error.to_string().contains("Plugin Product Active Release"), "{error}");
@@ -221,6 +275,9 @@ fn before_tool_consumer_rejects_product_descriptor_drift() {
     for mismatch in ["effect", "schema", "presentation", "extra_action"] {
         let mut item = product();
         item.actions = vec![nomifun_ai_agent::tool_middleware::before_action()];
+        item.action_allowlist = BTreeSet::from([
+            nomifun_ai_agent::tool_middleware::BEFORE_ACTION_ID.into(),
+        ]);
         match mismatch {
             "effect" => item.actions[0].effect_class = EffectClass::ExecuteLocal,
             "schema" => item.actions[0].input_schema = "schema://fixture/other".into(),
@@ -239,6 +296,7 @@ fn middleware_boundary_generic_compile_accepts_alternative_but_nomi_rejects() {
     alternative.actions[0].action_id = "agent.after_model".into();
     alternative.actions[0].input_schema = "schema://fixture/after-model/input".into();
     alternative.actions[0].output_schema = "schema://fixture/after-model/output".into();
+    alternative.action_allowlist = BTreeSet::from(["agent.after_model".into()]);
     let snapshot = compile(alternative.clone(), true);
     snapshot.validate().unwrap();
     assert_eq!(snapshot.content.enabled_capabilities, vec![alternative]);
@@ -246,19 +304,11 @@ fn middleware_boundary_generic_compile_accepts_alternative_but_nomi_rejects() {
 }
 
 #[test]
-fn middleware_boundary_nomi_accepts_exact_contract_with_optional_order_and_allowlist() {
+fn middleware_boundary_nomi_accepts_exact_contract_with_optional_order() {
     for ordered in [false, true] {
-        for explicit_authority in [false, true] {
-            let mut capability = product();
-            if explicit_authority {
-                capability
-                    .action_allowlist
-                    .insert(model_middleware::ACTION_ID.into());
-            }
-            let snapshot = compile(capability, ordered);
-            model_middleware::validate_selection(&snapshot.content).unwrap();
-            validate_snapshot(&MaterializedRegistry::empty(), &snapshot).unwrap();
-        }
+        let snapshot = compile(product(), ordered);
+        model_middleware::validate_selection(&snapshot.content).unwrap();
+        validate_snapshot(&MaterializedRegistry::empty(), &snapshot).unwrap();
     }
 }
 

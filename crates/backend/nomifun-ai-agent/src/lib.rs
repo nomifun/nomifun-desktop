@@ -92,8 +92,6 @@ pub use runtime_catalog::{
     NomiRuntimeProvider, RUNTIME_HOST_CONTRACT_VERSION, RuntimeEngineBinding,
     RuntimeEngineDescriptor, RuntimeEngineFactory,
 };
-#[cfg(any(test, feature = "test-support"))]
-pub use runtime_catalog::{RuntimeEngineCatalog, RuntimeEngineSelector};
 pub use boot_process_reaper::{
     AgentProcessReapReport, ConversationProcessReapVerdict, reap_orphan_agent_processes,
 };
