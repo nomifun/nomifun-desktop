@@ -1,8 +1,13 @@
 //! Bundled Wave 1 read-capability registrations.
 //!
-//! The eight package identities and 27 capabilities below are the Wave 1 slice
+//! The seven package identities and 23 capabilities below are the Wave 1 slice
 //! of the frozen first-party contribution inventory.  Customer-service
 //! dialogue/identity is owned by Wave 4 and is intentionally absent here.
+//!
+//! Skills are deliberately absent from this capability slice. They are
+//! materialized from exact `skill_bindings` into frozen Snapshot locks and
+//! consumed through the Runtime Skill port; catalog, describe, invoke, and
+//! hook infrastructure are not Agent-authorable capabilities.
 
 #![forbid(unsafe_code)]
 
@@ -24,7 +29,7 @@ use nomifun_agent_contracts::{
     PluginMountId, PluginRegistrarDescriptor, PluginRegistrarOperation,
     PluginRegistrationMetadata, PluginSourceKind, PluginSourceMetadata,
     PluginStateHandleDescriptor, PluginStateMethod, PrincipalRef, ResolvedSnapshotRef,
-    ResourceBindingId, ResourceId, ResourceKind, ScopeKey, SkillDefinition, StateKey,
+    ResourceBindingId, ResourceId, ResourceKind, ScopeKey, StateKey,
     StrictJsonValue, ToolPresentationKind, TypedResourceBinding, TypedResourceBindings,
     ValidatedPluginConfig, VersionString, PluginStateCompareAndSwapOutcome, PluginStateEntry,
     CAPABILITY_UNAVAILABLE_ON_PLATFORM, capability_surface_declarations,
@@ -50,17 +55,15 @@ pub const CHAT_PACKAGE_ID: &str = "nomifun.chat";
 pub const KNOWLEDGE_PACKAGE_ID: &str = "nomifun.knowledge";
 pub const PROJECT_MEMORY_PACKAGE_ID: &str = "nomifun.project-memory";
 pub const COMPANION_MEMORY_PACKAGE_ID: &str = "nomifun.companion-memory";
-pub const SKILLS_PACKAGE_ID: &str = "nomifun.skills";
 
 pub const WEB_RESEARCH_MOUNT_ID: &str = "domain-web-research";
 pub const CHAT_MOUNT_ID: &str = "domain-chat";
 pub const KNOWLEDGE_MOUNT_ID: &str = "domain-knowledge";
 pub const PROJECT_MEMORY_MOUNT_ID: &str = "domain-project-memory";
 pub const COMPANION_MEMORY_MOUNT_ID: &str = "domain-companion-memory";
-pub const SKILLS_MOUNT_ID: &str = "domain-skills";
 
 /// Bundled package identities owned by Wave 1.
-pub const PACKAGE_IDS: [&str; 8] = [
+pub const PACKAGE_IDS: [&str; 7] = [
     WEB_RESEARCH_PACKAGE_ID,
     LOCAL_WEBSEARCH_PACKAGE_ID,
     SYSTEM_BROWSER_PACKAGE_ID,
@@ -68,12 +71,11 @@ pub const PACKAGE_IDS: [&str; 8] = [
     KNOWLEDGE_PACKAGE_ID,
     PROJECT_MEMORY_PACKAGE_ID,
     COMPANION_MEMORY_PACKAGE_ID,
-    SKILLS_PACKAGE_ID,
 ];
-pub const TARGET_PACKAGE_IDS: [&str; 8] = PACKAGE_IDS;
+pub const TARGET_PACKAGE_IDS: [&str; 7] = PACKAGE_IDS;
 
-/// Capability IDs present in the eight Wave 1 packages.
-pub const CAPABILITY_IDS: [&str; 27] = [
+/// Capability IDs present in the seven Wave 1 packages.
+pub const CAPABILITY_IDS: [&str; 23] = [
     "web.search",
     "nomi_local_websearch",
     "nomi_system_browser",
@@ -97,13 +99,9 @@ pub const CAPABILITY_IDS: [&str; 27] = [
     "memory.companion.write",
     "memory.companion.merge",
     "memory.companion.evolve",
-    "skill.catalog",
-    "skill.describe",
-    "skill.invoke",
-    "skill.hooks",
 ];
-pub const TARGET_CAPABILITY_IDS: [&str; 27] = CAPABILITY_IDS;
-pub const ALL_CAPABILITY_IDS: [&str; 27] = CAPABILITY_IDS;
+pub const TARGET_CAPABILITY_IDS: [&str; 23] = CAPABILITY_IDS;
+pub const ALL_CAPABILITY_IDS: [&str; 23] = CAPABILITY_IDS;
 
 pub const WEB_SEARCH: &str = "web.search";
 pub const NOMI_LOCAL_WEBSEARCH: &str = "nomi_local_websearch";
@@ -128,10 +126,6 @@ pub const MEMORY_COMPANION_RECALL: &str = "memory.companion.recall";
 pub const MEMORY_COMPANION_WRITE: &str = "memory.companion.write";
 pub const MEMORY_COMPANION_MERGE: &str = "memory.companion.merge";
 pub const MEMORY_COMPANION_EVOLVE: &str = "memory.companion.evolve";
-pub const SKILL_CATALOG: &str = "skill.catalog";
-pub const SKILL_DESCRIBE: &str = "skill.describe";
-pub const SKILL_INVOKE: &str = "skill.invoke";
-pub const SKILL_HOOKS: &str = "skill.hooks";
 
 pub const WEB_SEARCH_ACTION: &str = "web.search.invoke";
 pub const NOMI_LOCAL_WEBSEARCH_ACTION: &str = "nomi_local_websearch.invoke";
@@ -148,16 +142,14 @@ pub const MEMORY_PROJECT_DISTILL_ACTION: &str = "memory.project.distill.invoke";
 pub const MEMORY_COMPANION_WRITE_ACTION: &str = "memory.companion.write.invoke";
 pub const MEMORY_COMPANION_MERGE_ACTION: &str = "memory.companion.merge.invoke";
 pub const MEMORY_COMPANION_EVOLVE_ACTION: &str = "memory.companion.evolve.invoke";
-pub const SKILL_INVOKE_ACTION: &str = "skill.invoke.invoke";
 
 /// Family names owned by this bounded read-capability slice.
-pub const TARGET_CAPABILITY_FAMILIES: [&str; 11] = [
+pub const TARGET_CAPABILITY_FAMILIES: [&str; 10] = [
     "attachments.read",
     "knowledge.read",
     "knowledge.search",
     "memory.read",
     "research.core",
-    "skill.instructions",
     "web.fetch",
     "web.search",
     "nomi_local_websearch",
@@ -258,7 +250,7 @@ pub struct TypedResourceDescriptor {
 ///
 /// This is an in-process Rust port, not a product service object or a
 /// registry.  A production host adapts its existing domain owners
-/// (Knowledge, Skills, Research, and memory stores) to this port and passes
+/// (Knowledge, Research, and memory stores) to this port and passes
 /// the adapter to [`registrations_with_host_port`].  The Wave 1 crate owns
 /// neither those stores nor their business facts.
 pub const WAVE1_CAPABILITY_HOST_PORT_ID: &str = "host.wave1.capability.invoke";
@@ -416,12 +408,6 @@ pub struct Wave1CompanionMemoryEvolveRequest {
     pub content: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Wave1SkillInvokeRequest {
-    pub skill_id: String,
-    pub arguments: Option<StrictJsonValue>,
-}
-
 /// Typed operation variants understood by the Wave 1 host port.
 ///
 /// The result returned by the port is passed through unchanged.  In
@@ -443,7 +429,6 @@ pub enum Wave1CapabilityOperation {
     CompanionMemoryWrite(Wave1CompanionMemoryWriteRequest),
     CompanionMemoryMerge(Wave1CompanionMemoryMergeRequest),
     CompanionMemoryEvolve(Wave1CompanionMemoryEvolveRequest),
-    SkillInvoke(Wave1SkillInvokeRequest),
 }
 
 impl Wave1CapabilityOperation {
@@ -465,7 +450,6 @@ impl Wave1CapabilityOperation {
             Self::CompanionMemoryWrite(_) => MEMORY_COMPANION_WRITE,
             Self::CompanionMemoryMerge(_) => MEMORY_COMPANION_MERGE,
             Self::CompanionMemoryEvolve(_) => MEMORY_COMPANION_EVOLVE,
-            Self::SkillInvoke(_) => SKILL_INVOKE,
         })
     }
 
@@ -632,23 +616,12 @@ pub trait Wave1MemoryOwner: Send + Sync {
     ) -> Result<StrictJsonValue, Wave1HostPortError>;
 }
 
-/// Typed Skills owner seam for explicit Skill invocation.
-#[async_trait]
-pub trait Wave1SkillOwner: Send + Sync {
-    async fn skill_invoke(
-        &self,
-        context: Wave1HostContext,
-        request: Wave1SkillInvokeRequest,
-    ) -> Result<StrictJsonValue, Wave1HostPortError>;
-}
-
 /// Minimal typed adapter used by the app composition root.
 pub struct Wave1HostPortAdapter {
     local_search: Option<Arc<dyn Wave1LocalSearchOwner>>,
     research: Arc<dyn Wave1ResearchOwner>,
     knowledge: Arc<dyn Wave1KnowledgeOwner>,
     memory: Arc<dyn Wave1MemoryOwner>,
-    skills: Arc<dyn Wave1SkillOwner>,
 }
 
 impl Wave1HostPortAdapter {
@@ -660,14 +633,12 @@ impl Wave1HostPortAdapter {
         research: Arc<dyn Wave1ResearchOwner>,
         knowledge: Arc<dyn Wave1KnowledgeOwner>,
         memory: Arc<dyn Wave1MemoryOwner>,
-        skills: Arc<dyn Wave1SkillOwner>,
     ) -> Self {
         Self {
             research,
             local_search: None,
             knowledge,
             memory,
-            skills,
         }
     }
 }
@@ -730,9 +701,6 @@ impl Wave1HostPort for Wave1HostPortAdapter {
             }
             Wave1CapabilityOperation::CompanionMemoryEvolve(request) => {
                 self.memory.companion_memory_evolve(context, request).await
-            }
-            Wave1CapabilityOperation::SkillInvoke(request) => {
-                self.skills.skill_invoke(context, request).await
             }
         }
     }
@@ -869,13 +837,6 @@ const COMPANION_MEMORY_CAPABILITIES: &[CapabilitySpec] = &[
     ),
 ];
 
-const SKILLS: &[CapabilitySpec] = &[
-    context("skill.catalog", &[]),
-    context("skill.describe", &[]),
-    tool("skill.invoke", EffectClass::ExecuteLocal, &[]),
-    middleware("skill.hooks"),
-];
-
 const PACKAGES: &[PackageSpec] = &[
     PackageSpec {
         id: SYSTEM_BROWSER_PACKAGE_ID,
@@ -925,13 +886,6 @@ const PACKAGES: &[PackageSpec] = &[
         description: "Read and maintain explicitly bound companion memory.",
         mount_id: "domain-companion-memory",
         capabilities: COMPANION_MEMORY_CAPABILITIES,
-    },
-    PackageSpec {
-        id: "nomifun.skills",
-        display_name: "Skills",
-        description: "Expose catalogued skill guidance and invocation.",
-        mount_id: "domain-skills",
-        capabilities: SKILLS,
     },
 ];
 
@@ -999,17 +953,7 @@ const fn background(id: &'static str) -> CapabilitySpec {
     }
 }
 
-const fn middleware(id: &'static str) -> CapabilitySpec {
-    CapabilitySpec {
-        id,
-        kind: CapabilityKind::TurnMiddleware,
-        effect: None,
-        resources: &[],
-        requirements: &[],
-    }
-}
-
-/// Build the eight trusted Wave 1 registrations without a production adapter.
+/// Build the seven trusted Wave 1 registrations without a production adapter.
 ///
 /// This preserves the metadata-only bootstrap path, but every action fails
 /// closed until the host uses [`registrations_with_host_port`] with a real
@@ -1024,11 +968,11 @@ pub fn unconfigured_host_port() -> Arc<dyn Wave1HostPort> {
     Arc::new(UnconfiguredWave1HostPort)
 }
 
-/// Build the eight trusted Wave 1 registrations with the host-owned action port.
+/// Build the seven trusted Wave 1 registrations with the host-owned action port.
 ///
 /// The host port is captured by each action handler as an explicit dependency.
 /// This keeps the registration crate independent of concrete Knowledge,
-/// Skills, Research, memory, Gateway, and application service types while
+/// Research, memory, Gateway, and application service types while
 /// making the runtime path actually executable when the host supplies an
 /// implementation.
 pub fn registrations_with_host_port(
@@ -1116,7 +1060,6 @@ pub fn action_id(capability_id: &str) -> Option<ActionId> {
         MEMORY_COMPANION_WRITE => MEMORY_COMPANION_WRITE_ACTION,
         MEMORY_COMPANION_MERGE => MEMORY_COMPANION_MERGE_ACTION,
         MEMORY_COMPANION_EVOLVE => MEMORY_COMPANION_EVOLVE_ACTION,
-        SKILL_INVOKE => SKILL_INVOKE_ACTION,
         _ => return None,
     };
     Some(ActionId::from(action))
@@ -1169,7 +1112,6 @@ pub fn canonical_capability_ids_for_family(family: &str) -> BTreeSet<CapabilityI
             MEMORY_COMPANION_RECALL,
         ],
         "research.core" => &[WEB_SEARCH, WEB_FETCH, CITATION_RENDER],
-        "skill.instructions" => &[SKILL_CATALOG, SKILL_DESCRIBE],
         "web.fetch" => &[WEB_FETCH],
         "web.search" => &[WEB_SEARCH],
         _ => &[],
@@ -1353,10 +1295,6 @@ pub fn companion_memory_registration() -> Result<PluginRegistration, String> {
     registration_for_package(COMPANION_MEMORY_PACKAGE_ID)
 }
 
-pub fn skills_registration() -> Result<PluginRegistration, String> {
-    registration_for_package(SKILLS_PACKAGE_ID)
-}
-
 fn registration_for_package(package_id: &str) -> Result<PluginRegistration, String> {
     let spec = PACKAGES
         .iter()
@@ -1398,7 +1336,7 @@ fn registration_for(
         .into(),
         contributions: PackageContributions {
             capabilities,
-            skills: Vec::<SkillDefinition>::new(),
+            skills: Vec::new(),
             mcp_tools: Vec::new(),
             role_contracts: Vec::new(),
             role_providers: Vec::new(),
@@ -1950,15 +1888,6 @@ fn operation_from_input(
                 content: required("content")?,
             },
         )),
-        SKILL_INVOKE => Ok(Wave1CapabilityOperation::SkillInvoke(
-            Wave1SkillInvokeRequest {
-                skill_id: required("skill_id")?,
-                arguments: input
-                    .get("arguments")
-                    .cloned()
-                    .map(StrictJsonValue),
-            },
-        )),
         _ => Err(KernelError::CapabilityExecution {
             reason: format!("{id} does not expose an action host operation"),
         }),
@@ -2191,15 +2120,6 @@ fn tool_input_schema(capability_id: &str) -> Value {
             },
             "required": ["memory_id", "content"]
         }),
-        SKILL_INVOKE => json!({
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "skill_id": {"type": "string", "minLength": 1, "maxLength": 256},
-                "arguments": {"type": "object"}
-            },
-            "required": ["skill_id"]
-        }),
         _ => object_schema(false),
     }
 }
@@ -2219,7 +2139,7 @@ fn validate_action_input(capability_id: &str, input: &Value) -> Result<(), Kerne
         }
         match key.as_str() {
             "query" | "url" | "handle" | "base" | "rel_path" | "content" | "title"
-            | "text" | "skill_id" | "kind" | "merged_content" | "memory_id" => {
+            | "text" | "kind" | "merged_content" | "memory_id" => {
                 let Some(value) = value.as_str() else {
                     return Err(KernelError::CapabilityExecution {
                         reason: format!("{capability_id} field `{key}` must be a string"),
@@ -2241,7 +2161,6 @@ fn validate_action_input(capability_id: &str, input: &Value) -> Result<(), Kerne
                     (_, "rel_path") => 1_024,
                     (_, "base") => 256,
                     (_, "handle" | "title") => 512,
-                    (_, "skill_id") => 256,
                     (_, "memory_id") => 128,
                     (_, "kind") => 16,
                     (KNOWLEDGE_EMBEDDING | KNOWLEDGE_RERANK, "text" | "query") => 16_384,
@@ -2415,7 +2334,6 @@ fn validate_action_input(capability_id: &str, input: &Value) -> Result<(), Kerne
             require_string(input, capability_id, "memory_id")?;
             require_string(input, capability_id, "content")?;
         }
-        SKILL_INVOKE => require_string(input, capability_id, "skill_id")?,
         _ => {}
     }
     Ok(())
@@ -2465,7 +2383,6 @@ fn allowed_input_key(capability_id: &str, key: &str) -> bool {
             matches!(key, "memory_ids" | "merged_content" | "kind")
         }
         MEMORY_COMPANION_EVOLVE => matches!(key, "memory_id" | "content"),
-        SKILL_INVOKE => matches!(key, "skill_id" | "arguments"),
         _ => false,
     }
 }
@@ -2661,22 +2578,6 @@ fn capability_display(capability_id: &str) -> LocalizedMetadata {
             "Companion memory evolution",
             "Submit bounded evolution material for companion memory.",
         ),
-        SKILL_CATALOG => (
-            "Skill catalog",
-            "Expose the selected Skill catalog as Agent context.",
-        ),
-        SKILL_DESCRIBE => (
-            "Skill description",
-            "Expose selected Skill instructions and metadata as context.",
-        ),
-        SKILL_INVOKE => (
-            "Skill invocation",
-            "Invoke an explicitly selected Skill through the capability boundary.",
-        ),
-        SKILL_HOOKS => (
-            "Skill turn hooks",
-            "Apply selected Skill turn middleware.",
-        ),
         _ => ("Wave 1 capability", "Bundled Wave 1 capability."),
     };
     let mut metadata = display(name, description);
@@ -2824,7 +2725,6 @@ mod tests {
             (KNOWLEDGE_PACKAGE_ID, knowledge_registration()),
             (PROJECT_MEMORY_PACKAGE_ID, project_memory_registration()),
             (COMPANION_MEMORY_PACKAGE_ID, companion_memory_registration()),
-            (SKILLS_PACKAGE_ID, skills_registration()),
         ] {
             let registration = registration.expect("named Wave 1 registration");
             let manifest = &registration.metadata.manifest.payload;
@@ -2838,6 +2738,7 @@ mod tests {
                 spec.capabilities.iter().map(|capability| capability.id).collect(),
             );
         }
+        assert!(registration_for_package("nomifun.skills").is_err());
         assert!(registration_for_package("nomifun.unknown-package").is_err());
     }
 
@@ -2879,6 +2780,17 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(capabilities, capability_ids());
         assert_eq!(capabilities.len(), CAPABILITY_IDS.len());
+        for retired in [
+            concat!("skill", ".", "catalog"),
+            concat!("skill", ".", "describe"),
+            concat!("skill", ".", "invoke"),
+            concat!("skill", ".", "hooks"),
+        ] {
+            assert!(
+                !capabilities.contains(&CapabilityId::from(retired)),
+                "Skill infrastructure must come from frozen bindings, not {retired}"
+            );
+        }
         for registration in &registrations {
             assert!(
                 registration
@@ -3150,7 +3062,6 @@ mod tests {
                 MEMORY_COMPANION_EVOLVE,
                 json!({"memory_id": "memory-1", "content": "evolved entry"}),
             ),
-            (SKILL_INVOKE, json!({"skill_id": "skill.example"})),
         ];
         let mut operation_ids = BTreeSet::new();
 
@@ -3278,7 +3189,6 @@ mod tests {
                 "merged_content": "entry", "kind": "preference"
             })),
             (MEMORY_COMPANION_EVOLVE, json!({"memory_id": "memory-1", "content": "entry"})),
-            (SKILL_INVOKE, json!({"skill_id": "skill.example"})),
         ];
         for (capability_id, input) in cases {
             let action = action_id(capability_id).unwrap();

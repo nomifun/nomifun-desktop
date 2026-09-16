@@ -1,10 +1,8 @@
 //! Dynamic resource reads on the shared Session owner, not a new tool/router
-//! authority. Compiled resource capability, bound server and live model turn
-//! must all match before the retained task may contact the MCP owner.
+//! authority. Frozen typed server bindings and the live model turn must all
+//! match before the retained task may contact the MCP owner.
 use super::*;
-use nomifun_agent_contracts::{
-    CapabilityKind, ContributionSourceKind, PluginSourceKind, digest_payload,
-};
+use nomifun_agent_contracts::digest_payload;
 use nomifun_engine_core::{
     EngineResourceImageRead, EngineResourceQuery, EngineResourceRead, EngineToolResult,
 };
@@ -24,14 +22,12 @@ impl EngineKernelSession {
     }
 
     pub fn mcp_resources_selected(&self) -> bool {
-        self.constraints.allows_capability("mcp.resource")
+        !self.constraints.restricted()
             && self
                 .compiled
-                .content()
-                .enabled_capabilities
+                .resource_bindings()
                 .iter()
-
-                .any(|entry| entry.capability.id.as_ref() == "mcp.resource")
+                .any(|binding| binding.resource_kind.as_ref() == "mcp_server")
     }
 
     pub async fn join_resource_reads(&self) -> Result<(), AppError> {
@@ -146,37 +142,23 @@ impl EngineKernelSession {
                 "resource request differs from its selected Session",
             ));
         }
-        let id = nomifun_agent_contracts::CapabilityId::from("mcp.resource");
         let active = self.active.snapshot().map_err(failure)?;
         if active.resolved_snapshot_ref != *self.compiled.snapshot_ref()
             || active.generation != generation
-            || !active.active.contains(&id)
         {
-            return Err(failure(
-                "mcp.resource must be active in the exact generation",
-            ));
+            return Err(failure("MCP resource binding is outside the exact generation"));
         }
-        let selected = self
-            .compiled
-            .content()
-            .enabled_capabilities
-            .iter()
-
-            .find(|entry| entry.capability.id == id)
-            .ok_or_else(|| failure("resource capability is not selected"))?;
         let registry = self.kernel.snapshot().map_err(failure)?;
         if registry.generation != self.compiled.registry_generation
             || registry.registry_digest != self.compiled.registry_digest
-            || selected.contribution_lock.source_kind != ContributionSourceKind::PlatformBuiltin
-            || selected.resolved_source.source_kind != PluginSourceKind::Bundled
-            || registry
-                .capability(&id)
-                .is_none_or(|entry| entry.manifest.kind != CapabilityKind::ResourceProvider)
         {
-            return Err(failure(
-                "resource capability differs from its bundled registry",
-            ));
+            return Err(failure("MCP resource binding differs from its frozen registry"));
         }
+        super::super::nomi_core_mcp_catalog::validate_resources(
+            &self.compiled,
+            &registry,
+            &self.principal,
+        )?;
         let resource = select_resource_server(
             &self.compiled,
             &self.principal,
@@ -217,7 +199,7 @@ impl EngineKernelSession {
                 owner.ensure_hosted_effects_settled().await?;
                 owner.wave2.ensure_mcp_settled(&owner.principal.principal_id, owner.session_id.as_ref()).await?;
                 let dispatch = json!({"event":"host_resource_dispatch","operation_id":operation,"call_id":call_id,
-                    "capability_id":"mcp.resource","resource_binding_id":resource.binding_id,
+                    "resource_kind":"mcp_server","resource_binding_id":resource.binding_id,
                     "request_sha256":request_digest,"model_operation_id":causality.operation_id,"causality":causality});
                 if let Err(error) = journal.append(dispatch.to_string(), None, super::super::engine_journal::EngineJournalWrite::Progress).await {
                     owner.resource_settlement_failed.store(true, Ordering::Release);
@@ -395,6 +377,12 @@ pub(crate) fn select_resource_server<'a>(
         .iter()
         .map(|binding| binding.binding_id.clone())
         .collect::<std::collections::BTreeSet<_>>();
+    let tool_servers = compiled
+        .content()
+        .mcp_tool_locks
+        .iter()
+        .map(|lock| lock.server_id.as_ref())
+        .collect::<std::collections::BTreeSet<_>>();
     if bindings.is_empty()
         || bindings.len() > super::super::nomi_core_mcp_catalog::MAX_SESSION_SERVERS
         || resource_server_ids(compiled).len() != bindings.len()
@@ -404,17 +392,23 @@ pub(crate) fn select_resource_server<'a>(
                 || binding.resource_id.as_ref().len() > 256
                 || binding.resource_id.as_ref().chars().any(char::is_control)
                 || binding.owner_id != principal.principal_id
-                || !binding.operations.contains("connect")
-                || !binding.operations.contains("read")
+                || binding.operations
+                    != std::collections::BTreeSet::from_iter(
+                        ["connect", "read"]
+                            .into_iter()
+                            .chain(
+                                tool_servers
+                                    .contains(binding.resource_id.as_ref())
+                                    .then_some("invoke"),
+                            )
+                            .map(str::to_owned),
+                    )
                 || binding.connection_config_ref.is_none()
                 || !binding.typed_parameters.is_empty()
         })
-        || compiled
-            .policy(&nomifun_agent_contracts::CapabilityId::from("mcp.resource"))
-            .is_none_or(|policy| policy.resource_binding_ids != ids)
     {
         return Err(failure(
-            "resource servers differ from the exact compiled read policy",
+            "resource servers differ from the exact frozen bindings",
         ));
     }
     match server_id {

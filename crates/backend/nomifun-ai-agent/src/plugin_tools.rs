@@ -1179,8 +1179,25 @@ impl NomiPluginToolSession {
     pub(crate) fn has_hosted_mcp_resources(&self) -> bool { self.mcp_resources.is_some() }
 
     fn with_mcp_resources(mut self, resources: crate::nomi_resources::NomiMcpResources) -> Result<Self, NomiPluginToolError> {
-        if self.mcp_resources.is_some() || !self.execution_constraints.allows_capability("mcp.resource") {
-            return Err(NomiPluginToolError::Contract("MCP resource adapter is already installed or outside the execution ceiling".into()));
+        let bindings = self.target_resource_bindings.iter()
+            .filter(|binding| binding.resource_kind.as_ref() == "mcp_server")
+            .collect::<Vec<_>>();
+        let unique_bindings = bindings.iter().map(|binding| &binding.binding_id).collect::<BTreeSet<_>>();
+        let unique_servers = bindings.iter().map(|binding| &binding.resource_id).collect::<BTreeSet<_>>();
+        if self.mcp_resources.is_some()
+            || self.execution_constraints.restricted()
+            || bindings.is_empty()
+            || unique_bindings.len() != bindings.len()
+            || unique_servers.len() != bindings.len()
+            || bindings.iter().any(|binding| {
+                binding.resource_id.as_ref().is_empty()
+                    || !binding.operations.contains("connect")
+                    || !binding.operations.contains("read")
+                    || binding.connection_config_ref.is_none()
+                    || !binding.typed_parameters.is_empty()
+            })
+        {
+            return Err(NomiPluginToolError::Contract("MCP resource adapter requires exact frozen server bindings and an unrestricted Session".into()));
         }
         self.mcp_resources = Some(resources);
         Ok(self)
@@ -1596,9 +1613,6 @@ impl NomiPluginToolSession {
         capability_id: &str,
         deferred: bool,
     ) -> Vec<String> {
-        if capability_id == "mcp.resource" && self.mcp_resources.as_ref().is_some_and(|resources| resources.deferred == deferred) {
-            return crate::nomi_resources::NAMES.map(str::to_owned).to_vec();
-    }
         if self.discovery_policy.as_ref().is_some_and(|binding| binding.id().as_ref() == capability_id) {
             return vec!["ToolSearch".into()];
         }
@@ -1955,6 +1969,15 @@ impl KernelNomiPluginToolSession {
             &agent_session_id,
             &state_scope_key,
         )?;
+        if compiled.content().enabled_capabilities.iter().any(|capability| {
+            nomifun_mcp::is_retired_mcp_authoring_capability(
+                capability.capability.id.as_ref(),
+            )
+        }) {
+            return Err(NomiPluginToolError::Contract(
+                "retired broad MCP capabilities cannot enter a Runtime Session".into(),
+            ));
+        }
         let registry = kernel.snapshot()?;
 
         let active = Arc::new(SessionCapabilityState::new(&compiled));

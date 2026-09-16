@@ -179,8 +179,9 @@ impl NomiCoreResourceBindingResolverRegistry {
         }))
     }
 
-    /// Legacy single-resource resolution. Multi-server admission additionally
-    /// requires the saved Snapshot locks, supplied by resolve_for_saved_binding.
+    /// Single-resource resolution for capability-owned resources and explicit
+    /// resource-only MCP bindings. Per-tool MCP invoke authority additionally
+    /// requires saved Snapshot locks, supplied by `resolve_for_saved_binding`.
     pub(crate) async fn resolve(
         &self,
         owner_id: &str,
@@ -203,8 +204,54 @@ impl NomiCoreResourceBindingResolverRegistry {
             )));
         }
 
-        let required = required_operations(selected_capability_ids);
-        let resource_provider = selected_capability_ids.contains("mcp.resource");
+        if selected_capability_ids
+            .iter()
+            .any(|id| nomifun_mcp::is_retired_mcp_authoring_capability(id))
+        {
+            return Err(ResourceSelectionResolutionError::new(
+                "MCP_LEGACY_CAPABILITY_RETIRED",
+                "MCP servers are bound resources and tools require namespaced per-tool Actions",
+                Value::Null,
+            ));
+        }
+        let mcp_lock_ids = mcp_locks
+            .iter()
+            .map(|lock| lock.capability_id.as_ref())
+            .collect::<BTreeSet<_>>();
+        let selected_mcp_tool_ids = selected_capability_ids
+            .iter()
+            .map(String::as_str)
+            .filter(|id| super::nomi_core_mcp_catalog::is_product_tool(id))
+            .collect::<BTreeSet<_>>();
+        if mcp_lock_ids.len() != mcp_locks.len()
+            || selected_mcp_tool_ids != mcp_lock_ids
+            || mcp_locks.iter().any(|lock| {
+                nomifun_api_types::McpServerId::parse(lock.server_id.as_ref().to_owned()).is_err()
+                    || !super::nomi_core_mcp_catalog::is_product_tool(lock.capability_id.as_ref())
+                    || lock.canonical_tool_key.as_ref() != lock.capability_id.as_ref()
+                    || lock.materialization_revision
+                        != nomifun_mcp::MCP_TOOL_MATERIALIZATION_REVISION
+                    || !selected_capability_ids.contains(lock.capability_id.as_ref())
+            })
+        {
+            return Err(ResourceSelectionResolutionError::new(
+                "MCP_RESOURCE_SELECTION_MISMATCH",
+                "MCP Snapshot locks must identify selected namespaced per-tool Actions",
+                Value::Null,
+            ));
+        }
+
+        let mut required = required_operations(selected_capability_ids);
+        let selected_mcp_servers = selections
+            .iter()
+            .filter(|selection| selection.resource_kind == "mcp_server")
+            .count();
+        if selected_mcp_servers > 0 {
+            required
+                .entry("mcp_server".to_owned())
+                .or_default()
+                .extend(["connect".to_owned(), "read".to_owned()]);
+        }
         let mut selections_by_kind = BTreeMap::new();
         let mut selected_pairs = BTreeSet::new();
         for selection in selections {
@@ -218,7 +265,7 @@ impl NomiCoreResourceBindingResolverRegistry {
                     selection.resource_kind.clone(),
                     selection.resource_id.clone(),
                 )
-                .is_some() && !(selection.resource_kind == "mcp_server" && (!mcp_locks.is_empty() || resource_provider))
+                .is_some() && selection.resource_kind != "mcp_server"
             {
                 return Err(ResourceSelectionResolutionError::invalid(format!(
                     "resource kind {} was selected more than once",
@@ -233,22 +280,14 @@ impl NomiCoreResourceBindingResolverRegistry {
                 ));
             }
         }
-        if !mcp_locks.is_empty() || resource_provider {
+        if !mcp_locks.is_empty() || selected_mcp_servers > 0 {
             let expected = mcp_locks.iter().map(|lock| lock.server_id.as_ref()).collect::<BTreeSet<_>>();
             let actual = selections.iter().filter(|selection| selection.resource_kind == "mcp_server")
                 .map(|selection| selection.resource_id.as_str()).collect::<BTreeSet<_>>();
-            if (!resource_provider && actual != expected)
-                || !expected.is_subset(&actual)
+            if !expected.is_subset(&actual)
                 || actual.len() > super::nomi_core_mcp_catalog::MAX_SESSION_SERVERS {
                 return Err(ResourceSelectionResolutionError::new("MCP_RESOURCE_SELECTION_MISMATCH",
-                    "MCP selection must contain every frozen tool server; extra servers require mcp.resource and the total is bounded to 16", Value::Null));
-            }
-            if actual.len() > 1 && selected_capability_ids.iter().any(|id|
-                !super::nomi_core_mcp_catalog::is_product_tool(id)
-                && !(resource_provider && matches!(id.as_str(), "mcp.resource" | "mcp.connect" | "mcp.oauth"))
-                && required_operations(&BTreeSet::from([id.clone()])).contains_key("mcp_server")) {
-                return Err(ResourceSelectionResolutionError::invalid(
-                    "multiple MCP servers cannot be mixed with an unmapped resource consumer"));
+                    "MCP selection must contain every frozen tool server and the total is bounded to 16", Value::Null));
             }
             // This map is only for cross-kind relationship checks. Never
             // expose an arbitrary last MCP server as the singular selection.
@@ -301,8 +340,17 @@ impl NomiCoreResourceBindingResolverRegistry {
                     && lock.server_id.as_ref() == resource_id.as_str())).cloned().collect::<BTreeSet<_>>();
             // Resource-only members must not inherit invoke from tools frozen
             // to another server, even though per-tool policy also filters it.
-            let operations = required_operations(&resource_capabilities)
+            let mut operations = required_operations(&resource_capabilities)
                 .get(kind).cloned().unwrap_or_default();
+            if kind == "mcp_server" {
+                operations.extend(["connect".to_owned(), "read".to_owned()]);
+                if mcp_locks
+                    .iter()
+                    .any(|lock| lock.server_id.as_ref() == resource_id.as_str())
+                {
+                    operations.insert("invoke".to_owned());
+                }
+            }
             let resolved = authority
                 .resolve(ResourceAuthorityRequest {
                     owner_id: owner_id.to_owned(),
@@ -475,16 +523,10 @@ fn required_operations(
             "memory.companion.recall" => grant("companion_memory", "read"),
             "memory.companion.write" | "memory.companion.merge" | "memory.companion.evolve"
             | "companion.learn" | "companion.evolve" => grant("companion_memory", "write"),
-            id if id == "mcp.tool_proxy" || super::nomi_core_mcp_catalog::is_product_tool(id) => {
+            id if super::nomi_core_mcp_catalog::is_product_tool(id) => {
                 grant("mcp_server", "connect");
                 grant("mcp_server", "invoke");
             }
-            "mcp.resource" => {
-                grant("mcp_server", "connect");
-                grant("mcp_server", "read");
-            }
-            "connector.data.read" => grant("mcp_server", "read"),
-            "connector.data.write" => grant("mcp_server", "invoke"),
             "companion.persona" | "companion.roster" => grant("companion", "read"),
             "channel.receive" => grant("channel", "receive"),
             "channel.reply" => grant("channel", "reply"),
@@ -1005,6 +1047,9 @@ impl ProductResourceAuthority {
 mod tests {
     use super::*;
 
+    const MCP_SERVER_A: &str = "0195f7c0-7b6a-7c21-8f4a-1234567890ab";
+    const MCP_SERVER_B: &str = "0195f7c0-7b6a-7c21-8f4a-1234567890ac";
+
     struct RecordingAuthority {
         allowed: BTreeSet<String>,
     }
@@ -1164,15 +1209,68 @@ mod tests {
         assert_eq!(error.code(), "RESOURCE_SELECTION_RELATIONSHIP_MISMATCH");
     }
 
+    #[tokio::test]
+    async fn mcp_bindings_derive_read_and_exact_per_tool_invoke_without_legacy_capabilities() {
+        let server_id = nomifun_api_types::McpServerId::parse(MCP_SERVER_A).unwrap();
+        let capability_id =
+            nomifun_mcp::canonical_mcp_tool_capability_id(&server_id, "lookup").unwrap();
+        let lock = ResolvedMcpToolLock {
+            server_id: nomifun_agent_contracts::McpServerId::from(MCP_SERVER_A),
+            canonical_tool_key: capability_id.clone().into(),
+            capability_id: capability_id.clone().into(),
+            schema_digest: "a".repeat(64).into(),
+            materialization_revision: nomifun_mcp::MCP_TOOL_MATERIALIZATION_REVISION,
+        };
+        let resolver = registry("mcp_server", &["connect", "invoke", "read"]);
+        let selections = [MCP_SERVER_A, MCP_SERVER_B].map(|resource_id| {
+            AgentResourceSelectionDto {
+                resource_kind: "mcp_server".into(),
+                resource_id: resource_id.into(),
+            }
+        });
+        let bindings = resolver
+            .resolve_selected(
+                "owner-1",
+                &selections,
+                &BTreeSet::from([capability_id]),
+                &[lock],
+            )
+            .await
+            .unwrap();
+        let by_server = bindings
+            .iter()
+            .map(|binding| (binding.resource_id.as_ref(), &binding.operations))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            by_server[MCP_SERVER_A],
+            &BTreeSet::from(["connect".into(), "invoke".into(), "read".into()])
+        );
+        assert_eq!(
+            by_server[MCP_SERVER_B],
+            &BTreeSet::from(["connect".into(), "read".into()])
+        );
+
+        for legacy in nomifun_mcp::RETIRED_MCP_AUTHORING_CAPABILITY_IDS {
+            let error = resolver
+                .resolve("owner-1", &[], &BTreeSet::from([legacy.to_owned()]))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), "MCP_LEGACY_CAPABILITY_RETIRED");
+        }
+    }
+
     #[test]
     fn all_published_resource_kinds_have_capability_operation_derivation() {
+        let server_id = nomifun_api_types::McpServerId::parse(MCP_SERVER_A).unwrap();
+        let mcp_tool =
+            nomifun_mcp::canonical_mcp_tool_capability_id(&server_id, "lookup").unwrap();
         let capabilities = BTreeSet::from([
             "fs.read".into(),
             "knowledge.search".into(),
             "memory.project.read".into(),
             "process.exec".into(),
             "terminal.pty".into(),
-            "mcp.tool_proxy".into(),
+            mcp_tool,
             "companion.persona".into(),
             "memory.companion.recall".into(),
             "channel.receive".into(),

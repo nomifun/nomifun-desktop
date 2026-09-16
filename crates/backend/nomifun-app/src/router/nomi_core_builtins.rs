@@ -165,6 +165,12 @@ pub(crate) async fn build(services: &AppServices) -> anyhow::Result<NomiCoreBuil
     }
     let mut wave2 = nomifun_agent_domain_wave2::registrations_with_role_host_ports(wave2_ports)
     .map_err(anyhow::Error::msg)?;
+    // MCP connection/OAuth/resource lifecycle is platform-managed, while
+    // every callable remote tool is published below as its own frozen,
+    // namespaced Action. Never republish the retired broad MCP/connector
+    // capability package even while older domain inventory is being removed.
+    remove_retired_extension_packages(&mut wave2);
+    remove_retired_extension_packages(&mut registrations);
     #[cfg(feature="browser-use")]
     if let Some(runtime)=services.headless_render.as_ref() {
         if let Some(browser)=wave2.iter_mut().find(|registration|registration.metadata.manifest.payload.package_id.as_ref()==nomifun_agent_domain_wave2::BROWSER_PACKAGE_ID) {
@@ -344,6 +350,64 @@ fn replace_package_registrations(
     current.extend(replacements);
 }
 
+fn remove_retired_extension_packages(registrations: &mut Vec<PluginRegistration>) {
+    registrations.retain(|registration| {
+        !matches!(
+            registration
+                .metadata
+                .manifest
+                .payload
+                .package_id
+                .as_ref(),
+            "nomifun.skills" | "nomifun.mcp-connectors"
+        )
+    });
+}
+
+#[cfg(test)]
+mod extension_cutover_tests {
+    use super::*;
+
+    #[test]
+    fn production_composition_removes_legacy_skill_and_broad_mcp_packages() {
+        let mut registrations = nomifun_agent_domain_support::registrations(
+            nomifun_agent_domain_support::c7_package_specs(),
+        )
+        .unwrap();
+        remove_retired_extension_packages(&mut registrations);
+
+        let packages = registrations
+            .iter()
+            .map(|registration| registration.metadata.manifest.payload.package_id.as_ref())
+            .collect::<BTreeSet<_>>();
+        assert!(!packages.contains("nomifun.skills"));
+        assert!(!packages.contains("nomifun.mcp-connectors"));
+        let capabilities = registrations
+            .iter()
+            .flat_map(|registration| {
+                &registration
+                    .metadata
+                    .manifest
+                    .payload
+                    .contributions
+                    .capabilities
+            })
+            .map(|capability| capability.id.as_ref())
+            .collect::<BTreeSet<_>>();
+        for retired in [
+            concat!("skill", ".", "catalog"),
+            concat!("skill", ".", "describe"),
+            concat!("skill", ".", "invoke"),
+            concat!("skill", ".", "hooks"),
+        ] {
+            assert!(!capabilities.contains(retired));
+        }
+        for retired in nomifun_mcp::RETIRED_MCP_AUTHORING_CAPABILITY_IDS {
+            assert!(!capabilities.contains(retired));
+        }
+    }
+}
+
 struct NomiWave1SchemaResolver;
 
 #[async_trait::async_trait]
@@ -431,9 +495,9 @@ impl NomiPlatformBuiltinLifecycleInvoker for NomiCoreLifecycleInvoker {
                 .ok_or_else(|| "Nomi Robot lifecycle owner is unavailable".to_owned())?
                 .activate_lifecycle(request)
                 .await,
-            super::nomi_core_wave2::FS_WATCH => Ok(StrictJsonValue(
+            "workspace.files" => Ok(StrictJsonValue(
                 serde_json::json!({
-                    "capability_id": super::nomi_core_wave2::FS_WATCH,
+                    "capability_id": "workspace.files",
                     "state": "active"
                 }),
             )),
@@ -459,9 +523,7 @@ impl NomiPlatformBuiltinLifecycleInvoker for NomiCoreLifecycleInvoker {
                 .lifecycle_context_contributor(&request)
                 .await;
         }
-        if request.capability.capability.id.as_ref()
-            != super::nomi_core_wave2::FS_WATCH
-        {
+        if request.capability.capability.id.as_ref() != "workspace.files" {
             return Ok(None);
         }
         let workspace = request
@@ -470,7 +532,7 @@ impl NomiPlatformBuiltinLifecycleInvoker for NomiCoreLifecycleInvoker {
             .find(|binding| binding.resource_kind.as_ref() == "workspace")
             .and_then(|binding| binding.typed_parameters.get("workspace_root"))
             .ok_or_else(|| {
-                "fs.watch has no server-resolved workspace root".to_owned()
+                "workspace.files watch context has no server-resolved workspace root".to_owned()
             })?;
         super::nomi_core_wave2::NomiWorkspaceWatchContext::start(workspace)
             .map(|contributor| {

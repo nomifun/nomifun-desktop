@@ -138,7 +138,7 @@ async fn installed_discovery_is_selectable_and_saved_provider_is_used_without_fa
             id: CAPABILITY_ID.into(),
             version: "1.0.0".into(),
         },
-        action_allowlist: BTreeSet::new(),
+        action_allowlist: BTreeSet::from([discovery::ACTION_ID.to_owned()]),
     }];
     let mut frozen_plans = Vec::new();
     for choice in choices {
@@ -181,7 +181,7 @@ async fn installed_discovery_is_selectable_and_saved_provider_is_used_without_fa
                 id: "example.discovery".into(),
                 version: "1.0.0".into(),
             },
-            action_allowlist: BTreeSet::new(),
+            action_allowlist: BTreeSet::from([discovery::ACTION_ID.to_owned()]),
         });
     let error = control
         .save_revision(

@@ -11,7 +11,7 @@ use nomifun_agent_contracts::{
     ConnectionConfigRef, McpToolKey, PrincipalRef, ResolvedMcpToolLock, StrictJsonValue,
     TypedResourceBinding, digest_payload,
 };
-use nomifun_agent_domain_wave2::{Wave2HostContext, Wave2HostPortError};
+use nomifun_agent_domain_wave2::Wave2HostPortError;
 use nomifun_common::AppError;
 use nomifun_db::IMcpServerRepository;
 use nomifun_mcp::{McpOwner, McpServer, OAuthMcpCredentialAuthority};
@@ -36,13 +36,20 @@ pub(crate) fn canonical_tool_key(
     server_id: &str,
     remote_name: &str,
 ) -> Result<McpToolKey, Wave2HostPortError> {
-    let digest = digest_payload(&(server_id, remote_name)).map_err(|_| {
+    let server_id = nomifun_api_types::McpServerId::parse(server_id.to_owned()).map_err(|_| {
         error(
             "MCP_BINDING_INVALID",
-            "MCP identity cannot be canonicalized",
+            "MCP server identity is not a canonical UUIDv7",
         )
     })?;
-    Ok(format!("nomi.mcp.v1.{}", digest.as_ref()).into())
+    nomifun_mcp::canonical_mcp_tool_capability_id(&server_id, remote_name)
+        .map(McpToolKey::from)
+        .map_err(|_| {
+            error(
+                "MCP_BINDING_INVALID",
+                "MCP identity cannot be canonicalized",
+            )
+        })
 }
 
 pub(crate) struct NomiCoreMcpRuntimeBindingSource {
@@ -326,18 +333,6 @@ pub(crate) struct McpExecutionContext {
     resource_bindings: Vec<TypedResourceBinding>,
     mcp_tool_lock: Option<ResolvedMcpToolLock>,
 }
-impl From<&Wave2HostContext> for McpExecutionContext {
-    fn from(context: &Wave2HostContext) -> Self {
-        Self {
-            principal: context.principal.clone(),
-            agent_session_id: context.agent_session_id.clone(),
-            operation_id: context.operation_id.clone(),
-            capability_id: context.capability_id.clone(),
-            resource_bindings: context.resource_bindings.clone(),
-            mcp_tool_lock: context.mcp_tool_lock.clone(),
-        }
-    }
-}
 impl From<nomifun_agent_kernel::CapabilityInvocationContext> for McpExecutionContext {
     fn from(context: nomifun_agent_kernel::CapabilityInvocationContext) -> Self {
         Self {
@@ -352,8 +347,9 @@ impl From<nomifun_agent_kernel::CapabilityInvocationContext> for McpExecutionCon
 }
 
 impl NomiCoreMcpHost {
-    /// Called only after the shared Session host checks the active bundled
-    /// mcp.resource capability and its exact compiled binding policy.
+    /// Called only after the shared Session host checks the exact frozen
+    /// `mcp_server` binding. Resource reads are binding-derived and never
+    /// depend on an Agent-authorable connection/resource capability.
     pub(crate) async fn resource(
         &self,
         principal: PrincipalRef,
@@ -390,7 +386,7 @@ impl NomiCoreMcpHost {
                 &principal.principal_id,
                 session.as_ref(),
                 operation_id.as_ref(),
-                "mcp.resource",
+                super::mcp_effect_receipts::MCP_SERVER_RESOURCE_EFFECT,
             )
             .await
         {
@@ -479,11 +475,10 @@ impl NomiCoreMcpHost {
             .as_ref()
             .filter(|lock| {
                 lock.capability_id == context.capability_id
-                    && (context.capability_id.as_ref() == "mcp.tool_proxy"
-                        || (super::nomi_core_mcp_catalog::is_product_tool(
-                            context.capability_id.as_ref(),
-                        ) && context.capability_id.as_ref()
-                            == lock.canonical_tool_key.as_ref()))
+                    && super::nomi_core_mcp_catalog::is_product_tool(
+                        context.capability_id.as_ref(),
+                    )
+                    && context.capability_id.as_ref() == lock.canonical_tool_key.as_ref()
             })
             .ok_or_else(|| {
                 error(

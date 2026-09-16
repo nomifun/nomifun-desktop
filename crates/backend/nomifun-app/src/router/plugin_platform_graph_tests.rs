@@ -6,7 +6,7 @@ use super::*;
 use crate::router::nomi_core_control_plane::NomiCoreControlPlaneStore;
 use crate::router::nomi_core_session::compile_nomi_plugin_snapshot;
 use nomifun_agent_contracts::{
-    AgentBindingValue, CapabilityConsumption, CapabilityRef,
+    ActionId, AgentBindingValue, CapabilityConsumption, CapabilityRef, ContributionSourceKind,
     ExactRoleContractRef, PresetRevisionRef, PrincipalRef, RoleContractKey, RoleContractManifest,
     RoleMemberContract, RoleMemberRequirement, RoleProviderContribution,
     RoleProviderMemberContribution, RuntimeProfileKind, StrictJsonValue,
@@ -236,7 +236,7 @@ async fn installed_heterogeneous_providers_freeze_private_graphs_across_save_ope
             id: FACADE.into(),
             version: "1.0.0".into(),
         },
-        action_allowlist: BTreeSet::new(),
+        action_allowlist: BTreeSet::from([ACTION.to_owned()]),
     }];
     let preset = draft.preset_id.clone();
     let mut saved_plans = Vec::new();
@@ -272,6 +272,32 @@ async fn installed_heterogeneous_providers_freeze_private_graphs_across_save_ope
                 .collect::<Vec<_>>(),
             vec![FACADE]
         );
+        let facade = frozen
+            .content
+            .enabled_capabilities
+            .iter()
+            .find(|capability| capability.capability.id.as_ref() == FACADE)
+            .unwrap();
+        assert_eq!(
+            facade.contribution_lock.source_kind,
+            ContributionSourceKind::PluginProductActiveRelease
+        );
+        assert_eq!(
+            facade.action_allowlist,
+            BTreeSet::from([ActionId::from(ACTION)])
+        );
+        assert_eq!(
+            facade
+                .actions
+                .iter()
+                .map(|action| action.action_id.as_ref())
+                .collect::<Vec<_>>(),
+            vec![ACTION]
+        );
+        assert!(facade.plugin_product_id.is_some());
+        assert!(facade.active_release.is_some());
+        assert!(facade.active_release_epoch.is_some_and(|epoch| epoch > 0));
+        assert!(facade.catalog_digest.is_some());
         for dependency in frozen
             .content
             .enabled_capabilities
