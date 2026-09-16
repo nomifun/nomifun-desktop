@@ -195,7 +195,7 @@
       "status": "active",
       "depends_on": ["UARC-013", "UARC-014"],
       "lane": "feature-runtime",
-      "write_set": ["crates/backend/nomifun-coding-engine/**", "crates/backend/nomifun-ai-agent/src/coding_runtime.rs", "crates/backend/nomifun-app/src/router/coding_runtime_*.rs"],
+      "write_set": ["crates/backend/nomifun-coding-engine/**", "crates/backend/nomifun-ai-agent/src/coding_runtime.rs", "crates/backend/nomifun-app/src/router/coding_runtime_*.rs", "crates/backend/nomifun-app/src/router/mod.rs"],
       "delete_set": ["Coding family assumptions", "static light/standard/durable profiles", "duplicate private session recovery"],
       "retained_set": ["Compaction", "requirements ledger", "completion evidence", "history", "task continuation", "patch/effect evidence"],
       "ui_surface": [],
