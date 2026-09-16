@@ -10,6 +10,7 @@ import AgentRoleProviderPicker from './AgentRoleProviderPicker';
 import { unavailableCapabilityReferences } from './capabilityGroups';
 import { TEMPLATE_I18N_PATH, editingDocument, type TemplateEditingState } from './model';
 import styles from './AgentSettingsPage.module.css';
+import { AgentEditorActionBar, AgentEditorActionButton } from './AgentEditorActionBar';
 
 type Props = {
   template: OfficialPresetTemplate;
@@ -81,11 +82,11 @@ const OfficialTemplateOverview: React.FC<Props> = ({ template, busy, catalog, on
         <AgentRoleProviderPicker document={document} catalog={catalog} disabled={busy} onChange={setDocument} />
       </div>}
     </div>
-    <footer className={styles.actionBar}>
+    <AgentEditorActionBar>
       <label className={styles.footerName}><span>{t('agentSettings.workbench.customName')}</span><Input value={displayName} maxLength={80} disabled={busy} onChange={setDisplayName} onInput={(event) => setDisplayName((event.target as HTMLInputElement).value)} aria-label={t('agentSettings.workbench.customName')} /></label>
       <div className={styles.templateSaveState}><span className={blocked ? styles.statusWarningDot : styles.statusReadyDot} /><span>{t(blocked ? 'agentSettings.workbench.disabledSave' : 'agentSettings.workbench.readyToSave')}</span></div>
-      <Button type='primary' icon={<Save theme='outline' size={16} />} loading={busy} disabled={busy || blocked || !displayName.trim()} onClick={() => onSave(displayName.trim(), document, t(`agentSettings.template.${path}.description`))}>{t('agentSettings.workbench.saveAsMine')}</Button>
-    </footer>
+      <AgentEditorActionButton icon={<Save theme='outline' size={15} fill='currentColor' />} loading={busy} disabled={busy || blocked || !displayName.trim()} onClick={() => onSave(displayName.trim(), document, t(`agentSettings.template.${path}.description`))}>{t('agentSettings.workbench.saveAsMine')}</AgentEditorActionButton>
+    </AgentEditorActionBar>
   </main>;
 };
 
