@@ -218,14 +218,9 @@ export async function settleCanvasImageMaskEditTask(input: {
         const created = creativeNodeFromHistoricalAsset(
           asset,
           state,
-          input.viewportSize,
-          {
-            position: canvasImageMaskEditResultPosition(
-              state.document.nodes,
-              config
-            ),
-          }
+          input.viewportSize
         );
+        created.position = canvasImageMaskEditResultPosition(state.document.nodes, config, created.size);
         if (created.type !== 'image') {
           throw new Error(
             creativeStudioProductText(

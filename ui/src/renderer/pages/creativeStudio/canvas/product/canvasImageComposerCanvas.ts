@@ -511,11 +511,12 @@ export function reconcileCanvasImageComposeConfig(
 
 export function canvasImageComposeResultPosition(
   nodes: readonly CreativeCanvasNode[],
-  config: ConfigNode
+  config: ConfigNode,
+  size: CreativeSize = CREATIVE_CANVAS_PRODUCT_NODE_SIZES.image
 ): { x: number; y: number } {
   return canvasTaskResultPosition(
     nodes,
     config,
-    CREATIVE_CANVAS_PRODUCT_NODE_SIZES.image
+    size
   );
 }

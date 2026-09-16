@@ -15,6 +15,7 @@ import {
 } from './document';
 import { graphNodeIntersectsRect, normalizeSelectionRect } from './geometry';
 import { validateCanvasConnection } from './graph';
+import { canvasMediaNodeSize } from './mediaNodeSize';
 import type {
   CanvasDocument,
   CanvasHistoryMeta,
@@ -162,6 +163,9 @@ function reconcileRuntimeNode(
   if (!current || current.type !== requested.type) return document;
   const next = {
     ...current,
+    ...((requested.type === 'image' || requested.type === 'video') && requested.data.assetId
+      ? { size: canvasMediaNodeSize(requested.size, current.size) }
+      : {}),
     locked: requested.locked,
     data: structuredClone(requested.data),
   } as typeof current;

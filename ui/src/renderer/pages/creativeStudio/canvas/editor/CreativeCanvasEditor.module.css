@@ -36,7 +36,7 @@
   position: absolute;
   inset: calc(-3px * var(--creative-canvas-inverse-zoom));
   border: calc(2px * var(--creative-canvas-inverse-zoom)) solid var(--creative-canvas-selection-accent);
-  border-radius: 18px;
+  border-radius: 10px;
   background: color-mix(in srgb, var(--creative-canvas-selection-accent) 8%, transparent);
   pointer-events: none;
 }

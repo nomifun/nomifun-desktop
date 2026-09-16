@@ -144,6 +144,8 @@ import CreativeCanvasImageComposer, {
   type CreativeCanvasImageComposerReference,
 } from './CreativeCanvasImageComposer';
 import CreativeCanvasVideoComposer from './CreativeCanvasVideoComposer';
+import { canvasNodeDisplayNames } from './nodeDisplayNames';
+import { canvasMediaNodeSize } from '../core/mediaNodeSize';
 import CreativeCanvasInteractionOverlays, {
   type CreativeCanvasContextMenuState,
 } from './CreativeCanvasInteractionOverlays';
@@ -1154,6 +1156,39 @@ const CreativeCanvasProductRoute: React.FC = () => {
     }) ?? []),
   ])], [canvasState?.document.nodes, selectedCanvasImageReferenceAssetKey]);
   const canvasMediaAssetKey = canvasMediaAssetIds.join('\u0000');
+  const nodeDisplayNames = useMemo(
+    () => canvasNodeDisplayNames(canvasState?.document.nodes ?? [], knownAssetsById, t),
+    [canvasState?.document.nodes, knownAssetsById, t]
+  );
+  const reconcileMediaSize = useCallback((
+    nodeId: string, assetId: string, media: { width: number | null; height: number | null }
+  ) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const node = editor.getState().document.nodes.find((item) => item.id === nodeId);
+    if (!node || (node.type !== 'image' && node.type !== 'video') ||
+        node.data.assetId !== assetId) return;
+    const known = knownAssetsRef.current.get(assetId);
+    if (known && isCreativeAssetDeleted(known)) return;
+    // Prefer full-resolution metadata over a potentially cropped thumbnail.
+    const dimensions = known?.width && known.height ? known
+      : node.type === 'image' && node.data.naturalSize ? node.data.naturalSize : media;
+    const size = canvasMediaNodeSize(dimensions, node.size);
+    if (Math.abs(size.width - node.size.width) < 0.01 &&
+        Math.abs(size.height - node.size.height) < 0.01) return;
+    editor.dispatch(canvasCommands.reconcileRuntimeNode({ ...node, size }));
+  }, []);
+
+  useEffect(() => {
+    const nodes = editorRef.current?.getState().document.nodes ?? [];
+    for (const node of nodes) {
+      if ((node.type !== 'image' && node.type !== 'video') || !node.data.assetId) continue;
+      const asset = knownAssetsById.get(node.data.assetId);
+      if (asset && !isCreativeAssetDeleted(asset) && asset.kind === node.type) {
+        reconcileMediaSize(node.id, asset.id, asset);
+      }
+    }
+  }, [knownAssetsById, canvasMediaAssetKey, projectId, reconcileMediaSize]);
 
   useEffect(() => {
     let active = true;
@@ -4755,6 +4790,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
                   const nodeView = (
                     <CreativeNodeView
                       node={node}
+                      title={nodeDisplayNames.get(node.id)}
+                      onMediaSize={(size) => {
+                        if ((node.type === 'image' || node.type === 'video') && node.data.assetId) {
+                          reconcileMediaSize(node.id, node.data.assetId, size);
+                        }
+                      }}
                       selected={selected}
                       placement="contained"
                       asset={

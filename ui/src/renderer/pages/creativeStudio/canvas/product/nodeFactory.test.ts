@@ -167,10 +167,10 @@ describe('createCreativeCanvasProductNode', () => {
     const oneClientSlot = createCreativeCanvasProductNode('text', empty, VIEWPORT_SIZE, {
       cascadeIndex: 1,
     });
-    expect(centered.position).toEqual({ x: 180, y: 80 });
+    expect(centered.position).toEqual({ x: 190, y: 40 });
     expect(oneClientSlot.position).toEqual({
-      x: 180 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP / 2,
-      y: 80 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP / 2,
+      x: 190 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP / 2,
+      y: 40 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP / 2,
     });
 
     const high = createCreativeCanvasProductNode('image', empty, VIEWPORT_SIZE, {
@@ -188,8 +188,8 @@ describe('createCreativeCanvasProductNode', () => {
     const cascaded = createCreativeCanvasProductNode('text', populated, VIEWPORT_SIZE);
 
     expect(cascaded.position).toEqual({
-      x: 180 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
-      y: 80 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
+      x: 190 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
+      y: 40 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
     });
     expect(cascaded.zIndex).toBe(8);
 
@@ -222,7 +222,7 @@ describe('createCreativeCanvasProductNode', () => {
       createCreativeCanvasProductNode('text', centeredState, VIEWPORT_SIZE, {
         cascadeIndex: 0,
       }).position
-    ).toEqual({ x: -170, y: -120 });
+    ).toEqual({ x: -160, y: -160 });
 
     const userPanned = createInitialCanvasState({
       viewport: { x: 12, y: -8, zoom: 1 },
