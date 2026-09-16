@@ -15,9 +15,20 @@ pub enum CodingEngineEvent {
         binding: EngineBinding,
         turn_operation_id: OperationId,
     },
+    ExecutionBudgetPrepared {
+        context_window_tokens: u32,
+        max_output_tokens: u32,
+        max_model_steps: u16,
+    },
     ContextPrepared {
         dropped_history_messages: usize,
         warnings: Vec<String>,
+    },
+    /// Turn-local mechanisms activated by observed work. This records actual
+    /// execution weight; it never changes the frozen Snapshot or ToolPlan.
+    RuntimeModulesActivated {
+        modules: Vec<crate::CodingRuntimeModule>,
+        reason: crate::CodingRuntimeActivationReason,
     },
     ModelStepStarted {
         step: u16,

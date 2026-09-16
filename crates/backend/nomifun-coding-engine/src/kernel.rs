@@ -1,4 +1,4 @@
-//! Coding compatibility adapter over the shared canonical Kernel tool port.
+//! Nomi adapter over the shared canonical Kernel tool port.
 use crate::{
     CodingEngineError, CodingToolInvocation, CodingToolInvoker, CodingToolPlan, CodingToolResult,
 };
@@ -93,7 +93,7 @@ mod tests {
         RuntimeTarget, UserId, VersionString, digest_payload,
     };
     use nomifun_agent_domain_wave2::{
-        CONTRACT_VERSION, Wave2HostPort, Wave2HostPortError, Wave2HostRequest, action_id,
+        CONTRACT_VERSION, Wave2HostPort, Wave2HostPortError, Wave2HostRequest,
         registrations_with_host_port,
     };
     use nomifun_agent_kernel::{
@@ -162,6 +162,7 @@ mod tests {
         snapshot: Arc<CompiledSnapshot>,
         active: Arc<SessionCapabilityState>,
         principal: PrincipalRef,
+        capability_id: CapabilityId,
         action_id: ActionId,
         binding_id: ResourceBindingId,
         seen: Arc<Mutex<Vec<SeenInvocation>>>,
@@ -188,8 +189,19 @@ mod tests {
             principal_kind: "user".to_owned(),
             principal_id: "coding-owner".to_owned(),
         };
-        let capability_id = CapabilityId::from("fs.read");
-        let action_id = action_id(capability_id.as_ref()).unwrap();
+        let target_modules = materialized
+            .capability(&CapabilityId::from("workspace.files"))
+            .is_some();
+        let capability_id = CapabilityId::from(if target_modules {
+            "workspace.files"
+        } else {
+            "fs.read"
+        });
+        let action_id = ActionId::from(if target_modules {
+            "workspace.files/read"
+        } else {
+            "fs.read.invoke"
+        });
         let binding_id = ResourceBindingId::from("workspace-binding");
         let binding = nomifun_agent_contracts::TypedResourceBinding {
             binding_id: binding_id.clone(),
@@ -208,7 +220,7 @@ mod tests {
             chat_route_records: BTreeMap::new(),
             enabled_capabilities: vec![CapabilitySelection {
                 capability: CapabilityRef {
-                    id: capability_id,
+                    id: capability_id.clone(),
                     version: VersionString::from(CONTRACT_VERSION),
                 },
                 action_allowlist: BTreeSet::from([action_id.clone()]),
@@ -228,7 +240,7 @@ mod tests {
             payload,
             contribution_locks: vec![
                 materialized
-                    .capability(&CapabilityId::from("fs.read"))
+                    .capability(&capability_id)
                     .unwrap()
                     .contribution_lock
                     .clone(),
@@ -276,13 +288,14 @@ mod tests {
             snapshot,
             active,
             principal,
+            capability_id,
             action_id,
             binding_id,
             seen,
         }
     }
 
-    fn read_exposure(action_id: ActionId) -> CodingToolExposure {
+    fn read_exposure(capability_id: CapabilityId, action_id: ActionId) -> CodingToolExposure {
         CodingToolExposure {
             definition: ChatToolDefinition {
                 name: "read_file".to_owned(),
@@ -297,7 +310,7 @@ mod tests {
                 })),
                 deferred: false,
             },
-            capability_id: CapabilityId::from("fs.read"),
+            capability_id,
             action_id,
         }
     }
@@ -316,7 +329,10 @@ mod tests {
             &fixture.snapshot,
             &active,
             &fixture.materialized,
-            [read_exposure(fixture.action_id.clone())],
+            [read_exposure(
+                fixture.capability_id.clone(),
+                fixture.action_id.clone(),
+            )],
         )
         .unwrap();
         let binding = plan.binding("read_file").unwrap().clone();
@@ -362,8 +378,8 @@ mod tests {
         assert_eq!(
             *fixture.seen.lock().unwrap(),
             vec![(
-                "fs.read".to_owned(),
-                "fs.read.invoke".to_owned(),
+                fixture.capability_id.as_ref().to_owned(),
+                fixture.action_id.as_ref().to_owned(),
                 "coding-session".to_owned(),
                 vec!["workspace-binding".to_owned()]
             )]
@@ -385,8 +401,20 @@ mod tests {
                     input_schema: StrictJsonValue(json!({"type": "object"})),
                     deferred: false,
                 },
-                capability_id: CapabilityId::from("fs.write"),
-                action_id: action_id("fs.write").unwrap(),
+                capability_id: CapabilityId::from(if fixture.capability_id.as_ref()
+                    == "workspace.files"
+                {
+                    "workspace.vcs"
+                } else {
+                    "fs.write"
+                }),
+                action_id: ActionId::from(if fixture.capability_id.as_ref()
+                    == "workspace.files"
+                {
+                    "workspace.vcs/status"
+                } else {
+                    "fs.write.invoke"
+                }),
             }],
         )
         .unwrap_err();

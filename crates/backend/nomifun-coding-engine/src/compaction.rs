@@ -58,7 +58,6 @@ pub struct CodingCompactionSummary {
     pub source_event_cursor: u64,
     pub agent_session_id: String,
     pub runtime_binding_id: String,
-    pub engine_family_id: String,
     pub engine_build_id: String,
     pub engine_build_digest: String,
     pub snapshot_id: String,
@@ -84,7 +83,6 @@ impl CodingCompactionSummary {
             source_event_cursor,
             agent_session_id: binding.agent_session_id().as_ref().to_owned(),
             runtime_binding_id: binding.runtime_binding_id().as_ref().to_owned(),
-            engine_family_id: binding.family_id().as_ref().to_owned(),
             engine_build_id: binding.build_id().as_ref().to_owned(),
             engine_build_digest: binding.build_digest().as_ref().to_owned(),
             snapshot_id: binding
@@ -110,7 +108,6 @@ impl CodingCompactionSummary {
     pub fn validate(&self) -> Result<(), CodingEngineError> {
         if self.agent_session_id.trim().is_empty()
             || self.runtime_binding_id.trim().is_empty()
-            || self.engine_family_id.trim().is_empty()
             || self.engine_build_id.trim().is_empty()
             || self.engine_build_digest.len() != 64
             || self.snapshot_id.trim().is_empty()
@@ -266,9 +263,7 @@ mod tests {
     use async_trait::async_trait;
     use futures::stream;
     use super::*;
-    use crate::engine::{
-        CodingEngine, CodingEngineBuild, CodingRuntimeProfile, EngineBuildId, EngineFamilyId,
-    };
+    use crate::engine::{CodingEngine, CodingEngineBuild, EngineBuildId};
     use nomifun_agent_contracts::{
         AgentSessionId, ChatRouteIdentity, DigestHex, EventId, ModelRouteId, OperationId,
         ResolvedSnapshotId, ResolvedSnapshotRef, RuntimeBindingId, VersionString,
@@ -281,17 +276,13 @@ mod tests {
 
     fn binding() -> EngineBinding {
         CodingEngine::new(CodingEngineBuild {
-            family_id: EngineFamilyId::from("nomifun.coding"),
             build_id: EngineBuildId::from("build-1"),
             build_digest: DigestHex::from("a".repeat(64)),
-            display_name: "Coding".to_owned(),
-            supported_profiles: vec![CodingRuntimeProfile::Coding],
         })
         .unwrap()
         .bind(
             AgentSessionId::from("session"),
             RuntimeBindingId::from("binding"),
-            CodingRuntimeProfile::Coding,
             ResolvedSnapshotRef {
                 snapshot_id: ResolvedSnapshotId::from("snapshot"),
                 snapshot_digest: DigestHex::from("b".repeat(64)),

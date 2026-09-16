@@ -28,7 +28,7 @@ pub struct CodingTurnRequest {
     pub tool_plan: CodingToolPlan,
     pub principal: PrincipalRef,
     /// Platform-supplied compatibility generation for the frozen enabled set.
-    /// The Coding loop never changes it or the admitted tool plan.
+    /// The runtime loop never changes it or the admitted tool plan.
     pub active_set_generation: u64,
     pub max_model_steps: u16,
     pub model_budget: crate::CodingModelBudget,
@@ -198,39 +198,54 @@ pub(crate) async fn run_turn(
         binding: binding.clone(),
         turn_operation_id: request.model_request.causality.turn_operation_id.clone(),
     }).await?;
-    let agents = crate::workspace_context::prepare(&request, tools.as_ref(), event_sink.as_ref(), cancellation.clone()).await?;
-    let mut scoped_instructions = crate::workspace_context::ScopedInstructions::new(&request, &agents);
+    event_sink.emit(CodingEngineEvent::ExecutionBudgetPrepared {
+        context_window_tokens: request.model_budget.context_window_tokens,
+        max_output_tokens: request.model_budget.max_output_tokens,
+        max_model_steps: request.max_model_steps,
+    }).await?;
+    let mut adaptive = crate::adaptive::AdaptiveExecution::default();
+    let mut scoped_instructions = crate::workspace_context::ScopedInstructions::new(&request);
     let mut patch_recovery = crate::patch_recovery::PatchRecovery::restore(&request.patch_recovery)?;
-    patch_recovery.persist(event_sink.as_ref()).await?;
+    if request.prior_task.is_some() {
+        adaptive
+            .activate(
+                [crate::CodingRuntimeModule::TaskContinuation],
+                crate::CodingRuntimeActivationReason::HistoricalTaskCandidate,
+                event_sink.as_ref(),
+            )
+            .await?;
+    }
+    if patch_recovery.pending() {
+        adaptive
+            .activate(
+                crate::adaptive::LONG_HORIZON_MODULES
+                    .into_iter()
+                    .chain([crate::CodingRuntimeModule::PatchRecovery]),
+                crate::CodingRuntimeActivationReason::PendingPatchRecovery,
+                event_sink.as_ref(),
+            )
+            .await?;
+    }
     let mut model_request = request.model_request;
-    model_request.input.instructions.insert(0, crate::workflow::CODING_EXECUTION_INSTRUCTIONS.into());
+    model_request
+        .input
+        .instructions
+        .insert(0, crate::workflow::MINIMAL_EXECUTION_INSTRUCTIONS.into());
     model_request.input.max_output_tokens = Some(request.model_budget.max_output_tokens);
     model_request.input.instructions.push(request.model_budget.execution_context(request.max_model_steps));
     let requested_tool_choice = model_request.input.tool_choice.clone();
-    configure_tools(&mut model_request, &request.tool_plan, !request.context_resources.is_empty(), request.prior_task.is_some(), request.resource_port.is_some(), request.history_port.is_some())?;
     if let Some(prior) = &request.prior_task {
         model_request.input.instructions.push(prior.context()?);
     }
     if !request.context_resources.is_empty() {
         model_request.input.instructions.push(crate::context_resources::index(&request.context_resources, request.context_image_input)?);
     }
-    model_request.input.tool_choice = if matches!(requested_tool_choice, ChatToolChoice::None) {
-        ChatToolChoice::Auto
-    } else {
-        requested_tool_choice
-    };
-    model_request
-        .validate()
-        .map_err(|error| CodingEngineError::InvalidContract(error.to_string()))?;
-
     let agent_session_id = model_request.causality.agent_session_id.clone();
     let turn_operation_id = model_request.causality.turn_operation_id.clone();
-    let mut tool_archive = crate::tool_archive::ToolArchive::new(
-        serde_json::json!([agent_session_id, turn_operation_id]).to_string(),
-        &model_request.input.messages,
-    )?;
-    let archive_context_slot = model_request.input.instructions.len();
-    model_request.input.instructions.push(tool_archive.context());
+    let tool_archive_scope = serde_json::json!([agent_session_id, turn_operation_id]).to_string();
+    let mut tool_archive = adaptive
+        .tool_history()
+        .then(|| crate::tool_archive::ToolArchive::new(tool_archive_scope.clone()));
 
     // The host supplies canonical facts; the engine selects its model context.
     // Do this only at turn entry: trimming individual messages inside an active
@@ -241,23 +256,33 @@ pub(crate) async fn run_turn(
     let mut steering_receipts = std::collections::BTreeSet::new();
     // Compact before the resource assembler would discard entire old turns.
     // Repository instructions are retained independently, never summarized away.
-    let scoped_context_slot = model_request.input.instructions.len();
-    model_request.input.instructions.push(scoped_instructions.context());
-    let patch_recovery_context_slot = model_request.input.instructions.len();
-    model_request.input.instructions.push(patch_recovery.context());
-    let plan_context_slot = model_request.input.instructions.len();
-    let mut execution_plan = crate::CodingPlan::default();
-    model_request.input.instructions.push(execution_plan.context()?);
-    let mut work_status = crate::CodingWorkStatus::default();
-    let mut completion = crate::completion::CompletionTracker::default();
-    let completion_context_slot = model_request.input.instructions.len();
-    model_request.input.instructions.push(completion.context(&execution_plan, &work_status, retained_inputs.len())?);
+    let mut long_horizon = adaptive.task_ledger().then(LongHorizonState::default);
+    let mut adaptive_slots = AdaptiveContextSlots::default();
     let live_context_slot = if let Some(port) = &request.live_context_port {
         let slot = model_request.input.instructions.len();
         model_request.input.instructions.push(crate::live_context::read(port.as_ref(),
             &model_request.causality, request.active_set_generation, &cancellation).await?);
         Some(slot)
     } else { None };
+    synchronize_adaptive_context(
+        &mut model_request,
+        &request.tool_plan,
+        &requested_tool_choice,
+        &adaptive,
+        &scoped_instructions,
+        &patch_recovery,
+        tool_archive.as_ref(),
+        long_horizon.as_ref(),
+        retained_inputs.len(),
+        !request.context_resources.is_empty(),
+        request.prior_task.is_some(),
+        request.resource_port.is_some(),
+        request.history_port.is_some(),
+        &mut adaptive_slots,
+    )?;
+    model_request
+        .validate()
+        .map_err(|error| CodingEngineError::InvalidContract(error.to_string()))?;
     context_lifecycle.prepare(&mut model_request, &retained_inputs, &binding, model.clone(), event_sink.as_ref(), cancellation.clone()).await?;
     let mut input = model_request.input;
     let current = input.messages.pop().ok_or_else(|| CodingEngineError::ContextAssembly(
@@ -265,7 +290,7 @@ pub(crate) async fn run_turn(
     ))?;
     let history = std::mem::take(&mut input.messages);
     let (input, diagnostics) = CodingContextAssembler::assemble(
-        input, history, current, &crate::AgentsMdContext { warnings: agents.warnings, ..Default::default() }, context_budget,
+        input, history, current, &crate::AgentsMdContext::default(), context_budget,
     )?;
     model_request.input = input;
     event_sink.emit(CodingEngineEvent::ContextPrepared {
@@ -278,7 +303,6 @@ pub(crate) async fn run_turn(
     let mut model_steps = 0_u16;
     let mut tool_call_count = 0_u32;
     let mut provider_round_id = None;
-    let mut command_tracker = crate::workflow::CommandTracker::default();
     let mut completion_review_used = false;
     let mut admitted_call_ids = std::collections::BTreeSet::new();
     let mut stream_budget = crate::stream_limits::StreamBudget::default();
@@ -318,51 +342,82 @@ pub(crate) async fn run_turn(
         if let Some(port) = &request.input_port {
             let inputs = port.take(&model_request.causality, false).await?;
             if crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts)? {
-                execution_plan.needs_replan = true;
                 completion_review_used = false;
+                adaptive
+                    .activate(
+                        crate::adaptive::LEDGER_MODULES,
+                        crate::CodingRuntimeActivationReason::Steering,
+                        event_sink.as_ref(),
+                    )
+                    .await?;
+                let state = long_horizon.get_or_insert_with(LongHorizonState::default);
+                state.execution_plan.needs_replan = true;
+                state.completion.invalidate();
             }
         }
         let refreshed_instructions = scoped_instructions.before_model(tools.as_ref(), event_sink.as_ref(), cancellation.clone()).await?;
-        let scoped_context = scoped_instructions.context();
         // before_calls may already have replaced layers. Comparing
         // the actual model slot also catches those changes on read-only batches
         // where no effect marked the instruction view dirty.
-        if refreshed_instructions || model_request.input.instructions[scoped_context_slot] != scoped_context {
-            execution_plan.needs_replan = true;
-            completion.invalidate();
+        if refreshed_instructions {
             completion_review_used = false;
             model_request.input.provider_round_parent = None;
-            event_sink.emit(CodingEngineEvent::PlanUpdated { plan: execution_plan.clone() }).await?;
+            if let Some(state) = long_horizon.as_mut() {
+                state.execution_plan.needs_replan = true;
+                state.completion.invalidate();
+                if adaptive.task_ledger() {
+                    event_sink.emit(CodingEngineEvent::PlanUpdated {
+                        plan: state.execution_plan.clone(),
+                    }).await?;
+                }
+            }
         }
-        model_request.input.instructions[scoped_context_slot] = scoped_context;
         let recovery_context = patch_recovery.context();
-        if model_request.input.instructions[patch_recovery_context_slot] != recovery_context {
-            execution_plan.needs_replan = true;
-            completion.invalidate();
+        if adaptive_slots
+            .patch_recovery
+            .is_some_and(|slot| model_request.input.instructions[slot] != recovery_context)
+        {
             completion_review_used = false;
             model_request.input.provider_round_parent = None;
+            if let Some(state) = long_horizon.as_mut() {
+                state.execution_plan.needs_replan = true;
+                state.completion.invalidate();
+            }
         }
-        model_request.input.instructions[patch_recovery_context_slot] = recovery_context;
-        model_request.input.instructions[plan_context_slot] = execution_plan.context()?;
-        model_request.input.instructions[completion_context_slot] = completion.context(&execution_plan, &work_status, retained_inputs.len())?;
         if let (Some(port), Some(slot)) = (&request.live_context_port, live_context_slot) {
             let latest = crate::live_context::read(port.as_ref(), &model_request.causality,
                 request.active_set_generation, &cancellation).await?;
             if model_request.input.instructions[slot] != latest {
                 model_request.input.provider_round_parent = None;
-                completion.invalidate();
                 completion_review_used = false;
-                model_request.input.instructions[completion_context_slot] = completion.context(&execution_plan, &work_status, retained_inputs.len())?;
+                if let Some(state) = long_horizon.as_mut() {
+                    state.completion.invalidate();
+                }
             }
             model_request.input.instructions[slot] = latest;
         }
-        model_request.input.instructions[archive_context_slot] = tool_archive.context();
+        synchronize_adaptive_context(
+            &mut model_request,
+            &request.tool_plan,
+            &requested_tool_choice,
+            &adaptive,
+            &scoped_instructions,
+            &patch_recovery,
+            tool_archive.as_ref(),
+            long_horizon.as_ref(),
+            retained_inputs.len(),
+            !request.context_resources.is_empty(),
+            request.prior_task.is_some(),
+            request.resource_port.is_some(),
+            request.history_port.is_some(),
+            &mut adaptive_slots,
+        )?;
         context_lifecycle.prepare(&mut model_request, &retained_inputs, &binding, model.clone(), event_sink.as_ref(), cancellation.clone()).await?;
         let context_bytes = serde_json::to_vec(&model_request.input)
             .map_err(|error| CodingEngineError::ContextAssembly(error.to_string()))?.len();
         if context_bytes > context_budget.max_context_bytes {
             return fail_turn(&event_sink, model_steps,
-                format!("active turn context still exceeds the Coding byte budget after compaction ({} > {})",
+                format!("active turn context still exceeds the Nomi byte budget after compaction ({} > {})",
                     context_bytes, context_budget.max_context_bytes)).await;
         }
         model_steps = model_steps.saturating_add(1);
@@ -627,7 +682,7 @@ pub(crate) async fn run_turn(
                         &event_sink,
                         model_steps,
                         format!(
-                            "native Responses item {item_type:?} is not yet representable in Coding history"
+                            "native Responses item {item_type:?} is not yet representable in Nomi history"
                         ),
                     )
                     .await;
@@ -636,7 +691,7 @@ pub(crate) async fn run_turn(
                     return fail_turn(
                         &event_sink,
                         model_steps,
-                        "audio output is outside the Coding Engine core",
+                        "audio output is outside the Nomi Runtime core",
                     )
                     .await;
                 }
@@ -711,6 +766,17 @@ pub(crate) async fn run_turn(
         if let Some(port) = &request.input_port {
             let inputs = port.take(&model_request.causality, false).await?;
             if !inputs.is_empty() {
+                adaptive
+                    .activate(
+                        crate::adaptive::LONG_HORIZON_MODULES,
+                        crate::CodingRuntimeActivationReason::Steering,
+                        event_sink.as_ref(),
+                    )
+                    .await?;
+                let state = long_horizon.get_or_insert_with(LongHorizonState::default);
+                let archive = tool_archive.get_or_insert_with(|| {
+                    crate::tool_archive::ToolArchive::new(tool_archive_scope.clone())
+                });
                 append_assistant_step(&mut model_request, &step)?;
                 let deferred = step.call_order.iter().map(|id| (id.clone(), Ok(CodingToolResult::text(id.clone(),
                     "Not executed: a new accepted user instruction arrived. Reconsider the task and update_plan before further effects.", true)))).collect();
@@ -718,14 +784,15 @@ pub(crate) async fn run_turn(
                 tool_call_count = tool_call_count.saturating_add(results.len() as u32);
                 for (_, result) in results {
                     if let Some(call) = step.calls.get(&result.call_id).and_then(|pending| pending.completed.as_ref()) {
-                        tool_archive.record(&call.name, &call.call_id, &call.arguments,
+                        archive.record(&call.name, &call.call_id, &call.arguments,
                             &result.output, result.is_error, Some(model_steps), Some(false))?;
                     }
                     model_request.input.messages.push(ChatMessage { role: ChatRole::Tool,
                         content: vec![ChatContentPart::ToolResult { call_id: result.call_id, output: result.output, is_error: result.is_error }], provider_round_id: None });
                 }
                 crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts)?;
-                execution_plan.needs_replan = true;
+                state.execution_plan.needs_replan = true;
+                state.completion.invalidate();
                 completion_review_used = false;
                 continue;
             }
@@ -740,6 +807,89 @@ pub(crate) async fn run_turn(
                 .await;
             }
 
+            let mut external_calls = 0usize;
+            let mut effectful = false;
+            let mut explicit_continuation = false;
+            let mut explicit_plan = false;
+            for call_id in &step.call_order {
+                let call = step
+                    .calls
+                    .get(call_id)
+                    .and_then(|pending| pending.completed.as_ref())
+                    .ok_or_else(|| {
+                        CodingEngineError::InvalidModelEvent(
+                            "incomplete tool call during adaptive classification".into(),
+                        )
+                    })?;
+                if let Some(tool) = request.tool_plan.binding(&call.name) {
+                    external_calls = external_calls.saturating_add(1);
+                    effectful |= !matches!(tool.effect_class, CodingEffectClass::ReadOnly);
+                } else if matches!(
+                    call.name.as_str(),
+                    crate::remote_resources::LIST
+                        | crate::remote_resources::READ
+                        | crate::remote_resources::TEMPLATES
+                ) {
+                    external_calls = external_calls.saturating_add(1);
+                    // Opening a remote resource can start a connection or
+                    // local stdio owner even when the requested operation is a read.
+                    effectful = true;
+                } else if call.name == crate::context_resources::TOOL_NAME {
+                    external_calls = external_calls.saturating_add(1);
+                } else if call.name == crate::task_continuation::TOOL_NAME {
+                    explicit_continuation = true;
+                } else if call.name == crate::planning::TOOL_NAME {
+                    explicit_plan = true;
+                }
+            }
+            adaptive
+                .activate(
+                    crate::adaptive::TOOL_MODULES,
+                    crate::CodingRuntimeActivationReason::ToolCall,
+                    event_sink.as_ref(),
+                )
+                .await?;
+            let multi_step = adaptive.observe_external_batch(external_calls);
+            if explicit_continuation {
+                adaptive
+                    .activate(
+                        crate::adaptive::LONG_HORIZON_MODULES
+                            .into_iter()
+                            .chain([crate::CodingRuntimeModule::TaskContinuation]),
+                        crate::CodingRuntimeActivationReason::ExplicitTaskContinuation,
+                        event_sink.as_ref(),
+                    )
+                    .await?;
+            } else if explicit_plan {
+                adaptive
+                    .activate(
+                        crate::adaptive::LEDGER_MODULES,
+                        crate::CodingRuntimeActivationReason::ExplicitPlan,
+                        event_sink.as_ref(),
+                    )
+                    .await?;
+            } else if effectful {
+                adaptive
+                    .activate(
+                        crate::adaptive::LONG_HORIZON_MODULES,
+                        crate::CodingRuntimeActivationReason::EffectfulToolCall,
+                        event_sink.as_ref(),
+                    )
+                    .await?;
+            } else if multi_step {
+                adaptive
+                    .activate(
+                        crate::adaptive::LONG_HORIZON_MODULES,
+                        crate::CodingRuntimeActivationReason::MultiStepToolUse,
+                        event_sink.as_ref(),
+                    )
+                    .await?;
+            }
+            let state = long_horizon.get_or_insert_with(LongHorizonState::default);
+            let archive = tool_archive.get_or_insert_with(|| {
+                crate::tool_archive::ToolArchive::new(tool_archive_scope.clone())
+            });
+
             append_assistant_step(&mut model_request, &step)?;
             let dispatch = crate::tool_dispatch::ToolDispatchBatch::new(tools.as_ref(), &step.call_order);
             let results = match invoke_tool_calls(
@@ -753,9 +903,9 @@ pub(crate) async fn run_turn(
                 &step,
                 model_steps,
                 &cancellation,
-                &mut execution_plan,
-                &mut completion,
-                &mut work_status,
+                &mut state.execution_plan,
+                &mut state.completion,
+                &mut state.work_status,
                 &retained_inputs,
                 &mut scoped_instructions,
                 &mut patch_recovery,
@@ -764,7 +914,7 @@ pub(crate) async fn run_turn(
                 request.input_port.as_deref(),
                 request.prior_task.as_ref(),
                 request.resource_port.as_deref(),
-                &mut tool_archive,
+                archive,
                 request.history_port.as_deref(),
                 &binding,
             )
@@ -793,35 +943,48 @@ pub(crate) async fn run_turn(
                     if let Some(binding) = request.tool_plan.binding(&call.name) {
                         let attempted = dispatch.attempted(&expected_call_id)?;
                         if attempted {
-                            work_status.observe(binding, call, &result, &mut command_tracker);
+                            state.work_status.observe(
+                                binding,
+                                call,
+                                &result,
+                                &mut state.command_tracker,
+                            );
                         } else {
                             if !result.is_error {
                                 return Err(CodingEngineError::InvalidContract("unattempted platform tool returned success".into()));
                             }
-                            work_status.observe_deferred();
+                            state.work_status.observe_deferred();
                         }
-                        if attempted && binding.capability_id.as_ref() == "fs.read" && work_status.running_processes.is_empty() {
+                        if attempted && binding.action_id.as_ref() == "workspace.files/read" && state.work_status.running_processes.is_empty() {
                             patch_recovery.observe_read(call, &result);
                         }
                         if (attempted && (!matches!(binding.effect_class, crate::CodingEffectClass::ReadOnly)
-                            || binding.capability_id.as_ref() == "process.exec"))
-                            || !work_status.running_processes.is_empty()
+                            || binding.capability_id.as_ref() == "workspace.process"))
+                            || !state.work_status.running_processes.is_empty()
                         {
                             // Failed calls may have partial effects too.
                             scoped_instructions.invalidate();
                         }
-                        let observation = completion.observe(&work_status, binding, call, &result, attempted);
-                        event_sink.emit(CodingEngineEvent::CompletionObservation { observation }).await?;
+                        let observation = state.completion.observe(
+                            &state.work_status,
+                            binding,
+                            call,
+                            &result,
+                            attempted,
+                        );
+                        if adaptive.task_ledger() {
+                            event_sink.emit(CodingEngineEvent::CompletionObservation { observation }).await?;
+                        }
                         // New observations require a fresh completion account;
                         // the model-step bound limits repeated work/review.
                         completion_review_used = false;
                         if result.is_error {
-                            execution_plan.needs_replan = true;
+                            state.execution_plan.needs_replan = true;
                         }
                     } else if call.name != crate::completion::TOOL_NAME {
                         // Planning/resource control can change the
                         // model's account even though it supplies no evidence.
-                        completion.invalidate();
+                        state.completion.invalidate();
                         completion_review_used = false;
                     }
                 }
@@ -829,7 +992,7 @@ pub(crate) async fn run_turn(
                     let attempted = if request.tool_plan.binding(&call.name).is_some() {
                         Some(dispatch.attempted(&expected_call_id)?)
                     } else { None };
-                    tool_archive.record(&call.name, &call.call_id, &call.arguments,
+                    archive.record(&call.name, &call.call_id, &call.arguments,
                         &result.output, result.is_error, Some(model_steps), attempted)?;
                 }
                 // Evidence/patch recovery and the archive above consume the
@@ -837,7 +1000,7 @@ pub(crate) async fn run_turn(
                 let context_kind = step.calls.get(&expected_call_id)
                     .and_then(|pending| pending.completed.as_ref())
                     .and_then(|call| request.tool_plan.binding(&call.name))
-                    .and_then(|binding| crate::tool_context::ToolContextKind::for_capability(binding.capability_id.as_ref()));
+                            .and_then(|binding| crate::tool_context::ToolContextKind::for_action(binding.action_id.as_ref()));
                 let result = match context_kind {
                     Some(kind) if dispatch.attempted(&expected_call_id)? => crate::tool_context::project(kind, &result),
                     _ => result,
@@ -854,8 +1017,14 @@ pub(crate) async fn run_turn(
             }
             patch_recovery.end_batch();
             patch_recovery.persist(event_sink.as_ref()).await?;
-            event_sink.emit(CodingEngineEvent::WorkStatus { status: work_status.clone() }).await?;
-            event_sink.emit(CodingEngineEvent::PlanUpdated { plan: execution_plan.clone() }).await?;
+            if adaptive.task_ledger() {
+                event_sink.emit(CodingEngineEvent::WorkStatus {
+                    status: state.work_status.clone(),
+                }).await?;
+                event_sink.emit(CodingEngineEvent::PlanUpdated {
+                    plan: state.execution_plan.clone(),
+                }).await?;
+            }
             if let Some(round_id) = step.provider_round_id {
                 model_request.input.provider_round_parent = Some(round_id);
             }
@@ -869,28 +1038,61 @@ pub(crate) async fn run_turn(
         // At most one evidence review, never an unbounded self-retry. The
         // model may report a blocker/unverified result instead of invoking a
         // command; a user prohibition on verification remains authoritative.
-        if matches!(finish_reason, ChatFinishReason::Completed)
-            && completion.current(&execution_plan, &work_status, retained_inputs.len()).is_none()
-            && (work_status.needs_completion_review() || execution_plan.is_open() || tool_call_count > 0 || execution_plan.revision > 0)
-            && !completion_review_used
-            && model_steps < request.max_model_steps {
-            completion_review_used = true;
-            event_sink.emit(CodingEngineEvent::CompletionReview { status: work_status.clone() }).await?;
-            model_request.input.messages.push(work_status.completion_review_message()?);
-            model_request.input.provider_round_parent = None;
-            continue;
+        if matches!(finish_reason, ChatFinishReason::Completed) && adaptive.task_ledger() {
+            let state = long_horizon.as_ref().ok_or_else(|| {
+                CodingEngineError::InvalidContract(
+                    "active task ledger has no turn-local state".into(),
+                )
+            })?;
+            if state
+                .completion
+                .current(
+                    &state.execution_plan,
+                    &state.work_status,
+                    retained_inputs.len(),
+                )
+                .is_none()
+                && !completion_review_used
+                && model_steps < request.max_model_steps
+            {
+                completion_review_used = true;
+                event_sink.emit(CodingEngineEvent::CompletionReview {
+                    status: state.work_status.clone(),
+                }).await?;
+                model_request.input.messages.push(state.work_status.completion_review_message()?);
+                model_request.input.provider_round_parent = None;
+                continue;
+            }
         }
-        if matches!(finish_reason, ChatFinishReason::Completed) && execution_plan.is_open() {
+        if matches!(finish_reason, ChatFinishReason::Completed)
+            && adaptive.task_ledger()
+            && long_horizon
+                .as_ref()
+                .is_some_and(|state| state.execution_plan.is_open())
+        {
             return fail_turn(&event_sink, model_steps, "execution plan remains unresolved; completion was not accepted").await;
         }
         if matches!(finish_reason, ChatFinishReason::Completed) && patch_recovery.pending() {
             return fail_turn(&event_sink, model_steps, "failed patch targets have not been re-observed; task completion was not accepted").await;
         }
-        if matches!(finish_reason, ChatFinishReason::Completed) && !work_status.running_processes.is_empty() {
+        if matches!(finish_reason, ChatFinishReason::Completed)
+            && long_horizon
+                .as_ref()
+                .is_some_and(|state| !state.work_status.running_processes.is_empty())
+        {
             return fail_turn(&event_sink, model_steps, "processes remain running; poll or cancel them explicitly before completion (host cleanup will still reap them)").await;
         }
-        if matches!(finish_reason, ChatFinishReason::Completed) && (tool_call_count > 0 || execution_plan.revision > 0) {
-            let Some(report) = completion.current(&execution_plan, &work_status, retained_inputs.len()) else {
+        if matches!(finish_reason, ChatFinishReason::Completed) && adaptive.task_ledger() {
+            let state = long_horizon.as_ref().ok_or_else(|| {
+                CodingEngineError::InvalidContract(
+                    "active task ledger has no turn-local state".into(),
+                )
+            })?;
+            let Some(report) = state.completion.current(
+                &state.execution_plan,
+                &state.work_status,
+                retained_inputs.len(),
+            ) else {
                 return fail_turn(&event_sink, model_steps, "completion account is missing or stale; call report_completion after the latest plan, input and tool observations").await;
             };
             if report.is_blocked() {
@@ -903,13 +1105,28 @@ pub(crate) async fn run_turn(
         if let Some(port) = &request.input_port {
             let inputs = port.take(&model_request.causality, true).await?;
             if crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts)? {
-                execution_plan.needs_replan = true;
                 completion_review_used = false;
+                adaptive
+                    .activate(
+                        crate::adaptive::LEDGER_MODULES,
+                        crate::CodingRuntimeActivationReason::Steering,
+                        event_sink.as_ref(),
+                    )
+                    .await?;
+                let state = long_horizon.get_or_insert_with(LongHorizonState::default);
+                state.execution_plan.needs_replan = true;
+                state.completion.invalidate();
                 continue;
             }
         }
         if matches!(finish_reason, ChatFinishReason::Completed) {
-            if let Some(report) = completion.current(&execution_plan, &work_status, retained_inputs.len()) {
+            if let Some(report) = long_horizon.as_ref().and_then(|state| {
+                state.completion.current(
+                    &state.execution_plan,
+                    &state.work_status,
+                    retained_inputs.len(),
+                )
+            }) {
                 if let Some(disclosure) = report.unverified_disclosure() {
                     output_text.push_str(&disclosure);
                     event_sink.emit(CodingEngineEvent::OutputTextDelta { step: model_steps, text: disclosure }).await?;
@@ -946,7 +1163,133 @@ pub(crate) async fn run_turn(
     .await
 }
 
-fn configure_tools(request: &mut ChatModelRequest, plan: &CodingToolPlan, resources: bool, prior_task: bool, remote_resources: bool, history: bool) -> Result<(), CodingEngineError> {
+#[derive(Default)]
+struct LongHorizonState {
+    execution_plan: crate::CodingPlan,
+    work_status: crate::CodingWorkStatus,
+    completion: crate::completion::CompletionTracker,
+    command_tracker: crate::workflow::CommandTracker,
+}
+
+#[derive(Default)]
+struct AdaptiveContextSlots {
+    long_horizon_policy: Option<usize>,
+    scoped_instructions: Option<usize>,
+    patch_recovery: Option<usize>,
+    tool_history: Option<usize>,
+    task_plan: Option<usize>,
+    completion: Option<usize>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn synchronize_adaptive_context(
+    request: &mut ChatModelRequest,
+    plan: &CodingToolPlan,
+    requested_tool_choice: &ChatToolChoice,
+    adaptive: &crate::adaptive::AdaptiveExecution,
+    scoped_instructions: &crate::workspace_context::ScopedInstructions,
+    patch_recovery: &crate::patch_recovery::PatchRecovery,
+    tool_archive: Option<&crate::tool_archive::ToolArchive>,
+    long_horizon: Option<&LongHorizonState>,
+    input_revision: usize,
+    resources: bool,
+    prior_task: bool,
+    remote_resources: bool,
+    history: bool,
+    slots: &mut AdaptiveContextSlots,
+) -> Result<(), CodingEngineError> {
+    configure_tools(
+        request,
+        plan,
+        resources,
+        prior_task,
+        remote_resources,
+        history,
+        adaptive.task_ledger(),
+        adaptive.tool_history(),
+    )?;
+    request.input.tool_choice = if request.input.tools.is_empty() {
+        ChatToolChoice::None
+    } else if matches!(requested_tool_choice, ChatToolChoice::None) {
+        ChatToolChoice::Auto
+    } else {
+        requested_tool_choice.clone()
+    };
+    if adaptive.task_ledger() {
+        let state = long_horizon.ok_or_else(|| {
+            CodingEngineError::InvalidContract("active task ledger has no turn-local state".into())
+        })?;
+        upsert_instruction(
+            &mut request.input.instructions,
+            &mut slots.long_horizon_policy,
+            crate::workflow::LONG_HORIZON_EXECUTION_INSTRUCTIONS.into(),
+        );
+        upsert_instruction(
+            &mut request.input.instructions,
+            &mut slots.task_plan,
+            state.execution_plan.context()?,
+        );
+        upsert_instruction(
+            &mut request.input.instructions,
+            &mut slots.completion,
+            state.completion.context(
+                &state.execution_plan,
+                &state.work_status,
+                input_revision,
+            )?,
+        );
+    }
+    if scoped_instructions.has_context() || slots.scoped_instructions.is_some() {
+        upsert_instruction(
+            &mut request.input.instructions,
+            &mut slots.scoped_instructions,
+            scoped_instructions.context(),
+        );
+    }
+    if patch_recovery.pending() || slots.patch_recovery.is_some() {
+        upsert_instruction(
+            &mut request.input.instructions,
+            &mut slots.patch_recovery,
+            patch_recovery.context(),
+        );
+    }
+    if adaptive.tool_history() {
+        let archive = tool_archive.ok_or_else(|| {
+            CodingEngineError::InvalidContract("active tool history has no turn-local archive".into())
+        })?;
+        upsert_instruction(
+            &mut request.input.instructions,
+            &mut slots.tool_history,
+            archive.context(),
+        );
+    }
+    Ok(())
+}
+
+fn upsert_instruction(
+    instructions: &mut Vec<String>,
+    slot: &mut Option<usize>,
+    value: String,
+) {
+    if let Some(index) = *slot {
+        instructions[index] = value;
+    } else {
+        *slot = Some(instructions.len());
+        instructions.push(value);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn configure_tools(
+    request: &mut ChatModelRequest,
+    plan: &CodingToolPlan,
+    resources: bool,
+    prior_task: bool,
+    remote_resources: bool,
+    history: bool,
+    task_ledger: bool,
+    tool_history: bool,
+) -> Result<(), CodingEngineError> {
     // Retired capability-control names remain reserved so a host cannot
     // accidentally restore the old dynamic authority surface as ordinary tools.
     if [crate::planning::TOOL_NAME, crate::completion::TOOL_NAME, crate::context_resources::TOOL_NAME, "search_capabilities", "activate_capability", crate::task_continuation::TOOL_NAME, crate::remote_resources::LIST, crate::remote_resources::READ, crate::remote_resources::TEMPLATES, crate::tool_archive::SEARCH, crate::tool_archive::READ, crate::tool_archive::LOAD]
@@ -954,10 +1297,14 @@ fn configure_tools(request: &mut ChatModelRequest, plan: &CodingToolPlan, resour
         return Err(CodingEngineError::InvalidContract("engine control tool names cannot be shadowed".into()));
     }
     request.input.tools = plan.model_definitions();
-    request.input.tools.push(crate::planning::definition());
-    request.input.tools.push(crate::completion::definition());
-    request.input.tools.extend(crate::tool_archive::definitions());
-    if history { request.input.tools.push(crate::tool_archive::load_definition()); }
+    if task_ledger {
+        request.input.tools.push(crate::planning::definition());
+        request.input.tools.push(crate::completion::definition());
+    }
+    if tool_history {
+        request.input.tools.extend(crate::tool_archive::definitions());
+        if history { request.input.tools.push(crate::tool_archive::load_definition()); }
+    }
     if prior_task { request.input.tools.push(crate::task_continuation::definition()); }
     if resources { request.input.tools.push(crate::context_resources::definition()); }
     if remote_resources { request.input.tools.extend(crate::remote_resources::definitions()); }
@@ -1147,7 +1494,7 @@ async fn invoke_tool_calls(
         return finish_tool_results(results, event_sink, model_step, cancellation).await;
     }
     let workspace_image = completed.iter().any(|call|
-        plan.binding(&call.name).is_some_and(|binding| binding.capability_id.as_ref() == "fs.read")
+        plan.binding(&call.name).is_some_and(|binding| binding.action_id.as_ref() == "workspace.files/read")
             && call.arguments.0.get("format").and_then(|value| value.as_str()) == Some("image"));
     if workspace_image && (completed.len() != 1 || !*context_image_input) {
         let results = completed.into_iter().map(|call| (call.call_id.clone(), Ok(CodingToolResult::text(
@@ -1156,8 +1503,8 @@ async fn invoke_tool_calls(
     }
     let gate = completed.iter().find_map(|call| {
         plan.binding(&call.name).and_then(|binding| {
-            let cleanup = binding.capability_id.as_ref() == "process.exec"
-                && matches!(call.arguments.0.get("operation").and_then(|v| v.as_str()), Some("poll" | "cancel" | "close_stdin"));
+            let cleanup = matches!(binding.action_id.as_ref(),
+                "workspace.process/poll" | "workspace.process/cancel" | "workspace.process/close_stdin");
             if let Some(reason) = patch_recovery.gate(binding, call) { Some(reason) }
             else if !cleanup && !matches!(binding.effect_class, CodingEffectClass::ReadOnly) { execution_plan.effect_gate() }
             else { None }
@@ -1305,7 +1652,7 @@ async fn invoke_tool_calls(
             results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
             continue;
         }
-        let patch_call = (invocation.binding.capability_id.as_ref() == "fs.patch").then(|| invocation.call.clone());
+        let patch_call = (invocation.binding.action_id.as_ref() == "workspace.files/patch").then(|| invocation.call.clone());
         if let Some(call) = &patch_call {
             // Persist BEFORE the invoker owns the effect, including cancellation
             // and crash windows where no engine result can ever be observed.
@@ -1318,7 +1665,7 @@ async fn invoke_tool_calls(
             }
             patch_recovery.persist(event_sink).await?;
         }
-        if patch_call.is_none() && (invocation.binding.capability_id.as_ref() == "process.exec"
+        if patch_call.is_none() && (invocation.binding.capability_id.as_ref() == "workspace.process"
             || !matches!(invocation.binding.effect_class, crate::CodingEffectClass::ReadOnly)) {
             patch_recovery.invalidate_observations();
             patch_recovery.persist(event_sink).await?;
@@ -1646,7 +1993,7 @@ mod tests {
 
     use super::*;
     use crate::engine::{
-        CodingEngine, CodingEngineBuild, CodingRuntimeProfile, EngineBuildId, EngineFamilyId,
+        CodingEngine, CodingEngineBuild, EngineBuildId,
     };
     use crate::events::NoopCodingEventSink;
     use crate::model::CodingModelStream;
@@ -1668,18 +2015,14 @@ mod tests {
 
     fn binding() -> EngineBinding {
         let engine = CodingEngine::new(CodingEngineBuild {
-            family_id: EngineFamilyId::from("nomifun.coding"),
             build_id: EngineBuildId::from("coding-dev"),
             build_digest: DigestHex::from("a".repeat(64)),
-            display_name: "NomiFun Coding Engine".to_owned(),
-            supported_profiles: vec![CodingRuntimeProfile::Coding],
         })
         .unwrap();
         engine
             .bind(
                 AgentSessionId::from("session"),
                 nomifun_agent_contracts::RuntimeBindingId::from("binding"),
-                CodingRuntimeProfile::Coding,
                 ResolvedSnapshotRef {
                     snapshot_id: ResolvedSnapshotId::from("snapshot"),
                     snapshot_digest: DigestHex::from("b".repeat(64)),
@@ -1738,8 +2081,8 @@ mod tests {
     fn tool_plan() -> CodingToolPlan {
         CodingToolPlan::new([tool_binding(
             "read_file",
-            "fs.read",
-            "read",
+            "workspace.files",
+            "workspace.files/read",
             CodingEffectClass::ReadOnly,
             true,
         )])
@@ -1750,25 +2093,30 @@ mod tests {
     fn frozen_tool_surface_never_advertises_capability_activation() {
         let mut request = request();
         let plan = tool_plan();
-        configure_tools(&mut request, &plan, true, true, true, true).unwrap();
+        configure_tools(&mut request, &plan, true, true, true, true, false, false).unwrap();
         assert!(request.input.tools.iter().any(|tool| tool.name == "read_file"));
+        assert!(!request.input.tools.iter().any(|tool| tool.name == crate::planning::TOOL_NAME));
+        assert!(!request.input.tools.iter().any(|tool| tool.name == crate::tool_archive::SEARCH));
+        configure_tools(&mut request, &plan, true, true, true, true, true, true).unwrap();
         assert!(request.input.tools.iter().any(|tool| tool.name == crate::planning::TOOL_NAME));
+        assert!(request.input.tools.iter().any(|tool| tool.name == crate::completion::TOOL_NAME));
+        assert!(request.input.tools.iter().any(|tool| tool.name == crate::tool_archive::SEARCH));
         assert!(!request.input.tools.iter().any(|tool|
             matches!(tool.name.as_str(), "activate_capability" | "search_capabilities")));
         for name in ["activate_capability", "search_capabilities"] {
             let calls = [ChatToolCall {
                 call_id: ToolCallId::from("retired-control"),
                 name: name.into(),
-                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"capability_id":"fs.write"})),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"capability_id":"workspace.files"})),
                 provider_metadata: None,
             }];
             let rejected = crate::tool::reject_unexposed_batch(&calls, &request.input.tools).unwrap();
             assert_eq!(rejected.len(), 1);
             assert!(rejected[0].1.as_ref().unwrap().is_error);
             let shadow = CodingToolPlan::new([tool_binding(
-                name, "fs.read", "read", CodingEffectClass::ReadOnly, true,
+                name, "workspace.files", "workspace.files/read", CodingEffectClass::ReadOnly, true,
             )]).unwrap();
-            assert!(configure_tools(&mut request, &shadow, false, false, false, false).is_err());
+            assert!(configure_tools(&mut request, &shadow, false, false, false, false, false, false).is_err());
         }
     }
 
@@ -1807,23 +2155,23 @@ mod tests {
     fn two_tool_plan(effect_class: CodingEffectClass, parallel_safe: bool) -> CodingToolPlan {
         if effect_class == CodingEffectClass::ManagedEffect {
             return CodingToolPlan::new([
-                tool_binding("read_file", "fs.read", "read", CodingEffectClass::ReadOnly, true),
-                tool_binding("write_file", "fs.write", "write", effect_class, parallel_safe),
-                tool_binding("write_other_file", "fs.write", "write", effect_class, parallel_safe),
+                tool_binding("read_file", "workspace.files", "workspace.files/read", CodingEffectClass::ReadOnly, true),
+                tool_binding("write_file", "workspace.files", "workspace.files/write", effect_class, parallel_safe),
+                tool_binding("write_other_file", "workspace.files", "workspace.files/write", effect_class, parallel_safe),
             ]).unwrap();
         }
         CodingToolPlan::new([
             tool_binding(
                 "read_file",
-                "fs.read",
-                "read",
+                "workspace.files",
+                "workspace.files/read",
                 effect_class,
                 parallel_safe,
             ),
             tool_binding(
                 "search_files",
-                "fs.search",
-                "query",
+                "workspace.files",
+                "workspace.files/search",
                 effect_class,
                 parallel_safe,
             ),
@@ -1936,7 +2284,7 @@ mod tests {
     // Internal instruction observations are real fs.read envelopes, not model
     // tool calls. Keep them out of dispatch/concurrency/cancellation counters.
     fn instruction_result(invocation: &CodingToolInvocation) -> Option<CodingToolResult> {
-        if invocation.binding.capability_id.as_ref() != "fs.read" {
+        if invocation.binding.action_id.as_ref() != "workspace.files/read" {
             return None;
         }
         let args = &invocation.call.arguments.0;
@@ -1957,17 +2305,17 @@ mod tests {
 
     fn workspace_result(invocation: CodingToolInvocation) -> CodingToolResult {
         let args = &invocation.call.arguments.0;
-        let value = match invocation.binding.capability_id.as_ref() {
-            "fs.read" => {
+        let value = match invocation.binding.action_id.as_ref() {
+            "workspace.files/read" => {
                 let content = "file contents";
                 json!({"path":args["path"], "content":content, "offset":0,
                     "total_bytes":content.len(), "eof":true, "next_offset":null,
                     "sha256":nomifun_agent_contracts::digest_bytes(content.as_bytes())})
             }
-            "fs.search" => json!({"query":args["query"], "matches":[], "truncated":false,
+            "workspace.files/search" => json!({"query":args["query"], "matches":[], "truncated":false,
                 "incomplete_reasons":[], "files_scanned":1, "files_skipped":0,
                 "source_bytes_read":13, "notice":"No matches in the fixture file."}),
-            "fs.write" => json!({"path":args["path"], "written":true}),
+            "workspace.files/write" => json!({"path":args["path"], "written":true}),
             other => panic!("unexpected fixture capability: {other}"),
         };
         CodingToolResult::text(invocation.call.call_id, value.to_string(), false)
@@ -2036,6 +2384,29 @@ mod tests {
         delay: Duration,
     }
 
+    #[derive(Debug)]
+    struct OneSteer {
+        input: std::sync::Mutex<Option<crate::CodingSteeringInput>>,
+    }
+
+    #[async_trait]
+    impl crate::CodingInputPort for OneSteer {
+        async fn take(
+            &self,
+            _causality: &ChatCausality,
+            _close_if_empty: bool,
+        ) -> Result<Vec<crate::CodingSteeringInput>, CodingEngineError> {
+            Ok(self.input.lock().unwrap().take().into_iter().collect())
+        }
+
+        async fn has_pending(
+            &self,
+            _causality: &ChatCausality,
+        ) -> Result<bool, CodingEngineError> {
+            Ok(self.input.lock().unwrap().is_some())
+        }
+    }
+
     #[async_trait]
     impl CodingToolInvoker for ConcurrencyTool {
         async fn invoke(
@@ -2089,11 +2460,8 @@ mod tests {
         budget: CodingContextBudget,
     ) -> crate::engine::CodingEngineSession {
         let engine = CodingEngine::new(CodingEngineBuild {
-            family_id: EngineFamilyId::from("nomifun.coding"),
             build_id: EngineBuildId::from("coding-dev"),
             build_digest: DigestHex::from("a".repeat(64)),
-            display_name: "NomiFun Coding Engine".to_owned(),
-            supported_profiles: vec![CodingRuntimeProfile::Coding],
         })
         .unwrap().with_context_budget(budget).unwrap();
         engine
@@ -2159,6 +2527,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_turn_can_compact_repeatedly_without_losing_the_accepted_requirement() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                text_step("summary-one"),
+                text_step("summary-two"),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        let requirement = request.input.messages[0].clone();
+        request.input.messages.insert(0, crate::context_lifecycle::text_message(
+            ChatRole::Assistant,
+            "older context one ".repeat(256),
+        ));
+        request.input.messages.insert(0, crate::context_lifecycle::text_message(
+            ChatRole::User,
+            "older context two ".repeat(256),
+        ));
+        let budget = CodingContextBudget {
+            max_history_messages: 2,
+            max_context_bytes: 64 * 1024,
+        };
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            crate::CodingModelBudget::default(),
+            budget,
+        )
+        .unwrap();
+        let sink = NoopCodingEventSink;
+        lifecycle
+            .prepare(
+                &mut request,
+                std::slice::from_ref(&requirement),
+                &binding(),
+                model.clone(),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        request.input.messages.push(crate::context_lifecycle::text_message(
+            ChatRole::Assistant,
+            "new tool-loop context ".repeat(256),
+        ));
+        request.input.messages.push(crate::context_lifecycle::text_message(
+            ChatRole::User,
+            "new observation ".repeat(256),
+        ));
+        lifecycle
+            .prepare(
+                &mut request,
+                std::slice::from_ref(&requirement),
+                &binding(),
+                model.clone(),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let compactions = model.requests.lock().unwrap();
+        assert_eq!(compactions.len(), 2);
+        assert!(compactions[0]
+            .causality
+            .operation_id
+            .as_ref()
+            .ends_with(":compact:1"));
+        assert!(compactions[1]
+            .causality
+            .operation_id
+            .as_ref()
+            .ends_with(":compact:2"));
+        assert_eq!(request.input.messages.last(), Some(&requirement));
+        assert!(serde_json::to_string(&request.input.messages)
+            .unwrap()
+            .contains("summary-two"));
+    }
+
+    #[tokio::test]
     async fn growing_tool_cycle_stops_before_over_budget_model_call() {
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(vec![vec![
@@ -2202,8 +2649,10 @@ mod tests {
         });
         let session = open_session_with_budget(model.clone(), Arc::new(EchoTool),
             CodingContextBudget { max_history_messages: 4, max_context_bytes: 2048 });
+        let mut oversized = request();
+        oversized.input.instructions.push("x".repeat(4096));
         let error = session.run_turn(CodingTurnRequest::new(
-            request(), CodingToolPlan::default(), principal(), 0,
+            oversized, CodingToolPlan::default(), principal(), 0,
         )).await.unwrap_err();
         assert!(matches!(&error, CodingEngineError::Compaction(message)
             if message.contains("Mandatory instructions/task state/accepted inputs")), "{error}");
@@ -2242,9 +2691,9 @@ mod tests {
             }}),
             Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
         ]];
-        // A read-only first step is allowed without a plan. The next step
-        // consumes its result, then records requirements and completion.
-        steps.extend(completion_steps("inspect", &["call-1"], true));
+        // One read-only batch stays on the generic Tool loop. It does not pay
+        // for a task ledger or completion-account exchange.
+        steps.push(text_step("done"));
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
         });
@@ -2253,8 +2702,8 @@ mod tests {
             request(), tool_plan(), principal(), 0,
         )).await.unwrap();
         assert_eq!(result.output_text, "done");
-        assert_eq!(result.model_steps, 4);
-        assert_eq!(result.tool_call_count, 3); // read, closed plan, completion
+        assert_eq!(result.model_steps, 2);
+        assert_eq!(result.tool_call_count, 1);
         assert!(matches!(result.terminal, CodingTurnTerminal::Completed {
             finish_reason: ChatFinishReason::Completed
         }));
@@ -2311,7 +2760,7 @@ mod tests {
     #[tokio::test]
     async fn effectful_tools_run_serially() {
         let quote = "Write a and b; do not run verification.";
-        let mut steps = vec![plan_step("in_progress", quote), vec![
+        let proposed = vec![
             Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
                 call_id: "call-1".into(), name: "write_file".into(),
                 arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"a", "content":"first"})),
@@ -2323,7 +2772,19 @@ mod tests {
                 provider_metadata: None,
             }}),
             Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
-        ]];
+        ];
+        // The first effect proposal only activates reliability state and is
+        // deferred before the owner port. The model then records scope and
+        // retries with fresh call identities.
+        let activation = vec![
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: "activate-1".into(), name: "write_file".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"a", "content":"first"})),
+                provider_metadata: None,
+            }}),
+            Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
+        ];
+        let mut steps = vec![activation, plan_step("in_progress", quote), proposed];
         steps.extend(completion_steps(quote, &[], false));
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
@@ -2343,8 +2804,23 @@ mod tests {
         assert_eq!(tools.max_active.load(Ordering::SeqCst), 1);
         assert_eq!(*tools.order.lock().unwrap(), vec!["call-1", "call-2"]);
         let requests = model.requests.lock().unwrap();
+        assert!(!requests[0]
+            .input
+            .tools
+            .iter()
+            .any(|tool| tool.name == crate::planning::TOOL_NAME));
+        assert!(requests[1]
+            .input
+            .tools
+            .iter()
+            .any(|tool| tool.name == crate::planning::TOOL_NAME));
+        assert!(requests[1]
+            .input
+            .instructions
+            .iter()
+            .any(|instruction| instruction.contains("Long-horizon execution policy")));
         for id in ["call-1", "call-2"] {
-            assert!(requests[2].input.messages.iter().flat_map(|message| &message.content).any(|part|
+            assert!(requests[3].input.messages.iter().flat_map(|message| &message.content).any(|part|
                 matches!(part, ChatContentPart::ToolResult { call_id, is_error: false, .. } if call_id.as_ref() == id)));
         }
         assert!(model.steps.lock().unwrap().is_empty());
@@ -2352,7 +2828,7 @@ mod tests {
 
     #[tokio::test]
     async fn plain_text_turn_completes_without_tools() {
-        let model = Arc::new(ScriptedModel {
+        let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(vec![vec![
                 Ok(ChatModelEvent::OutputTextDelta {
                     text: "hello".to_owned(),
@@ -2361,13 +2837,20 @@ mod tests {
                     finish_reason: ChatFinishReason::Completed,
                 }),
             ]]),
+            requests: std::sync::Mutex::new(Vec::new()),
         });
-        let session = open_session(model, Arc::new(EchoTool));
+        let tools = Arc::new(ConcurrencyTool {
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            order: std::sync::Mutex::new(Vec::new()),
+            delay: Duration::from_millis(1),
+        });
+        let session = open_session(model.clone(), tools.clone());
 
         let result = session
             .run_turn(CodingTurnRequest::new(
                 request(),
-                CodingToolPlan::default(),
+                tool_plan(),
                 principal(),
                 1,
             ))
@@ -2376,12 +2859,77 @@ mod tests {
 
         assert_eq!(result.output_text, "hello");
         assert_eq!(result.model_steps, 1);
+        assert!(tools.order.lock().unwrap().is_empty(), "direct answers must not pre-read workspace instructions");
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].input.tools.iter().any(|tool| tool.name == "read_file"));
+        assert!(!requests[0].input.tools.iter().any(|tool| matches!(tool.name.as_str(),
+            crate::planning::TOOL_NAME | crate::completion::TOOL_NAME | crate::tool_archive::SEARCH)));
+        assert!(!requests[0].input.instructions.iter().any(|instruction|
+            instruction.contains("Current engine plan") || instruction.contains("Completion accounting")));
         assert!(matches!(
             result.terminal,
             CodingTurnTerminal::Completed {
                 finish_reason: ChatFinishReason::Completed
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn accepted_steering_activates_the_long_horizon_ledger() {
+        let plan = control_step("plan-steered", crate::planning::TOOL_NAME, json!({
+            "explanation":"Account for both accepted inputs.",
+            "plan":[{"step":"response","status":"completed"}],
+            "requirements":[
+                {"id":"original","description":"Inspect","source":{"input":0,"quote":"inspect"}},
+                {"id":"steer","description":"Explain too","source":{"input":1,"quote":"also explain"}}
+            ]
+        }));
+        let completion = control_step("completion-steered", crate::completion::TOOL_NAME, json!({
+            "summary":"Both accepted inputs were addressed without external effects.",
+            "criteria":[{"step":"response","requirement_ids":["original","steer"],
+                "disposition":"unverified","evidence_call_ids":[],
+                "rationale":"No external observation was required."}]
+        }));
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![plan, completion, text_step("steered")]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let port = Arc::new(OneSteer {
+            input: std::sync::Mutex::new(Some(crate::CodingSteeringInput {
+                receipt_operation_id: "steer-receipt".into(),
+                message_id: "steer-message".into(),
+                text: "also explain".into(),
+                files: Vec::new(),
+                inject_skills: Vec::new(),
+                image_count: 0,
+                prepared_images: Vec::new(),
+            })),
+        });
+        let result = open_session(model.clone(), Arc::new(EchoTool))
+            .run_turn(
+                CodingTurnRequest::new(
+                    request(),
+                    CodingToolPlan::default(),
+                    principal(),
+                    0,
+                )
+                .with_input_port(port),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result.terminal, CodingTurnTerminal::Completed { .. }));
+        let requests = model.requests.lock().unwrap();
+        assert!(requests[0]
+            .input
+            .tools
+            .iter()
+            .any(|tool| tool.name == crate::planning::TOOL_NAME));
+        assert!(requests[0]
+            .input
+            .instructions
+            .iter()
+            .any(|instruction| instruction.contains("Long-horizon execution policy")));
     }
 
     #[tokio::test]

@@ -51,7 +51,6 @@ mod coding_tool_surface;
 mod coding_attachments;
 mod coding_skills;
 pub mod engine_skills;
-mod coding_runtime_recovery;
 pub(crate) mod nomi_core_wave2;
 #[cfg(feature = "browser-use")]
 pub(crate) mod knowledge_browser;

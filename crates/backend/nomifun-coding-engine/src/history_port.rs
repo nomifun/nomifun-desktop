@@ -1,5 +1,5 @@
 //! Optional read-only host history input. No store handles or effect authority
-//! cross this boundary; Coding interprets its own persisted event codec.
+//! cross this boundary; the runtime interprets its persisted event codec.
 use crate::{CodingEngineError, CodingEngineEvent};
 use nomifun_chat_model_broker::{ChatCausality, ChatMessage};
 

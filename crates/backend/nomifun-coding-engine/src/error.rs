@@ -6,21 +6,6 @@ pub enum CodingEngineError {
     #[error("invalid coding engine contract: {0}")]
     InvalidContract(String),
 
-    #[error("engine build was not found: {0}")]
-    EngineBuildNotFound(String),
-
-    #[error(
-        "engine build digest mismatch for {engine_build_id}: expected {expected}, actual {actual}"
-    )]
-    EngineBuildDigestMismatch {
-        engine_build_id: String,
-        expected: String,
-        actual: String,
-    },
-
-    #[error("unsupported coding runtime profile: {0}")]
-    UnsupportedProfile(String),
-
     #[error("coding turn is already running")]
     TurnAlreadyRunning,
 
@@ -29,12 +14,6 @@ pub enum CodingEngineError {
 
     #[error("coding turn {field} does not match the fixed engine binding")]
     TurnBindingMismatch { field: &'static str },
-
-    #[error("coding turn has no active operation")]
-    NoActiveTurn,
-
-    #[error("coding turn exceeded the model-step limit of {0}")]
-    ModelStepLimitExceeded(u16),
 
     #[error("coding model stream failed ({code:?}): {message}")]
     Model {
@@ -69,25 +48,25 @@ pub enum CodingEngineError {
     #[error("coding ToolPlan could not be compiled: {0}")]
     ToolPlan(String),
 
-    #[error("Capability Kernel rejected Coding Tool ({code}): {message}")]
+    #[error("Capability Kernel rejected Nomi Tool ({code}): {message}")]
     CapabilityKernel { code: String, message: String },
 
-    #[error("Coding workspace context failed: {0}")]
+    #[error("Nomi workspace context failed: {0}")]
     WorkspaceContext(String),
 
-    #[error("Coding context assembly failed: {0}")]
+    #[error("Nomi context assembly failed: {0}")]
     ContextAssembly(String),
 
-    #[error("Coding context is {actual} bytes, above the {limit} byte limit")]
+    #[error("Nomi context is {actual} bytes, above the {limit} byte limit")]
     ContextTooLarge { limit: usize, actual: usize },
 
-    #[error("Coding checkpoint is invalid: {0}")]
+    #[error("Nomi replay/checkpoint data is invalid: {0}")]
     Checkpoint(String),
 
-    #[error("Coding compaction failed: {0}")]
+    #[error("Nomi compaction failed: {0}")]
     Compaction(String),
 
-    #[error("Coding process owner failed: {0}")]
+    #[error("Nomi process owner failed: {0}")]
     Process(String),
 
     #[error("coding tool invocation failed: {0}")]

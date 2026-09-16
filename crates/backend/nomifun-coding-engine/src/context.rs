@@ -1,4 +1,4 @@
-//! Bounded Coding model-context assembly.
+//! Bounded Nomi model-context assembly.
 //!
 //! The platform owns durable SessionEvent history. This module only turns a
 //! bounded projection plus current input into the existing ChatModelInput
@@ -38,7 +38,7 @@ impl CodingContextBudget {
             || self.max_context_bytes > 64 * 1024 * 1024
         {
             return Err(CodingEngineError::ContextAssembly(
-                "Coding context budget is invalid".to_owned(),
+                "Nomi context budget is invalid".to_owned(),
             ));
         }
         Ok(self)

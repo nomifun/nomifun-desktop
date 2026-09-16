@@ -69,7 +69,7 @@ impl PatchRecovery {
             targets,
             unaddressable: state.target_budget_exceeded,
             ready_for_reads: true,
-            ..Default::default()
+            persisted: Some(state.clone()),
         })
     }
 
@@ -164,16 +164,17 @@ impl PatchRecovery {
     pub(crate) fn gate(
         &self,
         binding: &CodingToolBinding,
-        call: &ChatToolCall,
+        _call: &ChatToolCall,
     ) -> Option<&'static str> {
-        let cleanup = binding.capability_id.as_ref() == "process.exec"
-            && matches!(
-                call.arguments.0.get("operation").and_then(|v| v.as_str()),
-                Some("poll" | "cancel" | "close_stdin")
-            );
+        let cleanup = matches!(
+            binding.action_id.as_ref(),
+            "workspace.process/poll"
+                | "workspace.process/cancel"
+                | "workspace.process/close_stdin"
+        );
         (self.pending() && !cleanup
             && (!matches!(binding.effect_class, CodingEffectClass::ReadOnly)
-                || binding.capability_id.as_ref() == "process.exec"))
+                || binding.capability_id.as_ref() == "workspace.process"))
             .then_some("Not executed: a failed patch requires fresh read_file text observations of every recorded target (or missing_ok=true absence), then replanning. An instruction scan/search is not a file-version observation. If reads are unavailable, report blocked; do not bypass via shell.")
     }
 
@@ -287,4 +288,51 @@ fn normalize(path: &str) -> Option<String> {
     crate::agents_md::normalize_workspace_directory(path)
         .ok()
         .filter(|path| !path.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use nomifun_agent_contracts::StrictJsonValue;
+    use nomifun_chat_model_broker::{ChatToolCall, ToolCallId};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct Sink(AtomicUsize);
+
+    #[async_trait]
+    impl crate::CodingEventSink for Sink {
+        async fn emit(
+            &self,
+            event: crate::CodingEngineEvent,
+        ) -> Result<(), crate::CodingEngineError> {
+            if matches!(event, crate::CodingEngineEvent::PatchRecoveryUpdated { .. }) {
+                self.0.fetch_add(1, Ordering::AcqRel);
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn restored_recovery_state_is_written_only_after_a_transition() {
+        let sink = Sink::default();
+        let mut recovery = PatchRecovery::restore(&CodingPatchRecoveryState::default()).unwrap();
+        recovery.persist(&sink).await.unwrap();
+        assert_eq!(sink.0.load(Ordering::Acquire), 0);
+
+        recovery.failed(&ChatToolCall {
+            call_id: ToolCallId::from("patch"),
+            name: "apply_patch".into(),
+            arguments: StrictJsonValue(serde_json::json!({
+                "files":[{"path":"src/lib.rs","hunks":[]}]
+            })),
+            provider_metadata: None,
+        });
+        recovery.persist(&sink).await.unwrap();
+        recovery.persist(&sink).await.unwrap();
+        assert_eq!(sink.0.load(Ordering::Acquire), 1);
+    }
 }

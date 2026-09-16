@@ -142,7 +142,7 @@ impl CompletionTracker {
         let usable = invocation_attempted
             && !result.is_error
             && work.running_processes.is_empty()
-            && (binding.capability_id.as_ref() != "process.exec"
+            && (binding.capability_id.as_ref() != "workspace.process"
                 || command.is_some_and(|command| {
                     command.was_current_at_observation
                         && command.cleanup_proven

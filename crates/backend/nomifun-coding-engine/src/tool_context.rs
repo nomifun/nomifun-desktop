@@ -16,12 +16,12 @@ pub(crate) enum ToolContextKind {
 }
 
 impl ToolContextKind {
-    /// Canonical capability, not a model-selected tool name. Unrecognized
+    /// Canonical Action, not a model-selected tool name. Unrecognized
     /// community output, file/instruction reads and media stay unchanged.
-    pub fn for_capability(capability: &str) -> Option<Self> {
-        match capability {
-            "process.exec" => Some(Self::Process),
-            "vcs.diff" => Some(Self::Diff),
+    pub fn for_action(action: &str) -> Option<Self> {
+        match action {
+            action if action.starts_with("workspace.process/") => Some(Self::Process),
+            "workspace.vcs/diff" => Some(Self::Diff),
             _ => None,
         }
     }

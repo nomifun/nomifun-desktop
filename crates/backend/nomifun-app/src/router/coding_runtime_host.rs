@@ -1,4 +1,4 @@
-//! Coding runtime on the production Conversation owner, Broker and Kernel.
+//! Unified Nomi runtime on the production Conversation owner, Broker and Kernel.
 //! No SessionStore, private transcript, provider client or native tool bypass.
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -26,13 +26,13 @@ mod steering;
 mod history_port;
 
 fn error(value: impl std::fmt::Display) -> AppError {
-    AppError::Conflict(format!("Coding host: {value}"))
+    AppError::Conflict(format!("Nomi runtime host: {value}"))
 }
 
 pub(crate) fn descriptor() -> RuntimeEngineDescriptor {
     RuntimeEngineDescriptor {
-        family_id: "nomifun.coding".into(),
-        build_id: format!("{}-host2-coding-loop99", env!("CARGO_PKG_VERSION")),
+        family_id: nomifun_ai_agent::OFFICIAL_NOMI_RUNTIME_FAMILY_ID.into(),
+        build_id: format!("{}-host3-adaptive-loop1", env!("CARGO_PKG_VERSION")),
         build_digest: format!(
             "{:x}",
             Sha256::digest(
@@ -51,6 +51,7 @@ pub(crate) fn descriptor() -> RuntimeEngineDescriptor {
                     include_str!("remote_runtime.rs"),
                     include_str!("../../../nomifun-public/src/canonical.rs"),
                     include_str!("../../../nomifun-coding-engine/src/engine.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/adaptive.rs"),
                     include_str!("../../../nomifun-coding-engine/src/error.rs"),
                     include_str!("../../../nomifun-coding-engine/src/turn.rs"),
                     include_str!("../../../nomifun-coding-engine/src/kernel.rs"),
@@ -124,7 +125,6 @@ pub(crate) fn descriptor() -> RuntimeEngineDescriptor {
                     include_str!("../../../nomifun-agent-contracts/src/tool_middleware.rs"),
                     include_str!("coding_runtime_history.rs"),
                     include_str!("coding_patch_recovery.rs"),
-                    include_str!("coding_runtime_recovery.rs"),
                     include_str!("engine_process_host.rs"),
                     include_str!("engine_process_recovery.rs"),
                     include_str!("coding_event_buffer.rs"),
@@ -218,9 +218,9 @@ pub(crate) fn descriptor() -> RuntimeEngineDescriptor {
                 .as_bytes()
             )
         ),
-        display_name: "Coding".into(),
+        display_name: "Nomi".into(),
         host_contract_version: nomifun_api_types::RUNTIME_HOST_CONTRACT_VERSION,
-        supported_profiles: vec!["coding".into()],
+        supported_profiles: vec!["default".into()],
     }
 }
 
@@ -264,7 +264,7 @@ pub(crate) fn factory(
             }))?;
             let full_plan = full_plan.merged(&resources.plugin_product_tool_plan().await?).map_err(error)?;
             let full_plan = full_plan.merged(&resources.robot_tool_plan().await?).map_err(error)?;
-            if full_plan.len() > 128 { return Err(error("Coding tool surface exceeds 128 actions")); }
+            if full_plan.len() > 128 { return Err(error("Nomi tool surface exceeds 128 actions")); }
             let skills = session_host.read_selected_skills(&admitted).await?;
             let tools = Arc::new(JoinedTools(resources.install_tools(full_plan.clone(), Arc::new(CodingToolObservation))?));
             let host = Arc::new_cyclic(|weak| ConversationCodingHost {
@@ -290,21 +290,16 @@ pub(crate) fn factory(
             });
             let model = host.session_host.compose_model_port(host.clone())?;
             let build = CodingEngineBuild {
-                family_id: binding.family_id.clone().into(),
                 build_id: binding.build_id.clone().into(),
                 build_digest: binding.build_digest.clone().into(),
-                display_name: descriptor().display_name,
-                supported_profiles: vec![CodingRuntimeProfile::Coding],
             };
             let engine = Arc::new(CodingEngine::new(build).map_err(error)?
                 .with_context_budget(CodingContextBudget { max_context_bytes: 12 * 1024 * 1024, ..Default::default() }).map_err(error)?);
             let engine_binding = EngineBinding::new(
                 session_id,
                 RuntimeBindingId::from(format!("conversation-runtime:{}", options.conversation_id)),
-                binding.family_id.into(),
                 binding.build_id.into(),
                 binding.build_digest.into(),
-                CodingRuntimeProfile::Coding,
                 compiled.snapshot_ref().clone(),
             )
             .map_err(error)?;
@@ -313,11 +308,6 @@ pub(crate) fn factory(
             Ok(Arc::new(runtime) as Arc<dyn nomifun_ai_agent::RegisteredAgentRuntime>)
         })
     })
-}
-
-/// Registered compatibility policy; shared Session routes never name Coding.
-pub(crate) fn support() -> super::coding_tool_surface::CodingAdmission {
-    super::coding_tool_surface::CodingAdmission
 }
 
 struct ActiveTurn {
@@ -418,11 +408,11 @@ impl CodingRuntimeHost for ConversationCodingHost {
         let admitted = self.session_host.read_turn_receipt(&self.options, &self.binding, &self.snapshot_ref, message).await?;
         let patch_recovery = super::coding_patch_recovery::load(&self.pool, &admitted, &self.snapshot_ref).await?;
         // Refresh platform facts each turn. Unknown-limit fallback and output
-        // reservation are explicit Coding policies, not platform defaults.
+        // reservation are explicit runtime policies, not platform defaults.
         let facts = self.session_host.read_model_facts(admitted.session()).await?;
         let (context, output) = facts.envelope_with_unknown_policy(super::engine_model_facts::EngineModelLimits {
             context_tokens: Some(32_768), output_tokens: Some(4096),
-        }).ok_or_else(|| error("model limits cannot support Coding context policy"))?;
+        }).ok_or_else(|| error("model limits cannot support Nomi context policy"))?;
         let model_budget = CodingModelBudget::from_limits(Some(context), Some(output)).map_err(error)?;
         let operation = admitted.operation_id().to_owned();
         let epoch = admitted.admission_epoch();
@@ -459,7 +449,7 @@ impl CodingRuntimeHost for ConversationCodingHost {
         let current_content = super::coding_attachments::prepare(message, receipt, &response.extra,
             capabilities.active.iter().any(|id| id.as_ref() == "llm.vision")).await?;
         // Supply a bounded canonical candidate window, not a model-context
-        // strategy. Coding owns selection and per-call budgets. Host limits
+        // strategy. The runtime owns selection and per-call budgets. Host limits
         // bound DB/resource consumption independently of the engine algorithm.
         // Tool results remain data, never new system instructions.
         let bytes = message.content.len();
@@ -668,7 +658,7 @@ impl ChatCausalityGate for ConversationCodingHost {
         let active = self.active.lock().await;
         let turn = active
             .as_ref()
-            .ok_or_else(|| reject("no active Coding turn"))?;
+            .ok_or_else(|| reject("no active Nomi turn"))?;
         if self.activation_failed.load(std::sync::atomic::Ordering::Acquire)
             || turn.cancellation.is_cancelled()
             || causality.agent_session_id.as_ref() != self.options.conversation_id
@@ -678,14 +668,14 @@ impl ChatCausalityGate for ConversationCodingHost {
             || causality.route_identity != self.route
         {
             return Err(reject(
-                "Coding request differs from its admitted Conversation authority",
+                "Nomi request differs from its admitted Conversation authority",
             ));
         }
         turn.journal.authorize(causality).await
     }
 }
 
-/// Coding supplies only its instruction-observation policy; tool lifetime,
+/// The runtime supplies only its instruction-observation policy; tool lifetime,
 /// duplicate fencing and durable dispatch/settlement belong to the shared host.
 struct JoinedTools(Arc<super::engine_tool_host::EngineToolHost>);
 impl std::ops::Deref for JoinedTools {

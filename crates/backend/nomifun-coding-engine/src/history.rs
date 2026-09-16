@@ -94,7 +94,7 @@ fn replay_into(
             CodingEngineEvent::ToolStarted {
                 step,
                 call_id,
-                capability_id,
+                action_id,
                 ..
             } if *step > 0 => {
                 if batch.discarded {
@@ -108,7 +108,7 @@ fn replay_into(
                     ));
                 }
                 if let Some(kind) =
-                    crate::tool_context::ToolContextKind::for_capability(capability_id.as_ref())
+                    crate::tool_context::ToolContextKind::for_action(action_id.as_ref())
                 {
                     batch.context_kinds.insert(call_id.clone(), kind);
                 }
@@ -525,4 +525,112 @@ impl ReplayBatch {
 
 fn invalid(message: &str) -> CodingEngineError {
     CodingEngineError::Checkpoint(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CodingEngine, CodingEngineBuild, EngineBuildId, EngineBinding};
+    use nomifun_agent_contracts::{
+        ActionId, AgentSessionId, CapabilityId, DigestHex, OperationId, ResolvedSnapshotId,
+        ResolvedSnapshotRef, RuntimeBindingId, StrictJsonValue,
+    };
+    use nomifun_chat_model_broker::{ChatContentPart, ChatRole, ChatToolCall};
+
+    fn binding() -> EngineBinding {
+        CodingEngine::new(CodingEngineBuild {
+            build_id: EngineBuildId::from("build"),
+            build_digest: DigestHex::from("a".repeat(64)),
+        })
+        .unwrap()
+        .bind(
+            AgentSessionId::from("session"),
+            RuntimeBindingId::from("binding"),
+            ResolvedSnapshotRef {
+                snapshot_id: ResolvedSnapshotId::from("snapshot"),
+                snapshot_digest: DigestHex::from("b".repeat(64)),
+            },
+        )
+        .unwrap()
+    }
+
+    fn requirement() -> ChatMessage {
+        ChatMessage {
+            role: ChatRole::User,
+            content: vec![ChatContentPart::Text {
+                text: "change the file".into(),
+            }],
+            provider_round_id: None,
+        }
+    }
+
+    #[test]
+    fn restart_history_without_a_durable_terminal_is_never_replayed() {
+        let mut history = Vec::new();
+        let error = replay_closed_turn(
+            &mut history,
+            requirement(),
+            &[CodingEngineEvent::TurnStarted {
+                binding: binding(),
+                turn_operation_id: OperationId::from("turn"),
+            }],
+        )
+        .unwrap_err();
+        assert!(matches!(error, CodingEngineError::Checkpoint(message)
+            if message.contains("no durable terminal")));
+        assert!(history.is_empty());
+    }
+
+    #[test]
+    fn interrupted_effect_without_a_result_becomes_unknown_and_is_not_replayed() {
+        let call_id = ToolCallId::from("effect-1");
+        let events = vec![
+            CodingEngineEvent::TurnStarted {
+                binding: binding(),
+                turn_operation_id: OperationId::from("turn"),
+            },
+            CodingEngineEvent::ModelStepStarted {
+                step: 1,
+                operation_id: OperationId::from("turn:model:1"),
+            },
+            CodingEngineEvent::ToolCallCompleted {
+                step: 1,
+                call: ChatToolCall {
+                    call_id: call_id.clone(),
+                    name: "write_file".into(),
+                    arguments: StrictJsonValue(serde_json::json!({"path":"a","content":"b"})),
+                    provider_metadata: None,
+                },
+            },
+            CodingEngineEvent::ToolStarted {
+                step: 1,
+                call_id: call_id.clone(),
+                capability_id: CapabilityId::from("workspace.files"),
+                action_id: ActionId::from("workspace.files/write"),
+            },
+            CodingEngineEvent::TurnFailed {
+                model_steps: 1,
+                message: "application restarted".into(),
+            },
+        ];
+        let mut history = Vec::new();
+        replay_closed_turn(&mut history, requirement(), &events).unwrap();
+        let result = history
+            .iter()
+            .flat_map(|message| &message.content)
+            .find_map(|part| match part {
+                ChatContentPart::ToolResult {
+                    call_id: observed,
+                    output,
+                    is_error,
+                } if observed == &call_id => Some((output, is_error)),
+                _ => None,
+            })
+            .expect("unknown effect observation");
+        assert!(*result.1);
+        assert!(result.0.iter().any(|part| matches!(part,
+            nomifun_chat_model_broker::ChatToolResultPart::Text { text }
+                if text.contains("may have occurred") && text.contains("before retrying"))));
+        assert!(!events.iter().any(|event| matches!(event, CodingEngineEvent::ToolCompleted { .. })));
+    }
 }

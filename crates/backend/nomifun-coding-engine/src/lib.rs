@@ -1,4 +1,4 @@
-//! Isolated in-process Coding Agent execution engine.
+//! Source-integrated execution loop for the unified Nomi Agent Runtime.
 //!
 //! The application composes this engine through model/tool/event ports.
 //! Platform owners retain authorization, process ownership and canonical
@@ -7,7 +7,8 @@
 #![forbid(unsafe_code)]
 
 mod agents_md;
-mod checkpoint;
+mod adaptive;
+pub use adaptive::{CodingRuntimeActivationReason, CodingRuntimeModule};
 mod compaction;
 mod compaction_source;
 mod compacted_history;
@@ -56,14 +57,11 @@ mod workflow;
 pub use workflow::{CodingCommandObservation, CodingWorkStatus};
 
 pub use engine::{
-    AgentEngine, CodingEngine, CodingEngineBuild, CodingEngineCatalog, CodingEngineChannel,
-    CodingEngineSelector, CodingEngineSession, CodingRuntimeProfile, EngineBinding,
-    EngineBuildId, EngineFamilyId,
+    CodingEngine, CodingEngineBuild, CodingEngineSession, EngineBinding, EngineBuildId,
 };
 pub use agents_md::{
     load_agents_md, AgentsMdContext, AgentsMdLayer, AgentsMdPolicy, CodingWorkspaceReader,
 };
-pub use checkpoint::{CheckpointAdmission, CheckpointDiscardReason, CodingCheckpoint};
 pub use compaction::{
     run_compaction, CodingCompactionRequest, CodingCompactionSummary,
 };
@@ -81,9 +79,7 @@ pub use process::{
     CodingCleanupReport, CodingProcessOutput, CodingProcessPoll, CodingProcessRequest,
     CodingProcessSession, CodingProcessTransport, ManagedCodingProcessOwner,
 };
-pub use standard_tools::{
-    standard_coding_tool_exposures, StandardCodingToolLevel,
-};
+pub use standard_tools::standard_coding_tool_exposures;
 pub use tool::{
     input_schema_digest, CodingEffectClass, CodingToolBinding, CodingToolInvocation,
     CodingToolInvoker, CodingToolPlan, CodingToolResult,
