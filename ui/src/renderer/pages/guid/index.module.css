@@ -345,15 +345,14 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: flex-start;
-  /* Keep the hero anchored when the selected Agent adds resource controls
-     (for example the Workspace footer used by assistant.general). Centering
-     a variable-height layout made the whole page move by half the delta. */
-  padding: clamp(64px, 10vh, 108px) 20px 24px;
+  justify-content: center;
+  /* Center the complete group as the companion stage smoothly changes height.
+     min-height lets taller content grow into normal document scrolling. */
+  padding: 48px 20px;
   box-sizing: border-box;
 }
 
-/* Agent capability rows may grow downward without moving the hero anchor. */
+/* Keep horizontal centering while the stage owns vertical alignment. */
 .guidPrimaryStage .guidLayout {
   margin-top: 0;
 }
@@ -383,5 +382,5 @@
 /* 设定标签 */
 
 @media (max-height: 720px) {
-  .guidPrimaryStage { padding-top: 48px; }
+  .guidPrimaryStage { padding-block: 32px; }
 }
