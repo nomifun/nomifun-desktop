@@ -71,6 +71,8 @@ import styles from './index.module.css';
 import CreationControls, { CreationModelSelector } from '@/renderer/creation/CreationControls';
 import { CreationComposerContext } from '@/renderer/creation/CreationComposerContext';
 import { useGuidCreation } from '@/renderer/creation/useGuidCreation';
+import { useCompanion } from '@/renderer/pages/nomi/useNomi';
+import { parseCompanionId } from '@/common/types/ids';
 
 type GuidNavigationState = {
   resetAgentSelection?: boolean;
@@ -146,8 +148,10 @@ const GuidPage: React.FC = () => {
   // Knowledge is an optional, session-scoped mount. It keeps its compact
   // KnowledgeControl interaction and is applied after the conversation exists;
   // only resources that truly gate launch belong in the large resource picker.
+  const isCompanionAgent = agentSelection.selection.kind === 'template' && agentSelection.selection.templateKey === 'companion.default';
+  const selectedCompanion = useCompanion(isCompanionAgent && resourceSelectionValue.companion ? parseCompanionId(resourceSelectionValue.companion) : null);
   const knowledgeEnabled =
-    presetResourceResolutionReady && presetResourceKinds.has('knowledge_base');
+    !isCompanionAgent && presetResourceResolutionReady && presetResourceKinds.has('knowledge_base');
   const resourcePickerKinds = new Set(
     [...presetResourceKinds].filter((kind) => kind !== 'knowledge_base')
   );
@@ -155,17 +159,19 @@ const GuidPage: React.FC = () => {
     resourcePickerKinds,
     resourceSelectionValue
   );
-  const advancedControlsEnabled = presetResourceResolutionReady && presetCapabilityIds.size > 0;
+  const advancedControlsEnabled = !isCompanionAgent && presetResourceResolutionReady && presetCapabilityIds.size > 0;
   const effectiveAutoWork = advancedControlsEnabled ? advancedConfig.autoWork : { enabled: false };
   const isAutoWorkMode = isAutoWorkEntry(effectiveAutoWork);
-  const resourceSelectionsReady = presetResourceResolutionReady && resourceSelectionResolution.missingKinds.length === 0;
+  const resourceSelectionsReady = presetResourceResolutionReady && (isCompanionAgent
+    ? Boolean(resourceSelectionValue.companion)
+    : resourceSelectionResolution.missingKinds.length === 0);
   // A workspace chosen before the Agent target (for example from a project
   // drawer's "new conversation" action) is explicit user intent. Keep that
   // project context visible and bind it on send even when the selected target
   // does not otherwise expose an optional workspace picker.
-  const workspaceEnabled =
+  const workspaceEnabled = !isCompanionAgent && (
     Boolean(guidInput.dir.trim()) ||
-    (presetResourceResolutionReady && presetResourceKinds.has('workspace'));
+    (presetResourceResolutionReady && presetResourceKinds.has('workspace')));
   const hasAgentLaunchTarget = agentSelection.selection.kind === 'template'
     ? Boolean(agentSelection.selectedTemplate)
     : Boolean(
@@ -265,7 +271,7 @@ const GuidPage: React.FC = () => {
       }),
     autoWork: effectiveAutoWork,
     workspaceEnabled,
-    resourceResolutionReady: resourceSelectionsReady && collaboration.ready,
+    resourceResolutionReady: resourceSelectionsReady && (isCompanionAgent || collaboration.ready),
     collaboration: collaboration.config,
     resourceSelections: resourceSelectionResolution.selections,
     capabilitySelection: capabilitySelectionReady ? capabilitySelection : undefined,
@@ -539,7 +545,11 @@ const GuidPage: React.FC = () => {
   ) : null;
 
   const modelSelectorNode = (
-    creation.draft.mode ? <CreationModelSelector files={guidInput.files} /> : (
+    creation.draft.mode ? <CreationModelSelector files={guidInput.files} /> : isCompanionAgent && selectedCompanion.profile?.model ? (
+      <Button type='text' size='small' onClick={() => void navigate(`/nomi?companion=${selectedCompanion.profile!.companion_id}&tab=overview`)}>
+        {selectedCompanion.profile.model.model}
+      </Button>
+    ) : (
       <ChatModelSelector
         providers={modelSelection.modelList}
         currentModel={modelSelection.current_model}
@@ -583,7 +593,7 @@ const GuidPage: React.FC = () => {
 
             <Composer
               sideTools={
-                <SessionCapabilityPicker
+                !isCompanionAgent && <SessionCapabilityPicker
                   catalog={displayedCapabilityCatalog}
                   draft={effectiveCapabilityDraft}
                   onChange={handleCapabilityDraftChange}
@@ -675,7 +685,9 @@ const GuidPage: React.FC = () => {
             />
 
             {!creation.draft.mode && <AgentResourcePicker
-              requiredKinds={resourcePickerKinds}
+              requiredKinds={isCompanionAgent ? ['companion'] : resourcePickerKinds}
+              optionalKinds={isCompanionAgent ? ['channel', 'robot', 'mcp_server'] : undefined}
+              companionBindings={isCompanionAgent}
               capabilityIds={presetCapabilityIds}
               value={resourceSelectionValue}
               onChange={setResourceSelectionValue}

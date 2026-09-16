@@ -354,10 +354,6 @@
           {
             "id": "mcp.tool_proxy",
             "version": "1.0.0"
-          },
-          {
-            "id": "mcp.resource",
-            "version": "1.0.0"
           }
         ],
         "skill_bindings": [],
@@ -602,7 +598,6 @@
           "knowledge.read",
           "knowledge.search",
           "mcp.connect",
-          "mcp.resource",
           "mcp.tool_proxy",
           "memory.companion.evolve",
           "memory.companion.merge",
@@ -677,5 +672,5 @@
       "research.web"
     ]
   },
-  "payload_digest": "477236de5f2a9afcb289ba4409a3dd8eae25f1df9ef924d0fcb9ecfd6d61421b"
+  "payload_digest": "9a4f4144f2927e6d67b0dbf430e97d2859a8f5043a3e0fc4c43d59183fd093eb"
 }

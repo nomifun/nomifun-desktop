@@ -1123,7 +1123,19 @@ impl nomifun_cron::CronAgentPresetResolver for NomiCoreCronAgentPresetResolver {
 }
 
 pub(super) fn control_plane_error_to_app(error: nomifun_agent_control_plane::ControlPlaneError) -> AppError {
-    let message = format!("{}: {error}", error.code().as_ref());
+    let mut message = format!("{}: {error}", error.code().as_ref());
+    // Preserve compiler explanations across the product-domain adapter. The
+    // outer preset error alone cannot identify an incompatible capability.
+    if let Some(details) = error.details()
+        && let Some(diagnostics) = details.get("diagnostics").and_then(serde_json::Value::as_array)
+    {
+        for diagnostic in diagnostics {
+            if let Some(reason) = diagnostic.get("message").and_then(serde_json::Value::as_str) {
+                message.push_str("; ");
+                message.push_str(reason);
+            }
+        }
+    }
     match error.status() {
         StatusCode::BAD_REQUEST => AppError::BadRequest(message),
         StatusCode::FORBIDDEN => AppError::Forbidden(message),
@@ -2730,6 +2742,18 @@ mod tests {
     use super::*;
 
     use crate::AppConfig;
+
+    #[test]
+    fn product_agent_errors_keep_the_compiler_reason() {
+        let error = nomifun_agent_control_plane::ControlPlaneError::with_details(
+            "PRESET_REVISION_SAVE_FAILED", StatusCode::UNPROCESSABLE_ENTITY,
+            "template expansion did not pass compiler validation",
+            serde_json::json!({"diagnostics": [{"code": "AGENT_RUNTIME_ENGINE_UNAVAILABLE", "message": "MCP owner paths cannot be mixed"}]}),
+        );
+        let mapped = control_plane_error_to_app(error);
+        assert_eq!(mapped.status_code(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(mapped.to_string().contains("MCP owner paths cannot be mixed"));
+    }
 
     #[test]
     fn terminal_exit_notice_rejects_stale_relaunch_epochs() {

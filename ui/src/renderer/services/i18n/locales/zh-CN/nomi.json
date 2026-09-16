@@ -363,7 +363,7 @@
   "chat": {
     "modelSaveFailed": "对话模型保存失败，请重试",
     "skillsScopeHint": "管理这位伙伴的技能，桌面与机器人共同使用",
-    "mcpScopeHint": "已预置连接、工具调用与资源读取能力。选择的服务由这位伙伴的所有入口共用，下一轮生效。",
+    "mcpScopeHint": "支持按需连接与工具调用。选择的服务由这位伙伴的所有入口共用，下一轮生效。",
     "mcpAgentRequired": "当前 Agent 未启用 MCP 连接能力，请切换为伙伴预设或在 Agent 工作台配置。",
     "mcpBusy": "请等待当前回复结束后再修改 MCP 服务。",
     "modelConfig": "对话模型",

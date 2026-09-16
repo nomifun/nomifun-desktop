@@ -866,9 +866,14 @@ async fn companion_entry_uses_its_official_agent_and_can_switch_to_minimal() {
         &format!("/api/companion/companions/{companion_id}"),
         json!({ "model": { "provider_id": provider_id, "model": "step-3.7-flash" } })).await;
     assert_eq!(status, StatusCode::OK, "{patched}");
-    let (status, thread) = call(router.clone(), "POST",
-        &format!("/api/companion/companions/{companion_id}/companion/threads"), json!({})).await;
+    let path = format!("/api/companion/companions/{companion_id}/companion/threads");
+    let ((status, thread), (other_status, other_thread)) = tokio::join!(
+        call(router.clone(), "POST", &path, json!({})),
+        call(router.clone(), "POST", &path, json!({})),
+    );
     assert_eq!(status, StatusCode::OK, "{thread}");
+    assert_eq!(other_status, StatusCode::OK, "{other_thread}");
+    assert_eq!(thread["data"]["conversation_id"], other_thread["data"]["conversation_id"], "concurrent home/sidebar/device opens must share the first conversation");
     let conversation_id = thread["data"]["conversation_id"].as_str().unwrap();
     let (preset_id, snapshot_json, _extra_json): (String, String, String) = sqlx::query_as(
         "SELECT preset_id, agent_snapshot, extra FROM conversations WHERE conversation_id = ?")
@@ -877,6 +882,10 @@ async fn companion_entry_uses_its_official_agent_and_can_switch_to_minimal() {
     assert!(snapshot["enabled_capabilities"].as_array().unwrap().iter()
         .any(|capability| capability == "companion.persona"));
     assert_eq!(snapshot["preset_name"], "companion.default");
+    assert!(!snapshot["enabled_capabilities"].as_array().unwrap().iter().any(|capability| capability == "mcp.resource"), "the native MCP template must pass runtime admission without mixing owners");
+    let conversation_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations")
+        .fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(conversation_count, 1, "ensure must not leak a second conversation");
     let (status, options) = call(router.clone(), "GET",
         &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{options}");

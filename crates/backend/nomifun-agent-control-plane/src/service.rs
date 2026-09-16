@@ -730,11 +730,19 @@ impl AgentControlPlane {
         let Some(seed) = self.templates.seed(key) else { return Ok(None); };
         let Some(revision) = self.current_revision(&stored).await? else { return Ok(None); };
         let payload = &revision.payload;
+        let capabilities = payload.enabled_capabilities.iter().map(|item| item.capability.clone()).collect::<Vec<_>>();
+        // Internal companion defaults published before the MCP owner split
+        // included the now-incompatible platform resource provider. Recognize
+        // that exact former seed so existing shared conversations refresh too.
+        let previous_companion_seed = key == OfficialPresetKey::CompanionDefault
+            && capabilities.len() == seed.enabled_capabilities.len() + 1
+            && capabilities.iter().any(|item| item.id.as_ref() == "mcp.resource" && item.version.as_ref() == "1.0.0")
+            && capabilities.iter().filter(|item| item.id.as_ref() != "mcp.resource").cloned().collect::<Vec<_>>() == seed.enabled_capabilities;
         let exact = payload.persona.is_empty() && payload.instructions.is_empty()
             && payload.starter_prompts.is_empty() && payload.system_role_provider_overrides.is_empty()
             && payload.skill_bindings == seed.skill_bindings
             && payload.enabled_capabilities.iter().all(|item| item.action_allowlist.is_empty())
-            && payload.enabled_capabilities.iter().map(|item| item.capability.clone()).collect::<Vec<_>>() == seed.enabled_capabilities;
+            && (capabilities == seed.enabled_capabilities || previous_companion_seed);
         Ok(exact.then_some(key))
     }
 
@@ -2336,6 +2344,38 @@ mod tests {
         assert!(fresh.draft.document.instructions.is_empty());
         let preserved = control_plane.editor(&owner, &original.preset.preset_id, None).await.unwrap();
         assert_eq!(preserved.draft.document.instructions, "User-specific behavior");
+    }
+
+    #[tokio::test]
+    async fn former_internal_companion_seed_is_recognized_without_reclassifying_personal_agents() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control = template_control_plane(store.clone(), OfficialPresetKey::CompanionDefault, false);
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let mut request = official_launch_request(true);
+        request.display_name = "companion.default".into();
+        let created = control.create_from_template(&owner, "companion.default", request).await.unwrap();
+        let id = &created.preset.preset_id;
+        assert_eq!(control.internal_official_template(&owner, id).await.unwrap(), Some(OfficialPresetKey::CompanionDefault));
+        let reference: PresetRevisionRef = wire_cast(created.preset.current_stable_revision.as_ref().unwrap()).unwrap();
+        let mut former = store.get_revision(&reference).await.unwrap().unwrap();
+        let snapshot = store.get_snapshot(&reference).await.unwrap().unwrap();
+        // Model the already-persisted previous official payload. This test does
+        // not ask today's compiler to admit the prohibited combination.
+        former.payload.enabled_capabilities.push(serde_json::from_value(json!({
+            "capability": { "id": "mcp.resource", "version": "1.0.0" },
+            "action_allowlist": []
+        })).unwrap());
+        former.reference.revision += 1;
+        let stored = store.append_revision(Some(&reference), former.clone(), snapshot.clone(), "companion.default".into(), None).await.unwrap();
+        assert_eq!(control.internal_official_template(&owner, id).await.unwrap(), Some(OfficialPresetKey::CompanionDefault));
+        former.payload.instructions = "User-specific behavior".into();
+        former.reference.revision += 1;
+        let stored = store.append_revision(stored.preset.current_stable_revision.as_ref(), former, snapshot, "companion.default".into(), None).await.unwrap();
+        assert_eq!(control.internal_official_template(&owner, id).await.unwrap(), None);
+        let mut personal = stored;
+        personal.session_only = false;
+        store.update_preset_metadata(&personal).await.unwrap();
+        assert_eq!(control.internal_official_template(&owner, id).await.unwrap(), None);
     }
 
     fn general_template_control_plane(store: Arc<InMemoryControlPlaneStore>, updated_schema: bool) -> AgentControlPlane {

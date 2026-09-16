@@ -5,6 +5,7 @@ import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
 import CompanionAvatar from '@/renderer/pages/companion/CompanionAvatar';
 import { customFigureMetaOf } from '@/renderer/pages/companion/characters/customMeta';
 import { useCompanions } from '@/renderer/pages/nomi/useNomi';
+import { getConversationCreateErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
 import { Message } from '@arco-design/web-react';
 import { Add, CloseSmall, Down, More, Right, Search, Up } from '@icon-park/react';
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -205,8 +206,8 @@ export default function GuidCompanionShowcase() {
     try {
       const thread = await ipcBridge.companion.ensureCompanionSession.invoke({ companion_id: companion.companion_id });
       if (active.current) void navigate(`/conversation/${thread.conversation_id}`);
-    } catch {
-      if (active.current) Message.error(t('guid.showcase.chatFailed'));
+    } catch (error) {
+      if (active.current) Message.error(getConversationCreateErrorMessage(error, t));
     } finally {
       opening.current = false;
       if (active.current) setOpeningId(null);

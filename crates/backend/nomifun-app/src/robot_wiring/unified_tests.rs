@@ -44,7 +44,7 @@ async fn companion_mcp_selection_preserves_skills_and_serves_desktop_and_robot()
     let mcp_calls = || async { external.received_requests().await.unwrap().into_iter().filter_map(|r| serde_json::from_slice::<Value>(&r.body).ok()).collect::<Vec<_>>() };
     let calls = mcp_calls().await;
     assert!(calls.iter().any(|r| r["method"] == "tools/call"), "desktop must reach the selected MCP tool");
-    assert!(calls.iter().any(|r| r["method"] == "resources/read"));
+    assert!(!calls.iter().any(|r| r["method"] == "resources/read"), "native MCP tools must not enter the platform resource lane");
     harness.device("robot-mcp").await;
     harness.robot("robot-mcp", "EXTERNAL_MCP robot").await;
     assert_eq!(mcp_calls().await.iter().filter(|r| r["method"] == "tools/call").count(), 2);
@@ -87,7 +87,7 @@ impl Respond for Model {
             let start = messages.iter().rposition(|m| m["role"] == "user").unwrap();
             let called = messages[start..].iter().flat_map(|m| m["tool_calls"].as_array().into_iter().flatten())
                 .filter_map(|call| call["function"]["name"].as_str()).collect::<Vec<_>>();
-            if let Some(next) = ["mcp_connect", "mcp_tool_proxy", "mcp_resource_read"].into_iter().find(|name| !called.contains(name)) {
+            if let Some(next) = ["mcp_connect", "mcp_tool_proxy"].into_iter().find(|name| !called.contains(name)) {
                 let visible = messages[start..].iter().flat_map(|m| m["tool_calls"].as_array().into_iter().flatten())
                     .any(|call| call["function"]["name"] == "ToolSearch" && call["function"]["arguments"].as_str()
                         .and_then(|args| serde_json::from_str::<Value>(args).ok()).is_some_and(|args| args["query"] == next));
