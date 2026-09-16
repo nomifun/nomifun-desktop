@@ -2,7 +2,7 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-17
-> 当前阶段：Wave 2 / feature lanes ready
+> 当前阶段：Wave 2 / UARC-020 + UARC-021 + UARC-022 active
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
@@ -65,9 +65,9 @@
 | `UARC-012` | integrated | Integration | verified | n/a | 单一 AgentSession owner、完整生命周期 API 与 exact receipt 已闭合 |
 | `UARC-013` | integrated | Integration | verified | n/a | 单一官方 provider/factory、Driver lifecycle 与 typed host ports 已闭合 |
 | `UARC-014` | integrated | Integration | verified | n/a | Runtime selector 删除、通用 Compiler/projection、136-ID retirement 已闭合 |
-| `UARC-020` | ready | Feature Runtime | pending | pending | 自适应单 Runtime 与长程 Coding；从 Wave 1 barrier 启动 |
-| `UARC-021` | ready | Feature Workspace | pending | pending | Workspace/VCS/Process/Artifact modules；从 Wave 1 barrier 启动 |
-| `UARC-022` | ready | Feature Extensions | pending | pending | Skill/MCP/Plugin/Connector modules；从 Wave 1 barrier 启动 |
+| `UARC-020` | active | Feature Runtime | pending | pending | `codex/uarc-020-runtime`；自适应单 Runtime 与长程 Coding |
+| `UARC-021` | active | Feature Workspace | pending | pending | `codex/uarc-021-workspace`；Workspace/VCS/Process/Artifact modules |
+| `UARC-022` | active | Feature Extensions | pending | pending | `codex/uarc-022-extensions`；Skill/MCP/Plugin/Connector modules |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -149,9 +149,8 @@
 
 ## 8. Next ready tasks
 
-1. `UARC-020`：自适应单 Runtime 与长程 Coding。
-2. `UARC-021`：Workspace/VCS/Process/Artifact modules。
-3. `UARC-022`：Skill/MCP/Plugin/Connector modules。
+1. `UARC-020/021/022` 已从同一 Wave 1 barrier 并行执行；Integration 等待有界交付。
+2. Wave 2 合并前没有其他 ready task；共享合同变更只由 Integration 处理。
 
 ## 9. 状态更新模板
 
@@ -378,3 +377,19 @@
 - Remaining/blocker: no UARC-014 blocker. Full App remains 444/497 and Core workspace first stops at
   domain-wave1 9/11; all 53 App failures plus both Core failures are exact UARC-021/022 migration inputs.
 - Next ready tasks: `UARC-020`, `UARC-021`, `UARC-022`; at most three Feature workers, all from the next barrier.
+
+### 2026-09-17 Wave 2 feature lanes started
+
+- Barrier/source: `4b65cf019e9e6942c5c3458d6db64d868c241bd2` for all three worktrees.
+- Owner/write set: Feature Runtime → `UARC-020`; Feature Workspace → `UARC-021`; Feature Extensions →
+  `UARC-022`. Manifest write sets are pairwise disjoint; `agent_wave2_host.rs` belongs only to UARC-021.
+- Changed: three isolated branches/worktrees created; no Feature worker may edit shared contracts, generated
+  artifacts, root config, status ledger or another lane's files.
+- Deleted: pending each task's declared delete set; no deletion performed by task start.
+- Retained + reason: Integration main checkout remains the sole merge/status/gate owner.
+- Tests: workers begin without a Cargo lease; Integration will grant and serialize focused Cargo runs.
+- Windows: implementation active.
+- macOS: source implementation active where applicable; no Mac host verification claimed.
+- Not run: Wave 2 gates wait for each bounded delivery and Integration merge.
+- Remaining/blocker: no product blocker. External Mac host remains a later platform prerequisite.
+- Next ready tasks: none until the three active lanes are integrated and the Wave 2 gate completes.
