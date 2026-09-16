@@ -39,7 +39,6 @@ pub use desktop::{
     StartupCleanupDisposition, WebUiAsset, WebUiAssetSource, WebUiStatus,
 };
 pub use nomifun_auth::AuthPolicy;
-pub use router::runtime_engines::{RuntimeEngineHost, SessionEngineDriverFactory};
 pub use router::engine_session_host::{AdmittedEngineSession, EngineSessionHost, EngineTurnReceipt};
 pub use router::engine_journal::{EngineJournalWrite, EngineTurnJournal};
 pub use router::engine_history::{EngineHistoryRecord, EngineHistoryTurn, EngineHistoryWindow, EngineHistoryMessage, EngineMessageHistoryWindow};

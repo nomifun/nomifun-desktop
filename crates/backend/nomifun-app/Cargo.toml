@@ -4,18 +4,9 @@ version.workspace = true
 edition.workspace = true
 autotests = false
 
-[[test]]
-name = "coding_runtime_production"
-path = "tests/coding_runtime_production.rs"
-
 [[bin]]
 name = "nomicore"
 path = "src/main.rs"
-
-# Opt-in source-integrated reference, never registered by the product default.
-[[example]]
-name = "evidence-engine"
-path = "examples/evidence_engine/main.rs"
 
 # Content E2E tests have been verified together and share one linked binary.
 # All other integration tests stay in separate processes because several use

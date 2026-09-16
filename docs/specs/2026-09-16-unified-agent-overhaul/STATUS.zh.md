@@ -2,7 +2,7 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-17
-> 当前阶段：Wave 1 / UARC-013 ready
+> 当前阶段：Wave 1 / UARC-013 active
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
@@ -55,7 +55,7 @@
 | `UARC-010` | integrated | Integration | verified | n/a | Module 多 contribution、authoring policy、exact Action grant 已闭合 |
 | `UARC-011` | integrated | Integration | verified | n/a | generation 5 Store、main migration、effect ledger、reset gate 已闭合 |
 | `UARC-012` | integrated | Integration | verified | n/a | 单一 AgentSession owner、完整生命周期 API 与 exact receipt 已闭合 |
-| `UARC-013` | ready | Integration | pending | n/a | 单一官方 Nomi Runtime Driver 与 typed host ports |
+| `UARC-013` | active | Integration | pending | n/a | 单一官方 Nomi Runtime Driver 与 typed host ports 实施中 |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -288,3 +288,17 @@
 - Not run: full Wave 1 milestone gate waits for UARC-013/014; no UI/native/package gate was required by this non-UI task.
 - Remaining/blocker: no UARC-012 blocker. Durable accepted Turns deliberately have no legacy Runtime fallback; UARC-013 is the only next task that may consume them.
 - Next ready tasks: `UARC-013` only.
+
+### 2026-09-17 UARC-013 started
+
+- Barrier/source: UARC-012 closeout `fe44927d5bb86c94f5b55f1e8736f817d2c1f4c7`.
+- Owner/write set: Integration; `nomifun-engine-core`, AI Agent `runtime_*` modules and App `engine_*` host-port adapters only.
+- Changed: task claimed; Runtime family registration, selector/downcast, active-turn ownership and EngineSessionHost ports are under call-graph audit.
+- Deleted: pending arbitrary family registration, Agent Runtime selector and Nomi-specific runtime handle downcast.
+- Retained + reason: an internal fake/replacement Driver seam plus exact build/checkpoint identity remain required for tests and future whole-driver replacement.
+- Tests: pending Driver contract, one-active-turn, cancel/cleanup and non-official-family rejection gates.
+- Windows: active.
+- macOS: not applicable to this shared Driver contract task; native consumers remain later platform gates.
+- Not run: no UARC-013 implementation gate yet.
+- Remaining/blocker: fit one official Driver to the canonical accepted Turn without reopening a legacy Conversation path. No blocker.
+- Next ready tasks: none until UARC-013 barrier; then `UARC-014`.

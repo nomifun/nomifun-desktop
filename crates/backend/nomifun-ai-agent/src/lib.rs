@@ -6,6 +6,7 @@ pub mod runtime_handle;
 pub mod runtime_extension;
 pub mod runtime_catalog;
 pub mod runtime_admission;
+pub mod runtime_driver;
 pub mod coding_runtime;
 pub mod engine_sdk;
 mod engine_tasks;
@@ -82,10 +83,17 @@ pub use nomi_types;
 pub use runtime_state::AgentRuntimeState;
 pub use runtime_extension::{RegisteredAgentRuntime, RuntimeSteerDelivery, RuntimeTeardown};
 pub use runtime_admission::{RuntimeEngineAdmission, RuntimeEngineSupport};
-pub use runtime_catalog::{
-    RuntimeEngineBinding, RuntimeEngineCatalog, RuntimeEngineDescriptor,
-    RuntimeEngineFactory, RuntimeEngineSelector, RUNTIME_HOST_CONTRACT_VERSION,
+pub use runtime_driver::{
+    HostedNomiRuntime, NomiRuntimeDriver, NomiRuntimeDriverFactory,
+    NomiRuntimeTurnOutcome, NomiRuntimeTurnOutput, NomiRuntimeTurnTerminal,
+    OFFICIAL_NOMI_RUNTIME_FAMILY_ID,
 };
+pub use runtime_catalog::{
+    NomiRuntimeProvider, RUNTIME_HOST_CONTRACT_VERSION, RuntimeEngineBinding,
+    RuntimeEngineDescriptor, RuntimeEngineFactory,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use runtime_catalog::{RuntimeEngineCatalog, RuntimeEngineSelector};
 pub use boot_process_reaper::{
     AgentProcessReapReport, ConversationProcessReapVerdict, reap_orphan_agent_processes,
 };
