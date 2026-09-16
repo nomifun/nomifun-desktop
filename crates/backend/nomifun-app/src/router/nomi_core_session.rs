@@ -775,10 +775,11 @@ impl NomiCorePluginToolSessionProvider {
             .map_err(|error| AppError::Conflict(error.to_string()))?;
         super::nomi_core_tool_discovery::validate_snapshot(&materialized, &snapshot)
             .map_err(control_plane_error_to_app)?;
-        if snapshot.content.enabled_capabilities.iter()
-            .any(|capability| capability.capability.id.as_ref() == "mcp.resource" || super::nomi_core_mcp_catalog::is_product_tool(capability.capability.id.as_ref())) {
-            super::nomi_core_mcp_catalog::validate_session_selection(&snapshot, &binding.typed_resource_bindings, &response.extra)?;
-        }
+        super::nomi_core_mcp_catalog::validate_product_session_selection(
+            &snapshot,
+            &binding.typed_resource_bindings,
+            &response.extra,
+        )?;
         let principal = PrincipalRef {
             principal_kind: "user".to_owned(),
             principal_id: common_owner.as_ref().to_owned(),
@@ -790,10 +791,7 @@ impl NomiCorePluginToolSessionProvider {
             .any(|selection| {
                 matches!(
                     selection.capability.id.as_ref(),
-                    super::nomi_core_wave2::FS_DELETE
-                        | super::nomi_core_wave2::FS_WATCH
-                        | super::nomi_core_wave2::FS_SNAPSHOT
-                        | super::nomi_core_wave2::VCS_PUSH
+                    "workspace.files" | "workspace.vcs" | "workspace.artifacts"
                 )
             });
         let mut runtime_binding = binding;
@@ -996,9 +994,14 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
                 ))
             })? };
         let hosted_witness = self.hosted_effects.witness(principal.principal_id.clone(), session_id.as_ref().to_owned());
-        let git_witness = if constraints.allows_capability("vcs.push") && compiled.content()
-            .enabled_capabilities.iter()
-            .any(|capability| capability.capability.id.as_ref() == "vcs.push") {
+        let git_witness = if !constraints.restricted()
+            && compiled.content().enabled_capabilities.iter().any(|capability| {
+                capability.capability.id.as_ref() == "workspace.vcs"
+                    && capability.action_allowlist.contains(
+                        &nomifun_agent_contracts::ActionId::from("workspace.vcs/push"),
+                    )
+            })
+        {
             Some(super::engine_git_lifecycle::WorkspaceGitWitness::new(
                 self.wave2_owner.clone(),
                 response.extra.get("workspace").and_then(Value::as_str)
@@ -1014,10 +1017,13 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
         ];
         if let Some(witness) = &git_witness { witnesses.push(witness.clone()); }
         let effect_scope = Arc::new(nomifun_ai_agent::engine_effect_scope::EngineEffectScope::new(witnesses)?);
-        let mcp_resources = if constraints.allows_capability("mcp.resource") && compiled.content()
-            .enabled_capabilities.iter()
-            .any(|entry| entry.capability.id.as_ref() == "mcp.resource") {
-            let active = plugin_session.capability_state().ok_or_else(|| AppError::Conflict("MCP resource capability state is unavailable".into()))?;
+        let mcp_resources = if !constraints.restricted()
+            && compiled
+                .resource_bindings()
+                .iter()
+                .any(|binding| binding.resource_kind.as_ref() == "mcp_server")
+        {
+            let active = plugin_session.capability_state().ok_or_else(|| AppError::Conflict("MCP resource binding state is unavailable".into()))?;
             let resources = super::nomi_core_mcp_resources::adapter(self.kernel.clone(), compiled.clone(),
                 active, self.wave2_owner.clone(), principal.clone(), session_id.clone(), resource_image_model, constraints)?;
             Some(resources)

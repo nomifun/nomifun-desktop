@@ -6,6 +6,8 @@ use nomifun_db::{SqlitePool, sqlx};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+pub(crate) const MCP_SERVER_RESOURCE_EFFECT: &str = "mcp.server";
+
 #[derive(Clone)]
 pub(crate) struct McpEffectReceipts {
     pool: SqlitePool,
@@ -43,6 +45,7 @@ impl McpEffectReceipts {
         if [user, session, operation, capability]
             .iter()
             .any(|value| value.is_empty() || value.len() > 1024)
+            || !valid_effect_identity(capability)
         {
             return Err(unavailable());
         }
@@ -55,8 +58,8 @@ impl McpEffectReceipts {
              AND r.conversation_id = c.conversation_id AND r.user_id = c.user_id AND r.kind = 'turn' AND r.status = 'accepted' \
              AND (SELECT COUNT(*) FROM conversation_mcp_effects e WHERE e.conversation_id = c.conversation_id \
                   AND e.turn_operation_id = c.active_turn_operation_id) < 512 \
-             AND (? != 'mcp.resource' OR (SELECT COUNT(*) FROM conversation_mcp_effects e WHERE e.conversation_id = c.conversation_id \
-                  AND e.turn_operation_id = c.active_turn_operation_id AND e.capability_id = 'mcp.resource') < 64) \
+             AND (? != 'mcp.server' OR (SELECT COUNT(*) FROM conversation_mcp_effects e WHERE e.conversation_id = c.conversation_id \
+                  AND e.turn_operation_id = c.active_turn_operation_id AND e.capability_id = 'mcp.server') < 64) \
              RETURNING turn_operation_id, admission_epoch")
             .bind(operation).bind(capability).bind(nomifun_common::now_ms())
             .bind(user).bind(session).bind(capability).fetch_optional(&self.pool).await.map_err(|_| unavailable())?;
@@ -82,11 +85,11 @@ impl McpEffectReceipts {
     ) -> Result<(), AppError> {
         // Resource blobs must not enter recovery model context as base64 text,
         // including small blobs which would fit the untruncated receipt path.
-        let projected = if receipt.capability == "mcp.resource" {
+        let projected = if receipt.capability == MCP_SERVER_RESOURCE_EFFECT {
             super::engine_mcp_media::text_projection(result)?
         } else { result.clone() };
         let observation = bounded_observation(&projected, 4096)?;
-        let observation = if receipt.capability == "mcp.resource" {
+        let observation = if receipt.capability == MCP_SERVER_RESOURCE_EFFECT {
             let failure = result.get("failure").filter(|failure| !failure.is_null());
             if failure.is_some_and(|value| !value.is_object() || value.to_string().len() > 1024) {
                 return Err(unavailable());
@@ -187,7 +190,7 @@ impl McpEffectReceipts {
                 .transpose()?;
             // Keep the returned-failure fact outside a shortened remote-data
             // excerpt. Older receipts without this metadata remain unspecified.
-            let resource_outcome = if capability == "mcp.resource" {
+            let resource_outcome = if capability == MCP_SERVER_RESOURCE_EFFECT {
                 raw.as_ref().and_then(|value| value.get("resource_outcome"))
             } else {
                 None
@@ -201,7 +204,7 @@ impl McpEffectReceipts {
                 Some(value) => bounded_observation(value, 1024)?,
                 None => json!({"observation_available": false}),
             };
-            let tool_reported_is_error = if capability != "mcp.resource" {
+            let tool_reported_is_error = if capability != MCP_SERVER_RESOURCE_EFFECT {
                 raw.as_ref()
                     .and_then(|value| value.get("isError"))
                     .and_then(Value::as_bool)
@@ -260,4 +263,28 @@ fn bounded_observation(value: &Value, full_limit: usize) -> Result<Value, AppErr
         json!({"truncated": true, "sha256": format!("{:x}", Sha256::digest(raw.as_bytes())),
         "serialized_preview": raw.chars().take(512).collect::<String>()}),
     )
+}
+
+fn valid_effect_identity(value: &str) -> bool {
+    value == MCP_SERVER_RESOURCE_EFFECT
+        || nomifun_mcp::is_namespaced_mcp_tool_capability(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effect_receipts_accept_only_binding_resources_or_namespaced_tools() {
+        assert!(valid_effect_identity(MCP_SERVER_RESOURCE_EFFECT));
+        let server = nomifun_api_types::McpServerId::parse(
+            "0195f7c0-7b6a-7c21-8f4a-1234567890ab",
+        )
+        .unwrap();
+        let tool = nomifun_mcp::canonical_mcp_tool_capability_id(&server, "lookup").unwrap();
+        assert!(valid_effect_identity(&tool));
+        for retired in nomifun_mcp::RETIRED_MCP_AUTHORING_CAPABILITY_IDS {
+            assert!(!valid_effect_identity(retired));
+        }
+    }
 }

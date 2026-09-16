@@ -19,16 +19,11 @@ use super::nomi_core_mcp::canonical_tool_key;
 use super::nomi_core_wave2::NomiCoreWave2Host;
 
 const VERSION: &str = "1.0.0";
-const PREFIX: &str = "nomi.mcp.v1.";
+const PREFIX: &str = nomifun_mcp::MCP_TOOL_CAPABILITY_PREFIX;
 pub(crate) const MAX_SESSION_SERVERS: usize = 16;
 
 pub(crate) fn is_product_tool(id: &str) -> bool {
-    id.strip_prefix(PREFIX).is_some_and(|suffix| {
-        suffix.len() == 64
-            && suffix
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    })
+    nomifun_mcp::is_namespaced_mcp_tool_capability(id)
 }
 
 fn failure() -> AppError {
@@ -65,7 +60,9 @@ impl FrozenMcpTool {
         Ok(format!("mcp-tool-{}", self.suffix()?).into())
     }
     pub(crate) fn action(&self) -> ActionId {
-        format!("{}.invoke", self.lock.capability_id.as_ref()).into()
+        nomifun_mcp::canonical_mcp_tool_action_id(self.lock.capability_id.as_ref())
+            .expect("FrozenMcpTool validates the namespaced capability identity")
+            .into()
     }
     pub(crate) fn input_ref(&self) -> CanonicalSchemaRef {
         format!(
@@ -76,7 +73,8 @@ impl FrozenMcpTool {
         .into()
     }
     fn validator(&self) -> Result<jsonschema::Validator, AppError> {
-        if self.lock.materialization_revision != 1
+        if self.lock.materialization_revision
+            != nomifun_mcp::MCP_TOOL_MATERIALIZATION_REVISION
             || self.remote_tool_name.is_empty()
             || self.remote_tool_name.len() > 256
             || self.remote_tool_name.trim() != self.remote_tool_name
@@ -201,7 +199,7 @@ pub(super) fn server_tools(
                 canonical_tool_key: key.clone(),
                 capability_id: key.as_ref().to_owned().into(),
                 schema_digest: digest_payload(&input_schema).map_err(|_| failure())?,
-                materialization_revision: 1,
+                materialization_revision: nomifun_mcp::MCP_TOOL_MATERIALIZATION_REVISION,
             },
             connection_config_ref: config_ref.clone(),
             display_name: format!("{} / {}", server.name, tool.name),
@@ -271,9 +269,10 @@ fn registration(
                 display: display(&tool.display_name, &tool.description),
                 requires: Vec::new(),
                 conflicts: Vec::new(),
-                supported_surfaces: capability_surface_declarations(
+                supported_surfaces: capability_module_surface_declarations(
                     ["desktop", "headless"],
                     [CapabilityConsumer::Agent],
+                    CapabilityAuthoringPolicy::Direct,
                 ),
                 requires_runtime_features: Vec::new(),
                 supported_platforms: vec![PlatformConstraint::Any],
@@ -492,53 +491,80 @@ pub(crate) fn validate_resources(
     registry: &MaterializedRegistry,
     principal: &PrincipalRef,
 ) -> Result<(), AppError> {
-    let resource_provider = compiled
-        .content()
-        .enabled_capabilities
+    let resources = compiled
+        .resource_bindings()
         .iter()
-        .any(|entry| entry.capability.id.as_ref() == "mcp.resource");
-    if resource_provider {
-        let resources = compiled
-            .resource_bindings()
+        .filter(|resource| resource.resource_kind.as_ref() == "mcp_server")
+        .collect::<Vec<_>>();
+    if resources.len() > MAX_SESSION_SERVERS
+        || resources
             .iter()
-            .filter(|resource| resource.resource_kind.as_ref() == "mcp_server")
-            .collect::<Vec<_>>();
-        if resources.is_empty() || resources.len() > MAX_SESSION_SERVERS
-            || resources.iter().map(|resource| &resource.resource_id).collect::<BTreeSet<_>>().len() != resources.len()
-            || resources.iter().any(|resource| resource.owner_id != principal.principal_id
+            .map(|resource| &resource.resource_id)
+            .collect::<BTreeSet<_>>()
+            .len()
+            != resources.len()
+        || resources
+            .iter()
+            .map(|resource| &resource.binding_id)
+            .collect::<BTreeSet<_>>()
+            .len()
+            != resources.len()
+        || resources.iter().any(|resource| {
+            resource.resource_id.as_ref().is_empty()
+                || resource.resource_id.as_ref().len() > 256
+                || resource.resource_id.as_ref().chars().any(char::is_control)
+                || resource.owner_id != principal.principal_id
                 || !resource.operations.contains("connect")
                 || !resource.operations.contains("read")
                 || !resource.typed_parameters.is_empty()
-                || resource.connection_config_ref.is_none())
-            || compiled
-                .policy(&CapabilityId::from("mcp.resource"))
-                .is_none_or(|policy| {
-                    policy.resource_binding_ids != resources.iter().map(|resource| resource.binding_id.clone()).collect()
-                })
-        {
-            return Err(failure());
-        }
+                || resource.connection_config_ref.is_none()
+        })
+    {
+        return Err(failure());
     }
-    let expected = compiled
-        .content()
-        .mcp_tool_locks
+    let locks = &compiled.content().mcp_tool_locks;
+    if locks.iter().any(|lock| {
+        nomifun_api_types::McpServerId::parse(lock.server_id.as_ref().to_owned()).is_err()
+            || !is_product_tool(lock.capability_id.as_ref())
+            || lock.canonical_tool_key.as_ref() != lock.capability_id.as_ref()
+            || lock.materialization_revision
+                != nomifun_mcp::MCP_TOOL_MATERIALIZATION_REVISION
+    }) {
+        return Err(failure());
+    }
+    let lock_capability_ids = locks
         .iter()
-        .filter(|lock| is_product_tool(lock.capability_id.as_ref()))
+        .map(|lock| lock.capability_id.clone())
+        .collect::<BTreeSet<_>>();
+    let selected_capability_ids = compiled
+        .content()
+        .enabled_capabilities
+        .iter()
+        .filter(|selected| is_product_tool(selected.capability.id.as_ref()))
+        .map(|selected| selected.capability.id.clone())
+        .collect::<BTreeSet<_>>();
+    if lock_capability_ids.len() != locks.len()
+        || selected_capability_ids != lock_capability_ids
+    {
+        return Err(failure());
+    }
+    let expected = locks
+        .iter()
         .map(|lock| lock.server_id.as_ref())
         .collect::<BTreeSet<_>>();
-    if !expected.is_empty() {
-        let actual = compiled
-            .resource_bindings()
-            .iter()
-            .filter(|resource| resource.resource_kind.as_ref() == "mcp_server")
-            .map(|resource| resource.resource_id.as_ref())
-            .collect::<Vec<_>>();
-        let actual_ids = actual.iter().copied().collect::<BTreeSet<_>>();
-        if actual.len() > MAX_SESSION_SERVERS
-            || actual_ids.len() != actual.len()
-            || !expected.is_subset(&actual_ids)
-            || (!resource_provider && actual_ids != expected)
-        {
+    let actual_ids = resources
+        .iter()
+        .map(|resource| resource.resource_id.as_ref())
+        .collect::<BTreeSet<_>>();
+    if !expected.is_subset(&actual_ids) {
+        return Err(failure());
+    }
+    for resource in &resources {
+        let mut operations = BTreeSet::from(["connect".to_owned(), "read".to_owned()]);
+        if expected.contains(resource.resource_id.as_ref()) {
+            operations.insert("invoke".to_owned());
+        }
+        if resource.operations != operations {
             return Err(failure());
         }
     }
@@ -598,16 +624,10 @@ pub(crate) fn validate_product_session_selection(
     resources: &[TypedResourceBinding],
     extra: &Value,
 ) -> Result<(), AppError> {
-    if snapshot
-        .content
-        .mcp_tool_locks
-        .iter()
-        .any(|lock| is_product_tool(lock.capability_id.as_ref()))
-        || snapshot
-            .content
-            .enabled_capabilities
+    if !snapshot.content.mcp_tool_locks.is_empty()
+        || resources
             .iter()
-            .any(|entry| entry.capability.id.as_ref() == "mcp.resource")
+            .any(|resource| resource.resource_kind.as_ref() == "mcp_server")
     {
         validate_session_selection(snapshot, resources, extra)?;
     }
@@ -619,34 +639,76 @@ pub(crate) fn validate_session_selection(
     resources: &[TypedResourceBinding],
     extra: &Value,
 ) -> Result<(), AppError> {
-    let mut expected = snapshot
+    let lock_ids = snapshot
+        .content
+        .mcp_tool_locks
+        .iter()
+        .map(|lock| lock.capability_id.clone())
+        .collect::<BTreeSet<_>>();
+    let selected_tool_ids = snapshot
+        .content
+        .enabled_capabilities
+        .iter()
+        .filter(|selected| is_product_tool(selected.capability.id.as_ref()))
+        .map(|selected| selected.capability.id.clone())
+        .collect::<BTreeSet<_>>();
+    if lock_ids.len() != snapshot.content.mcp_tool_locks.len()
+        || selected_tool_ids != lock_ids
+        || snapshot.content.mcp_tool_locks.iter().any(|lock| {
+            nomifun_api_types::McpServerId::parse(lock.server_id.as_ref().to_owned()).is_err()
+                || !is_product_tool(lock.capability_id.as_ref())
+                || lock.canonical_tool_key.as_ref() != lock.capability_id.as_ref()
+                || lock.materialization_revision
+                    != nomifun_mcp::MCP_TOOL_MATERIALIZATION_REVISION
+        })
+    {
+        return Err(failure());
+    }
+    let expected_tools = snapshot
         .content
         .mcp_tool_locks
         .iter()
         .map(|lock| lock.server_id.as_ref())
         .collect::<BTreeSet<_>>();
-    if snapshot
-        .content
-        .enabled_capabilities
+    // Resource-only servers have no frozen tool mapping. Their authority is
+    // the typed platform binding itself, never an authorable generic switch
+    // switch or an extra/alias value.
+    let selected = resources
         .iter()
-        .any(|entry| entry.capability.id.as_ref() == "mcp.resource")
+        .filter(|resource| resource.resource_kind.as_ref() == "mcp_server")
+        .collect::<Vec<_>>();
+    let expected = selected
+        .iter()
+        .map(|resource| resource.resource_id.as_ref())
+        .collect::<BTreeSet<_>>();
+    let binding_ids = selected
+        .iter()
+        .map(|resource| &resource.binding_id)
+        .collect::<BTreeSet<_>>();
+    if selected.len() > MAX_SESSION_SERVERS
+        || expected.len() != selected.len()
+        || binding_ids.len() != selected.len()
+        || !expected_tools.is_subset(&expected)
+        || selected.iter().any(|resource| {
+            resource.resource_id.as_ref().is_empty()
+                || resource.resource_id.as_ref().len() > 256
+                || resource.resource_id.as_ref().chars().any(char::is_control)
+                || !resource.operations.contains("connect")
+                || !resource.operations.contains("read")
+                || resource.connection_config_ref.is_none()
+                || !resource.typed_parameters.is_empty()
+        })
     {
-        // Resource-only servers have no frozen tools mapping. Their authority
-        // is the platform-resolved Agent binding, never an extra/alias value.
-        let selected = resources
-            .iter()
-            .filter(|resource| resource.resource_kind.as_ref() == "mcp_server")
-            .collect::<Vec<_>>();
-        let selected_ids = selected.iter().map(|resource| resource.resource_id.as_ref()).collect::<BTreeSet<_>>();
-        if selected.is_empty() || selected.len() > MAX_SESSION_SERVERS
-            || selected_ids.len() != selected.len()
-            || !expected.is_subset(&selected_ids)
-            || selected.iter().any(|resource| !resource.operations.contains("connect")
-                || !resource.operations.contains("read"))
-        {
+        return Err(failure());
+    }
+    for resource in &selected {
+        let mut operations = BTreeSet::from(["connect".to_owned(), "read".to_owned()]);
+        if expected_tools.contains(resource.resource_id.as_ref()) {
+            operations.insert("invoke".to_owned());
+        }
+        if resource.operations != operations {
             return Err(failure());
         }
-        expected.extend(selected_ids);
     }
     if expected.len() > MAX_SESSION_SERVERS {
         return Err(failure());
@@ -712,6 +774,78 @@ pub(crate) fn recovery_context(
         owner,
         session,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SERVER_ID: &str = "0195f7c0-7b6a-7c21-8f4a-1234567890ab";
+
+    fn frozen_tool() -> FrozenMcpTool {
+        let input_schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"]
+        });
+        let server_id = nomifun_api_types::McpServerId::parse(SERVER_ID).unwrap();
+        let capability_id =
+            nomifun_mcp::canonical_mcp_tool_capability_id(&server_id, "lookup").unwrap();
+        FrozenMcpTool {
+            lock: ResolvedMcpToolLock {
+                server_id: SERVER_ID.into(),
+                canonical_tool_key: capability_id.clone().into(),
+                capability_id: capability_id.into(),
+                schema_digest: digest_payload(&input_schema).unwrap(),
+                materialization_revision: nomifun_mcp::MCP_TOOL_MATERIALIZATION_REVISION,
+            },
+            connection_config_ref: format!("mcp-server:{SERVER_ID}@1").into(),
+            remote_tool_name: "lookup".into(),
+            input_schema,
+            display_name: "Server / lookup".into(),
+            description: "Lookup one value".into(),
+        }
+    }
+
+    #[test]
+    fn one_remote_tool_publishes_one_exact_direct_action_without_runtime_authority() {
+        let tool = frozen_tool();
+        let registration = registration(tool.clone(), Arc::new(NomiCoreWave2Host::default()))
+            .unwrap();
+        let manifest = &registration.metadata.manifest.payload;
+        assert!(manifest.requires_runtime_features.is_empty());
+        assert!(manifest.package_dependencies.is_empty());
+        assert_eq!(manifest.contributions.capabilities.len(), 1);
+        assert_eq!(manifest.contributions.mcp_tools.len(), 1);
+        assert!(manifest.contributions.skills.is_empty());
+        assert!(manifest.contributions.role_contracts.is_empty());
+        assert!(manifest.contributions.role_providers.is_empty());
+        let capability = &manifest.contributions.capabilities[0];
+        assert_eq!(capability.id, tool.lock.capability_id);
+        assert_eq!(capability.authoring_policy().unwrap(), CapabilityAuthoringPolicy::Direct);
+        assert_eq!(capability.contributions.actions.len(), 1);
+        assert_eq!(capability.contributions.actions[0].action_id, tool.action());
+        assert_eq!(
+            capability.contributions.resource_kinds,
+            BTreeSet::from([ResourceKind::from("mcp_server")])
+        );
+        let mapping = &manifest.contributions.mcp_tools[0];
+        assert_eq!(mapping.server_id, tool.lock.server_id);
+        assert_eq!(mapping.canonical_tool_key, tool.lock.canonical_tool_key);
+        assert_eq!(mapping.schema_digest, tool.lock.schema_digest);
+        assert_eq!(mapping.capability.id, tool.lock.capability_id);
+        assert_eq!(registration.handler_ids(), BTreeSet::from([tool.lock.capability_id]));
+    }
+
+    #[test]
+    fn broad_proxy_identity_cannot_be_materialized_as_a_remote_tool() {
+        let mut tool = frozen_tool();
+        let broad_proxy = concat!("mcp", ".", "tool_proxy");
+        tool.lock.canonical_tool_key = broad_proxy.into();
+        tool.lock.capability_id = broad_proxy.into();
+        assert!(tool.validator().is_err());
+    }
 }
 
 #[async_trait]

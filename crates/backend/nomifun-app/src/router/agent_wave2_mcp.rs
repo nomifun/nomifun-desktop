@@ -183,6 +183,7 @@ impl McpRuntimeBindingSource for SqliteMcpRuntimeBindingSource {
         resource_binding: &TypedResourceBinding,
         principal: &PrincipalRef,
     ) -> Result<ResolvedMcpRuntimeBinding, Wave2HostPortError> {
+        validate_materialized_tool_identity(lock)?;
         let server_id = lock.server_id.as_ref();
         let row: Option<(String, String, i64)> = sqlx::query_as(
             "SELECT owner_user_id, connection_config_ref, catalog_revision \
@@ -591,6 +592,7 @@ fn validate_remote_tool(
     lock: &ResolvedMcpToolLock,
     remote_tool: &McpRemoteToolFacts,
 ) -> Result<(), Wave2HostPortError> {
+    validate_materialized_tool_identity(lock)?;
     if lock.server_id.as_ref().trim().is_empty()
         || lock.canonical_tool_key.as_ref().trim().is_empty()
         || lock.capability_id.as_ref().trim().is_empty()
@@ -618,6 +620,29 @@ fn validate_remote_tool(
             "frozen MCP remote tool name is empty or malformed",
         ));
     }
+    let server_id = nomifun_api_types::McpServerId::parse(lock.server_id.as_ref().to_owned())
+        .map_err(|_| {
+            mcp_adapter_error(
+                "MCP_BINDING_INVALID",
+                "frozen MCP server identity is not a canonical UUIDv7",
+            )
+        })?;
+    let expected_capability = nomifun_mcp::canonical_mcp_tool_capability_id(
+        &server_id,
+        &remote_tool.remote_tool_name,
+    )
+    .map_err(|_| {
+        mcp_adapter_error(
+            "MCP_BINDING_INVALID",
+            "frozen MCP server/tool identity is malformed",
+        )
+    })?;
+    if expected_capability != lock.capability_id.as_ref() {
+        return Err(mcp_adapter_error(
+            "MCP_MATERIALIZATION_MISMATCH",
+            "frozen MCP capability does not match its exact server/tool identity",
+        ));
+    }
 
     let computed_digest = digest_payload(&remote_tool.input_schema).map_err(|error| {
         mcp_adapter_error(
@@ -632,6 +657,22 @@ fn validate_remote_tool(
                 "frozen MCP tool schema does not match lock digest {}",
                 lock.schema_digest.as_ref()
             ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_materialized_tool_identity(
+    lock: &ResolvedMcpToolLock,
+) -> Result<(), Wave2HostPortError> {
+    if nomifun_api_types::McpServerId::parse(lock.server_id.as_ref().to_owned()).is_err()
+        || !nomifun_mcp::is_namespaced_mcp_tool_capability(lock.capability_id.as_ref())
+        || lock.canonical_tool_key.as_ref() != lock.capability_id.as_ref()
+        || lock.materialization_revision != nomifun_mcp::MCP_TOOL_MATERIALIZATION_REVISION
+    {
+        return Err(mcp_adapter_error(
+            "MCP_MATERIALIZATION_MISMATCH",
+            "MCP tools require one namespaced per-tool capability and exact materialization revision",
         ));
     }
     Ok(())
@@ -765,6 +806,8 @@ mod tests {
     use sqlx::sqlite::SqlitePoolOptions;
     use tokio::sync::Mutex;
 
+    const SERVER_ID: &str = "0195f7c0-7b6a-7c21-8f4a-1234567890ab";
+
     fn schema() -> Value {
         serde_json::json!({
             "type": "object",
@@ -783,18 +826,24 @@ mod tests {
         }
     }
 
+    fn capability_id() -> String {
+        let server_id = nomifun_api_types::McpServerId::parse(SERVER_ID).unwrap();
+        nomifun_mcp::canonical_mcp_tool_capability_id(&server_id, "remote.echo")
+            .expect("canonical fixture MCP identity")
+    }
+
     fn input(endpoint: &str) -> McpOwnerInvocationInput {
         let schema = schema();
         McpOwnerInvocationInput {
             mcp_tool_lock: ResolvedMcpToolLock {
-                server_id: McpServerId::from("server-1"),
-                canonical_tool_key: "vendor.echo".into(),
-                capability_id: "vendor.echo.capability".into(),
+                server_id: McpServerId::from(SERVER_ID),
+                canonical_tool_key: capability_id().into(),
+                capability_id: capability_id().into(),
                 schema_digest: digest_payload(&schema).expect("schema digest"),
-                materialization_revision: 7,
+                materialization_revision: nomifun_mcp::MCP_TOOL_MATERIALIZATION_REVISION,
             },
             server: McpServerBindingFacts {
-                server_id: McpServerId::from("server-1"),
+                server_id: McpServerId::from(SERVER_ID),
                 server_owner_id: "system".to_owned(),
                 enabled: true,
                 connection_config_ref: ConnectionConfigRef::from("connection-1"),
@@ -806,7 +855,7 @@ mod tests {
             resource_binding: TypedResourceBinding {
                 binding_id: "mcp-binding-1".into(),
                 resource_kind: MCP_SERVER_RESOURCE_KIND.into(),
-                resource_id: "server-1".into(),
+                resource_id: SERVER_ID.into(),
                 owner_id: "owner-1".to_owned(),
                 operations: BTreeSet::from([
                     MCP_CONNECT_OPERATION.to_owned(),
@@ -830,11 +879,11 @@ mod tests {
         let request = build_mcp_tool_invocation_request(input("http://127.0.0.1:1/mcp"))
             .expect("valid exact MCP input");
 
-        assert_eq!(request.server.server_id, "server-1");
+        assert_eq!(request.server.server_id, SERVER_ID);
         assert_eq!(request.server.resource_binding_id, "mcp-binding-1");
-        assert_eq!(request.server.resource_id, "server-1");
-        assert_eq!(request.tool.server_id, "server-1");
-        assert_eq!(request.tool.canonical_tool_key, "vendor.echo");
+        assert_eq!(request.server.resource_id, SERVER_ID);
+        assert_eq!(request.tool.server_id, SERVER_ID);
+        assert_eq!(request.tool.canonical_tool_key, capability_id());
         assert_eq!(request.tool.remote_tool_name, "remote.echo");
         assert_eq!(request.arguments, serde_json::json!({"message": "hello"}));
 
@@ -856,6 +905,18 @@ mod tests {
         assert_eq!(error.code, "MCP_SCHEMA_MISMATCH");
     }
 
+    #[test]
+    fn request_builder_rejects_the_retired_generic_proxy_identity() {
+        let mut legacy = input("http://127.0.0.1:1/mcp");
+        let broad_proxy = concat!("mcp", ".", "tool_proxy");
+        legacy.mcp_tool_lock.canonical_tool_key = broad_proxy.into();
+        legacy.mcp_tool_lock.capability_id = broad_proxy.into();
+
+        let error = build_mcp_tool_invocation_request(legacy)
+            .expect_err("the broad proxy must not be accepted as a per-tool mapping");
+        assert_eq!(error.code, "MCP_MATERIALIZATION_MISMATCH");
+    }
+
     #[derive(Clone, Default)]
     struct FixtureState {
         requests: Arc<Mutex<Vec<Value>>>,
@@ -871,7 +932,7 @@ mod tests {
             .and_then(Value::as_str)
             .unwrap_or_default();
         if method == "notifications/initialized" {
-            return StatusCode::NO_CONTENT.into_response();
+            return StatusCode::ACCEPTED.into_response();
         }
 
         let id = request.get("id").cloned().unwrap_or(Value::Null);
@@ -1043,7 +1104,7 @@ mod tests {
               manifest_json, manifest_digest) \
              VALUES (?, ?, ?, ?, ?, ?)",
         )
-        .bind("mcp.tool_proxy")
+        .bind(capability_id())
         .bind("1.0.0")
         .bind("nomifun.mcp-connectors")
         .bind("1.0.0")
@@ -1057,7 +1118,7 @@ mod tests {
              (server_id, owner_user_id, connection_config_ref, catalog_revision) \
              VALUES (?, ?, ?, ?)",
         )
-        .bind("server-1")
+        .bind(SERVER_ID)
         .bind("system")
         .bind("connection-1")
         .bind(4_i64)
@@ -1070,10 +1131,10 @@ mod tests {
               capability_version, materialization_revision, package_id, package_version) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind("server-1")
-        .bind("vendor.echo")
+        .bind(SERVER_ID)
+        .bind(capability_id())
         .bind(schema_digest.as_ref())
-        .bind("mcp.tool_proxy")
+        .bind(capability_id())
         .bind("1.0.0")
         .bind(1_i64)
         .bind("nomifun.mcp-connectors")
@@ -1084,7 +1145,7 @@ mod tests {
 
         let config = McpRuntimeCatalogConfig {
             servers: vec![McpRuntimeServerConfig {
-                server_id: "server-1".to_owned(),
+                server_id: SERVER_ID.to_owned(),
                 connection_config_ref: "connection-1".to_owned(),
                 enabled: true,
                 transport: McpRuntimeTransportConfig::Http {
@@ -1092,7 +1153,7 @@ mod tests {
                     headers: HashMap::new(),
                 },
                 tools: vec![McpRuntimeToolConfig {
-                    canonical_tool_key: "vendor.echo".to_owned(),
+                    canonical_tool_key: capability_id(),
                     remote_tool_name: "remote.echo".to_owned(),
                     input_schema: schema.clone(),
                 }],
@@ -1116,7 +1177,7 @@ mod tests {
         TypedResourceBinding {
             binding_id: "mcp-binding-1".into(),
             resource_kind: MCP_SERVER_RESOURCE_KIND.into(),
-            resource_id: "server-1".into(),
+            resource_id: SERVER_ID.into(),
             owner_id: "owner-1".to_owned(),
             operations: BTreeSet::from([
                 MCP_CONNECT_OPERATION.to_owned(),
@@ -1129,11 +1190,11 @@ mod tests {
 
     fn source_lock(schema: &Value) -> ResolvedMcpToolLock {
         ResolvedMcpToolLock {
-            server_id: McpServerId::from("server-1"),
-            canonical_tool_key: "vendor.echo".into(),
-            capability_id: "mcp.tool_proxy".into(),
+            server_id: McpServerId::from(SERVER_ID),
+            canonical_tool_key: capability_id().into(),
+            capability_id: capability_id().into(),
             schema_digest: digest_payload(schema).expect("schema digest"),
-            materialization_revision: 1,
+            materialization_revision: nomifun_mcp::MCP_TOOL_MATERIALIZATION_REVISION,
         }
     }
 
@@ -1151,7 +1212,7 @@ mod tests {
             .await
             .expect("exact v4 MCP source resolution");
 
-        assert_eq!(resolved.server.server_id, McpServerId::from("server-1"));
+        assert_eq!(resolved.server.server_id, McpServerId::from(SERVER_ID));
         assert_eq!(resolved.server.server_owner_id, "system");
         assert_eq!(
             resolved.server.connection_config_ref,
@@ -1173,7 +1234,7 @@ mod tests {
             .resolve(&lock, &source_resource_binding(), &principal())
             .await
             .expect_err("drifted MCP mapping must fail closed");
-        assert_eq!(error.code, "MCP_MAPPING_NOT_FOUND");
+        assert_eq!(error.code, "MCP_MATERIALIZATION_MISMATCH");
         pool.close().await;
     }
 

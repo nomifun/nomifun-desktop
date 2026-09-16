@@ -1,10 +1,10 @@
-//! Exact Nomi ResourceProvider admission into the shared platform MCP owner.
+//! Exact Nomi `mcp_server` binding admission into the shared platform MCP owner.
 //! Nomi's execution context differs from Coding's Broker context; neither is
 //! fabricated here. The retained Nomi effect scope owns calls and turn closure.
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    AgentSessionId, CapabilityId, CapabilityKind, ContributionSourceKind, PluginSourceKind,
-    PrincipalRef, digest_payload,
+    AgentSessionId, CapabilityId, ContributionSourceKind, PluginSourceKind, PrincipalRef,
+    digest_payload,
 };
 use nomifun_agent_kernel::{
     ActiveCapabilitySetSnapshot, CompiledSnapshot, KernelRegistry, SessionCapabilityState,
@@ -75,24 +75,10 @@ fn validate(
     principal: &PrincipalRef,
 ) -> Result<(), AppError> {
     let registry = kernel.snapshot().map_err(failure)?;
-    let id = CapabilityId::from("mcp.resource");
-    let selected = compiled
-        .content()
-        .enabled_capabilities
-        .iter()
-        .find(|entry| entry.capability.id == id)
-        .ok_or_else(|| failure("resource capability is not selected"))?;
     if compiled.registry_generation != registry.generation
         || compiled.registry_digest != registry.registry_digest
-        || selected.contribution_lock.source_kind != ContributionSourceKind::PlatformBuiltin
-        || selected.resolved_source.source_kind != PluginSourceKind::Bundled
-        || registry
-            .capability(&id)
-            .is_none_or(|entry| entry.manifest.kind != CapabilityKind::ResourceProvider)
     {
-        return Err(failure(
-            "resource authority differs from its bundled registry",
-        ));
+        return Err(failure("resource binding differs from its frozen registry"));
     }
     super::nomi_core_mcp_catalog::validate_resources(compiled, &registry, principal)
 }
@@ -102,12 +88,8 @@ fn frozen_state(
     state: &SessionCapabilityState,
 ) -> Result<ActiveCapabilitySetSnapshot, AppError> {
     let active = state.snapshot().map_err(failure)?;
-    if active.resolved_snapshot_ref != *compiled.snapshot_ref()
-        || active.generation != 0
-        || active.active != compiled.content().capability_allowlist
-        || !active.active.contains(&CapabilityId::from("mcp.resource"))
-    {
-        return Err(failure("resource capability is outside the frozen enabled set"));
+    if active.resolved_snapshot_ref != *compiled.snapshot_ref() {
+        return Err(failure("resource binding belongs to another frozen Snapshot"));
     }
     Ok(active)
 }
@@ -205,7 +187,7 @@ impl ResourceOwner {
         request: EngineResourceRead,
     ) -> Result<(Value, EngineResourceRead, u64), AppError> {
         validate_resource_page(&request)?;
-        if !self.constraints.allows_capability("mcp.resource") {
+        if self.constraints.restricted() {
             return Err(failure(
                 "resource read exceeds the frozen execution ceiling",
             ));
@@ -223,8 +205,8 @@ impl ResourceOwner {
             return Err(failure("resource operation has no valid engine presentation evidence or operation identity"));
         }
         validate(&self.kernel, &self.compiled, &self.principal)?;
-        // The compatibility proof above is presentation evidence only. Never
-        // activate a capability: require the saved Session's enabled set before IO.
+        // Presentation evidence never grants a resource. The exact typed
+        // binding remains the sole server/read authority.
         let active = frozen_state(&self.compiled, &self.active)?;
         // Reject an ambiguous/unknown target before entering the shared owner.
         let binding = select_resource_server(

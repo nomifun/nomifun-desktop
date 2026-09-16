@@ -43,7 +43,7 @@ pub(crate) const NAMES: [&str; 3] = [
 
 #[async_trait]
 pub trait NomiMcpResourceInvoker: Send + Sync {
-    /// The host revalidates the exact frozen capability, resource and turn.
+    /// The host revalidates the exact frozen server binding and turn.
     /// `activation_proven` is only Nomi ToolSearch presentation evidence;
     /// it must never activate or grant a canonical capability.
     async fn read(
@@ -194,7 +194,7 @@ impl Tool for ResourceTool {
         &self.identity
     }
     fn deferred_search_aliases(&self) -> Vec<String> {
-        vec!["mcp.resource".into()]
+        vec!["mcp resources".into()]
     }
     fn is_deferred(&self) -> bool {
         self.resources.deferred
