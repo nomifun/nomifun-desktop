@@ -24,6 +24,7 @@ import {
 } from './canvasVideoComposerCanvas';
 import { creativeStudioProductText } from './i18n';
 import { creativeNodeFromHistoricalAsset } from './nodeFactory';
+import { canvasMediaNodeSize } from '../core/mediaNodeSize';
 
 export type CanvasVideoComposerEditorPort = Pick<
   CreativeCanvasEditorHandle,
@@ -212,6 +213,7 @@ export async function settleCanvasVideoComposeTask(input: {
         }
         const reconciledSource = clearCanvasVideoComposeDraftModel({
           ...source,
+          size: canvasMediaNodeSize(asset, source.size),
           data: { ...source.data, assetId: asset.id },
         });
         if (source.data.assetId !== asset.id || Boolean(source.data.composer?.model)) {
@@ -237,9 +239,8 @@ export async function settleCanvasVideoComposeTask(input: {
               )
             );
           }
-          const created = creativeNodeFromHistoricalAsset(asset, state, input.viewportSize, {
-            position: canvasVideoComposeResultPosition(state.document.nodes, config),
-          });
+          const created = creativeNodeFromHistoricalAsset(asset, state, input.viewportSize);
+          created.position = canvasVideoComposeResultPosition(state.document.nodes, config, created.size);
           if (created.type !== 'video') {
             throw new Error(
               creativeStudioProductText(

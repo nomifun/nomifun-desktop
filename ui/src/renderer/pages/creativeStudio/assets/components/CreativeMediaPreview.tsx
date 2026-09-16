@@ -33,10 +33,11 @@ export interface CreativeMediaPreviewProps {
   unavailableLabel?: string;
   /** Canvas nodes can explicitly opt into their persisted fit setting. */
   fit?: React.CSSProperties['objectFit'];
+  onImageSize?: (size: { width: number; height: number }) => void;
 }
 
 const MediaPreview: React.FC<CreativeMediaPreviewProps> = ({
-  kind, src, posterSrc, alt = '', className, unavailableLabel, fit,
+  kind, src, posterSrc, alt = '', className, unavailableLabel, fit, onImageSize,
 }) => {
   const { t } = useTranslation();
   const [failedSources, setFailedSources] = useState<string[]>([]);
@@ -52,7 +53,14 @@ const MediaPreview: React.FC<CreativeMediaPreviewProps> = ({
   return (
     <span className={[styles.preview, className].filter(Boolean).join(' ')} data-creative-media-preview={kind} data-asset-media-state={failed ? 'missing' : kind}>
       {imageSrc ? (
-        <img className={styles.media} src={imageSrc} alt={alt} loading='lazy' draggable={false} style={fit ? { objectFit: fit } : undefined} onError={() => markFailed(imageSrc)} />
+        <img className={styles.media} src={imageSrc} alt={alt} loading='lazy' draggable={false} style={fit ? { objectFit: fit } : undefined} onError={() => markFailed(imageSrc)}
+          onLoad={(event) => {
+            const image = event.currentTarget;
+            if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+              onImageSize?.({ width: image.naturalWidth, height: image.naturalHeight });
+            }
+          }}
+        />
       ) : videoSrc ? (
         <CreativeVideoMedia className={styles.media} src={videoSrc} muted controls={false} tabIndex={-1} draggable={false} aria-label={alt} onError={() => markFailed(videoSrc)} />
       ) : (

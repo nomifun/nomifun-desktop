@@ -598,11 +598,12 @@ export function reconcileCanvasVideoComposeConfig(
 
 export function canvasVideoComposeResultPosition(
   nodes: readonly CreativeCanvasNode[],
-  config: ConfigNode
+  config: ConfigNode,
+  size: CreativeSize = CREATIVE_CANVAS_PRODUCT_NODE_SIZES.video
 ): { x: number; y: number } {
   return canvasTaskResultPosition(
     nodes,
     config,
-    CREATIVE_CANVAS_PRODUCT_NODE_SIZES.video
+    size
   );
 }

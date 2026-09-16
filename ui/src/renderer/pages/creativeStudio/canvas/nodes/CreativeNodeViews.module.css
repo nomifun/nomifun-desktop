@@ -25,7 +25,7 @@
   padding: 8px 10px;
   resize: none;
   border: 0;
-  border-radius: 18px;
+  border-radius: 6px;
   outline: none;
   background: color-mix(in srgb, var(--color-bg-1) 36%, transparent);
   caret-color: var(--color-text-1);
@@ -40,12 +40,13 @@
 
 .textEditor::placeholder {
   color: var(--creative-canvas-node-placeholder, var(--color-text-3));
-  font-size: 14px;
+  font-size: 15px;
+  opacity: 1;
 }
 
 .emptyText {
   color: var(--creative-canvas-node-placeholder, var(--color-text-3));
-  font-size: 14px;
+  font-size: 15px;
 }
 
 .imageMedia,
@@ -74,7 +75,7 @@
   align-items: center;
   justify-content: center;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   padding: 14px;
   background: var(--creative-canvas-node-fill, var(--color-fill-3));
   color: var(--creative-canvas-node-placeholder, var(--color-text-3));
@@ -84,24 +85,32 @@
 .emptyMedia strong {
   max-width: 100%;
   overflow: hidden;
-  font-size: 10px;
-  font-weight: 400;
-  letter-spacing: 0.18em;
-  opacity: 0.55;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  letter-spacing: 0.02em;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .emptyIcon {
   display: grid;
-  width: 56px;
-  height: 56px;
+  width: 48px;
+  height: 48px;
   place-items: center;
   border: 0;
-  border-radius: 16px;
+  border-radius: 12px;
   background: color-mix(in srgb, var(--creative-canvas-node-panel, var(--color-bg-2)) 62%, transparent);
   color: var(--creative-canvas-node-placeholder, var(--color-text-3));
-  opacity: 0.55;
+  line-height: 0;
+}
+
+.emptyIcon :global(.i-icon),
+.emptyIcon :global(svg) {
+  display: block;
+  width: 28px;
+  height: 28px;
+  line-height: 0;
 }
 
 .assetReference {

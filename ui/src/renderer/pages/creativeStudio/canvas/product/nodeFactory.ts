@@ -16,6 +16,7 @@ import {
 import type { PromptLibrarySelection } from '../../prompts';
 import {
   clientToCanvas,
+  canvasMediaNodeSize,
   makeCanvasNode,
   normalizeCanvasViewport,
   type CanvasState,
@@ -24,13 +25,13 @@ import {
 import { creativeStudioProductText } from './i18n';
 
 export const CREATIVE_CANVAS_PRODUCT_NODE_SIZES = {
-  text: { width: 340, height: 240 },
-  image: { width: 340, height: 240 },
-  panorama: { width: 340, height: 170 },
-  video: { width: 420, height: 236 },
-  audio: { width: 340, height: 160 },
+  text: { width: 320, height: 320 },
+  image: { width: 320, height: 320 },
+  panorama: { width: 320, height: 320 },
+  video: { width: 320, height: 320 },
+  audio: { width: 320, height: 320 },
   config: { width: 440, height: 240 },
-  group: { width: 760, height: 480 },
+  group: { width: 320, height: 320 },
 } as const satisfies Record<CreativeCanvasNodeKind, CreativeSize>;
 
 /** Repeated insertions move by this many client pixels, independent of zoom. */
@@ -312,6 +313,14 @@ export function creativeNodeFromHistoricalAsset(
   overrides: CreativeCanvasProductNodeOverrides = {}
 ): CreativeCanvasNode {
   const assetId = requireAssetId(asset);
+  const mediaOverrides = asset.kind === 'image' || asset.kind === 'video'
+    ? {
+        ...overrides,
+        size: canvasMediaNodeSize(
+          asset, overrides.size ?? CREATIVE_CANVAS_PRODUCT_NODE_SIZES[asset.kind]
+        ),
+      }
+    : overrides;
   switch (asset.kind) {
     case 'image':
       return createNodeWithData(
@@ -326,7 +335,7 @@ export function creativeNodeFromHistoricalAsset(
         },
         state,
         viewportSize,
-        overrides
+        mediaOverrides
       );
     case 'video':
       return createNodeWithData(
@@ -344,7 +353,7 @@ export function creativeNodeFromHistoricalAsset(
         },
         state,
         viewportSize,
-        overrides
+        mediaOverrides
       );
     case 'audio':
       return createNodeWithData(

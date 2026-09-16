@@ -171,7 +171,7 @@ describe('Creative Studio canonical node views', () => {
     }
   });
 
-  test('keeps node names accessible without rendering descriptions above cards', () => {
+  test('renders an accessible type icon and filename above the card', () => {
     const imageNode = nodes.find((node): node is Extract<CreativeCanvasNode, { type: 'image' }> => node.type === 'image');
     if (!imageNode) throw new Error('image fixture is missing');
     const accessibleName = 'Image node accessible name';
@@ -184,7 +184,9 @@ describe('Creative Studio canonical node views', () => {
     );
 
     expect(html.includes(`aria-label="${accessibleName}"`)).toBe(true);
-    expect(html.includes(`>${accessibleName}<`)).toBe(false);
+    expect(html.includes(`>${accessibleName}<`)).toBe(true);
+    expect(html.includes('data-node-title')).toBe(true);
+    expect(html.includes('i-icon-pic')).toBe(true);
   });
 
   test('stays headless and imports the canonical schema instead of defining document fields', () => {

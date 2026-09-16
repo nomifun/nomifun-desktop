@@ -28,6 +28,7 @@ export interface CreativeVideoPlayerProps {
   loop?: boolean;
   muted?: boolean;
   onPlayRequest?: () => void;
+  onMediaSize?: (size: { width: number; height: number }) => void;
 }
 
 type FullscreenDocument = Document & {
@@ -68,6 +69,7 @@ const VideoPlayer: React.FC<CreativeVideoPlayerProps> = ({
   loop = false,
   muted: initialMuted = false,
   onPlayRequest,
+  onMediaSize,
 }) => {
   const { t } = useTranslation();
   const contentRef = useRef<HTMLDivElement>(null);
@@ -239,6 +241,10 @@ const VideoPlayer: React.FC<CreativeVideoPlayerProps> = ({
         tabIndex={-1}
         aria-label={label}
         onLoadedMetadata={(event) => {
+          const video = event.currentTarget;
+          if (video.videoWidth > 0 && video.videoHeight > 0) {
+            onMediaSize?.({ width: video.videoWidth, height: video.videoHeight });
+          }
           setDuration(safeMediaTime(event.currentTarget.duration));
           setCurrentTime(safeMediaTime(event.currentTarget.currentTime));
         }}

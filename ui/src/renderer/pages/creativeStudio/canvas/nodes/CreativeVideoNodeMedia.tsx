@@ -17,11 +17,12 @@ interface CreativeVideoNodeMediaProps {
   title: string;
   selected?: boolean;
   onActivate?: () => void;
+  onMediaSize?: (size: { width: number; height: number }) => void;
 }
 
 /** Canvas selection is independent of the shared player's transient media state. */
 const CreativeVideoNodeMedia: React.FC<CreativeVideoNodeMediaProps> = ({
-  node, asset, title, selected, onActivate,
+  node, asset, title, selected, onActivate, onMediaSize,
 }) => (
   <CreativeVideoPlayer
     src={asset.src}
@@ -32,6 +33,7 @@ const CreativeVideoNodeMedia: React.FC<CreativeVideoNodeMediaProps> = ({
     loop={node.data.loop}
     muted={node.data.muted}
     onPlayRequest={() => { if (!selected) onActivate?.(); }}
+    onMediaSize={onMediaSize}
   />
 );
 
