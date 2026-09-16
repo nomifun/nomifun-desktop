@@ -5,7 +5,7 @@ import { Message } from '@arco-design/web-react';
 import { useState, type ReactNode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { SWRConfig } from 'swr';
-import type { IProvider } from '@/common/config/storage';
+import type { IProvider, TProviderWithModel } from '@/common/config/storage';
 import { parseAgentPresetId, parseConversationId, parseProviderId } from '@/common/types/ids';
 import type { OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import type { GuidAgentSelection } from '@/renderer/pages/guid/types';
@@ -34,13 +34,13 @@ const realFetch = globalThis.fetch;
 beforeEach(() => setBrowserStorageGeneration('0190f5fe-7c00-7a00-8000-000000000107'));
 afterEach(() => { cleanup(); sessionStorage.clear(); globalThis.fetch = realFetch; });
 
-function mount(generationProvider = provider) {
+function mount(generationProvider = provider, sessionCollaboration?: Parameters<typeof useGuidCreation>[5]) {
   const cache = new Map();
   const wrapper = ({ children }: { children: ReactNode }) => <MemoryRouter><SWRConfig value={{ provider: () => cache, fallback: { providers: [generationProvider] }, revalidateOnMount: false, shouldRetryOnError: false }}>{children}</SWRConfig></MemoryRouter>;
   return renderHook(() => {
     const [selection, setSelection] = useState<GuidAgentSelection>({ kind: 'template', templateKey: 'chat.minimal' });
     const [input, setInput] = useState('一只橘猫');
-    const creation = useGuidCreation({ selection, setSelection, officialTemplates: [template], selectedPreset: undefined, selectedTemplate: template, presets: [], draftPresets: [], isLoading: false, isLoaded: true, loadError: undefined, refreshPresets: async () => {} }, input, [], '', () => setInput(''));
+    const creation = useGuidCreation({ selection, setSelection, officialTemplates: [template], selectedPreset: undefined, selectedTemplate: template, presets: [], draftPresets: [], isLoading: false, isLoaded: true, loadError: undefined, refreshPresets: async () => {} }, input, [], '', () => setInput(''), sessionCollaboration);
     return { creation, selection, input, setInput };
   }, { wrapper });
 }
@@ -62,10 +62,11 @@ describe('conversation creation admission and draft behavior', () => {
   });
 
   test.each([
-    ['image', 'image_generation', 'openai.images', 't2i'],
-    ['video', 'video_generation', 'openai.videos', 't2v'],
-    ['music', 'music_generation', 'minimax.music', 'music'],
-  ] as const)('%s binds the required asset library before admitting generation without a chat model', async (mode, task, protocol, capability) => {
+    ['image', 'image_generation', 'openai.images', 't2i', false],
+    ['image', 'image_generation', 'openai.images', 't2i', true],
+    ['video', 'video_generation', 'openai.videos', 't2v', false],
+    ['music', 'music_generation', 'minimax.music', 'music', false],
+  ] as const)('%s binds its asset library and keeps optional chat collaboration separate from generation', async (mode, task, protocol, capability, carryCollaboration) => {
     const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
     globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
       const path = String(url), body = init?.body ? JSON.parse(String(init.body)) : {};
@@ -84,7 +85,12 @@ describe('conversation creation admission and draft behavior', () => {
       return new Response(JSON.stringify({ success: true, data }), { headers: { 'Content-Type': 'application/json' } });
     }) as typeof fetch;
     await prepareOfficialAgent(template, '创意工坊', { id: providerId, use_model: 'previous-chat-model' });
-    const hook = mount({ ...provider, models: [{ model: model.model, enabled: true, capabilities: [{ task, traits: [], protocol }] }] } as unknown as IProvider);
+    const collaboration = {
+      execution_model_pool: { mode: 'range' as const, models: [{ provider_id: providerId, model: 'chat-lead' }, { provider_id: providerId, model: 'reviewer' }] },
+      execution_template_id: null, delegation_policy: 'prefer_parallel' as const, decision_policy: 'ask_user' as const,
+    };
+    const hook = mount({ ...provider, models: [{ model: model.model, enabled: true, capabilities: [{ task, traits: [], protocol }] }] } as unknown as IProvider,
+      carryCollaboration ? { config: collaboration, model: { ...provider, use_model: 'chat-lead' } as TProviderWithModel, ready: true } : undefined);
     act(() => hook.result.current.creation.selectMode(mode as CreationMode));
     await waitFor(() => expect(hook.result.current.creation.ready).toBe(true));
     await act(async () => { await hook.result.current.creation.send(); });
@@ -95,6 +101,11 @@ describe('conversation creation admission and draft behavior', () => {
     expect(presetCalls).toHaveLength(2);
     for (const call of presetCalls) expect(call.body).not.toHaveProperty('model');
     expect(calls.find(call => call.url.endsWith('/creation-tasks'))?.body).toMatchObject({ preset_id: presetId, provider_id: providerId, model: 'image-exact', capability, params: { prompt: '一只橘猫' } });
+    const collaborationIndex = calls.findIndex(call => call.body.execution_model_pool);
+    if (carryCollaboration) {
+      expect(calls[collaborationIndex].body).toMatchObject(collaboration);
+      expect(collaborationIndex).toBeLessThan(calls.findIndex(call => call.url.endsWith('/creation-tasks')));
+    } else expect(collaborationIndex).toBe(-1);
     expect(calls.some(call => call.url.endsWith('/messages') || call.url.includes('switch-preset'))).toBe(false);
   });
 

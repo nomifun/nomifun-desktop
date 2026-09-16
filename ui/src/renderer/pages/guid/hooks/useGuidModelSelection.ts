@@ -40,6 +40,7 @@ function isPersistedDefaultModel(value: unknown): value is PersistedDefaultModel
 
 export type GuidModelSelectionResult = {
   modelList: IProvider[];
+  getAvailableModels: (provider: IProvider) => string[];
   formatGeminiModelLabel: (provider: { platform?: string } | undefined, modelName?: string) => string;
   current_model: TProviderWithModel | undefined;
   setCurrentModel: (model_info: TProviderWithModel) => Promise<void>;
@@ -178,6 +179,7 @@ export const useGuidModelSelection = (agentKey: ProviderAgentKey = 'nomi'): Guid
 
   return {
     modelList,
+    getAvailableModels: availableModelsFor,
     formatGeminiModelLabel,
     current_model,
     setCurrentModel,

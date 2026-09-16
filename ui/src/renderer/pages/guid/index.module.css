@@ -6,117 +6,6 @@
   margin: 0 auto;
 }
 
-.guidInputCardWrap {
-  width: 100%;
-  box-sizing: border-box;
-  background: var(--bg-2);
-}
-
-.guidInputInner {
-  background: var(--bg-base, #fff);
-  border: 1px solid var(--color-border-3);
-  border-radius: 24px;
-  box-sizing: border-box;
-}
-
-:global([data-theme='dark']) .guidInputInner {
-  background: #262626;
-  border-color: #3a3a3a;
-}
-
-.guidAgentSelectorRow {
-  display: flex;
-  align-items: center;
-  min-height: 38px;
-  margin-bottom: 8px;
-  padding: 0 4px 0 2px;
-  min-width: 0;
-  box-sizing: border-box;
-}
-
-.guidAgentSelectorRow > * {
-  min-width: 0;
-  max-width: 100%;
-}
-.actionRow {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  width: 100%;
-  gap: 8px;
-  margin-top: auto;
-}
-
-.actionTools {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 1;
-  min-width: 0;
-}
-
-.actionEntry {
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
-  margin-right: 0;
-}
-
-.actionConfigGroup {
-  display: inline-flex;
-  align-items: center;
-  gap: 0;
-  min-width: 0;
-  flex: 0 1 auto;
-}
-
-.actionConfigGroupResponsive {
-  flex: 0 1 auto;
-  justify-content: flex-end;
-  max-width: 100%;
-}
-
-/* 首页输入框右下模型选择器：与对话框 .sendbox-tools/.sendbox-actions 同款 */
-.actionSubmit :global(.sendbox-model-btn),
-.actionSubmit :global(.sendbox-model-btn:hover),
-.actionSubmit :global(.sendbox-model-btn:active),
-.actionSubmit :global(.sendbox-model-btn:focus),
-.actionSubmit :global(.sendbox-model-btn:focus-visible) {
-  background: transparent !important;
-  border: none !important;
-  box-shadow: none !important;
-  color: var(--text-secondary) !important;
-}
-
-.actionSubmit :global(.sendbox-model-btn:hover),
-.actionSubmit :global(.sendbox-model-btn:active),
-.actionSubmit :global(.sendbox-model-btn:focus),
-.actionSubmit :global(.sendbox-model-btn:focus-visible) {
-  color: var(--text-primary) !important;
-}
-
-.actionConfigGroup :global(.sendbox-model-btn .arco-btn-content) {
-  gap: 0 !important;
-}
-
-.actionConfigGroup :global(.sendbox-model-btn .arco-btn-content > span:first-child) {
-  gap: 4px !important;
-}
-
-.actionSubmit {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
-  margin-left: auto;
-  min-width: 0;
-}
-
-.actionSubmitResponsive {
-  flex: 1 1 auto;
-  justify-content: flex-end;
-}
-
 .workspaceFootnote {
   display: flex;
   align-items: center;
@@ -297,24 +186,6 @@
   margin: 4px 0;
 }
 
-.lightPlaceholder::placeholder {
-  color: #b4b5bc;
-  opacity: 1;
-}
-
-.plusButtonRotate {
-  animation: rotate-animation 0.3s ease-in-out;
-}
-
-@keyframes rotate-animation {
-  0% {
-    transform: rotate(0deg);
-  }
-  100% {
-    transform: rotate(45deg);
-  }
-}
-
 /* Skeleton shimmer animation */
 @keyframes guid-shimmer {
   0% {
@@ -372,14 +243,6 @@
   margin-bottom: 12px;
 }
 
-
-/* 浅色占位符 */
-.lightPlaceholder :global(textarea::placeholder) {
-  color: #b4b5bc !important;
-  opacity: 1 !important;
-}
-
-/* 设定标签 */
 
 @media (max-height: 720px) {
   .guidPrimaryStage { padding-block: 32px; }

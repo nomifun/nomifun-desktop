@@ -14,13 +14,15 @@ import { useGuidCreation } from './useGuidCreation';
 import { creationDraftStorageKey } from './useCreationDraft';
 import { creativeAssetClient } from '@/renderer/pages/creativeStudio/assets/client';
 import { CreationComposerContext } from './CreationComposerContext';
-import CreationControls from './CreationControls';
+import CreationControls, { CreationModelSelector } from './CreationControls';
+import ComposerSceneSelector from './ComposerSceneSelector';
+import creationMessages from '@/renderer/services/i18n/locales/zh-CN/creation.json';
 import { emptyCreationDraft } from './useCreationDraft';
 import { buildCreationRequest } from './submission';
 import type { CreationDraft } from './types';
 
 const i18n = createInstance();
-await i18n.use(initReactI18next).init({ lng: 'zh-CN', resources: {} });
+await i18n.use(initReactI18next).init({ lng: 'zh-CN', resources: { 'zh-CN': { translation: { creation: creationMessages } } } });
 let assetList: ReturnType<typeof spyOn<typeof creativeAssetClient, 'list'>>;
 beforeEach(() => {
   setBrowserStorageGeneration('0190f5fe-7c00-7a00-8000-000000000105');
@@ -45,9 +47,14 @@ test.each(['image', 'video'] as const)('%s quantity offers at most four and subm
     latest = draft;
     return <CreationComposerContext.Provider value={{ draft, update: change => setDraft(change), setMode: () => {}, selectMode: () => {}, exit: () => {} }}>
       <CreationControls prompt='测试生成' onPromptChange={() => {}} files={[]} />
+      <CreationModelSelector files={[]} />
     </CreationComposerContext.Provider>;
   }
   const page = render(<I18nextProvider i18n={i18n}><MemoryRouter><SWRConfig value={{ provider: () => new Map(), fallback: { providers: [provider] }, revalidateOnMount: false }}><Harness /></SWRConfig></MemoryRouter></I18nextProvider>);
+  fireEvent.click(page.getByRole('button', { name: '生成模型' }));
+  const modelPanel = await page.findByTestId('creation-model-panel');
+  fireEvent.click(within(modelPanel).getByRole('button', { name: new RegExp(model) }));
+  expect(latest.models[mode]).toEqual({ providerId, model });
   fireEvent.click(page.getByRole('button', { name: /^生成参数：/ }));
   const panel = await page.findByTestId('creation-parameter-panel');
   const count = within(within(panel).getByRole('group', { name: '生成数量' }));
@@ -83,13 +90,14 @@ test('chat menu switches the creative composer to general assistant and keeps it
     }, '继续编辑我的描述', ['C:/cat.png'], '');
     return <CreationComposerContext.Provider value={current}>
       <output>{selection.kind === 'template' ? selection.templateKey : selection.presetId}</output>
+      <ComposerSceneSelector />
       <CreationControls prompt='继续编辑我的描述' onPromptChange={() => {}} files={['C:/cat.png']} />
     </CreationComposerContext.Provider>;
   }
   try {
     const page = render(<I18nextProvider i18n={i18n}><MemoryRouter><SWRConfig value={{ provider: () => new Map(), fallback: { providers: [] }, revalidateOnMount: false }}><Harness /></SWRConfig></MemoryRouter></I18nextProvider>);
-    fireEvent.click(page.getByRole('button', { name: '视频生成' }));
-    fireEvent.click(await page.findByRole('button', { name: '对话' }));
+    fireEvent.click(page.getByRole('button', { name: '使用场景：视频创作，展开全部场景' }));
+    fireEvent.click(await page.findByRole('menuitemradio', { name: /日常对话/ }));
     expect(page.getByText('assistant.general')).toBeTruthy();
     expect(page.queryByRole('button', { name: /^生成参数：/ })).toBeNull();
     expect(current.draft.mode).toBeNull();

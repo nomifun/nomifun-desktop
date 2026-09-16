@@ -1,0 +1,10 @@
+{
+  "mode": { "chat": "Daily chat", "image": "Image creation", "video": "Video creation", "music": "Music creation" },
+  "scene": {
+    "trigger": "Use case: {{scene}}, show all use cases",
+    "title": "What would you like to do?",
+    "description": { "chat": "Questions and everyday help", "image": "Turn ideas into images", "video": "Bring ideas to life in video", "music": "Create melodies and songs" },
+    "discovery": "You can also create images, videos, and music",
+    "dismissHint": "Dismiss use case hint"
+  }
+}

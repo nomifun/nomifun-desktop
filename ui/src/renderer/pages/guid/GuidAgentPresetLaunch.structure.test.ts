@@ -103,15 +103,15 @@ describe('Guid workbench Agent launch behavior', () => {
 
   test('keeps ordinary session model selection independent from Agent identity', () => {
     const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
-    const actionRow = readSource(
-      new URL('./components/GuidActionRow.tsx', import.meta.url)
+    const composer = readSource(
+      new URL('../../components/chat/Composer.tsx', import.meta.url)
     );
 
     expect(page.includes('isDefaultAgent')).toBe(false);
     expect(page.includes('const modelSelectorNode = (')).toBe(true);
-    expect(page.includes('<GuidModelSelector')).toBe(true);
-    expect(page.includes('modelSelectorNode={modelSelectorNode}')).toBe(true);
-    expect(actionRow.includes('modelSelectorNode: React.ReactNode;')).toBe(true);
+    expect(page.includes('<ChatModelSelector')).toBe(true);
+    expect(page.includes('{modelSelectorNode}</div>}')).toBe(true);
+    expect(composer.includes('rightTools?: ReactNode;')).toBe(true);
   });
 
   test('does not retain a hidden plain-Nomi launch branch', () => {
