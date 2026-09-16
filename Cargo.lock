@@ -6574,6 +6574,8 @@ dependencies = [
  "axum",
  "futures-util",
  "nomi-redact",
+ "nomifun-agent-contracts",
+ "nomifun-agent-session",
  "nomifun-ai-agent",
  "nomifun-api-types",
  "nomifun-auth",
@@ -6594,6 +6596,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -952,6 +952,29 @@ pub struct CreateAgentSessionTurnResponseDto {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct SteerAgentSessionTurnRequestDto {
+    pub input: Value,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionTurnMutationResponseDto {
+    pub agent_session_id: String,
+    pub target_operation_id: String,
+    pub cursor: SessionCursorDto,
+    pub status: String,
+    pub duplicate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancelAgentSessionTurnRequestDto {
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ForkAgentSessionRequestDto {
     pub target_agent_binding: AgentBindingValueDto,
     pub parent_through_seq: u64,
@@ -1260,5 +1283,20 @@ mod snapshot_tests {
             "action_allowlist": []
         }))
         .is_err());
+    }
+
+    #[test]
+    fn canonical_turn_mutations_require_explicit_idempotency() {
+        assert!(serde_json::from_value::<SteerAgentSessionTurnRequestDto>(json!({
+            "input": {"content": "continue"},
+            "idempotency_key": "steer-1"
+        })).is_ok());
+        assert!(serde_json::from_value::<SteerAgentSessionTurnRequestDto>(json!({
+            "input": "continue"
+        })).is_err());
+        assert!(serde_json::from_value::<CancelAgentSessionTurnRequestDto>(json!({
+            "idempotency_key": "cancel-1",
+            "conversation_id": "legacy"
+        })).is_err());
     }
 }

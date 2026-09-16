@@ -405,6 +405,148 @@ impl AgentSessionStore {
         Ok(result)
     }
 
+    /// Accept one user message and its Turn in the same transaction. The Store
+    /// selects the exact predecessor while holding the write fence, so a
+    /// concurrent caller cannot attach a second Turn to a stale ready head.
+    /// Replays validate the original input and return the original receipt even
+    /// after that Turn has crossed a terminal boundary.
+    pub async fn start_turn(
+        &self,
+        session_id: &AgentSessionId,
+        producer_id: EventProducerId,
+        idempotency_key: IdempotencyKey,
+        operation_id: OperationId,
+        input: StrictJsonValue,
+    ) -> Result<(SessionEventAppendResult, SessionEventAppendResult), SessionStoreError> {
+        if input
+            .0
+            .get("content")
+            .and_then(Value::as_str)
+            .is_none_or(|content| content.trim().is_empty())
+        {
+            return Err(SessionStoreError::InvalidPayload(
+                "accepted turn input requires non-empty content".to_owned(),
+            ));
+        }
+
+        let message_event_id = EventId::from(format!("message:{}", idempotency_key.as_ref()));
+        let message_key = IdempotencyKey::from(format!("{}:message", idempotency_key.as_ref()));
+        let turn_event_id = EventId::from(format!("turn-start:{}", idempotency_key.as_ref()));
+        let turn_key = IdempotencyKey::from(format!("{}:turn", idempotency_key.as_ref()));
+        let mut tx = self.begin_write_transaction().await?;
+        require_live_session_tx(&mut tx, session_id.as_ref()).await?;
+
+        let existing_message = event_by_producer_key_tx(
+            &mut tx,
+            producer_id.as_ref(),
+            message_key.as_ref(),
+        )
+        .await?;
+        let existing_turn =
+            event_by_producer_key_tx(&mut tx, producer_id.as_ref(), turn_key.as_ref()).await?;
+        match (existing_message, existing_turn) {
+            (Some(message), Some(turn)) => {
+                let message = event_from_row(message)?;
+                let turn = event_from_row(turn)?;
+                let expected_turn_payload = SessionEventPayloadRef::InlineJson(StrictJsonValue(
+                    json!({
+                        "operation_id": operation_id,
+                        "source_message_id": message_event_id,
+                    }),
+                ));
+                if message.agent_session_id != *session_id
+                    || message.event_id != message_event_id
+                    || message.producer_id != producer_id
+                    || message.idempotency_key != message_key
+                    || message.kind.0 != "message/user-accepted"
+                    || message.kind_version != 1
+                    || message.correlation_id.as_ref() != message_event_id.as_ref()
+                    || message.causation_event_id.is_none()
+                    || message.payload
+                        != SessionEventPayloadRef::InlineJson(input.clone())
+                    || turn.agent_session_id != *session_id
+                    || turn.event_id != turn_event_id
+                    || turn.producer_id != producer_id
+                    || turn.idempotency_key != turn_key
+                    || turn.kind.0 != "turn/started"
+                    || turn.kind_version != 1
+                    || turn.correlation_id.as_ref() != operation_id.as_ref()
+                    || turn.causation_event_id.as_ref() != Some(&message_event_id)
+                    || turn.payload != expected_turn_payload
+                {
+                    return Err(SessionStoreError::IdempotencyConflict(
+                        "turn start idempotency key was already used for different input"
+                            .to_owned(),
+                    ));
+                }
+                let message_ack = event_ack(&message);
+                let turn_ack = event_ack(&turn);
+                tx.commit().await?;
+                return Ok((
+                    SessionEventAppendResult {
+                        record: Some(message),
+                        ack: Some(message_ack.clone()),
+                        cursor: message_ack.cursor,
+                        persisted: true,
+                        duplicate: true,
+                    },
+                    SessionEventAppendResult {
+                        record: Some(turn),
+                        ack: Some(turn_ack.clone()),
+                        cursor: turn_ack.cursor,
+                        persisted: true,
+                        duplicate: true,
+                    },
+                ));
+            }
+            (None, None) => {}
+            _ => {
+                return Err(SessionStoreError::IdempotencyConflict(
+                    "turn start idempotency pair is incomplete".to_owned(),
+                ));
+            }
+        }
+
+        let boundary = latest_turn_boundary_event_tx(&mut tx, session_id.as_ref()).await?;
+        let message = SessionEventAppend {
+            agent_session_id: session_id.clone(),
+            event_id: message_event_id.clone(),
+            producer_id: producer_id.clone(),
+            idempotency_key: message_key,
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                kind: SessionEventKind("message/user-accepted".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(message_event_id.as_ref().to_owned()),
+                causation_event_id: Some(boundary),
+                payload: SessionEventPayloadRef::InlineJson(input),
+            },
+        };
+        let turn = SessionEventAppend {
+            agent_session_id: session_id.clone(),
+            event_id: turn_event_id,
+            producer_id,
+            idempotency_key: turn_key,
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                kind: SessionEventKind("turn/started".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(operation_id.as_ref().to_owned()),
+                causation_event_id: Some(message_event_id.clone()),
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "operation_id": operation_id,
+                    "source_message_id": message_event_id,
+                }))),
+            },
+        };
+        let message_result = self.append_event_tx(&mut tx, &message, None).await?;
+        let turn_result = self.append_event_tx(&mut tx, &turn, None).await?;
+        tx.commit().await?;
+        Ok((message_result, turn_result))
+    }
+
     /// Append a Chat message terminal and its turn terminal under one
     /// active-turn fence. A cancel/terminal event cannot be committed between
     /// the two semantic records, and a failed second append rolls the first
@@ -599,6 +741,114 @@ impl AgentSessionStore {
         Ok((target_operation_id, result))
     }
 
+    /// Append one steering input to the exact active Turn under the same
+    /// atomic head fence used by cancellation.
+    pub async fn steer_active_turn(
+        &self,
+        session_id: &AgentSessionId,
+        idempotency_key: IdempotencyKey,
+        producer_id: EventProducerId,
+        input: StrictJsonValue,
+    ) -> Result<(OperationId, SessionEventAppendResult), SessionStoreError> {
+        let mut tx = self.begin_write_transaction().await?;
+        require_live_session_tx(&mut tx, session_id.as_ref()).await?;
+        if let Some(existing) = event_by_producer_key_tx(
+            &mut tx,
+            producer_id.as_ref(),
+            idempotency_key.as_ref(),
+        )
+        .await?
+        {
+            let record = event_from_row(existing)?;
+            if record.agent_session_id != *session_id
+                || record.kind.0 != "turn/steer-accepted"
+            {
+                return Err(SessionStoreError::IdempotencyConflict(
+                    "steering idempotency key was already used for another event".to_owned(),
+                ));
+            }
+            let target = OperationId::from(record.correlation_id.as_ref().to_owned());
+            let replay_matches = match &record.payload {
+                SessionEventPayloadRef::InlineJson(value) => {
+                    value
+                        .0
+                        .get("target_operation_id")
+                        .and_then(Value::as_str)
+                        == Some(target.as_ref())
+                        && value.0.get("input") == Some(&input.0)
+                }
+                SessionEventPayloadRef::Empty | SessionEventPayloadRef::Stored(_) => false,
+            };
+            if !replay_matches {
+                return Err(SessionStoreError::IdempotencyConflict(
+                    "steering idempotency key was replayed with different input".to_owned(),
+                ));
+            }
+            let ack = event_ack(&record);
+            tx.commit().await?;
+            return Ok((
+                target,
+                SessionEventAppendResult {
+                    record: Some(record),
+                    ack: Some(ack.clone()),
+                    cursor: ack.cursor,
+                    persisted: true,
+                    duplicate: true,
+                },
+            ));
+        }
+        let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        let target_operation_id = head
+            .active_turn_id
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .map(OperationId::from)
+            .ok_or_else(|| {
+                SessionStoreError::Conflict(
+                    "steering requires an active canonical Agent Turn".to_owned(),
+                )
+            })?;
+        let turn_event = sqlx::query_as::<_, StoredEventRow>(
+            "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
+                    runtime_binding_id, runtime_producer_seq, kind, kind_version, \
+                    correlation_id, causation_event_id, inline_json, payload_id \
+             FROM agent_events \
+             WHERE session_id = ? AND kind = 'turn/started' AND correlation_id = ? \
+             ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(session_id.as_ref())
+        .bind(target_operation_id.as_ref())
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| {
+            SessionStoreError::Conflict(
+                "active canonical Agent Turn has no start fact".to_owned(),
+            )
+        })?;
+        let turn_event = event_from_row(turn_event)?;
+        let append = SessionEventAppend {
+            agent_session_id: session_id.clone(),
+            event_id: new_event_id(),
+            producer_id,
+            idempotency_key,
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                kind: SessionEventKind("turn/steer-accepted".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(target_operation_id.as_ref().to_owned()),
+                causation_event_id: Some(turn_event.event_id),
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "target_operation_id": target_operation_id,
+                    "input": input,
+                }))),
+            },
+        };
+        let result = self.append_event_tx(&mut tx, &append, None).await?;
+        tx.commit().await?;
+        Ok((target_operation_id, result))
+    }
+
     /// Converge an opening Session to `open_failed` without racing a runtime
     /// ready event. The head-state check and event append share one SQLite
     /// transaction; if another opener already committed `ready`, this returns
@@ -767,6 +1017,51 @@ impl AgentSessionStore {
     ) -> Result<AgentSessionLiveRecord, SessionStoreError> {
         let row = session_row_by_id(&self.pool, session_id.as_ref()).await?;
         require_live_row(row)
+    }
+
+    pub async fn active_capability_ids(
+        &self,
+        session_id: &AgentSessionId,
+    ) -> Result<Vec<String>, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        require_live_session_tx(&mut tx, session_id.as_ref()).await?;
+        let row = sqlx::query_as::<_, StoredEventRow>(
+            "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
+                    runtime_binding_id, runtime_producer_seq, kind, kind_version, \
+                    correlation_id, causation_event_id, inline_json, payload_id \
+             FROM agent_events WHERE session_id = ? \
+               AND kind = 'capability/active-set-committed' \
+             ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(session_id.as_ref())
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| {
+            SessionStoreError::Conflict(
+                "AgentSession has no committed active capability set".to_owned(),
+            )
+        })?;
+        let event = event_from_row(row)?;
+        let payload = payload_value_for_event_tx(&mut tx, &event).await?;
+        let ids = payload
+            .get("active_capability_ids")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                SessionStoreError::InvalidEvent(
+                    "active capability projection lost active_capability_ids".to_owned(),
+                )
+            })?
+            .iter()
+            .map(|value| {
+                value.as_str().map(str::to_owned).ok_or_else(|| {
+                    SessionStoreError::InvalidEvent(
+                        "active capability projection contains a non-string ID".to_owned(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        tx.commit().await?;
+        Ok(ids)
     }
 
     /// Return live Remote Sessions whose post-commit Runtime admission has
@@ -1545,7 +1840,7 @@ impl AgentSessionStore {
                 kind: SessionEventKind("capability/active-set-committed".to_owned()),
                 kind_version: 1,
                 correlation_id: request.correlation_id.clone(),
-                causation_event_id: Some(child_opening.event_id),
+                causation_event_id: Some(child_opening.event_id.clone()),
                 payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
                     "generation": 0,
                     "active_capability_ids": child_active_ids,
@@ -1554,10 +1849,35 @@ impl AgentSessionStore {
                 }))),
             },
         };
-        let child_activation_ack = required_ack(
+        let _child_activation_ack = required_ack(
             self.append_event_tx(&mut tx, &child_activation, None)
                 .await?,
         )?;
+        let child_ready = SessionEventAppend {
+            agent_session_id: request.child_session_id.clone(),
+            event_id: EventId::from(format!(
+                "child-ready:{}",
+                request.idempotency_key.as_ref()
+            )),
+            producer_id: EventProducerId::from("runtime_supervisor"),
+            idempotency_key: IdempotencyKey::from(format!(
+                "{}:child-ready",
+                request.idempotency_key.as_ref()
+            )),
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                kind: SessionEventKind("session/ready".to_owned()),
+                kind_version: 1,
+                correlation_id: request.correlation_id.clone(),
+                causation_event_id: Some(child_opening.event_id),
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "resolved_snapshot_ref": &request.child_agent_binding.resolved_snapshot_ref,
+                }))),
+            },
+        };
+        let child_ready_ack =
+            required_ack(self.append_event_tx(&mut tx, &child_ready, None).await?)?;
 
         let fork_payload = SessionForkPayload {
             parent_session_id: parent_session_id.clone(),
@@ -1600,7 +1920,7 @@ impl AgentSessionStore {
                 replays_tool_or_effect: false,
             },
             fork_ack,
-            child_cursor: child_activation_ack.cursor,
+            child_cursor: child_ready_ack.cursor,
         })
     }
 
@@ -3688,6 +4008,27 @@ async fn event_by_producer_key_tx(
     .await?)
 }
 
+async fn latest_turn_boundary_event_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session_id: &str,
+) -> Result<EventId, SessionStoreError> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT event_id FROM agent_events \
+         WHERE session_id = ? AND kind IN (\
+            'session/ready', 'turn/completed', 'turn/failed', 'turn/cancelled'\
+         ) ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(session_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .map(EventId::from)
+    .ok_or_else(|| {
+        SessionStoreError::Conflict(
+            "AgentSession has no committed turn admission boundary".to_owned(),
+        )
+    })
+}
+
 async fn event_by_runtime_sequence_tx(
     tx: &mut Transaction<'_, Sqlite>,
     runtime_binding_id: &str,
@@ -4280,6 +4621,11 @@ async fn replay_fork(
         ));
     }
     let child_head = head_by_id_tx(tx, fork.child_session_id.as_ref()).await?;
+    if child_head.status != "ready" || child_head.active_turn_id.is_some() {
+        return Err(SessionStoreError::Conflict(
+            "fork child did not reach the canonical ready boundary".to_owned(),
+        ));
+    }
     Ok(ForkResult {
         child_session,
         contract: SessionForkContract {

@@ -1,5 +1,6 @@
 //! Conversation and message CRUD with streaming relay and event emission.
 mod agent_execution_port;
+mod canonical_session_owner;
 pub mod companion_interaction;
 mod convert;
 mod execution_conversation_boundary;
@@ -27,6 +28,9 @@ pub use response_middleware::{
 };
 pub use failover_seam::FailoverSwitch;
 pub use agent_execution_port::AgentExecutionConversationPort;
+pub use canonical_session_owner::{
+    AgentMutationReceipt, AgentTurnReceipt, CanonicalAgentSessionOwner, OpenAgentSession,
+};
 pub use execution_conversation_boundary::{
     ConversationExecutionProjection, ExecutionConversationBoundary, NoExecutionConversationBoundary,
     RepositoryExecutionConversationBoundary,

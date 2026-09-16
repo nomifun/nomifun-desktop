@@ -2,7 +2,7 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-17
-> 当前阶段：Wave 1 / UARC-012 ready
+> 当前阶段：Wave 1 / UARC-012 active
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
@@ -52,7 +52,7 @@
 | `UARC-001` | integrated | Integration | verified | pending | 机器 inventory/self-test/timing/platform gap 已完成；Mac gaps 保持 pending |
 | `UARC-010` | integrated | Integration | verified | n/a | Module 多 contribution、authoring policy、exact Action grant 已闭合 |
 | `UARC-011` | integrated | Integration | verified | n/a | generation 5 Store、main migration、effect ledger、reset gate 已闭合 |
-| `UARC-012` | ready | Integration | pending | n/a | 单一 AgentSession owner/API |
+| `UARC-012` | active | Integration | pending | n/a | 单一 AgentSession owner 与 open/turn/steer/cancel/fork/delete API 实施中 |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -253,3 +253,17 @@
 - Not run: full post-migration `nomifun-db` 411-test suite; the same task's pre-migration serial baseline was 411/411 and all migration-sensitive post-change suites passed.
 - Remaining/blocker: none for UARC-011. Old production Session writers remain intentionally owned by cutover tasks, not by a compatibility reader in the new Store.
 - Next ready tasks: `UARC-012` only.
+
+### 2026-09-17 UARC-012 started
+
+- Barrier/source: UARC-011 closeout `9b62887aee46130a144bca7369c01823718e79c8`.
+- Owner/write set: Integration; Conversation, Agent Session Store and App router/composition paths.
+- Changed: task claimed; current Conversation creation, AgentSession routes, receipts and `extra` authority are under call-graph audit.
+- Deleted: pending double-create/dual-ID path, compatibility projections and JSON authority.
+- Retained + reason: user-facing “对话/conversation” terminology remains a projection of one AgentSession.
+- Tests: pending open/turn/steer/cancel/fork/delete, idempotency and projection rebuild gates.
+- Windows: active.
+- macOS: not applicable to the shared API task.
+- Not run: no implementation gate yet.
+- Remaining/blocker: wire generation 5 Store into composition and route every Agent entrypoint through one receipt. No blocker.
+- Next ready tasks: none until UARC-012 barrier; then `UARC-013`.
