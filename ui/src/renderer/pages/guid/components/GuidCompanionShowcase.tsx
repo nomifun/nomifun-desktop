@@ -7,7 +7,7 @@ import { customFigureMetaOf } from '@/renderer/pages/companion/characters/custom
 import { useCompanions } from '@/renderer/pages/nomi/useNomi';
 import { Message } from '@arco-design/web-react';
 import { Add, CloseSmall, Down, More, Right, Search, Up } from '@icon-park/react';
-import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import podium from '@/renderer/assets/images/companion-podium.png';
@@ -38,6 +38,20 @@ export function GuidCompanionShowcaseView({ companions, loading, error, openingI
   const { t } = useTranslation();
   const { ref, width } = useContainerWidth<HTMLElement>();
   const [collapsed, setCollapsed] = useState(readCollapsed);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [bodyHeight, setBodyHeight] = useState<number>();
+
+  // Measure natural content, including wrapped avatars and shorter desktop windows.
+  // The outer height animates; the measured inner content never inherits that height.
+  useLayoutEffect(() => {
+    const body = bodyRef.current;
+    if (!body) return;
+    const measure = () => setBodyHeight(body.getBoundingClientRect().height);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(body);
+    return () => observer.disconnect();
+  }, [collapsed, loading, error, companions.length, width]);
   const [selectedId, setSelectedId] = useState<CompanionId | null>(null);
   const [detailId, setDetailId] = useState<CompanionId | null>(null);
   const [allOpen, setAllOpen] = useState(false);
@@ -129,6 +143,8 @@ export function GuidCompanionShowcaseView({ companions, loading, error, openingI
     {error && <div role='alert' className={styles.error}>{t('guid.showcase.loadFailed')}
       <button type='button' className={styles.textButton} onClick={onRetry}>{t('guid.showcase.retry')}</button>
     </div>}
+    <div className={styles.bodyTransition} style={{ height: bodyHeight }}>
+    <div ref={bodyRef}>
     {loading && companions.length === 0 ? <div role='status' className={styles.empty}>{t('guid.showcase.loading')}</div>
       : companions.length === 0 ? !error && <div className={styles.empty}>
         <button type='button' className={styles.createFigure} onClick={onCreate} aria-label={t('guid.showcase.create')}>
@@ -137,7 +153,7 @@ export function GuidCompanionShowcaseView({ companions, loading, error, openingI
         <div className={styles.emptyCopy}><h2>{t('guid.showcase.emptyTitle')}</h2><p>{t('guid.showcase.emptyDescription')}</p>
           <button type='button' className={styles.primaryButton} onClick={onCreate}>{t('guid.showcase.create')}</button>
         </div>
-      </div> : <div className={collapsed ? styles.compactStage : styles.stage}
+      </div> : <div key={collapsed ? 'compact' : 'expanded'} className={collapsed ? styles.compactStage : styles.stage}
         style={{ gridTemplateColumns: `repeat(${visible.length}, minmax(0, 1fr))` }}>
         {visible.map((companion) => {
           const meta = customFigureMetaOf(companion);
@@ -163,6 +179,8 @@ export function GuidCompanionShowcaseView({ companions, loading, error, openingI
           </GuidPopover>;
         })}
       </div>}
+    </div>
+    </div>
   </section>;
 }
 
