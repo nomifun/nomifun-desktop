@@ -41,7 +41,6 @@ async fn tc_ax_01_multi_feature_collaboration() {
         Some(&mem_dir),
         false, // plan_mode_active = false
         false,
-        false, // browser_enabled
     );
 
     // Assert: system prompt contains memory content

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>Nomi native browser fixture</title>
+<style>
+body { font: 16px system-ui; margin: 40px; background: #fafafa; color: #17202a; }
+input,button { font: inherit; padding: 12px; margin: 12px 0; display: block; }
+button:hover { background: #c7dcff; }
+button:active { background: #82b0ff; }
+button { display: inline-block; margin-right: 8px; }
+#scroller { height: 80px; width: 300px; overflow: auto; border: 1px solid #999; }
+#scroller div { height: 500px; }
+#drag { margin-top: 20px; width: 140px; height: 50px; background: #c7dcff; user-select: none; }
+.selectors { position: absolute; top: 40px; right: 40px; width: 220px; }
+.selectors label, .selectors select { display: block; font: inherit; width: 100%; }
+</style>
+<h1>真实内嵌浏览器输入验证</h1>
+<p>自动化通过此 WebView 的浏览器输入管线点击、输入中文，再验证事件。</p>
+<label for="field">输入内容</label><input id="field" autocomplete="off">
+<button id="submit">验证点击</button>
+<button id="disabled" disabled>不可点击</button>
+<button id="gestures">鼠标手势验证</button>
+<button id="mutates">首次点击后替换</button>
+<output id="result">等待 Agent</output>
+<div id="scroller"><div>滚轮验证</div></div>
+<div id="drag">拖拽验证</div>
+<div class="selectors">
+  <label for="single">单选测试</label>
+  <select id="single">
+    <option disabled selected>请选择</option><option>Alpha</option>
+    <option disabled>不可选择</option><optgroup label="禁用组" disabled><option>组内禁用</option></optgroup>
+    <option hidden>隐藏选项</option><option>Café 中文</option><option>Omega</option><option>重名</option><option>重名</option>
+  </select>
+  <label for="multi">多选测试</label>
+  <select id="multi" multiple size="4">
+    <option selected>Alpha</option><option disabled selected>不可选择</option><option hidden selected>隐藏选项</option><option selected>Café 中文</option><option>Omega</option>
+  </select>
+  <label for="changing">动态单选</label>
+  <select id="changing"><option>Alpha</option><option>Beta</option><option>Omega</option></select>
+  <label for="blocked">拦截方向键</label>
+  <select id="blocked" multiple size="3"><option selected>Alpha</option><option selected>Beta</option><option>Omega</option></select>
+</div>
+<script>
+window.smoke = { clicks: 0, events: [], capturedMoves: 0, replacementClicks: 0, selectMutations: 0 };
+for (const type of ['pointerdown','pointerup','mousedown','mouseup','click','dblclick','contextmenu','auxclick','keydown','keyup','beforeinput','input','change','wheel']) {
+  document.addEventListener(type, event => {
+    smoke.events.push({ type, trusted: event.isTrusted, target: event.target.id, button: event.button, buttons: event.buttons, detail: event.detail, key: event.key });
+  }, true);
+}
+document.querySelector('#submit').addEventListener('click', () => {
+  smoke.clicks++;
+  document.querySelector('#result').textContent = '已收到浏览器点击与文本：' + document.querySelector('#field').value;
+});
+document.querySelector('#mutates').addEventListener('click', event => {
+  smoke.replacementClicks++;
+  const replacement = event.currentTarget.cloneNode(true);
+  replacement.addEventListener('click', () => smoke.replacementClicks++);
+  event.currentTarget.replaceWith(replacement);
+});
+document.querySelector('#changing').addEventListener('change', event => {
+  smoke.selectMutations++;
+  const option = document.createElement('option');
+  option.textContent = '改变后的选项';
+  event.currentTarget.replaceChildren(option);
+});
+document.querySelector('#blocked').addEventListener('keydown', event => {
+  if (event.key==='ArrowDown') event.preventDefault();
+});
+const drag = document.querySelector('#drag');
+drag.addEventListener('pointerdown', event => drag.setPointerCapture(event.pointerId));
+drag.addEventListener('pointermove', event => {
+  if (drag.hasPointerCapture(event.pointerId) && event.buttons === 1) smoke.capturedMoves++;
+});
+</script>
+</html>

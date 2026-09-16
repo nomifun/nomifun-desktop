@@ -592,6 +592,8 @@
     "fallbackQueued": "Couldn't interject into the running reply — added to the queue instead, with your attachments."
   },
   "stop": {
+    "button": "Stop Agent",
+    "stopping": "Stopping Agent…",
     "failed": "Failed to stop the current task. Please try again."
   },
   "editMessage": {

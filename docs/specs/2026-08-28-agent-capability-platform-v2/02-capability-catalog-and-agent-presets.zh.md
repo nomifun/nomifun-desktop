@@ -457,6 +457,7 @@ Catalog Capability。因此 `chat.minimal` 可以正常对话，同时保持 Cap
 
 ```text
 web.search
+nomi_local_websearch
 web.fetch
 citation.render
 
@@ -485,6 +486,12 @@ browser.takeover
 computer.launch
 a11y.observe
 ```
+
+Browser Workspace v2 新增 `nomi_local_websearch@1.0.0`：它是 Agent 工作台可独立选择的 NomiFun 本地浏览器
+检索 Capability，Agent Tool 也精确命名为 `nomi_local_websearch`，固定使用隔离 Headless Browser Provider，
+不要求 Chat model 自身提供原生 web search。现有 `web.search` / `web_search` 保持厂商原生能力；两项 Capability
+身份不同，可独立或同时启用。`nomi_local_websearch` 不隐含 `browser.*`，也不由 `browser.*` 隐含。详见
+[`../2026-09-13-browser-workspace-v2.zh.md`](../2026-09-13-browser-workspace-v2.zh.md)。
 
 基础 Chat model route、Provider credential storage 和普通 reasoning model selection 属于
 平台模型调用基础，不必包装成 Capability。媒体、Embedding、Rerank 等额外产品功能可以

@@ -216,6 +216,11 @@ pub struct AgentPlatformConfig {
     pub runtime: Arc<dyn CodexRuntimePort>,
     pub broker: Arc<dyn ChatBrokerPort>,
     pub initial_plugins: Vec<PluginRegistration>,
+    /// Execution Roles backed by concrete host owners in this composition.
+    /// Merely publishing bundled Role metadata never grants an installation
+    /// binding. An empty set therefore fails every Role-backed capability
+    /// closed without hiding its catalog metadata.
+    pub owned_role_ids: BTreeSet<ExecutionRoleId>,
 }
 
 impl AgentPlatformConfig {
@@ -233,6 +238,7 @@ impl AgentPlatformConfig {
             runtime,
             broker,
             initial_plugins: Vec::new(),
+            owned_role_ids: BTreeSet::new(),
         }
     }
 
@@ -600,6 +606,7 @@ pub struct AgentPlatform {
     kernel_environment: CompilerEnvironment,
     runtime: Arc<dyn CodexRuntimePort>,
     broker: Arc<dyn ChatBrokerPort>,
+    owned_role_ids: BTreeSet<ExecutionRoleId>,
     executions: RwLock<BTreeMap<AgentSessionId, Arc<SessionExecutionState>>>,
     opening_bindings: Arc<StdMutex<BTreeMap<RuntimeBindingId, AgentSessionId>>>,
     registrations: RwLock<Vec<PluginRegistration>>,
@@ -2572,7 +2579,12 @@ impl AgentPlatform {
         initial_plugins.push(agent_core_registration);
         let mut installation_role_bindings =
             load_installation_role_bindings(&config.pool).await?;
-        let derived_defaults = installation_role_defaults(&initial_plugins)?;
+        installation_role_bindings
+            .retain(|role_id, _| config.owned_role_ids.contains(role_id));
+        let derived_defaults = owned_installation_role_defaults(
+            &initial_plugins,
+            &config.owned_role_ids,
+        )?;
         for (role_id, binding) in derived_defaults {
             installation_role_bindings.entry(role_id).or_insert(binding);
         }
@@ -2607,6 +2619,7 @@ impl AgentPlatform {
             kernel_environment: config.kernel_environment,
             runtime: config.runtime,
             broker: config.broker,
+            owned_role_ids: config.owned_role_ids,
             executions: RwLock::new(BTreeMap::new()),
             opening_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
             registrations: RwLock::new(Vec::new()),
@@ -2696,7 +2709,12 @@ impl AgentPlatform {
         let _guard = self.publish_lock.lock().await;
         let previous = self.registrations.read().await.clone();
         let mut tx = self.pool.begin().await?;
-        persist_plugin_registrations_tx(&mut tx, &registrations).await?;
+        persist_plugin_registrations_tx(
+            &mut tx,
+            &registrations,
+            &self.owned_role_ids,
+        )
+        .await?;
         let published = match self.kernel.replace_all(registrations.clone()) {
             Ok(published) => published,
             Err(error) => return Err(error.into()),
@@ -4716,6 +4734,7 @@ fn runtime_platform_error(error: AgentPlatformError) -> RuntimeError {
 async fn persist_plugin_registrations_tx(
     tx: &mut Transaction<'_, Sqlite>,
     registrations: &[PluginRegistration],
+    owned_role_ids: &BTreeSet<ExecutionRoleId>,
 ) -> Result<(), AgentPlatformError> {
     for registration in registrations {
         let metadata = &registration.metadata;
@@ -4877,15 +4896,16 @@ async fn persist_plugin_registrations_tx(
             .await?;
         }
     }
-    insert_installation_role_defaults_tx(tx, registrations).await?;
+    insert_owned_installation_role_defaults_tx(tx, registrations, owned_role_ids).await?;
     Ok(())
 }
 
-async fn insert_installation_role_defaults_tx(
+async fn insert_owned_installation_role_defaults_tx(
     tx: &mut Transaction<'_, Sqlite>,
     registrations: &[PluginRegistration],
+    owned_role_ids: &BTreeSet<ExecutionRoleId>,
 ) -> Result<(), AgentPlatformError> {
-    for (role_id, binding) in installation_role_defaults(registrations)? {
+    for (role_id, binding) in owned_installation_role_defaults(registrations, owned_role_ids)? {
         let selection = binding.selection;
         sqlx::query(
             "INSERT INTO installation_role_bindings \
@@ -4908,8 +4928,9 @@ async fn insert_installation_role_defaults_tx(
     Ok(())
 }
 
-fn installation_role_defaults(
+fn owned_installation_role_defaults(
     registrations: &[PluginRegistration],
+    owned_role_ids: &BTreeSet<ExecutionRoleId>,
 ) -> Result<BTreeMap<ExecutionRoleId, InstallationRoleBinding>, AgentPlatformError> {
     let mut defaults =
         BTreeMap::<ExecutionRoleId, InstallationRoleBinding>::new();
@@ -4922,6 +4943,9 @@ fn installation_role_defaults(
         }
         for provider in &manifest.contributions.role_providers {
             let role_id = provider.role.key.role_id.clone();
+            if !owned_role_ids.contains(&role_id) {
+                continue;
+            }
             let candidate = InstallationRoleBinding {
                 selection: RoleProviderSelection {
                     role: provider.role.clone(),

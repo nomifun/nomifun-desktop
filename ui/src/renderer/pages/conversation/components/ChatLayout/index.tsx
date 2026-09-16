@@ -1,7 +1,7 @@
 import type { ConversationId } from '@/common/types/ids';
 import { AgentLogoIcon } from '@/renderer/components/agent/AgentBadge';
 import { conversationTarget } from '@/common/types/ids';
-import { browserStorageKey } from '@/common/utils/browserStorageKey';
+import { browserStorageKey, sessionStorageKey } from '@/common/utils/browserStorageKey';
 import type { AgentInfo } from '@/renderer/hooks/agent/useAgentInfo';
 import FlexFullContainer from '@/renderer/components/layout/FlexFullContainer';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
@@ -36,11 +36,17 @@ import {
   calcLayoutMetrics,
 } from '@/renderer/pages/conversation/utils/layoutCalc';
 import { Layout as ArcoLayout } from '@arco-design/web-react';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { uuid } from '@/renderer/utils/common';
 import type { WorkspaceExtraTab, WorkspaceTab } from '@/renderer/pages/conversation/Workspace/types';
 import './chat-layout.css';
+import BrowserWorkspacePanel from '../../Browser/BrowserWorkspacePanel';
+import { BrowserLinkContext, type BrowserLinkRequest } from '../../Browser/BrowserLinkContext';
+import type { LocalBrowserLink } from '../../Browser/localBrowserLink';
+import { Earth } from '@icon-park/react';
+import SystemBrowserControl from '../../SystemBrowser/SystemBrowserControl';
+import { StopButtonHostContext } from '@/renderer/components/chat/SendBox/StopButtonPortal';
 
 // headerExtra allows injecting custom actions (e.g., model picker) into the header's right area
 export interface ChatLayoutProps {
@@ -64,6 +70,9 @@ export interface ChatLayoutProps {
   /** Whether this Agent's immutable capability ceiling permits target-scoped
    * knowledge binding. Plain Nomi defaults to enabled. */
   knowledgeEnabled?: boolean;
+  /** Independent immutable capability; never inferred from embedded Browser access. */
+  systemBrowserEnabled?: boolean;
+  systemBrowserLocked?: boolean;
   /**
    * Make the header title read-only (no click-to-rename). Used by single-session
    * surfaces like the companion chat, where the title tracks an external source
@@ -115,7 +124,13 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
   const isMacRuntime = isDesktopRuntime && isMacOS();
   const isWindowsRuntime = isDesktopRuntime && isWindows();
   // Preview panel state
-  const { isOpen: isPreviewOpen } = usePreviewContext();
+  const { isOpen: isPreviewOpen, closePreview } = usePreviewContext();
+  const [browserOpen, setBrowserOpen] = useState(false);
+  const [stopButtonHost, setStopButtonHost] = useState<HTMLDivElement | null>(null);
+  const [browserLinkRequest, setBrowserLinkRequest] = useState<BrowserLinkRequest>();
+  const browserLinkSequence = useRef(0);
+  const workSurfaceOpen = browserOpen || isPreviewOpen;
+  useEffect(() => { if (isPreviewOpen) setBrowserOpen(false); }, [isPreviewOpen]);
 
   // --- Hook A: workspace collapse ---
   const { rightSiderCollapsed, setRightSiderCollapsed, persistRightSiderCollapsed } = useWorkspaceCollapse({
@@ -126,6 +141,30 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
     autoExpandOnFiles: false,
   });
   const { activeWorkspaceTab, setActiveWorkspaceTab } = useWorkspacePanelTabs(workspaceTarget);
+  useEffect(() => {
+    if (!isDesktopRuntime || !conversation_id || props.selfContainedWorkspaceToggle) return;
+    const key = sessionStorageKey('initial-browser-open', conversationTarget(conversation_id));
+    if (sessionStorage.getItem(key) !== 'true') return;
+    sessionStorage.removeItem(key);
+    closePreview(); setRightSiderCollapsed(true); setBrowserOpen(true);
+  }, [conversation_id, isDesktopRuntime, props.selfContainedWorkspaceToggle, closePreview, setRightSiderCollapsed]);
+  const openBrowserLink = useCallback((link: LocalBrowserLink) => {
+    closePreview(); setRightSiderCollapsed(true); setBrowserOpen(true);
+    setBrowserLinkRequest({ ...link, id: ++browserLinkSequence.current });
+  }, [closePreview, setRightSiderCollapsed]);
+  useEffect(() => {
+    if (!isDesktopRuntime || !conversation_id || props.selfContainedWorkspaceToggle) return;
+    let disposed = false;
+    let unsubscribe: (() => void) | undefined;
+    void import('@tauri-apps/api/event').then(async ({ listen }) => {
+      const stop = await listen<string>('browser-workspace-open', event => {
+        if (event.payload !== conversation_id || disposed) return;
+        closePreview(); setRightSiderCollapsed(true); setBrowserOpen(true);
+      });
+      if (disposed) stop(); else unsubscribe = stop;
+    }).catch(() => {});
+    return () => { disposed = true; unsubscribe?.(); };
+  }, [isDesktopRuntime, conversation_id, props.selfContainedWorkspaceToggle, closePreview, setRightSiderCollapsed]);
 
   const activeWorkspaceTitle =
     activeWorkspaceTab === 'files'
@@ -198,7 +237,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
     workspaceWidthPx: workspaceWidthPxPref,
     chatSplitRatio: 60, // placeholder; only dynamicChatMinRatio/dynamicChatMaxRatio are used here
     workspaceEnabled,
-    isPreviewOpen,
+    isPreviewOpen: workSurfaceOpen,
     rightSiderCollapsed,
   });
 
@@ -219,13 +258,13 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
     workspaceWidthPx: workspaceWidthPxPref,
     chatSplitRatio,
     workspaceEnabled,
-    isPreviewOpen,
+    isPreviewOpen: workSurfaceOpen,
     rightSiderCollapsed,
   });
 
   // --- Hook D: preview auto-collapse ---
   usePreviewAutoCollapse({
-    isPreviewOpen,
+    isPreviewOpen: workSurfaceOpen,
     workspaceEnabled,
     rightSiderCollapsed,
     setRightSiderCollapsed,
@@ -237,7 +276,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
   useLayoutConstraints({
     containerWidth,
     workspaceEnabled,
-    isPreviewOpen,
+    isPreviewOpen: workSurfaceOpen,
     rightSiderCollapsed,
     setRightSiderCollapsed,
     workspaceWidthPx: workspaceWidthPxPref,
@@ -249,6 +288,9 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
   });
 
   const [workspaceChangeCount, setWorkspaceChangeCount] = useState(0);
+  const browserAvailableWidth = Math.max(1, containerWidth - (workspaceEnabled ? 32 : 0) - (rightSiderCollapsed ? 0 : workspaceWidthPx));
+  const browserFocus = browserOpen && browserAvailableWidth < 904;
+  const browserChatFlex = Math.max(360 / browserAvailableWidth * 100, Math.min(chatFlex, 100 - 544 / browserAvailableWidth * 100));
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
     const handleWorkspaceMeta = (event: Event) => {
@@ -273,7 +315,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
         'min-h-44px flex items-center justify-between px-16px pt-8px pb-10px gap-16px !bg-1 chat-layout-header chat-layout-header--glass overflow-hidden'
       )}
     >
-      <FlexFullContainer className='h-full min-w-0' containerClassName='flex items-center'>
+      <FlexFullContainer className='h-full min-w-0 chat-layout-header-title' containerClassName='flex items-center'>
         <ChatTitleEditor
           editingTitle={editingTitle}
           titleDraft={titleDraft}
@@ -298,7 +340,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
           }
         />
       </FlexFullContainer>
-      <div className='flex items-center gap-12px shrink-0'>
+      <div className='chat-layout-header-actions'>
         {!props.hideAdvancedControls && conversation_id != null && (
           <>
             <AutoWorkControl target={{ kind: 'conversation', id: conversation_id }} />
@@ -306,10 +348,18 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
             {(props.knowledgeEnabled ?? true) && (
               <KnowledgeControl target={{ kind: 'conversation', id: conversation_id }} />
             )}
+            {props.systemBrowserEnabled && <SystemBrowserControl key={conversation_id} conversationId={conversation_id} locked={props.systemBrowserLocked ?? true} available={isWindowsRuntime} />}
           </>
         )}
         {props.headerExtra}
       </div>
+      {browserFocus && <div ref={setStopButtonHost} className='chat-focus-stop-host' />}
+      {isDesktopRuntime && conversation_id && !props.selfContainedWorkspaceToggle && (
+          <button type='button' className='chat-browser-toggle' aria-label={t('browserWorkspace.title')} aria-pressed={browserOpen}
+            onClick={() => { if (!browserOpen) { closePreview(); setRightSiderCollapsed(true); } setBrowserOpen(value => !value); }}>
+            <Earth size={17} /><span>{t('browserWorkspace.title')}</span>
+          </button>
+      )}
     </ArcoLayout.Header>
   );
 
@@ -321,6 +371,8 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
   );
 
   return (
+    <StopButtonHostContext.Provider value={browserFocus ? stopButtonHost : null}>
+    <BrowserLinkContext.Provider value={isDesktopRuntime && conversation_id && !props.selfContainedWorkspaceToggle ? openBrowserLink : null}>
     <ArcoLayout
       className='size-full color-black '
       style={{
@@ -337,16 +389,17 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
             flexBasis: 0,
           }}
         >
-          <div className='shrink-0 !bg-1'>{headerBlock}</div>
+          <div className='shrink-0 !bg-1 chat-layout-header-host'>{headerBlock}</div>
           <div className='flex flex-1 min-h-0 relative'>
             {/* Chat area - always mounted, never unmounted on preview toggle */}
             <div
               className='flex flex-col relative'
               style={{
-                flexGrow: isPreviewOpen ? 0 : 1,
+                flexGrow: workSurfaceOpen ? 0 : 1,
                 flexShrink: 0,
-                flexBasis: isPreviewOpen ? `${chatFlex}%` : 0,
-                minWidth: '240px',
+                flexBasis: workSurfaceOpen ? `${browserOpen ? browserChatFlex : chatFlex}%` : 0,
+                minWidth: '360px',
+                display: browserFocus ? 'none' : undefined,
               }}
             >
               <ArcoLayout.Content className='flex flex-col flex-1 bg-1 overflow-hidden'>
@@ -354,10 +407,14 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
               </ArcoLayout.Content>
             </div>
             {/* Preview panel - conditionally rendered */}
-            {isPreviewOpen && (
+            {workSurfaceOpen && (
               <div
                 className={classNames(
-                  'preview-panel flex flex-col relative overflow-visible rounded-[15px]',
+                  // Native child views are positioned independently of CSS.
+                  // The file preview's translateX entrance animation would
+                  // temporarily place their measured slot outside the window.
+                  browserOpen ? 'browser-workspace-surface' : 'preview-panel',
+                  'flex flex-col relative overflow-visible rounded-[15px]',
                   'mb-[12px] mr-[12px] ml-[8px]'
                 )}
                 style={{
@@ -365,11 +422,11 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
                   flexShrink: 1,
                   flexBasis: 0,
                   border: '1px solid var(--bg-3)',
-                  minWidth: '260px',
+                  minWidth: browserOpen ? (browserFocus ? 0 : '520px') : '340px',
                   boxSizing: 'border-box',
                 }}
               >
-                {createPreviewDragHandle({
+                {!browserFocus && createPreviewDragHandle({
                   className: 'absolute top-0 bottom-0 z-30',
                   style: { width: '20px', left: '-20px' },
                   linePlacement: 'end',
@@ -377,7 +434,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
                   lineStyle: { width: '2px' },
                 })}
                 <div className='h-full w-full overflow-hidden rounded-[15px]'>
-                  <PreviewPanel />
+                  {browserOpen && conversation_id ? <BrowserWorkspacePanel conversationId={conversation_id} linkRequest={browserLinkRequest} onLinkConsumed={id => setBrowserLinkRequest(current => current?.id === id ? undefined : current)} onClose={() => { setBrowserOpen(false); setBrowserLinkRequest(undefined); }} /> : <PreviewPanel />}
                 </div>
               </div>
             )}
@@ -447,6 +504,8 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
         )}
       </div>
     </ArcoLayout>
+    </BrowserLinkContext.Provider>
+    </StopButtonHostContext.Provider>
   );
 };
 

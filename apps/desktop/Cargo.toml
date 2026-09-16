@@ -21,12 +21,18 @@ serde_json.workspace = true
 nomifun-app = { workspace = true, features = ["computer-use", "browser-use"] }
 nomifun-common.workspace = true
 nomifun-runtime.workspace = true
+nomifun-browser-platform.workspace = true
+nomi-browser-engine.workspace = true
+async-trait.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+tempfile.workspace = true
 nomi-process-runtime.workspace = true
 clap.workspace = true
 
 # `macos-private-api` is required for the transparent nomi companion window on macOS.
 # `tray-icon` powers the system tray (close-to-tray default + tray Show/Quit menu).
-tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
+tauri = { version = "2", features = ["macos-private-api", "tray-icon", "unstable"] }
 # `deep-link` feature is REQUIRED for runtime deep links on Windows/Linux: those
 # OSes deliver `nomifun://` as argv to a second process, which single-instance
 # intercepts. Only with this feature does single-instance forward that argv into
@@ -71,18 +77,36 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 ] }
 
 [target.'cfg(windows)'.dependencies]
+mime_guess.workspace = true
+webview2-com = "=0.38.2"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", features = ["v3_24"] }
 
 [dev-dependencies]
+zeroize.workspace = true
+tracing-subscriber.workspace = true
+axum.workspace = true
 tempfile.workspace = true
 tauri = { version = "2", features = ["test"] }
+nomi-tools.workspace = true
+nomi-types.workspace = true
+nomi-protocol.workspace = true
+nomifun-agent-kernel.workspace = true
+nomifun-agent-contracts.workspace = true
+nomifun-ai-agent.workspace = true
+image.workspace = true
 
 # Tests build a real NTFS junction inside the fake legacy tree to prove the
 # data relocation skips links instead of failing.

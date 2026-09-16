@@ -30,8 +30,7 @@ const DISTILL_MAX_TOKENS: u32 = 2048;
 /// Environment-variable gate. Distillation adds one extra LLM call per normal
 /// work session (token cost), so it is OFF unless explicitly enabled — this
 /// avoids surprising users with unexpected spend. nomi-config has no memory
-/// section today, so an env flag is the lowest-risk gate (same pattern as the
-/// `NOMIFUN_COMPUTER_USE` / `NOMIFUN_BROWSER_USE` host flags).
+/// section today, so this remains an explicit host-only gate.
 const DISTILL_ENABLED_ENV: &str = "NOMIFUN_MEMORY_DISTILL";
 
 /// Whether distillation is enabled for this host. `"1"` / `"true"`

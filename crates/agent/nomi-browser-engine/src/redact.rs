@@ -98,9 +98,8 @@ fn blank_inline_value(line: &str, r: &str) -> String {
 /// 兜底 over-redact（fail-closed）：把**所有可编辑控件行**的内联 `: value` 尾部一律抹成
 /// ` [REDACTED]`，role ∈ {`textbox`,`searchbox`,`spinbutton`,`combobox`}。
 ///
-/// 仅在 password 探测（[`crate::injected::InjectionManager::password_refs`]）**任一帧失败**时
-/// 启用：此时无法精确知道哪些字段是 password，故对所有可编辑控件值整体置空，**绝不放行明文**
-/// （Critical secret 控制须 fail-closed）。非编辑控件（button/link/heading/…）不动。
+/// Native/attached 观察均不向模型暴露表单当前值，对所有可编辑控件值整体置空。
+/// 非编辑控件（button/link/heading/…）不动。
 pub fn blank_all_editable_values(yaml: &str) -> String {
     yaml.lines()
         .map(|line| match editable_role(line) {

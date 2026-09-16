@@ -102,12 +102,12 @@ pub(super) fn merge_sources(global: &str, project: &str) -> ConfigFile {
 #[test]
 fn explicit_default_values_override_global_scalars() {
     let merged = merge_sources(
-        "[default]\nprovider = \"openai\"\n[tools]\nmax_recent_images = 8\n[tools.browser]\nsource = \"system\"",
-        "[default]\nprovider = \"anthropic\"\n[tools]\nmax_recent_images = 3\n[tools.browser]\nsource = \"managed\"",
+        "[default]\nprovider = \"openai\"\n[tools]\nmax_recent_images = 8\n[tools.computer]\nmax_screenshot_edge = 2048",
+        "[default]\nprovider = \"anthropic\"\n[tools]\nmax_recent_images = 3\n[tools.computer]\nmax_screenshot_edge = 1568",
     );
     assert_eq!(merged.default.provider, "anthropic");
     assert_eq!(merged.tools.max_recent_images, 3);
-    assert_eq!(merged.tools.browser.source, "managed");
+    assert_eq!(merged.tools.computer.max_screenshot_edge, 1568);
 }
 
 #[test]
@@ -156,11 +156,11 @@ fn explicit_true_can_restore_default_feature_settings() {
 #[test]
 fn merge_retains_documented_additive_tool_policies() {
     let merged = merge_sources(
-        "[tools]\nbash_sandbox = true\nwrite_root = \"guarded\"\nbuiltin_allowlist = [\"Read\"]\n[tools.browser]\nfull_power = true\n[session]\nenabled = false",
-        "[tools]\nbash_sandbox = false\nwrite_root = \"\"\nbuiltin_allowlist = []\n[tools.browser]\nfull_power = false\n[session]\nenabled = true",
+        "[tools]\nbash_sandbox = true\nwrite_root = \"guarded\"\nbuiltin_allowlist = [\"Read\"]\n[tools.computer]\nenabled = true\n[session]\nenabled = false",
+        "[tools]\nbash_sandbox = false\nwrite_root = \"\"\nbuiltin_allowlist = []\n[tools.computer]\nenabled = false\n[session]\nenabled = true",
     );
     assert!(merged.tools.bash_sandbox);
-    assert!(merged.tools.browser.full_power);
+    assert!(merged.tools.computer.enabled);
     assert_eq!(merged.tools.write_root, "guarded");
     assert_eq!(merged.tools.builtin_allowlist, ["Read"]);
     assert!(!merged.session.enabled);

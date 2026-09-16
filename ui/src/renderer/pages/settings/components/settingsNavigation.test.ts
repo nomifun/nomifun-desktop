@@ -27,7 +27,7 @@ describe('settings navigation', () => {
     const enginePageSource = readSource(new URL('../AgentSettings/index.tsx', import.meta.url));
     const engineContentSource = readSource(new URL('../AgentSettings/ExecutionEnginesSettingsContent.tsx', import.meta.url));
 
-    for (const path of ['/settings/execution-engines', '/settings/browser-use', '/settings/computer-use']) {
+    for (const path of ['/settings/execution-engines', '/settings/computer-use']) {
       expect(routerSource.includes(`path='${path}'`)).toBe(true);
     }
 
@@ -46,11 +46,8 @@ describe('settings navigation', () => {
     expect(engineContentSource.includes('<RuntimeManager />')).toBe(true);
     expect(engineContentSource.includes('<LocalAgents />')).toBe(false);
     expect(engineContentSource.includes('agentSettings.navigation')).toBe(false);
-    expect(
-      routerSource.includes(
-        "path='/settings/browser-use' element={<Navigate to='/browser?tab=settings' replace />}"
-      )
-    ).toBe(true);
+    expect(routerSource.includes("path='/settings/browser-use'")).toBe(false);
+    expect(routerSource.includes("path='/browser'")).toBe(false);
     expect(routerSource.includes("path='/settings/computer-use' element={<Navigate to='/settings/system'")).toBe(false);
   });
 });

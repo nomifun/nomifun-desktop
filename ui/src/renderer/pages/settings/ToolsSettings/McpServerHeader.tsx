@@ -84,11 +84,7 @@ const getStatusPopoverContent = (
   const checkedAt = formatStatusTimestamp(server.updated_at);
 
   const reasonText =
-    server.builtin && server.name === 'chrome-devtools' && server.transport.type === 'stdio'
-      ? t?.('settings.mcpInlineCommandHint', {
-          command: server.transport.command,
-        }) || `Missing ${server.transport.command}. Install it and test again.`
-      : t?.('settings.mcpInlineConfigHint') || 'Configuration may be incorrect. Review the MCP JSON and test again.';
+    t?.('settings.mcpInlineConfigHint') || 'Configuration may be incorrect. Review the MCP JSON and test again.';
 
   return (
     <div className='max-w-300px space-y-2 text-13px leading-20px'>
@@ -102,7 +98,6 @@ const getStatusPopoverContent = (
 };
 
 const getStatusText = (
-  server: IMcpServer,
   last_test_status?: IMcpServer['last_test_status'],
   oauthStatus?: McpOAuthStatus,
   isTestingConnection?: boolean,
@@ -113,13 +108,6 @@ const getStatusText = (
   }
 
   if (last_test_status === 'error') {
-    if (server.builtin && server.name === 'chrome-devtools' && server.transport.type === 'stdio') {
-      return (
-        t?.('settings.mcpLocalCommandUnavailable', {
-          command: server.transport.command,
-        }) || `Requires ${server.transport.command} on this machine`
-      );
-    }
     return t?.('settings.mcpCheckFailedSimple') || 'Failed';
   }
 
@@ -155,7 +143,7 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
 
   const oauthCapable = supportsOAuth(server);
   const needsLogin = oauthCapable && oauthStatus?.needsLogin;
-  const statusText = getStatusText(server, server.last_test_status, oauthStatus, isTestingConnection, t);
+  const statusText = getStatusText(server.last_test_status, oauthStatus, isTestingConnection, t);
   const statusIcon = getStatusIcon(server.last_test_status, oauthStatus, isTestingConnection);
   const statusPopoverContent = getStatusPopoverContent(server, t);
 

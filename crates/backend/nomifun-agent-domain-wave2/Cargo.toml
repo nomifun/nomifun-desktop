@@ -12,3 +12,6 @@ nomifun-agent-contracts = { path = "../nomifun-agent-contracts" }
 nomifun-agent-kernel = { path = "../nomifun-agent-kernel" }
 serde_json = { workspace = true }
 jsonschema = { workspace = true }
+
+[dev-dependencies]
+nomifun-agent-domain-wave1 = { path = "../nomifun-agent-domain-wave1" }

@@ -1,175 +1,51 @@
-# Computer Use 与 Browser Use（计算机控制与浏览器自动化）
+# Computer Use 与 Browser Workspace
 
-NomiFun agent 内置/接入两项可选的系统级能力：
+NomiFun 将桌面范围的 Computer 自动化与会话中的原生浏览器区分开。两者都受 Agent 能力授权约束，网页或模型提示不能自行授予权限。
 
-- **Computer**（computer use，进程内 Rust）：截屏、鼠标键盘合成输入、窗口枚举/聚焦——让 agent 看到并操作本机桌面。crate：`nomi-computer`（xcap + enigo）。
-- **Browser**（browser use，主进程统一托管）：应用只创建一个 `BrowserSessionHub`，由它管理 Chromium Host、Browser Lane、身份、资源队列和清理。`nomi-browser-engine` 提供 CDP 驱动，`nomi-browser` 提供 Lane-aware 工具适配；Native Nomi、Gateway 和并行 AgentExecution attempt 都接入同一个 Hub。
+## 会话浏览器（v2，实施中）
 
-> 注：早期的外接 `@playwright/mcp` sidecar，以及各调用方各自持有私有 `BrowserTool` 或 Chromium 的路径均已移除。浏览器自动化统一进入进程内 `BrowserSessionHub`，不再创建 browser stdio sidecar 或调用方私有 profile。
->
-> 当前文档只描述已落地路径：桌面端的系统设置开关、进程内
-> browser/computer 工具，以及对应的 build feature 门控。
+通过会话工作区的“浏览器”按钮打开。旧全局浏览器管理/设置页及兼容重定向已移除。
 
-两者都是高权限能力。当前桌面产品构建在对应 feature 存在时默认开启，
-用户可在系统设置中关闭；无头 Web/服务器构建则不承诺桌面控制或托管
-浏览器能力。
+用户和 Agent 看到的是同一个原生网页。Agent 工作期间锁定用户页面输入；停止 Agent 并等待在途操作完成清理后，用户才能操作。隐藏面板会保留页面和标签，不是接管，也不是重置。
 
-## 启用与关闭方式
+开发前端项目时，先启动开发服务器，再让 Agent 在会话浏览器中打开 localhost 地址，观察页面、执行交互并验证结果。导航、点击、键盘输入和标准 HTML 选择操作使用真实浏览器，交互表面不是截图流。
 
-### 1. 桌面端管理入口（推荐）
+Windows 原生输入已有真实 smoke 验证。macOS、frame、dialog、文件和打包等完整产品验收仍在进行，请参阅[架构说明](../architecture/browser-platform.zh.md)与[实施记录](../specs/2026-09-13-browser-workspace-v2-progress.zh.md)中的当前限制。
 
-桌面应用提供两个能力管理入口：
+## 可选系统浏览器（Windows，实施中）
 
-- **浏览器管理 → 设置**（`/browser?tab=settings`；旧 `/settings/browser-use` 会自动跳转）
-- **Computer Use**（`/settings/computer-use`）
+在 Agent 工作台“网页”分类选择 `nomi_system_browser`，再从会话标题栏的“系统浏览器”连接正在运行、已登录的 Chrome 144+。
+首次使用需在 Chrome 的 `chrome://inspect/#remote-debugging` 中启用并批准连接，然后选择允许本会话使用的标签。
+不要求重启 Chrome，不创建替代 Profile，也不导入 Cookie、密码或历史。Chrome 原生许可覆盖所选个人资料；标签限制由 NomiFun 额外执行。
 
-当前桌面构建默认把两个能力开关设为开启；关闭任一开关会持久化到用户偏好，
-后续新会话不会获得对应能力。Browser 设置还提供：
+当前支持主文档观察、导航、点击、输入、按键和滚动。页面仍在原 Chrome 窗口中，不是嵌入式截图；没有测试面板或接管模式。
+Agent 运行时不能在 NomiFun 更改授权；NomiFun 无法物理锁定 Chrome 地址栏、关闭按钮或用户撤销许可。
+断开只释放连接和自动化状态，不关闭用户浏览器或标签。连接请求可以取消，连接结果不确定时只刷新状态，不自动重连或重放操作。
 
-- **浏览器来源**：系统 Chrome/Edge 可执行文件或 managed source；
-- **显示模式**：应用级默认可见策略。"后台静默"（新安装默认）让普通 Primary
-  Agent 任务以 Chromium `--headless=new` 静默运行；"前台可见"是用户显式选择的
-  默认前台策略，Primary Host 以真实窗口启动。安装 owner 可在“设置”Tab 修改；
-  后端会立即应用并持久化已确认的更改。普通 Agent/模型无权覆盖该偏好；
-- **资源策略**：Automatic、Resource saving 或 High concurrency。总容量随并发任务数量与机器压力弹性伸缩，不使用安装级固定 RSS 总上限；
-- 高级资源限制（仅在需要诊断或精细调优时修改）：机器级弹性内存压力比例，以及单任务的归因内存、操作、Lane、标签页和队列预算。共享 Host 的单任务内存属于估算值，结构配额则是硬边界。
+主文档的真实输入已在独立临时 Chrome 中验证；个人登录页面授权实测、完整 iframe/文件/对话框矩阵与发行验收仍未完成。
+Edge、macOS 和 Linux 尚未声明支持。这项能力与内嵌浏览器、`nomi_local_websearch` 和厂商搜索相互独立。
 
-右侧边栏的 **浏览器** 页面（`/browser`）统一承载两个 Tab。“运行周期”展示
-running/queued Lane 的状态、容量、队列、身份、owner 与生命周期，并在权限允许时
-关闭单个 Lane、某个 conversation 的 Lane 或全部 Lane；对 running Primary Lane，
-它还提供“前台打开”和“转到后台”，两者只改变当前共享 Primary Host，不修改全局
-默认值。“设置”承载 Browser Use 开关、来源、显示默认值、登录身份、安全和资源
-策略。该页面仍不嵌入网页，也不提供页面输入、tab 控制、用户接管或地址导航。
+## 可选网页搜索
 
-### 2. 会话级
+Agent 工作台“网页”分类中的 `nomi_local_websearch` 与模型厂商的 `web.search` 是两项独立能力。本地搜索通过隔离的 Headless 运行时将查询发送给搜索引擎，不使用会话登录态，不要求模型原生搜索，也不授予浏览器自动化权限。
 
-创建会话时在 `extra` 中传开关（camelCase 与 snake_case 均可）：
+Windows 桌面会识别已安装的 Chrome 120+；没有合格安装时不能启用。发现过程不启动浏览器，实际查询才启动隔离运行时并核对版本。
+搜索词发送给 Bing，引擎域名通过 Google Public DNS（HTTPS）解析，不读取会话登录态。Chrome 更新导致旧绑定失效时需重启应用。
+Windows 目录接线及公网查询已验证；主应用完整交互和安装包验收仍在进行，macOS 尚待后续移交实施。
 
-```json
-{ "computerUse": true, "browserUse": true }
-```
+## Computer Use
 
-### 3. 宿主级环境变量
+Computer 仍是独立的桌面控制能力。在 Agent 工作台选择对应能力，在“设置 → Computer Use”管理桌面控制设置和操作系统权限。
 
-```bash
-NOMIFUN_COMPUTER_USE=1   # 所有 nomi 会话默认启用 Computer
-NOMIFUN_BROWSER_USE=1    # 所有 nomi 会话默认允许接入主进程 BrowserSessionHub
-```
-
-### 4. nomi CLI / 配置文件
-
-`~/.nomi/config.toml` 或项目 `.nomi/config.toml`：
+独立 Nomi 的 Computer 配置仍可使用：
 
 ```toml
 [tools]
-max_recent_images = 3        # 历史中保留的工具结果图片总数（旧图自动剥离省 token）
-
+max_recent_images = 3
 [tools.computer]
 enabled = true
-max_screenshot_edge = 1568   # 截图长边像素上限
-
-[tools.browser]
-enabled = true
-# 可信全局默认值为 headless；安装 owner 可实时改为 external。
-# 对 Lane 的前台/后台切换不会改写该默认值。
-# 未知的旧配置键（如早期的 browser_path / idle_timeout_secs）会被忽略，
-# 不能绕过 BrowserSessionHub 的身份、容量或生命周期策略。
+max_screenshot_edge = 1568
 ```
-
-启用 Browser 后，Hub 首次需要 Host 时按需解析系统 Chrome/Edge 可执行文件或
-managed source，无需 Node/npm/Playwright。来源只决定二进制；进程始终由 NomiFun
-托管并应用隔离 profile，绝不读取或共用用户真实 Chrome/Edge profile；同一个
-user-data directory 也不会被两个存活 Chromium 同时打开。
-
-对稳定受管 profile 完成可证明的正常关闭后，NomiFun 会删除确属该次已完成启动的
-ownership marker 和 `DevToolsActivePort`，并保留 cookie、站点存储及其他稳定
-profile 数据。若无法重新验证精确 ownership 或进程树已经退出，清理会保留这些
-运行时文件供恢复，并把关闭报告为未完成，而不是猜测成功。
-
-## 构建形态（feature 门控）
-
-| 宿主 | Computer（进程内） | Browser（进程内 native CDP） |
-|---|---|---|
-| 桌面应用（nomifun-desktop） | ✅ 默认编译（`computer-use` feature） | ✅（`browser-use` feature；首次自动获取 Chrome） |
-| nomi CLI | ✅ 当前 `nomi-cli` manifest 启用 | ❌ 当前 `nomi-cli` manifest 未启用 |
-| Web/服务器（nomifun-web、Docker） | ❌ 不编译（无显示器；xcap/enigo 不进二进制） | ❌ 当前 headless web host 未启用 `browser-use` feature |
-
-`computer-use` feature 链：`apps/desktop` → `nomifun-app` → `nomifun-ai-agent` → `nomi-agent` → `nomi-computer`。Web 构建若配置中误开 computer，仅记录 warning，不报错。Browser 由 `browser-use` feature 门控（`nomifun-browser-platform` / `nomi-browser` / `nomi-browser-engine`）。
-
-## Browser Lane、身份与并发
-
-- 一个 Agent runtime 的默认 Lane 在其生命周期内保持稳定；同一 AgentExecution 的并行 attempt
-  使用不同 LaneKey，不会因为 companion 或 conversation 相同而被合并。
-- 同一 Lane 内的导航、观察和动作严格串行；不同 Lane 可以并行，target、frame、
-  ref、tab、download 和 cancellation 状态互不串线。
-- 普通交互式浏览默认使用 **Primary shared live identity**。多个 Primary Lane
-  的全局显示默认值为 `headless`，普通 Agent 任务因此使用 Chromium
-  `--headless=new`，不创建操作系统浏览器窗口；安装 owner 可显式把实时、持久
-  默认值改为 `external`。Lane owner 也可只前台或后台切换当前 Primary Host，
-  而不改变该默认值。多个 Primary Lane 共享 cookies、站点存储和其他
-  profile-backed 身份状态，但不共享活动 target、frame、ref、操作 gate 或下载
-  归属。
-- 公开读取默认使用 **Anonymous crawl**，不携带 Primary cookies/站点存储。
-  有界只读认证扩展可使用 **Authenticated replica**，副本变更不会自动写回
-  Primary；可能修改登录或持久账户状态的动作必须回到 Primary。
-- 切换账户、退出测试、不可信浏览或用户显式隔离使用 **Isolated identity**。
-  crawl、replica 与 isolated Host 均可 headless 运行。
-- Anonymous profile 状态按共享 Host 设有持续增长边界：512 MiB、50,000 个目录项、
-  30 分钟或 256 次已准入导航中的任一条件会触发精确加栅栏轮换。它阻止长期公开
-  网页任务无限积累缓存和站点数据，但不会给所有无关任务设置固定内存总上限。
-
-容量按任务设置边界，同时在安装级保持弹性。超过单任务资源包络或当前机器级安全预算的 Lane 会进入可取消队列，返回
-`browser_capacity_queued` 或 `system_memory_pressure`，并携带队列位置、原因、
-建议并发和重试延迟。`browser_open` 会成功报告 Lane 已进入队列，但导航、观察、
-页面 `wait` 等普通 action 在 Lane 变为 `running` 前不会派发，而会返回显式可重试
-工具错误：`ok: false`、`dispatched: false` 和 `browser_capacity_queued`。应按
-`retry_delay_ms` 调用 `browser_status`，确认 `running` 后再重试原 action。不要用
-页面 `wait` 等待 Lane，也不要尝试额外启动浏览器绕过限制；还可复用已有 running
-Lane、降低并发，或让批量公开读取使用 `browser_crawl_many`。
-
-## Browser 工具与生命周期
-
-现有导航、观察、动作、截图、tab、下载和 debug action 都可传可选 `lane_id`；
-省略时使用调用方默认 Lane。平台管理 action 包括：
-
-- `browser_open`：幂等打开默认或命名 Lane；
-- `browser_fork`：创建扩展 Lane；
-- `browser_list` / `browser_status`：查看 Lane、身份、容量、队列和恢复状态；
-- `browser_close` / `browser_close_all`：关闭当前 owner 的一个或全部 Lane；
-- `browser_crawl_many`：有界并发处理一组 URL，并负责 Lane 复用、排序、取消和清理。
-
-知识渲染对每个 URL 打开并关闭一个事务级 Anonymous Lane。页面文本与 HTML 在
-跨 CDP 之前以及批次聚合之前都执行字节上限，因此取消或恶意超大页面不会留下持续
-增长的完整 HTML/文本结果队列。
-
-关闭 Lane 只会让相关浏览器调用收到类型化错误，不会关闭 conversation 或
-AgentExecution。attempt 完成/取消、runtime 终止、conversation 删除、远程连接断开、
-capability 过期和应用退出都会撤销 owner lease 并触发权威 drain。Native Agent
-turn 正常完成或取消时会 drain 该 owner 的 Lane；session/conversation 关闭会
-drain 对应 Lane 和 target cleanup，再关闭因此变空的 Host。应用退出与安装级
-“全局关闭所有浏览器”会阻止新 open，同时 drain 所有 Lane、待处理 cleanup 和
-受管 Host。
-
-只有响应同时给出三项权威零值，UI 才确认安装级“全局关闭所有浏览器”成功：
-`remaining_lane_count`、`remaining_cleanup_count` 和
-`remaining_managed_host_count`。仅请求成功或 `closed` 非零都不能证明清理完成。
-
-### 切换 Primary 可见性
-
-需要查看真实受管浏览器时，进入 `/browser`，选择身份为 Primary、状态为
-`running` 的 Lane，再点击“前台打开”。这是当前 Primary Host 的一次性显示请求，
-不会改变全局默认值；“转到后台”是其对称操作。Primary Lane 共用一个 canonical
-Host，因此只要 headless/headful 模式需要改变，Hub 都会以新 browser epoch 安全
-替换整个 Host，并重新绑定其上的所有 live Primary Lane。安装 owner 改变全局
-默认值、且 running Primary Host 模式不同时，也使用相同转换。系统会尽力恢复各
-Lane 的活动 URL，但旧 target/frame/ref 已失效；应刷新库存并 fresh observe 后再
-继续。该操作不会改变 Lane 所有权，也不会恢复内嵌 preview、用户接管或页面输入
-表面。queued、failed 和非 Primary Lane 不能使用这些可见性操作。
-
-对应的认证管理接口为 `POST /api/browser/lanes/{id}/foreground` 和
-`POST /api/browser/lanes/{id}/background`；改变状态的请求继续使用现有 CSRF
-防护。它们不是 Agent 可调用的 Browser action。安装 owner 通过浏览器管理的
-“设置”Tab 使用 `GET`/`PUT /api/browser/display-mode` 管理持久默认值。
 
 ## macOS 权限
 
@@ -185,7 +61,7 @@ Computer 能力首次使用需在「系统设置 → 隐私与安全性」中授
 - Computer 为单工具 + `action` 参数形态。
 - 只读 action（`screenshot`、`cursor_position`、`list_windows`、`wait`）按 **Info** 类审批——AutoEdit/Default 模式自动放行；操作类 action（点击、输入、滚动、拖拽、`focus_window` 等）按 **Exec** 类——Default 模式需用户确认。
 - Plan mode 下 Computer 整工具不可见（只读规划阶段不操作桌面）。
-- Browser 工具按动作语义派生审批类别：只读观察（如 `observe`/快照）→ Info，写操作（导航、点击、输入等）→ Exec；Browser 管理页不能触发这些页面动作。egress、approval、secret、下载、full-power 与不可逆动作护栏继续生效，模型输入不能伪造可信批准。
+- Browser 观察属于 Info，导航和页面修改属于 Exec；运行 guard 与 exact capability policy 不受网页内容影响。
 - 推荐工作流：`screenshot` 观察 → 操作 → 再次 `screenshot` 验证。
 
 ## 截图与 token 治理

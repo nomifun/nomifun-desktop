@@ -52,7 +52,7 @@ pub use enums::{
 pub use error::{AppError, ErrorChain, workspace_path_has_edge_whitespace_segment};
 pub use execution_authority::ExecutionAuthority;
 pub use fsname::sanitize_dir_segment;
-pub use hooks::{OnConversationDelete, OnTerminalDelete, RequirementCreator};
+pub use hooks::{BeforeConversationDelete, OnConversationDelete, OnTerminalDelete, RequirementCreator};
 pub use id::{
     AgentExecutionAttemptId, AgentExecutionId, AgentExecutionParticipantId,
     AgentExecutionStepId, AgentExecutionTemplateId, AgentExecutionTemplateParticipantId,

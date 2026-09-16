@@ -807,6 +807,15 @@ impl ConversationRuntimeStateService {
         self: &Arc<Self>,
         conversation_id: &str,
     ) -> Result<ConversationResetGuard, AppError> {
+        self.begin_reset_inner(conversation_id,false)
+    }
+
+    /// Resource replacement may cancel idle preparation, never an Agent build.
+    pub fn begin_idle_resource_reconfiguration(self:&Arc<Self>,conversation_id:&str)->Result<ConversationResetGuard,AppError> {
+        self.begin_reset_inner(conversation_id,true)
+    }
+
+    fn begin_reset_inner(self:&Arc<Self>,conversation_id:&str,reject_execution_builds:bool)->Result<ConversationResetGuard,AppError> {
         let _linearization = self
             .cleanup_linearization
             .lock()
@@ -852,6 +861,10 @@ impl ConversationRuntimeStateService {
             )));
         }
 
+        if reject_execution_builds && self.runtime_builds.lock().map_err(|_|AppError::Internal("conversation runtime build lock poisoned".into()))?
+            .get(conversation_id).is_some_and(|builds|builds.values().any(|build|build.purpose.marks_processing() && !build.cancellation.is_cancelled())) {
+            return Err(AppError::Conflict(format!("conversation {conversation_id} is starting an Agent")));
+        }
         reset_tombstones.insert(conversation_id.to_owned());
         drop(active_turns);
         drop(completion_tombstones);

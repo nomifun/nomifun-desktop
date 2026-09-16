@@ -318,13 +318,13 @@ Agent；主 Agent 始终是整次执行的控制点。
 自研、**进程内 Rust** 实现 —— 不依赖 Playwright、不依赖 Node、不依赖第三方自动化守护进程。能力更强、速度更快、token 更省，提供细粒度控制，且完全开源供你增强。
 
 - **Computer use** —— 无障碍树 + Set-of-Marks 叠层 + OCR，引导模型操作真实 UI 元素而非猜像素。macOS（AXUIElement + Vision OCR）与 Windows（UI Automation）已完整，Linux（AT-SPI2）为部分支持。
-- **Browser use** —— 由应用主进程中的 `BrowserSessionHub` 统一管理 Chromium Host 与可寻址 Browser Lane；内置 Agent、Gateway 和并行 AgentExecution attempt 都进入同一平台，不再各自启动私有浏览器。
-- **只做浏览器状态与生命周期管理。** 右侧 **Browser** 页面展示会话、runtime、Lane、Tab、URL、身份模式、容量、队列位置、压力、资源估算和错误；用户可对 running Primary Lane 显式“前台打开”，但页面不嵌入预览，也不提供页面输入或接管控件。
-- **共享实时登录身份。** 普通交互式 Lane 使用 NomiFun 管理的稳定 Primary profile，并实时共享登录状态；公开抓取使用不携带 Primary cookies/站点存储的匿名身份，显式隔离任务使用独立身份。NomiFun 不读取用户真实 Chrome / Edge profile。
-- **并发有界且可观察。** 不同 Lane 可真正并行，同一 Lane 严格串行；容量不足时显示队列位置、压力原因和建议并发，而不是用不可见的全局锁假装浏览器已就绪。
-- **默认静默后台，按需前台打开。** 普通 Primary Agent 任务使用真实、headful 的受管 Chromium，但默认以最小化窗口在后台启动，不自动弹窗或抢焦点。对 running Primary Lane 执行“前台打开”会恢复同一个窗口和活动 target；显式登录流程则会自动前台打开。NomiFun 继续权威管理用户关闭、owner 撤销和受管进程树清理。
-- **仅 Agent 操作页面。** 页面导航与输入只属于执行中的 Agent；浏览器高风险操作仍遵循既有 danger × surface 审批策略，但不再存在独立的查看器接管路径。
-- **生而受控** —— 每个动作都带 danger × surface 审批矩阵，不可逆操作须显式确认。
+- **会话里的真实浏览器** —— Windows 当前已把原生 WebView2 直接嵌入会话工作区；macOS 后端遵循同一契约继续实现，Linux 暂缓。用户与 Agent 看到并操作同一个真实页面，保留真实标签页、导航、表单、历史、站点存储、登录状态、WebSocket 与 HMR；不是 iframe、视频流或连续截图。
+- **一条简单的输入规则** —— Agent 工作期间，浏览器输入只属于 Agent，用户可以直接观察真实交互；本轮结束后，用户即可手动操作页面。系统不存在暂停后“接管”的流程。
+- **无需额外测试产品的前端闭环** —— 启用相应能力后，Agent 可以观察渲染元素，并用真实鼠标、键盘、拖拽、上传、下载和网站对话框交互测试自己开发的应用。Browser 不提供控制台、问题列表、测试步骤面板或专门测试模式。
+- **会话持有状态** —— 每个持久会话拥有独立的浏览器 Profile 与标签页。Browser 从会话内打开，不再有全局管理页或 Browser 设置中心；站点数据与下载只放在简洁的会话浏览器菜单中管理。
+- **可选的本地网页搜索** —— `nomi_local_websearch` 为不支持厂商原生搜索的模型提供独立、可选择的公开网页检索工具。它使用隔离的后台浏览器，不读取会话标签页或登录状态。
+- **可选的系统浏览器连接** —— `nomi_system_browser` 是另一项独立能力，用于连接 Windows 上已经运行并登录的 Chrome。用户按会话明确授权标签页；NomiFun 不导入 Profile，也不把凭据搬进内嵌浏览器。
+- **不做隐藏的交互降级** —— 隔离 headless Chromium 只用于本地搜索与内容渲染。交互式 Browser 始终使用会话内原生 Surface；创建失败时直接报告，不会悄悄切换执行引擎。
 
 > ℹ️ computer/browser 控制随**桌面应用**提供；无头的 web/server 宿主按设计不含。
 
@@ -602,7 +602,7 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 | `bun run check:creative-studio-retirement` | 扫描 tracked 源码，阻止旧创意工坊页面、路由、API、翻译与 Gateway 标记回流 |
 | `bun run check:creative-studio-retirement:dist` | 在 UI production build 后扫描 ui/dist，阻止旧创意工坊标记进入发布产物 |
 | `bun run check:process-runtime-boundary` | Enforce the supervised process runtime boundary and exact hand-off allowlist. |
-| `bun run check:browser-platform-boundary` | Enforce the single BrowserSessionHub ownership boundary and reject private browser launch paths. |
+| `bun run check:browser-platform-boundary` | Enforce native conversation Browser ownership, isolated background-browser boundaries, and retirement of legacy browser paths. |
 | `bun run check:agent-vocabulary` | Enforce AgentExecution as the only active collaboration aggregate and permit only exact migration fences. |
 | `bun run check` | 聚合静态检查：typecheck + i18n + 主题/图标/dead-CSS + Windows 安装器 + 创意工坊退役 + 进程/浏览器边界 + Agent 词汇 + 脚本登记 |
 | `bun run typecheck` | 前端 TypeScript 类型检查（tsc --noEmit） |

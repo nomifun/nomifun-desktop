@@ -58,8 +58,6 @@ pub enum CanonicalHost {
 pub struct FreshV4Application {
     pool: SqlitePool,
     platform: Arc<AgentPlatform>,
-    #[cfg(feature = "browser-use")]
-    browser_hub: Option<Arc<nomifun_browser_platform::BrowserSessionHub>>,
     remote_runtime: Arc<RemoteRuntimeCoordinator>,
     user_repo: Arc<dyn IUserRepository>,
     jwt_service: Arc<JwtService>,
@@ -168,30 +166,8 @@ impl FreshV4Application {
             .shutdown()
             .await
             .context("shut down Fresh-v4 runtime bindings");
-        #[cfg(feature = "browser-use")]
-        let browser_shutdown = match self.browser_hub {
-            Some(hub) => hub
-                .close_all()
-                .await
-                .map(|_| ())
-                .map_err(|error| anyhow::anyhow!("shut down Fresh-v4 Browser Hub: {error}")),
-            None => Ok(()),
-        };
         self.platform.pool().close().await;
-        #[cfg(feature = "browser-use")]
-        {
-            match (platform_shutdown, browser_shutdown) {
-                (Ok(()), Ok(())) => Ok(()),
-                (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-                (Err(error), Err(browser_error)) => Err(anyhow::anyhow!(
-                    "{error:#}; Browser cleanup also failed: {browser_error:#}"
-                )),
-            }
-        }
-        #[cfg(not(feature = "browser-use"))]
-        {
-            platform_shutdown
-        }
+        platform_shutdown
     }
 }
 
@@ -286,37 +262,6 @@ impl FreshV4Host {
                 return Err(error);
             }
         };
-        #[cfg(feature = "browser-use")]
-        let browser_hub = match agent_platform_host::build_browser_session_hub(
-            self.canonical_root(),
-            &config.work_dir,
-            encryption_key,
-        )
-        .await
-        {
-            Ok(hub) => hub,
-            Err(error) => {
-                pool.close().await;
-                return Err(error);
-            }
-        };
-        #[cfg(feature = "browser-use")]
-        let platform_result = agent_platform_host::build_from_open_pool_with_browser(
-            pool.clone(),
-            self.canonical_root()
-                .join(nomifun_v4_root::FRESH_V4_READY_MARKER_FILE),
-            self.outcome.ready_marker.clone(),
-            self.outcome
-                .ready_marker
-                .canonical_schema_manifest_digest
-                .clone(),
-            Some(pool.clone()),
-            encryption_key,
-            config.work_dir.clone(),
-            browser_hub.clone(),
-        )
-        .await;
-        #[cfg(not(feature = "browser-use"))]
         let platform_result = agent_platform_host::build_from_open_pool(
             pool.clone(),
             self.canonical_root()
@@ -334,10 +279,6 @@ impl FreshV4Host {
         let platform = match platform_result {
             Ok(platform) => platform,
             Err(error) => {
-                #[cfg(feature = "browser-use")]
-                if let Some(hub) = browser_hub {
-                    let _ = hub.close_all().await;
-                }
                 pool.close().await;
                 return Err(error);
             }
@@ -515,8 +456,6 @@ impl FreshV4Host {
         Ok(FreshV4Application {
             pool,
             platform,
-            #[cfg(feature = "browser-use")]
-            browser_hub,
             remote_runtime,
             user_repo,
             jwt_service,
@@ -1159,6 +1098,7 @@ mod tests {
                 .is_file()
         );
         assert!(!config.database_path().exists());
+        assert!(!directory.path().join("browser-data").exists());
         let storage_generation =
             fs::read_to_string(directory.path().join("storage-generation")).unwrap();
         assert!(nomifun_common::validate_uuidv7(&storage_generation).is_ok());

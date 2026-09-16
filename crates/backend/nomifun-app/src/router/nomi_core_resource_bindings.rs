@@ -1236,12 +1236,30 @@ mod tests {
             "workshop.canvas.read".into(),
             "workshop.asset.read".into(),
             "creation.image".into(),
-            "plugin.product.read".into(),
+            "plugin.read".into(),
         ]);
         let derived = required_operations(&capabilities);
         assert_eq!(
             derived.keys().map(String::as_str).collect::<BTreeSet<_>>(),
             SUPPORTED_RESOURCE_KINDS.into_iter().collect()
         );
+    }
+
+    #[tokio::test]
+    async fn conversation_browser_does_not_require_or_accept_a_saved_browser_binding() {
+        let capabilities = [
+            "browser.observe", "browser.navigate", "browser.act", "browser.download",
+            "browser.upload", "browser.render_content", "browser.evaluate",
+        ].into_iter().map(String::from).collect::<BTreeSet<_>>();
+        // The canonical manifests and the HTTP resource resolver must agree.
+        for id in &capabilities {
+            assert!(nomifun_agent_domain_wave2::required_resource_kinds(id).unwrap().is_empty());
+        }
+        let registry = NomiCoreResourceBindingResolverRegistry::from_authorities([]).unwrap();
+        assert!(registry.resolve("owner-1", &[], &capabilities).await.unwrap().is_empty());
+        let error = registry.resolve("owner-1", &[AgentResourceSelectionDto {
+            resource_kind: "browser".into(), resource_id: "model-selected-browser".into(),
+        }], &capabilities).await.unwrap_err();
+        assert_eq!(error.code(), "RESOURCE_SELECTION_UNUSED");
     }
 }

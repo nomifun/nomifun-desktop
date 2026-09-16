@@ -168,7 +168,7 @@ const patchGlobalErrorFilters = () => {
 };
 
 const patchConsole = () => {
-  // Console patch mirrors the listener filters so devtools logs stay clean（控制台同样做拦截，防止被重复警告淹没）.
+  // Console patch mirrors the listener filters so browser logs stay clean（控制台同样做拦截，防止被重复警告淹没）.
   if (typeof console !== 'undefined' && !console.__NomiResizeObserverPatched__) {
     const rawError = console.error.bind(console);
     console.error = (...args: unknown[]) => {

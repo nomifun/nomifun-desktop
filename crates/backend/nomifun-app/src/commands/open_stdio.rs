@@ -8,8 +8,9 @@
 //! mis-handles paths and surfaces "Windows cannot find 'X'" dialogs.
 //!
 //! Web URLs (http/https) deliberately fail closed: this is an Agent surface,
-//! and Agent-initiated web opens belong to the managed Browser Hub rather than
-//! the operating-system browser (`ShellService::launch` enforces the policy).
+//! and Agent-initiated web opens require an explicitly selected Browser
+//! capability rather than the operating-system browser (`ShellService::launch`
+//! enforces the policy).
 //!
 //! Unlike the requirement/gateway bridges this is STATELESS: opening is a pure
 //! local OS call (`open::that_detached` via `ShellService::launch`), so there is

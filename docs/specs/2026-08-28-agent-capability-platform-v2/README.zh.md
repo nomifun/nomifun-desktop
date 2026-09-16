@@ -12,6 +12,17 @@
 `CROSS-MACHINE-WORK-START-PROMPT-2026-09-09.zh.md` 作为一次性启动材料；它不改变
 设计合同、状态源、owner 或 Git 交付规则。
 
+## 相邻已确认 ADR
+
+- [`../2026-09-13-browser-workspace-v2.zh.md`](../2026-09-13-browser-workspace-v2.zh.md)
+  冻结 Browser Engine / Embedded Surface 的下一代产品与技术架构：Conversation 内使用真实 native WebView，
+  Agent 与用户顺序使用同一个 BrowserTab；Agent run 期间用户只观看，run terminal 后用户才能操作，不建立
+  takeover/share/control-lease 状态机。方案不使用 JPEG/screencast/iframe Viewer，不新增数据库迁移，并在
+  切换时物理删除 Browser v1 产品路径。它不改写本目录已经完成的 Capability/Role Provider 基础；Browser
+  Role Contract v2 与 native Surface 按该 ADR 接入现有 exact Provider 主链。Agent 用户级动作必须走真实浏览器
+  输入；独立的 `nomi_local_websearch@1.0.0` 作为 Agent 工作台可选能力和同名 Tool，固定使用隔离 Headless
+  Browser Provider，不覆盖厂商 `web.search` / `web_search`。
+
 ## 阅读顺序
 
 0. `CROSS-MACHINE-WORK-START-PROMPT-2026-09-09.zh.md`

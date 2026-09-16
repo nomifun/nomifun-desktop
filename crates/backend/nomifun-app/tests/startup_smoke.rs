@@ -139,6 +139,7 @@ async fn desktop_startup_uses_the_original_nomi_core() {
         None,
         None,
         None,
+        nomifun_app::DesktopHostServices::default(),
     )
     .await
     .expect("Nomi-core desktop startup");

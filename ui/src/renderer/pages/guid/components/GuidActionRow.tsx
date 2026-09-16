@@ -9,7 +9,7 @@ import { getCleanFileNames, FileService } from '@/renderer/services/FileService'
 import { iconColors } from '@/renderer/styles/colors';
 import { isDesktopShell } from '@/renderer/utils/platform';
 import { Button, Dropdown, Menu, Message, Tooltip } from '@arco-design/web-react';
-import { ArrowUp, Plus, Robot, UploadOne } from '@icon-park/react';
+import { ArrowUp, Earth, Plus, Robot, UploadOne } from '@icon-park/react';
 import React, { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import styles from '../index.module.css';
@@ -27,6 +27,8 @@ type GuidActionRowProps = {
   isButtonDisabled: boolean;
   speechInputNode?: React.ReactNode;
   onSend: () => void;
+  onOpenBrowser?: () => void;
+  browserDisabled?: boolean;
   /** When true the primary button starts an AutoWork session (no chat send):
    * it shows a robot icon + "Start AutoWork" tooltip. Disabled/onClick are
    * still driven by the parent. */
@@ -41,6 +43,8 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
   isButtonDisabled,
   speechInputNode,
   onSend,
+  onOpenBrowser,
+  browserDisabled,
   autoWorkMode = false,
 }) => {
   const { t } = useTranslation();
@@ -122,6 +126,12 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
   return (
     <div className={styles.actionRow}>
       <div className={styles.actionTools}>
+        {!isWebUI && onOpenBrowser && (
+          <Button type='text' size='small' disabled={loading || browserDisabled} onClick={onOpenBrowser}
+            icon={<Earth size={16} />} aria-label={t('browserWorkspace.title')}>
+            {t('browserWorkspace.title')}
+          </Button>
+        )}
         <div className={styles.actionEntry}>
           <Dropdown trigger='hover' onVisibleChange={setIsPlusDropdownOpen} droplist={menuContent}>
             <span className='flex items-center gap-4px cursor-pointer lh-[1]'>

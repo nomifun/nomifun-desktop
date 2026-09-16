@@ -196,7 +196,6 @@ const CAPABILITY_ACTION_LABELS: Readonly<
   send: { en: 'sending', zh: '发送' },
   serve: { en: 'serving', zh: '提供服务' },
   session: { en: 'session access', zh: '会话访问' },
-  site_memory: { en: 'site memory', zh: '站点记忆' },
   snapshot: { en: 'snapshots', zh: '快照' },
   stage: { en: 'staging', zh: '暂存' },
   status: { en: 'status', zh: '状态' },
@@ -204,7 +203,6 @@ const CAPABILITY_ACTION_LABELS: Readonly<
   store: { en: 'storage', zh: '存储' },
   sudo: { en: 'privileged execution', zh: '管理员执行' },
   sync: { en: 'synchronization', zh: '同步' },
-  takeover: { en: 'takeover', zh: '接管' },
   template: { en: 'templates', zh: '模板' },
   timer: { en: 'timers', zh: '定时触发' },
   tool_proxy: { en: 'tool proxy', zh: '工具代理' },
@@ -220,6 +218,9 @@ const CAPABILITY_ACTION_LABELS: Readonly<
 const CAPABILITY_COPY_OVERRIDES: Readonly<
   Record<string, { en: [string, string]; zh: [string, string] }>
 > = {
+  'browser.evaluate': { en: ['Browser developer scripts', 'Developer option: run synchronous JavaScript with DOM access on localhost pages in the conversation browser. Uses a separate script context, not page-global variables. This is not simulated user input, and script changes are not automatically undone.'], zh: ['浏览器开发者脚本', '开发者选项：允许 Agent 在会话浏览器的 localhost 页面运行同步 JavaScript，读取或修改 DOM。脚本上下文独立，不访问页面全局变量；这不是模拟用户操作，脚本修改不会自动撤销。'] },
+  'browser.download': { en: ['Download webpage files', 'Allow the Agent to click download links or buttons in the conversation browser. Validated files are saved under the authorized workspace downloads directory, not your personal Downloads folder. Executables and scripts are blocked; downloaded files are never opened automatically.'], zh: ['下载网页文件', '允许 Agent 在会话浏览器中点击下载链接或按钮。文件校验后保存到授权工作区的 downloads 目录，不写入个人下载文件夹；阻止可执行文件和脚本，不自动打开下载内容。'] },
+  'browser.upload': { en: ['Upload workspace files', 'Allow the Agent to send workspace files to a webpage. Windows supports standard file inputs and HTML file chooser buttons, including observed frames in the current page. Folders, links and files outside the workspace are not supported.'], zh: ['上传工作区文件', '允许 Agent 将工作区文件发送给网页。Windows 支持标准文件输入控件和网页文件选择按钮，包括当前页面中已观察的 iframe；不支持文件夹、链接或工作区外文件。'] },
   'fs.watch': { en: ['Watch file changes', 'Provide changes in the selected workspace to the Agent.'], zh: ['监听文件变化', '监听所选工作区的文件变化，并把更新提供给 Agent。'] },
   'fs.snapshot': { en: ['Use file snapshots', 'Provide file snapshots from the selected workspace.'], zh: ['查看文件快照', '为任务提供所选工作区的文件快照。'] },
   'process.session': { en: ['Access command sessions', 'Provide the current process session for command tools.'], zh: ['访问命令会话', '提供当前会话的进程资源，供命令执行能力使用。'] },
@@ -230,7 +231,9 @@ const CAPABILITY_COPY_OVERRIDES: Readonly<
   'agent.execution.observe': { en: ['Inspect task progress', 'Read the status and results of the selected Agent task.'], zh: ['查看任务进度', '读取所选 Agent 任务的执行状态和结果。'] },
   'agent.execution.steer': { en: ['Adjust a running task', 'Provide follow-up instructions to the selected Agent task.'], zh: ['调整执行任务', '向所选 Agent 任务补充指令或调整工作方向。'] },
   'llm.vision': { en: ['Understand images', 'Allow an image-capable model to read images attached to this session.'], zh: ['理解图片', '允许支持图像输入的模型读取当前会话中的图片。'] },
-  'web.search': { en: ['Search the web', 'Find relevant information from web sources.'], zh: ['搜索网页', '查找相关网页，收集任务所需的信息。'] },
+  'web.search': { en: ['Search the web', 'Use the model provider’s native web search. Requires a model route that supports it.'], zh: ['搜索网页', '使用模型厂商原生联网搜索，需要支持该能力的模型路由。'] },
+  'nomi_local_websearch': { en: ['Nomi local web search', 'Search public pages with an isolated local browser and return citable sources. It does not use conversation sign-in state or require model-native web search.'], zh: ['Nomi 本地网页搜索', '通过隔离的本地浏览器检索公开网页并返回可引用来源；不读取会话登录态，也不要求模型自带联网搜索能力。'] },
+  'nomi_system_browser': { en: ['Nomi signed-in Chrome', 'Connect to an already-running Chrome on Windows. Only tabs explicitly authorized for this conversation are available; their existing sign-in state is used. Separate from the conversation browser and local web search.'], zh: ['Nomi 已登录 Chrome', '连接 Windows 上已运行的 Chrome，仅访问你为当前会话明确授权的标签页，并使用其现有登录态。与会话浏览器、本地网页搜索相互独立。'] },
   'web.fetch': { en: ['Read a webpage', 'Fetch a public webpage and read its main content.'], zh: ['读取网页', '抓取公开网页，读取标题和正文内容。'] },
   'citation.render': { en: ['Organize citations', 'Include source references with the information used by the Agent.'], zh: ['整理引用', '为使用到的信息整理来源，方便核对与追溯。'] },
   'fs.read': { en: ['Read files', 'Read file contents to understand a project or work with documents.'], zh: ['读取文件', '读取文件内容，理解项目或处理文档。'] },
@@ -396,6 +399,12 @@ export const capabilityProductCopy = (
 ): { name: string; description: string } => {
   const override = CAPABILITY_COPY_OVERRIDES[item.capability.id];
   const zh = language.toLowerCase().startsWith('zh');
+  if (item.capability.id === 'nomi_local_websearch' && override && ['bundled', 'first_party', 'platform_builtin'].includes(item.source_kind)) {
+    const [name, summary] = override[zh ? 'zh' : 'en'];
+    const unavailable = item.materialization_state !== 'materialized';
+    const reason = zh ? '当前尚未绑定可用的本地检索运行时。' : 'No available local search runtime is currently bound.';
+    return { name, description: unavailable ? `${summary} ${reason}` : summary };
+  }
   const localizeBuiltin = zh && ['bundled', 'first_party', 'platform_builtin'].includes(item.source_kind);
   if (
     override &&

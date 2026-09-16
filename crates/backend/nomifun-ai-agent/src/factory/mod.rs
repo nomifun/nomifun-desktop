@@ -1,5 +1,3 @@
-#[cfg(feature = "browser-use")]
-pub mod browser_lane;
 pub mod provider_config;
 
 mod context;
@@ -50,6 +48,26 @@ pub trait CompanionPromptProvider: Send + Sync {
 pub type ProviderConfigDigestResolver =
     Arc<dyn Fn(String) -> BoxFuture<'static, Result<String, AppError>> + Send + Sync>;
 
+#[cfg(feature = "browser-use")]
+pub type BrowserRuntimeResolver = Arc<
+    dyn Fn(BrowserRuntimeRequest) -> BoxFuture<
+            'static,
+            Result<Option<Arc<nomifun_browser_platform::workspace::BrowserWorkspace>>, AppError>,
+        > + Send
+        + Sync,
+>;
+
+#[cfg(feature = "browser-use")]
+pub struct BrowserRuntimeRequest {
+    pub user_id: String,
+    pub conversation_id: String,
+    pub temporary: bool,
+    /// Derived from the compiled capability selection, never model input.
+    pub selected: bool,
+    /// Taken from the recompiled, exact Session Snapshot, never model input.
+    pub provider: Option<nomifun_agent_contracts::ExactRoleProviderRef>,
+}
+
 /// Dependencies needed by the agent factory to construct agents.
 pub struct AgentFactoryDeps {
     /// Canonical owner for installation-scoped tools. Every factory backend
@@ -64,7 +82,6 @@ pub struct AgentFactoryDeps {
     /// lightweight tests and standalone hosts that must not expose the tool.
     pub model_invoke_service: Option<Arc<ModelInvokeService>>,
     pub provider_config_digest_resolver: Option<ProviderConfigDigestResolver>,
-    pub encryption_key: [u8; 32],
     pub data_dir: PathBuf,
     /// Root for auto-provisioned managed workspaces
     /// (`{work_dir}/conversations/{uuidv7}`). Defaults to the data
@@ -77,14 +94,14 @@ pub struct AgentFactoryDeps {
     /// only after resolving installation-owner authority. `None` when the
     /// gateway server failed to start (graceful degradation).
     pub gateway_mcp_config: Option<GatewayMcpConfig>,
-    /// Late-wired issuer for native Browser Platform capabilities.
-    ///
-    /// `Some(slot)` means this host requires the process-wide Hub path. If the
-    /// slot has not been installed when a browser-enabled Nomi runtime is
-    /// built, construction fails closed; it never falls back to a private
-    /// Chromium engine. `None` is reserved for explicit standalone/test hosts.
+    /// Host classification from persisted Conversation ownership/source.
+    /// Installed even when this host has no native browser surface.
     #[cfg(feature = "browser-use")]
-    pub browser_lane_provider: Option<browser_lane::BrowserLaneClientProviderSlot>,
+    pub browser_runtime_resolver: Option<BrowserRuntimeResolver>,
+    #[cfg(feature = "browser-use")]
+    pub local_web_search: Option<Arc<crate::local_web_search::BrowserSearchProvider>>,
+    #[cfg(feature = "browser-use")]
+    pub system_browser: Option<Arc<dyn nomifun_browser_platform::system_browser::SystemBrowserHost>>,
     /// Client-preferences repo for reading user-facing settings at session-build
     /// time — currently the `agent.computerUse` toggle that gates the nomi
     /// Computer tool. `Option` so tests can omit it (then the default applies).

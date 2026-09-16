@@ -990,6 +990,22 @@ pub fn c7_package_specs() -> Vec<PackageSpec> {
             supported_surfaces: &["desktop", "headless"],
         },
         PackageSpec {
+            id: "nomifun.local-websearch",
+            display_name: "Nomi Local Web Search",
+            description: "Isolated browser-backed public web search.",
+            mount_id: "domain-local-websearch",
+            capabilities: &LOCAL_WEBSEARCH_CAPABILITIES,
+            supported_surfaces: &["desktop","headless"],
+        },
+        PackageSpec {
+            id: "nomifun.system-browser",
+            display_name: "Nomi System Browser",
+            description: "Operate user-authorized tabs in an explicitly connected system browser.",
+            mount_id: "domain-system-browser",
+            capabilities: &SYSTEM_BROWSER_CAPABILITIES,
+            supported_surfaces: &["desktop"],
+        },
+        PackageSpec {
             id: "nomifun.chat",
             display_name: "Chat Attachments",
             description: "Read attachment context for a chat Session.",
@@ -1188,7 +1204,6 @@ const WORKSPACE: &[&str] = &["workspace"];
 const PROCESS_SESSION: &[&str] = &["process_session"];
 const TERMINAL: &[&str] = &["terminal"];
 const SSH_HOST: &[&str] = &["ssh_host"];
-const BROWSER: &[&str] = &["browser"];
 const COMPUTER: &[&str] = &["computer"];
 const KNOWLEDGE_BASE: &[&str] = &["knowledge_base"];
 const PROJECT_MEMORY: &[&str] = &["project_memory"];
@@ -1206,6 +1221,12 @@ const WEB_RESEARCH_CAPABILITIES: [CapabilitySpec; 3] = [
     CapabilitySpec::tool("web.search", EffectClass::ExternalTransmit, &[]),
     CapabilitySpec::tool("web.fetch", EffectClass::ExternalTransmit, &[]),
     CapabilitySpec::context("citation.render"),
+];
+const LOCAL_WEBSEARCH_CAPABILITIES: [CapabilitySpec; 1] = [
+    CapabilitySpec::tool("nomi_local_websearch",EffectClass::ExternalTransmit,&[]),
+];
+const SYSTEM_BROWSER_CAPABILITIES: [CapabilitySpec; 1] = [
+    CapabilitySpec::tool("nomi_system_browser",EffectClass::ExternalTransmit,&[]),
 ];
 const MODEL_MEDIA_CAPABILITIES: [CapabilitySpec; 9] = [
     CapabilitySpec::transport("llm.realtime"),
@@ -1291,21 +1312,18 @@ const MCP_CAPABILITIES: [CapabilitySpec; 6] = [
     CapabilitySpec::tool("connector.data.read", EffectClass::ReadSensitive, MCP_SERVER),
     CapabilitySpec::tool("connector.data.write", EffectClass::WriteDurable, MCP_SERVER),
 ];
-const BROWSER_CAPABILITIES: [CapabilitySpec; 10] = [
-    CapabilitySpec::resource_provider("browser.identity", BROWSER),
+const BROWSER_CAPABILITIES: [CapabilitySpec; 7] = [
     CapabilitySpec::context("browser.observe"),
-    CapabilitySpec::tool("browser.navigate", EffectClass::ExternalTransmit, BROWSER),
-    CapabilitySpec::tool("browser.act", EffectClass::WriteReversible, BROWSER),
+    CapabilitySpec::tool("browser.navigate", EffectClass::ExternalTransmit, &[]),
+    CapabilitySpec::tool("browser.act", EffectClass::WriteReversible, &[]),
     CapabilitySpec::tool(
         "browser.render_content",
         EffectClass::ExternalTransmit,
-        BROWSER,
+        &[],
     ),
-    CapabilitySpec::tool("browser.download", EffectClass::WriteDurable, BROWSER),
-    CapabilitySpec::tool("browser.upload", EffectClass::ExternalTransmit, BROWSER),
-    CapabilitySpec::tool("browser.evaluate", EffectClass::ExecuteLocal, BROWSER),
-    CapabilitySpec::context("browser.site_memory"),
-    CapabilitySpec::tool("browser.takeover", EffectClass::WriteReversible, BROWSER),
+    CapabilitySpec::tool("browser.download", EffectClass::WriteDurable, &[]),
+    CapabilitySpec::tool("browser.upload", EffectClass::ExternalTransmit, &[]),
+    CapabilitySpec::tool("browser.evaluate", EffectClass::ExecuteLocal, &[]),
 ];
 const COMPUTER_CAPABILITIES: [CapabilitySpec; 4] = [
     CapabilitySpec::context("computer.observe"),
@@ -1591,7 +1609,7 @@ mod tests {
     #[test]
     fn c7_inventory_has_unique_packages_and_capabilities() {
         let registrations = registrations(c7_package_specs()).unwrap();
-        assert_eq!(registrations.len(), 26);
+        assert_eq!(registrations.len(), 28);
         validate_inventory(&registrations).unwrap();
         let capability_ids = registrations
             .iter()

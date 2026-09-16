@@ -3,11 +3,6 @@ pub(crate) mod runtime_state;
 pub mod artifact_store;
 pub mod boot_process_reaper;
 pub mod runtime_handle;
-// Rendering page-fetch adapter for knowledge URL sources. The implementation
-// consumes the application-owned Browser Session Hub and keeps the knowledge
-// crate browser-platform-free.
-#[cfg(feature = "browser-use")]
-pub mod browser_fetcher;
 pub mod capability;
 pub mod cc_switch;
 pub mod factory;
@@ -31,6 +26,10 @@ pub mod web_fetch;
 mod subagent_gateway;
 #[path = "web_search_provider.rs"]
 pub mod web_search;
+#[cfg(feature = "browser-use")]
+pub mod local_web_search;
+#[cfg(feature = "browser-use")]
+pub mod system_browser;
 
 // ── Agent-layer re-exports (the seam) ──────────────────────────────────────
 // Backend crates reach the agent (nomi-*) layer ONLY through nomifun-ai-agent.
@@ -105,13 +104,6 @@ pub use factory::{
     AgentFactoryDeps, CompanionPromptProvider,
     build_agent_factory, build_agent_model_config_resolver,
 };
-#[cfg(feature = "browser-use")]
-pub use factory::browser_lane::{
-    BrowserLaneBinding, BrowserLaneClientProvider, BrowserLaneClientProviderSlot,
-    BrowserOwnerLeaseGuard, TrustedBrowserRuntimeContext,
-};
-#[cfg(feature = "browser-use")]
-pub use browser_fetcher::BrowserFetcher;
 pub use knowledge_completer::LiveKnowledgeCompleter;
 pub use knowledge_completer::resolve_default_model;
 pub use knowledge_retrieval::LiveKnowledgeRetrievalSink;

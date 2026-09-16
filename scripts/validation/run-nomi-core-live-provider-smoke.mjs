@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 /**
- * Compile and run the ignored Nomi-core live-provider smoke without exposing
+ * Compile and run an opt-in Nomi-core or native-browser live-provider smoke without exposing
  * its credential to Cargo, build scripts, argv, files, logs, or tool children.
  *
  * The smoke is intentionally pinned to StepFun Coding Plan
@@ -11,6 +11,9 @@
  * Usage:
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --compile-only
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --browser
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --browser --compile-only
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --browser-gui --data-dir C:/new-disposable-gui-data
  *
  * Cargo always runs first with a credential-free environment and emits JSON
  * metadata. The runner resolves the freshly-built test executable from that
@@ -28,7 +31,12 @@ const WINDOWS_TOOLCHAIN_MODULE_URL = pathToFileURL(
   resolve(ROOT, 'scripts/run-dev.mjs'),
 ).href;
 const API_KEY_ENVIRONMENT_NAME = 'NOMIFUN_LIVE_STEPFUN_API_KEY';
-const TEST_TARGET = 'nomi_core_live_provider_smoke';
+const browser = process.argv.includes('--browser');
+const browserGui = process.argv.includes('--browser-gui');
+const guiDataIndex = process.argv.indexOf('--data-dir');
+const guiDataDir = guiDataIndex >= 0 && process.argv[guiDataIndex + 1] ? resolve(process.argv[guiDataIndex + 1]) : null;
+const TEST_TARGET = browserGui ? 'browser_gui_fixture' : browser ? 'browser_workspace_smoke' : 'nomi_core_live_provider_smoke';
+const TARGET_KIND = browser || browserGui ? 'example' : 'test';
 const TEST_NAME =
   'nomi_core_product_chain_reaches_live_stepfun_and_remote_binding';
 const GLOBAL_TIMEOUT_MS = 30 * 60 * 1000;
@@ -95,7 +103,7 @@ function terminateProcessTree(child, environment) {
 function runCaptured(
   command,
   args,
-  { environment, input = null, outputLimitBytes },
+  { environment, input = null, outputLimitBytes, onStdoutLine = null },
 ) {
   const remainingMs = globalDeadline - Date.now();
   if (remainingMs <= 0) {
@@ -115,6 +123,7 @@ function runCaptured(
     let bytes = 0;
     const stdout = [];
     const stderr = [];
+    let pendingLine = '';
     const child = spawn(command, args, {
       cwd: ROOT,
       env: environmentWithoutCredential(environment),
@@ -157,7 +166,16 @@ function runCaptured(
       target.push(buffer);
     };
 
-    child.stdout.on('data', collect(stdout));
+    child.stdout.on('data', chunk => {
+      collect(stdout)(chunk);
+      if (onStdoutLine && !settled) {
+        pendingLine += chunk.toString('utf8');
+        const lines = pendingLine.split(/\r?\n/);
+        pendingLine = lines.pop() ?? '';
+        if (pendingLine.length > 16000) pendingLine = '';
+        for (const line of lines) if (line.length < 16000) onStdoutLine(line);
+      }
+    });
     child.stderr.on('data', collect(stderr));
     child.once('error', () => finish({ status: null, spawnError: true }));
     child.once('close', (status, signal) => finish({ status, signal }));
@@ -190,7 +208,7 @@ function testExecutableFromCargoJson(stdout) {
       message.reason === 'compiler-artifact' &&
       message.target?.name === TEST_TARGET &&
       Array.isArray(message.target?.kind) &&
-      message.target.kind.includes('test') &&
+      message.target.kind.includes(TARGET_KIND) &&
       typeof message.executable === 'string'
     ) {
       executable = message.executable;
@@ -199,8 +217,45 @@ function testExecutableFromCargoJson(stdout) {
   return executable;
 }
 
+function browserEvidenceFromOutput(output) {
+  const prefix = 'NOMIFUN_BROWSER_LIVE_EVIDENCE ';
+  const line = output.split(/\r?\n/).find(line => line.startsWith(prefix) && line.length < 12000);
+  if (!line) return null;
+  try {
+    const data = JSON.parse(line.slice(prefix.length));
+    const smallNumber = value => Number.isInteger(value) && value >= -100 && value <= 100 ? value : null;
+    const choice = (value, allowed, fallback = null) => allowed.includes(value) ? value : fallback;
+    return {
+      count: smallNumber(data.count),
+      values: Array.isArray(data.values) ? data.values.slice(0, 128).map(smallNumber) : [],
+      served_versions: smallNumber(data.served_versions),
+      source_changed: data.source_changed === true,
+      presented: data.presented === true,
+      presentation_failed: data.presentation_failed === true,
+      tools: Array.isArray(data.tools) ? data.tools.slice(0, 100).map(tool => ({
+        name: choice(tool.name, ['Browser', 'Read', 'Write', 'Edit', 'apply_patch', 'update_plan', 'AskUserQuestion'], 'OTHER'),
+        status: choice(tool.status, ['completed', 'failed'], 'other'),
+        operation: choice(tool.operation, ['navigate', 'observe', 'act', 'tab', 'diagnostics', 'screenshot']),
+        action: choice(tool.action, ['click', 'type', 'press', 'scroll', 'hover']),
+        error_present: tool.error_present === true,
+        result_error: typeof tool.result_error === 'boolean' ? tool.result_error : null,
+        error_codes: Array.isArray(tool.error_codes) ? tool.error_codes.filter(code => ['INVALID_PAYLOAD', 'CAPABILITY_NOT_SELECTED', 'BROWSER_STALE_OBSERVATION', 'BROWSER_STALE_TARGET', 'BROWSER_NOT_ACTIONABLE', 'BROWSER_NATIVE_COMMAND_FAILED', 'BROWSER_UNSUPPORTED_ACTION', 'TOOL_NOT_FOUND', 'PERMISSION_DENIED'].includes(code)).slice(0, 9) : [],
+      })) : [],
+    };
+  } catch { return null; }
+}
+function browserProofFromOutput(output) {
+  const prefix = 'BROWSER_WORKSPACE_SMOKE_PASS ';
+  const line = output.split(/\r?\n/).find(line => line.startsWith(prefix) && line.length < 16000);
+  try {
+    const proof = JSON.parse(line?.slice(prefix.length) ?? 'null');
+    return proof?.scope === 'live-agent-only' && proof.native_fixture_profile_cleanup === true && proof.agent?.real_provider === true && proof.agent?.reproduced_bug_with_trusted_click === true && proof.agent?.workspace_code_changed_and_reloaded === true && proof.agent?.terminal_before_unlock === true && JSON.stringify(proof.agent?.trusted_retest_values) === '[1,2,3]';
+  } catch { return false; }
+}
 function typedFailureFromOutput(output) {
   for (const line of output.split(/\r?\n/)) {
+    const browserFailure = browser && line.match(/^BROWSER_WORKSPACE_SMOKE_FAIL (LIVE_[A-Z0-9_]+)$/);
+    if (browserFailure) return { phase: 'browser.frontend', code: browserFailure[1], status: '422' };
     const match = line.match(FAILURE_SENTINEL);
     if (match) {
       return { phase: match[1], code: match[2], status: match[3] };
@@ -249,6 +304,10 @@ async function resolveToolchainEnvironment() {
 }
 
 async function main() {
+  if (browserGui && (browser || !guiDataDir || existsSync(guiDataDir))) {
+    emitFailure('browser_gui_status=not_run', 'NEW_DATA_DIRECTORY_REQUIRED', 412);
+    process.exitCode = 2; return;
+  }
   const toolchain = await resolveToolchainEnvironment();
   if (!toolchain.environment) {
     emitFailure(
@@ -266,7 +325,7 @@ async function main() {
   const cargo = process.platform === 'win32' ? 'cargo.exe' : 'cargo';
   const compile = await runCaptured(
     cargo,
-    [
+    browserGui ? ['build', '--locked', '-p', 'nomifun-app', '--example', TEST_TARGET, '--features', 'browser-use', '--message-format=json-render-diagnostics'] : browser ? ['build', '--locked', '-p', 'nomifun-desktop', '--example', TEST_TARGET, '--no-default-features', '--message-format=json-render-diagnostics'] : [
       'test',
       '--locked',
       '-p',
@@ -366,7 +425,7 @@ async function main() {
   try {
     test = await runCaptured(
       executable,
-      [
+      browserGui ? [guiDataDir, '--live-frontend'] : browser ? ['--live-agent-only'] : [
         TEST_NAME,
         '--exact',
         '--ignored',
@@ -377,6 +436,19 @@ async function main() {
         environment,
         input: credentialInput,
         outputLimitBytes: TEST_OUTPUT_LIMIT_BYTES,
+        onStdoutLine: browserGui ? line => {
+          const prefix = 'BROWSER_GUI_FIXTURE_READY ';
+          if (!line.startsWith(prefix)) return;
+          try {
+            const data = JSON.parse(line.slice(prefix.length));
+            const page = new URL(data.page);
+            if (resolve(data.data_dir) !== guiDataDir || resolve(data.work_dir) !== resolve(guiDataDir, 'work') ||
+                data.real_provider !== true || page.protocol !== 'http:' || page.hostname !== '127.0.0.1' ||
+                page.username || page.password || page.pathname !== '/' || data.control !== page.origin ||
+                !/^[a-f0-9-]{36}$/.test(data.session_id)) return;
+            console.log('browser_gui_ready=' + JSON.stringify({data_dir:guiDataDir,work_dir:resolve(guiDataDir,'work'),page:page.href,control:page.origin,session_id:data.session_id,real_provider:true}));
+          } catch { /* Never forward arbitrary child output or credentials. */ }
+        } : null,
       },
     );
   } finally {
@@ -399,12 +471,28 @@ async function main() {
     return;
   }
   if (test.status === 0) {
+    if (browserGui) {
+      console.log('browser_gui_fixture_status=stopped');
+      process.exitCode = 0; return; // A stopped fixture is not a GUI acceptance claim.
+    }
+    if (browser) {
+      if (!browserProofFromOutput(test.stdout)) {
+        emitFailure('live_smoke_status=fail', 'BROWSER_EVIDENCE_MISSING', 422);
+        process.exitCode = 1;
+        return;
+      }
+      console.log('browser_live_frontend_status=pass native_click=true workspace_fix=true retest=1,2,3 terminal_unlock=true');
+    }
     console.log('live_smoke_status=pass code=OK status=200');
     process.exitCode = 0;
     return;
   }
 
   const typed = typedFailureFromOutput(`${test.stdout}\n${test.stderr}`);
+  if (browser) {
+    const evidence = browserEvidenceFromOutput(test.stderr);
+    if (evidence) console.error(`browser_live_evidence=${JSON.stringify(evidence)}`);
+  }
   if (typed) {
     console.error(
       `live_smoke_status=fail phase=${typed.phase} code=${typed.code} status=${typed.status}`,
@@ -420,6 +508,10 @@ async function main() {
 }
 
 function runSelfTest() {
+  const proof = 'BROWSER_WORKSPACE_SMOKE_PASS ' + JSON.stringify({ scope: 'live-agent-only', native_fixture_profile_cleanup: true, agent: { real_provider: true, reproduced_bug_with_trusted_click: true, workspace_code_changed_and_reloaded: true, terminal_before_unlock: true, trusted_retest_values: [1,2,3] } });
+  if (!browserProofFromOutput(proof) || browserProofFromOutput('') || browserProofFromOutput(proof.replace('[1,2,3]', '[2,4,6]'))) throw new Error('browser proof parsing failed');
+  const evidence = browserEvidenceFromOutput('NOMIFUN_BROWSER_LIVE_EVIDENCE ' + JSON.stringify({ count: 3, secret: 'DO_NOT_EMIT', tools: [{ name: 'DO_NOT_EMIT', args: 'DO_NOT_EMIT' }] }));
+  if (evidence?.count !== 3 || JSON.stringify(evidence).includes('DO_NOT_EMIT')) throw new Error('browser evidence redaction failed');
   const scrubbed = environmentWithoutCredential({
     PATH: 'safe',
     [API_KEY_ENVIRONMENT_NAME.toLowerCase()]: 'must-not-copy',
@@ -446,7 +538,7 @@ function runSelfTest() {
   const executable = testExecutableFromCargoJson(
     JSON.stringify({
       reason: 'compiler-artifact',
-      target: { name: TEST_TARGET, kind: ['test'] },
+      target: { name: TEST_TARGET, kind: [TARGET_KIND] },
       executable: 'test-executable',
     }),
   );

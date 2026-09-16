@@ -16,8 +16,6 @@ import { cleanupSiderTooltips, getSiderTooltipProps } from '@renderer/utils/ui/s
 import { useAuth } from '@renderer/hooks/context/AuthContext';
 import { blurActiveElement } from '@renderer/utils/ui/focus';
 import { isDesktopShell } from '@renderer/utils/platform';
-import { useBrowserOverview } from '@renderer/pages/browser/useBrowserInventory';
-import { parseSessionRoute } from '@renderer/utils/routes/sessionRoute';
 import {
   CREATIVE_STUDIO_ASSETS_PATH,
   WORKBENCH_HOME_PATH,
@@ -33,7 +31,6 @@ import {
 import {
   SiderAssetLibraryEntry,
   SiderAgentEntry,
-  SiderBrowserEntry,
   SiderCreativeStudioEntry,
   SiderSkillsEntry,
   SiderConversationEntry,
@@ -78,11 +75,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const { t } = useTranslation();
   const location = useLocation();
   const { pathname, search, hash } = location;
-  const {
-    overview: browserOverview,
-    transient: browserOverviewTransient,
-    retry: retryBrowserOverview,
-  } = useBrowserOverview();
 
   const navigate = useNavigate();
   const { logout, status } = useAuth();
@@ -176,17 +168,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
 
   const handleConversationClick = () =>
     navTo('/guid', false, { resetAgentSelection: true });
-  const handleBrowserClick = () => {
-    if (browserOverviewTransient) {
-      void retryBrowserOverview();
-    }
-    const currentSession = parseSessionRoute(pathname);
-    if (currentSession?.kind === 'conversation') {
-      navTo(`/browser?conversation_id=${encodeURIComponent(currentSession.id)}`);
-      return;
-    }
-    navTo(pathname === '/browser' && search ? `/browser${search}` : '/browser');
-  };
   const handleScheduledClick = () => navTo('/scheduled');
   const handleRequirementsClick = () => navTo('/requirements');
   const handleKnowledgeClick = () => navTo('/knowledge');
@@ -451,18 +432,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
           <>
             {/* 设置 — section label; the enclosing border-t already separates this region when collapsed */}
             <SiderSectionHeader label={t('common.siderSection.settings')} collapsed={collapsed} collapsedRule={false} />
-            {/* Unified Browser management — keep the entry reachable when Browser Use is
-                disabled so the user can open Settings and turn it back on. */}
-            {(isDesktopShell() || browserOverview?.supported !== false) && (
-              <SiderBrowserEntry
-                isActive={pathname === '/browser'}
-                collapsed={collapsed}
-                runningCount={browserOverview?.running_lanes ?? 0}
-                queuedCount={browserOverview?.queued_lanes ?? 0}
-                siderTooltipProps={siderTooltipProps}
-                onClick={handleBrowserClick}
-              />
-            )}
             <SiderModelHubEntry
               isActive={pathname.startsWith('/models')}
               collapsed={collapsed}

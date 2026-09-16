@@ -11,9 +11,8 @@
 //! cleanup proof（Windows Job / Unix watchdog）。生命周期 owner 必须同时持有二者，并且只有
 //! direct child 已回收且 cleanup proof 完成后，才能报告 Chromium 已停止。
 //!
-//! headless 决策：[`crate::display::display_available`] 为 false（无显示器：无头 server /
-//! CI / SSH 无 X）→ 强制 `--headless=new`。日常 Agent 工作同样显式使用现代 headless；
-//! 只有受信任的“前台打开”入口才会创建带真实窗口的替代 Host。
+//! The caller explicitly chooses process presentation. This launcher never
+//! probes displays, replaces an interactive Host or chooses a default profile.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -22,11 +21,11 @@ use std::time::Instant;
 
 use crate::engine::BrowserError;
 
-/// Chromium Host 的进程级展示模式。
+/// Test/diagnostic Chromium process presentation.
 ///
-/// 这是不可在存活进程上切换的启动属性。普通 Agent 工作必须使用
-/// [`Self::Headless`]；只有 Hub 的受信任前台入口可以在先完整关闭旧 Host 后，
-/// 用同一应用托管 profile 创建 [`Self::Headful`] 替代 Host。
+/// Product browser interaction is owned by the native embedded surface. The
+/// isolated search/render owner always selects [`Self::Headless`]; the visible
+/// variant remains only for explicit low-level conformance fixtures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserHostLaunchMode {
     Headless,
@@ -50,14 +49,14 @@ const PORT_FILE_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(windows)]
 const PORT_FILE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// 托管启动配置。`resolve_chrome_path`（Task 6）得到的可执行 + 专属数据目录 + headful。
+/// 托管启动配置：宿主明确供应的可执行文件、专属数据目录及窗口模式。
 #[derive(Clone)]
 pub struct LaunchConfig {
-    /// chrome 可执行绝对路径（来自 [`crate::acquire::resolve_chrome_path`]）。
+    /// Host-supplied absolute browser executable; no discovery or download.
     pub chrome_path: PathBuf,
     /// **专属** user-data-dir（红线：绝不指向用户真实 profile）。launch 会确保其存在。
     pub user_data_dir: PathBuf,
-    /// 是否带可见窗口。注意：`display_available()==false` 时本标志被忽略，强制 headless。
+    /// Whether this explicitly owned process has a visible window.
     pub headful: bool,
 }
 
@@ -81,6 +80,12 @@ pub struct Launched {
 }
 
 impl Launched {
+    /// Read-only completion receipt for this exact managed process tree.
+    /// Observers cannot signal the process or take profile cleanup authority.
+    pub fn exit_receipt(&self) -> Option<nomi_process_runtime::ChildProcessCleanup> {
+        self.cleanup.process.as_ref().and_then(|process|process.cleanup_receipt())
+    }
+
     fn new(transport: LaunchTransport, cleanup: CommittedLaunchGuard) -> Self {
         Self {
             transport: Some(transport),
@@ -95,7 +100,7 @@ impl Launched {
         LaunchTransport,
         crate::profile::BrowserOwnershipToken,
         Option<PathBuf>,
-        Option<crate::host::HostCleanupLease>,
+        Option<crate::cleanup::HostCleanupLease>,
     ) {
         let transport = self
             .transport
@@ -113,8 +118,8 @@ impl Launched {
     }
 
     /// Connect a low-level test/diagnostic caller while retaining exact process
-    /// and profile cleanup authority. Production runtimes normally consume the
-    /// launch through `CdpBackend`/`CdpHostRuntime` instead.
+    /// and profile cleanup authority. The isolated page runtime adds its own
+    /// purpose-specific network owner before creating any page.
     ///
     /// This path spawns no egress-firewall loop, so `handle_attached` does NOT
     /// arm `Fetch.enable` on attached targets (the arming gate requires a live
@@ -152,8 +157,24 @@ pub struct LaunchedProcessGuard {
 }
 
 impl LaunchedProcessGuard {
+    #[cfg(test)]
+    pub(crate) fn ephemeral_profile_path(&self) -> Option<&Path> {
+        self.cleanup.cleanup_user_data_dir.as_deref()
+    }
     pub fn child_mut(&mut self) -> &mut tokio::process::Child {
         self.cleanup.process_mut().child_mut()
+    }
+
+    /// A successful return proves whole-tree exit and this launch's exact
+    /// profile cleanup. Failed attempts retain the same cleanup authority.
+    pub async fn shutdown(&mut self) -> Result<(), BrowserError> {
+        let Some(process) = self.cleanup.process.as_mut() else { return Ok(()); };
+        let token = self.cleanup.ownership_token.as_ref().expect("live launch ownership");
+        terminate_launched_process_tree_and_cleanup_profile(process,token,self.cleanup.cleanup_user_data_dir.as_deref()).await?;
+        self.cleanup.process.take();
+        self.cleanup.ownership_token.take();
+        self.cleanup.host_cleanup_lease.take();
+        Ok(())
     }
 }
 
@@ -255,7 +276,7 @@ struct UncommittedLaunchGuard<'claim> {
     process: Option<nomi_process_runtime::ManagedChildProcess>,
     ephemeral_cleanup: Option<crate::profile::EphemeralProfileCleanupToken>,
     ownership_claim: &'claim crate::profile::ProfileLaunchClaim,
-    host_cleanup_lease: Option<crate::host::HostCleanupLease>,
+    host_cleanup_lease: Option<crate::cleanup::HostCleanupLease>,
 }
 
 impl<'claim> UncommittedLaunchGuard<'claim> {
@@ -270,7 +291,7 @@ impl<'claim> UncommittedLaunchGuard<'claim> {
     fn new_with_host_lease(
         ownership_claim: &'claim crate::profile::ProfileLaunchClaim,
         ephemeral_cleanup: Option<crate::profile::EphemeralProfileCleanupToken>,
-        host_cleanup_lease: Option<crate::host::HostCleanupLease>,
+        host_cleanup_lease: Option<crate::cleanup::HostCleanupLease>,
     ) -> Self {
         Self {
             process: None,
@@ -374,7 +395,7 @@ struct CommittedLaunchGuard {
     process: Option<nomi_process_runtime::ManagedChildProcess>,
     ownership_token: Option<crate::profile::BrowserOwnershipToken>,
     cleanup_user_data_dir: Option<PathBuf>,
-    host_cleanup_lease: Option<crate::host::HostCleanupLease>,
+    host_cleanup_lease: Option<crate::cleanup::HostCleanupLease>,
 }
 
 impl CommittedLaunchGuard {
@@ -391,7 +412,7 @@ impl CommittedLaunchGuard {
         process: nomi_process_runtime::ManagedChildProcess,
         ownership_token: crate::profile::BrowserOwnershipToken,
         cleanup_user_data_dir: Option<PathBuf>,
-        host_cleanup_lease: Option<crate::host::HostCleanupLease>,
+        host_cleanup_lease: Option<crate::cleanup::HostCleanupLease>,
     ) -> Self {
         Self {
             process: Some(process),
@@ -413,7 +434,7 @@ impl CommittedLaunchGuard {
         nomi_process_runtime::ManagedChildProcess,
         crate::profile::BrowserOwnershipToken,
         Option<PathBuf>,
-        Option<crate::host::HostCleanupLease>,
+        Option<crate::cleanup::HostCleanupLease>,
     ) {
         (
             self.process
@@ -473,7 +494,7 @@ fn spawn_committed_launch_cleanup(
     process: nomi_process_runtime::ManagedChildProcess,
     ownership_token: crate::profile::BrowserOwnershipToken,
     cleanup_user_data_dir: Option<PathBuf>,
-    host_cleanup_lease: Option<crate::host::HostCleanupLease>,
+    host_cleanup_lease: Option<crate::cleanup::HostCleanupLease>,
 ) {
     hand_off_dropped_browser_cleanup_with_host_lease(
         std::sync::Arc::new(tokio::sync::Mutex::new(process)),
@@ -868,9 +889,9 @@ static BROWSER_CLEANUP_RELAY: std::sync::OnceLock<BrowserCleanupRelay> =
     std::sync::OnceLock::new();
 static BROWSER_CLEANUP_QUARANTINE: std::sync::OnceLock<BrowserCleanupQuarantine> =
     std::sync::OnceLock::new();
-/// Structural Host cleanup leases survive even a failed cleanup-dispatch
-/// handoff. This covers both standalone capacity and the platform Hub's
-/// provisional launch authority. A ticket removes itself only after exact
+/// Structural process cleanup leases survive even a failed cleanup-dispatch
+/// handoff. This covers both isolated page owners and provisional launch
+/// authority. A ticket removes itself only after exact
 /// cleanup completion.
 static HOST_CLEANUP_LEASE_DEBTS: std::sync::OnceLock<
     std::sync::Mutex<Vec<DroppedBrowserCleanupTicket>>,
@@ -1203,7 +1224,7 @@ struct DroppedBrowserCleanupTicketInner {
     /// Opaque structural Host authority follows the exact process/profile
     /// cleanup ticket. It is released only when this ticket publishes proven
     /// completion, never merely because the public Host/runtime was dropped.
-    host_cleanup_lease: std::sync::Mutex<Option<crate::host::HostCleanupLease>>,
+    host_cleanup_lease: std::sync::Mutex<Option<crate::cleanup::HostCleanupLease>>,
 }
 
 struct ReclaimableDroppedBrowserCleanup {
@@ -1222,7 +1243,7 @@ impl DroppedBrowserCleanupTicket {
     }
 
     fn pending_with_host_lease(
-        host_cleanup_lease: Option<crate::host::HostCleanupLease>,
+        host_cleanup_lease: Option<crate::cleanup::HostCleanupLease>,
     ) -> Self {
         let retain_structural_debt = host_cleanup_lease.is_some();
         let (changed, _) = tokio::sync::watch::channel(0);
@@ -1522,7 +1543,7 @@ pub(crate) fn hand_off_dropped_browser_cleanup_with_host_lease(
     >,
     ownership_token: crate::profile::BrowserOwnershipToken,
     cleanup_user_data_dir: Option<PathBuf>,
-    host_cleanup_lease: Option<crate::host::HostCleanupLease>,
+    host_cleanup_lease: Option<crate::cleanup::HostCleanupLease>,
 ) -> DroppedBrowserCleanupTicket {
     hand_off_dropped_browser_cleanup_with_host_lease_and_tasks(
         process,
@@ -1540,7 +1561,7 @@ pub(crate) fn hand_off_dropped_browser_cleanup_with_host_lease_and_tasks(
     >,
     ownership_token: crate::profile::BrowserOwnershipToken,
     cleanup_user_data_dir: Option<PathBuf>,
-    host_cleanup_lease: Option<crate::host::HostCleanupLease>,
+    host_cleanup_lease: Option<crate::cleanup::HostCleanupLease>,
     runtime_tasks: Vec<tokio::task::JoinHandle<()>>,
     post_stop_reconcile: std::sync::Arc<PostStopReconcileCell>,
 ) -> DroppedBrowserCleanupTicket {
@@ -1563,7 +1584,7 @@ pub(crate) fn hand_off_dropped_browser_cleanup_with_host_lease_and_tasks(
 fn hand_off_uncommitted_browser_cleanup(
     process: nomi_process_runtime::ManagedChildProcess,
     cleanup_token: Option<crate::profile::EphemeralProfileCleanupToken>,
-    host_cleanup_lease: Option<crate::host::HostCleanupLease>,
+    host_cleanup_lease: Option<crate::cleanup::HostCleanupLease>,
 ) {
     let completion =
         DroppedBrowserCleanupTicket::pending_with_host_lease(host_cleanup_lease);
@@ -2138,7 +2159,7 @@ pub enum LaunchTransport {
 ///   `Target.createTarget` 单独建）。靠 `--remote-debugging-port` 触发的 REMOTE_DEBUGGING
 ///   keep-alive 保进程存活、不无窗口自退。
 ///
-/// `force_headless` 由调用方按 `display_available()` 与 `LaunchConfig::headful` 算好后传入，
+/// `force_headless` 由受信任调用方显式传入，
 /// 使本函数保持纯逻辑、无平台/环境探测，单测可在任意宿主断言。
 pub fn build_chrome_args(user_data_dir: &Path, force_headless: bool) -> Vec<String> {
     build_chrome_args_for_mode(
@@ -2151,69 +2172,11 @@ pub fn build_chrome_args(user_data_dir: &Path, force_headless: bool) -> Vec<Stri
     )
 }
 
-fn is_platform_managed_profile(user_data_dir: &Path) -> bool {
-    let mut components = Vec::new();
-    for component in user_data_dir.components() {
-        match component {
-            std::path::Component::Normal(value) => {
-                let value = value.to_string_lossy();
-                #[cfg(windows)]
-                components.push(value.to_ascii_lowercase());
-                #[cfg(not(windows))]
-                components.push(value.into_owned());
-            }
-            // A trailing `..` must never be ignored and accidentally make an
-            // external profile look like one of the trusted managed suffixes.
-            std::path::Component::ParentDir => return false,
-            std::path::Component::Prefix(_)
-            | std::path::Component::RootDir
-            | std::path::Component::CurDir => {}
-        }
-    }
-
-    let numbered = |value: &str, prefix: &str| {
-        value.strip_prefix(prefix).is_some_and(|suffix| {
-            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
-        })
-    };
-    let hosted = |value: &str| {
-        value
-            .strip_prefix("host-")
-            .is_some_and(|suffix| !suffix.is_empty())
-    };
-
-    match components.as_slice() {
-        [.., root, identity, generation]
-            if root == "platform-profiles"
-                && identity == "primary"
-                && numbered(generation, "generation-") =>
-        {
-            true
-        }
-        [.., root, identity, host]
-            if root == "platform-profiles"
-                && matches!(identity.as_str(), "anonymous" | "isolated")
-                && hosted(host) =>
-        {
-            true
-        }
-        [.., root, identity, generation, host]
-            if root == "platform-profiles"
-                && identity == "replica"
-                && numbered(generation, "generation-")
-                && hosted(host) =>
-        {
-            true
-        }
-        _ => false,
-    }
-}
-
-/// 按显式 Host 展示模式构造 Chromium 参数。
+/// 按显式进程展示模式构造 Chromium 参数。
 ///
 /// 不允许用 `--start-minimized` 模拟静默执行：Headless 必须包含
 /// `--headless=new`，Headful 必须创建正常窗口。这样系统托盘/任务栏中不会残留一个
-/// 用户未请求的隐藏窗口，且“前台打开”的可见性完全由 Hub 的显式替换流程控制。
+/// 用户未请求的隐藏窗口。
 pub fn build_chrome_args_for_mode(
     user_data_dir: &Path,
     mode: BrowserHostLaunchMode,
@@ -2228,15 +2191,6 @@ pub fn build_chrome_args_for_mode(
     args.push("--remote-debugging-port=0".into());
 
     args.push(format!("--user-data-dir={}", user_data_dir.display()));
-    if is_platform_managed_profile(user_data_dir) {
-        // Every platform-managed Host uses an application-owned profile. Keep
-        // its reconstructible caches bounded independently of persistent
-        // cookies and origin state. Standalone/external profile layouts do not
-        // match the trusted platform suffixes and retain their existing args.
-        args.push("--disk-cache-size=67108864".into());
-        args.push("--media-cache-size=33554432".into());
-        args.push("--disable-gpu-shader-disk-cache".into());
-    }
 
     // 静态硬化基线（零后台出站 / 容器防崩 / 截图可复现；Linux 含 dev-shm）。
     args.extend(crate::switches::chromium_switches());
@@ -2260,7 +2214,7 @@ pub fn build_chrome_args_for_mode(
     // do not infer a security downgrade from the OS, WSL, or container identity.
 
     // **不自动开启动窗口/标签**：消除冗余的命令行起始标签——受控页由 backend
-    // `Target.createTarget("about:blank")` 单独建（[`crate::backend::cdp`]），命令行再开一个就是
+    // `Target.createTarget("about:blank")` 由调用方单独建，命令行再开一个就是
     // 多余的孤儿空白标签。改用 `--no-startup-window` 让 chrome 启动时不开任何窗口/标签。
     //
     // 为何不会因「无窗口」自退、也不影响 launch 轮询：本函数恒传 `--remote-debugging-port`
@@ -2396,6 +2350,63 @@ pub async fn launch_chrome(
     launch_chrome_with_cleanup_profile(config, force_headless, None, None).await
 }
 
+/// Isolated page launches never use user profiles, visible windows, environment
+/// overrides, or startup-page fallback. All browser networking hits an owned
+/// rejecting proxy; only the separate restricted request broker may fetch.
+pub async fn launch_headless_page_chrome(
+    chrome_path: PathBuf,
+    rejecting_proxy: std::net::SocketAddr,
+    network_boundary: crate::cleanup::HostCleanupLease,
+) -> Result<Launched, BrowserError> {
+    if !rejecting_proxy.ip().is_loopback() || rejecting_proxy.port()==0 {
+        return Err(BrowserError::Other("invalid search network boundary".into()));
+    }
+    let directory = tempfile::Builder::new().prefix("nomifun-headless-page-").tempdir()
+        .map_err(|_|BrowserError::Other("search profile could not be created".into()))?;
+    let path = directory.path().to_path_buf();
+    let config = LaunchConfig {chrome_path,user_data_dir:path.clone(),headful:false};
+    launch_chrome_owned(&config,true,Some(path),Some(network_boundary),Some(rejecting_proxy),Some(directory)).await
+}
+
+fn headless_network_args(proxy: std::net::SocketAddr) -> Vec<String> {
+    vec![
+        format!("--proxy-server=http://{proxy}"),
+        "--proxy-bypass-list=<-loopback>".into(),
+        "--host-resolver-rules=MAP * ~NOTFOUND".into(),
+        "--disable-quic".into(),
+        // New Headless uses Chrome's preference override, not the old
+        // content-shell --force-webrtc-ip-handling-policy switch.
+        "--webrtc-ip-handling-policy=disable_non_proxied_udp".into(),
+        "--disable-extensions".into(),
+        "--deny-permission-prompts".into(),
+        "--auth-server-allowlist=_nomifun_no_ambient_auth_".into(),
+        "--auth-negotiate-delegate-allowlist=_nomifun_no_ambient_auth_".into(),
+        "--auth-schemes=basic,digest".into(),
+    ]
+}
+
+fn headless_chrome_args(profile: &Path, proxy: std::net::SocketAddr) -> Vec<String> {
+    let mut args=build_chrome_args_for_mode(profile,BrowserHostLaunchMode::Headless);
+    args.retain(|arg|arg!="--disable-popup-blocking");
+    args.extend(headless_network_args(proxy));
+    args
+}
+
+#[cfg(test)]
+mod search_launch_tests {
+    use super::*;
+    #[test]
+    fn search_is_headless_and_keeps_proxy_loopback_and_permission_guards() {
+        let args=headless_chrome_args(Path::new("owned-search-profile"),"127.0.0.1:31234".parse().unwrap());
+        for required in ["--headless=new","--no-startup-window","--proxy-server=http://127.0.0.1:31234","--proxy-bypass-list=<-loopback>","--host-resolver-rules=MAP * ~NOTFOUND","--deny-permission-prompts","--disable-quic","--webrtc-ip-handling-policy=disable_non_proxied_udp"] {
+            assert!(args.iter().any(|arg|arg==required),"missing {required}");
+        }
+        for denied in ["--disable-popup-blocking","--no-sandbox","--disable-web-security","--start-minimized"] {
+            assert!(!args.iter().any(|arg|arg==denied),"unexpected {denied}");
+        }
+    }
+}
+
 fn prepare_profile_directory_for_launch(
     config: &LaunchConfig,
     cleanup_debt_fenced: bool,
@@ -2412,8 +2423,25 @@ pub(crate) async fn launch_chrome_with_cleanup_profile(
     config: &LaunchConfig,
     force_headless: bool,
     cleanup_user_data_dir: Option<PathBuf>,
-    host_cleanup_lease: Option<crate::host::HostCleanupLease>,
+    host_cleanup_lease: Option<crate::cleanup::HostCleanupLease>,
 ) -> Result<Launched, BrowserError> {
+    launch_chrome_owned(config,force_headless,cleanup_user_data_dir,host_cleanup_lease,None,None).await
+}
+
+async fn launch_chrome_owned(
+    config: &LaunchConfig,
+    force_headless: bool,
+    cleanup_user_data_dir: Option<PathBuf>,
+    host_cleanup_lease: Option<crate::cleanup::HostCleanupLease>,
+    restricted_proxy: Option<std::net::SocketAddr>,
+    pending_directory: Option<tempfile::TempDir>,
+) -> Result<Launched, BrowserError> {
+    if !config.chrome_path.is_absolute() || !config.chrome_path.is_file() {
+        return Err(BrowserError::Unsupported {
+            capability: "browser_executable".into(),
+            hint: "An explicit absolute browser executable is required; PATH lookup and automatic browser supply are disabled.".into(),
+        });
+    }
     // This fence represents retained, repeatedly-unprovable cleanup debt only.
     // It is checked before creating or mutating a profile and is never held by
     // healthy live Hosts, so normal multi-task concurrency does not become a
@@ -2454,6 +2482,11 @@ pub(crate) async fn launch_chrome_with_cleanup_profile(
         first_ephemeral_cleanup,
         host_cleanup_lease.clone(),
     );
+    if let Some(directory) = pending_directory {
+        // From this synchronous point the exact launch guard, not TempDir's
+        // unconditional Drop, owns deletion after process-tree proof.
+        let _ = directory.keep();
+    }
 
     // **脏 profile 根治（keystone）**：上次 chrome 必被硬杀（kill_on_drop / Job Object / app 同步
     // exit），profile.exit_type 停在 "Crashed" → 下次启动弹「未正确关闭 / 恢复页面?」气泡 + 跑会话
@@ -2475,17 +2508,17 @@ pub(crate) async fn launch_chrome_with_cleanup_profile(
     )
     .map_err(|_| safe_profile_prepare_error())?;
 
-    #[cfg(debug_assertions)]
-    let mut args = build_chrome_args(&config.user_data_dir, force_headless);
-    #[cfg(not(debug_assertions))]
-    let args = build_chrome_args(&config.user_data_dir, force_headless);
+    let mut args = match restricted_proxy {
+        Some(proxy)=>headless_chrome_args(&config.user_data_dir,proxy),
+        None=>build_chrome_args(&config.user_data_dir, force_headless),
+    };
 
     // The environment escape hatch is compiled out of release builds.
     // Debug builds still use the exact allowlist above; arbitrary Chromium
     // switches must never be able to replace the managed profile or CDP
     // transport, load extensions, or weaken sandbox/security settings.
     #[cfg(debug_assertions)]
-    if let Ok(extra) = std::env::var("NOMI_CHROME_EXTRA_ARGS") {
+    if restricted_proxy.is_none() && let Ok(extra) = std::env::var("NOMI_CHROME_EXTRA_ARGS") {
         args.extend(filtered_extra_chrome_args(&extra));
     }
 
@@ -2497,7 +2530,7 @@ pub(crate) async fn launch_chrome_with_cleanup_profile(
     {
         match launch_chrome_ws(config, &args, first_attempt).await {
             Ok(v) => Ok(v),
-            Err(first) if should_retry_with_startup_page(&first, &args) => {
+            Err(first) if restricted_proxy.is_none() && should_retry_with_startup_page(&first, &args) => {
                 tracing::warn!(
                     target: "nomi_browser_engine::launch",
                     error = %first,
@@ -2791,6 +2824,17 @@ fn chrome_args_with_startup_page(args: &[String]) -> Vec<String> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn launch_requires_an_explicit_absolute_file_before_profile_creation() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = directory.path().join("profile-must-not-exist");
+        for chrome_path in [PathBuf::from("chrome"), directory.path().join("missing"), directory.path().to_path_buf()] {
+            let config = LaunchConfig { chrome_path, user_data_dir: profile.clone(), headful: false };
+            assert!(matches!(launch_chrome(&config, true).await, Err(BrowserError::Unsupported { .. })));
+            assert!(!profile.exists());
+        }
+    }
+
     fn isolated_cleanup_quarantine() -> &'static BrowserCleanupQuarantine {
         Box::leak(Box::new(BrowserCleanupQuarantine::new()))
     }
@@ -3053,38 +3097,38 @@ mod tests {
 
     #[test]
     fn dropped_host_cleanup_tickets_retain_structural_slots_until_exact_completion() {
-        let scope = crate::host::StandaloneResourceScope::new();
+        let capacity = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
         let mut cleanup_debts = Vec::new();
-        for _ in 0..crate::host::STANDALONE_MAX_LIVE_HOSTS_PER_SCOPE {
-            let lease = scope
-                .reserve_host()
+        for _ in 0..4 {
+            let lease = capacity.clone()
+                .try_acquire_owned()
                 .expect("repeated Host construction remains within the task cap");
-            // Models CdpHostRuntime::Drop after it has transferred process and
+            // Models an owner's Drop after it has transferred process and
             // profile authority. A permanently pending cleanup ticket must keep
             // the structural lease even though the runtime itself is gone.
             cleanup_debts.push(DroppedBrowserCleanupTicket::pending_with_host_lease(Some(
-                crate::host::HostCleanupLease::new(lease),
+                crate::cleanup::HostCleanupLease::new(lease),
             )));
         }
         assert!(
-            scope.reserve_host().is_err(),
+            capacity.clone().try_acquire_owned().is_err(),
             "the fifth Host must fail closed while four dropped Hosts remain cleanup-pending"
         );
         assert_eq!(
-            scope.counts().0,
-            crate::host::STANDALONE_MAX_LIVE_HOSTS_PER_SCOPE
+            capacity.available_permits(),
+            0
         );
 
         cleanup_debts[0].publish_complete();
-        let replacement = scope
-            .reserve_host()
+        let replacement = capacity.clone()
+            .try_acquire_owned()
             .expect("exact process/profile completion returns one Host slot");
         drop(replacement);
         for ticket in &cleanup_debts[1..] {
             ticket.publish_complete();
         }
         drop(cleanup_debts);
-        assert_eq!(scope.counts(), (0, 0, 0));
+        assert_eq!(capacity.available_permits(), 4);
     }
 
     #[test]
@@ -3098,7 +3142,7 @@ mod tests {
 
         let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let ticket = DroppedBrowserCleanupTicket::pending_with_host_lease(Some(
-            crate::host::HostCleanupLease::new(CountDrop(std::sync::Arc::clone(&drops))),
+            crate::cleanup::HostCleanupLease::new(CountDrop(std::sync::Arc::clone(&drops))),
         ));
         assert_eq!(drops.load(std::sync::atomic::Ordering::Acquire), 0);
         ticket.publish_complete();
@@ -3682,61 +3726,6 @@ mod tests {
     }
 
     #[test]
-    fn cache_limits_apply_to_every_exact_platform_managed_profile_shape() {
-        for profile in [
-            "/data/platform-profiles/primary/generation-1",
-            "/data/platform-profiles/anonymous/host-shared",
-            "/data/platform-profiles/replica/generation-1/host-one",
-            "/data/platform-profiles/isolated/host-one",
-        ] {
-            let args = build_chrome_args(Path::new(profile), true);
-            for expected in [
-                "--disk-cache-size=67108864",
-                "--media-cache-size=33554432",
-                "--disable-gpu-shader-disk-cache",
-            ] {
-                assert!(
-                    args.iter().any(|arg| arg == expected),
-                    "missing cache boundary for {profile}: {args:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn cache_limits_never_apply_to_standalone_or_malformed_profile_shapes() {
-        for profile in [
-            "/data/profile",
-            "/data/profiles/browser-1",
-            "/data/platform-profiles/primary/generation-",
-            "/data/platform-profiles/primary/generation-one",
-            "/data/platform-profiles/primary/generation-1/child",
-            "/data/platform-profiles/anonymous/not-a-host",
-            "/data/platform-profiles/anonymous/host-",
-            "/data/platform-profiles/replica/generation-1",
-            "/data/platform-profiles/replica/generation-one/host-one",
-            "/data/platform-profiles/isolated/not-a-host",
-            "/data/platform-profiles/isolated/host-one/..",
-        ] {
-            let args = build_chrome_args(Path::new(profile), true);
-            assert!(
-                !args.iter().any(|arg| arg.starts_with("--disk-cache-size=")),
-                "external or malformed profile received a disk-cache cap: {profile}"
-            );
-            assert!(
-                !args.iter().any(|arg| arg.starts_with("--media-cache-size=")),
-                "external or malformed profile received a media-cache cap: {profile}"
-            );
-            assert!(
-                !args
-                    .iter()
-                    .any(|arg| arg == "--disable-gpu-shader-disk-cache"),
-                "external or malformed profile had its shader cache disabled: {profile}"
-            );
-        }
-    }
-
-    #[test]
     fn extra_chrome_args_cannot_override_managed_profile_or_transport() {
         let managed_profile = Path::new("/managed/profile");
         let mut args = build_chrome_args(managed_profile, true);
@@ -3893,11 +3882,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let profile = temp.path().join("cancelled-uncommitted-launch");
         std::fs::create_dir_all(&profile).unwrap();
-        let scope = crate::host::StandaloneResourceScope::new();
-        let host_lease = crate::host::HostCleanupLease::new(
-            scope
-                .reserve_host()
-                .expect("standalone Host transaction slot"),
+        let capacity = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let host_lease = crate::cleanup::HostCleanupLease::new(
+            capacity.clone()
+                .try_acquire_owned()
+                .expect("caller-owned process transaction slot"),
         );
         let task_profile = profile.clone();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
@@ -3921,8 +3910,8 @@ mod tests {
 
         let pid = ready_rx.await.expect("guard reached pre-commit state");
         assert_eq!(
-            scope.counts().0,
-            1,
+            capacity.available_permits(),
+            0,
             "the structural Host slot is already inside the launch transaction after physical spawn"
         );
         task.abort();
@@ -3939,7 +3928,7 @@ mod tests {
                 );
                 if system.process(sysinfo::Pid::from_u32(pid)).is_none()
                     && !profile.exists()
-                    && scope.counts().0 == 0
+                    && capacity.available_permits() == 1
                 {
                     break;
                 }
@@ -4334,6 +4323,7 @@ mod tests {
         let profile = temp.path().join("private-profile-sentinel");
         std::fs::write(&profile, b"not a directory").unwrap();
         let chrome = temp.path().join("private-chrome-sentinel");
+        std::fs::write(&chrome, b"not an executable").unwrap();
         let config = LaunchConfig {
             chrome_path: chrome.clone(),
             user_data_dir: profile.clone(),
@@ -4344,6 +4334,7 @@ mod tests {
             Ok(_) => panic!("a regular file cannot be used as a browser profile"),
             Err(error) => error.to_string(),
         };
+        assert_eq!(error, safe_profile_prepare_error().to_string());
         assert!(!error.contains(&profile.display().to_string()));
         assert!(!error.contains(&chrome.display().to_string()));
         assert!(!error.contains("private-profile-sentinel"));
@@ -4355,6 +4346,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let profile = temp.path().join("private-profile-sentinel");
         let chrome = temp.path().join("private-chrome-sentinel");
+        std::fs::write(&chrome, b"not an executable").unwrap();
         let config = LaunchConfig {
             chrome_path: chrome.clone(),
             user_data_dir: profile.clone(),
@@ -4362,9 +4354,11 @@ mod tests {
         };
 
         let error = match launch_chrome(&config, true).await {
-            Ok(_) => panic!("a nonexistent Chromium executable cannot launch"),
+            Ok(_) => panic!("an invalid Chromium executable cannot launch"),
             Err(error) => error.to_string(),
         };
+        assert_eq!(error, safe_chromium_spawn_error().to_string());
+        assert!(profile.is_dir(), "the test must reach OS spawn after profile preparation");
         assert!(!error.contains(&profile.display().to_string()));
         assert!(!error.contains(&chrome.display().to_string()));
         assert!(!error.contains("private-profile-sentinel"));

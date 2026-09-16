@@ -1074,7 +1074,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
     case 'cron_trigger':
     case 'info': // Stream retry notifications and similar transient agent updates
     case 'system': // Cron system responses, ignored
-    case 'request_trace': // Request trace events, logged to F12 console (not persisted)
+    case 'request_trace': // Transient request traces are not persisted or rendered.
       return undefined;
     default: {
       console.warn(
