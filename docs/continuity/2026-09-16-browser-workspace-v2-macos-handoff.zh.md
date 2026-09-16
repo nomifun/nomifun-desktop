@@ -1,5 +1,8 @@
 # Browser Workspace v2：macOS 实施移交
 
+> 后续用户决策：macOS 使用独立 CEF 原生宿主，Windows 保留 WebView2；
+> [平台架构决策](2026-09-16-browser-platform-architecture-decision.zh.md)覆盖本文 WKWebView 实现要求。
+
 > 状态：Windows 完成后执行；本文不声称 macOS 已支持。
 >
 > 基线：`docs/specs/2026-09-13-browser-workspace-v2.zh.md` 与

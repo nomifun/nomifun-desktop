@@ -9,15 +9,22 @@ import type { BrowserLinkRequest } from './BrowserLinkContext';
 import { localBrowserLink } from './localBrowserLink';
 import WebsiteDialog from './WebsiteDialog';
 import { copyText } from '@/renderer/utils/ui/clipboard';
+import { isBackendHttpError } from '@/common/adapter/httpBridge';
 
 type Props = { conversationId: string; onClose: () => void; client?: BrowserClient; linkRequest?: BrowserLinkRequest; onLinkConsumed?: (id: number) => void };
+type BrowserFailureMessage = 'browserWorkspace.hostUnavailableHint' | 'browserWorkspace.requestFailed' | 'browserWorkspace.clearSiteDataFailed';
+
+function browserFailureMessage(reason: unknown): BrowserFailureMessage {
+  const code = isBackendHttpError(reason) ? reason.code : typeof reason === 'string' ? reason : '';
+  return code === 'BROWSER_NATIVE_SURFACE_UNAVAILABLE' ? 'browserWorkspace.hostUnavailableHint' : 'browserWorkspace.requestFailed';
+}
 
 export default function BrowserWorkspacePanel({ conversationId, onClose, client = browserClient, linkRequest, onLinkConsumed }: Props) {
   const { t } = useTranslation();
   const [snapshot, setSnapshot] = useState<BrowserSnapshot | null>(null);
   const [address, setAddress] = useState('');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<BrowserFailureMessage | ''>('');
   const [clearFailed, setClearFailed] = useState(false);
   const [retry, setRetry] = useState(0);
   const [draftTab, setDraftTab] = useState(false);
@@ -89,7 +96,7 @@ export default function BrowserWorkspacePanel({ conversationId, onClose, client 
       const issued = ++sequence;
       void client.update(attachment, issued, bounds, visible).catch(reason => {
         if (!disposed && issued === sequence) {
-          blocked.current = true; hide.current(); setError(String(reason));
+          blocked.current = true; hide.current(); setError(browserFailureMessage(reason));
         }
       });
     };
@@ -106,7 +113,7 @@ export default function BrowserWorkspacePanel({ conversationId, onClose, client 
           const id = await client.attach(conversationId, bounds, event => {
             if (disposed) return;
             if (event.kind === 'snapshot') setSnapshot(current => newerSnapshot(current, event.snapshot));
-            else { blocked.current = true; setError(event.code); hide.current(); }
+            else { blocked.current = true; setError(browserFailureMessage(event.code)); hide.current(); }
           });
           if (disposed) { await client.detach(id); return; }
           attachment = id;
@@ -116,7 +123,7 @@ export default function BrowserWorkspacePanel({ conversationId, onClose, client 
         if (bounds) lastBounds = bounds;
         send(lastBounds, Boolean(bounds) && !blocked.current && !draft.current && document.visibilityState !== 'hidden' && !obscured());
       } catch (reason) {
-        if (!disposed && issued === measurement) { blocked.current = true; hide.current(); setError(String(reason)); }
+        if (!disposed && issued === measurement) { blocked.current = true; hide.current(); setError(browserFailureMessage(reason)); }
       }
     };
     const schedule = () => {
@@ -143,7 +150,7 @@ export default function BrowserWorkspacePanel({ conversationId, onClose, client 
         setSnapshot(current => newerSnapshot(current, initial));
         initialized = true;
         schedule();
-      } catch (reason) { if (!disposed) setError(String(reason)); }
+      } catch (reason) { if (!disposed) setError(browserFailureMessage(reason)); }
     })();
     return () => {
       disposed = true;
@@ -176,9 +183,9 @@ export default function BrowserWorkspacePanel({ conversationId, onClose, client 
       else if (command.command === 'cancel_download') setNotice(t('browserWorkspace.downloadCancelFailed'));
       else if (command.command === 'open_external') setNotice(t('browserWorkspace.externalFailed'));
       else if (command.command === 'open_downloads') setNotice(t('browserWorkspace.openDownloadsFailed'));
-      else if (command.command === 'clear_site_data') { blocked.current = true; hide.current(); setClearFailed(true); setError(t('browserWorkspace.clearSiteDataFailed')); }
+      else if (command.command === 'clear_site_data') { blocked.current = true; hide.current(); setClearFailed(true); setError('browserWorkspace.clearSiteDataFailed'); }
       else if (fromLink) setNotice(t('browserWorkspace.linkFailed'));
-      else { blocked.current = true; hide.current(); setError(String(reason)); }
+      else { blocked.current = true; hide.current(); setError(browserFailureMessage(reason)); }
     } }
     finally { if (current()) setBusy(false); }
   }, [client, conversationId, controlsDisabled, t]);
@@ -320,7 +327,7 @@ export default function BrowserWorkspacePanel({ conversationId, onClose, client 
         <button type='button' className={styles.icon} aria-label={t('browserWorkspace.menu')} disabled={!snapshot?.runtime || busy || (locked && !snapshot.run.input_gate_failed)}>⋯</button>
       </Dropdown>
     </form>
-    <div className={styles.status} role='status'><span className={styles.dot} data-locked={locked} />{t(locked ? 'browserWorkspace.agentRunning' : 'browserWorkspace.userReady')}{locked && <span className={styles.hint}>{t('browserWorkspace.stopHint')}</span>}</div>
+    <div className={styles.status} role='status'><span className={styles.dot} data-locked={locked} />{t(error || snapshot?.run.input_gate_failed ? 'browserWorkspace.notReady' : !snapshot ? 'browserWorkspace.opening' : locked ? 'browserWorkspace.agentRunning' : 'browserWorkspace.userReady')}{locked && <span className={styles.hint}>{t('browserWorkspace.stopHint')}</span>}</div>
     {notice && <div className={styles.notice} role='status'><span>{notice}</span><button type='button' className={styles.icon} aria-label={t('browserWorkspace.dismissNotice')} onClick={() => setNotice('')}><Close size={12} /></button></div>}
     {!permission && active && Boolean(active.blocked_permissions?.length) && !locked && !draftTab && !error && <div className={styles.permission} role='status'>
       <span>{t('browserWorkspace.permissionRetryHint')}</span>
@@ -333,8 +340,8 @@ export default function BrowserWorkspacePanel({ conversationId, onClose, client 
     </div>}
     <div ref={slot} className={styles.surface} data-browser-surface>
       {dialog && !draftTab && !error && <WebsiteDialog key={`${conversationId}:${dialog.request_id}`} dialog={dialog} locked={Boolean(locked || snapshot?.run.input_gate_failed)} busy={busy} onReply={command => void run(command)} />}
-      {error ? <div className={styles.empty} role='alert'><Earth size={28} /><strong>{t('browserWorkspace.unavailable')}</strong><p>{error}</p><button type='button' onClick={() => clearFailed ? rebuild() : setRetry(value => value + 1)}>{t(clearFailed ? 'browserWorkspace.rebuild' : 'browserWorkspace.retry')}</button></div>
-        : (tabs.length === 0 || draftTab) && <div className={styles.empty}><Earth size={30} /><strong>{t('browserWorkspace.start')}</strong><p>{t('browserWorkspace.startHint')}</p></div>}
+      {error ? <div className={styles.empty} role='alert'><Earth size={28} /><strong>{t('browserWorkspace.unavailable')}</strong><p>{t(error)}</p>{error !== 'browserWorkspace.hostUnavailableHint' && <button type='button' onClick={() => clearFailed ? rebuild() : setRetry(value => value + 1)}>{t(clearFailed ? 'browserWorkspace.rebuild' : 'browserWorkspace.retry')}</button>}</div>
+        : snapshot && (tabs.length === 0 || draftTab) && <div className={styles.empty}><Earth size={30} /><strong>{t('browserWorkspace.start')}</strong><p>{t('browserWorkspace.startHint')}</p></div>}
     </div>
   </section>;
 }

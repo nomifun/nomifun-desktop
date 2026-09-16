@@ -1,0 +1,30 @@
+[package]
+name = "nomifun-browser-macos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# This native adapter is deliberately absent from the Windows dependency graph.
+# Windows continues to use the desktop's existing WebView2 host.
+[target.'cfg(target_os = "macos")'.dependencies]
+cef = { version = "=152.3.0", default-features = false, features = ["sandbox"] }
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSGraphicsContext", "NSTextInputClient"] }
+block2 = "0.6"
+dispatch2 = "0.3"
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+async-trait.workspace = true
+nomifun-browser-platform.workspace = true
+nomi-browser-engine.workspace = true
+url.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+tempfile.workspace = true
+
+[[bin]]
+name = "nomifun-browser-cef-helper"
+path = "src/helper.rs"

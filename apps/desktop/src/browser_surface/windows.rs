@@ -2,6 +2,8 @@
 //! These methods are host-only and are never registered as Tauri commands.
 
 use serde_json::Value;
+// Shared semantic algorithms use this type; Windows still owns a WebView2 view.
+pub(crate) type View = tauri::Webview;
 use std::{
     cell::RefCell,
     collections::{HashMap,HashSet},
@@ -707,3 +709,6 @@ mod tests {
         assert_eq!(event_string(PWSTR::null(), 256).as_deref(), Some(""));
     }
 }
+
+/// Used by shared task settlement before native tab destruction.
+pub(crate) async fn hide(view: &View) -> Result<(), String> { view.hide().map_err(|error| error.to_string()) }
