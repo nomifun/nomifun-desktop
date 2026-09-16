@@ -1,6 +1,7 @@
 import '../../../../test/setup-dom.ts';
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
-import { afterEach, describe, expect, test } from 'bun:test';
+import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import { ipcBridge } from '@/common';
 import { createInstance } from 'i18next';
 import { useState } from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
@@ -40,9 +41,61 @@ const inventory: AgentResourceInventory = {
 };
 
 const realFetch = globalThis.fetch;
-afterEach(() => { cleanup(); globalThis.fetch = realFetch; });
+const restores: (() => void)[] = [];
+beforeEach(() => {
+  for (const event of [ipcBridge.companion.onCompanionCreated, ipcBridge.companion.onCompanionDeleted]) {
+    const spy = spyOn(event, 'on').mockReturnValue(() => {});
+    restores.push(() => spy.mockRestore());
+  }
+});
+afterEach(() => { cleanup(); restores.splice(0).forEach((restore) => restore()); globalThis.fetch = realFetch; });
 
 describe('Agent resource picker', () => {
+  test('a pointer click opens the companion menu without native label activation closing it', async () => {
+    const loader = async () => inventory;
+    function Harness() {
+      const [value, setValue] = useState<AgentResourceSelectionValue>({});
+      return <><AgentResourcePicker requiredKinds={['companion']} capabilityIds={[]} value={value} onChange={setValue} loadInventory={loader} />
+        <output data-testid='selection'>{value.companion}</output></>;
+    }
+    const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><Harness /></MemoryRouter></I18nextProvider>);
+    const select = screen.getByRole('combobox', { name: 'Select Companion' });
+    await waitFor(() => expect(select.getAttribute('aria-disabled')).not.toBe('true'));
+    // Happy DOM's fireEvent does not implement the browser's native label
+    // activation. Reproduce Chromium's second click on the implicit control.
+    const target = select.querySelector('.arco-select-view-value-mirror')!;
+    const label = target.closest('label');
+    fireEvent.mouseDown(target);
+    fireEvent.mouseUp(target);
+    fireEvent.click(target);
+    if (label?.control) fireEvent.click(label.control);
+    // Arco closes via a deferred transition; wait past it before choosing.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 400)); });
+    expect(select.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(await screen.findByText('Mochi'));
+    await waitFor(() => expect(screen.getByTestId('selection').textContent).toBe('companion-1'));
+  });
+
+  test('keeps companion selection usable while optional MCP inventory is still loading', async () => {
+    let finishMcp!: (value: AgentResourceInventory) => void;
+    const mcp = new Promise<AgentResourceInventory>((resolve) => { finishMcp = resolve; });
+    const loader = async (kinds: readonly string[]) => kinds.includes('mcp_server') ? mcp : inventory;
+    function Harness() {
+      const [value, setValue] = useState<AgentResourceSelectionValue>({});
+      return <><AgentResourcePicker requiredKinds={['companion']} optionalKinds={['mcp_server', 'channel', 'robot']}
+        companionBindings capabilityIds={['mcp.connect', 'mcp.tool_proxy']} value={value} onChange={setValue} loadInventory={loader} />
+        <output data-testid='selection'>{value.companion}</output></>;
+    }
+    const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><Harness /></MemoryRouter></I18nextProvider>);
+    const select = screen.getByRole('combobox', { name: 'Select Companion' });
+    await waitFor(() => expect(select.getAttribute('aria-disabled')).not.toBe('true'));
+    fireEvent.click(select);
+    fireEvent.click(await screen.findByText('Mochi'));
+    await waitFor(() => expect(screen.getByTestId('selection').textContent).toBe('companion-1'));
+    expect(screen.getByText('Resources ready')).toBeTruthy();
+    await act(async () => { finishMcp({ options: { mcp_server: [] }, errors: {} }); });
+  });
+
   test('loads enabled Plugin products with surfaces through the runtime library contract', async () => {
     const calls: string[] = [];
     const plugin = {

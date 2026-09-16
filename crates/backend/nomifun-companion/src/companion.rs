@@ -461,6 +461,8 @@ mod workspace_apply_tests {
 /// Thread management over the real conversation domain. Every method is
 /// scoped to one companion — threads are owned, listed and activated per companion.
 pub struct CompanionThreads {
+    /// Serialize ensure across all entry points, including simultaneous first opens.
+    pub ensure_lock: tokio::sync::Mutex<()>,
     /// Canonical instance owner resolved from the user repository at startup.
     /// Companion conversations are host-control-plane resources and must never
     /// infer their owner from a username or a hard-coded database identifier.
@@ -743,6 +745,7 @@ impl CompanionThreads {
     /// requires the companion's `profile.model` to be configured (else BadRequest).
     /// `title` only applies when a brand-new thread is created.
     pub async fn create(&self, companion_id: &str, title: Option<String>) -> Result<CompanionThread, AppError> {
+        let _guard = self.ensure_lock.lock().await;
         let profile = self
             .registry
             .get(companion_id)

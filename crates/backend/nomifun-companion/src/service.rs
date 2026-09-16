@@ -462,6 +462,7 @@ impl CompanionService {
             }
         }
         let _ = self.companion.set(CompanionThreads {
+            ensure_lock: Mutex::new(()),
             authoritative_user_id: self.authoritative_user_id.clone(),
             store: self.store.clone(),
             config: self.config.clone(),

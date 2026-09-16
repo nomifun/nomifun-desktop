@@ -352,10 +352,6 @@
         {
           "id": "mcp.tool_proxy",
           "version": "1.0.0"
-        },
-        {
-          "id": "mcp.resource",
-          "version": "1.0.0"
         }
       ],
       "skill_bindings": [],
@@ -600,7 +596,6 @@
         "knowledge.read",
         "knowledge.search",
         "mcp.connect",
-        "mcp.resource",
         "mcp.tool_proxy",
         "memory.companion.evolve",
         "memory.companion.merge",

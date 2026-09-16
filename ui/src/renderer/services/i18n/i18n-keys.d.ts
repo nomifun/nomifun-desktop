@@ -282,6 +282,7 @@ export type I18nKey =
   | 'agentSettings.providers.title'
   | 'agentSettings.resources.bindingPolicyBody'
   | 'agentSettings.resources.bindingPolicyTitle'
+  | 'agentSettings.resources.companionBindingHint'
   | 'agentSettings.resources.configure'
   | 'agentSettings.resources.dependencyHint'
   | 'agentSettings.resources.emptyOptions'

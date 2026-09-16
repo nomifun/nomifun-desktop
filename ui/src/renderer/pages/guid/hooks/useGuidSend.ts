@@ -35,6 +35,7 @@ import { TEMPLATE_I18N_PATH } from '../../agentSettings/model';
 import { officialAgentLaunchError, prepareOfficialAgent } from './officialAgentLaunch';
 import type { GuidCollaborationConfig } from './useGuidCollaboration';
 import { creationDraftStorageKey, emptyCreationDraft } from '@/renderer/creation/useCreationDraft';
+import { prepareCompanionConversation, sendCompanionLaunchMessage } from './companionLaunch';
 
 export type GuidSendDeps = {
   input: string;
@@ -110,8 +111,19 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
   } = deps;
   const sendingRef = useRef(false);
   const selectedWorkspace = workspaceEnabled ? dir : '';
+  const isCompanion = selection.kind === 'template' && selection.templateKey === 'companion.default';
 
   const handleSend = useCallback(async (entry: 'message' | 'browser' = 'message') => {
+    if (isCompanion) {
+      if (!resourceResolutionReady) throw new Error('RESOURCE_SELECTION_REQUIRED');
+      const conversation = await prepareCompanionConversation(resourceSelections, current_model);
+      if (entry === 'message') await sendCompanionLaunchMessage(conversation.id, input, files);
+      seedConversationCache(conversation);
+      emitter.emit('chat.history.refresh');
+      if (entry === 'browser') sessionStorage.setItem(sessionStorageKey('initial-browser-open', conversationTarget(conversation.id)), 'true');
+      await navigate(`/conversation/${conversation.id}`);
+      return;
+    }
     const entryPlan = entry === 'browser'
       ? { sendInitialMessage: false, conversationName: t('browserWorkspace.title') }
       : planGuidEntry(input, autoWork);
@@ -219,6 +231,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     }
     await navigate(`/conversation/${conversationId}`);
   }, [
+    isCompanion,
     applyAdvancedConfig,
     autoWork,
     current_model,
@@ -239,7 +252,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
   const launch = useCallback((entry: 'message' | 'browser') => {
     if (loading || sendingRef.current) return;
     if (!resourceResolutionReady) return;
-    if (!current_model) {
+    if (!current_model && !isCompanion) {
       Message.warning(t('conversation.noModelConfigured'));
       return;
     }
@@ -267,7 +280,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
 
     handleSend(entry)
       .then(() => {
-        if (entry === 'browser') return;
+        if (entry !== 'message') return;
         setInput('');
         setMentionOpen(false);
         setMentionQuery(null);
@@ -286,6 +299,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         if (entry === 'message') endPending?.();
       });
   }, [
+    isCompanion,
     autoWork,
     beginPending,
     endPending,
@@ -319,7 +333,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
           selectedPreset.preset_id === selection.presetId &&
           resourceResolutionReady
       );
-  const hasLaunchTarget = hasAgentLaunchTarget && Boolean(current_model);
+  const hasLaunchTarget = hasAgentLaunchTarget && (isCompanion || Boolean(current_model));
   const isButtonDisabled = loading || !input.trim() || !hasLaunchTarget;
   const sendMessageHandler = useCallback(() => launch('message'), [launch]);
   const openBrowserHandler = useCallback(() => launch('browser'), [launch]);

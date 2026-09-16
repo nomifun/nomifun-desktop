@@ -202,6 +202,7 @@
     "requiredAtUse": "使用时需要",
     "pickerTitle": "选择本次使用的资源",
     "pickerHint": "只选择产品中的实际资源；权限、路径、凭据和运行参数由系统安全解析。",
+    "companionBindingHint": "与侧边栏共用这位伙伴的聊天记录和设置。渠道、机器人和 MCP 可选；发送消息或进入会话浏览器后，绑定同步到管理伙伴。",
     "ready": "资源已就绪",
     "missingCount": "还需选择 {{count}} 项",
     "selectPlaceholder": "请选择{{resource}}",

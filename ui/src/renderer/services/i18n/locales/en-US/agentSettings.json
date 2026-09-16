@@ -202,6 +202,7 @@
     "requiredAtUse": "Required when used",
     "pickerTitle": "Choose resources for this run",
     "pickerHint": "Choose actual product resources only. The system securely resolves permissions, paths, credentials and runtime parameters.",
+    "companionBindingHint": "Use this companion's shared conversation and settings. Channel, robot and MCP are optional; sending a message or entering the conversation browser saves these bindings to companion management.",
     "ready": "Resources ready",
     "missingCount": "{{count}} selections required",
     "selectPlaceholder": "Select {{resource}}",
