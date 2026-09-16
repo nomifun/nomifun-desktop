@@ -267,11 +267,26 @@ pub(crate) fn factory(
             if full_plan.len() > 128 { return Err(error("Nomi tool surface exceeds 128 actions")); }
             let skills = session_host.read_selected_skills(&admitted).await?;
             let tools = Arc::new(JoinedTools(resources.install_tools(full_plan.clone(), Arc::new(CodingToolObservation))?));
+            let build = CodingEngineBuild {
+                build_id: binding.build_id.clone().into(),
+                build_digest: binding.build_digest.clone().into(),
+            };
+            let engine = Arc::new(CodingEngine::new(build).map_err(error)?
+                .with_context_budget(CodingContextBudget { max_context_bytes: 12 * 1024 * 1024, ..Default::default() }).map_err(error)?);
+            let engine_binding = EngineBinding::new(
+                session_id,
+                RuntimeBindingId::from(format!("conversation-runtime:{}", options.conversation_id)),
+                binding.build_id.clone().into(),
+                binding.build_digest.clone().into(),
+                compiled.snapshot_ref().clone(),
+            )
+            .map_err(error)?;
             let host = Arc::new_cyclic(|weak| ConversationCodingHost {
                 session_host,
                 pool,
                 options: options.clone(),
                 binding: binding.clone(),
+                engine_binding: engine_binding.clone(),
                 snapshot_ref: compiled.snapshot_ref().clone(),
                 route,
                 primary_image_input,
@@ -285,24 +300,11 @@ pub(crate) fn factory(
                 principal,
                 capability_state: active,
                 active: tokio::sync::Mutex::new(None),
+                last_terminal_root: std::sync::Mutex::new(None),
                 tools: tools.clone(),
                 resources,
             });
             let model = host.session_host.compose_model_port(host.clone())?;
-            let build = CodingEngineBuild {
-                build_id: binding.build_id.clone().into(),
-                build_digest: binding.build_digest.clone().into(),
-            };
-            let engine = Arc::new(CodingEngine::new(build).map_err(error)?
-                .with_context_budget(CodingContextBudget { max_context_bytes: 12 * 1024 * 1024, ..Default::default() }).map_err(error)?);
-            let engine_binding = EngineBinding::new(
-                session_id,
-                RuntimeBindingId::from(format!("conversation-runtime:{}", options.conversation_id)),
-                binding.build_id.into(),
-                binding.build_digest.into(),
-                compiled.snapshot_ref().clone(),
-            )
-            .map_err(error)?;
             let runtime =
                 CodingAgentRuntime::new(&options, engine, engine_binding, model, tools, host)?;
             Ok(Arc::new(runtime) as Arc<dyn nomifun_ai_agent::RegisteredAgentRuntime>)
@@ -318,6 +320,7 @@ struct ActiveTurn {
     epoch: i64,
     journal: super::engine_journal::EngineTurnJournal,
     cleanup_started: bool,
+    cleanup_proven: bool,
     cancellation: CancellationToken,
     event_buffer: super::coding_event_buffer::CodingEventBuffer,
 }
@@ -327,6 +330,7 @@ struct ConversationCodingHost {
     pool: SqlitePool,
     options: AgentRuntimeBuildOptions,
     binding: RuntimeEngineBinding,
+    engine_binding: EngineBinding,
     snapshot_ref: ResolvedSnapshotRef,
     route: ChatRouteSelection,
     primary_image_input: bool,
@@ -340,11 +344,68 @@ struct ConversationCodingHost {
     principal: PrincipalRef,
     capability_state: Arc<SessionCapabilityState>,
     active: tokio::sync::Mutex<Option<ActiveTurn>>,
+    last_terminal_root: std::sync::Mutex<Option<String>>,
     tools: Arc<JoinedTools>,
     resources: Arc<super::engine_kernel_session::EngineKernelSession>,
 }
 
 impl ConversationCodingHost {
+    fn root<'a>(&self, message: &'a SendMessageData) -> &'a str {
+        message
+            .source_message_id
+            .as_deref()
+            .unwrap_or(&message.msg_id)
+    }
+
+    fn terminal_already_recorded(&self, root: &str) -> Result<bool, AppError> {
+        self.last_terminal_root
+            .lock()
+            .map(|last| last.as_deref() == Some(root))
+            .map_err(|_| error("terminal root state poisoned"))
+    }
+
+    /// Acquire the canonical receipt/journal and publish in-memory ownership
+    /// before opening any resource or doing further awaited preparation. If a
+    /// later preparation step fails or is cancelled, cleanup still has the
+    /// exact root needed to settle resources and append a terminal.
+    async fn admit_preparation(
+        &self,
+        message: &SendMessageData,
+        cancellation: CancellationToken,
+    ) -> Result<super::engine_session_host::EngineTurnReceipt, AppError> {
+        let root = self.root(message);
+        let admitted = self.session_host.read_turn_receipt(
+            &self.options,
+            &self.binding,
+            &self.snapshot_ref,
+            message,
+        ).await?;
+        let operation = admitted.operation_id().to_owned();
+        let epoch = admitted.admission_epoch();
+        let journal = self.session_host.open_journal(&admitted, cancellation.clone())?;
+        let mut active = self.active.lock().await;
+        if active.is_some() {
+            return Err(error("previous turn has not reached its recorded terminal"));
+        }
+        *active = Some(ActiveTurn {
+            root: root.into(),
+            wire_id: message.msg_id.clone(),
+            steering: Default::default(),
+            operation,
+            epoch,
+            journal: journal.clone(),
+            cleanup_started: false,
+            cleanup_proven: false,
+            cancellation,
+            event_buffer: Default::default(),
+        });
+        drop(active);
+        // EngineKernelSession retains its own partial-open state before any
+        // owner can fail, so leaving ActiveTurn installed is intentional.
+        self.resources.open_turn(&admitted, journal)?;
+        Ok(admitted)
+    }
+
     async fn append_record(
         &self,
         root: &str,
@@ -360,7 +421,13 @@ impl ConversationCodingHost {
             return Err(error("event root mismatch"));
         }
         self.append_locked_record(turn, payload, model_operation, terminal).await?;
-        if terminal { *active = None; }
+        if terminal {
+            *self
+                .last_terminal_root
+                .lock()
+                .map_err(|_| error("terminal root state poisoned"))? = Some(root.to_owned());
+            *active = None;
+        }
         Ok(())
     }
 
@@ -405,7 +472,7 @@ impl CodingRuntimeHost for ConversationCodingHost {
             .source_message_id
             .as_deref()
             .unwrap_or(&message.msg_id);
-        let admitted = self.session_host.read_turn_receipt(&self.options, &self.binding, &self.snapshot_ref, message).await?;
+        let admitted = self.admit_preparation(message, cancellation.clone()).await?;
         let patch_recovery = super::coding_patch_recovery::load(&self.pool, &admitted, &self.snapshot_ref).await?;
         // Refresh platform facts each turn. Unknown-limit fallback and output
         // reservation are explicit runtime policies, not platform defaults.
@@ -415,25 +482,6 @@ impl CodingRuntimeHost for ConversationCodingHost {
         }).ok_or_else(|| error("model limits cannot support Nomi context policy"))?;
         let model_budget = CodingModelBudget::from_limits(Some(context), Some(output)).map_err(error)?;
         let operation = admitted.operation_id().to_owned();
-        let epoch = admitted.admission_epoch();
-        let journal = self.session_host.open_journal(&admitted, cancellation.clone())?;
-        let mut active = self.active.lock().await;
-        if active.is_some() {
-            return Err(error("previous turn has not reached its recorded terminal"));
-        }
-        self.resources.open_turn(&admitted, journal.clone())?;
-        *active = Some(ActiveTurn {
-            root: root.into(),
-            wire_id: message.msg_id.clone(),
-            steering: Default::default(),
-            operation: operation.clone(),
-            epoch,
-            journal,
-            cleanup_started: false,
-            cancellation: cancellation.clone(),
-            event_buffer: Default::default(),
-        });
-        drop(active);
         let response = admitted.session().session();
         let receipt = admitted.request_payload();
         self.skills.validate_extra(&response.extra)?;
@@ -554,6 +602,24 @@ impl CodingRuntimeHost for ConversationCodingHost {
         message: &SendMessageData,
         event: &CodingEngineEvent,
     ) -> Result<(), AppError> {
+        let terminal_event = matches!(
+            event,
+            CodingEngineEvent::TurnCompleted { .. }
+                | CodingEngineEvent::TurnCancelled { .. }
+                | CodingEngineEvent::TurnFailed { .. }
+        );
+        let root = self.root(message);
+        if terminal_event && self.active.lock().await.is_none() {
+            // No canonical receipt could be re-resolved during cleanup. No
+            // Runtime resource was opened, but the Hosted SDK still requires
+            // one explicit terminal acknowledgement instead of quarantining
+            // the transport for a missing in-memory ActiveTurn.
+            *self
+                .last_terminal_root
+                .lock()
+                .map_err(|_| error("terminal root state poisoned"))? = Some(root.to_owned());
+            return Ok(());
+        }
         if matches!(event, CodingEngineEvent::CapabilitiesActivated { .. } | CodingEngineEvent::TurnInputScope { .. } | CodingEngineEvent::SteeringInputs { .. } | CodingEngineEvent::SteeringDeferred { .. }) {
             return Err(error("control records must be committed by the platform owner"));
         }
@@ -568,6 +634,9 @@ impl CodingRuntimeHost for ConversationCodingHost {
             let turn = active.as_mut().ok_or_else(|| error("event without admitted turn"))?;
             if turn.root != message.source_message_id.as_deref().unwrap_or(&message.msg_id) {
                 return Err(error("event root differs from admitted turn"));
+            }
+            if terminal_event && !turn.cleanup_proven {
+                return Err(error("terminal requires the durable cleanup witness"));
             }
             turn.event_buffer.project(event)
         };
@@ -614,9 +683,56 @@ impl CodingRuntimeHost for ConversationCodingHost {
     }
 
     async fn cleanup_turn(&self, message: &SendMessageData) -> Result<(), AppError> {
+        let root = self.root(message);
+        if self.terminal_already_recorded(root)? {
+            return Ok(());
+        }
+        if self.active.lock().await.is_none() {
+            // The shared SDK may select cancellation before polling run_turn.
+            // Re-resolve the already accepted root so cleanup/terminal still
+            // use canonical authority. Failure means no Runtime-owned resource
+            // could have been opened, so cleanup remains an idempotent no-op.
+            let _ = self
+                .admit_preparation(message, CancellationToken::new())
+                .await;
+        }
+        {
+            let mut active = self.active.lock().await;
+            let Some(turn) = active.as_mut() else {
+                return Ok(());
+            };
+            if turn.root != root {
+                return Err(error("cleanup targets a different accepted root"));
+            }
+            if turn.journal.sequence() == 0 {
+                let started = serde_json::to_string(&CodingEngineEvent::TurnStarted {
+                    binding: self.engine_binding.clone(),
+                    turn_operation_id: turn.operation.clone().into(),
+                })
+                .map_err(error)?;
+                self.append_locked_record(
+                    turn,
+                    started,
+                    None,
+                    false,
+                )
+                .await?;
+                let input_scope = serde_json::to_string(&CodingEngineEvent::TurnInputScope {
+                    wire_turn_id: turn.wire_id.clone(),
+                })
+                .map_err(error)?;
+                self.append_locked_record(
+                    turn,
+                    input_scope,
+                    None,
+                    false,
+                )
+                .await?;
+            }
+        }
         // Always attempt owned-effect cleanup even if inbox journaling fails.
         let steering = nomifun_ai_agent::engine_effect_scope::guard_effect_settlement(|| self.close_steering()).await;
-        self.resources.cleanup_turn(message.source_message_id.as_deref().unwrap_or(&message.msg_id)).await?;
+        self.resources.cleanup_turn(root).await?;
         steering?;
         // Persist the last partial response before the cleanup witness, so a
         // crash between cleanup and terminal publication retains its text.
@@ -631,13 +747,17 @@ impl CodingRuntimeHost for ConversationCodingHost {
         }
         // Joined tool tasks have already persisted every settlement before this cleanup witness.
         self.tools.discard_closed_observations()?;
-        let (epoch, operation) = {
-            let active = self.active.lock().await;
-            let turn = active.as_ref().ok_or_else(|| error("cleanup has no active turn authority"))?;
-            (turn.epoch, turn.operation.clone())
-        };
-        self.append_record(message.source_message_id.as_deref().unwrap_or(&message.msg_id),
-            serde_json::json!({"event":"host_cleanup_proven", "binding":self.binding, "epoch":epoch, "operation":operation}).to_string(), None, false).await?;
+        let mut active = self.active.lock().await;
+        let turn = active
+            .as_mut()
+            .ok_or_else(|| error("cleanup lost its active turn authority"))?;
+        if turn.cleanup_proven {
+            return Ok(());
+        }
+        let payload = serde_json::json!({"event":"host_cleanup_proven", "binding":self.binding,
+            "epoch":turn.epoch, "operation":turn.operation}).to_string();
+        self.append_locked_record(turn, payload, None, false).await?;
+        turn.cleanup_proven = true;
         Ok(())
     }
     async fn cleanup_session(&self) -> Result<(), AppError> {

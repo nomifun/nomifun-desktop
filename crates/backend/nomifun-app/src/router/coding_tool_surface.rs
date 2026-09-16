@@ -1,7 +1,7 @@
 //! Projection of selected, exact Snapshot contributions into Nomi tools.
 //! No global catalog discovery and no executable/runtime loading occurs here.
 use nomifun_agent_contracts::{
-    ActionId, CapabilityId, CapabilityKind, ContributionSourceKind, ToolPresentationKind,
+    ActionId, CapabilityId, CapabilityManifest, ContributionSourceKind, ToolPresentationKind,
 };
 use nomifun_agent_kernel::{ActiveCapabilitySetSnapshot, CompiledSnapshot, MaterializedRegistry};
 use nomifun_ai_agent::NomiPluginToolSchemaResolver;
@@ -122,9 +122,7 @@ pub(super) async fn compile(
         let policy = snapshot
             .policy(&selected.capability.id)
             .ok_or_else(|| error("selected Plugin capability has no authority policy"))?;
-        if capability.manifest.kind != CapabilityKind::Tool
-            || capability.manifest.contributions.actions.is_empty()
-        {
+        if capability.manifest.contributions.actions.is_empty() {
             return Err(error(format!(
                 "{} has no function-tool action; Nomi has not admitted its lifecycle",
                 selected.capability.id.as_ref()
@@ -136,15 +134,7 @@ pub(super) async fn compile(
             return Err(error("Plugin tool description exceeds context bounds"));
         }
         let start = exposures.len();
-        for action in &capability.manifest.contributions.actions {
-            if !policy.allowed_actions.contains(&action.action_id)
-                || matches!(
-                    action.presentation,
-                    ToolPresentationKind::Hidden | ToolPresentationKind::CodeMode
-                )
-            {
-                continue;
-            }
+        for action in admitted_plugin_actions(&capability.manifest, &policy.allowed_actions) {
             let schema = plugin_schemas
                 .resolve(selected, &action.input_schema)
                 .await
@@ -179,6 +169,19 @@ pub(super) async fn compile(
         ));
     }
     compile_coding_tool_plan(snapshot, active, registry, exposures).map_err(error)
+}
+
+fn admitted_plugin_actions<'a>(
+    manifest: &'a CapabilityManifest,
+    allowed_actions: &'a std::collections::BTreeSet<ActionId>,
+) -> impl Iterator<Item = &'a nomifun_agent_contracts::CapabilityActionDescriptor> + 'a {
+    manifest.contributions.actions.iter().filter(|action| {
+        allowed_actions.contains(&action.action_id)
+            && !matches!(
+                action.presentation,
+                ToolPresentationKind::Hidden | ToolPresentationKind::CodeMode
+            )
+    })
 }
 
 fn retain_exact_platform_actions(
@@ -228,6 +231,13 @@ pub(super) fn validate_session_mcp(
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
+    use nomifun_agent_contracts::{
+        CapabilityActionDescriptor, CapabilityConsumer, CapabilityContributions, CapabilityKind,
+        EffectClass, LocalizedMetadata, PackageRef, PlatformConstraint, StrictJsonValue,
+        capability_surface_declarations,
+    };
+    use serde_json::json;
+
     use super::*;
 
     #[test]
@@ -247,5 +257,61 @@ mod tests {
         assert_eq!(exposures[0].capability_id, module);
         assert_eq!(exposures[0].action_id.as_ref(), "workspace.files/read");
         assert_eq!(exposures[0].definition.name, "read_file");
+    }
+
+    #[test]
+    fn display_kind_does_not_change_an_exact_plugin_action_grant() {
+        let action_id = ActionId::from("mixed.module/run");
+        let mut manifest = CapabilityManifest {
+            id: CapabilityId::from("mixed.module"),
+            contribution_id: "capability:mixed.module".into(),
+            version: "1.0.0".into(),
+            kind: CapabilityKind::Tool,
+            package: PackageRef {
+                id: "fixture.package".into(),
+                version: "1.0.0".into(),
+            },
+            display: LocalizedMetadata {
+                name: "Mixed".into(),
+                description: "Action plus Context/Event contributions".into(),
+                localized_names: BTreeMap::new(),
+                localized_descriptions: BTreeMap::new(),
+            },
+            requires: Vec::new(),
+            conflicts: Vec::new(),
+            supported_surfaces: capability_surface_declarations(
+                ["desktop"],
+                [CapabilityConsumer::Agent],
+            ),
+            requires_runtime_features: Vec::new(),
+            supported_platforms: vec![PlatformConstraint::Any],
+            config_schema: StrictJsonValue(json!({"type":"object"})),
+            contributions: CapabilityContributions {
+                actions: vec![CapabilityActionDescriptor {
+                    action_id: action_id.clone(),
+                    input_schema: "schema://mixed/run/input@1".into(),
+                    output_schema: "schema://mixed/run/output@1".into(),
+                    effect_class: EffectClass::Pure,
+                    presentation: ToolPresentationKind::FunctionTool,
+                }],
+                context_schema_refs: vec!["schema://mixed/context@1".into()],
+                event_schema_refs: vec!["schema://mixed/event@1".into()],
+                ..Default::default()
+            },
+        };
+        let allowed = BTreeSet::from([action_id.clone()]);
+        for kind in [
+            CapabilityKind::Tool,
+            CapabilityKind::ContextContributor,
+            CapabilityKind::EventSource,
+        ] {
+            manifest.kind = kind;
+            assert_eq!(
+                admitted_plugin_actions(&manifest, &allowed)
+                    .map(|action| action.action_id.clone())
+                    .collect::<Vec<_>>(),
+                vec![action_id.clone()],
+            );
+        }
     }
 }
