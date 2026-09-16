@@ -16,7 +16,8 @@ use std::sync::Arc;
 
 use nomifun_agent_contracts::{
     ActionId, AgentSessionId, ArtifactEnvelope, CapabilityActionDescriptor,
-    CapabilityConsumer, CapabilityContributions, CapabilityId, CapabilityKind,
+    CapabilityAuthoringPolicy, CapabilityConsumer, CapabilityContributions, CapabilityId,
+    CapabilityKind,
     CapabilityManifest, CapabilityRef,
     CanonicalErrorCode, CanonicalSchemaRef, CancellationDescriptor,
     CorrelationId, DeclaredServiceViewDescriptor, EffectClass, ExactRoleContractRef,
@@ -35,7 +36,7 @@ use nomifun_agent_contracts::{
     StrictJsonValue,
     ToolPresentationKind, TypedResourceBindings, ValidatedPluginConfig, VersionString,
     CAPABILITY_UNAVAILABLE_ON_PLATFORM, PRESET_RESOURCE_NOT_BOUND, RESOURCE_OWNER_MISMATCH,
-    capability_surface_declarations, digest_payload,
+    capability_module_surface_declarations, capability_surface_declarations, digest_payload,
 };
 use nomifun_agent_kernel::{
     CapabilityContextContributionFactory, CapabilityContextContributionRequest,
@@ -82,7 +83,6 @@ pub const WORKSPACE_FILES_ACTION_IDS: &[&str] = &[
     "workspace.files/write",
     "workspace.files/patch",
     "workspace.files/delete",
-    "workspace.files/watch",
 ];
 pub const WORKSPACE_VCS_ACTION_IDS: &[&str] = &[
     "workspace.vcs/status",
@@ -289,6 +289,10 @@ pub struct Wave2HostContext {
     /// infer identity from input payloads or resource IDs.
     pub principal: PrincipalRef,
     pub agent_session_id: AgentSessionId,
+    /// Canonical parent Turn whose durable Agent Effect ledger owns this
+    /// invocation. Hosts must not derive this identity from the operation or
+    /// from model-visible input.
+    pub turn_id: OperationId,
     pub operation_id: OperationId,
     pub idempotency_key: IdempotencyKey,
     pub correlation_id: CorrelationId,
@@ -335,7 +339,6 @@ pub enum Wave2TypedCapabilityOperation {
     WorkspaceFileWrite { input: StrictJsonValue },
     WorkspaceFilePatch { input: StrictJsonValue },
     WorkspaceFileDelete { input: StrictJsonValue },
-    WorkspaceFileWatch { input: StrictJsonValue },
     WorkspaceVcsStatus { input: StrictJsonValue },
     WorkspaceVcsDiff { input: StrictJsonValue },
     WorkspaceVcsStage { input: StrictJsonValue },
@@ -371,8 +374,7 @@ impl Wave2TypedCapabilityOperation {
             | Self::WorkspaceFileSearch { .. }
             | Self::WorkspaceFileWrite { .. }
             | Self::WorkspaceFilePatch { .. }
-            | Self::WorkspaceFileDelete { .. }
-            | Self::WorkspaceFileWatch { .. } => WORKSPACE_FILES_MODULE_ID,
+            | Self::WorkspaceFileDelete { .. } => WORKSPACE_FILES_MODULE_ID,
             Self::WorkspaceVcsStatus { .. }
             | Self::WorkspaceVcsDiff { .. }
             | Self::WorkspaceVcsStage { .. }
@@ -409,7 +411,6 @@ impl Wave2TypedCapabilityOperation {
             Self::WorkspaceFileWrite { .. } => "workspace.files/write",
             Self::WorkspaceFilePatch { .. } => "workspace.files/patch",
             Self::WorkspaceFileDelete { .. } => "workspace.files/delete",
-            Self::WorkspaceFileWatch { .. } => "workspace.files/watch",
             Self::WorkspaceVcsStatus { .. } => "workspace.vcs/status",
             Self::WorkspaceVcsDiff { .. } => "workspace.vcs/diff",
             Self::WorkspaceVcsStage { .. } => "workspace.vcs/stage",
@@ -446,7 +447,6 @@ impl Wave2TypedCapabilityOperation {
             | Self::WorkspaceFileWrite { input }
             | Self::WorkspaceFilePatch { input }
             | Self::WorkspaceFileDelete { input }
-            | Self::WorkspaceFileWatch { input }
             | Self::WorkspaceVcsStatus { input }
             | Self::WorkspaceVcsDiff { input }
             | Self::WorkspaceVcsStage { input }
@@ -1179,7 +1179,6 @@ const WORKSPACE_FILES_ACTIONS: &[ActionDefinition] = &[
     ActionDefinition::function("workspace.files/write", EffectClass::WriteDurable),
     ActionDefinition::function("workspace.files/patch", EffectClass::WriteReversible),
     ActionDefinition::function("workspace.files/delete", EffectClass::Destructive),
-    ActionDefinition::function("workspace.files/watch", EffectClass::ReadLocal),
 ];
 
 const WORKSPACE_VCS_ACTIONS: &[ActionDefinition] = &[
@@ -1717,10 +1716,18 @@ fn build_capability(
         },
         requires: Vec::new(),
         conflicts: Vec::new(),
-        supported_surfaces: capability_surface_declarations(
-            supported_surfaces.iter().copied(),
-            supported_consumers(definition.id),
-        ),
+        supported_surfaces: if definition.module_actions.is_empty() {
+            capability_surface_declarations(
+                supported_surfaces.iter().copied(),
+                supported_consumers(definition.id),
+            )
+        } else {
+            capability_module_surface_declarations(
+                supported_surfaces.iter().copied(),
+                supported_consumers(definition.id),
+                CapabilityAuthoringPolicy::Direct,
+            )
+        },
         requires_runtime_features: Vec::new(),
         supported_platforms,
         config_schema: object_schema(),
@@ -1956,6 +1963,7 @@ impl CapabilityHandler for Wave2CapabilityHandler {
                     context: Wave2HostContext {
                         principal: context.principal,
                         agent_session_id: context.agent_session_id,
+                        turn_id: context.turn_id,
                         operation_id: context.operation_id,
                         idempotency_key: context.idempotency_key,
                         correlation_id: context.correlation_id,
@@ -2026,9 +2034,6 @@ pub fn typed_operation_for(
         }
         (WORKSPACE_FILES_MODULE_ID, "workspace.files/delete") => {
             Wave2TypedCapabilityOperation::WorkspaceFileDelete { input }
-        }
-        (WORKSPACE_FILES_MODULE_ID, "workspace.files/watch") => {
-            Wave2TypedCapabilityOperation::WorkspaceFileWatch { input }
         }
         (WORKSPACE_VCS_MODULE_ID, "workspace.vcs/status") => {
             Wave2TypedCapabilityOperation::WorkspaceVcsStatus { input }
@@ -2144,7 +2149,7 @@ pub fn required_action_resource_operation(
     action_id: &ActionId,
 ) -> Option<&'static str> {
     match (capability_id.as_ref(), action_id.as_ref()) {
-        (WORKSPACE_FILES_MODULE_ID, "workspace.files/read" | "workspace.files/search" | "workspace.files/watch")
+        (WORKSPACE_FILES_MODULE_ID, "workspace.files/read" | "workspace.files/search")
         | (WORKSPACE_VCS_MODULE_ID, "workspace.vcs/status" | "workspace.vcs/diff")
         | (WORKSPACE_ARTIFACTS_MODULE_ID, "workspace.artifacts/read") => Some("read"),
         (WORKSPACE_FILES_MODULE_ID, "workspace.files/write" | "workspace.files/patch" | "workspace.files/delete")
@@ -3031,6 +3036,7 @@ mod tests {
                 principal: principal.clone(),
                 session_owner: principal,
                 agent_session_id: AgentSessionId::from("wave2-state-session"),
+                turn_id: OperationId::from("wave2-state-turn"),
                 operation_id: OperationId::from("wave2-state-operation"),
                 idempotency_key: IdempotencyKey::from("wave2-state-idempotency"),
                 correlation_id: CorrelationId::from("wave2-state-correlation"),
@@ -3234,6 +3240,18 @@ mod tests {
                 1,
                 "each workspace Module requires one typed owner resource"
             );
+            let mut presentation_only_kind = module.clone();
+            presentation_only_kind.kind = CapabilityKind::ContextContributor;
+            assert_eq!(
+                presentation_only_kind.authoring_policy().unwrap(),
+                CapabilityAuthoringPolicy::Direct,
+                "explicit Module authoring policy must not be inferred from display kind"
+            );
+            assert_eq!(
+                presentation_only_kind.contributions.actions,
+                module.contributions.actions,
+                "changing display kind must not rewrite Action contributions"
+            );
         }
     }
 
@@ -3360,18 +3378,13 @@ mod tests {
     }
 
     #[test]
-    fn workspace_files_watch_is_an_action_and_event_with_workspace_authority() {
+    fn workspace_files_changed_event_is_module_derived_without_a_fake_watch_action() {
         assert_eq!(
             required_resource_kinds(WORKSPACE_FILES_MODULE_ID),
             Some(BTreeSet::from([ResourceKind::from("workspace")]))
         );
-        assert_eq!(
-            required_action_resource_operation(
-                &CapabilityId::from(WORKSPACE_FILES_MODULE_ID),
-                &ActionId::from("workspace.files/watch"),
-            ),
-            Some("read")
-        );
+        assert!(!action_ids(WORKSPACE_FILES_MODULE_ID)
+            .contains(&ActionId::from("workspace.files/watch")));
         let manifest = workspace_execution_registration()
             .unwrap()
             .metadata
@@ -3583,6 +3596,7 @@ mod tests {
                 principal: principal.clone(),
                 session_owner: principal.clone(),
                 agent_session_id: AgentSessionId::from("browser-provider-session"),
+                turn_id: OperationId::from("browser-provider-turn"),
                 operation_id: OperationId::from("browser-provider-invoke"),
                 idempotency_key: IdempotencyKey::from("browser-provider-invoke"),
                 correlation_id: CorrelationId::from("browser-provider-invoke"),
@@ -3712,6 +3726,7 @@ mod tests {
         let context = Wave2HostContext {
             principal: principal.clone(),
             agent_session_id: AgentSessionId::from("session"),
+            turn_id: OperationId::from("turn"),
             operation_id: OperationId::from("operation"),
             idempotency_key: IdempotencyKey::from("idempotency"),
             correlation_id: CorrelationId::from("correlation"),
@@ -3882,6 +3897,7 @@ mod tests {
                     principal_id: "owner".to_owned(),
                 },
                 agent_session_id: AgentSessionId::from("session"),
+                turn_id: OperationId::from("turn"),
                 operation_id: OperationId::from("operation"),
                 idempotency_key: IdempotencyKey::from("idempotency"),
                 correlation_id: CorrelationId::from("correlation"),
@@ -3940,6 +3956,7 @@ mod tests {
                         principal_id: "wave2-test-owner".to_owned(),
                     },
                     agent_session_id: AgentSessionId::from("wave2-test-session"),
+                    turn_id: OperationId::from("wave2-test-turn"),
                     operation_id: OperationId::from("wave2-test-operation"),
                     idempotency_key: IdempotencyKey::from("wave2-test-idempotency"),
                     correlation_id: CorrelationId::from("wave2-test-correlation"),

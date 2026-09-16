@@ -23,6 +23,10 @@ fn error(value: impl std::fmt::Display) -> Wave2HostPortError {
     Wave2HostPortError::new("CAPABILITY_UNAVAILABLE", value.to_string())
 }
 
+fn outcome_unknown(value: impl std::fmt::Display) -> Wave2HostPortError {
+    Wave2HostPortError::new("EFFECT_OUTCOME_UNKNOWN", value.to_string())
+}
+
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum Operation {
@@ -55,6 +59,10 @@ struct Params {
     tty: bool,
     cols: Option<u16>,
     rows: Option<u16>,
+}
+
+fn poll_wait(params: &Params) -> Duration {
+    Duration::from_millis(params.wait_ms.unwrap_or(0))
 }
 
 pub(crate) struct EngineProcessScope {
@@ -178,7 +186,7 @@ impl EngineProcessScope {
                 .await
             {
                 self.close_admission();
-                return Err(error(cause));
+                return Err(outcome_unknown(cause));
             }
         }
         result
@@ -189,6 +197,7 @@ impl EngineProcessScope {
         params: Params,
         state: &mut ProcessState,
     ) -> Result<StrictJsonValue, Wave2HostPortError> {
+        let poll_delay = poll_wait(&params);
         let sessions = &mut state.sessions;
         let launch = matches!(params.operation, Operation::Exec | Operation::Start);
         let id = if launch {
@@ -230,7 +239,11 @@ impl EngineProcessScope {
                 Ok(session) => session,
                 Err(failure) => {
                     state.unregistered_start = !failure.no_live_process_proven;
-                    return Err(error(failure.error));
+                    return Err(if failure.no_live_process_proven {
+                        error(failure.error)
+                    } else {
+                        outcome_unknown(failure.error)
+                    });
                 }
             };
             let id = session.session_id();
@@ -256,6 +269,7 @@ impl EngineProcessScope {
             }
             params
                 .process_id
+                .clone()
                 .ok_or_else(|| error("process control requires process_id"))?
         };
         let entry = sessions
@@ -283,8 +297,12 @@ impl EngineProcessScope {
                     self.cancellation.clone(),
                 )
                 .await
-                .map_err(error)?,
-            Operation::CloseStdin => self.owner.close_stdin(session).await.map_err(error)?,
+                .map_err(outcome_unknown)?,
+            Operation::CloseStdin => self
+                .owner
+                .close_stdin(session)
+                .await
+                .map_err(outcome_unknown)?,
             Operation::Resize => self
                 .owner
                 .resize(
@@ -299,7 +317,7 @@ impl EngineProcessScope {
                         .ok_or_else(|| error("resize requires rows"))?,
                 )
                 .await
-                .map_err(error)?,
+                .map_err(outcome_unknown)?,
             _ => {}
         }
         let poll = match params.operation {
@@ -309,13 +327,13 @@ impl EngineProcessScope {
                 self.owner
                     .poll(
                         session,
-                        Duration::from_millis(params.wait_ms.unwrap_or(250)),
+                        poll_delay,
                         self.cancellation.clone(),
                     )
                     .await
             }
         }
-        .map_err(error)?;
+        .map_err(outcome_unknown)?;
         if cleanup_is_proven(&poll) {
             entry.terminal = Some(poll.clone());
         }
@@ -385,4 +403,26 @@ fn process_output(
     output["process_id"] = id.into();
     output["success"] = serde_json::to_value(success).map_err(error)?;
     Ok(StrictJsonValue(output))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn omitted_wait_matches_explicit_zero_wire_contract() {
+        let omitted: Params = serde_json::from_value(serde_json::json!({
+            "operation": "poll",
+            "process_id": "process-1"
+        }))
+        .unwrap();
+        let explicit: Params = serde_json::from_value(serde_json::json!({
+            "operation": "poll",
+            "process_id": "process-1",
+            "wait_ms": 0
+        }))
+        .unwrap();
+        assert_eq!(poll_wait(&omitted), Duration::ZERO);
+        assert_eq!(poll_wait(&explicit), Duration::ZERO);
+    }
 }

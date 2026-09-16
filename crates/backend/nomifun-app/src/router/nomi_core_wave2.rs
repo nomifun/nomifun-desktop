@@ -65,7 +65,6 @@ pub(crate) fn event_capability_ids() -> BTreeSet<CapabilityId> {
 pub(crate) fn action_host_port(services: &crate::services::AppServices) -> Arc<NomiCoreWave2Host> {
     Arc::new(NomiCoreWave2Host {
         mcp: Some(super::nomi_core_mcp::NomiCoreMcpHost::for_services(services)),
-        git_receipts: Some(super::hosted_effect_receipts::HostedEffectReceipts::new(services.database.pool().clone())),
         ..Default::default()
     })
 }
@@ -202,12 +201,30 @@ pub(crate) fn canonical_workspace_root(root: &Path) -> Result<PathBuf, AppError>
 #[derive(Default)]
 pub(crate) struct NomiCoreWave2Host {
     mcp: Option<super::nomi_core_mcp::NomiCoreMcpHost>,
-    git_receipts: Option<super::hosted_effect_receipts::HostedEffectReceipts>,
+    effect_store: Option<nomifun_agent_session::AgentSessionStore>,
     roots: Mutex<HashMap<PathBuf, Arc<Wave2ApplicationHost>>>,
     processes: Mutex<HashMap<(String, String, String), Arc<super::engine_process_host::EngineProcessScope>>>,
 }
 
 impl NomiCoreWave2Host {
+    /// Inject the canonical durable Agent Session Effect owner before this
+    /// host is published to the Kernel. Existing per-root owners cannot be
+    /// retrofitted because that would split one workspace's admission epoch.
+    pub(crate) fn with_effect_store(
+        mut self,
+        store: nomifun_agent_session::AgentSessionStore,
+    ) -> Self {
+        assert!(
+            self.roots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "Agent Effect store must be injected before workspace owner creation"
+        );
+        self.effect_store = Some(store);
+        self
+    }
+
     pub(crate) async fn read_mcp_resource(&self, principal: PrincipalRef, session: AgentSessionId,
         operation_id: nomifun_agent_contracts::OperationId, resource: TypedResourceBinding,
         operation: nomifun_mcp::McpResourceOperation) -> Result<StrictJsonValue, AppError> {
@@ -218,9 +235,6 @@ impl NomiCoreWave2Host {
 
     pub(crate) async fn ensure_workspace_git_evidence(&self, root: &Path) -> Result<(), AppError> {
         self.ensure_workspace_git_ready(root)?;
-        if let Some(receipts) = &self.git_receipts {
-            receipts.ensure_git_workspace_settled(root).await?;
-        }
         Ok(())
     }
 
@@ -320,16 +334,6 @@ impl NomiCoreWave2Host {
         self.host_for_root(canonical_root)
     }
 
-    pub(crate) async fn cleanup_coding_snapshots(&self, session: &str) -> Result<(), AppError> {
-        let hosts = self.roots.lock().map_err(|_| AppError::Conflict("workspace owners poisoned".into()))?
-            .values().cloned().collect::<Vec<_>>();
-        let mut failures = Vec::new();
-        for host in hosts {
-            if let Err(error) = host.dispose_session_snapshots(session).await { failures.push(error.to_string()); }
-        }
-        if failures.is_empty() { Ok(()) } else { Err(AppError::Conflict(failures.join("; "))) }
-    }
-
     fn host_for_root(
         &self,
         canonical_root: PathBuf,
@@ -341,11 +345,11 @@ impl NomiCoreWave2Host {
         if let Some(owner) = roots.get(&canonical_root) {
             return Ok(Arc::clone(owner));
         }
-        let owner = Wave2ApplicationHost::for_workspace_root(canonical_root.clone());
-        let owner = Arc::new(match &self.git_receipts {
-            Some(receipts) => owner.with_git_receipts(receipts.clone()),
-            None => owner,
-        });
+        let mut owner = Wave2ApplicationHost::for_workspace_root(canonical_root.clone());
+        if let Some(store) = &self.effect_store {
+            owner = owner.with_effect_store(store.clone());
+        }
+        let owner = Arc::new(owner);
         roots.insert(canonical_root, Arc::clone(&owner));
         Ok(owner)
     }
@@ -382,9 +386,6 @@ impl Wave2HostPort for NomiCoreWave2Host {
                     ));
                 }
             };
-            if request.context.action_id.as_ref() == "workspace.vcs/push" && self.git_receipts.is_none() {
-                return Err(Wave2HostPortError::unavailable("Conversation Git dispatch requires the persistent effect owner"));
-            }
             let root = if request.context.capability_id.as_ref() == WORKSPACE_PROCESS {
                 exact_session_process_root(&request.context)?
             } else {
@@ -408,8 +409,24 @@ impl Wave2HostPort for NomiCoreWave2Host {
                 // Windows extended prefixes); compare like representations.
                 let native_root = std::fs::canonicalize(&root).map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?;
                 if scope.workspace_root() != native_root.as_path() { return Err(Wave2HostPortError::unavailable("process workspace authority changed")); }
-                let input = process_owner_input(request.context.action_id.as_ref(), input)?;
-                return scope.invoke(input, request.context.operation_id.as_ref()).await;
+                let owner_input = process_owner_input(request.context.action_id.as_ref(), input)?;
+                if request.context.action_id.as_ref() == "workspace.process/poll" {
+                    return scope
+                        .invoke(owner_input, request.context.operation_id.as_ref())
+                        .await;
+                }
+                let [binding] = request.context.resource_bindings.as_slice() else {
+                    return Err(Wave2HostPortError::unavailable(
+                        "process execution requires one Session process binding",
+                    ));
+                };
+                let effect_owner = self.host_for(&request.context)?;
+                let operation_id = request.context.operation_id.as_ref().to_owned();
+                return effect_owner
+                    .invoke_managed_effect(&request.context, binding, input, move || async move {
+                        scope.invoke(owner_input, &operation_id).await
+                    })
+                    .await;
             }
             let owner = dispatch_validated_action_input(
                 request.context.capability_id.as_ref(),

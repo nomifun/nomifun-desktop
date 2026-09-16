@@ -1038,7 +1038,6 @@ fn validate_agent_patch_target(
     relative_path: &str,
     authority: &PathAuthority,
 ) -> Result<(PathBuf, bool), AppError> {
-    let relative_path = relative_path.trim();
     let candidate = scope.resolve_relative_path(relative_path)?;
     let candidate_string = candidate.to_string_lossy();
     let write_candidate = validate_path_for_write_authority(&candidate_string, authority)?;
