@@ -229,6 +229,7 @@ import {
   canLeaveCreativeCanvasAfterFlush,
   creativeCanvasBlockedLeaveMessage,
   creativeCanvasProductPanelViews,
+  restoreCreativeCanvasSessionPanels,
   creativeCanvasProductSelectionCapabilities,
   creativeCanvasSaveDisplayMessage,
   resolveCreativeNodeAssetPresentation,
@@ -900,7 +901,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const imageNodeUploadInputRef = useRef<HTMLInputElement>(null);
   const imageNodeUploadTargetRef = useRef<string | null>(null);
   const panelsRef = useRef<CreativeStudioPanelState>(
-    structuredClone(DEFAULT_CREATIVE_STUDIO_PANELS)
+    restoreCreativeCanvasSessionPanels(DEFAULT_CREATIVE_STUDIO_PANELS)
   );
   const hydratedPanelsRef = useRef<{
     projectId: string;
@@ -944,7 +945,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [miniMapOpen, setMiniMapOpen] = useState(false);
   const [miniMapDragging, setMiniMapDragging] = useState(false);
   const [panels, setPanels] = useState<CreativeStudioPanelState>(() =>
-    structuredClone(DEFAULT_CREATIVE_STUDIO_PANELS)
+    restoreCreativeCanvasSessionPanels(DEFAULT_CREATIVE_STUDIO_PANELS)
   );
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -1263,7 +1264,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     imageToolAbortRef.current = null;
     imageNodeUploadTargetRef.current = null;
     if (imageNodeUploadInputRef.current) imageNodeUploadInputRef.current.value = '';
-    const defaultPanels = structuredClone(DEFAULT_CREATIVE_STUDIO_PANELS);
+    const defaultPanels = restoreCreativeCanvasSessionPanels(DEFAULT_CREATIVE_STUDIO_PANELS);
     panelsRef.current = defaultPanels;
     setPanels(defaultPanels);
     hydratedPanelsRef.current = null;
@@ -1373,7 +1374,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
       (save.status === 'idle' && hydrated.revision !== detail.project.revision);
     if (!shouldHydratePanels) return;
 
-    const nextPanels = structuredClone(detail.document.panels);
+    const nextPanels = restoreCreativeCanvasSessionPanels(
+      detail.document.panels,
+      hydrated?.projectId === projectId ? panelsRef.current.left.open : false
+    );
     panelsRef.current = nextPanels;
     setPanels(nextPanels);
     hydratedPanelsRef.current = {
@@ -4730,7 +4734,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
       data-canvas-id={canvasId}
     >
       <CreativeCanvasChrome
+        canvasId={canvasId}
         canvasTitle={canvasTitle}
+        onRenameCanvas={project.detail ? async (title) => { await project.rename(title); } : undefined}
         saveStatus={save.status}
         saveMessage={saveMessage}
         tool={tool}
