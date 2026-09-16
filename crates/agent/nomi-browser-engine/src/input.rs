@@ -1,24 +1,6 @@
-//! input —— 输入路径：**纯几何**（点击点计算）+ **CDP 输入合成**，全程 **禁 DPR**。
-//!
-//! 背景（DESIGN §10，设计裁决④）：CDP `Input.dispatchMouseEvent` 吃主框架 viewport 的
-//! **CSS 像素**，故输入路径全程不做 deviceScaleFactor 换算（DPR 仅属截图，P3+）。点击点来自
-//! `DOM.getContentQuads`（已 CSS 像素，扁平 8 数 = 4 角点）→ 钳位 (0,0)-(innerW,innerH)
-//! + 鞋带公式面积 >0.99 过滤退化 quad + 取首个有效 quad 的中点；区分 NotVisible /
-//!   NotInViewport。
-//!
-//! 本模块分两层：
-//! - **纯几何函数**（[`quad_to_points`]/[`shoelace_area`]/[`pick_click_point`]/[`clamp_point`]/
-//!   [`frame_offset`]，B1 已交付）—— 不发 CDP，不接 chrome，纯算术。
-//! - **CDP 输入合成**（B5，本文件后段）—— 收 `&Connection` + session 的自由 async 函数，发裸
-//!   CDP `DOM.getContentQuads` / `Runtime.evaluate` / `Input.dispatchMouseEvent` /
-//!   `Input.dispatchKeyEvent` / `Input.insertText`。**任何路径都不收 / 不乘 deviceScaleFactor**：
-//!   坐标原样从 getContentQuads（CSS 像素）流到 dispatchMouseEvent（CSS 像素）。组合键
-//!   （`Ctrl+A` / `Enter` / `Shift+Tab`…）由纯函数 [`parse_key_combo`] 按 **US 布局**合成
-//!   key/code/windowsVirtualKeyCode + modifiers 位掩码（CDP 约定：Alt=1, Ctrl=2, Meta=4,
-//!   Shift=8）；文本 / IME / secret 走 [`insert_text`]（`Input.insertText`）。所有 send 经
-//!   `map_transport_err`，**绝不 panic**。
-//!
-//! B5 不做 hit-target 串联（B4 已有原语，C1 才串）/ 重试（B6）/ act 动作（C1）/ facade。
+//! Shared geometry, keyboard mapping and explicit CDP input primitives.
+//! Callers own target selection, active-run admission and input cleanup.
+//! No standalone runtime, DOM action fallback or legacy action adapter.
 
 use chromiumoxide::cdp::browser_protocol::dom::GetContentQuadsParams;
 use chromiumoxide::cdp::browser_protocol::input::{
@@ -27,7 +9,7 @@ use chromiumoxide::cdp::browser_protocol::input::{
 };
 use chromiumoxide::cdp::js_protocol::runtime::{EvaluateParams, RemoteObjectId};
 
-use crate::backend::cdp::map_transport_err;
+use crate::engine::map_transport_err;
 use crate::engine::BrowserError;
 use crate::transport::Connection;
 
@@ -622,11 +604,11 @@ fn modifier_chord(bit: u32) -> KeyChord {
 /// 故对**会产生文本/默认动作**的键，keyDown 要带 text：
 /// - `Enter` → `"\r"`（隐式表单提交 / textarea 换行的默认动作 token）；
 /// - 单个可打印字符（key 长度 1，如 `"a"`/`"5"`/`" "`）→ 该字符（Shift 字母大写）——让 tier3 逐字符
-///   逃生（[`crate::backend::cdp::CdpBackend::act_type_per_char`]）的 keyDown 真产生 `input`；
+///   逃生（the native text driver）的 keyDown 真产生 `input`；
 /// - 其它具名键（Tab/Escape/方向键/…）→ `None`（无文本默认动作）。
 ///
 /// **带 Ctrl/Alt/Meta 修饰时一律 None**：那是快捷键（`Ctrl+A`），不应产生字符/默认动作。
-fn chord_text(chord: &KeyChord) -> Option<String> {
+pub fn chord_text(chord: &KeyChord) -> Option<String> {
     // Ctrl/Alt/Meta 修饰 → 快捷键，无文本默认动作。
     let cmd_like =
         chord.modifiers & (modifier_bits::CTRL | modifier_bits::ALT | modifier_bits::META) != 0;
@@ -751,131 +733,6 @@ pub async fn insert_text(conn: &Connection, session: &str, text: &str) -> Result
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 滚动（C2，DESIGN §9/§11）：视口滚动经 `Input.dispatchMouseEvent{mouseWheel, deltaX/deltaY}`
-// （CSS 像素 delta，**零 DPR**）。方向 + 可选量 → (deltaX, deltaY) 由纯函数 [`scroll_deltas`]
-// 换算（可单测）。element-target 滚动走注入 scrollIntoView（在 injected.rs / actions.rs）。
-// ═══════════════════════════════════════════════════════════════════════════
-
-use crate::actions::ScrollDir;
-
-/// 视口滚动一「步」的默认 CSS 像素量（`amount` 为 None 时用它；约一屏的多半，对齐常见 wheel notch
-/// 的几倍——足够推进又不过冲）。
-pub const DEFAULT_SCROLL_STEP: f64 = 400.0;
-
-/// **[纯逻辑] 方向 + 可选量 → mouseWheel 的 `(deltaX, deltaY)`**（CSS 像素，**零 DPR**）。
-///
-/// CDP `Input.dispatchMouseEvent{type:mouseWheel}` 的 `deltaY > 0` = 内容向**上**移动（即视口向**下**
-/// 滚），`deltaX > 0` = 向**右**滚（与 `window.scrollBy` 符号一致）。故：
-/// - [`ScrollDir::Down`] → `(0, +amount)`；[`ScrollDir::Up`] → `(0, -amount)`；
-/// - [`ScrollDir::Right`] → `(+amount, 0)`；[`ScrollDir::Left`] → `(-amount, 0)`。
-///
-/// `amount` 为 `None` → 用 [`DEFAULT_SCROLL_STEP`]。负 `amount` 取绝对值（方向由 `dir` 决定，量是标量）。
-pub fn scroll_deltas(dir: ScrollDir, amount: Option<f64>) -> (f64, f64) {
-    let step = amount.map(f64::abs).unwrap_or(DEFAULT_SCROLL_STEP);
-    match dir {
-        ScrollDir::Down => (0.0, step),
-        ScrollDir::Up => (0.0, -step),
-        ScrollDir::Right => (step, 0.0),
-        ScrollDir::Left => (-step, 0.0),
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// CdpBackend 的输入合成方法：把上面的自由函数接到主 page session。把「选哪个 session」收口在
-// backend（B5 范围只覆盖主 page session 的元素；OOPIF 跨 session 留 C1，届时 ObjectHandle 需带帧
-// 路由）。C1 act facade 经这些方法串 hit-target + 重试。**零 DPR**（坐标原样 CSS 像素）。
-// ═══════════════════════════════════════════════════════════════════════════
-
-use crate::actionability::ObjectHandle;
-use crate::backend::cdp::CdpBackend;
-
-impl CdpBackend {
-    /// 取已反查元素句柄的 content quads（CSS 像素，**零 DPR**），喂 [`pick_click_point`] 选点。
-    /// 元素无布局盒（不可见）→ 空列表（调用方 [`pick_click_point`] 报 `NotVisible`）。
-    /// **D1**：page session 经 active tab 解引用（async 取，立即释放 tabs 锁）。
-    pub async fn element_content_quads(&self, h: &ObjectHandle) -> Result<Vec<Quad>, BrowserError> {
-        let session = self.page_session_id().await?;
-        get_content_quads(self.conn(), &session, &h.object_id).await
-    }
-
-    /// 主框架 viewport CSS 像素尺寸 `(innerW, innerH)`（**零 DPR**），喂 [`pick_click_point`] 判视口内。
-    pub async fn viewport_size(&self) -> Result<(f64, f64), BrowserError> {
-        let session = self.page_session_id().await?;
-        viewport_size(self.conn(), &session).await
-    }
-
-    /// 在 `point`（CSS 像素，**零 DPR**）左键单击（mousePressed + mouseReleased）。
-    pub async fn click_at(&self, point: Point) -> Result<(), BrowserError> {
-        let session = self.page_session_id().await?;
-        dispatch_click(self.conn(), &session, point).await
-    }
-
-    /// 把鼠标移到 `point`（CSS 像素，**零 DPR**）（hover；mouseMoved）。
-    pub async fn mouse_move_to(&self, point: Point) -> Result<(), BrowserError> {
-        let session = self.page_session_id().await?;
-        dispatch_mouse_move(self.conn(), &session, point).await
-    }
-
-    /// 合成组合键（US 布局）：`"Ctrl+A"` / `"Enter"` / `"Shift+Tab"`…（见 [`dispatch_key_combo`]）。
-    pub async fn key_combo(&self, keys: &str) -> Result<(), BrowserError> {
-        let session = self.page_session_id().await?;
-        dispatch_key_combo(self.conn(), &session, keys).await
-    }
-
-    /// 插入文本（`Input.insertText`）：IME / secret / fill 兜底（见 [`insert_text`]）。
-    pub async fn type_text(&self, text: &str) -> Result<(), BrowserError> {
-        let session = self.page_session_id().await?;
-        insert_text(self.conn(), &session, text).await
-    }
-
-    /// **视口滚动**（C2）：把视口按 `(delta_x, delta_y)`（CSS 像素 **零 DPR**，[`scroll_deltas`] 按
-    /// direction/amount 换算）滚动。**注入 `window.scrollBy`**（而非 `Input.dispatchMouseEvent{mouseWheel}`）：
-    /// DESIGN §9 两者皆可，但合成 wheel 事件在 headless 下常不驱动滚动（落点/可滚动容器命中弱），
-    /// `scrollBy` 确定性强、跨 headless/headful 一致，且 `behavior:'instant'` 同步落定便于 verify 读回。
-    /// `delta_y>0` = 视口下滚（与 [`scroll_deltas`] 符号约定一致）。**禁 DPR**（scrollBy 是 CSS 像素语义）。
-    pub async fn scroll_viewport(&self, delta_x: f64, delta_y: f64) -> Result<(), BrowserError> {
-        let session = self.page_session_id().await?;
-        let expr = format!(
-            "window.scrollBy({{ left: {delta_x}, top: {delta_y}, behavior: 'instant' }})"
-        );
-        let mut params = EvaluateParams::new(expr);
-        params.return_by_value = Some(true);
-        self.conn()
-            .send::<EvaluateParams>(&session, &params)
-            .await
-            .map_err(map_transport_err)?;
-        Ok(())
-    }
-
-    /// 读当前视口滚动位置 `(scrollX, scrollY)`（verify 锚点：scroll 前后对比证 changed）。
-    /// best-effort：读不到 / active tab 缺失返 `(0.0, 0.0)`（不致命；锚点缺失只影响 changed 判定保守）。
-    pub async fn scroll_position(&self) -> (f64, f64) {
-        let Ok(session) = self.page_session_id().await else {
-            return (0.0, 0.0);
-        };
-        let mut params = EvaluateParams::new("[window.scrollX, window.scrollY]".to_string());
-        params.return_by_value = Some(true);
-        let Ok(result) = self
-            .conn()
-            .send::<EvaluateParams>(&session, &params)
-            .await
-        else {
-            return (0.0, 0.0);
-        };
-        let arr = result
-            .get("result")
-            .and_then(|r| r.get("value"))
-            .and_then(|v| v.as_array());
-        match arr {
-            Some(a) => (
-                a.first().and_then(serde_json::Value::as_f64).unwrap_or(0.0),
-                a.get(1).and_then(serde_json::Value::as_f64).unwrap_or(0.0),
-            ),
-            None => (0.0, 0.0),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1076,42 +933,6 @@ mod tests {
     }
 
     // ── scroll_deltas（C2 视口滚动量换算，[纯逻辑]，CSS 像素零 DPR）─────────────────────
-
-    #[test]
-    fn scroll_deltas_direction_signs() {
-        use crate::actions::ScrollDir;
-        // Down → 视口下滚（deltaY > 0，内容上移）；Up → deltaY < 0。
-        assert_eq!(scroll_deltas(ScrollDir::Down, Some(300.0)), (0.0, 300.0));
-        assert_eq!(scroll_deltas(ScrollDir::Up, Some(300.0)), (0.0, -300.0));
-        // Right → deltaX > 0；Left → deltaX < 0。
-        assert_eq!(scroll_deltas(ScrollDir::Right, Some(150.0)), (150.0, 0.0));
-        assert_eq!(scroll_deltas(ScrollDir::Left, Some(150.0)), (-150.0, 0.0));
-    }
-
-    #[test]
-    fn scroll_deltas_default_step_when_amount_none() {
-        use crate::actions::ScrollDir;
-        // amount=None → 用 DEFAULT_SCROLL_STEP。
-        assert_eq!(
-            scroll_deltas(ScrollDir::Down, None),
-            (0.0, DEFAULT_SCROLL_STEP)
-        );
-        assert_eq!(
-            scroll_deltas(ScrollDir::Up, None),
-            (0.0, -DEFAULT_SCROLL_STEP)
-        );
-    }
-
-    #[test]
-    fn scroll_deltas_negative_amount_is_taken_as_magnitude() {
-        use crate::actions::ScrollDir;
-        // 负 amount 取绝对值（方向由 dir 决定，量是标量）——防 LLM 给负值反转方向。
-        assert_eq!(scroll_deltas(ScrollDir::Down, Some(-200.0)), (0.0, 200.0));
-        assert_eq!(scroll_deltas(ScrollDir::Up, Some(-200.0)), (0.0, -200.0));
-        assert_eq!(scroll_deltas(ScrollDir::Right, Some(-50.0)), (50.0, 0.0));
-    }
-
-    // ── chord_text（keyDown 该带的 text，[纯逻辑]，禁 DPR）─────────────────────────────
 
     #[test]
     fn chord_text_enter_is_carriage_return() {

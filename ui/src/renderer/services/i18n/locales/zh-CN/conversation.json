@@ -590,6 +590,8 @@
     "fallbackQueued": "未能插入正在生成的回复，已连同附件改为排队。"
   },
   "stop": {
+    "button": "停止 Agent",
+    "stopping": "正在停止 Agent…",
     "failed": "停止当前任务失败，请重试。"
   },
   "editMessage": {

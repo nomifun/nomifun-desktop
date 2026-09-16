@@ -1,6 +1,6 @@
 {
   "manifest_version": "1.0.0",
-  "target_first_party_contribution_digest": "cd85680e160f852a069bbeb8e58db3fe8b6e912b2585c792c9e4ba988b22b2bf",
+  "target_first_party_contribution_digest": "0792960feecd590a328f53332345de584c602c3055b0132020b125d0fc75b8eb",
   "target_runtime_feature_inventory_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
   "templates": {
     "chat.minimal": {

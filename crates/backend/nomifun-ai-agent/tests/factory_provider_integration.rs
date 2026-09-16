@@ -114,7 +114,11 @@ fn make_factory(
         cron_sink_factory: None,
         gateway_mcp_config: None,
         #[cfg(feature = "browser-use")]
-        browser_lane_provider: None,
+        browser_runtime_resolver: None,
+        #[cfg(feature = "browser-use")]
+        local_web_search: None,
+        #[cfg(feature = "browser-use")]
+        system_browser: None,
         client_prefs: None,
         settings_repo: None,
         companion_prompt: None,
@@ -123,7 +127,6 @@ fn make_factory(
         model_invoke,
         model_invoke_service: None,
         provider_config_digest_resolver: None,
-        encryption_key: test_encryption_key(),
         data_dir: PathBuf::from("/tmp/nomi-test"),
         work_dir: PathBuf::from("/tmp/nomi-test"),
         mcp_server_repo: None,
@@ -236,6 +239,32 @@ async fn nomi_factory_resolves_provider_from_db() {
 
     let result = factory(options).await;
     assert!(result.is_ok(), "Expected Ok, got: {:?}", result.err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(feature = "browser-use")]
+async fn selected_browser_requires_native_host_instead_of_creating_private_chromium() {
+    let (provider_repo, provider_model_repo, model_invoke) = setup().await;
+    insert_test_provider(provider_repo.as_ref(), provider_model_repo.as_ref(), PROVIDER_ID_1, "openai").await;
+    let factory = make_factory(model_invoke);
+    let workspace = tempfile::tempdir().unwrap();
+    let result = factory(AgentRuntimeBuildOptions {
+        user_id: TEST_OWNER_ID.into(),
+        agent_type: AgentType::Nomi,
+        workspace: workspace.path().to_string_lossy().into_owned(),
+        model: Some(ProviderWithModel {
+            provider_id: PROVIDER_ID_1.into(),
+            model: "gpt-4o".into(),
+            use_model: None,
+        }),
+        conversation_id: ConversationId::new().into_string(),
+        delegation_policy: Default::default(),
+        conversation_created_at: Some(1),
+        workspace_binding_lease: None,
+        extra: serde_json::json!({"browser_use":true}),
+    }).await;
+    let error = result.err().expect("missing native host must reject selected browser");
+    assert!(error.to_string().contains("requires a native browser host"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -45,7 +45,6 @@ fn memory_injection_into_system_prompt() {
         Some(&mem_dir),
         false,
         false,
-        false, // browser_enabled
     );
 
     // Behavioral instructions must be present
@@ -128,7 +127,6 @@ fn memory_full_lifecycle() {
         Some(&mem_dir),
         false,
         false,
-        false, // browser_enabled
     );
 
     assert!(
@@ -184,7 +182,6 @@ fn memory_full_lifecycle() {
         Some(&mem_dir),
         false,
         false,
-        false, // browser_enabled
     );
 
     assert!(

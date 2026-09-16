@@ -150,7 +150,6 @@ pub enum PreviewContentType {
     Word,
     Excel,
     Image,
-    Url,
 }
 
 /// File change operation type.

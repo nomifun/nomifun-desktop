@@ -142,12 +142,12 @@ const FORMS = {
   deadBorder: {
     scan: 'line',
     // 后缀不限于数字：theme 里根本没有名为 `border` 的颜色，所以 `border-border-base`
-    // 与 `border-border-2` 一样产出 0 条 CSS。这条规则最初只写了 `\d`，于是
-    // HTMLViewer.tsx 里 3 处 `border-border-base` 从棘轮时代一路漏到禁令时代。
+    // 与 `border-border-2` 一样产出 0 条 CSS。这条规则最初只写了 `\d`，会漏掉
+    // `border-border-base` 这类命名后缀。
     // The suffix is NOT limited to digits: there is no colour named `border` in the
     // theme at all, so `border-border-base` emits zero CSS exactly like
     // `border-border-2`. This regex used to be `\d`-anchored, which is how 3 live
-    // `border-border-base` sites survived both the ratchet and the sweep.
+    // named suffixes such as `border-border-base` survived the old scan.
     re: /\bborder-border-[a-z0-9]+\b/g,
     label: 'border-border-*：theme 无 border 颜色，产出 0 条 CSS',
     fix: '改用 border-arco-N（--color-border-N）或 border-N（--bg-N）或 border-[var(--border-base)]；注意本仓库没有全局 border-style 重置，宽度类要配 border-solid 才画得出来',

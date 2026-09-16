@@ -930,6 +930,11 @@ struct NomiLifecycleIdentity {
 /// A complete set of Plugin action tools for one frozen Nomi session.
 #[derive(Clone)]
 pub struct NomiPluginToolSession {
+    #[cfg(feature = "browser-use")]
+    local_search_binding: Option<crate::local_web_search::LocalSearchBinding>,
+    #[cfg(feature = "browser-use")]
+    system_browser_binding: Option<nomifun_browser_platform::system_browser::SystemBrowserBinding>,
+    browser_provider: Option<nomifun_agent_contracts::ExactRoleProviderRef>,
     resolved_snapshot_ref: ResolvedSnapshotRef,
     /// Exact server-compiled resource bindings for this frozen Session.
     /// Runtime factories may inspect these bindings to lazily connect
@@ -976,6 +981,27 @@ impl fmt::Debug for NomiPluginToolSession {
 }
 
 impl NomiPluginToolSession {
+    #[cfg(feature = "browser-use")]
+    pub fn local_search_binding(&self)->Option<&crate::local_web_search::LocalSearchBinding> {self.local_search_binding.as_ref()}
+    #[cfg(feature = "browser-use")]
+    pub fn system_browser_binding(&self) -> Option<&nomifun_browser_platform::system_browser::SystemBrowserBinding> { self.system_browser_binding.as_ref() }
+    pub fn browser_provider(&self) -> Result<Option<&nomifun_agent_contracts::ExactRoleProviderRef>, NomiPluginToolError> {
+        if let Some(state) = &self.capability_state {
+            let snapshot = state.snapshot()?;
+            if snapshot.active.iter().any(|id| matches!(id.as_ref(),
+                "browser.observe" | "browser.navigate" | "browser.act"
+                | "browser.render_content" | "browser.download"
+                | "browser.upload" | "browser.evaluate"
+            ))
+                && self.browser_provider.is_none()
+            {
+                return Err(NomiPluginToolError::Contract(
+                    "Browser capability requires an exact Browser Role Provider in the verified Snapshot".into(),
+                ));
+            }
+        }
+        Ok(self.browser_provider.as_ref())
+    }
     pub(crate) fn new(
         resolved_snapshot_ref: ResolvedSnapshotRef,
         mut actions: Vec<NomiPluginToolAction>,
@@ -1012,6 +1038,11 @@ impl NomiPluginToolSession {
         }
         Ok(Self {
             resolved_snapshot_ref,
+            #[cfg(feature = "browser-use")]
+            local_search_binding: None,
+            #[cfg(feature = "browser-use")]
+            system_browser_binding: None,
+            browser_provider: None,
             target_resource_bindings: Arc::from(
                 Vec::<nomifun_agent_contracts::TypedResourceBinding>::new(),
             ),
@@ -1756,6 +1787,27 @@ impl KernelNomiPluginToolSession {
         session.initial_context_contributions =
             Arc::from(initial_context_contributions);
         session.capability_state = Some(active);
+        session.browser_provider = compiled.content().resolved_role_providers
+            .get(&nomifun_agent_contracts::ExecutionRoleId::from("system.browser_use"))
+            .map(|lock| lock.provider.clone());
+        #[cfg(feature = "browser-use")]
+        if let Some(resolved)=compiled.content().enabled_capabilities.iter().find(|capability|capability.capability.id.as_ref()==crate::local_web_search::TOOL_NAME) {
+            let live=registry.capability(&resolved.capability.id).ok_or_else(||NomiPluginToolError::Contract("Local search capability disappeared".into()))?;
+            if resolved.schema_digest!=live.schema_digest || resolved.contribution_lock!=live.contribution_lock || resolved.target_artifact_digest!=live.target_artifact_digest {
+                return Err(NomiPluginToolError::Contract("Local search binding differs from the frozen Snapshot".into()));
+            }
+            session.local_search_binding=crate::local_web_search::binding_from_manifest(&live.manifest)
+                .map_err(|error|NomiPluginToolError::Contract(error.to_string()))?;
+        }
+        #[cfg(feature = "browser-use")]
+        if let Some(resolved) = compiled.content().enabled_capabilities.iter().find(|capability| capability.capability.id.as_ref() == nomifun_browser_platform::system_browser::TOOL_NAME) {
+            let live = registry.capability(&resolved.capability.id).ok_or_else(|| NomiPluginToolError::Contract("System browser capability disappeared".into()))?;
+            if resolved.schema_digest != live.schema_digest || resolved.contribution_lock != live.contribution_lock || resolved.target_artifact_digest != live.target_artifact_digest {
+                return Err(NomiPluginToolError::Contract("System browser binding differs from the frozen Snapshot".into()));
+            }
+            session.system_browser_binding = Some(crate::system_browser::binding_from_manifest(&live.manifest)
+                .map_err(|error| NomiPluginToolError::Contract(error.to_string()))?);
+        }
         session.target_resource_bindings =
             Arc::from(compiled.target_resource_bindings.clone());
         for contributor in lifecycle_context_contributors {

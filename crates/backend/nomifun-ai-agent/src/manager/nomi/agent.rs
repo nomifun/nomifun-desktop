@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use nomi_agent::bootstrap::AgentBootstrap;
 use nomi_agent::companion_tools::{
@@ -242,12 +242,15 @@ pub struct NomiAgentManager {
     /// children revoke on clean exit; this guard covers abrupt child/runtime
     /// teardown and construction failure.
     loopback_capability_leases: nomifun_common::LoopbackCapabilityLeaseSet,
-    /// Main-process `BrowserSessionHub` owner binding. The contained
-    /// `BrowserLaneClient` grants this runtime scoped access without transferring
-    /// Chromium/profile ownership. Explicit kill/revoke closes every Lane for
-    /// this runtime; final Drop is the construction/abrupt-teardown backstop.
     #[cfg(feature = "browser-use")]
-    browser_lane_binding: Option<crate::BrowserLaneBinding>,
+    browser_workspace: Option<Arc<nomifun_browser_platform::workspace::BrowserWorkspace>>,
+    #[cfg(feature = "browser-use")]
+    system_browser_session: Option<Arc<crate::system_browser::SystemBrowserSession>>,
+    #[cfg(feature = "browser-use")]
+    native_browser_turn: super::browser_lifecycle::NativeBrowserTurnSlot,
+    #[cfg(feature = "browser-use")]
+    system_browser_turn: crate::system_browser::SystemBrowserTurnSlot,
+    stop_generation: AtomicU64,
     /// This runtime's claim on the pooled SSH link behind an SSH-bound session.
     /// Held for the runtime's whole life and released — never closed — at
     /// teardown; the link belongs to the conversation, which outlives every
@@ -324,10 +327,6 @@ impl Drop for NomiAgentManager {
             "The agent manager was dropped before this tool call reached a terminal state.",
         );
         self.loopback_capability_leases.revoke_all();
-        #[cfg(feature = "browser-use")]
-        if let Some(binding) = &self.browser_lane_binding {
-            binding.revoke();
-        }
     }
 }
 
@@ -873,7 +872,9 @@ pub(crate) fn map_engine_stop_reason(
 /// ownership.
 pub(crate) struct NomiHostWiring {
     #[cfg(feature = "browser-use")]
-    pub browser_lane_binding: Option<crate::BrowserLaneBinding>,
+    pub browser_workspace: Option<Arc<nomifun_browser_platform::workspace::BrowserWorkspace>>,
+    #[cfg(feature = "browser-use")]
+    pub system_browser_session: Option<Arc<crate::system_browser::SystemBrowserSession>>,
     /// A ready remote backend when the session is SSH-bound (the factory already
     /// connected it via the SshBackendProvider). Selects the remote tool family.
     pub ssh_backend: Option<Arc<dyn crate::SshBackend>>,
@@ -899,6 +900,8 @@ pub(crate) struct NomiHostWiring {
     /// Search tool backed by the exact authorized Chat route. `None` means the
     /// selected route cannot satisfy `web.search`; no public fallback exists.
     pub web_search_tool: Option<Box<dyn nomi_tools::Tool>>,
+    #[cfg(feature = "browser-use")]
+    pub local_web_search_tool: Option<Box<dyn nomi_tools::Tool>>,
     /// Renderer sharing this Session's bounded search-citation store.
     pub citation_render_tool: Option<Box<dyn nomi_tools::Tool>>,
 
@@ -914,7 +917,9 @@ impl Default for NomiHostWiring {
     fn default() -> Self {
         Self {
             #[cfg(feature = "browser-use")]
-            browser_lane_binding: None,
+            browser_workspace: None,
+            #[cfg(feature = "browser-use")]
+            system_browser_session: None,
             ssh_backend: None,
             ssh_lease: None,
             image_generation_tool: None,
@@ -923,6 +928,8 @@ impl Default for NomiHostWiring {
             image_generation_discovery_failed: false,
             image_generation_response_in_chinese: false,
             web_search_tool: None,
+            #[cfg(feature = "browser-use")]
+            local_web_search_tool: None,
             citation_render_tool: None,
 
             lazy_mcp_runtime: None,
@@ -988,7 +995,15 @@ impl NomiAgentManager {
         let runtime = AgentRuntimeState::new(conversation_id.clone(), workspace.clone(), 128);
         let loopback_capability_leases = config_extra.loopback_capability_leases.clone();
         #[cfg(feature = "browser-use")]
-        let browser_lane_binding = host_wiring.browser_lane_binding;
+        let browser_workspace = host_wiring.browser_workspace;
+        #[cfg(feature = "browser-use")]
+        let system_browser_session = if config_extra.allowed_tools.iter().any(|name| name == nomifun_browser_platform::system_browser::TOOL_NAME) {
+            Some(host_wiring.system_browser_session.ok_or_else(|| AppError::Conflict("Selected system browser Tool has no frozen host binding".into()))?)
+        } else { None };
+        #[cfg(feature = "browser-use")]
+        let native_browser_turn = super::browser_lifecycle::NativeBrowserTurnSlot::default();
+        #[cfg(feature = "browser-use")]
+        let system_browser_turn = crate::system_browser::SystemBrowserTurnSlot::default();
         let ssh_lease = host_wiring.ssh_lease;
         let image_generation_entitled = host_wiring.image_generation_entitled
             && ((!config_extra.enforce_tool_allowlist && config_extra.allowed_tools.is_empty())
@@ -1015,6 +1030,8 @@ impl NomiAgentManager {
         let image_generation_response_in_chinese =
             host_wiring.image_generation_response_in_chinese;
         let web_search_tool = host_wiring.web_search_tool;
+        #[cfg(feature = "browser-use")]
+        let local_web_search_tool=host_wiring.local_web_search_tool;
         let citation_render_tool = host_wiring.citation_render_tool;
         let lazy_mcp_runtime = host_wiring.lazy_mcp_runtime;
         let plugin_tool_session = host_wiring.plugin_tool_session;
@@ -1127,9 +1144,6 @@ impl NomiAgentManager {
         if config_extra.computer_use {
             config.tools.computer.enabled = true;
         }
-        if config_extra.browser_use {
-            config.tools.browser.enabled = true;
-        }
         // Per-session 工具白名单（工厂已算好；bootstrap 的 retain_named
         // 会安装持久注册策略，后续 post-build / dynamic 工具也受同一策略约束）。
         // Embedded AgentExecution 的 host composition 不写入 ToolsConfig，
@@ -1191,25 +1205,6 @@ impl NomiAgentManager {
         if let Some(root) = config_extra.write_root.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             config.tools.write_root = root.to_owned();
         }
-        // F1-sec: 把会话的 evaluate「全权模式」LIVE 值灌进 BrowserConfig.full_power。
-        // Hub-backed Browser tool adapter 在调用 BrowserLaneClient 前执行 evaluate gate；
-        // Hub 仍是最终权威。默认 false（default-deny）。
-        config.tools.browser.full_power = config_extra.browser_full_power;
-        // SD-6: 把会话的持久登录 LIVE 值灌进 BrowserConfig.persistent_login，供
-        // Hub-backed Browser tool adapter 执行 evaluate 互斥门。Primary 实时身份由
-        // BrowserSessionHub 的应用管理 profile 提供。产品默认 true（由 factory host_default 实现）。
-        config.tools.browser.persistent_login = config_extra.browser_persistent_login;
-        // P7A: 把会话的 site-memory LIVE 值灌进 BrowserConfig.site_memory（默认 OFF，opt-in）。
-        // bootstrap 据它给 Hub-backed Browser tool adapter 注入文件型 SiteMemorySink。
-        config.tools.browser.site_memory = config_extra.browser_site_memory;
-        // P7B: 把会话的 visual-fallback LIVE 值灌进 BrowserConfig.visual_fallback（默认 OFF，opt-in）。
-        // bootstrap 据它给 Hub-backed Browser tool adapter 注入会话模型的 VisualLocator。
-        config.tools.browser.visual_fallback = config_extra.browser_visual_fallback;
-        // Browser is status-only: Primary runs in the external managed window.
-        // BrowserSessionHub owns every Host/profile; this runtime never
-        // creates a private/headless one.
-        config.tools.browser.headless = false;
-        config.tools.browser.source = config_extra.browser_source.clone();
 
         // Companion memory tools only touch the companion's own memory.db and
         // are registered only when the host provides that scoped sink.
@@ -1242,15 +1237,6 @@ impl NomiAgentManager {
             .install_embedded_agent_execution(
                 config_extra.install_embedded_agent_execution,
             );
-        if let Some(key) = config_extra.persistent_login_key {
-            bootstrap = bootstrap.persistent_login_key(key);
-        }
-        #[cfg(feature = "browser-use")]
-        if let Some(binding) = &browser_lane_binding {
-            // The runtime receives only the scoped client. Chromium, profiles,
-            // Host restart, and Lane inventory remain owned by BrowserSessionHub.
-            bootstrap = bootstrap.browser_lane_client(binding.client());
-        }
         if let Some(session) = resume_session {
             info!(
                 conversation_id = %conversation_id,
@@ -1318,6 +1304,36 @@ impl NomiAgentManager {
             ));
         }
         let mut engine = result.engine;
+        #[cfg(feature = "browser-use")]
+        if system_browser_session.is_some() {
+            if !engine.registry_mut().register(Box::new(crate::system_browser::SystemBrowserTool::new(system_browser_turn.clone()))) {
+                return Err(AppError::Conflict("System browser Tool was rejected by the Agent capability policy".into()));
+            }
+        }
+        #[cfg(feature = "browser-use")]
+        if browser_workspace.is_some() && config_extra.enforce_tool_allowlist
+            && config_extra.allowed_tools.iter().any(|name|name=="Browser") {
+            let capabilities=capability_state.clone().ok_or_else(||AppError::Conflict("Native browser requires an exact Agent capability snapshot.".into()))?;
+            let available=capabilities.snapshot().map_err(|error|AppError::Conflict(error.to_string()))?;
+            if available.active.iter().any(|id|matches!(id.as_ref(),"browser.observe"|"browser.navigate"|"browser.act"|"browser.upload"|"browser.download"|"browser.evaluate")) {
+                let uploads=available.active.iter().any(|id|id.as_ref()=="browser.upload");
+                let downloads=available.active.iter().any(|id|id.as_ref()=="browser.download");
+                let mut tool=super::browser_tool::ConversationBrowserTool::new(native_browser_turn.clone(),available);
+                if uploads {
+                    let scope=nomifun_browser_platform::uploads::BrowserUploadScope::open(std::path::Path::new(&workspace))
+                        .map_err(|error|AppError::Conflict(error.to_string()))?;
+                    tool=tool.with_upload_scope(Arc::new(scope));
+                }
+                if downloads {
+                    let scope = nomifun_browser_platform::downloads::BrowserDownloadScope::open(std::path::Path::new(&workspace))
+                        .map_err(|error| AppError::Conflict(error.to_string()))?;
+                    tool = tool.with_download_scope(Arc::new(scope));
+                }
+                if !engine.registry_mut().register(Box::new(tool)) {
+                    return Err(AppError::Conflict("Native Browser tool was rejected by the Agent capability policy.".into()));
+                }
+            }
+        }
         let delegate_selected = !config_extra.enforce_tool_allowlist
             || config_extra
                 .allowed_tools
@@ -1416,6 +1432,12 @@ impl NomiAgentManager {
                     "authorized web_search tool could not be registered under the session policy"
                         .to_owned(),
                 ));
+            }
+        }
+        #[cfg(feature = "browser-use")]
+        if let Some(tool)=local_web_search_tool {
+            if !engine.registry_mut().register(tool) {
+                return Err(AppError::Conflict("Local search was rejected by the exact Agent capability policy".into()));
             }
         }
         if let Some(tool) = citation_render_tool {
@@ -1651,7 +1673,14 @@ impl NomiAgentManager {
             lazy_mcp_runtime,
             loopback_capability_leases,
             #[cfg(feature = "browser-use")]
-            browser_lane_binding,
+            browser_workspace,
+            #[cfg(feature = "browser-use")]
+            system_browser_session,
+            #[cfg(feature = "browser-use")]
+            native_browser_turn,
+            #[cfg(feature = "browser-use")]
+            system_browser_turn,
+            stop_generation: AtomicU64::new(0),
             ssh_lease,
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
             active_turn: Arc::new(std::sync::Mutex::new(None)),
@@ -1792,6 +1821,11 @@ impl NomiAgentManager {
             .lifecycle_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.stop_generation.fetch_add(1, Ordering::AcqRel);
+        #[cfg(feature = "browser-use")]
+        self.native_browser_turn.cancel();
+        #[cfg(feature = "browser-use")]
+        self.system_browser_turn.cancel();
         if close_permanently {
             self.closing.store(true, Ordering::Release);
         }
@@ -1922,6 +1956,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
             "Nomi send_message started"
         );
         let _turn = self.turn_gate.lock().await;
+        let admission_stop_generation = self.stop_generation.load(Ordering::Acquire);
         if !self
             .turn_teardown_fence
             .wait_until_clear(TURN_TEARDOWN_FENCE_WAIT_TIMEOUT)
@@ -1943,16 +1978,27 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
         // generation. The turn termination guard can then fence subprocesses
         // even if the engine future panics and its mutex guard unwinds.
         let process_supervisor = self.process_supervisor.clone();
-        let (turn_cancel, runtime_turn) = {
+        #[cfg(feature = "browser-use")]
+        if let Some(workspace) = &self.browser_workspace {
+            self.native_browser_turn.begin(workspace.clone()).await.map_err(AgentSendError::from_app_error)?;
+        }
+        #[cfg(feature = "browser-use")]
+        if let Some(session) = &self.system_browser_session {
+            if let Err(error) = self.system_browser_turn.begin(session.clone()).await {
+                super::browser_lifecycle::settle_turns(&self.native_browser_turn, &self.system_browser_turn).await.map_err(AgentSendError::from_app_error)?;
+                super::browser_lifecycle::finish_turns(&self.native_browser_turn, &self.system_browser_turn).await.map_err(AgentSendError::from_app_error)?;
+                return Err(AgentSendError::from_app_error(error));
+            }
+        }
+        let accepted = {
             let _lifecycle = self
                 .lifecycle_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if self.closing.load(Ordering::Acquire) {
-                return Err(AgentSendError::from_app_error(AppError::Conflict(
-                    "Agent runtime is shutting down; retry on the replacement runtime".to_owned(),
-                )));
-            }
+            if self.closing.load(Ordering::Acquire)
+                || self.stop_generation.load(Ordering::Acquire) != admission_stop_generation {
+                None
+            } else {
             // Backstop for abnormal teardown and data written by older builds:
             // a fresh explicit turn never inherits steering from a prior
             // generation. Normal terminalization performs the same clear.
@@ -1968,7 +2014,19 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
             self.runtime.bump_activity();
             let runtime_turn = self.runtime.reset_for_new_turn(ConversationStatus::Running);
             *self.active_turn.lock().unwrap_or_else(|e| e.into_inner()) = Some(runtime_turn);
-            (token, runtime_turn)
+            Some((token, runtime_turn))
+            }
+        };
+        let Some((turn_cancel, runtime_turn)) = accepted else {
+            #[cfg(feature = "browser-use")]
+            super::browser_lifecycle::settle_turns(&self.native_browser_turn, &self.system_browser_turn).await.map_err(AgentSendError::from_app_error)?;
+            #[cfg(feature = "browser-use")]
+            super::browser_lifecycle::finish_turns(&self.native_browser_turn, &self.system_browser_turn).await.map_err(AgentSendError::from_app_error)?;
+            return if self.closing.load(Ordering::Acquire) {
+                Err(AgentSendError::from_app_error(AppError::Conflict(
+                    "Agent runtime is shutting down; retry on the replacement runtime".into(),
+                )))
+            } else { Ok(()) };
         };
 
         // Backstop: guarantee a terminal event even if this turn unwinds
@@ -1976,6 +2034,10 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
         // after the real terminal event is emitted below. (Phase 0 F0.2)
         let accepted_turn_recovery_required = Arc::new(AtomicBool::new(false));
         let mut term_guard = TurnTerminationGuard {
+            #[cfg(feature = "browser-use")]
+            native_browser_turn: self.native_browser_turn.clone(),
+            #[cfg(feature = "browser-use")]
+            system_browser_turn: self.system_browser_turn.clone(),
             runtime: self.runtime.clone(),
             turn: runtime_turn,
             active_turn: Arc::clone(&self.active_turn),
@@ -1989,8 +2051,6 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
             accepted_turn_recovery_required: Arc::clone(
                 &accepted_turn_recovery_required,
             ),
-            #[cfg(feature = "browser-use")]
-            browser_lane_binding: self.browser_lane_binding.clone(),
             armed: true,
         };
 
@@ -2962,10 +3022,6 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
     fn kill(&self, reason: Option<AgentKillReason>) -> Result<(), AppError> {
         let was_running = self.request_stop(reason, "kill", true);
         self.loopback_capability_leases.revoke_all();
-        #[cfg(feature = "browser-use")]
-        if let Some(binding) = &self.browser_lane_binding {
-            binding.revoke();
-        }
         if !was_running {
             schedule_nomi_cancelled_terminal_after_process_fence(
                 self.runtime.clone(),
@@ -2976,8 +3032,6 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 self.process_supervisor.clone(),
                 self.mcp_managers.clone(),
                 self.lazy_mcp_runtime.clone(),
-                #[cfg(feature = "browser-use")]
-                self.browser_lane_binding.clone(),
             )?;
         }
         Ok(())
@@ -2991,6 +3045,10 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
 /// The emit is idempotent via `AgentRuntimeState`'s absorbing-state guard, so this can
 /// never leak a spurious terminal event past a real one. (Phase 0 F0.2)
 struct TurnTerminationGuard {
+    #[cfg(feature = "browser-use")]
+    native_browser_turn: super::browser_lifecycle::NativeBrowserTurnSlot,
+    #[cfg(feature = "browser-use")]
+    system_browser_turn: crate::system_browser::SystemBrowserTurnSlot,
     runtime: AgentRuntimeState,
     turn: crate::runtime_state::AgentRuntimeTurn,
     active_turn: Arc<std::sync::Mutex<Option<crate::runtime_state::AgentRuntimeTurn>>>,
@@ -3006,10 +3064,6 @@ struct TurnTerminationGuard {
     /// the backstop must publish the typed inconsistency terminal so the owner
     /// retires the runtime and exactly rewinds that root.
     accepted_turn_recovery_required: Arc<AtomicBool>,
-    /// Reusable runtime binding. Turn cleanup closes its current Lanes but must
-    /// not revoke the owner lease; the next turn lazily opens a fresh Lane.
-    #[cfg(feature = "browser-use")]
-    browser_lane_binding: Option<crate::BrowserLaneBinding>,
     armed: bool,
 }
 
@@ -3029,13 +3083,7 @@ impl TurnTerminationGuard {
         ) -> bool,
     ) -> Result<bool, AppError> {
         #[cfg(feature = "browser-use")]
-        if let Some(binding) = &self.browser_lane_binding {
-            // A terminal event is the externally observable proof that a turn
-            // has ended. Do not publish it while that turn still owns browser
-            // pages or Chromium capacity. `close_turn_lanes` preserves the
-            // owner lease, so this manager remains reusable.
-            binding.close_turn_lanes().await?;
-        }
+        super::browser_lifecycle::settle_turns(&self.native_browser_turn, &self.system_browser_turn).await?;
 
         let emitted = terminalize_exact_nomi_turn(
             &self.runtime,
@@ -3046,6 +3094,8 @@ impl TurnTerminationGuard {
             terminal,
         );
         self.armed = false;
+        #[cfg(feature = "browser-use")]
+        super::browser_lifecycle::finish_turns(&self.native_browser_turn, &self.system_browser_turn).await?;
         Ok(emitted)
     }
 
@@ -3062,9 +3112,20 @@ impl TurnTerminationGuard {
         completed: TurnCompletedEventData,
     ) -> Result<bool, AppError> {
         #[cfg(feature = "browser-use")]
-        if let Some(binding) = &self.browser_lane_binding {
-            binding.close_turn_lanes().await?;
-        }
+        super::browser_lifecycle::settle_turns(&self.native_browser_turn, &self.system_browser_turn).await?;
+        let result = self.publish_host_text_terminal(turn_cancel, msg_id, response, completed).await?;
+        #[cfg(feature = "browser-use")]
+        if !self.armed { super::browser_lifecycle::finish_turns(&self.native_browser_turn, &self.system_browser_turn).await?; }
+        Ok(result)
+    }
+
+    async fn publish_host_text_terminal(
+        &mut self,
+        turn_cancel: &tokio_util::sync::CancellationToken,
+        msg_id: &str,
+        response: &str,
+        completed: TurnCompletedEventData,
+    ) -> Result<bool, AppError> {
 
         let _lifecycle = self
             .lifecycle_gate
@@ -3105,9 +3166,19 @@ impl TurnTerminationGuard {
         stream_error: crate::protocol::events::ErrorEventData,
     ) -> Result<bool, AppError> {
         #[cfg(feature = "browser-use")]
-        if let Some(binding) = &self.browser_lane_binding {
-            binding.close_turn_lanes().await?;
-        }
+        super::browser_lifecycle::settle_turns(&self.native_browser_turn, &self.system_browser_turn).await?;
+        let result = self.fail_adjudicated_terminal(turn_cancel, completed, stream_error).await?;
+        #[cfg(feature = "browser-use")]
+        if !self.armed { super::browser_lifecycle::finish_turns(&self.native_browser_turn, &self.system_browser_turn).await?; }
+        Ok(result)
+    }
+
+    async fn fail_adjudicated_terminal(
+        &mut self,
+        turn_cancel: &tokio_util::sync::CancellationToken,
+        completed: TurnCompletedEventData,
+        stream_error: crate::protocol::events::ErrorEventData,
+    ) -> Result<bool, AppError> {
 
         let _lifecycle = self
             .lifecycle_gate
@@ -3148,9 +3219,22 @@ impl TurnTerminationGuard {
         completion_context: &CompletionEvidenceContext,
     ) -> Result<VerifiedTurnCommitOutcome, AppError> {
         #[cfg(feature = "browser-use")]
-        if let Some(binding) = &self.browser_lane_binding {
-            binding.close_turn_lanes().await?;
-        }
+        super::browser_lifecycle::settle_turns(&self.native_browser_turn, &self.system_browser_turn).await?;
+        let result = self.commit_verified_terminal(turn_cancel, completed, stop_reason, prepared_distill, engine, completion_context).await?;
+        #[cfg(feature = "browser-use")]
+        if !self.armed { super::browser_lifecycle::finish_turns(&self.native_browser_turn, &self.system_browser_turn).await?; }
+        Ok(result)
+    }
+
+    async fn commit_verified_terminal(
+        &mut self,
+        turn_cancel: &tokio_util::sync::CancellationToken,
+        completed: TurnCompletedEventData,
+        stop_reason: TurnStopReason,
+        prepared_distill: Option<super::distill::PreparedDistill>,
+        engine: &Mutex<AgentEngine>,
+        completion_context: &CompletionEvidenceContext,
+    ) -> Result<VerifiedTurnCommitOutcome, AppError> {
 
         let verified = match self
             .backend_output_sink
@@ -3237,6 +3321,10 @@ impl TurnTerminationGuard {
 impl Drop for TurnTerminationGuard {
     fn drop(&mut self) {
         if self.armed {
+            #[cfg(feature = "browser-use")]
+            self.native_browser_turn.cancel();
+            #[cfg(feature = "browser-use")]
+            self.system_browser_turn.cancel();
             // This store happens synchronously while the old send still owns
             // `turn_gate`. Therefore a queued successor can never slip between
             // the unwind and the asynchronous process-tree fence.
@@ -3271,7 +3359,9 @@ impl Drop for TurnTerminationGuard {
             let lazy_mcp_runtime = self.lazy_mcp_runtime.clone();
             let turn_teardown_fence = Arc::clone(&self.turn_teardown_fence);
             #[cfg(feature = "browser-use")]
-            let browser_lane_binding = self.browser_lane_binding.clone();
+            let native_browser_turn = self.native_browser_turn.clone();
+            #[cfg(feature = "browser-use")]
+            let system_browser_turn = self.system_browser_turn.clone();
             let terminalize = move || {
                 terminalize_exact_nomi_turn(
                     &runtime,
@@ -3291,7 +3381,6 @@ impl Drop for TurnTerminationGuard {
                         }
                     },
                 );
-                turn_teardown_fence.complete();
             };
 
             let Ok(runtime_handle) = tokio::runtime::Handle::try_current() else {
@@ -3303,7 +3392,7 @@ impl Drop for TurnTerminationGuard {
             };
             runtime_handle.spawn(async move {
                 // Every fence below is attempted unconditionally. An inexact
-                // MCP or process teardown must never skip the Browser Lane
+                // MCP or process teardown must never skip native Browser
                 // cleanup (or vice versa); only the terminal publication is
                 // conditioned on the aggregate proof.
                 let mut exact = true;
@@ -3332,18 +3421,18 @@ impl Drop for TurnTerminationGuard {
                     }
                 }
                 #[cfg(feature = "browser-use")]
-                if let Some(binding) = browser_lane_binding
-                    && let Err(error) = binding.close_turn_lanes().await
-                {
-                    error!(
-                        conversation_id = %conversation_id,
-                        error = %ErrorChain(&error),
-                        "Nomi turn Browser Lane cleanup was not exact; retaining non-terminal quarantine"
-                    );
+                if let Err(error) = super::browser_lifecycle::settle_turns(&native_browser_turn, &system_browser_turn).await {
+                    error!(%error, "browser turn did not settle; retaining cleanup authority");
                     exact = false;
                 }
                 if exact {
                     terminalize();
+                    #[cfg(feature = "browser-use")]
+                    if let Err(error) = super::browser_lifecycle::finish_turns(&native_browser_turn, &system_browser_turn).await {
+                        error!(%error, "browser turn did not finish after terminal");
+                        return;
+                    }
+                    turn_teardown_fence.complete();
                 }
                 // A non-exact teardown deliberately withholds the terminal
                 // event: the runtime-registry quarantine remains authoritative
@@ -3393,8 +3482,6 @@ struct NomiTeardownResults {
     kill: Result<(), AppError>,
     mcp: Result<(), AppError>,
     process: Result<(), AppError>,
-    #[cfg(feature = "browser-use")]
-    browser_lane_binding: Option<crate::BrowserLaneBinding>,
     ssh_lease: Option<Arc<dyn crate::SshSessionLease>>,
 }
 
@@ -3475,23 +3562,14 @@ fn describe_ssh_release(release: crate::SshLeaseRelease) -> Result<(), AppError>
     }
 }
 
-/// Finish every already-started Nomi teardown stage without allowing an early
-/// failure to skip the Browser owner cleanup. In particular, `kill()` already
-/// issues a synchronous best-effort revoke, but this function is the
-/// result-bearing proof that waits for the Hub-owned owner-lease cleanup flight.
+/// Finish every already-started teardown stage without allowing an early
+/// failure to skip the independent SSH release proof.
 async fn finish_nomi_teardown(results: NomiTeardownResults) -> Result<(), AppError> {
     let mut failures = NomiTeardownFailures::default();
     failures.record("kill", results.kill);
     failures.record("MCP", results.mcp);
     failures.record("process tree", results.process);
 
-    #[cfg(feature = "browser-use")]
-    if let Some(binding) = results.browser_lane_binding {
-        // Deliberately run this after the other stages, but never condition it
-        // on their success. The Hub retains the cleanup flight if this waiter
-        // itself reports a timeout, so a later lifecycle sweep can retry it.
-        failures.record("Browser owner lease", binding.shutdown().await);
-    }
 
     // Same posture for the remote session: last, and unconditional. A failed kill
     // must not cost us the one report that says whether the operator's shell is
@@ -3534,7 +3612,6 @@ fn schedule_nomi_cancelled_terminal_after_process_fence(
     process_supervisor: Option<Arc<nomi_process_runtime::ProcessSupervisor>>,
     mcp_managers: Vec<Arc<McpManager>>,
     lazy_mcp_runtime: Option<LazyMcpRuntime>,
-    #[cfg(feature = "browser-use")] browser_lane_binding: Option<crate::BrowserLaneBinding>,
 ) -> Result<(), AppError> {
     let terminalize = move || {
         backend_output_sink.cancel_active_tool_calls(
@@ -3562,14 +3639,9 @@ fn schedule_nomi_cancelled_terminal_after_process_fence(
         }
     };
 
-    #[cfg(feature = "browser-use")]
-    let has_browser_binding = browser_lane_binding.is_some();
-    #[cfg(not(feature = "browser-use"))]
-    let has_browser_binding = false;
     if process_supervisor.is_none()
         && mcp_managers.is_empty()
         && lazy_mcp_runtime.is_none()
-        && !has_browser_binding
     {
         terminalize();
         return Ok(());
@@ -3602,19 +3674,6 @@ fn schedule_nomi_cancelled_terminal_after_process_fence(
                 exact = false;
             }
         }
-        // `kill()` already started the Hub-owned owner-lease revocation
-        // flight; join it here so the idle terminal is published only after
-        // the bounded Browser cleanup proof, not merely after its request.
-        #[cfg(feature = "browser-use")]
-        if let Some(binding) = browser_lane_binding
-            && let Err(error) = binding.revoke_and_wait().await
-        {
-            error!(
-                error = %ErrorChain(&error),
-                "Idle Nomi kill could not prove exact Browser owner cleanup; retaining non-terminal quarantine"
-            );
-            exact = false;
-        }
         if exact {
             terminalize();
         }
@@ -3632,14 +3691,11 @@ impl NomiAgentManager {
         let process_supervisor = self.process_supervisor.clone();
         let mcp_managers = self.mcp_managers.clone();
         let lazy_mcp_runtime = self.lazy_mcp_runtime.clone();
-        #[cfg(feature = "browser-use")]
-        let browser_lane_binding = self.browser_lane_binding.clone();
         let ssh_lease = self.ssh_lease.clone();
         Box::pin(async move {
             // Every cleanup stage is attempted even if an earlier one failed.
-            // In particular, a synchronous `kill()` failure or an inexact MCP
-            // / process fence must never skip the result-bearing Browser owner
-            // lease shutdown below.
+            // A synchronous kill failure or inexact MCP/process fence must
+            // never skip the independent SSH release below.
             let mcp_result =
                 shutdown_mcp_runtimes_exact(&mcp_managers, lazy_mcp_runtime.as_ref()).await;
             let process_result = if let Some(supervisor) = process_supervisor {
@@ -3660,8 +3716,6 @@ impl NomiAgentManager {
                 kill: kill_result,
                 mcp: mcp_result,
                 process: process_result,
-                #[cfg(feature = "browser-use")]
-                browser_lane_binding,
                 ssh_lease,
             })
             .await?;
@@ -3897,6 +3951,16 @@ fn image_artifact_delivery_error_to_send_error(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "browser-use")]
+    mod native_browser {
+        use super::*;
+        include!("browser_lifecycle_tests.rs");
+    }
+    #[cfg(feature = "browser-use")]
+    mod system_browser {
+        use super::*;
+        include!("system_browser_lifecycle_tests.rs");
+    }
     use super::*;
     use crate::protocol::events::ToolCallStatus;
     use crate::runtime_handle::AgentRuntimeControl;
@@ -3910,8 +3974,6 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[cfg(feature = "browser-use")]
-    struct RejectingBrowserHostFactory;
 
     #[tokio::test]
     async fn turn_teardown_fence_wait_is_bounded_while_cleanup_is_stuck() {
@@ -3942,273 +4004,6 @@ mod tests {
                 .await,
             "an exact cleanup proof must release the successor fence"
         );
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[async_trait::async_trait]
-    impl nomifun_browser_platform::BrowserHostFactory for RejectingBrowserHostFactory {
-        async fn launch(
-            &self,
-            _request: nomifun_browser_platform::HostLaunchRequest,
-        ) -> Result<
-            Arc<dyn nomifun_browser_platform::BrowserHostDriver>,
-            nomifun_browser_platform::BrowserPlatformError,
-        > {
-            Err(nomifun_browser_platform::BrowserPlatformError::new(
-                nomifun_browser_platform::BrowserErrorCode::BrowserUnavailable,
-                "A browser host is not required by this teardown test.",
-                false,
-                "Do not launch a browser host in this teardown test.",
-            ))
-        }
-    }
-
-    #[cfg(feature = "browser-use")]
-    struct BlockingBrowserOwnerLease {
-        shutdown_started: tokio::sync::Semaphore,
-        shutdown_release: tokio::sync::Semaphore,
-        shutdown_calls: AtomicUsize,
-        shutdown_error: Option<&'static str>,
-    }
-
-    #[cfg(feature = "browser-use")]
-    impl BlockingBrowserOwnerLease {
-        fn new(shutdown_error: Option<&'static str>) -> Arc<Self> {
-            Arc::new(Self {
-                shutdown_started: tokio::sync::Semaphore::new(0),
-                shutdown_release: tokio::sync::Semaphore::new(0),
-                shutdown_calls: AtomicUsize::new(0),
-                shutdown_error,
-            })
-        }
-
-        async fn wait_until_shutdown_started(&self) {
-            self.shutdown_started.acquire().await.unwrap().forget();
-        }
-
-        fn release_shutdown(&self) {
-            self.shutdown_release.add_permits(1);
-        }
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[async_trait::async_trait]
-    impl crate::BrowserOwnerLeaseGuard for BlockingBrowserOwnerLease {
-        fn revoke(&self) {}
-
-        async fn revoke_and_wait(&self) -> Result<(), AppError> {
-            self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
-            self.shutdown_started.add_permits(1);
-            self.shutdown_release.acquire().await.unwrap().forget();
-            match self.shutdown_error {
-                Some(message) => Err(AppError::Internal(message.to_owned())),
-                None => Ok(()),
-            }
-        }
-    }
-
-    #[cfg(feature = "browser-use")]
-    struct ControlledBrowserOwnerLease {
-        flight_started: AtomicBool,
-        flight_starts: AtomicUsize,
-        waiter_started: tokio::sync::Semaphore,
-        completion: std::sync::OnceLock<Option<&'static str>>,
-        completed: tokio::sync::Notify,
-    }
-
-    #[cfg(feature = "browser-use")]
-    impl ControlledBrowserOwnerLease {
-        fn new() -> Arc<Self> {
-            Arc::new(Self {
-                flight_started: AtomicBool::new(false),
-                flight_starts: AtomicUsize::new(0),
-                waiter_started: tokio::sync::Semaphore::new(0),
-                completion: std::sync::OnceLock::new(),
-                completed: tokio::sync::Notify::new(),
-            })
-        }
-
-        fn start_or_join(&self) {
-            if self
-                .flight_started
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                self.flight_starts.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        async fn wait_until_waiter_started(&self) {
-            self.waiter_started.acquire().await.unwrap().forget();
-        }
-
-        fn complete(&self, error: Option<&'static str>) {
-            self.completion
-                .set(error)
-                .expect("the controlled owner cleanup flight completes once");
-            self.completed.notify_waiters();
-        }
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[async_trait::async_trait]
-    impl crate::BrowserOwnerLeaseGuard for ControlledBrowserOwnerLease {
-        fn revoke(&self) {
-            self.start_or_join();
-        }
-
-        async fn revoke_and_wait(&self) -> Result<(), AppError> {
-            self.start_or_join();
-            self.waiter_started.add_permits(1);
-            loop {
-                let completed = self.completed.notified();
-                if let Some(error) = self.completion.get() {
-                    return match error {
-                        Some(message) => Err(AppError::Internal((*message).to_owned())),
-                        None => Ok(()),
-                    };
-                }
-                completed.await;
-            }
-        }
-    }
-
-    #[cfg(feature = "browser-use")]
-    fn teardown_test_browser_binding<L>(lease: Arc<L>) -> crate::BrowserLaneBinding
-    where
-        L: crate::BrowserOwnerLeaseGuard + 'static,
-    {
-        teardown_test_browser_binding_with_hub(lease).0
-    }
-
-    #[cfg(feature = "browser-use")]
-    fn teardown_test_browser_binding_with_hub<L>(lease: Arc<L>) -> (
-        crate::BrowserLaneBinding,
-        nomifun_browser_platform::BrowserSessionHub,
-        nomifun_browser_platform::OwnerLeaseId,
-    )
-    where
-        L: crate::BrowserOwnerLeaseGuard + 'static,
-    {
-        use std::collections::BTreeSet;
-
-        let hub = nomifun_browser_platform::BrowserSessionHub::new(
-            Arc::new(RejectingBrowserHostFactory),
-            nomifun_browser_platform::HubConfig::default(),
-        );
-        let owner = hub
-            .issue_owner_lease(
-                "teardown-user",
-                Some("teardown-conversation".to_owned()),
-                "teardown-runtime",
-            )
-            .expect("teardown test owner lease should be issued");
-        let lease_id = owner.lease_id.clone();
-        let client = hub
-            .bind(nomifun_browser_platform::CallerIdentity {
-                user_id: owner.user_id,
-                conversation_id: owner.conversation_id,
-                runtime_instance_id: owner.runtime_instance_id,
-                agent_id: None,
-                companion_id: None,
-                execution_id: None,
-                step_id: None,
-                attempt_id: None,
-                remote_connection_id: None,
-                surface: nomifun_browser_platform::BrowserSurface::Native,
-                owner_lease_id: owner.lease_id,
-                capability_expires_at_ms: owner.expires_at_ms,
-                allowed_operations: BTreeSet::from([
-                    nomifun_browser_platform::BrowserOperationKind::Manage,
-                ]),
-            })
-            .expect("teardown test caller should bind");
-        (
-            crate::BrowserLaneBinding::new(client, lease),
-            hub,
-            lease_id,
-        )
-    }
-
-    #[cfg(feature = "browser-use")]
-    async fn assert_failed_stage_waits_for_browser_shutdown(
-        kill: Result<(), AppError>,
-        mcp: Result<(), AppError>,
-        process: Result<(), AppError>,
-        expected_error: &'static str,
-    ) {
-        let lease = BlockingBrowserOwnerLease::new(None);
-        let binding = teardown_test_browser_binding(Arc::clone(&lease));
-        let mut teardown = Box::pin(finish_nomi_teardown(NomiTeardownResults {
-            kill,
-            mcp,
-            process,
-            browser_lane_binding: Some(binding),
-            ssh_lease: None,
-        }));
-
-        tokio::select! {
-            biased;
-            result = &mut teardown => {
-                panic!("teardown returned before Browser owner shutdown completed: {result:?}");
-            }
-            _ = lease.wait_until_shutdown_started() => {}
-        }
-        assert_eq!(lease.shutdown_calls.load(Ordering::SeqCst), 1);
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(20),
-                teardown.as_mut(),
-            )
-            .await
-            .is_err(),
-            "teardown must remain pending while Browser owner shutdown is pending"
-        );
-
-        lease.release_shutdown();
-        let error = teardown
-            .await
-            .expect_err("the original teardown stage failure must be returned");
-        assert!(
-            matches!(&error, AppError::Internal(message) if message == expected_error),
-            "single-stage failure must retain its exact AppError: {error:?}"
-        );
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[tokio::test]
-    async fn finish_nomi_teardown_awaits_browser_after_kill_failure() {
-        assert_failed_stage_waits_for_browser_shutdown(
-            Err(AppError::Internal("kill failed".to_owned())),
-            Ok(()),
-            Ok(()),
-            "kill failed",
-        )
-        .await;
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[tokio::test]
-    async fn finish_nomi_teardown_awaits_browser_after_mcp_failure() {
-        assert_failed_stage_waits_for_browser_shutdown(
-            Ok(()),
-            Err(AppError::Internal("MCP failed".to_owned())),
-            Ok(()),
-            "MCP failed",
-        )
-        .await;
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[tokio::test]
-    async fn finish_nomi_teardown_awaits_browser_after_process_failure() {
-        assert_failed_stage_waits_for_browser_shutdown(
-            Ok(()),
-            Ok(()),
-            Err(AppError::Internal("process failed".to_owned())),
-            "process failed",
-        )
-        .await;
     }
 
     /// A lease that reports whatever the pool would have told it, and counts how
@@ -4244,8 +4039,6 @@ mod tests {
             kill,
             mcp: Ok(()),
             process: Ok(()),
-            #[cfg(feature = "browser-use")]
-            browser_lane_binding: None,
             ssh_lease: Some(lease),
         }
     }
@@ -4341,286 +4134,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "browser-use")]
-    #[tokio::test]
-    async fn finish_nomi_teardown_aggregates_browser_and_prior_failures() {
-        let lease = BlockingBrowserOwnerLease::new(Some("browser failed"));
-        let binding = teardown_test_browser_binding(Arc::clone(&lease));
-        lease.release_shutdown();
-
-        let error = finish_nomi_teardown(NomiTeardownResults {
-            kill: Err(AppError::Internal("kill failed".to_owned())),
-            mcp: Err(AppError::Internal("MCP failed".to_owned())),
-            process: Err(AppError::Internal("process failed".to_owned())),
-            browser_lane_binding: Some(binding),
-            ssh_lease: None,
-        })
-        .await
-        .expect_err("all teardown failures should be reported");
-
-        let AppError::Internal(message) = error else {
-            panic!("the primary Internal error variant must be preserved");
-        };
-        assert!(message.contains("kill failed"));
-        assert!(message.contains("MCP: Internal error: MCP failed"));
-        assert!(message.contains("process tree: Internal error: process failed"));
-        assert!(message.contains("Browser owner lease: Internal error: browser failed"));
-        assert_eq!(lease.shutdown_calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[tokio::test]
-    async fn turn_boundary_close_joins_in_flight_owner_revocation() {
-        // The kill() race: the exact-owner revocation flight has invalidated
-        // the lease, but its Chromium cleanup proof is still pending when the
-        // turn boundary attempts owner-scoped close_all.
-        let lease = ControlledBrowserOwnerLease::new();
-        let (binding, hub, lease_id) =
-            teardown_test_browser_binding_with_hub(Arc::clone(&lease));
-        binding.revoke();
-        hub.close_owner_lease(&lease_id)
-            .await
-            .expect("the simulated revocation flight should invalidate the owner lease");
-
-        let mut close_turn_lanes = Box::pin(binding.close_turn_lanes());
-        tokio::select! {
-            biased;
-            result = &mut close_turn_lanes => {
-                panic!("turn cleanup returned before exact-owner revocation completed: {result:?}");
-            }
-            _ = lease.wait_until_waiter_started() => {}
-        }
-        assert_eq!(
-            lease.flight_starts.load(Ordering::SeqCst),
-            1,
-            "the expired-lease branch must join the existing exact-owner flight"
-        );
-
-        lease.complete(None);
-        close_turn_lanes
-            .await
-            .expect("the completed exact-owner cleanup proof should satisfy the turn boundary");
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[tokio::test]
-    async fn termination_guard_drop_emits_finish_after_revoked_lease_browser_cleanup() {
-        // End-to-end kill race at the guard level: an armed guard drop whose
-        // close_turn_lanes hits the already-revoked owner lease must still
-        // publish the terminal event and complete the teardown fence, because
-        // the Hub-owned revocation flight is the cleanup authority.
-        let lease = ControlledBrowserOwnerLease::new();
-        let (binding, hub, lease_id) =
-            teardown_test_browser_binding_with_hub(Arc::clone(&lease));
-        binding.revoke();
-        hub.close_owner_lease(&lease_id)
-            .await
-            .expect("the simulated revocation flight should invalidate the owner lease");
-
-        let rt = AgentRuntimeState::new("c-guard-kill-race", "/w", 16);
-        let mut rx = rt.subscribe();
-        let backend_output_sink = Arc::new(BackendOutputSink::new(rt.event_sender()));
-        let turn = rt.reset_for_new_turn(ConversationStatus::Running);
-        let active_turn = Arc::new(std::sync::Mutex::new(Some(turn)));
-        let fence = Arc::new(TurnTeardownFence::new());
-        {
-            let _g = TurnTerminationGuard {
-                runtime: rt.clone(),
-                turn,
-                active_turn: Arc::clone(&active_turn),
-                lifecycle_gate: Arc::new(std::sync::Mutex::new(())),
-                steering_inbox: Arc::new(std::sync::Mutex::new(
-                    std::collections::VecDeque::new(),
-                )),
-                backend_output_sink,
-                process_supervisor: None,
-                mcp_managers: Vec::new(),
-                lazy_mcp_runtime: None,
-                turn_teardown_fence: Arc::clone(&fence),
-                accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
-                browser_lane_binding: Some(binding),
-                armed: true,
-            };
-        }
-        lease.wait_until_waiter_started().await;
-        assert!(
-            matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
-            "the terminal must not be published while owner cleanup is pending"
-        );
-        lease.complete(None);
-        let event = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            rx.recv(),
-        )
-        .await
-        .expect("armed drop must publish a terminal event despite the revoked lease")
-        .expect("terminal event channel closed unexpectedly");
-        assert!(
-            matches!(event, AgentStreamEvent::Finish(_)),
-            "expected Finish after browser cleanup, got {event:?}"
-        );
-        assert_eq!(rt.status(), Some(ConversationStatus::Finished));
-        assert!(active_turn.lock().unwrap().is_none());
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[tokio::test]
-    async fn termination_guard_withholds_finish_when_expired_owner_cleanup_fails() {
-        let lease = ControlledBrowserOwnerLease::new();
-        let (binding, hub, lease_id) =
-            teardown_test_browser_binding_with_hub(Arc::clone(&lease));
-        binding.revoke();
-        hub.close_owner_lease(&lease_id)
-            .await
-            .expect("the simulated revocation flight should invalidate the owner lease");
-
-        let rt = AgentRuntimeState::new("c-guard-kill-race-failure", "/w", 16);
-        let mut rx = rt.subscribe();
-        let backend_output_sink = Arc::new(BackendOutputSink::new(rt.event_sender()));
-        let turn = rt.reset_for_new_turn(ConversationStatus::Running);
-        let active_turn = Arc::new(std::sync::Mutex::new(Some(turn)));
-        let mut guard = TurnTerminationGuard {
-            runtime: rt.clone(),
-            turn,
-            active_turn: Arc::clone(&active_turn),
-            lifecycle_gate: Arc::new(std::sync::Mutex::new(())),
-            steering_inbox: Arc::new(std::sync::Mutex::new(
-                std::collections::VecDeque::new(),
-            )),
-            backend_output_sink,
-            process_supervisor: None,
-            mcp_managers: Vec::new(),
-            lazy_mcp_runtime: None,
-            turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
-            accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
-            browser_lane_binding: Some(binding),
-            armed: true,
-        };
-
-        let mut terminalize = Box::pin(guard.terminalize(|runtime, turn| {
-            runtime.emit_finish_for_turn(
-                turn,
-                None,
-                Some(TurnStopReason::Cancelled),
-            )
-        }));
-        tokio::select! {
-            biased;
-            result = &mut terminalize => {
-                panic!("terminalization returned before exact-owner revocation completed: {result:?}");
-            }
-            _ = lease.wait_until_waiter_started() => {}
-        }
-        assert!(
-            matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
-            "the terminal must not be published while owner cleanup is pending"
-        );
-
-        lease.complete(Some("owner cleanup failed"));
-        let error = terminalize
-            .as_mut()
-            .await
-            .expect_err("failed exact-owner cleanup must fail terminalization");
-        assert!(
-            matches!(&error, AppError::Internal(message) if message == "owner cleanup failed"),
-            "the exact owner cleanup failure must be propagated: {error:?}"
-        );
-        assert!(
-            matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
-            "a failed owner cleanup proof must withhold Finish"
-        );
-        assert_eq!(rt.status(), Some(ConversationStatus::Running));
-        assert_eq!(*active_turn.lock().unwrap(), Some(turn));
-
-        // The result-bearing path was exercised directly. Suppress the Drop
-        // backstop so it cannot schedule a second terminalization attempt.
-        drop(terminalize);
-        guard.armed = false;
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[tokio::test]
-    async fn idle_kill_terminal_waits_for_browser_cleanup_proof() {
-        // The idle-kill fence must publish its cancelled terminal only after
-        // the Hub-owned Browser owner cleanup proof, not merely after the
-        // cleanup request was issued.
-        let lease = BlockingBrowserOwnerLease::new(None);
-        let binding = teardown_test_browser_binding(Arc::clone(&lease));
-        let rt = AgentRuntimeState::new("c-idle-kill", "/w", 16);
-        let mut rx = rt.subscribe();
-        let backend_output_sink = Arc::new(BackendOutputSink::new(rt.event_sender()));
-
-        schedule_nomi_cancelled_terminal_after_process_fence(
-            rt.clone(),
-            Arc::new(std::sync::Mutex::new(None)),
-            Arc::new(std::sync::Mutex::new(())),
-            Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
-            backend_output_sink,
-            None,
-            Vec::new(),
-            None,
-            Some(binding),
-        )
-        .expect("idle-kill fence should schedule");
-
-        lease.wait_until_shutdown_started().await;
-        assert!(
-            matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
-            "the terminal must not be published while Browser cleanup is pending"
-        );
-
-        lease.release_shutdown();
-        let event = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            rx.recv(),
-        )
-        .await
-        .expect("terminal must follow the completed Browser cleanup proof")
-        .expect("terminal event channel closed unexpectedly");
-        assert!(
-            matches!(event, AgentStreamEvent::Finish(_)),
-            "expected Finish after browser proof, got {event:?}"
-        );
-        assert_eq!(lease.shutdown_calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[tokio::test]
-    async fn idle_kill_withholds_terminal_when_browser_cleanup_fails() {
-        // A failed Browser cleanup proof retains the non-terminal quarantine;
-        // the result-bearing kill_and_wait path surfaces the error instead.
-        let lease = BlockingBrowserOwnerLease::new(Some("browser failed"));
-        let binding = teardown_test_browser_binding(Arc::clone(&lease));
-        let rt = AgentRuntimeState::new("c-idle-kill-fail", "/w", 16);
-        let mut rx = rt.subscribe();
-        let backend_output_sink = Arc::new(BackendOutputSink::new(rt.event_sender()));
-
-        schedule_nomi_cancelled_terminal_after_process_fence(
-            rt.clone(),
-            Arc::new(std::sync::Mutex::new(None)),
-            Arc::new(std::sync::Mutex::new(())),
-            Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
-            backend_output_sink,
-            None,
-            Vec::new(),
-            None,
-            Some(binding),
-        )
-        .expect("idle-kill fence should schedule");
-
-        lease.wait_until_shutdown_started().await;
-        lease.release_shutdown();
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(200),
-                rx.recv(),
-            )
-            .await
-            .is_err(),
-            "a failed Browser cleanup proof must withhold the idle terminal"
-        );
-    }
-
     fn make_test_config() -> NomiResolvedConfig {
         NomiResolvedConfig {
             provider: "anthropic".into(),
@@ -4637,14 +4150,7 @@ mod tests {
             loopback_capability_leases: Default::default(),
             bedrock_config: None,
             computer_use: false,
-            browser_use: false,
-            browser_source: "managed".to_owned(),
-            browser_full_power: false,
-            browser_persistent_login: false,
-            browser_site_memory: false,
-            browser_visual_fallback: false,
             goal: None,
-            persistent_login_key: None,
             owner_token: None,
             install_embedded_agent_execution: true,
             allowed_tools: Vec::new(),
@@ -5310,6 +4816,15 @@ mod tests {
             PathBuf::from("/project"),
         );
         NomiAgentManager {
+            #[cfg(feature = "browser-use")]
+            browser_workspace: None,
+            #[cfg(feature = "browser-use")]
+            system_browser_session: None,
+            #[cfg(feature = "browser-use")]
+            native_browser_turn: Default::default(),
+            #[cfg(feature = "browser-use")]
+            system_browser_turn: Default::default(),
+            stop_generation: AtomicU64::new(0),
             runtime,
             backend_output_sink,
             engine: Mutex::new(engine),
@@ -5319,8 +4834,6 @@ mod tests {
             mcp_managers: Vec::new(),
             lazy_mcp_runtime: None,
             loopback_capability_leases: Default::default(),
-            #[cfg(feature = "browser-use")]
-            browser_lane_binding: None,
             ssh_lease: None,
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
             active_turn: Arc::new(std::sync::Mutex::new(None)),
@@ -5609,6 +5122,15 @@ mod tests {
             PathBuf::from("/project"),
         );
         let agent = NomiAgentManager {
+            #[cfg(feature = "browser-use")]
+            browser_workspace: None,
+            #[cfg(feature = "browser-use")]
+            system_browser_session: None,
+            #[cfg(feature = "browser-use")]
+            native_browser_turn: Default::default(),
+            #[cfg(feature = "browser-use")]
+            system_browser_turn: Default::default(),
+            stop_generation: AtomicU64::new(0),
             runtime,
             backend_output_sink,
             engine: Mutex::new(engine),
@@ -5618,8 +5140,6 @@ mod tests {
             mcp_managers: Vec::new(),
             lazy_mcp_runtime: None,
             loopback_capability_leases: Default::default(),
-            #[cfg(feature = "browser-use")]
-            browser_lane_binding: None,
             ssh_lease: None,
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
             active_turn: Arc::new(std::sync::Mutex::new(None)),
@@ -7818,6 +7338,10 @@ mod tests {
                 turn,
                 active_turn: Arc::clone(&active_turn),
                 lifecycle_gate,
+                #[cfg(feature = "browser-use")]
+                native_browser_turn: Default::default(),
+                #[cfg(feature = "browser-use")]
+                system_browser_turn: Default::default(),
                 steering_inbox: Arc::clone(&steering_inbox),
                 backend_output_sink,
                 process_supervisor: None,
@@ -7825,8 +7349,6 @@ mod tests {
                 lazy_mcp_runtime: None,
                 turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
                 accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
-                #[cfg(feature = "browser-use")]
-                browser_lane_binding: None,
                 armed: true,
             };
         }
@@ -7863,6 +7385,10 @@ mod tests {
         let recovery_required = Arc::new(AtomicBool::new(true));
         {
             let _guard = TurnTerminationGuard {
+                #[cfg(feature = "browser-use")]
+                native_browser_turn: Default::default(),
+                #[cfg(feature = "browser-use")]
+                system_browser_turn: Default::default(),
                 runtime: rt.clone(),
                 turn,
                 active_turn: Arc::clone(&active_turn),
@@ -7876,8 +7402,6 @@ mod tests {
                 lazy_mcp_runtime: None,
                 turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
                 accepted_turn_recovery_required: recovery_required,
-                #[cfg(feature = "browser-use")]
-                browser_lane_binding: None,
                 armed: true,
             };
         }
@@ -7912,6 +7436,10 @@ mod tests {
         ));
         {
             let mut g = TurnTerminationGuard {
+                #[cfg(feature = "browser-use")]
+                native_browser_turn: Default::default(),
+                #[cfg(feature = "browser-use")]
+                system_browser_turn: Default::default(),
                 runtime: rt.clone(),
                 turn,
                 active_turn: Arc::clone(&active_turn),
@@ -7923,8 +7451,6 @@ mod tests {
                 lazy_mcp_runtime: None,
                 turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
                 accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
-                #[cfg(feature = "browser-use")]
-                browser_lane_binding: None,
                 armed: true,
             };
             assert!(g.terminalize(|runtime, turn| {

@@ -20,6 +20,13 @@ pub trait OnConversationDelete: Send + Sync {
     async fn on_conversation_deleted(&self, user_id: &str, conversation_id: &str);
 }
 
+/// Result-bearing resource cleanup after Agent quiescence and before row deletion.
+/// A failure preserves the conversation so its resource owner can retry cleanup.
+#[async_trait]
+pub trait BeforeConversationDelete: Send + Sync {
+    async fn before_conversation_delete(&self, user_id: &str, conversation_id: &str) -> Result<(), crate::AppError>;
+}
+
 /// Notified when a terminal session row is deleted via
 /// `TerminalService::delete`.
 ///

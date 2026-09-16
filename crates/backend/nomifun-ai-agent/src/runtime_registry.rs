@@ -232,8 +232,16 @@ pub trait AgentRuntimeRegistry: Send + Sync {
         })
     }
 
-    /// Terminate and remove every active runtime.
+    /// Request termination of every active runtime. This is not exit proof;
+    /// application shutdown uses the result-bearing shutdown boundary below.
     fn terminate_all(&self);
+
+    /// Permanently close factory admission and prove every owned runtime exited.
+    /// Hosts must await this before destroying browser or database resources.
+    /// Unsupported registries fail closed instead of treating kill requests as proof.
+    fn shutdown(&self) -> BoxFuture<'static, Result<(), AppError>> {
+        Box::pin(async { Err(AppError::Internal("Agent runtime registry has no proven shutdown implementation".into())) })
+    }
 
     /// Number of fully initialized active runtimes.
     fn active_runtime_count(&self) -> usize;
@@ -480,6 +488,10 @@ impl RestartGovernor {
 /// Default implementation of [`AgentRuntimeRegistry`] using a concurrent hash map.
 #[derive(Clone)]
 pub struct InMemoryAgentRuntimeRegistry {
+    shutdown_requested: CancellationToken,
+    /// Readers own complete factory admission; the shutdown writer drains all
+    /// admitted builds without dropping a future that may have spawned a process.
+    shutdown_gate: Arc<tokio::sync::RwLock<()>>,
     runtimes: Arc<DashMap<String, RuntimeSlot>>,
     /// Slots whose awaitable teardown failed. They remain authoritative until
     /// the exact runtime's process exit is proven; a replacement must never be
@@ -525,6 +537,8 @@ pub struct InMemoryAgentRuntimeRegistry {
 impl InMemoryAgentRuntimeRegistry {
     pub fn new(factory: AgentRuntimeFactory) -> Self {
         Self {
+            shutdown_requested: CancellationToken::new(),
+            shutdown_gate: Arc::new(tokio::sync::RwLock::new(())),
             runtimes: Arc::new(DashMap::new()),
             teardown_quarantine: Arc::new(DashMap::new()),
             turn_admissions: Arc::new(DashMap::new()),
@@ -981,6 +995,14 @@ impl InMemoryAgentRuntimeRegistry {
         cancellation: Option<CancellationToken>,
         mut options: AgentRuntimeBuildOptions,
     ) -> Result<AgentRuntimeHandle, AppError> {
+        let _admission = tokio::select! {
+            biased;
+            _ = self.shutdown_requested.cancelled() => return Err(AppError::Conflict("Agent runtime registry is shutting down".into())),
+            admission = self.shutdown_gate.read() => admission,
+        };
+        if self.shutdown_requested.is_cancelled() {
+            return Err(AppError::Conflict("Agent runtime registry is shutting down".into()));
+        }
         if options.workspace_binding_lease.is_none() {
             return Err(AppError::Conflict(format!(
                 "Agent runtime build for conversation {conversation_id} requires an exact physical workspace binding lease"
@@ -1378,10 +1400,11 @@ impl InMemoryAgentRuntimeRegistry {
             .runtimes
             .get(conversation_id)
             .is_some_and(|entry| Arc::ptr_eq(entry.value(), &slot));
-        let cancelled = cancellation.as_ref().is_some_and(CancellationToken::is_cancelled);
+        let user_cancelled = cancellation.as_ref().is_some_and(CancellationToken::is_cancelled);
+        let cancelled = user_cancelled || self.shutdown_requested.is_cancelled();
         let teardown_requested = self.slot_is_quarantined(conversation_id, &slot);
         if cancelled || !slot_is_current || teardown_requested {
-            let reason = cancelled.then_some(AgentKillReason::UserCancelled);
+            let reason = user_cancelled.then_some(AgentKillReason::UserCancelled);
             self.teardown_slot_under_gate(conversation_id, Arc::clone(&slot), reason, None)
                 .await?;
             return Err(AppError::Conflict(format!(
@@ -1474,6 +1497,7 @@ impl AgentRuntimeRegistry for InMemoryAgentRuntimeRegistry {
     }
 
     fn get_runtime(&self, conversation_id: &str) -> Option<AgentRuntimeHandle> {
+        if self.shutdown_requested.is_cancelled() { return None; }
         self.initialized_runtime(conversation_id)
     }
 
@@ -1732,6 +1756,34 @@ impl AgentRuntimeRegistry for InMemoryAgentRuntimeRegistry {
                 }
             }
         }
+    }
+
+    fn shutdown(&self) -> BoxFuture<'static, Result<(), AppError>> {
+        self.shutdown_requested.cancel();
+        // Cancel ready runtimes promptly, even while an unrelated factory is
+        // still settling. The writer below proves and removes each exact slot.
+        self.terminate_all();
+        let registry=self.clone();
+        let worker=tokio::spawn(async move {
+            let _admission=registry.shutdown_gate.write().await;
+            let ids=registry.runtimes.iter().map(|entry|entry.key().clone())
+                .chain(registry.teardown_quarantine.iter().map(|entry|entry.key().clone()))
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut failures=vec![];
+            for id in ids {
+                let lifecycle=registry.lifecycle_gate(&id);
+                let _lifecycle=lifecycle.lock().await;
+                let slot=registry.quarantined_slot(&id).or_else(||registry.runtimes.get(&id).map(|entry|entry.value().clone()));
+                if let Some(slot)=slot {
+                    if let Err(error)=registry.teardown_slot_under_gate(&id,slot,None,Some(BROKEN_RUNTIME_TEARDOWN_GRACE)).await {
+                        failures.push(format!("{id}: {error}"));
+                    }
+                }
+            }
+            if failures.is_empty() { Ok(()) }
+            else { Err(AppError::Internal(format!("Agent runtime shutdown failed: {}",failures.join("; ")))) }
+        });
+        Box::pin(async move {worker.await.map_err(|error|AppError::Internal(format!("Agent shutdown worker failed: {error}")))?})
     }
 
     fn active_runtime_count(&self) -> usize {
@@ -3093,6 +3145,72 @@ mod tests {
 
         registry.terminate_all();
         assert_eq!(registry.active_runtime_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_keeps_exact_runtime_owned_when_its_caller_drops() {
+        let entered=Arc::new(Semaphore::new(0));
+        let release=Arc::new(Semaphore::new(0));
+        let registry=InMemoryAgentRuntimeRegistry::new(Arc::new({
+            let entered=entered.clone(); let release=release.clone();
+            move |options| {
+                let runtime=MockAgent::new(&options.conversation_id,Some(ConversationStatus::Running))
+                    .with_blocking_kill(entered.clone(),release.clone());
+                async move {Ok(mock_runtime(runtime))}.boxed()
+            }
+        }));
+        registry.get_or_create_runtime("shutdown-owned",make_runtime_options("shutdown-owned")).await.unwrap();
+        drop(registry.shutdown());
+        entered.acquire().await.unwrap().forget();
+        assert!(registry.has_registered_runtime("shutdown-owned"));
+        assert!(registry.get_runtime("shutdown-owned").is_none());
+        assert!(registry.get_or_create_runtime("after-shutdown",make_runtime_options("after-shutdown")).await.is_err());
+        release.add_permits(1);
+        tokio::time::timeout(std::time::Duration::from_secs(2),async {
+            while registry.has_registered_runtime("shutdown-owned") {tokio::task::yield_now().await;}
+        }).await.unwrap();
+        registry.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_a_cold_factory_without_publishing_its_runtime() {
+        let entered=Arc::new(Semaphore::new(0));
+        let release=Arc::new(Semaphore::new(0));
+        let kills=Arc::new(std::sync::Mutex::new(vec![]));
+        let registry=InMemoryAgentRuntimeRegistry::new(Arc::new({
+            let entered=entered.clone(); let release=release.clone(); let kills=kills.clone();
+            move |options| {
+                let entered=entered.clone(); let release=release.clone(); let kills=kills.clone();
+                async move {
+                    entered.add_permits(1); release.acquire().await.unwrap().forget();
+                    Ok(mock_runtime(MockAgent::new(&options.conversation_id,Some(ConversationStatus::Pending)).with_kill_reasons(kills)))
+                }.boxed()
+            }
+        }));
+        let build=tokio::spawn({let registry=registry.clone();async move {registry.get_or_create_runtime("shutdown-build",make_runtime_options("shutdown-build")).await}});
+        entered.acquire().await.unwrap().forget();
+        let closing=tokio::spawn(registry.shutdown());
+        assert!(!closing.is_finished());
+        assert!(registry.get_or_create_runtime("shutdown-next",make_runtime_options("shutdown-next")).await.is_err());
+        release.add_permits(1);
+        assert!(build.await.unwrap().is_err());
+        closing.await.unwrap().unwrap();
+        assert!(!registry.has_registered_runtime("shutdown-build"));
+        assert_eq!(kills.lock().unwrap().len(),1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_failure_retains_quarantine_and_never_reopens_admission() {
+        let registry=InMemoryAgentRuntimeRegistry::new(Arc::new(|options|async move {
+            Ok(mock_runtime(MockAgent::new(&options.conversation_id,Some(ConversationStatus::Running)).with_kill_error("exit not proven")))
+        }.boxed()));
+        registry.get_or_create_runtime("shutdown-failed",make_runtime_options("shutdown-failed")).await.unwrap();
+        assert!(registry.shutdown().await.is_err());
+        let original=registry.quarantined_slot("shutdown-failed").unwrap();
+        assert!(registry.shutdown().await.is_err());
+        assert!(Arc::ptr_eq(&original,&registry.quarantined_slot("shutdown-failed").unwrap()));
+        assert!(registry.has_registered_runtime("shutdown-failed"));
+        assert!(registry.get_or_create_runtime("shutdown-failed",make_runtime_options("shutdown-failed")).await.is_err());
     }
 
     #[tokio::test]

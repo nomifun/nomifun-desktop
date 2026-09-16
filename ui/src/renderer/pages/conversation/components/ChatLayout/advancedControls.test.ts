@@ -10,6 +10,28 @@ import { describe, expect, test } from 'bun:test';
 const readSource = (url: URL) => readFileSync(url, 'utf8');
 
 describe('ChatLayout advanced controls', () => {
+  test('native browser surfaces do not inherit the file preview transform animation', () => {
+    const source = readSource(new URL('./index.tsx', import.meta.url));
+    expect(source).toContain("browserOpen ? 'browser-workspace-surface' : 'preview-panel'");
+  });
+  test('keeps browser entry outside wrapping controls in narrow desktop panes', () => {
+    const source = readSource(new URL('./index.tsx', import.meta.url));
+    const css = readSource(new URL('./chat-layout.css', import.meta.url));
+    expect(source).toContain("chat-layout-header-host");
+    expect(source).toMatch(/\{props\.headerExtra\}\s*<\/div>\s*\{browserFocus/);
+    expect(css).toContain('container: conversation-header / inline-size');
+    expect(css).toContain('@container conversation-header (max-width: 600px)');
+    expect(css).toContain('order:2; flex:1 1 100%; min-width:0; flex-wrap:wrap');
+    expect(css).not.toContain('(max-width: 768px)');
+  });
+
+  test('keeps the existing composer stop action in the header while browser focus hides chat', () => {
+    const source = readSource(new URL('./index.tsx', import.meta.url));
+    expect(source).toContain('<StopButtonHostContext.Provider value={browserFocus ? stopButtonHost : null}>');
+    expect(source).toContain("{browserFocus && <div ref={setStopButtonHost} className='chat-focus-stop-host' />}");
+    expect(source).toContain("display: browserFocus ? 'none' : undefined");
+  });
+
   test('keeps the stable header controls', () => {
     const source = readSource(new URL('./index.tsx', import.meta.url));
 

@@ -50,7 +50,7 @@ pub struct FetchedPage {
 /// The request intentionally contains only the source URL. Provider
 /// selection, operation admission, resource binding, and browser lifecycle
 /// belong to the injected port implementation; Knowledge must not carry a
-/// Browser Hub or a provider-specific lane handle.
+/// browser runtime or provider-specific handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserRenderContentRequest {
     pub url: String,
@@ -77,7 +77,7 @@ pub struct BrowserRenderContent {
 ///
 /// Implementations are expected to dispatch through the resolved Provider
 /// selected for the non-Agent operation. This crate deliberately knows
-/// nothing about Browser Hub, lanes, profiles, or concrete browser engines.
+/// nothing about browser processes, profiles, or concrete engines.
 #[async_trait::async_trait]
 pub trait BrowserRenderContentPort: Send + Sync {
     async fn render_content(
@@ -556,6 +556,49 @@ mod tests {
         assert_eq!(page.title.as_deref(), Some("Rendered"));
         assert!(page.markdown.contains("# Body"), "{}", page.markdown);
         assert!(page.truncated);
+    }
+
+    #[test]
+    fn rendered_content_projection_uses_shared_html_conversion() {
+        let page = rendered_content_to_page(BrowserRenderContent {
+            final_url: "https://spa.example.test/app".into(),
+            html: "<html><head><title>Rendered title</title><script>noise()</script></head><body><h1>Dynamic body</h1><p>Rendered content</p></body></html>".into(),
+            html_truncated: false,
+        });
+        assert_eq!(page.title.as_deref(), Some("Rendered title"));
+        assert_eq!(page.final_url, "https://spa.example.test/app");
+        assert!(page.markdown.contains("# Dynamic body"));
+        assert!(page.markdown.contains("Rendered content"));
+        assert!(!page.markdown.contains("noise()"));
+        assert!(!page.markdown.contains("<data"));
+        assert!(!page.markdown.contains("[REDACTED"));
+        assert!(!page.truncated);
+    }
+
+    #[test]
+    fn rendered_content_projection_truncates_utf8_markdown() {
+        let body = "中".repeat(FETCH_MAX_BYTES / 3 + 100);
+        let page = rendered_content_to_page(BrowserRenderContent {
+            final_url: "https://example.test/large".into(),
+            html: format!("<html><body><p>{body}</p></body></html>"),
+            html_truncated: false,
+        });
+        assert!(page.truncated);
+        assert!(!page.markdown.is_empty());
+        assert!(page.markdown.len() <= FETCH_MAX_BYTES);
+        assert!(page.markdown.ends_with('中'));
+    }
+
+    #[test]
+    fn rendered_content_projection_handles_missing_title() {
+        let page = rendered_content_to_page(BrowserRenderContent {
+            final_url: "https://example.test/no-title".into(),
+            html: "<html><body><p>No title</p></body></html>".into(),
+            html_truncated: false,
+        });
+        assert!(page.title.is_none());
+        assert!(page.markdown.contains("No title"));
+        assert!(!page.truncated);
     }
 
     // ── ordinary PageFetcher seam ────────────────────────────────────

@@ -535,6 +535,8 @@ const GuidPage: React.FC = () => {
         isAutoWorkMode ? autoWorkButtonDisabled : send.isButtonDisabled
       }
       onSend={send.sendMessageHandler}
+      onOpenBrowser={send.openBrowserHandler}
+      browserDisabled={send.isBrowserButtonDisabled}
     />
   );
 

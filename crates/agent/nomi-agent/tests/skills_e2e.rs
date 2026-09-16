@@ -229,7 +229,6 @@ async fn e7_system_prompt_injection() {
         None,
         false,
         false,
-        false,
     );
     assert!(
         prompt.contains("greet"),

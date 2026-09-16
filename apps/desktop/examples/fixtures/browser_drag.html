@@ -1,0 +1,54 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Native drag fixture</title>
+<style>
+  body { margin: 0; font: 16px sans-serif; }
+  [role=button] { position: absolute; width: 180px; height: 90px; box-sizing: border-box;
+    padding: 20px; border: 2px solid #6262bd; user-select: none; }
+  #source { left: 50px; top: 60px; background: #ccd9ff; }
+  #target { left: 450px; top: 60px; background: #dcffdc; }
+  #capture { left: 50px; top: 270px; background: #ccd9ff; }
+  #captureTarget { left: 450px; top: 270px; background: #dcffdc; }
+</style>
+<div id="source" draggable="true" role="button" tabindex="0">HTML drag source</div>
+<div id="target" role="button" tabindex="0">HTML drop target</div>
+<div id="capture" role="button" tabindex="0">Pointer capture source</div>
+<div id="captureTarget" role="button" tabindex="0">Pointer capture target</div>
+<script>
+  window.dragEvidence = {events:[],drops:0,capturedMoves:0};
+  const source=document.getElementById('source'), target=document.getElementById('target'), capture=document.getElementById('capture');
+  for (const type of ['dragstart','dragenter','dragover','dragleave','drop','dragend','pointerdown','pointerup','pointercancel','mouseup']) {
+    document.addEventListener(type, event => {
+      const item={type,target:event.target.id,trusted:event.isTrusted,buttons:event.buttons,dropEffect:event.dataTransfer?.dropEffect};
+      dragEvidence.events.push(item);
+      if (parent!==window) parent.postMessage({nomiDragEvent:item},'*');
+    },true);
+  }
+  source.addEventListener('dragstart', event => {
+    event.dataTransfer.setData('text/plain','nomifun-native-drag');
+    event.dataTransfer.setData('application/x-nomifun-fixture','opaque-value');
+    event.dataTransfer.effectAllowed='copyMove';
+  });
+  target.addEventListener('dragover', event => {
+    event.preventDefault();event.dataTransfer.dropEffect='move';
+    if (window.replaceDragTarget) {
+      window.replaceDragTarget=false;
+      const replacement=target.cloneNode(true);
+      replacement.addEventListener('dragover', event=>event.preventDefault());
+      replacement.addEventListener('drop', event=>{event.preventDefault();dragEvidence.replacementDrops++});
+      target.replaceWith(replacement);
+      dragEvidence.replaced=true;
+    }
+  });
+  target.addEventListener('drop', event => {
+    event.preventDefault();
+    dragEvidence.drops++;
+    dragEvidence.text=event.dataTransfer.getData('text/plain');
+    dragEvidence.custom=event.dataTransfer.getData('application/x-nomifun-fixture');
+    if (parent!==window) parent.postMessage({nomiDragDrop:{text:dragEvidence.text,custom:dragEvidence.custom,trusted:event.isTrusted}},'*');
+  });
+  capture.addEventListener('pointerdown', event => capture.setPointerCapture(event.pointerId));
+  capture.addEventListener('pointermove', event => {
+    if (capture.hasPointerCapture(event.pointerId) && event.buttons===1) dragEvidence.capturedMoves++;
+  });
+</script>

@@ -36,16 +36,16 @@ pub fn validate_launch_target(target: &str) -> Result<(), String> {
 /// Fail closed on Agent-initiated web-page opens through the operating-system
 /// browser. Every caller of [`launch`] is an Agent surface (the in-process
 /// Computer tool, the computer/open MCP servers, and Gateway capabilities), so
-/// an `http`/`https` target here would bypass the managed Browser Hub's
-/// approval, egress and lifecycle policies and could open a visible window the
+/// an `http`/`https` target here would bypass the explicitly selected Browser
+/// capability and its run ownership and could open a visible window the
 /// user never asked for. Classification is an anchored scheme parse rather
 /// than a substring scan: a local file whose NAME merely contains `http:`
 /// (legal on POSIX, e.g. a saved "Re: http://…" attachment) is not a web
 /// navigation, while scheme-only forms such as `https:example.com` (browsers
 /// normalize them back to a real navigation) and wrapper protocols such as
 /// `microsoft-edge:https://…` still fail closed — the leading scheme of every
-/// nesting level is classified. Trusted user surfaces (the Browser management
-/// page's foreground action and UI-clicked links) do not route through this
+/// nesting level is classified. Trusted user surfaces and UI-clicked links do
+/// not route through this
 /// function.
 pub fn validate_agent_web_target(target: &str) -> Result<(), String> {
     // Wrapper protocols nest at most a handful of levels; bound the unwrap so
@@ -59,9 +59,8 @@ pub fn validate_agent_web_target(target: &str) -> Result<(), String> {
         if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
             return Err(format!(
                 "opening web URLs through the operating-system browser is not available to \
-                 Agent tools ({target:?}). Use the managed Browser tool (browser navigate) to \
-                 read or interact with web pages; the user can foreground a running Primary \
-                 browser lane from the Browser management page when a visible window is needed."
+                 Agent tools ({target:?}). Use the selected conversation Browser or system-browser \
+                 capability to read or interact with web pages."
             ));
         }
         // Descend into the wrapped target (`microsoft-edge:https://…`),

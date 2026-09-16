@@ -30,12 +30,14 @@ pub(crate) mod nomi_core_robot;
 pub(crate) mod nomi_core_resource_bindings;
 pub(crate) mod nomi_core_session;
 pub(crate) mod nomi_core_wave2;
+#[cfg(feature = "browser-use")]
+pub(crate) mod knowledge_browser;
 pub(crate) mod plugin_platform;
 mod plugin_runtime_host;
 #[cfg(feature = "browser-use")]
-pub(crate) mod browser_management;
+pub(crate) mod browser_workspace;
 #[cfg(feature = "browser-use")]
-pub(crate) mod browser_login;
+pub(crate) mod system_browser;
 mod boot_terminal_proof;
 mod computer_permissions;
 mod health;

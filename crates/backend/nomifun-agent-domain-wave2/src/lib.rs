@@ -41,12 +41,12 @@ use nomifun_agent_kernel::{
     CapabilityHandler, CapabilityInvocationContext, CapabilityResourceProviderFactory,
     CapabilityResourceProviderRequest, ContextContributionFactory, ContextContributionRequest,
     ContextContributionResult, HostPluginStateApi, KernelError, PluginRegistration,
-    PluginStateError, PluginStateHandle, ResourceProviderFactory, ResourceProviderRequest,
-    ResourceProviderResult, ResolvedRoleMemberContext, RoleToolHandler,
+    PluginStateError, PluginStateHandle, ResourceProviderResult, ResolvedRoleMemberContext, RoleToolHandler,
     RoleToolInvocationContext,
 };
 
 pub const CONTRACT_VERSION: &str = "1.0.0";
+pub const BROWSER_ROLE_CONTRACT_VERSION: &str = "2.0.0";
 pub const VERSION: &str = CONTRACT_VERSION;
 pub const PACKAGE_VERSION: &str = CONTRACT_VERSION;
 
@@ -111,7 +111,6 @@ pub const MCP_CONNECTORS_CAPABILITY_IDS: &[&str] = &[
 ];
 
 pub const BROWSER_CAPABILITY_IDS: &[&str] = &[
-    "browser.identity",
     "browser.observe",
     "browser.navigate",
     "browser.act",
@@ -119,8 +118,6 @@ pub const BROWSER_CAPABILITY_IDS: &[&str] = &[
     "browser.download",
     "browser.upload",
     "browser.evaluate",
-    "browser.site_memory",
-    "browser.takeover",
 ];
 
 pub const COMPUTER_A11Y_CAPABILITY_IDS: &[&str] = &[
@@ -130,7 +127,7 @@ pub const COMPUTER_A11Y_CAPABILITY_IDS: &[&str] = &[
     "a11y.observe",
 ];
 
-pub const ALL_CAPABILITY_IDS: [&str; 42] = [
+pub const ALL_CAPABILITY_IDS: [&str; 39] = [
     "fs.read",
     "fs.search",
     "fs.write",
@@ -159,7 +156,6 @@ pub const ALL_CAPABILITY_IDS: [&str; 42] = [
     "mcp.oauth",
     "connector.data.read",
     "connector.data.write",
-    "browser.identity",
     "browser.observe",
     "browser.navigate",
     "browser.act",
@@ -167,14 +163,12 @@ pub const ALL_CAPABILITY_IDS: [&str; 42] = [
     "browser.download",
     "browser.upload",
     "browser.evaluate",
-    "browser.site_memory",
-    "browser.takeover",
     "computer.observe",
     "computer.input",
     "computer.launch",
     "a11y.observe",
 ];
-pub const TARGET_CAPABILITY_IDS: [&str; 42] = ALL_CAPABILITY_IDS;
+pub const TARGET_CAPABILITY_IDS: [&str; 39] = ALL_CAPABILITY_IDS;
 
 pub const TARGET_CAPABILITY_FAMILIES: [&str; 11] = [
     "browser",
@@ -217,7 +211,6 @@ const PROCESS_RESOURCE: &[&str] = &["process_session"];
 const TERMINAL_RESOURCE: &[&str] = &["terminal"];
 const MCP_RESOURCE: &[&str] = &["mcp_server"];
 const SSH_RESOURCE: &[&str] = &["ssh_host"];
-const BROWSER_RESOURCE: &[&str] = &["browser"];
 const COMPUTER_RESOURCE: &[&str] = &["computer"];
 // Keep this composite grant aligned with the canonical MCP owner contract.
 const MCP_TOOL_PROXY_REQUIRED_OPERATIONS: &[&str] = &["connect", "invoke"];
@@ -380,7 +373,6 @@ pub enum Wave2TypedCapabilityOperation {
     BrowserDownload { input: StrictJsonValue },
     BrowserUpload { input: StrictJsonValue },
     BrowserEvaluate { input: StrictJsonValue },
-    BrowserTakeover { input: StrictJsonValue },
     ComputerInput { input: StrictJsonValue },
     ComputerLaunch { input: StrictJsonValue },
 }
@@ -413,7 +405,6 @@ impl Wave2TypedCapabilityOperation {
             Self::BrowserDownload { .. } => "browser.download",
             Self::BrowserUpload { .. } => "browser.upload",
             Self::BrowserEvaluate { .. } => "browser.evaluate",
-            Self::BrowserTakeover { .. } => "browser.takeover",
             Self::ComputerInput { .. } => "computer.input",
             Self::ComputerLaunch { .. } => "computer.launch",
         }
@@ -449,8 +440,7 @@ impl Wave2TypedCapabilityOperation {
             | Self::BrowserRenderContent { input }
             | Self::BrowserDownload { input }
             | Self::BrowserUpload { input }
-            | Self::BrowserEvaluate { input }
-            | Self::BrowserTakeover { input } => {
+            | Self::BrowserEvaluate { input } => {
                 Wave2CapabilityOperation::Browser { input: input.clone() }
             }
             Self::ComputerInput { input } | Self::ComputerLaunch { input } => {
@@ -600,7 +590,6 @@ pub struct Wave2RoleMemberContext {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Wave2ContextCapabilityOperation {
     BrowserObserve,
-    BrowserSiteMemory,
     ComputerObserve,
     A11yObserve,
 }
@@ -609,25 +598,12 @@ impl Wave2ContextCapabilityOperation {
     pub fn capability_id(&self) -> &'static str {
         match self {
             Self::BrowserObserve => "browser.observe",
-            Self::BrowserSiteMemory => "browser.site_memory",
             Self::ComputerObserve => "computer.observe",
             Self::A11yObserve => "a11y.observe",
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum Wave2ResourceCapabilityOperation {
-    BrowserIdentity,
-}
-
-impl Wave2ResourceCapabilityOperation {
-    pub fn capability_id(&self) -> &'static str {
-        match self {
-            Self::BrowserIdentity => "browser.identity",
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct Wave2ContextHostRequest {
@@ -636,11 +612,6 @@ pub struct Wave2ContextHostRequest {
     pub schema_ref: CanonicalSchemaRef,
 }
 
-#[derive(Clone)]
-pub struct Wave2ResourceHostRequest {
-    pub context: ResolvedRoleMemberContext,
-    pub operation: Wave2ResourceCapabilityOperation,
-}
 
 pub trait Wave2ContextHostPort: Send + Sync {
     fn contribute<'a>(
@@ -655,18 +626,6 @@ pub trait Wave2ContextHostPort: Send + Sync {
     >;
 }
 
-pub trait Wave2ResourceHostPort: Send + Sync {
-    fn acquire<'a>(
-        &'a self,
-        request: Wave2ResourceHostRequest,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<ResourceProviderResult, Wave2HostPortError>>
-                + Send
-                + 'a,
-        >,
-    >;
-}
 
 /// Host boundary for a Tool invoked by a non-Agent operation.
 ///
@@ -837,36 +796,11 @@ impl Wave2ContextHostPort for UnconfiguredWave2ContextHostPort {
     }
 }
 
-struct UnconfiguredWave2ResourceHostPort;
-
-impl Wave2ResourceHostPort for UnconfiguredWave2ResourceHostPort {
-    fn acquire<'a>(
-        &'a self,
-        request: Wave2ResourceHostRequest,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<ResourceProviderResult, Wave2HostPortError>>
-                + Send
-                + 'a,
-        >,
-    >
-    {
-        Box::pin(async move {
-            Err(Wave2HostPortError::unavailable(format!(
-                "no production resource owner is bound for {}",
-                request.context.member_id.as_ref()
-            )))
-        })
-    }
-}
 
 pub fn unconfigured_context_host_port() -> Arc<dyn Wave2ContextHostPort> {
     Arc::new(UnconfiguredWave2ContextHostPort)
 }
 
-pub fn unconfigured_resource_host_port() -> Arc<dyn Wave2ResourceHostPort> {
-    Arc::new(UnconfiguredWave2ResourceHostPort)
-}
 
 struct UnconfiguredWave2OperationToolHostPort;
 
@@ -896,7 +830,6 @@ pub struct Wave2RoleHostPorts {
     pub computer_actions: Arc<dyn Wave2HostPort>,
     pub browser_contexts: Arc<dyn Wave2ContextHostPort>,
     pub computer_contexts: Arc<dyn Wave2ContextHostPort>,
-    pub browser_resources: Arc<dyn Wave2ResourceHostPort>,
     pub browser_operation_tools: Arc<dyn Wave2OperationToolHostPort>,
 }
 
@@ -908,7 +841,6 @@ impl Wave2RoleHostPorts {
             actions,
             browser_contexts: unconfigured_context_host_port(),
             computer_contexts: unconfigured_context_host_port(),
-            browser_resources: unconfigured_resource_host_port(),
             browser_operation_tools: unconfigured_operation_tool_host_port(),
         }
     }
@@ -932,15 +864,6 @@ impl Wave2RoleHostPorts {
         }
     }
 
-    fn resource_port(
-        &self,
-        role_id: &ExecutionRoleId,
-    ) -> Arc<dyn Wave2ResourceHostPort> {
-        match role_id.as_ref() {
-            BROWSER_EXECUTION_ROLE_ID => Arc::clone(&self.browser_resources),
-            _ => unconfigured_resource_host_port(),
-        }
-    }
 
     fn operation_tool_port(
         &self,
@@ -1013,7 +936,6 @@ impl ContextContributionFactory for Wave2ContextFactory {
         }
         let operation = match self.capability_id.as_ref() {
             "browser.observe" => Wave2ContextCapabilityOperation::BrowserObserve,
-            "browser.site_memory" => Wave2ContextCapabilityOperation::BrowserSiteMemory,
             "computer.observe" => Wave2ContextCapabilityOperation::ComputerObserve,
             "a11y.observe" => Wave2ContextCapabilityOperation::A11yObserve,
             _ => {
@@ -1034,11 +956,6 @@ impl ContextContributionFactory for Wave2ContextFactory {
     }
 }
 
-struct Wave2ResourceFactory {
-    role_id: ExecutionRoleId,
-    capability_id: CapabilityId,
-    host_port: Arc<dyn Wave2ResourceHostPort>,
-}
 
 struct Wave2OperationToolFactory {
     role_id: ExecutionRoleId,
@@ -1084,38 +1001,6 @@ impl RoleToolHandler for Wave2OperationToolFactory {
     }
 }
 
-#[async_trait::async_trait]
-impl ResourceProviderFactory for Wave2ResourceFactory {
-    async fn acquire(
-        &self,
-        request: ResourceProviderRequest,
-    ) -> Result<ResourceProviderResult, KernelError> {
-        if request.context.provider_lock.provider.role.key.role_id != self.role_id
-            || request.context.member_id != self.capability_id
-        {
-            return Err(KernelError::RoleProviderMemberUnavailable {
-                role_id: self.role_id.clone(),
-                capability_id: self.capability_id.clone(),
-            });
-        }
-        let operation = match self.capability_id.as_ref() {
-            "browser.identity" => Wave2ResourceCapabilityOperation::BrowserIdentity,
-            _ => {
-                return Err(KernelError::RoleProviderMemberUnavailable {
-                    role_id: self.role_id.clone(),
-                    capability_id: self.capability_id.clone(),
-                });
-            }
-        };
-        self.host_port
-            .acquire(Wave2ResourceHostRequest {
-                context: request.context,
-                operation,
-            })
-            .await
-            .map_err(wave2_host_error_to_kernel)
-    }
-}
 
 fn role_member_context(
     context: ResolvedRoleMemberContext,
@@ -1314,14 +1199,9 @@ const MCP_CONNECTORS_CAPABILITIES: &[CapabilityDefinition] = &[
 ];
 
 const BROWSER_CAPABILITIES: &[CapabilityDefinition] = &[
-    CapabilityDefinition::resource_provider(
-        "browser.identity",
-        BROWSER_RESOURCE,
-        PlatformScope::BrowserDesktop,
-    ),
     CapabilityDefinition::context(
         "browser.observe",
-        BROWSER_RESOURCE,
+        &[],
         PlatformScope::BrowserDesktop,
     ),
     CapabilityDefinition::browser_tool("browser.navigate", EffectClass::ExternalTransmit),
@@ -1333,12 +1213,6 @@ const BROWSER_CAPABILITIES: &[CapabilityDefinition] = &[
     CapabilityDefinition::browser_tool("browser.download", EffectClass::WriteDurable),
     CapabilityDefinition::browser_tool("browser.upload", EffectClass::ExternalTransmit),
     CapabilityDefinition::browser_tool("browser.evaluate", EffectClass::ExecuteLocal),
-    CapabilityDefinition::context(
-        "browser.site_memory",
-        BROWSER_RESOURCE,
-        PlatformScope::BrowserDesktop,
-    ),
-    CapabilityDefinition::browser_tool("browser.takeover", EffectClass::WriteReversible),
 ];
 
 const COMPUTER_A11Y_CAPABILITIES: &[CapabilityDefinition] = &[
@@ -1362,7 +1236,9 @@ impl CapabilityDefinition {
             id,
             kind: CapabilityKind::Tool,
             effect_class: Some(effect_class),
-            resource_kinds: BROWSER_RESOURCE,
+            // The selected Provider resolves the runtime from the trusted invocation
+            // (Conversation/run or headless job). Users do not bind a Browser resource.
+            resource_kinds: &[],
             platform_scope: PlatformScope::BrowserDesktop,
         }
     }
@@ -1727,21 +1603,6 @@ fn build_registration(
                         format!("register {} context factory: {error}", package.id)
                     })?;
             }
-            CapabilityKind::ResourceProvider => {
-                registration
-                    .add_role_resource_factory(
-                        role_id.clone(),
-                        capability_id.clone(),
-                        Arc::new(Wave2ResourceFactory {
-                            host_port: role_host_ports.resource_port(&role_id),
-                            role_id,
-                            capability_id,
-                        }),
-                    )
-                    .map_err(|error| {
-                        format!("register {} resource factory: {error}", package.id)
-                    })?;
-            }
             _ => {}
         }
     }
@@ -1839,6 +1700,10 @@ fn build_capability(
 
 fn action_input_schema(capability_id: &str) -> StrictJsonValue {
     let schema = match capability_id {
+        "browser.render_content" => strict_object_schema(
+            serde_json::json!({"url":{"type":"string","minLength":1,"maxLength":8192,"pattern":"^https?://"}}),
+            &["url"],
+        ),
         "fs.delete" => strict_object_schema(
             serde_json::json!({
                 "path": {
@@ -1902,6 +1767,13 @@ fn action_input_schema(capability_id: &str) -> StrictJsonValue {
 }
 
 fn canonical_schema(capability_id: &str, role: &str) -> StrictJsonValue {
+    if capability_id=="browser.render_content" && role=="output" {
+        return strict_object_schema(serde_json::json!({
+            "final_url":{"type":"string","maxLength":8192},
+            "html":{"type":"string","maxLength":262144},
+            "html_truncated":{"type":"boolean"}
+        }), &["final_url","html","html_truncated"]);
+    }
     match role {
         "input" => action_input_schema(capability_id),
         "request" => open_object_schema(),
@@ -2117,7 +1989,6 @@ pub fn typed_operation_for(
         "browser.download" => Wave2TypedCapabilityOperation::BrowserDownload { input },
         "browser.upload" => Wave2TypedCapabilityOperation::BrowserUpload { input },
         "browser.evaluate" => Wave2TypedCapabilityOperation::BrowserEvaluate { input },
-        "browser.takeover" => Wave2TypedCapabilityOperation::BrowserTakeover { input },
         "computer.input" => Wave2TypedCapabilityOperation::ComputerInput { input },
         "computer.launch" => Wave2TypedCapabilityOperation::ComputerLaunch { input },
         _ => {
@@ -2184,10 +2055,6 @@ pub fn required_resource_operation(capability_id: &CapabilityId) -> Option<&'sta
         "process.exec" | "ssh.exec" | "ssh.sudo" => Some("execute"),
         "ssh.fs.read" | "connector.data.read" => Some("read"),
         "mcp.tool_proxy" => Some("invoke"),
-        "browser.navigate" | "browser.upload" | "browser.render_content" => Some("navigate"),
-        "browser.act" | "browser.takeover" => Some("interact"),
-        "browser.download" => Some("download"),
-        "browser.evaluate" => Some("evaluate"),
         "computer.input" => Some("input"),
         "computer.launch" => Some("launch"),
         _ => None,
@@ -2427,13 +2294,10 @@ fn role_contracts_for_package(
             ("browser.observe", RoleMemberRequirement::Required),
             ("browser.navigate", RoleMemberRequirement::Required),
             ("browser.act", RoleMemberRequirement::Required),
-            ("browser.identity", RoleMemberRequirement::Optional),
             ("browser.render_content", RoleMemberRequirement::Optional),
             ("browser.download", RoleMemberRequirement::Optional),
             ("browser.upload", RoleMemberRequirement::Optional),
             ("browser.evaluate", RoleMemberRequirement::Optional),
-            ("browser.site_memory", RoleMemberRequirement::Optional),
-            ("browser.takeover", RoleMemberRequirement::Optional),
         ]
         .as_slice(),
         COMPUTER_EXECUTION_ROLE_ID => [
@@ -2470,7 +2334,11 @@ fn role_contracts_for_package(
     Ok(vec![RoleContractManifest {
         key: RoleContractKey {
             role_id: ExecutionRoleId::from(role_id),
-            contract_version: VersionString::from(CONTRACT_VERSION),
+            contract_version: VersionString::from(if role_id == BROWSER_EXECUTION_ROLE_ID {
+                BROWSER_ROLE_CONTRACT_VERSION
+            } else {
+                CONTRACT_VERSION
+            }),
         },
         members,
         serialized_target_resource_kind: (role_id == COMPUTER_EXECUTION_ROLE_ID)
@@ -2649,8 +2517,19 @@ fn host_port_binding() -> Result<HostPortBindingDescriptor, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rendered_content_contract_has_only_url_input_and_bounded_html_output() {
+        let valid=super::StrictJsonValue(serde_json::json!({"url":"https://example.com/"}));
+        assert!(super::validate_action_input("browser.render_content",&valid).is_ok());
+        for value in [serde_json::json!({}),serde_json::json!({"url":"file:///private"}),serde_json::json!({"url":"https://example.com/","chrome_path":"other.exe"})] {
+            assert!(super::validate_action_input("browser.render_content",&super::StrictJsonValue(value)).is_err());
+        }
+        let output=super::canonical_schema("browser.render_content","output");
+        let validator=jsonschema::options().build(&output.0).unwrap();
+        assert!(validator.validate(&serde_json::json!({"final_url":"https://example.com/","html":"<p>content</p>","html_truncated":false})).is_ok());
+        assert!(validator.validate(&serde_json::json!({"html":"content"})).is_err());
+    }
     use std::collections::BTreeMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
     use std::task::{Context, Poll, Waker};
 
@@ -2660,8 +2539,7 @@ mod tests {
         AgentPresetCompiler, CapabilityInvocationRequest, CompileRequest, CompilerEnvironment,
         ContextContributionFactory, ContextContributionRequest, ContextContributionResult,
         InMemoryPluginStatePersistence, KernelRegistry, MaterializationPolicy, Materializer,
-        ResourceHandle, ResourceHandleIdentity, ResourceProviderFactory, ResourceProviderRequest,
-        ResourceProviderResult, RoleMemberAdmission, RoleMemberInvocationRequest,
+        RoleMemberAdmission, RoleMemberInvocationRequest,
         SessionCapabilityState,
     };
     use nomifun_agent_contracts::{
@@ -2695,52 +2573,6 @@ mod tests {
         }
     }
 
-    struct AlternateBrowserResourceFactory {
-        releases: Arc<AtomicUsize>,
-    }
-
-    struct AlternateBrowserResourceHandle {
-        identity: ResourceHandleIdentity,
-        releases: Arc<AtomicUsize>,
-    }
-
-    #[async_trait::async_trait]
-    impl ResourceHandle for AlternateBrowserResourceHandle {
-        fn identity(&self) -> &ResourceHandleIdentity {
-            &self.identity
-        }
-
-        async fn release(&self) -> Result<(), KernelError> {
-            self.releases.fetch_add(1, Ordering::AcqRel);
-            Ok(())
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ResourceProviderFactory for AlternateBrowserResourceFactory {
-        async fn acquire(
-            &self,
-            request: ResourceProviderRequest,
-        ) -> Result<ResourceProviderResult, KernelError> {
-            let binding = request
-                .context
-                .resource_bindings
-                .first()
-                .ok_or_else(|| KernelError::ResourceBindingMissing {
-                    binding_id: ResourceBindingId::from("browser"),
-                })?;
-            Ok(ResourceProviderResult {
-                handle: Arc::new(AlternateBrowserResourceHandle {
-                    identity: ResourceHandleIdentity {
-                        binding_id: binding.binding_id.clone(),
-                        resource_kind: binding.resource_kind.clone(),
-                        resource_id: binding.resource_id.clone(),
-                    },
-                    releases: Arc::clone(&self.releases),
-                }),
-            })
-        }
-    }
 
     impl CapabilityHandler for AlternateBrowserHandler {
         fn invoke<'life0, 'async_trait>(
@@ -2799,7 +2631,6 @@ mod tests {
 
     fn alternate_browser_registration_with_capture(
         captured_mount: Arc<Mutex<Option<String>>>,
-        releases: Arc<AtomicUsize>,
     ) -> PluginRegistration {
         let first_party = browser_registration().expect("first-party Browser registration");
         let provider = first_party.metadata.manifest.payload.contributions.role_providers[0].clone();
@@ -2923,17 +2754,6 @@ mod tests {
                             Arc::new(AlternateBrowserContextFactory),
                         )
                         .expect("alternate Browser context factory");
-                }
-                CapabilityKind::ResourceProvider => {
-                    registration
-                        .add_role_resource_factory(
-                            provider.role.key.role_id.clone(),
-                            capability_id.clone(),
-                            Arc::new(AlternateBrowserResourceFactory {
-                                releases: Arc::clone(&releases),
-                            }),
-                        )
-                        .expect("alternate Browser resource factory");
                 }
                 _ => {}
             }
@@ -3344,9 +3164,19 @@ mod tests {
         )
         .expect("Wave 2 metadata materializes");
         assert_eq!(materialized.packages.len(), 5);
-        assert_eq!(materialized.capabilities.len(), 42);
+        assert_eq!(materialized.capabilities.len(), 39);
         assert_eq!(materialized.role_contracts.len(), 2);
         assert_eq!(materialized.role_providers.len(), 2);
+        let browser_role = materialized.role_contract(&ExecutionRoleId::from(BROWSER_EXECUTION_ROLE_ID))
+            .expect("Browser Role v2");
+        assert_eq!(browser_role.manifest.key.contract_version.as_ref(), BROWSER_ROLE_CONTRACT_VERSION);
+        assert_eq!(browser_role.manifest.members.iter().map(|member| member.capability.id.as_ref()).collect::<BTreeSet<_>>(), BTreeSet::from([
+            "browser.observe", "browser.navigate", "browser.act", "browser.download",
+            "browser.upload", "browser.render_content", "browser.evaluate",
+        ]));
+        for member in &browser_role.manifest.members {
+            assert!(required_resource_kinds(member.capability.id.as_ref()).unwrap().is_empty());
+        }
         assert_eq!(
             required_resource_kinds("process.exec"),
             Some(BTreeSet::from([ResourceKind::from("process_session")]))
@@ -3370,11 +3200,9 @@ mod tests {
     fn explicit_browser_provider_lock_dispatches_once_without_fallback() {
         let first_party = browser_registration().expect("first-party Browser registration");
         let captured_mount = Arc::new(Mutex::new(None));
-        let releases = Arc::new(AtomicUsize::new(0));
         let alternate =
             alternate_browser_registration_with_capture(
                 Arc::clone(&captured_mount),
-                Arc::clone(&releases),
             );
         let registry = KernelRegistry::new(
             MaterializationPolicy::stable_with_test_fixtures(CONTRACT_VERSION),
@@ -3391,18 +3219,6 @@ mod tests {
         let principal = PrincipalRef {
             principal_kind: "user".to_owned(),
             principal_id: "browser-provider-owner".to_owned(),
-        };
-        let binding = TypedResourceBinding {
-            binding_id: ResourceBindingId::from("browser-provider-binding"),
-            resource_kind: ResourceKind::from("browser"),
-            resource_id: nomifun_agent_contracts::ResourceId::from("browser-target"),
-            owner_id: principal.principal_id.clone(),
-            operations: BTreeSet::from([
-                "navigate".to_owned(),
-                "observe".to_owned(),
-            ]),
-            connection_config_ref: None,
-            typed_parameters: BTreeMap::new(),
         };
         let revision = |overrides: BTreeMap<ExecutionRoleId, RoleProviderSelection>| {
             let payload = AgentPresetRevisionPayload {
@@ -3422,13 +3238,6 @@ mod tests {
                     CapabilitySelection {
                         capability: CapabilityRef {
                             id: CapabilityId::from("browser.observe"),
-                            version: VersionString::from(CONTRACT_VERSION),
-                        },
-                        action_allowlist: BTreeSet::new(),
-                    },
-                    CapabilitySelection {
-                        capability: CapabilityRef {
-                            id: CapabilityId::from("browser.identity"),
                             version: VersionString::from(CONTRACT_VERSION),
                         },
                         action_allowlist: BTreeSet::new(),
@@ -3521,7 +3330,7 @@ mod tests {
             },
         )
         .expect("compile selected alternate Browser provider")
-        .with_target_resource_bindings(&principal, vec![binding.clone()])
+        .with_target_resource_bindings(&principal, Vec::new())
         .expect("bind alternate Browser target resource");
         assert_eq!(
             compiled
@@ -3549,7 +3358,7 @@ mod tests {
                 active_set_generation: active.generation,
                 capability_id: CapabilityId::from("browser.navigate"),
                 action_id: ActionId::from("browser.navigate.invoke"),
-                resource_binding_ids: BTreeSet::from([binding.binding_id.clone()]),
+                resource_binding_ids: BTreeSet::new(),
                 state_scope_key: ScopeKey::from("session:browser-provider"),
                 input: empty_object(),
             },
@@ -3568,7 +3377,7 @@ mod tests {
             operation_id: OperationId::from(format!("{capability_id}:operation")),
             correlation_id: CorrelationId::from(format!("{capability_id}:correlation")),
             capability_id: CapabilityId::from(capability_id),
-            resource_binding_ids: BTreeSet::from([binding.binding_id.clone()]),
+            resource_binding_ids: BTreeSet::new(),
             state_scope_key: ScopeKey::from("session:browser-provider"),
             admission: RoleMemberAdmission::Agent {
                 agent_session_id: AgentSessionId::from("browser-provider-session"),
@@ -3587,25 +3396,7 @@ mod tests {
             "fixture-browser-provider"
         );
 
-        let first_handle = poll_ready(registry.acquire_role_resource(
-            &compiled,
-            &active,
-            role_member_request("browser.identity"),
-        ))
-        .expect("first Browser resource acquisition");
-        let replay_handle = poll_ready(registry.acquire_role_resource(
-            &compiled,
-            &active,
-            role_member_request("browser.identity"),
-        ))
-        .expect("replayed Browser resource acquisition");
-        assert!(Arc::ptr_eq(&first_handle.handle, &replay_handle.handle));
-        assert_eq!(releases.load(Ordering::Acquire), 0);
-        poll_ready(registry.release_resources(&ScopeKey::from(
-            "session:browser-provider",
-        )))
-        .expect("release Browser resource");
-        assert_eq!(releases.load(Ordering::Acquire), 1);
+        assert!(compiled.content().required_resource_kinds.is_empty(), "Browser runtime is resolved by the host, not a saved resource binding");
     }
 
     #[test]

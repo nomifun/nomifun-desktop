@@ -1840,17 +1840,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "console"
-version = "0.16.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d64e8af5551369d19cf50138de61f1c42074ab970f74e99be916646777f8fc87"
-dependencies = [
- "encode_unicode",
- "libc",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2884,12 +2873,6 @@ name = "embed_plist"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ef6b89e5b37196644d8796de5268852ff179b44e96276cf4290264843743bb7"
-
-[[package]]
-name = "encode_unicode"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 
 [[package]]
 name = "encoding_rs"
@@ -4465,21 +4448,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "insta"
-version = "1.48.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86f0f8fee8c926415c58d6ae43a08523a26faccb2323f5e6b644fe7dd4ef6b82"
-dependencies = [
- "console",
- "once_cell",
- "pest",
- "pest_derive",
- "serde",
- "similar",
- "tempfile",
-]
-
-[[package]]
 name = "instant"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5575,7 +5543,6 @@ version = "0.7.6"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.22.1",
  "chrono",
  "crossterm",
  "dunce",
@@ -5583,7 +5550,6 @@ dependencies = [
  "glob",
  "is-terminal",
  "mockall",
- "nomi-browser",
  "nomi-compact",
  "nomi-computer",
  "nomi-config",
@@ -5614,49 +5580,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "nomi-browser"
-version = "0.7.6"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "image",
- "nomi-browser-engine",
- "nomi-config",
- "nomi-protocol",
- "nomi-tools",
- "nomi-types",
- "nomifun-browser-platform",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
 name = "nomi-browser-engine"
 version = "0.7.6"
 dependencies = [
- "async-trait",
  "base64 0.22.1",
  "chromiumoxide",
- "core-graphics",
  "dunce",
  "fs2",
  "futures-util",
  "getrandom 0.2.17",
  "hex",
- "insta",
  "libc",
  "nomi-process-runtime",
  "nomi-redact",
+ "nomifun-browser-platform",
  "nomifun-common",
  "nomifun-net",
- "psl",
- "regex",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.19",
@@ -5665,9 +5608,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
- "windows 0.61.3",
  "windows-sys 0.61.2",
- "zip 2.4.2",
 ]
 
 [[package]]
@@ -5979,8 +5920,10 @@ name = "nomifun-agent-domain-wave1"
 version = "0.7.6"
 dependencies = [
  "async-trait",
+ "jsonschema",
  "nomifun-agent-contracts",
  "nomifun-agent-kernel",
+ "nomifun-browser-platform",
  "serde_json",
  "tokio",
 ]
@@ -5992,6 +5935,7 @@ dependencies = [
  "async-trait",
  "jsonschema",
  "nomifun-agent-contracts",
+ "nomifun-agent-domain-wave1",
  "nomifun-agent-kernel",
  "serde_json",
 ]
@@ -6129,7 +6073,7 @@ dependencies = [
  "image",
  "libc",
  "nomi-agent",
- "nomi-browser",
+ "nomi-browser-engine",
  "nomi-config",
  "nomi-mcp",
  "nomi-memory",
@@ -6140,6 +6084,7 @@ dependencies = [
  "nomi-tools",
  "nomi-types",
  "nomifun-agent-contracts",
+ "nomifun-agent-domain-wave1",
  "nomifun-agent-domain-wave4",
  "nomifun-agent-kernel",
  "nomifun-api-types",
@@ -6199,6 +6144,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "chromiumoxide",
  "clap",
  "dashmap",
  "dirs 6.0.0",
@@ -6210,11 +6156,9 @@ dependencies = [
  "if-addrs",
  "image",
  "junction",
- "nomi-browser",
  "nomi-browser-engine",
  "nomi-computer",
  "nomi-config",
- "nomi-process-runtime",
  "nomi-tools",
  "nomi-types",
  "nomifun-agent-contracts",
@@ -6278,8 +6222,8 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
- "sysinfo",
  "tempfile",
+ "thiserror 2.0.19",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "tokio-util",
@@ -6341,14 +6285,20 @@ name = "nomifun-browser-platform"
 version = "0.7.6"
 dependencies = [
  "async-trait",
+ "cap-fs-ext",
+ "cap-std",
+ "dunce",
  "futures-util",
+ "junction",
+ "libc",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
- "tracing",
- "uuid",
+ "url",
 ]
 
 [[package]]
@@ -6613,16 +6563,28 @@ name = "nomifun-desktop"
 version = "0.7.6"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "axum",
  "base64 0.22.1",
  "chrono",
  "clap",
  "dunce",
  "gtk",
  "hex",
+ "image",
  "junction",
  "keepawake",
+ "mime_guess",
+ "nomi-browser-engine",
  "nomi-process-runtime",
+ "nomi-protocol",
+ "nomi-tools",
+ "nomi-types",
+ "nomifun-agent-contracts",
+ "nomifun-agent-kernel",
+ "nomifun-ai-agent",
  "nomifun-app",
+ "nomifun-browser-platform",
  "nomifun-common",
  "nomifun-runtime",
  "objc2",
@@ -6642,9 +6604,14 @@ dependencies = [
  "tauri-plugin-updater",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "url",
+ "uuid",
+ "webview2-com",
  "windows 0.61.3",
+ "zeroize",
 ]
 
 [[package]]
@@ -6927,6 +6894,8 @@ version = "0.7.6"
 dependencies = [
  "nomi-process-runtime",
  "reqwest 0.12.28",
+ "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tracing",
@@ -8279,49 +8248,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
-name = "pest"
-version = "2.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0848c601009d37dfa3430c4666e147e49cdcf1b92ecd3e63657d8a5f19da662"
-dependencies = [
- "memchr",
- "ucd-trie",
-]
-
-[[package]]
-name = "pest_derive"
-version = "2.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11f486f1ea21e6c10ed15d5a7c77165d0ee443402f0780849d1768e7d9d6fe77"
-dependencies = [
- "pest",
- "pest_generator",
-]
-
-[[package]]
-name = "pest_generator"
-version = "2.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8040c4647b13b210a963c1ed407c1ff4fdfa01c31d6d2a098218702e6664f94f"
-dependencies = [
- "pest",
- "pest_meta",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "pest_meta"
-version = "2.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89815c69d36021a140146f26659a81d6c2afa33d216d736dd4be5381a7362220"
-dependencies = [
- "pest",
- "sha2 0.10.9",
-]
-
-[[package]]
 name = "phc"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8835,21 +8761,6 @@ dependencies = [
  "quote",
  "syn 2.0.117",
 ]
-
-[[package]]
-name = "psl"
-version = "2.1.213"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04e78830163eebdf905adb55ba26ba9b3ba554b08bd84c2fbe3b643c8addf22c"
-dependencies = [
- "psl-types",
-]
-
-[[package]]
-name = "psl-types"
-version = "2.0.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 
 [[package]]
 name = "pxfm"
@@ -10403,12 +10314,6 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
-
-[[package]]
-name = "similar"
-version = "2.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "simple_asn1"
@@ -12311,12 +12216,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
-name = "ucd-trie"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
-
-[[package]]
 name = "uds_windows"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13849,8 +13748,6 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 [[package]]
 name = "wry"
 version = "0.55.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "186f9871daa55fd9c016578b810d149de58367113db7fb72b462d2323ce19514"
 dependencies = [
  "base64 0.22.1",
  "block2",

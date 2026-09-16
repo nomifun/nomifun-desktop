@@ -334,8 +334,8 @@ async fn shell_open_external(
     p: ShellOpenExternalParams,
 ) -> Value {
     // Every Gateway caller is an Agent surface. An http/https open here would
-    // send web content to the operating-system browser, bypassing the managed
-    // Browser Hub's egress and lifecycle policies — fail closed and
+    // send web content to the operating-system browser, bypassing the selected
+    // Browser capability and run ownership — fail closed and
     // steer the model to the Browser tool. The trusted UI link path
     // (`POST /api/shell/open-external`) does not route through this
     // capability and keeps its http/https support.
@@ -343,7 +343,7 @@ async fn shell_open_external(
     if !lower.starts_with("mailto:") {
         return json!({
             "error": "opening web URLs through the operating-system browser is not available \
-                      to Agent tools. Use the managed Browser tool (browser navigate) to read \
+                      to Agent tools. Use the selected conversation Browser or system-browser capability to read \
                       or interact with web pages; only mailto: links may be opened here."
         });
     }

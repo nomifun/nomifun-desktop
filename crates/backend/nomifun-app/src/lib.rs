@@ -8,12 +8,13 @@ mod config;
 // the full receipt loop without the whole app harness).
 pub mod delivery_notify;
 #[cfg(feature = "browser-use")]
-mod browser_lane_provider;
-// Public only for `BUNDLED_CHROME_DIR_ENV`: the desktop shell resolves the
-// Tauri resource dir and publishes it through that env seam (F48).
+mod browser_workspace_provider;
 #[cfg(feature = "browser-use")]
-pub mod browser_resource;
-mod browser_inventory_events;
+pub mod headless_render;
+#[cfg(feature = "browser-use")]
+pub mod system_browser;
+#[cfg(feature = "browser-use")]
+mod system_browser_owner;
 mod provider_deletion;
 mod robot_wiring;
 mod router;
@@ -34,7 +35,7 @@ pub mod lan_endpoint;
 
 pub use config::{AppConfig, derive_encryption_key, load_or_create_data_encryption_key};
 pub use desktop::{
-    DesktopKeepAlive, DesktopServer, DesktopStartError, LanRestoreOutcome,
+    DesktopHostServices, DesktopKeepAlive, DesktopServer, DesktopStartError, LanRestoreOutcome,
     StartupCleanupDisposition, WebUiAsset, WebUiAssetSource, WebUiStatus,
 };
 pub use bootstrap::{CanonicalHost, FreshV4Host};

@@ -3,11 +3,10 @@
 /**
  * Enforce the Browser Platform ownership boundary.
  *
- * Production application/agent entry points may only dispatch through the
- * process-wide BrowserSessionHub.  The low-level browser engine and facade
- * retain standalone compatibility helpers for tests and explicit embeddings,
- * but those helpers must not leak into App, Gateway, or Agent factory
- * production paths.
+ * Conversation Browser dispatches through its native Workspace owner. The
+ * retired Headless Hub must not be constructed by any application entry point.
+ * Background browser work requires the new isolated owners.
+ * Low-level standalone helpers must not leak into application entry points.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -24,12 +23,8 @@ const GATEWAY_REGISTRY = 'crates/backend/nomifun-gateway/src/browser_registry.rs
 const HUB_COMPOSITION = 'crates/backend/nomifun-app/src/services.rs';
 const KNOWLEDGE_BROWSER_COMPOSITION =
   'crates/backend/nomifun-app/src/services.rs';
-const FRESH_V4_HUB_COMPOSITION =
+const FRESH_V4_COMPOSITION =
   'crates/backend/nomifun-app/src/router/agent_platform_host.rs';
-const HUB_COMPOSITION_ROOTS = new Set([
-  HUB_COMPOSITION,
-  FRESH_V4_HUB_COMPOSITION,
-]);
 
 const OWNERSHIP_BOUNDARY_PREFIXES = [
   'apps/desktop/src/',
@@ -44,6 +39,85 @@ const OWNERSHIP_BOUNDARY_PREFIXES = [
 // still run without treating the engine as an application entry point.
 const APPLICATION_PRODUCTION_PREFIXES = OWNERSHIP_BOUNDARY_PREFIXES;
 const ENGINE_PRODUCTION_PREFIX = 'crates/agent/nomi-browser-engine/src/';
+const RETIRED_ENGINE_FILES = new Set([
+  'crates/agent/nomi-browser-engine/src/actionability.rs',
+  'crates/agent/nomi-browser-engine/src/actions.rs',
+  'crates/agent/nomi-browser-engine/src/aria_ref.rs',
+  'crates/agent/nomi-browser-engine/src/backend/cdp.rs',
+  'crates/agent/nomi-browser-engine/src/backend/mod.rs',
+  'crates/agent/nomi-browser-engine/src/debug_capture.rs',
+  'crates/agent/nomi-browser-engine/src/domain.rs',
+  'crates/agent/nomi-browser-engine/src/errmap.rs',
+  'crates/agent/nomi-browser-engine/src/evaluate.rs',
+  'crates/agent/nomi-browser-engine/src/firewall.rs',
+  'crates/agent/nomi-browser-engine/src/host.rs',
+  'crates/agent/nomi-browser-engine/src/nav.rs',
+  'crates/agent/nomi-browser-engine/src/observe.rs',
+  'crates/agent/nomi-browser-engine/src/progress.rs',
+  'crates/agent/nomi-browser-engine/src/selector.rs',
+  'crates/agent/nomi-browser-engine/src/storage_state.rs',
+  'crates/agent/nomi-browser-engine/src/tabs.rs',
+  'crates/agent/nomi-browser-engine/src/test_support.rs',
+  'crates/agent/nomi-browser-engine/tests/snapshots/observe_fixtures__observe_inject_contract_iframe.snap',
+  'crates/agent/nomi-browser-engine/tests/snapshots/observe_fixtures__observe_iframe_stitched.snap',
+  'crates/agent/nomi-browser-engine/tests/snapshots/integration_act__hit_target_contract.snap',
+  'crates/agent/nomi-browser-engine/tests/snapshots/integration_act__check_states_contract.snap',
+  'crates/agent/nomi-browser-engine/tests/op_mutex_concurrency.rs',
+  'crates/agent/nomi-browser-engine/tests/observe_fixtures.rs',
+  'crates/agent/nomi-browser-engine/tests/integration_w4c.rs',
+  'crates/agent/nomi-browser-engine/tests/integration_w4b.rs',
+  'crates/agent/nomi-browser-engine/tests/integration_takeover.rs',
+  'crates/agent/nomi-browser-engine/tests/integration_storage_snapshot.rs',
+  'crates/agent/nomi-browser-engine/tests/integration_single_tab.rs',
+  'crates/agent/nomi-browser-engine/tests/integration_oopif.rs',
+  'crates/agent/nomi-browser-engine/tests/integration_nav.rs',
+  'crates/agent/nomi-browser-engine/tests/integration_multiorigin_storage.rs',
+  'crates/agent/nomi-browser-engine/tests/integration_indexeddb.rs',
+  'crates/agent/nomi-browser-engine/tests/integration_factions.rs',
+  'crates/agent/nomi-browser-engine/tests/integration_e5.rs',
+  'crates/agent/nomi-browser-engine/tests/integration_e4.rs',
+  'crates/agent/nomi-browser-engine/tests/integration_debug_capture.rs',
+  'crates/agent/nomi-browser-engine/tests/integration_d4.rs',
+  'crates/agent/nomi-browser-engine/tests/integration_act.rs',
+  'crates/agent/nomi-browser-engine/tests/fixtures/upload.html',
+  'crates/agent/nomi-browser-engine/tests/fixtures/switch-frame.html',
+  'crates/agent/nomi-browser-engine/tests/fixtures/spa-softnav.html',
+  'crates/agent/nomi-browser-engine/tests/fixtures/shadow.html',
+  'crates/agent/nomi-browser-engine/tests/fixtures/secrets.html',
+  'crates/agent/nomi-browser-engine/tests/fixtures/page-b.html',
+  'crates/agent/nomi-browser-engine/tests/fixtures/page-a.html',
+  'crates/agent/nomi-browser-engine/tests/fixtures/never-idle.html',
+  'crates/agent/nomi-browser-engine/tests/fixtures/modal-overlay.html',
+  'crates/agent/nomi-browser-engine/tests/fixtures/input-synth.html',
+  'crates/agent/nomi-browser-engine/tests/fixtures/iframe.html',
+  'crates/agent/nomi-browser-engine/tests/fixtures/firewall.html',
+  'crates/agent/nomi-browser-engine/tests/fixtures/download_exe.html',
+  'crates/agent/nomi-browser-engine/tests/fixtures/download.html',
+  'crates/agent/nomi-browser-engine/tests/fixtures/c3.html',
+  'crates/agent/nomi-browser-engine/tests/fixtures/c2.html',
+  'crates/agent/nomi-browser-engine/tests/fixtures/actionability.html',
+  'crates/agent/nomi-browser-engine/tests/fixtures/act-c1.html',
+  'crates/agent/nomi-browser-engine/tests/engine_lifecycle.rs',
+  'crates/agent/nomi-browser-engine/tests/common/mod.rs',
+]);
+const RETIRED_BROWSER_UI_FILES = new Set([
+  'ui/src/renderer/components/media/WebviewHost.tsx',
+  'ui/src/renderer/pages/conversation/Preview/components/viewers/URLViewer.tsx',
+  'ui/src/renderer/pages/conversation/Preview/components/viewers/HTMLViewer.tsx',
+  'ui/src/renderer/components/settings/SettingsModal/contents/BrowserUseSettingsContent.tsx',
+  'ui/src/renderer/components/settings/SettingsModal/contents/BrowserUseSettingsContent.test.ts',
+  'ui/src/renderer/components/layout/Sider/SiderNav/SiderBrowserEntry.tsx',
+  ...['browserSession', 'browserSettings', 'browserDisplayModeController', 'browserTypes']
+    .flatMap(name => [`ui/src/common/browser/${name}.ts`, `ui/src/common/browser/${name}.test.ts`]),
+]);
+const RETIRED_KNOWLEDGE_BROWSER_FILES = new Set([
+  'crates/backend/nomifun-ai-agent/src/browser_fetcher.rs',
+  'crates/backend/nomifun-ai-agent/src/browser_fetcher_tests.rs',
+]);
+const RETIRED_BROWSER_VAULT_FILES = new Set([
+  'crates/agent/nomi-browser-engine/src/vault.rs',
+  'crates/agent/nomi-browser-engine/tests/integration_w4d.rs',
+]);
 
 const normalizePath = (path) => path.replaceAll('\\', '/');
 
@@ -131,7 +205,7 @@ function charLiteralEnd(source, index) {
  * Browser ownership terms in documentation and error strings must not become
  * false boundary violations.
  */
-function lexicalMask(source) {
+function lexicalMask(source, { keepLiterals = false } = {}) {
   let output = source;
   let index = 0;
   while (index < source.length) {
@@ -162,14 +236,14 @@ function lexicalMask(source) {
     }
     const rawEnd = rawStringEnd(source, index);
     if (rawEnd !== null) {
-      output = replaceNonNewline(output, index, rawEnd);
+      if (!keepLiterals) output = replaceNonNewline(output, index, rawEnd);
       index = rawEnd;
       continue;
     }
     if (source[index] === '"' || source.startsWith('b"', index)) {
       const quote = source[index] === '"' ? index : index + 1;
       const end = quotedEnd(source, quote, '"');
-      output = replaceNonNewline(output, index, end);
+      if (!keepLiterals) output = replaceNonNewline(output, index, end);
       index = end;
       continue;
     }
@@ -179,7 +253,7 @@ function lexicalMask(source) {
     ) {
       const end = charLiteralEnd(source, index);
       if (end !== null) {
-        output = replaceNonNewline(output, index, end);
+        if (!keepLiterals) output = replaceNonNewline(output, index, end);
         index = end;
         continue;
       }
@@ -280,9 +354,9 @@ function attributedItemEnd(source, index) {
   return source.length;
 }
 
-function productionMask(source) {
+function productionMask(source, { keepLiterals = false } = {}) {
   const masked = lexicalMask(source);
-  let output = masked;
+  let output = keepLiterals ? source : masked;
   let index = 0;
   while (index < masked.length) {
     if (masked[index] !== '#' || masked[index + 1] !== '[') {
@@ -399,35 +473,12 @@ function managedHostLaunchPattern() {
   return /\b(?:[A-Za-z_]\w*\s*::\s*)*ManagedBrowserHost\s*::\s*launch(?:_platform_managed(?:_with_cleanup_lease)?)?\s*(?:::<[^;{}()]*>\s*)?\(/g;
 }
 
-function managedBrowserToolConstructorPattern() {
-  return /\b(?:[A-Za-z_]\w*\s*::\s*)*BrowserTool\s*::\s*with_managed_engine\s*(?:::<[^;{}()]*>\s*)?\(/g;
-}
-
 function managedBrowserFacadeConstructorPattern() {
   return /\b(?:[A-Za-z_]\w*\s*::\s*)*BrowserTool\s*::\s*new_managed\s*(?:::<[^;{}()]*>\s*)?\(/g;
 }
 
-function functionBody(source, name) {
-  const signaturePattern = new RegExp(`\\bfn\\s+${name}\\s*\\(`, 'g');
-  const signature = signaturePattern.exec(source);
-  if (!signature) return null;
-  const open = source.indexOf('{', signature.index);
-  if (open < 0) return null;
-  const end = matchingBrace(source, open);
-  return {
-    signatureIndex: signature.index,
-    open,
-    end,
-    body: source.slice(open + 1, Math.max(open + 1, end - 1)),
-  };
-}
-
 function standaloneBrowserConstructorPattern() {
   return /\b(?:Self|BrowserTool)\s*::\s*(?:new|new_standalone|with_data_dir)\s*(?:::<[^;{}()]*>\s*)?\(/g;
-}
-
-function browserProfileAllocationPattern() {
-  return /\b(?:allocate_profile_dir\s*\(|profile_dir\s*:)/g;
 }
 
 function standaloneProfileAllocationPattern() {
@@ -671,6 +722,193 @@ function scanEntries(entries) {
     const path = normalizePath(entry.path);
     const masked = productionMask(entry.source);
 
+    if (path === `${ENGINE_PRODUCTION_PREFIX}attached_browser.rs`
+      || (path.startsWith(`${ENGINE_PRODUCTION_PREFIX}attached_browser/`) && isRustSourcePath(path) && !path.endsWith('/tests.rs'))) {
+      const production = lexicalMask(productionMask(entry.source, { keepLiterals: true }), { keepLiterals: true });
+      for (const match of findMatches(production, /\b(?:CdpBackend|Launched|ChildProcessBuilder|kill_process_tree|enable_auto_attach|run_attach_loop|CloseTargetParams|CloseParams)\b|Browser\.close|Target\.closeTarget/g)) {
+        report(path, entry.source, production, match.index, 'attached-browser-connection-only', 'An attached user browser is not owned: do not launch, globally attach, or inherit browser/process/target cleanup');
+      }
+    }
+
+    if (path.startsWith('apps/desktop/')) {
+      for (const match of findMatches(masked, /\.plugin\s*\(\s*tauri_plugin_(?:dialog|notification)\s*::\s*init\s*\(/g)) {
+        report(path, entry.source, masked, match.index, 'native-dialog-global-shim', 'Use the scoped native API adapters; global initializers replace standard website APIs');
+      }
+    }
+    if (path.startsWith('apps/desktop/src/browser_surface/') && isRustSourcePath(path)) {
+      for (const match of findMatches(masked, /\.devtools\s*\(\s*true\s*\)|\b(?:OpenDevToolsWindow|open_devtools|close_devtools|is_devtools_open)\b/g)) {
+        report(path, entry.source, masked, match.index, 'embedded-devtools-unsupported', 'Embedded Browser v2 does not expose F12, Inspect, or a DevTools window; keep host-only protocol transport internal');
+      }
+      for (const match of findMatches(masked, /\.proxy_url\s*\(|\b(?:ProxyConfig|WebResourceRequestedEventHandler)\b|additional_browser_args\s*\([^)]*proxy-server/g)) {
+        report(path, entry.source, masked, match.index, 'embedded-browser-native-network', 'Conversation Browser uses the native system network stack; do not restore an application proxy, IP/port allowlist, or request firewall');
+      }
+    }
+    if (path === 'apps/desktop/src/browser_surface/network_policy.rs') {
+      report(path, entry.source, masked, 0, 'embedded-browser-native-network', 'The retired interactive-browser network policy module must not be restored');
+    }
+    if (path === 'apps/desktop/examples/support/browser_devtools.rs') {
+      report(path, entry.source, masked, 0, 'embedded-devtools-unsupported', 'The retired visible-DevTools probe must not be restored');
+    }
+    if (path === 'apps/desktop/examples/support/browser_composition_probe.rs'
+      || path === 'apps/desktop/examples/support/webview2_drag_bindings.rs') {
+      report(path, entry.source, masked, 0, 'retired-composition-drag-probe', 'Do not restore the failed Composition/OLE drag experiment; cross-session drag is an explicit unsupported boundary');
+    }
+    if (path === 'apps/desktop/examples/browser_workspace_smoke.rs') {
+      for (const match of findMatches(masked, /\.reparent\s*\(|browser-smoke-popout|composition-drag-(?:target-entry-)?only/g)) {
+        report(path, entry.source, masked, match.index, 'retired-browser-popout-probe', 'The Windows MVP has no popout/reparent or Composition drag product path');
+      }
+    }
+
+    if (path.startsWith('crates/backend/nomifun-app/src/') && entry.source.includes('browser.inventory.changed')) {
+      report(path, entry.source, entry.source, entry.source.indexOf('browser.inventory.changed'), 'retired-browser-inventory-event', 'The retired Browser inventory has no renderer consumer; use the generic resync event only');
+    }
+
+    if (path.startsWith('ui/src/') && !path.includes('.test.') && !path.endsWith('.d.ts')) {
+      for (const match of findMatches(entry.source, /\b(?:openDevTools|writeRendererLog|logStream)\b|chrome-devtools/g)) {
+        report(path, entry.source, entry.source, match.index, 'retired-renderer-devtools', 'Do not restore F12/DevTools renderer bridges or a Chrome DevTools special-case product path');
+      }
+    }
+
+    if (path.startsWith('ui/src/renderer/pages/browser/') || RETIRED_BROWSER_UI_FILES.has(path)) {
+      report(path, entry.source, masked, 0, 'retired-browser-ui-path', 'Browser v2 lives in the conversation workspace; do not restore the v1 product or adapters');
+    }
+    if (path.startsWith('crates/agent/nomi-browser/')) {
+      report(path, entry.source, masked, 0, 'retired-browser-facade', 'The legacy BrowserTool/managed/visual-fallback crate must not be restored');
+    }
+    if (path.startsWith('crates/backend/nomifun-browser-platform/src/')) {
+      for (const match of findMatches(masked, /\b(?:BrowserSessionHub|BrowserLaneClient|OwnerLeaseService|BrowserLaneScheduler)\b/g)) {
+        report(path, entry.source, masked, match.index, 'retired-browser-hub-core', 'Browser Platform contains native Workspace contracts, not the retired Hub/Lane ownership model');
+      }
+    }
+    if (path === 'crates/agent/nomi-config/src/config.rs') {
+      for (const match of findMatches(masked, /\b(?:BrowserConfig|browser_data_dir|default_browser_source)\b/g)) {
+        report(path, entry.source, masked, match.index, 'retired-browser-config', 'Browser capability and runtime supply must not restore old TOML/profile settings');
+      }
+    }
+    if (path === 'crates/backend/nomifun-app/src/router/browser_login.rs') {
+      report(path, entry.source, masked, 0, 'retired-browser-login', 'Sign-in belongs to the real conversation browser, not a compatibility login Lane');
+    }
+    if (RETIRED_KNOWLEDGE_BROWSER_FILES.has(path)) {
+      report(path, entry.source, masked, 0, 'retired-knowledge-browser-fetcher', 'Do not restore the retired Hub-backed knowledge renderer or its private lifecycle tests');
+    }
+    if (['crates/backend/nomifun-app/src/browser_lane_provider.rs',
+      'crates/backend/nomifun-ai-agent/src/factory/browser_lane.rs'].includes(path)) {
+      report(path, entry.source, masked, 0, 'retired-headless-provider', 'The old Hub lease issuer and its private cleanup executor are retired');
+    }
+    if (path === 'crates/backend/nomifun-app/src/browser_resource.rs') {
+      report(path, entry.source, masked, 0, 'retired-browser-resource-supply', 'Do not restore the unused legacy packaged-Chrome discovery channel');
+    }
+    if (path === `${ENGINE_PRODUCTION_PREFIX}acquire.rs`) {
+      report(path, entry.source, masked, 0, 'retired-engine-browser-acquisition', 'Browser executable supply belongs to the v2 host, not the retired engine downloader');
+    }
+    if (path.startsWith(ENGINE_PRODUCTION_PREFIX)) {
+      for (const match of findMatches(masked, /\b(?:CdpBackend|CdpHostRuntime|BrowserEngine|LaneOperationGate|LaneEngineConfig|CdpTaskResources|TargetOwnership|TaskTabReservationAuthority|TaskDownloadReservationAuthority|DeferredObjectGroupRelease|ObjectGroupReleaseDispatcher|defer_object_group_release|ReliableEventTaskBudget|ReliableTaskEventReceiver|subscribe_reliable_for_task|TaskSessionAuthority|TaskSessionAdmission|SessionResourceScope|LegacyUnscoped|enable_task_session_quota_routing|claim_task_session_authority|run_attach_loop|close_quota_rejected_attached_target)\b/g)) {
+        report(path, entry.source, masked, match.index, 'retired-engine-runtime', 'Use the v2 native/attached/isolated page owners, not the retired standalone Host/Lane executor');
+      }
+      for (const match of findMatches(masked, /\b(?:ChromeSource|resolve_chrome_path(?:_with_source)?|chrome_source|bundled_dir)\b|\bmod\s+acquire\b/g)) {
+        report(path, entry.source, masked, match.index, 'retired-engine-browser-acquisition', 'Do not restore engine browser-source preferences or implicit acquisition');
+      }
+      for (const match of findMatches(masked, /\b(?:create_engine|EngineConfig|ManagedBrowserHost|StandaloneResourceScope|HostLaneCoordinator|TaskTabReconcileCoordinator|resolve_user_data_dir|launch_semaphore)\b/g)) {
+        report(path, entry.source, masked, match.index, 'retired-engine-implicit-owner', 'Use caller-owned runtime admission instead of the retired default engine/profile/Host owner');
+      }
+    }
+    if (path === `${ENGINE_PRODUCTION_PREFIX}display.rs`) {
+      report(path, entry.source, masked, 0, 'retired-engine-implicit-owner', 'Native surface availability must not fall back to the old display/headless selector');
+    }
+    if (RETIRED_ENGINE_FILES.has(path)) {
+      report(path, entry.source, masked, 0, 'retired-engine-file', 'Do not restore the retired standalone runtime or its private tests/fixtures');
+    }
+    if (APPLICATION_PRODUCTION_PREFIXES.some(prefix => path.startsWith(prefix))) {
+      const production = productionMask(entry.source, { keepLiterals: true });
+      for (const match of findMatches(production, /\b(?:NOMIFUN_BUNDLED_CHROME_DIR|BUNDLED_CHROME_DIR_ENV)\b/g)) {
+        report(path, entry.source, production, match.index, 'retired-browser-resource-supply', 'Use the verified v2 runtime supply instead of the retired environment seam');
+      }
+    }
+    if (RETIRED_BROWSER_VAULT_FILES.has(path)) {
+      report(path, entry.source, masked, 0, 'retired-browser-vault', 'Do not restore the removed encrypted shared-login repository or its disk-sharing tests');
+    }
+    if (path.startsWith(ENGINE_PRODUCTION_PREFIX) || path === BROWSER_TOOL || path === BOOTSTRAP) {
+      for (const match of findMatches(masked, /\b(?:load_storage_state|save_storage_state|shared_storage_state_path|storage_state_path|VaultError|persistent_login_key|persist_login_coordinator|PersistLoginCoordinator|PersistLoginOutcome|PERSIST_LOGIN_COORDINATORS)\b|\bmod\s+vault\b/g)) {
+        report(path, entry.source, masked, match.index, 'retired-browser-vault', 'Browser identity snapshots are in-memory host data, not a shared login vault');
+      }
+    }
+    if (path.startsWith('crates/backend/nomifun-ai-agent/src/')) {
+      for (const match of findMatches(masked, /\b(?:BrowserLaneBinding|BrowserOwnerLeaseGuard|browser_lane_client)\b/g)) {
+        report(path, entry.source, masked, match.index, 'retired-headless-provider', 'Nomi runtime must not restore old Headless bindings or lease teardown');
+      }
+      const production = productionMask(entry.source);
+      for (const match of findMatches(production, /\b(?:BrowserFetcher|browser_fetcher)\b/g)) {
+        report(path, entry.source, production, match.index, 'retired-knowledge-browser-fetcher', 'Knowledge rendering belongs to its typed canonical render-content port, not the old Agent-layer fetcher');
+      }
+    }
+    if (path === 'crates/backend/nomifun-app/src/router/browser_management.rs') {
+      report(path, entry.source, masked, 0, 'retired-browser-management', 'Do not restore the v1 management/visibility/resource-policy coordinator');
+    }
+    if (path === 'crates/backend/nomifun-app/src/services.rs' || path === 'crates/backend/nomifun-ai-agent/src/factory/nomi.rs') {
+      const production = productionMask(entry.source, { keepLiterals: true });
+      for (const match of findMatches(production, /["'](?:agent\.browserUse(?:\.[^"']*)?|browser\.resourcePolicy)["']/g)) {
+        report(path, entry.source, production, match.index, 'retired-browser-preference-read', 'Browser startup/factory code must not read or migrate v1 preferences');
+      }
+    }
+    if (path === 'crates/backend/nomifun-app/src/router/routes.rs') {
+      for (const match of findMatches(entry.source, /["']\/api\/browser\//g)) {
+        report(path, entry.source, masked, match.index, 'retired-browser-management', 'Browser product routes must be scoped to a conversation');
+      }
+      for (const match of findMatches(entry.source, /["']\/api\/browser\/login\//g)) {
+        report(path, entry.source, masked, match.index, 'retired-browser-login', 'Do not restore the retired browser login endpoints');
+      }
+    }
+    if (path.startsWith('crates/backend/nomifun-ai-agent/src/')) {
+      for (const match of findMatches(masked, /\b(?:browser_(?:source|full_power|persistent_login|site_memory|visual_fallback)|persistent_login_key)\b/g)) {
+        report(path, entry.source, masked, match.index, 'retired-browser-config-forwarding', 'Do not reintroduce legacy browser preference fields into Agent application configuration');
+      }
+    }
+    if (path.startsWith('crates/backend/nomifun-app/src/')) {
+      for (const match of findMatches(masked, /\.set_browser_render_content_port\s*\(/g)) {
+        if (!/^\.set_browser_render_content_port\s*\(\s*super::knowledge_browser::KnowledgeBrowserPort::bind\s*\(/.test(masked.slice(match.index))) {
+          report(path, entry.source, masked, match.index, 'knowledge-render-kernel-port', 'Knowledge rendering must use the exact non-Agent Kernel Provider port');
+        }
+      }
+      for (const match of findMatches(masked, /\b(?:BrowserRoleRuntime|BoundBrowserRoleInvoker|build_browser_session_hub|with_browser_hub)\b/g)) {
+        report(path, entry.source, masked, match.index, 'retired-browser-role-hub', 'Do not restore the unreachable v1 Browser role owner or its legacy Profile/Hub startup');
+      }
+      const production = productionMask(entry.source);
+      for (const match of findMatches(production, /\b(?:load_storage_state|save_storage_state|shared_storage_state_path|with_identity_vault|persisted_identity_seed_coverage)\b/g)) {
+        report(path, entry.source, production, match.index, 'retired-browser-vault', 'Browser v2 must not import or persist the old shared login vault');
+      }
+    }
+    if (path === PLATFORM_ADAPTER) {
+      for (const match of findMatches(masked, /\b(?:IdentitySnapshotPersister|identity_snapshot_persister|ManagedLanePolicyDecorator|with_lane_policy|with_identity_vault)\b/g)) {
+        report(path, entry.source, masked, match.index, 'retired-browser-vault', 'Do not restore the removed shared-vault persistence/decorator hooks');
+      }
+    }
+    if (path === 'crates/backend/nomifun-ai-agent/src/factory/mod.rs') {
+      for (const match of findMatches(masked, /\bpub\s+encryption_key\s*:/g)) {
+        report(path, entry.source, masked, match.index, 'retired-browser-vault', 'Agent factory dependencies must not retain the unused application-wide browser vault key');
+      }
+    }
+    if (path === HUB_COMPOSITION) {
+      const production = productionMask(entry.source, { keepLiterals: true });
+      for (const match of findMatches(production, /["'](?:browser-data|platform-profiles)["']/g)) {
+        report(path, entry.source, production, match.index, 'retired-browser-profile-root', 'Launch and recovery must use the same fresh v2-owned roots, never legacy profiles');
+      }
+    }
+    if (path === 'crates/backend/nomifun-common/src/enums.rs') {
+      for (const match of findMatches(masked, /enum\s+PreviewContentType\s*\{[^}]*\bUrl\b/g)) {
+        report(path, entry.source, masked, match.index, 'retired-browser-preview-type', 'Web pages are not document preview content');
+      }
+    }
+    if (path === 'ui/src/renderer/components/layout/Router.tsx') {
+      for (const match of findMatches(entry.source, /path=['"]\/(?:browser|settings\/browser-use)['"]/g)) {
+        report(path, entry.source, masked, match.index, 'retired-browser-route', 'Do not restore the global Browser page or its settings redirect');
+      }
+    }
+    if (path === 'ui/src/common/config/configKeys.ts') {
+      for (const match of findMatches(entry.source, /['"]agent\.browserUse(?:\.[^'"]+)?['"]\s*:/g)) {
+        report(path, entry.source, masked, match.index, 'retired-browser-setting', 'Browser v2 must not publish the old browser settings or migration keys');
+      }
+    }
+
     if (isScannedPath(path)) {
       for (const match of privateEngineMatches(masked)) {
         report(
@@ -776,53 +1014,15 @@ function scanEntries(entries) {
     }
   }
 
-  const constructorsByRoot = new Map();
   for (const constructor of hubConstructors) {
-    constructorsByRoot.set(
+    report(
       constructor.path,
-      (constructorsByRoot.get(constructor.path) ?? 0) + 1,
+      constructor.source,
+      constructor.masked,
+      constructor.index,
+      'hub-composition-contract',
+      'The retired Headless BrowserSessionHub must not be constructed in production',
     );
-  }
-  const hasUnexpectedRoot = hubConstructors.some(
-    (constructor) => !HUB_COMPOSITION_ROOTS.has(constructor.path),
-  );
-  const hasMissingRoot = [...HUB_COMPOSITION_ROOTS].some(
-    (path) => constructorsByRoot.get(path) !== 1,
-  );
-  if (
-    hubConstructors.length === 0 ||
-    hasUnexpectedRoot ||
-    hasMissingRoot ||
-    hubConstructors.length !== HUB_COMPOSITION_ROOTS.size
-  ) {
-    violations.push({
-      path: HUB_COMPOSITION,
-      line: 1,
-      rule: 'hub-composition-contract',
-      detail:
-        `each mutually exclusive Browser composition root must construct exactly one ` +
-        `BrowserSessionHub (${[...HUB_COMPOSITION_ROOTS].join(', ')})`,
-      snippet: '',
-    });
-  }
-  if (hasUnexpectedRoot || hasMissingRoot) {
-    for (const constructor of hubConstructors) {
-      if (
-        HUB_COMPOSITION_ROOTS.has(constructor.path) &&
-        constructorsByRoot.get(constructor.path) === 1
-      ) {
-        continue;
-      }
-      report(
-        constructor.path,
-        constructor.source,
-        constructor.masked,
-        constructor.index,
-        'hub-composition-contract',
-        `BrowserSessionHub construction is only allowed once in each declared ` +
-          `mutually exclusive composition root`,
-      );
-    }
   }
 
   const bootstrap = byPath.get(BOOTSTRAP);
@@ -840,14 +1040,14 @@ function scanEntries(entries) {
       masked,
       managedBrowserFacadeConstructorPattern(),
     );
-    if (managedConstructors.length !== 1) {
+    if (managedConstructors.length !== 0) {
       report(
         BOOTSTRAP,
         bootstrap.source,
         masked,
         managedConstructors[0]?.index ?? 0,
         'bootstrap-managed-constructor-contract',
-        `Native bootstrap must construct exactly one managed BrowserTool facade (found ${managedConstructors.length})`,
+        'Bootstrap must not construct the retired BrowserTool facade',
       );
     }
     if (findMatches(masked, browserPolicyConstructorPattern()).length > 0) {
@@ -857,7 +1057,7 @@ function scanEntries(entries) {
         masked,
         0,
         'bootstrap-legacy-policy-constructor',
-        'Native bootstrap must use BrowserTool::new_managed rather than the standalone policy constructor',
+        'Bootstrap must not restore the legacy BrowserTool policy constructor',
       );
     }
     for (const match of findMatches(
@@ -882,158 +1082,6 @@ function scanEntries(entries) {
         'bootstrap-profile-allocation',
         'Native bootstrap must not allocate or own a browser profile',
       );
-    }
-  }
-
-  const adapter = byPath.get(PLATFORM_ADAPTER);
-  if (!adapter) {
-    violations.push({
-      path: PLATFORM_ADAPTER,
-      line: 1,
-      rule: 'adapter-missing',
-      detail: 'Managed Browser engine adapter source is missing',
-      snippet: '',
-    });
-  } else {
-    const masked = productionMask(adapter.source);
-    const launches = findMatches(masked, managedHostLaunchPattern());
-    if (launches.length !== 1) {
-      report(
-        PLATFORM_ADAPTER,
-        adapter.source,
-        masked,
-        launches[0]?.index ?? 0,
-        'adapter-launch-contract',
-        `the adapter must contain exactly one ManagedBrowserHost managed launch call (found ${launches.length})`,
-      );
-    }
-
-    const managedConstructors = findMatches(
-      masked,
-      managedBrowserToolConstructorPattern(),
-    );
-    if (managedConstructors.length !== 1) {
-      report(
-        PLATFORM_ADAPTER,
-        adapter.source,
-        masked,
-        managedConstructors[0]?.index ?? 0,
-        'adapter-managed-tool-contract',
-        `the managed adapter must construct exactly one BrowserTool through with_managed_engine (found ${managedConstructors.length})`,
-      );
-    }
-
-    for (const match of findMatches(
-      masked,
-      standaloneBrowserConstructorPattern(),
-    )) {
-      report(
-        PLATFORM_ADAPTER,
-        adapter.source,
-        masked,
-        match.index,
-        'adapter-standalone-constructor',
-        'the managed Browser Platform adapter must not construct a standalone BrowserTool',
-      );
-    }
-
-    for (const match of findMatches(masked, standaloneProfileAllocationPattern())) {
-      report(
-        PLATFORM_ADAPTER,
-        adapter.source,
-        masked,
-        match.index,
-        'adapter-profile-allocation',
-        'the managed Browser Platform adapter must not allocate or own a facade profile',
-      );
-    }
-  }
-
-  const browserTool = byPath.get(BROWSER_TOOL);
-  if (!browserTool) {
-    violations.push({
-      path: BROWSER_TOOL,
-      line: 1,
-      rule: 'managed-policy-facade-missing',
-      detail: 'BrowserTool managed policy facade source is missing',
-      snippet: '',
-    });
-  } else {
-    const masked = productionMask(browserTool.source);
-    const managedFactory = functionBody(masked, 'new_managed');
-    const managedEngineFactory = functionBody(masked, 'with_managed_engine');
-    if (!managedFactory) {
-      report(
-        BROWSER_TOOL,
-        browserTool.source,
-        masked,
-        0,
-        'managed-policy-constructor-missing',
-        'BrowserTool must expose a managed constructor that does not allocate standalone browser state',
-      );
-    } else {
-      if (!/\bmanaged_only\s*:\s*true\s*,/.test(managedFactory.body)) {
-        report(
-          BROWSER_TOOL,
-          browserTool.source,
-          masked,
-          managedFactory.signatureIndex,
-          'managed-policy-private-fallback',
-          'new_managed must mark its facade managed-only so it can never launch private Chromium',
-        );
-      }
-      for (const match of findMatches(
-        managedFactory.body,
-        standaloneBrowserConstructorPattern(),
-      )) {
-        report(
-          BROWSER_TOOL,
-          browserTool.source,
-          masked,
-          managedFactory.open + 1 + match.index,
-          'managed-policy-standalone-constructor',
-          'new_managed must not delegate to a standalone BrowserTool constructor',
-        );
-      }
-      for (const match of findMatches(
-        managedFactory.body,
-        standaloneProfileAllocationPattern(),
-      )) {
-        report(
-          BROWSER_TOOL,
-          browserTool.source,
-          masked,
-          managedFactory.open + 1 + match.index,
-          'managed-policy-profile-allocation',
-          'new_managed must not allocate or own a facade profile; the managed host owns profiles',
-        );
-      }
-    }
-
-    if (!managedEngineFactory) {
-      report(
-        BROWSER_TOOL,
-        browserTool.source,
-        masked,
-        0,
-        'managed-policy-factory-missing',
-        'BrowserTool must expose a managed-engine policy factory for the Browser Platform adapter',
-      );
-    } else {
-      const managedDelegates = findMatches(
-        managedEngineFactory.body,
-        /\b(?:Self|BrowserTool)\s*::\s*new_managed\s*(?:::<[^;{}()]*>\s*)?\(/g,
-      );
-      if (managedDelegates.length !== 1) {
-        report(
-          BROWSER_TOOL,
-          browserTool.source,
-          masked,
-          managedEngineFactory.signatureIndex,
-          'managed-policy-factory-contract',
-          `with_managed_engine must delegate exactly once to new_managed (found ${managedDelegates.length})`,
-        );
-      }
     }
   }
 
@@ -1063,30 +1111,7 @@ function selfTest() {
         #[cfg(test)]
         mod tests { fn private() { nomi_browser_engine::create_engine(); } }
         fn production() {
-          let browser_tool = BrowserTool::new_managed(&config);
-        }
-      `,
-    },
-    {
-      path: PLATFORM_ADAPTER,
-      source: `
-        ManagedBrowserHost::launch_platform_managed_with_cleanup_lease(config, cleanup_lease).await?;
-        BrowserTool::with_managed_engine(engine);
-      `,
-    },
-    {
-      path: BROWSER_TOOL,
-      source: `
-        impl BrowserTool {
-          fn new_managed() {
-            Self {
-              profile_dir: PathBuf::new(),
-              managed_only: true,
-            }
-          }
-          fn with_managed_engine() {
-            let mut tool = Self::new_managed();
-          }
+          // Browser capabilities are supplied by native host composition.
         }
       `,
     },
@@ -1096,14 +1121,26 @@ function selfTest() {
     },
     {
       path: HUB_COMPOSITION,
-      source: 'fn service() { BrowserSessionHub::new(); }',
+      source: 'fn service() { /* retired Hub has no production composition */ }',
     },
     {
-      path: FRESH_V4_HUB_COMPOSITION,
-      source: 'fn fresh_v4() { BrowserSessionHub::new(); }',
+      path: FRESH_V4_COMPOSITION,
+      source: 'fn fresh_v4() { /* no legacy Browser owner */ }',
     },
   ];
   assertNoViolation(baseline, 'baseline unexpectedly violates the Browser Platform boundary');
+  assertViolation(baseline.concat({path:`${ENGINE_PRODUCTION_PREFIX}backend/cdp.rs`,source:'// old runtime'}),
+    'retired-engine-file', 'failed to reject restoration of the retired CDP backend');
+  assertViolation(baseline.concat({path:`${ENGINE_PRODUCTION_PREFIX}replacement.rs`,source:'struct CdpBackend {}'}),
+    'retired-engine-runtime', 'failed to reject relocation of the retired CDP executor');
+  assertViolation(baseline.concat({path:`${ENGINE_PRODUCTION_PREFIX}transport.rs`,source:'fn defer_object_group_release() {}'}),
+    'retired-engine-runtime', 'failed to reject restoring the retired object release dispatcher');
+  assertViolation(baseline.concat({path:`${ENGINE_PRODUCTION_PREFIX}session.rs`,source:'struct ReliableEventTaskBudget {}'}),
+    'retired-engine-runtime', 'failed to reject restoring the retired cross-Host event authority');
+  assertViolation(baseline.concat({path:`${ENGINE_PRODUCTION_PREFIX}session.rs`,source:'enum SessionResourceScope { LegacyUnscoped }'}),
+    'retired-engine-runtime', 'failed to reject restoring legacy task/Lane session routing');
+  assertViolation(baseline.concat({path:`${ENGINE_PRODUCTION_PREFIX}transport.rs`,source:'fn close_quota_rejected_attached_target() {}'}),
+    'retired-engine-runtime', 'failed to reject restoring target closure in generic transport');
 
   assertViolation(
     baseline.concat({
@@ -1145,11 +1182,11 @@ function selfTest() {
   assertViolation(
     baseline.map((entry) =>
       entry.path === BOOTSTRAP
-        ? { ...entry, source: 'fn production() { BrowserTool::new(&config); }' }
+        ? { ...entry, source: 'fn production() { BrowserTool::new_managed(&config); }' }
         : entry,
     ),
     'bootstrap-managed-constructor-contract',
-    'failed to enforce the bootstrap managed-constructor contract',
+    'failed to reject the retired bootstrap managed constructor',
   );
   assertViolation(
     baseline.map((entry) =>
@@ -1185,37 +1222,6 @@ function selfTest() {
     'failed to reject bootstrap-owned browser profile allocation',
   );
   assertViolation(
-    baseline.map((entry) =>
-      entry.path === PLATFORM_ADAPTER
-        ? {
-            ...entry,
-            source: `
-              ManagedBrowserHost::launch_platform_managed(config).await?;
-              BrowserTool::with_data_dir(data_dir, false);
-            `,
-          }
-        : entry,
-    ),
-    'adapter-standalone-constructor',
-    'failed to reject a managed adapter standalone BrowserTool constructor',
-  );
-  assertViolation(
-    baseline.map((entry) =>
-      entry.path === PLATFORM_ADAPTER
-        ? {
-            ...entry,
-            source: `
-              ManagedBrowserHost::launch_platform_managed(config).await?;
-              BrowserTool::with_managed_engine(engine);
-              let profile_dir = allocate_profile_dir(&data_dir);
-            `,
-          }
-        : entry,
-    ),
-    'adapter-profile-allocation',
-    'failed to reject managed adapter browser profile allocation',
-  );
-  assertViolation(
     baseline.concat({
       path: 'crates/backend/nomifun-app/src/desktop.rs',
       source: 'fn second_hub() { BrowserSessionHub::new(); }',
@@ -1225,80 +1231,15 @@ function selfTest() {
   );
   assertViolation(
     baseline.concat({
-      path: FRESH_V4_HUB_COMPOSITION,
+      path: FRESH_V4_COMPOSITION,
       source: `
         fn fresh_v4() {
-          BrowserSessionHub::new();
           BrowserSessionHub::new();
         }
       `,
     }),
     'hub-composition-contract',
-    'failed to reject a second Fresh-v4 BrowserSessionHub constructor',
-  );
-  assertViolation(
-    baseline.map((entry) =>
-      entry.path === BROWSER_TOOL
-        ? {
-            ...entry,
-            source: `
-              impl BrowserTool {
-                fn new_managed() {
-                  Self {
-                    profile_dir: PathBuf::new(),
-                    managed_only: false,
-                  }
-                }
-                fn with_managed_engine() { let tool = Self::new_managed(); }
-              }
-            `,
-          }
-        : entry,
-    ),
-    'managed-policy-private-fallback',
-    'failed to enforce managed-only BrowserTool policy facades',
-  );
-  assertViolation(
-    baseline.map((entry) =>
-      entry.path === BROWSER_TOOL
-        ? {
-            ...entry,
-            source: `
-              impl BrowserTool {
-                fn new_managed() {
-                  let profile_dir = allocate_profile_dir(&data_dir);
-                  Self { profile_dir, managed_only: true }
-                }
-                fn with_managed_engine() { let tool = Self::new_managed(); }
-              }
-            `,
-          }
-        : entry,
-    ),
-    'managed-policy-profile-allocation',
-    'failed to reject profile allocation inside BrowserTool::new_managed',
-  );
-  assertViolation(
-    baseline.map((entry) =>
-      entry.path === BROWSER_TOOL
-        ? {
-            ...entry,
-            source: `
-              impl BrowserTool {
-                fn new_managed() {
-                  Self {
-                    profile_dir: PathBuf::new(),
-                    managed_only: true,
-                  }
-                }
-                fn with_managed_engine() { let tool = Self::with_data_dir(); }
-              }
-            `,
-          }
-        : entry,
-    ),
-    'managed-policy-factory-contract',
-    'failed to require with_managed_engine to delegate to new_managed',
+    'failed to reject any restored Fresh-v4 BrowserSessionHub constructor',
   );
   assertViolation(
     baseline.concat({
@@ -1317,6 +1258,113 @@ function selfTest() {
     'renderer-raw-cdp-config',
     'failed to reject renderer-published raw CDP connection flags',
   );
+  assertViolation(baseline.concat({path:'ui/src/renderer/pages/browser/index.tsx',source:'export const oldPage = true;'}),
+    'retired-browser-ui-path','failed to reject the retired Browser page');
+  assertViolation(baseline.concat({path:'ui/src/renderer/components/layout/Router.tsx',source:'<Route path="/settings/browser-use" />'}),
+    'retired-browser-route','failed to reject the old browser settings redirect');
+  assertViolation(baseline.concat({path:'ui/src/common/config/configKeys.ts',source:'type Keys = { "agent.browserUse": boolean };'}),
+    'retired-browser-setting','failed to reject old browser configuration keys');
+  assertViolation(baseline.concat({path:'crates/backend/nomifun-app/src/router/routes.rs',source:'route("/api/browser/login/open", handler)'}),
+    'retired-browser-login','failed to reject the retired login API');
+  assertViolation(baseline.concat({path:'crates/backend/nomifun-common/src/enums.rs',source:'enum PreviewContentType { Markdown, Url }'}),
+    'retired-browser-preview-type','failed to reject URL document previews');
+  assertViolation(baseline.concat({path:'crates/backend/nomifun-app/src/router/routes.rs',source:'route("/api/browser/display-mode", handler)'}),
+    'retired-browser-management','failed to reject the retired global management API');
+  assertViolation(baseline.concat({path:'crates/backend/nomifun-ai-agent/src/factory/nomi.rs',source:'fn read() { preferences.get("agent.browserUse.source"); }'}),
+    'retired-browser-preference-read','failed to reject restored v1 preference reads');
+  assertViolation(baseline.concat({path:'crates/backend/nomifun-ai-agent/src/types.rs',source:'pub struct Config { pub browser_full_power: bool }'}),
+    'retired-browser-config-forwarding','failed to reject legacy browser configuration forwarding');
+  assertViolation(baseline.concat({path:'crates/backend/nomifun-app/src/router/agent_role_host.rs',source:'struct BrowserRoleRuntime { hub: BrowserSessionHub }'}),
+    'retired-browser-role-hub','failed to reject the retired Browser role owner');
+  assertViolation(baseline.concat({path:'crates/backend/nomifun-app/src/bootstrap/canonical_host.rs',source:'let hub = build_browser_session_hub(data).await?;'}),
+    'retired-browser-role-hub','failed to reject the retired Browser profile startup');
+  assertViolation(baseline.concat({path:'crates/backend/nomifun-ai-agent/src/browser_fetcher.rs',source:'// Even an empty retired module is not a replacement.'}),
+    'retired-knowledge-browser-fetcher','failed to reject restoration of the retired renderer file');
+  assertViolation(baseline.concat({path:'crates/backend/nomifun-ai-agent/src/lib.rs',source:'pub use old_renderer::BrowserFetcher;'}),
+    'retired-knowledge-browser-fetcher','failed to reject a renamed legacy renderer export');
+  assertViolation(baseline.concat({path:HUB_COMPOSITION,source:'fn boot() { nomi_browser_engine::load_storage_state(path, key); }'}),
+    'retired-browser-vault','failed to reject legacy cookie import');
+  assertViolation(baseline.concat({path:HUB_COMPOSITION,source:'fn boot() { data.join("browser-data").join("platform-profiles"); }'}),
+    'retired-browser-profile-root','failed to reject a legacy profile recovery root');
+  assertViolation(baseline.concat({path:PLATFORM_ADAPTER,source:'pub fn with_identity_vault() {}'}),
+    'retired-browser-vault','failed to reject the removed vault persistence hook');
+  assertViolation(baseline.concat({path:'crates/backend/nomifun-ai-agent/src/types.rs',source:'pub struct Config { pub persistent_login_key: Option<[u8;32]> }'}),
+    'retired-browser-config-forwarding','failed to reject forwarding a legacy browser encryption key');
+  assertViolation(baseline.concat({path:'crates/backend/nomifun-ai-agent/src/factory/mod.rs',source:'pub struct AgentFactoryDeps { pub encryption_key: [u8;32] }'}),
+    'retired-browser-vault','failed to reject retention of the unused application key in Agent factory dependencies');
+  assertViolation(baseline.concat({path:'apps/desktop/src/main.rs',source:'fn boot() { builder.plugin(tauri_plugin_dialog::init()); }'}),
+    'native-dialog-global-shim','failed to reject global website dialog overrides');
+  assertViolation(baseline.concat({path:'apps/desktop/src/main.rs',source:'fn boot() { builder.plugin(tauri_plugin_notification::init()); }'}),
+    'native-dialog-global-shim','failed to reject global website notification overrides');
+  assertViolation(baseline.concat({path:'apps/desktop/src/browser_surface/host.rs',source:'fn build(builder: Builder) { builder.devtools(true); }'}),
+    'embedded-devtools-unsupported','failed to reject enabling embedded DevTools');
+  assertViolation(baseline.concat({path:'apps/desktop/src/browser_surface/host.rs',source:'fn open(core: Core) { core.OpenDevToolsWindow(); }'}),
+    'embedded-devtools-unsupported','failed to reject a DevTools window entry point');
+  assertViolation(baseline.concat({path:'apps/desktop/examples/support/browser_devtools.rs',source:'// retired visible DevTools probe'}),
+    'embedded-devtools-unsupported','failed to reject restoration of the DevTools probe');
+  assertViolation(baseline.concat({path:'apps/desktop/examples/support/browser_composition_probe.rs',source:'// retired composition probe'}),
+    'retired-composition-drag-probe','failed to reject restoration of the Composition drag probe');
+  assertViolation(baseline.concat({path:'apps/desktop/examples/browser_workspace_smoke.rs',source:'fn popout(view: View, window: Window) { view.reparent(&window); }'}),
+    'retired-browser-popout-probe','failed to reject restoration of browser popout/reparent');
+  assertViolation(baseline.concat({path:'crates/backend/nomifun-app/src/router/routes.rs',source:'fn lag() { broadcast("browser.inventory.changed"); }'}),
+    'retired-browser-inventory-event','failed to reject restoration of the legacy browser inventory event');
+  assertViolation(baseline.concat({path:'ui/src/renderer/components/layout/Layout.tsx',source:'function debug() { ipcBridge.application.openDevTools.invoke(); }'}),
+    'retired-renderer-devtools','failed to reject restoration of the renderer DevTools bridge');
+  assertViolation(baseline.concat({path:'ui/src/renderer/pages/conversation/Preview/components/viewers/HTMLViewer.tsx',source:'export default function HTMLViewer() {}'}),
+    'retired-browser-ui-path','failed to reject restoration of the iframe HTML viewer');
+  assertViolation(baseline.concat({path:'apps/desktop/src/browser_surface/host.rs',source:'fn build(builder: Builder, proxy: Url) { builder.proxy_url(proxy); }'}),
+    'embedded-browser-native-network','failed to reject an interactive Browser proxy');
+  assertViolation(baseline.concat({path:'apps/desktop/src/browser_surface/network_policy.rs',source:'struct NetworkPolicy;'}),
+    'embedded-browser-native-network','failed to reject restoration of the interactive Browser network-policy module');
+  assertViolation(baseline.concat({path:'crates/backend/nomifun-app/src/services.rs',source:'fn boot() { knowledge.set_browser_render_content_port(Arc::new(DirectEngine)); }'}),
+    'knowledge-render-kernel-port','failed to reject direct Knowledge renderer injection');
+  assertViolation(baseline.concat({path:HUB_COMPOSITION,source:'fn boot() { BrowserSessionHub::new(); }'}),
+    'hub-composition-contract','failed to reject restoring the old primary Hub composition');
+  assertViolation(baseline.concat({path:'crates/backend/nomifun-app/src/browser_lane_provider.rs',source:'// old issuer'}),
+    'retired-headless-provider','failed to reject restoring the old lease issuer');
+  assertViolation(baseline.concat({path:'crates/backend/nomifun-ai-agent/src/factory/browser_lane.rs',source:'// old binding'}),
+    'retired-headless-provider','failed to reject restoring the old binding module');
+  assertViolation(baseline.concat({path:'crates/backend/nomifun-ai-agent/src/manager/nomi/agent.rs',source:'struct Runtime { binding: BrowserLaneBinding }'}),
+    'retired-headless-provider','failed to reject restoring old runtime binding ownership');
+  assertViolation(baseline.concat({path:PLATFORM_ADAPTER,source:'// old adapter'}),
+    'retired-browser-facade','failed to reject restoring the retired facade crate');
+  assertViolation(baseline.concat({path:'crates/backend/nomifun-browser-platform/src/hub.rs',source:'pub struct BrowserSessionHub {}'}),
+    'retired-browser-hub-core','failed to reject restoring the retired Hub implementation');
+  assertViolation(baseline.concat({path:'crates/agent/nomi-config/src/config.rs',source:'pub struct BrowserConfig {}'}),
+    'retired-browser-config','failed to reject restoring old browser configuration');
+  assertViolation(baseline.concat({path:'crates/backend/nomifun-app/src/browser_resource.rs',source:'// old resource supply'}),
+    'retired-browser-resource-supply','failed to reject restoring old packaged-Chrome discovery');
+  assertViolation(baseline.concat({path:'apps/desktop/src/main.rs',source:'fn boot() { std::env::set_var("NOMIFUN_BUNDLED_CHROME_DIR", path); }'}),
+    'retired-browser-resource-supply','failed to reject restoring the unconsumed browser environment variable');
+  assertViolation(baseline.concat({path:`${ENGINE_PRODUCTION_PREFIX}acquire.rs`,source:'// retired downloader'}),
+    'retired-engine-browser-acquisition','failed to reject restoring engine acquisition');
+  assertViolation(baseline.concat({path:`${ENGINE_PRODUCTION_PREFIX}lib.rs`,source:'pub mod acquire;'}),
+    'retired-engine-browser-acquisition','failed to reject restoring acquisition under another file path');
+  assertViolation(baseline.concat({path:ENGINE_BACKEND,source:'fn launch() { resolve_chrome_path_with_source(data, None, ChromeSource::Managed); }'}),
+    'retired-engine-browser-acquisition','failed to reject restoring implicit CDP executable supply');
+  assertViolation(baseline.concat({path:`${ENGINE_PRODUCTION_PREFIX}lib.rs`,source:'pub async fn create_engine(config: EngineConfig) {}'}),
+    'retired-engine-implicit-owner','failed to reject the retired default engine constructor');
+  assertViolation(baseline.concat({path:`${ENGINE_PRODUCTION_PREFIX}host.rs`,source:'pub struct StandaloneResourceScope {}'}),
+    'retired-engine-implicit-owner','failed to reject implicit standalone task resource issuance');
+  assertViolation(baseline.concat({path:`${ENGINE_PRODUCTION_PREFIX}display.rs`,source:'// removed display fallback'}),
+    'retired-engine-implicit-owner','failed to reject the removed display/headless fallback');
+  for (const source of ['fn attach() { conn.enable_auto_attach(); }',
+    'struct Attached { owner: Launched }', 'fn stop() { send("Browser.close"); }',
+    'fn stop() { send("Target.closeTarget"); }', 'fn stop() { kill_process_tree(child); }']) {
+    assertViolation(baseline.concat({path:`${ENGINE_PRODUCTION_PREFIX}attached_browser.rs`,source}),
+      'attached-browser-connection-only','failed to reject managed-browser ownership in personal-browser attach');
+  }
+  assertNoViolation(baseline.concat({path:`${ENGINE_PRODUCTION_PREFIX}attached_browser.rs`,source:
+    '// Never use Launched or Browser.close.\nfn disconnect() { connection.shutdown(); }\n#[cfg(test)] fn fixture() { send("Browser.close"); }'}),
+    'attach-only ownership comments or isolated fixtures became production violations');
+  assertViolation(baseline.concat({path:`${ENGINE_PRODUCTION_PREFIX}attached_browser/tabs.rs`,source:'fn stop() { kill_process_tree(child); }'}),
+    'attached-browser-connection-only','failed to reject managed cleanup in an attach-only submodule');
+  assertViolation(baseline.concat({path:'crates/agent/nomi-browser-engine/src/vault.rs',source:'// retired file'}),
+    'retired-browser-vault','failed to reject the retired vault implementation path');
+  assertViolation(baseline.concat({path:BROWSER_TOOL,source:'fn navigate() { save_storage_state(state, path, key); }'}),
+    'retired-browser-vault','failed to reject implicit state persistence in BrowserTool');
+  assertViolation(baseline.concat({path:BOOTSTRAP,source:'pub fn persistent_login_key() {}'}),
+    'retired-browser-vault','failed to reject restoring browser key forwarding in bootstrap');
 }
 
 if (process.argv.includes('--self-test')) {

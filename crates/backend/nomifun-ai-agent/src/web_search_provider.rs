@@ -39,7 +39,7 @@ pub struct SessionCitationStore {
 }
 
 impl SessionCitationStore {
-    fn insert(&self, id: String, title: String, url: String) {
+    pub(crate) fn insert(&self, id: String, title: String, url: String) {
         let mut inner = self
             .inner
             .lock()
@@ -497,7 +497,7 @@ impl Tool for CitationRenderTool {
     }
 
     fn description(&self) -> &str {
-        "Render exact Markdown citations previously returned by this AgentSession's web_search tool. Unknown or expired citation IDs are rejected."
+        "Render exact Markdown citations previously returned by this AgentSession's web_search or nomi_local_websearch tool. Unknown or expired citation IDs are rejected."
     }
 
     fn input_schema(&self) -> JsonSchema {

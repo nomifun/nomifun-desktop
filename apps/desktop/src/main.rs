@@ -32,6 +32,10 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
 
+mod browser_surface;
+mod native_api_plugins;
+#[cfg(windows)]
+mod headless_browser_runtime;
 mod companion_pointer;
 mod relay_pairing;
 mod updater_install_context;
@@ -2654,6 +2658,8 @@ fn reconcile_companion_windows(
 }
 
 fn main() -> std::process::ExitCode {
+    #[cfg(windows)]
+    if let Some(code)=browser_surface::windows::user_file_picker::helper_entry() {return code;}
     // If a terminal agent CLI spawned this shell as an MCP stdio bridge
     // (`current_exe() mcp-requirement-stdio` etc.), run that helper and exit
     // BEFORE any runtime init, single-instance handling, or window creation.
@@ -2697,26 +2703,7 @@ fn main() -> std::process::ExitCode {
         }
     }
 
-    // F48: publish Tauri's authoritative resource-dir resolution for the
-    // backend's bundled Chrome-for-Testing discovery. macOS .app bundles place
-    // resources in Contents/Resources while the executable lives in
-    // Contents/MacOS, so the backend's exe-relative fallback alone can never
-    // see a packaged Chrome there. The backend crate has no Tauri dependency;
-    // this env var is the seam (see nomifun_app::browser_resource).
     let tauri_context = generated_tauri_context();
-    if let Ok(resource_dir) = tauri::utils::platform::resource_dir(
-        tauri_context.package_info(),
-        &tauri::Env::default(),
-    ) {
-        // SAFETY: same single-threaded window as `enhance_process_path`
-        // above — Tauri's runtime threads are only created by `.run()`.
-        unsafe {
-            std::env::set_var(
-                nomifun_app::browser_resource::BUNDLED_CHROME_DIR_ENV,
-                resource_dir.join("chrome-for-testing"),
-            );
-        }
-    }
 
     let app = tauri::Builder::default()
         // single-instance MUST be the first plugin. With its `deep-link` feature
@@ -2730,8 +2717,8 @@ fn main() -> std::process::ExitCode {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main_window(app);
         }))
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_notification::init())
+        .plugin(native_api_plugins::dialog())
+        .plugin(native_api_plugins::notification())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_autostart::init(
@@ -2741,6 +2728,15 @@ fn main() -> std::process::ExitCode {
         .plugin(tauri_plugin_deep_link::init())
         .setup(move |app| {
             let app_handle = app.handle().clone();
+            #[cfg(windows)]
+            let browser_workspaces = Some(Arc::new(
+                nomifun_browser_platform::workspace::BrowserWorkspaceService::new(Arc::new(
+                    browser_surface::host::DesktopBrowserHost::new(app_handle.clone()),
+                )),
+            ));
+            #[cfg(not(windows))]
+            let browser_workspaces = None;
+            app.manage(browser_workspaces.clone());
             let coordinator = app.state::<Arc<ExitCoordinator>>().inner().clone();
 
             // In dev, the desktop webview loads the live Vite server; the LAN
@@ -2845,12 +2841,18 @@ fn main() -> std::process::ExitCode {
                     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                         || -> anyhow::Result<()> {
                             runtime.block_on(async move {
+                                let mut host_services=nomifun_app::DesktopHostServices { browser_workspaces, ..Default::default() };
+                                #[cfg(windows)]
+                                { host_services.system_browser = Some(nomifun_app::system_browser::SystemBrowserService::new()); }
+                                #[cfg(windows)]
+                                headless_browser_runtime::prepare(&mut host_services).await;
                                 let (server, keep_alive) = match DesktopServer::start_with_outcome(
                                     &cli,
                                     &merged_path,
                                     spa_dir,
                                     dev_frontend_url,
                                     webui_asset_source,
+                                    host_services,
                                 )
                                 .await
                                 {
@@ -3052,10 +3054,14 @@ fn main() -> std::process::ExitCode {
         // The ~38 OS-shell commands (window controls, tray, zoom, get-path,
         // feedback, auto-update status) register here as #[tauri::command]s (P3).
         .manage(AwakeState(Mutex::new(None)))
+        .manage(browser_surface::commands::BrowserSurfaceState::default())
         .manage(QuitFlag(AtomicBool::new(false)))
         .manage(Arc::new(ExitCoordinator::default()))
         .manage(DownloadedUpdateState::default())
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(browser_surface::security::app_commands_only(tauri::generate_handler![
+            browser_surface::commands::browser_surface_attach,
+            browser_surface::commands::browser_surface_update,
+            browser_surface::commands::browser_surface_detach,
             download_update,
             install_update,
             update_package_status,
@@ -3072,7 +3078,7 @@ fn main() -> std::process::ExitCode {
             relay_pairing_disconnect,
             set_keep_awake,
             set_tray_labels
-        ])
+        ]))
         // Close-to-tray is now the DEFAULT (and only) close behavior. Closing the
         // main window (titlebar ×, OS close, Alt+F4) hides it to the tray instead
         // of quitting — the agent, scheduled tasks, and companions keep running in

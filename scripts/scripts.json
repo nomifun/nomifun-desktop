@@ -27,7 +27,7 @@
     },
     "check:browser-platform-boundary": {
       "group": "check",
-      "desc": "Enforce the single BrowserSessionHub ownership boundary and reject private browser launch paths."
+      "desc": "Enforce native conversation Browser ownership, isolated background-browser boundaries, and retirement of legacy browser paths."
     },
     "check:desktop-ui-boundary": {
       "group": "check",

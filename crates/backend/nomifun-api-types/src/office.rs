@@ -393,13 +393,13 @@ mod tests {
             ("word", PreviewContentType::Word),
             ("excel", PreviewContentType::Excel),
             ("image", PreviewContentType::Image),
-            ("url", PreviewContentType::Url),
         ];
         for (name, expected) in types {
             let raw = json!({"content_type": name});
             let t: PreviewHistoryTargetDto = serde_json::from_value(raw).unwrap();
             assert_eq!(t.content_type, expected);
         }
+        assert!(serde_json::from_value::<PreviewHistoryTargetDto>(json!({"content_type":"url"})).is_err(),"web pages belong to Browser Workspace, not document preview");
     }
 
     // -- C2. PreviewSnapshotInfoDto -------------------------------------------

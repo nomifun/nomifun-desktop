@@ -118,9 +118,6 @@ async fn forward_user_events(
                 // invalidation contains no inventory data: every connection
                 // can safely receive it and refresh its own authenticated
                 // snapshot. Sending directly avoids the already-lagged bus.
-                // Backward-compatible clients refresh on every inventory event;
-                // marker-aware clients explicitly classify this as a resync.
-                //
                 // Coalesced (F61): a sustained burst of unrelated events (
                 // terminal scrollback, agent step updates) produces repeated
                 // lag errors; without coalescing every one became another
@@ -145,10 +142,9 @@ const RESYNC_COALESCE_INTERVAL: std::time::Duration = std::time::Duration::from_
 /// clients that refetched on the previous resync still learn about events
 /// dropped after it.
 ///
-/// Each firing broadcasts TWO frames: the legacy
-/// `browser.inventory.changed` invalidation (backward compat — older clients
-/// only refresh browser inventory on it) and the generic
-/// `sync.resync-required` marker every domain UI can consume.
+/// Each firing broadcasts the generic `sync.resync-required` marker consumed
+/// by the shared client bridge. Retired browser-inventory clients no longer
+/// have a second compatibility event.
 #[derive(Clone)]
 struct LagResyncCoalescer {
     ws_manager: Arc<WebSocketManager>,
@@ -210,12 +206,8 @@ impl LagResyncCoalescer {
         });
     }
 
-    /// One coalesced firing: legacy inventory invalidation first, then the
-    /// generic resync marker, so old clients act on the first frame and
-    /// marker-aware clients on the second.
+    /// One coalesced firing for every connected client.
     fn broadcast_resync(&self, skipped: u64) {
-        self.ws_manager
-            .broadcast_all(crate::browser_inventory_events::browser_inventory_resync_event(skipped));
         self.ws_manager
             .broadcast_all(nomifun_api_types::WebSocketMessage::new(
                 "sync.resync-required",
@@ -558,17 +550,10 @@ mod realtime_bridge_tests {
         serde_json::from_str(&text).expect("forwarded websocket event must be valid JSON")
     }
 
-    /// Each coalesced firing emits the backward-compatible inventory
-    /// invalidation first, then the generic resync marker.
-    async fn receive_resync_pair(
+    async fn receive_resync(
         receiver: &mut mpsc::Receiver<WsOutbound>,
         expected_skipped: u64,
     ) {
-        let inventory = receive_event(receiver).await;
-        assert_eq!(inventory.name, "browser.inventory.changed");
-        assert_eq!(inventory.data["change_kind"], "resync_required");
-        assert_eq!(inventory.data["skipped"], expected_skipped);
-
         let generic = receive_event(receiver).await;
         assert_eq!(generic.name, "sync.resync-required");
         assert_eq!(generic.data["scope"], "all");
@@ -591,7 +576,7 @@ mod realtime_bridge_tests {
         coalescer.on_lag(2);
         coalescer.on_lag(3);
 
-        receive_resync_pair(&mut client_rx, 1).await;
+        receive_resync(&mut client_rx, 1).await;
         assert!(
             client_rx.try_recv().is_err(),
             "suppressed lags must not broadcast before the interval boundary"
@@ -599,7 +584,7 @@ mod realtime_bridge_tests {
 
         // The scheduled trailing task fires at the interval boundary and no
         // invalidation is lost: the suppressed counts accumulate into it.
-        receive_resync_pair(&mut client_rx, 5).await;
+        receive_resync(&mut client_rx, 5).await;
         assert!(
             client_rx.try_recv().is_err(),
             "three lag errors must produce exactly two coalesced firings"
@@ -608,7 +593,7 @@ mod realtime_bridge_tests {
         // A later lag (outside the interval) broadcasts immediately again.
         tokio::time::sleep(std::time::Duration::from_millis(450)).await;
         coalescer.on_lag(7);
-        receive_resync_pair(&mut client_rx, 7).await;
+        receive_resync(&mut client_rx, 7).await;
     }
 
     #[tokio::test]
@@ -631,8 +616,8 @@ mod realtime_bridge_tests {
 
         // Instance-bus lag drops instance-scoped events too, so every client
         // gets the same coalesced invalidation as on user-bus lag.
-        receive_resync_pair(&mut client_rx, 1).await;
-        receive_resync_pair(&mut other_rx, 1).await;
+        receive_resync(&mut client_rx, 1).await;
+        receive_resync(&mut other_rx, 1).await;
 
         // The bridge then continues from the newest event, still scoped to
         // the authoritative user.
@@ -652,11 +637,11 @@ mod realtime_bridge_tests {
         // on scheduling rather than the resync contract.
         let bus = Arc::new(BroadcastEventBus::new(1));
         let receiver = bus.subscribe_user();
-        // This first inventory event is observed before the later burst makes
-        // the receiver lag. It models an already-open browser page.
+        // Observe one ordinary owner event before the later burst makes the
+        // receiver lag.
         bus.send_to_user(
             "owner-a",
-            WebSocketMessage::new("browser.inventory.changed", json!({"sequence": 1})),
+            WebSocketMessage::new("before-lag", json!({"sequence": 1})),
         );
 
         let manager = Arc::new(WebSocketManager::new());
@@ -667,7 +652,7 @@ mod realtime_bridge_tests {
         let task = tokio::spawn(forward_user_events(receiver, manager));
 
         let initial = receive_event(&mut owner_rx).await;
-        assert_eq!(initial.name, "browser.inventory.changed");
+        assert_eq!(initial.name, "before-lag");
         assert!(other_rx.try_recv().is_err());
 
         // Pause the task so a deterministic capacity overflow occurs after it
@@ -687,15 +672,9 @@ mod realtime_bridge_tests {
         manager.add_client("owner-b".into(), "token-b".into(), other_tx);
         let task = tokio::spawn(forward_user_events(receiver, manager));
 
-        // Both clients receive the invalidation pair; neither frame carries
-        // any inventory data from the dropped envelopes.
+        // Both clients receive the generic invalidation; it carries no data
+        // from the dropped envelopes.
         for rx in [&mut owner_rx, &mut other_rx] {
-            let inventory = receive_event(rx).await;
-            assert_eq!(inventory.name, "browser.inventory.changed");
-            assert_eq!(inventory.data["change_kind"], "resync_required");
-            assert_eq!(inventory.data["resync_required"], true);
-            assert!(inventory.data.get("sequence").is_none());
-
             let generic = receive_event(rx).await;
             assert_eq!(generic.name, "sync.resync-required");
             assert_eq!(generic.data["scope"], "all");
@@ -830,8 +809,26 @@ fn create_nomi_core_router_with_all_state(
     );
 
     // Conversation routes protected by auth middleware
+    #[cfg(feature = "browser-use")]
+    let browser_workspace_authenticated = protect_instance_owner(
+        crate::router::browser_workspace::routes(crate::router::browser_workspace::BrowserWorkspaceApiState {
+            workspaces: services.browser_workspaces.clone(),
+            conversations: states.conversation.service.clone(),
+            data_dir: services.data_dir.clone(),
+        }).route_layer(middleware::from_fn(require_local_trust_middleware)),
+        &auth_mw_state,
+        &instance_owner_state,
+    );
     let conversation_authenticated = conversation_routes(states.conversation.clone())
         .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
+    #[cfg(feature = "browser-use")]
+    let system_browser_authenticated = protect_instance_owner(
+        crate::router::system_browser::routes(crate::router::system_browser::SystemBrowserApiState {
+            service: services.system_browser.clone(),
+            conversations: states.conversation.service.clone(),
+        }).route_layer(middleware::from_fn(require_local_trust_middleware)),
+        &auth_mw_state, &instance_owner_state,
+    );
 
     let creative_studio_agent_session_authenticated = protect_instance_owner(
         creative_studio_agent_session_routes(states.conversation.clone()),
@@ -1139,64 +1136,7 @@ fn create_nomi_core_router_with_all_state(
         "startup: route groups built"
     );
 
-    // Phase 2b: 「登录我的浏览器」——用户一键拉起可见登录浏览器(共享 profile),登录一次后静默会话复用。
-    // 仅 browser-use 构建(需 CDP 引擎);面向桌面(headful 需显示器)。auth 中间件保护(与其它诊断端点同)。
-    #[cfg(feature = "browser-use")]
-    let browser_login_authenticated = {
-        let login_state = crate::router::browser_login::BrowserLoginState::new(
-            services.browser_session_hub.clone(),
-            services.authoritative_user_id.clone(),
-            // Boot-time snapshot source for the effective-source echo (F67);
-            // the same store the composition root froze into the Hub's engine
-            // template at startup.
-            Some(Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
-                services.database.pool().clone(),
-            ))),
-        );
-        protect_instance_owner(
-            Router::new()
-                .route(
-                    "/api/browser/login/open",
-                    post(crate::router::browser_login::open_browser_login),
-                )
-                .route(
-                    "/api/browser/login/close",
-                    post(crate::router::browser_login::close_browser_login),
-                )
-                .route(
-                    "/api/browser/login/status",
-                    get(crate::router::browser_login::browser_login_status),
-                )
-                .with_state(login_state),
-            &auth_mw_state,
-            &instance_owner_state,
-        )
-    };
 
-    // Browser inventory and lifecycle management are projections over the
-    // process-wide Hub. Page execution remains Agent-only.
-    // The state may deliberately carry `None` while a browser-enabled host is
-    // degraded; handlers then return a stable 501 and never launch a private
-    // fallback engine.
-    #[cfg(feature = "browser-use")]
-    let (browser_management_user_authenticated, browser_management_owner_authenticated) = {
-        let state = crate::router::browser_management::BrowserManagementState::new(
-            services.browser_session_hub.clone(),
-            Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
-                services.database.pool().clone(),
-            )),
-            services.authoritative_user_id.clone(),
-        );
-        let user_routes =
-            crate::router::browser_management::browser_management_user_routes(state.clone())
-                .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
-        let owner_routes = protect_instance_owner(
-            crate::router::browser_management::browser_management_owner_routes(state),
-            &auth_mw_state,
-            &instance_owner_state,
-        );
-        (user_routes, owner_routes)
-    };
 
     let router = Router::new()
         .route("/health", get(health_check))
@@ -1252,12 +1192,10 @@ fn create_nomi_core_router_with_all_state(
         None => router,
     };
 
-    // Phase 2b: mount the login-browser routes (browser-use builds only).
+    // Native browser and personal-browser connection management are separate,
+    // locally trusted APIs. Neither grants the other capability's authority.
     #[cfg(feature = "browser-use")]
-    let router = router
-        .merge(browser_management_user_authenticated)
-        .merge(browser_management_owner_authenticated)
-        .merge(browser_login_authenticated);
+    let router = router.merge(browser_workspace_authenticated).merge(system_browser_authenticated);
 
     // CSRF (Double Submit Cookie) protects cookie-authenticated (remote
     // browser) requests. It is skipped entirely under NoAuth, and skips

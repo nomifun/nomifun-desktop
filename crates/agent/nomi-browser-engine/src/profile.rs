@@ -749,16 +749,6 @@ impl std::fmt::Debug for BrowserOwnershipToken {
     }
 }
 
-impl BrowserOwnershipToken {
-    pub(crate) fn browser_start_time_epoch_seconds(&self) -> u64 {
-        self.marker.browser.start_time_epoch_seconds
-    }
-
-    pub(crate) fn browser_platform_start_key(&self) -> u64 {
-        self.marker.browser.platform_start_key
-    }
-}
-
 /// Opaque authority for deleting one exact, explicitly ephemeral browser
 /// profile before an ownership marker has been committed.
 ///
