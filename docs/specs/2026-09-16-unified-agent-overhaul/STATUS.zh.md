@@ -2,9 +2,10 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-17
-> 当前阶段：Wave 0 / UARC-001 active
+> 当前阶段：Wave 1 / UARC-010 ready
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
+> Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
 > 当前主机：Windows
 > Initiative 状态：`active / baseline freeze`
 
@@ -46,7 +47,8 @@
 | Task | 状态 | Owner | Windows | macOS | 说明 |
 | --- | --- | --- | --- | --- | --- |
 | `UARC-000` | windows_verified | Integration | verified | n/a | barrier `2147863da`；26/26 文件归属，基线 gate 通过 |
-| `UARC-001` | active | Integration | pending | pending | 在 UARC-000 barrier 上生成机器可读 inventory 与 boundary self-test |
+| `UARC-001` | integrated | Integration | verified | pending | 机器 inventory/self-test/timing/platform gap 已完成；Mac gaps 保持 pending |
+| `UARC-010` | ready | Integration | pending | n/a | Wave 1 首个串行合同任务 |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -73,6 +75,10 @@
 | UARC-000 i18n parity/types | passed，7,787 keys / 35 modules | 可用于当前生成物基线 |
 | UARC-000 desktop UI boundary | passed，1,931 renderer sources | 可用于 880×600 边界基线 |
 | UARC-000 `bun run check` | passed | barrier 候选完整静态 gate |
+| UARC boundary scanner/self-test | passed，3,029 files / 13 groups / 4,094 matches | UARC-001 machine-readable baseline |
+| Wave 1 targeted Rust baseline | 198 passed（contracts/kernel/session/engine-core） | Windows shared foundation baseline |
+| Browser/Process/Terminal targeted baseline | 303 passed with Process serial control | Windows platform timing baseline |
+| Process Runtime default parallel sample | interrupted after >210 s | open anomaly owned by `UARC-021`; serial 119/119 passed |
 | Windows UARC full gate | not run | 否 |
 | macOS UARC shared compile | not run | 否 |
 | macOS native Browser/Computer/Process | not run | 否 |
@@ -92,12 +98,14 @@
 
 - UARC 实施无产品决定 blocker。
 - macOS 任务需要可用 Mac 主机；在主机可用前状态保持 `pending`，不能标完成。
-- UARC-000 已收口；Wave 1 和并行 Feature tasks 仍须等待 UARC-001 gate。
+- Wave 0 已收口并释放串行 `UARC-010`；并行 Feature tasks 仍须等待全部 Wave 1 barrier。
+- `nomi-process-runtime --lib` 默认并行样本存在 ConPTY serial-group 挂起；已归 `UARC-021`，不阻塞
+  Wave 1，但最终 gate 前必须闭合。
 
 ## 8. Next ready tasks
 
-1. `UARC-001`：生成 reachability/test/storage/platform inventory 与 timing baseline。
-2. 完成 UARC-001 gate 后串行执行 `UARC-010`。
+1. `UARC-010`：Capability Module / Action / Resource 合同（Integration 串行）。
+2. `UARC-010` barrier 后执行 `UARC-011`；不得提前启动 Feature tasks。
 
 ## 9. 状态更新模板
 
@@ -160,3 +168,17 @@
 - Not run: implementation gates pending inventory construction.
 - Remaining/blocker: enumerate production legacy reachability, storage ownership, test costs and macOS-only work. No blocker.
 - Next ready tasks: none until UARC-001 gate; then `UARC-010`.
+
+### 2026-09-17 UARC-001 integrated and Wave 0 gate complete
+
+- Barrier/source: UARC-000 closeout `6b09b4094`; inventory commit `440626d91dc800af0c5b2c81cf13f63eac9abfaf`.
+- Owner/write set: Integration; only UARC docs and `scripts/check-uarc-boundary.mjs` changed.
+- Changed: machine-readable 13-group reachability inventory, four storage ownership chains, timing samples, macOS evidence gaps and a self-testing scanner.
+- Deleted: none; existing focused boundary scripts remain intact.
+- Retained + reason: current old paths remain only as explicitly counted debt with manifest owners and zero-reference completion requirements.
+- Tests: scanner self-test and JSON parse passed; contracts 101, kernel 58, agent-session 25, engine-core 14, Browser Platform 50, Process Runtime serial 119 and Terminal 134 tests passed; `git diff --cached --check` passed.
+- Windows: verified for Wave 0 inventory and targeted baseline.
+- macOS: pending by design; three exact evidence groups are machine-readable and owned by `UARC-061/062/063`.
+- Not run: no macOS host, native CEF product, DMG/signing or notarization evidence.
+- Remaining/blocker: Process Runtime default parallel test anomaly is open under `UARC-021`; no blocker for starting serial Wave 1.
+- Next ready tasks: `UARC-010` only.
