@@ -75,10 +75,10 @@ test.each(['image', 'video'] as const)('%s quantity offers at most four and subm
   }
 });
 
-test('chat menu switches the creative composer to general assistant and keeps its draft', async () => {
+test.each(['image', 'video', 'music'] as const)('chat button exits %s to the general assistant and keeps its draft', async mode => {
   const initial = emptyCreationDraft();
-  initial.mode = 'video';
-  initial.lastMode = 'video';
+  initial.mode = mode;
+  initial.lastMode = mode;
   initial.parameters.video = { size: '1080x1920', count: 4 };
   initial.references = [{ asset_id: 'cat', title: '猫', kind: 'image', role: 'reference' }];
   sessionStorage.setItem(creationDraftStorageKey('guid'), JSON.stringify(initial));
@@ -96,8 +96,7 @@ test('chat menu switches the creative composer to general assistant and keeps it
   }
   try {
     const page = render(<I18nextProvider i18n={i18n}><MemoryRouter><SWRConfig value={{ provider: () => new Map(), fallback: { providers: [] }, revalidateOnMount: false }}><Harness /></SWRConfig></MemoryRouter></I18nextProvider>);
-    fireEvent.click(page.getByRole('button', { name: '使用场景：视频创作，展开全部场景' }));
-    fireEvent.click(await page.findByRole('menuitemradio', { name: /日常对话/ }));
+    fireEvent.click(page.getByRole('button', { name: '日常对话' }));
     expect(page.getByText('assistant.general')).toBeTruthy();
     expect(page.queryByRole('button', { name: /^生成参数：/ })).toBeNull();
     expect(current.draft.mode).toBeNull();
