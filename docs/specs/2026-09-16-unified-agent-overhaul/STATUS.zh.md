@@ -2,10 +2,11 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-17
-> 当前阶段：Wave 1 / UARC-010 active
+> 当前阶段：Wave 1 / UARC-011 ready
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
+> UARC-010 实现提交：`c059728ae4395fcdf72df59a54b4e53e8b7562a1`
 > 当前主机：Windows
 > Initiative 状态：`active / baseline freeze`
 
@@ -48,7 +49,8 @@
 | --- | --- | --- | --- | --- | --- |
 | `UARC-000` | windows_verified | Integration | verified | n/a | barrier `2147863da`；26/26 文件归属，基线 gate 通过 |
 | `UARC-001` | integrated | Integration | verified | pending | 机器 inventory/self-test/timing/platform gap 已完成；Mac gaps 保持 pending |
-| `UARC-010` | active | Integration | pending | n/a | Capability Module / Action / Resource 合同实施中 |
+| `UARC-010` | integrated | Integration | verified | n/a | Module 多 contribution、authoring policy、exact Action grant 已闭合 |
+| `UARC-011` | ready | Integration | pending | n/a | 新 canonical Agent Store baseline |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -79,6 +81,10 @@
 | Wave 1 targeted Rust baseline | 198 passed（contracts/kernel/session/engine-core） | Windows shared foundation baseline |
 | Browser/Process/Terminal targeted baseline | 303 passed with Process serial control | Windows platform timing baseline |
 | Process Runtime default parallel sample | interrupted after >210 s | open anomaly owned by `UARC-021`; serial 119/119 passed |
+| UARC-010 Contracts/API/Kernel | 103 + 533 + 60 passed | Module/Action/authoring/Snapshot authority gate |
+| UARC-010 Session/Engine/Plugin consumers | 25 + 14 + 40 passed | shared consumer regression |
+| UARC-010 contract generator/rustfmt/boundary | passed | generated schema and reachability consistent |
+| Control Plane transition probe | 48/50 passed | 2 old kind/direct-middleware assumptions owned by `UARC-014` |
 | Windows UARC full gate | not run | 否 |
 | macOS UARC shared compile | not run | 否 |
 | macOS native Browser/Computer/Process | not run | 否 |
@@ -101,11 +107,13 @@
 - Wave 0 已收口并释放串行 `UARC-010`；并行 Feature tasks 仍须等待全部 Wave 1 barrier。
 - `nomi-process-runtime --lib` 默认并行样本存在 ConPTY serial-group 挂起；已归 `UARC-021`，不阻塞
   Wave 1，但最终 gate 前必须闭合。
+- UARC-010 后 Control Plane 有两项旧语义测试等待 `UARC-014`：kind-only Context 和 direct
+  TurnMiddleware；这是已登记的串行迁移，不是恢复兼容的理由。
 
 ## 8. Next ready tasks
 
-1. `UARC-010`：完成 Capability Module / Action / Resource 合同和 Kernel authority tests。
-2. `UARC-010` barrier 后执行 `UARC-011`；不得提前启动 Feature tasks。
+1. `UARC-011`：建立 canonical Agent Store baseline 和 Agent-only reset 合同。
+2. UARC-011 barrier 后执行 `UARC-012`；不得提前启动 Feature tasks。
 
 ## 9. 状态更新模板
 
@@ -196,3 +204,17 @@
 - Not run: no task implementation yet.
 - Remaining/blocker: implement and verify multi-contribution Module plus exact Action grants. No blocker.
 - Next ready tasks: none until UARC-010 barrier; then `UARC-011`.
+
+### 2026-09-17 UARC-010 integrated and gate complete
+
+- Barrier/source: Wave 0 closeout `89a4f820d`; implementation `c059728ae4395fcdf72df59a54b4e53e8b7562a1`.
+- Owner/write set: Integration; Contracts, API Types, Kernel, generated contracts and UARC evidence only.
+- Changed: Module multi-contribution validation, authoring policy, exact Action grant DTO/compiler/Snapshot/authority and contribution-driven dispatch.
+- Deleted: implicit empty-allowlist-to-all expansion; Tool/Context kind-based generic dispatch; direct authoring of platform/dependency/internal forms.
+- Retained + reason: `CapabilityKind` is presentation summary/resource-provider dispatch; v1 outer selection names remain until the serial `UARC-014` document switch.
+- Tests: Contracts 103, API Types 533, Kernel 60, Agent Session 25, Engine Core 14 and Plugin Platform 40 passed; contract generator, targeted rustfmt, UARC boundary and staged whitespace checks passed.
+- Windows: shared contract implementation verified.
+- macOS: not applicable to this contract task; Mac platform consumers remain pending in their tasks.
+- Not run: full Wave 1 milestone gate waits for `UARC-014`. Control Plane probe is 48/50 with two intentional old-contract failures assigned to `UARC-014`.
+- Remaining/blocker: no UARC-010 blocker; do not restore implicit grants or kind authority to satisfy transitional tests.
+- Next ready tasks: `UARC-011` only.
