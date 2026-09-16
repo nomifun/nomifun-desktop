@@ -533,8 +533,14 @@ pub(crate) async fn try_build_module_states(
     );
 
     let conversation_service = build_nomi_core_conversation_owner(services);
+    let canonical_session_owner = nomifun_conversation::CanonicalAgentSessionOwner::from_pool(
+        services.database.pool().clone(),
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("canonical AgentSession owner assembly failed: {error:#}"))?;
     let conversation_owner = Arc::new(NomiCoreSessionOwner::new(
         conversation_service,
+        canonical_session_owner,
         services.agent_runtime_registry.clone(),
     ));
     let javascript_runtime_foundation =
@@ -1049,8 +1055,6 @@ async fn build_nomi_core_agent_api_state(
                 platform_builtin_tool_admission,
                 platform_builtin_context_admission,
                 platform_builtin_lifecycle_admission,
-                Arc::clone(&mcp_server_repository),
-                resource_bindings.clone(),
                 robot_owner,
                 Arc::clone(&services.plugin_runtime),
                 Arc::clone(&builtin_plan.wave2_owner),

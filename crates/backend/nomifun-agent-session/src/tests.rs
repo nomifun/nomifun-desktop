@@ -2006,7 +2006,8 @@ async fn fork_is_self_contained_and_parent_deletion_leaves_child_live() {
     assert!(forked.contract.child_base_is_self_contained);
     assert!(!forked.contract.copies_full_transcript);
     assert_eq!(forked.contract.fork.parent_through_seq, 1);
-    assert_eq!(forked.child_cursor.seq, 2);
+    assert_eq!(forked.child_cursor.seq, 3);
+    assert_eq!(store.head(&child_id).await.unwrap().status, "ready");
     let replay = store
         .fork_session(&parent.agent_session_id, request.clone())
         .await
