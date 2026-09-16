@@ -1,5 +1,12 @@
 # 可直接交给 macOS 开发 Agent 的工作 prompt
 
+> 最新接续入口：[CEF 开发检查点与后续 TODO](2026-09-16-browser-cef-macos-next-session.zh.md)。
+> 用户已要求本轮暂缓全面验证，之后另行安排；请先读取最新 TODO，而非从旧 WKWebView 步骤重新开始。
+
+> 后续用户决策：macOS 会话浏览器改为独立 CEF 原生 child NSView；Windows 保留 WebView2。
+> 本文 WKWebView 实现要求由[平台架构决策](2026-09-16-browser-platform-architecture-decision.zh.md)覆盖，
+> 其余产品边界与验收门槛仍适用。下文保留原交接上下文。
+
 你在 macOS 电脑上接手 NomiFun 的 Browser Workspace v2。请实现并自行验证 macOS 原生内嵌浏览器，
 保持 Windows 已有能力，不扩张产品范围。请先阅读仓库 AGENTS.md，以及
 `docs/continuity/2026-09-16-browser-workspace-v2-macos-handoff.zh.md` 全文，再检查实际代码。
