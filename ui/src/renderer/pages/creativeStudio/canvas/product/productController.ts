@@ -58,6 +58,16 @@ export function creativeCanvasProductPanelViews(
   };
 }
 
+/** Start each canvas visit collapsed; preserve this visit's choice on refresh. */
+export function restoreCreativeCanvasSessionPanels(
+  persisted: CreativeStudioPanelState,
+  leftOpen = false
+): CreativeStudioPanelState {
+  const panels = structuredClone(persisted);
+  panels.left.open = leftOpen;
+  return panels;
+}
+
 export function withCreativeCanvasLeftView(
   panels: CreativeStudioPanelState,
   view: CreativeLeftPanelView

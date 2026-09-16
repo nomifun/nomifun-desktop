@@ -32,7 +32,9 @@ export interface CreativeCanvasChromeSlots {
 }
 
 export interface CreativeCanvasChromeProps {
+  canvasId?: string;
   canvasTitle: string;
+  onRenameCanvas?(title: string): Promise<void>;
   saveStatus: CreativeCanvasChromeSaveStatus;
   saveMessage?: string;
   tool: CreativeCanvasChromeTool;

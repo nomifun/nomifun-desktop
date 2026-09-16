@@ -16,6 +16,7 @@ import {
   canLeaveCreativeCanvasAfterFlush,
   creativeCanvasBlockedLeaveMessage,
   creativeCanvasProductPanelViews,
+  restoreCreativeCanvasSessionPanels,
   creativeCanvasProductSelectionCapabilities,
   creativeCanvasSaveDisplayMessage,
   resolveCreativeNodeAssetPresentation,
@@ -90,6 +91,22 @@ describe('Creative Canvas product controller helpers', () => {
     expect(assistant.right.width).toBe(
       clampCreativeCanvasRightPanelWidth(staleGeometry.right.width)
     );
+  });
+
+  test('each canvas visit starts collapsed while refresh preserves a manual expansion', () => {
+    const saved = createEmptyCreativeProjectDocument('019b0000-0000-7000-8000-000000000001').panels;
+    saved.left.open = true;
+    saved.left.activeView = 'prompts';
+    const firstVisit = restoreCreativeCanvasSessionPanels(saved);
+    expect(firstVisit.left.open).toBe(false);
+    expect(firstVisit.left.activeView).toBe('prompts');
+    expect(firstVisit.right).toEqual(saved.right);
+    expect(firstVisit.bottom).toEqual(saved.bottom);
+    const expanded = withCreativeCanvasLeftPanelOpen(firstVisit, true);
+    const refreshed = restoreCreativeCanvasSessionPanels(saved, expanded.left.open);
+    expect(refreshed.left.open).toBe(true);
+    expect(restoreCreativeCanvasSessionPanels(refreshed).left.open).toBe(false);
+    expect(saved.left.open).toBe(true);
   });
 
   test('derives grouping and deletion affordances from canonical selection', () => {

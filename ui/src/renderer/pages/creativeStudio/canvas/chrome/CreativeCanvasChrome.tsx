@@ -42,6 +42,7 @@ import React, {
 import { useTranslation } from 'react-i18next';
 
 import styles from './CreativeCanvasChrome.module.css';
+import CreativeCanvasTitle from './CreativeCanvasTitle';
 import {
   CREATIVE_CANVAS_CHROME_BACKGROUNDS,
   CREATIVE_CANVAS_CHROME_NODE_KINDS,
@@ -548,7 +549,7 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
         </button>
 
         <div className={styles.projectIdentity}>
-          <h1 title={props.canvasTitle}>{props.canvasTitle}</h1>
+          <CreativeCanvasTitle key={props.canvasId} title={props.canvasTitle} disabled={props.disabled} onRename={props.onRenameCanvas} />
           <div
             className={styles.saveState}
             data-save-status={props.saveStatus}
