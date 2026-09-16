@@ -12,6 +12,8 @@ const nomiChatSource = readFileSync(new URL('../../platforms/nomi/NomiChat.tsx',
 const nomiSendBoxSource = readFileSync(new URL('../../platforms/nomi/NomiSendBox.tsx', import.meta.url), 'utf8');
 const sendBoxSource = readFileSync(new URL('../../../../components/chat/SendBox/index.tsx', import.meta.url), 'utf8');
 
+const composerSource = readFileSync(new URL('../../../../components/chat/Composer.tsx', import.meta.url), 'utf8');
+
 describe('PinnedPlan composer popover layout', () => {
   test('uses the conversation surface with a content-fit queue capsule and fixed text spacing', () => {
     expect(source.includes("data-testid='pinned-plan-bar'")).toBe(true);
@@ -47,9 +49,9 @@ describe('PinnedPlan composer popover layout', () => {
     expect(sendBoxSource.includes("data-testid='sendbox-plan-anchor'")).toBe(true);
     expect(sendBoxSource.includes('<PinnedPlan plan={pinnedPlan} active={Boolean(loading || isLoading)} />')).toBe(true);
     expect(sendBoxSource.includes("data-testid='sendbox-top-right-tools'")).toBe(false);
-    expect(sendBoxSource.includes("data-testid='sendbox-internal-status-row'")).toBe(true);
+    expect(composerSource.includes("data-testid='sendbox-internal-status-row'")).toBe(true);
     expect(sendBoxSource.includes("data-testid='sendbox-internal-plan'")).toBe(false);
-    expect(sendBoxSource.includes("data-testid='sendbox-internal-context-tools'")).toBe(true);
+    expect(composerSource.includes("data-testid='sendbox-internal-context-tools'")).toBe(true);
     expect(sendBoxSource.includes('absolute left-1/2 bottom-[calc(100%+8px)] -translate-x-1/2')).toBe(true);
     expect(sendBoxSource.includes('max-w-[420px]')).toBe(false);
     expect(sendBoxSource.includes('flex-[1_1_340px]')).toBe(false);
@@ -58,12 +60,12 @@ describe('PinnedPlan composer popover layout', () => {
     expect(nomiSendBoxSource.includes("data-testid='nomi-context-usage-slot'")).toBe(false);
     expect(nomiSendBoxSource.includes('topRightTools=')).toBe(false);
 
-    const panelIndex = sendBoxSource.indexOf('sendbox-panel relative');
+    const panelIndex = sendBoxSource.indexOf('<Composer\n');
     const anchorIndex = sendBoxSource.indexOf("data-testid='sendbox-plan-anchor'");
-    const pinnedIndex = sendBoxSource.indexOf("data-testid='sendbox-internal-status-row'");
+    const pinnedIndex = composerSource.indexOf("data-testid='sendbox-internal-status-row'");
     expect(anchorIndex).toBeGreaterThan(-1);
     expect(panelIndex).toBeGreaterThan(-1);
     expect(anchorIndex).toBeLessThan(panelIndex);
-    expect(pinnedIndex).toBeGreaterThan(panelIndex);
+    expect(pinnedIndex).toBeGreaterThan(composerSource.indexOf('data-composer-surface'));
   });
 });

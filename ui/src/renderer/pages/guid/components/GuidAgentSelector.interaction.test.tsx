@@ -42,9 +42,8 @@ const renderSelector = (props: Partial<GuidAgentSelectorProps> = {}) => {
 afterEach(cleanup);
 
 describe('Guid Agent selector', () => {
-  test('supports a compact current-session label while an Agent switch is pending', () => {
+  test('supports a current-session label while an Agent switch is pending', () => {
     const { page } = renderSelector({
-      compact: true,
       disabled: true,
       selectedLabelOverride: '当前会话 Agent',
     });

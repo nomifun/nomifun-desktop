@@ -33,6 +33,7 @@ import type { AgentResourceSelection } from '@/common/types/agentPlatform';
 import type { AgentSessionCapabilitySelection } from '@/common/types/agentPlatform';
 import { TEMPLATE_I18N_PATH } from '../../agentSettings/model';
 import { officialAgentLaunchError, prepareOfficialAgent } from './officialAgentLaunch';
+import type { GuidCollaborationConfig } from './useGuidCollaboration';
 import { creationDraftStorageKey, emptyCreationDraft } from '@/renderer/creation/useCreationDraft';
 
 export type GuidSendDeps = {
@@ -57,6 +58,7 @@ export type GuidSendDeps = {
   /** Product-selected resources. The backend derives ownership and operations. */
   resourceSelections: AgentResourceSelection[];
   capabilitySelection?: AgentSessionCapabilitySelection;
+  collaboration?: GuidCollaborationConfig;
   setMentionOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setMentionQuery: React.Dispatch<React.SetStateAction<string | null>>;
   setMentionSelectorOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -94,6 +96,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     resourceResolutionReady,
     resourceSelections,
     capabilitySelection,
+    collaboration,
     setMentionOpen,
     setMentionQuery,
     setMentionSelectorOpen,
@@ -153,20 +156,23 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         'AgentSession was created without a Conversation projection'
       );
     }
-    if (selectedWorkspace) {
+    if (selectedWorkspace || collaboration) {
       const updated = await ipcBridge.conversation.update.invoke({
         conversation_id: conversationId,
-        updates: { extra: { workspace: selectedWorkspace } },
+        updates: {
+          ...(selectedWorkspace ? { extra: { workspace: selectedWorkspace } } : {}),
+          ...collaboration,
+        },
       });
       if (!updated) {
-        throw new Error('AgentSession workspace was not bound');
+        throw new Error('AgentSession draft configuration was not saved');
       }
       conversation = await ipcBridge.conversation.get.invoke({
         conversation_id: conversationId,
       });
       if (!conversation?.id) {
         throw new Error(
-          'AgentSession workspace update lost its Conversation projection'
+          'AgentSession draft configuration lost its Conversation projection'
         );
       }
     }
@@ -218,6 +224,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     resourceResolutionReady,
     resourceSelections,
     capabilitySelection,
+    collaboration,
     t,
   ]);
 

@@ -4,8 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ipcBridge } from '@/common';
+import Composer, { ComposerSendButton } from '@/renderer/components/chat/Composer';
+import ComposerAttachments from '@/renderer/components/chat/ComposerAttachments';
+import FileAttachButton from '@/renderer/components/media/FileAttachButton';
+import { ComposerSceneHeader, SceneDiscoveryHint } from '@/renderer/creation/ComposerSceneSelector';
+import GuidWorkspaceFootnote from './components/GuidWorkspaceFootnote';
+import { Robot } from '@icon-park/react';
 import { useConfig } from '@/renderer/hooks/config/useConfig';
-import { useInputFocusRing } from '@/renderer/hooks/chat/useInputFocusRing';
 import { isSubmitGesture } from '@/renderer/hooks/chat/useCompositionInput';
 import { appendSpeechTranscript } from '@/renderer/hooks/system/useSpeechInput';
 import SpeechInputButton from '@/renderer/components/chat/SpeechInputButton';
@@ -39,10 +45,8 @@ import React, {
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import GuidAgentSelector from './components/GuidAgentSelector';
-import GuidActionRow from './components/GuidActionRow';
 import GuidCompanionShowcase from './components/GuidCompanionShowcase';
-import GuidInputCard from './components/GuidInputCard';
-import GuidModelSelector from './components/GuidModelSelector';
+import ChatModelSelector from '@/renderer/components/chat/ChatModelSelector';
 import MentionDropdown, {
   MentionSelectorBadge,
 } from './components/MentionDropdown';
@@ -53,6 +57,8 @@ import {
 } from './hooks/autoWorkEntry';
 import { useGuidAdvancedConfig } from './hooks/useGuidAdvancedConfig';
 import { useGuidAgentSelection } from './hooks/useGuidAgentSelection';
+import CollaborationComposerControl from '@/renderer/components/collaboration/CollaborationComposerControl';
+import { useGuidCollaboration } from './hooks/useGuidCollaboration';
 import { useGuidInput } from './hooks/useGuidInput';
 import { useGuidMention } from './hooks/useGuidMention';
 import { useGuidModelSelection } from './hooks/useGuidModelSelection';
@@ -61,7 +67,7 @@ import { useGuidSend } from './hooks/useGuidSend';
 import { useTypewriterPlaceholder } from './hooks/useTypewriterPlaceholder';
 import type { GuidAgentSelection } from './types';
 import styles from './index.module.css';
-import CreationControls from '@/renderer/creation/CreationControls';
+import CreationControls, { CreationModelSelector } from '@/renderer/creation/CreationControls';
 import { CreationComposerContext } from '@/renderer/creation/CreationComposerContext';
 import { useGuidCreation } from '@/renderer/creation/useGuidCreation';
 
@@ -77,8 +83,6 @@ const GuidPage: React.FC = () => {
   const location = useLocation();
   const pendingConversation = usePendingConversation();
   const guidContainerRef = useRef<HTMLDivElement>(null);
-  const { activeBorderColor, inactiveBorderColor, activeShadow } =
-    useInputFocusRing();
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
   const [resourceSelectionValue, setResourceSelectionValue] = useState<AgentResourceSelectionValue>({});
   const [capabilityDraft, setCapabilityDraft] = useState<SessionCapabilityDraft>({
@@ -102,6 +106,7 @@ const GuidPage: React.FC = () => {
     locationKey: location.key,
   });
   const modelSelection = useGuidModelSelection('nomi');
+  const collaboration = useGuidCollaboration(modelSelection.current_model);
   const guidInput = useGuidInput({
     locationState: navigationState,
   });
@@ -111,7 +116,9 @@ const GuidPage: React.FC = () => {
     guidInput.setFiles([]);
     guidInput.setDir('');
   }, [guidInput.setInput, guidInput.setFiles, guidInput.setDir]);
-  const creation = useGuidCreation(agentSelection, guidInput.input, guidInput.files, guidInput.dir, clearSentInput);
+  const creation = useGuidCreation(agentSelection, guidInput.input, guidInput.files, guidInput.dir, clearSentInput, {
+    config: collaboration.config, model: modelSelection.current_model, ready: collaboration.ready,
+  });
   useEffect(() => {
     if (creation.draft.pendingPrompt === undefined) return;
     guidInput.setInput(creation.draft.pendingPrompt);
@@ -257,7 +264,8 @@ const GuidPage: React.FC = () => {
       }),
     autoWork: effectiveAutoWork,
     workspaceEnabled,
-    resourceResolutionReady: resourceSelectionsReady,
+    resourceResolutionReady: resourceSelectionsReady && collaboration.ready,
+    collaboration: collaboration.config,
     resourceSelections: resourceSelectionResolution.selections,
     capabilitySelection: capabilitySelectionReady ? capabilitySelection : undefined,
     setMentionOpen: mention.setMentionOpen,
@@ -433,12 +441,14 @@ const GuidPage: React.FC = () => {
       guidInput.setDir('');
     }
     advancedConfig.reset();
+    collaboration.reset();
     setResourceSelectionValue({});
     creation.update(draft => ({ ...draft, references: [], pendingPrompt: undefined, pendingFiles: undefined }));
   }, [
     creation.update,
     setResourceSelectionValue,
     advancedConfig.reset,
+    collaboration.reset,
     guidInput.setDir,
     guidInput.setFiles,
     guidInput.setInput,
@@ -528,43 +538,24 @@ const GuidPage: React.FC = () => {
   ) : null;
 
   const modelSelectorNode = (
-    !creation.draft.mode && (
-      <GuidModelSelector
-        isProviderModelMode
-        modelList={modelSelection.modelList}
-        current_model={modelSelection.current_model}
-        setCurrentModel={modelSelection.setCurrentModel}
+    creation.draft.mode ? <CreationModelSelector files={guidInput.files} /> : (
+      <ChatModelSelector
+        providers={modelSelection.modelList}
+        currentModel={modelSelection.current_model}
+        getAvailableModels={modelSelection.getAvailableModels}
+        onSelectModel={(provider, model) => modelSelection.setCurrentModel({ ...provider, use_model: model })}
       />
     )
   );
 
   const autoWorkButtonDisabled =
-    !hasLaunchTarget || !resourceSelectionsReady ||
+    !hasLaunchTarget || !resourceSelectionsReady || !collaboration.ready ||
     autoWorkStartDisabled(guidInput.loading, advancedConfig.autoWork);
-  const actionRowNode = (
-    <GuidActionRow
-      onFilesUploaded={guidInput.handleFilesUploaded}
-      modelSelectorNode={modelSelectorNode}
-      creationControls={<CreationControls prompt={guidInput.input} onPromptChange={guidInput.setInput} files={guidInput.files} />}
-      loading={guidInput.loading || creation.loading}
-      speechInputNode={
-        <SpeechInputButton
-          disabled={guidInput.loading}
-          locale={i18n.language}
-          onTranscript={(transcript) => {
-            guidInput.setInput((current) =>
-              appendSpeechTranscript(current, transcript)
-            );
-          }}
-        />
-      }
-      autoWorkMode={!creation.draft.mode && isAutoWorkMode}
-      isButtonDisabled={
-        creation.draft.mode ? creation.loading || !creation.ready || !guidInput.input.trim() : isAutoWorkMode ? autoWorkButtonDisabled : send.isButtonDisabled
-      }
-      onSend={() => void submitInput()}
-    />
-  );
+  const openFileSelector = () => {
+    void ipcBridge.dialog.showOpen.invoke({ properties: ['openFile', 'multiSelections'] })
+      .then(paths => { if (paths?.length) guidInput.handleFilesUploaded(paths); })
+      .catch(error => console.error('Failed to open file dialog:', error));
+  };
 
   return (
     <CreationComposerContext.Provider value={creation}>
@@ -589,7 +580,7 @@ const GuidPage: React.FC = () => {
               />
             )}
 
-            <GuidInputCard
+            <Composer
               sideTools={
                 <SessionCapabilityPicker
                   catalog={displayedCapabilityCatalog}
@@ -601,41 +592,24 @@ const GuidPage: React.FC = () => {
                   applyMode='create'
                   disabled={guidInput.loading}
                   lockedMcpServerIds={lockedMcpServerIds}
-                />
+                >
+                  <CollaborationComposerControl
+                    value={collaboration.activeCollaborators}
+                    onChange={collaboration.setCollaborators}
+                    mainModel={collaboration.mainModel}
+                    selectedTemplate={collaboration.selectedTemplate}
+                    workDir={guidInput.dir}
+                    onTemplateApply={collaboration.setTemplate}
+                    onTemplateClear={() => collaboration.setTemplate(null)}
+                    policy={collaboration.policy}
+                    onPolicyChange={collaboration.setPolicy}
+                  />
+                </SessionCapabilityPicker>
               }
-              input={guidInput.input}
-              onInputChange={handleInputChange}
-              onKeyDown={handleInputKeyDown}
-              onPaste={guidInput.onPaste}
-              onFocus={guidInput.handleTextareaFocus}
-              onBlur={guidInput.handleTextareaBlur}
-              placeholder={creation.draft.mode ? '描述你想创作的内容，可添加参考素材…' : normalPlaceholder}
-              isInputActive={guidInput.isInputFocused}
               isFileDragging={guidInput.isFileDragging}
-              activeBorderColor={activeBorderColor}
-              inactiveBorderColor={inactiveBorderColor}
-              activeShadow={activeShadow}
               dragHandlers={guidInput.dragHandlers}
-              mentionOpen={mention.mentionOpen}
-              mentionSelectorBadge={
-                <MentionSelectorBadge
-                  visible={mention.mentionSelectorVisible}
-                  open={mention.mentionSelectorOpen}
-                  onOpenChange={mention.setMentionSelectorOpen}
-                  agentLabel={mention.selectedAgentLabel}
-                  mentionMenu={mentionDropdownNode}
-                  onResetQuery={() => mention.setMentionQuery(null)}
-                />
-              }
-              mentionDropdown={mentionDropdownNode}
-              files={guidInput.files}
-              onRemoveFile={guidInput.handleRemoveFile}
-              actionRow={actionRowNode}
-              showWorkspace={workspaceEnabled}
-              workspaceDir={guidInput.dir}
-              onSelectWorkspace={guidInput.setDir}
-              onClearWorkspace={() => guidInput.setDir('')}
-              agentSelector={
+              overlayOpen={mention.mentionOpen}
+              header={<ComposerSceneHeader agent={
                 <GuidAgentSelector
                   presets={agentSelection.presets}
                   draftPresets={agentSelection.draftPresets}
@@ -651,7 +625,45 @@ const GuidPage: React.FC = () => {
                     handleSelectAgent({ kind: 'template', templateKey })
                   }
                 />
-              }
+              } />}
+              beforeInput={<MentionSelectorBadge
+                visible={mention.mentionSelectorVisible}
+                open={mention.mentionSelectorOpen}
+                onOpenChange={mention.setMentionSelectorOpen}
+                agentLabel={mention.selectedAgentLabel}
+                mentionMenu={mentionDropdownNode}
+                onResetQuery={() => mention.setMentionQuery(null)}
+              />}
+              overlays={mention.mentionOpen && <div className='absolute left-12px right-12px bottom-[calc(100%+8px)] z-70'>{mentionDropdownNode}</div>}
+              inputProps={{
+                value: guidInput.input,
+                onChange: handleInputChange,
+                onKeyDown: handleInputKeyDown,
+                onPaste: guidInput.onPaste,
+                onFocus: guidInput.handleTextareaFocus,
+                placeholder: creation.draft.mode ? '描述你想创作的内容，可添加参考素材…' : normalPlaceholder,
+                'data-testid': 'guid-input',
+              }}
+              attachments={<ComposerAttachments files={guidInput.files} onRemoveFile={guidInput.handleRemoveFile} />}
+              tools={<FileAttachButton openFileSelector={openFileSelector} onLocalFilesAdded={guidInput.handleFilesPasted} showLoadedCapabilities={false} />}
+              creationTools={<CreationControls prompt={guidInput.input} onPromptChange={guidInput.setInput} files={guidInput.files} />}
+              rightTools={<div className='sendbox-responsive-config-group flex flex-1 items-center justify-end gap-2 min-w-0' data-composer-group>{modelSelectorNode}</div>}
+              actions={<>
+                <SpeechInputButton disabled={guidInput.loading} locale={i18n.language}
+                  onTranscript={transcript => guidInput.setInput(current => appendSpeechTranscript(current, transcript))} />
+                <ComposerSendButton
+                  loading={guidInput.loading || creation.loading}
+                  disabled={creation.draft.mode ? creation.loading || !creation.ready || !guidInput.input.trim() : isAutoWorkMode ? autoWorkButtonDisabled : send.isButtonDisabled}
+                  icon={!creation.draft.mode && isAutoWorkMode ? <Robot theme='filled' size='14' fill='currentColor' strokeWidth={5} /> : undefined}
+                  title={!creation.draft.mode && isAutoWorkMode ? t('requirements.autowork.startSession') : undefined}
+                  onClick={() => void submitInput()}
+                  testId='guid-send-btn'
+                />
+              </>}
+              footer={<>
+                <SceneDiscoveryHint />
+                {workspaceEnabled && <GuidWorkspaceFootnote workspaceDir={guidInput.dir} onSelectWorkspace={guidInput.setDir} onClearWorkspace={() => guidInput.setDir('')} />}
+              </>}
             />
 
             {!creation.draft.mode && <AgentResourcePicker

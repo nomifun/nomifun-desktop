@@ -24,7 +24,6 @@ export type GuidAgentSelectorProps = {
   loadError?: Error;
   onRetry?: () => Promise<void>;
   selectedLabelOverride?: string;
-  compact?: boolean;
   disabled?: boolean;
   onSelectTemplate: (templateKey: OfficialPresetKey) => void;
   onSelectPreset: (presetId: AgentPresetId) => void;
@@ -48,7 +47,6 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
   loadError,
   onRetry,
   selectedLabelOverride,
-  compact = false,
   disabled = false,
   onSelectTemplate,
   onSelectPreset,
@@ -142,16 +140,16 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
       <button
         ref={refs.setReference}
         type='button'
-        className={`${styles.trigger} ${compact ? `${styles.compactTrigger} sendbox-model-btn nomi-sendbox-agent-btn` : ''}`}
+        className={styles.trigger}
         disabled={disabled}
-        title={compact ? undefined : selectedLabel}
+        title={selectedLabel}
         aria-label={selectedLabel}
         data-testid='guid-agent-selector'
         {...getReferenceProps()}
       >
-        <Robot theme='outline' size={compact ? 14 : 18} fill='currentColor' />
-        <span className={`${styles.triggerLabel} ${compact ? 'sendbox-responsive-label' : ''}`}>{selectedLabel}</span>
-        <Down theme='outline' size={12} fill='currentColor' className={`${compact ? 'sendbox-responsive-chevron' : ''} ${open ? styles.chevronOpen : ''}`} />
+        <Robot theme='outline' size={18} fill='currentColor' />
+        <span className={styles.triggerLabel}>{selectedLabel}</span>
+        <Down theme='outline' size={12} fill='currentColor' className={open ? styles.chevronOpen : undefined} />
       </button>
       {open && (
         <FloatingPortal>

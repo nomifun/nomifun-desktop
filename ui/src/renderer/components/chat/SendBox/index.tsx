@@ -7,10 +7,7 @@
 import type { ConversationId, MessageId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import AtFileMenu from '@/renderer/components/chat/AtFileMenu';
-import ResponsiveComposerRow from '@/renderer/components/chat/ResponsiveComposerRow';
 import BtwOverlay from '@/renderer/components/chat/BtwOverlay';
-import { SessionCapabilityComposerLayout } from '@/renderer/components/chat/SessionCapabilityPicker/ComposerLayout';
-import { useInputFocusRing } from '@/renderer/hooks/chat/useInputFocusRing';
 import SlashCommandMenu, { type SlashCommandMenuItem } from '@/renderer/components/chat/SlashCommandMenu';
 import { useBtwCommand } from '@/renderer/components/chat/BtwOverlay/useBtwCommand';
 import { useSlashCommandController } from '@/renderer/hooks/chat/useSlashCommandController';
@@ -26,7 +23,7 @@ import { filterWorkspaceMentionItems } from '@/renderer/utils/file/workspaceMent
 import { copyText } from '@/renderer/utils/ui/clipboard';
 import { Button, Input, Message, Tag } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
-import { ArrowUp, CloseSmall, Lightning, Quote } from '@icon-park/react';
+import { CloseSmall, Lightning, Quote } from '@icon-park/react';
 import type { SlashCommandItem } from '@/common/chat/slash/types';
 import type { TFunction } from 'i18next';
 import { theme } from '@/platform';
@@ -42,14 +39,13 @@ import { useMessageList } from '@renderer/pages/conversation/Messages/hooks';
 import type { FileMetadata } from '@renderer/services/FileService';
 import { useUploadState } from '@renderer/hooks/file/useUploadState';
 import { useAbortUploadsOnConversationChange } from '@renderer/hooks/file/useAbortUploadsOnConversationChange';
-import UploadProgressBar from '@renderer/components/media/UploadProgressBar';
 import { allSupportedExts } from '@renderer/services/FileService';
 import SpeechInputButton from '@/renderer/components/chat/SpeechInputButton';
 import { appendSpeechTranscript } from '@/renderer/hooks/system/useSpeechInput';
 import { getConversationInputHistory, isCaretOnFirstLine } from '@/renderer/utils/chat/messageHistory';
 import PinnedPlan from '@renderer/pages/conversation/Messages/components/PinnedPlan';
 import { derivePinnedPlan } from '@renderer/pages/conversation/Messages/components/pinnedPlanModel';
-import './sendbox.css';
+import Composer, { ComposerSendButton } from '../Composer';
 
 const constVoid = (): void => undefined;
 // 临界值：超过该字符数直接切换至多行模式，避免为超长文本做昂贵的宽度测量
@@ -255,8 +251,6 @@ const SendBox: React.FC<{
   const isStoppingRef = useRef(false);
   const [isSingleLine, setIsSingleLine] = useState(!defaultMultiLine);
   const [isInputFocused, setIsInputFocused] = useState(false);
-  const isInputActive = isInputFocused;
-  const { activeBorderColor, inactiveBorderColor, activeShadow } = useInputFocusRing();
   const containerRef = useRef<HTMLDivElement>(null);
   const singleLineWidthRef = useRef<number>(0);
   const measurementCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -266,7 +260,6 @@ const SendBox: React.FC<{
   const setInputRef = useLatestRef(setInput);
   const messageList = useMessageList();
   const pinnedPlan = useMemo(() => (showPinnedPlan ? derivePinnedPlan(messageList) : null), [messageList, showPinnedPlan]);
-  const hasInternalStatusRow = Boolean(topRightTools);
   const [historyNavigationIndex, setHistoryNavigationIndex] = useState<number | null>(null);
   const historyDraftRef = useRef<string | null>(null);
   const [replyQuote, setReplyQuote] = useState<ReplyQuote | null>(null);
@@ -1001,11 +994,11 @@ const SendBox: React.FC<{
     }
   }, [handlePasteFocus, conversationContext?.conversation_id, skipChatWarmup]);
   const handleInputBlur = useCallback(() => {
+    setIsInputFocused(false);
     if (warmupTimerRef.current) {
       clearTimeout(warmupTimerRef.current);
       warmupTimerRef.current = null;
     }
-    setIsInputFocused(false);
   }, []);
 
   useEffect(() => {
@@ -1340,20 +1333,7 @@ const SendBox: React.FC<{
   const isButtonDisabled = disabled || isUploading || isStopping || (!input.trim() && domSnippets.length === 0);
 
   // Reusable send button component
-  const sendButton = (
-    <Button
-      shape='circle'
-      type='primary'
-      disabled={isButtonDisabled}
-      className='send-button-custom'
-      icon={<ArrowUp theme='filled' size='14' fill={sideTools ? 'currentColor' : 'white'} strokeWidth={5} />}
-      onClick={() => {
-        sendMessageHandler();
-      }}
-      data-testid='sendbox-send-btn'
-      data-composer-action='send'
-    />
-  );
+  const sendButton = <ComposerSendButton disabled={isButtonDisabled} onClick={sendMessageHandler} />;
 
   const stopButton = (
     <Button
@@ -1477,29 +1457,16 @@ const SendBox: React.FC<{
           <PinnedPlan plan={pinnedPlan} active={Boolean(loading || isLoading)} />
         </div>
       )}
-      <div
-        ref={containerRef}
-        data-composer-surface
-        className={`sendbox-panel relative p-16px border-3 b bg-dialog-fill-0 b-solid rd-20px flex flex-col ${sideTools ? 'sendbox-panel--side-tools' : ''} ${isOverlayOpen ? 'overflow-visible' : 'overflow-hidden'} ${isFileDragging ? 'b-dashed sendbox-panel--dragging' : ''}`}
-        style={{
-          transition: 'box-shadow 0.25s ease, border-color 0.25s ease',
-          padding: sideTools ? 0 : undefined,
-          borderRadius: sideTools ? 22 : undefined,
-          ...(isFileDragging
-            ? {
-                backgroundColor: 'var(--color-primary-light-1)',
-                borderColor: 'rgb(var(--primary-3))',
-                borderWidth: '1px',
-              }
-            : {
-                borderWidth: '1px',
-                borderColor: isInputActive ? activeBorderColor : inactiveBorderColor,
-                boxShadow: isInputActive ? activeShadow : 'none',
-              }),
-        }}
-        {...dragHandlers}
-      >
-        <SessionCapabilityComposerLayout picker={sideTools}>
+      <Composer
+        surfaceRef={containerRef}
+        singleLine={isSingleLine}
+        isFileDragging={isFileDragging}
+        dragHandlers={dragHandlers}
+        overlayOpen={isOverlayOpen}
+        sideTools={sideTools}
+        topRightTools={topRightTools}
+        header={prefix}
+        overlays={<>
           <BtwOverlay
             answer={btwCommand.answer}
             anchorEl={containerRef.current}
@@ -1565,20 +1532,9 @@ const SendBox: React.FC<{
               )}
             </div>
           )}
-          {hasInternalStatusRow && (
-            <div
-              className='sendbox-internal-status-row mb-8px flex w-full flex-wrap items-start gap-8px'
-              data-testid='sendbox-internal-status-row'
-            >
-              {topRightTools && (
-                <div className='ml-auto flex h-28px flex-shrink-0 items-center' data-testid='sendbox-internal-context-tools'>
-                  {topRightTools}
-                </div>
-              )}
-            </div>
-          )}
+        </>}
+        beforeInput={
           <div style={{ width: '100%' }}>
-            {prefix}
             {context}
             {/* 编辑消息提示条 / Editing message banner */}
             {/* b-1px 才是 1px 宽度（`b-1` 是 --bg-1 颜色），b-border-2 在 theme 里不存在，
@@ -1659,86 +1615,32 @@ const SendBox: React.FC<{
               </div>
             )}
           </div>
-          <UploadProgressBar source='sendbox' />
-          <div
-            className={isSingleLine ? 'flex items-center gap-2 w-full min-w-0 overflow-hidden' : 'w-full overflow-hidden'}
-          >
-            {isSingleLine && (
-              <div
-                className='flex-shrink-0 sendbox-tools'
-              >
-                {tools}
-              </div>
-            )}
-            <div
-              className={`sendbox-highlight-container ${isSingleLine ? 'sendbox-highlight-container--single' : ''}`}
-              style={{
-                width: isSingleLine ? 'auto' : '100%',
-                flex: isSingleLine ? 1 : 'none',
-                minWidth: 0,
-                maxWidth: '100%',
-                marginBottom: isSingleLine ? 0 : sideTools ? '6px' : '8px',
-                minHeight: isSingleLine ? '20px' : '40px',
-              }}
-            >
-              <div
-                ref={highlightScrollRef}
-                aria-hidden='true'
-                className={`sendbox-highlight-layer text-14px ${isSingleLine ? 'sendbox-highlight-layer--single' : ''}`}
-                data-testid='sendbox-highlight-layer'
-                style={!shouldUseHighlightOverlay ? { visibility: 'hidden' } : undefined}
-              >
-                {renderHighlightedInputValue()}
-              </div>
-              <Input.TextArea
-                autoFocus
-                disabled={disabled}
-                spellCheck={false}
-                value={input}
-                placeholder={
-                  placeholder
-                    ? `${placeholder}  ${bottomHint ?? t('conversation.sendbox.hint', { defaultValue: 'Type / for commands, @ to reference files' })}`
-                    : ((bottomHint as string | undefined) ??
-                      t('conversation.sendbox.hint', { defaultValue: 'Type / for commands, @ to reference files' }))
-                }
-                className={`${shouldUseHighlightOverlay ? 'sendbox-highlight-textarea ' : ''}pl-0 pr-0 !b-none focus:shadow-none m-0 !bg-transparent !focus:bg-transparent !hover:bg-transparent lh-[20px] !resize-none text-14px`}
-                data-testid='sendbox-input'
-                style={{
-                  width: '100%',
-                  flex: isSingleLine ? 1 : 'none',
-                  minWidth: 0,
-                  maxWidth: '100%',
-                  marginLeft: 0,
-                  marginRight: 0,
-                  marginBottom: 0,
-                  height: isSingleLine ? '20px' : 'auto',
-                  minHeight: isSingleLine ? '20px' : '40px',
-                  overflowY: isSingleLine ? 'hidden' : 'auto',
-                  overflowX: 'hidden',
-                  whiteSpace: isSingleLine ? 'nowrap' : 'pre-wrap',
-                  textOverflow: isSingleLine ? 'ellipsis' : 'clip',
-                  wordBreak: isSingleLine ? 'normal' : 'break-word',
-                  overflowWrap: 'break-word',
-                }}
-                onChange={handleTextAreaChange}
-                onPaste={onPaste}
-                onClick={(event) => {
-                  syncCaretPosition(event.target);
-                }}
-                onFocus={handleInputFocus}
-                onBlur={handleInputBlur}
-                onKeyUp={(event) => {
-                  syncCaretPosition(event.currentTarget);
-                }}
-                onSelect={(event) => {
-                  syncCaretPosition(event.currentTarget);
-                }}
-                onScroll={(event) => {
-                  syncHighlightScroll(event.currentTarget);
-                }}
-                {...compositionHandlers}
-                autoSize={isSingleLine ? false : { minRows: 1, maxRows: 10 }}
-                onKeyDown={createKeyDownHandler(
+        }
+        inputOverlay={<div ref={highlightScrollRef} aria-hidden='true'
+          className={`sendbox-highlight-layer text-14px ${isSingleLine ? 'sendbox-highlight-layer--single' : ''}`}
+          data-testid='sendbox-highlight-layer'
+          style={!shouldUseHighlightOverlay ? { visibility: 'hidden' } : undefined}>
+          {renderHighlightedInputValue()}
+        </div>}
+        highlightInput={shouldUseHighlightOverlay}
+        inputProps={{
+          autoFocus: true,
+          disabled,
+          value: input,
+          placeholder: placeholder
+            ? `${placeholder}  ${bottomHint ?? t('conversation.sendbox.hint', { defaultValue: 'Type / for commands, @ to reference files' })}`
+            : ((bottomHint as string | undefined) ?? t('conversation.sendbox.hint', { defaultValue: 'Type / for commands, @ to reference files' })),
+          'data-testid': 'sendbox-input',
+          onChange: handleTextAreaChange,
+          onPaste,
+          onClick: event => syncCaretPosition(event.target),
+          onFocus: handleInputFocus,
+          onBlur: handleInputBlur,
+          onKeyUp: event => syncCaretPosition(event.currentTarget),
+          onSelect: event => syncCaretPosition(event.currentTarget),
+          onScroll: event => syncHighlightScroll(event.currentTarget),
+          ...compositionHandlers,
+          onKeyDown: createKeyDownHandler(
                   sendMessageHandler,
                   (event) => {
                     if (handleAtFileMenuKeyDown(event) || handleOverlayKeyDown(event) || handleHistoryKeyDown(event)) {
@@ -1762,18 +1664,9 @@ const SendBox: React.FC<{
                     return false;
                   },
                   sendKey
-                )}
-              ></Input.TextArea>
-            </div>
-            {isSingleLine && (
-              <div className='flex items-center gap-2'>
-                {renderedSpeechButton}
-                {sendButtonPrefix}
-                {renderActionButtons()}
-              </div>
-            )}
-          </div>
-          {renderAttachments?.(selectedWorkspaceItems ?? [], (path) => {
+                ),
+        }}
+        attachments={renderAttachments?.(selectedWorkspaceItems ?? [], (path) => {
             const item = selectedWorkspaceItems?.find(item => getSelectedItemPath(item) === path);
             if (!item) return;
             const keys = getSelectedItemMatchKeys(item);
@@ -1787,24 +1680,11 @@ const SendBox: React.FC<{
             selectedItemByPathRef.current.delete(path);
             onSelectedWorkspaceItemsChange?.((selectedWorkspaceItems ?? []).filter(item => getSelectedItemPath(item) !== path));
           })}
-          {!isSingleLine && (
-            <ResponsiveComposerRow className='sendbox-bottom-row flex items-center justify-between gap-2 w-full'>
-              <div
-                className='sendbox-tools'
-              >
-                {tools}
-              </div>
-              {creationTools}
-              <div data-composer-group className='sendbox-actions flex items-center gap-2' style={{ marginLeft: 'auto', maxWidth: '100%' }}>
-                {rightTools}
-                {renderedSpeechButton}
-                {sendButtonPrefix}
-                {renderActionButtons()}
-              </div>
-            </ResponsiveComposerRow>
-          )}
-        </SessionCapabilityComposerLayout>
-      </div>
+        tools={tools}
+        creationTools={creationTools}
+        rightTools={rightTools}
+        actions={<>{renderedSpeechButton}{sendButtonPrefix}{renderActionButtons()}</>}
+      />
     </div>
   );
 };
