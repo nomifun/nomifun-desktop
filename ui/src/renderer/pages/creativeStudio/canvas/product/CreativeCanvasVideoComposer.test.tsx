@@ -75,10 +75,11 @@ describe('CreativeCanvasVideoComposer', () => {
       <CreativeCanvasVideoComposer
         {...props({
           mode: 'i2v',
-          reference: {
+          references: [{
+            assetId: 'reference',
             name: '晨雾参考图.png',
             previewUrl: 'http://127.0.0.1:8788/assets/reference.png',
-          },
+          }],
         })}
       />
     );
@@ -96,7 +97,7 @@ describe('CreativeCanvasVideoComposer', () => {
       <CreativeCanvasVideoComposer
         {...props({
           mode: 'i2v',
-          reference: { name: '参考图', originalUrl: '/reference-original.png' },
+          references: [{ assetId: 'reference', name: '参考图', originalUrl: '/reference-original.png' }],
         })}
       />
     );
@@ -104,6 +105,33 @@ describe('CreativeCanvasVideoComposer', () => {
     expect(html.includes('src="/reference-original.png"')).toBe(true);
     expect(html.match(/<img\b/g)?.length).toBe(1);
     expect(html.includes('data-creative-media-preview="image"')).toBe(true);
+  });
+
+  test('previews every linked image in keyframe order', () => {
+    const html = renderToStaticMarkup(<CreativeCanvasVideoComposer {...props({
+      mode: 'i2v', initialPrompt: 'transition',
+      modelOptions: [{ ...model, protocol: 'agnes.video_jobs' }],
+      references: ['first', 'middle', 'last'].map((id) => ({
+        assetId: id, name: id, originalUrl: `/${id}.png`,
+      })),
+    })} />);
+    expect(html.match(/<img\b/g)?.length).toBe(3);
+    expect(html.indexOf('/first.png')).toBeLessThan(html.indexOf('/middle.png'));
+    expect(html.indexOf('/middle.png')).toBeLessThan(html.indexOf('/last.png'));
+    expect(html.includes('aria-label="生成视频" disabled')).toBe(false);
+    expect(html.includes('关键帧 · 按连线顺序')).toBe(true);
+  });
+
+  test('keeps single-image model limits visible without hiding the references', () => {
+    for (const protocol of ['openai.videos', 'siliconflow.video_jobs']) {
+      const html = renderToStaticMarkup(<CreativeCanvasVideoComposer {...props({
+        mode: 'i2v', initialPrompt: 'transition', modelOptions: [{ ...model, protocol }],
+        references: ['first', 'last'].map((assetId) => ({ assetId, name: assetId, originalUrl: `/${assetId}.png` })),
+      })} />);
+      expect(html.includes('所选模型仅支持一张参考图')).toBe(true);
+      expect(html.includes('aria-label="生成视频" disabled')).toBe(true);
+      expect(html.match(/<img\b/g)?.length).toBe(2);
+    }
   });
 
   test('keeps generation disabled when no exact video model exists', () => {

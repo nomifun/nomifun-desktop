@@ -254,6 +254,22 @@ describe('canvas video composer product model', () => {
     });
   });
 
+  test('preserves all ordered references in the request, persisted config and recovery', () => {
+    const ids = [testUuid(412), IMAGE_ASSET_ID, testUuid(411)];
+    const { prepared, document } = prepareFixture({
+      operation: operation('i2v'),
+      references: {
+        assets: ids.map((id) => asset(id, 'image')).reverse(),
+        bindings: ids.map((assetId) => ({ assetId, kind: 'image', role: 'reference' })),
+      },
+    });
+    expect(prepared.plan.input.inputs.map((input) => input.assetId)).toEqual(ids);
+    expect(prepared.configNode.data.inputAssetIds).toEqual(ids);
+    document.nodes.push(prepared.configNode);
+    const restored = canvasVideoComposeConfigFromTask(document, taskFor(prepared));
+    expect(restored.data.inputAssetIds).toEqual(ids);
+  });
+
   test('rejects unsupported reference contracts, v2v and non-empty targets', () => {
     const image = asset(IMAGE_ASSET_ID, 'image');
     const video = asset(UPSTREAM_VIDEO_ASSET_ID, 'video');
@@ -269,21 +285,21 @@ describe('canvas video composer product model', () => {
             ],
           },
         })
-      ).includes('一张 role=reference')
+      ).includes('需要有效的图片引用')
     ).toBe(true);
     expect(
       thrownMessage(() =>
         prepareFixture({
           operation: operation('i2v'),
           references: {
-            assets: [image, asset(testUuid(405), 'image')],
+            assets: [image, asset(testUuid(405), 'video')],
             bindings: [
               { assetId: image.id, kind: 'image', role: 'reference' },
               { assetId: testUuid(405), kind: 'image', role: 'reference' },
             ],
           },
         })
-      ).includes('一张 role=reference')
+      ).includes('需要有效的图片引用')
     ).toBe(true);
     expect(
       thrownMessage(() =>
@@ -354,7 +370,7 @@ describe('canvas video composer product model', () => {
     }];
     expect(canvasVideoComposeMode(document, source.id)).toEqual({
       kind: 'i2v',
-      assetId: IMAGE_ASSET_ID,
+      assetIds: [IMAGE_ASSET_ID],
     });
     document.connections.push({
       id: testUuid(407),
@@ -363,7 +379,14 @@ describe('canvas video composer product model', () => {
       sourceHandle: null,
       targetHandle: null,
     });
-    expect(canvasVideoComposeMode(document, source.id).kind).toBe('unsupported');
+    expect(canvasVideoComposeMode(document, source.id)).toEqual({
+      kind: 'i2v', assetIds: [IMAGE_ASSET_ID, testUuid(404)],
+    });
+    document.nodes.reverse();
+    expect(canvasVideoComposeMode(document, source.id)).toEqual({
+      kind: 'i2v', assetIds: [IMAGE_ASSET_ID, testUuid(404)],
+    });
+    document.nodes.reverse();
 
     document.connections = [{
       id: testUuid(408),

@@ -28,6 +28,7 @@ export type CanvasVideoAspectRatio = '16:9' | '9:16' | '1:1';
 export type CanvasVideoSeconds = 5 | 10;
 
 export interface CanvasVideoReferenceSummary {
+  assetId: string;
   name: string;
   previewUrl?: string | null;
   originalUrl?: string | null;
@@ -36,7 +37,7 @@ export interface CanvasVideoReferenceSummary {
 export interface CreativeCanvasVideoComposerProps {
   nodeId: string;
   mode: CanvasVideoComposerMode;
-  reference?: CanvasVideoReferenceSummary | null;
+  references?: readonly CanvasVideoReferenceSummary[];
   initialPrompt: string;
   settings: CanvasVideoComposeSettings;
   modelOptions: readonly CreativeModelOption[];
@@ -123,7 +124,7 @@ const CreativeCanvasVideoComposer: React.FC<
 > = ({
   nodeId,
   mode,
-  reference,
+  references = [],
   initialPrompt,
   settings,
   modelOptions,
@@ -150,10 +151,18 @@ const CreativeCanvasVideoComposer: React.FC<
     ? modelOptions.find((option) => modelKey(option) === modelKey(settings.model!)) ??
       null
     : null;
+  const referenceIssue = references.length > 1 &&
+    (selectedModel?.protocol === 'openai.videos' || selectedModel?.protocol === 'siliconflow.video_jobs')
+    ? t('creativeStudio.canvas.video.singleImageModel', {
+        defaultValue: '所选模型仅支持一张参考图，请减少连接或切换支持多图的模型。',
+      })
+    : null;
+  const keyframes = references.length > 1 && selectedModel?.protocol === 'agnes.video_jobs';
   const canSubmit = retrySubmission
     ? !interactionDisabled && onRetrySubmission !== undefined
     : !interactionDisabled &&
       !busy &&
+      !referenceIssue &&
       prompt.trim().length > 0 &&
       selectedModel !== null;
   const unsupportedModeLabel = unsupported
@@ -167,7 +176,7 @@ const CreativeCanvasVideoComposer: React.FC<
   const submit = (): void => {
     const result = dispatchCanvasVideoComposerSubmission({
       mode,
-      disabled,
+      disabled: disabled || Boolean(referenceIssue),
       busy,
       prompt,
       hasModel: selectedModel !== null,
@@ -195,13 +204,21 @@ const CreativeCanvasVideoComposer: React.FC<
       nodeId={nodeId}
       mode={mode}
     >
-        {unsupportedModeLabel || (mode === 'i2v' && reference) ? (
+        {unsupportedModeLabel || (mode === 'i2v' && references.length > 0) ? (
           <div className={styles.contextRow}>
             {unsupportedModeLabel ? (
               <span className={styles.modePill}>{unsupportedModeLabel}</span>
             ) : null}
-            {mode === 'i2v' && reference ? (
-              <span className={styles.reference} title={reference.name}>
+            {keyframes ? (
+              <span className={styles.modePill}>
+                {t('creativeStudio.canvas.video.keyframeOrder', {
+                  defaultValue: '关键帧 · 按连线顺序',
+                })}
+              </span>
+            ) : null}
+            {mode === 'i2v' ? references.map((reference, index) => (
+              <span key={reference.assetId} className={styles.reference} title={reference.name}>
+                <span>{index + 1}</span>
                 {reference.previewUrl || reference.originalUrl ? (
                   <span className={styles.referencePreview}>
                     <CreativeMediaPreview
@@ -214,7 +231,7 @@ const CreativeCanvasVideoComposer: React.FC<
                 ) : null}
                 <span className={styles.referenceName}>{reference.name}</span>
               </span>
-            ) : null}
+            )) : null}
           </div>
         ) : null}
 
@@ -436,7 +453,7 @@ const CreativeCanvasVideoComposer: React.FC<
           >
             {t('creativeStudio.canvas.video.unsupportedMessage', {
               defaultValue:
-                '当前节点不支持直接生成视频。请选择空视频节点，或为它添加一张图片参考。',
+                '当前节点不支持直接生成视频。请选择空视频节点，可连接图片作为参考。',
             })}
           </div>
         ) : null}
@@ -445,12 +462,12 @@ const CreativeCanvasVideoComposer: React.FC<
             {modelStatus}
           </div>
         ) : null}
-        {error || task.message ? (
+        {error || referenceIssue || task.message ? (
           <div
             className={composerStyles.message}
-            role={error ? 'alert' : 'status'}
+            role={error || referenceIssue ? 'alert' : 'status'}
           >
-            {error ?? task.message}
+            {error ?? referenceIssue ?? task.message}
           </div>
         ) : null}
         {retrySubmission && onConfirmSubmission ? (

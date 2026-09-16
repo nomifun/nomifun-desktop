@@ -2,6 +2,7 @@
   display: flex;
   min-width: 0;
   align-items: center;
+  overflow-x: auto;
   gap: 8px;
   padding: 2px 6px 8px;
 }
@@ -31,7 +32,8 @@
 .reference {
   display: inline-flex;
   min-width: 0;
-  max-width: 260px;
+  max-width: 160px;
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
   color: var(--color-text-3);
