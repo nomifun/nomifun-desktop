@@ -901,11 +901,6 @@ impl EngineKernelSession {
                     settled?;
                     robot_closed?;
                     owner
-                        .wave2
-                        .cleanup_coding_snapshots(owner.session_id.as_ref())
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    owner
                         .kernel
                         .release_resources(&ScopeKey::from(format!(
                             "session:{}",

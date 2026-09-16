@@ -4,32 +4,29 @@
 //! configured here. Unsupported families fail closed instead of delegating to
 //! the legacy Gateway or manufacturing an acknowledgement.
 
-use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
+#[cfg(test)]
 use std::time::Duration;
 
 use nomifun_agent_contracts::{
-    DigestHex, PluginStateCompareAndSwapOutcome, ScopeKey, StateKey, StrictJsonValue,
-    TypedResourceBinding, VersionString, canonical_json_bytes, digest_payload,
+    DigestHex, StrictJsonValue, TypedResourceBinding, canonical_json_bytes, digest_payload,
 };
 use nomifun_agent_domain_wave2::{
     Wave2CapabilityOperation, Wave2HostContext, Wave2HostPort, Wave2HostPortError,
-    Wave2HostRequest, Wave2StateHandle,
+    Wave2HostRequest,
 };
 use nomifun_api_types::{TypedResourceBindingDto, WebSocketMessage};
 use nomifun_common::AppError;
 use nomifun_file::{
     AgentSessionPatchRequest, AgentSessionWorkspaceBinding, FileService,
-    FileWatchService, IFileWatchService, ISnapshotService, SnapshotInfo, SnapshotMode,
-    SnapshotService, WorkspaceArtifactStore,
+    WorkspaceArtifactStore, WorkspaceVcsStageOwner,
     WORKSPACE_READ_OPERATION, WORKSPACE_RESOURCE_KIND, WORKSPACE_ROOT_PARAMETER,
     WORKSPACE_WRITE_OPERATION,
 };
 use nomifun_realtime::UserEventSink;
-use nomifun_terminal::pty::{PtyExit, PtyHandle, SpawnParams};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -38,43 +35,29 @@ use super::agent_wave2_vcs_push::{
     VcsPushRequest,
 };
 const MAX_DIFF_BYTES: usize = 1024 * 1024;
-const MAX_SNAPSHOT_CHANGES: usize = 512;
-const MAX_SNAPSHOT_BASELINE_BYTES: usize = 1024 * 1024;
-const WAVE2_EFFECT_STATE_FORMAT: &str = "1.0.0";
-const MAX_WAVE2_EFFECT_RECORDS: usize = 128;
-const MAX_WAVE2_EFFECT_CAS_ATTEMPTS: usize = 8;
 const MAX_WAVE2_IDEMPOTENCY_KEY_BYTES: usize = 128;
-const PROCESS_SESSION_RESOURCE_KIND: &str = "process_session";
-const PROCESS_EXECUTE_OPERATION: &str = "execute";
-const DEFAULT_PROCESS_TIMEOUT_MS: u64 = 30_000;
-const MAX_PROCESS_TIMEOUT_MS: u64 = 10 * 60 * 1000;
-const MAX_PROCESS_COMMAND_CHARS: usize = 32 * 1024;
-const MAX_PROCESS_ARGUMENTS: usize = 256;
-const MAX_PROCESS_ARGUMENT_CHARS: usize = 64 * 1024;
-const MAX_PROCESS_ENVIRONMENT_ENTRIES: usize = 128;
-const MAX_PROCESS_OUTPUT_BYTES: usize = 256 * 1024;
-const MAX_VCS_STAGE_ENTRIES: usize = 100_000;
 
 #[derive(Clone)]
 pub(crate) struct Wave2ApplicationHost {
     files: Arc<FileService>,
-    snapshots: Arc<tokio::sync::Mutex<BTreeMap<(String, String), SnapshotService>>>,
+    artifacts: Result<Arc<WorkspaceArtifactStore>, Arc<str>>,
     workspace_write_lock: Arc<tokio::sync::Mutex<()>>,
+    git_mutation_lock: Arc<tokio::sync::Mutex<()>>,
     vcs_push_owner: Arc<OnceLock<Result<VcsPushOwner, VcsPushError>>>,
-    git_receipts: Option<super::hosted_effect_receipts::HostedEffectReceipts>,
+    vcs_stage_owner: Result<Arc<WorkspaceVcsStageOwner>, Arc<str>>,
+    effect_store: Option<Arc<nomifun_agent_session::AgentSessionStore>>,
     configured_workspace_root: PathBuf,
-    watches: Result<Arc<FileWatchService>, Arc<str>>,
+    #[cfg(test)]
+    git_mutation_hook: Option<Arc<GitMutationTestHook>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Wave2EffectReservation {
-    state: Wave2StateHandle,
-    scope: ScopeKey,
-    state_key: StateKey,
-    idempotency_key: String,
-    request_digest: DigestHex,
+    store: nomifun_agent_session::AgentSessionStore,
+    request: nomifun_agent_session::EffectEventRequest,
 }
 
+#[derive(Debug)]
 enum Wave2EffectAdmission {
     Replay(StrictJsonValue),
     Reserved(Wave2EffectReservation),
@@ -84,6 +67,7 @@ enum Wave2EffectAdmission {
 enum Wave2EffectCompletion<'a> {
     Succeeded(&'a StrictJsonValue),
     Failed(&'a Wave2HostPortError),
+    Uncertain(&'a Wave2HostPortError),
 }
 
 /// Compact structured observations survive the generic Kernel error channel
@@ -108,11 +92,6 @@ fn patch_failure_error(
 }
 
 impl Wave2ApplicationHost {
-    pub(crate) fn with_git_receipts(mut self, receipts: super::hosted_effect_receipts::HostedEffectReceipts) -> Self {
-        self.git_receipts = Some(receipts);
-        self
-    }
-
     pub(crate) fn new() -> Self {
         Self::for_workspace_root(std::env::temp_dir())
     }
@@ -133,7 +112,10 @@ impl Wave2ApplicationHost {
 
     pub(crate) fn for_workspace_root(workspace_root: impl Into<PathBuf>) -> Self {
         let workspace_root = workspace_root.into();
-        let watches = FileWatchService::new(Arc::new(NullUserEvents))
+        let vcs_stage_owner = WorkspaceVcsStageOwner::new(&workspace_root)
+            .map(Arc::new)
+            .map_err(|error| Arc::<str>::from(error.to_string()));
+        let artifacts = WorkspaceArtifactStore::new(&workspace_root)
             .map(Arc::new)
             .map_err(|error| Arc::<str>::from(error.to_string()));
         Self {
@@ -141,13 +123,118 @@ impl Wave2ApplicationHost {
                 Arc::new(NullUserEvents),
                 vec![workspace_root.clone()],
             )),
-            snapshots: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+            artifacts,
             workspace_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            git_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             vcs_push_owner: Arc::new(OnceLock::new()),
-            git_receipts: None,
+            vcs_stage_owner,
+            effect_store: None,
             configured_workspace_root: workspace_root,
-            watches,
+            #[cfg(test)]
+            git_mutation_hook: None,
         }
+    }
+
+    pub(crate) fn with_effect_store(
+        mut self,
+        store: nomifun_agent_session::AgentSessionStore,
+    ) -> Self {
+        self.effect_store = Some(Arc::new(store));
+        self
+    }
+
+    fn effect_store(
+        &self,
+    ) -> Result<&nomifun_agent_session::AgentSessionStore, Wave2HostPortError> {
+        self.effect_store.as_deref().ok_or_else(|| {
+            Wave2HostPortError::unavailable(
+                "canonical Agent Session Effect store is not mounted for workspace effects",
+            )
+        })
+    }
+
+    /// Wrap a physical effect owned by another retained Domain adapter (the
+    /// turn-scoped process owner) in the same canonical Agent Effect ledger as
+    /// file, Git, and artifact mutations. The caller must finish all pure
+    /// validation before entering this boundary.
+    pub(crate) async fn invoke_managed_effect<F, Fut>(
+        &self,
+        context: &Wave2HostContext,
+        binding: &TypedResourceBinding,
+        input: &StrictJsonValue,
+        invoke_owner: F,
+    ) -> Result<StrictJsonValue, Wave2HostPortError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<StrictJsonValue, Wave2HostPortError>>,
+    {
+        let _effect_guard = self.workspace_write_lock.lock().await;
+        match begin_wave2_effect(self.effect_store()?, context, binding, input).await? {
+            Wave2EffectAdmission::Replay(output) => Ok(output),
+            Wave2EffectAdmission::Reserved(reservation) => match invoke_owner().await {
+                Ok(output) => {
+                    finish_wave2_effect(
+                        &reservation,
+                        Wave2EffectCompletion::Succeeded(&output),
+                    )
+                    .await?;
+                    Ok(output)
+                }
+                Err(error) if error.code == "EFFECT_OUTCOME_UNKNOWN" => {
+                    // The process owner retains handles and cleanup authority,
+                    // but until it can prove a terminal outcome this durable
+                    // reservation must remain pending across restarts.
+                    Err(error)
+                }
+                Err(error) => {
+                    finish_wave2_effect(
+                        &reservation,
+                        Wave2EffectCompletion::Failed(&error),
+                    )
+                    .await?;
+                    Err(error)
+                }
+            },
+        }
+    }
+
+    #[cfg(test)]
+    fn with_git_mutation_hook(mut self, hook: Arc<GitMutationTestHook>) -> Self {
+        self.git_mutation_hook = Some(hook);
+        self
+    }
+
+    async fn pause_after_git_admission_for_test(&self, action_id: &str) {
+        #[cfg(test)]
+        if let Some(hook) = &self.git_mutation_hook
+            && hook.action_id == action_id
+            && hook.armed.swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            hook.entered.notify_one();
+            hook.release.notified().await;
+        }
+        #[cfg(not(test))]
+        let _ = action_id;
+    }
+}
+
+#[cfg(test)]
+struct GitMutationTestHook {
+    action_id: &'static str,
+    armed: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl GitMutationTestHook {
+    fn new(action_id: &'static str) -> Arc<Self> {
+        Arc::new(Self {
+            action_id,
+            armed: std::sync::atomic::AtomicBool::new(true),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        })
     }
 }
 
@@ -157,43 +244,13 @@ impl Default for Wave2ApplicationHost {
     }
 }
 
-fn wave2_effect_scope(
-    context: &Wave2HostContext,
-    binding: &TypedResourceBinding,
-) -> Result<ScopeKey, Wave2HostPortError> {
-    let state_descriptor = context.state.descriptor();
-    if state_descriptor.package_id.as_ref()
-        != nomifun_agent_domain_wave2::WORKSPACE_EXECUTION_PACKAGE_ID
-        || state_descriptor.mount_id.as_ref()
-            != nomifun_agent_domain_wave2::WORKSPACE_EXECUTION_MOUNT_ID
-    {
-        return Err(Wave2HostPortError::unavailable(
-            "Wave 2 workspace state handle is not owned by the workspace package mount",
-        ));
-    }
-    if binding.resource_id.as_ref().trim().is_empty() {
-        return Err(Wave2HostPortError::new(
-            "INVALID_PAYLOAD",
-            "workspace effect journal requires a non-empty resource ID",
-        ));
-    }
-    let scope = ScopeKey::from(format!("resource:{}", binding.resource_id.as_ref()));
-    if scope.as_ref().len() > nomifun_agent_kernel::MAX_PLUGIN_STATE_KEY_BYTES {
-        return Err(Wave2HostPortError::new(
-            "INVALID_PAYLOAD",
-            "workspace effect journal scope exceeds the PluginState key limit",
-        ));
-    }
-    Ok(scope)
-}
-
 fn wave2_effect_request_digest(
     context: &Wave2HostContext,
     binding: &TypedResourceBinding,
     input: &StrictJsonValue,
 ) -> Result<DigestHex, Wave2HostPortError> {
     let fingerprint = json!({
-        "capability_id": context.capability_id.as_ref(),
+        "capability_module": context.capability_id.as_ref(),
         "action_id": context.action_id.as_ref(),
         "resource_binding": binding,
         "input": input.0,
@@ -206,211 +263,12 @@ fn wave2_effect_request_digest(
     })
 }
 
-fn wave2_effect_state_key(
-    context: &Wave2HostContext,
-) -> Result<StateKey, Wave2HostPortError> {
-    let key = format!(
-        "action.idempotency.{}.{}",
-        context.capability_id.as_ref(),
-        context.action_id.as_ref().replace('/', ".")
-    );
-    if key.len() > nomifun_agent_kernel::MAX_PLUGIN_STATE_KEY_BYTES {
+fn wave2_effect_id(context: &Wave2HostContext) -> Result<String, Wave2HostPortError> {
+    let idempotency_key = context.idempotency_key.as_ref();
+    if idempotency_key.is_empty() || idempotency_key != idempotency_key.trim() {
         return Err(Wave2HostPortError::new(
             "INVALID_PAYLOAD",
-            "Wave 2 effect journal state key exceeds the PluginState key limit",
-        ));
-    }
-    Ok(StateKey::from(key))
-}
-
-fn decode_wave2_effect_records(
-    current: Option<&nomifun_agent_contracts::PluginStateEntry>,
-) -> Result<Vec<Value>, Wave2HostPortError> {
-    let Some(current) = current else {
-        return Ok(Vec::new());
-    };
-    if current.revision == 0 {
-        return Err(Wave2HostPortError::unavailable(
-            "Wave 2 effect journal has an invalid zero revision",
-        ));
-    }
-    if current.state_format_version.as_ref() != WAVE2_EFFECT_STATE_FORMAT {
-        return Err(Wave2HostPortError::unavailable(format!(
-            "Wave 2 effect journal format {} is unsupported; expected {}",
-            current.state_format_version.as_ref(),
-            WAVE2_EFFECT_STATE_FORMAT
-        )));
-    }
-    let object = current.value.0.as_object().ok_or_else(|| {
-        Wave2HostPortError::unavailable("Wave 2 effect journal has an invalid stored shape")
-    })?;
-    if object.keys().any(|key| key != "entries") {
-        return Err(Wave2HostPortError::unavailable(
-            "Wave 2 effect journal contains unknown top-level fields",
-        ));
-    }
-    let entries = object
-        .get("entries")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            Wave2HostPortError::unavailable(
-                "Wave 2 effect journal entries must be an array",
-            )
-        })?;
-    if entries.len() > MAX_WAVE2_EFFECT_RECORDS {
-        return Err(Wave2HostPortError::unavailable(format!(
-            "Wave 2 effect journal contains more than {MAX_WAVE2_EFFECT_RECORDS} records"
-        )));
-    }
-    let mut keys = std::collections::BTreeSet::new();
-    for (index, entry) in entries.iter().enumerate() {
-        let object = entry.as_object().ok_or_else(|| {
-            Wave2HostPortError::unavailable(format!(
-                "Wave 2 effect journal record {index} is not an object"
-            ))
-        })?;
-        if object.keys().any(|key| {
-            !matches!(
-                key.as_str(),
-                "idempotency_key" | "request_digest" | "status" | "result"
-                    | "error_code" | "error_message"
-            )
-        }) {
-            return Err(Wave2HostPortError::unavailable(format!(
-                "Wave 2 effect journal record {index} contains unknown fields"
-            )));
-        }
-        let key = object
-            .get("idempotency_key")
-            .and_then(Value::as_str)
-            .filter(|key| !key.trim().is_empty())
-            .ok_or_else(|| {
-                Wave2HostPortError::unavailable(format!(
-                    "Wave 2 effect journal record {index} has an invalid idempotency key"
-                ))
-            })?;
-        if !keys.insert(key.to_owned()) {
-            return Err(Wave2HostPortError::unavailable(format!(
-                "Wave 2 effect journal contains duplicate idempotency key at record {index}"
-            )));
-        }
-        let digest = object
-            .get("request_digest")
-            .and_then(Value::as_str)
-            .filter(|digest| {
-                digest.len() == 64
-                    && digest.bytes().all(|byte| {
-                        byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
-                    })
-            })
-            .ok_or_else(|| {
-                Wave2HostPortError::unavailable(format!(
-                    "Wave 2 effect journal record {index} has an invalid request digest"
-                ))
-            })?;
-        let _ = digest;
-        let status = object
-            .get("status")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                Wave2HostPortError::unavailable(format!(
-                    "Wave 2 effect journal record {index} has no status"
-                ))
-            })?;
-        match status {
-            "started" => {
-                if object.contains_key("result")
-                    || object.contains_key("error_code")
-                    || object.contains_key("error_message")
-                {
-                    return Err(Wave2HostPortError::unavailable(format!(
-                        "Wave 2 started effect record {index} has terminal fields"
-                    )));
-                }
-            }
-            "completed" => {
-                if object.get("result").is_none_or(Value::is_null)
-                    || object.contains_key("error_code")
-                    || object.contains_key("error_message")
-                {
-                    return Err(Wave2HostPortError::unavailable(format!(
-                        "Wave 2 completed effect record {index} is incomplete"
-                    )));
-                }
-            }
-            "failed" => {
-                if object
-                    .get("error_code")
-                    .and_then(Value::as_str)
-                    .is_none_or(|code| code.trim().is_empty())
-                    || object
-                        .get("error_message")
-                        .and_then(Value::as_str)
-                        .is_none_or(|message| message.trim().is_empty())
-                    || object.contains_key("result")
-                {
-                    return Err(Wave2HostPortError::unavailable(format!(
-                        "Wave 2 failed effect record {index} is incomplete"
-                    )));
-                }
-            }
-            _ => {
-                return Err(Wave2HostPortError::unavailable(format!(
-                    "Wave 2 effect journal record {index} has an unknown status"
-                )));
-            }
-        }
-        let bytes = canonical_json_bytes(entry).map_err(|error| {
-            Wave2HostPortError::unavailable(format!(
-                "Wave 2 effect journal record {index} could not be encoded: {error}"
-            ))
-        })?;
-        if bytes.len() > nomifun_agent_kernel::MAX_PLUGIN_STATE_BYTES {
-            return Err(Wave2HostPortError::unavailable(format!(
-                "Wave 2 effect journal record {index} exceeds the PluginState limit"
-            )));
-        }
-    }
-    let bytes = canonical_json_bytes(&current.value.0).map_err(|error| {
-        Wave2HostPortError::unavailable(format!(
-            "Wave 2 effect journal could not be encoded: {error}"
-        ))
-    })?;
-    if bytes.len() > nomifun_agent_kernel::MAX_PLUGIN_STATE_BYTES {
-        return Err(Wave2HostPortError::unavailable(
-            "Wave 2 effect journal exceeds the PluginState limit",
-        ));
-    }
-    Ok(entries.clone())
-}
-
-async fn begin_wave2_effect(
-    context: &Wave2HostContext,
-    binding: &TypedResourceBinding,
-    input: &StrictJsonValue,
-) -> Result<Wave2EffectAdmission, Wave2HostPortError> {
-    begin_wave2_effect_with_policy(context, binding, input, false).await
-}
-
-async fn begin_wave2_exclusive_effect(
-    context: &Wave2HostContext,
-    binding: &TypedResourceBinding,
-    input: &StrictJsonValue,
-) -> Result<Wave2EffectAdmission, Wave2HostPortError> {
-    begin_wave2_effect_with_policy(context, binding, input, true).await
-}
-
-async fn begin_wave2_effect_with_policy(
-    context: &Wave2HostContext,
-    binding: &TypedResourceBinding,
-    input: &StrictJsonValue,
-    block_on_other_started: bool,
-) -> Result<Wave2EffectAdmission, Wave2HostPortError> {
-    let idempotency_key = context.idempotency_key.as_ref().trim();
-    if idempotency_key.is_empty() {
-        return Err(Wave2HostPortError::new(
-            "INVALID_PAYLOAD",
-            "Wave 2 effect action requires a non-empty idempotency key",
+            "Wave 2 effect action requires a canonical non-empty idempotency key without edge whitespace",
         ));
     }
     if idempotency_key.len() > MAX_WAVE2_IDEMPOTENCY_KEY_BYTES
@@ -425,239 +283,349 @@ async fn begin_wave2_effect_with_policy(
             ),
         ));
     }
-    let scope = wave2_effect_scope(context, binding)?;
-    let digest = wave2_effect_request_digest(context, binding, input)?;
-    let state_key = wave2_effect_state_key(context)?;
-    let format = VersionString::from(WAVE2_EFFECT_STATE_FORMAT);
-    for _attempt in 0..MAX_WAVE2_EFFECT_CAS_ATTEMPTS {
-        let current = context.state.get(&scope, &state_key).await.map_err(|error| {
-            Wave2HostPortError::new(
-                "CAPABILITY_UNAVAILABLE",
-                format!("Wave 2 effect journal could not be read: {error}"),
-            )
-        })?;
-        let revision = current.as_ref().map_or(0, |entry| entry.revision);
-        let mut entries = decode_wave2_effect_records(current.as_ref())?;
-        if let Some(previous) = entries.iter().find(|entry| {
-            entry
-                .get("idempotency_key")
-                .and_then(Value::as_str)
-                == Some(idempotency_key)
-        }) {
-            let previous_digest = previous
-                .get("request_digest")
-                .and_then(Value::as_str)
+    let identity = json!({
+        "agent_session_id": context.agent_session_id.as_ref(),
+        "turn_id": context.turn_id.as_ref(),
+        "idempotency_key": idempotency_key,
+    });
+    let digest = digest_payload(&identity).map_err(|error| {
+        Wave2HostPortError::new(
+            "INVALID_PAYLOAD",
+            format!("Wave 2 effect identity could not be canonicalized: {error}"),
+        )
+    })?;
+    Ok(format!("workspace:{}", digest.as_ref()))
+}
+
+fn wave2_effect_resource_key(
+    context: &Wave2HostContext,
+    binding: &TypedResourceBinding,
+) -> Result<String, Wave2HostPortError> {
+    if binding.resource_id.as_ref().trim().is_empty() {
+        return Err(Wave2HostPortError::invalid_payload(
+            "workspace effect requires a non-empty resource identity",
+        ));
+    }
+    if binding.owner_id != context.principal.principal_id
+        || context.principal.principal_kind.trim().is_empty()
+    {
+        return Err(Wave2HostPortError::invalid_payload(
+            "workspace effect resource owner differs from authenticated authority",
+        ));
+    }
+    let identity = json!({
+        "principal_kind": context.principal.principal_kind.as_str(),
+        "owner_id": binding.owner_id.as_str(),
+        "resource_kind": binding.resource_kind.as_ref(),
+        "resource_id": binding.resource_id.as_ref(),
+    });
+    let digest = digest_payload(&identity).map_err(|error| {
+        Wave2HostPortError::invalid_payload(format!(
+            "workspace effect resource identity could not be canonicalized: {error}"
+        ))
+    })?;
+    Ok(format!("workspace:{}", digest.as_ref()))
+}
+
+fn effect_record_matches(
+    record: &nomifun_agent_session::AgentEffectRecord,
+    context: &Wave2HostContext,
+    binding: &TypedResourceBinding,
+    input_digest: &DigestHex,
+    strategy: nomifun_agent_session::EffectStrategy,
+    resource_key: &str,
+) -> bool {
+    record.agent_session_id == context.agent_session_id
+        && record.turn_id == context.turn_id
+        && record.owner_domain == "workspace"
+        && record.capability_module == context.capability_id
+        && record.action_id == context.action_id
+        && record.resource_binding_id.as_ref() == Some(&binding.binding_id)
+        && record.resource_key.as_deref() == Some(resource_key)
+        && record.input_digest == *input_digest
+        && record.strategy == strategy
+}
+
+fn observe_wave2_effect(
+    record: nomifun_agent_session::AgentEffectRecord,
+    context: &Wave2HostContext,
+    binding: &TypedResourceBinding,
+    input_digest: &DigestHex,
+    strategy: nomifun_agent_session::EffectStrategy,
+    resource_key: &str,
+) -> Result<Wave2EffectAdmission, Wave2HostPortError> {
+    if !effect_record_matches(
+        &record,
+        context,
+        binding,
+        input_digest,
+        strategy,
+        resource_key,
+    ) {
+        return Err(Wave2HostPortError::new(
+            "IDEMPOTENCY_CONFLICT",
+            "Wave 2 idempotency key was already used for a different turn, action, resource, or input",
+        ));
+    }
+    match record.state {
+        nomifun_agent_session::AgentEffectState::Returned => {
+            let result = record
+                .bounded_observation
+                .as_ref()
+                .and_then(|observation| observation.get("result"))
+                .cloned()
                 .ok_or_else(|| {
                     Wave2HostPortError::unavailable(
-                        "Wave 2 effect journal record has no request digest",
+                        "Wave 2 effect already returned, but its bounded durable observation cannot reproduce the exact result; automatic execution remains disabled",
                     )
                 })?;
-            if previous_digest != digest.as_ref() {
-                return Err(Wave2HostPortError::new(
-                    "IDEMPOTENCY_CONFLICT",
-                    "Wave 2 idempotency key was already used for different input",
-                ));
-            }
-            match previous.get("status").and_then(Value::as_str) {
-                Some("completed") => {
-                    let result = previous.get("result").cloned().ok_or_else(|| {
-                        Wave2HostPortError::unavailable(
-                            "Wave 2 completed effect record has no result",
-                        )
-                    })?;
-                    return Ok(Wave2EffectAdmission::Replay(StrictJsonValue(result)));
-                }
-                Some("failed") => {
-                    let code = previous
-                        .get("error_code")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            Wave2HostPortError::unavailable(
-                                "Wave 2 failed effect record has no error code",
-                            )
-                        })?;
-                    let message = previous
-                        .get("error_message")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            Wave2HostPortError::unavailable(
-                                "Wave 2 failed effect record has no error message",
-                            )
-                        })?;
-                    return Err(Wave2HostPortError::new(code, message));
-                }
-                Some("started") => {
-                    return Err(Wave2HostPortError::new(
-                        "CAPABILITY_UNAVAILABLE",
-                        "Wave 2 effect outcome is in progress or uncertain; automatic retry is disabled",
-                    ));
-                }
-                _ => {
-                    return Err(Wave2HostPortError::unavailable(
-                        "Wave 2 effect journal record has an invalid status",
-                    ));
-                }
-            }
+            Ok(Wave2EffectAdmission::Replay(StrictJsonValue(result)))
         }
-        if block_on_other_started
-            && entries.iter().any(|entry| {
-                entry.get("status").and_then(Value::as_str) == Some("started")
-            })
-        {
-            return Err(Wave2HostPortError::new(
-                "CAPABILITY_UNAVAILABLE",
-                "Wave 2 effect has another unresolved outcome; new executions are fenced",
-            ));
+        nomifun_agent_session::AgentEffectState::Rejected => {
+            let error = record
+                .bounded_observation
+                .as_ref()
+                .and_then(|observation| observation.get("error"))
+                .and_then(Value::as_object);
+            let code = error
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str)
+                .unwrap_or("CAPABILITY_UNAVAILABLE");
+            let message = error
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or(
+                    "Wave 2 effect was durably rejected without a replayable bounded error",
+                );
+            Err(Wave2HostPortError::new(code, message))
         }
-        if entries.len() >= MAX_WAVE2_EFFECT_RECORDS {
-            return Err(Wave2HostPortError::new(
-                "CAPABILITY_UNAVAILABLE",
-                format!(
-                    "Wave 2 effect journal reached its {MAX_WAVE2_EFFECT_RECORDS}-record limit"
-                ),
-            ));
+        nomifun_agent_session::AgentEffectState::Pending => {
+            Err(Wave2HostPortError::unavailable(
+                "Wave 2 effect has a durable pending outcome; restart or cancellation cannot authorize automatic retry",
+            ))
         }
-        entries.push(json!({
-            "idempotency_key": idempotency_key,
-            "request_digest": digest.as_ref(),
-            "status": "started",
-        }));
-        let next = StrictJsonValue(json!({"entries": entries}));
-        let bytes = canonical_json_bytes(&next.0).map_err(|error| {
-            Wave2HostPortError::new(
-                "INVALID_PAYLOAD",
-                format!("Wave 2 effect journal could not be encoded: {error}"),
-            )
-        })?;
-        if bytes.len() > nomifun_agent_kernel::MAX_PLUGIN_STATE_BYTES {
-            return Err(Wave2HostPortError::new(
-                "CAPABILITY_UNAVAILABLE",
-                "Wave 2 effect journal would exceed the PluginState limit",
-            ));
+        nomifun_agent_session::AgentEffectState::Unknown => {
+            Err(Wave2HostPortError::unavailable(
+                "Wave 2 effect has a durable unknown outcome; explicit reconciliation is required before another physical effect",
+            ))
         }
-        match context
-            .state
-            .compare_and_swap(&scope, &state_key, revision, &format, Some(next))
-            .await
-            .map_err(|error| {
-                Wave2HostPortError::new(
-                    "CAPABILITY_UNAVAILABLE",
-                    format!("Wave 2 effect journal could not reserve the action: {error}"),
-                )
-            })? {
-            PluginStateCompareAndSwapOutcome::Applied { .. } => {
-                return Ok(Wave2EffectAdmission::Reserved(Wave2EffectReservation {
-                    state: context.state.clone(),
-                    scope,
-                    state_key,
-                    idempotency_key: idempotency_key.to_owned(),
-                    request_digest: digest,
-                }));
-            }
-            PluginStateCompareAndSwapOutcome::Conflict { .. } => continue,
+        nomifun_agent_session::AgentEffectState::Cancelled => {
+            Err(Wave2HostPortError::unavailable(
+                "Wave 2 effect was cancelled after admission; automatic retry is disabled",
+            ))
         }
     }
-    Err(Wave2HostPortError::new(
-        "CAPABILITY_UNAVAILABLE",
-        "Wave 2 effect journal changed concurrently; bounded CAS retry exhausted",
-    ))
+}
+
+fn new_wave2_effect_request(
+    effect_id: &str,
+    context: &Wave2HostContext,
+    binding: &TypedResourceBinding,
+    input_digest: DigestHex,
+    resource_key: String,
+    strategy: nomifun_agent_session::EffectStrategy,
+) -> nomifun_agent_session::EffectEventRequest {
+    nomifun_agent_session::EffectEventRequest {
+        agent_session_id: context.agent_session_id.clone(),
+        effect_id: effect_id.to_owned(),
+        turn_id: context.turn_id.clone(),
+        operation_id: context.operation_id.clone(),
+        owner_domain: "workspace".to_owned(),
+        capability_module: context.capability_id.clone(),
+        action_id: context.action_id.clone(),
+        resource_binding_id: Some(binding.binding_id.clone()),
+        resource_key: Some(resource_key),
+        input_digest,
+        recorded_at: nomifun_common::now_ms(),
+        event_id: nomifun_agent_contracts::EventId::from(format!(
+            "{effect_id}:started"
+        )),
+        producer_id: nomifun_agent_contracts::EventProducerId::from("capability_host"),
+        // Session events scope idempotency by producer globally. Namespace the
+        // lifecycle key with the already session+turn+caller-key-derived Effect
+        // identity so equal caller keys in different AgentSessions cannot
+        // collide while terminal events retain the started event's exact key.
+        idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(format!(
+            "{effect_id}:lifecycle"
+        )),
+        correlation_id: nomifun_agent_contracts::CorrelationId::from(effect_id.to_owned()),
+        strategy,
+        causation_event_id: None,
+        payload: nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(
+            StrictJsonValue(json!({})),
+        ),
+    }
+}
+
+async fn begin_wave2_effect(
+    store: &nomifun_agent_session::AgentSessionStore,
+    context: &Wave2HostContext,
+    binding: &TypedResourceBinding,
+    input: &StrictJsonValue,
+) -> Result<Wave2EffectAdmission, Wave2HostPortError> {
+    begin_wave2_effect_with_strategy(
+        store,
+        context,
+        binding,
+        input,
+        nomifun_agent_session::EffectStrategy::ManagedEffect,
+    )
+    .await
+}
+
+async fn begin_wave2_exclusive_effect(
+    store: &nomifun_agent_session::AgentSessionStore,
+    context: &Wave2HostContext,
+    binding: &TypedResourceBinding,
+    input: &StrictJsonValue,
+    strategy: nomifun_agent_session::EffectStrategy,
+) -> Result<Wave2EffectAdmission, Wave2HostPortError> {
+    // The Agent Store's unique unsettled-resource index is the cross-process
+    // admission fence. It is intentionally used for every workspace physical
+    // effect, so the "exclusive" name documents call-site intent rather than
+    // selecting a weaker in-memory policy.
+    begin_wave2_effect_with_strategy(store, context, binding, input, strategy).await
+}
+
+async fn begin_wave2_effect_with_strategy(
+    store: &nomifun_agent_session::AgentSessionStore,
+    context: &Wave2HostContext,
+    binding: &TypedResourceBinding,
+    input: &StrictJsonValue,
+    strategy: nomifun_agent_session::EffectStrategy,
+) -> Result<Wave2EffectAdmission, Wave2HostPortError> {
+    let effect_id = wave2_effect_id(context)?;
+    let input_digest = wave2_effect_request_digest(context, binding, input)?;
+    let resource_key = wave2_effect_resource_key(context, binding)?;
+    let read = || async {
+        store
+            .read_effect(&context.agent_session_id, &effect_id)
+            .await
+            .map_err(|error| {
+                Wave2HostPortError::unavailable(format!(
+                    "canonical Agent Effect ledger could not be read: {error}"
+                ))
+            })
+    };
+    if let Some(record) = read().await? {
+        return observe_wave2_effect(
+            record,
+            context,
+            binding,
+            &input_digest,
+            strategy,
+            &resource_key,
+        );
+    }
+
+    let request = new_wave2_effect_request(
+        &effect_id,
+        context,
+        binding,
+        input_digest.clone(),
+        resource_key.clone(),
+        strategy,
+    );
+    match store.record_effect_started(request.clone()).await {
+        Ok(_) => Ok(Wave2EffectAdmission::Reserved(Wave2EffectReservation {
+            store: store.clone(),
+            request,
+        })),
+        Err(error) => {
+            // A concurrent identical invocation may have won after our read.
+            // Re-read exactly once and either replay/fence that durable fact or
+            // surface the unsettled-resource/store rejection. Never retry the
+            // physical owner merely because admission raced.
+            if let Some(record) = read().await? {
+                return observe_wave2_effect(
+                    record,
+                    context,
+                    binding,
+                    &input_digest,
+                    strategy,
+                    &resource_key,
+                );
+            }
+            Err(Wave2HostPortError::unavailable(format!(
+                "canonical Agent Effect admission failed or another workspace effect is unsettled: {error}"
+            )))
+        }
+    }
+}
+
+fn bounded_terminal_payload(completion: Wave2EffectCompletion<'_>) -> StrictJsonValue {
+    const MAX_TERMINAL_OBSERVATION_BYTES: usize = 48 * 1024;
+    let mut value = match completion {
+        Wave2EffectCompletion::Succeeded(output) => json!({"result": output.0.clone()}),
+        Wave2EffectCompletion::Failed(error) => json!({
+            "error": {
+                "code": error.code.as_str(),
+                "message": error.message.chars().take(2048).collect::<String>(),
+            }
+        }),
+        Wave2EffectCompletion::Uncertain(error) => json!({
+            "outcome": "unknown",
+            "error": {
+                "code": error.code.as_str(),
+                "message": error.message.chars().take(2048).collect::<String>(),
+            }
+        }),
+    };
+    let encoded = canonical_json_bytes(&value).unwrap_or_default();
+    if encoded.len() > MAX_TERMINAL_OBSERVATION_BYTES {
+        let digest = digest_payload(&value)
+            .map(|digest| digest.as_ref().to_owned())
+            .unwrap_or_else(|_| "unavailable".to_owned());
+        value = json!({
+            "observation_truncated": true,
+            "observation_digest": digest,
+            "serialized_preview": String::from_utf8_lossy(
+                &encoded[..encoded.len().min(1024)]
+            ),
+        });
+    }
+    StrictJsonValue(value)
 }
 
 async fn finish_wave2_effect(
     reservation: &Wave2EffectReservation,
     completion: Wave2EffectCompletion<'_>,
 ) -> Result<(), Wave2HostPortError> {
-    let state_key = reservation.state_key.clone();
-    let format = VersionString::from(WAVE2_EFFECT_STATE_FORMAT);
-    for _attempt in 0..MAX_WAVE2_EFFECT_CAS_ATTEMPTS {
-        let current = reservation
-            .state
-            .get(&reservation.scope, &state_key)
-            .await
-            .map_err(|error| {
-                Wave2HostPortError::new(
-                    "CAPABILITY_UNAVAILABLE",
-                    format!("Wave 2 effect journal could not be read for completion: {error}"),
-                )
-            })?;
-        let revision = current.as_ref().map_or(0, |entry| entry.revision);
-        let mut entries = decode_wave2_effect_records(current.as_ref())?;
-        let Some(record) = entries.iter_mut().find(|entry| {
-            entry
-                .get("idempotency_key")
-                .and_then(Value::as_str)
-                == Some(reservation.idempotency_key.as_str())
-        }) else {
-            return Err(Wave2HostPortError::unavailable(
-                "Wave 2 effect reservation disappeared before completion",
-            ));
-        };
-        if record
-            .get("request_digest")
-            .and_then(Value::as_str)
-            != Some(reservation.request_digest.as_ref())
-        {
-            return Err(Wave2HostPortError::new(
-                "IDEMPOTENCY_CONFLICT",
-                "Wave 2 effect reservation digest changed before completion",
-            ));
-        }
-        match record.get("status").and_then(Value::as_str) {
-            Some("completed") | Some("failed") => return Ok(()),
-            Some("started") => {}
-            _ => {
-                return Err(Wave2HostPortError::unavailable(
-                    "Wave 2 effect reservation has an invalid status",
-                ));
-            }
-        }
-        let Some(record_object) = record.as_object_mut() else {
-            return Err(Wave2HostPortError::unavailable(
-                "Wave 2 effect reservation is not an object",
-            ));
-        };
-        match completion {
-            Wave2EffectCompletion::Succeeded(output) => {
-                record_object.insert("status".to_owned(), json!("completed"));
-                record_object.insert("result".to_owned(), output.0.clone());
-            }
-            Wave2EffectCompletion::Failed(error) => {
-                record_object.insert("status".to_owned(), json!("failed"));
-                record_object.insert("error_code".to_owned(), json!(error.code.as_str()));
-                record_object.insert("error_message".to_owned(), json!(error.message));
-            }
-        }
-        let next = StrictJsonValue(json!({"entries": entries}));
-        let bytes = canonical_json_bytes(&next.0).map_err(|error| {
-            Wave2HostPortError::new(
-                "CAPABILITY_UNAVAILABLE",
-                format!("Wave 2 effect completion could not be encoded: {error}"),
-            )
+    let (state, suffix) = match completion {
+        Wave2EffectCompletion::Succeeded(_) => (
+            nomifun_agent_session::EffectTerminalState::Succeeded,
+            "succeeded",
+        ),
+        Wave2EffectCompletion::Failed(_) => (
+            nomifun_agent_session::EffectTerminalState::Failed,
+            "failed",
+        ),
+        Wave2EffectCompletion::Uncertain(_) => (
+            nomifun_agent_session::EffectTerminalState::Uncertain,
+            "uncertain",
+        ),
+    };
+    let mut request = reservation.request.clone();
+    request.recorded_at = nomifun_common::now_ms();
+    request.event_id = nomifun_agent_contracts::EventId::from(format!(
+        "{}:{suffix}",
+        request.effect_id
+    ));
+    request.producer_id = nomifun_agent_contracts::EventProducerId::from("owning_plugin");
+    request.causation_event_id = Some(reservation.request.event_id.clone());
+    request.payload = nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(
+        bounded_terminal_payload(completion),
+    );
+    reservation
+        .store
+        .record_effect_terminal(request, state)
+        .await
+        .map_err(|error| {
+            Wave2HostPortError::unavailable(format!(
+                "canonical Agent Effect terminal observation could not be committed: {error}"
+            ))
         })?;
-        if bytes.len() > nomifun_agent_kernel::MAX_PLUGIN_STATE_BYTES {
-            return Err(Wave2HostPortError::new(
-                "CAPABILITY_UNAVAILABLE",
-                "Wave 2 effect completion exceeds the PluginState limit",
-            ));
-        }
-        match reservation
-            .state
-            .compare_and_swap(&reservation.scope, &state_key, revision, &format, Some(next))
-            .await
-            .map_err(|error| {
-                Wave2HostPortError::new(
-                    "CAPABILITY_UNAVAILABLE",
-                    format!("Wave 2 effect completion could not be committed: {error}"),
-                )
-            })? {
-            PluginStateCompareAndSwapOutcome::Applied { .. } => return Ok(()),
-            PluginStateCompareAndSwapOutcome::Conflict { .. } => continue,
-        }
-    }
-    Err(Wave2HostPortError::new(
-        "CAPABILITY_UNAVAILABLE",
-        "Wave 2 effect completion changed concurrently; bounded CAS retry exhausted",
-    ))
+    Ok(())
 }
 
 impl Wave2HostPort for Wave2ApplicationHost {
@@ -708,10 +676,6 @@ impl Wave2ApplicationHost {
         input: StrictJsonValue,
     ) -> Result<StrictJsonValue, Wave2HostPortError> {
         let action_id = context.action_id.as_ref();
-        if capability_id == nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID {
-            return self.invoke_process_action(context, action_id, input).await;
-        }
-
         let scope = self.workspace_scope(context)?;
         match action_id {
             "workspace.files/read" => {
@@ -742,10 +706,10 @@ impl Wave2ApplicationHost {
                         )
                     },
                 )?);
-                match begin_wave2_effect(context, binding, &effect_input).await? {
+                let _write_guard = self.workspace_write_lock.lock().await;
+                match begin_wave2_effect(self.effect_store()?, context, binding, &effect_input).await? {
                     Wave2EffectAdmission::Replay(output) => Ok(output),
                     Wave2EffectAdmission::Reserved(reservation) => {
-                        let _write_guard = self.workspace_write_lock.lock().await;
                         let result = self
                             .files
                             .write_file_for_agent_session(
@@ -794,10 +758,18 @@ impl Wave2ApplicationHost {
                 );
                 // A lost settlement must also fence a new idempotency key;
                 // otherwise re-submitting could duplicate a published patch.
-                match begin_wave2_effect_with_policy(context, binding, &effect_input, true).await? {
+                let _write_guard = self.workspace_write_lock.lock().await;
+                match begin_wave2_exclusive_effect(
+                    self.effect_store()?,
+                    context,
+                    binding,
+                    &effect_input,
+                    nomifun_agent_session::EffectStrategy::ManagedEffect,
+                )
+                .await?
+                {
                     Wave2EffectAdmission::Replay(output) => Ok(output),
                     Wave2EffectAdmission::Reserved(reservation) => {
-                        let _write_guard = self.workspace_write_lock.lock().await;
                         let result = self.files.apply_patch_with_observation_for_agent_session(&scope, request).await;
                         match result {
                             Ok(result) => {
@@ -849,10 +821,10 @@ impl Wave2ApplicationHost {
                         )
                     },
                 )?);
-                match begin_wave2_effect(context, binding, &effect_input).await? {
+                let _write_guard = self.workspace_write_lock.lock().await;
+                match begin_wave2_effect(self.effect_store()?, context, binding, &effect_input).await? {
                     Wave2EffectAdmission::Replay(output) => Ok(output),
                     Wave2EffectAdmission::Reserved(reservation) => {
-                        let _write_guard = self.workspace_write_lock.lock().await;
                         let result = self
                             .files
                             .remove_entry_for_agent_session(&scope, &params.path)
@@ -893,52 +865,14 @@ impl Wave2ApplicationHost {
                 Ok(StrictJsonValue(serde_json::to_value(result)
                     .map_err(|error| operation_error(capability_id, AppError::Internal(error.to_string())))?))
             }
-            "workspace.files/watch" => {
-                scope
-                    .require_operation(WORKSPACE_READ_OPERATION)
-                    .map_err(|error| operation_error(action_id, error))?;
-                let params: WatchParams = decode(input)?;
-                let path = scope
-                    .resolve_relative_path(&params.path)
-                    .map_err(|error| operation_error(action_id, error))?;
-                let path = path.to_str().ok_or_else(|| {
-                    Wave2HostPortError::invalid_payload(
-                        "workspace.files/watch path is not representable as UTF-8",
-                    )
-                })?;
-                let watches = self.watches.as_ref().map_err(|error| {
-                    Wave2HostPortError::unavailable(format!(
-                        "workspace file watch owner is unavailable: {error}"
-                    ))
-                })?;
-                match params.operation.as_str() {
-                    "start" => watches
-                        .start_watch(&context.principal.principal_id, path)
-                        .await
-                        .map_err(|error| operation_error(action_id, error))?,
-                    "stop" => watches
-                        .stop_watch(&context.principal.principal_id, path)
-                        .await
-                        .map_err(|error| operation_error(action_id, error))?,
-                    _ => {
-                        return Err(Wave2HostPortError::invalid_payload(
-                            "workspace.files/watch operation must be start or stop",
-                        ));
-                    }
-                }
-                Ok(StrictJsonValue(json!({
-                    "operation": params.operation,
-                    "path": params.path,
-                    "active": params.operation == "start"
-                })))
-            }
             "workspace.artifacts/read" => {
                 scope
                     .require_operation(WORKSPACE_READ_OPERATION)
                     .map_err(|error| operation_error(action_id, error))?;
                 let params: ArtifactReadParams = decode(input)?;
-                let store = WorkspaceArtifactStore::new(scope.workspace_root())
-                    .map_err(|error| operation_error(action_id, error))?;
+                let store = self.artifacts.as_ref().map_err(|error| {
+                    Wave2HostPortError::unavailable(format!("artifact owner unavailable: {error}"))
+                })?.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     store.read(
                         &params.artifact_id,
@@ -967,8 +901,9 @@ impl Wave2ApplicationHost {
                     .map_err(|error| operation_error(action_id, error))?;
                 let params: ArtifactPublishParams = decode(input)?;
                 let binding = workspace_typed_binding(context)?;
-                let store = WorkspaceArtifactStore::new(scope.workspace_root())
-                    .map_err(|error| operation_error(action_id, error))?;
+                let store = self.artifacts.as_ref().map_err(|error| {
+                    Wave2HostPortError::unavailable(format!("artifact owner unavailable: {error}"))
+                })?.clone();
                 let effect_input = StrictJsonValue(serde_json::to_value(&params).map_err(
                     |error| {
                         Wave2HostPortError::invalid_payload(format!(
@@ -976,7 +911,16 @@ impl Wave2ApplicationHost {
                         ))
                     },
                 )?);
-                match begin_wave2_effect_with_policy(context, binding, &effect_input, true).await? {
+                let _write_guard = self.workspace_write_lock.lock().await;
+                match begin_wave2_exclusive_effect(
+                    self.effect_store()?,
+                    context,
+                    binding,
+                    &effect_input,
+                    nomifun_agent_session::EffectStrategy::ManagedEffect,
+                )
+                .await?
+                {
                     Wave2EffectAdmission::Replay(output) => Ok(output),
                     Wave2EffectAdmission::Reserved(reservation) => {
                         let path = params.path.clone();
@@ -1006,6 +950,13 @@ impl Wave2ApplicationHost {
                                 )
                                 .await?;
                                 Ok(output)
+                            }
+                            Err(error) if error.code == "EFFECT_OUTCOME_UNKNOWN" => {
+                                // The hard-link may exist without a durable
+                                // directory observation. Keep the Agent Effect
+                                // pending so neither restart nor a new caller
+                                // key can publish again automatically.
+                                Err(error)
                             }
                             Err(error) => {
                                 let _ = finish_wave2_effect(
@@ -1047,7 +998,10 @@ impl Wave2ApplicationHost {
                         )
                     },
                 )?);
-                match begin_wave2_effect(context, binding, &effect_input).await? {
+                let _effect_guard = self.workspace_write_lock.lock().await;
+                let _git_guard = self.git_mutation_lock.lock().await;
+                self.pause_after_git_admission_for_test(action_id).await;
+                match begin_wave2_effect(self.effect_store()?, context, binding, &effect_input).await? {
                     Wave2EffectAdmission::Replay(output) => Ok(output),
                     Wave2EffectAdmission::Reserved(reservation) => {
                         match self
@@ -1088,7 +1042,10 @@ impl Wave2ApplicationHost {
                         )
                     })?,
                 );
-                match begin_wave2_effect(context, binding, &effect_input).await? {
+                let _effect_guard = self.workspace_write_lock.lock().await;
+                let _git_guard = self.git_mutation_lock.lock().await;
+                self.pause_after_git_admission_for_test(action_id).await;
+                match begin_wave2_effect(self.effect_store()?, context, binding, &effect_input).await? {
                     Wave2EffectAdmission::Replay(output) => Ok(output),
                     Wave2EffectAdmission::Reserved(reservation) => {
                         match self
@@ -1134,34 +1091,23 @@ impl Wave2ApplicationHost {
                         )
                     })?,
                 );
-                // Conversation hosts always install this port. The independent
-                // non-Conversation Wave2 owner retains its resource journal.
-                // Persist BEFORE either replay or fresh push admission; an
-                // already-used operation cannot execute a second time.
-                let hosted = match &self.git_receipts {
-                    Some(receipts) => Some(receipts.begin_git(context, &self.configured_workspace_root, &effect_input.0)
-                        .await.map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?),
-                    None => None,
-                };
-                let admission = match begin_wave2_exclusive_effect(context, &binding, &effect_input).await {
+                let _effect_guard = self.workspace_write_lock.lock().await;
+                let _git_guard = self.git_mutation_lock.lock().await;
+                self.pause_after_git_admission_for_test(action_id).await;
+                let admission = match begin_wave2_exclusive_effect(
+                    self.effect_store()?,
+                    context,
+                    &binding,
+                    &effect_input,
+                    nomifun_agent_session::EffectStrategy::ExternalUncertainEffect,
+                )
+                .await
+                {
                     Ok(admission) => admission,
-                    Err(error) => {
-                        if let (Some(receipts), Some(hosted)) = (&self.git_receipts, hosted) {
-                            // The owner has not been called by THIS operation.
-                            receipts.rejected(hosted, "GIT_JOURNAL_REJECTED_BEFORE_DISPATCH").await
-                                .map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?;
-                        }
-                        return Err(error);
-                    }
+                    Err(error) => return Err(error),
                 };
                 match admission {
-                    Wave2EffectAdmission::Replay(output) => {
-                        if let (Some(receipts), Some(hosted)) = (&self.git_receipts, hosted) {
-                            receipts.returned(hosted, &json!({"resource_journal_replay":true,"result":output.0})).await
-                                .map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?;
-                        }
-                        Ok(output)
-                    }
+                    Wave2EffectAdmission::Replay(output) => Ok(output),
                     Wave2EffectAdmission::Reserved(reservation) => {
                         let mut settlement = owner.settlement_guard();
                         let request = VcsPushRequest::from_action_input(
@@ -1187,10 +1133,6 @@ impl Wave2ApplicationHost {
                                     Wave2EffectCompletion::Succeeded(&output),
                                 )
                                 .await?;
-                                if let (Some(receipts), Some(hosted)) = (&self.git_receipts, hosted) {
-                                    receipts.returned(hosted, &output.0).await
-                                        .map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?;
-                                }
                                 settlement.confirm();
                                 Ok(output)
                             }
@@ -1198,26 +1140,25 @@ impl Wave2ApplicationHost {
                                 if error.disposition
                                     == VcsPushEffectDisposition::OutcomeUnknown =>
                             {
-                                // Keep the durable reservation in `started`: replay is
-                                // fenced until an explicit reconciliation path exists.
-                                Err(vcs_push_error(error))
+                                let owner_error = vcs_push_error(error);
+                                // Persist the owner's explicit uncertainty. The Agent
+                                // Store retains the unsettled resource fence across
+                                // process restarts; the local settlement guard remains
+                                // unconfirmed as a second current-process fence.
+                                finish_wave2_effect(
+                                    &reservation,
+                                    Wave2EffectCompletion::Uncertain(&owner_error),
+                                )
+                                .await?;
+                                Err(owner_error)
                             }
                             Err(error) => {
-                                // NotApplied concerns the destination ref, not
-                                // absence of protocol/object transfer. Never
-                                // label this as rejected-before-dispatch.
-                                let observation = json!({"acknowledged_error":error.code,
-                                    "destination_update":"not_applied","safe_to_repeat":false});
                                 let owner_error = vcs_push_error(error);
                                 finish_wave2_effect(
                                     &reservation,
                                     Wave2EffectCompletion::Failed(&owner_error),
                                 )
                                 .await?;
-                                if let (Some(receipts), Some(hosted)) = (&self.git_receipts, hosted) {
-                                    receipts.returned(hosted, &observation).await
-                                        .map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?;
-                                }
                                 settlement.confirm();
                                 Err(owner_error)
                             }
@@ -1226,127 +1167,6 @@ impl Wave2ApplicationHost {
                 }
             }
             _ => Err(unavailable(capability_id)),
-        }
-    }
-
-    async fn invoke_process_action(
-        &self,
-        context: &Wave2HostContext,
-        action_id: &str,
-        input: StrictJsonValue,
-    ) -> Result<StrictJsonValue, Wave2HostPortError> {
-        if action_id != "workspace.process/exec" {
-            return Err(Wave2HostPortError::unavailable(format!(
-                "{action_id} requires the admitted turn-scoped process owner"
-            )));
-        }
-        let binding = self.process_binding(context)?;
-        let process_session_id = binding.resource_id.as_ref().to_owned();
-        let requested_root = binding
-            .typed_parameters
-            .get(WORKSPACE_ROOT_PARAMETER)
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| {
-                Wave2HostPortError::new(
-                    "PRESET_RESOURCE_NOT_BOUND",
-                    format!(
-                        "process_session binding {} has no host-resolved {} parameter",
-                        binding.binding_id.as_ref(),
-                        WORKSPACE_ROOT_PARAMETER
-                    ),
-                )
-            })?;
-        let process_root = resolve_allowed_workspace_root(
-            &self.configured_workspace_root,
-            requested_root,
-        )?;
-        let params: ProcessExecParams = decode(input)?;
-        validate_process_exec_params(&params)?;
-        let (cwd, cwd_label) =
-            resolve_process_cwd(&process_root, params.cwd.as_deref())?;
-        let timeout = Duration::from_millis(
-            params.timeout_ms.unwrap_or(DEFAULT_PROCESS_TIMEOUT_MS),
-        );
-        let capture = Arc::new(Mutex::new(ProcessOutputCapture::default()));
-        let capture_output = Arc::clone(&capture);
-        let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
-        let process = PtyHandle::spawn(
-            SpawnParams {
-                program: params.command,
-                args: params.args,
-                cwd: cwd.to_string_lossy().into_owned(),
-                env: params.env,
-                cols: 120,
-                rows: 40,
-            },
-            1,
-            move |chunk| append_process_output(&capture_output, &chunk),
-            move |exit, _scrollback| {
-                let _ = exit_tx.send(exit);
-            },
-        )
-        .await
-        .map_err(|error| {
-            Wave2HostPortError::new(
-                "CAPABILITY_UNAVAILABLE",
-                format!("workspace.process/exec could not start a managed process: {error}"),
-            )
-        })?;
-        process.activate();
-
-        // The coordinator owns the process even if the capability request is
-        // cancelled. It always observes an exit or times out and reaps the
-        // complete process tree through the existing Windows/Unix owner.
-        let worker = tokio::spawn(async move {
-            match tokio::time::timeout(timeout, exit_rx).await {
-                Ok(Ok(exit)) => Ok((exit, finish_process_output(&capture))),
-                Ok(Err(_)) => Err(Wave2HostPortError::new(
-                    "CAPABILITY_UNAVAILABLE",
-                    "workspace.process/exec lost its managed exit observation",
-                )),
-                Err(_) => match process.kill().await {
-                    Ok(()) => Err(Wave2HostPortError::new(
-                        "CAPABILITY_UNAVAILABLE",
-                        format!(
-                            "workspace.process/exec timed out after {}ms; the managed process tree was reaped",
-                            timeout.as_millis()
-                        ),
-                    )),
-                    Err(error) => Err(Wave2HostPortError::new(
-                        "CAPABILITY_UNAVAILABLE",
-                        format!(
-                            "workspace.process/exec timed out after {}ms and process-tree cleanup is unproven: {error}",
-                            timeout.as_millis()
-                        ),
-                    )),
-                },
-            }
-        });
-        let (exit, output) = worker.await.map_err(|error| {
-            Wave2HostPortError::new(
-                "CAPABILITY_UNAVAILABLE",
-                format!("workspace.process/exec coordinator failed: {error}"),
-            )
-        })??;
-        match exit {
-            PtyExit::Exited(exit_code) => Ok(StrictJsonValue(json!({
-                "process_session_id": process_session_id,
-                "cwd": cwd_label,
-                "success": exit_code == Some(0),
-                "exit_code": exit_code,
-                "output": output.text,
-                "truncated": output.truncated
-            }))),
-            PtyExit::Lost {
-                message,
-                cleanup_reaped,
-            } => Err(Wave2HostPortError::new(
-                "CAPABILITY_UNAVAILABLE",
-                format!(
-                    "workspace.process/exec lost managed process ownership \
-                     (cleanup_reaped={cleanup_reaped}): {message}"
-                ),
-            )),
         }
     }
 
@@ -1404,125 +1224,6 @@ impl Wave2ApplicationHost {
         Ok(status)
     }
 
-    async fn invoke_snapshot(
-        &self,
-        context: &Wave2HostContext,
-        scope: &AgentSessionWorkspaceBinding,
-        capability_id: &str,
-        params: SnapshotParams,
-    ) -> Result<StrictJsonValue, Wave2HostPortError> {
-        let workspace = scope.workspace_root().to_string_lossy().into_owned();
-        let session_key = snapshot_session_key(context, scope);
-        // Serialize snapshot lifetime operations and retain one independent
-        // owner per Session/root. A dispose can never remove another baseline.
-        let mut sessions = self.snapshots.lock().await;
-        match params.operation {
-            SnapshotOperation::Init => {
-                if sessions.len() >= 128 && !sessions.contains_key(&session_key) {
-                    return Err(Wave2HostPortError::unavailable("snapshot owner limit reached"));
-                }
-                let snapshots = sessions.entry(session_key).or_insert_with(|| SnapshotService::for_owner(uuid::Uuid::now_v7().to_string()));
-                let info = if snapshots.is_tracked(&workspace) {
-                    snapshots
-                        .info(&workspace)
-                        .await
-                        .map_err(|error| operation_error(capability_id, error))?
-                } else {
-                    let info = snapshots
-                        .init(&workspace)
-                        .await
-                        .map_err(|error| operation_error(capability_id, error))?;
-                    info
-                };
-                Ok(StrictJsonValue(snapshot_info_value(info)))
-            }
-            SnapshotOperation::Compare => {
-                let snapshots = sessions.get(&session_key).filter(|owner| owner.is_tracked(&workspace)).ok_or_else(|| Wave2HostPortError::new(
-                        "CAPABILITY_UNAVAILABLE",
-                        "workspace snapshot compare requires a baseline initialized by this AgentSession",
-                    ))?;
-                let compare = snapshots
-                    .compare(&workspace)
-                    .await
-                    .map_err(|error| operation_error(capability_id, error))?;
-                Ok(StrictJsonValue(snapshot_compare_value(compare)?))
-            }
-            SnapshotOperation::Baseline => {
-                let path = params.path.as_deref().ok_or_else(|| {
-                    Wave2HostPortError::invalid_payload(
-                        "workspace snapshot baseline requires a workspace-relative path",
-                    )
-                })?;
-                let path = path.trim();
-                if path.is_empty() {
-                    return Err(Wave2HostPortError::invalid_payload(
-                        "workspace snapshot baseline path must not be empty",
-                    ));
-                }
-                let path = scope
-                    .resolve_relative_path(path)
-                    .and_then(|resolved| {
-                        resolved
-                            .strip_prefix(scope.workspace_root())
-                            .map(|relative| relative.to_string_lossy().replace('\\', "/"))
-                            .map_err(|_| {
-                                AppError::BadRequest(
-                                    "workspace snapshot baseline path is outside the workspace"
-                                        .to_owned(),
-                                )
-                            })
-                    })
-                    .map_err(|error| operation_error(capability_id, error))?;
-                let snapshots = sessions.get(&session_key).filter(|owner| owner.is_tracked(&workspace)).ok_or_else(|| Wave2HostPortError::new(
-                        "CAPABILITY_UNAVAILABLE",
-                        "workspace snapshot baseline requires a baseline initialized by this AgentSession",
-                    ))?;
-                let content = snapshots
-                    .get_baseline_content(&workspace, &path)
-                    .await
-                    .map_err(|error| operation_error(capability_id, error))?;
-                let found = content.is_some();
-                let (content, truncated) = match content {
-                    Some(content) if content.len() > MAX_SNAPSHOT_BASELINE_BYTES => {
-                        let mut end = MAX_SNAPSHOT_BASELINE_BYTES;
-                        while end > 0 && !content.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        (content[..end].to_owned(), true)
-                    }
-                    Some(content) => (content, false),
-                    None => (String::new(), false),
-                };
-                Ok(StrictJsonValue(json!({
-                    "path": path,
-                    "content": content,
-                    "found": found,
-                    "truncated": truncated
-                })))
-            }
-            SnapshotOperation::Dispose => {
-                if let Some(snapshots) = sessions.get(&session_key) {
-                    snapshots
-                        .dispose(&workspace)
-                        .await
-                        .map_err(|error| operation_error(capability_id, error))?;
-                }
-                sessions.remove(&session_key);
-                Ok(StrictJsonValue(json!({"disposed": true})))
-            }
-        }
-    }
-
-    pub(crate) async fn dispose_session_snapshots(&self, session: &str) -> Result<(), AppError> {
-        let mut owners = self.snapshots.lock().await;
-        let keys = owners.keys().filter(|(id, _)| id == session).cloned().collect::<Vec<_>>();
-        for key in keys {
-            if let Some(owner) = owners.get(&key) { owner.dispose(&key.1).await?; }
-            owners.remove(&key);
-        }
-        Ok(())
-    }
-
     async fn invoke_vcs_diff(
         &self,
         scope: &AgentSessionWorkspaceBinding,
@@ -1532,7 +1233,7 @@ impl Wave2ApplicationHost {
         let workspace = scope.workspace_root().to_path_buf();
         let capability_id = capability_id.to_owned();
         let worker_capability_id = capability_id.clone();
-        let path = match path.map(str::trim).filter(|path| !path.is_empty()) {
+        let path = match path.filter(|path| !path.is_empty()) {
             Some(path) => {
                 let resolved = scope
                     .resolve_relative_path(path)
@@ -1636,7 +1337,6 @@ impl Wave2ApplicationHost {
         capability_id: &str,
         path: &str,
     ) -> Result<StrictJsonValue, Wave2HostPortError> {
-        let path = path.trim();
         if path.is_empty() {
             return Err(Wave2HostPortError::invalid_payload(
                 "workspace.vcs/stage path must not be empty",
@@ -1656,103 +1356,21 @@ impl Wave2ApplicationHost {
                     ),
                 )
             })?;
-        let target_exists = resolved.exists();
-        let target_is_dir = resolved.is_dir();
-        if target_exists {
-            let canonical_workspace =
-                std::fs::canonicalize(scope.workspace_root()).map_err(|error| {
-                    Wave2HostPortError::new(
-                        "PRESET_RESOURCE_NOT_BOUND",
-                        format!("workspace.vcs/stage workspace is unavailable: {error}"),
-                    )
-                })?;
-            let canonical_target = std::fs::canonicalize(&resolved).map_err(|error| {
-                Wave2HostPortError::new(
-                    "RESOURCE_NOT_FOUND",
-                    format!("workspace.vcs/stage target is unavailable: {error}"),
-                )
-            })?;
-            if !canonical_target.starts_with(&canonical_workspace) {
-                return Err(Wave2HostPortError::new(
-                    "PRESET_RESOURCE_NOT_BOUND",
-                    format!("workspace.vcs/stage path '{path}' escapes the workspace"),
-                ));
-            }
-        }
-        let _write_guard = self.workspace_write_lock.lock().await;
         let workspace = scope.workspace_root().to_path_buf();
         let path_label = path.to_owned();
+        let owner = self.vcs_stage_owner.as_ref().map_err(|error| {
+            Wave2HostPortError::unavailable(format!("VCS stage owner is unavailable: {error}"))
+        })?.clone();
         tokio::task::spawn_blocking(move || {
             let (repository, workspace_prefix) = scoped_repository(&workspace)?;
-            let repo_path = join_repo_path(
-                &workspace_prefix,
-                &git_path_to_string(&relative)?,
-            );
             let mut index = repository.index().map_err(|error| {
                 Wave2HostPortError::new(
                     "CAPABILITY_UNAVAILABLE",
                     format!("workspace.vcs/stage could not open the Git index: {error}"),
                 )
             })?;
-            if target_exists && target_is_dir {
-                let mut stage_paths = Vec::new();
-                collect_directory_stage_paths(
-                    &resolved,
-                    &repo_path,
-                    &mut stage_paths,
-                )?;
-                for indexed_path in indexed_paths_for_target(&index, &repo_path)? {
-                    index.remove_path(&indexed_path).map_err(|error| {
-                        Wave2HostPortError::new(
-                            "CAPABILITY_UNAVAILABLE",
-                            format!(
-                                "workspace.vcs/stage could not refresh {}: {error}",
-                                path_label
-                            ),
-                        )
-                    })?;
-                }
-                for stage_path in stage_paths {
-                    index.add_path(&stage_path).map_err(|error| {
-                        Wave2HostPortError::new(
-                            "CAPABILITY_UNAVAILABLE",
-                            format!(
-                                "workspace.vcs/stage could not stage {}: {error}",
-                                stage_path.display()
-                            ),
-                        )
-                    })?;
-                }
-            } else if target_exists {
-                index.add_path(Path::new(&repo_path)).map_err(|error| {
-                    Wave2HostPortError::new(
-                        "CAPABILITY_UNAVAILABLE",
-                        format!(
-                            "workspace.vcs/stage could not stage {}: {error}",
-                            path_label
-                        ),
-                    )
-                })?;
-            } else {
-                let indexed_paths = indexed_paths_for_target(&index, &repo_path)?;
-                if indexed_paths.is_empty() {
-                    return Err(Wave2HostPortError::new(
-                        "RESOURCE_NOT_FOUND",
-                        format!("workspace.vcs/stage path '{}' is not tracked", path_label),
-                    ));
-                }
-                for indexed_path in indexed_paths {
-                    index.remove_path(&indexed_path).map_err(|error| {
-                        Wave2HostPortError::new(
-                            "CAPABILITY_UNAVAILABLE",
-                            format!(
-                                "workspace.vcs/stage could not stage deletion {}: {error}",
-                                indexed_path.display()
-                            ),
-                        )
-                    })?;
-                }
-            }
+            let staged_paths = owner.stage(&repository, &mut index, &workspace_prefix, &relative)
+                .map_err(|error| operation_error("workspace.vcs/stage", error))?;
             index.write().map_err(|error| {
                 Wave2HostPortError::new(
                     "CAPABILITY_UNAVAILABLE",
@@ -1761,6 +1379,7 @@ impl Wave2ApplicationHost {
             })?;
             Ok::<_, Wave2HostPortError>(StrictJsonValue(json!({
                 "path": path_label,
+                "paths": staged_paths,
                 "staged": true
             })))
         })
@@ -2042,113 +1661,6 @@ fn path_relative_to_workspace(path: &str, prefix: &str) -> Option<String> {
     Some(path_components.collect::<Vec<_>>().join("/"))
 }
 
-fn indexed_paths_for_target(
-    index: &git2::Index,
-    repo_path: &str,
-) -> Result<Vec<PathBuf>, Wave2HostPortError> {
-    let mut paths = Vec::new();
-    for entry in index.iter() {
-        let candidate = std::str::from_utf8(&entry.path).map_err(|_| {
-            Wave2HostPortError::new(
-                "CAPABILITY_UNAVAILABLE",
-                "workspace.vcs/stage encountered a non-UTF-8 Git index path",
-            )
-        })?;
-        if path_relative_to_workspace(candidate, repo_path).is_some() {
-            paths.push(PathBuf::from(candidate));
-        }
-    }
-    Ok(paths)
-}
-
-fn collect_directory_stage_paths(
-    directory: &Path,
-    repo_path: &str,
-    output: &mut Vec<PathBuf>,
-) -> Result<(), Wave2HostPortError> {
-    let mut entries = std::fs::read_dir(directory)
-        .map_err(|error| {
-            Wave2HostPortError::new(
-                "RESOURCE_NOT_FOUND",
-                format!(
-                    "workspace.vcs/stage could not read directory '{}': {error}",
-                    directory.display()
-                ),
-            )
-        })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| {
-            Wave2HostPortError::new(
-                "RESOURCE_NOT_FOUND",
-                format!(
-                    "workspace.vcs/stage could not enumerate directory '{}': {error}",
-                    directory.display()
-                ),
-            )
-        })?;
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-    for entry in entries {
-        if entry.file_name().to_str().is_some_and(|name| {
-            repo_path_component_matches(name, nomifun_file::WORKSPACE_OWNER_DIRECTORY)
-        }) {
-            continue;
-        }
-        if output.len() == MAX_VCS_STAGE_ENTRIES {
-            return Err(Wave2HostPortError::new(
-                "CAPABILITY_UNAVAILABLE",
-                format!(
-                    "workspace.vcs/stage directory exceeds {MAX_VCS_STAGE_ENTRIES} entries"
-                ),
-            ));
-        }
-        let metadata = std::fs::symlink_metadata(entry.path()).map_err(|error| {
-            Wave2HostPortError::new(
-                "RESOURCE_NOT_FOUND",
-                format!(
-                    "workspace.vcs/stage could not inspect '{}': {error}",
-                    entry.path().display()
-                ),
-            )
-        })?;
-        let entry_repo_path = join_repo_path(
-            repo_path,
-            &entry.file_name().to_string_lossy().replace('\\', "/"),
-        );
-        if metadata_is_windows_reparse_point(&metadata) {
-            return Err(Wave2HostPortError::new(
-                "PRESET_RESOURCE_NOT_BOUND",
-                format!(
-                    "workspace.vcs/stage refuses Windows reparse entry '{}'",
-                    entry.path().display()
-                ),
-            ));
-        }
-        if metadata.is_dir() {
-            collect_directory_stage_paths(
-                &entry.path(),
-                &entry_repo_path,
-                output,
-            )?;
-        } else {
-            output.push(PathBuf::from(entry_repo_path));
-        }
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn metadata_is_windows_reparse_point(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-#[cfg(not(windows))]
-fn metadata_is_windows_reparse_point(_metadata: &std::fs::Metadata) -> bool {
-    false
-}
-
 /// Open the repository containing the bound workspace and return the
 /// repository-relative prefix of that workspace. Git status/index APIs operate
 /// from the repository root, so every result and mutation must be projected
@@ -2273,13 +1785,6 @@ struct VcsCommitParams {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct WatchParams {
-    operation: String,
-    path: String,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct ArtifactPublishParams {
     path: String,
     #[serde(default)]
@@ -2296,48 +1801,6 @@ struct ArtifactReadParams {
     limit: Option<usize>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct SnapshotParams {
-    operation: SnapshotOperation,
-    #[serde(default)]
-    path: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum SnapshotOperation {
-    Init,
-    Compare,
-    Baseline,
-    Dispose,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProcessExecParams {
-    command: String,
-    #[serde(default)]
-    args: Vec<String>,
-    #[serde(default)]
-    cwd: Option<String>,
-    #[serde(default)]
-    env: HashMap<String, String>,
-    #[serde(default)]
-    timeout_ms: Option<u64>,
-}
-
-#[derive(Default)]
-struct ProcessOutputCapture {
-    bytes: Vec<u8>,
-    total_bytes: usize,
-}
-
-struct FinishedProcessOutput {
-    text: String,
-    truncated: bool,
-}
-
 fn decode<T: for<'de> Deserialize<'de>>(
     input: StrictJsonValue,
 ) -> Result<T, Wave2HostPortError> {
@@ -2349,259 +1812,7 @@ fn decode<T: for<'de> Deserialize<'de>>(
     })
 }
 
-fn snapshot_session_key(
-    context: &Wave2HostContext,
-    scope: &AgentSessionWorkspaceBinding,
-) -> (String, String) {
-    (
-        context.agent_session_id.as_ref().to_owned(),
-        scope.workspace_root().to_string_lossy().into_owned(),
-    )
-}
-
-fn snapshot_info_value(info: SnapshotInfo) -> Value {
-    let (mode, reason) = match info.mode {
-        SnapshotMode::GitRepo => ("git-repo", None),
-        SnapshotMode::Snapshot => ("snapshot", None),
-        SnapshotMode::Disabled { reason } => ("disabled", Some(reason)),
-    };
-    json!({
-        "mode": mode,
-        "branch": info.branch,
-        "reason": reason,
-    })
-}
-
-fn snapshot_compare_value(
-    compare: nomifun_file::CompareResult,
-) -> Result<Value, Wave2HostPortError> {
-    if compare.staged.len() > MAX_SNAPSHOT_CHANGES
-        || compare.unstaged.len() > MAX_SNAPSHOT_CHANGES
-    {
-        return Err(Wave2HostPortError::new(
-            "CAPABILITY_UNAVAILABLE",
-            format!(
-                "workspace snapshot compare exceeds the {MAX_SNAPSHOT_CHANGES}-entry result limit"
-            ),
-        ));
-    }
-    let convert = |changes: Vec<nomifun_file::FileChangeInfo>| {
-        changes
-            .into_iter()
-            .map(|change| {
-                json!({
-                    "relative_path": change.relative_path.replace('\\', "/"),
-                    "operation": change.operation,
-                })
-            })
-            .collect::<Vec<_>>()
-    };
-    Ok(json!({
-        "staged": convert(compare.staged),
-        "unstaged": convert(compare.unstaged),
-    }))
-}
-
-fn validate_process_exec_params(
-    params: &ProcessExecParams,
-) -> Result<(), Wave2HostPortError> {
-    if params.command.trim().is_empty()
-        || params.command.trim() != params.command
-        || params.command.contains('\0')
-    {
-        return Err(Wave2HostPortError::invalid_payload(
-            "workspace.process/exec command must be a non-empty executable without edge whitespace or NUL bytes",
-        ));
-    }
-    if params.command.chars().count() > MAX_PROCESS_COMMAND_CHARS {
-        return Err(Wave2HostPortError::invalid_payload(format!(
-            "workspace.process/exec command must not exceed {MAX_PROCESS_COMMAND_CHARS} characters"
-        )));
-    }
-    if params.args.len() > MAX_PROCESS_ARGUMENTS {
-        return Err(Wave2HostPortError::invalid_payload(format!(
-            "workspace.process/exec args must not contain more than {MAX_PROCESS_ARGUMENTS} entries"
-        )));
-    }
-    if params.args.iter().any(|argument| {
-        argument.contains('\0')
-            || argument.chars().count() > MAX_PROCESS_ARGUMENT_CHARS
-    }) {
-        return Err(Wave2HostPortError::invalid_payload(format!(
-            "workspace.process/exec arguments must not contain NUL bytes or exceed \
-             {MAX_PROCESS_ARGUMENT_CHARS} characters"
-        )));
-    }
-    if params.env.len() > MAX_PROCESS_ENVIRONMENT_ENTRIES {
-        return Err(Wave2HostPortError::invalid_payload(format!(
-            "workspace.process/exec env must not contain more than \
-             {MAX_PROCESS_ENVIRONMENT_ENTRIES} entries"
-        )));
-    }
-    if params.env.iter().any(|(key, value)| {
-        key.is_empty()
-            || key.contains(['=', '\0'])
-            || value.contains('\0')
-    }) {
-        return Err(Wave2HostPortError::invalid_payload(
-            "workspace.process/exec env contains an invalid key or NUL byte",
-        ));
-    }
-    let timeout_ms = params.timeout_ms.unwrap_or(DEFAULT_PROCESS_TIMEOUT_MS);
-    if !(1..=MAX_PROCESS_TIMEOUT_MS).contains(&timeout_ms) {
-        return Err(Wave2HostPortError::invalid_payload(format!(
-            "workspace.process/exec timeout_ms must be between 1 and {MAX_PROCESS_TIMEOUT_MS}"
-        )));
-    }
-    Ok(())
-}
-
-fn resolve_process_cwd(
-    configured_root: &Path,
-    requested_cwd: Option<&str>,
-) -> Result<(PathBuf, String), Wave2HostPortError> {
-    let configured_root = std::fs::canonicalize(configured_root).map_err(|error| {
-        Wave2HostPortError::new(
-            "PRESET_RESOURCE_NOT_BOUND",
-            format!(
-                "configured process workspace root '{}' is unavailable: {error}",
-                configured_root.display()
-            ),
-        )
-    })?;
-    let requested_cwd = requested_cwd.unwrap_or("").trim();
-    if requested_cwd.is_empty() {
-        return Ok((configured_root, ".".to_owned()));
-    }
-    let relative = Path::new(requested_cwd);
-    if relative.is_absolute()
-        || requested_cwd.starts_with('/')
-        || requested_cwd.starts_with('\\')
-        || requested_cwd.contains('\\')
-        || relative.components().any(|component| {
-            matches!(
-                component,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_)
-            )
-        })
-    {
-        return Err(Wave2HostPortError::invalid_payload(
-            "workspace.process/exec cwd must be a normalized workspace-relative path",
-        ));
-    }
-    let resolved = std::fs::canonicalize(configured_root.join(relative))
-        .map_err(|error| {
-            Wave2HostPortError::new(
-                "RESOURCE_NOT_FOUND",
-                format!("workspace.process/exec cwd '{requested_cwd}' is unavailable: {error}"),
-            )
-        })?;
-    if !resolved.is_dir() {
-        return Err(Wave2HostPortError::new(
-            "RESOURCE_NOT_FOUND",
-            format!("workspace.process/exec cwd '{requested_cwd}' is not a directory"),
-        ));
-    }
-    if !resolved.starts_with(&configured_root) {
-        return Err(Wave2HostPortError::new(
-            "PRESET_RESOURCE_NOT_BOUND",
-            format!("workspace.process/exec cwd '{requested_cwd}' escapes the configured workspace"),
-        ));
-    }
-    let label = resolved
-        .strip_prefix(&configured_root)
-        .map(|path| path.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_default();
-    Ok((
-        resolved,
-        if label.is_empty() {
-            ".".to_owned()
-        } else {
-            label
-        },
-    ))
-}
-
-fn append_process_output(
-    capture: &Arc<Mutex<ProcessOutputCapture>>,
-    chunk: &[u8],
-) {
-    let mut capture = capture
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    capture.total_bytes = capture.total_bytes.saturating_add(chunk.len());
-    if chunk.len() >= MAX_PROCESS_OUTPUT_BYTES {
-        capture.bytes.clear();
-        capture
-            .bytes
-            .extend_from_slice(&chunk[chunk.len() - MAX_PROCESS_OUTPUT_BYTES..]);
-        return;
-    }
-    let required = capture
-        .bytes
-        .len()
-        .saturating_add(chunk.len())
-        .saturating_sub(MAX_PROCESS_OUTPUT_BYTES);
-    if required > 0 {
-        capture.bytes.drain(..required);
-    }
-    capture.bytes.extend_from_slice(chunk);
-}
-
-fn finish_process_output(
-    capture: &Arc<Mutex<ProcessOutputCapture>>,
-) -> FinishedProcessOutput {
-    let mut capture = capture
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let bytes = std::mem::take(&mut capture.bytes);
-    FinishedProcessOutput {
-        truncated: capture.total_bytes > bytes.len(),
-        text: nomifun_terminal::strip_ansi(&bytes),
-    }
-}
-
 impl Wave2ApplicationHost {
-    fn process_binding<'a>(
-        &self,
-        context: &'a Wave2HostContext,
-    ) -> Result<&'a TypedResourceBinding, Wave2HostPortError> {
-        let mut bindings = context.resource_bindings.iter().filter(|binding| {
-            binding.resource_kind.as_ref() == PROCESS_SESSION_RESOURCE_KIND
-        });
-        let binding = bindings.next().ok_or_else(|| {
-            Wave2HostPortError::new(
-                "PRESET_RESOURCE_NOT_BOUND",
-                "workspace.process requires one process_session resource binding",
-            )
-        })?;
-        if bindings.next().is_some() {
-            return Err(Wave2HostPortError::new(
-                "PRESET_RESOURCE_NOT_BOUND",
-                "workspace.process received more than one process_session resource binding",
-            ));
-        }
-        if binding.owner_id != context.principal.principal_id {
-            return Err(Wave2HostPortError::new(
-                "RESOURCE_OWNER_MISMATCH",
-                format!(
-                    "process_session binding {} belongs to a different principal",
-                    binding.binding_id.as_ref()
-                ),
-            ));
-        }
-        if !binding.operations.contains(PROCESS_EXECUTE_OPERATION) {
-            return Err(Wave2HostPortError::new(
-                "PRESET_RESOURCE_NOT_BOUND",
-                format!(
-                    "process_session binding {} does not allow execute",
-                    binding.binding_id.as_ref()
-                ),
-            ));
-        }
-        Ok(binding)
-    }
-
     fn workspace_scope(
         &self,
         context: &Wave2HostContext,
@@ -2745,7 +1956,12 @@ fn workspace_typed_binding<'a>(
 }
 
 fn operation_error(capability_id: &str, error: AppError) -> Wave2HostPortError {
-    let code = match error {
+    let code = match &error {
+        AppError::Conflict(message)
+            if message.starts_with("artifact publication outcome is unknown") =>
+        {
+            "EFFECT_OUTCOME_UNKNOWN"
+        }
         AppError::BadRequest(_) => "INVALID_PAYLOAD",
         AppError::Forbidden(_) => "PRESET_RESOURCE_NOT_BOUND",
         AppError::NotFound(_) => "RESOURCE_NOT_FOUND",
@@ -2781,13 +1997,16 @@ mod tests {
     use std::task::{Context, Poll, Waker};
 
     use nomifun_agent_contracts::{
-        ActionId, AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, AgentSessionId,
-        CapabilityId, CapabilityRef, CapabilitySelection, CorrelationId, DigestHex,
-        IdempotencyKey, OperationId, PresetRevisionRef, PrincipalRef, ResolvedSnapshotRef,
-        ResourceBindingId, ResourceId,
-        ResourceKind, RuntimeProfileKind, RuntimeTarget, ScopeKey, StrictJsonValue,
+        ActionId, AgentBindingValue, AgentPresetId, AgentPresetRevision,
+        AgentPresetRevisionPayload, AgentSessionId, AgentSessionLiveRecord,
+        AgentSessionMetadata, CapabilityId, CapabilityRef, CapabilitySelection, CorrelationId,
+        DigestHex, EventId, EventProducerId, IdempotencyKey, OperationId, PresetRevisionRef,
+        PrincipalRef, ResolvedSnapshotRef, ResourceBindingId, ResourceId, ResourceKind,
+        RuntimeProfileKind, RuntimeTarget, ScopeKey, SemanticSessionEventDraft,
+        SessionEventAppend, SessionEventKind, SessionEventPayloadRef, StrictJsonValue,
         TypedResourceBinding, UserId, VersionString,
     };
+    use nomifun_agent_domain_wave2::Wave2StateHandle;
     use nomifun_agent_kernel::{
         AgentPresetCompiler, CapabilityInvocationRequest, CompileRequest,
         CompilerEnvironment, InMemoryPluginStatePersistence, KernelRegistry,
@@ -2937,6 +2156,7 @@ mod tests {
                 principal: principal.clone(),
                 session_owner: principal,
                 agent_session_id: AgentSessionId::from("wave2-host-session"),
+                turn_id: OperationId::from("wave2-host-turn"),
                 operation_id: OperationId::from("wave2-host-operation"),
                 idempotency_key: IdempotencyKey::from("wave2-host-idempotency"),
                 correlation_id: CorrelationId::from("wave2-host-correlation"),
@@ -2960,12 +2180,14 @@ mod tests {
     }
 
     fn context(root: &std::path::Path) -> Wave2HostContext {
+        let agent_session_id = AgentSessionId::from(nomifun_common::generate_id());
         Wave2HostContext {
             principal: PrincipalRef {
                 principal_kind: "user".to_owned(),
                 principal_id: "owner-1".to_owned(),
             },
-            agent_session_id: AgentSessionId::from(nomifun_common::generate_id()),
+            agent_session_id: agent_session_id.clone(),
+            turn_id: OperationId::from("turn-1"),
             operation_id: OperationId::from("operation-1"),
             idempotency_key: IdempotencyKey::from("idempotency-1"),
             correlation_id: CorrelationId::from("correlation-1"),
@@ -2979,7 +2201,10 @@ mod tests {
             role_provider: None,
             state: test_state_handle(),
             resource_bindings: vec![TypedResourceBinding {
-                binding_id: ResourceBindingId::from("workspace-binding"),
+                binding_id: ResourceBindingId::from(format!(
+                    "workspace-binding:{}",
+                    agent_session_id.as_ref()
+                )),
                 resource_kind: ResourceKind::from(WORKSPACE_RESOURCE_KIND),
                 resource_id: ResourceId::from(format!(
                     "workspace-resource:{}",
@@ -3000,102 +2225,124 @@ mod tests {
         }
     }
 
-    fn process_context(root: &std::path::Path) -> Wave2HostContext {
-        let mut context = context(root);
-        context.resource_bindings = vec![TypedResourceBinding {
-            binding_id: ResourceBindingId::from("process-session-binding"),
-            resource_kind: ResourceKind::from(PROCESS_SESSION_RESOURCE_KIND),
-            resource_id: ResourceId::from("process-session-resource"),
-            owner_id: "owner-1".to_owned(),
-            operations: BTreeSet::from([PROCESS_EXECUTE_OPERATION.to_owned()]),
-            connection_config_ref: None,
-            typed_parameters: BTreeMap::from([(
-                WORKSPACE_ROOT_PARAMETER.to_owned(),
-                root.to_string_lossy().into_owned(),
-            )]),
-        }];
-        context
+    async fn test_effect_store() -> nomifun_agent_session::AgentSessionStore {
+        static STORE: tokio::sync::OnceCell<nomifun_agent_session::AgentSessionStore> =
+            tokio::sync::OnceCell::const_new();
+        STORE
+            .get_or_init(|| async {
+                let database = nomifun_db::init_database_memory()
+                    .await
+                    .expect("in-memory Agent Store database");
+                nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+                    .await
+                    .expect("canonical Agent Session Store")
+            })
+            .await
+            .clone()
     }
 
-    const PROCESS_TREE_FIXTURE_MODE_ENV: &str =
-        "NOMIFUN_WAVE2_PROCESS_TREE_FIXTURE_MODE";
-    const PROCESS_TREE_FIXTURE_ROOT_ENV: &str =
-        "NOMIFUN_WAVE2_PROCESS_TREE_FIXTURE_ROOT";
-    const PROCESS_TREE_FIXTURE_TEST: &str =
-        "router::agent_wave2_host::tests::managed_process_tree_fixture";
-
-    fn process_tree_request(
-        root: &Path,
-        timeout_ms: u64,
-    ) -> Value {
-        let environment = HashMap::from([
-            (
-                PROCESS_TREE_FIXTURE_MODE_ENV.to_owned(),
-                "parent".to_owned(),
-            ),
-            (
-                PROCESS_TREE_FIXTURE_ROOT_ENV.to_owned(),
-                root.to_string_lossy().into_owned(),
-            ),
-        ]);
-        json!({
-            "command": std::env::current_exe().unwrap(),
-            "args": [
-                "--exact",
-                PROCESS_TREE_FIXTURE_TEST,
-                "--nocapture"
-            ],
-            "env": environment,
-            "timeout_ms": timeout_ms
-        })
+    async fn test_host(root: &Path) -> Wave2ApplicationHost {
+        Wave2ApplicationHost::for_workspace_root(root)
+            .with_effect_store(test_effect_store().await)
     }
 
-    async fn wait_for_fixture_file(path: &Path) -> bool {
-        for _ in 0..60 {
-            if path.exists() {
-                return true;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        false
+    fn effectful_workspace_action(action_id: &str) -> bool {
+        matches!(
+            action_id,
+            "workspace.files/write"
+                | "workspace.files/patch"
+                | "workspace.files/delete"
+                | "workspace.artifacts/publish"
+                | "workspace.vcs/stage"
+                | "workspace.vcs/commit"
+                | "workspace.vcs/push"
+        )
     }
 
-    #[test]
-    fn managed_process_tree_fixture() {
-        let Ok(mode) = std::env::var(PROCESS_TREE_FIXTURE_MODE_ENV) else {
+    async fn ensure_test_effect_context(
+        store: &nomifun_agent_session::AgentSessionStore,
+        context: &Wave2HostContext,
+    ) {
+        if store
+            .get_live_session(&context.agent_session_id)
+            .await
+            .is_ok()
+        {
             return;
-        };
-        let root = PathBuf::from(
-            std::env::var(PROCESS_TREE_FIXTURE_ROOT_ENV)
-                .expect("process-tree fixture root"),
-        );
-        match mode.as_str() {
-            "parent" => {
-                let child = std::process::Command::new(
-                    std::env::current_exe().expect("fixture executable"),
-                )
-                .args([
-                    "--exact",
-                    PROCESS_TREE_FIXTURE_TEST,
-                    "--nocapture",
-                ])
-                .env(PROCESS_TREE_FIXTURE_MODE_ENV, "child")
-                .env(PROCESS_TREE_FIXTURE_ROOT_ENV, &root)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .expect("spawn process-tree fixture child");
-                std::fs::write(root.join("started.txt"), child.id().to_string())
-                    .expect("write process-tree start marker");
-                std::thread::sleep(Duration::from_secs(30));
-            }
-            "child" => {
-                std::thread::sleep(Duration::from_secs(3));
-                std::fs::write(root.join("survived.txt"), "survived")
-                    .expect("write process-tree survival marker");
-            }
-            other => panic!("unknown process-tree fixture mode {other}"),
         }
+        let preset_ref = PresetRevisionRef {
+            preset_id: AgentPresetId::from("wave2-workspace-test"),
+            revision: 1,
+            revision_digest: DigestHex::from("b".repeat(64)),
+        };
+        let session = AgentSessionLiveRecord {
+            agent_session_id: context.agent_session_id.clone(),
+            owner_ref: context.principal.clone(),
+            metadata: AgentSessionMetadata {
+                title: Some("Wave 2 workspace test".to_owned()),
+                archived: false,
+                pinned: false,
+            },
+            agent_binding: AgentBindingValue {
+                preset_revision_ref: preset_ref,
+                resolved_snapshot_ref: context.resolved_snapshot_ref.clone(),
+                typed_resource_bindings: context.resource_bindings.clone(),
+                binding_version: 1,
+            },
+            remote_binding_provenance: None,
+            parent_session_id: None,
+            fork_base_payload_id: None,
+            next_seq: 1,
+        };
+        let session_key = format!("workspace-test-session:{}", context.agent_session_id.as_ref());
+        store
+            .create_session(nomifun_agent_session::CreateSessionRequest::new(
+                session,
+                1,
+                OperationId::from(format!("{session_key}:create")),
+                EventProducerId::from("session_api"),
+                IdempotencyKey::from(format!("{session_key}:create")),
+                CorrelationId::from(format!("{session_key}:create")),
+            ))
+            .await
+            .expect("create durable effect test Session");
+        let (_, turn) = store
+            .start_turn(
+                &context.agent_session_id,
+                EventProducerId::from("session_api"),
+                IdempotencyKey::from(format!("{session_key}:turn")),
+                context.turn_id.clone(),
+                StrictJsonValue(json!({"content": "exercise a workspace effect"})),
+            )
+            .await
+            .expect("start durable effect test Turn");
+        let turn_event_id = turn
+            .ack
+            .expect("turn start acknowledgement")
+            .event_id;
+        let tool = SessionEventAppend {
+            agent_session_id: context.agent_session_id.clone(),
+            event_id: EventId::from(format!("{session_key}:tool")),
+            producer_id: EventProducerId::from("capability_host"),
+            idempotency_key: IdempotencyKey::from(format!("{session_key}:tool")),
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: SemanticSessionEventDraft {
+                kind: SessionEventKind("tool/call-started".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(format!("{session_key}:tool")),
+                causation_event_id: Some(turn_event_id),
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "operation_id": context.operation_id.as_ref(),
+                    "capability_id": context.capability_id.as_ref(),
+                    "action_id": context.action_id.as_ref(),
+                }))),
+            },
+        };
+        store
+            .append_event(&tool)
+            .await
+            .expect("append durable effect test Tool fact");
     }
 
     async fn invoke(
@@ -3109,6 +2356,13 @@ mod tests {
         })?;
         context.capability_id = CapabilityId::from(capability_id.to_owned());
         context.action_id = ActionId::from(action_id.to_owned());
+        if effectful_workspace_action(action_id) {
+            let store = host
+                .effect_store
+                .as_deref()
+                .expect("effectful test host must mount the canonical Agent Store");
+            ensure_test_effect_context(store, &context).await;
+        }
         host.invoke(Wave2HostRequest {
             context,
             operation: Wave2CapabilityOperation::WorkspaceExecution {
@@ -3121,7 +2375,7 @@ mod tests {
     #[tokio::test]
     async fn workspace_file_actions_use_the_typed_binding_root() {
         let directory = tempfile::tempdir().unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let host = test_host(directory.path()).await;
         let context = context(directory.path());
 
         let written = invoke(
@@ -3164,7 +2418,7 @@ mod tests {
             "before\nold value\nafter\n",
         )
         .unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let host = test_host(directory.path()).await;
         let context = context(directory.path());
 
         let patched = invoke(
@@ -3233,7 +2487,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("first.txt"), "alpha\n").unwrap();
         std::fs::write(directory.path().join("second.txt"), "beta\n").unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let host = test_host(directory.path()).await;
         let context = context(directory.path());
 
         let mut first_context = context.clone();
@@ -3297,7 +2551,7 @@ mod tests {
     async fn workspace_artifact_publish_and_read_use_the_file_domain_owner() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("result.txt"), "artifact payload").unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let host = test_host(directory.path()).await;
         let context = context(directory.path());
 
         let published = invoke(
@@ -3334,7 +2588,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let _repository = initialize_git_repository(directory.path());
         std::fs::write(directory.path().join("result.txt"), "artifact payload").unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let host = test_host(directory.path()).await;
         let context = context(directory.path());
         invoke(
             &host,
@@ -3365,169 +2619,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_exec_uses_the_managed_process_owner_and_confined_cwd() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::create_dir(directory.path().join("nested")).unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
-        #[cfg(windows)]
-        let (command, args) = (
-            std::env::var("ComSpec")
-                .unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".to_owned()),
-            vec![
-                "/d".to_owned(),
-                "/c".to_owned(),
-                "echo executed>marker.txt".to_owned(),
-            ],
-        );
-        #[cfg(not(windows))]
-        let (command, args) = (
-            "/bin/sh".to_owned(),
-            vec![
-                "-c".to_owned(),
-                "printf executed > marker.txt".to_owned(),
-            ],
-        );
-
-        let result = invoke(
-            &host,
-            process_context(directory.path()),
-            "workspace.process/exec",
-            json!({
-                "command": command,
-                "args": args,
-                "cwd": "nested",
-                "timeout_ms": 10_000
-            }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(result.0["success"], true);
-        assert_eq!(result.0["exit_code"], 0);
-        assert_eq!(result.0["cwd"], "nested");
-        assert_eq!(
-            std::fs::read_to_string(directory.path().join("nested/marker.txt"))
-                .unwrap()
-                .trim(),
-            "executed"
-        );
-    }
-
-    #[tokio::test]
-    async fn process_exec_rejects_workspace_escape_before_spawn() {
-        let directory = tempfile::tempdir().unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
-        let error = invoke(
-            &host,
-            process_context(directory.path()),
-            "workspace.process/exec",
-            json!({
-                "command": "unused",
-                "cwd": "../outside"
-            }),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(error.code, "INVALID_PAYLOAD");
-    }
-
-    #[tokio::test]
-    async fn process_exec_requires_a_host_resolved_process_root() {
-        let directory = tempfile::tempdir().unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
-        let mut context = process_context(directory.path());
-        context.resource_bindings[0].typed_parameters.clear();
-        let error = invoke(
-            &host,
-            context,
-            "workspace.process/exec",
-            json!({"command": "unused"}),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(error.code, "PRESET_RESOURCE_NOT_BOUND");
-        assert!(error.message.contains(WORKSPACE_ROOT_PARAMETER));
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn process_exec_rejects_junction_cwd_escape_on_windows() {
-        let directory = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        junction::create(
-            outside.path(),
-            directory.path().join("outside-junction"),
-        )
-        .unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
-        let error = invoke(
-            &host,
-            process_context(directory.path()),
-            "workspace.process/exec",
-            json!({
-                "command": "unused",
-                "cwd": "outside-junction"
-            }),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(error.code, "PRESET_RESOURCE_NOT_BOUND");
-    }
-
-    #[tokio::test]
-    async fn process_exec_timeout_reaps_the_managed_process_tree() {
-        let directory = tempfile::tempdir().unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
-        let error = invoke(
-            &host,
-            process_context(directory.path()),
-            "workspace.process/exec",
-            process_tree_request(directory.path(), 1_500),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(error.code, "CAPABILITY_UNAVAILABLE");
-        assert!(error.message.contains("process tree was reaped"));
-        assert!(directory.path().join("started.txt").exists());
-
-        tokio::time::sleep(Duration::from_millis(3_500)).await;
-        assert!(
-            !directory.path().join("survived.txt").exists(),
-            "a timed-out workspace.process/exec left its descendant alive"
-        );
-    }
-
-    #[tokio::test]
-    async fn cancelling_process_exec_keeps_cleanup_coordinator_alive() {
-        let directory = tempfile::tempdir().unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
-        let root = directory.path().to_path_buf();
-        let task = tokio::spawn(async move {
-            invoke(
-                &host,
-                process_context(&root),
-                "workspace.process/exec",
-                process_tree_request(&root, 1_500),
-            )
-            .await
-        });
-        assert!(
-            wait_for_fixture_file(&directory.path().join("started.txt")).await,
-            "process-tree fixture did not start"
-        );
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
-
-        tokio::time::sleep(Duration::from_millis(3_500)).await;
-        assert!(
-            !directory.path().join("survived.txt").exists(),
-            "cancelling workspace.process/exec abandoned its descendant process"
-        );
-    }
-
-    #[tokio::test]
     async fn missing_workspace_root_fails_closed() {
         let directory = tempfile::tempdir().unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let host = test_host(directory.path()).await;
         let mut context = context(directory.path());
         context.resource_bindings[0].typed_parameters.clear();
         let error = invoke(&host, context, "workspace.files/read", json!({"path": "x"}))
@@ -3539,7 +2633,7 @@ mod tests {
     #[tokio::test]
     async fn host_rejects_action_identity_and_extra_resource_bindings() {
         let directory = tempfile::tempdir().unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let host = test_host(directory.path()).await;
         let mut wrong_action = context(directory.path());
         wrong_action.capability_id = CapabilityId::from("workspace.files");
         wrong_action.action_id = ActionId::from("workspace.files/unknown");
@@ -3580,7 +2674,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("needle.txt"), "before\nneedle line\nafter\n")
             .unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let host = test_host(directory.path()).await;
         let result = invoke(
             &host,
             context(directory.path()),
@@ -3599,7 +2693,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("a.txt"), "alpha\n").unwrap();
         std::fs::write(directory.path().join("b.txt"), "bravo\n").unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let host = test_host(directory.path()).await;
         let patch = |path: &str, old: &str, new: &str| {
             json!({
                 "path": path,
@@ -3670,7 +2764,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret.txt"), "secret\n").unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let host = test_host(directory.path()).await;
         let mut read_only = context(directory.path());
         read_only.resource_bindings[0].operations =
             BTreeSet::from([WORKSPACE_READ_OPERATION.to_owned()]);
@@ -3731,9 +2825,11 @@ mod tests {
     async fn effectful_workspace_actions_replay_and_conflict_by_idempotency_key() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("entry.txt"), "before\n").unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
-        let mut context = context(directory.path());
-        context.idempotency_key = IdempotencyKey::from("patch-replay-key");
+        let host = test_host(directory.path()).await;
+        let mut replay_context = context(directory.path());
+        replay_context.capability_id = CapabilityId::from("workspace.files");
+        replay_context.action_id = ActionId::from("workspace.files/patch");
+        replay_context.idempotency_key = IdempotencyKey::from("patch-replay-key");
         let patch = json!({
             "files": [{
                 "path": "entry.txt",
@@ -3749,13 +2845,31 @@ mod tests {
                 }]
             }]
         });
-        let first = invoke(&host, context.clone(), "workspace.files/patch", patch.clone())
+        let first = invoke(&host, replay_context.clone(), "workspace.files/patch", patch.clone())
             .await
             .unwrap();
-        let replay = invoke(&host, context.clone(), "workspace.files/patch", patch)
+        let replay = invoke(&host, replay_context.clone(), "workspace.files/patch", patch)
             .await
             .unwrap();
         assert_eq!(replay, first);
+        let durable = host
+            .effect_store()
+            .unwrap()
+            .read_effect(
+                &replay_context.agent_session_id,
+                &wave2_effect_id(&replay_context).unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(durable.turn_id, replay_context.turn_id);
+        assert_eq!(durable.capability_module.as_ref(), "workspace.files");
+        assert_eq!(durable.action_id.as_ref(), "workspace.files/patch");
+        assert_eq!(
+            durable.resource_binding_id.as_ref(),
+            Some(&replay_context.resource_bindings[0].binding_id)
+        );
+        assert_eq!(durable.state, nomifun_agent_session::AgentEffectState::Returned);
         assert_eq!(
             std::fs::read_to_string(directory.path().join("entry.txt")).unwrap(),
             "after\n"
@@ -3763,7 +2877,7 @@ mod tests {
 
         let conflict = invoke(
             &host,
-            context,
+            replay_context,
             "workspace.files/patch",
             json!({
                 "files": [{
@@ -3784,6 +2898,284 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(conflict.code, "IDEMPOTENCY_CONFLICT");
+
+        let mut action_context = context(directory.path());
+        action_context.idempotency_key = IdempotencyKey::from("action-mismatch-key");
+        let action_conflict = invoke(
+            &host,
+            action_context.clone(),
+            "workspace.files/write",
+            json!({"path": "entry.txt", "content": "replacement"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(action_conflict.0["written"], true);
+        let mismatch = invoke(
+            &host,
+            action_context,
+            "workspace.files/delete",
+            json!({"path": "entry.txt"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(mismatch.code, "IDEMPOTENCY_CONFLICT");
+        assert!(directory.path().join("entry.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn durable_effect_ledger_has_no_128_record_lockout_and_namespaces_sessions() {
+        let directory = tempfile::tempdir().unwrap();
+        let host = test_host(directory.path()).await;
+        let base = context(directory.path());
+        for index in 0..129 {
+            let mut invocation = base.clone();
+            invocation.idempotency_key = IdempotencyKey::from(format!("write-{index}"));
+            invocation.operation_id = OperationId::from(format!("write-operation-{index}"));
+            invoke(
+                &host,
+                invocation,
+                "workspace.files/write",
+                json!({"path": format!("record-{index}.txt"), "content": index.to_string()}),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("record-128.txt")).unwrap(),
+            "128"
+        );
+
+        let mut first_session = context(directory.path());
+        first_session.idempotency_key = IdempotencyKey::from("same-caller-key");
+        let mut second_session = context(directory.path());
+        second_session.idempotency_key = IdempotencyKey::from("same-caller-key");
+        invoke(
+            &host,
+            first_session,
+            "workspace.files/write",
+            json!({"path": "first-session.txt", "content": "first"}),
+        )
+        .await
+        .unwrap();
+        invoke(
+            &host,
+            second_session,
+            "workspace.files/write",
+            json!({"path": "second-session.txt", "content": "second"}),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn durable_effect_identity_rejects_edge_whitespace_in_wire_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        for key in [" key", "key ", "\tkey"] {
+            let mut value = context(directory.path());
+            value.idempotency_key = IdempotencyKey::from(key);
+            let error = wave2_effect_id(&value).unwrap_err();
+            assert_eq!(error.code, "INVALID_PAYLOAD");
+        }
+        let mut value = context(directory.path());
+        value.idempotency_key = IdempotencyKey::from("key value");
+        assert!(wave2_effect_id(&value).is_ok());
+    }
+
+    #[test]
+    fn truncated_terminal_observation_is_bounded_and_never_decoded_as_original_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut context = context(directory.path());
+        context.capability_id = CapabilityId::from("workspace.files");
+        context.action_id = ActionId::from("workspace.files/write");
+        let binding = context.resource_bindings[0].clone();
+        let input = StrictJsonValue(json!({"path": "large", "content": "value"}));
+        let input_digest = wave2_effect_request_digest(&context, &binding, &input).unwrap();
+        let resource_key = wave2_effect_resource_key(&context, &binding).unwrap();
+        let output = StrictJsonValue(json!({"blob": "x".repeat(96 * 1024)}));
+        let bounded = bounded_terminal_payload(Wave2EffectCompletion::Succeeded(&output));
+        assert!(canonical_json_bytes(&bounded.0).unwrap().len() < 64 * 1024);
+        assert_eq!(bounded.0["observation_truncated"], true);
+        assert!(bounded.0.get("result").is_none());
+        let record = nomifun_agent_session::AgentEffectRecord {
+            effect_id: wave2_effect_id(&context).unwrap(),
+            agent_session_id: context.agent_session_id.clone(),
+            turn_id: context.turn_id.clone(),
+            operation_id: context.operation_id.clone(),
+            owner_domain: "workspace".to_owned(),
+            capability_module: context.capability_id.clone(),
+            action_id: context.action_id.clone(),
+            resource_binding_id: Some(binding.binding_id.clone()),
+            resource_key: Some(resource_key.clone()),
+            input_digest: input_digest.clone(),
+            strategy: nomifun_agent_session::EffectStrategy::ManagedEffect,
+            state: nomifun_agent_session::AgentEffectState::Returned,
+            bounded_observation: Some(bounded.0),
+            started_event_id: EventId::from("started"),
+            terminal_event_id: Some(EventId::from("terminal")),
+            created_at: 1,
+            settled_at: Some(2),
+        };
+        let error = observe_wave2_effect(
+            record,
+            &context,
+            &binding,
+            &input_digest,
+            nomifun_agent_session::EffectStrategy::ManagedEffect,
+            &resource_key,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("cannot reproduce the exact result"));
+    }
+
+    #[tokio::test]
+    async fn durable_effect_resource_fence_is_owner_scoped_but_physical_resource_stable() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = test_effect_store().await;
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path())
+            .with_effect_store(store.clone());
+        let input = StrictJsonValue(json!({"path": "owned.txt", "content": "value"}));
+
+        let mut first = context(directory.path());
+        first.capability_id = CapabilityId::from("workspace.files");
+        first.action_id = ActionId::from("workspace.files/write");
+        first.idempotency_key = IdempotencyKey::from("first-owner-pending");
+        first.resource_bindings[0].resource_id = ResourceId::from("workspace");
+        ensure_test_effect_context(&store, &first).await;
+        let first_binding = workspace_typed_binding(&first).unwrap();
+        assert!(matches!(
+            begin_wave2_effect(host.effect_store().unwrap(), &first, first_binding, &input)
+                .await
+                .unwrap(),
+            Wave2EffectAdmission::Reserved(_)
+        ));
+
+        let mut second_owner = context(directory.path());
+        second_owner.principal.principal_id = "owner-2".to_owned();
+        second_owner.resource_bindings[0].owner_id = "owner-2".to_owned();
+        second_owner.resource_bindings[0].resource_id = ResourceId::from("workspace");
+        second_owner.capability_id = CapabilityId::from("workspace.files");
+        second_owner.action_id = ActionId::from("workspace.files/write");
+        second_owner.idempotency_key = IdempotencyKey::from("second-owner-pending");
+        ensure_test_effect_context(&store, &second_owner).await;
+        assert!(matches!(
+            begin_wave2_effect(
+                host.effect_store().unwrap(),
+                &second_owner,
+                workspace_typed_binding(&second_owner).unwrap(),
+                &input,
+            )
+            .await
+            .unwrap(),
+            Wave2EffectAdmission::Reserved(_)
+        ));
+
+        let mut same_owner = context(directory.path());
+        same_owner.resource_bindings[0].resource_id = ResourceId::from("workspace");
+        same_owner.capability_id = CapabilityId::from("workspace.files");
+        same_owner.action_id = ActionId::from("workspace.files/write");
+        same_owner.idempotency_key = IdempotencyKey::from("same-owner-competing");
+        ensure_test_effect_context(&store, &same_owner).await;
+        let blocked = begin_wave2_effect(
+            host.effect_store().unwrap(),
+            &same_owner,
+            workspace_typed_binding(&same_owner).unwrap(),
+            &input,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(blocked.code, "CAPABILITY_UNAVAILABLE");
+        assert!(blocked.message.contains("unsettled"));
+    }
+
+    #[tokio::test]
+    async fn durable_effect_pending_and_unknown_fences_survive_host_restart() {
+        let pending_root = tempfile::tempdir().unwrap();
+        let store = test_effect_store().await;
+        let first_host = Wave2ApplicationHost::for_workspace_root(pending_root.path())
+            .with_effect_store(store.clone());
+        let mut pending_context = context(pending_root.path());
+        pending_context.capability_id = CapabilityId::from("workspace.files");
+        pending_context.action_id = ActionId::from("workspace.files/write");
+        pending_context.idempotency_key = IdempotencyKey::from("restart-pending");
+        ensure_test_effect_context(&store, &pending_context).await;
+        let pending_input = StrictJsonValue(json!({
+            "path": "pending.txt",
+            "content": "must-not-run"
+        }));
+        let pending_binding = workspace_typed_binding(&pending_context).unwrap();
+        let admission = begin_wave2_effect(
+            first_host.effect_store().unwrap(),
+            &pending_context,
+            pending_binding,
+            &pending_input,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(admission, Wave2EffectAdmission::Reserved(_)));
+        drop(first_host);
+
+        let restarted = Wave2ApplicationHost::for_workspace_root(pending_root.path())
+            .with_effect_store(store.clone());
+        let pending = invoke(
+            &restarted,
+            pending_context,
+            "workspace.files/write",
+            pending_input.0,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(pending.code, "CAPABILITY_UNAVAILABLE");
+        assert!(pending.message.contains("durable pending"));
+        assert!(!pending_root.path().join("pending.txt").exists());
+
+        let unknown_root = tempfile::tempdir().unwrap();
+        let first_host = Wave2ApplicationHost::for_workspace_root(unknown_root.path())
+            .with_effect_store(store.clone());
+        let mut unknown_context = context(unknown_root.path());
+        unknown_context.capability_id = CapabilityId::from("workspace.vcs");
+        unknown_context.action_id = ActionId::from("workspace.vcs/push");
+        unknown_context.idempotency_key = IdempotencyKey::from("restart-unknown");
+        ensure_test_effect_context(&store, &unknown_context).await;
+        let unknown_input = StrictJsonValue(json!({
+            "remote": "origin",
+            "refspec": "HEAD:refs/heads/main"
+        }));
+        let unknown_binding = workspace_typed_binding(&unknown_context).unwrap();
+        let Wave2EffectAdmission::Reserved(reservation) = begin_wave2_exclusive_effect(
+            first_host.effect_store().unwrap(),
+            &unknown_context,
+            unknown_binding,
+            &unknown_input,
+            nomifun_agent_session::EffectStrategy::ExternalUncertainEffect,
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("fresh external effect must reserve")
+        };
+        let uncertain = Wave2HostPortError::unavailable("transport outcome is unknown");
+        finish_wave2_effect(
+            &reservation,
+            Wave2EffectCompletion::Uncertain(&uncertain),
+        )
+        .await
+        .unwrap();
+        drop(first_host);
+
+        let restarted = Wave2ApplicationHost::for_workspace_root(unknown_root.path())
+            .with_effect_store(store);
+        let unknown = begin_wave2_exclusive_effect(
+            restarted.effect_store().unwrap(),
+            &unknown_context,
+            workspace_typed_binding(&unknown_context).unwrap(),
+            &unknown_input,
+            nomifun_agent_session::EffectStrategy::ExternalUncertainEffect,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unknown.code, "CAPABILITY_UNAVAILABLE");
+        assert!(unknown.message.contains("durable unknown"));
     }
 
     fn initialize_git_repository(root: &Path) -> git2::Repository {
@@ -3814,7 +3206,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let repository = initialize_git_repository(directory.path());
         std::fs::write(directory.path().join("tracked.txt"), "base\nchanged\n").unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let host = test_host(directory.path()).await;
         let base_context = context(directory.path());
 
         let status = invoke(&host, base_context.clone(), "workspace.vcs/status", json!({}))
@@ -3867,7 +3259,7 @@ mod tests {
         std::fs::create_dir(&batch).unwrap();
         std::fs::write(batch.join("keep.txt"), "keep\n").unwrap();
         std::fs::write(batch.join("remove.txt"), "remove\n").unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let host = test_host(directory.path()).await;
         let context = context(directory.path());
 
         invoke(
@@ -3927,7 +3319,7 @@ mod tests {
         std::fs::write(nested.join("inside.txt"), "inside\n").unwrap();
         std::fs::write(directory.path().join("tracked.txt"), "root changed\n").unwrap();
 
-        let host = Wave2ApplicationHost::for_workspace_root(&nested);
+        let host = test_host(&nested).await;
         let context = {
             let mut context = context(&nested);
             context.resource_bindings[0]
@@ -3988,7 +3380,7 @@ mod tests {
             config.set_str("user.name", "NomiFun Test").unwrap();
             config.set_str("user.email", "nomifun-test@nomifun.invalid").unwrap();
         }
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let host = test_host(directory.path()).await;
         let context = context(directory.path());
 
         invoke(
@@ -4036,7 +3428,7 @@ mod tests {
             config.set_str("user.name", "NomiFun Test").unwrap();
             config.set_str("user.email", "nomifun-test@nomifun.invalid").unwrap();
         }
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let host = test_host(directory.path()).await;
         let context = context(directory.path());
         invoke(
             &host,
@@ -4078,7 +3470,7 @@ mod tests {
             .remote("origin", remote_path.to_str().unwrap())
             .unwrap();
         let expected = repository.head().unwrap().target().unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(&worktree);
+        let host = test_host(&worktree).await;
         let context = context(&worktree);
         let input = json!({
             "remote": "origin",
@@ -4116,7 +3508,7 @@ mod tests {
         std::fs::create_dir(&worktree).unwrap();
         let repository = initialize_git_repository(&worktree);
         git2::Repository::init_bare(&remote_path).unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(&worktree);
+        let host = test_host(&worktree).await;
         let context = context(&worktree);
         let input = json!({
             "remote": "origin",
@@ -4160,7 +3552,7 @@ mod tests {
         index.add_path(Path::new("tracked.txt")).unwrap();
         index.write().unwrap();
 
-        let host = Wave2ApplicationHost::for_workspace_root(&nested);
+        let host = test_host(&nested).await;
         let context = {
             let mut context = context(&nested);
             context.resource_bindings[0]
@@ -4196,7 +3588,7 @@ mod tests {
         index.add_path(Path::new("nested\\outside.txt")).unwrap();
         index.write().unwrap();
 
-        let host = Wave2ApplicationHost::for_workspace_root(&nested);
+        let host = test_host(&nested).await;
         let mut context = context(&nested);
         context.resource_bindings[0]
             .typed_parameters
@@ -4224,7 +3616,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let repository = initialize_git_repository(directory.path());
         std::fs::write(directory.path().join("tracked.txt"), "changed\n").unwrap();
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let host = test_host(directory.path()).await;
         let mut read_only = context(directory.path());
         read_only.resource_bindings[0].operations =
             BTreeSet::from(["read".to_owned()]);
@@ -4257,5 +3649,142 @@ mod tests {
             repository.head().unwrap().peel_to_commit().unwrap().message(),
             Some("initial")
         );
+    }
+
+    fn configure_git_identity(repository: &git2::Repository) {
+        let mut config = repository.config().unwrap();
+        config.set_str("user.name", "NomiFun Test").unwrap();
+        config
+            .set_str("user.email", "nomifun-test@nomifun.invalid")
+            .unwrap();
+    }
+
+    fn distinct_context(root: &Path, suffix: &str) -> Wave2HostContext {
+        let mut value = context(root);
+        value.operation_id = OperationId::from(format!("operation-{suffix}"));
+        value.idempotency_key = IdempotencyKey::from(format!("idempotency-{suffix}"));
+        value.correlation_id = CorrelationId::from(format!("correlation-{suffix}"));
+        value
+    }
+
+    #[tokio::test]
+    async fn stage_and_commit_share_one_workspace_git_mutation_gate() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = initialize_git_repository(directory.path());
+        configure_git_identity(&repository);
+        std::fs::write(directory.path().join("tracked.txt"), "changed\n").unwrap();
+        let hook = GitMutationTestHook::new("workspace.vcs/stage");
+        let host = Arc::new(
+            test_host(directory.path())
+                .await
+                .with_git_mutation_hook(Arc::clone(&hook)),
+        );
+        let stage_host = Arc::clone(&host);
+        let stage_root = directory.path().to_path_buf();
+        let stage = tokio::spawn(async move {
+            invoke(
+                &stage_host,
+                distinct_context(&stage_root, "stage-gate"),
+                "workspace.vcs/stage",
+                json!({"path": "tracked.txt"}),
+            )
+            .await
+        });
+        hook.entered.notified().await;
+        let commit_host = Arc::clone(&host);
+        let commit_root = directory.path().to_path_buf();
+        let mut commit = tokio::spawn(async move {
+            invoke(
+                &commit_host,
+                distinct_context(&commit_root, "commit-after-stage"),
+                "workspace.vcs/commit",
+                json!({"message": "serialized stage"}),
+            )
+            .await
+        });
+        assert!(tokio::time::timeout(Duration::from_millis(100), &mut commit).await.is_err());
+        hook.release.notify_one();
+        stage.await.unwrap().unwrap();
+        commit.await.unwrap().unwrap();
+        assert_eq!(repository.head().unwrap().peel_to_commit().unwrap().message(), Some("serialized stage"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_commits_cannot_both_commit_one_index_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = initialize_git_repository(directory.path());
+        configure_git_identity(&repository);
+        std::fs::write(directory.path().join("tracked.txt"), "changed\n").unwrap();
+        let hook = GitMutationTestHook::new("workspace.vcs/commit");
+        let host = Arc::new(
+            test_host(directory.path())
+                .await
+                .with_git_mutation_hook(Arc::clone(&hook)),
+        );
+        invoke(
+            &host,
+            distinct_context(directory.path(), "stage-before-commits"),
+            "workspace.vcs/stage",
+            json!({"path": "tracked.txt"}),
+        )
+        .await
+        .unwrap();
+        let first_host = Arc::clone(&host);
+        let first_root = directory.path().to_path_buf();
+        let first = tokio::spawn(async move {
+            invoke(&first_host, distinct_context(&first_root, "commit-one"), "workspace.vcs/commit", json!({"message": "first"})).await
+        });
+        hook.entered.notified().await;
+        let second_host = Arc::clone(&host);
+        let second_root = directory.path().to_path_buf();
+        let mut second = tokio::spawn(async move {
+            invoke(&second_host, distinct_context(&second_root, "commit-two"), "workspace.vcs/commit", json!({"message": "second"})).await
+        });
+        assert!(tokio::time::timeout(Duration::from_millis(100), &mut second).await.is_err());
+        hook.release.notify_one();
+        first.await.unwrap().unwrap();
+        assert!(second.await.unwrap().is_err());
+        let head = repository.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.message(), Some("first"));
+        assert_eq!(head.parent_count(), 1);
+        assert_eq!(head.parent(0).unwrap().message(), Some("initial"));
+    }
+
+    #[tokio::test]
+    async fn push_waits_for_commit_and_observes_the_new_head() {
+        let directory = tempfile::tempdir().unwrap();
+        let worktree = directory.path().join("worktree");
+        let remote = directory.path().join("remote.git");
+        std::fs::create_dir(&worktree).unwrap();
+        let repository = initialize_git_repository(&worktree);
+        configure_git_identity(&repository);
+        git2::Repository::init_bare(&remote).unwrap();
+        repository.remote("origin", remote.to_str().unwrap()).unwrap();
+        std::fs::write(worktree.join("tracked.txt"), "changed\n").unwrap();
+        let hook = GitMutationTestHook::new("workspace.vcs/commit");
+        let host = Arc::new(
+            test_host(&worktree)
+                .await
+                .with_git_mutation_hook(Arc::clone(&hook)),
+        );
+        invoke(&host, distinct_context(&worktree, "stage-before-push"), "workspace.vcs/stage", json!({"path":"tracked.txt"})).await.unwrap();
+        let commit_host = Arc::clone(&host);
+        let commit_root = worktree.clone();
+        let commit = tokio::spawn(async move {
+            invoke(&commit_host, distinct_context(&commit_root, "commit-before-push"), "workspace.vcs/commit", json!({"message":"before push"})).await
+        });
+        hook.entered.notified().await;
+        let push_host = Arc::clone(&host);
+        let push_root = worktree.clone();
+        let mut push = tokio::spawn(async move {
+            invoke(&push_host, distinct_context(&push_root, "push-after-commit"), "workspace.vcs/push", json!({"remote":"origin","refspec":"HEAD:refs/heads/main"})).await
+        });
+        assert!(tokio::time::timeout(Duration::from_millis(100), &mut push).await.is_err());
+        hook.release.notify_one();
+        commit.await.unwrap().unwrap();
+        push.await.unwrap().unwrap();
+        let local = repository.head().unwrap().target().unwrap();
+        let remote_head = git2::Repository::open_bare(&remote).unwrap().find_reference("refs/heads/main").unwrap().target().unwrap();
+        assert_eq!(remote_head, local);
     }
 }

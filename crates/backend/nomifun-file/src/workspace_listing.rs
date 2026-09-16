@@ -18,7 +18,7 @@
 //! Entries are returned directories-first, then case-insensitively
 //! alphabetical.
 
-use std::path::{Component, Path};
+use std::path::{Path, PathBuf};
 
 use nomifun_api_types::WorkspaceEntry;
 use nomifun_common::AppError;
@@ -41,31 +41,17 @@ pub fn list_workspace_level(
     rel: &str,
     search: Option<&str>,
 ) -> Result<Vec<WorkspaceEntry>, AppError> {
-    let relative_path = rel.trim_start_matches('/');
-    let relative_path_obj = Path::new(relative_path);
-    if relative_path_obj
-        .components()
-        .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(AppError::BadRequest(
-            "Path traversal outside workspace is not allowed".into(),
-        ));
-    }
-    if relative_path_obj
-        .components()
-        .next()
-        .is_some_and(|component| {
-            crate::artifact_store::is_workspace_owner_component(component.as_os_str())
-        })
-    {
-        return Err(AppError::NotFound("Directory not found".into()));
-    }
+    let relative_path_obj = if rel.is_empty() || rel == "/" {
+        PathBuf::new()
+    } else {
+        crate::artifact_store::normalized_workspace_relative(rel, false)?
+    };
 
     // Resolve the browsed path relative to the workspace root.
-    let browse_path = if relative_path.is_empty() {
+    let browse_path = if relative_path_obj.as_os_str().is_empty() {
         base.to_path_buf()
     } else {
-        base.join(relative_path_obj)
+        base.join(&relative_path_obj)
     };
 
     // Security: reject direct traversal outside the workspace root, but allow
@@ -240,6 +226,8 @@ mod tests {
             list_workspace_level(dir.path(), ".nomifun/artifacts", None),
             Err(AppError::NotFound(_))
         ));
+        assert!(list_workspace_level(dir.path(), "./.nomifun/artifacts", None).is_err());
+        assert!(list_workspace_level(dir.path(), "nested//path", None).is_err());
     }
 
     #[test]

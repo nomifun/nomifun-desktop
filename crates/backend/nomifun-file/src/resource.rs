@@ -6,12 +6,12 @@
 //! persist a second session mapping or infer ownership from a path.
 
 use std::collections::BTreeSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use nomifun_api_types::TypedResourceBindingDto;
 use nomifun_common::AppError;
 
-use crate::path_safety::{PathAuthority, has_traversal};
+use crate::path_safety::PathAuthority;
 
 pub const WORKSPACE_RESOURCE_KIND: &str = "workspace";
 /// Host-resolved absolute path carried by a typed workspace binding.
@@ -113,28 +113,11 @@ impl AgentSessionWorkspaceBinding {
     /// Resolve a workspace-relative path without allowing an absolute path,
     /// parent component, NUL byte, or portable separator escape.
     pub fn resolve_relative_path(&self, relative_path: &str) -> Result<PathBuf, AppError> {
-        let trimmed = relative_path.trim();
-        let path = Path::new(trimmed);
-        if path.is_absolute()
-            || trimmed.starts_with('/')
-            || trimmed.starts_with('\\')
-            || path
-                .components()
-                .any(|component| matches!(component, Component::RootDir | Component::Prefix(_)))
-            || trimmed.contains('\\')
-            || has_traversal(trimmed)
-            || path.components().next().is_some_and(|component| {
-                crate::artifact_store::is_workspace_owner_component(component.as_os_str())
-            })
-        {
-            return Err(AppError::BadRequest(
-                "workspace resource paths must be relative and traversal-free".to_owned(),
-            ));
-        }
-        Ok(if trimmed.is_empty() {
+        let relative = crate::artifact_store::normalized_workspace_relative(relative_path, true)?;
+        Ok(if relative.as_os_str().is_empty() {
             self.workspace_root.clone()
         } else {
-            self.workspace_root.join(trimmed)
+            self.workspace_root.join(relative)
         })
     }
 
@@ -211,6 +194,9 @@ mod tests {
         assert!(scope.resolve_relative_path("/outside").is_err());
         assert!(scope.resolve_relative_path(r"nested\outside").is_err());
         assert!(scope.resolve_relative_path(".nomifun/artifacts/receipt").is_err());
+        assert!(scope.resolve_relative_path("./.nomifun/artifacts/receipt").is_err());
+        assert!(scope.resolve_relative_path("nested//file.txt").is_err());
+        assert!(scope.resolve_relative_path("./nested/file.txt").is_err());
         #[cfg(windows)]
         assert!(scope.resolve_relative_path(".NOMIFUN/artifacts/receipt").is_err());
     }

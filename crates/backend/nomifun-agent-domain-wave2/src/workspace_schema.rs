@@ -54,13 +54,6 @@ pub(super) fn input(action: &str) -> Option<StrictJsonValue> {
         ),
         "workspace.files/patch" => patch(),
         "workspace.files/delete" => object(json!({"path":path()}), &["path"]),
-        "workspace.files/watch" => object(
-            json!({
-                "operation":{"type":"string", "enum":["start", "stop"]},
-                "path":path()
-            }),
-            &["operation", "path"],
-        ),
         "workspace.vcs/status" => object(json!({}), &[]),
         "workspace.vcs/diff" => object(json!({"path":path()}), &[]),
         "workspace.vcs/stage" => object(json!({"path":path()}), &["path"]),

@@ -25,6 +25,7 @@ pub mod traits;
 pub mod types;
 pub mod watch_service;
 pub mod workspace_listing;
+mod vcs_stage;
 
 pub use path_safety::{PathAuthority, has_traversal, validate_path, validate_path_for_write};
 pub use resource::{
@@ -48,3 +49,4 @@ pub use types::{
 };
 pub use watch_service::FileWatchService;
 pub use workspace_listing::{MAX_DIR_DEPTH, list_workspace_level};
+pub use vcs_stage::WorkspaceVcsStageOwner;
