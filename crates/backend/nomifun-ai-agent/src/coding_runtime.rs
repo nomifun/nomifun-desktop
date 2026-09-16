@@ -362,7 +362,6 @@ mod tests {
     use crate::runtime_registry::AgentRuntimeFactory;
     use crate::{
         AgentRuntimeHandle, AgentRuntimeRegistry, InMemoryAgentRuntimeRegistry,
-        RuntimeEngineCatalog,
     };
     use nomifun_agent_contracts::{
         AgentSessionId, ChatRouteIdentity, DigestHex, EventId, ModelRouteId, OperationId,
@@ -878,53 +877,4 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
-    async fn coding_is_constructed_through_the_open_catalog_without_a_handle_variant() {
-        let engine = engine();
-        let descriptor = coding_runtime_descriptor(engine.build()).unwrap();
-        let selector = crate::RuntimeEngineSelector::Exact {
-            family_id: descriptor.family_id.clone(),
-            build_id: descriptor.build_id.clone(),
-            build_digest: descriptor.build_digest.clone(),
-        };
-        let mut catalog = RuntimeEngineCatalog::default();
-        catalog
-            .register(
-                descriptor,
-                Arc::new(move |options, _exact| {
-                    let engine = engine.clone();
-                    Box::pin(async move {
-                        let runtime = CodingAgentRuntime::new(
-                            &options,
-                            engine,
-                            binding(),
-                            model(false, false),
-                            Arc::new(NoTools),
-                            Host::new(),
-                        )?;
-                        Ok(Arc::new(runtime) as Arc<dyn RegisteredAgentRuntime>)
-                    })
-                }),
-                Arc::new(crate::RuntimeEngineSupport::enabled_only([])),
-            )
-            .unwrap();
-        let exact = catalog.resolve(&selector, "coding").unwrap();
-        let catalog = Arc::new(catalog);
-        let registry = InMemoryAgentRuntimeRegistry::new(catalog.bound_factory(exact).unwrap());
-        let handle = registry
-            .get_or_create_runtime(SESSION, options())
-            .await
-            .unwrap();
-        assert!(matches!(handle, AgentRuntimeHandle::Registered(_)));
-        let mut events = handle.subscribe();
-        handle.send_message(message()).await.unwrap();
-        assert!(matches!(
-            terminal(&mut events).await,
-            AgentStreamEvent::Finish(_)
-        ));
-        registry
-            .terminate_and_wait_result(SESSION, None)
-            .await
-            .unwrap();
-    }
 }

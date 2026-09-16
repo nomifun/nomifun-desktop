@@ -14,6 +14,8 @@ use nomifun_agent_kernel::{
 };
 use std::collections::BTreeMap;
 
+use crate::OfficialTemplateCatalog;
+
 const ROLE: &str = "system.test_context";
 const MEMBER: &str = "platform.test_context";
 
@@ -50,7 +52,10 @@ impl Fixture {
             requires_runtime_features: Vec::new(),
             supported_platforms: vec![PlatformConstraint::Any],
             config_schema: StrictJsonValue(json!({"type": "object"})),
-            contributions: CapabilityContributions::default(),
+            contributions: CapabilityContributions {
+                context_schema_refs: vec!["schema://platform.test/context@1".into()],
+                ..Default::default()
+            },
         };
         let reference = CapabilityRef {
             id: manifest.id.clone(),
@@ -192,7 +197,6 @@ impl Fixture {
             availability_evidence_revision: "fixture".into(),
         };
     let payload = AgentPresetRevisionPayload {
-        runtime_engine: None,
             context_order: Vec::new(),
             middleware_order: Vec::new(),
             schema_version: "1.0.0".into(),
@@ -230,7 +234,7 @@ impl Fixture {
     }
 
     fn compiler(&self) -> PresetRevisionCompiler {
-        PresetRevisionCompiler::new(OfficialTemplateCatalog::load().unwrap())
+        PresetRevisionCompiler::new()
             .with_materialized_registry(Arc::new(self.registry.clone()), self.environment.clone())
     }
 
@@ -244,7 +248,6 @@ impl Fixture {
                 &self.draft,
                 saved.map(|s| &s.0),
                 saved.map(|s| &s.1),
-                None,
                 &self.catalog,
             )
             .unwrap()
@@ -287,7 +290,6 @@ impl Fixture {
         capability.manifest.id = id.into();
         capability.manifest.contribution_id = format!("capability:{id}").into();
         if middleware {
-            capability.manifest.kind = CapabilityKind::TurnMiddleware;
             capability.manifest.contributions.actions = vec![nomifun_agent_contracts::model_middleware::action()];
         }
         capability.contribution_id = capability.manifest.contribution_id.clone();
@@ -298,7 +300,10 @@ impl Fixture {
         if selected {
             let reference = CapabilityRef { id: id.into(), version: "1.0.0".into() };
             self.draft.document.enabled_capabilities.push(wire_cast(&CapabilitySelection {
-                capability: reference.clone(), action_allowlist: BTreeSet::new(),
+                capability: reference.clone(),
+                action_allowlist: middleware.then(|| {
+                    BTreeSet::from([nomifun_agent_contracts::model_middleware::ACTION_ID.into()])
+                }).unwrap_or_default(),
             }).unwrap());
             let entry = CapabilityCatalogMaterializer::materialize(CapabilityCatalogMaterialization {
                 manifest: capability.manifest.clone(),
@@ -348,7 +353,7 @@ fn consumer_validation_runs_on_new_and_unchanged_plans_without_rewriting_them() 
     for prior in [None, Some(&saved)] {
         let result = compiler.compile(
             &"owner".into(), &fixture.draft, prior.map(|p| &p.0), prior.map(|p| &p.1),
-            None, &fixture.catalog,
+            &fixture.catalog,
         ).unwrap();
         assert!(result.snapshot.is_none());
         assert_eq!(result.diagnostics.len(), 1);
@@ -359,7 +364,7 @@ fn consumer_validation_runs_on_new_and_unchanged_plans_without_rewriting_them() 
     }
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     let accepted = fixture.compiler().with_consumer_validator(|_, _| Ok(()))
-        .compile(&"owner".into(), &fixture.draft, Some(&saved.0), Some(&saved.1), None, &fixture.catalog)
+        .compile(&"owner".into(), &fixture.draft, Some(&saved.0), Some(&saved.1), &fixture.catalog)
         .unwrap();
     assert_eq!(accepted.snapshot.as_ref(), Some(&saved.1));
 }
@@ -925,7 +930,7 @@ async fn save_read_upgrade_and_withdrawal_preserve_old_revisions_and_never_fallb
     let registry = Arc::new(RwLock::new(fixture.registry.clone()));
     let registry_reader = registry.clone();
     let templates = OfficialTemplateCatalog::load().unwrap();
-    let compiler = PresetRevisionCompiler::new(templates.clone()).with_canonical_registry(
+    let compiler = PresetRevisionCompiler::new().with_canonical_registry(
         Arc::new(move || Ok(Arc::new(registry_reader.read().unwrap().clone()))),
         fixture.environment.clone(),
     );

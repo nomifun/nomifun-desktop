@@ -348,18 +348,22 @@ impl AgentPresetCompiler {
             }
         }
         for id in &request.revision.payload.middleware_order {
-            // Revision validation owns unique, directly selected order entries.
-            // Product projections have already passed exact identity validation
-            // and carry no kind; the application owns their consumer support.
-            // Registry entries additionally expose a structural kind/consumer.
+            // Ordering follows the actual frozen middleware Action contract;
+            // CapabilityKind is presentation metadata, not execution support.
+            // Plugin Product actions may target a different source-integrated
+            // consumer. The generic compiler freezes their order and identity;
+            // the installed consumer validator decides phase support.
             let valid = plugin_product_by_id.contains_key(id)
                 || registry.capability(id).is_some_and(|value| {
-                    value.manifest.kind == nomifun_agent_contracts::CapabilityKind::TurnMiddleware
+                    nomifun_agent_contracts::tool_middleware::phase_for_actions(
+                        &value.manifest.contributions.actions,
+                    )
+                    .is_some()
                         && value.manifest.supports_consumer(CapabilityConsumer::Agent)
                 });
             if !valid {
                 return Err(KernelError::InvalidPresetRevision {
-                    reason: format!("middleware_order capability {} must be an Agent TurnMiddleware or an application-supplied Product contribution", id.as_ref()),
+                    reason: format!("middleware_order capability {} must freeze a supported Agent middleware Action contribution", id.as_ref()),
                 });
             }
         }
@@ -447,13 +451,7 @@ impl AgentPresetCompiler {
                 capability.required_runtime_features.iter().cloned()
             })
             .collect::<BTreeSet<_>>();
-        let required_runtime_features = if environment.required_runtime_profile
-            == RuntimeProfileKind::CodingNative
-        {
-            environment.available_runtime_features.clone()
-        } else {
-            capability_runtime_features
-        };
+        let required_runtime_features = capability_runtime_features;
         let required_resource_kinds = authority_policies
             .values()
             .flat_map(|policy| policy.required_resource_kinds.iter().cloned())
@@ -1620,7 +1618,6 @@ mod tests {
             action_allowlist,
         };
         let payload = AgentPresetRevisionPayload {
-            runtime_engine: None,
             context_order: Vec::new(),
             middleware_order: Vec::new(),
             schema_version: VERSION.into(),

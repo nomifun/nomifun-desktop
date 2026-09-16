@@ -334,7 +334,7 @@ fn validate_revision_snapshot(
 fn validate_nomi_projection(
     revision: &AgentPresetRevision,
 ) -> Result<(), ControlPlaneError> {
-    super::nomi_core_agent_projection::validate_nomi_capability_projection(revision).map_err(
+    super::nomi_core_agent_projection::validate_agent_revision_projection(revision).map_err(
         |error| {
             ControlPlaneError::canonical(
                 "CAPABILITY_UNAVAILABLE",

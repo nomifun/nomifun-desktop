@@ -2944,7 +2944,6 @@ mod tests {
         let test_action_id =
             action_id("knowledge.search").expect("knowledge.search has an action identity");
         let payload = AgentPresetRevisionPayload {
-            runtime_engine: None,
             context_order: Vec::new(),
             middleware_order: Vec::new(),
             schema_version: VersionString::from(CONTRACT_VERSION),

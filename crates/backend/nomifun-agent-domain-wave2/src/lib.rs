@@ -2848,7 +2848,6 @@ mod tests {
         };
         let action = action_id(capability_id).expect("workspace action");
         let payload = AgentPresetRevisionPayload {
-            runtime_engine: None,
             context_order: Vec::new(),
             middleware_order: Vec::new(),
             schema_version: VersionString::from(CONTRACT_VERSION),
@@ -3262,7 +3261,6 @@ mod tests {
         };
         let revision = |overrides: BTreeMap<ExecutionRoleId, RoleProviderSelection>| {
             let payload = AgentPresetRevisionPayload {
-                runtime_engine: None,
                 context_order: Vec::new(),
                 middleware_order: Vec::new(),
                 schema_version: VersionString::from(CONTRACT_VERSION),

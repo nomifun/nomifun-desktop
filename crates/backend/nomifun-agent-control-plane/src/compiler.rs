@@ -6,7 +6,7 @@ use nomifun_agent_contracts::{
     AgentPresetRevision, AgentPresetRevisionPayload, CanonicalErrorCode,
     CapabilityCatalogPublication, CapabilityConsumer, CapabilityRef,
     ContributionLock, ContributionSourceKind, ResolvedCapability,
-    PluginProductCapabilityCatalogPublication, OfficialPresetKey, OperationId,
+    PluginProductCapabilityCatalogPublication, OperationId,
     PresetRevisionRef, PrincipalRef, PluginSourceMetadata, PluginSourceKind,
     ResolvedSnapshotEnvelope, UserId, digest_payload,
 };
@@ -16,10 +16,12 @@ use nomifun_agent_kernel::{
 };
 use nomifun_api_types::{AgentPresetDraftDto, AgentPresetRevisionDto};
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 use uuid::Uuid;
 
-use crate::catalog::{availability_code, CatalogSnapshot, OfficialTemplateCatalog};
+use crate::catalog::{availability_code, CatalogSnapshot};
 use crate::error::ControlPlaneError;
 use crate::wire::wire_cast;
 
@@ -75,10 +77,8 @@ pub(crate) struct CompilationDiagnostic {
 
 #[derive(Clone)]
 pub struct PresetRevisionCompiler {
-    official_templates: OfficialTemplateCatalog,
     canonical_registry: Option<Arc<dyn CanonicalRegistryProvider>>,
     canonical_environment: Option<CompilerEnvironment>,
-    runtime_validator: Option<Arc<dyn Fn(&AgentPresetRevisionPayload, &ResolvedSnapshotEnvelope) -> Result<(), String> + Send + Sync>>,
     consumer_validator: Option<Arc<ConsumerValidator>>,
 }
 
@@ -106,12 +106,10 @@ impl PresetRevisionCompiler {
             ))
     }
 
-    pub fn new(official_templates: OfficialTemplateCatalog) -> Self {
+    pub fn new() -> Self {
         Self {
-            official_templates,
             canonical_registry: None,
             canonical_environment: None,
-            runtime_validator: None,
             consumer_validator: None,
         }
     }
@@ -152,23 +150,12 @@ impl PresetRevisionCompiler {
         )
     }
 
-    /// The embedding host owns the open runtime catalog and compatibility checks.
-    /// Validate engine compatibility before persisting a workbench revision.
-    pub fn with_runtime_validator(
-        mut self,
-        validator: impl Fn(&AgentPresetRevisionPayload, &ResolvedSnapshotEnvelope) -> Result<(), String> + Send + Sync + 'static,
-    ) -> Self {
-        self.runtime_validator = Some(Arc::new(validator));
-        self
-    }
-
     pub(crate) fn compile(
         &self,
         owner: &UserId,
         draft: &AgentPresetDraftDto,
         current_revision: Option<&AgentPresetRevision>,
         current_snapshot: Option<&ResolvedSnapshotEnvelope>,
-        transient_template_key: Option<OfficialPresetKey>,
         catalog: &CatalogSnapshot,
     ) -> Result<PresetCompilation, ControlPlaneError> {
         catalog.validate()?;
@@ -266,15 +253,6 @@ impl PresetRevisionCompiler {
             ));
         }
         validate_direct_catalog_availability(&payload, catalog, &mut diagnostics);
-        validate_template_baseline(
-            transient_template_key,
-            &self.official_templates,
-            &payload,
-            self.canonical_environment
-                .as_ref()
-                .map(|environment| &environment.available_runtime_features),
-            &mut diagnostics,
-        );
         if clean && current_snapshot.is_none() {
             diagnostics.push(error_diagnostic(
                 CanonicalErrorCode::from("CAPABILITY_NOT_MATERIALIZED"),
@@ -286,23 +264,8 @@ impl PresetRevisionCompiler {
         let compiled = if clean || has_errors(&diagnostics) {
             None
         } else {
-            let (registry, mut environment) = canonical_inputs
+            let (registry, environment) = canonical_inputs
                 .expect("dirty compilation has canonical inputs");
-            let selected_capabilities = payload
-                .enabled_capabilities
-                .iter()
-                .map(|selection| selection.capability.id.clone())
-                .collect::<BTreeSet<_>>();
-            environment.required_runtime_profile = runtime_profile_for_compile(
-                environment.required_runtime_profile,
-                transient_template_key,
-                current_snapshot.map(|snapshot| snapshot.content.required_runtime_profile),
-                &selected_capabilities,
-                &self
-                    .official_templates
-                    .required_capability_ids(OfficialPresetKey::CodingCodex)
-                    .unwrap_or_default(),
-            );
             let request = CompileRequest {
                 revision: candidate_revision,
                 principal: PrincipalRef {
@@ -332,14 +295,6 @@ impl PresetRevisionCompiler {
         } else {
             compiled.as_ref().map(|compiled| compiled.envelope.clone())
         };
-        if let (Some(validator), Some(candidate)) = (&self.runtime_validator, &snapshot)
-            && let Err(message) = validator(&payload, candidate)
-        {
-            diagnostics.push(error_diagnostic(
-                CanonicalErrorCode::from("AGENT_RUNTIME_ENGINE_UNAVAILABLE"), message, None,
-            ));
-            snapshot = None;
-        }
         if let (Some(validate), Some(candidate)) = (&self.consumer_validator, &snapshot) {
             let registry = consumer_registry.as_deref().ok_or_else(||
                 ControlPlaneError::Wire("consumer validation requires the canonical registry".into()))?;
@@ -424,24 +379,6 @@ fn snapshot_matches_registry(
 
 fn has_errors(diagnostics: &[CompilationDiagnostic]) -> bool {
     !diagnostics.is_empty()
-}
-
-fn runtime_profile_for_compile(
-    default_profile: nomifun_agent_contracts::RuntimeProfileKind,
-    template_key: Option<OfficialPresetKey>,
-    current_profile: Option<nomifun_agent_contracts::RuntimeProfileKind>,
-    selected_capabilities: &BTreeSet<nomifun_agent_contracts::CapabilityId>,
-    coding_required_capabilities: &BTreeSet<nomifun_agent_contracts::CapabilityId>,
-) -> nomifun_agent_contracts::RuntimeProfileKind {
-    if template_key == Some(OfficialPresetKey::CodingCodex)
-        || current_profile == Some(nomifun_agent_contracts::RuntimeProfileKind::CodingNative)
-        || (!coding_required_capabilities.is_empty()
-            && coding_required_capabilities.is_subset(selected_capabilities))
-    {
-        nomifun_agent_contracts::RuntimeProfileKind::CodingNative
-    } else {
-        default_profile
-    }
 }
 
 pub(crate) fn validate_direct_catalog_availability(
@@ -818,53 +755,6 @@ fn contribution_locks_for_payload(
     Ok(locks)
 }
 
-fn validate_template_baseline(
-    template_key: Option<OfficialPresetKey>,
-    templates: &OfficialTemplateCatalog,
-    payload: &AgentPresetRevisionPayload,
-    available_runtime_features: Option<
-        &BTreeSet<nomifun_agent_contracts::RuntimeFeatureId>,
-    >,
-    diagnostics: &mut Vec<CompilationDiagnostic>,
-) {
-    if template_key != Some(OfficialPresetKey::CodingCodex) {
-        return;
-    }
-    let selected = payload
-        .enabled_capabilities
-        .iter()
-        .map(|selection| selection.capability.id.clone())
-        .collect::<BTreeSet<_>>();
-    let missing_capabilities = templates
-        .required_capability_ids(OfficialPresetKey::CodingCodex)
-        .unwrap_or_default()
-        .difference(&selected)
-        .map(|id| id.as_ref().to_owned())
-        .collect::<Vec<_>>();
-    // Runtime availability belongs to the validated CompilerEnvironment.
-    // A capability manifest declares what that capability requires; aggregating
-    // those declarations here inverted the relationship and made a complete
-    // host look empty whenever the selected capabilities had no dependencies.
-    let available_features = available_runtime_features.cloned().unwrap_or_default();
-    let missing_features = templates
-        .required_runtime_features(OfficialPresetKey::CodingCodex)
-        .unwrap_or_default()
-        .difference(&available_features)
-        .map(|feature| feature.as_ref().to_owned())
-        .collect::<Vec<_>>();
-    if !missing_capabilities.is_empty() || !missing_features.is_empty() {
-        diagnostics.push(CompilationDiagnostic {
-            code: "CODING_CODEX_NATIVE_INCOMPLETE".into(),
-            message: "coding.codex must retain the complete frozen Coding capability and runtime-feature baseline".into(),
-            subject: Some("coding.codex".into()),
-            details: Some(json!({
-                "missing_capability_ids": missing_capabilities,
-                "missing_runtime_features": missing_features,
-            })),
-        });
-    }
-}
-
 fn kernel_error_diagnostic(error: &KernelError) -> CompilationDiagnostic {
     error_diagnostic(
         error.canonical_code(),
@@ -925,7 +815,7 @@ mod tests {
         LogicalArtifactRef, McpBindingId, McpServerId, McpToolCapabilityMapping,
         McpToolKey, PluginProductId, PluginReleaseId, PluginReleaseRef, PackageId,
         PackageRef, PlatformConstraint, PluginMountId, PluginSourceKind,
-        PluginSourceMetadata, ResourceKind, RuntimeProfileKind, SkillDefinition, SkillId,
+        PluginSourceMetadata, ResourceKind, SkillDefinition, SkillId,
         SkillRef, StableSourceIdentity, StrictJsonValue, ToolPresentationKind, VersionString,
         capability_surface_declarations,
     };
@@ -933,110 +823,6 @@ mod tests {
         MaterializedCapability, MaterializedMcpTool, MaterializedSkill,
     };
     use std::collections::BTreeMap;
-
-    #[test]
-    fn coding_template_baseline_uses_the_validated_runtime_environment_inventory() {
-        let templates = OfficialTemplateCatalog::load().unwrap();
-        let seed = templates.seed(OfficialPresetKey::CodingCodex).unwrap();
-        let payload = AgentPresetRevisionPayload {
-            runtime_engine: None,
-            context_order: Vec::new(),
-            middleware_order: Vec::new(),
-            schema_version: VersionString::from("1.0.0"),
-            model_route_refs: BTreeMap::new(),
-            chat_route_records: BTreeMap::new(),
-            enabled_capabilities: seed
-                .enabled_capabilities
-                .iter()
-                .cloned()
-                .map(|capability| CapabilitySelection {
-                    capability,
-                    action_allowlist: BTreeSet::new(),
-                })
-                .collect(),
-            skill_bindings: seed.skill_bindings.clone(),
-            system_role_provider_overrides: BTreeMap::new(),
-            persona: String::new(),
-            instructions: String::new(),
-            starter_prompts: Vec::new(),
-        };
-        let available = templates
-            .required_runtime_features(OfficialPresetKey::CodingCodex)
-            .unwrap();
-        let mut diagnostics = Vec::new();
-        validate_template_baseline(
-            Some(OfficialPresetKey::CodingCodex),
-            &templates,
-            &payload,
-            Some(&available),
-            &mut diagnostics,
-        );
-        assert!(diagnostics.is_empty());
-
-        validate_template_baseline(
-            Some(OfficialPresetKey::CodingCodex),
-            &templates,
-            &payload,
-            Some(&BTreeSet::new()),
-            &mut diagnostics,
-        );
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, "CODING_CODEX_NATIVE_INCOMPLETE");
-        assert_eq!(
-            diagnostics[0].details.as_ref().unwrap()["missing_runtime_features"]
-                .as_array()
-                .unwrap()
-                .len(),
-            available.len()
-        );
-    }
-
-    #[test]
-    fn coding_profile_survives_template_provenance_and_saved_snapshot_reloads() {
-        let coding_required =
-            BTreeSet::from([CapabilityId::from("fs.read"), CapabilityId::from("process.exec")]);
-
-        assert_eq!(
-            runtime_profile_for_compile(
-                RuntimeProfileKind::ManagedMinimal,
-                Some(OfficialPresetKey::CodingCodex),
-                None,
-                &BTreeSet::new(),
-                &coding_required,
-            ),
-            RuntimeProfileKind::CodingNative
-        );
-        assert_eq!(
-            runtime_profile_for_compile(
-                RuntimeProfileKind::ManagedMinimal,
-                None,
-                Some(RuntimeProfileKind::CodingNative),
-                &BTreeSet::new(),
-                &coding_required,
-            ),
-            RuntimeProfileKind::CodingNative
-        );
-        assert_eq!(
-            runtime_profile_for_compile(
-                RuntimeProfileKind::ManagedMinimal,
-                None,
-                None,
-                &coding_required,
-                &coding_required,
-            ),
-            RuntimeProfileKind::CodingNative
-        );
-        assert_eq!(
-            runtime_profile_for_compile(
-                RuntimeProfileKind::ManagedMinimal,
-                None,
-                None,
-                &BTreeSet::from([CapabilityId::from("fs.read")]),
-                &coding_required,
-            ),
-            RuntimeProfileKind::ManagedMinimal
-        );
-    }
 
     #[test]
     fn contribution_locks_preserve_exact_managed_skill_and_mcp_facts() {
@@ -1221,7 +1007,6 @@ mod tests {
             .insert(capability_ref.id.clone(), mcp_key.clone());
         registry.mcp_tools.insert(mcp_key, materialized_mcp);
         let payload = AgentPresetRevisionPayload {
-            runtime_engine: None,
             context_order: Vec::new(),
             middleware_order: Vec::new(),
             schema_version: VersionString::from("1.0.0"),
@@ -1382,7 +1167,6 @@ mod tests {
 
         let action_allowlist = BTreeSet::from([action.action_id.clone()]);
         let payload = AgentPresetRevisionPayload {
-            runtime_engine: None,
             context_order: Vec::new(),
             middleware_order: Vec::new(),
             schema_version: VersionString::from("1.0.0"),

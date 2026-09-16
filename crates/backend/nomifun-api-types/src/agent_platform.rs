@@ -248,8 +248,6 @@ pub struct PutAgentRoleDefaultRequest {
 #[serde(deny_unknown_fields)]
 pub struct AgentPresetDocumentDto {
     /// Versioned Agent configuration; Session creation resolves this server-side.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_engine: Option<crate::RuntimeEngineSelection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_order: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -884,8 +882,6 @@ pub struct CreateAgentSessionRequestDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentSessionResponseDto {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_engine_binding: Option<crate::RuntimeEngineBinding>,
     pub agent_session_id: String,
     pub agent_binding: AgentBindingValueDto,
     pub state: String,

@@ -138,7 +138,6 @@ async fn cold_skill_commands_use_saved_binding_without_starting_runtime_or_conte
             description: None,
             fork_from_revision: None,
             document: Some(AgentPresetDocumentDto {
-                runtime_engine: None,
                 schema_version: "1.0.0".into(),
                 model_route_refs: BTreeMap::new(),
                 chat_route_records: BTreeMap::new(),

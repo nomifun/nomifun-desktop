@@ -345,7 +345,7 @@ mod tests {
             store,
             Arc::new(StaticCatalogProvider::new(Default::default())),
             templates.clone(),
-            PresetRevisionCompiler::new(templates),
+            PresetRevisionCompiler::new(),
         ))
     }
 

@@ -28,20 +28,6 @@ pub struct RuntimeEngineBinding {
     pub profile: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "selection", rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimeEngineSelector {
-    Exact {
-        family_id: String,
-        build_id: String,
-        build_digest: String,
-    },
-    Channel {
-        family_id: String,
-        channel: String,
-    },
-}
-
 fn identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -106,11 +92,4 @@ fn validate_contract_version(version: u32) -> Result<(), AppError> {
         return Err(invalid("unsupported host contract version"));
     }
     Ok(())
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeEngineSelection {
-    pub selector: RuntimeEngineSelector,
-    pub profile: String,
 }

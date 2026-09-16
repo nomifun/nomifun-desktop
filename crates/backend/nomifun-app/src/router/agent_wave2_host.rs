@@ -2787,7 +2787,6 @@ mod tests {
         };
         let action = ActionId::from("fs.read.invoke");
         let payload = AgentPresetRevisionPayload {
-            runtime_engine: None,
             context_order: Vec::new(),
             middleware_order: Vec::new(),
             schema_version: VersionString::from(nomifun_agent_domain_wave2::CONTRACT_VERSION),

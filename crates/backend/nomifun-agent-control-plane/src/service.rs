@@ -491,7 +491,6 @@ impl AgentControlPlane {
             );
         }
         let document = nomifun_api_types::AgentPresetDocumentDto {
-            runtime_engine: None,
             context_order: Vec::new(),
             middleware_order: Vec::new(),
             schema_version: "1.0.0".into(),
@@ -800,7 +799,7 @@ impl AgentControlPlane {
             current_revision: None,
             document,
         };
-        let compilation = self.authoring_compiler(owner).await?.compile(owner, &draft, None, source_snapshot.as_ref(), template_key, &catalog)?;
+        let compilation = self.authoring_compiler(owner).await?.compile(owner, &draft, None, source_snapshot.as_ref(), &catalog)?;
         if compilation.snapshot.is_none() {
             return Err(ControlPlaneError::with_details("PRESET_REVISION_SAVE_FAILED",
                 axum::http::StatusCode::UNPROCESSABLE_ENTITY, "Agent is unavailable",
@@ -830,17 +829,11 @@ impl AgentControlPlane {
         let current = self.current_revision(&stored).await?;
         let current_snapshot = self.current_snapshot(current.as_ref()).await?;
         let catalog = self.catalog.snapshot()?;
-        let transient_template_key = request
-            .draft
-            .source_template_key
-            .map(|key| wire_cast(&key))
-            .transpose()?;
         let compilation = self.authoring_compiler(owner).await?.compile(
             owner,
             &request.draft,
             current.as_ref(),
             current_snapshot.as_ref(),
-            transient_template_key,
             &catalog,
         )?;
         let snapshot = compilation.snapshot.ok_or_else(|| {
@@ -1294,7 +1287,6 @@ impl AgentControlPlane {
             &draft,
             None,
             source_snapshot,
-            transient_template_key,
             &catalog,
         )?;
         let snapshot = compilation.snapshot.ok_or_else(|| {
@@ -1562,7 +1554,6 @@ impl AgentControlPlane {
 
 fn empty_document() -> nomifun_api_types::AgentPresetDocumentDto {
     nomifun_api_types::AgentPresetDocumentDto {
-        runtime_engine: None,
         context_order: Vec::new(),
         middleware_order: Vec::new(),
         schema_version: "1.0.0".into(),
@@ -1838,8 +1829,8 @@ mod tests {
     };
     use serde_json::json;
 
-    fn test_compiler(templates: &OfficialTemplateCatalog) -> PresetRevisionCompiler {
-        PresetRevisionCompiler::new(templates.clone()).with_materialized_registry(
+    fn test_compiler() -> PresetRevisionCompiler {
+        PresetRevisionCompiler::new().with_materialized_registry(
             Arc::new(MaterializedRegistry::empty()),
             CompilerEnvironment {
                 resolver_version: VersionString::from("1.0.0"),
@@ -1862,7 +1853,7 @@ mod tests {
     ) -> AgentControlPlane {
         let catalog = Arc::new(StaticCatalogProvider::new(Default::default()));
         let templates = OfficialTemplateCatalog::load().unwrap();
-        let compiler = test_compiler(&templates);
+        let compiler = test_compiler();
         AgentControlPlane::new(store, catalog, templates, compiler)
     }
 
@@ -2118,7 +2109,7 @@ mod tests {
             Arc::new(InMemoryControlPlaneStore::new()),
             catalog,
             templates.clone(),
-            test_compiler(&templates),
+            test_compiler(),
         );
         let shared_ref = CapabilityRef {
             id: CapabilityId::from("knowledge.search"),
@@ -2192,7 +2183,7 @@ mod tests {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let catalog = Arc::new(StaticCatalogProvider::new(Default::default()));
         let templates = OfficialTemplateCatalog::load().unwrap();
-        let compiler = test_compiler(&templates);
+        let compiler = test_compiler();
         let control_plane = AgentControlPlane::new(
             store.clone(),
             catalog,
@@ -2395,7 +2386,7 @@ mod tests {
             catalog.capabilities.push(capability);
             catalog.formal_capability_entries.insert(entry.capability.clone(), entry);
         }
-        let compiler = test_compiler(&templates).with_materialized_registry(Arc::new(registry), CompilerEnvironment {
+        let compiler = test_compiler().with_materialized_registry(Arc::new(registry), CompilerEnvironment {
             resolver_version: VersionString::from("1.0.0"), required_runtime_protocol_version: VersionString::from("1.0.0"),
             required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
             runtime_feature_inventory_digest: DigestHex::from("runtime-features"), available_runtime_features: BTreeSet::new(),
@@ -2618,7 +2609,7 @@ mod tests {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let catalog = Arc::new(StaticCatalogProvider::new(Default::default()));
         let templates = OfficialTemplateCatalog::load().unwrap();
-        let compiler = test_compiler(&templates);
+        let compiler = test_compiler();
         let control_plane = AgentControlPlane::new(
             store.clone(),
             catalog,
@@ -2753,7 +2744,7 @@ mod tests {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let catalog = Arc::new(StaticCatalogProvider::new(Default::default()));
         let templates = OfficialTemplateCatalog::load().unwrap();
-        let compiler = test_compiler(&templates);
+        let compiler = test_compiler();
         let control_plane = AgentControlPlane::new(
             store.clone(),
             catalog,
@@ -2832,7 +2823,7 @@ mod tests {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let catalog = Arc::new(StaticCatalogProvider::new(Default::default()));
         let templates = OfficialTemplateCatalog::load().unwrap();
-        let compiler = test_compiler(&templates);
+        let compiler = test_compiler();
         let control_plane = AgentControlPlane::new(
             store.clone(),
             catalog,

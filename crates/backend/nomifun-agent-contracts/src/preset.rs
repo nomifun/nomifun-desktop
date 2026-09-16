@@ -212,10 +212,6 @@ impl CapabilitySelection {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPresetRevisionPayload {
-    /// Execution implementation belongs to the Agent revision, not the chat composer.
-    /// Omission preserves the default Nomi behavior of older revisions and their digests.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_engine: Option<AgentRuntimeEngineSelection>,
     /// Ordered Context contributors; omitted contributors follow canonical ID order.
     /// This is presentation/execution order, never an authorization grant.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -239,20 +235,6 @@ pub struct AgentPresetRevisionPayload {
     pub instructions: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub starter_prompts: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AgentRuntimeEngineSelection {
-    pub selector: AgentRuntimeEngineSelector,
-    pub profile: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "selection", rename_all = "snake_case", deny_unknown_fields)]
-pub enum AgentRuntimeEngineSelector {
-    Exact { family_id: String, build_id: String, build_digest: String },
-    Channel { family_id: String, channel: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1793,7 +1775,6 @@ mod tests {
     #[test]
     fn resource_neutral_preset_contract_rejects_legacy_resource_fields() {
         let mut payload = serde_json::to_value(AgentPresetRevisionPayload {
-            runtime_engine: None,
             context_order: Vec::new(),
             middleware_order: Vec::new(),
             schema_version: VersionString::from("1.0.0"),
@@ -1859,26 +1840,20 @@ mod tests {
     }
 
     #[test]
-    fn agent_runtime_configuration_is_versioned_without_rehashing_pre_engine_payloads() {
+    fn agent_runtime_selection_is_not_part_of_the_preset_contract() {
         let legacy = serde_json::json!({
             "schema_version":"1.0.0", "model_route_refs":{},
             "enabled_capabilities":[], "skill_bindings":[],
             "persona":"", "instructions":""
         });
         let payload: AgentPresetRevisionPayload = serde_json::from_value(legacy.clone()).unwrap();
-        assert!(payload.runtime_engine.is_none());
         assert_eq!(serde_json::to_value(&payload).unwrap(), legacy);
-        let legacy_digest = digest_payload(&payload).unwrap();
-        let mut selected = payload;
-        selected.runtime_engine = Some(AgentRuntimeEngineSelection {
-            selector: AgentRuntimeEngineSelector::Exact {
-                family_id: "customer.workflow".into(), build_id: "v1".into(), build_digest: "a".repeat(64),
-            },
-            profile: "custom".into(),
+        let mut selected = legacy;
+        selected["runtime_engine"] = serde_json::json!({
+            "selector": {"selection":"exact","family_id":"customer.workflow","build_id":"v1","build_digest":"a".repeat(64)},
+            "profile":"custom"
         });
-        assert_ne!(digest_payload(&selected).unwrap(), legacy_digest);
-        let encoded = serde_json::to_value(&selected).unwrap();
-        assert_eq!(serde_json::from_value::<AgentPresetRevisionPayload>(encoded).unwrap(), selected);
+        assert!(serde_json::from_value::<AgentPresetRevisionPayload>(selected).is_err());
     }
 
     #[test]
