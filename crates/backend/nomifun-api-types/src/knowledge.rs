@@ -322,13 +322,9 @@ pub struct KnowledgeSourceEntry {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// **P3-K3**: route this URL through the rendering backend (`BrowserFetcher`,
-    /// a real headless browser) instead of the default HTTP fetcher. Set for
-    /// JS-heavy SPAs whose content a plain HTTP GET cannot see. `#[serde(default)]`
-    /// keeps old persisted `extra.source` rows (which lack the key) deserializing
-    /// to `false` ⇒ HTTP — full backward compatibility. When `true` but no render
-    /// backend is wired (`browser-use` feature off / not injected), the fetch
-    /// gracefully falls back to HTTP at the dispatch site (`prepare_snapshot_body`).
+    /// Request canonical `browser.render_content` for JS-rendered pages instead
+    /// of the ordinary HTTP fetcher. Missing rendering capability fails closed;
+    /// it does not silently substitute HTTP or launch a private browser.
     #[serde(default)]
     pub rendered: bool,
     /// Stable managed document identity, independent of its current path.

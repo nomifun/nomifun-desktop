@@ -807,6 +807,22 @@ pub(super) async fn build(
         &mut fields.compat_overrides.supports_image,
     )?;
     let session_citations = Arc::new(crate::web_search::SessionCitationStore::default());
+    #[cfg(feature = "browser-use")]
+    let local_web_search_tool:Option<Box<dyn nomi_tools::Tool>>=if overrides.allowed_tools.iter().any(|name|name==crate::local_web_search::TOOL_NAME) {
+        let provider=deps.local_web_search.as_ref().ok_or_else(||AppError::UnprocessableEntity("No verified local search runtime is bound".into()))?;
+        let binding=plugin_tool_session.as_ref().and_then(|session|session.local_search_binding()).cloned()
+            .ok_or_else(||AppError::UnprocessableEntity("Local search requires an exact Snapshot runtime binding".into()))?;
+        provider.validate_binding(&binding).await.map_err(|error|AppError::Conflict(error.to_string()))?;
+        let provider=Arc::new(provider.for_locale(app_language.clone()).map_err(|error|AppError::Conflict(error.to_string()))?);
+        Some(Box::new(crate::local_web_search::LocalWebSearchTool::new(provider,binding,session_citations.clone())
+            .map_err(|error|AppError::Conflict(error.to_string()))?))
+    } else {None};
+    #[cfg(feature = "browser-use")]
+    let system_browser_session = crate::system_browser::bind_selected(
+        &overrides.allowed_tools, deps.system_browser.clone(),
+        plugin_tool_session.as_ref().and_then(|session| session.system_browser_binding()).cloned(),
+        &options.user_id, &ctx.conversation_id,
+    ).await?;
     let web_search_tool: Option<Box<dyn nomi_tools::Tool>> = if overrides
         .allowed_tools
         .iter()
@@ -928,111 +944,36 @@ pub(super) async fn build(
         }
     };
 
-    // System Settings capability toggles, read LIVE per session (toggling in
-    // System Settings affects new sessions without a restart). No setting row →
-    // host default. computer-use defaults ON on the desktop build (the only one
-    // with the feature); browser-use also defaults ON. Browser execution is
-    // delegated through a runtime-scoped BrowserLaneClient to the process-wide
-    // BrowserSessionHub, which starts managed Browser Hosts lazily. The toggle
-    // only controls whether this runtime exposes Browser tools.
-    let computer_use_default = read_bool_pref(
-        &deps,
-        PREF_COMPUTER_USE,
-        cfg!(feature = "computer-use") || env_flag("NOMIFUN_COMPUTER_USE"),
-    )
-    .await;
-    // browser-use has a cargo-feature gate (`browser-use`, desktop builds); on
-    // those builds it defaults **ON** (user decision). The main-process
-    // BrowserSessionHub is the only Chromium/profile owner and shares managed
-    // Primary or Crawl Hosts across authorized Lanes. A Nomi runtime receives
-    // only a BrowserLaneClient. Builds without the feature register no Browser
-    // tools. `NOMIFUN_BROWSER_USE` forces the setting on for parity/testing.
-    let browser_use_default = read_bool_pref(
-        &deps,
-        PREF_BROWSER_USE,
-        cfg!(feature = "browser-use") || env_flag("NOMIFUN_BROWSER_USE"),
-    )
-    .await;
-    // F1-sec: evaluate「全权模式」LIVE 值（裁决⑨，default-deny）。用户在 System Settings 显式 opt-in
-    // 的 `agent.browserUse.fullPower` 开关，每会话构造时 LIVE 读（read_bool_pref 范式，与上面的启用开关
-    // 同源），灌进 BrowserConfig.full_power，由 Hub-backed Browser tool adapter 在进入
-    // BrowserLaneClient 前执行 evaluate gate。默认 OFF（host_default=false）——evaluate 是最高危
-    let browser_full_power_default = read_bool_pref(
-        &deps,
-        PREF_BROWSER_FULL_POWER,
-        env_flag("NOMIFUN_BROWSER_FULL_POWER"),
-    )
-    .await;
-    // SD-6: 持久登录 LIVE 值（DESIGN §16/§27 互斥约束）。产品默认 ON（host_default=true）——持久登录
-    // 开启时与全权互斥（evaluate Blocked）。用户可在 System Settings 关闭以解除互斥。
-    let browser_persistent_login_default =
-        read_bool_pref(&deps, PREF_BROWSER_PERSISTENT_LOGIN, true).await;
-    // P7A: site-memory LIVE 值。host_default=false（OFF）——把站点交互持久化到磁盘是隐私相关行为，
-    // 须用户在 System Settings 显式 opt-in。
-    let browser_site_memory_default = read_bool_pref(&deps, PREF_BROWSER_SITE_MEMORY, false).await;
-    // P7B: visual-fallback LIVE 值。host_default=false（OFF）——每次兜底都过一遍视觉模型，有额外 token
-    // 成本，须用户在 System Settings 显式 opt-in。
-    let browser_visual_fallback_default =
-        read_bool_pref(&deps, PREF_BROWSER_VISUAL_FALLBACK, false).await;
-    // Browser management is status-only. Primary Chromium is always shown in
-    // its managed external window; historical embedded/headless/silent values
-    // are frontend migration inputs only and never affect runtime headlessness.
-    // Browser Host 可执行文件来源偏好（与 silent 正交）。host_default="system"，优先系统安装
-    // 的 Chrome/Edge，未探测到时回退 managed。该值不授予 runtime 所有权：主进程
-    // BrowserSessionHub 统一创建/共享 Host，Primary 使用应用管理的稳定 profile，Crawl 使用临时 profile。
-    let browser_source_default =
-        read_string_pref(&deps, PREF_BROWSER_SOURCE, BROWSER_SOURCE_DEFAULT).await;
-
-    let browser_use_enabled = overrides.browser_use.unwrap_or(browser_use_default);
-
-    let persistent_login_key = browser_use_enabled.then_some(deps.encryption_key);
-
     #[cfg(feature = "browser-use")]
-    let browser_lane_binding = if browser_use_enabled {
-        match deps.browser_lane_provider.as_ref() {
-            Some(slot) => {
-                let provider = slot.get().ok_or_else(|| {
-                    AppError::Internal(
-                        "browser use is enabled but the process-wide Browser Session Hub provider \
-                         has not been installed"
-                            .to_owned(),
-                    )
-                })?;
-                let runtime_instance_id = format!(
-                    "native:{}:{}",
-                    ctx.conversation_id,
-                    uuid::Uuid::now_v7()
-                );
-                Some(
-                    provider
-                        .issue(
-                            crate::factory::browser_lane::TrustedBrowserRuntimeContext {
-                                user_id: options.user_id.clone(),
-                                conversation_id: Some(ctx.conversation_id.clone()),
-                                runtime_instance_id,
-                                agent_id: Some("nomi".to_owned()),
-                                // Execution ownership is resolved by the host
-                                // provider from the authoritative persisted
-                                // ConversationLink. It is never read from
-                                // `options.extra`.
-                                execution_id: None,
-                                step_id: None,
-                                attempt_id: None,
-                                surface:
-                                    nomifun_browser_platform::BrowserSurface::Native,
-                            },
-                        )
-                        .await?,
-                )
-            }
-            // Explicit standalone/test composition. Production AppServices
-            // always supplies a slot, so a provider outage cannot create an
-            // alternate browser owner outside BrowserSessionHub.
+    let browser_workspace = if is_instance_owner {
+        let selected = overrides.browser_use.unwrap_or(false);
+        let provider = if selected {
+            plugin_tool_session.as_ref()
+                .map(|session| session.browser_provider())
+                .transpose()
+                .map_err(|error| AppError::UnprocessableEntity(error.to_string()))?
+                .flatten().cloned()
+        } else {
+            None
+        };
+        match &deps.browser_runtime_resolver {
+            Some(resolve) => resolve(crate::factory::BrowserRuntimeRequest {
+                user_id: options.user_id.clone(), conversation_id: ctx.conversation_id.clone(),
+                temporary: ctx.is_temporary_workspace,
+                selected,
+                provider,
+            }).await?,
+            None if selected => return Err(AppError::UnprocessableEntity(
+                "No native browser host is available for this interactive conversation.".into(),
+            )),
             None => None,
         }
-    } else {
-        None
-    };
+    } else { None };
+
+    let computer_use_default = read_bool_pref(
+        &deps, PREF_COMPUTER_USE,
+        cfg!(feature = "computer-use") || env_flag("NOMIFUN_COMPUTER_USE"),
+    ).await;
 
     let config = NomiResolvedConfig {
         provider: fields.provider,
@@ -1049,25 +990,12 @@ pub(super) async fn build(
         loopback_capability_leases,
         bedrock_config: fields.bedrock_config,
         computer_use: overrides.computer_use.unwrap_or(computer_use_default),
-        browser_use: browser_use_enabled,
-        // Browser Host 可执行文件来源偏好；BrowserSessionHub 仍是唯一 owner。
-        browser_source: browser_source_default,
-        // F1-sec: 全权模式 LIVE 值（无 per-session override，纯 client_preferences 全局开关）。
-        browser_full_power: browser_full_power_default,
-        // SD-6: 持久登录 LIVE 值（产品默认 ON，无 per-session override）。
-        browser_persistent_login: browser_persistent_login_default,
-        // P7A: site-memory LIVE 值（默认 OFF，opt-in；无 per-session override）。
-        browser_site_memory: browser_site_memory_default,
-        // P7B: visual-fallback LIVE 值（默认 OFF，opt-in；无 per-session override）。
-        browser_visual_fallback: browser_visual_fallback_default,
         goal: overrides.goal.clone().map(|g| {
             nomi_agent::goal::runtime::GoalSpec::new(
                 g.objective,
                 g.max_auto_continuations.unwrap_or(8),
             )
         }),
-        // Persistent-login encryption key; absent when browser-use is off.
-        persistent_login_key,
         // Owning conversation instance identity — the nomi manager stamps it
         // onto the session after build so a future reused id is rejected.
         owner_token: owner_token.clone(),
@@ -1180,7 +1108,9 @@ pub(super) async fn build(
     };
     let host_wiring = NomiHostWiring {
         #[cfg(feature = "browser-use")]
-        browser_lane_binding,
+        browser_workspace,
+        #[cfg(feature = "browser-use")]
+        system_browser_session,
         ssh_backend: ssh_session.as_ref().map(|s| Arc::clone(&s.backend)),
         ssh_lease: ssh_session.map(|s| s.lease),
         image_generation_tool,
@@ -1196,6 +1126,8 @@ pub(super) async fn build(
             })
         } else { None },
         web_search_tool,
+        #[cfg(feature = "browser-use")]
+        local_web_search_tool,
         citation_render_tool,
         lazy_mcp_runtime,
         plugin_tool_session,
@@ -1251,24 +1183,6 @@ fn env_flag(name: &str) -> bool {
 /// `client_preferences` keys for the System Settings capability toggles
 /// (written by the frontend via `configService`, read here per session).
 const PREF_COMPUTER_USE: &str = "agent.computerUse";
-const PREF_BROWSER_USE: &str = "agent.browserUse";
-/// **F1-sec**: browser-use evaluate「全权模式」开关（裁决⑨）。`true` → evaluate 放行（仍受与持久登录
-/// 互斥约束）；缺/`false` → evaluate 默认 OFF（最高危逃生舱 default-deny）。前端 System Settings 写。
-const PREF_BROWSER_FULL_POWER: &str = "agent.browserUse.fullPower";
-/// **SD-6**: browser-use 持久登录开关（裁决⑨ 互斥约束）。`true`（产品默认）→ 与全权互斥；`false` → 解除互斥。
-const PREF_BROWSER_PERSISTENT_LOGIN: &str = "agent.browserUse.persistentLogin";
-/// **P7A**: browser-use 站点记忆开关（opt-in，隐私相关）。`true` → 跨会话记住站点结构 + 注入 hints；
-/// 缺/`false`（host_default）→ OFF（不持久化、零行为变化）。前端 System Settings 写。
-const PREF_BROWSER_SITE_MEMORY: &str = "agent.browserUse.siteMemory";
-/// **P7B**: browser-use 视觉兜底点击（opt-in，有 token 成本）。`true` → DOM/aria 锚定失败时截图交视觉
-/// 模型定位再点；缺/`false`（host_default）→ OFF（不注入 locator、零行为变化）。前端 System Settings 写。
-const PREF_BROWSER_VISUAL_FALLBACK: &str = "agent.browserUse.visualFallback";
-/// Browser Host 可执行文件来源偏好（与 silent 正交）。`"managed"` = 内置/下载 CfT；
-/// `"system"`（默认）= 系统 Chrome/Edge 本体优先（未探到回退 managed）。前端写入偏好；
-/// 主进程 BrowserSessionHub 仍统一拥有 Host 和应用管理 profile。
-const PREF_BROWSER_SOURCE: &str = "agent.browserUse.source";
-/// Browser Host 来源默认值（无设置行/无 client_prefs 时）：系统安装的 Chrome / Edge。
-const BROWSER_SOURCE_DEFAULT: &str = "system";
 
 /// Read a boolean `client_preferences` toggle live, falling back to
 /// `host_default` when there is no setting row (fresh install) or no
@@ -1290,17 +1204,6 @@ async fn read_bool_pref(deps: &AgentFactoryDeps, key: &str, host_default: bool) 
     }
 }
 
-/// Shared boolean-preference parse semantics for the `agent.browserUse.*`
-/// toggles this factory shares with the Hub.
-///
-/// Deliberately identical to the boot-time reader in nomifun-app
-/// `load_browser_startup_preferences` (services.rs), so Hub startup policy and
-/// this per-session policy can never disagree about the same stored row:
-/// quotes are trimmed (a raw settings-API write stores JSON strings like
-/// `"false"`), an explicit opposite value flips the toggle, and any junk value
-/// resolves to `host_default` — default-ON toggles (e.g. persistentLogin)
-/// parse as `value != "false"`, default-OFF toggles (e.g. fullPower) parse as
-/// `value == "true"`.
 fn parse_bool_pref(value: &str, host_default: bool) -> bool {
     let value = value.trim().trim_matches('"');
     if host_default {
@@ -1310,25 +1213,6 @@ fn parse_bool_pref(value: &str, host_default: bool) -> bool {
     }
 }
 
-/// Read a string `client_preferences` value live, falling back to `host_default`
-/// when there is no setting row (fresh install), no client_prefs repo is wired, or
-/// the stored value is blank. Mirrors [`read_bool_pref`] for stringly settings
-/// (e.g. `agent.browserUse.source` = `"managed"`/`"system"`). Read per session so
-/// toggling the setting affects new sessions without a restart.
-async fn read_string_pref(deps: &AgentFactoryDeps, key: &str, host_default: &str) -> String {
-    let Some(repo) = deps.client_prefs.as_ref() else {
-        return host_default.to_owned();
-    };
-    match repo.get_by_keys(&[key]).await {
-        Ok(rows) => rows
-            .into_iter()
-            .find(|r| r.key == key)
-            .map(|r| r.value.trim().trim_matches('"').to_owned())
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| host_default.to_owned()),
-        Err(_) => host_default.to_owned(),
-    }
-}
 
 /// App UI language default — the final fallback when no language is persisted
 /// AND the host OS locale is unavailable. Matches
@@ -1973,7 +1857,7 @@ mod tests {
     }
 
     #[test]
-    fn bool_pref_parse_matches_the_boot_time_reader_semantics() {
+    fn boolean_preference_parser_handles_bare_and_quoted_values() {
         // Fail-open default-ON keys (persistentLogin): only an explicit
         // "false" (bare or JSON-quoted) turns them off; junk keeps the default.
         for on in ["true", "\"true\"", "yes", "\"yes\"", "", "junk"] {

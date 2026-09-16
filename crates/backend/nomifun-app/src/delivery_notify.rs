@@ -225,14 +225,16 @@ impl DeliveryNotifyObserver {
             self.asset_resolver.clone(),
         );
         let shutdown = self.shutdown.clone();
-        let task = tokio::spawn(async move {
+        let task = async move {
             tokio::select! {
                 _ = shutdown.cancelled() => {}
                 _ = relay.run(rx) => {}
             }
-        });
+        };
         if let Some(registrar) = self.background_task_registrar.as_ref() {
-            registrar.register(task);
+            registrar.spawn(Box::pin(task));
+        } else {
+            tokio::spawn(task);
         }
     }
 }

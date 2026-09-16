@@ -9,7 +9,7 @@
  *
  * This file replaces the original IPC bridge calls with HTTP REST and WebSocket
  * calls routed to nomicore. Electron-native operations (window controls,
- * native dialogs, auto-update, devtools, zoom, deep links) remain as IPC.
+ * native dialogs, auto-update, zoom, and deep links) remain as IPC.
  */
 
 import { bridge } from '@/platform';
@@ -19,7 +19,6 @@ import {
   noopEmitter,
   shellEmitter,
   shellProvider,
-  stubShellProvider,
   subscribeDeepLink,
   subscribeWebuiStatus,
   subscribeWindowMaximized,
@@ -303,21 +302,6 @@ import {
   wsMappedEmitter,
 } from './httpBridge';
 
-export { browserSession } from '@/common/browser/browserSession';
-export type {
-  BrowserCloseResult,
-  BrowserIdentityMode,
-  BrowserLaneLifecycleState,
-  BrowserResourcePressureState,
-  IBrowserCapacityOverview,
-  IBrowserInventoryChangedEvent,
-  IBrowserLane,
-  IBrowserLaneIdentity,
-  IBrowserLaneOwner,
-  IBrowserLaneQueue,
-  IBrowserOverview,
-  IBrowserTab,
-} from '@/common/browser/browserTypes';
 import {
   parseConversationArtifactId,
   type ConversationArtifactId,
@@ -1297,15 +1281,6 @@ export interface IStartOnBootStatus {
   platform: string;
 }
 
-export type IRendererLogLevel = 'info' | 'warn' | 'error';
-
-export interface IRendererLogEntry {
-  level: IRendererLogLevel;
-  tag: string;
-  message: string;
-  data?: unknown;
-}
-
 // ---------------------------------------------------------------------------
 // Application — stays IPC (Electron-native)
 // ---------------------------------------------------------------------------
@@ -1316,8 +1291,6 @@ export const application = {
   // on the next boot (see nomifun_common::factory_reset). Callers should relaunch
   // (application.restart) right after this resolves.
   factoryReset: httpPost<void, void>('/api/system/factory-reset'),
-  // DEGRADE_STUB: Tauri v2 has no public JS API to toggle the webview devtools.
-  openDevTools: stubShellProvider<boolean, void>(false),
   systemInfo: withResponseMap(
     httpGet<
       {
@@ -1380,14 +1353,6 @@ export const application = {
     },
     { success: false }
   ),
-  // DEGRADE_STUB: renderer-log piping to the shell; the in-process backend owns log files.
-  writeRendererLog: stubShellProvider<void, IRendererLogEntry>(undefined),
-  logStream: noopEmitter<{
-    level: 'log' | 'warn' | 'error';
-    tag: string;
-    message: string;
-    data?: unknown;
-  }>(),
 };
 
 // ---------------------------------------------------------------------------
@@ -5955,41 +5920,6 @@ export const companion = {
   }),
 };
 
-/** Phase 2b「登录我的浏览器」status returned by open/close/status. */
-export interface IBrowserLoginStatus {
-  /** Whether a visible login browser is currently open. */
-  active: boolean;
-  /** Outcome code: 'opened' | 'already_open' | 'queued' | 'closed' | 'not_open' | 'launch_failed:<err>'. */
-  message?: string;
-  /** Whether a fresh Primary-identity capture was committed to the encrypted vault
-   *  DURING this login session (the Hub advances its canonical identity generation
-   *  only after a successful capture + vault persist). NOT a close()-triggered
-   *  backup: a manual login that triggered no capture reports `false` even though
-   *  the persistent on-disk profile still retains the login for silent reuse. */
-  saved: boolean;
-  /** Lane backing the login session; present while a session exists. */
-  lane_id?: string;
-  // NOTE: responses also carry `source` — the EFFECTIVE host-policy Chrome
-  // source ('managed' | 'system') the login browser actually uses.
-}
-
-/** 「登录我的浏览器」— open a visible browser bound to the shared profile so the user logs
- *  into their sites once; silent agent sessions then reuse the login. The request-body
- *  `source` is IGNORED by the backend (kept only for wire compatibility): the trusted
- *  Chrome source is host policy frozen at process start, and the response's `source`
- *  field reports the effective value (a live agent.browserUse.source toggle only takes
- *  effect after an app restart). */
-export const browserLogin = {
-  /** Open the visible login window (idempotent while already open; a 'queued'
-   *  outcome is foregrounded automatically once the Lane starts running). */
-  open: httpPost<IBrowserLoginStatus, { source: 'managed' | 'system' }>('/api/browser/login/open'),
-  /** Close it, returns final status; `saved` reports whether a vault capture
-   *  actually happened during the session (see IBrowserLoginStatus.saved). */
-  close: httpPost<IBrowserLoginStatus, void>('/api/browser/login/close'),
-  /** Poll whether a login window is currently open. A pure read: it never
-   *  renews or revokes the underlying session. */
-  status: httpGet<IBrowserLoginStatus, void>('/api/browser/login/status'),
-};
 
 // ==================== Knowledge Base Platform (knowledge) ====================
 

@@ -8,6 +8,7 @@ export type CapabilityCategory = (typeof CAPABILITY_CATEGORIES)[number];
 export type CapabilityReference = ExactCatalogRef<'capability'>;
 
 export function capabilityCategory(reference: CapabilityReference): CapabilityCategory {
+  if (reference.id === 'nomi_local_websearch' || reference.id === 'nomi_system_browser') return 'web';
   const family = reference.id.split('.')[0];
   if (['knowledge', 'memory', 'session'].includes(family)) return 'knowledge';
   if (['fs', 'vcs', 'process', 'terminal', 'workspace', 'ssh'].includes(family)) return 'development';

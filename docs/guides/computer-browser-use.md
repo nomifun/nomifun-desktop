@@ -1,234 +1,51 @@
-# Computer Use And Browser Use
+# Computer Use And Browser Workspace
 
-NomiFun exposes two optional automation capability families to agents:
+NomiFun separates desktop-wide Computer automation from a conversation's native browser. Both require the corresponding Agent capabilities; a page or model prompt cannot grant those permissions.
 
-- **Computer use**: screenshots, mouse/keyboard input, window enumeration, and
-  focus control through the in-process Rust implementation (`nomi-computer`,
-  with accessibility helpers in `nomi-a11y`).
-- **Browser use**: a single main-process `BrowserSessionHub` manages Chromium
-  Hosts, addressable Browser Lanes, identity, resource queues, and cleanup.
-  `nomi-browser-engine` supplies the CDP driver and
-  `nomi-browser` supplies the Lane-aware tool adapter. Native Nomi, Gateway,
-  and parallel AgentExecution attempts all enter this Hub.
+## Browser Workspace (v2, implementation in progress)
 
-Both are high-privilege capabilities. In the desktop product UI they are
-compiled in and enabled by default so a user can opt out from Settings. In
-headless/server hosts they are omitted or disabled unless the host explicitly
-enables the relevant build feature and runtime flag.
+Open the browser from the Browser button inside a conversation. The global Browser management/settings page and its compatibility redirect have been removed.
 
-## Current Architecture
+The user and Agent see the same native web page. During an Agent run, user page input is locked. Stop the Agent and wait for pending operations to settle before interacting manually. Hiding the panel keeps the page and tabs alive; it is not a takeover or a reset.
 
-The old external `@playwright/mcp` sidecar and the private per-caller
-`BrowserTool` or Chromium ownership paths have been removed. Browser automation
-now enters through the process-wide `BrowserSessionHub`; no browser stdio
-sidecar or per-caller profile is created.
+For a frontend project, start its development server, then ask the Agent to navigate to the localhost URL in the conversation browser, observe the page, interact, and verify the result. Navigation, clicks, keyboard input and standard HTML selections use the real browser. A screenshot stream is not the interactive surface.
 
-Computer use is desktop-oriented. It can observe the screen and synthesize
-input, so it is compiled into desktop/Nomi CLI builds but omitted from the
-headless web/server build.
+Windows native input has real smoke coverage. The full product acceptance matrix, including macOS, frames, dialogs, files, and packaging, is still in progress. See the [architecture](../architecture/browser-platform.md) and [implementation record](../specs/2026-09-13-browser-workspace-v2-progress.zh.md) for the current limits.
 
-## Enabling And Disabling Capabilities
+## Optional System Browser (Windows, implementation in progress)
 
-### Desktop Management Surfaces
+Select `nomi_system_browser` in the Agent workbench's Web category, then use System Browser in the conversation header to connect to your running, signed-in Chrome 144+.
+Enable connections at `chrome://inspect/#remote-debugging`, approve Chrome's prompt, and choose the tabs this conversation may use.
+No Chrome restart, replacement profile, or import of cookies, passwords or history is required. Chrome's native permission covers the selected profile; NomiFun separately restricts Agent targets to your selected tabs.
 
-The desktop app exposes two capability-management surfaces:
+The initial driver supports main-document observation, navigation, clicks, text, keys and scrolling in the original Chrome window. There is no screenshot-stream surface, test panel or takeover mode.
+Authorization changes are disabled while the Agent runs. NomiFun cannot physically lock Chrome's address bar, window controls or permission-revocation UI.
+Disconnect releases automation and its connection, not your browser or tabs. A pending connection can be cancelled; uncertain requests are reconciled by reading state, never automatically reconnected or replayed.
 
-- **Browser management → Settings** (`/browser?tab=settings`; legacy `/settings/browser-use` redirects here)
-- **Computer Use** (`/settings/computer-use`)
+Trusted main-document input has been tested in an owned disposable Chrome. User-approved personal-login acceptance, the full iframe/file/dialog matrix, and release acceptance remain outstanding.
+Edge, macOS and Linux support is not yet claimed. This capability grants neither embedded-browser control nor local or provider-native web search.
 
-Current desktop builds default both capability toggles to **on** when the
-corresponding feature is compiled. Turning either toggle off persists a user
-preference and prevents new sessions from receiving that capability. Browser
-Settings also provides:
+## Optional Web Search
 
-- browser source: a system Chrome/Edge executable or the managed source;
-- presentation: the global default is **Silent** (`headless`), which runs
-  ordinary Primary work with Chromium `--headless=new`. The installation owner
-  may choose **Visible window** (`external`) in the Settings tab; the backend
-  applies a confirmed change immediately and persists it;
-- resource policy: Automatic, Resource saving, or High concurrency. Aggregate
-  capacity scales with concurrent tasks and machine pressure instead of using a
-  fixed installation-wide RSS cap;
-- advanced resource limits for diagnostics and explicit tuning: an elastic
-  global memory-pressure ratio plus per-task attributed-memory, operation,
-  Lane, tab, and queue budgets. Shared-Host task memory is an estimate; the
-  structural limits are hard boundaries.
+In the Agent workbench's Web category, `nomi_local_websearch` is distinct from the model provider's `web.search`. Local search sends the query to a search engine through an isolated Headless runtime and does not use conversation login state. It does not require model-native search or grant browser automation.
 
-The sidebar **Browser** page (`/browser`) now owns two tabs. **Lifecycle** lists
-running and queued Lanes and shows status, capacity, queue, identity, owner, and
-lifecycle data. It can close a Lane, a conversation's Lanes, or all Lanes when
-authorized. For a running Primary Lane it also offers **Open browser in
-foreground** and **Run in background**; these change the current shared Primary
-Host without changing the global default. **Settings** owns the Browser Use
-toggle, source, global visibility default, login identity, security, and resource
-policy. The page still does not embed web content or provide page input, tab
-control, user takeover, or address navigation.
+Windows desktop detects installed Chrome 120+; without a suitable installation this capability cannot be enabled. Discovery does not launch a browser. A query starts an isolated runtime and verifies its live version.
+Queries go to Bing and engine domains are resolved through Google Public DNS over HTTPS, without conversation login state. Restart the app if a Chrome update invalidates the pinned release.
+Windows catalog integration and public queries are verified. Full main-application interaction and packaging acceptance remain in progress; macOS implementation awaits the later handoff.
 
-### Per Session
+## Computer Use
 
-Create or update a session with capability flags in `extra`:
+Computer automation remains desktop-oriented and separate from Browser Workspace. Use the Agent workbench to select its capabilities and Settings → Computer Use to manage desktop-control settings and OS permissions.
 
-```json
-{ "computerUse": true, "browserUse": true }
-```
-
-Both camelCase and snake_case keys are accepted by compatibility paths.
-
-### Host Environment
-
-```bash
-NOMIFUN_COMPUTER_USE=1
-NOMIFUN_BROWSER_USE=1
-```
-
-These set default availability for Nomi-engine sessions in the host where they
-are read. They do not bypass build-time feature gates.
-
-### Nomi Engine Config
-
-`~/.nomi/config.toml` or project `.nomi/config.toml`:
+Standalone Nomi Computer configuration remains:
 
 ```toml
 [tools]
 max_recent_images = 3
-
 [tools.computer]
 enabled = true
 max_screenshot_edge = 1568
-
-[tools.browser]
-enabled = true
-# The trusted global default is headless; an installation owner may change it
-# live to external. Foreground/background Lane actions do not rewrite it.
-# Unknown legacy keys (e.g. old browser_path / idle_timeout_secs entries) are
-# ignored and cannot bypass BrowserSessionHub policy.
 ```
-
-On first use, the Hub resolves a system Chrome/Edge executable or the managed
-source without requiring Node, npm, or Playwright. The selected source chooses
-only the executable: every process remains managed by NomiFun and always uses
-an application-owned isolated profile, never the user's real Chrome or Edge
-profile. Two live Chromium processes are never allowed to open the same
-user-data directory.
-
-After a proven normal shutdown of a stable managed profile, NomiFun removes the
-exact completed ownership marker and that launch's `DevToolsActivePort` file.
-Cookies, site storage, and other stable profile data remain. If exact ownership
-or process-tree exit cannot be revalidated, cleanup preserves those artifacts
-for recovery and reports the shutdown as incomplete rather than guessing.
-
-## Build Matrix
-
-| Host | Computer use | Browser use |
-| --- | --- | --- |
-| `nomifun-desktop` | Compiled by the `computer-use` feature | Compiled by the `browser-use` feature |
-| `nomi` CLI | Enabled in the current `nomi-cli` build | Not enabled in the current `nomi-cli` manifest |
-| `nomifun-web` / Docker | Not compiled | Not compiled in the current headless web host |
-
-Web/server builds should not promise desktop or managed-browser control. If a
-config enables these tools in a host that was built without the relevant
-features, the backend should warn rather than expose a non-working tool.
-
-## Browser Lanes, Identity, And Concurrency
-
-- A runtime keeps a stable default Lane for its lifetime. Parallel attempts in
-  one AgentExecution receive different LaneKeys even when companion and
-  conversation fields match.
-- Operations within one Lane are strictly serialized. Different Lanes can run
-  concurrently without crossing target, frame, ref, tab, download, or
-  cancellation state.
-- Ordinary interactive work defaults to the **Primary shared live identity**.
-  The global presentation default is `headless`, so ordinary Agent use runs
-  Chromium with `--headless=new` and creates no OS browser window. The
-  installation owner may explicitly make `external` the live, persisted
-  default. A Lane owner may also foreground or background only the current
-  Primary Host without changing that default. Primary Lanes share cookies and
-  profile-backed site state, but never share active targets, frame/ref cursors,
-  operation gates, or downloads.
-- Public reads default to **Anonymous crawl**, with no Primary cookies or site
-  storage. Bounded read-only authenticated expansion may use an
-  **Authenticated replica**; replica changes never merge back automatically,
-  and identity-changing operations require Primary. Account switching,
-  sign-out tests, untrusted browsing, and explicit isolation use an
-  **Isolated identity**. Crawl, replica, and isolated Hosts may run headless.
-- Anonymous profile state is bounded per shared Host: 512 MiB, 50,000 entries,
-  30 minutes, or 256 admitted navigations trigger an exact fenced rotation.
-  This prevents long-running public-page work from accumulating browser cache
-  and site data indefinitely without imposing a fixed total-memory cap across
-  unrelated tasks.
-
-Capacity is bounded per task and remains elastic in aggregate. Requests beyond a
-task's envelope or the current machine-wide safe budget enter a
-cancellable queue and return `browser_capacity_queued` or
-`system_memory_pressure` with queue position, reason, recommended concurrency,
-and retry delay. `browser_open` successfully reports that its Lane entered the
-queue, but navigation, observation, page `wait`, and other ordinary actions are
-not dispatched until the Lane is `running`; they return an explicit retryable
-tool error with `ok: false`, `dispatched: false`, and
-`browser_capacity_queued` instead. After `retry_delay_ms`, call
-`browser_status` and retry the original action only when it reports `running`.
-Do not use page `wait` to wait for Lane capacity or launch another browser to
-bypass it; reuse a running Lane, lower concurrency, or use
-`browser_crawl_many` for bounded batch reads.
-
-## Browser Tools And Lifecycle
-
-Existing navigation, observation, action, screenshot, tab, download, and debug
-actions accept an optional `lane_id`; omission uses the caller's default Lane.
-Lane management actions are:
-
-- `browser_open`: idempotently open the default or a named Lane;
-- `browser_fork`: create an expansion Lane;
-- `browser_list` / `browser_status`: inspect Lane, identity, capacity, queue,
-  and recovery state;
-- `browser_close` / `browser_close_all`: close one or all Lanes owned by the
-  caller;
-- `browser_crawl_many`: process a bounded URL batch while owning Lane reuse,
-  ordering, cancellation, and cleanup.
-
-Knowledge rendering opens and closes a transaction-scoped Anonymous Lane for
-each URL. Crawl output is byte-bounded before it crosses CDP and before batch
-aggregation, so cancellation or a hostile large page cannot leave a growing
-queue of full HTML/text results.
-
-Closing a Lane gives its browser calls a typed error but does not close the
-conversation or AgentExecution. Attempt completion/cancellation, runtime
-termination, conversation deletion, remote disconnect, capability expiry, and
-app exit revoke owner leases and trigger authoritative drains. A Native Agent
-turn drains its owner Lanes when it completes or is cancelled. A
-session/conversation close drains matching Lanes and their target cleanup, then
-shuts down any Host made empty. Installation shutdown and installation-wide
-**Close All** prevent new opens while draining every Lane, pending cleanup, and
-managed Host.
-
-The UI confirms installation-wide **Close All** only when the response includes
-all three authoritative zeroes: `remaining_lane_count`,
-`remaining_cleanup_count`, and `remaining_managed_host_count`. A successful
-request or a nonzero `closed` count alone is not proof that cleanup finished.
-
-### Changing Primary Visibility
-
-To inspect the real managed browser, open `/browser`, select a Lane whose
-identity is Primary and whose state is `running`, then choose **Open browser in
-foreground**. This is a one-time display request for the current Primary Host;
-it does not change the global default. **Run in background** is the symmetric
-current-Host action. Because Primary Lanes share one canonical Host, a required
-headless/headful change safely replaces the whole Host at a new browser epoch
-and rebinds every live Primary Lane on it. The same transition occurs when the
-installation owner changes the global default and a running Primary Host has
-the other mode. The Hub makes a best effort to restore active URLs, but old
-target/frame/ref state is stale: refresh inventory and perform a fresh observe
-before continuing. This does not change Lane ownership or add an embedded
-preview, takeover, or page-input surface. Queued, failed, and non-Primary Lanes
-cannot use these visibility actions.
-
-The authenticated management endpoints are
-`POST /api/browser/lanes/{id}/foreground` and
-`POST /api/browser/lanes/{id}/background`; state-changing requests retain the
-normal CSRF protection. They are not exposed as Agent Browser actions.
-Installation owners manage the persistent default through
-`GET`/`PUT /api/browser/display-mode`, as used by the Browser management
-**Settings** tab.
 
 ## macOS Permissions
 
@@ -269,11 +86,7 @@ Backed by `GET/POST /api/computer/permissions[/request|/open-settings]`
   `focus_window` are execution-level operations and require approval in default
   modes.
 - Plan mode hides the whole computer-use tool.
-- Browser actions derive approval from behavior: observation is info-level;
-  navigation, clicking, typing, and other page mutations are execution-level.
-  The Browser management page cannot invoke those actions. Egress, approval,
-  secret, download, full-power, and irreversible-action safeguards remain in
-  force, and model input cannot manufacture trusted approval.
+- Browser observation is info-level; navigation and page changes are execution-level. The run guard and exact capability policy apply independently of page content.
 
 Recommended loop: observe with a screenshot or browser snapshot, perform one
 small operation, then observe again.

@@ -52,7 +52,6 @@ use nomifun_realtime::UserEventSink;
 use nomifun_runtime::resolve_command_path;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::{broadcast, oneshot};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -1030,15 +1029,21 @@ pub trait TurnCompletionObserver: Send + Sync {
         result_ok: bool, result_text: Option<&str>, result_error_code: Option<&str>);
 }
 
-/// Host-owned sink for detached service tasks.
+/// Host-owned admission for independent completion tasks.
 ///
 /// ConversationService deliberately remains independent of the application
 /// composition root, but its completion observer still performs repository
 /// work after a turn has released its runtime.  Production hosts install this
-/// registrar so those tasks are joined before SQLite closes; isolated tests
-/// may leave it unset and retain the historical detached behavior.
+/// registrar so new work can be rejected during shutdown and accepted tasks
+/// are joined before SQLite closes. Isolated tests may own their Tokio runtime
+/// directly and omit the host registrar.
 pub trait BackgroundTaskRegistrar: Send + Sync {
-    fn register(&self, task: JoinHandle<()>);
+    /// Admit before spawning so shutdown can reject a new observer without
+    /// ever starting it. Accepted work remains owned until the host joins it.
+    fn spawn(
+        &self,
+        task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+    ) -> bool;
 }
 
 /// Outcome of a delivery-notify registration attempt (spec D2).
@@ -1069,6 +1074,7 @@ pub struct ConversationService {
     /// can happen post-construction without breaking the `Clone` impl —
     /// mirrors the `cron_service` slot pattern below.
     delete_hooks: Arc<RwLock<Vec<Arc<dyn OnConversationDelete>>>>,
+    before_delete_hooks: Arc<RwLock<Vec<Arc<dyn nomifun_common::BeforeConversationDelete>>>>,
     cron_service: Arc<RwLock<Option<Arc<dyn ICronService>>>>,
     mcp_server_repo: Arc<RwLock<Option<Arc<dyn IMcpServerRepository>>>>,
     /// Knowledge base service slot (same post-construction registration
@@ -2301,6 +2307,7 @@ impl ConversationService {
             skill_resolver,
             runtime_registry,
             delete_hooks: Arc::new(RwLock::new(Vec::new())),
+            before_delete_hooks: Arc::new(RwLock::new(Vec::new())),
             cron_service: Arc::new(RwLock::new(None)),
             mcp_server_repo: Arc::new(RwLock::new(None)),
             knowledge_service: Arc::new(RwLock::new(None)),
@@ -2545,6 +2552,10 @@ impl ConversationService {
         if let Ok(mut guard) = self.delete_hooks.write() {
             guard.push(hook);
         }
+    }
+
+    pub fn with_before_delete_hook(&self, hook: Arc<dyn nomifun_common::BeforeConversationDelete>) {
+        self.before_delete_hooks.write().unwrap_or_else(|error| error.into_inner()).push(hook);
     }
 
     /// The single source of truth for `msg_id` values across the backend.
@@ -3236,6 +3247,42 @@ impl ConversationService {
 
         self.runtime_state
             .summary_from_parts(conversation_id, runtime_status, has_runtime)
+    }
+
+    /// Reconfigure an idle owned runtime resource without resetting messages,
+    /// saved session history, workspace files, or the conversation aggregate.
+    /// Check and work are trusted host callbacks, never user-supplied code.
+    pub async fn with_idle_runtime_reconfiguration<T,C,CF,F,FF>(
+        &self,user_id:&str,id:&str,check:C,work:F,
+    )->Result<T,AppError>
+    where T:Send+'static,C:FnOnce()->CF+Send+'static,CF:std::future::Future<Output=Result<(),AppError>>+Send+'static,
+        F:FnOnce()->FF+Send+'static,FF:std::future::Future<Output=Result<T,AppError>>+Send+'static {
+        let (service,user_id,id)=(self.clone(),user_id.to_owned(),id.to_owned());
+        tokio::spawn(async move {
+            service.ensure_public_mutation_allowed(&user_id,&id).await?;
+            service.ensure_not_creative_studio_agent_session(&user_id,&id,"reconfigure browser").await?;
+            let preparation=service.runtime_state.acquire_preparation_gate(&id,&CancellationToken::new()).await?;
+            service.ensure_public_mutation_allowed(&user_id,&id).await?;
+            let row=service.conversation_repo.get(&id).await?.filter(|row|row.user_id==user_id)
+                .ok_or_else(||AppError::NotFound("Conversation not found".into()))?;
+            if !matches!(row.status.as_deref(),Some("pending"|"finished"))
+                || service.runtime_registry.get_runtime(&id).is_some_and(|runtime|runtime.status()==Some(ConversationStatus::Running)) {
+                return Err(AppError::Conflict("Stop the Agent before rebuilding its browser".into()));
+            }
+            // Reject stale resources before advancing cancellation epochs or
+            // disturbing idle preparation. The preparation gate is held.
+            check().await?;
+            let fence=service.runtime_state.begin_idle_resource_reconfiguration(&id)?;
+            let builds=fence.cancelled_build_ids().to_vec();
+            service.await_cancelled_runtime_builds_quiesced(&id,&builds,"idle browser reconfiguration").await;
+            service.runtime_state.forget_cancelled_runtime_builds(&id,&builds);
+            service.runtime_registry.terminate_and_wait_result(&id,Some(AgentKillReason::ConfigurationChanged)).await?;
+            service.runtime_state.clear_knowledge_signature(&id);
+            let result=work().await;
+            drop(fence);
+            drop(preparation);
+            result
+        }).await.map_err(|_|AppError::Internal("Browser reconfiguration worker failed".into()))?
     }
 
     /// The most recent completed `turn` receipt for one owned Conversation.
@@ -4062,7 +4109,7 @@ impl ConversationService {
             let result_ok = completion.result_ok;
             let result_text = completion.result_text.clone();
             let result_error_code = completion.result_error_code.clone();
-            let observer_task = tokio::spawn(async move {
+            let observer_task = async move {
                 observer
                     .on_turn_completed(
                         &conversation_id,
@@ -4072,14 +4119,16 @@ impl ConversationService {
                         result_error_code.as_deref(),
                     )
                     .await;
-            });
+            };
             if let Some(registrar) = self
                 .background_task_registrar
                 .read()
                 .ok()
                 .and_then(|slot| slot.clone())
             {
-                registrar.register(observer_task);
+                registrar.spawn(Box::pin(observer_task));
+            } else {
+                tokio::spawn(observer_task);
             }
         }
         let turn_generation = turn_handle.turn_id();
@@ -5930,6 +5979,7 @@ impl ConversationService {
         let (result_tx, result_rx) = oneshot::channel();
         let service = self.clone();
         let deletion_cancelled_build_ids = deletion_guard.cancelled_build_ids().to_vec();
+        let before_hooks = self.before_delete_hooks.read().unwrap_or_else(|error| error.into_inner()).clone();
         let hooks: Vec<Arc<dyn OnConversationDelete>> =
             self.delete_hooks.read().map(|guard| guard.clone()).unwrap_or_default();
         tokio::spawn(async move {
@@ -5994,6 +6044,12 @@ impl ConversationService {
             // owner must let the explicit database transaction finish. Dropping
             // the repository future on an inner timeout would lose the
             // captured Cron IDs needed for post-commit scheduler/file cleanup.
+            for hook in before_hooks {
+                if let Err(error) = hook.before_conversation_delete(&user_id, &conversation_id).await {
+                    let _ = result_tx.send(Err(error));
+                    return;
+                }
+            }
             if let Err(error) = service.cancel_conversation_creations(&conversation_id).await {
                 let _ = result_tx.send(Err(error));
                 return;

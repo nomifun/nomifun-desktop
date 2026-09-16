@@ -1,6 +1,6 @@
 //! Bundled Wave 1 read-capability registrations.
 //!
-//! The six package identities and 25 capabilities below are the Wave 1 slice
+//! The eight package identities and 27 capabilities below are the Wave 1 slice
 //! of the frozen first-party contribution inventory.  Customer-service
 //! dialogue/identity is owned by Wave 4 and is intentionally absent here.
 
@@ -44,6 +44,8 @@ pub const VERSION: &str = CONTRACT_VERSION;
 pub const PACKAGE_VERSION: &str = CONTRACT_VERSION;
 
 pub const WEB_RESEARCH_PACKAGE_ID: &str = "nomifun.web-research";
+pub const LOCAL_WEBSEARCH_PACKAGE_ID: &str = "nomifun.local-websearch";
+pub const SYSTEM_BROWSER_PACKAGE_ID: &str = "nomifun.system-browser";
 pub const CHAT_PACKAGE_ID: &str = "nomifun.chat";
 pub const KNOWLEDGE_PACKAGE_ID: &str = "nomifun.knowledge";
 pub const PROJECT_MEMORY_PACKAGE_ID: &str = "nomifun.project-memory";
@@ -58,19 +60,23 @@ pub const COMPANION_MEMORY_MOUNT_ID: &str = "domain-companion-memory";
 pub const SKILLS_MOUNT_ID: &str = "domain-skills";
 
 /// Bundled package identities owned by Wave 1.
-pub const PACKAGE_IDS: [&str; 6] = [
+pub const PACKAGE_IDS: [&str; 8] = [
     WEB_RESEARCH_PACKAGE_ID,
+    LOCAL_WEBSEARCH_PACKAGE_ID,
+    SYSTEM_BROWSER_PACKAGE_ID,
     CHAT_PACKAGE_ID,
     KNOWLEDGE_PACKAGE_ID,
     PROJECT_MEMORY_PACKAGE_ID,
     COMPANION_MEMORY_PACKAGE_ID,
     SKILLS_PACKAGE_ID,
 ];
-pub const TARGET_PACKAGE_IDS: [&str; 6] = PACKAGE_IDS;
+pub const TARGET_PACKAGE_IDS: [&str; 8] = PACKAGE_IDS;
 
-/// Capability IDs present in the six Wave 1 packages.
-pub const CAPABILITY_IDS: [&str; 25] = [
+/// Capability IDs present in the eight Wave 1 packages.
+pub const CAPABILITY_IDS: [&str; 27] = [
     "web.search",
+    "nomi_local_websearch",
+    "nomi_system_browser",
     "web.fetch",
     "citation.render",
     "session.attachments.read",
@@ -96,10 +102,12 @@ pub const CAPABILITY_IDS: [&str; 25] = [
     "skill.invoke",
     "skill.hooks",
 ];
-pub const TARGET_CAPABILITY_IDS: [&str; 25] = CAPABILITY_IDS;
-pub const ALL_CAPABILITY_IDS: [&str; 25] = CAPABILITY_IDS;
+pub const TARGET_CAPABILITY_IDS: [&str; 27] = CAPABILITY_IDS;
+pub const ALL_CAPABILITY_IDS: [&str; 27] = CAPABILITY_IDS;
 
 pub const WEB_SEARCH: &str = "web.search";
+pub const NOMI_LOCAL_WEBSEARCH: &str = "nomi_local_websearch";
+pub const NOMI_SYSTEM_BROWSER: &str = nomifun_browser_platform::system_browser::TOOL_NAME;
 pub const WEB_FETCH: &str = "web.fetch";
 pub const CITATION_RENDER: &str = "citation.render";
 pub const SESSION_ATTACHMENTS_READ: &str = "session.attachments.read";
@@ -126,6 +134,8 @@ pub const SKILL_INVOKE: &str = "skill.invoke";
 pub const SKILL_HOOKS: &str = "skill.hooks";
 
 pub const WEB_SEARCH_ACTION: &str = "web.search.invoke";
+pub const NOMI_LOCAL_WEBSEARCH_ACTION: &str = "nomi_local_websearch.invoke";
+pub const NOMI_SYSTEM_BROWSER_ACTION: &str = "nomi_system_browser.invoke";
 pub const WEB_FETCH_ACTION: &str = "web.fetch.invoke";
 pub const KNOWLEDGE_SEARCH_ACTION: &str = "knowledge.search.invoke";
 pub const KNOWLEDGE_READ_ACTION: &str = "knowledge.read.invoke";
@@ -141,7 +151,7 @@ pub const MEMORY_COMPANION_EVOLVE_ACTION: &str = "memory.companion.evolve.invoke
 pub const SKILL_INVOKE_ACTION: &str = "skill.invoke.invoke";
 
 /// Family names owned by this bounded read-capability slice.
-pub const TARGET_CAPABILITY_FAMILIES: [&str; 9] = [
+pub const TARGET_CAPABILITY_FAMILIES: [&str; 11] = [
     "attachments.read",
     "knowledge.read",
     "knowledge.search",
@@ -150,6 +160,8 @@ pub const TARGET_CAPABILITY_FAMILIES: [&str; 9] = [
     "skill.instructions",
     "web.fetch",
     "web.search",
+    "nomi_local_websearch",
+    "nomi_system_browser",
     "customer-service.read",
 ];
 
@@ -418,6 +430,7 @@ pub struct Wave1SkillInvokeRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Wave1CapabilityOperation {
     ResearchSearch(Wave1SearchRequest),
+    LocalWebSearch(Wave1SearchRequest),
     ResearchFetch(Wave1FetchRequest),
     KnowledgeSearch(Wave1SearchRequest),
     KnowledgeRead(Wave1KnowledgeReadRequest),
@@ -439,6 +452,7 @@ impl Wave1CapabilityOperation {
     pub fn capability_id(&self) -> CapabilityId {
         CapabilityId::from(match self {
             Self::ResearchSearch(_) => WEB_SEARCH,
+            Self::LocalWebSearch(_) => NOMI_LOCAL_WEBSEARCH,
             Self::ResearchFetch(_) => WEB_FETCH,
             Self::KnowledgeSearch(_) => KNOWLEDGE_SEARCH,
             Self::KnowledgeRead(_) => KNOWLEDGE_READ,
@@ -541,6 +555,13 @@ pub trait Wave1ResearchOwner: Send + Sync {
     ) -> Result<StrictJsonValue, Wave1HostPortError>;
 }
 
+/// Independent browser-backed search owner. Never routed to model-native search.
+#[async_trait]
+pub trait Wave1LocalSearchOwner: Send + Sync {
+    async fn local_web_search(&self, context: Wave1HostContext, request: Wave1SearchRequest)
+        -> Result<StrictJsonValue, Wave1HostPortError>;
+}
+
 /// Typed Knowledge owner seam for all Knowledge actions.
 #[async_trait]
 pub trait Wave1KnowledgeOwner: Send + Sync {
@@ -623,6 +644,7 @@ pub trait Wave1SkillOwner: Send + Sync {
 
 /// Minimal typed adapter used by the app composition root.
 pub struct Wave1HostPortAdapter {
+    local_search: Option<Arc<dyn Wave1LocalSearchOwner>>,
     research: Arc<dyn Wave1ResearchOwner>,
     knowledge: Arc<dyn Wave1KnowledgeOwner>,
     memory: Arc<dyn Wave1MemoryOwner>,
@@ -630,6 +652,10 @@ pub struct Wave1HostPortAdapter {
 }
 
 impl Wave1HostPortAdapter {
+    pub fn with_local_search(mut self, owner: Arc<dyn Wave1LocalSearchOwner>) -> Self {
+        self.local_search = Some(owner);
+        self
+    }
     pub fn new(
         research: Arc<dyn Wave1ResearchOwner>,
         knowledge: Arc<dyn Wave1KnowledgeOwner>,
@@ -638,6 +664,7 @@ impl Wave1HostPortAdapter {
     ) -> Self {
         Self {
             research,
+            local_search: None,
             knowledge,
             memory,
             skills,
@@ -661,6 +688,10 @@ impl Wave1HostPort for Wave1HostPortAdapter {
         }
 
         match operation {
+            Wave1CapabilityOperation::LocalWebSearch(request) => {
+                let owner=self.local_search.as_ref().ok_or_else(||Wave1HostPortError::unavailable("No verified local browser search runtime is bound"))?;
+                owner.local_web_search(context,request).await
+            }
             Wave1CapabilityOperation::ResearchSearch(request) => {
                 self.research.research_search(context, request).await
             }
@@ -847,6 +878,20 @@ const SKILLS: &[CapabilitySpec] = &[
 
 const PACKAGES: &[PackageSpec] = &[
     PackageSpec {
+        id: SYSTEM_BROWSER_PACKAGE_ID,
+        display_name: "Nomi System Browser",
+        description: "Operate only user-authorized tabs in an explicitly connected system browser.",
+        mount_id: "domain-system-browser",
+        capabilities: &[tool(NOMI_SYSTEM_BROWSER,EffectClass::ExternalTransmit,&[])],
+    },
+    PackageSpec {
+        id: LOCAL_WEBSEARCH_PACKAGE_ID,
+        display_name: "Nomi Local Web Search",
+        description: "Isolated browser-backed public web search.",
+        mount_id: "domain-local-websearch",
+        capabilities: &[tool(NOMI_LOCAL_WEBSEARCH,EffectClass::ExternalTransmit,&[])],
+    },
+    PackageSpec {
         id: "nomifun.web-research",
         display_name: "Web Research",
         description: "Search and fetch web sources for an AgentSession.",
@@ -964,7 +1009,7 @@ const fn middleware(id: &'static str) -> CapabilitySpec {
     }
 }
 
-/// Build the six trusted Wave 1 registrations without a production adapter.
+/// Build the eight trusted Wave 1 registrations without a production adapter.
 ///
 /// This preserves the metadata-only bootstrap path, but every action fails
 /// closed until the host uses [`registrations_with_host_port`] with a real
@@ -979,7 +1024,7 @@ pub fn unconfigured_host_port() -> Arc<dyn Wave1HostPort> {
     Arc::new(UnconfiguredWave1HostPort)
 }
 
-/// Build the six trusted Wave 1 registrations with the host-owned action port.
+/// Build the eight trusted Wave 1 registrations with the host-owned action port.
 ///
 /// The host port is captured by each action handler as an explicit dependency.
 /// This keeps the registration crate independent of concrete Knowledge,
@@ -1057,6 +1102,8 @@ pub fn capability_ids_by_package() -> BTreeMap<PackageId, BTreeSet<CapabilityId>
 pub fn action_id(capability_id: &str) -> Option<ActionId> {
     let action = match capability_id {
         WEB_SEARCH => WEB_SEARCH_ACTION,
+        NOMI_LOCAL_WEBSEARCH => NOMI_LOCAL_WEBSEARCH_ACTION,
+        NOMI_SYSTEM_BROWSER => NOMI_SYSTEM_BROWSER_ACTION,
         WEB_FETCH => WEB_FETCH_ACTION,
         KNOWLEDGE_SEARCH => KNOWLEDGE_SEARCH_ACTION,
         KNOWLEDGE_READ => KNOWLEDGE_READ_ACTION,
@@ -1256,7 +1303,10 @@ pub fn check_platform_availability(
             reason: format!("unknown Wave 1 capability {}", capability_id.as_ref()),
         });
     }
-    if SURFACES.contains(&host_surface) {
+    if capability_id.as_ref() == NOMI_SYSTEM_BROWSER && host_target.as_ref() != "x86_64-pc-windows-msvc" {
+        return Err(KernelError::CapabilityUnavailableOnPlatform { capability_id: capability_id.clone(), target:host_target.as_ref().to_owned(), surface:host_surface.to_owned() });
+    }
+    if capability_surfaces(capability_id.as_ref()).contains(&host_surface) {
         let _ = host_target;
         Ok(())
     } else {
@@ -1269,13 +1319,14 @@ pub fn check_platform_availability(
 
 pub fn is_available_on_platform(
     capability_id: &str,
-    _host_target: &str,
+    host_target: &str,
     host_surface: &str,
 ) -> Result<bool, String> {
     if capability_for(capability_id).is_none() {
         return Err(format!("unknown Wave 1 capability {capability_id}"));
     }
-    Ok(SURFACES.contains(&host_surface))
+    Ok(capability_surfaces(capability_id).contains(&host_surface)
+        && (capability_id != NOMI_SYSTEM_BROWSER || host_target == "x86_64-pc-windows-msvc"))
 }
 
 pub fn unavailable_on_platform_code() -> CanonicalErrorCode {
@@ -1283,27 +1334,35 @@ pub fn unavailable_on_platform_code() -> CanonicalErrorCode {
 }
 
 pub fn web_research_registration() -> Result<PluginRegistration, String> {
-    registration_for(&PACKAGES[0], unconfigured_host_port())
+    registration_for_package(WEB_RESEARCH_PACKAGE_ID)
 }
 
 pub fn chat_registration() -> Result<PluginRegistration, String> {
-    registration_for(&PACKAGES[1], unconfigured_host_port())
+    registration_for_package(CHAT_PACKAGE_ID)
 }
 
 pub fn knowledge_registration() -> Result<PluginRegistration, String> {
-    registration_for(&PACKAGES[2], unconfigured_host_port())
+    registration_for_package(KNOWLEDGE_PACKAGE_ID)
 }
 
 pub fn project_memory_registration() -> Result<PluginRegistration, String> {
-    registration_for(&PACKAGES[3], unconfigured_host_port())
+    registration_for_package(PROJECT_MEMORY_PACKAGE_ID)
 }
 
 pub fn companion_memory_registration() -> Result<PluginRegistration, String> {
-    registration_for(&PACKAGES[4], unconfigured_host_port())
+    registration_for_package(COMPANION_MEMORY_PACKAGE_ID)
 }
 
 pub fn skills_registration() -> Result<PluginRegistration, String> {
-    registration_for(&PACKAGES[5], unconfigured_host_port())
+    registration_for_package(SKILLS_PACKAGE_ID)
+}
+
+fn registration_for_package(package_id: &str) -> Result<PluginRegistration, String> {
+    let spec = PACKAGES
+        .iter()
+        .find(|spec| spec.id == package_id)
+        .ok_or_else(|| format!("unknown Wave 1 package {package_id}"))?;
+    registration_for(spec, unconfigured_host_port())
 }
 
 fn registration_for(
@@ -1536,14 +1595,23 @@ fn capability_manifest(
         requires: Vec::new(),
         conflicts: Vec::new(),
         supported_surfaces: capability_surface_declarations(
-            SURFACES.iter().copied(),
+            capability_surfaces(spec.id).iter().copied(),
             supported_consumers(spec.id),
         ),
         requires_runtime_features: Vec::new(),
-        supported_platforms: vec![PlatformConstraint::Any],
+        supported_platforms: if spec.id == NOMI_SYSTEM_BROWSER {
+            vec![PlatformConstraint::Targets {
+                host_targets:BTreeSet::from([nomifun_agent_contracts::RuntimeTarget::from("x86_64-pc-windows-msvc")]),
+                host_surfaces:BTreeSet::from(["desktop".to_owned()]),
+            }]
+        } else {vec![PlatformConstraint::Any]},
         config_schema: StrictJsonValue(object_schema(false)),
         contributions,
     })
+}
+
+fn capability_surfaces(capability_id: &str) -> &'static [&'static str] {
+    if capability_id == NOMI_SYSTEM_BROWSER { &["desktop"] } else { SURFACES }
 }
 
 pub fn supported_consumers(capability_id: &str) -> BTreeSet<CapabilityConsumer> {
@@ -1724,6 +1792,14 @@ pub fn operation_from_action(
         .ok_or_else(|| KernelError::CapabilityExecution {
             reason: format!("unknown Wave 1 action {}", action.as_ref()),
         })?;
+    if capability_id.as_ref() == NOMI_SYSTEM_BROWSER {
+        // The native Session Tool owns the exact user's conversation/run.
+        // A generic Wave 1 action host must never mint that browser authority.
+        return Err(KernelError::capability_execution_failed(
+            CAPABILITY_UNAVAILABLE_CODE,
+            "System browser actions require the owning conversation's SystemBrowserTurn",
+        ));
+    }
     validate_action_input(capability_id.as_ref(), &input.0)?;
     operation_from_input(&capability_id, &input.0)
 }
@@ -1770,7 +1846,7 @@ fn operation_from_input(
     };
 
     match id {
-        WEB_SEARCH | KNOWLEDGE_SEARCH => {
+        WEB_SEARCH | NOMI_LOCAL_WEBSEARCH | KNOWLEDGE_SEARCH => {
             let request = Wave1SearchRequest {
                 query: required("query")?,
                 limit: input
@@ -1780,6 +1856,8 @@ fn operation_from_input(
             };
             if id == WEB_SEARCH {
                 Ok(Wave1CapabilityOperation::ResearchSearch(request))
+            } else if id == NOMI_LOCAL_WEBSEARCH {
+                Ok(Wave1CapabilityOperation::LocalWebSearch(request))
             } else {
                 Ok(Wave1CapabilityOperation::KnowledgeSearch(request))
             }
@@ -1992,6 +2070,12 @@ fn object_schema(additional_properties: bool) -> Value {
 
 fn tool_input_schema(capability_id: &str) -> Value {
     match capability_id {
+        NOMI_SYSTEM_BROWSER => nomifun_browser_platform::system_browser::input_schema(),
+        NOMI_LOCAL_WEBSEARCH => json!({
+            "type":"object","additionalProperties":false,
+            "properties":{"query":{"type":"string","minLength":1,"maxLength":2048},"limit":{"type":"integer","minimum":1,"maximum":10,"default":5}},
+            "required":["query"]
+        }),
         WEB_SEARCH | KNOWLEDGE_SEARCH => json!({
             "type": "object",
             "additionalProperties": false,
@@ -2178,9 +2262,10 @@ fn validate_action_input(capability_id: &str, input: &Value) -> Result<(), Kerne
                         reason: format!("{capability_id} field `limit` must be an integer"),
                     });
                 };
-                if !(1..=20).contains(&value) {
+                let maximum=if capability_id==NOMI_LOCAL_WEBSEARCH {10} else {20};
+                if !(1..=maximum).contains(&value) {
                     return Err(KernelError::CapabilityExecution {
-                        reason: format!("{capability_id} field `limit` must be between 1 and 20"),
+                        reason: format!("{capability_id} field `limit` must be between 1 and {maximum}"),
                     });
                 }
             }
@@ -2288,7 +2373,7 @@ fn validate_action_input(capability_id: &str, input: &Value) -> Result<(), Kerne
     }
 
     match capability_id {
-        WEB_SEARCH | KNOWLEDGE_SEARCH => require_string(input, capability_id, "query")?,
+        WEB_SEARCH | NOMI_LOCAL_WEBSEARCH | KNOWLEDGE_SEARCH => require_string(input, capability_id, "query")?,
         WEB_FETCH => require_string(input, capability_id, "url")?,
         KNOWLEDGE_READ => require_string(input, capability_id, "handle")?,
         KNOWLEDGE_WRITE => {
@@ -2366,7 +2451,7 @@ fn require_string(input: &Value, capability_id: &str, field: &str) -> Result<(),
 
 fn allowed_input_key(capability_id: &str, key: &str) -> bool {
     match capability_id {
-        WEB_SEARCH | KNOWLEDGE_SEARCH => matches!(key, "query" | "limit"),
+        WEB_SEARCH | NOMI_LOCAL_WEBSEARCH | KNOWLEDGE_SEARCH => matches!(key, "query" | "limit"),
         WEB_FETCH => key == "url",
         KNOWLEDGE_READ => key == "handle",
         KNOWLEDGE_WRITE => matches!(key, "handle" | "base" | "rel_path" | "content" | "title"),
@@ -2416,6 +2501,28 @@ fn companion_memory_schema() -> Value {
 }
 
 fn tool_output_schema(capability_id: &str) -> Value {
+    if capability_id==NOMI_LOCAL_WEBSEARCH {
+        return json!({
+            "type":"object","additionalProperties":false,
+            "required":["query","provider","searched_at","results"],
+            "properties":{
+                "query":{"type":"string","minLength":1,"maxLength":2048},
+                "provider":{"const":{"kind":"browser","id":"nomi.local.browser","version":"1"}},
+                "searched_at":{"type":"string","format":"date-time"},
+                "results":{"type":"array","maxItems":10,"items":{
+                    "type":"object","additionalProperties":false,
+                    "required":["citation_id","rank","title","url","snippet"],
+                    "properties":{
+                        "citation_id":{"type":"string","pattern":"^nomi-local-search-[0-9a-f]{32}$"},
+                        "rank":{"type":"integer","minimum":1,"maximum":10},
+                        "title":{"type":"string","minLength":1,"maxLength":512},
+                        "url":{"type":"string","maxLength":8192,"pattern":"^https?://"},
+                        "snippet":{"type":"string","maxLength":2048}
+                    }
+                }}
+            }
+        });
+    }
     if matches!(
         capability_id,
         MEMORY_COMPANION_WRITE | MEMORY_COMPANION_MERGE | MEMORY_COMPANION_EVOLVE
@@ -2462,6 +2569,14 @@ fn display(name: &str, description: &str) -> LocalizedMetadata {
 
 fn capability_display(capability_id: &str) -> LocalizedMetadata {
     let (name, description) = match capability_id {
+        NOMI_SYSTEM_BROWSER => (
+            "Nomi system browser",
+            "Observe and operate only tabs explicitly authorized in this conversation's connected system browser. Does not connect, enumerate private tabs, launch a browser, or provide web search.",
+        ),
+        NOMI_LOCAL_WEBSEARCH => (
+            "Nomi local web search",
+            "Search public pages with an isolated local browser. Sends queries to Bing; Google Public DNS resolves engine domains only. No conversation login state or model-native search is required.",
+        ),
         WEB_SEARCH => (
             "Web search",
             "Search web sources through the selected research capability.",
@@ -2564,7 +2679,12 @@ fn capability_display(capability_id: &str) -> LocalizedMetadata {
         ),
         _ => ("Wave 1 capability", "Bundled Wave 1 capability."),
     };
-    display(name, description)
+    let mut metadata = display(name, description);
+    if capability_id == NOMI_SYSTEM_BROWSER {
+        metadata.localized_names.insert("zh-CN".into(), "Nomi 系统浏览器".into());
+        metadata.localized_descriptions.insert("zh-CN".into(), "仅操作当前会话中用户明确授权的系统浏览器标签页；不自动连接、不列出未授权页面、不启动浏览器，也不提供网页检索。".into());
+    }
+    metadata
 }
 
 fn descriptor<const N: usize>(
@@ -2694,6 +2814,31 @@ mod tests {
                 "memories": [],
             })))
         }
+    }
+
+    #[test]
+    fn named_registrations_select_their_package_not_inventory_position() {
+        for (expected_id, registration) in [
+            (WEB_RESEARCH_PACKAGE_ID, web_research_registration()),
+            (CHAT_PACKAGE_ID, chat_registration()),
+            (KNOWLEDGE_PACKAGE_ID, knowledge_registration()),
+            (PROJECT_MEMORY_PACKAGE_ID, project_memory_registration()),
+            (COMPANION_MEMORY_PACKAGE_ID, companion_memory_registration()),
+            (SKILLS_PACKAGE_ID, skills_registration()),
+        ] {
+            let registration = registration.expect("named Wave 1 registration");
+            let manifest = &registration.metadata.manifest.payload;
+            assert_eq!(manifest.package_id.as_ref(), expected_id);
+            assert_eq!(registration.metadata.source.source_identity, expected_id);
+            let spec = PACKAGES.iter().find(|spec| spec.id == expected_id).unwrap();
+            assert_eq!(registration.metadata.mount_id.as_ref(), spec.mount_id);
+            assert_eq!(
+                manifest.contributions.capabilities.iter()
+                    .map(|capability| capability.id.as_ref()).collect::<BTreeSet<_>>(),
+                spec.capabilities.iter().map(|capability| capability.id).collect(),
+            );
+        }
+        assert!(registration_for_package("nomifun.unknown-package").is_err());
     }
 
     #[test]
@@ -3062,6 +3207,61 @@ mod tests {
         )
         .expect_err("Companion writes must use the durable memory taxonomy");
         assert!(error.to_string().contains("supported memory kind"));
+    }
+
+    #[test]
+    fn local_search_is_a_separate_strict_tool_contract() {
+        let action=action_id(NOMI_LOCAL_WEBSEARCH).unwrap();
+        assert_eq!(action.as_ref(),"nomi_local_websearch.invoke");
+        assert!(matches!(operation_from_action(&action,StrictJsonValue(json!({"query":"Rust","limit":10}))).unwrap(),Wave1CapabilityOperation::LocalWebSearch(_)));
+        for input in [json!({"query":"Rust","limit":11}),json!({"query":"Rust","provider":"native"}),json!({"query":" "})] {
+            assert!(operation_from_action(&action,StrictJsonValue(input)).is_err());
+        }
+        let output=json!({"query":"Rust","provider":{"kind":"browser","id":"nomi.local.browser","version":"1"},"searched_at":"2026-09-14T00:00:00Z","results":[{
+            "citation_id":format!("nomi-local-search-{}","a".repeat(32)),"rank":1,"title":"Source","url":"https://example.com/","snippet":"Text"
+        }]});
+        assert!(jsonschema::is_valid(&tool_output_schema(NOMI_LOCAL_WEBSEARCH),&output));
+        let registration=registrations().unwrap().into_iter().find(|registration|registration.metadata.manifest.payload.package_id.as_ref()==LOCAL_WEBSEARCH_PACKAGE_ID).unwrap();
+        let manifest=&registration.metadata.manifest.payload.contributions.capabilities;
+        let local=manifest.iter().find(|capability|capability.id.as_ref()==NOMI_LOCAL_WEBSEARCH).unwrap();
+        assert!(local.requires.is_empty());
+        assert!(local.conflicts.is_empty());
+        assert!(local.requires_runtime_features.is_empty(),"model-native web_search is not a dependency");
+        assert!(local.contributions.resource_kinds.is_empty());
+    }
+
+    #[test]
+    fn system_browser_owns_one_desktop_tool_and_the_shared_strict_input_schema() {
+        let registration = registrations().unwrap().into_iter()
+            .find(|entry| entry.metadata.manifest.payload.package_id.as_ref() == SYSTEM_BROWSER_PACKAGE_ID).unwrap();
+        let capabilities = &registration.metadata.manifest.payload.contributions.capabilities;
+        assert_eq!(capabilities.len(), 1);
+        let system = &capabilities[0];
+        assert_eq!(system.id.as_ref(), NOMI_SYSTEM_BROWSER);
+        assert_eq!(system.version.as_ref(), "1.0.0");
+        assert!(system.requires.is_empty() && system.conflicts.is_empty());
+        assert!(system.contributions.resource_kinds.is_empty());
+        assert_eq!(system.contributions.actions.len(), 1);
+        let action = &system.contributions.actions[0];
+        assert_eq!(action.action_id.as_ref(), NOMI_SYSTEM_BROWSER_ACTION);
+        assert_eq!(action.effect_class, EffectClass::ExternalTransmit);
+        assert_eq!(resolve_canonical_schema(NOMI_SYSTEM_BROWSER, &action.input_schema).unwrap().0,
+            nomifun_browser_platform::system_browser::input_schema());
+        let schema = tool_input_schema(NOMI_SYSTEM_BROWSER);
+        for input in [json!({"operation":"tabs"}), json!({"operation":"observe","tab_id":"granted"}),
+            json!({"operation":"click","tab_id":"granted","observation_id":"observation","ref_id":"element"})] {
+            assert!(jsonschema::is_valid(&schema, &input));
+        }
+        for input in [json!({"operation":"connect"}), json!({"operation":"tabs","url":"https://example.com"}),
+            json!({"operation":"click","tab_id":"granted","ref_id":"element"}), json!({"query":"search"})] {
+            assert!(!jsonschema::is_valid(&schema, &input));
+        }
+        assert!(is_available_on_platform(NOMI_SYSTEM_BROWSER, "x86_64-pc-windows-msvc", "desktop").unwrap());
+        assert!(!is_available_on_platform(NOMI_SYSTEM_BROWSER, "x86_64-pc-windows-msvc", "headless").unwrap());
+        assert!(!is_available_on_platform(NOMI_SYSTEM_BROWSER, "aarch64-apple-darwin", "desktop").unwrap());
+        assert!(!is_available_on_platform(NOMI_SYSTEM_BROWSER, "x86_64-unknown-linux-gnu", "desktop").unwrap());
+        assert!(operation_from_action(&action.action_id, StrictJsonValue(json!({"operation":"tabs"}))).is_err(),
+            "A generic Wave 1 host cannot acquire conversation SystemBrowserTurn authority");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Real Linux sandbox evidence through the product's pipe/process launcher.
 //! Run explicitly with NOMIFUN_CHROME_BINARY; no download or normal profile use.
 
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "conformance"))]
 
 use std::path::PathBuf;
 use std::time::Duration;

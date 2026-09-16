@@ -6,17 +6,13 @@ use nomifun_db::IClientPreferenceRepository;
 
 /// Maximum allowed key length for client preferences.
 const MAX_KEY_LENGTH: usize = 255;
-/// Key prefixes only system-owned write paths may touch. The generic
-/// PUT /api/settings/client endpoint rejects them so a client cannot forge
-/// system-managed state:
+/// System-owned and retired key prefixes. The generic PUT /api/settings/client
+/// endpoint rejects them so a client cannot forge managed state or restore
+/// removed product settings:
 /// - `managedModel.`: refresh bookkeeping owned by the model manager.
-/// - `agent.browserUse.displayMode`: covers both the display-mode value and
-///   its `…Version` lineage marker. The browser display-mode owner API
-///   (`/api/browser/display-mode`, see nomifun-app browser_management) is the
-///   sole trusted write path; a raw preference write could otherwise forge the
-///   v2 lineage and make the next boot launch the Primary Chromium host with a
-///   visible window the user never chose.
-const SYSTEM_RESERVED_PREFIXES: &[&str] = &["managedModel.", "agent.browserUse.displayMode"];
+/// - Retired Browser v1 keys have no supported write owner. They must not be
+///   resurrected through the generic preferences API after their UI is removed.
+const SYSTEM_RESERVED_PREFIXES: &[&str] = &["managedModel.", "agent.browserUse", "browser.resourcePolicy"];
 
 /// Business logic for client preferences (generic key-value store).
 #[derive(Clone)]
@@ -136,11 +132,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_rejects_browser_display_mode_lineage_keys() {
+    async fn update_rejects_retired_browser_preferences() {
         let svc = setup().await;
         for (key, value) in [
             ("agent.browserUse.displayMode", json!("external")),
             ("agent.browserUse.displayModeVersion", json!(2)),
+            ("agent.browserUse", json!(true)),
+            ("agent.browserUse.source", json!("managed")),
+            ("agent.browserUse.fullPower", json!(true)),
+            ("agent.browserUse.persistentLogin", json!(false)),
+            ("browser.resourcePolicy", json!({"preset":"highConcurrency"})),
         ] {
             let mut req = UpdateClientPreferencesRequest::new();
             req.insert(key.into(), value);
@@ -148,21 +149,17 @@ mod tests {
             assert_eq!(
                 err.status_code(),
                 axum::http::StatusCode::FORBIDDEN,
-                "{key} must only be writable through the display-mode owner API"
+                "{key} has no supported browser settings owner"
             );
         }
-        // Deleting through the generic endpoint is the same forged-lineage
-        // write (a removed marker migrates the mode back to headless).
+        // Retired keys are not rewritten or migrated through the generic API.
         let mut req = UpdateClientPreferencesRequest::new();
         req.insert("agent.browserUse.displayModeVersion".into(), json!(null));
         assert_eq!(
             svc.update_preferences(req).await.unwrap_err().status_code(),
             axum::http::StatusCode::FORBIDDEN
         );
-        // Sibling browser-use preferences remain client-writable.
-        let mut req = UpdateClientPreferencesRequest::new();
-        req.insert("agent.browserUse.source".into(), json!("managed"));
-        svc.update_preferences(req).await.unwrap();
+        assert!(svc.get_preferences(None).await.unwrap().is_empty());
     }
 
     #[tokio::test]

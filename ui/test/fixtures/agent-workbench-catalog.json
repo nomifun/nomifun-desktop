@@ -1729,14 +1729,14 @@
   },
   {
     "capability": {
-      "id": "browser.identity",
+      "id": "nomi_system_browser",
       "version": "1.0.0"
     },
-    "kind": "resource_provider",
-    "display_name": "browser.identity",
-    "description": "browser.identity",
+    "kind": "tool",
+    "display_name": "nomi_system_browser",
+    "description": "nomi_system_browser",
     "source_package": {
-      "id": "nomifun.browser",
+      "id": "nomifun.system-browser",
       "version": "1.0.0"
     },
     "source_kind": "bundled",
@@ -1745,12 +1745,34 @@
       "desktop"
     ],
     "required_runtime_features": [],
-    "required_resource_kinds": [
-      "browser"
-    ],
+    "required_resource_kinds": [],
     "required_capabilities": [],
     "conflicting_capabilities": [],
-    "action_count": 0,
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "nomi_local_websearch",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "nomi_local_websearch",
+    "description": "nomi_local_websearch",
+    "source_package": {
+      "id": "nomifun.local-websearch",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
     "context_contributor_count": 0
   },
   {
@@ -1831,6 +1853,30 @@
   },
   {
     "capability": {
+      "id": "browser.render_content",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "browser.render_content",
+    "description": "browser.render_content",
+    "source_package": {
+      "id": "nomifun.browser",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
       "id": "browser.download",
       "version": "1.0.0"
     },
@@ -1889,57 +1935,6 @@
     "kind": "tool",
     "display_name": "browser.evaluate",
     "description": "browser.evaluate",
-    "source_package": {
-      "id": "nomifun.browser",
-      "version": "1.0.0"
-    },
-    "source_kind": "bundled",
-    "materialization_state": "materialized",
-    "supported_surfaces": [
-      "desktop"
-    ],
-    "required_runtime_features": [],
-    "required_resource_kinds": [
-      "browser"
-    ],
-    "required_capabilities": [],
-    "conflicting_capabilities": [],
-    "action_count": 1,
-    "context_contributor_count": 0
-  },
-  {
-    "capability": {
-      "id": "browser.site_memory",
-      "version": "1.0.0"
-    },
-    "kind": "context_contributor",
-    "display_name": "browser.site_memory",
-    "description": "browser.site_memory",
-    "source_package": {
-      "id": "nomifun.browser",
-      "version": "1.0.0"
-    },
-    "source_kind": "bundled",
-    "materialization_state": "unavailable",
-    "unavailable_code": "CAPABILITY_UNAVAILABLE",
-    "supported_surfaces": [
-      "desktop"
-    ],
-    "required_runtime_features": [],
-    "required_resource_kinds": [],
-    "required_capabilities": [],
-    "conflicting_capabilities": [],
-    "action_count": 0,
-    "context_contributor_count": 1
-  },
-  {
-    "capability": {
-      "id": "browser.takeover",
-      "version": "1.0.0"
-    },
-    "kind": "tool",
-    "display_name": "browser.takeover",
-    "description": "browser.takeover",
     "source_package": {
       "id": "nomifun.browser",
       "version": "1.0.0"

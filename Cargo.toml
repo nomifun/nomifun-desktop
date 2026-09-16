@@ -1,7 +1,11 @@
 [workspace]
 resolver = "3"
 members = ["crates/agent/*", "crates/backend/*", "crates/shared/*", "apps/web", "apps/desktop"]
-exclude = ["crates/backend/nomifun-preset"]
+exclude = ["crates/backend/nomifun-preset", "vendor/wry"]
+
+[patch.crates-io]
+# Child-WebView shutdown belongs to the native browser owner, not a JS callback.
+wry = { path = "vendor/wry" }
 
 [workspace.package]
 version = "0.7.6"
@@ -85,7 +89,6 @@ nomi-agent = { path = "crates/agent/nomi-agent" }
 nomi-computer = { path = "crates/agent/nomi-computer" }
 nomi-a11y = { path = "crates/agent/nomi-a11y" }
 nomi-browser-engine = { path = "crates/agent/nomi-browser-engine" }
-nomi-browser = { path = "crates/agent/nomi-browser" }
 
 # --- Core framework ---
 tokio = { version = "1", features = ["full"] }
@@ -133,8 +136,6 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 # CSPRNG for robot device tokens / activation codes. 0.9 renamed `thread_rng()`
 # to `rng()`; 0.9.x is already in the lockfile via transitive deps.
 rand = "0.9"
-# Public Suffix List (compile-time embedded, offline) for browser domain policy.
-psl = "2"
 
 uuid = { version = "1", features = ["v7"] }
 reqwest = { version = "0.12", features = ["json", "multipart", "stream", "gzip", "rustls-tls", "socks", "system-proxy"], default-features = false }
@@ -296,9 +297,6 @@ tokio-test = "0.4"
 mockall = "0.14"
 rstest = "0.26"
 serial_test = "3"
-# 快照测试：注入侧 aria 契约（observe_fixtures.rs）+ 序列化层契约（T6）防 PW 升级漂移。
-# yaml/json/redactions feature 用于结构化快照与随机字段归一。
-insta = { version = "1.48", features = ["yaml", "json", "redactions"] }
 
 # Minimal debuginfo to shrink build output. Incremental compilation stays at
 # the Cargo default (on for dev/test): it only applies to workspace members and

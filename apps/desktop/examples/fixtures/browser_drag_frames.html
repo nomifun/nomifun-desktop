@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Cross-frame native drag fixture</title>
+<style>
+  body {margin:0}
+  iframe {position:absolute;top:60px;width:330px;height:300px;border:5px solid #6868b5;padding:3px}
+  #from {left:20px;transform:rotate(2deg);transform-origin:top left}
+  #to {left:460px;transform:scale(.95);transform-origin:top left}
+</style>
+<iframe id="from" src="http://localhost:__PORT__/html-drag-source"></iframe>
+<iframe id="to" src="/html-drag-target"></iframe>
+<script>
+  window.dragFrameEvidence={events:[],drops:[]};
+  addEventListener('message', event=>{
+    if(event.data?.nomiDragEvent) dragFrameEvidence.events.push(event.data.nomiDragEvent);
+    if(event.data?.nomiDragDrop) dragFrameEvidence.drops.push(event.data.nomiDragDrop);
+  });
+</script>

@@ -93,7 +93,7 @@
 | Crate | 职责 |
 | --- | --- |
 | [`nomifun-terminal`](../../crates/backend/nomifun-terminal/) | 基于 `portable-pty` 的终端会话，支持 resize，通过 WS 进行输入 / 输出流式传输。 |
-| [`nomifun-browser-platform`](../../crates/backend/nomifun-browser-platform/) | 主进程浏览器所有权、调度与生命周期权威：`BrowserSessionHub` 提供 Native 与 Gateway 调用方共享的所有权、隔离、调度、租约、清单与清理契约；Chromium 启动本身留给宿主侧的 `BrowserHostFactory` 实现。 |
+| [`nomifun-browser-platform`](../../crates/backend/nomifun-browser-platform/) | 会话持有的原生 Browser Workspace 类型契约：run/输入所有权、Tab 与 runtime generation、snapshot、上传/下载、Profile 清理，以及独立的系统浏览器授权模型。桌面宿主提供原生 WebView；隔离搜索/渲染与附着个人浏览器保持为不同消费者。 |
 | [`nomifun-model-invoke`](../../crates/backend/nomifun-model-invoke/) | 统一多模态模型调用层：类型化任务请求 / 结果、声明式鉴权方案、共享 HTTP 传输、协议适配器接缝 + 注册表与模型目录解析管线；被 `nomifun-shell` STT/TTS、`nomifun-creation` 等模型调用方消费。 |
 | [`nomifun-shell`](../../crates/backend/nomifun-shell/) | 操作系统外壳辅助：用系统应用打开文件，针对 Deepgram 或 OpenAI 的语音转文字，剪贴板 / 粘贴集成。 |
 | [`nomifun-file`](../../crates/backend/nomifun-file/) | 在会话工作目录下的沙箱化文件系统（`browse`、`path_safety`、`watch_service`、`snapshot_service`），zip 辅助。 |

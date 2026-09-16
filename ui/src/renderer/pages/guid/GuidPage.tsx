@@ -10,7 +10,8 @@ import ComposerAttachments from '@/renderer/components/chat/ComposerAttachments'
 import FileAttachButton from '@/renderer/components/media/FileAttachButton';
 import { ComposerSceneHeader, SceneDiscoveryHint } from '@/renderer/creation/ComposerSceneSelector';
 import GuidWorkspaceFootnote from './components/GuidWorkspaceFootnote';
-import { Robot } from '@icon-park/react';
+import { Earth, Robot } from '@icon-park/react';
+import { isDesktopShell } from '@/renderer/utils/platform';
 import { useConfig } from '@/renderer/hooks/config/useConfig';
 import { isSubmitGesture } from '@/renderer/hooks/chat/useCompositionInput';
 import { appendSpeechTranscript } from '@/renderer/hooks/system/useSpeechInput';
@@ -33,7 +34,7 @@ import {
   hasFrozenMcpTools,
   type AgentResourceSelectionValue,
 } from '@/renderer/hooks/agent/agentResourceSelection';
-import { Alert, ConfigProvider } from '@arco-design/web-react';
+import { Alert, Button, ConfigProvider } from '@arco-design/web-react';
 import React, {
   useCallback,
   useEffect,
@@ -645,7 +646,14 @@ const GuidPage: React.FC = () => {
                 'data-testid': 'guid-input',
               }}
               attachments={<ComposerAttachments files={guidInput.files} onRemoveFile={guidInput.handleRemoveFile} />}
-              tools={<FileAttachButton openFileSelector={openFileSelector} onLocalFilesAdded={guidInput.handleFilesPasted} showLoadedCapabilities={false} />}
+              tools={<div className='inline-flex items-center gap-6px'>
+                {isDesktopShell() && !creation.draft.mode && <Button type='text' size='small'
+                  disabled={guidInput.loading || creation.loading || send.isBrowserButtonDisabled}
+                  onClick={send.openBrowserHandler} icon={<Earth size={16} />} aria-label={t('browserWorkspace.title')}>
+                  {t('browserWorkspace.title')}
+                </Button>}
+                <FileAttachButton openFileSelector={openFileSelector} onLocalFilesAdded={guidInput.handleFilesPasted} showLoadedCapabilities={false} />
+              </div>}
               creationTools={<CreationControls prompt={guidInput.input} onPromptChange={guidInput.setInput} files={guidInput.files} />}
               rightTools={<div className='sendbox-responsive-config-group flex flex-1 items-center justify-end gap-2 min-w-0' data-composer-group>{modelSelectorNode}</div>}
               actions={<>

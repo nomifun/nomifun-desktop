@@ -182,19 +182,14 @@ computer-use = [
     "dep:nomi-types",
 ]
 # Browser-automation tools (desktop host enables this; web/server hosts do not).
-# The native Nomi executor and Platform Gateway share the process-wide
-# BrowserSessionHub; web/headless builds omit the self-hosted-CDP / Chromium
-# stack entirely.
-# The Platform Gateway does not own or register Browser tools; canonical
-# AgentPlatform Role dispatch is the only Browser capability path.
+# Native Conversation Workspace plus the new isolated search/render engines.
+# No legacy Headless Hub or BrowserTool facade is linked by this feature.
 browser-use = [
     "nomifun-ai-agent/browser-use",
-    "dep:nomi-browser",
     "dep:nomi-browser-engine",
     "dep:nomifun-browser-platform",
-    "dep:nomi-process-runtime",
-    "dep:sysinfo",
 ]
+browser-conformance = ["browser-use", "computer-use", "nomi-browser-engine/conformance"]
 
 [dependencies]
 nomifun-common.workspace = true
@@ -276,6 +271,7 @@ reqwest.workspace = true
 url.workspace = true
 rmcp = { version = "1.5", features = ["server", "transport-io", "schemars"] }
 anyhow.workspace = true
+thiserror.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
 dashmap.workspace = true
@@ -289,17 +285,9 @@ percent-encoding = "2"
 # Computer Role implementation. Optional; only the `computer-use` feature pulls
 # the native screen/input/UI-Automation stack, so web/headless builds stay lean.
 nomi-computer = { workspace = true, optional = true }
-# Browser facade used by the application-owned managed Host factory. Optional;
-# only the `browser-use` feature pulls the managed browser engine + Chromium,
-# so web/headless builds stay lean.
-nomi-browser = { workspace = true, optional = true }
-# Browser engine types used by the application-owned managed Host and identity
-# vault. Login routes allocate a Primary Hub Lane; they never launch a private
-# engine. Only the browser-use feature pulls this dependency.
+# Browser v2 native contracts and isolated page execution, without the old facade.
 nomi-browser-engine = { workspace = true, optional = true }
 nomifun-browser-platform = { workspace = true, optional = true }
-nomi-process-runtime = { workspace = true, optional = true }
-sysinfo = { workspace = true, optional = true }
 nomi-config = { workspace = true, optional = true }
 nomi-tools = { workspace = true, optional = true }
 nomi-types = { workspace = true, optional = true }
@@ -314,6 +302,7 @@ windows-sys = { version = "0.61", features = [
 junction = "1"
 
 [dev-dependencies]
+chromiumoxide.workspace = true
 nomi-process-runtime.workspace = true
 image = { workspace = true, features = ["jpeg", "gif", "webp"] }
 nomifun-api-types.workspace = true
@@ -330,3 +319,28 @@ tower = { workspace = true, features = ["util"] }
 tokio-tungstenite.workspace = true
 wiremock = "0.6"
 toml.workspace = true
+
+[[example]]
+name = "browser_gui_fixture"
+path = "examples/browser_gui_fixture.rs"
+required-features = ["browser-use"]
+
+[[test]]
+name = "browser_workspace"
+path = "tests/browser_workspace.rs"
+required-features = ["browser-use"]
+
+[[test]]
+name = "system_browser"
+path = "tests/system_browser.rs"
+required-features = ["browser-use"]
+
+[[test]]
+name = "system_browser_agent"
+path = "tests/system_browser_agent.rs"
+required-features = ["browser-conformance"]
+
+[[test]]
+name = "local_websearch_agent"
+path = "tests/local_websearch_agent.rs"
+required-features = ["browser-use"]

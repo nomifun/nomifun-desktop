@@ -51,7 +51,6 @@ fn tc_4_3_01_tool_guidance_section_exists() {
         None,
         false,
         false,
-        false, // browser_enabled
     );
     assert!(
         result.contains("# Using your tools"),
@@ -62,6 +61,21 @@ fn tc_4_3_01_tool_guidance_section_exists() {
 // ---------------------------------------------------------------------------
 // TC-4.3-02: Bash prohibition list with dedicated tool alternatives
 // ---------------------------------------------------------------------------
+
+#[test]
+fn tool_guidance_does_not_grant_tools_or_require_search_for_known_paths() {
+    let prompt = build_system_prompt(
+        &mut SystemPromptCache::new(), None, "/tmp", "test-model",
+        &[], None, None, false, false,
+    );
+    let authority = prompt.find("Only call tools advertised in the current request").unwrap();
+    let listing = prompt.find("when Glob is advertised").unwrap();
+    assert!(authority < listing);
+    assert!(prompt.contains("conditional examples, not a grant of capability"));
+    assert!(prompt.contains("When a file path is already known, read that path directly"));
+    assert!(prompt.contains("no Glob or search call is required first"));
+    assert!(prompt.contains("If no listing tool is available, report that limitation"));
+}
 
 #[test]
 fn tc_4_3_02_bash_prohibition_list() {
@@ -75,7 +89,6 @@ fn tc_4_3_02_bash_prohibition_list() {
         None,
         false,
         false,
-        false, // browser_enabled
     );
 
     // Glob replaces find/ls
@@ -117,7 +130,6 @@ fn tool_guidance_routes_directory_listing_to_glob() {
         None,
         false,
         false,
-        false, // browser_enabled
     );
     let lower = result.to_lowercase();
 
@@ -159,7 +171,6 @@ fn tc_4_3_03_parallel_call_guidance() {
         None,
         false,
         false,
-        false, // browser_enabled
     );
     assert!(
         result.contains("parallel"),
@@ -183,7 +194,6 @@ fn tc_4_3_03b_failure_checkpoint_guidance() {
         None,
         false,
         false,
-        false, // browser_enabled
     );
     assert!(
         result.contains("hard checkpoint"),
@@ -205,7 +215,6 @@ fn tool_call_efficiency_guidance_routes_batches_without_removing_checkpoints() {
         &[],
         None,
         None,
-        false,
         false,
         false,
     );
@@ -241,7 +250,6 @@ fn tc_4_3_04_edit_write_read_rules() {
         None,
         false,
         false,
-        false, // browser_enabled
     );
     assert!(
         result.contains("Prefer Edit over Write"),
@@ -269,7 +277,6 @@ fn tc_4_3_05_order_after_intro_before_custom() {
         None,
         false,
         false,
-        false, // browser_enabled
     );
 
     let intro_pos = result
@@ -309,7 +316,6 @@ fn tc_4_3_06_order_before_skills() {
         None,
         false,
         false,
-        false, // browser_enabled
     );
 
     let guidance_pos = result
@@ -346,7 +352,6 @@ fn tc_4_3_06_order_before_memory() {
         Some(&mem_dir),
         false,
         false,
-        false, // browser_enabled
     );
 
     let guidance_pos = result
@@ -397,7 +402,6 @@ fn tc_4_3_07_all_sections_coexist() {
         Some(&mem_dir),
         true, // plan mode active
         false,
-        false, // browser_enabled
     );
 
     // All sections should exist
@@ -454,7 +458,6 @@ fn tc_4_3_08_guidance_in_plan_mode() {
         None,
         true,
         false,
-        false, // browser_enabled
     );
     assert!(
         result.contains("# Using your tools"),

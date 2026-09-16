@@ -53,6 +53,8 @@ mod coding_skills;
 pub mod engine_skills;
 mod coding_runtime_recovery;
 pub(crate) mod nomi_core_wave2;
+#[cfg(feature = "browser-use")]
+pub(crate) mod knowledge_browser;
 mod nomi_core_mcp;
 mod nomi_core_mcp_resources;
 mod mcp_effect_receipts;
@@ -61,9 +63,9 @@ mod nomi_core_mcp_catalog;
 pub(crate) mod plugin_platform;
 mod plugin_runtime_host;
 #[cfg(feature = "browser-use")]
-pub(crate) mod browser_management;
+pub(crate) mod browser_workspace;
 #[cfg(feature = "browser-use")]
-pub(crate) mod browser_login;
+pub(crate) mod system_browser;
 mod boot_terminal_proof;
 mod computer_permissions;
 mod health;

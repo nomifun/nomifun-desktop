@@ -27,36 +27,6 @@ import { useConversationShortcuts } from '@renderer/hooks/ui/useConversationShor
 import { isDesktopShell } from '@renderer/utils/platform';
 import '@renderer/styles/layout.css';
 
-const useDebug = () => {
-  const [count, setCount] = useState(0);
-  const timer = useRef<any>(null);
-  const onClick = () => {
-    const open = () => {
-      ipcBridge.application.openDevTools.invoke().catch((error) => {
-        console.error('Failed to open dev tools:', error);
-      });
-      setCount(0);
-    };
-    if (count >= 3) {
-      return open();
-    }
-    setCount((prev) => {
-      if (prev >= 2) {
-        open();
-        return 0;
-      }
-      return prev + 1;
-    });
-    clearTimeout(timer.current);
-    timer.current = setTimeout(() => {
-      clearTimeout(timer.current);
-      setCount(0);
-    }, 1000);
-  };
-
-  return { onClick };
-};
-
 const UpdateModal = React.lazy(() => import('@/renderer/components/settings/UpdateModal'));
 
 // Primary rail width. Default slimmed from 216 → 184; the rail is now freely
@@ -95,7 +65,6 @@ const Layout: React.FC<{
   const [collapsed, setCollapsed] = useState(false);
   const [railWidth, setRailWidth] = useState<number>(() => readStoredRailWidth());
   const updateAvailability = useUpdateAvailability();
-  const { onClick } = useDebug();
   const { contextHolder: directorySelectionContextHolder } = useDirectorySelection();
   const navigate = useNavigate();
   useConversationShortcuts({ navigate });
@@ -118,22 +87,6 @@ const Layout: React.FC<{
   useEffect(() => {
     cleanupSiderTooltips();
   }, [collapsed, location.pathname, location.search, location.hash]);
-
-  // Bridge Main Process logs to F12 Console
-  useEffect(() => {
-    const unsubscribe = ipcBridge.application.logStream.on((entry) => {
-      const prefix = `%c[Main:${entry.tag}]%c ${entry.message}`;
-      const style = 'color:#7c3aed;font-weight:bold';
-      if (entry.level === 'error') {
-        console.error(prefix, style, 'color:inherit', ...(entry.data !== undefined ? [entry.data] : []));
-      } else if (entry.level === 'warn') {
-        console.warn(prefix, style, 'color:inherit', ...(entry.data !== undefined ? [entry.data] : []));
-      } else {
-        console.log(prefix, style, 'color:inherit', ...(entry.data !== undefined ? [entry.data] : []));
-      }
-    });
-    return () => unsubscribe();
-  }, []);
 
   // 启动后静默检查一次更新（仅桌面壳）：发现新版本时同步全局 Logo 入口并沿用现有弹窗提醒；
   // 无更新 / 离线 / 出错时不显示 Logo 入口。
@@ -305,7 +258,6 @@ const Layout: React.FC<{
                   className={classNames('shrink-0 size-32px relative rd-0.5rem overflow-hidden', {
                     '!size-24px': collapsed,
                   })}
-                  onClick={onClick}
                 >
                   <svg className='absolute inset-0 w-full h-full' viewBox='0 0 80 80' fill='none'>
                     <defs>

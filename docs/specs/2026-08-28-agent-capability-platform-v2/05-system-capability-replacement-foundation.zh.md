@@ -940,7 +940,15 @@ Runtime 只执行 Snapshot 已解析的 canonical Capability，不在 turn 中�
 
 如果后续需要一个现有 contribution kind 无法表达的新切入点，应先以真实产品场景定义一个稳定、命名明确的 typed extension point，再加入 Capability contract；不能让 Plugin 直接订阅 Kernel 内部函数或任意数据库变化。
 
-UI Shell/Workbench 布局替换属于 UI contribution 与 Surface 架构；Browser Engine/Embedded Surface 属于另一个 ADR。它们都不应借 Browser/Computer Role Provider 顺带实现。
+UI Shell/Workbench 布局替换属于 UI contribution 与 Surface 架构；Browser Engine/Embedded Surface 属于另一个 ADR。它们都不应借 Browser/Computer Role Provider 顺带实现。该独立目标架构现由
+[`../2026-09-13-browser-workspace-v2.zh.md`](../2026-09-13-browser-workspace-v2.zh.md)
+冻结：会话内交互表面必须使用真实 native WebView，不使用 JPEG/screencast/iframe Viewer；Browser Role
+Provider 与 native Surface 保持分离，并以同一个 Conversation BrowserWorkspace 汇合。浏览器输入权直接由
+Agent run lifecycle 派生：Agent 运行时用户只观看，run terminal 后用户才可操作，不建立 takeover/share/
+control-lease 兼容状态机。Agent click/type/wheel/drag 必须进入该 BrowserTab 的真实浏览器输入管线，DOM mutation
+不得冒充用户操作。新增 `nomi_local_websearch@1.0.0` 作为 Agent 工作台可选的普通 Capability 和同名 Tool，固定
+使用隔离 Browser Search Provider；它不依赖模型原生 search、不覆盖厂商 `web.search` / `web_search`，也不并入
+Browser Role。
 
 ### 4. 架构方案与推荐
 

@@ -18,7 +18,7 @@ import { saveNomiDefaultModel } from '@/renderer/pages/guid/hooks/agentSelection
 import { configService } from '@/common/config/configService';
 import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import { resolveHealModel } from '../platforms/nomi/healConversationModel';
-import { isConversationProcessing } from '@/renderer/pages/conversation/utils/conversationRuntime';
+import { getConversationRuntimeAuthority, isConversationProcessing } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import NomiChat from '../platforms/nomi/NomiChat';
 import { useNomiModelSelection } from '../platforms/nomi/useNomiModelSelection';
 import CompanionChatPanel from '@/renderer/pages/nomi/companion/CompanionChatPanel';
@@ -538,6 +538,8 @@ const NomiConversationPanel: React.FC<{
     backend: 'nomi' as const,
     preset: presetPresetInfo ?? undefined,
     knowledgeEnabled,
+    systemBrowserEnabled: conversation.agent_snapshot?.enabled_capabilities.includes('nomi_system_browser') ?? false,
+    systemBrowserLocked: getConversationRuntimeAuthority(conversation) !== 'idle',
     hideAdvancedControls,
   };
 

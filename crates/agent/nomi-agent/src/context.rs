@@ -21,8 +21,6 @@ pub struct SystemPromptCache {
     pub(crate) last_plan_mode: bool,
     /// Track last toon_enabled value to detect changes.
     pub(crate) last_toon_enabled: bool,
-    /// Track last browser_enabled value to detect changes.
-    pub(crate) last_browser_enabled: bool,
 }
 
 impl SystemPromptCache {
@@ -32,7 +30,6 @@ impl SystemPromptCache {
             joined: None,
             last_plan_mode: false,
             last_toon_enabled: false,
-            last_browser_enabled: false,
         }
     }
 
@@ -67,9 +64,11 @@ fn tool_usage_guidance() -> String {
     let mut s = String::from(
         "\
 # Using your tools
+ - Only call tools advertised in the current request. Tool names mentioned in these guidelines are conditional examples, not a grant of capability. If a tool is absent, do not invent a call to it or assume it can be enabled automatically.
+ - When a file path is already known, read that path directly with an available file-reading tool; no Glob or search call is required first.
  - Do NOT use Bash when a dedicated tool is available. Using dedicated tools \
 allows the user to better understand and review your work:
-   - File listing/search: Glob on every operating system (not shell-specific listing commands such as ls, dir, Get-ChildItem, or find). When asked what files are in the current directory or workspace, use Glob with \"*\" for top-level files or \"**/*\" recursively before saying there are no files.
+   - File listing/search: when Glob is advertised, use it on every operating system (not shell-specific listing commands such as ls, dir, Get-ChildItem, or find). When asked what files are in the current directory or workspace, use Glob with \"*\" for top-level files or \"**/*\" recursively before saying there are no files. If no listing tool is available, report that limitation instead of calling an absent tool.
    - Content search: Grep (not grep or rg)
    - Read files: Read (not cat, head, or tail)
    - Edit files: Edit (not sed or awk)
@@ -146,25 +145,6 @@ title and pops a blocking \"Windows cannot find\" dialog that hangs the command.
     s
 }
 
-/// Return the browser-use preset nudge for the system prompt.
-///
-/// Intentionally a single sentence (默认①, 省 token): it only points the model at
-/// the `Browser` tool and the observe→act→verify loop. The detailed action
-/// semantics live in `BrowserTool::DESCRIPTION` (its CORE LOOP section), which the
-/// model already sees per-call — so this preset deliberately does NOT restate the
-/// per-action vocabulary the way the longer `[Controlling the desktop]` computer
-/// nudge does.
-///
-/// Only emitted when the `browser-use` feature is built AND
-/// `config.tools.browser.enabled` is true (threaded in as `browser_enabled`).
-#[cfg(feature = "browser-use")]
-fn browser_preset() -> &'static str {
-    "[Browsing the web] Use the `Browser` tool directly when a page must be opened, \
-rendered, inspected, or operated. Do not ask the user for permission to browse. Prefer local \
-context or knowledge tools when they already answer the task, and after each Browser navigation \
-or interaction run `observe` for fresh refs before acting again."
-}
-
 /// Build the system prompt from config and environment.
 ///
 /// Sections are assembled in this order:
@@ -191,13 +171,11 @@ pub fn build_system_prompt(
     memory_dir: Option<&Path>,
     plan_mode_active: bool,
     toon_enabled: bool,
-    browser_enabled: bool,
 ) -> String {
     // Fast path: return cached joined result if nothing changed
     if let Some(ref joined) = cache.joined
         && cache.last_plan_mode == plan_mode_active
         && cache.last_toon_enabled == toon_enabled
-        && cache.last_browser_enabled == browser_enabled
     {
         return joined.clone();
     }
@@ -226,19 +204,6 @@ pub fn build_system_prompt(
         .entry("tool_guidance")
         .or_insert_with(tool_usage_guidance);
     parts.push(guidance.clone());
-
-    // Section: browser-use preset (session permanent once enabled). Feature-gated
-    // at compile time + runtime `browser_enabled` flag (= config.tools.browser.enabled,
-    // threaded from bootstrap). A single nudge — detailed action semantics are carried
-    // by BrowserTool::DESCRIPTION (默认①, 省 token).
-    #[cfg(feature = "browser-use")]
-    if browser_enabled {
-        let browser_section = cache
-            .sections
-            .entry("browser_preset")
-            .or_insert_with(|| browser_preset().to_string());
-        parts.push(browser_section.clone());
-    }
 
     // Section: custom prompt (session permanent)
     if let Some(custom) = custom_prompt {
@@ -322,7 +287,6 @@ pub fn build_system_prompt(
     cache.joined = Some(joined.clone());
     cache.last_plan_mode = plan_mode_active;
     cache.last_toon_enabled = toon_enabled;
-    cache.last_browser_enabled = browser_enabled;
     joined
 }
 
@@ -355,7 +319,6 @@ mod tests {
             None,
             false,
             false,
-            false,
         );
         assert!(prompt.contains(cwd), "system prompt should contain the cwd");
     }
@@ -370,7 +333,6 @@ mod tests {
             &[],
             None,
             None,
-            false,
             false,
             false,
         );
@@ -396,7 +358,6 @@ mod tests {
             &[],
             None,
             None,
-            false,
             false,
             false,
         );
@@ -462,7 +423,6 @@ mod tests {
             None,
             false,
             false,
-            false,
         );
         assert!(
             !result.contains("The following skills are available"),
@@ -484,7 +444,6 @@ mod tests {
             &skills,
             None,
             None,
-            false,
             false,
             false,
         );
@@ -520,7 +479,6 @@ mod tests {
             None,
             false,
             false,
-            false,
         );
         assert!(
             result.contains("visible-skill"),
@@ -548,7 +506,6 @@ mod tests {
             None,
             false,
             false,
-            false,
         );
         assert!(
             !result.contains("The following skills are available"),
@@ -567,7 +524,6 @@ mod tests {
             &skills,
             None,
             None,
-            false,
             false,
             false,
         );
@@ -594,7 +550,6 @@ mod tests {
             None,
             false,
             false,
-            false,
         );
         let custom_pos = result.find("Custom text").unwrap();
         let reminder_pos = result.rfind("<system-reminder>").unwrap();
@@ -616,7 +571,6 @@ mod tests {
             &[skill],
             Some(50),
             None,
-            false,
             false,
             false,
         );
@@ -641,7 +595,6 @@ mod tests {
             &[],
             None,
             None,
-            false,
             false,
             false,
         );
@@ -674,7 +627,6 @@ mod tests {
             &[],
             None,
             None,
-            false,
             false,
             false,
         );
@@ -715,7 +667,6 @@ mod tests {
             None,
             false,
             false,
-            false,
         );
 
         assert!(
@@ -743,7 +694,6 @@ mod tests {
             None,
             false,
             false,
-            false,
         );
 
         let custom = result.find("CUSTOM_PROMPT_MARKER").unwrap();
@@ -765,7 +715,6 @@ mod tests {
             &[],
             None,
             None,
-            false,
             false,
             false,
         );
@@ -796,7 +745,6 @@ mod tests {
             Some(&mem_dir),
             false,
             false,
-            false,
         );
 
         assert!(
@@ -825,7 +773,6 @@ mod tests {
             Some(Path::new("/nonexistent/memory/dir")),
             false,
             false,
-            false,
         );
 
         // Should not panic and should show empty state
@@ -850,7 +797,6 @@ mod tests {
             &[],
             None,
             Some(&mem_dir),
-            false,
             false,
             false,
         );
@@ -892,7 +838,6 @@ mod tests {
             Some(&mem_dir),
             false,
             false,
-            false,
         );
 
         let agents_pos = result.find("PROJECT_RULES_HERE").unwrap();
@@ -930,7 +875,6 @@ mod tests {
             Some(&mem_dir),
             false,
             false,
-            false,
         );
 
         assert!(
@@ -957,7 +901,6 @@ mod tests {
             None,
             false,
             false,
-            false,
         );
         assert!(
             result.contains("# Using your tools"),
@@ -975,7 +918,6 @@ mod tests {
             &[],
             None,
             None,
-            false,
             false,
             false,
         );
@@ -1013,7 +955,6 @@ mod tests {
             None,
             false,
             false,
-            false,
         );
         assert!(
             result.contains("parallel"),
@@ -1037,7 +978,6 @@ mod tests {
             None,
             false,
             false,
-            false,
         );
         assert!(
             result.contains("Prefer Edit over Write"),
@@ -1057,7 +997,6 @@ mod tests {
             None,
             false,
             false,
-            false,
         );
         assert!(
             result.contains("Read a file before editing"),
@@ -1075,7 +1014,6 @@ mod tests {
             &[],
             None,
             None,
-            false,
             false,
             false,
         );
@@ -1106,7 +1044,6 @@ mod tests {
             &[],
             None,
             None,
-            false,
             false,
             false,
         );
@@ -1144,7 +1081,6 @@ mod tests {
             None,
             false,
             false,
-            false,
         );
         let intro_pos = result.find("You are an AI assistant").unwrap();
         let guidance_pos = result.find("# Using your tools").unwrap();
@@ -1172,7 +1108,6 @@ mod tests {
             None,
             false,
             false,
-            false,
         );
         let guidance_pos = result.find("# Using your tools").unwrap();
         let skills_pos = result.find("guide-test-skill").unwrap();
@@ -1194,7 +1129,6 @@ mod tests {
             None,
             true,
             false,
-            false,
         );
         assert!(
             result.contains("# Using your tools"),
@@ -1212,7 +1146,6 @@ mod tests {
             &[],
             None,
             None,
-            false,
             false,
             false,
         );
@@ -1245,7 +1178,6 @@ mod tests {
             &[],
             None,
             Some(&mem_dir),
-            false,
             false,
             false,
         );
@@ -1288,7 +1220,6 @@ mod tests {
             None,
             false,
             false,
-            false,
         );
         assert!(cache.joined.is_some());
 
@@ -1300,7 +1231,6 @@ mod tests {
             &[],
             None,
             None,
-            false,
             false,
             false,
         );
@@ -1320,7 +1250,6 @@ mod tests {
             None,
             false,
             false,
-            false,
         );
         let with_plan = build_system_prompt(
             &mut cache,
@@ -1331,7 +1260,6 @@ mod tests {
             None,
             None,
             true,
-            false,
             false,
         );
         assert_ne!(without_plan, with_plan);
@@ -1351,7 +1279,6 @@ mod tests {
             None,
             false,
             true,
-            false,
         );
         assert!(
             result.contains("TOON"),
@@ -1375,7 +1302,6 @@ mod tests {
             None,
             false,
             false,
-            false,
         );
         assert!(
             !result.contains("TOON"),
@@ -1383,86 +1309,4 @@ mod tests {
         );
     }
 
-    // --- Browser-use preset injection tests (P3-P1) ---
-    //
-    // The preset is feature-gated (`browser-use`) AND runtime-gated
-    // (`browser_enabled`). These tests only run in the `browser-use` build —
-    // in a build without the feature, the section is compiled out entirely, so
-    // there is nothing meaningful to assert about its presence.
-
-    #[cfg(feature = "browser-use")]
-    #[test]
-    fn browser_enabled_injects_preset() {
-        let result = build_system_prompt(
-            &mut SystemPromptCache::new(),
-            None,
-            "/tmp",
-            "test-model",
-            &[],
-            None,
-            None,
-            false,
-            false,
-            true, // browser_enabled
-        );
-        assert!(
-            result.contains("[Browsing the web]"),
-            "browser_enabled should inject the browser preset heading"
-        );
-        assert!(
-            result.contains("`Browser` tool"),
-            "preset should name the Browser tool"
-        );
-        assert!(
-            result.contains("Do not ask the user for permission to browse"),
-            "preset should make ordinary browsing low-friction"
-        );
-        assert!(
-            !result.contains("For web tasks, use the `Browser` tool"),
-            "preset should not route every web task to Browser"
-        );
-        assert!(
-            result.contains("observe"),
-            "preset should mention the observe step of the loop"
-        );
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[test]
-    fn browser_disabled_no_preset() {
-        let result = build_system_prompt(
-            &mut SystemPromptCache::new(),
-            None,
-            "/tmp",
-            "test-model",
-            &[],
-            None,
-            None,
-            false,
-            false,
-            false, // browser_enabled = false
-        );
-        assert!(
-            !result.contains("[Browsing the web]"),
-            "browser disabled should not inject the browser preset"
-        );
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[test]
-    fn browser_preset_is_concise_single_sentence_nudge() {
-        // 默认①: the preset must stay a short nudge, NOT a restatement of the
-        // full per-action vocabulary. Guard against accidental token bloat and
-        // against copying the long `[Controlling the desktop]` computer nudge.
-        let preset = browser_preset();
-        assert!(
-            preset.len() < 400,
-            "browser preset should stay a concise nudge (got {} chars)",
-            preset.len()
-        );
-        assert!(
-            !preset.contains("[Controlling the desktop]"),
-            "browser preset must not copy the computer-use nudge"
-        );
-    }
 }

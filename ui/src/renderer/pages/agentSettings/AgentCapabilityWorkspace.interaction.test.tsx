@@ -1,7 +1,8 @@
 import '../../../../test/setup-dom.ts';
 import '@arco-design/web-react/lib/_util/react-19-adapter';
-import { cleanup, fireEvent, render, within, waitFor } from '@testing-library/react';
-import { afterEach, describe, expect, test } from 'bun:test';
+import { act, cleanup, fireEvent, render, within, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { Message, Modal } from '@arco-design/web-react';
 import { createInstance } from 'i18next';
 import { type ReactElement, useState } from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
@@ -34,7 +35,24 @@ function mount(document: AgentPresetDocument, catalog = [read, knowledge, web, u
   const result = renderInRouter(<I18nextProvider i18n={testI18n}><Harness /></I18nextProvider>);
   return { ...result, state: () => current };
 }
-afterEach(() => cleanup());
+let arcoPortal: HTMLDivElement;
+beforeEach(() => {
+  arcoPortal = document.createElement('div');
+  document.body.append(arcoPortal);
+  // Arco Message owns a process-global React root. Give every test a fresh
+  // container so a toast cannot survive into another test file.
+  Message.config({ getContainer: () => arcoPortal });
+});
+afterEach(async () => {
+  await act(async () => {
+    Message.clear();
+    Modal.destroyAll();
+  });
+  cleanup();
+  // Declarative Modal/Message exits are animated and can otherwise leave
+  // their portal wrappers in happy-dom after RTL has unmounted its roots.
+  document.body.replaceChildren();
+});
 
 describe('Agent capability transfer workspace', () => {
   test('shows enabled items and the full catalog together with explicit state', () => {
@@ -84,6 +102,32 @@ describe('Agent capability transfer workspace', () => {
     expect((screen.getByRole('checkbox', { name: 'Add Search the web' }) as HTMLInputElement).disabled).toBe(true);
     expect(screen.getByRole('button', { name: 'View Search the web details' })).toBeTruthy();
     expect((screen.getByRole('button', { name: 'Enable Search the web' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  test('local browser search is independently selectable when native model search is unavailable', async () => {
+    const local = item('nomi_local_websearch');
+    const screen = mount(documentWith([]), [local, unavailable]);
+    fireEvent.click(screen.getByRole('button', { name: 'Enable Nomi local web search' }));
+    await waitFor(() => expect(screen.state().enabled_capabilities.map(row => row.capability.id)).toEqual(['nomi_local_websearch']));
+    expect((screen.getByRole('checkbox', { name: 'Add Search the web' }) as HTMLInputElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Disable Nomi local web search' }));
+    await waitFor(() => expect(screen.state().enabled_capabilities).toEqual([]));
+  });
+
+  test('system browser selection does not enable embedded browser or local search capabilities', async () => {
+    const screen = mount(documentWith([]), [item('nomi_system_browser'), item('nomi_local_websearch'), item('browser.navigate')]);
+    fireEvent.click(screen.getByRole('button', { name: 'Enable Nomi signed-in Chrome' }));
+    await waitFor(() => expect(screen.state().enabled_capabilities.map(row => row.capability.id)).toEqual(['nomi_system_browser']));
+    fireEvent.click(screen.getByRole('button', { name: 'Disable Nomi signed-in Chrome' }));
+    await waitFor(() => expect(screen.state().enabled_capabilities).toEqual([]));
+  });
+
+  test('an unavailable local browser runtime cannot be enabled but its details remain accessible', () => {
+    const screen = mount(documentWith([]), [item('nomi_local_websearch', false)]);
+    expect((screen.getByRole('button', { name: 'Enable Nomi local web search' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'View Nomi local web search details' })).toBeTruthy();
+    expect(screen.getByText(/No available local search runtime is currently bound/)).toBeTruthy();
+    expect(screen.state().enabled_capabilities).toEqual([]);
   });
 
   test('a missing saved capability stays visible and can be disabled', async () => {

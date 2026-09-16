@@ -143,8 +143,9 @@ pub struct NomiBuildExtra {
     /// session. Falls back to host config / NOMIFUN_COMPUTER_USE when None.
     #[serde(default)]
     pub computer_use: Option<bool>,
-    /// Opt-in to the Browser tool (CDP automation) for this session.
-    /// Falls back to host config / NOMIFUN_BROWSER_USE when None.
+    /// Exact session projection for the conversation Browser tool. The
+    /// canonical capability host sets this from the selected Browser binding;
+    /// an absent value is disabled and never falls back to host configuration.
     #[serde(default)]
     pub browser_use: Option<bool>,
     /// Platform Gateway MCP stdio bridge config, injected only from

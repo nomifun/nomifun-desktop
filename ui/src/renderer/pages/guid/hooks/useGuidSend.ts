@@ -70,8 +70,10 @@ export type GuidSendDeps = {
 };
 
 export type GuidSendResult = {
-  handleSend: () => Promise<void>;
+  handleSend: (entry?: 'message' | 'browser') => Promise<void>;
   sendMessageHandler: () => void;
+  openBrowserHandler: () => void;
+  isBrowserButtonDisabled: boolean;
   isButtonDisabled: boolean;
 };
 
@@ -109,8 +111,10 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
   const sendingRef = useRef(false);
   const selectedWorkspace = workspaceEnabled ? dir : '';
 
-  const handleSend = useCallback(async () => {
-    const entryPlan = planGuidEntry(input, autoWork);
+  const handleSend = useCallback(async (entry: 'message' | 'browser' = 'message') => {
+    const entryPlan = entry === 'browser'
+      ? { sendInitialMessage: false, conversationName: t('browserWorkspace.title') }
+      : planGuidEntry(input, autoWork);
     if (!current_model) throw new Error('MODEL_REQUIRED');
     if (!resourceResolutionReady) throw new Error('RESOURCE_SELECTION_REQUIRED');
     let conversationId: ConversationId;
@@ -177,7 +181,8 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       }
     }
 
-    await applyAdvancedConfig?.(conversationId);
+    // Browsing first must not start AutoWork/IDMM or send the staged draft.
+    if (entry === 'message') await applyAdvancedConfig?.(conversationId);
     emitter.emit('chat.history.refresh');
 
     if (entryPlan.sendInitialMessage) {
@@ -209,6 +214,9 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       } catch { /* A created session remains usable when browser storage is unavailable. */ }
     }
     seedConversationCache(conversation);
+    if (entry === 'browser') {
+      sessionStorage.setItem(sessionStorageKey('initial-browser-open', conversationTarget(conversationId)), 'true');
+    }
     await navigate(`/conversation/${conversationId}`);
   }, [
     applyAdvancedConfig,
@@ -228,7 +236,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     t,
   ]);
 
-  const sendMessageHandler = useCallback(() => {
+  const launch = useCallback((entry: 'message' | 'browser') => {
     if (loading || sendingRef.current) return;
     if (!resourceResolutionReady) return;
     if (!current_model) {
@@ -251,14 +259,15 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
 
     sendingRef.current = true;
     setLoading(true);
-    beginPending?.({
+    if (entry === 'message') beginPending?.({
       input,
       files: files.length > 0 ? files : undefined,
       sendsInitialMessage: !isAutoWorkEntry(autoWork),
     });
 
-    handleSend()
+    handleSend(entry)
       .then(() => {
+        if (entry === 'browser') return;
         setInput('');
         setMentionOpen(false);
         setMentionQuery(null);
@@ -274,7 +283,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       .finally(() => {
         sendingRef.current = false;
         setLoading(false);
-        endPending?.();
+        if (entry === 'message') endPending?.();
       });
   }, [
     autoWork,
@@ -312,10 +321,14 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       );
   const hasLaunchTarget = hasAgentLaunchTarget && Boolean(current_model);
   const isButtonDisabled = loading || !input.trim() || !hasLaunchTarget;
+  const sendMessageHandler = useCallback(() => launch('message'), [launch]);
+  const openBrowserHandler = useCallback(() => launch('browser'), [launch]);
 
   return {
     handleSend,
     sendMessageHandler,
     isButtonDisabled,
+    openBrowserHandler,
+    isBrowserButtonDisabled: loading || !hasLaunchTarget,
   };
 };
