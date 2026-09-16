@@ -1,7 +1,7 @@
 //! Canonical AgentSession facts, projections, recovery, and deletion closure.
 //!
-//! The store attaches to the shared canonical Fresh-v4 SQLite root and owns
-//! only the three AgentSession fact tables plus two rebuildable projections.
+//! The store attaches to the shared canonical Agent Store SQLite root and owns
+//! Session, Turn, Event, Effect, Payload and Resource facts plus rebuildable projections.
 //! It depends only on the frozen `nomifun-agent-contracts` vocabulary and
 //! general-purpose infrastructure crates.
 

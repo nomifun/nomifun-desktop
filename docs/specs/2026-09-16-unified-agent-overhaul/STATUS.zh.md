@@ -2,7 +2,7 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-17
-> 当前阶段：Wave 1 / UARC-011 ready
+> 当前阶段：Wave 1 / UARC-011 active
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
@@ -50,7 +50,7 @@
 | `UARC-000` | windows_verified | Integration | verified | n/a | barrier `2147863da`；26/26 文件归属，基线 gate 通过 |
 | `UARC-001` | integrated | Integration | verified | pending | 机器 inventory/self-test/timing/platform gap 已完成；Mac gaps 保持 pending |
 | `UARC-010` | integrated | Integration | verified | n/a | Module 多 contribution、authoring policy、exact Action grant 已闭合 |
-| `UARC-011` | ready | Integration | pending | n/a | 新 canonical Agent Store baseline |
+| `UARC-011` | active | Integration | pending | n/a | canonical Agent Store baseline 与 Agent-only reset 实施中 |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -218,3 +218,17 @@
 - Not run: full Wave 1 milestone gate waits for `UARC-014`. Control Plane probe is 48/50 with two intentional old-contract failures assigned to `UARC-014`.
 - Remaining/blocker: no UARC-010 blocker; do not restore implicit grants or kind authority to satisfy transitional tests.
 - Next ready tasks: `UARC-011` only.
+
+### 2026-09-17 UARC-011 started
+
+- Barrier/source: UARC-010 closeout `dd2c098dab8bc13bc8693719953f9864498360d4`.
+- Owner/write set: Integration; `nomifun-db`, `nomifun-agent-session`, Agent contract schema/generated artifacts and UARC evidence.
+- Changed: task claimed; current v3 migrations, Fresh-v4 schema, Session Store and reset paths are under ownership audit.
+- Deleted: pending legacy Conversation/Message/receipt/runtime-event/effect schema and duplicate Fresh-v4 root assumptions.
+- Retained + reason: one SQLite transaction boundary plus content-addressed payload/checkpoint storage.
+- Tests: pending empty DB, schema owner, effect ledger and Agent-only reset preservation gates.
+- Windows: active.
+- macOS: not applicable to this schema task; filesystem/path behavior remains a later Mac revalidation item.
+- Not run: no implementation gate yet.
+- Remaining/blocker: freeze exact non-Agent preserved tables and replace Agent facts without legacy readers. No blocker.
+- Next ready tasks: none until UARC-011 barrier; then `UARC-012`.

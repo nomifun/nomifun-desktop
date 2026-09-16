@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use nomifun_agent_contracts::{
     AgentBindingValue, AgentPresetRevision, AgentPresetRevisionDigestInput,
     AgentPresetRevisionPayload, AgentSessionAggregate, ArtifactEnvelope,
+    AgentStoreSchemaManifestPayload,
     CandidateTestReceipt,
     CanonicalApiInventoryPayload, CanonicalErrorRegistryPayload, CanonicalV4SchemaManifestPayload,
     CapabilityCatalogEntry, PlatformFeatureInventoryPayload,
@@ -13,7 +14,7 @@ use nomifun_agent_contracts::{
     CredentialSlotBinding,
     D025FixtureContractReferencePayload, D025FixtureEnvelopeReference, D026OrderingOutcomeMatrix,
     D027TerminalSequenceMatrix, D028PlatformMatrix, DeletionManifest, DigestHex,
-    FRESH_V4_BASELINE_SQL, FreshV4ParentOperationMarker, FreshV4ReadyMarker,
+    AGENT_STORE_BASELINE_SQL, FreshV4ParentOperationMarker, FreshV4ReadyMarker,
     FreshV4SchemaMetadata, JavaScriptHostHello, N1CohortLock, N1PlatformValidationRecord,
     PluginBridgeRequest, PluginBridgeSession, PluginRuntimeContractManifest,
     PluginMigration, PluginProductLifecycleRecord, PluginPublishRequest,
@@ -256,7 +257,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         "runtime_features": feature_inventory.runtime_features,
     }))?;
 
-    let database_schema_digest = digest_bytes(FRESH_V4_BASELINE_SQL.as_bytes());
+    let database_schema_digest = digest_bytes(AGENT_STORE_BASELINE_SQL.as_bytes());
     let cargo_lock_digest = digest_bytes(&fs::read(root.join("../../../Cargo.lock"))?);
 
     let canonical_manifest_payload = CanonicalV4SchemaManifestPayload {
@@ -676,6 +677,7 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
     add_schema::<AgentBindingValue>(&mut schemas, "agent_binding")?;
     add_schema::<RemoteBinding>(&mut schemas, "remote_binding")?;
     add_schema::<AgentSessionAggregate>(&mut schemas, "agent_session")?;
+    add_schema::<AgentStoreSchemaManifestPayload>(&mut schemas, "agent_store_schema_manifest")?;
     add_schema::<SessionEventRegistryPayload>(&mut schemas, "session_event_registry")?;
     add_schema::<CanonicalErrorRegistryPayload>(&mut schemas, "canonical_error_registry")?;
     add_schema::<PlatformFeatureInventoryPayload>(

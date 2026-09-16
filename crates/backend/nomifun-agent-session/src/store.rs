@@ -5,19 +5,22 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 #[cfg(test)]
-use nomifun_agent_contracts::FRESH_V4_BASELINE_SQL;
+use nomifun_agent_contracts::AGENT_STORE_BASELINE_SQL;
 use nomifun_agent_contracts::{
-    AgentSessionDeletedState, AgentSessionDeletingRecord, AgentSessionId, AgentSessionLiveRecord,
-    AgentSessionTombstone, ArtifactId, ChatRouteIdentity, CompactionCompletedPayload, CorrelationId,
-    DeleteAgentSessionCommand, DigestHex, EventId, EventProducerId, FRESH_V4_DATA_GENERATION,
-    FRESH_V4_MIGRATION_HEAD, FRESH_V4_PROJECTION_SCHEMA_VERSION, IdempotencyKey, PrincipalRef,
+    ActionId, AgentSessionDeletedState, AgentSessionDeletingRecord, AgentSessionId,
+    AgentSessionLiveRecord, AgentSessionTombstone, ArtifactId, CapabilityId, ChatRouteIdentity,
+    CompactionCompletedPayload, ConnectionConfigRef, CorrelationId, DeleteAgentSessionCommand,
+    DigestHex, EventId,
+    EventProducerId, AGENT_STORE_DATA_GENERATION,
+    AGENT_STORE_MIGRATION_HEAD, AGENT_STORE_PROJECTION_SCHEMA_VERSION, IdempotencyKey, PrincipalRef,
     OperationId, RemoteBindingId, RuntimeBindingId, RuntimeCheckpointValidationInput,
     RuntimeCheckpointValidationResult, RuntimeEventAck, SessionEventAck, SessionEventAppend,
     SessionEventCursor, SessionEventKind, SessionEventPayloadRef, SessionEventPredecessorMode,
     SessionEventRecord, SessionForkContract, SessionForkPayload, SessionPayloadBody,
-    SessionPayloadId, SessionPayloadRecord, SnapshotCompatibilityAdmissionInput,
+    ResourceBindingId, ResourceId, ResourceKind, SessionPayloadId, SessionPayloadRecord,
+    SnapshotCompatibilityAdmissionInput,
     SnapshotCompatibilityAdmissionResult, StrictJsonValue, VersionString, canonical_json_bytes,
-    digest_bytes, digest_payload, fresh_v4_schema_manifest_payload,
+    TypedResourceBinding, digest_bytes, digest_payload, agent_store_schema_manifest_payload,
 };
 use serde_json::{Value, json};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
@@ -26,11 +29,12 @@ use uuid::Uuid;
 
 use crate::checkpoint::{evaluate_snapshot_compatibility, validate_checkpoint};
 use crate::error::SessionStoreError;
-use crate::projector::{initial_head, payload_value, reduce_head, reduce_message_projection};
+use crate::projector::{initial_head, payload_value, reduce_head, reduce_agent_messages};
 use crate::registry::EventRegistry;
 use crate::types::{
-    CheckpointAdmission, CreateSessionRequest, DeleteResult, EffectEventRequest,
-    EffectReconcileOutcome, EffectTerminalState, ForkRequest, ForkResult, MessageProjection,
+    AgentEffectRecord, AgentEffectState, CheckpointAdmission, CreateSessionRequest, DeleteResult,
+    EffectEventRequest, EffectReconcileOutcome, EffectStrategy, EffectTerminalState, ForkRequest,
+    ForkResult, MessageProjection,
     ChatCausalityFacts, RuntimeAppendContext, RuntimeEventAppendResult, SessionCreateResult,
     ChatOperationClaimRequest, SessionEventAppendResult, SessionEventPage,
     SessionHeadProjection, SessionObservation, SessionRehydrationInput, TurnReceipt,
@@ -42,15 +46,18 @@ pub const MAX_SINGLE_PAYLOAD_BYTES: usize = 1024 * 1024;
 pub const MAX_SESSION_PAYLOAD_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_EVENT_PAGE_SIZE: u32 = 500;
 
-const SESSION_TABLES: [&str; 5] = [
+const AGENT_STORE_TABLES: [&str; 8] = [
     "agent_sessions",
-    "message_projection",
-    "session_events",
-    "session_heads",
-    "session_payloads",
+    "agent_turns",
+    "agent_effects",
+    "agent_session_resources",
+    "agent_messages",
+    "agent_events",
+    "agent_session_heads",
+    "agent_payloads",
 ];
 
-const SESSION_COLUMNS: &[(&str, &[&str])] = &[
+const AGENT_STORE_COLUMNS: &[(&str, &[&str])] = &[
     (
         "agent_sessions",
         &[
@@ -71,7 +78,62 @@ const SESSION_COLUMNS: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "session_events",
+        "agent_turns",
+        &[
+            "session_id",
+            "turn_id",
+            "operation_id",
+            "idempotency_key",
+            "source_message_id",
+            "admission_json",
+            "state",
+            "result_json",
+            "error_json",
+            "started_event_id",
+            "terminal_event_id",
+            "accepted_at",
+            "started_at",
+            "finished_at",
+        ],
+    ),
+    (
+        "agent_effects",
+        &[
+            "effect_id",
+            "session_id",
+            "turn_id",
+            "operation_id",
+            "owner_domain",
+            "capability_module",
+            "action_id",
+            "resource_binding_id",
+            "resource_key",
+            "input_digest",
+            "strategy",
+            "state",
+            "bounded_observation_json",
+            "started_event_id",
+            "terminal_event_id",
+            "created_at",
+            "settled_at",
+        ],
+    ),
+    (
+        "agent_session_resources",
+        &[
+            "binding_id",
+            "session_id",
+            "resource_kind",
+            "resource_id",
+            "owner_id",
+            "operations_json",
+            "connection_config_ref",
+            "typed_parameters_json",
+            "binding_digest",
+        ],
+    ),
+    (
+        "agent_events",
         &[
             "session_id",
             "seq",
@@ -89,18 +151,20 @@ const SESSION_COLUMNS: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "session_payloads",
+        "agent_payloads",
         &[
             "payload_id",
             "session_id",
             "media_type",
             "byte_len",
             "digest",
+            "storage_kind",
             "body",
+            "object_ref",
         ],
     ),
     (
-        "session_heads",
+        "agent_session_heads",
         &[
             "session_id",
             "status",
@@ -117,7 +181,7 @@ const SESSION_COLUMNS: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "message_projection",
+        "agent_messages",
         &[
             "session_id",
             "projection_id",
@@ -130,11 +194,15 @@ const SESSION_COLUMNS: &[(&str, &[&str])] = &[
     ),
 ];
 
-const SESSION_INDEXES: [&str; 4] = [
+const AGENT_STORE_INDEXES: [&str; 8] = [
     "idx_agent_sessions_owner_state",
-    "idx_message_projection_sequence",
-    "idx_session_events_correlation",
-    "idx_session_payloads_session",
+    "idx_agent_turns_session_state",
+    "idx_agent_session_resources_session_kind",
+    "idx_agent_messages_sequence",
+    "idx_agent_events_correlation",
+    "idx_agent_payloads_session",
+    "idx_agent_effects_session_turn",
+    "idx_agent_effects_resource_unsettled",
 ];
 
 #[derive(Clone, Debug)]
@@ -160,7 +228,7 @@ impl AgentSessionStore {
     }
 
     pub async fn from_pool(pool: SqlitePool) -> Result<Self, SessionStoreError> {
-        validate_fresh_v4_schema(&pool).await?;
+        validate_agent_store_schema(&pool).await?;
         Ok(Self {
             pool,
             registry: EventRegistry::canonical()?,
@@ -190,7 +258,7 @@ impl AgentSessionStore {
             .max_connections(max_connections)
             .connect_with(options)
             .await?;
-        sqlx::raw_sql(FRESH_V4_BASELINE_SQL).execute(&pool).await?;
+        sqlx::raw_sql(AGENT_STORE_BASELINE_SQL).execute(&pool).await?;
         seed_test_schema_metadata(&pool).await?;
         Self::from_pool(pool).await
     }
@@ -243,6 +311,13 @@ impl AgentSessionStore {
 
         insert_live_session_tx(&mut tx, &request.session, request.created_at).await?;
         insert_head_tx(&mut tx, &initial_head(&request.session.agent_session_id)).await?;
+        insert_session_resources_tx(
+            &mut tx,
+            &request.session.agent_session_id,
+            &request.session.owner_ref,
+            &request.session.agent_binding.typed_resource_bindings,
+        )
+        .await?;
 
         let opening = SessionEventAppend {
             agent_session_id: request.session.agent_session_id.clone(),
@@ -484,7 +559,7 @@ impl AgentSessionStore {
             "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
                     runtime_binding_id, runtime_producer_seq, kind, kind_version, \
                     correlation_id, causation_event_id, inline_json, payload_id \
-             FROM session_events \
+             FROM agent_events \
              WHERE session_id = ? AND kind = 'turn/started' AND correlation_id = ? \
              ORDER BY seq DESC LIMIT 1",
         )
@@ -576,7 +651,7 @@ impl AgentSessionStore {
             "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
                     runtime_binding_id, runtime_producer_seq, kind, kind_version, \
                     correlation_id, causation_event_id, inline_json, payload_id \
-             FROM session_events \
+             FROM agent_events \
              WHERE session_id = ? AND kind = 'session/opening' \
              ORDER BY seq ASC LIMIT 1",
         )
@@ -704,7 +779,7 @@ impl AgentSessionStore {
         let rows: Vec<String> = sqlx::query_scalar(
             "SELECT sessions.agent_session_id \
              FROM agent_sessions AS sessions \
-             INNER JOIN session_heads AS heads \
+             INNER JOIN agent_session_heads AS heads \
                ON heads.session_id = sessions.agent_session_id \
              WHERE sessions.state = 'live' \
                AND sessions.remote_binding_id IS NOT NULL \
@@ -745,6 +820,22 @@ impl AgentSessionStore {
         })
     }
 
+    pub async fn session_resources(
+        &self,
+        session_id: &AgentSessionId,
+    ) -> Result<Vec<TypedResourceBinding>, SessionStoreError> {
+        require_live_session(&self.pool, session_id.as_ref()).await?;
+        let rows = sqlx::query_as::<_, StoredResourceRow>(
+            "SELECT binding_id, resource_kind, resource_id, owner_id, operations_json, \
+                    connection_config_ref, typed_parameters_json \
+             FROM agent_session_resources WHERE session_id = ? ORDER BY binding_id",
+        )
+        .bind(session_id.as_ref())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(resource_from_row).collect()
+    }
+
     pub async fn read_events(
         &self,
         session_id: &AgentSessionId,
@@ -778,7 +869,7 @@ impl AgentSessionStore {
             "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
                     runtime_binding_id, runtime_producer_seq, kind, kind_version, \
                     correlation_id, causation_event_id, inline_json, payload_id \
-             FROM session_events \
+             FROM agent_events \
              WHERE session_id = ? AND seq > ? \
              ORDER BY seq ASC LIMIT ?",
         )
@@ -819,20 +910,16 @@ impl AgentSessionStore {
         let mut tx = self.pool.begin().await?;
         require_live_session_tx(&mut tx, session_id.as_ref()).await?;
 
-        let started_row = sqlx::query_as::<_, StoredEventRow>(
-            "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
-                    runtime_binding_id, runtime_producer_seq, kind, kind_version, \
-                    correlation_id, causation_event_id, inline_json, payload_id \
-             FROM session_events \
-             WHERE session_id = ? AND correlation_id = ? AND kind = 'turn/started' \
-             ORDER BY seq ASC LIMIT 1",
+        let turn = sqlx::query_as::<_, StoredTurnRow>(
+            "SELECT turn_id, operation_id, state, started_event_id, terminal_event_id \
+             FROM agent_turns WHERE session_id = ? AND operation_id = ?",
         )
         .bind(session_id.as_ref())
         .bind(operation_id.as_ref())
         .fetch_optional(&mut *tx)
         .await?;
 
-        let Some(started_row) = started_row else {
+        let Some(turn) = turn else {
             tx.commit().await?;
             return Ok(TurnReceipt {
                 agent_session_id: session_id.clone(),
@@ -842,32 +929,39 @@ impl AgentSessionStore {
                 terminal_event: None,
             });
         };
-        let started_event = event_from_row(started_row)?;
-
-        let terminal_row = sqlx::query_as::<_, StoredEventRow>(
-            "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
-                    runtime_binding_id, runtime_producer_seq, kind, kind_version, \
-                    correlation_id, causation_event_id, inline_json, payload_id \
-             FROM session_events \
-             WHERE session_id = ? AND correlation_id = ? \
-               AND kind IN ('turn/completed', 'turn/failed', 'turn/cancelled') \
-               AND seq > ? \
-             ORDER BY seq ASC LIMIT 1",
-        )
-        .bind(session_id.as_ref())
-        .bind(operation_id.as_ref())
-        .bind(as_i64(started_event.seq, "turn start seq")?)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let terminal_event = terminal_row.map(event_from_row).transpose()?;
-        let status = terminal_event.as_ref().map_or(TurnReceiptStatus::Running, |event| {
-            match event.kind.0.as_str() {
-                "turn/completed" => TurnReceiptStatus::Completed,
-                "turn/failed" => TurnReceiptStatus::Failed,
-                "turn/cancelled" => TurnReceiptStatus::Cancelled,
-                _ => unreachable!("turn receipt query returned a non-terminal event"),
-            }
-        });
+        if turn.turn_id != turn.operation_id || turn.operation_id != operation_id.as_ref() {
+            return Err(SessionStoreError::InvalidSession(
+                "canonical Agent Turn identity is inconsistent".to_owned(),
+            ));
+        }
+        let started_event = event_by_event_id_tx(&mut tx, &turn.started_event_id)
+            .await?
+            .map(event_from_row)
+            .transpose()?
+            .ok_or_else(|| SessionStoreError::InvalidSession(
+                "canonical Agent Turn is missing its started event".to_owned(),
+            ))?;
+        let terminal_event = match &turn.terminal_event_id {
+            Some(event_id) => Some(
+                event_by_event_id_tx(&mut tx, event_id)
+                    .await?
+                    .map(event_from_row)
+                    .transpose()?
+                    .ok_or_else(|| SessionStoreError::InvalidSession(
+                        "canonical Agent Turn is missing its terminal event".to_owned(),
+                    ))?,
+            ),
+            None => None,
+        };
+        let status = match turn.state.as_str() {
+            "accepted" | "running" => TurnReceiptStatus::Running,
+            "completed" => TurnReceiptStatus::Completed,
+            "failed" => TurnReceiptStatus::Failed,
+            "cancelled" | "interrupted" => TurnReceiptStatus::Cancelled,
+            state => return Err(SessionStoreError::InvalidSession(format!(
+                "canonical Agent Turn has unknown state {state}"
+            ))),
+        };
 
         tx.commit().await?;
         Ok(TurnReceipt {
@@ -877,6 +971,26 @@ impl AgentSessionStore {
             started_event: Some(started_event),
             terminal_event,
         })
+    }
+
+    pub async fn read_effect(
+        &self,
+        session_id: &AgentSessionId,
+        effect_id: &str,
+    ) -> Result<Option<AgentEffectRecord>, SessionStoreError> {
+        require_live_session(&self.pool, session_id.as_ref()).await?;
+        let row = sqlx::query_as::<_, StoredEffectRow>(
+            "SELECT effect_id, session_id, turn_id, operation_id, owner_domain, \
+                    capability_module, action_id, resource_binding_id, resource_key, \
+                    input_digest, strategy, state, bounded_observation_json, \
+                    started_event_id, terminal_event_id, created_at, settled_at \
+             FROM agent_effects WHERE session_id = ? AND effect_id = ?",
+        )
+        .bind(session_id.as_ref())
+        .bind(effect_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(effect_from_row).transpose()
     }
 
     pub async fn observe(
@@ -893,7 +1007,7 @@ impl AgentSessionStore {
         let after_seq = validate_cursor(session_id, after)?;
         let page = Self::read_event_page_tx(&mut tx, session_id, after_seq, head.last_seq, limit).await?;
         let messages =
-            Self::message_projections_after_tx(&mut tx, session_id, after_seq, head.last_seq).await?;
+            Self::messages_after_tx(&mut tx, session_id, after_seq, head.last_seq).await?;
         tx.commit().await?;
         Ok(SessionObservation {
             session,
@@ -1090,7 +1204,7 @@ impl AgentSessionStore {
         Ok(head)
     }
 
-    pub async fn message_projections_after(
+    pub async fn messages_after(
         &self,
         session_id: &AgentSessionId,
         after_seq: u64,
@@ -1098,12 +1212,12 @@ impl AgentSessionStore {
         let mut tx = self.pool.begin().await?;
         require_live_session_tx(&mut tx, session_id.as_ref()).await?;
         let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
-        let messages = Self::message_projections_after_tx(&mut tx, session_id, after_seq, head.last_seq).await?;
+        let messages = Self::messages_after_tx(&mut tx, session_id, after_seq, head.last_seq).await?;
         tx.commit().await?;
         Ok(messages)
     }
 
-    async fn message_projections_after_tx(
+    async fn messages_after_tx(
         tx: &mut Transaction<'_, Sqlite>,
         session_id: &AgentSessionId,
         after_seq: u64,
@@ -1117,7 +1231,7 @@ impl AgentSessionStore {
         let rows = sqlx::query_as::<_, StoredProjectionRow>(
             "SELECT session_id, projection_id, first_seq, last_seq, presentation_intent, \
                     projection_json, semantic_digest \
-             FROM message_projection \
+             FROM agent_messages \
              WHERE session_id = ? AND last_seq > ? \
              ORDER BY first_seq ASC, projection_id ASC",
         )
@@ -1134,11 +1248,11 @@ impl AgentSessionStore {
     ) -> Result<SessionHeadProjection, SessionStoreError> {
         let mut tx = self.pool.begin().await?;
         require_live_session_tx(&mut tx, session_id.as_ref()).await?;
-        sqlx::query("DELETE FROM message_projection WHERE session_id = ?")
+        sqlx::query("DELETE FROM agent_messages WHERE session_id = ?")
             .bind(session_id.as_ref())
             .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM session_heads WHERE session_id = ?")
+        sqlx::query("DELETE FROM agent_session_heads WHERE session_id = ?")
             .bind(session_id.as_ref())
             .execute(&mut *tx)
             .await?;
@@ -1151,10 +1265,10 @@ impl AgentSessionStore {
             let payload = payload_value_for_event_tx(&mut tx, &event).await?;
             reduce_head(&mut head, &event, &payload)?;
             persist_head_tx(&mut tx, &head).await?;
-            if event_uses_message_projection(self.registry.entry(&event.kind, event.kind_version)?)
+            if event_uses_agent_messages(self.registry.entry(&event.kind, event.kind_version)?)
             {
                 let existing = projection_by_identity_tx(&mut tx, &event).await?;
-                let projection = reduce_message_projection(existing, &event, &payload)?;
+                let projection = reduce_agent_messages(existing, &event, &payload)?;
                 upsert_projection_tx(&mut tx, &projection).await?;
             }
         }
@@ -1185,7 +1299,7 @@ impl AgentSessionStore {
             "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
                     runtime_binding_id, runtime_producer_seq, kind, kind_version, \
                     correlation_id, causation_event_id, inline_json, payload_id \
-             FROM session_events \
+             FROM agent_events \
              WHERE session_id = ? AND kind = 'compaction/completed' \
              ORDER BY seq DESC LIMIT 1",
         )
@@ -1207,7 +1321,7 @@ impl AgentSessionStore {
             "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
                     runtime_binding_id, runtime_producer_seq, kind, kind_version, \
                     correlation_id, causation_event_id, inline_json, payload_id \
-             FROM session_events \
+             FROM agent_events \
              WHERE session_id = ? AND seq > ? \
              ORDER BY seq ASC",
         )
@@ -1376,6 +1490,13 @@ impl AgentSessionStore {
         insert_live_session_tx(&mut tx, &child_session, request.created_at).await?;
         insert_payload_tx(&mut tx, &payload).await?;
         insert_head_tx(&mut tx, &initial_head(&request.child_session_id)).await?;
+        insert_session_resources_tx(
+            &mut tx,
+            &request.child_session_id,
+            &request.child_owner_ref,
+            &request.child_agent_binding.typed_resource_bindings,
+        )
+        .await?;
 
         let child_opening = SessionEventAppend {
             agent_session_id: request.child_session_id.clone(),
@@ -1726,13 +1847,15 @@ impl AgentSessionStore {
 
         let payload_value = payload_value(&record, stored_payload_value);
         validate_semantic_event_tx(tx, &record, &payload_value).await?;
+        project_turn_fact_tx(tx, &record, &payload_value).await?;
+        project_effect_fact_tx(tx, &record, &payload_value).await?;
         let mut head = head_by_id_tx(tx, append.agent_session_id.as_ref()).await?;
         reduce_head(&mut head, &record, &payload_value)?;
         persist_head_tx(tx, &head).await?;
 
-        if event_uses_message_projection(&registry_entry) {
+        if event_uses_agent_messages(&registry_entry) {
             let existing = projection_by_identity_tx(tx, &record).await?;
-            let projection = reduce_message_projection(existing, &record, &payload_value)?;
+            let projection = reduce_agent_messages(existing, &record, &payload_value)?;
             upsert_projection_tx(tx, &projection).await?;
         }
 
@@ -1813,6 +1936,79 @@ async fn validate_turn_lifecycle_tx(
     Ok(())
 }
 
+async fn project_turn_fact_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    event: &SessionEventRecord,
+    payload: &Value,
+) -> Result<(), SessionStoreError> {
+    let operation_id = event.correlation_id.as_ref();
+    match event.kind.0.as_str() {
+        "turn/started" => {
+            let source_message_id = payload
+                .get("source_message_id")
+                .or_else(|| payload.get("message_id"))
+                .and_then(Value::as_str);
+            let admission_json = payload
+                .get("admission")
+                .map(serde_json::to_string)
+                .transpose()?;
+            sqlx::query(
+                "INSERT INTO agent_turns (\
+                    session_id, turn_id, operation_id, idempotency_key, source_message_id, \
+                    admission_json, state, result_json, error_json, started_event_id, \
+                    terminal_event_id, accepted_at, started_at, finished_at\
+                 ) VALUES (?, ?, ?, ?, ?, ?, 'running', NULL, NULL, ?, NULL, ?, ?, NULL)",
+            )
+            .bind(event.agent_session_id.as_ref())
+            .bind(operation_id)
+            .bind(operation_id)
+            .bind(event.idempotency_key.as_ref())
+            .bind(source_message_id)
+            .bind(admission_json)
+            .bind(event.event_id.as_ref())
+            .bind(as_i64(event.seq, "turn accepted sequence")?)
+            .bind(as_i64(event.seq, "turn started sequence")?)
+            .execute(&mut **tx)
+            .await?;
+        }
+        "turn/completed" | "turn/failed" | "turn/cancelled" => {
+            let state = match event.kind.0.as_str() {
+                "turn/completed" => "completed",
+                "turn/failed" => "failed",
+                "turn/cancelled" => "cancelled",
+                _ => unreachable!(),
+            };
+            let payload_json = serde_json::to_string(payload)?;
+            let (result_json, error_json) = if state == "completed" {
+                (Some(payload_json), None)
+            } else {
+                (None, Some(payload_json))
+            };
+            let result = sqlx::query(
+                "UPDATE agent_turns SET state = ?, result_json = ?, error_json = ?, \
+                    terminal_event_id = ?, finished_at = ? \
+                 WHERE session_id = ? AND operation_id = ? AND state = 'running'",
+            )
+            .bind(state)
+            .bind(result_json)
+            .bind(error_json)
+            .bind(event.event_id.as_ref())
+            .bind(as_i64(event.seq, "turn finished sequence")?)
+            .bind(event.agent_session_id.as_ref())
+            .bind(operation_id)
+            .execute(&mut **tx)
+            .await?;
+            if result.rows_affected() != 1 {
+                return Err(SessionStoreError::Conflict(format!(
+                    "canonical Agent Turn {operation_id} was not running"
+                )));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn is_turn_terminal_kind(kind: &str) -> bool {
     matches!(kind, "turn/completed" | "turn/failed" | "turn/cancelled")
 }
@@ -1823,7 +2019,7 @@ async fn first_turn_lifecycle_kind_tx(
     operation_id: &str,
 ) -> Result<Option<String>, SessionStoreError> {
     Ok(sqlx::query_scalar(
-        "SELECT kind FROM session_events \
+        "SELECT kind FROM agent_events \
          WHERE session_id = ? AND correlation_id = ? \
            AND kind IN ('turn/started', 'turn/completed', 'turn/failed', 'turn/cancelled') \
          ORDER BY seq ASC LIMIT 1",
@@ -1840,7 +2036,7 @@ async fn first_turn_terminal_kind_tx(
     operation_id: &str,
 ) -> Result<Option<String>, SessionStoreError> {
     Ok(sqlx::query_scalar(
-        "SELECT kind FROM session_events \
+        "SELECT kind FROM agent_events \
          WHERE session_id = ? AND correlation_id = ? \
            AND kind IN ('turn/completed', 'turn/failed', 'turn/cancelled') \
          ORDER BY seq ASC LIMIT 1",
@@ -1857,7 +2053,7 @@ async fn turn_started_exists_tx(
     operation_id: &str,
 ) -> Result<bool, SessionStoreError> {
     let exists: i64 = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM session_events \
+        "SELECT EXISTS(SELECT 1 FROM agent_events \
          WHERE session_id = ? AND correlation_id = ? AND kind = 'turn/started')",
     )
     .bind(session_id)
@@ -1909,7 +2105,50 @@ struct StoredPayloadRow {
     media_type: String,
     byte_len: i64,
     digest: String,
-    body: Vec<u8>,
+    storage_kind: String,
+    body: Option<Vec<u8>>,
+    object_ref: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct StoredTurnRow {
+    turn_id: String,
+    operation_id: String,
+    state: String,
+    started_event_id: String,
+    terminal_event_id: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct StoredEffectRow {
+    effect_id: String,
+    session_id: String,
+    turn_id: String,
+    operation_id: String,
+    owner_domain: String,
+    capability_module: String,
+    action_id: String,
+    resource_binding_id: Option<String>,
+    resource_key: Option<String>,
+    input_digest: String,
+    strategy: String,
+    state: String,
+    bounded_observation_json: Option<String>,
+    started_event_id: String,
+    terminal_event_id: Option<String>,
+    created_at: i64,
+    settled_at: Option<i64>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct StoredResourceRow {
+    binding_id: String,
+    resource_kind: String,
+    resource_id: String,
+    owner_id: String,
+    operations_json: String,
+    connection_config_ref: Option<String>,
+    typed_parameters_json: String,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1939,19 +2178,22 @@ struct StoredProjectionRow {
     semantic_digest: String,
 }
 
-async fn validate_fresh_v4_schema(pool: &SqlitePool) -> Result<(), SessionStoreError> {
+async fn validate_agent_store_schema(pool: &SqlitePool) -> Result<(), SessionStoreError> {
     let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
         .fetch_one(pool)
         .await?;
     if foreign_keys != 1 {
         return Err(SessionStoreError::InvalidSession(
-            "shared Fresh-v4 pool must enforce SQLite foreign keys".to_owned(),
+            "shared canonical Agent Store pool must enforce SQLite foreign keys".to_owned(),
         ));
     }
     let actual = schema_table_names(pool).await?;
-    let required = fresh_v4_schema_manifest_payload()
+    let required = agent_store_schema_manifest_payload()
         .tables
         .into_iter()
+        .filter(|table| {
+            table.owner == "platform.agent-session" || table.table_name == "schema_metadata"
+        })
         .map(|table| table.table_name)
         .collect::<BTreeSet<_>>();
     let missing = required
@@ -1960,7 +2202,7 @@ async fn validate_fresh_v4_schema(pool: &SqlitePool) -> Result<(), SessionStoreE
         .collect::<BTreeSet<_>>();
     if !missing.is_empty() {
         return Err(SessionStoreError::InvalidSession(format!(
-            "AgentSessionStore requires the shared canonical Fresh-v4 schema; missing tables {missing:?}"
+            "AgentSessionStore requires the shared canonical Agent Store schema; missing tables {missing:?}"
         )));
     }
     let metadata: Option<(i64, i64, i64)> = sqlx::query_as(
@@ -1971,15 +2213,15 @@ async fn validate_fresh_v4_schema(pool: &SqlitePool) -> Result<(), SessionStoreE
     .await?;
     let Some((data_generation, migration_head, projection_schema_version)) = metadata else {
         return Err(SessionStoreError::InvalidSession(
-            "canonical Fresh-v4 schema_metadata row is missing".to_owned(),
+            "canonical Agent Store schema_metadata row is missing".to_owned(),
         ));
     };
-    if data_generation != i64::from(FRESH_V4_DATA_GENERATION)
-        || migration_head < i64::from(FRESH_V4_MIGRATION_HEAD)
-        || projection_schema_version < i64::from(FRESH_V4_PROJECTION_SCHEMA_VERSION)
+    if data_generation != i64::from(AGENT_STORE_DATA_GENERATION)
+        || migration_head < i64::from(AGENT_STORE_MIGRATION_HEAD)
+        || projection_schema_version < i64::from(AGENT_STORE_PROJECTION_SCHEMA_VERSION)
     {
         return Err(SessionStoreError::InvalidSession(format!(
-            "unsupported Fresh-v4 metadata: generation={data_generation}, migration_head={migration_head}, projection_schema_version={projection_schema_version}"
+            "unsupported canonical Agent Store metadata: generation={data_generation}, migration_head={migration_head}, projection_schema_version={projection_schema_version}"
         )));
     }
 
@@ -1990,7 +2232,7 @@ async fn validate_fresh_v4_schema(pool: &SqlitePool) -> Result<(), SessionStoreE
             "AgentSession owned tables are missing: {missing_owned:?}"
         )));
     }
-    for (table, expected_columns) in SESSION_COLUMNS {
+    for (table, expected_columns) in AGENT_STORE_COLUMNS {
         let sql = format!("SELECT name FROM pragma_table_info('{table}') ORDER BY cid");
         let actual_columns: Vec<String> = sqlx::query_scalar(&sql).fetch_all(pool).await?;
         let expected_columns = expected_columns
@@ -2007,15 +2249,16 @@ async fn validate_fresh_v4_schema(pool: &SqlitePool) -> Result<(), SessionStoreE
         "SELECT name FROM sqlite_schema \
          WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%' \
            AND tbl_name IN (\
-               'agent_sessions', 'session_events', 'session_payloads', \
-               'session_heads', 'message_projection'\
+               'agent_sessions', 'agent_turns', 'agent_events', 'agent_payloads', \
+               'agent_effects', 'agent_session_resources', \
+               'agent_session_heads', 'agent_messages'\
            )",
     )
     .fetch_all(pool)
     .await?
     .into_iter()
     .collect();
-    let expected_indexes = SESSION_INDEXES
+    let expected_indexes = AGENT_STORE_INDEXES
         .iter()
         .map(|index| (*index).to_owned())
         .collect::<BTreeSet<_>>();
@@ -2046,7 +2289,7 @@ async fn schema_table_names(pool: &SqlitePool) -> Result<BTreeSet<String>, Sessi
 }
 
 fn expected_owned_table_names() -> BTreeSet<String> {
-    SESSION_TABLES
+    AGENT_STORE_TABLES
         .iter()
         .map(|name| (*name).to_owned())
         .collect()
@@ -2060,11 +2303,11 @@ async fn seed_test_schema_metadata(pool: &SqlitePool) -> Result<(), SessionStore
             seed_manifest_digest, canonical_schema_manifest_digest, projection_schema_version\
          ) VALUES ('canonical', ?, 'agent-session-test-root', ?, ?, ?, ?)",
     )
-    .bind(i64::from(FRESH_V4_DATA_GENERATION))
-    .bind(i64::from(FRESH_V4_MIGRATION_HEAD))
+    .bind(i64::from(AGENT_STORE_DATA_GENERATION))
+    .bind(i64::from(AGENT_STORE_MIGRATION_HEAD))
     .bind("0".repeat(64))
     .bind("1".repeat(64))
-    .bind(i64::from(FRESH_V4_PROJECTION_SCHEMA_VERSION))
+    .bind(i64::from(AGENT_STORE_PROJECTION_SCHEMA_VERSION))
     .execute(pool)
     .await?;
     Ok(())
@@ -2233,7 +2476,7 @@ async fn replay_create(
         "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
                 runtime_binding_id, runtime_producer_seq, kind, kind_version, \
                 correlation_id, causation_event_id, inline_json, payload_id \
-         FROM session_events \
+         FROM agent_events \
          WHERE session_id = ? AND kind = 'capability/active-set-committed' \
          ORDER BY seq ASC LIMIT 1",
     )
@@ -2331,12 +2574,65 @@ async fn insert_live_session_tx(
     Ok(())
 }
 
+async fn insert_session_resources_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session_id: &AgentSessionId,
+    owner: &PrincipalRef,
+    bindings: &[TypedResourceBinding],
+) -> Result<(), SessionStoreError> {
+    let mut ids = BTreeSet::new();
+    for binding in bindings {
+        if !ids.insert(binding.binding_id.clone())
+            || binding.binding_id.as_ref().trim().is_empty()
+            || binding.resource_kind.as_ref().trim().is_empty()
+            || binding.resource_id.as_ref().trim().is_empty()
+            || binding.owner_id != owner.principal_id
+            || binding
+                .operations
+                .iter()
+                .any(|operation| operation.trim().is_empty())
+        {
+            return Err(SessionStoreError::InvalidSession(format!(
+                "Session {} has an invalid or foreign resource binding {}",
+                session_id.as_ref(),
+                binding.binding_id.as_ref()
+            )));
+        }
+        let operations_json = serde_json::to_string(&binding.operations)?;
+        let typed_parameters_json = serde_json::to_string(&binding.typed_parameters)?;
+        let binding_digest = digest_payload(binding)?;
+        sqlx::query(
+            "INSERT INTO agent_session_resources (\
+                binding_id, session_id, resource_kind, resource_id, owner_id, \
+                operations_json, connection_config_ref, typed_parameters_json, binding_digest\
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(binding.binding_id.as_ref())
+        .bind(session_id.as_ref())
+        .bind(binding.resource_kind.as_ref())
+        .bind(binding.resource_id.as_ref())
+        .bind(&binding.owner_id)
+        .bind(operations_json)
+        .bind(
+            binding
+                .connection_config_ref
+                .as_ref()
+                .map(|value| value.as_ref()),
+        )
+        .bind(typed_parameters_json)
+        .bind(binding_digest.as_ref())
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
 async fn insert_head_tx(
     tx: &mut Transaction<'_, Sqlite>,
     head: &SessionHeadProjection,
 ) -> Result<(), SessionStoreError> {
     sqlx::query(
-        "INSERT INTO session_heads (\
+        "INSERT INTO agent_session_heads (\
             session_id, status, active_turn_id, active_set_generation, \
             runtime_checkpoint_locator, runtime_checkpoint_digest, runtime_bound_event_id, \
             runtime_protocol_version, snapshot_digest, checkpoint_through_seq, \
@@ -2369,7 +2665,7 @@ async fn persist_head_tx(
     head: &SessionHeadProjection,
 ) -> Result<(), SessionStoreError> {
     sqlx::query(
-        "UPDATE session_heads SET \
+        "UPDATE agent_session_heads SET \
             status = ?, active_turn_id = ?, active_set_generation = ?, \
             runtime_checkpoint_locator = ?, runtime_checkpoint_digest = ?, \
             runtime_bound_event_id = ?, runtime_protocol_version = ?, snapshot_digest = ?, \
@@ -2403,7 +2699,7 @@ async fn insert_event_tx(
 ) -> Result<(), SessionStoreError> {
     let (inline_json, payload_id) = event_payload_columns(&event.payload)?;
     sqlx::query(
-        "INSERT INTO session_events (\
+        "INSERT INTO agent_events (\
             session_id, seq, event_id, producer_id, idempotency_key, \
             runtime_binding_id, runtime_producer_seq, kind, kind_version, \
             correlation_id, causation_event_id, inline_json, payload_id\
@@ -2477,7 +2773,7 @@ async fn insert_payload_tx(
     }
 
     let total: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(byte_len), 0) FROM session_payloads WHERE session_id = ?",
+        "SELECT COALESCE(SUM(byte_len), 0) FROM agent_payloads WHERE session_id = ?",
     )
     .bind(payload.agent_session_id.as_ref())
     .fetch_one(&mut **tx)
@@ -2491,9 +2787,9 @@ async fn insert_payload_tx(
 
     let stored_body = serde_json::to_vec(&payload.body)?;
     sqlx::query(
-        "INSERT INTO session_payloads \
-            (payload_id, session_id, media_type, byte_len, digest, body) \
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO agent_payloads \
+            (payload_id, session_id, media_type, byte_len, digest, storage_kind, body, object_ref) \
+         VALUES (?, ?, ?, ?, ?, 'inline', ?, NULL)",
     )
     .bind(payload.payload_id.as_ref())
     .bind(payload.agent_session_id.as_ref())
@@ -2658,7 +2954,7 @@ async fn validate_predecessor_tx(
     append: &SessionEventAppend,
     entry: &nomifun_agent_contracts::SessionEventRegistryEntry,
 ) -> Result<(), SessionStoreError> {
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_events WHERE session_id = ?")
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id = ?")
         .bind(append.agent_session_id.as_ref())
         .fetch_one(&mut **tx)
         .await?;
@@ -2687,7 +2983,7 @@ async fn validate_predecessor_tx(
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(
-                "SELECT EXISTS(SELECT 1 FROM session_events \
+                "SELECT EXISTS(SELECT 1 FROM agent_events \
                  WHERE session_id = ? AND kind IN ({placeholders}))"
             );
             let mut query =
@@ -2707,7 +3003,7 @@ async fn validate_predecessor_tx(
 
     if let Some(causation_event_id) = append.semantic_event.causation_event_id.as_ref() {
         let cause: Option<String> =
-            sqlx::query_scalar("SELECT session_id FROM session_events WHERE event_id = ?")
+            sqlx::query_scalar("SELECT session_id FROM agent_events WHERE event_id = ?")
                 .bind(causation_event_id.as_ref())
                 .fetch_optional(&mut **tx)
                 .await?;
@@ -2740,7 +3036,7 @@ async fn validate_runtime_sequence_tx(
     };
     if append.semantic_event.kind.0 != "runtime/bound" {
         let bound_exists: i64 = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM session_events \
+            "SELECT EXISTS(SELECT 1 FROM agent_events \
              WHERE session_id = ? AND runtime_binding_id = ? AND kind = 'runtime/bound')",
         )
         .bind(append.agent_session_id.as_ref())
@@ -2755,7 +3051,7 @@ async fn validate_runtime_sequence_tx(
         }
     }
     let maximum: Option<i64> = sqlx::query_scalar(
-        "SELECT MAX(runtime_producer_seq) FROM session_events WHERE runtime_binding_id = ?",
+        "SELECT MAX(runtime_producer_seq) FROM agent_events WHERE runtime_binding_id = ?",
     )
     .bind(binding.as_ref())
     .fetch_one(&mut **tx)
@@ -2787,7 +3083,7 @@ async fn validate_effect_transition_tx(
         "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
                 runtime_binding_id, runtime_producer_seq, kind, kind_version, \
                 correlation_id, causation_event_id, inline_json, payload_id \
-         FROM session_events \
+         FROM agent_events \
          WHERE session_id = ? AND correlation_id = ? AND kind LIKE 'effect/%' \
          ORDER BY seq ASC",
     )
@@ -2891,7 +3187,132 @@ async fn validate_effect_transition_tx(
     }
 }
 
-fn event_uses_message_projection(
+async fn project_effect_fact_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    event: &SessionEventRecord,
+    payload: &Value,
+) -> Result<(), SessionStoreError> {
+    if !event.kind.0.starts_with("effect/") {
+        return Ok(());
+    }
+    let field = |name: &str| -> Result<&str, SessionStoreError> {
+        payload.get(name).and_then(Value::as_str).ok_or_else(|| {
+            SessionStoreError::InvalidEvent(format!(
+                "effect ledger payload is missing {name}"
+            ))
+        })
+    };
+    let effect_id = field("effect_id")?;
+    if effect_id != event.correlation_id.as_ref() {
+        return Err(SessionStoreError::InvalidEvent(
+            "effect ledger identity differs from event correlation".to_owned(),
+        ));
+    }
+    let recorded_at = payload
+        .get("recorded_at")
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| {
+            SessionStoreError::InvalidEvent(
+                "effect ledger payload has invalid recorded_at".to_owned(),
+            )
+        })?;
+    match event.kind.0.as_str() {
+        "effect/started" => {
+            let strategy = field("strategy")?;
+            if !matches!(strategy, "managed_effect" | "external_uncertain_effect") {
+                return Err(SessionStoreError::InvalidEvent(
+                    "effect ledger cannot persist a read-only strategy".to_owned(),
+                ));
+            }
+            sqlx::query(
+                "INSERT INTO agent_effects (\
+                    effect_id, session_id, turn_id, operation_id, owner_domain, \
+                    capability_module, action_id, resource_binding_id, resource_key, \
+                    input_digest, strategy, state, bounded_observation_json, \
+                    started_event_id, terminal_event_id, created_at, settled_at\
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL, ?, NULL)",
+            )
+            .bind(effect_id)
+            .bind(event.agent_session_id.as_ref())
+            .bind(field("turn_id")?)
+            .bind(field("operation_id")?)
+            .bind(field("owner_domain")?)
+            .bind(field("capability_module")?)
+            .bind(field("action_id")?)
+            .bind(payload.get("resource_binding_id").and_then(Value::as_str))
+            .bind(payload.get("resource_key").and_then(Value::as_str))
+            .bind(field("input_digest")?)
+            .bind(strategy)
+            .bind(event.event_id.as_ref())
+            .bind(recorded_at)
+            .execute(&mut **tx)
+            .await?;
+        }
+        "effect/succeeded" | "effect/failed" | "effect/uncertain" => {
+            let state = match event.kind.0.as_str() {
+                "effect/succeeded" => "returned",
+                "effect/failed" => "rejected",
+                "effect/uncertain" => "unknown",
+                _ => unreachable!(),
+            };
+            let observation = serde_json::to_string(payload)?;
+            let result = sqlx::query(
+                "UPDATE agent_effects SET state = ?, bounded_observation_json = ?, \
+                    terminal_event_id = ?, settled_at = ? \
+                 WHERE effect_id = ? AND session_id = ? AND state = 'pending'",
+            )
+            .bind(state)
+            .bind(observation)
+            .bind(event.event_id.as_ref())
+            .bind(recorded_at)
+            .bind(effect_id)
+            .bind(event.agent_session_id.as_ref())
+            .execute(&mut **tx)
+            .await?;
+            if result.rows_affected() != 1 {
+                return Err(SessionStoreError::Conflict(format!(
+                    "canonical effect {effect_id} was not pending"
+                )));
+            }
+        }
+        "effect/reconciled" => {
+            let state = match payload.get("outcome").and_then(Value::as_str) {
+                Some("confirmed_succeeded") => "returned",
+                Some("confirmed_failed") => "rejected",
+                Some("still_uncertain") => "unknown",
+                other => {
+                    return Err(SessionStoreError::InvalidEvent(format!(
+                        "effect reconciliation has invalid outcome {other:?}"
+                    )));
+                }
+            };
+            let observation = serde_json::to_string(payload)?;
+            let result = sqlx::query(
+                "UPDATE agent_effects SET state = ?, bounded_observation_json = ?, \
+                    terminal_event_id = ?, settled_at = ? \
+                 WHERE effect_id = ? AND session_id = ? AND state = 'unknown'",
+            )
+            .bind(state)
+            .bind(observation)
+            .bind(event.event_id.as_ref())
+            .bind(recorded_at)
+            .bind(effect_id)
+            .bind(event.agent_session_id.as_ref())
+            .execute(&mut **tx)
+            .await?;
+            if result.rows_affected() != 1 {
+                return Err(SessionStoreError::Conflict(format!(
+                    "canonical effect {effect_id} was not unknown"
+                )));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn event_uses_agent_messages(
     entry: &nomifun_agent_contracts::SessionEventRegistryEntry,
 ) -> bool {
     entry
@@ -2905,6 +3326,20 @@ fn effect_append(
     mut request: EffectEventRequest,
     kind: &str,
 ) -> Result<SessionEventAppend, SessionStoreError> {
+    if request.effect_id.trim().is_empty()
+        || request.effect_id != request.correlation_id.as_ref()
+        || request.turn_id.as_ref().trim().is_empty()
+        || request.operation_id.as_ref().trim().is_empty()
+        || request.owner_domain.trim().is_empty()
+        || request.capability_module.as_ref().trim().is_empty()
+        || request.action_id.as_ref().trim().is_empty()
+        || request.input_digest.as_ref().len() != 64
+        || request.recorded_at < 0
+    {
+        return Err(SessionStoreError::InvalidEvent(
+            "effect ledger identity is incomplete or inconsistent".to_owned(),
+        ));
+    }
     let SessionEventPayloadRef::InlineJson(mut payload) = request.payload else {
         return Err(SessionStoreError::InvalidEvent(
             "effect lifecycle payload must be inline canonical JSON".to_owned(),
@@ -2926,6 +3361,60 @@ fn effect_append(
             "strategy".to_owned(),
             Value::String(request.strategy.as_str().to_owned()),
         );
+    }
+    for (key, value) in [
+        ("effect_id", Value::String(request.effect_id.clone())),
+        ("turn_id", Value::String(request.turn_id.as_ref().to_owned())),
+        (
+            "operation_id",
+            Value::String(request.operation_id.as_ref().to_owned()),
+        ),
+        ("owner_domain", Value::String(request.owner_domain.clone())),
+        (
+            "capability_module",
+            Value::String(request.capability_module.as_ref().to_owned()),
+        ),
+        ("action_id", Value::String(request.action_id.as_ref().to_owned())),
+        (
+            "input_digest",
+            Value::String(request.input_digest.as_ref().to_owned()),
+        ),
+        ("recorded_at", Value::from(request.recorded_at)),
+    ] {
+        if let Some(existing) = object.get(key) {
+            if existing != &value {
+                return Err(SessionStoreError::InvalidEvent(format!(
+                    "effect ledger field {key} changed between events"
+                )));
+            }
+        } else {
+            object.insert(key.to_owned(), value);
+        }
+    }
+    for (key, value) in [
+        (
+            "resource_binding_id",
+            request
+                .resource_binding_id
+                .as_ref()
+                .map(|value| Value::String(value.as_ref().to_owned())),
+        ),
+        (
+            "resource_key",
+            request.resource_key.as_ref().map(|value| Value::String(value.clone())),
+        ),
+    ] {
+        if let Some(value) = value {
+            if let Some(existing) = object.get(key) {
+                if existing != &value {
+                    return Err(SessionStoreError::InvalidEvent(format!(
+                        "effect ledger field {key} changed between events"
+                    )));
+                }
+            } else {
+                object.insert(key.to_owned(), value);
+            }
+        }
     }
     request.payload = SessionEventPayloadRef::InlineJson(payload);
     Ok(SessionEventAppend {
@@ -3175,7 +3664,7 @@ async fn event_by_event_id_tx(
         "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
                 runtime_binding_id, runtime_producer_seq, kind, kind_version, \
                 correlation_id, causation_event_id, inline_json, payload_id \
-         FROM session_events WHERE event_id = ?",
+         FROM agent_events WHERE event_id = ?",
     )
     .bind(event_id)
     .fetch_optional(&mut **tx)
@@ -3191,7 +3680,7 @@ async fn event_by_producer_key_tx(
         "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
                 runtime_binding_id, runtime_producer_seq, kind, kind_version, \
                 correlation_id, causation_event_id, inline_json, payload_id \
-         FROM session_events WHERE producer_id = ? AND idempotency_key = ?",
+         FROM agent_events WHERE producer_id = ? AND idempotency_key = ?",
     )
     .bind(producer_id)
     .bind(idempotency_key)
@@ -3208,7 +3697,7 @@ async fn event_by_runtime_sequence_tx(
         "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
                 runtime_binding_id, runtime_producer_seq, kind, kind_version, \
                 correlation_id, causation_event_id, inline_json, payload_id \
-         FROM session_events WHERE runtime_binding_id = ? AND runtime_producer_seq = ?",
+         FROM agent_events WHERE runtime_binding_id = ? AND runtime_producer_seq = ?",
     )
     .bind(runtime_binding_id)
     .bind(as_i64(producer_seq, "runtime_producer_seq")?)
@@ -3224,7 +3713,7 @@ async fn event_rows_for_session_tx(
         "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
                 runtime_binding_id, runtime_producer_seq, kind, kind_version, \
                 correlation_id, causation_event_id, inline_json, payload_id \
-         FROM session_events WHERE session_id = ? ORDER BY seq ASC",
+         FROM agent_events WHERE session_id = ? ORDER BY seq ASC",
     )
     .bind(session_id)
     .fetch_all(&mut **tx)
@@ -3282,8 +3771,8 @@ async fn payload_by_id_tx(
     payload_id: &str,
 ) -> Result<Option<StoredPayloadRow>, SessionStoreError> {
     Ok(sqlx::query_as::<_, StoredPayloadRow>(
-        "SELECT payload_id, session_id, media_type, byte_len, digest, body \
-         FROM session_payloads WHERE payload_id = ?",
+        "SELECT payload_id, session_id, media_type, byte_len, digest, storage_kind, body, object_ref \
+         FROM agent_payloads WHERE payload_id = ?",
     )
     .bind(payload_id)
     .fetch_optional(&mut **tx)
@@ -3291,13 +3780,79 @@ async fn payload_by_id_tx(
 }
 
 fn payload_from_row(row: StoredPayloadRow) -> Result<SessionPayloadRecord, SessionStoreError> {
+    if row.storage_kind != "inline" || row.object_ref.is_some() {
+        return Err(SessionStoreError::InvalidPayload(
+            "object payload must be resolved by the content-addressed object port".to_owned(),
+        ));
+    }
+    let body = row.body.ok_or_else(|| {
+        SessionStoreError::InvalidPayload("inline payload body is missing".to_owned())
+    })?;
     Ok(SessionPayloadRecord {
         payload_id: ArtifactId(row.payload_id),
         agent_session_id: AgentSessionId(row.session_id),
         media_type: row.media_type,
         byte_len: as_u64(row.byte_len, "payload byte_len")?,
         digest: DigestHex(row.digest),
-        body: serde_json::from_slice(&row.body)?,
+        body: serde_json::from_slice(&body)?,
+    })
+}
+
+fn effect_from_row(row: StoredEffectRow) -> Result<AgentEffectRecord, SessionStoreError> {
+    let strategy = match row.strategy.as_str() {
+        "managed_effect" => EffectStrategy::ManagedEffect,
+        "external_uncertain_effect" => EffectStrategy::ExternalUncertainEffect,
+        value => {
+            return Err(SessionStoreError::InvalidEvent(format!(
+                "canonical effect has unknown strategy {value}"
+            )));
+        }
+    };
+    let state = match row.state.as_str() {
+        "pending" => AgentEffectState::Pending,
+        "returned" => AgentEffectState::Returned,
+        "rejected" => AgentEffectState::Rejected,
+        "cancelled" => AgentEffectState::Cancelled,
+        "unknown" => AgentEffectState::Unknown,
+        value => {
+            return Err(SessionStoreError::InvalidEvent(format!(
+                "canonical effect has unknown state {value}"
+            )));
+        }
+    };
+    Ok(AgentEffectRecord {
+        effect_id: row.effect_id,
+        agent_session_id: AgentSessionId::from(row.session_id),
+        turn_id: OperationId::from(row.turn_id),
+        operation_id: OperationId::from(row.operation_id),
+        owner_domain: row.owner_domain,
+        capability_module: CapabilityId::from(row.capability_module),
+        action_id: ActionId::from(row.action_id),
+        resource_binding_id: row.resource_binding_id.map(ResourceBindingId::from),
+        resource_key: row.resource_key,
+        input_digest: DigestHex::from(row.input_digest),
+        strategy,
+        state,
+        bounded_observation: row
+            .bounded_observation_json
+            .map(|value| serde_json::from_str(&value))
+            .transpose()?,
+        started_event_id: EventId::from(row.started_event_id),
+        terminal_event_id: row.terminal_event_id.map(EventId::from),
+        created_at: row.created_at,
+        settled_at: row.settled_at,
+    })
+}
+
+fn resource_from_row(row: StoredResourceRow) -> Result<TypedResourceBinding, SessionStoreError> {
+    Ok(TypedResourceBinding {
+        binding_id: ResourceBindingId::from(row.binding_id),
+        resource_kind: ResourceKind::from(row.resource_kind),
+        resource_id: ResourceId::from(row.resource_id),
+        owner_id: row.owner_id,
+        operations: serde_json::from_str(&row.operations_json)?,
+        connection_config_ref: row.connection_config_ref.map(ConnectionConfigRef::from),
+        typed_parameters: serde_json::from_str(&row.typed_parameters_json)?,
     })
 }
 
@@ -3448,7 +4003,7 @@ async fn head_by_id_tx(
                 runtime_checkpoint_locator, runtime_checkpoint_digest, \
                 runtime_bound_event_id, runtime_protocol_version, snapshot_digest, \
                 checkpoint_through_seq, last_seq, unread_count \
-         FROM session_heads WHERE session_id = ?",
+         FROM agent_session_heads WHERE session_id = ?",
     )
     .bind(session_id)
     .fetch_one(&mut **tx)
@@ -3501,7 +4056,7 @@ async fn projection_by_identity_tx(
     let row = sqlx::query_as::<_, StoredProjectionRow>(
         "SELECT session_id, projection_id, first_seq, last_seq, presentation_intent, \
                 projection_json, semantic_digest \
-         FROM message_projection WHERE session_id = ? AND projection_id = ?",
+         FROM agent_messages WHERE session_id = ? AND projection_id = ?",
     )
     .bind(event.agent_session_id.as_ref())
     .bind(projection_id)
@@ -3515,7 +4070,7 @@ async fn upsert_projection_tx(
     projection: &MessageProjection,
 ) -> Result<(), SessionStoreError> {
     sqlx::query(
-        "INSERT INTO message_projection (\
+        "INSERT INTO agent_messages (\
             session_id, projection_id, first_seq, last_seq, presentation_intent, \
             projection_json, semantic_digest\
          ) VALUES (?, ?, ?, ?, ?, ?, ?) \
@@ -3555,23 +4110,35 @@ async fn purge_private_content_tx(
     tx: &mut Transaction<'_, Sqlite>,
     session_id: &str,
 ) -> Result<(), SessionStoreError> {
-    sqlx::query("DELETE FROM message_projection WHERE session_id = ?")
+    sqlx::query("DELETE FROM agent_effects WHERE session_id = ?")
         .bind(session_id)
         .execute(&mut **tx)
         .await?;
-    sqlx::query("DELETE FROM session_heads WHERE session_id = ?")
+    sqlx::query("DELETE FROM agent_turns WHERE session_id = ?")
         .bind(session_id)
         .execute(&mut **tx)
         .await?;
-    sqlx::query("UPDATE session_events SET causation_event_id = NULL WHERE session_id = ?")
+    sqlx::query("DELETE FROM agent_session_resources WHERE session_id = ?")
         .bind(session_id)
         .execute(&mut **tx)
         .await?;
-    sqlx::query("DELETE FROM session_events WHERE session_id = ?")
+    sqlx::query("DELETE FROM agent_messages WHERE session_id = ?")
         .bind(session_id)
         .execute(&mut **tx)
         .await?;
-    sqlx::query("DELETE FROM session_payloads WHERE session_id = ?")
+    sqlx::query("DELETE FROM agent_session_heads WHERE session_id = ?")
+        .bind(session_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("UPDATE agent_events SET causation_event_id = NULL WHERE session_id = ?")
+        .bind(session_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM agent_events WHERE session_id = ?")
+        .bind(session_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM agent_payloads WHERE session_id = ?")
         .bind(session_id)
         .execute(&mut **tx)
         .await?;
@@ -3601,10 +4168,13 @@ async fn assert_tombstone_exact_tx(
         ));
     }
     for table in [
-        "session_events",
-        "session_payloads",
-        "session_heads",
-        "message_projection",
+        "agent_turns",
+        "agent_effects",
+        "agent_session_resources",
+        "agent_events",
+        "agent_payloads",
+        "agent_session_heads",
+        "agent_messages",
     ] {
         let sql = format!("SELECT COUNT(*) FROM {table} WHERE session_id = ?");
         let count: i64 = sqlx::query_scalar(&sql)
@@ -3686,7 +4256,7 @@ async fn replay_fork(
         "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
                 runtime_binding_id, runtime_producer_seq, kind, kind_version, \
                 correlation_id, causation_event_id, inline_json, payload_id \
-         FROM session_events \
+         FROM agent_events \
          WHERE session_id = ? AND kind = 'capability/active-set-committed' \
          ORDER BY seq ASC LIMIT 1",
     )

@@ -37,6 +37,28 @@ pub(crate) const FTS_SHADOW_TABLES: &[&str] = &[
     "cs_notes_fts_idx",
 ];
 
+/// UARC Agent Store tables intentionally use canonical TEXT identities,
+/// physical foreign keys and composite fact keys. They belong to the exact
+/// database table set but not to the legacy v3 AUTOINCREMENT/logical-link
+/// contract applied to `PRODUCT_TABLES`.
+pub(crate) const CANONICAL_AGENT_STORE_TABLES: &[&str] = &[
+    "schema_metadata",
+    "agent_preset_templates",
+    "agent_presets",
+    "agent_preset_revisions",
+    "agent_preset_contribution_locks",
+    "agent_bindings",
+    "agent_runtime_snapshots",
+    "agent_sessions",
+    "agent_turns",
+    "agent_session_resources",
+    "agent_payloads",
+    "agent_events",
+    "agent_effects",
+    "agent_session_heads",
+    "agent_messages",
+];
+
 pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "agent_execution_attempts",
     "agent_execution_events",
@@ -1298,6 +1320,7 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
         .iter()
         .chain(std::iter::once(&CS_NOTES_FTS_TABLE))
         .chain(FTS_SHADOW_TABLES.iter())
+        .chain(CANONICAL_AGENT_STORE_TABLES.iter())
         .map(|value| (*value).to_owned())
         .collect();
     if actual_tables != expected_tables {

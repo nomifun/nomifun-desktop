@@ -66,7 +66,9 @@ impl FreshV4ParentOperationMarker {
             }
         }
         if self.target_data_generation != FRESH_V4_DATA_GENERATION {
-            return Err("target_data_generation must be Fresh-v4 generation 4".into());
+            return Err(format!(
+                "target_data_generation must be canonical generation {FRESH_V4_DATA_GENERATION}"
+            ));
         }
         validate_digest(&self.canonical_schema_manifest_digest)
     }
@@ -90,7 +92,9 @@ impl FreshV4SchemaMetadata {
             return Err("schema metadata singleton_key must be canonical".into());
         }
         if self.data_generation != FRESH_V4_DATA_GENERATION {
-            return Err("schema metadata data_generation must be 4".into());
+            return Err(format!(
+                "schema metadata data_generation must be {FRESH_V4_DATA_GENERATION}"
+            ));
         }
         if self.root_instance_id.trim().is_empty()
             || self.root_instance_id.contains(['/', '\\'])
@@ -191,7 +195,7 @@ mod tests {
                     Some("NomiFun-v4.pre-v4-archive-20260829123456".into())
                 }
             },
-            target_data_generation: 4,
+            target_data_generation: FRESH_V4_DATA_GENERATION,
             canonical_schema_manifest_digest: DIGEST.into(),
         }
     }
@@ -223,7 +227,7 @@ mod tests {
     fn schema_metadata_validates_exact_generation_and_digests() {
         let metadata = FreshV4SchemaMetadata {
             singleton_key: "canonical".into(),
-            data_generation: 4,
+            data_generation: FRESH_V4_DATA_GENERATION,
             root_instance_id: "root-1".into(),
             migration_head: 1,
             seed_manifest_digest: DIGEST.into(),
@@ -237,7 +241,7 @@ mod tests {
     fn ready_marker_matches_schema_metadata_and_has_a_build_digest() {
         let metadata = FreshV4SchemaMetadata {
             singleton_key: "canonical".into(),
-            data_generation: 4,
+            data_generation: FRESH_V4_DATA_GENERATION,
             root_instance_id: "root-1".into(),
             migration_head: 1,
             seed_manifest_digest: DIGEST.into(),

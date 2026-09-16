@@ -62,12 +62,12 @@
       {
         "decision_id": "D-012",
         "status": "confirmed",
-        "contract": "v4 is a clean start with no legacy data conversion or compatibility read."
+        "contract": "Agent Store generation 5 is a clean Agent-data start with no legacy Agent conversion or compatibility read."
       },
       {
         "decision_id": "D-013",
         "status": "confirmed",
-        "contract": "First v4 cutover performs one same-filesystem whole-root rename before creating an empty v4 root."
+        "contract": "Agent-only reset replaces Session, Execution, Preset and logs in the same canonical SQLite while preserving non-Agent configuration."
       },
       {
         "decision_id": "D-014",
@@ -77,7 +77,7 @@
       {
         "decision_id": "D-015",
         "status": "confirmed",
-        "contract": "Canonical semantic SessionEvent facts are authoritative; projections contain only UI state and never duplicate the Event Log."
+        "contract": "Canonical AgentSession, Turn, Event, Effect, Payload and Resource facts are authoritative; Message and Head projections are rebuildable."
       },
       {
         "decision_id": "D-016",
@@ -155,8 +155,8 @@
         ]
       },
       {
-        "source_kind": "fresh_v4_schema",
-        "logical_path": "crates/backend/nomifun-agent-contracts/schema/0001_fresh_v4.sql",
+        "source_kind": "canonical_agent_store_schema",
+        "logical_path": "crates/backend/nomifun-agent-contracts/schema/0001_agent_store.sql",
         "owns": [
           "tables",
           "indexes",
@@ -187,7 +187,7 @@
     "closure_resolutions": [
       {
         "resolution_id": "CR-001",
-        "canonical_rule": "Markdown explains generated artifacts; Rust types, fresh-v4 schema, and SessionEvent Registry are the only machine owners."
+        "canonical_rule": "Markdown explains generated artifacts; Rust types, the canonical Agent Store schema, and SessionEvent Registry are the only machine owners."
       },
       {
         "resolution_id": "CR-002",
@@ -211,15 +211,15 @@
       },
       {
         "resolution_id": "CR-007",
-        "canonical_rule": "Cutover archive basename is <canonical>.pre-v4-archive-<UTC timestamp>."
+        "canonical_rule": "Agent-only reset clears only tables whose schema reset_scope is agent_data and preserves all other domain configuration."
       },
       {
         "resolution_id": "CR-008",
-        "canonical_rule": "Once durable, the immutable parent marker survives mkdir or rename failure and is removed only after ready and metadata exact-match."
+        "canonical_rule": "Runtime checkpoints and content-addressed objects are derived storage; canonical SQLite facts are sufficient for safe rebuild."
       },
       {
         "resolution_id": "CR-009",
-        "canonical_rule": "Fresh initialization order is schema and schema_metadata, bundled Package materialization, seven authoring seeds, ready, then marker removal."
+        "canonical_rule": "Fresh initialization installs generation 5 schema, preserves non-Agent configuration, seeds current official Presets, and starts with empty Session and Execution collections."
       },
       {
         "resolution_id": "CR-010",
@@ -237,5 +237,5 @@
     "production_behavior_included": false,
     "unresolved_decisions": []
   },
-  "payload_digest": "c1eeb87b010954fa19324fb59d63c9d8722d6704fe1121ea63f41d4d06d14643"
+  "payload_digest": "d1cff555fcb33de6ffc654be651e60610d63be54fd41ab29a3df15355d594848"
 }

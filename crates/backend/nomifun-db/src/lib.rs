@@ -1,5 +1,6 @@
 //! SQLite database layer: init, migrations, repository traits, and implementations.
 pub mod backup_bundle;
+mod agent_store_reset;
 pub mod conversation_context;
 mod database;
 mod error;
@@ -16,6 +17,7 @@ pub use database::{
     init_database_memory_with_owner, inspect_supported_migration_lineage,
     open_database_for_backup, validate_current_migration_lineage,
 };
+pub use agent_store_reset::{AgentDataResetReport, reset_agent_data};
 pub use error::DbError;
 pub use id_schema_contract::{validate_id_data_contract, validate_id_schema_contract};
 pub use models::{

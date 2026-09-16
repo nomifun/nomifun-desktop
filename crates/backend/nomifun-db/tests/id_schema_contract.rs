@@ -166,6 +166,9 @@ async fn legacy_preset_tables_are_absent_from_the_current_schema() {
 /// them from the per-table row-key invariants below: SQLite, not this
 /// repository, owns their shape.
 const EXPECTED_PRODUCT_TABLES: &[&str] = &[
+    "agent_bindings",
+    "agent_effects",
+    "agent_events",
     "agent_execution_attempts",
     "agent_execution_events",
     "agent_execution_participants",
@@ -174,7 +177,18 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "agent_execution_template_participants",
     "agent_execution_templates",
     "agent_executions",
+    "agent_messages",
     "agent_metadata",
+    "agent_payloads",
+    "agent_preset_contribution_locks",
+    "agent_preset_revisions",
+    "agent_preset_templates",
+    "agent_presets",
+    "agent_runtime_snapshots",
+    "agent_session_heads",
+    "agent_session_resources",
+    "agent_sessions",
+    "agent_turns",
     "attachments",
     "channel_inbound_receipts",
     "channel_pairing_codes",
@@ -219,6 +233,7 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "idmm_action_reservations",
     "idmm_interventions",
     "installation_identity",
+    "installation_role_bindings",
     "instance_access_token",
     "javascript_runtime_selection",
     "knowledge_bases",
@@ -278,6 +293,7 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "requirement_pre_effect_abandon_guards",
     "requirement_tags",
     "requirements",
+    "schema_metadata",
     "skill_tags",
     "ssh_hosts",
     "system_settings",
@@ -301,6 +317,27 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
 /// above still pins their presence.
 fn is_sqlite_owned_table(table: &str) -> bool {
     table == "cs_notes_fts" || table.starts_with("cs_notes_fts_")
+}
+
+fn is_canonical_agent_store_table(table: &str) -> bool {
+    matches!(
+        table,
+        "agent_bindings"
+            | "agent_effects"
+            | "agent_events"
+            | "agent_messages"
+            | "agent_payloads"
+            | "agent_preset_contribution_locks"
+            | "agent_preset_revisions"
+            | "agent_preset_templates"
+            | "agent_presets"
+            | "agent_runtime_snapshots"
+            | "agent_session_heads"
+            | "agent_session_resources"
+            | "agent_sessions"
+            | "agent_turns"
+            | "schema_metadata"
+    )
 }
 
 #[tokio::test]
@@ -330,7 +367,7 @@ async fn every_product_table_has_one_integer_autoincrement_row_primary_key() {
             .collect::<Vec<_>>(),
     );
     for table in tables {
-        if is_sqlite_owned_table(&table) {
+        if is_sqlite_owned_table(&table) || is_canonical_agent_store_table(&table) {
             continue;
         }
         let columns = sqlx::query(&format!("PRAGMA table_info(\"{table}\")"))
@@ -446,7 +483,7 @@ async fn all_nontechnical_id_columns_are_text_and_only_id_is_a_technical_key() {
     .expect("tables");
 
     for table in tables {
-        if is_sqlite_owned_table(&table) {
+        if is_sqlite_owned_table(&table) || is_canonical_agent_store_table(&table) {
             continue;
         }
         let columns = sqlx::query(&format!("PRAGMA table_info(\"{table}\")"))
@@ -489,6 +526,9 @@ async fn runtime_v3_schema_has_no_physical_foreign_keys_or_cascades_and_only_gua
     .expect("tables");
 
     for table in &tables {
+        if is_canonical_agent_store_table(table) {
+            continue;
+        }
         let foreign_keys = sqlx::query(&format!("PRAGMA foreign_key_list(\"{table}\")"))
             .fetch_all(pool)
             .await
@@ -525,6 +565,12 @@ async fn runtime_v3_schema_has_no_physical_foreign_keys_or_cascades_and_only_gua
             "trg_conversation_delivery_receipts_lifecycle_insert_guard",
             "trg_conversation_delivery_receipts_lifecycle_update_guard",
             "trg_conversation_delivery_receipts_no_delete",
+            "trg_conversation_hosted_effect_admission",
+            "trg_conversation_hosted_effect_no_delete",
+            "trg_conversation_hosted_effect_update",
+            "trg_conversation_mcp_effect_admission",
+            "trg_conversation_mcp_effect_no_delete",
+            "trg_conversation_mcp_effect_update",
             "trg_conversation_runtime_engine_immutable",
             "trg_conversation_runtime_event_owner",
             "trg_conversations_running_admission_guard",
@@ -607,14 +653,22 @@ async fn runtime_v3_schema_has_no_physical_foreign_keys_or_cascades_and_only_gua
         "v3 schema permits only registered guard triggers"
     );
 
-    let schema_sql: Vec<String> = sqlx::query_scalar(
-        "SELECT sql FROM sqlite_schema \
+    let schema_rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT name, tbl_name, sql FROM sqlite_schema \
          WHERE sql IS NOT NULL AND type IN ('table', 'index') \
          ORDER BY name",
     )
     .fetch_all(pool)
     .await
     .expect("schema SQL");
+    let schema_sql = schema_rows
+        .into_iter()
+        .filter(|(name, table, _)| {
+            !is_canonical_agent_store_table(name)
+                && !is_canonical_agent_store_table(table)
+        })
+        .map(|(_, _, sql)| sql)
+        .collect::<Vec<_>>();
     let tokens = sql_tokens(&schema_sql.join("\n"));
     for forbidden in [["FOREIGN", "KEY"], ["ON", "DELETE"], ["ON", "UPDATE"]] {
         assert!(

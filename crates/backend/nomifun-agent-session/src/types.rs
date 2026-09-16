@@ -1,14 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nomifun_agent_contracts::{
-    AgentBindingValue, AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata,
+    ActionId, AgentBindingValue, AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata,
     AgentSessionTombstone,
-    CanonicalErrorCode, ChatRouteIdentity, CompactionCompletedPayload, CorrelationId, EffectClass,
+    CanonicalErrorCode, CapabilityId, ChatRouteIdentity, CompactionCompletedPayload, CorrelationId,
+    DigestHex, EffectClass,
     EventId,
     EventProducerId, IdempotencyKey, OperationId, PrincipalRef, ResolvedSnapshotRef,
     RuntimeCheckpointValidationResult, RuntimeEventAck, RuntimeEventEnvelope, SessionEventAck,
     SessionEventCursor, SessionEventPayloadRef, SessionEventRecord, SessionForkContract,
-    SessionPayloadBody, SessionPayloadId, StrictJsonValue,
+    ResourceBindingId, SessionPayloadBody, SessionPayloadId, StrictJsonValue,
 };
 use serde::{Deserialize, Serialize};
 
@@ -215,6 +216,18 @@ pub struct SessionEventPage {
 #[serde(deny_unknown_fields)]
 pub struct EffectEventRequest {
     pub agent_session_id: nomifun_agent_contracts::AgentSessionId,
+    pub effect_id: String,
+    pub turn_id: OperationId,
+    pub operation_id: OperationId,
+    pub owner_domain: String,
+    pub capability_module: CapabilityId,
+    pub action_id: ActionId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_binding_id: Option<ResourceBindingId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_key: Option<String>,
+    pub input_digest: DigestHex,
+    pub recorded_at: i64,
     pub event_id: EventId,
     pub producer_id: EventProducerId,
     pub idempotency_key: IdempotencyKey,
@@ -288,6 +301,43 @@ pub enum EffectReconcileOutcome {
     ConfirmedSucceeded { receipt: serde_json::Value },
     ConfirmedFailed { error: CanonicalErrorCode },
     StillUncertain,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEffectState {
+    Pending,
+    Returned,
+    Rejected,
+    Cancelled,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentEffectRecord {
+    pub effect_id: String,
+    pub agent_session_id: AgentSessionId,
+    pub turn_id: OperationId,
+    pub operation_id: OperationId,
+    pub owner_domain: String,
+    pub capability_module: CapabilityId,
+    pub action_id: ActionId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_binding_id: Option<ResourceBindingId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_key: Option<String>,
+    pub input_digest: DigestHex,
+    pub strategy: EffectStrategy,
+    pub state: AgentEffectState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bounded_observation: Option<serde_json::Value>,
+    pub started_event_id: EventId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_event_id: Option<EventId>,
+    pub created_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settled_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
