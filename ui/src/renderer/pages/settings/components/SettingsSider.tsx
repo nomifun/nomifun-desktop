@@ -2,6 +2,7 @@ import FlexFullContainer from '@/renderer/components/layout/FlexFullContainer';
 import {
   Computer,
   Cpu,
+  Code,
   Info,
   Server,
   System,
@@ -17,6 +18,7 @@ import { getSiderTooltipProps } from '@/renderer/utils/ui/siderTooltip';
 export const BUILTIN_TAB_IDS = [
   'system',
   'execution-engines',
+  'javascript-runtime',
   'ssh-hosts',
   'computer-use',
   'about',
@@ -51,9 +53,15 @@ const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }>
     const builtinMap: Record<string, SiderItem> = {
       'execution-engines': {
         id: 'execution-engines',
-        label: t('settings.runtimeManager.railTitle'),
+        label: t('settings.executionEngines.title'),
         icon: <Cpu />,
         path: 'execution-engines',
+      },
+      'javascript-runtime': {
+        id: 'javascript-runtime',
+        label: t('settings.runtimeManager.railTitle'),
+        icon: <Code />,
+        path: 'javascript-runtime',
       },
       'ssh-hosts': {
         id: 'ssh-hosts',

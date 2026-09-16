@@ -1,5 +1,10 @@
 # Browser Workspace v2 实施记录
 
+> 本文是历史实施证据。2026-09-16 起不再以“会话浏览器”专属入口为目标；底层引擎可复用，
+> 产品身份、授权、API 和 UI 按
+> [Agent 能力模型重构 §7](2026-09-16-agent-capability-product-redesign.zh.md)“Browser 产品模型纠正”
+> 改为任意获授权 AgentSession 的 Browser Capability Resource。下列完成记录不能作为保留旧入口的理由。
+
 目标：完整交付 `2026-09-13-browser-workspace-v2.zh.md`。本文件只记录代码与验证事实，不缩减 ADR 的交付条件。
 
 ## 当前状态

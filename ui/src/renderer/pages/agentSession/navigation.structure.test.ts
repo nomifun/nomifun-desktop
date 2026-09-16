@@ -47,18 +47,17 @@ describe('Agent navigation', () => {
     expect(router.includes("path='/settings/agent'")).toBe(false);
   });
 
-  test('execution-engine settings no longer links to Agent authoring', () => {
-    const settingsPage = read(new URL('../settings/AgentSettings/index.tsx', import.meta.url));
-    const settingsContent = read(
-      new URL('../settings/AgentSettings/ExecutionEnginesSettingsContent.tsx', import.meta.url)
-    );
+  test('execution engines link to the public Agent workbench and keep Node.js separate', () => {
+    const settingsPage = read(new URL('../settings/ExecutionEngines/index.tsx', import.meta.url));
+    const javascriptPage = read(new URL('../settings/JavaScriptRuntimeSettings.tsx', import.meta.url));
 
     expect(settingsPage.includes('AgentModalContent')).toBe(false);
-    expect(settingsPage.includes('ExecutionEnginesSettingsContent')).toBe(true);
-    expect(settingsContent.includes('<RuntimeManager />')).toBe(true);
-    expect(settingsContent.includes('<LocalAgents />')).toBe(false);
-    expect(settingsContent.includes('SettingsModal')).toBe(false);
-    expect(settingsContent.includes('agentSettings.navigation')).toBe(false);
+    expect(settingsPage.includes("to='/agent'")).toBe(true);
+    expect(settingsPage.includes("to='/settings/javascript-runtime'")).toBe(true);
+    expect(settingsPage.includes('<RuntimeManager />')).toBe(false);
+    expect(javascriptPage.includes('<RuntimeManager />')).toBe(true);
+    expect(settingsPage.includes('<LocalAgents />')).toBe(false);
+    expect(settingsPage.includes('SettingsModal')).toBe(false);
   });
 
   test('historical Agent Session links redirect to the standard conversation without a second client', () => {

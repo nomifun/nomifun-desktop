@@ -1,5 +1,10 @@
 # Browser Workspace 浏览器工作区
 
+> 当前源码仍按 Conversation BrowserWorkspace 工作；该产品模型已进入整改计划。
+> 目标是删除“会话浏览器”专属入口，把底层 Workspace 作为任意获授权 AgentSession 的
+> Browser Resource，并将 attached Chrome 收敛为同一 `browser` Module 的 Provider。
+> 实施范围见 [能力模型重构 §7](../specs/2026-09-16-agent-capability-product-redesign.zh.md)“Browser 产品模型纠正”。
+
 状态：Browser Workspace v2 实施中。[批准的设计](../specs/2026-09-13-browser-workspace-v2.zh.md)定义完整目标，[实施记录](../specs/2026-09-13-browser-workspace-v2-progress.zh.md)列出已取得的证据与剩余工作。
 
 ## 产品边界
