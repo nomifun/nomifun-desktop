@@ -1,18 +1,17 @@
-//! Projection of selected, exact Snapshot contributions into Coding tools.
+//! Projection of selected, exact Snapshot contributions into Nomi tools.
 //! No global catalog discovery and no executable/runtime loading occurs here.
 use nomifun_agent_contracts::{CapabilityKind, ContributionSourceKind, ToolPresentationKind};
 use nomifun_agent_kernel::{ActiveCapabilitySetSnapshot, CompiledSnapshot, MaterializedRegistry};
 use nomifun_ai_agent::NomiPluginToolSchemaResolver;
 use nomifun_chat_model_broker::ChatToolDefinition;
 use nomifun_coding_engine::{
-    CodingToolExposure, CodingToolPlan, StandardCodingToolLevel, compile_coding_tool_plan,
-    standard_coding_tool_exposures,
+    CodingToolExposure, CodingToolPlan, compile_coding_tool_plan, standard_coding_tool_exposures,
 };
 use nomifun_common::AppError;
 use sha2::{Digest, Sha256};
 
 fn error(value: impl std::fmt::Display) -> AppError {
-    AppError::Conflict(format!("Coding tool surface: {value}"))
+    AppError::Conflict(format!("Nomi tool surface: {value}"))
 }
 
 pub(super) async fn compile(
@@ -28,9 +27,9 @@ pub(super) async fn compile(
     }
     if snapshot.content().enabled_capabilities.len() > 128
     {
-        return Err(error("Coding supports at most 128 selected capabilities"));
+        return Err(error("Nomi supports at most 128 selected capabilities"));
     }
-    let mut exposures = standard_coding_tool_exposures(StandardCodingToolLevel::Full);
+    let mut exposures = standard_coding_tool_exposures();
     exposures.retain(|item| {
         active.active.contains(&item.capability_id)
             && snapshot
@@ -63,7 +62,10 @@ pub(super) async fn compile(
         // Every standard builtin has a concrete contract. Fail assembly if a
         // future owner accidentally falls back to an open/opaque object again;
         // otherwise the model loses the fields needed to invoke the tool.
-        if !concrete_object_schema(&schema.0, exposure.capability_id.as_ref() == "vcs.status") {
+        if !concrete_object_schema(
+            &schema.0,
+            exposure.action_id.as_ref() == "workspace.vcs/status",
+        ) {
             return Err(error(format!(
                 "{} has no strict canonical tool schema",
                 exposure.capability_id.as_ref()
@@ -118,7 +120,7 @@ pub(super) async fn compile(
             || capability.manifest.contributions.actions.is_empty()
         {
             return Err(error(format!(
-                "{} has no function-tool action; Coding has not admitted its lifecycle",
+                "{} has no function-tool action; Nomi has not admitted its lifecycle",
                 selected.capability.id.as_ref()
             )));
         }
@@ -193,141 +195,6 @@ fn concrete_object_schema(schema: &serde_json::Value, allow_empty: bool) -> bool
                 .is_some_and(|variants| {
                     !variants.is_empty() && variants.len() <= 16 && variants.iter().all(strict)
                 }))
-}
-
-/// Admission is broader than the standard builtins, but remains explicit:
-/// ordinary Plugin tools must carry a frozen PluginMount contribution lock.
-pub(crate) struct CodingAdmission;
-
-impl nomifun_ai_agent::RuntimeEngineAdmission for CodingAdmission {
-    fn uses_platform_history_context(&self, _binding: &nomifun_api_types::RuntimeEngineBinding) -> bool {
-        true
-    }
-
-    fn validate_snapshot(
-        &self,
-        binding: &nomifun_api_types::RuntimeEngineBinding,
-        snapshot: &nomifun_agent_contracts::ResolvedSnapshotEnvelope,
-    ) -> Result<(), AppError> {
-        let mut allowed = super::nomi_core_wave2::coding_capability_ids()
-            .into_iter()
-            .map(|id| id.as_ref().to_owned())
-            .collect::<std::collections::BTreeSet<_>>();
-        allowed.insert("llm.vision".into());
-        allowed.insert("mcp.resource".into());
-        let robot_ids = super::engine_robot_tools::supported_ids();
-        let selected_ids = snapshot
-            .content
-            .enabled_capabilities
-            .iter()
-
-            .map(|item| item.capability.id.clone())
-            .collect::<std::collections::BTreeSet<_>>();
-        if selected_ids
-            .iter()
-            .any(|id| super::nomi_core_robot::tool_capability_ids().contains(id))
-            && !selected_ids.contains(&nomifun_agent_contracts::CapabilityId::from("robot.link"))
-        {
-            return Err(error(
-                "Robot tools require an explicitly selected robot.link capability",
-            ));
-        }
-        for capability in snapshot
-            .content
-            .enabled_capabilities
-            .iter()
-
-        {
-            if robot_ids.contains(&capability.capability.id) {
-                if capability.contribution_lock.source_kind
-                    != ContributionSourceKind::PlatformBuiltin
-                {
-                    return Err(error("Robot requires its bundled platform owner"));
-                }
-                allowed.insert(capability.capability.id.as_ref().to_owned());
-            }
-            if capability.contribution_lock.source_kind == ContributionSourceKind::PluginMount {
-                allowed.insert(capability.capability.id.as_ref().to_owned());
-            }
-            if capability.contribution_lock.source_kind == ContributionSourceKind::McpBinding
-                && capability.resolved_source.source_kind
-                    == nomifun_agent_contracts::PluginSourceKind::Bundled
-                && super::nomi_core_mcp_catalog::is_product_tool(capability.capability.id.as_ref())
-                && snapshot.content.mcp_tool_locks.iter().any(|lock| {
-                    lock.capability_id == capability.capability.id
-                        && lock.canonical_tool_key.as_ref() == capability.capability.id.as_ref()
-                        && lock.materialization_revision == 1
-                })
-            {
-                allowed.insert(capability.capability.id.as_ref().to_owned());
-            }
-        }
-        let servers = snapshot
-            .content
-            .mcp_tool_locks
-            .iter()
-            .map(|lock| &lock.server_id)
-            .collect::<std::collections::BTreeSet<_>>();
-        if servers.len() > super::nomi_core_mcp_catalog::MAX_SESSION_SERVERS
-            || snapshot.content.mcp_tool_locks.iter().any(|lock| {
-                !super::nomi_core_mcp_catalog::is_product_tool(lock.capability_id.as_ref())
-                    || lock.canonical_tool_key.as_ref() != lock.capability_id.as_ref()
-                    || lock.materialization_revision != 1
-            })
-        {
-            return Err(error(
-                "Coding requires bounded exact product MCP tool servers",
-            ));
-        }
-        let products = snapshot
-            .content
-            .enabled_capabilities
-            .iter()
-            .filter(|capability| capability.contribution_lock.source_kind == ContributionSourceKind::PluginProductActiveRelease)
-            .collect::<Vec<_>>();
-        if snapshot.content.enabled_capabilities.len() > 128
-        {
-            return Err(error("Coding supports at most 128 selected capabilities"));
-        }
-        for capability in products {
-            super::engine_plugin_product_tools::validate_capability(capability)?;
-            allowed.insert(capability.capability.id.as_ref().to_owned());
-        }
-        let mut policy = nomifun_ai_agent::RuntimeEngineSupport::enabled_only(allowed);
-        policy.skills = true;
-        policy.mcp = true;
-        policy.plugin_products = true;
-        policy.validate_snapshot(binding, snapshot)
-    }
-
-    fn validate_session_extra(
-        &self,
-        binding: &nomifun_api_types::RuntimeEngineBinding,
-        extra: &serde_json::Value,
-    ) -> Result<(), AppError> {
-        let mut policy = nomifun_ai_agent::RuntimeEngineSupport::enabled_only([]);
-        policy.skills = true;
-        policy.mcp = true;
-        for key in ["mcp_server_ids", "mcp_servers", "selected_mcp_server_ids"] {
-            if let Some(value) = extra.get(key) {
-                let values = value
-                    .as_array()
-                    .ok_or_else(|| error("MCP selection must be an array"))?;
-                if values.len() > super::nomi_core_mcp_catalog::MAX_SESSION_SERVERS
-                    || values.iter().any(|value| {
-                        !value
-                            .as_str()
-                            .is_some_and(|value| !value.is_empty() && value.len() <= 256)
-                    })
-                {
-                    return Err(error(
-                        "Coding MCP overlay exceeds the bounded server selection",
-                    ));
-                }
-            }
-        }
-        policy.validate_session_extra(binding, extra)
-    }
 }
 
 pub(super) fn validate_session_mcp(

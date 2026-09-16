@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Isolated in-process Coding Agent execution engine for NomiFun"
+description = "Adaptive execution loop for the unified Nomi Agent Runtime"
 
 [dependencies]
 async-trait.workspace = true

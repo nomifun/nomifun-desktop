@@ -1,6 +1,6 @@
-//! Coding implementation of the same open runtime contract used by Nomi.
+//! Long-horizon implementation of the single Nomi runtime contract.
 //!
-//! This adapter supplies Coding strategy/event projection to the shared engine
+//! This adapter supplies adaptive execution/event projection to the shared engine
 //! lifecycle SDK. Production composition supplies admitted Session/Broker/Kernel
 //! ports; neither adapter nor SDK creates a second persistence/authority owner.
 
@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use nomifun_coding_engine::{
-    CodingEngine, CodingEngineBuild, CodingEngineError, CodingEngineEvent, CodingEventSink,
-    CodingModelPort, CodingToolInvoker, CodingTurnRequest, CodingTurnTerminal, EngineBinding,
+    CodingEngine, CodingEngineError, CodingEngineEvent, CodingEventSink, CodingModelPort,
+    CodingToolInvoker, CodingTurnRequest, CodingTurnTerminal, EngineBinding,
 };
 use nomifun_common::{AgentKillReason, AgentType, AppError, ConversationStatus, TimestampMs};
 use tokio::sync::broadcast;
@@ -23,7 +23,7 @@ use crate::protocol::send_error::AgentSendError;
 use crate::engine_sdk::{EngineProgress, EngineSessionDriver, EngineTurnOutcome, EngineTurnOutput, EngineTurnTerminal, HostedAgentRuntime};
 use crate::types::{AgentRuntimeBuildOptions, SendMessageData};
 use crate::{
-    AgentRuntimeControl, RegisteredAgentRuntime, RuntimeEngineDescriptor, RuntimeTeardown,
+    AgentRuntimeControl, RegisteredAgentRuntime, RuntimeTeardown,
 };
 
 /// Per-Session, host-admitted ports. Implementations must validate the durable
@@ -32,7 +32,7 @@ use crate::{
 #[async_trait]
 pub trait CodingRuntimeHost: Send + Sync {
     async fn queue_steer(&self, _delivery: crate::RuntimeSteerDelivery) -> Result<bool, AppError> {
-        Err(AppError::BadRequest("Coding host does not support receipt-bound steering".into()))
+        Err(AppError::BadRequest("Nomi host does not support receipt-bound steering".into()))
     }
     /// Return the same canonical active set used by tool admission. A host
     /// without a materialized Snapshot must explicitly return None.
@@ -79,24 +79,8 @@ pub trait CodingRuntimeHost: Send + Sync {
     async fn cleanup_session(&self) -> Result<(), AppError>;
 }
 
-pub fn coding_runtime_descriptor(
-    build: &CodingEngineBuild,
-) -> Result<RuntimeEngineDescriptor, AppError> {
-    build.validate().map_err(contract_error)?;
-    let descriptor = RuntimeEngineDescriptor {
-        family_id: build.family_id.as_ref().to_owned(),
-        build_id: build.build_id.as_ref().to_owned(),
-        build_digest: build.build_digest.as_ref().to_owned(),
-        display_name: build.display_name.clone(),
-        host_contract_version: crate::RUNTIME_HOST_CONTRACT_VERSION,
-        supported_profiles: vec!["coding".to_owned()],
-    };
-    descriptor.validate()?;
-    Ok(descriptor)
-}
-
 fn contract_error(error: CodingEngineError) -> AppError {
-    AppError::Conflict(format!("Coding runtime: {error}"))
+    AppError::Conflict(format!("Nomi runtime: {error}"))
 }
 
 pub struct CodingAgentRuntime {
@@ -113,7 +97,7 @@ struct CodingSessionDriver {
 }
 
 impl CodingAgentRuntime {
-    /// The Coding loop plugs into the same lifecycle SDK as source-integrated
+    /// The adaptive loop plugs into the same lifecycle SDK as source-integrated
     /// engines; only its execution/context policy and semantic codec differ.
     pub fn new(
         options: &AgentRuntimeBuildOptions,
@@ -124,7 +108,7 @@ impl CodingAgentRuntime {
         host: Arc<dyn CodingRuntimeHost>,
     ) -> Result<Self, AppError> {
         if binding.agent_session_id().as_ref() != options.conversation_id {
-            return Err(AppError::Conflict("Coding runtime Session binding mismatch".into()));
+            return Err(AppError::Conflict("Nomi runtime Session binding mismatch".into()));
         }
         engine.open_session(binding.clone(), model.clone(), tools.clone(), None)
             .map_err(contract_error)?;
@@ -266,7 +250,7 @@ impl EngineSessionDriver for CodingSessionDriver {
             self.tools.clone(), Some(projection.clone())).map_err(contract_error)?;
         let request = self.host.prepare_turn(message, cancellation.clone()).await?;
         if request.principal.principal_kind != "user" || request.principal.principal_id != self.owner_id {
-            return Err(AppError::Conflict("Coding turn principal differs from its Session owner".into()));
+            return Err(AppError::Conflict("Nomi turn principal differs from its Session owner".into()));
         }
         let execution = session.run_turn_cancellable(request, cancellation).await;
         let pending = projection.terminal.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -281,7 +265,7 @@ impl EngineSessionDriver for CodingSessionDriver {
                     },
                 };
                 if pending.as_ref() != Some(&coding_terminal(&outcome)) {
-                    return Err(AppError::Conflict("Coding result and terminal event disagree or terminal is absent".into()));
+                    return Err(AppError::Conflict("Nomi result and terminal event disagree or terminal is absent".into()));
                 }
                 Ok(outcome)
             }
@@ -290,7 +274,7 @@ impl EngineSessionDriver for CodingSessionDriver {
             Err(CodingEngineError::TurnFailed(message)) => {
                 let model_steps = match pending {
                     Some(CodingEngineEvent::TurnFailed { model_steps, message: recorded }) if recorded == message => model_steps,
-                    _ => return Err(AppError::Conflict("Coding failure has no matching terminal record".into())),
+                    _ => return Err(AppError::Conflict("Nomi failure has no matching terminal record".into())),
                 };
                 Ok(EngineTurnOutcome { model_steps, terminal: EngineTurnTerminal::Failed { message } })
             }
@@ -373,8 +357,8 @@ mod tests {
         PromptCachePolicy,
     };
     use nomifun_coding_engine::{
-        CodingModelStream, CodingRuntimeProfile, CodingToolInvocation, CodingToolPlan,
-        CodingToolResult, EngineBuildId, EngineFamilyId,
+        CodingEngineBuild, CodingModelStream, CodingToolInvocation, CodingToolPlan,
+        CodingToolResult, EngineBuildId,
     };
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -419,11 +403,8 @@ mod tests {
     fn engine() -> Arc<CodingEngine> {
         Arc::new(
             CodingEngine::new(CodingEngineBuild {
-                family_id: EngineFamilyId::from("nomifun.coding"),
                 build_id: EngineBuildId::from("test-build"),
                 build_digest: DigestHex::from("a".repeat(64)),
-                display_name: "Coding test".to_owned(),
-                supported_profiles: vec![CodingRuntimeProfile::Coding],
             })
             .unwrap(),
         )
@@ -434,7 +415,6 @@ mod tests {
             .bind(
                 AgentSessionId::from(SESSION),
                 RuntimeBindingId::from("binding"),
-                CodingRuntimeProfile::Coding,
                 ResolvedSnapshotRef {
                     snapshot_id: ResolvedSnapshotId::from("snapshot"),
                     snapshot_digest: DigestHex::from("b".repeat(64)),
@@ -830,7 +810,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registry_retains_coding_quarantine_until_real_owner_cleanup_succeeds() {
+    async fn registry_retains_nomi_driver_quarantine_until_real_owner_cleanup_succeeds() {
         let host = Host::new();
         host.fail_cleanup.store(true, Ordering::Release);
         let calls = Arc::new(AtomicUsize::new(0));

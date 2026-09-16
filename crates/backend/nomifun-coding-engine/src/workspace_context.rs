@@ -11,59 +11,12 @@ use tokio_util::sync::CancellationToken;
 mod search_context;
 
 use crate::{
-    AgentsMdContext, AgentsMdPolicy, CodingEngineError, CodingEngineEvent, CodingEventSink,
-    CodingToolInvoker, CodingTurnRequest, CodingWorkspaceReader,
+    AgentsMdPolicy, CodingEngineError, CodingEngineEvent, CodingEventSink, CodingToolInvoker,
+    CodingTurnRequest, CodingWorkspaceReader,
 };
 
-pub(crate) async fn prepare(
-    request: &CodingTurnRequest,
-    tools: &dyn CodingToolInvoker,
-    sink: &dyn CodingEventSink,
-    cancellation: CancellationToken,
-) -> Result<AgentsMdContext, CodingEngineError> {
-    let Some(binding) = request.tool_plan.binding("read_file") else {
-        return Ok(AgentsMdContext {
-            warnings: vec![
-                "Repository instructions were not loaded: fs.read is not selected.".into(),
-            ],
-            ..Default::default()
-        });
-    };
-    if binding.capability_id.as_ref() != "fs.read" {
-        return Err(CodingEngineError::WorkspaceContext(
-            "read_file is not bound to fs.read".into(),
-        ));
-    }
-    let sequence = AtomicU32::new(0);
-    let reader = InstructionReader {
-        request,
-        tools,
-        sink,
-        sequence: &sequence,
-    };
-    // The host binds tools to the Session root. Descendant instructions must
-    // still be inspected before changing files in a nested directory.
-    let context = crate::load_agents_md(
-        &reader,
-        "",
-        AgentsMdPolicy {
-            max_file_bytes: 16 * 1024,
-            max_total_bytes: 24 * 1024,
-            ..Default::default()
-        },
-        cancellation,
-    )
-    .await?;
-    if !context.warnings.is_empty() {
-        return Err(CodingEngineError::WorkspaceContext(
-            context.warnings.join("; "),
-        ));
-    }
-    Ok(context)
-}
-
 struct InstructionReader<'a> {
-    request: &'a CodingTurnRequest,
+    authority: &'a InstructionAuthority,
     tools: &'a dyn CodingToolInvoker,
     sink: &'a dyn CodingEventSink,
     sequence: &'a AtomicU32,
@@ -152,7 +105,7 @@ impl CodingWorkspaceReader for InstructionReader<'_> {
             };
             let invalid = || {
                 CodingEngineError::WorkspaceContext(
-                    "fs.read returned an inconsistent instruction page".into(),
+                    "workspace.files/read returned an inconsistent instruction page".into(),
                 )
             };
             let content = value
@@ -250,10 +203,15 @@ impl InstructionReader<'_> {
             return Err(CodingEngineError::Cancelled);
         }
         let binding = self
-            .request
+            .authority
             .tool_plan
             .binding("read_file")
             .ok_or_else(|| CodingEngineError::ToolNotExposed("read_file".into()))?;
+        if binding.action_id.as_ref() != "workspace.files/read" {
+            return Err(CodingEngineError::WorkspaceContext(
+                "read_file is not bound to workspace.files/read".into(),
+            ));
+        }
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
         if sequence >= 4096 {
             return Err(CodingEngineError::WorkspaceContext(
@@ -281,19 +239,11 @@ impl InstructionReader<'_> {
             })
             .await?;
         let invocation = crate::tool::invocation_for(
-            self.request
-                .model_request
-                .causality
-                .agent_session_id
-                .clone(),
-            self.request.principal.clone(),
-            self.request
-                .model_request
-                .causality
-                .resolved_snapshot_ref
-                .clone(),
-            self.request.active_set_generation,
-            &self.request.model_request.causality.turn_operation_id,
+            self.authority.causality.agent_session_id.clone(),
+            self.authority.principal.clone(),
+            self.authority.causality.resolved_snapshot_ref.clone(),
+            self.authority.active_set_generation,
+            &self.authority.causality.turn_operation_id,
             call.clone(),
             binding,
         );
@@ -337,7 +287,7 @@ impl InstructionReader<'_> {
 /// A turn-scoped, bounded instruction view. Re-read after effects: an edit or
 /// command can itself change AGENTS.md. New rules are delivered before retry.
 pub(crate) struct ScopedInstructions {
-    authority: CodingTurnRequest,
+    authority: InstructionAuthority,
     sequence: AtomicU32,
     layers: BTreeMap<String, String>,
     // Remember inspected scopes even when no file existed. A later command
@@ -347,6 +297,13 @@ pub(crate) struct ScopedInstructions {
     // newly created descendant instruction file cannot remain invisible.
     recursive_scopes: BTreeSet<String>,
     dirty: bool,
+}
+
+struct InstructionAuthority {
+    tool_plan: crate::CodingToolPlan,
+    principal: nomifun_agent_contracts::PrincipalRef,
+    causality: nomifun_chat_model_broker::ChatCausality,
+    active_set_generation: u64,
 }
 
 struct DiscoveredScope {
@@ -377,7 +334,7 @@ impl ScopedInstructions {
     ) -> Result<DiscoveredScope, CodingEngineError> {
         let requested = if path.is_empty() { "." } else { path };
         let reader = InstructionReader {
-            request: &self.authority,
+            authority: &self.authority,
             tools,
             sink,
             sequence: &self.sequence,
@@ -452,23 +409,24 @@ impl ScopedInstructions {
         })
     }
 
-    pub(crate) fn new(request: &CodingTurnRequest, root: &AgentsMdContext) -> Self {
-        let mut authority = request.clone();
-        // Keep only invocation authority, not another copy of model history.
-        authority.model_request.input.messages.clear();
-        authority.model_request.input.instructions.clear();
+    pub(crate) fn new(request: &CodingTurnRequest) -> Self {
         Self {
-            authority,
+            authority: InstructionAuthority {
+                tool_plan: request.tool_plan.clone(),
+                principal: request.principal.clone(),
+                causality: request.model_request.causality.clone(),
+                active_set_generation: request.active_set_generation,
+            },
             sequence: AtomicU32::new(100),
             directories: BTreeSet::from([String::new()]),
             recursive_scopes: BTreeSet::new(),
             dirty: false,
-            layers: root
-                .layers
-                .iter()
-                .map(|layer| (layer.path.clone(), layer.content.clone()))
-                .collect(),
+            layers: BTreeMap::new(),
         }
+    }
+
+    pub(crate) fn has_context(&self) -> bool {
+        !self.layers.is_empty()
     }
 
     pub(crate) fn context(&self) -> String {
@@ -540,10 +498,14 @@ impl ScopedInstructions {
             };
             let value = &call.arguments.0;
             let mut paths = Vec::new();
-            match binding.capability_id.as_ref() {
-                "fs.read" | "fs.write" | "fs.delete" => {
+            match binding.action_id.as_ref() {
+                "workspace.files/read"
+                | "workspace.files/write"
+                | "workspace.files/delete"
+                | "workspace.files/watch"
+                | "workspace.artifacts/publish" => {
                     if let Some(path) = value.get("path").and_then(|v| v.as_str()) {
-                        let recursive = binding.capability_id.as_ref() == "fs.delete"
+                        let recursive = binding.action_id.as_ref() == "workspace.files/delete"
                             || (value.get("format").and_then(|value| value.as_str())
                                 == Some("instruction_scope")
                                 && value.get("recursive").and_then(|value| value.as_bool())
@@ -554,7 +516,12 @@ impl ScopedInstructions {
                             .or_insert(recursive);
                     }
                 }
-                "fs.search" | "vcs.diff" | "vcs.stage" | "fs.snapshot" => {
+                "workspace.files/search"
+                | "workspace.vcs/status"
+                | "workspace.vcs/diff"
+                | "workspace.vcs/stage"
+                | "workspace.vcs/commit"
+                | "workspace.vcs/push" => {
                     let path = value
                         .get("path")
                         .and_then(|value| value.as_str())
@@ -562,13 +529,13 @@ impl ScopedInstructions {
                     // Search applies hidden/ignore filters and may touch many
                     // files. Inspect its selected root here; after_call loads
                     // exact hit scopes before snippets enter the model view.
-                    let recursive = binding.capability_id.as_ref() == "vcs.stage";
+                    let recursive = binding.action_id.as_ref() == "workspace.vcs/stage";
                     scopes
                         .entry(path.to_owned())
                         .and_modify(|scan| *scan |= recursive)
                         .or_insert(recursive);
                 }
-                "fs.patch" => {
+                "workspace.files/patch" => {
                     if let Some(files) = value.get("files").and_then(|v| v.as_array()) {
                         for file in files {
                             if let Some(path) = file.get("path").and_then(|v| v.as_str()) {
@@ -577,7 +544,7 @@ impl ScopedInstructions {
                         }
                     }
                 }
-                "process.exec" => {
+                "workspace.process/exec" | "workspace.process/start" => {
                     // A shell command is opaque. cwd instructions are known;
                     // arbitrary paths embedded in shell text are not inferred.
                     if value.get("process_id").is_none() {
@@ -681,7 +648,7 @@ impl ScopedInstructions {
             .authority
             .tool_plan
             .binding(&call.name)
-            .is_some_and(|binding| binding.capability_id.as_ref() == "fs.search")
+            .is_some_and(|binding| binding.action_id.as_ref() == "workspace.files/search")
         {
             return Ok((result, false));
         }
@@ -701,10 +668,10 @@ impl ScopedInstructions {
                 .authority
                 .tool_plan
                 .binding("read_file")
-                .is_some_and(|binding| binding.capability_id.as_ref() == "fs.read")
+                .is_some_and(|binding| binding.action_id.as_ref() == "workspace.files/read")
             {
                 return Err(CodingEngineError::WorkspaceContext(
-                    "fs.read is not active".into(),
+                    "workspace.files/read is not active".into(),
                 ));
             }
             let mut directories = BTreeSet::new();
@@ -775,7 +742,7 @@ impl ScopedInstructions {
         }
         let reader = RefreshReader {
             inner: InstructionReader {
-                request: &self.authority,
+                authority: &self.authority,
                 tools,
                 sink,
                 sequence: &self.sequence,

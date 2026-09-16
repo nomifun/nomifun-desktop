@@ -1,6 +1,6 @@
 //! Bounded Workspace `AGENTS.md` discovery.
 //!
-//! The Coding Engine receives text only through a workspace owner port. It
+//! The Nomi Runtime receives text only through a workspace owner port. It
 //! never falls back to the host process current directory and never resolves
 //! native paths itself.
 

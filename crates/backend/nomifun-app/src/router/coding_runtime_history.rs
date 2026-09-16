@@ -1,4 +1,4 @@
-//! Read-only replay of closed Coding turns from the existing Conversation DB.
+//! Read-only replay of closed Nomi turns from the existing Conversation owner.
 use nomifun_chat_model_broker::{ChatContentPart, ChatMessage, ChatRole};
 use nomifun_coding_engine::{CodingEngineEvent, CodingPriorTask, replay_closed_turn};
 use nomifun_common::AppError;
@@ -18,7 +18,7 @@ pub(super) async fn load(
     let conversation = admitted.session().session().conversation_id.as_str();
     let binding = admitted.session().engine_binding();
     let snapshot = &admitted.session().snapshot().snapshot_ref;
-    let fail = |message: String| AppError::Conflict(format!("Coding history: {message}"));
+    let fail = |message: String| AppError::Conflict(format!("Nomi history: {message}"));
     if window.turns.is_empty() {
         return Ok(None);
     }
@@ -35,7 +35,7 @@ pub(super) async fn load(
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| fail("accepted root has no text".into()))?;
         // Engine-neutral storage cannot infer that a codec has a complete
-        // replay. Coding keeps its legacy/fork fallback and terminal checks.
+        // replay. The runtime keeps its fork fallback and terminal checks.
         if turn.records.is_empty() {
             return Ok(None);
         }
@@ -82,8 +82,7 @@ pub(super) async fn load(
             // all subsequent turns; use the legacy data-only projection.
             return Ok(None);
         };
-        if recorded.family_id().as_ref() != binding.family_id
-            || recorded.build_id().as_ref() != binding.build_id
+        if recorded.build_id().as_ref() != binding.build_id
             || recorded.build_digest().as_ref() != binding.build_digest
             || recorded.agent_session_id().as_ref() != conversation
             || recorded.resolved_snapshot_ref() != snapshot
@@ -177,7 +176,7 @@ pub(super) fn project_messages(
     let mut bytes = 0usize;
     for row in rows {
         let value: serde_json::Value = serde_json::from_str(&row.content_json)
-            .map_err(|error| AppError::Conflict(format!("Coding message history: {error}")))?;
+            .map_err(|error| AppError::Conflict(format!("Nomi message history: {error}")))?;
         let text = match row.kind.as_str() {
             "text" => value
                 .get("content")
@@ -234,7 +233,7 @@ async fn unresolved_steering(
         return if scopes.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(AppError::Conflict("duplicate Coding input scope".into()))
+            Err(AppError::Conflict("duplicate Nomi input scope".into()))
         };
     };
     let observed = events
@@ -253,7 +252,7 @@ async fn unresolved_steering(
          WHERE r.conversation_id = ? AND r.kind = 'steer' AND json_extract(r.request_payload, '$.turn_scope.wire_turn_id') = ? \
          AND (r.status = 'accepted' OR (r.status = 'completed' AND r.result_ok = 1)) ORDER BY r.id LIMIT 65")
         .bind(conversation).bind(wire.as_str()).fetch_all(pool).await
-        .map_err(|error| AppError::Conflict(format!("Coding steering history: {error}")))?;
+        .map_err(|error| AppError::Conflict(format!("Nomi steering history: {error}")))?;
     let mut messages = Vec::new();
     let overflow = rows.len() > 64;
     for (operation, raw) in rows.into_iter().take(64) {

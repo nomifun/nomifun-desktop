@@ -5,8 +5,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use nomifun_agent_contracts::{StrictJsonValue, digest_payload};
 use nomifun_chat_model_broker::{
-    ChatContentPart, ChatMessage, ChatRole, ChatToolCall, ChatToolDefinition, ChatToolResultPart,
-    ToolCallId,
+    ChatRole, ChatToolCall, ChatToolDefinition, ChatToolResultPart, ToolCallId,
 };
 use serde_json::{Value, json};
 
@@ -45,67 +44,19 @@ pub(crate) struct ToolArchive {
     entries: VecDeque<Entry>,
     bytes: usize,
     evicted: u64,
-    unmatched: u64,
     loaded_turns: VecDeque<String>,
 }
 
 impl ToolArchive {
-    pub fn new(scope: String, history: &[ChatMessage]) -> Result<Self, CodingEngineError> {
-        let mut archive = Self {
+    pub fn new(scope: String) -> Self {
+        Self {
             scope,
             sequence: 0,
             entries: VecDeque::new(),
             bytes: 0,
             evicted: 0,
-            unmatched: 0,
             loaded_turns: VecDeque::new(),
-        };
-        // Pair only with the latest assistant batch. Never fabricate a tool
-        // name or recover calls from User/System text or a model summary.
-        let mut calls = BTreeMap::new();
-        for message in history {
-            if message.role == ChatRole::Assistant {
-                calls.clear();
-                for part in &message.content {
-                    if let ChatContentPart::ToolCall {
-                        call_id,
-                        name,
-                        arguments,
-                        ..
-                    } = part
-                    {
-                        if calls.len() == 64 && !calls.contains_key(call_id) {
-                            // An oversized supplied batch cannot grow an
-                            // unbounded auxiliary map or give a partial index.
-                            calls.clear();
-                            break;
-                        }
-                        if calls.insert(call_id, Some((name, arguments))).is_some() {
-                            // A repeated declaration cannot silently replace
-                            // the provenance of an older result.
-                            calls.insert(call_id, None);
-                        }
-                    }
-                }
-            } else if message.role == ChatRole::Tool {
-                for part in &message.content {
-                    if let ChatContentPart::ToolResult {
-                        call_id,
-                        output,
-                        is_error,
-                    } = part
-                    {
-                        if let Some(Some((name, arguments))) = calls.remove(call_id) {
-                            archive
-                                .record(name, call_id, arguments, output, *is_error, None, None)?;
-                        } else {
-                            archive.unmatched = archive.unmatched.saturating_add(1);
-                        }
-                    }
-                }
-            }
         }
-        Ok(archive)
     }
 
     pub fn record(
@@ -233,10 +184,9 @@ impl ToolArchive {
 
     pub fn context(&self) -> String {
         format!(
-            "Coding tool history archive: {} retained results, {} older records evicted, {} unmatched supplied results omitted. Use search_tool_history to find previous tool text by literal substring (empty query lists); read_tool_history pages an exact returned ID. If load_tool_history is available, it imports one persisted older turn at a time using a platform-checked receipt cursor, then search this archive. This bounded archive survives model-window compaction only within this turn; it is not an automatically complete Conversation index. {}",
+            "Nomi tool history archive: {} retained results, {} older records evicted. Use search_tool_history to find previous tool text by literal substring (empty query lists); read_tool_history pages an exact returned ID. If load_tool_history is available, it imports one persisted older turn at a time using a platform-checked receipt cursor, then search this archive. This bounded archive survives model-window compaction only within this turn; it is not an automatically complete Conversation index. {}",
             self.entries.len(),
             self.evicted,
-            self.unmatched,
             NOTICE
         )
     }
@@ -481,7 +431,7 @@ impl ToolArchive {
                     "preview_kind":preview_kind,"preview":preview})
             }).collect::<Vec<_>>();
             let value = json!({"notice":NOTICE,"search":"case-sensitive literal in retained text or projected JSON; latest archive insertion first, not chronological execution order across imported turns",
-                "retained_records":self.entries.len(),"evicted_records":self.evicted,"unmatched_results":self.unmatched,
+                "retained_records":self.entries.len(),"evicted_records":self.evicted,
                 "hits":hits,"has_more":count < matches.len(),
                 "next_after_id":if count < matches.len() && count > 0 { Some(&matches[count - 1].id) } else { None }});
             if fits(&value) {

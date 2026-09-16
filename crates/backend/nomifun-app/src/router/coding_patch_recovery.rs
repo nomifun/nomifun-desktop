@@ -1,4 +1,4 @@
-//! Permanent Coding recovery obligations, not conversational replay. No tool
+//! Permanent Nomi patch-recovery obligations, not conversational replay. No tool
 //! execution, filesystem access, effect settlement or quarantine resolution.
 use super::engine_session_host::EngineTurnReceipt;
 use nomifun_agent_contracts::ResolvedSnapshotRef;
@@ -7,7 +7,7 @@ use nomifun_common::AppError;
 use nomifun_db::{SqlitePool, sqlx};
 
 fn failure(message: impl std::fmt::Display) -> AppError {
-    AppError::Conflict(format!("Coding patch recovery: {message}"))
+    AppError::Conflict(format!("Nomi patch recovery: {message}"))
 }
 
 pub(super) async fn load(
@@ -30,8 +30,10 @@ pub(super) async fn load(
     }
 
     // No join to messages, hidden flags, a finite replay window, or summaries.
-    // Each started engine turn re-emits its loaded state. The owner has already
-    // joined/recovered earlier turns before admitting this one.
+    // Recovery events are written only when state changes. The latest prior
+    // state therefore remains authoritative until a later transition clears
+    // or replaces it. The owner has already joined/recovered earlier turns
+    // before admitting this one.
     let head: Option<(i64, String, i64)> = sqlx::query_as(
         "SELECT id, turn_operation_id, length(CAST(event_json AS BLOB)) FROM conversation_runtime_events \
          WHERE conversation_id = ? AND turn_operation_id != ? AND json_extract(event_json, '$.event') = 'patch_recovery_updated' \
@@ -40,7 +42,7 @@ pub(super) async fn load(
     let state_id = head.as_ref().map_or(0, |(id, _, _)| *id);
     let (latest_dispatch,): (i64,) = sqlx::query_as(
         "SELECT COALESCE(MAX(id), 0) FROM conversation_runtime_events WHERE conversation_id = ? AND turn_operation_id != ? AND id > ? \
-         AND json_extract(event_json, '$.event') = 'host_tool_dispatch' AND json_extract(event_json, '$.dispatch.capability_id') = 'fs.patch'")
+         AND json_extract(event_json, '$.event') = 'host_tool_dispatch' AND json_extract(event_json, '$.dispatch.action_id') = 'workspace.files/patch'")
         .bind(session).bind(receipt.operation_id()).bind(state_id).fetch_one(&mut *tx).await.map_err(failure)?;
     let Some((id, operation, bytes)) = head else {
         if latest_dispatch != 0 {
@@ -79,7 +81,6 @@ pub(super) async fn load(
     };
     if recorded.agent_session_id().as_ref() != session
         || turn_operation_id.as_ref() != operation
-        || recorded.family_id().as_ref() != binding.family_id
         || recorded.build_id().as_ref() != binding.build_id
         || recorded.build_digest().as_ref() != binding.build_digest
         || recorded.resolved_snapshot_ref() != snapshot

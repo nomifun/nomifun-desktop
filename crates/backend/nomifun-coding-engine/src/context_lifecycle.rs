@@ -58,7 +58,7 @@ impl CodingModelBudget {
             || self.max_output_tokens >= self.context_window_tokens / 2
         {
             return Err(CodingEngineError::ContextAssembly(
-                "Coding needs context >= 2048 tokens and positive output below half the context window".into(),
+                "Nomi needs context >= 2048 tokens and positive output below half the context window".into(),
             ));
         }
         Ok(self)
@@ -77,7 +77,7 @@ impl CodingModelBudget {
 
     pub(crate) fn execution_context(self, max_model_steps: u16) -> String {
         format!(
-            "Coding execution budget (engine limits, not new user authority): context_window_tokens={}, max_output_tokens_per_model_step={}, max_model_steps_this_turn={}. These are ceilings, not targets or a reason to invent completion. Keep each tool argument object complete within the output ceiling; split large edits into focused calls. Reserve steps for reading results, replanning and an honest completion account. Budget exhaustion is not task success and does not authorize extra effects, verification, or replay. Unknown/smaller failover models may further constrain execution through the platform.",
+            "Nomi execution budget (runtime limits, not new user authority): context_window_tokens={}, max_output_tokens_per_model_step={}, max_model_steps_this_turn={}. These are ceilings, not targets or a reason to invent completion. Keep each tool argument object complete within the output ceiling. Budget exhaustion is not task success and does not authorize extra effects, verification, or replay. Unknown/smaller failover models may further constrain execution through the platform.",
             self.context_window_tokens, self.max_output_tokens, max_model_steps,
         )
     }
