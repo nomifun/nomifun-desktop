@@ -313,37 +313,13 @@ const parseImageData = (value: unknown, path: string): CreativeImageNodeData => 
   };
 };
 
-const parseImageComposerDraft = (
-  value: unknown,
-  path: string
-): CreativeImageComposerDraft => {
+const parseComposerMentions = (value: unknown, prompt: string, path: string) => {
   const code = 'INVALID_DOCUMENT';
-  const record = asRecord(value, path, code);
-  exactKeys(
-    record,
-    [
-      'prompt',
-      'model',
-      'interfaceMode',
-      'quality',
-      'width',
-      'height',
-      'aspectRatio',
-      'count',
-    ],
-    ['mentions'],
-    path,
-    code
-  );
-  const prompt = asString(record.prompt, `${path}.prompt`, code, {
-    allowEmpty: true,
-    maxLength: 1_000_000,
-  });
   const mentions =
-    record.mentions === undefined
+    value === undefined
       ? []
       : asArray(
-          record.mentions,
+          value,
           `${path}.mentions`,
           code,
           (entry, indexPath) => {
@@ -415,6 +391,36 @@ const parseImageComposerDraft = (
       fail(code, `${path}.mentions[${index}].start`, 'range not overlapping another mention');
     }
   }
+  return mentions;
+};
+
+const parseImageComposerDraft = (
+  value: unknown,
+  path: string
+): CreativeImageComposerDraft => {
+  const code = 'INVALID_DOCUMENT';
+  const record = asRecord(value, path, code);
+  exactKeys(
+    record,
+    [
+      'prompt',
+      'model',
+      'interfaceMode',
+      'quality',
+      'width',
+      'height',
+      'aspectRatio',
+      'count',
+    ],
+    ['mentions'],
+    path,
+    code
+  );
+  const prompt = asString(record.prompt, `${path}.prompt`, code, {
+    allowEmpty: true,
+    maxLength: 1_000_000,
+  });
+  const mentions = parseComposerMentions(record.mentions, prompt, path);
   const model = parseComposerModel(record.model, `${path}.model`);
   const nullableDimension = (entry: unknown, entryPath: string): number | null =>
     entry === null
@@ -691,7 +697,7 @@ const parseVideoComposerDraft = (
   exactKeys(
     record,
     ['prompt', 'model', 'resolution', 'aspectRatio', 'seconds'],
-    [],
+    ['mentions'],
     path,
     code
   );
@@ -702,10 +708,14 @@ const parseVideoComposerDraft = (
     }
     return parsed;
   };
+  const prompt = asString(record.prompt, `${path}.prompt`, code, {
+    allowEmpty: true,
+    maxLength: 1_000_000,
+  });
   return {
-    prompt: asString(record.prompt, `${path}.prompt`, code, {
-      allowEmpty: true,
-      maxLength: 1_000_000,
+    prompt,
+    ...(record.mentions === undefined ? {} : {
+      mentions: parseComposerMentions(record.mentions, prompt, path),
     }),
     model: parseComposerModel(record.model, `${path}.model`),
     resolution: trimmed(record.resolution, `${path}.resolution`),

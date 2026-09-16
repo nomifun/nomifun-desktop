@@ -463,7 +463,10 @@ describe('CreativeCanvasImageComposer', () => {
     expect(shellCss.includes('@media (prefers-color-scheme: dark)')).toBe(false);
     expect(shellCss.includes('width: 540px')).toBe(true);
     expect(promptCss.includes('min-height: 92px')).toBe(true);
-    expect(css.includes('padding: 0 4px 4px')).toBe(true);
+    const referenceCss = readFileSync(
+      new URL('./CreativeCanvasReferenceList.module.css', import.meta.url), 'utf8'
+    );
+    expect(referenceCss.includes('padding: 0 4px 4px')).toBe(true);
     expect(css.includes('height: 160px')).toBe(false);
     expect(shellCss.includes('flex: 0 1 156px')).toBe(true);
     expect(

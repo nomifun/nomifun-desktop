@@ -3313,7 +3313,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
     async (
       nodeId: string,
       prompt: string,
-      settings: CanvasVideoComposeSettings
+      settings: CanvasVideoComposeSettings,
+      mentions: readonly CreativeImagePromptMention[] = []
     ) => {
       const editor = editorRef.current;
       const runtime = videoTaskRuntimeRef.current;
@@ -3429,8 +3430,32 @@ const CreativeCanvasProductRoute: React.FC = () => {
             })
           );
         }
+        // Resolve stable node identities against the graph after async hydration.
+        // Never send a stale @ alias or silently drop an invalid inbound edge.
+        const resolution = resolveCanvasImageReferences(currentState, nodeId, references);
+        const compilation = compileCanvasImageReferencePrompt(
+          prompt,
+          mentions.map((mention) => ({
+            sourceNodeId: mention.sourceNodeId,
+            start: mention.start,
+            end: mention.end,
+            tokenText: `@${mention.fallbackLabel}`,
+          })),
+          resolution.references,
+          resolution.textReferences
+        );
+        const blocker: CanvasImageGenerationBlocker | undefined = resolution.issues[0]
+          ? { code: 'reference_resolution_failed', issue: resolution.issues[0] }
+          : compilation.issues[0]
+            ? { code: 'prompt_compilation_failed', issue: compilation.issues[0] }
+            : undefined;
+        if (blocker || !compilation.ok) {
+          throw new Error(canvasImageGenerationBlockerMessage(blocker, t) ??
+            t('creativeStudio.canvas.errors.videoReferenceResolutionFailed'));
+        }
         const durableSource = withCanvasVideoComposeDraft(currentSource, {
           prompt,
+          mentions: structuredClone([...mentions]),
           settings: {
             ...settings,
             model: {
@@ -3457,14 +3482,14 @@ const CreativeCanvasProductRoute: React.FC = () => {
             capability: mode.kind === 'i2v' ? 'i2v' : 't2v',
           },
           references: {
-            assets: references,
-            bindings: references.map((reference) => ({
-              assetId: reference.id,
+            assets: resolution.references.map((reference) => reference.asset),
+            bindings: resolution.references.map((reference) => ({
+              assetId: reference.assetId,
               kind: 'image' as const,
               role: 'reference' as const,
             })),
           },
-          prompt,
+          prompt: compilation.providerPrompt,
           settings: {
             resolution: settings.resolution,
             aspectRatio: settings.aspectRatio,
@@ -4800,6 +4825,24 @@ const CreativeCanvasProductRoute: React.FC = () => {
                       selected && canvasState?.selection.nodeIds.length === 1;
                     const retrySubmission =
                       videoComposeSubmission?.nodeId === node.id;
+                    const referenceResolution = canvasState
+                      ? resolveCanvasImageReferences(canvasState, node.id, [...knownAssetsById.values()])
+                      : null;
+                    const composerReferences = referenceResolution && canvasState
+                      ? [
+                          ...canvasImageComposerReferences(referenceResolution.references),
+                          ...canvasTextComposerReferences(referenceResolution.textReferences, t),
+                          ...invalidCanvasImageComposerReferences(
+                            canvasState, node.id, referenceResolution, knownAssetsById, t
+                          ),
+                        ].sort((left, right) => left.ordinal - right.ordinal)
+                      : [];
+                    const referenceError = referenceResolution?.issues[0]
+                      ? canvasImageGenerationBlockerMessage({
+                          code: 'reference_resolution_failed',
+                          issue: referenceResolution.issues[0],
+                        }, t)
+                      : null;
                     return (
                       <div className={styles.nodeComposerHost} data-video-composer-host>
                         {nodeView}
@@ -4807,29 +4850,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           <CreativeCanvasVideoComposer
                             nodeId={node.id}
                             mode={mode.kind}
-                            references={
-                              mode.kind === 'i2v'
-                                ? mode.assetIds.map((assetId) => {
-                                    const referenceAsset = knownAssetsById.get(assetId);
-                                    return {
-                                      assetId,
-                                      name:
-                                        referenceAsset?.title ??
-                                        t('creativeStudio.canvas.video.connectedImage', {
-                                          defaultValue: '已连接图片',
-                                        }),
-                                      previewUrl:
-                                        referenceAsset?.thumbnailUrl ??
-                                        referenceAsset?.originalUrl ??
-                                        creativeAssetClient.url(assetId),
-                                      originalUrl:
-                                        referenceAsset?.originalUrl ??
-                                        creativeAssetClient.url(assetId),
-                                    };
-                                })
-                                : []
-                            }
+                            references={composerReferences}
                             initialPrompt={composeDraft.prompt}
+                            initialMentions={composeDraft.mentions}
+                            generateBlocked={Boolean(referenceError)}
                             settings={composeSettings}
                             modelOptions={videoModelOptions}
                             task={canvasVideoComposeTaskSummary(composeConfig)}
@@ -4848,14 +4872,24 @@ const CreativeCanvasProductRoute: React.FC = () => {
                                 ? videoComposeIssue.message
                                 : mode.kind === 'unsupported'
                                   ? mode.message
-                                  : null
+                                  : referenceError
                             }
                             retrySubmission={retrySubmission}
-                            onPromptChange={(prompt) =>
+                            onPromptChange={(change) =>
                               updateVideoComposeDraft(node.id, (current) => ({
                                 ...current,
-                                prompt,
+                                prompt: change.value,
+                                mentions: structuredClone(change.mentions),
                               }))
+                            }
+                            onReferenceActivate={(sourceNodeId) =>
+                              dispatch(canvasCommands.setSelection([sourceNodeId]))
+                            }
+                            onReferenceDisconnect={(connectionId) =>
+                              dispatch(canvasCommands.deleteEdges([connectionId]))
+                            }
+                            onReferencesDisconnect={(connectionIds) =>
+                              dispatch(canvasCommands.deleteEdges(connectionIds))
                             }
                             onOpenPromptLibrary={() =>
                               openPromptLibrary()
@@ -4884,11 +4918,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
                                 settings: { ...current.settings, seconds },
                               }))
                             }
-                            onGenerate={(prompt) =>
+                            onGenerate={(prompt, mentions) =>
                               void generateFromCanvasVideo(
                                 node.id,
                                 prompt,
-                                composeSettings
+                                composeSettings,
+                                mentions
                               )
                             }
                             onRetrySubmission={() =>

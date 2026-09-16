@@ -576,7 +576,7 @@ const GuidPage: React.FC = () => {
           {!creation.draft.mode && advancedControlsNode}
         </div>
         <div className={styles.guidPrimaryStage}>
-          <div className={styles.guidLayout} style={creation.draft.mode ? { width: '100%' } : undefined}>
+          <div className={styles.guidLayout}>
             <GuidCompanionShowcase />
 
             {agentSelection.selection.kind === 'preset' && presetCapabilities.error && (
