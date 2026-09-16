@@ -42,7 +42,9 @@ describe('GuidPage advanced controls', () => {
     expect(page.includes("presetResourceKinds.has('workspace')")).toBe(true);
     expect(page.includes("presetResourceKinds.has('knowledge_base')")).toBe(true);
     expect(page.includes("filter((kind) => kind !== 'knowledge_base')")).toBe(true);
-    expect(page.includes('requiredKinds={resourcePickerKinds}')).toBe(true);
+    expect(
+      page.includes("requiredKinds={isCompanionAgent ? ['companion'] : resourcePickerKinds}")
+    ).toBe(true);
     expect(page.includes('{workspaceEnabled && <GuidWorkspaceFootnote')).toBe(true);
     expect(page.includes('resourceSelections: resourceSelectionResolution.selections')).toBe(true);
     expect(page.includes('resourceSelectionResolution.missingKinds.length === 0')).toBe(true);

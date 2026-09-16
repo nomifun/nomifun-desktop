@@ -34,7 +34,13 @@ async function mountTranscript(readOnly: boolean) {
     onStream = listener;
     return () => { onStream = undefined; };
   });
-  for (const event of ['turnStarted', 'turnCompleted', 'userCreated', 'reconnected'] as const) {
+  for (const event of [
+    'turnStarted',
+    'turnCompleted',
+    'userCreated',
+    'messageAnnotated',
+    'reconnected',
+  ] as const) {
     spyOn(ipcBridge.conversation[event], 'on').mockImplementation(() => () => {});
   }
   // Missing conversation is an authoritative idle hydration, with no network.

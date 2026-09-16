@@ -45,7 +45,19 @@
   clean cut 前读取历史事实；canonical AgentPreset/AgentSession API 已不能选择或返回它。
 - 单 provider 的旧 `catalog()` 调用名和 registry callback shape 仅留在 crate 内，指向同一个
   provider；物理删除归 `UARC-052`，不形成第二 factory 或 family。
-- 本任务没有 UI 改动。已冻结的双 Runtime 设置页检查点继续归 `UARC-050`，不能当作最终产品 UI。
+- 本任务没有 UI 产品行为或布局改动。已冻结的双 Runtime 设置页检查点继续归 `UARC-050`，不能当作
+  最终产品 UI；下述 milestone 修复仅补 license header 与同步既有测试。
+
+## Wave 1 milestone gate 修复
+
+- 全量 UI 首次运行暴露 6 个 source HEAD 既有失败：Guid 结构断言、已删除 Creative Studio 侧栏
+  文件、read-only transcript 未 mock 新 emitter、Model capability 数量常量，以及 3 个缺 license header
+  的既有文件。修复仅同步当前产品结构与测试隔离，不改变 UI 行为或布局。
+- Core workspace 首次运行暴露 Browser recovery 日志测试的 Windows 并发分支不稳定，以及 Computer
+  Browser 引导断言仍要求旧 `browser navigate` 文案。前者保留 fail-closed report/no-secret 断言并仅在
+  实际捕获 event 时校验 reason；后者改为验证明确的 Conversation Browser/system-browser capability。
+- 修复后 UI 为 3,575/3,575，Browser Engine 为 296/296（另 9 个环境型 ignored），Computer 为
+  98/98（另 7 个原生环境型 ignored），Desktop 为 144/144（另 3 个真机/网络型 ignored）。
 
 ## 验证
 

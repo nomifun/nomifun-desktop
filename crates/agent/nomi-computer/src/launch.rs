@@ -444,7 +444,11 @@ mod tests {
         assert!(validate_agent_web_target("microsoft-edge:https://example.com").is_err());
         assert!(validate_agent_web_target("microsoft-edge:https:example.com").is_err());
         let error = validate_agent_web_target("https://example.com").unwrap_err();
-        assert!(error.contains("browser navigate"), "must steer to the managed Browser: {error}");
+        assert!(
+            error.contains("selected conversation Browser")
+                && error.contains("system-browser capability"),
+            "must steer to an explicit Browser capability: {error}"
+        );
         // Apps, files, folders and non-web protocols remain launchable.
         assert!(validate_agent_web_target("C:\\Windows\\notepad.exe").is_ok());
         assert!(validate_agent_web_target("QQ音乐").is_ok());
