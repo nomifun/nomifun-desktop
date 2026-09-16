@@ -14,6 +14,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         .join("../nomifun-agent-contracts/contracts/target-packages/target-first-party-contributions.v1.json");
     let original: TargetPackageInventoryPayload = serde_json::from_slice(&std::fs::read(&path)?)?;
     let mut updated = original.clone();
+    // Dynamic MCP tools now publish their own namespaced package/module
+    // contributions. The former broad first-party proxy package is not an
+    // active target and must disappear from a regenerated inventory.
+    updated
+        .packages
+        .retain(|target| target.package.id.as_ref() != "nomifun.mcp-connectors");
     for registration in nomifun_agent_domain_wave1::registrations()?.into_iter()
         .chain(nomifun_agent_domain_wave2::registrations()?) {
         let manifest = registration.metadata.manifest.payload;

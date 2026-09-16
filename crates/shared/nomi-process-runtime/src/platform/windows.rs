@@ -4263,7 +4263,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn every_post_create_child_spawn_failure_is_reaped_by_the_bounded_poller() {
         let temporary = TempDir::new().expect("temporary marker directory should be created");
         let cases = [
@@ -4344,7 +4344,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn child_job_registry_removes_the_exact_entry_at_terminal_cleanup() {
         let mut command = tokio::process::Command::new(command_shell());
         command
@@ -4370,7 +4370,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn child_cleanup_survives_a_temporary_member_snapshot_failure() {
         let mut command = tokio::process::Command::new(command_shell());
         command
@@ -4409,7 +4409,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn child_cleanup_recovers_a_temporary_supplemental_snapshot_failure() {
         let mut command = tokio::process::Command::new(command_shell());
         command
@@ -4445,7 +4445,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn persistent_supplemental_snapshot_failure_kills_but_fails_closed() {
         let mut command = tokio::process::Command::new(command_shell());
         command
@@ -4486,7 +4486,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn reaper_fails_closed_without_any_complete_member_snapshot() {
         let mut command = tokio::process::Command::new(command_shell());
         command
@@ -4516,7 +4516,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn child_cleanup_retries_a_temporary_terminate_failure() {
         let mut command = tokio::process::Command::new(command_shell());
         command
@@ -4559,7 +4559,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn persistent_terminate_failure_kills_on_close_but_remains_unproven() {
         let mut command = tokio::process::Command::new(command_shell());
         command
@@ -4596,7 +4596,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn reaper_fallback_publishes_success_after_exact_handles_terminate() {
         let mut command = tokio::process::Command::new(command_shell());
         command
@@ -4764,7 +4764,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn assignment_failure_never_resumes_or_executes_user_code() {
         let temporary = TempDir::new().expect("temporary marker directory should be created");
         let marker = temporary.path().join("must-not-exist.marker");
@@ -4814,7 +4814,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn conpty_assignment_failure_never_resumes_or_executes_user_code() {
         let temporary = TempDir::new().expect("temporary marker directory should be created");
         let marker = temporary.path().join("conpty-must-not-exist.marker");
@@ -4855,7 +4855,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn spawn_order_is_create_then_assign_then_resume() {
         let facade = Arc::new(AuditFacade::successful());
         let request = program_request(
@@ -4891,7 +4891,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn dropping_start_future_after_create_cannot_resume_later() {
         let temporary = TempDir::new().expect("temporary marker directory should be created");
         let marker = temporary.path().join("drop-must-not-resume.marker");
@@ -4936,7 +4936,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn dropping_conpty_start_after_create_cannot_resume_later() {
         let temporary = TempDir::new().expect("temporary marker directory should be created");
         let marker = temporary.path().join("drop-conpty-must-not-resume.marker");
@@ -4985,7 +4985,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn dropped_write_keeps_stdin_open_until_the_blocking_write_finishes() {
         let spawned = spawn_pipe_inner(
             program_request(
@@ -5035,7 +5035,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn child_inherits_only_the_three_whitelisted_stdio_handles() {
         let sentinel = create_inheritable_pipe().expect("sentinel pipe should be created");
         clear_inheritance(sentinel.read.as_raw())

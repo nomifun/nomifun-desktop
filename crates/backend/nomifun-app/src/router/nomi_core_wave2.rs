@@ -35,16 +35,15 @@ use serde_json::json;
 
 use super::agent_wave2_host::Wave2ApplicationHost;
 
-pub(crate) const FS_DELETE: &str = "fs.delete";
-pub(crate) const FS_WATCH: &str = "fs.watch";
-pub(crate) const FS_SNAPSHOT: &str = "fs.snapshot";
-pub(crate) const VCS_PUSH: &str = "vcs.push";
+const WORKSPACE_FILES: &str = nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID;
+const WORKSPACE_VCS: &str = nomifun_agent_domain_wave2::WORKSPACE_VCS_MODULE_ID;
+const WORKSPACE_PROCESS: &str = nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID;
+const WORKSPACE_ARTIFACTS: &str = nomifun_agent_domain_wave2::WORKSPACE_ARTIFACTS_MODULE_ID;
 
 /// Platform-owned workspace operations usable by the Coding host. Nomi's native
 /// tool admission below remains unchanged, so tools are never registered twice.
 pub(crate) fn coding_capability_ids() -> BTreeSet<CapabilityId> {
-    ["fs.read", "fs.search", "fs.write", "fs.patch", "fs.delete", "fs.snapshot",
-     "vcs.status", "vcs.diff", "vcs.stage", "vcs.commit", "vcs.push", "process.exec"]
+    [WORKSPACE_FILES, WORKSPACE_VCS, WORKSPACE_PROCESS, WORKSPACE_ARTIFACTS]
         .into_iter().map(CapabilityId::from).collect()
 }
 
@@ -53,14 +52,14 @@ const MAX_DEBOUNCE_IDENTITIES: usize = 1024;
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(200);
 
 pub(crate) fn tool_capability_ids() -> BTreeSet<CapabilityId> {
-    [FS_DELETE, FS_SNAPSHOT, VCS_PUSH]
+    [WORKSPACE_FILES, WORKSPACE_VCS, WORKSPACE_PROCESS, WORKSPACE_ARTIFACTS]
         .into_iter()
         .map(CapabilityId::from)
         .collect()
 }
 
 pub(crate) fn event_capability_ids() -> BTreeSet<CapabilityId> {
-    BTreeSet::from([CapabilityId::from(FS_WATCH)])
+    BTreeSet::from([CapabilityId::from(WORKSPACE_FILES)])
 }
 
 pub(crate) fn action_host_port(services: &crate::services::AppServices) -> Arc<NomiCoreWave2Host> {
@@ -305,16 +304,13 @@ impl NomiCoreWave2Host {
         &self,
         context: &Wave2HostContext,
     ) -> Result<Arc<Wave2ApplicationHost>, Wave2HostPortError> {
-        if !matches!(
-            context.capability_id.as_ref(),
-            FS_DELETE | FS_SNAPSHOT | VCS_PUSH
-        ) && !coding_capability_ids().contains(&context.capability_id) {
+        if !coding_capability_ids().contains(&context.capability_id) {
             return Err(Wave2HostPortError::unavailable(format!(
                 "{} is not owned by the Nomi-core Wave 2 workspace adapter",
                 context.capability_id.as_ref()
             )));
         }
-        let canonical_root = if context.capability_id.as_ref() == "process.exec" {
+        let canonical_root = if context.capability_id.as_ref() == WORKSPACE_PROCESS {
             exact_session_process_root(context)?
         } else { exact_session_workspace_root(
             &context.agent_session_id,
@@ -376,10 +372,6 @@ impl Wave2HostPort for NomiCoreWave2Host {
         >,
     > {
         Box::pin(async move {
-            if let nomifun_agent_domain_wave2::Wave2CapabilityOperation::McpConnectors { input } = &request.operation {
-                let owner = self.mcp.as_ref().ok_or_else(|| Wave2HostPortError::unavailable("no current-product MCP owner is configured"))?;
-                return owner.invoke((&request.context).into(), input.clone()).await;
-            }
             let input = match &request.operation {
                 nomifun_agent_domain_wave2::Wave2CapabilityOperation::WorkspaceExecution {
                     input,
@@ -390,10 +382,10 @@ impl Wave2HostPort for NomiCoreWave2Host {
                     ));
                 }
             };
-            if request.context.capability_id.as_ref() == VCS_PUSH && self.git_receipts.is_none() {
+            if request.context.action_id.as_ref() == "workspace.vcs/push" && self.git_receipts.is_none() {
                 return Err(Wave2HostPortError::unavailable("Conversation Git dispatch requires the persistent effect owner"));
             }
-            let root = if request.context.capability_id.as_ref() == "process.exec" {
+            let root = if request.context.capability_id.as_ref() == WORKSPACE_PROCESS {
                 exact_session_process_root(&request.context)?
             } else {
                 exact_session_workspace_root(&request.context.agent_session_id,
@@ -401,8 +393,12 @@ impl Wave2HostPort for NomiCoreWave2Host {
             };
             self.ensure_workspace_git_evidence(&root).await
                 .map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?;
-            if request.context.capability_id.as_ref() == "process.exec" {
-                nomifun_agent_domain_wave2::validate_action_input("process.exec", input)
+            if request.context.capability_id.as_ref() == WORKSPACE_PROCESS {
+                nomifun_agent_domain_wave2::validate_module_action_input(
+                    request.context.capability_id.as_ref(),
+                    request.context.action_id.as_ref(),
+                    input,
+                )
                     .map_err(|error| Wave2HostPortError::new("INVALID_PAYLOAD", error))?;
                 let root = exact_session_process_root(&request.context)?;
                 let key = (request.context.principal.principal_id.clone(), request.context.agent_session_id.as_ref().to_owned(), request.context.correlation_id.as_ref().to_owned());
@@ -412,10 +408,12 @@ impl Wave2HostPort for NomiCoreWave2Host {
                 // Windows extended prefixes); compare like representations.
                 let native_root = std::fs::canonicalize(&root).map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?;
                 if scope.workspace_root() != native_root.as_path() { return Err(Wave2HostPortError::unavailable("process workspace authority changed")); }
-                return scope.invoke(input.clone(), request.context.operation_id.as_ref()).await;
+                let input = process_owner_input(request.context.action_id.as_ref(), input)?;
+                return scope.invoke(input, request.context.operation_id.as_ref()).await;
             }
             let owner = dispatch_validated_action_input(
                 request.context.capability_id.as_ref(),
+                request.context.action_id.as_ref(),
                 input,
                 || self.host_for(&request.context),
             )??;
@@ -426,12 +424,38 @@ impl Wave2HostPort for NomiCoreWave2Host {
 
 fn dispatch_validated_action_input<T>(
     capability_id: &str,
+    action_id: &str,
     input: &StrictJsonValue,
     dispatch: impl FnOnce() -> T,
 ) -> Result<T, Wave2HostPortError> {
-    nomifun_agent_domain_wave2::validate_action_input(capability_id, input)
+    nomifun_agent_domain_wave2::validate_module_action_input(capability_id, action_id, input)
         .map_err(|error| Wave2HostPortError::new("INVALID_PAYLOAD", error))?;
     Ok(dispatch())
+}
+
+fn process_owner_input(
+    action_id: &str,
+    input: &StrictJsonValue,
+) -> Result<StrictJsonValue, Wave2HostPortError> {
+    let action = action_id
+        .strip_prefix("workspace.process/")
+        .ok_or_else(|| {
+            Wave2HostPortError::new(
+                "ACTION_NOT_DECLARED",
+                format!("{action_id} is not a workspace.process Action"),
+            )
+        })?;
+    let operation = if action == "input" { "stdin" } else { action };
+    let mut object = input.0.as_object().cloned().ok_or_else(|| {
+        Wave2HostPortError::invalid_payload("workspace.process input must be an object")
+    })?;
+    if object.contains_key("operation") {
+        return Err(Wave2HostPortError::invalid_payload(
+            "workspace.process operation is selected by the Action ID, not the payload",
+        ));
+    }
+    object.insert("operation".to_owned(), json!(operation));
+    Ok(StrictJsonValue(serde_json::Value::Object(object)))
 }
 
 /// A process grant never implies a file grant. Only the host may substitute
@@ -584,7 +608,7 @@ impl WatchQueue {
     }
 }
 
-/// Live `fs.watch` EventSource projected into Nomi's per-turn system context.
+/// Live `workspace.files` changed Event projected into per-turn system context.
 /// It owns no public watch ID; dropping the Session-held contributor drops the
 /// OS watcher and cancels the subscription.
 pub(crate) struct NomiWorkspaceWatchContext {
@@ -618,6 +642,12 @@ impl NomiWorkspaceWatchContext {
                     let Ok(relative) = path.strip_prefix(&callback_root) else {
                         continue;
                     };
+                    if relative.components().next().is_some_and(|component| {
+                        component.as_os_str().to_str()
+                            == Some(nomifun_file::WORKSPACE_OWNER_DIRECTORY)
+                    }) {
+                        continue;
+                    }
                     let path = relative.to_string_lossy().replace('\\', "/");
                     queue.push(WorkspaceWatchEvent { path, operation });
                 }
@@ -625,14 +655,14 @@ impl NomiWorkspaceWatchContext {
         )
         .map_err(|error| {
             AppError::Internal(format!(
-                "Nomi fs.watch could not create a workspace watcher: {error}"
+                "workspace.files could not create a workspace watcher: {error}"
             ))
         })?;
         watcher
             .watch(&root, RecursiveMode::Recursive)
             .map_err(|error| {
                 AppError::Internal(format!(
-                    "Nomi fs.watch could not subscribe to the Session workspace: {error}"
+                    "workspace.files could not subscribe to the Session workspace: {error}"
                 ))
             })?;
         Ok(Arc::new(Self {
@@ -674,7 +704,8 @@ impl ContextContributor for NomiWorkspaceWatchContext {
             return None;
         }
         serde_json::to_string(&json!({
-            "capability_id": FS_WATCH,
+            "capability_id": WORKSPACE_FILES,
+            "event_schema": "workspace.files/changed",
             "events": events,
             "dropped_event_count": dropped,
         }))
@@ -687,7 +718,7 @@ impl ContextContributor for NomiWorkspaceWatchContext {
     }
 
     fn label(&self) -> &str {
-        FS_WATCH
+        WORKSPACE_FILES
     }
 }
 
@@ -701,7 +732,7 @@ fn watch_operation(kind: &EventKind) -> Option<&'static str> {
     }
 }
 
-/// Exact Wave 2 input schema source for the three admitted FunctionTools.
+/// Exact input schema source for every admitted workspace Module Action.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct NomiCoreWave2SchemaResolver;
 
@@ -809,6 +840,8 @@ mod tests {
             .nth(1)
             .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
             .unwrap();
+        assert_eq!(json["capability_id"], WORKSPACE_FILES);
+        assert_eq!(json["event_schema"], "workspace.files/changed");
         assert_eq!(json["events"].as_array().unwrap().len(), MAX_WATCH_EVENTS);
         assert_eq!(json["dropped_event_count"], 1);
         assert!(watch.pre_turn_context().await.is_none());
@@ -899,11 +932,20 @@ mod tests {
     #[test]
     fn invalid_model_payloads_never_dispatch_to_a_workspace_owner() {
         let dispatches = AtomicUsize::new(0);
-        for (capability_id, input) in [
-            (FS_DELETE, json!({"path": "ok", "workspace_root": "C:/spoof"})),
-            (FS_SNAPSHOT, json!({"operation": "baseline"})),
+        for (capability_id, action_id, input) in [
             (
-                VCS_PUSH,
+                WORKSPACE_FILES,
+                "workspace.files/delete",
+                json!({"path": "ok", "workspace_root": "C:/spoof"}),
+            ),
+            (
+                WORKSPACE_ARTIFACTS,
+                "workspace.artifacts/publish",
+                json!({"path": ""}),
+            ),
+            (
+                WORKSPACE_VCS,
+                "workspace.vcs/push",
                 json!({
                     "remote": "origin",
                     "refspec": "HEAD:refs/heads/main",
@@ -913,6 +955,7 @@ mod tests {
         ] {
             let error = dispatch_validated_action_input(
                 capability_id,
+                action_id,
                 &StrictJsonValue(input),
                 || dispatches.fetch_add(1, Ordering::AcqRel),
             )
@@ -920,5 +963,22 @@ mod tests {
             assert_eq!(error.code, "INVALID_PAYLOAD");
         }
         assert_eq!(dispatches.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn process_action_identity_is_projected_only_inside_the_owner_boundary() {
+        let input = StrictJsonValue(json!({"process_id": "p", "input": "hello"}));
+        let projected = process_owner_input("workspace.process/input", &input).unwrap();
+        assert_eq!(projected.0["operation"], "stdin");
+        assert_eq!(projected.0["process_id"], "p");
+        assert!(process_owner_input(
+            "workspace.process/input",
+            &StrictJsonValue(json!({
+                "operation": "cancel",
+                "process_id": "p",
+                "input": "hello"
+            })),
+        )
+        .is_err());
     }
 }

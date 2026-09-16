@@ -51,6 +51,15 @@ pub fn list_workspace_level(
             "Path traversal outside workspace is not allowed".into(),
         ));
     }
+    if relative_path_obj
+        .components()
+        .next()
+        .is_some_and(|component| {
+            crate::artifact_store::is_workspace_owner_component(component.as_os_str())
+        })
+    {
+        return Err(AppError::NotFound("Directory not found".into()));
+    }
 
     // Resolve the browsed path relative to the workspace root.
     let browse_path = if relative_path.is_empty() {
@@ -118,6 +127,13 @@ pub fn list_workspace_level(
             }
         };
         let name = entry.file_name().to_string_lossy().into_owned();
+        if canonical_browse == canonical_base
+            && crate::artifact_store::is_workspace_owner_component(
+                std::ffi::OsStr::new(&name),
+            )
+        {
+            continue;
+        }
 
         // Apply search filter if provided.
         if let Some(ref needle) = search_lower
@@ -204,6 +220,26 @@ mod tests {
         let out = list_workspace_level(dir.path(), "", Some("cargo")).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "Cargo.toml");
+    }
+
+    #[test]
+    fn workspace_owner_directory_is_not_a_user_browsable_entry() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".nomifun").join("artifacts")).unwrap();
+        fs::write(
+            dir.path().join(".nomifun").join("artifacts").join("receipt"),
+            "owned",
+        )
+        .unwrap();
+        fs::write(dir.path().join("visible.txt"), "visible").unwrap();
+
+        let out = list_workspace_level(dir.path(), "", None).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "visible.txt");
+        assert!(matches!(
+            list_workspace_level(dir.path(), ".nomifun/artifacts", None),
+            Err(AppError::NotFound(_))
+        ));
     }
 
     #[test]
