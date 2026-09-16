@@ -2,11 +2,12 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-17
-> 当前阶段：Wave 1 / UARC-011 active
+> 当前阶段：Wave 1 / UARC-012 ready
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
 > UARC-010 实现提交：`c059728ae4395fcdf72df59a54b4e53e8b7562a1`
+> UARC-011 实现提交：`fa164520f72a053e8e244721cb9682bc58b1269b`
 > 当前主机：Windows
 > Initiative 状态：`active / baseline freeze`
 
@@ -50,7 +51,8 @@
 | `UARC-000` | windows_verified | Integration | verified | n/a | barrier `2147863da`；26/26 文件归属，基线 gate 通过 |
 | `UARC-001` | integrated | Integration | verified | pending | 机器 inventory/self-test/timing/platform gap 已完成；Mac gaps 保持 pending |
 | `UARC-010` | integrated | Integration | verified | n/a | Module 多 contribution、authoring policy、exact Action grant 已闭合 |
-| `UARC-011` | active | Integration | pending | n/a | canonical Agent Store baseline 与 Agent-only reset 实施中 |
+| `UARC-011` | integrated | Integration | verified | n/a | generation 5 Store、main migration、effect ledger、reset gate 已闭合 |
+| `UARC-012` | ready | Integration | pending | n/a | 单一 AgentSession owner/API |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -85,6 +87,9 @@
 | UARC-010 Session/Engine/Plugin consumers | 25 + 14 + 40 passed | shared consumer regression |
 | UARC-010 contract generator/rustfmt/boundary | passed | generated schema and reachability consistent |
 | Control Plane transition probe | 48/50 passed | 2 old kind/direct-middleware assumptions owned by `UARC-014` |
+| UARC-011 Contracts/Store | 105 + 27 passed | empty baseline, Turn/Event/Effect/Resource invariants |
+| UARC-011 DB reset/schema/migration | 3 + 20 + 5 passed | non-Agent preservation and main SQLite parity |
+| UARC-011 retained root consumer | 14 passed | temporary alias remains owned by `UARC-054` |
 | Windows UARC full gate | not run | 否 |
 | macOS UARC shared compile | not run | 否 |
 | macOS native Browser/Computer/Process | not run | 否 |
@@ -109,11 +114,13 @@
   Wave 1，但最终 gate 前必须闭合。
 - UARC-010 后 Control Plane 有两项旧语义测试等待 `UARC-014`：kind-only Context 和 direct
   TurnMiddleware；这是已登记的串行迁移，不是恢复兼容的理由。
+- 当前 main DB 的旧 Conversation writers/readers 仍由 `UARC-051/054` 删除；generation 5 已在同库
+  安装但没有双写。Fresh-v4 root coordinator aliases 仅为 `UARC-054` 保留。
 
 ## 8. Next ready tasks
 
-1. `UARC-011`：建立 canonical Agent Store baseline 和 Agent-only reset 合同。
-2. UARC-011 barrier 后执行 `UARC-012`；不得提前启动 Feature tasks。
+1. `UARC-012`：切换为单一 AgentSession owner 与 Turn API。
+2. UARC-012 barrier 后执行 `UARC-013`；不得提前启动 Feature tasks。
 
 ## 9. 状态更新模板
 
@@ -232,3 +239,17 @@
 - Not run: no implementation gate yet.
 - Remaining/blocker: freeze exact non-Agent preserved tables and replace Agent facts without legacy readers. No blocker.
 - Next ready tasks: none until UARC-011 barrier; then `UARC-012`.
+
+### 2026-09-17 UARC-011 integrated and gate complete
+
+- Barrier/source: UARC-010 closeout `dd2c098da`; implementation `fa164520f72a053e8e244721cb9682bc58b1269b`.
+- Owner/write set: Integration; DB, Agent Session Store, Agent schema/contracts/generated artifacts, Cargo lock and UARC evidence.
+- Changed: generation 5 schema, main migration 109, canonical Turn/Event/Effect/Resource facts, exact main-pool Store validation and Agent-only reset.
+- Deleted: `0001_fresh_v4.sql`, old Session table identities and projection embedded-event compatibility reader.
+- Retained + reason: content-addressed object/checkpoint contract; temporary Fresh-v4 root aliases have the explicit `UARC-054` deletion owner.
+- Tests: Contracts 105; Agent Session 27; reset/schema parity 3; ID schema 20; published migration upgrade 5; v4-root consumer 14; generator/rustfmt/boundary/whitespace checks passed.
+- Windows: verified for schema, SQLite transaction behavior and reset preservation.
+- macOS: not applicable to this shared schema task; path/permission behavior is revalidated later on Mac.
+- Not run: full post-migration `nomifun-db` 411-test suite; the same task's pre-migration serial baseline was 411/411 and all migration-sensitive post-change suites passed.
+- Remaining/blocker: none for UARC-011. Old production Session writers remain intentionally owned by cutover tasks, not by a compatibility reader in the new Store.
+- Next ready tasks: `UARC-012` only.
