@@ -123,6 +123,9 @@ impl AgentSessionWorkspaceBinding {
                 .any(|component| matches!(component, Component::RootDir | Component::Prefix(_)))
             || trimmed.contains('\\')
             || has_traversal(trimmed)
+            || path.components().next().is_some_and(|component| {
+                crate::artifact_store::is_workspace_owner_component(component.as_os_str())
+            })
         {
             return Err(AppError::BadRequest(
                 "workspace resource paths must be relative and traversal-free".to_owned(),
@@ -207,5 +210,8 @@ mod tests {
         assert!(scope.resolve_relative_path("../outside").is_err());
         assert!(scope.resolve_relative_path("/outside").is_err());
         assert!(scope.resolve_relative_path(r"nested\outside").is_err());
+        assert!(scope.resolve_relative_path(".nomifun/artifacts/receipt").is_err());
+        #[cfg(windows)]
+        assert!(scope.resolve_relative_path(".NOMIFUN/artifacts/receipt").is_err());
     }
 }

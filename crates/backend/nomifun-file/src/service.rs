@@ -1217,6 +1217,16 @@ fn build_dir_tree_sync(dir: &Path, root: &Path) -> Result<Vec<DirOrFile>, AppErr
         let entry = entry.map_err(|e| AppError::Internal(format!("error reading directory entry: {e}")))?;
 
         let path = entry.path();
+        if path
+            .strip_prefix(root)
+            .ok()
+            .and_then(|relative| relative.components().next())
+            .is_some_and(|component| {
+                crate::artifact_store::is_workspace_owner_component(component.as_os_str())
+            })
+        {
+            continue;
+        }
         let metadata = entry
             .metadata()
             .map_err(|e| AppError::Internal(format!("cannot read metadata for '{}': {e}", path.display())))?;
@@ -1266,6 +1276,16 @@ fn read_children_sync(dir: &Path, root: &Path) -> Result<Vec<DirOrFile>, AppErro
         };
 
         let path = entry.path();
+        if path
+            .strip_prefix(root)
+            .ok()
+            .and_then(|relative| relative.components().next())
+            .is_some_and(|component| {
+                crate::artifact_store::is_workspace_owner_component(component.as_os_str())
+            })
+        {
+            continue;
+        }
         let is_dir = entry.metadata().map(|m| m.is_dir()).unwrap_or(false);
 
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -1309,6 +1329,16 @@ fn list_workspace_files_sync(root: &Path) -> Result<Vec<WorkspaceFlatFile>, AppE
         };
 
         let path = entry.path();
+        if path
+            .strip_prefix(root)
+            .ok()
+            .and_then(|relative| relative.components().next())
+            .is_some_and(|component| {
+                crate::artifact_store::is_workspace_owner_component(component.as_os_str())
+            })
+        {
+            continue;
+        }
         let metadata = match std::fs::metadata(path) {
             Ok(metadata) => metadata,
             Err(e) => {
@@ -2579,6 +2609,23 @@ mod tests {
         let main_file = files.iter().find(|f| f.name == "main.rs").unwrap();
 
         assert_eq!(main_file.relative_path, "src/main.rs");
+    }
+
+    #[test]
+    fn list_workspace_files_sync_excludes_owner_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".nomifun/artifacts")).unwrap();
+        fs::write(dir.path().join(".nomifun/artifacts/receipt"), "owned").unwrap();
+        fs::write(dir.path().join("visible.txt"), "visible").unwrap();
+
+        let files = list_workspace_files_sync(dir.path()).unwrap();
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["visible.txt"]
+        );
     }
 
     #[cfg(unix)]

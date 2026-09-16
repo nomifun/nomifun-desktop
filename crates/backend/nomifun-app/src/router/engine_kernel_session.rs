@@ -14,7 +14,7 @@ use nomifun_agent_kernel::{
 };
 use nomifun_ai_agent::engine_effect_scope::guard_effect_settlement;
 use nomifun_api_types::{ExecutionConstraints, RuntimeEngineBinding};
-use nomifun_common::AppError;
+use nomifun_common::{AgentToolPolicy, AppError};
 use nomifun_engine_core::{EngineToolExposure, EngineToolPlan, KernelEngineToolInvoker};
 
 use super::engine_journal::EngineTurnJournal;
@@ -39,9 +39,11 @@ impl nomifun_engine_core::EngineToolInvoker for ConstrainedTools {
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<nomifun_engine_core::EngineToolResult, nomifun_engine_core::EngineToolError> {
         if self.plan.binding(&invocation.call.name) != Some(&invocation.binding)
-            || !self
-                .constraints
-                .allows_capability(invocation.binding.capability_id.as_ref())
+            || !constraints_allow_action(
+                self.constraints,
+                invocation.binding.capability_id.as_ref(),
+                invocation.binding.action_id.as_ref(),
+            )
         {
             return Err(nomifun_engine_core::EngineToolError::ToolInvocation(
                 "Tool is outside the frozen Session execution ceiling".into(),
@@ -65,6 +67,32 @@ pub(crate) struct EngineKernelAssembly {
     pub wave2: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
     pub plugin_product: super::engine_plugin_product_tools::PluginProductOwner,
     pub robot: Option<Arc<super::nomi_core_robot::NomiCoreRobotWave4Owner>>,
+}
+
+fn constraints_allow_action(
+    constraints: ExecutionConstraints,
+    capability_id: &str,
+    action_id: &str,
+) -> bool {
+    match capability_id {
+        nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID => match constraints.tool_scope {
+            AgentToolPolicy::Full => true,
+            AgentToolPolicy::ReadOnly | AgentToolPolicy::ReadShell => matches!(
+                action_id,
+                "workspace.files/read" | "workspace.files/search"
+            ),
+        },
+        nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID => match constraints.tool_scope {
+            AgentToolPolicy::Full => true,
+            AgentToolPolicy::ReadShell => action_id == "workspace.process/exec",
+            AgentToolPolicy::ReadOnly => false,
+        },
+        nomifun_agent_domain_wave2::WORKSPACE_VCS_MODULE_ID
+        | nomifun_agent_domain_wave2::WORKSPACE_ARTIFACTS_MODULE_ID => {
+            constraints.tool_scope == AgentToolPolicy::Full
+        }
+        _ => constraints.allows_capability(capability_id),
+    }
 }
 
 #[path = "engine_mcp_resources.rs"]
@@ -142,8 +170,18 @@ impl EngineKernelSession {
 
         };
         let workspace_selected = selected().any(|item| {
-            item.capability.id.as_ref() != "process.exec"
-                && super::nomi_core_wave2::coding_capability_ids().contains(&item.capability.id)
+            matches!(
+                item.capability.id.as_ref(),
+                nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID
+                    | nomifun_agent_domain_wave2::WORKSPACE_VCS_MODULE_ID
+                    | nomifun_agent_domain_wave2::WORKSPACE_ARTIFACTS_MODULE_ID
+            ) && item.action_allowlist.iter().any(|action_id| {
+                constraints_allow_action(
+                    constraints,
+                    item.capability.id.as_ref(),
+                    action_id.as_ref(),
+                )
+            })
         });
         if workspace_selected {
             let resources = binding
@@ -170,7 +208,17 @@ impl EngineKernelSession {
                     resource,
                 );
         }
-        let process_selected = selected().any(|item| item.capability.id.as_ref() == "process.exec");
+        let process_selected = selected().any(|item| {
+            item.capability.id.as_ref()
+                == nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID
+                && item.action_allowlist.iter().any(|action_id| {
+                    constraints_allow_action(
+                        constraints,
+                        item.capability.id.as_ref(),
+                        action_id.as_ref(),
+                    )
+                })
+        });
         let git_root = (workspace_selected || process_selected)
             .then(|| {
                 super::nomi_core_wave2::canonical_workspace_root(std::path::Path::new(&workspace))
@@ -233,7 +281,7 @@ impl EngineKernelSession {
             binding: session.engine_binding().clone(),
             constraints,
             workspace,
-            process_selected: process_selected && constraints.allows_capability("process.exec"),
+            process_selected,
             primary_image_input,
             active: Arc::new(SessionCapabilityState::new(&compiled)),
             compiled,
@@ -277,24 +325,27 @@ impl EngineKernelSession {
     }
     /// Subtractive ceiling of this Session, not another Agent capability grant.
     pub fn allows_capability(&self, id: &nomifun_agent_contracts::CapabilityId) -> bool {
-        if !self.constraints.allows_capability(id.as_ref()) {
-            return false;
-        }
-        if !self.constraints.restricted() {
-            return true;
-        }
-        self.compiled
+        let selected = self.compiled
             .content()
             .enabled_capabilities
             .iter()
-
-            .any(|item| {
-                &item.capability.id == id
-                    && item.contribution_lock.source_kind
-                        == nomifun_agent_contracts::ContributionSourceKind::PlatformBuiltin
-                    && item.resolved_source.source_kind
-                        == nomifun_agent_contracts::PluginSourceKind::Bundled
+            .find(|item| &item.capability.id == id);
+        let Some(selected) = selected else {
+            return false;
+        };
+        let policy_allows = if selected.action_allowlist.is_empty() {
+            self.constraints.allows_capability(id.as_ref())
+        } else {
+            selected.action_allowlist.iter().any(|action_id| {
+                constraints_allow_action(self.constraints, id.as_ref(), action_id.as_ref())
             })
+        };
+        policy_allows
+            && (!self.constraints.restricted()
+                || (selected.contribution_lock.source_kind
+                    == nomifun_agent_contracts::ContributionSourceKind::PlatformBuiltin
+                    && selected.resolved_source.source_kind
+                        == nomifun_agent_contracts::PluginSourceKind::Bundled))
     }
 
     pub fn registry_snapshot(&self) -> Result<Arc<MaterializedRegistry>, AppError> {
@@ -537,11 +588,11 @@ impl EngineKernelSession {
         EngineToolPlan::new(plan.model_definitions().iter().filter_map(|definition| {
             let binding = plan.binding(&definition.name)?;
             (self.allows_capability(&binding.capability_id)
-                && (!self.constraints.restricted()
-                    || matches!(
-                        binding.capability_id.as_ref(),
-                        "fs.read" | "fs.search" | "process.exec"
-                    )))
+                && constraints_allow_action(
+                    self.constraints,
+                    binding.capability_id.as_ref(),
+                    binding.action_id.as_ref(),
+                ))
             .then(|| binding.clone())
         }))
         .map_err(failure)
@@ -871,5 +922,61 @@ impl EngineKernelSession {
             }
         };
         done.await.map_err(failure)
+    }
+}
+
+#[cfg(test)]
+mod workspace_module_tests {
+    use super::*;
+
+    fn constraints(tool_scope: AgentToolPolicy) -> ExecutionConstraints {
+        ExecutionConstraints {
+            version: 1,
+            tool_scope,
+            exclude_delegation: false,
+        }
+    }
+
+    #[test]
+    fn restricted_attempts_filter_exact_workspace_actions_not_whole_modules() {
+        let read_only = constraints(AgentToolPolicy::ReadOnly);
+        assert!(constraints_allow_action(
+            read_only,
+            nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID,
+            "workspace.files/read",
+        ));
+        assert!(constraints_allow_action(
+            read_only,
+            nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID,
+            "workspace.files/search",
+        ));
+        assert!(!constraints_allow_action(
+            read_only,
+            nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID,
+            "workspace.files/write",
+        ));
+        assert!(!constraints_allow_action(
+            read_only,
+            nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID,
+            "workspace.process/exec",
+        ));
+
+        let read_shell = constraints(AgentToolPolicy::ReadShell);
+        assert!(constraints_allow_action(
+            read_shell,
+            nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID,
+            "workspace.process/exec",
+        ));
+        for action in [
+            "workspace.process/start",
+            "workspace.process/input",
+            "workspace.process/cancel",
+        ] {
+            assert!(!constraints_allow_action(
+                read_shell,
+                nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID,
+                action,
+            ));
+        }
     }
 }

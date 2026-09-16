@@ -13,26 +13,87 @@ fn path() -> Value {
         "description":"Workspace-relative path; no native root, traversal or authority fields."})
 }
 
-pub(super) fn input(capability: &str) -> Option<StrictJsonValue> {
-    Some(StrictJsonValue(match capability {
-        "fs.write" => object(
+pub(super) fn input(action: &str) -> Option<StrictJsonValue> {
+    Some(StrictJsonValue(match action {
+        "workspace.files/read" => json!({
+            "type":"object", "additionalProperties":false, "required":["path"],
+            "properties":{
+                "format":{"type":"string", "enum":["text", "image", "instruction_scope"], "default":"text"},
+                "recursive":{"type":"boolean", "default":false},
+                "missing_ok":{"type":"boolean", "default":false},
+                "path":path(),
+                "offset":{"type":"integer", "minimum":0, "maximum":8388608, "default":0},
+                "limit":{"type":"integer", "minimum":4, "maximum":16384, "default":16384},
+                "expected_sha256":{"type":"string", "pattern":"^[0-9a-f]{64}$"}
+            },
+            "allOf":[
+                {"if":{"properties":{"offset":{"minimum":1}},"required":["offset"]},
+                 "then":{"required":["expected_sha256"]}},
+                {"if":{"properties":{"format":{"const":"image"}},"required":["format"]},
+                 "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]},{"required":["missing_ok"]}]}}},
+                {"if":{"properties":{"format":{"const":"instruction_scope"}},"required":["format"]},
+                 "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]},{"required":["expected_sha256"]},{"required":["missing_ok"]}]}},
+                 "else":{"not":{"required":["recursive"]}}}
+            ]
+        }),
+        "workspace.files/search" => object(
+            json!({
+                "query":{"type":"string", "minLength":1, "maxLength":1024, "pattern":"\\S"},
+                "path":{"type":"string", "maxLength":4096},
+                "limit":{"type":"integer", "minimum":1, "maximum":200, "default":100}
+            }),
+            &["query"],
+        ),
+        "workspace.files/write" => object(
             json!({
                 "path":path(),
                 "content":{"type":"string", "maxLength":8388608,
-                    "description":"Complete UTF-8 text. Host also enforces an 8 MiB byte limit. Prefer fs.patch for focused edits."}
+                    "description":"Complete UTF-8 text. Host also enforces an 8 MiB byte limit. Prefer workspace.files/patch for focused edits."}
             }),
             &["path", "content"],
         ),
-        "fs.patch" => patch(),
-        "vcs.status" => object(json!({}), &[]),
-        "vcs.diff" => object(json!({"path":path()}), &[]),
-        "vcs.stage" => object(json!({"path":path()}), &["path"]),
-        "vcs.commit" => object(
+        "workspace.files/patch" => patch(),
+        "workspace.files/delete" => object(json!({"path":path()}), &["path"]),
+        "workspace.files/watch" => object(
+            json!({
+                "operation":{"type":"string", "enum":["start", "stop"]},
+                "path":path()
+            }),
+            &["operation", "path"],
+        ),
+        "workspace.vcs/status" => object(json!({}), &[]),
+        "workspace.vcs/diff" => object(json!({"path":path()}), &[]),
+        "workspace.vcs/stage" => object(json!({"path":path()}), &["path"]),
+        "workspace.vcs/commit" => object(
             json!({
                 "message":{"type":"string", "minLength":1, "maxLength":512, "pattern":"\\S",
                     "description":"Commit message, at most 512 characters; requires the selected action's existing authority."}
             }),
             &["message"],
+        ),
+        "workspace.vcs/push" => object(
+            json!({
+                "remote":{"type":"string", "minLength":1, "maxLength":256},
+                "refspec":{"type":"string", "minLength":1, "maxLength":1024,
+                    "pattern":"^(HEAD|refs/heads/.+):refs/heads/.+$"},
+                "force":{"const":false, "default":false}
+            }),
+            &["remote", "refspec"],
+        ),
+        "workspace.artifacts/read" => object(
+            json!({
+                "artifact_id":{"type":"string", "pattern":"^[0-9a-f]{64}$"},
+                "offset":{"type":"integer", "minimum":0, "maximum":536870912, "default":0},
+                "limit":{"type":"integer", "minimum":1, "maximum":1048576, "default":16384}
+            }),
+            &["artifact_id"],
+        ),
+        "workspace.artifacts/publish" => object(
+            json!({
+                "path":path(),
+                "expected_sha256":{"type":"string", "pattern":"^[0-9a-f]{64}$"}
+            }),
+            &["path"],
         ),
         _ => return None,
     }))

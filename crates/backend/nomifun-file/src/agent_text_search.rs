@@ -81,8 +81,27 @@ impl FileService {
             };
             let started = Instant::now();
             let mut attempted_files = 0usize;
-            let walker = ignore::WalkBuilder::new(target).follow_links(false)
-                .parents(false).git_global(false).git_exclude(false).max_depth(Some(64)).build();
+            let filter_root = root.clone();
+            let mut builder = ignore::WalkBuilder::new(target);
+            builder
+                .follow_links(false)
+                .parents(false)
+                .git_global(false)
+                .git_exclude(false)
+                .max_depth(Some(64))
+                .filter_entry(move |entry| {
+                    entry
+                        .path()
+                        .strip_prefix(&filter_root)
+                        .ok()
+                        .and_then(|relative| relative.components().next())
+                        .is_none_or(|component| {
+                            !crate::artifact_store::is_workspace_owner_component(
+                                component.as_os_str(),
+                            )
+                        })
+                });
+            let walker = builder.build();
             for (entry_index, entry) in walker.enumerate() {
                 if entry_index >= 20_000 || attempted_files >= 2048 || started.elapsed() >= Duration::from_secs(5) {
                     result.incomplete_reasons.insert("scan_budget".into());

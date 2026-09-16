@@ -736,6 +736,33 @@ fn platform_lifecycle_uses_one_fixed_bounded_poller_instead_of_per_process_threa
 }
 
 #[test]
+fn windows_conpty_global_state_tests_share_one_serial_group() {
+    let windows = read_workspace(
+        "crates/shared/nomi-process-runtime/src/platform/windows.rs",
+    );
+    let conpty = read_workspace(
+        "crates/shared/nomi-process-runtime/src/platform/windows/conpty.rs",
+    );
+    let combined = format!("{windows}\n{conpty}");
+    assert!(
+        !combined.contains("#[serial]")
+            && !combined.contains("serial(conpty_close_executor)"),
+        "default and separately named serial groups may overlap the global ConPTY close lifecycle"
+    );
+    assert_eq!(
+        combined.matches("#[serial(windows_process_runtime)]").count(),
+        22,
+        "every current Windows process/ConPTY global-state test must remain in the one shared group"
+    );
+    assert!(
+        without_whitespace(&conpty).contains(
+            "#[serial(windows_process_runtime)]fnpartial_worker_start_failure_joins_started_workers_and_fails_before_admission"
+        ),
+        "partial close-worker startup mutates the same worker lifecycle and must not run beside ConPTY cleanup"
+    );
+}
+
+#[test]
 fn exact_process_identity_registries_are_admission_bounded_and_retire_terminal_entries() {
     let windows = without_whitespace(&production_source(
         "crates/shared/nomi-process-runtime/src/platform/windows.rs",

@@ -39,6 +39,7 @@ Thumbs.db
 .next/
 .nuxt/
 .output/
+.nomifun/
 ";
 
 /// Signature name used for snapshot commits.
@@ -1284,6 +1285,22 @@ mod tests {
         assert!(
             reason.is_none(),
             "node_modules must be excluded from the pre-walk count: {reason:?}"
+        );
+    }
+
+    #[test]
+    fn guard_excludes_workspace_owner_artifacts_from_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("visible.txt"), "1").unwrap();
+        let artifacts = tmp.path().join(".nomifun/artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        for index in 0..20 {
+            std::fs::write(artifacts.join(format!("artifact-{index}")), "owned").unwrap();
+        }
+        let canonical = std::fs::canonicalize(tmp.path()).unwrap();
+        assert!(
+            snapshot_guard_with_limits(&canonical, 2, u64::MAX, test_deadline()).is_none(),
+            "owner artifacts must not inflate or enter workspace snapshots"
         );
     }
 

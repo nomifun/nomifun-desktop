@@ -2,7 +2,8 @@
 //!
 //! The package inventory in this crate is deliberately limited to the
 //! extension surface around Coding: workspace/filesystem/process/terminal/VCS,
-//! SSH, Browser, Computer/A11y, and MCP/connectors.  The exact native Coding
+//! SSH, Browser, and Computer/A11y. Dynamic MCP tools are published by their
+//! owning extension package and are intentionally absent here. The exact native Coding
 //! surface is owned by the Runtime contract and is not re-declared here.
 
 #![forbid(unsafe_code)]
@@ -30,7 +31,7 @@ use nomifun_agent_contracts::{
     PluginStateHandleDescriptor, PluginStateMethod, OperationId, PrincipalRef,
     ExactRoleProviderRef, ResolvedSnapshotRef, ResourceKind, RoleContractKey, RoleContractManifest,
     RoleMemberContract, RoleMemberRequirement, RoleProviderContribution,
-    ResolvedMcpToolLock, RoleProviderMemberContribution, RuntimeTarget, ScopeKey, StateKey,
+    RoleProviderMemberContribution, RuntimeTarget, ScopeKey, StateKey,
     StrictJsonValue,
     ToolPresentationKind, TypedResourceBindings, ValidatedPluginConfig, VersionString,
     CAPABILITY_UNAVAILABLE_ON_PLATFORM, PRESET_RESOURCE_NOT_BOUND, RESOURCE_OWNER_MISMATCH,
@@ -52,45 +53,63 @@ pub const PACKAGE_VERSION: &str = CONTRACT_VERSION;
 
 pub const WORKSPACE_EXECUTION_PACKAGE_ID: &str = "nomifun.workspace-execution";
 pub const SSH_PACKAGE_ID: &str = "nomifun.ssh";
-pub const MCP_CONNECTORS_PACKAGE_ID: &str = "nomifun.mcp-connectors";
 pub const BROWSER_PACKAGE_ID: &str = "nomifun.browser";
 pub const COMPUTER_A11Y_PACKAGE_ID: &str = "nomifun.computer-a11y";
 
 pub const WORKSPACE_EXECUTION_MOUNT_ID: &str = "domain-workspace-execution";
 pub const SSH_MOUNT_ID: &str = "domain-ssh";
-pub const MCP_CONNECTORS_MOUNT_ID: &str = "domain-mcp-connectors";
 pub const BROWSER_MOUNT_ID: &str = "domain-browser";
 pub const COMPUTER_A11Y_MOUNT_ID: &str = "domain-computer-a11y";
 pub const BROWSER_EXECUTION_ROLE_ID: &str = "system.browser_use";
 pub const COMPUTER_EXECUTION_ROLE_ID: &str = "system.computer_use";
 
-pub const PACKAGE_IDS: [&str; 5] = [
+pub const PACKAGE_IDS: [&str; 4] = [
     WORKSPACE_EXECUTION_PACKAGE_ID,
     SSH_PACKAGE_ID,
-    MCP_CONNECTORS_PACKAGE_ID,
     BROWSER_PACKAGE_ID,
     COMPUTER_A11Y_PACKAGE_ID,
 ];
-pub const TARGET_PACKAGE_IDS: [&str; 5] = PACKAGE_IDS;
+pub const TARGET_PACKAGE_IDS: [&str; 4] = PACKAGE_IDS;
+
+pub const WORKSPACE_FILES_MODULE_ID: &str = "workspace.files";
+pub const WORKSPACE_VCS_MODULE_ID: &str = "workspace.vcs";
+pub const WORKSPACE_PROCESS_MODULE_ID: &str = "workspace.process";
+pub const WORKSPACE_ARTIFACTS_MODULE_ID: &str = "workspace.artifacts";
+
+pub const WORKSPACE_FILES_ACTION_IDS: &[&str] = &[
+    "workspace.files/read",
+    "workspace.files/search",
+    "workspace.files/write",
+    "workspace.files/patch",
+    "workspace.files/delete",
+    "workspace.files/watch",
+];
+pub const WORKSPACE_VCS_ACTION_IDS: &[&str] = &[
+    "workspace.vcs/status",
+    "workspace.vcs/diff",
+    "workspace.vcs/stage",
+    "workspace.vcs/commit",
+    "workspace.vcs/push",
+];
+pub const WORKSPACE_PROCESS_ACTION_IDS: &[&str] = &[
+    "workspace.process/exec",
+    "workspace.process/start",
+    "workspace.process/poll",
+    "workspace.process/input",
+    "workspace.process/close_stdin",
+    "workspace.process/resize",
+    "workspace.process/cancel",
+];
+pub const WORKSPACE_ARTIFACTS_ACTION_IDS: &[&str] = &[
+    "workspace.artifacts/read",
+    "workspace.artifacts/publish",
+];
 
 pub const WORKSPACE_EXECUTION_CAPABILITY_IDS: &[&str] = &[
-    "fs.read",
-    "fs.search",
-    "fs.write",
-    "fs.patch",
-    "fs.delete",
-    "fs.watch",
-    "fs.snapshot",
-    "workspace.bind",
-    "workspace.artifacts",
-    "vcs.status",
-    "vcs.diff",
-    "vcs.stage",
-    "vcs.commit",
-    "vcs.push",
-    "process.exec",
-    "process.session",
-    "terminal.pty",
+    WORKSPACE_FILES_MODULE_ID,
+    WORKSPACE_VCS_MODULE_ID,
+    WORKSPACE_PROCESS_MODULE_ID,
+    WORKSPACE_ARTIFACTS_MODULE_ID,
 ];
 
 pub const SSH_CAPABILITY_IDS: &[&str] = &[
@@ -99,15 +118,6 @@ pub const SSH_CAPABILITY_IDS: &[&str] = &[
     "ssh.fs.write",
     "ssh.exec",
     "ssh.sudo",
-];
-
-pub const MCP_CONNECTORS_CAPABILITY_IDS: &[&str] = &[
-    "mcp.connect",
-    "mcp.tool_proxy",
-    "mcp.resource",
-    "mcp.oauth",
-    "connector.data.read",
-    "connector.data.write",
 ];
 
 pub const BROWSER_CAPABILITY_IDS: &[&str] = &[
@@ -127,35 +137,16 @@ pub const COMPUTER_A11Y_CAPABILITY_IDS: &[&str] = &[
     "a11y.observe",
 ];
 
-pub const ALL_CAPABILITY_IDS: [&str; 39] = [
-    "fs.read",
-    "fs.search",
-    "fs.write",
-    "fs.patch",
-    "fs.delete",
-    "fs.watch",
-    "fs.snapshot",
-    "workspace.bind",
-    "workspace.artifacts",
-    "vcs.status",
-    "vcs.diff",
-    "vcs.stage",
-    "vcs.commit",
-    "vcs.push",
-    "process.exec",
-    "process.session",
-    "terminal.pty",
+pub const ALL_CAPABILITY_IDS: [&str; 20] = [
+    WORKSPACE_FILES_MODULE_ID,
+    WORKSPACE_VCS_MODULE_ID,
+    WORKSPACE_PROCESS_MODULE_ID,
+    WORKSPACE_ARTIFACTS_MODULE_ID,
     "ssh.connect",
     "ssh.fs.read",
     "ssh.fs.write",
     "ssh.exec",
     "ssh.sudo",
-    "mcp.connect",
-    "mcp.tool_proxy",
-    "mcp.resource",
-    "mcp.oauth",
-    "connector.data.read",
-    "connector.data.write",
     "browser.observe",
     "browser.navigate",
     "browser.act",
@@ -168,12 +159,11 @@ pub const ALL_CAPABILITY_IDS: [&str; 39] = [
     "computer.launch",
     "a11y.observe",
 ];
-pub const TARGET_CAPABILITY_IDS: [&str; 39] = ALL_CAPABILITY_IDS;
+pub const TARGET_CAPABILITY_IDS: [&str; 20] = ALL_CAPABILITY_IDS;
 
-pub const TARGET_CAPABILITY_FAMILIES: [&str; 11] = [
+pub const TARGET_CAPABILITY_FAMILIES: [&str; 10] = [
     "browser",
     "computer",
-    "external-mcp",
     "filesystem",
     "process",
     "remote-execution",
@@ -208,12 +198,8 @@ pub const BROWSER_COMPUTER_SURFACES: &[&str] = &["desktop"];
 
 const WORKSPACE_RESOURCE: &[&str] = &["workspace"];
 const PROCESS_RESOURCE: &[&str] = &["process_session"];
-const TERMINAL_RESOURCE: &[&str] = &["terminal"];
-const MCP_RESOURCE: &[&str] = &["mcp_server"];
 const SSH_RESOURCE: &[&str] = &["ssh_host"];
 const COMPUTER_RESOURCE: &[&str] = &["computer"];
-// Keep this composite grant aligned with the canonical MCP owner contract.
-const MCP_TOOL_PROXY_REQUIRED_OPERATIONS: &[&str] = &["connect", "invoke"];
 
 const PLUGIN_CANCEL_PORT: &str = "host.plugin.cancel";
 const PLUGIN_TASKS_PORT: &str = "host.plugin.tasks";
@@ -221,7 +207,7 @@ const PLUGIN_TASKS_PORT: &str = "host.plugin.tasks";
 /// The single host port used by action-bearing Wave 2 capabilities.
 ///
 /// The domain crate owns capability metadata and invocation validation.  The
-/// host owns filesystem, process, SSH, MCP, Browser, and Computer facts and
+/// host owns filesystem, process, SSH, Browser, and Computer facts and
 /// must provide the real action result through this port.
 pub const WAVE2_CAPABILITY_HOST_PORT_ID: &str = "host.wave2.capability.invoke";
 
@@ -318,9 +304,6 @@ pub struct Wave2HostContext {
     /// the only state surface exposed to the adapter.
     pub state: Wave2StateHandle,
     pub resource_bindings: TypedResourceBindings,
-    /// Exact MCP mapping frozen by the Agent Snapshot. This is absent for
-    /// non-MCP capabilities and is never supplied by operation input.
-    pub mcp_tool_lock: Option<ResolvedMcpToolLock>,
 }
 
 /// A family-typed action operation for the host adapter.
@@ -333,7 +316,6 @@ pub struct Wave2HostContext {
 pub enum Wave2CapabilityOperation {
     WorkspaceExecution { input: StrictJsonValue },
     Ssh { input: StrictJsonValue },
-    McpConnectors { input: StrictJsonValue },
     Browser { input: StrictJsonValue },
     ComputerA11y { input: StrictJsonValue },
 }
@@ -341,32 +323,37 @@ pub enum Wave2CapabilityOperation {
 /// Exact capability-to-operation mapping exposed to composable host
 /// adapters.
 ///
-/// [`Wave2CapabilityOperation`] remains the compatibility envelope consumed by
-/// the existing application host. This enum is the stricter contract for new
+/// [`Wave2CapabilityOperation`] is the family envelope consumed by the
+/// application host. This enum is the exact contract for independently owned
 /// owners: each action has its own variant, so a dispatch implementation cannot
-/// accidentally handle `fs.delete` as `fs.read` or silently treat an
+/// accidentally handle `workspace.files/delete` as `workspace.files/read` or silently treat an
 /// unsupported action as a successful generic operation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Wave2TypedCapabilityOperation {
-    FsRead { input: StrictJsonValue },
-    FsSearch { input: StrictJsonValue },
-    FsWrite { input: StrictJsonValue },
-    FsPatch { input: StrictJsonValue },
-    FsDelete { input: StrictJsonValue },
-    FsSnapshot { input: StrictJsonValue },
-    VcsStatus { input: StrictJsonValue },
-    VcsDiff { input: StrictJsonValue },
-    VcsStage { input: StrictJsonValue },
-    VcsCommit { input: StrictJsonValue },
-    VcsPush { input: StrictJsonValue },
-    ProcessExec { input: StrictJsonValue },
+    WorkspaceFileRead { input: StrictJsonValue },
+    WorkspaceFileSearch { input: StrictJsonValue },
+    WorkspaceFileWrite { input: StrictJsonValue },
+    WorkspaceFilePatch { input: StrictJsonValue },
+    WorkspaceFileDelete { input: StrictJsonValue },
+    WorkspaceFileWatch { input: StrictJsonValue },
+    WorkspaceVcsStatus { input: StrictJsonValue },
+    WorkspaceVcsDiff { input: StrictJsonValue },
+    WorkspaceVcsStage { input: StrictJsonValue },
+    WorkspaceVcsCommit { input: StrictJsonValue },
+    WorkspaceVcsPush { input: StrictJsonValue },
+    WorkspaceProcessExec { input: StrictJsonValue },
+    WorkspaceProcessStart { input: StrictJsonValue },
+    WorkspaceProcessPoll { input: StrictJsonValue },
+    WorkspaceProcessInput { input: StrictJsonValue },
+    WorkspaceProcessCloseStdin { input: StrictJsonValue },
+    WorkspaceProcessResize { input: StrictJsonValue },
+    WorkspaceProcessCancel { input: StrictJsonValue },
+    WorkspaceArtifactRead { input: StrictJsonValue },
+    WorkspaceArtifactPublish { input: StrictJsonValue },
     SshFsRead { input: StrictJsonValue },
     SshFsWrite { input: StrictJsonValue },
     SshExec { input: StrictJsonValue },
     SshSudo { input: StrictJsonValue },
-    McpToolProxy { input: StrictJsonValue },
-    ConnectorDataRead { input: StrictJsonValue },
-    ConnectorDataWrite { input: StrictJsonValue },
     BrowserNavigate { input: StrictJsonValue },
     BrowserAct { input: StrictJsonValue },
     BrowserRenderContent { input: StrictJsonValue },
@@ -380,25 +367,30 @@ pub enum Wave2TypedCapabilityOperation {
 impl Wave2TypedCapabilityOperation {
     pub fn capability_id(&self) -> &'static str {
         match self {
-            Self::FsRead { .. } => "fs.read",
-            Self::FsSearch { .. } => "fs.search",
-            Self::FsWrite { .. } => "fs.write",
-            Self::FsPatch { .. } => "fs.patch",
-            Self::FsDelete { .. } => "fs.delete",
-            Self::FsSnapshot { .. } => "fs.snapshot",
-            Self::VcsStatus { .. } => "vcs.status",
-            Self::VcsDiff { .. } => "vcs.diff",
-            Self::VcsStage { .. } => "vcs.stage",
-            Self::VcsCommit { .. } => "vcs.commit",
-            Self::VcsPush { .. } => "vcs.push",
-            Self::ProcessExec { .. } => "process.exec",
+            Self::WorkspaceFileRead { .. }
+            | Self::WorkspaceFileSearch { .. }
+            | Self::WorkspaceFileWrite { .. }
+            | Self::WorkspaceFilePatch { .. }
+            | Self::WorkspaceFileDelete { .. }
+            | Self::WorkspaceFileWatch { .. } => WORKSPACE_FILES_MODULE_ID,
+            Self::WorkspaceVcsStatus { .. }
+            | Self::WorkspaceVcsDiff { .. }
+            | Self::WorkspaceVcsStage { .. }
+            | Self::WorkspaceVcsCommit { .. }
+            | Self::WorkspaceVcsPush { .. } => WORKSPACE_VCS_MODULE_ID,
+            Self::WorkspaceProcessExec { .. }
+            | Self::WorkspaceProcessStart { .. }
+            | Self::WorkspaceProcessPoll { .. }
+            | Self::WorkspaceProcessInput { .. }
+            | Self::WorkspaceProcessCloseStdin { .. }
+            | Self::WorkspaceProcessResize { .. }
+            | Self::WorkspaceProcessCancel { .. } => WORKSPACE_PROCESS_MODULE_ID,
+            Self::WorkspaceArtifactRead { .. }
+            | Self::WorkspaceArtifactPublish { .. } => WORKSPACE_ARTIFACTS_MODULE_ID,
             Self::SshFsRead { .. } => "ssh.fs.read",
             Self::SshFsWrite { .. } => "ssh.fs.write",
             Self::SshExec { .. } => "ssh.exec",
             Self::SshSudo { .. } => "ssh.sudo",
-            Self::McpToolProxy { .. } => "mcp.tool_proxy",
-            Self::ConnectorDataRead { .. } => "connector.data.read",
-            Self::ConnectorDataWrite { .. } => "connector.data.write",
             Self::BrowserNavigate { .. } => "browser.navigate",
             Self::BrowserAct { .. } => "browser.act",
             Self::BrowserRenderContent { .. } => "browser.render_content",
@@ -410,31 +402,71 @@ impl Wave2TypedCapabilityOperation {
         }
     }
 
+    pub fn action_id(&self) -> &'static str {
+        match self {
+            Self::WorkspaceFileRead { .. } => "workspace.files/read",
+            Self::WorkspaceFileSearch { .. } => "workspace.files/search",
+            Self::WorkspaceFileWrite { .. } => "workspace.files/write",
+            Self::WorkspaceFilePatch { .. } => "workspace.files/patch",
+            Self::WorkspaceFileDelete { .. } => "workspace.files/delete",
+            Self::WorkspaceFileWatch { .. } => "workspace.files/watch",
+            Self::WorkspaceVcsStatus { .. } => "workspace.vcs/status",
+            Self::WorkspaceVcsDiff { .. } => "workspace.vcs/diff",
+            Self::WorkspaceVcsStage { .. } => "workspace.vcs/stage",
+            Self::WorkspaceVcsCommit { .. } => "workspace.vcs/commit",
+            Self::WorkspaceVcsPush { .. } => "workspace.vcs/push",
+            Self::WorkspaceProcessExec { .. } => "workspace.process/exec",
+            Self::WorkspaceProcessStart { .. } => "workspace.process/start",
+            Self::WorkspaceProcessPoll { .. } => "workspace.process/poll",
+            Self::WorkspaceProcessInput { .. } => "workspace.process/input",
+            Self::WorkspaceProcessCloseStdin { .. } => "workspace.process/close_stdin",
+            Self::WorkspaceProcessResize { .. } => "workspace.process/resize",
+            Self::WorkspaceProcessCancel { .. } => "workspace.process/cancel",
+            Self::WorkspaceArtifactRead { .. } => "workspace.artifacts/read",
+            Self::WorkspaceArtifactPublish { .. } => "workspace.artifacts/publish",
+            Self::SshFsRead { .. } => "ssh.fs.read.invoke",
+            Self::SshFsWrite { .. } => "ssh.fs.write.invoke",
+            Self::SshExec { .. } => "ssh.exec.invoke",
+            Self::SshSudo { .. } => "ssh.sudo.invoke",
+            Self::BrowserNavigate { .. } => "browser.navigate.invoke",
+            Self::BrowserAct { .. } => "browser.act.invoke",
+            Self::BrowserRenderContent { .. } => "browser.render_content.invoke",
+            Self::BrowserDownload { .. } => "browser.download.invoke",
+            Self::BrowserUpload { .. } => "browser.upload.invoke",
+            Self::BrowserEvaluate { .. } => "browser.evaluate.invoke",
+            Self::ComputerInput { .. } => "computer.input.invoke",
+            Self::ComputerLaunch { .. } => "computer.launch.invoke",
+        }
+    }
+
     fn family(&self) -> Wave2CapabilityOperation {
         match self {
-            Self::FsRead { input }
-            | Self::FsSearch { input }
-            | Self::FsWrite { input }
-            | Self::FsPatch { input }
-            | Self::FsDelete { input }
-            | Self::FsSnapshot { input }
-            | Self::VcsStatus { input }
-            | Self::VcsDiff { input }
-            | Self::VcsStage { input }
-            | Self::VcsCommit { input }
-            | Self::VcsPush { input }
-            | Self::ProcessExec { input } => {
+            Self::WorkspaceFileRead { input }
+            | Self::WorkspaceFileSearch { input }
+            | Self::WorkspaceFileWrite { input }
+            | Self::WorkspaceFilePatch { input }
+            | Self::WorkspaceFileDelete { input }
+            | Self::WorkspaceFileWatch { input }
+            | Self::WorkspaceVcsStatus { input }
+            | Self::WorkspaceVcsDiff { input }
+            | Self::WorkspaceVcsStage { input }
+            | Self::WorkspaceVcsCommit { input }
+            | Self::WorkspaceVcsPush { input }
+            | Self::WorkspaceProcessExec { input }
+            | Self::WorkspaceProcessStart { input }
+            | Self::WorkspaceProcessPoll { input }
+            | Self::WorkspaceProcessInput { input }
+            | Self::WorkspaceProcessCloseStdin { input }
+            | Self::WorkspaceProcessResize { input }
+            | Self::WorkspaceProcessCancel { input }
+            | Self::WorkspaceArtifactRead { input }
+            | Self::WorkspaceArtifactPublish { input } => {
                 Wave2CapabilityOperation::WorkspaceExecution { input: input.clone() }
             }
             Self::SshFsRead { input }
             | Self::SshFsWrite { input }
             | Self::SshExec { input }
             | Self::SshSudo { input } => Wave2CapabilityOperation::Ssh { input: input.clone() },
-            Self::McpToolProxy { input }
-            | Self::ConnectorDataRead { input }
-            | Self::ConnectorDataWrite { input } => {
-                Wave2CapabilityOperation::McpConnectors { input: input.clone() }
-            }
             Self::BrowserNavigate { input }
             | Self::BrowserAct { input }
             | Self::BrowserRenderContent { input }
@@ -463,38 +495,31 @@ pub struct Wave2TypedHostRequest {
 }
 
 impl Wave2HostRequest {
-    /// Validate the compatibility envelope and project it to the exact
-    /// operation contract used by a new owner-backed adapter.
+    /// Validate the family envelope and project it to the exact operation
+    /// contract used by an owner-backed adapter.
     pub fn into_typed(self) -> Result<Wave2TypedHostRequest, Wave2HostPortError> {
-        let expected_action = action_id(self.context.capability_id.as_ref()).ok_or_else(|| {
-            Wave2HostPortError::new(
-                CAPABILITY_UNAVAILABLE,
-                format!(
-                    "{} does not expose an action host operation",
-                    self.context.capability_id.as_ref()
-                ),
-            )
-        })?;
-        if self.context.action_id != expected_action {
+        if !declares_action(&self.context.capability_id, &self.context.action_id) {
             return Err(Wave2HostPortError::new(
                 "ACTION_NOT_DECLARED",
                 format!(
-                    "{} received action {} instead of {}",
+                    "{} does not declare action {}",
                     self.context.capability_id.as_ref(),
-                    self.context.action_id.as_ref(),
-                    expected_action.as_ref()
+                    self.context.action_id.as_ref()
                 ),
             ));
         }
         let input = match &self.operation {
             Wave2CapabilityOperation::WorkspaceExecution { input }
             | Wave2CapabilityOperation::Ssh { input }
-            | Wave2CapabilityOperation::McpConnectors { input }
             | Wave2CapabilityOperation::Browser { input }
             | Wave2CapabilityOperation::ComputerA11y { input } => input.clone(),
         };
-        let typed = typed_operation_for(&self.context.capability_id, input)
-            .map_err(|error| Wave2HostPortError::new("ACTION_NOT_DECLARED", error.to_string()))?;
+        let typed = typed_operation_for(
+            &self.context.capability_id,
+            &self.context.action_id,
+            input,
+        )
+        .map_err(|error| Wave2HostPortError::new("ACTION_NOT_DECLARED", error.to_string()))?;
         if typed.family() != self.operation {
             return Err(Wave2HostPortError::new(
                 "ACTION_OPERATION_MISMATCH",
@@ -506,6 +531,7 @@ impl Wave2HostRequest {
         }
         validate_action_resource_bindings(
             &self.context.capability_id,
+            &self.context.action_id,
             &self.context.principal,
             &self.context.resource_bindings,
         )
@@ -987,7 +1013,7 @@ impl RoleToolHandler for Wave2OperationToolFactory {
                 ),
             ));
         }
-        let operation = typed_operation_for(&self.capability_id, input)
+        let operation = typed_operation_for(&self.capability_id, &request.action_id, input)
             .map_err(wave2_input_error_to_kernel)?;
         self.host_port
             .invoke(Wave2OperationToolHostRequest {
@@ -1038,10 +1064,31 @@ enum PlatformScope {
 }
 
 #[derive(Clone, Copy)]
+struct ActionDefinition {
+    id: &'static str,
+    effect_class: EffectClass,
+    presentation: ToolPresentationKind,
+}
+
+impl ActionDefinition {
+    const fn function(id: &'static str, effect_class: EffectClass) -> Self {
+        Self {
+            id,
+            effect_class,
+            presentation: ToolPresentationKind::FunctionTool,
+        }
+    }
+}
+
+const NO_ACTIONS: &[ActionDefinition] = &[];
+
+#[derive(Clone, Copy)]
 struct CapabilityDefinition {
     id: &'static str,
     kind: CapabilityKind,
     effect_class: Option<EffectClass>,
+    module_actions: &'static [ActionDefinition],
+    publishes_event: bool,
     resource_kinds: &'static [&'static str],
     platform_scope: PlatformScope,
 }
@@ -1056,6 +1103,25 @@ impl CapabilityDefinition {
             id,
             kind: CapabilityKind::Tool,
             effect_class: Some(effect_class),
+            module_actions: NO_ACTIONS,
+            publishes_event: false,
+            resource_kinds,
+            platform_scope: PlatformScope::Any,
+        }
+    }
+
+    const fn module(
+        id: &'static str,
+        actions: &'static [ActionDefinition],
+        publishes_event: bool,
+        resource_kinds: &'static [&'static str],
+    ) -> Self {
+        Self {
+            id,
+            kind: CapabilityKind::Tool,
+            effect_class: None,
+            module_actions: actions,
+            publishes_event,
             resource_kinds,
             platform_scope: PlatformScope::Any,
         }
@@ -1070,6 +1136,8 @@ impl CapabilityDefinition {
             id,
             kind: CapabilityKind::ContextContributor,
             effect_class: None,
+            module_actions: NO_ACTIONS,
+            publishes_event: false,
             resource_kinds,
             platform_scope,
         }
@@ -1084,39 +1152,15 @@ impl CapabilityDefinition {
             id,
             kind: CapabilityKind::ResourceProvider,
             effect_class: None,
+            module_actions: NO_ACTIONS,
+            publishes_event: false,
             resource_kinds,
             platform_scope,
         }
     }
 
-    const fn event_source(
-        id: &'static str,
-        resource_kinds: &'static [&'static str],
-    ) -> Self {
-        Self {
-            id,
-            kind: CapabilityKind::EventSource,
-            effect_class: None,
-            resource_kinds,
-            platform_scope: PlatformScope::Any,
-        }
-    }
-
-    const fn transport(
-        id: &'static str,
-        resource_kinds: &'static [&'static str],
-    ) -> Self {
-        Self {
-            id,
-            kind: CapabilityKind::Transport,
-            effect_class: None,
-            resource_kinds,
-            platform_scope: PlatformScope::Any,
-        }
-    }
-
     const fn is_tool(self) -> bool {
-        self.effect_class.is_some()
+        self.effect_class.is_some() || !self.module_actions.is_empty()
     }
 }
 
@@ -1129,44 +1173,63 @@ struct PackageDefinition {
     capabilities: &'static [CapabilityDefinition],
 }
 
+const WORKSPACE_FILES_ACTIONS: &[ActionDefinition] = &[
+    ActionDefinition::function("workspace.files/read", EffectClass::ReadLocal),
+    ActionDefinition::function("workspace.files/search", EffectClass::ReadLocal),
+    ActionDefinition::function("workspace.files/write", EffectClass::WriteDurable),
+    ActionDefinition::function("workspace.files/patch", EffectClass::WriteReversible),
+    ActionDefinition::function("workspace.files/delete", EffectClass::Destructive),
+    ActionDefinition::function("workspace.files/watch", EffectClass::ReadLocal),
+];
+
+const WORKSPACE_VCS_ACTIONS: &[ActionDefinition] = &[
+    ActionDefinition::function("workspace.vcs/status", EffectClass::ReadLocal),
+    ActionDefinition::function("workspace.vcs/diff", EffectClass::ReadLocal),
+    ActionDefinition::function("workspace.vcs/stage", EffectClass::WriteReversible),
+    ActionDefinition::function("workspace.vcs/commit", EffectClass::WriteDurable),
+    ActionDefinition::function("workspace.vcs/push", EffectClass::ExternalTransmit),
+];
+
+const WORKSPACE_PROCESS_ACTIONS: &[ActionDefinition] = &[
+    ActionDefinition::function("workspace.process/exec", EffectClass::ExecuteLocal),
+    ActionDefinition::function("workspace.process/start", EffectClass::ExecuteLocal),
+    ActionDefinition::function("workspace.process/poll", EffectClass::ReadLocal),
+    ActionDefinition::function("workspace.process/input", EffectClass::ExecuteLocal),
+    ActionDefinition::function("workspace.process/close_stdin", EffectClass::ExecuteLocal),
+    ActionDefinition::function("workspace.process/resize", EffectClass::ExecuteLocal),
+    ActionDefinition::function("workspace.process/cancel", EffectClass::ExecuteLocal),
+];
+
+const WORKSPACE_ARTIFACT_ACTIONS: &[ActionDefinition] = &[
+    ActionDefinition::function("workspace.artifacts/read", EffectClass::ReadLocal),
+    ActionDefinition::function("workspace.artifacts/publish", EffectClass::WriteDurable),
+];
+
 const WORKSPACE_EXECUTION_CAPABILITIES: &[CapabilityDefinition] = &[
-    CapabilityDefinition::tool("fs.read", EffectClass::ReadLocal, WORKSPACE_RESOURCE),
-    CapabilityDefinition::tool("fs.search", EffectClass::ReadLocal, WORKSPACE_RESOURCE),
-    CapabilityDefinition::tool("fs.write", EffectClass::WriteDurable, WORKSPACE_RESOURCE),
-    CapabilityDefinition::tool("fs.patch", EffectClass::WriteReversible, WORKSPACE_RESOURCE),
-    CapabilityDefinition::tool("fs.delete", EffectClass::Destructive, WORKSPACE_RESOURCE),
-    CapabilityDefinition::event_source("fs.watch", WORKSPACE_RESOURCE),
-    CapabilityDefinition::tool("fs.snapshot", EffectClass::ReadLocal, WORKSPACE_RESOURCE),
-    CapabilityDefinition::resource_provider(
-        "workspace.bind",
-        WORKSPACE_RESOURCE,
-        PlatformScope::Any,
-    ),
-    CapabilityDefinition::resource_provider(
-        "workspace.artifacts",
-        WORKSPACE_RESOURCE,
-        PlatformScope::Any,
-    ),
-    CapabilityDefinition::tool("vcs.status", EffectClass::ReadLocal, WORKSPACE_RESOURCE),
-    CapabilityDefinition::tool("vcs.diff", EffectClass::ReadLocal, WORKSPACE_RESOURCE),
-    CapabilityDefinition::tool("vcs.stage", EffectClass::WriteReversible, WORKSPACE_RESOURCE),
-    CapabilityDefinition::tool("vcs.commit", EffectClass::WriteDurable, WORKSPACE_RESOURCE),
-    CapabilityDefinition::tool(
-        "vcs.push",
-        EffectClass::ExternalTransmit,
+    CapabilityDefinition::module(
+        WORKSPACE_FILES_MODULE_ID,
+        WORKSPACE_FILES_ACTIONS,
+        true,
         WORKSPACE_RESOURCE,
     ),
-    CapabilityDefinition::tool(
-        "process.exec",
-        EffectClass::ExecuteLocal,
+    CapabilityDefinition::module(
+        WORKSPACE_VCS_MODULE_ID,
+        WORKSPACE_VCS_ACTIONS,
+        false,
+        WORKSPACE_RESOURCE,
+    ),
+    CapabilityDefinition::module(
+        WORKSPACE_PROCESS_MODULE_ID,
+        WORKSPACE_PROCESS_ACTIONS,
+        false,
         PROCESS_RESOURCE,
     ),
-    CapabilityDefinition::resource_provider(
-        "process.session",
-        PROCESS_RESOURCE,
-        PlatformScope::Any,
+    CapabilityDefinition::module(
+        WORKSPACE_ARTIFACTS_MODULE_ID,
+        WORKSPACE_ARTIFACT_ACTIONS,
+        false,
+        WORKSPACE_RESOURCE,
     ),
-    CapabilityDefinition::resource_provider("terminal.pty", TERMINAL_RESOURCE, PlatformScope::Any),
 ];
 
 const SSH_CAPABILITIES: &[CapabilityDefinition] = &[
@@ -1175,27 +1238,6 @@ const SSH_CAPABILITIES: &[CapabilityDefinition] = &[
     CapabilityDefinition::tool("ssh.fs.write", EffectClass::WriteDurable, SSH_RESOURCE),
     CapabilityDefinition::tool("ssh.exec", EffectClass::ExecuteLocal, SSH_RESOURCE),
     CapabilityDefinition::tool("ssh.sudo", EffectClass::ExecuteLocal, SSH_RESOURCE),
-];
-
-const MCP_CONNECTORS_CAPABILITIES: &[CapabilityDefinition] = &[
-    CapabilityDefinition::transport("mcp.connect", &[]),
-    CapabilityDefinition::tool(
-        "mcp.tool_proxy",
-        EffectClass::ExternalTransmit,
-        MCP_RESOURCE,
-    ),
-    CapabilityDefinition::resource_provider("mcp.resource", MCP_RESOURCE, PlatformScope::Any),
-    CapabilityDefinition::transport("mcp.oauth", &[]),
-    CapabilityDefinition::tool(
-        "connector.data.read",
-        EffectClass::ReadSensitive,
-        MCP_RESOURCE,
-    ),
-    CapabilityDefinition::tool(
-        "connector.data.write",
-        EffectClass::WriteDurable,
-        MCP_RESOURCE,
-    ),
 ];
 
 const BROWSER_CAPABILITIES: &[CapabilityDefinition] = &[
@@ -1236,6 +1278,8 @@ impl CapabilityDefinition {
             id,
             kind: CapabilityKind::Tool,
             effect_class: Some(effect_class),
+            module_actions: NO_ACTIONS,
+            publishes_event: false,
             // The selected Provider resolves the runtime from the trusted invocation
             // (Conversation/run or headless job). Users do not bind a Browser resource.
             resource_kinds: &[],
@@ -1248,6 +1292,8 @@ impl CapabilityDefinition {
             id,
             kind: CapabilityKind::Tool,
             effect_class: Some(effect_class),
+            module_actions: NO_ACTIONS,
+            publishes_event: false,
             resource_kinds: COMPUTER_RESOURCE,
             platform_scope: PlatformScope::ComputerDesktop,
         }
@@ -1268,13 +1314,6 @@ const PACKAGE_DEFINITIONS: &[PackageDefinition] = &[
         description: "Typed remote filesystem and process capabilities over SSH.",
         mount_id: SSH_MOUNT_ID,
         capabilities: SSH_CAPABILITIES,
-    },
-    PackageDefinition {
-        id: MCP_CONNECTORS_PACKAGE_ID,
-        display_name: "MCP & Connectors",
-        description: "MCP transports, resources, tool projection, and connectors.",
-        mount_id: MCP_CONNECTORS_MOUNT_ID,
-        capabilities: MCP_CONNECTORS_CAPABILITIES,
     },
     PackageDefinition {
         id: BROWSER_PACKAGE_ID,
@@ -1370,16 +1409,9 @@ fn build_registration(
         if definition.is_tool() {
             let capability_id = CapabilityId::from(definition.id);
             if let Some(role_id) = role_id_for_capability(definition.id) {
-                role_handlers.push((
-                    role_id,
-                    capability_id.clone(),
-                    ActionId::from(format!("{}.invoke", definition.id)),
-                ));
+                role_handlers.push((role_id, capability_id.clone()));
             } else {
-                handlers.push((
-                    capability_id.clone(),
-                    ActionId::from(format!("{}.invoke", definition.id)),
-                ));
+                handlers.push(capability_id.clone());
             }
         }
         capability_manifests.push(capability);
@@ -1512,26 +1544,24 @@ fn build_registration(
     };
 
     let mut registration = PluginRegistration::new(metadata);
-    for (capability_id, action_id) in handlers {
+    for capability_id in handlers {
         registration
             .add_capability_handler(
                 capability_id.clone(),
                 Arc::new(Wave2CapabilityHandler {
                     capability_id,
-                    action_id,
                     host_port: Arc::clone(&action_host_port),
                 }),
             )
             .map_err(|error| format!("register {} handler: {error}", package.id))?;
     }
-    for (role_id, capability_id, action_id) in role_handlers {
+    for (role_id, capability_id) in role_handlers {
         registration
             .add_role_action_handler(
                 role_id,
                 capability_id.clone(),
                 Arc::new(Wave2CapabilityHandler {
                     capability_id,
-                    action_id,
                     host_port: Arc::clone(&action_host_port),
                 }),
             )
@@ -1613,14 +1643,26 @@ fn build_capability(
     package: &PackageRef,
     definition: CapabilityDefinition,
 ) -> Result<CapabilityManifest, String> {
-    let actions = if definition.is_tool() {
+    let actions = if !definition.module_actions.is_empty() {
+        definition
+            .module_actions
+            .iter()
+            .map(|action| {
+                Ok(CapabilityActionDescriptor {
+                    action_id: ActionId::from(action.id),
+                    input_schema: schema_ref(action.id, "input")?,
+                    output_schema: schema_ref(action.id, "output")?,
+                    effect_class: action.effect_class,
+                    presentation: action.presentation,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?
+    } else if let Some(effect_class) = definition.effect_class {
         vec![CapabilityActionDescriptor {
             action_id: ActionId::from(format!("{}.invoke", definition.id)),
             input_schema: schema_ref(definition.id, "input")?,
             output_schema: schema_ref(definition.id, "output")?,
-            effect_class: definition
-                .effect_class
-                .expect("tool definitions always carry an effect class"),
+            effect_class,
             presentation: if definition.id == "browser.render_content" {
                 ToolPresentationKind::Hidden
             } else {
@@ -1635,7 +1677,8 @@ fn build_capability(
         .transpose()?
         .into_iter()
         .collect();
-    let event_schema_refs = (definition.kind == CapabilityKind::EventSource)
+    let event_schema_refs = definition
+        .publishes_event
         .then(|| schema_ref(definition.id, "event"))
         .transpose()?
         .into_iter()
@@ -1661,16 +1704,17 @@ fn build_capability(
     Ok(CapabilityManifest {
         id: CapabilityId::from(definition.id),
         contribution_id: nomifun_agent_contracts::ContributionId::from(format!(
-            "capability:{}",
+            "{}:{}",
+            if definition.module_actions.is_empty() { "capability" } else { "module" },
             definition.id
         )),
         version: VersionString::from(CONTRACT_VERSION),
         kind: definition.kind,
         package: package.clone(),
-        display: localized(
-            definition.id,
-            "Bundled Wave 2 coding-extension capability.",
-        ),
+        display: {
+            let (name, description) = capability_display(definition.id);
+            localized(name, description)
+        },
         requires: Vec::new(),
         conflicts: Vec::new(),
         supported_surfaces: capability_surface_declarations(
@@ -1702,114 +1746,42 @@ fn build_capability(
 
 mod process_schema;
 mod workspace_schema;
-pub use process_schema::process_exec_input_schema;
 
-fn action_input_schema(capability_id: &str) -> StrictJsonValue {
-    if let Some(schema) = workspace_schema::input(capability_id) {
+fn action_input_schema(action_id: &str) -> StrictJsonValue {
+    if let Some(schema) = workspace_schema::input(action_id) {
         return schema;
     }
-    let schema = match capability_id {
+    if let Some(schema) = process_schema::process_action_input_schema(action_id) {
+        return schema;
+    }
+    match action_id {
         "browser.render_content" => strict_object_schema(
             serde_json::json!({"url":{"type":"string","minLength":1,"maxLength":8192,"pattern":"^https?://"}}),
             &["url"],
         ),
-        "fs.read" => StrictJsonValue(serde_json::json!({
-            "type": "object", "additionalProperties": false, "required": ["path"],
-            "properties": {
-                "format": {"type":"string", "enum":["text", "image", "instruction_scope"], "default":"text"},
-                "recursive": {"type":"boolean", "default":false},
-                "missing_ok": {"type":"boolean", "default":false},
-                "path": {"type":"string", "minLength":1, "maxLength":4096, "pattern":"\\S"},
-                "offset": {"type":"integer", "minimum":0, "maximum":8388608, "default":0},
-                "limit": {"type":"integer", "minimum":4, "maximum":16384, "default":16384},
-                "expected_sha256": {"type":"string", "pattern":"^[0-9a-f]{64}$"}
-            },
-            "allOf": [{"if":{"properties":{"offset":{"minimum":1}},"required":["offset"]},
-                       "then":{"required":["expected_sha256"]}},
-                      {"if":{"properties":{"format":{"const":"image"}},"required":["format"]},
-                       "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]},{"required":["missing_ok"]}]}}},
-                      {"if":{"properties":{"format":{"const":"instruction_scope"}},"required":["format"]},
-                       "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]},{"required":["expected_sha256"]},{"required":["missing_ok"]}]}},
-                       "else":{"not":{"required":["recursive"]}}}]
-        })),
-        "process.exec" => process_exec_input_schema(),
-        "fs.search" => strict_object_schema(serde_json::json!({
-            "query":{"type":"string", "minLength":1, "maxLength":1024, "pattern":"\\S"},
-            "path":{"type":"string", "maxLength":4096},
-            "limit":{"type":"integer", "minimum":1, "maximum":200, "default":100}
-        }), &["query"]),
-        "fs.delete" => strict_object_schema(
-            serde_json::json!({
-                "path": {
-                    "type": "string",
-                    "minLength": 1,
-                    "pattern": "\\S"
-                }
-            }),
-            &["path"],
-        ),
-        "fs.snapshot" => {
-            let mut schema = strict_object_schema(
-                serde_json::json!({
-                    "operation": {
-                        "type": "string",
-                        "enum": ["init", "compare", "baseline", "dispose"]
-                    },
-                    "path": {
-                        "type": "string",
-                        "minLength": 1,
-                        "pattern": "\\S"
-                    }
-                }),
-                &["operation"],
-            );
-            schema.0.as_object_mut().expect("strict object schema").insert(
-                "allOf".to_owned(),
-                serde_json::json!([{
-                    "if": {
-                        "properties": {"operation": {"const": "baseline"}},
-                        "required": ["operation"]
-                    },
-                    "then": {"required": ["path"]}
-                }]),
-            );
-            schema
-        }
-        "vcs.push" => strict_object_schema(
-            serde_json::json!({
-                "remote": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 256
-                },
-                "refspec": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 1024,
-                    "pattern": "^(HEAD|refs/heads/.+):refs/heads/.+$"
-                },
-                "force": {
-                    "const": false,
-                    "default": false
-                }
-            }),
-            &["remote", "refspec"],
-        ),
         _ => open_object_schema(),
-    };
-    schema
+    }
 }
 
-fn canonical_schema(capability_id: &str, role: &str) -> StrictJsonValue {
-    if capability_id=="browser.render_content" && role=="output" {
+fn canonical_schema(schema_owner: &str, role: &str) -> StrictJsonValue {
+    if schema_owner == "browser.render_content" && role == "output" {
         return strict_object_schema(serde_json::json!({
             "final_url":{"type":"string","maxLength":8192},
             "html":{"type":"string","maxLength":262144},
             "html_truncated":{"type":"boolean"}
         }), &["final_url","html","html_truncated"]);
     }
+    if schema_owner == WORKSPACE_FILES_MODULE_ID && role == "event" {
+        return strict_object_schema(
+            serde_json::json!({
+                "path":{"type":"string","minLength":1,"maxLength":4096},
+                "kind":{"type":"string","enum":["created","modified","removed","renamed","other"]}
+            }),
+            &["path", "kind"],
+        );
+    }
     match role {
-        "input" => action_input_schema(capability_id),
+        "input" => action_input_schema(schema_owner),
         "request" => open_object_schema(),
         "output" | "response" => output_schema(),
         _ => object_schema(),
@@ -1825,11 +1797,21 @@ pub fn resolve_action_schema(
     let definition = definition_for(capability_id)
         .filter(|definition| definition.is_tool())
         .ok_or_else(|| format!("unknown Wave 2 action capability {capability_id}"))?;
-    debug_assert_eq!(definition.id, capability_id);
-    for role in ["input", "output"] {
-        let schema = canonical_schema(capability_id, role);
-        if schema_ref(capability_id, role)?.as_ref() == reference.as_ref() {
-            return Ok(schema);
+    let schema_owners = if definition.module_actions.is_empty() {
+        vec![definition.id]
+    } else {
+        definition
+            .module_actions
+            .iter()
+            .map(|action| action.id)
+            .collect()
+    };
+    for schema_owner in schema_owners {
+        for role in ["input", "output"] {
+            let schema = canonical_schema(schema_owner, role);
+            if schema_ref(schema_owner, role)?.as_ref() == reference.as_ref() {
+                return Ok(schema);
+            }
         }
     }
     Err(format!(
@@ -1842,23 +1824,51 @@ pub fn resolve_action_schema(
 /// schema used to construct the capability manifest. Nomi's application host
 /// calls this before selecting an execution owner, so an invalid payload
 /// cannot reserve effect state or touch a filesystem/Git service.
+pub fn validate_module_action_input(
+    capability_id: &str,
+    action_id: &str,
+    input: &StrictJsonValue,
+) -> Result<(), String> {
+    let capability = CapabilityId::from(capability_id);
+    let action = ActionId::from(action_id);
+    if !declares_action(&capability, &action) {
+        return Err(format!(
+            "Wave 2 capability {capability_id} does not declare action {action_id}"
+        ));
+    }
+    let schema_owner = if definition_for(capability_id)
+        .is_some_and(|definition| definition.module_actions.is_empty())
+    {
+        capability_id
+    } else {
+        action_id
+    };
+    let schema = action_input_schema(schema_owner);
+    let validator = jsonschema::options()
+        .build(&schema.0)
+        .map_err(|error| {
+            format!("compile {capability_id}/{action_id} canonical input schema: {error}")
+        })?;
+    validator.validate(&input.0).map_err(|error| {
+        format!("{capability_id}/{action_id} input does not match its canonical schema: {error}")
+    })
+}
+
+/// Validate a single-action capability used by existing Browser/Computer/SSH
+/// consumers. Workspace Modules must use [`validate_module_action_input`]
+/// because choosing a Module never implies choosing one of its Actions.
 pub fn validate_action_input(
     capability_id: &str,
     input: &StrictJsonValue,
 ) -> Result<(), String> {
-    let definition = definition_for(capability_id)
-        .filter(|definition| definition.is_tool())
-        .ok_or_else(|| format!("unknown Wave 2 action capability {capability_id}"))?;
-    debug_assert_eq!(definition.id, capability_id);
-    let schema = action_input_schema(capability_id);
-    let validator = jsonschema::options()
-        .build(&schema.0)
-        .map_err(|error| {
-            format!("compile {capability_id} canonical input schema: {error}")
-        })?;
-    validator.validate(&input.0).map_err(|error| {
-        format!("{capability_id} input does not match its canonical schema: {error}")
-    })
+    let actions = action_ids(capability_id);
+    if actions.len() == 1 {
+        let action = actions.into_iter().next().expect("one checked Action");
+        return validate_module_action_input(capability_id, action.as_ref(), input);
+    }
+    Err(format!(
+        "Wave 2 capability {capability_id} does not have one unambiguous Action"
+    ))
 }
 
 fn strict_object_schema(
@@ -1884,7 +1894,6 @@ pub fn supported_consumers(capability_id: &str) -> BTreeSet<CapabilityConsumer> 
 
 struct Wave2CapabilityHandler {
     capability_id: CapabilityId,
-    action_id: ActionId,
     host_port: Arc<dyn Wave2HostPort>,
 }
 
@@ -1906,19 +1915,22 @@ impl CapabilityHandler for Wave2CapabilityHandler {
     {
         Box::pin(async move {
             if context.capability_id != self.capability_id
-                || context.action_id != self.action_id
+                || !declares_action(&self.capability_id, &context.action_id)
             {
                 return Err(KernelError::ActionNotDeclared {
                     capability_id: context.capability_id,
                     action_id: context.action_id,
                 });
             }
-            if matches!(self.capability_id.as_ref(),
-                "fs.read" | "fs.search" | "fs.write" | "fs.patch" | "fs.delete" | "fs.snapshot"
-                | "vcs.status" | "vcs.diff" | "vcs.stage" | "vcs.commit" | "vcs.push" | "process.exec") {
+            if self.capability_id.as_ref().starts_with("workspace.") {
                 // These actions publish strict schemas; every Kernel host must
                 // enforce them before dispatch, not only the Nomi wrapper.
-                validate_action_input(self.capability_id.as_ref(), &input).map_err(|reason| {
+                validate_module_action_input(
+                    self.capability_id.as_ref(),
+                    context.action_id.as_ref(),
+                    &input,
+                )
+                .map_err(|reason| {
                     KernelError::capability_execution_failed(INVALID_PAYLOAD, reason)
                 })?;
             }
@@ -1933,11 +1945,12 @@ impl CapabilityHandler for Wave2CapabilityHandler {
 
             validate_action_resource_bindings(
                 &self.capability_id,
+                &context.action_id,
                 &context.principal,
                 &context.resource_bindings,
             )?;
 
-            let operation = operation_for(&self.capability_id, input)?;
+            let operation = operation_for(&self.capability_id, &context.action_id, input)?;
             self.host_port
                 .invoke(Wave2HostRequest {
                     context: Wave2HostContext {
@@ -1956,7 +1969,6 @@ impl CapabilityHandler for Wave2CapabilityHandler {
                             .map(|provider| provider.provider.clone()),
                         state: Wave2StateHandle::new(context.state),
                         resource_bindings: context.resource_bindings,
-                        mcp_tool_lock: context.mcp_tool_lock,
                     },
                     operation,
                 })
@@ -1981,9 +1993,10 @@ fn wave2_input_error_to_kernel(error: KernelError) -> KernelError {
 
 fn operation_for(
     capability_id: &CapabilityId,
+    action_id: &ActionId,
     input: StrictJsonValue,
 ) -> Result<Wave2CapabilityOperation, KernelError> {
-    Ok(typed_operation_for(capability_id, input)
+    Ok(typed_operation_for(capability_id, action_id, input)
         .map_err(wave2_input_error_to_kernel)?
         .family())
 }
@@ -1995,43 +2008,90 @@ fn operation_for(
 /// error instead of being admitted to an action dispatcher.
 pub fn typed_operation_for(
     capability_id: &CapabilityId,
+    action_id: &ActionId,
     input: StrictJsonValue,
 ) -> Result<Wave2TypedCapabilityOperation, KernelError> {
-    let operation = match capability_id.as_ref() {
-        "fs.read" => Wave2TypedCapabilityOperation::FsRead { input },
-        "fs.search" => Wave2TypedCapabilityOperation::FsSearch { input },
-        "fs.write" => Wave2TypedCapabilityOperation::FsWrite { input },
-        "fs.patch" => Wave2TypedCapabilityOperation::FsPatch { input },
-        "fs.delete" => Wave2TypedCapabilityOperation::FsDelete { input },
-        "fs.snapshot" => Wave2TypedCapabilityOperation::FsSnapshot { input },
-        "vcs.status" => Wave2TypedCapabilityOperation::VcsStatus { input },
-        "vcs.diff" => Wave2TypedCapabilityOperation::VcsDiff { input },
-        "vcs.stage" => Wave2TypedCapabilityOperation::VcsStage { input },
-        "vcs.commit" => Wave2TypedCapabilityOperation::VcsCommit { input },
-        "vcs.push" => Wave2TypedCapabilityOperation::VcsPush { input },
-        "process.exec" => Wave2TypedCapabilityOperation::ProcessExec { input },
-        "ssh.fs.read" => Wave2TypedCapabilityOperation::SshFsRead { input },
-        "ssh.fs.write" => Wave2TypedCapabilityOperation::SshFsWrite { input },
-        "ssh.exec" => Wave2TypedCapabilityOperation::SshExec { input },
-        "ssh.sudo" => Wave2TypedCapabilityOperation::SshSudo { input },
-        "mcp.tool_proxy" => Wave2TypedCapabilityOperation::McpToolProxy { input },
-        "connector.data.read" => Wave2TypedCapabilityOperation::ConnectorDataRead { input },
-        "connector.data.write" => Wave2TypedCapabilityOperation::ConnectorDataWrite { input },
-        "browser.navigate" => Wave2TypedCapabilityOperation::BrowserNavigate { input },
-        "browser.act" => Wave2TypedCapabilityOperation::BrowserAct { input },
-        "browser.render_content" => {
+    let operation = match (capability_id.as_ref(), action_id.as_ref()) {
+        (WORKSPACE_FILES_MODULE_ID, "workspace.files/read") => {
+            Wave2TypedCapabilityOperation::WorkspaceFileRead { input }
+        }
+        (WORKSPACE_FILES_MODULE_ID, "workspace.files/search") => {
+            Wave2TypedCapabilityOperation::WorkspaceFileSearch { input }
+        }
+        (WORKSPACE_FILES_MODULE_ID, "workspace.files/write") => {
+            Wave2TypedCapabilityOperation::WorkspaceFileWrite { input }
+        }
+        (WORKSPACE_FILES_MODULE_ID, "workspace.files/patch") => {
+            Wave2TypedCapabilityOperation::WorkspaceFilePatch { input }
+        }
+        (WORKSPACE_FILES_MODULE_ID, "workspace.files/delete") => {
+            Wave2TypedCapabilityOperation::WorkspaceFileDelete { input }
+        }
+        (WORKSPACE_FILES_MODULE_ID, "workspace.files/watch") => {
+            Wave2TypedCapabilityOperation::WorkspaceFileWatch { input }
+        }
+        (WORKSPACE_VCS_MODULE_ID, "workspace.vcs/status") => {
+            Wave2TypedCapabilityOperation::WorkspaceVcsStatus { input }
+        }
+        (WORKSPACE_VCS_MODULE_ID, "workspace.vcs/diff") => {
+            Wave2TypedCapabilityOperation::WorkspaceVcsDiff { input }
+        }
+        (WORKSPACE_VCS_MODULE_ID, "workspace.vcs/stage") => {
+            Wave2TypedCapabilityOperation::WorkspaceVcsStage { input }
+        }
+        (WORKSPACE_VCS_MODULE_ID, "workspace.vcs/commit") => {
+            Wave2TypedCapabilityOperation::WorkspaceVcsCommit { input }
+        }
+        (WORKSPACE_VCS_MODULE_ID, "workspace.vcs/push") => {
+            Wave2TypedCapabilityOperation::WorkspaceVcsPush { input }
+        }
+        (WORKSPACE_PROCESS_MODULE_ID, "workspace.process/exec") => {
+            Wave2TypedCapabilityOperation::WorkspaceProcessExec { input }
+        }
+        (WORKSPACE_PROCESS_MODULE_ID, "workspace.process/start") => {
+            Wave2TypedCapabilityOperation::WorkspaceProcessStart { input }
+        }
+        (WORKSPACE_PROCESS_MODULE_ID, "workspace.process/poll") => {
+            Wave2TypedCapabilityOperation::WorkspaceProcessPoll { input }
+        }
+        (WORKSPACE_PROCESS_MODULE_ID, "workspace.process/input") => {
+            Wave2TypedCapabilityOperation::WorkspaceProcessInput { input }
+        }
+        (WORKSPACE_PROCESS_MODULE_ID, "workspace.process/close_stdin") => {
+            Wave2TypedCapabilityOperation::WorkspaceProcessCloseStdin { input }
+        }
+        (WORKSPACE_PROCESS_MODULE_ID, "workspace.process/resize") => {
+            Wave2TypedCapabilityOperation::WorkspaceProcessResize { input }
+        }
+        (WORKSPACE_PROCESS_MODULE_ID, "workspace.process/cancel") => {
+            Wave2TypedCapabilityOperation::WorkspaceProcessCancel { input }
+        }
+        (WORKSPACE_ARTIFACTS_MODULE_ID, "workspace.artifacts/read") => {
+            Wave2TypedCapabilityOperation::WorkspaceArtifactRead { input }
+        }
+        (WORKSPACE_ARTIFACTS_MODULE_ID, "workspace.artifacts/publish") => {
+            Wave2TypedCapabilityOperation::WorkspaceArtifactPublish { input }
+        }
+        ("ssh.fs.read", "ssh.fs.read.invoke") => Wave2TypedCapabilityOperation::SshFsRead { input },
+        ("ssh.fs.write", "ssh.fs.write.invoke") => Wave2TypedCapabilityOperation::SshFsWrite { input },
+        ("ssh.exec", "ssh.exec.invoke") => Wave2TypedCapabilityOperation::SshExec { input },
+        ("ssh.sudo", "ssh.sudo.invoke") => Wave2TypedCapabilityOperation::SshSudo { input },
+        ("browser.navigate", "browser.navigate.invoke") => Wave2TypedCapabilityOperation::BrowserNavigate { input },
+        ("browser.act", "browser.act.invoke") => Wave2TypedCapabilityOperation::BrowserAct { input },
+        ("browser.render_content", "browser.render_content.invoke") => {
             Wave2TypedCapabilityOperation::BrowserRenderContent { input }
         }
-        "browser.download" => Wave2TypedCapabilityOperation::BrowserDownload { input },
-        "browser.upload" => Wave2TypedCapabilityOperation::BrowserUpload { input },
-        "browser.evaluate" => Wave2TypedCapabilityOperation::BrowserEvaluate { input },
-        "computer.input" => Wave2TypedCapabilityOperation::ComputerInput { input },
-        "computer.launch" => Wave2TypedCapabilityOperation::ComputerLaunch { input },
+        ("browser.download", "browser.download.invoke") => Wave2TypedCapabilityOperation::BrowserDownload { input },
+        ("browser.upload", "browser.upload.invoke") => Wave2TypedCapabilityOperation::BrowserUpload { input },
+        ("browser.evaluate", "browser.evaluate.invoke") => Wave2TypedCapabilityOperation::BrowserEvaluate { input },
+        ("computer.input", "computer.input.invoke") => Wave2TypedCapabilityOperation::ComputerInput { input },
+        ("computer.launch", "computer.launch.invoke") => Wave2TypedCapabilityOperation::ComputerLaunch { input },
         _ => {
             return Err(KernelError::CapabilityExecution {
                 reason: format!(
-                    "{} does not expose an action host operation",
-                    capability_id.as_ref()
+                    "{} does not expose action {} through the Wave 2 host",
+                    capability_id.as_ref(),
+                    action_id.as_ref()
                 ),
             });
         }
@@ -2079,22 +2139,35 @@ pub fn required_resource_kinds(capability_id: &str) -> Option<BTreeSet<ResourceK
 /// The official Coding resource defaults grant `read`, `write`, and `execute`;
 /// destructive filesystem actions therefore consume the workspace `write`
 /// grant rather than inventing a separate `delete` permission.
-///
-/// `mcp.tool_proxy` is the one composite resource contract: this compatibility
-/// helper returns its invocation operation, while
-/// [`validate_action_resource_bindings`] enforces both `connect` and `invoke`.
-pub fn required_resource_operation(capability_id: &CapabilityId) -> Option<&'static str> {
-    match capability_id.as_ref() {
-        "fs.read" | "fs.search" | "fs.snapshot" | "vcs.status" | "vcs.diff" => Some("read"),
-        "fs.write" | "fs.patch" | "fs.delete" | "vcs.stage" | "vcs.commit" | "vcs.push"
-        | "ssh.fs.write" | "connector.data.write" => Some("write"),
-        "process.exec" | "ssh.exec" | "ssh.sudo" => Some("execute"),
-        "ssh.fs.read" | "connector.data.read" => Some("read"),
-        "mcp.tool_proxy" => Some("invoke"),
-        "computer.input" => Some("input"),
-        "computer.launch" => Some("launch"),
+pub fn required_action_resource_operation(
+    capability_id: &CapabilityId,
+    action_id: &ActionId,
+) -> Option<&'static str> {
+    match (capability_id.as_ref(), action_id.as_ref()) {
+        (WORKSPACE_FILES_MODULE_ID, "workspace.files/read" | "workspace.files/search" | "workspace.files/watch")
+        | (WORKSPACE_VCS_MODULE_ID, "workspace.vcs/status" | "workspace.vcs/diff")
+        | (WORKSPACE_ARTIFACTS_MODULE_ID, "workspace.artifacts/read") => Some("read"),
+        (WORKSPACE_FILES_MODULE_ID, "workspace.files/write" | "workspace.files/patch" | "workspace.files/delete")
+        | (WORKSPACE_VCS_MODULE_ID, "workspace.vcs/stage" | "workspace.vcs/commit" | "workspace.vcs/push")
+        | (WORKSPACE_ARTIFACTS_MODULE_ID, "workspace.artifacts/publish")
+        | ("ssh.fs.write", "ssh.fs.write.invoke") => Some("write"),
+        (WORKSPACE_PROCESS_MODULE_ID, _)
+        | ("ssh.exec", "ssh.exec.invoke")
+        | ("ssh.sudo", "ssh.sudo.invoke") => Some("execute"),
+        ("ssh.fs.read", "ssh.fs.read.invoke") => Some("read"),
+        ("computer.input", "computer.input.invoke") => Some("input"),
+        ("computer.launch", "computer.launch.invoke") => Some("launch"),
         _ => None,
     }
+}
+
+/// Compatibility query for remaining single-action non-Workspace consumers.
+pub fn required_resource_operation(capability_id: &CapabilityId) -> Option<&'static str> {
+    let actions = action_ids(capability_id.as_ref());
+    (actions.len() == 1)
+        .then(|| actions.iter().next())
+        .flatten()
+        .and_then(|action_id| required_action_resource_operation(capability_id, action_id))
 }
 
 /// Validate the authorization-bearing resource projection before an action is
@@ -2106,6 +2179,7 @@ pub fn required_resource_operation(capability_id: &CapabilityId) -> Option<&'sta
 /// application pool.
 pub fn validate_action_resource_bindings(
     capability_id: &CapabilityId,
+    action_id: &ActionId,
     principal: &PrincipalRef,
     bindings: &TypedResourceBindings,
 ) -> Result<(), KernelError> {
@@ -2117,6 +2191,12 @@ pub fn validate_action_resource_bindings(
     if !definition.is_tool() {
         return Err(KernelError::CapabilityExecution {
             reason: format!("{} is not an action capability", capability_id.as_ref()),
+        });
+    }
+    if !declares_action(capability_id, action_id) {
+        return Err(KernelError::ActionNotDeclared {
+            capability_id: capability_id.clone(),
+            action_id: action_id.clone(),
         });
     }
 
@@ -2182,15 +2262,8 @@ pub fn validate_action_resource_bindings(
                 ),
             });
         }
-        let missing_operation = if capability_id.as_ref() == "mcp.tool_proxy" {
-            MCP_TOOL_PROXY_REQUIRED_OPERATIONS
-                .iter()
-                .copied()
-                .find(|operation| !matching_bindings[0].operations.contains(*operation))
-        } else {
-            required_resource_operation(capability_id)
-                .filter(|operation| !matching_bindings[0].operations.contains(*operation))
-        };
+        let missing_operation = required_action_resource_operation(capability_id, action_id)
+            .filter(|operation| !matching_bindings[0].operations.contains(*operation));
         if let Some(required_operation) = missing_operation {
             return Err(KernelError::CapabilityResourceNotBound {
                 capability_id: capability_id.clone(),
@@ -2205,11 +2278,25 @@ pub fn validate_action_resource_bindings(
     Ok(())
 }
 
-/// The action identity used by each Tool contribution.
-pub fn action_id(capability_id: &str) -> Option<ActionId> {
-    definition_for(capability_id)
-        .filter(|definition| definition.is_tool())
-        .map(|_| ActionId::from(format!("{}.invoke", capability_id)))
+/// The exact Action identities published by a Module/capability.
+pub fn action_ids(capability_id: &str) -> BTreeSet<ActionId> {
+    let Some(definition) = definition_for(capability_id).filter(|definition| definition.is_tool())
+    else {
+        return BTreeSet::new();
+    };
+    if definition.module_actions.is_empty() {
+        BTreeSet::from([ActionId::from(format!("{}.invoke", capability_id))])
+    } else {
+        definition
+            .module_actions
+            .iter()
+            .map(|action| ActionId::from(action.id))
+            .collect()
+    }
+}
+
+fn declares_action(capability_id: &CapabilityId, action_id: &ActionId) -> bool {
+    action_ids(capability_id.as_ref()).contains(action_id)
 }
 
 /// Check a Capability against its release-time host target/surface metadata.
@@ -2282,18 +2369,10 @@ pub fn ssh_registration() -> Result<PluginRegistration, String> {
     )
 }
 
-/// Build the bundled MCP/connectors registration.
-pub fn mcp_connectors_registration() -> Result<PluginRegistration, String> {
-    build_registration(
-        &PACKAGE_DEFINITIONS[2],
-        Wave2RoleHostPorts::with_actions(unconfigured_host_port()),
-    )
-}
-
 /// Build the bundled Browser registration.
 pub fn browser_registration() -> Result<PluginRegistration, String> {
     build_registration(
-        &PACKAGE_DEFINITIONS[3],
+        &PACKAGE_DEFINITIONS[2],
         Wave2RoleHostPorts::with_actions(unconfigured_host_port()),
     )
 }
@@ -2301,7 +2380,7 @@ pub fn browser_registration() -> Result<PluginRegistration, String> {
 /// Build the bundled Computer/A11y registration.
 pub fn computer_a11y_registration() -> Result<PluginRegistration, String> {
     build_registration(
-        &PACKAGE_DEFINITIONS[4],
+        &PACKAGE_DEFINITIONS[3],
         Wave2RoleHostPorts::with_actions(unconfigured_host_port()),
     )
 }
@@ -2534,6 +2613,28 @@ fn localized(name: &str, description: &str) -> LocalizedMetadata {
         description: description.to_owned(),
         localized_names: Default::default(),
         localized_descriptions: Default::default(),
+    }
+}
+
+fn capability_display(capability_id: &str) -> (&str, &str) {
+    match capability_id {
+        WORKSPACE_FILES_MODULE_ID => (
+            "Workspace Files",
+            "Read, search, update, patch, delete, and watch files in a bound workspace.",
+        ),
+        WORKSPACE_VCS_MODULE_ID => (
+            "Version Control",
+            "Inspect and explicitly change version-control state in a bound workspace.",
+        ),
+        WORKSPACE_PROCESS_MODULE_ID => (
+            "Workspace Processes",
+            "Run and control turn-owned processes inside a bound workspace.",
+        ),
+        WORKSPACE_ARTIFACTS_MODULE_ID => (
+            "Workspace Artifacts",
+            "Publish immutable workspace outputs and read them through bounded receipts.",
+        ),
+        _ => (capability_id, "Bundled Wave 2 coding-extension capability."),
     }
 }
 
@@ -2801,7 +2902,8 @@ mod tests {
     fn capture_state_handle() -> Wave2StateHandle {
         let captured = Arc::new(Mutex::new(None));
         invoke_workspace_action(
-            "fs.read",
+            WORKSPACE_FILES_MODULE_ID,
+            "workspace.files/read",
             StrictJsonValue(serde_json::json!({"path":"fixture.txt"})),
             Arc::new(StateCaptureHostPort { captured: Arc::clone(&captured) }),
         )
@@ -2815,6 +2917,7 @@ mod tests {
 
     fn invoke_workspace_action(
         capability_id: &str,
+        action_id: &str,
         input: StrictJsonValue,
         host_port: Arc<dyn Wave2HostPort>,
     ) -> Result<StrictJsonValue, KernelError> {
@@ -2839,14 +2942,17 @@ mod tests {
             resource_id: nomifun_agent_contracts::ResourceId::from("wave2-state-resource"),
             owner_id: principal.principal_id.clone(),
             operations: BTreeSet::from([
-                required_resource_operation(&CapabilityId::from(capability_id))
+                required_action_resource_operation(
+                    &CapabilityId::from(capability_id),
+                    &ActionId::from(action_id),
+                )
                     .expect("workspace action requires an operation")
                     .to_owned(),
             ]),
             connection_config_ref: None,
             typed_parameters: BTreeMap::new(),
         };
-        let action = action_id(capability_id).expect("workspace action");
+        let action = ActionId::from(action_id);
         let payload = AgentPresetRevisionPayload {
             context_order: Vec::new(),
             middleware_order: Vec::new(),
@@ -3053,10 +3159,14 @@ mod tests {
             );
             for capability in &manifest.contributions.capabilities {
                 if capability.kind == CapabilityKind::Tool {
-                    assert_eq!(capability.contributions.actions.len(), 1);
                     assert_eq!(
-                        action_id(capability.id.as_ref()),
-                        Some(capability.contributions.actions[0].action_id.clone())
+                        action_ids(capability.id.as_ref()),
+                        capability
+                            .contributions
+                            .actions
+                            .iter()
+                            .map(|action| action.action_id.clone())
+                            .collect()
                     );
                     assert_eq!(
                         capability.contributions.host_ports,
@@ -3089,7 +3199,46 @@ mod tests {
     }
 
     #[test]
-    fn repaired_workspace_actions_publish_exact_resolvable_input_schemas() {
+    fn workspace_package_exposes_four_direct_modules_with_exact_actions() {
+        let registration = workspace_execution_registration().unwrap();
+        let modules = registration
+            .metadata
+            .manifest
+            .payload
+            .contributions
+            .capabilities
+            .into_iter()
+            .map(|module| (module.id.as_ref().to_owned(), module))
+            .collect::<BTreeMap<_, _>>();
+        let expected = [
+            (WORKSPACE_FILES_MODULE_ID, WORKSPACE_FILES_ACTION_IDS),
+            (WORKSPACE_VCS_MODULE_ID, WORKSPACE_VCS_ACTION_IDS),
+            (WORKSPACE_PROCESS_MODULE_ID, WORKSPACE_PROCESS_ACTION_IDS),
+            (WORKSPACE_ARTIFACTS_MODULE_ID, WORKSPACE_ARTIFACTS_ACTION_IDS),
+        ];
+        assert_eq!(modules.len(), expected.len());
+        for (module_id, expected_actions) in expected {
+            let module = &modules[module_id];
+            assert_eq!(
+                module.authoring_policy().unwrap(),
+                nomifun_agent_contracts::CapabilityAuthoringPolicy::Direct
+            );
+            assert_eq!(
+                module.contributions.actions.iter()
+                    .map(|action| action.action_id.as_ref())
+                    .collect::<BTreeSet<_>>(),
+                expected_actions.iter().copied().collect::<BTreeSet<_>>()
+            );
+            assert_eq!(
+                module.contributions.resource_kinds.len(),
+                1,
+                "each workspace Module requires one typed owner resource"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_modules_publish_exact_resolvable_action_schemas() {
         let capabilities = registrations()
             .expect("Wave 2 registrations")
             .into_iter()
@@ -3103,12 +3252,18 @@ mod tests {
             })
             .map(|capability| (capability.id.as_ref().to_owned(), capability))
             .collect::<std::collections::BTreeMap<_, _>>();
-        for capability_id in ["fs.delete", "fs.snapshot", "vcs.push"] {
+        for (capability_id, action_id) in [
+            (WORKSPACE_FILES_MODULE_ID, "workspace.files/delete"),
+            (WORKSPACE_VCS_MODULE_ID, "workspace.vcs/push"),
+            (WORKSPACE_PROCESS_MODULE_ID, "workspace.process/start"),
+            (WORKSPACE_ARTIFACTS_MODULE_ID, "workspace.artifacts/publish"),
+        ] {
             let action = capabilities[capability_id]
                 .contributions
                 .actions
-                .first()
-                .expect("repaired capability action");
+                .iter()
+                .find(|action| action.action_id.as_ref() == action_id)
+                .expect("Module action");
             let schema = resolve_action_schema(capability_id, &action.input_schema)
                 .expect("manifest input ref resolves from its canonical source");
             assert_eq!(schema.0["additionalProperties"], serde_json::json!(false));
@@ -3117,7 +3272,7 @@ mod tests {
             assert!(schema.0["properties"].get("session_id").is_none());
             assert!(schema.0["properties"].get("workspace_root").is_none());
             assert_eq!(
-                schema_ref(capability_id, "input").unwrap(),
+                schema_ref(action_id, "input").unwrap(),
                 action.input_schema,
                 "manifest and resolver must share one canonical schema reference"
             );
@@ -3129,33 +3284,56 @@ mod tests {
             );
         }
 
-        assert!(validate_action_input("fs.delete", &StrictJsonValue(serde_json::json!({
-            "path": "src/lib.rs"
-        }))).is_ok());
-        assert!(validate_action_input("fs.delete", &StrictJsonValue(serde_json::json!({
-            "path": "src/lib.rs",
-            "workspace_root": "C:/spoof"
-        }))).is_err());
-        assert!(validate_action_input("fs.snapshot", &StrictJsonValue(serde_json::json!({
-            "operation": "baseline"
-        }))).is_err());
-        assert!(validate_action_input("fs.snapshot", &StrictJsonValue(serde_json::json!({
-            "operation": "compare"
-        }))).is_ok());
-        assert!(validate_action_input("vcs.push", &StrictJsonValue(serde_json::json!({
-            "remote": "origin",
-            "refspec": "HEAD:refs/heads/main",
-            "force": true
-        }))).is_err());
+        assert!(validate_module_action_input(
+            WORKSPACE_FILES_MODULE_ID,
+            "workspace.files/delete",
+            &StrictJsonValue(serde_json::json!({"path": "src/lib.rs"})),
+        ).is_ok());
+        assert!(validate_module_action_input(
+            WORKSPACE_FILES_MODULE_ID,
+            "workspace.files/delete",
+            &StrictJsonValue(serde_json::json!({
+                "path": "src/lib.rs",
+                "workspace_root": "C:/spoof"
+            })),
+        ).is_err());
+        assert!(validate_module_action_input(
+            WORKSPACE_PROCESS_MODULE_ID,
+            "workspace.process/start",
+            &StrictJsonValue(serde_json::json!({
+                "operation": "start",
+                "command": "git"
+            })),
+        ).is_err(), "the Action ID, not payload state, selects the process operation");
+        assert!(validate_module_action_input(
+            WORKSPACE_VCS_MODULE_ID,
+            "workspace.vcs/push",
+            &StrictJsonValue(serde_json::json!({
+                "remote": "origin",
+                "refspec": "HEAD:refs/heads/main",
+                "force": true
+            })),
+        ).is_err());
     }
 
     #[test]
     fn strict_workspace_inputs_are_rejected_before_kernel_owner_dispatch() {
-        for (capability_id, invalid, valid) in [
-            ("fs.delete", json!({"path": " \t"}), json!({"path": "src/lib.rs"})),
-            ("fs.snapshot", json!({"operation": "baseline"}), json!({"operation": "compare"})),
+        for (capability_id, action_id, invalid, valid) in [
             (
-                "vcs.push",
+                WORKSPACE_FILES_MODULE_ID,
+                "workspace.files/delete",
+                json!({"path": " \t"}),
+                json!({"path": "src/lib.rs"}),
+            ),
+            (
+                WORKSPACE_ARTIFACTS_MODULE_ID,
+                "workspace.artifacts/publish",
+                json!({"path": ""}),
+                json!({"path": "target/result.txt"}),
+            ),
+            (
+                WORKSPACE_VCS_MODULE_ID,
+                "workspace.vcs/push",
                 json!({"remote": "origin", "refspec": "HEAD:refs/heads/main", "force": true}),
                 json!({"remote": "origin", "refspec": "HEAD:refs/heads/main", "force": false}),
             ),
@@ -3167,6 +3345,7 @@ mod tests {
             for input in [json!(null), json!([]), invalid] {
                 let error = invoke_workspace_action(
                     capability_id,
+                    action_id,
                     StrictJsonValue(input),
                     Arc::clone(&host),
                 )
@@ -3174,23 +3353,36 @@ mod tests {
                 assert_eq!(error.canonical_code().as_ref(), INVALID_PAYLOAD);
                 assert!(captured.lock().unwrap().is_none());
             }
-            invoke_workspace_action(capability_id, StrictJsonValue(valid), host)
+            invoke_workspace_action(capability_id, action_id, StrictJsonValue(valid), host)
                 .expect("valid input with the declared resource grant reaches the owner");
             assert!(captured.lock().unwrap().is_some());
         }
     }
 
     #[test]
-    fn fs_watch_requires_the_current_workspace_resource() {
+    fn workspace_files_watch_is_an_action_and_event_with_workspace_authority() {
         assert_eq!(
-            required_resource_kinds("fs.watch"),
+            required_resource_kinds(WORKSPACE_FILES_MODULE_ID),
             Some(BTreeSet::from([ResourceKind::from("workspace")]))
         );
         assert_eq!(
-            required_resource_operation(&CapabilityId::from("fs.watch")),
-            None,
-            "EventSource read authority is consumed by its lifecycle owner, not an action"
+            required_action_resource_operation(
+                &CapabilityId::from(WORKSPACE_FILES_MODULE_ID),
+                &ActionId::from("workspace.files/watch"),
+            ),
+            Some("read")
         );
+        let manifest = workspace_execution_registration()
+            .unwrap()
+            .metadata
+            .manifest
+            .payload
+            .contributions
+            .capabilities
+            .into_iter()
+            .find(|capability| capability.id.as_ref() == WORKSPACE_FILES_MODULE_ID)
+            .unwrap();
+        assert_eq!(manifest.contributions.event_schema_refs.len(), 1);
     }
 
     #[test]
@@ -3202,8 +3394,8 @@ mod tests {
             1,
         )
         .expect("Wave 2 metadata materializes");
-        assert_eq!(materialized.packages.len(), 5);
-        assert_eq!(materialized.capabilities.len(), 39);
+        assert_eq!(materialized.packages.len(), 4);
+        assert_eq!(materialized.capabilities.len(), 20);
         assert_eq!(materialized.role_contracts.len(), 2);
         assert_eq!(materialized.role_providers.len(), 2);
         let browser_role = materialized.role_contract(&ExecutionRoleId::from(BROWSER_EXECUTION_ROLE_ID))
@@ -3217,13 +3409,12 @@ mod tests {
             assert!(required_resource_kinds(member.capability.id.as_ref()).unwrap().is_empty());
         }
         assert_eq!(
-            required_resource_kinds("process.exec"),
+            required_resource_kinds(WORKSPACE_PROCESS_MODULE_ID),
             Some(BTreeSet::from([ResourceKind::from("process_session")]))
         );
-        assert_eq!(
-            required_resource_kinds("terminal.pty"),
-            Some(BTreeSet::from([ResourceKind::from("terminal")]))
-        );
+        for retired in ["process.session", "terminal.pty", "workspace.bind"] {
+            assert!(required_resource_kinds(retired).is_none());
+        }
 
         let registry = KernelRegistry::new(
             MaterializationPolicy::stable(CONTRACT_VERSION),
@@ -3443,16 +3634,28 @@ mod tests {
     #[test]
     fn every_action_capability_maps_to_a_typed_host_operation() {
         assert!(matches!(
-            typed_operation_for(&CapabilityId::from("fs.read"), empty_object()),
-            Ok(Wave2TypedCapabilityOperation::FsRead { .. })
+            typed_operation_for(
+                &CapabilityId::from(WORKSPACE_FILES_MODULE_ID),
+                &ActionId::from("workspace.files/read"),
+                empty_object(),
+            ),
+            Ok(Wave2TypedCapabilityOperation::WorkspaceFileRead { .. })
         ));
         assert!(matches!(
-            typed_operation_for(&CapabilityId::from("fs.write"), empty_object()),
-            Ok(Wave2TypedCapabilityOperation::FsWrite { .. })
+            typed_operation_for(
+                &CapabilityId::from(WORKSPACE_PROCESS_MODULE_ID),
+                &ActionId::from("workspace.process/start"),
+                empty_object(),
+            ),
+            Ok(Wave2TypedCapabilityOperation::WorkspaceProcessStart { .. })
         ));
         assert!(matches!(
-            typed_operation_for(&CapabilityId::from("fs.delete"), empty_object()),
-            Ok(Wave2TypedCapabilityOperation::FsDelete { .. })
+            typed_operation_for(
+                &CapabilityId::from(WORKSPACE_ARTIFACTS_MODULE_ID),
+                &ActionId::from("workspace.artifacts/publish"),
+                empty_object(),
+            ),
+            Ok(Wave2TypedCapabilityOperation::WorkspaceArtifactPublish { .. })
         ));
 
         for definition in PACKAGE_DEFINITIONS
@@ -3461,22 +3664,34 @@ mod tests {
             .filter(|definition| definition.is_tool())
         {
             let capability_id = CapabilityId::from(definition.id);
-            let typed = typed_operation_for(&capability_id, empty_object())
-                .expect("action capabilities must have an exact typed operation");
-            assert_eq!(typed.capability_id(), definition.id);
-            assert!(
-                operation_for(&capability_id, empty_object()).is_ok(),
-                "{} must have a host operation",
-                definition.id
-            );
+            for action_id in action_ids(definition.id) {
+                let typed = typed_operation_for(
+                    &capability_id,
+                    &action_id,
+                    empty_object(),
+                )
+                .expect("Module Actions must have an exact typed operation");
+                assert_eq!(typed.capability_id(), definition.id);
+                assert_eq!(typed.action_id(), action_id.as_ref());
+                assert!(
+                    operation_for(&capability_id, &action_id, empty_object()).is_ok(),
+                    "{}/{} must have a host operation",
+                    definition.id,
+                    action_id.as_ref(),
+                );
+            }
         }
     }
 
     #[test]
     fn non_action_capabilities_cannot_enter_the_host_dispatch_contract() {
-        let error = typed_operation_for(&CapabilityId::from("workspace.bind"), empty_object())
+        let error = typed_operation_for(
+            &CapabilityId::from("ssh.connect"),
+            &ActionId::from("ssh.connect.invoke"),
+            empty_object(),
+        )
             .expect_err("resource providers must not become action operations");
-        assert!(error.to_string().contains("does not expose an action host operation"));
+        assert!(error.to_string().contains("does not expose action"));
     }
 
     #[test]
@@ -3505,12 +3720,11 @@ mod tests {
                 snapshot_digest: "digest".into(),
             },
             registry_generation: 7,
-            capability_id: CapabilityId::from("fs.read"),
-            action_id: ActionId::from("fs.read.invoke"),
+            capability_id: CapabilityId::from(WORKSPACE_FILES_MODULE_ID),
+            action_id: ActionId::from("workspace.files/read"),
             role_provider: None,
             state: test_state_handle(),
             resource_bindings: vec![binding.clone()],
-            mcp_tool_lock: None,
         };
         let wrong_family = match (Wave2HostRequest {
             context: context.clone(),
@@ -3520,7 +3734,7 @@ mod tests {
         })
         .into_typed()
         {
-            Ok(_) => panic!("fs.read cannot be routed through the SSH family"),
+            Ok(_) => panic!("workspace.files/read cannot be routed through the SSH family"),
             Err(error) => error,
         };
         assert_eq!(wrong_family.code, "ACTION_OPERATION_MISMATCH");
@@ -3610,74 +3824,9 @@ mod tests {
     }
 
     #[test]
-    fn mcp_tool_proxy_requires_connect_and_invoke_resource_grants() {
-        let capability_id = CapabilityId::from("mcp.tool_proxy");
-        let principal = PrincipalRef {
-            principal_kind: "user".to_owned(),
-            principal_id: "owner".to_owned(),
-        };
-        let binding_for = |operations: &[&str]| TypedResourceBinding {
-            binding_id: ResourceBindingId::from("mcp-binding"),
-            resource_kind: ResourceKind::from("mcp_server"),
-            resource_id: "server-1".into(),
-            owner_id: principal.principal_id.clone(),
-            operations: operations
-                .iter()
-                .map(|operation| (*operation).to_owned())
-                .collect(),
-            connection_config_ref: None,
-            typed_parameters: Default::default(),
-        };
-
-        let missing_connect = validate_action_resource_bindings(
-            &capability_id,
-            &principal,
-            &vec![binding_for(&["invoke"])],
-        )
-        .expect_err("MCP tool proxy must require the connect grant");
-        assert!(matches!(
-            &missing_connect,
-            KernelError::CapabilityResourceNotBound {
-                capability_id: actual_capability,
-                resource_kind,
-            } if actual_capability == &capability_id
-                && resource_kind == "mcp_server (operation connect)"
-        ));
-        assert_eq!(
-            missing_connect.canonical_code(),
-            CanonicalErrorCode::from(PRESET_RESOURCE_NOT_BOUND)
-        );
-
-        let missing_invoke = validate_action_resource_bindings(
-            &capability_id,
-            &principal,
-            &vec![binding_for(&["connect"])],
-        )
-        .expect_err("MCP tool proxy must require the invoke grant");
-        assert!(matches!(
-            &missing_invoke,
-            KernelError::CapabilityResourceNotBound {
-                capability_id: actual_capability,
-                resource_kind,
-            } if actual_capability == &capability_id
-                && resource_kind == "mcp_server (operation invoke)"
-        ));
-        assert_eq!(
-            missing_invoke.canonical_code(),
-            CanonicalErrorCode::from(PRESET_RESOURCE_NOT_BOUND)
-        );
-
-        validate_action_resource_bindings(
-            &capability_id,
-            &principal,
-            &vec![binding_for(&["connect", "invoke"])],
-        )
-        .expect("MCP tool proxy with both grants must be admitted");
-    }
-
-    #[test]
-    fn non_mcp_action_resource_contracts_remain_single_operation() {
-        let capability_id = CapabilityId::from("fs.read");
+    fn module_actions_require_their_exact_resource_operation() {
+        let capability_id = CapabilityId::from(WORKSPACE_FILES_MODULE_ID);
+        let action_id = ActionId::from("workspace.files/read");
         let principal = PrincipalRef {
             principal_kind: "user".to_owned(),
             principal_id: "owner".to_owned(),
@@ -3692,8 +3841,13 @@ mod tests {
             typed_parameters: Default::default(),
         };
 
-        validate_action_resource_bindings(&capability_id, &principal, &vec![binding])
-            .expect("non-MCP capabilities must retain their single-operation contract");
+        validate_action_resource_bindings(
+            &capability_id,
+            &action_id,
+            &principal,
+            &vec![binding],
+        )
+        .expect("Module Action must consume its exact resource operation");
     }
 
     #[test]
@@ -3701,13 +3855,13 @@ mod tests {
         let seen = Arc::new(Mutex::new(None));
         let seen_by_adapter = Arc::clone(&seen);
         let adapter = typed_operation_adapter(
-            |operation| matches!(operation, Wave2TypedCapabilityOperation::FsRead { .. }),
+            |operation| matches!(operation, Wave2TypedCapabilityOperation::WorkspaceFileRead { .. }),
             move |request| {
                 let seen = Arc::clone(&seen_by_adapter);
                 std::future::ready({
                     let is_exact = matches!(
                         request.operation,
-                        Wave2TypedCapabilityOperation::FsRead { .. }
+                        Wave2TypedCapabilityOperation::WorkspaceFileRead { .. }
                     );
                     let authorization = (
                         request.context.principal.principal_id,
@@ -3736,8 +3890,8 @@ mod tests {
                     snapshot_digest: "digest".into(),
                 },
                 registry_generation: 11,
-                capability_id: CapabilityId::from("fs.read"),
-                action_id: ActionId::from("fs.read.invoke"),
+                capability_id: CapabilityId::from(WORKSPACE_FILES_MODULE_ID),
+                action_id: ActionId::from("workspace.files/read"),
                 role_provider: None,
                 state: test_state_handle(),
                 resource_bindings: vec![nomifun_agent_contracts::TypedResourceBinding {
@@ -3749,7 +3903,6 @@ mod tests {
                     connection_config_ref: None,
                     typed_parameters: Default::default(),
                 }],
-                mcp_tool_lock: None,
             },
             operation: Wave2CapabilityOperation::WorkspaceExecution {
                 input: empty_object(),
@@ -3770,8 +3923,7 @@ mod tests {
 
         let empty_dispatcher = Wave2HostPortDispatcher::empty();
         let mut unsupported = request;
-        unsupported.context.capability_id = CapabilityId::from("fs.write");
-        unsupported.context.action_id = ActionId::from("fs.write.invoke");
+        unsupported.context.action_id = ActionId::from("workspace.files/write");
         unsupported.context.resource_bindings[0].operations = BTreeSet::from(["write".to_owned()]);
         let unavailable = poll_ready(empty_dispatcher.invoke(unsupported))
             .expect_err("unsupported owner-backed action must fail closed");
@@ -3796,12 +3948,11 @@ mod tests {
                         snapshot_digest: "digest".into(),
                     },
                     registry_generation: 1,
-                    capability_id: CapabilityId::from("fs.read"),
-                    action_id: ActionId::from("fs.read.invoke"),
+                    capability_id: CapabilityId::from(WORKSPACE_FILES_MODULE_ID),
+                    action_id: ActionId::from("workspace.files/read"),
                     role_provider: None,
                     state: test_state_handle(),
                     resource_bindings: Vec::new(),
-                    mcp_tool_lock: None,
                 },
                 operation: Wave2CapabilityOperation::WorkspaceExecution {
                     input: empty_object(),
@@ -3811,7 +3962,7 @@ mod tests {
         assert_eq!(result.code, CAPABILITY_UNAVAILABLE);
         assert_eq!(
             result.message,
-            "no production host adapter is bound for fs.read"
+            "no production host adapter is bound for workspace.files"
         );
 
         let kernel_error = wave2_host_error_to_kernel(Wave2HostPortError::new(
