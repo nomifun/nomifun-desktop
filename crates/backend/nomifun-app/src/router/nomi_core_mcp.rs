@@ -158,7 +158,8 @@ impl McpRuntimeBindingSource for NomiCoreMcpRuntimeBindingSource {
             || !resource.typed_parameters.is_empty()
             || !resource.operations.contains("connect")
             || !resource.operations.contains("invoke")
-            || lock.materialization_revision != 1
+            || lock.materialization_revision
+                != nomifun_mcp::MCP_TOOL_MATERIALIZATION_REVISION
         {
             return Err(error(
                 "MCP_BINDING_INVALID",

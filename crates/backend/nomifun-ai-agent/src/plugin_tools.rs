@@ -21,7 +21,7 @@ use nomi_tools::{
 use nomi_types::tool::{JsonSchema, ToolResult};
 use nomifun_agent_contracts::{
     ActionId, AgentSessionId, CapabilityActionDescriptor, CapabilityConsumer,
-    CapabilityId, CapabilityKind, CapabilityManifest, CanonicalErrorCode,
+    CapabilityId, CapabilityManifest, CanonicalErrorCode,
     CanonicalSchemaRef, ContributionSourceKind,
     CorrelationId, DigestHex, EffectClass, IdempotencyKey, OperationId,
     PluginSourceKind, PrincipalRef, ResolvedCapability,
@@ -58,18 +58,188 @@ const MAX_INITIAL_CAPABILITY_CONTEXT_BYTES: usize = 64 * 1024;
 /// their existing owners, not granted by this shape check.
 pub fn supports_nomi_plugin_capability(manifest: &CapabilityManifest) -> bool {
     manifest.supports_consumer(CapabilityConsumer::Agent)
-        && match manifest.kind {
-            CapabilityKind::Tool => manifest
-                .contributions
-                .actions
-                .iter()
-                .any(|action| action.presentation == ToolPresentationKind::FunctionTool)
-                || crate::tool_discovery::supports(manifest),
-            CapabilityKind::ContextContributor => {
-                manifest.contributions.context_schema_refs.len() == 1
-            }
-            _ => false,
+        && (has_function_tool_action(manifest)
+            || manifest.contributions.actions == [crate::tool_discovery::action()]
+            || manifest.contributions.context_schema_refs.len() == 1)
+}
+
+fn has_function_tool_action(manifest: &CapabilityManifest) -> bool {
+    manifest
+        .contributions
+        .actions
+        .iter()
+        .any(|action| action.presentation == ToolPresentationKind::FunctionTool)
+}
+
+fn middleware_phase(manifest: &CapabilityManifest) -> Option<&'static str> {
+    nomifun_agent_contracts::tool_middleware::phase_for_actions(
+        &manifest.contributions.actions,
+    )
+}
+
+fn exact_context_schema_ref(
+    manifest: &CapabilityManifest,
+) -> Result<Option<CanonicalSchemaRef>, NomiPluginToolError> {
+    match manifest.contributions.context_schema_refs.as_slice() {
+        [] => Ok(None),
+        [schema] => Ok(Some(schema.clone())),
+        _ => Err(NomiPluginToolError::Contract(format!(
+            "capability {} exposes multiple Context schemas to a single Nomi consumer",
+            manifest.id.as_ref()
+        ))),
+    }
+}
+
+fn exact_event_schema_ref(
+    manifest: &CapabilityManifest,
+) -> Result<Option<CanonicalSchemaRef>, NomiPluginToolError> {
+    match manifest.contributions.event_schema_refs.as_slice() {
+        [] => Ok(None),
+        [schema] => Ok(Some(schema.clone())),
+        _ => Err(NomiPluginToolError::Contract(format!(
+            "capability {} exposes multiple Event schemas to a single Nomi lifecycle consumer",
+            manifest.id.as_ref()
+        ))),
+    }
+}
+
+fn has_lifecycle_contribution(manifest: &CapabilityManifest) -> bool {
+    !manifest.contributions.event_schema_refs.is_empty()
+        || !manifest.contributions.context_schema_refs.is_empty()
+        || middleware_phase(manifest).is_some()
+        || (manifest.contributions.actions.is_empty()
+            && !manifest.contributions.resource_kinds.is_empty())
+}
+
+fn is_turn_middleware(
+    compiled: &CompiledSnapshot,
+    manifest: &CapabilityManifest,
+) -> bool {
+    middleware_phase(manifest).is_some()
+        || (manifest.contributions.context_schema_refs.len() == 1
+            && manifest.contributions.event_schema_refs.is_empty())
+        || compiled
+            .content()
+            .middleware_order
+            .contains(&manifest.id)
+}
+
+#[cfg(test)]
+mod kind_invariance_tests {
+    use super::*;
+
+    fn schema_ref(name: &str) -> CanonicalSchemaRef {
+        format!("schema://kind-invariance/{name}@1#{}", "a".repeat(64)).into()
+    }
+
+    fn mixed_manifest(kind: nomifun_agent_contracts::CapabilityKind) -> CapabilityManifest {
+        CapabilityManifest {
+            id: "example.mixed".into(),
+            contribution_id: "capability:example.mixed".into(),
+            version: "1.0.0".into(),
+            kind,
+            package: nomifun_agent_contracts::PackageRef {
+                id: "example.package".into(),
+                version: "1.0.0".into(),
+            },
+            display: nomifun_agent_contracts::LocalizedMetadata {
+                name: "Mixed module".into(),
+                description: "Action, Context, and Event contributions".into(),
+                localized_names: BTreeMap::new(),
+                localized_descriptions: BTreeMap::new(),
+            },
+            requires: Vec::new(),
+            conflicts: Vec::new(),
+            supported_surfaces:
+                nomifun_agent_contracts::capability_module_surface_declarations(
+                    ["desktop"],
+                    [CapabilityConsumer::Agent],
+                    nomifun_agent_contracts::CapabilityAuthoringPolicy::Direct,
+                ),
+            requires_runtime_features: Vec::new(),
+            supported_platforms: vec![nomifun_agent_contracts::PlatformConstraint::Any],
+            config_schema: StrictJsonValue(serde_json::json!({
+                "type": "object",
+                "additionalProperties": false
+            })),
+            contributions: nomifun_agent_contracts::CapabilityContributions {
+                actions: vec![CapabilityActionDescriptor {
+                    action_id: "example.mixed/read".into(),
+                    input_schema: schema_ref("action-input"),
+                    output_schema: schema_ref("action-output"),
+                    effect_class: EffectClass::ReadLocal,
+                    presentation: ToolPresentationKind::FunctionTool,
+                }],
+                context_schema_refs: vec![schema_ref("context")],
+                event_schema_refs: vec![schema_ref("event")],
+                resource_kinds: BTreeSet::from(["example_resource".into()]),
+                host_ports: vec![nomifun_agent_contracts::HostPortRef {
+                    id: "host.example.mixed".into(),
+                    version: "1.0.0".into(),
+                }],
+                ..Default::default()
+            },
         }
+    }
+
+    fn presentation_kinds() -> [nomifun_agent_contracts::CapabilityKind; 10] {
+        use nomifun_agent_contracts::CapabilityKind as Kind;
+        [
+            Kind::Tool,
+            Kind::ContextContributor,
+            Kind::ResourceProvider,
+            Kind::EventSource,
+            Kind::EventConsumer,
+            Kind::TurnMiddleware,
+            Kind::Transport,
+            Kind::Scheduler,
+            Kind::BackgroundService,
+            Kind::UiContribution,
+        ]
+    }
+
+    #[test]
+    fn mixed_module_consumers_are_invariant_to_presentation_kind() {
+        for kind in presentation_kinds() {
+            let manifest = mixed_manifest(kind);
+            assert!(supports_nomi_plugin_capability(&manifest));
+            assert!(has_function_tool_action(&manifest));
+            assert_eq!(
+                exact_context_schema_ref(&manifest).unwrap(),
+                Some(schema_ref("context"))
+            );
+            assert_eq!(
+                exact_event_schema_ref(&manifest).unwrap(),
+                Some(schema_ref("event"))
+            );
+            assert!(has_lifecycle_contribution(&manifest));
+            assert_eq!(
+                lifecycle_schema_ref(&manifest).unwrap(),
+                Some(schema_ref("event"))
+            );
+        }
+    }
+
+    #[test]
+    fn discovery_and_middleware_phases_ignore_presentation_kind() {
+        for kind in presentation_kinds() {
+            let mut discovery = mixed_manifest(kind);
+            discovery.contributions.actions = vec![crate::tool_discovery::action()];
+            assert!(crate::tool_discovery::supports(&discovery));
+            assert!(supports_nomi_plugin_capability(&discovery));
+
+            let mut middleware = mixed_manifest(kind);
+            middleware.contributions.actions = vec![crate::model_middleware::action()];
+            middleware.contributions.context_schema_refs.clear();
+            middleware.contributions.event_schema_refs.clear();
+            assert_eq!(middleware_phase(&middleware), Some("before_model"));
+            assert!(has_lifecycle_contribution(&middleware));
+            assert_eq!(
+                lifecycle_schema_ref(&middleware).unwrap(),
+                Some(crate::model_middleware::action().input_schema)
+            );
+        }
+    }
 }
 
 tokio::task_local! {
@@ -284,7 +454,6 @@ impl NomiPlatformBuiltinToolAdmission {
             };
             if target.source.source_kind != PluginSourceKind::Bundled
                 || target.contribution_lock.source_kind != ContributionSourceKind::McpBinding
-                || target.manifest.kind != CapabilityKind::Tool
                 || !target.manifest.supports_consumer(CapabilityConsumer::Agent)
                 || action.presentation != ToolPresentationKind::FunctionTool
                 || registry.mcp_for_capability(&id).is_none()
@@ -387,8 +556,7 @@ fn validate_platform_builtin_context_target(
             manifest.id.as_ref()
         )));
     }
-    if manifest.kind != CapabilityKind::ContextContributor
-        || !manifest.supports_consumer(CapabilityConsumer::Agent)
+    if !manifest.supports_consumer(CapabilityConsumer::Agent)
         || manifest.contributions.context_schema_refs.len() != 1
     {
         return Err(NomiPluginToolError::Contract(format!(
@@ -415,32 +583,53 @@ fn validate_platform_builtin_context_target(
 fn lifecycle_schema_ref(
     manifest: &CapabilityManifest,
 ) -> Result<Option<CanonicalSchemaRef>, NomiPluginToolError> {
-    let refs = match manifest.kind {
-        CapabilityKind::EventSource => &manifest.contributions.event_schema_refs,
-        CapabilityKind::TurnMiddleware => {
-            &manifest.contributions.context_schema_refs
-        }
-        CapabilityKind::Transport
-        | CapabilityKind::ResourceProvider
-        | CapabilityKind::BackgroundService => return Ok(None),
-        _ => {
+    if let Some(schema) = exact_event_schema_ref(manifest)? {
+        return Ok(Some(schema));
+    }
+    if let Some(schema) = exact_context_schema_ref(manifest)? {
+        return Ok(Some(schema));
+    }
+    if middleware_phase(manifest).is_some() {
+        let [action] = manifest.contributions.actions.as_slice() else {
             return Err(NomiPluginToolError::Contract(format!(
-                "{} is not a supported Nomi lifecycle capability",
+                "middleware capability {} must freeze one exact phase Action",
                 manifest.id.as_ref()
             )));
-        }
-    };
-    let [schema_ref] = refs.as_slice() else {
-        return Err(NomiPluginToolError::Contract(format!(
-            "lifecycle capability {} must declare exactly one canonical schema for its kind",
-            manifest.id.as_ref()
-        )));
-    };
-    Ok(Some(schema_ref.clone()))
+        };
+        return Ok(Some(action.input_schema.clone()));
+    }
+    if manifest.contributions.actions.is_empty()
+        && !manifest.contributions.resource_kinds.is_empty()
+    {
+        return Ok(None);
+    }
+    Err(NomiPluginToolError::Contract(format!(
+        "{} has no supported Nomi lifecycle contribution",
+        manifest.id.as_ref()
+    )))
 }
 
-/// Exact host invocation for a bundled non-Tool Session lifecycle
-/// contribution.
+fn turn_middleware_schema_ref(
+    manifest: &CapabilityManifest,
+) -> Result<CanonicalSchemaRef, NomiPluginToolError> {
+    if middleware_phase(manifest).is_some() {
+        let [action] = manifest.contributions.actions.as_slice() else {
+            return Err(NomiPluginToolError::Contract(format!(
+                "middleware capability {} must freeze one exact phase Action",
+                manifest.id.as_ref()
+            )));
+        };
+        return Ok(action.input_schema.clone());
+    }
+    exact_context_schema_ref(manifest)?.ok_or_else(|| {
+        NomiPluginToolError::Contract(format!(
+            "middleware capability {} has no canonical Context schema",
+            manifest.id.as_ref()
+        ))
+    })
+}
+
+/// Exact host invocation for one bundled Session lifecycle contribution.
 #[derive(Clone, Debug)]
 pub struct NomiPlatformBuiltinLifecycleInvocation {
     pub principal: PrincipalRef,
@@ -472,9 +661,9 @@ pub trait NomiPlatformBuiltinLifecycleInvoker: Send + Sync {
     }
 }
 
-/// Exact admission for bundled Event/Transport/TurnMiddleware lifecycle
-/// owners. Registration metadata alone is insufficient; every admitted ID is
-/// locked to the current materialized target and one host-owned invoker.
+/// Exact admission for bundled lifecycle contribution owners. Registration
+/// metadata alone is insufficient; every admitted ID is locked to the current
+/// materialized target and one host-owned invoker.
 #[derive(Clone)]
 pub struct NomiPlatformBuiltinLifecycleAdmission {
     targets: Arc<BTreeMap<CapabilityId, MaterializedCapability>>,
@@ -555,20 +744,15 @@ fn validate_platform_builtin_lifecycle_target(
         )));
     }
     if !manifest.supports_consumer(CapabilityConsumer::Agent)
-        || !matches!(
-            manifest.kind,
-            CapabilityKind::EventSource
-                | CapabilityKind::Transport
-                | CapabilityKind::TurnMiddleware
-                | CapabilityKind::ResourceProvider
-                | CapabilityKind::BackgroundService
-        )
+        || !has_lifecycle_contribution(manifest)
     {
         return Err(NomiPluginToolError::Contract(format!(
             "approved PlatformBuiltin {} is not an Agent lifecycle capability",
             manifest.id.as_ref()
         )));
     }
+    exact_event_schema_ref(manifest)?;
+    exact_context_schema_ref(manifest)?;
     let registration = registry
         .plugins
         .get(&capability.mount_id)
@@ -599,15 +783,8 @@ fn validate_platform_builtin_tool_target(
             manifest.id.as_ref()
         )));
     }
-    if manifest.kind != CapabilityKind::Tool
-        || !manifest.supports_consumer(CapabilityConsumer::Agent)
-        || !manifest
-            .contributions
-            .actions
-            .iter()
-            .any(|action| {
-                action.presentation == ToolPresentationKind::FunctionTool
-            })
+    if !manifest.supports_consumer(CapabilityConsumer::Agent)
+        || !has_function_tool_action(manifest)
     {
         return Err(NomiPluginToolError::Contract(format!(
             "approved PlatformBuiltin {} is not an Agent FunctionTool",
@@ -2114,8 +2291,8 @@ impl KernelNomiPluginToolSession {
                 })?;
             validate_exact_target(resolved, current)?;
             let manifest = &current.manifest;
-            if manifest.kind != CapabilityKind::Tool
-                || !manifest.supports_consumer(CapabilityConsumer::Agent)
+            if !manifest.supports_consumer(CapabilityConsumer::Agent)
+                || !has_function_tool_action(manifest)
             {
                 continue;
             }
@@ -2401,20 +2578,21 @@ async fn assemble_initial_capability_context(
                 version: resolved.capability.version.clone(),
             })?;
         validate_exact_target(resolved, current)?;
-        if current.manifest.kind != CapabilityKind::ContextContributor {
+        if current.manifest.contributions.context_schema_refs.is_empty() {
             if managed_plugin {
-                // Tools use the Tool consumer, never the prompt path.
+                // A mixed Module without Context contributions still uses its
+                // Action consumers; it never enters the prompt path.
                 continue;
             }
             return Err(NomiPluginToolError::Contract(format!(
-                "approved initial context {} is no longer a ContextContributor",
+                "approved initial context {} no longer publishes Context",
                 resolved.capability.id.as_ref()
             )));
         }
         if !current.manifest.supports_consumer(CapabilityConsumer::Agent) {
             continue;
         }
-        if !supports_nomi_plugin_capability(&current.manifest) {
+        if current.manifest.contributions.context_schema_refs.len() != 1 {
             return Err(NomiPluginToolError::Contract(format!(
                 "initial ContextContributor {} must declare one canonical context schema",
                 resolved.capability.id.as_ref()
@@ -2515,7 +2693,7 @@ async fn assemble_initial_platform_builtin_lifecycle(
                 version: resolved.capability.version.clone(),
             })?;
         validate_exact_target(resolved, current)?;
-        if current.manifest.kind == CapabilityKind::TurnMiddleware {
+        if is_turn_middleware(compiled, &current.manifest) {
             // TurnMiddleware is evaluated by the engine's per-turn context
             // contributor below, not frozen into the runtime-build prompt.
             continue;
@@ -2574,14 +2752,14 @@ fn turn_middleware_identities(
                 capability_id: resolved.capability.id.clone(),
                 version: resolved.capability.version.clone(),
             })?;
-        if current.manifest.kind != CapabilityKind::TurnMiddleware {
+        if !is_turn_middleware(compiled, &current.manifest) {
             continue;
         }
         validate_exact_target(resolved, current)?;
         identities.push(NomiLifecycleIdentity {
             resolved_snapshot_ref: compiled.snapshot_ref().clone(),
             resolved_capability: resolved.clone(),
-            schema_ref: lifecycle_schema_ref(&current.manifest)?,
+            schema_ref: Some(turn_middleware_schema_ref(&current.manifest)?),
         });
     }
     identities.sort_by(|left, right| {
@@ -2609,9 +2787,14 @@ async fn lifecycle_context_contributors(
                 capability_id: resolved.capability.id.clone(),
                 version: resolved.capability.version.clone(),
             })?;
+        let schema_ref = if is_turn_middleware(compiled, &current.manifest) {
+            Some(turn_middleware_schema_ref(&current.manifest)?)
+        } else {
+            lifecycle_schema_ref(&current.manifest)?
+        };
         let invocation = lifecycle_invocation(
             compiled, owner, agent_session_id, state_scope_key, resolved,
-            lifecycle_schema_ref(&current.manifest)?,
+            schema_ref,
             OperationId::from(format!("nomi-lifecycle-prepare:{}:{}", agent_session_id.as_ref(), resolved.capability.id.as_ref())),
         )?;
         if let Some(contributor) = admission.invoker.context_contributor(invocation).await.map_err(NomiPluginToolError::Contract)? {
