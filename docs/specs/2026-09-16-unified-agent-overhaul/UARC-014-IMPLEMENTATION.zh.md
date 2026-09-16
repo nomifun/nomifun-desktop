@@ -1,7 +1,8 @@
 # UARC-014 AgentPreset vNext Compiler 与通用 Capability Projection 实施记录
 
 > 开始 barrier：`e7babfd127c5e29d05a18e323243ae5b9b7765eb`
-> 实现提交：待提交
+> 实现提交：`3983deff110f7e22b4eb85b6cc8ce00e9e8c4009`
+> Wave 1 gate 修复提交：`8afc40c7a`
 > 平台：共享 Rust contract/compiler；Windows 执行工程验证
 
 ## 交付

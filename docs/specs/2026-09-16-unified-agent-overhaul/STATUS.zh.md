@@ -2,7 +2,7 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-17
-> 当前阶段：Wave 1 / UARC-014 active
+> 当前阶段：Wave 2 / feature lanes ready
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
@@ -10,8 +10,10 @@
 > UARC-011 实现提交：`fa164520f72a053e8e244721cb9682bc58b1269b`
 > UARC-012 实现提交：`82954016810ed5fabe48248adc4952d2bd5f199e`
 > UARC-013 实现提交：`5f317024d63c6845d896d379c201254101410d1b`
+> UARC-014 实现提交：`3983deff110f7e22b4eb85b6cc8ce00e9e8c4009`
+> Wave 1 gate 修复提交：`8afc40c7a`
 > 当前主机：Windows
-> Initiative 状态：`active / Wave 1 shared contracts`
+> Initiative 状态：`active / Wave 2 feature implementation`
 
 ## 1. 当前事实
 
@@ -25,9 +27,13 @@
 - 当前源码已经包含 macOS 独立 CEF host、原生 fixture 与部分底层验证；生产注入、产品会话闭环和
   UARC 新 Browser Resource 模型适配仍未完成。UARC-061 必须复用这套基线，不得回退到 WKWebView。
 - 产品组合只安装一个 `nomifun.nomi` provider/factory，旧 Nomi factory 与 `nomifun.coding` family
-  已不可达；旧实现源码等待 `UARC-020/052` 提取与物理删除。旧 Capability IDs 仍待 UARC-014+。
+  已不可达；旧实现源码等待 `UARC-020/052` 提取与物理删除。
+- AgentPreset/API 已删除 Runtime selector；Kernel/Control Plane/App projection 按 contribution 编译，
+  不再用 Runtime family 或 Capability ID 映射决定支持。136/136 旧 ID 已有机器可验退役路线，现存
+  Domain/UI migration input 分别归 `UARC-020..053`，没有兼容翻译器。
 - canonical `/api/agent-sessions` 已切换 generation 5 Store；旧领域入口等待后续 wave/cutover 删除。
-- Wave 1 的 UARC-010/011/012/013 已有 Windows 定向集成证据；完整产品 gate 尚未运行。
+- Wave 1 的 UARC-010/011/012/013/014 已集成；Windows 静态、UI、Desktop 与 debug native build
+  milestone 已通过，Core workspace 的唯二首失败是 `UARC-022` 的 `skill.hooks` Context factory 迁移。
 - 当前没有本轮源码重构的 macOS 编译、原生或打包证据。
 
 ## 2. 已确认产品决定
@@ -58,7 +64,10 @@
 | `UARC-011` | integrated | Integration | verified | n/a | generation 5 Store、main migration、effect ledger、reset gate 已闭合 |
 | `UARC-012` | integrated | Integration | verified | n/a | 单一 AgentSession owner、完整生命周期 API 与 exact receipt 已闭合 |
 | `UARC-013` | integrated | Integration | verified | n/a | 单一官方 provider/factory、Driver lifecycle 与 typed host ports 已闭合 |
-| `UARC-014` | active | Integration | pending | n/a | AgentPreset vNext Compiler 与通用 capability projection 实施中 |
+| `UARC-014` | integrated | Integration | verified | n/a | Runtime selector 删除、通用 Compiler/projection、136-ID retirement 已闭合 |
+| `UARC-020` | ready | Feature Runtime | pending | pending | 自适应单 Runtime 与长程 Coding；从 Wave 1 barrier 启动 |
+| `UARC-021` | ready | Feature Workspace | pending | pending | Workspace/VCS/Process/Artifact modules；从 Wave 1 barrier 启动 |
+| `UARC-022` | ready | Feature Extensions | pending | pending | Skill/MCP/Plugin/Connector modules；从 Wave 1 barrier 启动 |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -92,7 +101,13 @@
 | UARC-010 Contracts/API/Kernel | 103 + 533 + 60 passed | Module/Action/authoring/Snapshot authority gate |
 | UARC-010 Session/Engine/Plugin consumers | 25 + 14 + 40 passed | shared consumer regression |
 | UARC-010 contract generator/rustfmt/boundary | passed | generated schema and reachability consistent |
-| Control Plane transition probe | 48/50 passed | 2 old kind/direct-middleware assumptions owned by `UARC-014` |
+| UARC-014 Contracts/API/Kernel/Control Plane | 107 + 534 + 60 + 48 passed | generic contribution Compiler 与 136/136 retirement gate |
+| UARC-014 AI Agent/Engine Core/App focused | 545 + 14 + 19 passed | single provider、projection、middleware、state regression |
+| UARC-014 App compile/generator/boundary | lib/bin/tests + generator passed | selector 45→21；legacy matches 4,094→3,947 |
+| Wave 1 full UI | 3,575 passed / 0 failed | source HEAD test drift repaired；renderer behavior unchanged |
+| Wave 1 Desktop/native debug | 144 passed、3 environment ignored；`build:fast` passed | Windows desktop binary produced |
+| Wave 1 Core workspace transition | stopped at domain-wave1 9/11 | 2 `skill.hooks` Context factory failures owned by `UARC-022` |
+| App full transition | 444/497 passed | 27 UARC-021 + 26 UARC-022 failures；无 UARC-014 Runtime/Compiler failure |
 | UARC-011 Contracts/Store | 105 + 27 passed | empty baseline, Turn/Event/Effect/Resource invariants |
 | UARC-011 DB reset/schema/migration | 3 + 20 + 5 passed | non-Agent preservation and main SQLite parity |
 | UARC-011 retained root consumer | 14 passed | temporary alias remains owned by `UARC-054` |
@@ -121,21 +136,22 @@
 
 - UARC 实施无产品决定 blocker。
 - macOS 任务需要可用 Mac 主机；在主机可用前状态保持 `pending`，不能标完成。
-- Wave 0 已收口并释放串行 `UARC-010`；并行 Feature tasks 仍须等待全部 Wave 1 barrier。
+- Wave 1 barrier 已收口；`UARC-020/021/022` 写集互斥并已释放，Integration 仍独占共享合同、生成物、
+  状态台账与合并。
 - `nomi-process-runtime --lib` 默认并行样本存在 ConPTY serial-group 挂起；已归 `UARC-021`，不阻塞
   Wave 1，但最终 gate 前必须闭合。
-- UARC-010 后 Control Plane 有两项旧语义测试等待 `UARC-014`：kind-only Context 和 direct
-  TurnMiddleware；这是已登记的串行迁移，不是恢复兼容的理由。
-- UARC-013 的 App 全量 transition probe 为 455/515；60 项均是空 Action grant、kind-only Context
-  factory 或旧 Wave2 schema/MCP fixture，归 `UARC-014/021/022`，没有 Runtime provider/Driver 失败。
+- UARC-014 后 App 全量 transition probe 为 444/497：27 项旧 Workspace/Process/Git payload 归
+  `UARC-021`，26 项 Skill/MCP/Plugin/Robot fixture 归 `UARC-022`；不恢复 selector、kind authority 或
+  broad proxy 来伪造全绿。
 - canonical `/api/agent-sessions` 已只写 generation 5；Cron/Channel/AutoWork/Companion/IDMM/
   AgentExecution/Remote 的旧 Conversation writers/readers 仍由 `UARC-033/034/051/054` 迁移删除。
   Fresh-v4 root coordinator aliases 仅为 `UARC-054` 保留。
 
 ## 8. Next ready tasks
 
-1. `UARC-014`：删除 Runtime selector/旧 Capability IDs，并让 Compiler/投影完全 contribution-driven。
-2. Wave 1 全部收口前不得启动 Feature tasks。
+1. `UARC-020`：自适应单 Runtime 与长程 Coding。
+2. `UARC-021`：Workspace/VCS/Process/Artifact modules。
+3. `UARC-022`：Skill/MCP/Plugin/Connector modules。
 
 ## 9. 状态更新模板
 
@@ -338,3 +354,27 @@
 - Not run: no UARC-014 implementation gate yet.
 - Remaining/blocker: replace stale fixtures and mappings without weakening exact Action grants. No blocker.
 - Next ready tasks: none until UARC-014 and the Wave 1 barrier complete.
+
+### 2026-09-17 UARC-014 integrated and Wave 1 gate complete
+
+- Barrier/source: UARC-013 closeout `e7babfd127`; implementation
+  `3983deff110f7e22b4eb85b6cc8ce00e9e8c4009`; milestone gate repair `8afc40c7a`.
+- Owner/write set: Integration; exact Contracts/API/Compiler/Kernel/App projection inputs, generated artifacts,
+  and the minimal source-HEAD gate repairs now enumerated in the manifest.
+- Changed: contribution-driven Snapshot compile and middleware order, source-neutral binding projection, one fixed
+  Runtime provider, exact 136-ID retirement manifest, and stable Windows milestone tests.
+- Deleted: Preset/API Runtime selector and create-session binding response, open Runtime selector/catalog types,
+  Coding profile authority inflation, handwritten Nomi Capability mapping, kind-driven middleware authority and
+  unused Compiler compatibility parameters.
+- Retained + reason: exact Snapshot/runtime build binding, preview diagnostics and existing Domain migration inputs;
+  every remaining old ID/runtime/store path has a later manifest owner and no compatibility translator was added.
+- Tests: Contracts 107, API 534, Kernel 60, Control Plane 48, AI Agent 545, Engine Core 14, App focused 19,
+  Browser Engine 296, Computer 98, UI 3,575 and Desktop 144 passed; generator, App lib/bin/tests compile,
+  `bun run check`, UARC boundary and `build:fast` passed.
+- Windows: verified for Wave 1 shared contracts, UI/static milestone, Desktop test target and debug native binary.
+- macOS: not applicable to UARC-014; no macOS compile/native/package evidence claimed.
+- Not run: release installer signing/package and real-window visual interaction, because Wave 1 changed no product
+  layout or packaging contract; those remain required at `UARC-050/060/063`.
+- Remaining/blocker: no UARC-014 blocker. Full App remains 444/497 and Core workspace first stops at
+  domain-wave1 9/11; all 53 App failures plus both Core failures are exact UARC-021/022 migration inputs.
+- Next ready tasks: `UARC-020`, `UARC-021`, `UARC-022`; at most three Feature workers, all from the next barrier.
