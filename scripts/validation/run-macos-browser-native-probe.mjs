@@ -13,6 +13,8 @@ const root=resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const args=process.argv.slice(2);
 function option(name, fallback) { const index=args.indexOf(name); return index<0 ? fallback : args[index+1]; }
 const probe=option('--probe','input'), transport=option('--transport','appkit');
+const eventSource=option('--event-source','default');
+if (!['default','private','session'].includes(eventSource) || (eventSource !== 'default' && transport !== 'pid')) throw new Error('Use --event-source default|private|session; explicit sources require --transport pid');
 if (!['input','storage','permission'].includes(probe) || !['appkit','pid'].includes(transport)) throw new Error('Use --probe input|storage|permission and --transport appkit|pid');
 const output=resolve(option('--output',resolve(root,'dist/browser-macos-native-probe')));
 const identity=option('--identity','-');
@@ -61,11 +63,12 @@ const server=createServer((request,response)=>{
 });
 await new Promise((res,rej)=>{server.once('error',rej);server.listen(0,'127.0.0.1',res)});
 try {
-  const nativeArgs=['--probe',probe,'--transport',transport,'--fixture-url',`http://127.0.0.1:${server.address().port}/browser_workspace.html`,'--report',report];
+  const nativeArgs=['--probe',probe,'--transport',transport,'--event-source',eventSource,'--fixture-url',`http://127.0.0.1:${server.address().port}/browser_workspace.html`,'--report',report];
   // Requesting OS authorization is explicit, never a side effect of a normal check.
   if(args.includes('--request-event-access')) nativeArgs.push('--request-event-access');
   await run('open',['-W','-n',app,'--args',...nativeArgs]);
   const result=JSON.parse(await readFile(report,'utf8'));
+  if (eventSource !== 'default' && result.eventSource !== eventSource) throw new Error('The reused probe does not implement the requested event source; rebuild the signed probe before validating it');
   console.log(JSON.stringify({report,app,...result},null,2));
   process.exitCode=Number.isInteger(result.exitCode)?result.exitCode:2;
 } finally { await new Promise(resolve=>server.close(resolve)); }
