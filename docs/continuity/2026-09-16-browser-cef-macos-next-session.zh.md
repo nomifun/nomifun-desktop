@@ -8,6 +8,15 @@
 **当前状态是 CEF 核心适配和独立 Mac Host 已有原生证明，但整体跨平台开发尚未全部完成。**
 下方分别列出剩余开发和后续验收，不能把开发缺口归类成“只是没测”。
 
+## 远端恢复检查点
+
+- 暂停日期：2026-09-16。用户将在未来另选时间主动重启此工作；本次没有创建定时任务或后台任务。
+- 恢复分支：`rf/agent-capability-platform-v2`，远端为 `origin/rf/agent-capability-platform-v2`。
+- macOS CEF 代码检查点：`4899abc20`（`feat(browser): checkpoint independent macOS CEF host`）。
+- 推送前已将远端后续 4 个 UI 提交普通合并到本地，合并提交为 `883741915`；没有 reset、rebase、force push 或丢弃任一侧历史。
+- 本文件的提交是本次暂停时的最终恢复入口。未来恢复时先 `git fetch`，核对当前分支、工作区和远端分歧，再阅读本文件及实施记录；不要假定历史工作目录或上述 SHA 仍是最新远端 HEAD。
+- 本次暂停表示保存开发检查点，不表示 macOS Browser 已上线，也不表示正式产品验收已通过。
+
 ## 固定架构与背景
 
 - Windows 保留 WebView2、COM/CDP 宿主和 wry child-close 补丁；Windows 目标没有 CEF 依赖。
