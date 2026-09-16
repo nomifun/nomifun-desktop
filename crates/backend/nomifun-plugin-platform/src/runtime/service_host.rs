@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -24,7 +24,14 @@ pub struct PluginRuntimeCallCancellation {
     canceled: Arc<AtomicBool>,
 }
 
+impl PartialEq for PluginRuntimeCallCancellation {
+    fn eq(&self, other: &Self) -> bool { Arc::ptr_eq(&self.canceled, &other.canceled) }
+}
+
 impl PluginRuntimeCallCancellation {
+    /// Preserve an existing caller signal across the application boundary.
+    pub fn from_shared_flag(canceled: Arc<AtomicBool>) -> Self { Self { canceled } }
+
     pub fn cancel(&self) {
         self.canceled.store(true, Ordering::Release);
     }
@@ -182,7 +189,9 @@ struct ServiceSlot {
     next_generation: u64,
     process: Option<Arc<dyn PluginRuntimeServiceProcess>>,
     state: PluginRuntimeServiceHostState,
-    in_flight: BTreeMap<PluginBridgeCallId, PluginRuntimeCallCancellation>,
+    // The waiting invocation owns the registration. Dropping its future must
+    // not keep a Service permanently busy or require a detached cleanup task.
+    in_flight: BTreeMap<PluginBridgeCallId, Weak<PluginRuntimeCallCancellation>>,
     last_activity_ms: i64,
     consecutive_failures: u32,
 }
@@ -202,10 +211,14 @@ impl ServiceSlot {
     }
 
     fn cancel_all(&mut self) {
-        for cancellation in self.in_flight.values() {
+        for cancellation in self.in_flight.values().filter_map(Weak::upgrade) {
             cancellation.cancel();
         }
         self.in_flight.clear();
+    }
+
+    fn prune_finished_calls(&mut self) {
+        self.in_flight.retain(|_, call| call.strong_count() != 0);
     }
 
     fn active_generation(&self) -> Option<u64> {
@@ -219,6 +232,19 @@ impl ServiceSlot {
             } => Some(*host_generation),
             PluginRuntimeServiceHostState::Running { fence } => Some(fence.host_generation),
             PluginRuntimeServiceHostState::Stopped => None,
+        }
+    }
+}
+
+struct ActiveServiceCall {
+    cancellation: Arc<PluginRuntimeCallCancellation>,
+    completed: bool,
+}
+
+impl Drop for ActiveServiceCall {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.cancellation.cancel();
         }
     }
 }
@@ -535,10 +561,13 @@ impl PluginRuntimeServiceHostPort for InMemoryPluginRuntimeServiceHost {
         cancellation: PluginRuntimeCallCancellation,
         now_ms: i64,
     ) -> PluginRuntimePlatformResult<StrictJsonValue> {
+        if cancellation.is_canceled() {
+            return Err(PluginRuntimePlatformError::Canceled);
+        }
         let slot = self.slot(&spec.plugin_product_id).await.ok_or_else(|| {
             PluginRuntimePlatformError::ServiceUnavailable("Active Service is not bound".into())
         })?;
-        let (process, fence) = {
+        let (process, fence, mut call) = {
             let mut slot = slot.lock().await;
             if slot.spec != *spec {
                 return Err(PluginRuntimePlatformError::StaleServiceGeneration);
@@ -551,20 +580,23 @@ impl PluginRuntimeServiceHostPort for InMemoryPluginRuntimeServiceHost {
                     "Service is waiting for Retry or continuous reconciliation".into(),
                 ));
             }
+            slot.prune_finished_calls();
             if slot.in_flight.contains_key(&call_id) {
                 return Err(PluginRuntimePlatformError::DuplicateBridgeCall(
                     call_id.as_ref().into(),
                 ));
             }
             let (process, fence) = self.ensure_started(&mut slot, now_ms).await?;
-            slot.in_flight.insert(call_id.clone(), cancellation.clone());
+            let call = ActiveServiceCall {
+                cancellation: Arc::new(cancellation.clone()),
+                completed: false,
+            };
+            slot.in_flight.insert(call_id.clone(), Arc::downgrade(&call.cancellation));
             slot.last_activity_ms = now_ms;
-            (process, fence)
+            (process, fence, call)
         };
 
         if cancellation.is_canceled() {
-            let mut slot = slot.lock().await;
-            slot.in_flight.remove(&call_id);
             return Err(PluginRuntimePlatformError::Canceled);
         }
 
@@ -581,10 +613,12 @@ impl PluginRuntimeServiceHostPort for InMemoryPluginRuntimeServiceHost {
             .await;
 
         let mut slot = slot.lock().await;
-        let call_is_current = slot
-            .in_flight
-            .remove(&call_id)
-            .is_some_and(|registered| Arc::ptr_eq(&registered.canceled, &cancellation.canceled));
+        let call_is_current = slot.in_flight.get(&call_id)
+            .is_some_and(|registered| Weak::ptr_eq(registered, &Arc::downgrade(&call.cancellation)));
+        if call_is_current {
+            slot.in_flight.remove(&call_id);
+        }
+        call.completed = true;
         let generation_is_current = matches!(
             &slot.state,
             PluginRuntimeServiceHostState::Running { fence: current } if current == &fence
@@ -613,7 +647,7 @@ impl PluginRuntimeServiceHostPort for InMemoryPluginRuntimeServiceHost {
 
     async fn cancel(&self, plugin_product_id: &PluginProductId, call_id: &PluginBridgeCallId) {
         if let Some(slot) = self.slot(plugin_product_id).await
-            && let Some(cancellation) = slot.lock().await.in_flight.get(call_id)
+            && let Some(cancellation) = slot.lock().await.in_flight.get(call_id).and_then(Weak::upgrade)
         {
             cancellation.cancel();
         }
@@ -657,6 +691,7 @@ impl PluginRuntimeServiceHostPort for InMemoryPluginRuntimeServiceHost {
         let mut reaped = Vec::new();
         for slot in slots {
             let mut slot = slot.lock().await;
+            slot.prune_finished_calls();
             if slot.spec.lifecycle == PluginServiceLifecycle::OnDemand
                 && slot.in_flight.is_empty()
                 && matches!(slot.state, PluginRuntimeServiceHostState::Running { .. })

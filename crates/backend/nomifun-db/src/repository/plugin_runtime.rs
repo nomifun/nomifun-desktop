@@ -497,6 +497,7 @@ pub struct SetPluginRuntimeAutoPublishParams {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenPluginRuntimeSurfaceSessionParams {
+    pub conversation_id: Option<String>,
     pub owner_user_id: String,
     pub plugin_product_id: String,
     pub surface_session_id: String,
@@ -794,6 +795,7 @@ pub trait IPluginRuntimeRepository: Send + Sync {
         &self,
         params: &ResolvePluginRuntimeSurfaceSessionParams,
     ) -> Result<Option<PluginRuntimeSurfaceSessionRow>, DbError>;
+
 
     async fn close_surface_session_cas(
         &self,

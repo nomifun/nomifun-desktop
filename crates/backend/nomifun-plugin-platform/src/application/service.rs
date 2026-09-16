@@ -243,6 +243,17 @@ impl PluginApplicationService {
         Ok(project_library(&inventory))
     }
 
+    pub async fn captured_import_targets(
+        &self, owner_user_id: &str, package_id: &str,
+    ) -> Result<(u64, Vec<PluginProjectSummaryDto>), PluginServiceError> {
+        let inventory = self.repository.inventory(owner_user_id).await?;
+        let projects = inventory.projects.iter().filter(|project| project.package_id == package_id)
+            .map(|project| project_summary(project, inventory.candidates.iter().find(|candidate| candidate.project_id == project.project_id)))
+            .collect::<Vec<_>>();
+        if projects.len() > 64 { return Err(PluginServiceError::conflict("too many Projects for captured package identity")); }
+        Ok((inventory.library_revision, projects))
+    }
+
     pub async fn get_project(
         &self,
         owner_user_id: &str,
@@ -1017,6 +1028,33 @@ impl PluginApplicationService {
             .await
     }
 
+    /// Application-owned capture only; not a model or external path bypass.
+    /// Uses ordinary Project/library CAS, import operations and candidate
+    /// publication. It neither applies/enables a Mount nor edits an Agent.
+    pub async fn import_captured(
+        &self, owner_user_id: &str, request: ImportRequest, files: BTreeMap<String, Vec<u8>>,
+    ) -> Result<PluginProjectDetailDto, PluginServiceError> {
+        if request.import_kind != nomifun_api_types::PluginImportKindDto::PrebuiltArtifact {
+            return Err(PluginServiceError::invalid("captured import requires prebuilt artifact kind"));
+        }
+        let reserved_project_id = request.target_project_id.is_none().then(|| Uuid::now_v7().to_string());
+        let _guard = match request.target_project_id.as_deref() {
+            Some(project_id) => self.project_guard(owner_user_id, project_id).await?,
+            None => self.mutation_coordinator.acquire(&PluginOwnerMutationScope::project(
+                PluginProjectId::from(reserved_project_id.as_ref().expect("reserved captured import identity").clone()))?).await?,
+        };
+        if let Some(project_id) = request.target_project_id.as_deref() {
+            let project = self.owned_project(owner_user_id, project_id).await?;
+            if request.expected_project_revision != Some(project.updated_at as u64) {
+                return Err(PluginServiceError::stale("captured import Project revision changed"));
+            }
+        } else if self.repository.inventory(owner_user_id).await?.library_revision != request.expected_library_revision {
+            return Err(PluginServiceError::stale("captured import library revision changed"));
+        }
+        let imported = self.artifacts.import_files(files).await?;
+        self.record_imported_candidate(owner_user_id, request, imported, reserved_project_id).await
+    }
+
     pub async fn export_share(
         &self,
         owner_user_id: &str,
@@ -1238,6 +1276,13 @@ impl PluginApplicationService {
         } else {
             self.artifacts.import_zip(&source).await?
         };
+        self.record_imported_candidate(owner_user_id, request, imported, reserved_project_id).await
+    }
+
+    async fn record_imported_candidate(
+        &self, owner_user_id: &str, request: ImportRequest,
+        imported: crate::application::ImportedPluginArtifact, reserved_project_id: Option<String>,
+    ) -> Result<PluginProjectDetailDto, PluginServiceError> {
         if imported.artifact.artifact_digest.as_ref() != request.expected_bundle_or_artifact_digest
         {
             return Err(PluginServiceError::stale(

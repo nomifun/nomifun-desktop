@@ -110,6 +110,18 @@ async function runMountRequest(mount, action) {
   }
 }
 
+async function runCancellableMountRequest(mount, requestId, action) {
+  return runMountRequest(mount, async () => {
+    const controller = new AbortController();
+    activeRequests.set(requestId, controller);
+    try {
+      return await action(controller.signal);
+    } finally {
+      activeRequests.delete(requestId);
+    }
+  });
+}
+
 async function closeMount(mount) {
   // Retained SDK closures must not bind to a later activation with the same
   // mount_handle_id. Drain calls already sent before publishing MountLoad or
@@ -196,6 +208,24 @@ function sdkFor(mount) {
   });
 }
 
+function dependenciesFor(mount, requestId, signal) {
+  return Object.freeze({
+    invoke: async ({ capabilityId, actionId, callKey, input }) => {
+      if (signal.aborted || !activeRequests.has(requestId)) {
+        throw new Error("DEPENDENCY_PARENT_CLOSED: parent invocation has ended");
+      }
+      return hostCall(mount, {
+        method: "dependency_invoke",
+        params: {
+          mount_handle_id: mount.context.mount_handle_id,
+          parent_request_id: requestId,
+          call: { capability_id: capabilityId, action_id: actionId, call_key: callKey, input: input ?? null },
+        },
+      });
+    },
+  });
+}
+
 async function dispatch(frame) {
   const envelope = frame.envelope;
   if (
@@ -269,20 +299,15 @@ async function dispatch(frame) {
       if (!capability || typeof capability.invoke !== "function") {
         throw new Error("capability contribution is not implemented");
       }
-      return runMountRequest(mount, async () => {
-        const controller = new AbortController();
-        activeRequests.set(requestId, controller);
-        try {
+      return runCancellableMountRequest(mount, requestId, async (signal) => {
           const value = await capability.invoke(Object.freeze({
-            actionId: params.action_id,
-            input: structuredClone(params.input),
-            contribution: structuredClone(params.contribution),
-            signal: controller.signal,
-          }));
-          return { kind: "value", payload: value ?? null };
-        } finally {
-          activeRequests.delete(requestId);
-        }
+          actionId: params.action_id,
+          input: structuredClone(params.input),
+          contribution: structuredClone(params.contribution),
+            signal,
+            dependencies: dependenciesFor(mount, requestId, signal),
+        }));
+        return { kind: "value", payload: value ?? null };
       });
     }
     case "context_contribute": {
@@ -292,11 +317,14 @@ async function dispatch(frame) {
       if (!capability || typeof capability.contributeContext !== "function") {
         throw new Error("context contribution is not implemented");
       }
-      return runMountRequest(mount, async () => {
-        const value = await capability.contributeContext({
+      return runCancellableMountRequest(mount, requestId, async (signal) => {
+        const value = await capability.contributeContext(Object.freeze({
           schemaRef: params.schema_ref,
+          input: structuredClone(params.input ?? { phase: "session_start" }),
           contribution: structuredClone(params.contribution),
-        });
+          signal,
+          dependencies: dependenciesFor(mount, requestId, signal),
+        }));
         return { kind: "value", payload: value ?? null };
       });
     }

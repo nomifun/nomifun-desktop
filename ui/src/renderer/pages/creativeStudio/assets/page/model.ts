@@ -32,7 +32,6 @@ export interface CreativeAssetEditDraft {
   title: string;
   collection: string;
   tags: string[];
-  inLibrary: boolean;
 }
 
 export interface CreativeCollectionRenameDraft {
@@ -95,7 +94,6 @@ export const EMPTY_CREATIVE_TEXT_ASSET_FORM: CreativeTextAssetFormValue = {
   textContent: '',
   collection: '',
   tags: [],
-  inLibrary: true,
 };
 
 const uniqueTrimmedTags = (tags: readonly string[]): string[] => {
@@ -116,7 +114,6 @@ export function buildGlobalCreativeAssetQuery(
 ): Omit<CreativeAssetQuery, 'page' | 'pageSize'> {
   const normalizedSearch = search.trim();
   return {
-    inLibrary: true,
     kind: kind === 'all' ? undefined : kind,
     search: normalizedSearch || undefined,
     sort: 'updated_desc',
@@ -148,7 +145,7 @@ export function manualUploadRejectionMessage(
   switch (rejection) {
     case 'audio_unsupported':
       return translate('creativeStudio.assets.upload.audioUnsupported', {
-        defaultValue: '暂不支持手动上传音频；通过音频工作台生成的音频仍会进入素材库。',
+        defaultValue: '暂不支持手动上传音频；通过音频工作台生成的音频仍会进入资产库。',
       });
     case 'file_too_large':
       return translate('creativeStudio.assets.upload.fileTooLarge', {
@@ -166,7 +163,6 @@ export function creativeAssetEditDraft(asset: CreativeAsset): CreativeAssetEditD
     title: asset.title,
     collection: asset.collection ?? '',
     tags: [...asset.tags],
-    inLibrary: asset.inLibrary,
   };
 }
 
@@ -175,7 +171,6 @@ export function normalizeCreativeAssetEditDraft(draft: CreativeAssetEditDraft): 
     title: draft.title.trim(),
     collection: draft.collection.trim(),
     tags: uniqueTrimmedTags(draft.tags),
-    inLibrary: draft.inLibrary,
   };
 }
 
@@ -187,7 +182,6 @@ export function normalizeCreativeTextAssetForm(
     textContent: value.textContent.trim(),
     collection: value.collection.trim(),
     tags: uniqueTrimmedTags(value.tags),
-    inLibrary: value.inLibrary,
   };
 }
 

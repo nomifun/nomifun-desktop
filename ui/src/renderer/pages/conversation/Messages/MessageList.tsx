@@ -5,6 +5,7 @@
  */
 
 import type { IConversationArtifact } from '@/common/adapter/ipcBridge';
+import { ConversationCreationTaskCards } from '@/renderer/creation/ConversationCreationTasks';
 import type {
   IMessageText,
   IMessageToolCall,
@@ -23,6 +24,8 @@ import { useTranslation } from 'react-i18next';
 import { useLocation } from 'react-router-dom';
 import { uuid } from '@renderer/utils/common';
 import './messages.css';
+import contentStyles from '../components/ConversationContentColumn.module.css';
+import { useConversationColumnRef } from '../components/useConversationColumnRef';
 import HOC from '@renderer/utils/ui/HOC';
 import type { FileChangeInfo } from './MessageFileChanges';
 import { parseDiff } from './MessageFileChanges';
@@ -638,7 +641,7 @@ const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean; hideActi
         data-message-type={message.type}
         data-message-position={message.position}
         className={classNames(
-          'min-w-0 flex items-start message-item [&>div]:max-w-full px-8px max-w-full md:max-w-780px mx-auto',
+          'min-w-0 flex items-start message-item [&>div]:max-w-full',
           message.type,
           {
             'm-t-6px': message.type === 'tips' && message.content.type === 'error',
@@ -1187,6 +1190,7 @@ const MessageList: React.FC<{
     messages: list,
     itemCount: displayList.length,
   });
+  const handleColumnRef = useConversationColumnRef(handleContentRef);
 
   // ── Windowed history: load older messages on scroll-up with a scroll-anchor ──
   const scrollerElRef = useRef<HTMLDivElement | null>(null);
@@ -1356,7 +1360,7 @@ const MessageList: React.FC<{
           key={item.id}
           id={`message-${getProcessedItemAnchorId(item)}`}
           data-testid='turn-process-disclosure'
-          className='min-w-0 message-item px-8px m-t-10px max-w-full md:max-w-780px mx-auto turn_process_disclosure'
+          className='min-w-0 message-item m-t-10px turn_process_disclosure'
           style={highlighted ? highlightStyle : undefined}
         >
           {renderTurnDisclosure(item, highlighted)}
@@ -1369,7 +1373,7 @@ const MessageList: React.FC<{
           key={item.id}
           id={`message-${getProcessedItemAnchorId(item)}`}
           data-testid='turn-process-receipt'
-          className='min-w-0 message-item px-8px m-t-10px max-w-full md:max-w-780px mx-auto process_receipt'
+          className='min-w-0 message-item m-t-10px process_receipt'
           style={highlighted ? highlightStyle : undefined}
         >
           {renderProcessReceipt(item, highlighted)}
@@ -1383,7 +1387,7 @@ const MessageList: React.FC<{
           id={`message-${getProcessedItemAnchorId(item)}`}
           data-conversation-artifact-kind={item.artifact.kind}
           data-testid={`conversation-artifact-${item.artifact.kind}`}
-          className='min-w-0 message-item px-8px m-t-10px max-w-full md:max-w-780px mx-auto'
+          className='min-w-0 message-item m-t-10px'
           style={highlighted ? highlightStyle : undefined}
         >
           {item.artifact.kind === 'cron_trigger' ? (
@@ -1400,7 +1404,7 @@ const MessageList: React.FC<{
           key={item.id}
           id={`message-${getProcessedItemAnchorId(item)}`}
           data-testid='turn-deliverables'
-          className='min-w-0 message-item px-8px m-t-10px max-w-full md:max-w-780px mx-auto turn_deliverables'
+          className='min-w-0 message-item m-t-10px turn_deliverables'
           style={highlighted ? highlightStyle : undefined}
         >
           <TurnDeliverablesCard
@@ -1417,7 +1421,7 @@ const MessageList: React.FC<{
           key={item.id}
           id={`message-${getProcessedItemAnchorId(item)}`}
           data-testid='turn-actions'
-          className='min-w-0 message-item px-8px max-w-full md:max-w-780px mx-auto turn_actions'
+          className='min-w-0 message-item turn_actions'
           style={highlighted ? highlightStyle : undefined}
         >
           <MessageText message={item.message} actionsOnly />
@@ -1430,7 +1434,7 @@ const MessageList: React.FC<{
           key={item.id}
           id={`message-${getProcessedItemAnchorId(item)}`}
           data-testid='turn-live-step'
-          className='min-w-0 message-item px-8px m-t-10px max-w-full md:max-w-780px mx-auto turn_live_step'
+          className='min-w-0 message-item m-t-10px turn_live_step'
         >
           <div className='turn-live-step'>
             <TurnProcessReceipt
@@ -1454,7 +1458,7 @@ const MessageList: React.FC<{
         <div
           key={item.id}
           id={`message-${getProcessedItemAnchorId(item)}`}
-          className={'min-w-0 message-item px-8px m-t-10px max-w-full md:max-w-780px mx-auto ' + item.type}
+          className={'min-w-0 message-item m-t-10px ' + item.type}
           style={highlighted ? highlightStyle : undefined}
         >
           {renderProcessTraceItem(item, 'list', workspaceRoots)}
@@ -1487,21 +1491,24 @@ const MessageList: React.FC<{
       <ConversationQuestionLocator conversation_id={conversationContext?.conversation_id} />
 
       {/* Use PreviewGroup to wrap all messages for cross-message image preview */}
-      <Image.PreviewGroup actionsLayout={['zoomIn', 'zoomOut', 'originalSize', 'rotateLeft', 'rotateRight']}>
+      <Image.PreviewGroup
+        className='conversation-image-preview'
+        actionsLayout={['zoomIn', 'zoomOut', 'originalSize', 'rotateLeft', 'rotateRight']}
+      >
         <ImagePreviewContext.Provider value={{ inPreviewGroup: true }}>
           <div
             ref={handleScrollerRef}
             data-testid='message-list-scroller'
-            className='flex-1 h-full overflow-y-auto pb-10px box-border'
+            className={`flex-1 h-full overflow-y-auto pb-10px box-border ${contentStyles.scroller}`}
             style={{ overflowAnchor: 'none' }}
             onPointerDown={handlePointerDown}
             onScroll={handleScrollWithPaging}
             onWheel={handleWheel}
           >
-            <div ref={handleContentRef} data-testid='message-list-content' style={{ overflowAnchor: 'none' }}>
+            <div ref={handleColumnRef} className={contentStyles.column} data-testid='message-list-content' style={{ overflowAnchor: 'none' }}>
               <div className='h-10px' />
               {displayList.map((item, index) => (
-                <React.Fragment key={item.id}>{renderItem(index, item)}</React.Fragment>
+                <React.Fragment key={item.id}>{renderItem(index, item)}{'position' in item && item.position === 'right' && 'msg_id' in item && item.msg_id ? <ConversationCreationTaskCards messageId={item.msg_id} /> : null}</React.Fragment>
               ))}
               <div className='h-20px' />
             </div>

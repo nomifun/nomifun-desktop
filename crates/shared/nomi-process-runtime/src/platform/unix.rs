@@ -2571,7 +2571,19 @@ impl CleanupJob {
                     self.audit
                         .group_signals
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    match seal_process_group_anchored_by(pgid, anchor_pid) {
+                    #[cfg(target_os = "macos")]
+                    let session_seal = if !self.watchdog_anchors_group && anchor_pid == pgid {
+                        // A prior bounded cleanup may have stopped some jobs.
+                        // Preserve the exact leader and retry the whole session
+                        // before allowing this record to become Sealed/reapable.
+                        unsafe { super::macos_session::seal_owned_session(pgid, None) }
+                            .map_err(io::Error::from_raw_os_error)
+                    } else {
+                        Ok(())
+                    };
+                    #[cfg(not(target_os = "macos"))]
+                    let session_seal: io::Result<()> = Ok(());
+                    match session_seal.and_then(|()| seal_process_group_anchored_by(pgid, anchor_pid)) {
                         Ok(_) => self.group_state = CleanupGroupState::Sealed,
                         Err(error) => errors.push(format!("group SIGKILL failed: {error}")),
                     }
@@ -2911,6 +2923,10 @@ fn spawn_transaction(
     output: Arc<OutputBuffer>,
 ) -> Result<SpawnTransaction, ProcessError> {
     let _gate = lock_spawn_gate(deadline, cancelled)?;
+    #[cfg(target_os = "macos")]
+    if matches!(transport, SpawnTransport::Pty { .. }) {
+        super::macos_session::prepare_session_cleanup().map_err(spawn_failed)?;
+    }
     let platform_permit = platform_lifecycle_poller()
         .map_err(spawn_failed)?
         .reserve()
@@ -4009,6 +4025,14 @@ impl LifecycleJob {
         };
         if gate.phase == SignalPhase::Open {
             gate.phase = SignalPhase::Closing;
+        }
+        #[cfg(target_os = "macos")]
+        if force_kill && !self.watchdog_anchors_group {
+            // The exact session leader is still our unreaped direct child.
+            // Even an earlier force_kill only sealed its root process group;
+            // job-control groups require an independent session-wide proof.
+            unsafe { super::macos_session::seal_owned_session(self.pgid, None) }
+                .map_err(io::Error::from_raw_os_error)?;
         }
         let mut sent_now = false;
         if force_kill && !gate.final_kill_sent {

@@ -241,7 +241,7 @@ export function materializeCanvasPaste(
     const clone = cloneCanvasNode(node);
     const nextGroupId = clone.type === 'group' || !clone.groupId ? null : (idMap.get(clone.groupId) ?? null);
     const nextData =
-      clone.type === 'image' && clone.data.composer?.mentions
+      (clone.type === 'image' || clone.type === 'video') && clone.data.composer?.mentions
         ? {
             ...clone.data,
             composer: {

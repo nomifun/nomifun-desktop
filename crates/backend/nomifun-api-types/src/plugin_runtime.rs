@@ -347,6 +347,25 @@ pub struct SetPluginRuntimeEnabledRequest {
 #[serde(deny_unknown_fields)]
 pub struct OpenPluginRuntimeSurfaceRequest {
     pub plugin_id: String,
+    /// Explicit host UI consent to observe/send/cancel this existing Session.
+    /// Omitted for a normal standalone plugin page. Explicit null is not a grant.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_surface_session_grant")]
+    pub agent_session: Option<PluginAgentSurfaceGrantDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginAgentSurfaceGrantDto {
+    pub agent_session_id: String,
+    /// Optional exact Catalog choice for a replacement Agent page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_capability: Option<crate::ExactCatalogRefDto>,
+    /// Consent applies only to the release displayed by the trusted host UI.
+    pub expected_release_digest: String,
+}
+
+fn deserialize_surface_session_grant<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<PluginAgentSurfaceGrantDto>, D::Error> {
+    PluginAgentSurfaceGrantDto::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -566,6 +585,7 @@ mod tests {
     fn plugin_surface_open_request_is_explicit_and_rejects_extra_authority() {
         let request = serde_json::to_value(OpenPluginRuntimeSurfaceRequest {
             plugin_id: "plugin-1".into(),
+            agent_session: None,
         })
         .unwrap();
         assert_eq!(request, json!({"plugin_id": "plugin-1"}));
@@ -576,6 +596,25 @@ mod tests {
         }))
         .unwrap_err();
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn plugin_surface_session_consent_requires_exact_release_and_no_extra_authority() {
+        let grant = json!({"agent_session_id": "session", "expected_release_digest": "a".repeat(64)});
+        let request: OpenPluginRuntimeSurfaceRequest = serde_json::from_value(json!({
+            "plugin_id": "plugin", "agent_session": grant,
+        })).unwrap();
+        assert_eq!(serde_json::to_value(request.agent_session.unwrap()).unwrap(), grant);
+        for invalid in [
+            serde_json::Value::Null,
+            json!("session"),
+            json!({"agent_session_id": "session"}),
+            json!({"agent_session_id": "session", "expected_release_digest": "a".repeat(64), "owner_user_id": "other"}),
+        ] {
+            assert!(serde_json::from_value::<OpenPluginRuntimeSurfaceRequest>(json!({
+                "plugin_id": "plugin", "agent_session": invalid,
+            })).is_err());
+        }
     }
 
     #[test]

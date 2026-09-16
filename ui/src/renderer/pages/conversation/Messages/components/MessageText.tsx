@@ -467,6 +467,11 @@ const MessageText: React.FC<{
     <>
       <div className={classNames('min-w-0 flex flex-col group', isUserMessage ? 'items-end' : 'items-start')}>
         {cronMeta && <MessageCronBadge meta={cronMeta} />}
+        {message.content.interaction?.kind === 'robot' && (
+          <span className='mb-4px text-11px text-t-tertiary' title={message.content.interaction.robot_id}>
+            {t('nomi.robot.speechSource')}
+          </span>
+        )}
         {isAgentMessage && senderName && (
           <div className='flex items-center gap-6px mb-4px'>
             <AgentMessageAvatar
@@ -494,7 +499,7 @@ const MessageText: React.FC<{
         )}
         {hasRenderableContent && (
           <div
-            className={classNames('min-w-0 [&>p:first-child]:mt-0px [&>p:last-child]:mb-0px md:max-w-780px', {
+            className={classNames('min-w-0 max-w-full [&>p:first-child]:mt-0px [&>p:last-child]:mb-0px', {
               'bg-aou-2 p-6px md:p-8px': isUserMessage || cronMeta,
               'bg-3 p-6px md:p-8px': isAgentMessage,
               'w-full': !(isUserMessage || cronMeta || isAgentMessage),
@@ -537,6 +542,13 @@ const MessageText: React.FC<{
             )}
           </div>
         )}
+        {message.content.observations?.map((observation) => (
+          <div key={observation.image.id} className='mt-8px flex max-w-full flex-col gap-6px rd-8px border border-solid border-arco-2 p-10px'>
+            <span className='text-12px text-t-secondary'>{t('nomi.robot.visualObservation')}</span>
+            <FilePreview path={observation.image.path} readonly />
+            <span className='text-13px whitespace-pre-wrap break-words'>{observation.answer}</span>
+          </div>
+        ))}
         {writebackState && (
           <MessageKnowledgeWriteback
             state={writebackState}

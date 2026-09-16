@@ -848,6 +848,7 @@ impl ToolEfficiencyStats {
                     AgentError::UserAborted => "user_aborted",
                     AgentError::ContextTooLong { .. } => "context_too_long",
                     AgentError::Stagnation(_) => "tool_stagnation",
+                    AgentError::ToolMiddleware(_) => "tool_middleware",
                 },
                 self.model_turn_attempts,
             ),
@@ -960,6 +961,8 @@ pub struct AgentEngine {
     /// dynamic context (knowledge RAG, memory, …) without the engine hard-coding
     /// each source.
     context_contributors: Vec<std::sync::Arc<dyn crate::context_contributor::ContextContributor>>,
+    model_middleware: Vec<std::sync::Arc<dyn crate::model_middleware::ModelRequestMiddleware>>,
+    tool_middleware: Vec<Arc<dyn crate::tool_middleware::ToolCallMiddleware>>,
     /// Optional steering inbox: a shared queue the host manager pushes
     /// mid-turn user interjections into. Drained at two loop boundaries
     /// (after a tool-result message, and when a turn would otherwise end)
@@ -1042,6 +1045,8 @@ impl AgentEngine {
             goal: None,
             stagnation_guard: crate::loop_guard::StagnationGuard::new(crate::engine::STAGNATION_THRESHOLD),
             context_contributors: Vec::new(),
+            model_middleware: Vec::new(),
+            tool_middleware: Vec::new(),
             steering_inbox: None,
             system_resource_inbox: None,
             process_supervisor: None,
@@ -1117,6 +1122,8 @@ impl AgentEngine {
             goal: None,
             stagnation_guard: crate::loop_guard::StagnationGuard::new(crate::engine::STAGNATION_THRESHOLD),
             context_contributors: Vec::new(),
+            model_middleware: Vec::new(),
+            tool_middleware: Vec::new(),
             steering_inbox: None,
             system_resource_inbox: None,
             process_supervisor: None,
@@ -1311,6 +1318,22 @@ impl AgentEngine {
         self.context_contributors.push(contributor);
     }
 
+    /// Register a host-assembled tool gate in its frozen execution order.
+    pub fn register_tool_middleware(
+        &mut self,
+        middleware: Arc<dyn crate::tool_middleware::ToolCallMiddleware>,
+    ) {
+        self.tool_middleware.push(middleware);
+    }
+
+    /// Register a host-assembled request transform in its frozen execution order.
+    pub fn register_model_middleware(
+        &mut self,
+        middleware: std::sync::Arc<dyn crate::model_middleware::ModelRequestMiddleware>,
+    ) {
+        self.model_middleware.push(middleware);
+    }
+
     /// Get a reference to the output sink
     pub fn output(&self) -> &dyn OutputSink {
         self.output.as_ref()
@@ -1453,6 +1476,21 @@ impl AgentEngine {
         &mut self,
         input: &str,
     ) -> Option<Result<crate::commands::CommandResult, anyhow::Error>> {
+        self.handle_command_with_tool_allowlist(input, None).await
+    }
+
+    pub(crate) fn register_command(
+        &mut self,
+        command: Arc<dyn crate::commands::SlashCommand>,
+    ) -> anyhow::Result<()> {
+        self.commands.register_checked(command)
+    }
+
+    async fn handle_command_with_tool_allowlist(
+        &mut self,
+        input: &str,
+        tool_allowlist: Option<&HashSet<String>>,
+    ) -> Option<Result<crate::commands::CommandResult, anyhow::Error>> {
         let input = input.trim();
         let without_slash = input.strip_prefix('/')?;
         let (name, args) = match without_slash.split_once(char::is_whitespace) {
@@ -1462,7 +1500,25 @@ impl AgentEngine {
 
         // find() returns a cloned Arc, so the registry borrow ends here and
         // self can be mutably borrowed for CommandContext below.
-        let cmd = self.commands.find(name)?;
+        let cmd = match self.commands.find(name) {
+            Some(command) => command,
+            None if name.starts_with("skill:") => {
+                return Some(Err(anyhow::anyhow!("Selected Skill command /{name} is not available in this Session")));
+            }
+            None => return None,
+        };
+
+        if let Some(required) = cmd.required_tool() {
+            let permitted = self.tools.get(required).is_some_and(|tool| {
+                tool_allowlist.map_or_else(
+                    || !tool.requires_explicit_route(),
+                    |allowed| allowed.contains(required),
+                ) && (!self.plan_state.is_active || tool.category() == ToolCategory::Info)
+            });
+            if !permitted {
+                return Some(Err(anyhow::anyhow!("Command /{name} requires {required} in the current tool policy")));
+            }
+        }
 
         let mut ctx = crate::commands::CommandContext {
             messages: &mut self.messages,
@@ -1553,6 +1609,7 @@ impl AgentEngine {
             source_message_id,
             tool_allowlist,
             None,
+            None,
         )
         .await
     }
@@ -1561,6 +1618,10 @@ impl AgentEngine {
     /// completion scope. Direct/CLI callers use the ordinary entrypoint above;
     /// decorated desktop turns use this seam to keep adjudication tied to the
     /// raw user request and to union evidence across steering race-tail passes.
+    /// `raw_user_input` is the command source for this pass, before host/RAG
+    /// decoration. Hosts must supply it for decorated content, and supply an
+    /// empty string for automatic continuations that must not replay commands.
+    /// `None` uses the leading content text for ordinary direct/CLI callers.
     pub async fn execute_turn_with_completion_evidence_context(
         &mut self,
         user_content: Vec<ContentBlock>,
@@ -1568,6 +1629,7 @@ impl AgentEngine {
         source_message_id: &str,
         tool_allowlist: Option<&HashSet<String>>,
         completion_context: Option<&mut CompletionEvidenceContext>,
+        raw_user_input: Option<&str>,
     ) -> Result<AgentResult, AgentError> {
         let host_owns_terminal_commit = completion_context.is_some();
         let mut local_completion_context = CompletionEvidenceContext::new(user_content.clone());
@@ -1615,6 +1677,7 @@ impl AgentEngine {
                     source_message_id,
                     tool_allowlist,
                     completion_context,
+                    raw_user_input,
                     &mut efficiency,
                     &mut safe_messages,
                     &mut turn_started,
@@ -1930,17 +1993,19 @@ impl AgentEngine {
         self.commands
             .all()
             .iter()
+            .filter(|cmd| cmd.is_visible())
             .map(|cmd| (cmd.name().to_string(), cmd.description().to_string()))
             .collect()
     }
 
     async fn execute_turn_inner(
         &mut self,
-        user_content: Vec<ContentBlock>,
+        mut user_content: Vec<ContentBlock>,
         msg_id: &str,
         source_message_id: &str,
         tool_allowlist: Option<&HashSet<String>>,
         completion_context: &mut CompletionEvidenceContext,
+        raw_user_input: Option<&str>,
         efficiency: &mut ToolEfficiencyStats,
         safe_messages: &mut Vec<Message>,
         turn_started: &mut bool,
@@ -1955,24 +2020,30 @@ impl AgentEngine {
             ));
         }
 
-        // Slash command interception — before any LLM call. Commands remain
-        // text-only; attaching an image makes the input an ordinary model turn.
-        let command_input = match user_content.as_slice() {
-            [ContentBlock::Text { text }] => Some(text.as_str()),
-            _ => None,
-        };
+        // Resolve explicit package Skills before the provider even when images
+        // or host context accompany the user's command. Never scan attachments
+        // or RAG text for a command. Builtin control commands remain text-only.
+        let command_input = raw_user_input
+            .or_else(|| match user_content.first() {
+                Some(ContentBlock::Text { text }) => Some(text.as_str()),
+                _ => None,
+            })
+            .filter(|input| {
+                matches!(user_content.as_slice(), [ContentBlock::Text { .. }])
+                    || input.trim_start().starts_with("/skill:")
+            });
         if let Some(user_input) = command_input
-            && let Some(result) = self.handle_command(user_input).await
+            && let Some(result) = self.handle_command_with_tool_allowlist(user_input, tool_allowlist).await
         {
             let cmd_name = user_input.split_whitespace().next().unwrap_or(user_input);
-            return match result {
+            match result {
                 Ok(crate::commands::CommandResult::Exit) => {
                     tracing::info!(command = cmd_name, "Slash command executed: exit");
-                    Err(AgentError::UserAborted)
+                    return Err(AgentError::UserAborted);
                 }
                 Ok(crate::commands::CommandResult::Continue) => {
                     tracing::info!(command = cmd_name, "Slash command executed");
-                    Ok(AgentResult {
+                    return Ok(AgentResult {
                         text: String::new(),
                         stop_reason: StopReason::EndTurn,
                         usage: TokenUsage::default(),
@@ -1984,13 +2055,19 @@ impl AgentEngine {
                         cutoff_state_changing: 0,
                         state_changing_tools_advertised: false,
                         completion_adjudication: None,
-                    })
+                    });
+                }
+                Ok(crate::commands::CommandResult::Prompt(text)) => {
+                    // Keep the original user command and source-message identity.
+                    // Resolved instructions are user-level content, never a
+                    // privileged system override or a second recursive turn.
+                    user_content.push(ContentBlock::Text { text });
                 }
                 Err(e) => {
                     tracing::error!(command = cmd_name, error = %e, "Slash command failed");
-                    Err(AgentError::ApiError(e.to_string()))
+                    return Err(AgentError::ApiError(e.to_string()));
                 }
-            };
+            }
         }
 
         // Stagnation is scoped to one user-request execution. A later user
@@ -2118,42 +2195,12 @@ impl AgentEngine {
                 self.tools
                     .to_tool_defs_filtered(|t| t.name() != "ExitPlanMode" && route_allows(t))
             };
-            // This exact request is the authority for what the provider may
-            // call. Registry membership is broader (for example, plan mode
-            // deliberately hides mutating tools), so dispatch must never use
-            // the live registry as an implicit allow-list.
-            let tool_authority = ProviderToolAuthority::from_request_tools(&tools);
-            // What this exact request made possible, captured before `tools`
-            // moves into the LlmRequest below.
-            //
-            // `tools_advertised` is per-pass and gates the resumable restart: a
-            // request with no tools (a provider health check, a model-only
-            // answer) has no tool work to resume, so restarting it would only
-            // re-run the same generation against the same ceiling.
-            //
-            // `state_changing_tools_advertised` accumulates across every pass of
-            // the turn and gates the no-progress verdict. It must be recovered
-            // from the registry because `ToolDef` carries no category, and it
-            // stays false for plan mode (Info-only) and for model-only runtimes
-            // (`update_plan` alone, also Info) so a turn that COULD NOT have
-            // produced a state-changing effect is never judged for failing to.
-            let tools_advertised = !tools.is_empty();
-            state_changing_tools_advertised |= tools.iter().any(|def| {
-                self.tools
-                    .get(&def.name)
-                    .is_some_and(|tool| round::is_state_changing(tool.category()))
-            });
-
-            // Build system prompt: append plan mode instructions when active
-            let system = if self.plan_state.is_active {
-                format!(
-                    "{}\n\n{}",
-                    self.system_prompt,
-                    plan_prompt::plan_mode_instructions()
-                )
-            } else {
-                self.system_prompt.clone()
-            };
+            // Preserve the existing prompt ordering when no transform exists.
+            // With middleware, trusted plan rules are appended after the
+            // editable view, like request authority and resource/round facts.
+            let system = if self.plan_state.is_active && self.model_middleware.is_empty() {
+                format!("{}\n\n{}", self.system_prompt, plan_prompt::plan_mode_instructions())
+            } else { self.system_prompt.clone() };
 
             // §3.5: let registered contributors inject dynamic per-turn context
             // (knowledge RAG, memory, …). No-op when none are registered.
@@ -2177,6 +2224,24 @@ impl AgentEngine {
                 }
                 crate::context_contributor::merge_pre_turn_context(system, extras)
             };
+
+            let (system, tools) = crate::model_middleware::apply(
+                &self.model_middleware, &turn_context, system, tools,
+            ).await.map_err(AgentError::ApiError)?;
+            let system = if self.plan_state.is_active && !self.model_middleware.is_empty() {
+                format!("{}\n\n{}", system, plan_prompt::plan_mode_instructions())
+            } else { system };
+
+            // Authority is derived from the final offered subset, never the
+            // broader registry or the pre-middleware candidate list.
+            let tool_authority = ProviderToolAuthority::from_request_tools(&tools);
+            let tools_advertised = !tools.is_empty();
+            // Cumulative for the turn; only actually offered state-changing
+            // tools can justify a no-progress verdict.
+            state_changing_tools_advertised |= tools.iter().any(|def| {
+                self.tools.get(&def.name)
+                    .is_some_and(|tool| round::is_state_changing(tool.category()))
+            });
 
             let system = if tool_allowlist.is_some() {
                 let declared_tools = if tools.is_empty() {
@@ -3115,6 +3180,7 @@ impl AgentEngine {
                     self.hooks.as_mut(),
                     self.compaction_level,
                     self.toon_enabled,
+                    &self.tool_middleware,
                 )
                 .await
                 .expect("FullAuto protocol execution is infallible")
@@ -3127,6 +3193,7 @@ impl AgentEngine {
                     self.hooks.as_mut(),
                     self.compaction_level,
                     self.toon_enabled,
+                    &self.tool_middleware,
                 )
                 .await
                 .expect("FullAuto tool execution is infallible")
@@ -3296,6 +3363,12 @@ impl AgentEngine {
                 let Some(tool) = self.tools.get(name) else {
                     continue;
                 };
+                // A denied/failed gate has proven that this target never ran.
+                // Do not invalidate earlier exact receipts as if it were a
+                // partially executed mutation that returned an error.
+                if outcome.hook_not_dispatched_call_ids.contains(tool_use_id) {
+                    continue;
+                }
                 let invocation_may_mutate = tool.may_have_workspace_side_effects(input);
                 if !*is_error && invocation_may_mutate {
                     completion_context.successful_mutation_observed = true;
@@ -3473,6 +3546,7 @@ impl AgentEngine {
                 stagnation_action = crate::loop_guard::StagnationAction::Continue;
             }
 
+            let fatal_hook_error = outcome.fatal_hook_error.take();
             let mut tool_result_blocks = outcome.results;
             match stagnation_action {
                 crate::loop_guard::StagnationAction::Continue => {}
@@ -3537,6 +3611,9 @@ impl AgentEngine {
             // Save session after each turn
             *safe_messages = self.messages.clone();
             self.save_session();
+            if let Some(error) = fatal_hook_error {
+                return Err(AgentError::ToolMiddleware(error));
+            }
             if tool_allowlist.is_some() && artifact_retry_blocked {
                 // A strict artifact tool has already reached a terminal error.
                 // Do not ask the provider for prose with an empty tool surface:
@@ -6046,6 +6123,8 @@ pub enum AgentError {
     UserAborted,
     #[error("Context window nearly full ({input_tokens} tokens used, limit {limit})")]
     ContextTooLong { input_tokens: u64, limit: usize },
+    #[error("Tool middleware stopped the turn: {0}")]
+    ToolMiddleware(String),
     #[error("Tool loop stopped: {0}")]
     Stagnation(String),
 }
@@ -6067,3 +6146,9 @@ mod completion_evidence_tests;
 
 #[cfg(test)]
 mod runtime_authority_tests;
+
+#[cfg(test)]
+mod model_middleware_tests;
+
+#[cfg(test)]
+mod tool_middleware_tests;

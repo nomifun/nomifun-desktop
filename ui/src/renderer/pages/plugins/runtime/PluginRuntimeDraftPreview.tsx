@@ -5,7 +5,33 @@ import styles from './PluginRuntimeProduct.module.css';
 
 /** Every preview document gets a fresh in-frame store. It never receives a production capability. */
 export function previewDocument(html: string, token: string): string {
-  const bootstrap = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'"><script>(()=>{const token=${JSON.stringify(token)};const data=new Map();const report=(error)=>parent.postMessage({type:'nomifun-plugin-preview',token,error},'*');Object.defineProperty(window,'nomi',{value:Object.freeze({preview:true,service:Object.freeze({async invoke(){throw new Error("Background work is available after saving this plugin.")}}),storage:Object.freeze({async get(key){return data.has(key)?structuredClone(data.get(key)):null},async set(key,value){data.set(key,structuredClone(value))},async delete(key){data.delete(key)}})}),writable:false});let failed=false;window.addEventListener('error',event=>{failed=true;report(String(event.message||'Preview failed').slice(0,1000))});window.addEventListener('unhandledrejection',event=>{failed=true;report(String(event.reason?.message||event.reason||'Preview failed').slice(0,1000))});window.addEventListener('DOMContentLoaded',()=>setTimeout(()=>{if(!failed)report(null)},500));})();</script>`;
+  const bootstrap = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'"><script>(()=>{
+    const token=${JSON.stringify(token)};
+    const data=new Map();
+    const checkKey=key=>{if(typeof key!=='string'||!key||key.length>256)throw new Error('Invalid storage key')};
+    const read=key=>{checkKey(key);const entry=data.get(key);return {value:entry&&!entry.deleted?structuredClone(entry.value):null,revision:entry?.revision??null}};
+    const write=(key,value,deleted=false)=>{checkKey(key);const revision=(data.get(key)?.revision??0)+1;data.set(key,{value:structuredClone(value),revision,deleted});return revision};
+    const remove=key=>{checkKey(key);const entry=data.get(key);return entry&&!entry.deleted?write(key,null,true):entry?.revision??null};
+    const report=(error)=>parent.postMessage({type:'nomifun-plugin-preview',token,error},'*');
+    Object.defineProperty(window,'nomi',{value:Object.freeze({preview:true,
+      service:Object.freeze({async invoke(){throw new Error('Background work is available after saving this plugin.')}}),
+      storage:Object.freeze({
+        async get(key){return read(key).value},
+        async read(key){return read(key)},
+        async set(key,value){write(key,value)},
+        async delete(key){remove(key)},
+        async compareAndSwap(key,expectedRevision,value){
+          if(expectedRevision!==null&&(!Number.isSafeInteger(expectedRevision)||expectedRevision<1))throw new Error('Invalid storage revision');
+          const current=read(key);
+          if(current.revision!==expectedRevision)return {applied:false,revision:current.revision};
+          return {applied:true,revision:value==null?remove(key):write(key,value)};
+        }
+      })}),writable:false});
+    let failed=false;
+    window.addEventListener('error',event=>{failed=true;report(String(event.message||'Preview failed').slice(0,1000))});
+    window.addEventListener('unhandledrejection',event=>{failed=true;report(String(event.reason?.message||event.reason||'Preview failed').slice(0,1000))});
+    window.addEventListener('DOMContentLoaded',()=>setTimeout(()=>{if(!failed)report(null)},500));
+  })();</script>`;
   // Exported releases carry the production bridge before their HTML document.
   // Remove only host-owned bootstrap scripts and establish the temporary API
   // before ANY app code executes; imported previews must never wait for a

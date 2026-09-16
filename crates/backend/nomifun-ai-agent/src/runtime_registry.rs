@@ -26,14 +26,32 @@ use crate::factory::provider_config::resolve_runtime_model_selection;
 use crate::runtime_handle::AgentRuntimeHandle;
 use crate::types::AgentRuntimeBuildOptions;
 
+#[path = "runtime_registry_shutdown.rs"]
+mod shutdown;
+#[path = "runtime_registry_acquisition.rs"]
+mod acquisition;
+
 /// Factory function that creates an [`AgentRuntimeHandle`] from build options.
 ///
 /// Async so the factory can do real I/O (spawn a CLI process, negotiate the
 /// provider handshakes, etc.) without needing to `block_on` inside the
 /// `AgentRuntimeRegistry` call site. Returning `BoxFuture` keeps the trait
 /// object-safe for DI.
+/// A constructor must settle all partially acquired resources before returning
+/// Err. Production acquisition retains the constructor through waiter loss;
+/// panic/aborted-task exit is not an ordinary failed-build cleanup proof.
 pub type AgentRuntimeFactory =
     Arc<dyn Fn(AgentRuntimeBuildOptions) -> BoxFuture<'static, Result<AgentRuntimeHandle, AppError>> + Send + Sync>;
+
+/// Source-composed exact-build policy for Nomi's private Session adapter.
+/// Unknown builds deny compatibility without denying independent recovery.
+pub type RuntimeEngineNomiSessionResolver = Arc<
+    dyn Fn(&nomifun_api_types::RuntimeEngineBinding) -> Result<bool, AppError> + Send + Sync,
+>;
+
+pub type RuntimeEngineContextPolicyResolver = Arc<
+    dyn Fn(&nomifun_api_types::RuntimeEngineBinding) -> Result<bool, AppError> + Send + Sync,
+>;
 
 /// Non-secret identity of the exact provider invocation graph a long-lived
 /// model-backed runtime was built from. The provider-level revision changes
@@ -63,6 +81,23 @@ pub type AgentRuntimeModelConfigResolver = Arc<
 /// The trait is object-safe for dependency injection.
 #[async_trait]
 pub trait AgentRuntimeRegistry: Send + Sync {
+    fn binding_uses_platform_history_context(
+        &self, binding: &nomifun_api_types::RuntimeEngineBinding,
+    ) -> Result<bool, AppError> {
+        binding.validate()?;
+        Ok(false)
+    }
+
+    /// Cold recovery must not infer private codec compatibility from family.
+    /// Registries without a compiled policy grant no bound engine Nomi access.
+    fn binding_uses_nomi_session(
+        &self,
+        binding: &nomifun_api_types::RuntimeEngineBinding,
+    ) -> Result<bool, AppError> {
+        binding.validate()?;
+        Ok(false)
+    }
+
     /// Install the single host-owned resolver for exact Nomi Plugin Tool
     /// sessions. Registries that do not own the in-process Nomi factory reject
     /// this composition operation.
@@ -78,6 +113,19 @@ pub trait AgentRuntimeRegistry: Send + Sync {
 
     /// Get an existing runtime by conversation ID.
     fn get_runtime(&self, conversation_id: &str) -> Option<AgentRuntimeHandle>;
+
+    /// Query commands without creating a runtime or acquiring turn authority.
+    /// Callers authenticate conversation ownership before entering this seam.
+    async fn get_slash_commands(
+        &self,
+        _owner_id: &str,
+        conversation_id: &str,
+    ) -> Result<Vec<nomifun_api_types::SlashCommandItem>, AppError> {
+        match self.get_runtime(conversation_id) {
+            Some(runtime) => runtime.get_slash_commands().await,
+            None => Ok(Vec::new()),
+        }
+    }
 
     /// Get an existing runtime or create one if none exists.
     ///
@@ -236,11 +284,16 @@ pub trait AgentRuntimeRegistry: Send + Sync {
     /// application shutdown uses the result-bearing shutdown boundary below.
     fn terminate_all(&self);
 
-    /// Permanently close factory admission and prove every owned runtime exited.
-    /// Hosts must await this before destroying browser or database resources.
-    /// Unsupported registries fail closed instead of treating kill requests as proof.
-    fn shutdown(&self) -> BoxFuture<'static, Result<(), AppError>> {
-        Box::pin(async { Err(AppError::Internal("Agent runtime registry has no proven shutdown implementation".into())) })
+    /// Permanently close factory admission and await every registered runtime,
+    /// including cold builds and quarantined instances. Sending kill or seeing
+    /// an empty active count is not proof. The owned cleanup flight must survive
+    /// a dropped waiter; a failed result may be retried without reopening.
+    fn shutdown_and_wait(&self) -> crate::RuntimeTeardown {
+        Box::pin(async {
+            Err(AppError::Conflict(
+                "Agent runtime registry cannot prove process-wide shutdown".into(),
+            ))
+        })
     }
 
     /// Number of fully initialized active runtimes.
@@ -488,10 +541,8 @@ impl RestartGovernor {
 /// Default implementation of [`AgentRuntimeRegistry`] using a concurrent hash map.
 #[derive(Clone)]
 pub struct InMemoryAgentRuntimeRegistry {
-    shutdown_requested: CancellationToken,
-    /// Readers own complete factory admission; the shutdown writer drains all
-    /// admitted builds without dropping a future that may have spawned a process.
-    shutdown_gate: Arc<tokio::sync::RwLock<()>>,
+    shutdown: Arc<shutdown::ShutdownState>,
+    engine_bindings: Arc<DashMap<String, (Weak<OnceCell<AgentRuntimeHandle>>, Option<nomifun_api_types::RuntimeEngineBinding>)>>,
     runtimes: Arc<DashMap<String, RuntimeSlot>>,
     /// Slots whose awaitable teardown failed. They remain authoritative until
     /// the exact runtime's process exit is proven; a replacement must never be
@@ -515,6 +566,8 @@ pub struct InMemoryAgentRuntimeRegistry {
     /// can start while the old agent is still unwinding.
     lifecycle_gates: Arc<DashMap<String, Weak<AsyncMutex<()>>>>,
     factory: AgentRuntimeFactory,
+    nomi_session_resolver: Option<RuntimeEngineNomiSessionResolver>,
+    context_policy_resolver: Option<RuntimeEngineContextPolicyResolver>,
     model_config_resolver: Option<AgentRuntimeModelConfigResolver>,
     /// Optional only for source-compatible custom/test construction. Product
     /// composition configures this to `{data_dir}/nomi-sessions`; reset fails
@@ -537,8 +590,8 @@ pub struct InMemoryAgentRuntimeRegistry {
 impl InMemoryAgentRuntimeRegistry {
     pub fn new(factory: AgentRuntimeFactory) -> Self {
         Self {
-            shutdown_requested: CancellationToken::new(),
-            shutdown_gate: Arc::new(tokio::sync::RwLock::new(())),
+            shutdown: Arc::new(shutdown::ShutdownState::default()),
+            engine_bindings: Arc::new(DashMap::new()),
             runtimes: Arc::new(DashMap::new()),
             teardown_quarantine: Arc::new(DashMap::new()),
             turn_admissions: Arc::new(DashMap::new()),
@@ -547,11 +600,24 @@ impl InMemoryAgentRuntimeRegistry {
             lifecycle_gates: Arc::new(DashMap::new()),
             factory,
             model_config_resolver: None,
+            nomi_session_resolver: None,
+            context_policy_resolver: None,
             nomi_session_persistence: None,
             governor: Arc::new(RestartGovernor::default()),
             counted_crash_slots: Arc::new(DashMap::new()),
             plugin_tool_session_provider: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// Install the frozen catalog policy during trusted host composition.
+    pub fn with_nomi_session_resolver(mut self, resolver: RuntimeEngineNomiSessionResolver) -> Self {
+        self.nomi_session_resolver = Some(resolver);
+        self
+    }
+
+    pub fn with_context_policy_resolver(mut self, resolver: RuntimeEngineContextPolicyResolver) -> Self {
+        self.context_policy_resolver = Some(resolver);
+        self
     }
 
     /// Bind long-lived Nomi runtime reuse to the exact ModelInvoke Chat
@@ -579,6 +645,9 @@ impl InMemoryAgentRuntimeRegistry {
 
     /// Look up a fully initialized runtime by conversation ID.
     fn initialized_runtime(&self, conversation_id: &str) -> Option<AgentRuntimeHandle> {
+        if self.shutdown.closed.is_cancelled() {
+            return None;
+        }
         let slot = self.runtimes.get(conversation_id)?.value().clone();
         if self.slot_is_quarantined(conversation_id, &slot) {
             return None;
@@ -704,6 +773,9 @@ impl InMemoryAgentRuntimeRegistry {
     }
 
     fn clear_workspace_binding_if_matches(&self, conversation_id: &str, slot: &RuntimeSlot) {
+        self.engine_bindings.remove_if(conversation_id, |_, (bound_slot, _)| {
+            bound_slot.upgrade().is_none_or(|bound_slot| Arc::ptr_eq(&bound_slot, slot))
+        });
         self.workspace_bindings
             .remove_if(conversation_id, |_, binding| Arc::ptr_eq(&binding.slot, slot));
     }
@@ -875,6 +947,14 @@ impl InMemoryAgentRuntimeRegistry {
     ) -> Result<(), AppError> {
         self.quarantine_teardown_slot(conversation_id, &slot);
         let Some(agent) = slot.get().cloned() else {
+            if self.shutdown.uncertain_acquisition.load(std::sync::atomic::Ordering::Acquire) {
+                // A constructor may have acquired effects before it unwound
+                // without populating this cell. Keep the slot and workspace
+                // authority; an empty cell cannot prove safe release now.
+                return Err(AppError::Conflict(
+                    "Runtime construction exited abnormally; empty-slot cleanup is unproven".into(),
+                ));
+            }
             // The lifecycle gate proves no factory can still be filling this
             // OnceCell. An empty quarantined slot therefore owns no process.
             self.runtimes
@@ -995,14 +1075,22 @@ impl InMemoryAgentRuntimeRegistry {
         cancellation: Option<CancellationToken>,
         mut options: AgentRuntimeBuildOptions,
     ) -> Result<AgentRuntimeHandle, AppError> {
-        let _admission = tokio::select! {
-            biased;
-            _ = self.shutdown_requested.cancelled() => return Err(AppError::Conflict("Agent runtime registry is shutting down".into())),
-            admission = self.shutdown_gate.read() => admission,
-        };
-        if self.shutdown_requested.is_cancelled() {
-            return Err(AppError::Conflict("Agent runtime registry is shutting down".into()));
+        // Only acquisition::run calls this: its owned task retains the global
+        // admission reader and an abnormal-exit fence through all these awaits.
+        if self.shutdown.closed.is_cancelled() {
+            return Err(shutdown::closed_error());
         }
+        let requested_engine_binding: Option<nomifun_api_types::RuntimeEngineBinding> = options.extra
+            .get(nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY)
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose().map_err(|error| AppError::Conflict(format!("Invalid runtime engine binding: {error}")))?;
+        if let Some(binding) = &requested_engine_binding { binding.validate()?; }
+        let bound_engine = requested_engine_binding.is_some();
+        let uses_nomi_session = match requested_engine_binding.as_ref() {
+            Some(binding) => self.binding_uses_nomi_session(binding)?,
+            // Only the explicit unbound legacy Nomi lane retains its adapter.
+            None => options.agent_type == nomifun_common::AgentType::Nomi,
+        };
         if options.workspace_binding_lease.is_none() {
             return Err(AppError::Conflict(format!(
                 "Agent runtime build for conversation {conversation_id} requires an exact physical workspace binding lease"
@@ -1042,6 +1130,10 @@ impl InMemoryAgentRuntimeRegistry {
         } else {
             lifecycle_gate.lock().await
         };
+        let _unwind = acquisition::UnwindFence::new(self.shutdown.clone());
+        if self.shutdown.closed.is_cancelled() {
+            return Err(shutdown::closed_error());
+        }
         if cancellation.as_ref().is_some_and(CancellationToken::is_cancelled) {
             return Err(AppError::Conflict(format!(
                 "Agent runtime build for conversation {conversation_id} was cancelled before initialization"
@@ -1106,7 +1198,19 @@ impl InMemoryAgentRuntimeRegistry {
             }
         };
 
+        if self.shutdown.closed.is_cancelled() {
+            return Err(shutdown::closed_error());
+        }
+        if cancellation.as_ref().is_some_and(CancellationToken::is_cancelled) {
+            return Err(AppError::Conflict("Agent runtime acquisition was cancelled during configuration resolution".into()));
+        }
         let slot: RuntimeSlot = loop {
+            if self.shutdown.closed.is_cancelled() {
+                return Err(shutdown::closed_error());
+            }
+            if cancellation.as_ref().is_some_and(CancellationToken::is_cancelled) {
+                return Err(AppError::Conflict("Agent runtime acquisition was cancelled before slot reuse".into()));
+            }
             let slot = self
                 .runtimes
                 .entry(conversation_id.to_owned())
@@ -1115,6 +1219,12 @@ impl InMemoryAgentRuntimeRegistry {
             let Some(runtime) = slot.get().cloned() else {
                 break slot;
             };
+            let cached_engine = self.engine_bindings.get(conversation_id)
+                .filter(|entry| entry.0.upgrade().is_some_and(|bound| Arc::ptr_eq(&bound, &slot)))
+                .and_then(|entry| entry.1.clone());
+            if cached_engine != requested_engine_binding {
+                return Err(AppError::Conflict("A live Session cannot change its runtime engine; fork explicitly".into()));
+            }
             if self.slot_is_quarantined(conversation_id, &slot) {
                 if let Err(error) = self
                     .teardown_slot_under_gate(
@@ -1290,8 +1400,9 @@ impl InMemoryAgentRuntimeRegistry {
         }
 
         let factory = self.factory.clone();
-        let plugin_tool_session_provider =
-            self.plugin_tool_session_provider.get().cloned();
+        let plugin_tool_session_provider = if uses_nomi_session {
+            self.plugin_tool_session_provider.get().cloned()
+        } else { None };
         // Build-failure streak accounting lives INSIDE the init closure so it
         // is exact under single-flight: when a failed init lets the next
         // queued waiter run its own attempt, each real factory run is counted
@@ -1395,15 +1506,31 @@ impl InMemoryAgentRuntimeRegistry {
                 return Err(error);
             }
         };
+        self.engine_bindings.insert(conversation_id.to_owned(), (Arc::downgrade(&slot), requested_engine_binding));
+
+        // Check only after the completed runtime is retained in its exact slot:
+        // a bad factory is still responsible for real resources. Failed cleanup
+        // must retain quarantine/leases, not turn into a resource-free build Err.
+        if bound_engine && runtime.uses_nomi_recovery() != uses_nomi_session {
+            self.teardown_slot_under_gate(
+                conversation_id,
+                Arc::clone(&slot),
+                Some(AgentKillReason::ConfigurationChanged),
+                None,
+            ).await?;
+            return Err(AppError::Conflict(
+                "Runtime Nomi Session contract disagrees with its exact registered build policy".into(),
+            ));
+        }
 
         let slot_is_current = self
             .runtimes
             .get(conversation_id)
             .is_some_and(|entry| Arc::ptr_eq(entry.value(), &slot));
         let user_cancelled = cancellation.as_ref().is_some_and(CancellationToken::is_cancelled);
-        let cancelled = user_cancelled || self.shutdown_requested.is_cancelled();
+        let cancelled = user_cancelled || self.shutdown.closed.is_cancelled();
         let teardown_requested = self.slot_is_quarantined(conversation_id, &slot);
-        if cancelled || !slot_is_current || teardown_requested {
+        if cancelled || !slot_is_current || teardown_requested || self.shutdown.closed.is_cancelled() {
             let reason = user_cancelled.then_some(AgentKillReason::UserCancelled);
             self.teardown_slot_under_gate(conversation_id, Arc::clone(&slot), reason, None)
                 .await?;
@@ -1476,12 +1603,43 @@ impl InMemoryAgentRuntimeRegistry {
             }
             runtime.touch_activity();
         }
+        // Configuration confirmation above is asynchronous. Cancellation or
+        // host shutdown during it must not publish a newly built runtime.
+        if cancellation.as_ref().is_some_and(CancellationToken::is_cancelled)
+            || self.shutdown.closed.is_cancelled()
+        {
+            self.teardown_slot_under_gate(
+                conversation_id, Arc::clone(&slot), Some(AgentKillReason::UserCancelled), None,
+            ).await?;
+            return Err(AppError::Conflict("Agent runtime acquisition was cancelled before delivery".into()));
+        }
         Ok(runtime)
     }
 }
 
 #[async_trait]
 impl AgentRuntimeRegistry for InMemoryAgentRuntimeRegistry {
+    fn binding_uses_platform_history_context(
+        &self, binding: &nomifun_api_types::RuntimeEngineBinding,
+    ) -> Result<bool, AppError> {
+        binding.validate()?;
+        match &self.context_policy_resolver {
+            Some(resolve) => resolve(binding),
+            None => Ok(false),
+        }
+    }
+
+    fn binding_uses_nomi_session(
+        &self,
+        binding: &nomifun_api_types::RuntimeEngineBinding,
+    ) -> Result<bool, AppError> {
+        binding.validate()?;
+        match &self.nomi_session_resolver {
+            Some(resolve) => resolve(binding),
+            None => Ok(false),
+        }
+    }
+
     fn install_nomi_plugin_tool_session_provider(
         &self,
         provider: Arc<dyn crate::NomiPluginToolSessionProvider>,
@@ -1497,8 +1655,25 @@ impl AgentRuntimeRegistry for InMemoryAgentRuntimeRegistry {
     }
 
     fn get_runtime(&self, conversation_id: &str) -> Option<AgentRuntimeHandle> {
-        if self.shutdown_requested.is_cancelled() { return None; }
+        if self.shutdown.closed.is_cancelled() { return None; }
         self.initialized_runtime(conversation_id)
+    }
+
+    async fn get_slash_commands(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+    ) -> Result<Vec<nomifun_api_types::SlashCommandItem>, AppError> {
+        if let Some(runtime) = self.get_runtime(conversation_id) {
+            return runtime.get_slash_commands().await;
+        }
+        match self.plugin_tool_session_provider.get() {
+            Some(provider) => provider.discover_skill_commands(crate::NomiPluginToolSessionRequest {
+                owner_id: owner_id.to_owned(),
+                conversation_id: conversation_id.to_owned(),
+            }).await,
+            None => Ok(Vec::new()),
+        }
     }
 
     async fn get_or_create_runtime(
@@ -1506,8 +1681,7 @@ impl AgentRuntimeRegistry for InMemoryAgentRuntimeRegistry {
         conversation_id: &str,
         options: AgentRuntimeBuildOptions,
     ) -> Result<AgentRuntimeHandle, AppError> {
-        self.get_or_create_runtime_inner(conversation_id, None, None, options)
-            .await
+        acquisition::run(self, conversation_id, None, None, options).await
     }
 
     async fn get_or_create_runtime_for_preparation(
@@ -1516,8 +1690,7 @@ impl AgentRuntimeRegistry for InMemoryAgentRuntimeRegistry {
         cancellation: CancellationToken,
         options: AgentRuntimeBuildOptions,
     ) -> Result<AgentRuntimeHandle, AppError> {
-        self.get_or_create_runtime_inner(conversation_id, None, Some(cancellation), options)
-            .await
+        acquisition::run(self, conversation_id, None, Some(cancellation), options).await
     }
 
     async fn get_or_create_runtime_for_turn(
@@ -1527,7 +1700,8 @@ impl AgentRuntimeRegistry for InMemoryAgentRuntimeRegistry {
         cancellation: CancellationToken,
         options: AgentRuntimeBuildOptions,
     ) -> Result<AgentRuntimeHandle, AppError> {
-        self.get_or_create_runtime_inner(
+        acquisition::run(
+            self,
             conversation_id,
             Some(turn_generation),
             Some(cancellation),
@@ -1758,32 +1932,8 @@ impl AgentRuntimeRegistry for InMemoryAgentRuntimeRegistry {
         }
     }
 
-    fn shutdown(&self) -> BoxFuture<'static, Result<(), AppError>> {
-        self.shutdown_requested.cancel();
-        // Cancel ready runtimes promptly, even while an unrelated factory is
-        // still settling. The writer below proves and removes each exact slot.
-        self.terminate_all();
-        let registry=self.clone();
-        let worker=tokio::spawn(async move {
-            let _admission=registry.shutdown_gate.write().await;
-            let ids=registry.runtimes.iter().map(|entry|entry.key().clone())
-                .chain(registry.teardown_quarantine.iter().map(|entry|entry.key().clone()))
-                .collect::<std::collections::BTreeSet<_>>();
-            let mut failures=vec![];
-            for id in ids {
-                let lifecycle=registry.lifecycle_gate(&id);
-                let _lifecycle=lifecycle.lock().await;
-                let slot=registry.quarantined_slot(&id).or_else(||registry.runtimes.get(&id).map(|entry|entry.value().clone()));
-                if let Some(slot)=slot {
-                    if let Err(error)=registry.teardown_slot_under_gate(&id,slot,None,Some(BROKEN_RUNTIME_TEARDOWN_GRACE)).await {
-                        failures.push(format!("{id}: {error}"));
-                    }
-                }
-            }
-            if failures.is_empty() { Ok(()) }
-            else { Err(AppError::Internal(format!("Agent runtime shutdown failed: {}",failures.join("; ")))) }
-        });
-        Box::pin(async move {worker.await.map_err(|error|AppError::Internal(format!("Agent shutdown worker failed: {error}")))?})
+    fn shutdown_and_wait(&self) -> crate::RuntimeTeardown {
+        shutdown::start(self)
     }
 
     fn active_runtime_count(&self) -> usize {
@@ -1886,6 +2036,17 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::NomiPluginToolSessionProvider for CountingPluginToolProvider {
+        async fn discover_skill_commands(
+            &self,
+            request: crate::NomiPluginToolSessionRequest,
+        ) -> Result<Vec<nomifun_api_types::SlashCommandItem>, AppError> {
+            assert_eq!(request.owner_id, "0190f5fe-7c00-7a00-8000-000000000001");
+            assert_eq!(request.conversation_id, "conv-plugin-provider");
+            Ok(vec![nomifun_api_types::SlashCommandItem {
+                command: "skill:test.package.guide".into(), description: "Package guide".into(),
+            }])
+        }
+
         async fn resolve(
             &self,
             request: crate::NomiPluginToolSessionRequest,
@@ -2057,6 +2218,53 @@ mod tests {
         }
     }
 
+    impl crate::RegisteredAgentRuntime for MockAgent {
+        fn kill_and_wait(&self, reason: Option<AgentKillReason>) -> crate::RuntimeTeardown {
+            MockAgentRuntime::kill_and_wait(self, reason)
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_runtime_uses_singleflight_and_retains_failed_teardown_quarantine() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let factory_calls = calls.clone();
+        let factory: AgentRuntimeFactory = Arc::new(move |options| {
+            factory_calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Ok(AgentRuntimeHandle::Registered(Arc::new(
+                    MockAgent::new(&options.conversation_id, None)
+                        .with_kill_error("custom runtime cleanup was not confirmed"),
+                )))
+            }.boxed()
+        });
+        let registry = InMemoryAgentRuntimeRegistry::new(factory);
+        let id = "registered-runtime";
+        let first = registry.get_or_create_runtime(id, make_runtime_options(id)).await.unwrap();
+        let second = registry.get_or_create_runtime(id, make_runtime_options(id)).await.unwrap();
+        match (&first, &second) {
+            (AgentRuntimeHandle::Registered(a), AgentRuntimeHandle::Registered(b)) => {
+                assert!(Arc::ptr_eq(a, b));
+            }
+            _ => panic!("custom runtime must use the production extension handle"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(registry.terminate_and_wait_result(id, None).await.is_err());
+        assert!(registry.get_or_create_runtime(id, make_runtime_options(id)).await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "unproven cleanup must block replacement");
+    }
+
+    #[tokio::test]
+    async fn registered_runtime_optional_mutations_fail_closed() {
+        let runtime = AgentRuntimeHandle::Registered(Arc::new(MockAgent::new("custom", None)));
+        assert!(runtime.clear_context().await.is_err());
+        assert!(runtime.steer("new input".to_owned()).is_err());
+        assert!(runtime.notify_system_resource("resource update".to_owned()).is_err());
+        assert!(runtime.ensure_can_rewind_last_turn("source").await.is_err());
+        assert!(runtime.rewind_last_turn("source").await.is_err());
+        assert!(runtime.set_model("replacement-model").await.is_err());
+        runtime.kill_and_wait(None).await.unwrap();
+    }
+
     fn runtime_test_workspace() -> &'static Path {
         static WORKSPACE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         WORKSPACE
@@ -2075,6 +2283,7 @@ mod tests {
             delegation_policy: Default::default(),
             extra: serde_json::Value::Null,
             conversation_created_at: None,
+            device_mcp_servers: Vec::new(),
             workspace_binding_lease: Some(
                 nomifun_knowledge::WorkspaceBindingLease::acquire_unbound(
                     workspace,
@@ -2639,12 +2848,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cold_commands_do_not_materialize_session_or_create_runtime() {
+        let registry = make_registry();
+        assert!(registry.get_slash_commands("owner", "cold").await.unwrap().is_empty());
+        let calls = Arc::new(AtomicUsize::new(0));
+        registry.install_nomi_plugin_tool_session_provider(Arc::new(CountingPluginToolProvider {
+            calls: calls.clone(),
+        })).unwrap();
+        let commands = registry.get_slash_commands(
+            "0190f5fe-7c00-7a00-8000-000000000001", "conv-plugin-provider",
+        ).await.unwrap();
+        assert_eq!(commands[0].command, "skill:test.package.guide");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(registry.active_runtime_count(), 0);
+        registry.get_or_create_runtime("conv-plugin-provider", make_runtime_options("conv-plugin-provider"))
+            .await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(registry.get_slash_commands(
+            "0190f5fe-7c00-7a00-8000-000000000001", "conv-plugin-provider",
+        ).await.unwrap().is_empty(), "live runtime catalog replaces cold suggestions, even when empty");
+    }
+
+    #[tokio::test]
     async fn get_or_create_returns_existing() {
         let registry = make_registry();
         let h1 = registry.get_or_create_runtime("conv-1", make_runtime_options("conv-1")).await.unwrap();
         let h2 = registry.get_or_create_runtime("conv-1", make_runtime_options("conv-1")).await.unwrap();
         assert!(same_mock(&h1, &h2));
         assert_eq!(registry.active_runtime_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn custom_binding_skips_nomi_provider_and_cannot_change_on_cached_slot() {
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        let factory: AgentRuntimeFactory = Arc::new(|options| async move {
+            assert!(crate::plugin_tools::current_nomi_plugin_tool_session().is_none());
+            Ok(mock_runtime(MockAgent::new(&options.conversation_id, None)))
+        }.boxed());
+        let registry = InMemoryAgentRuntimeRegistry::new(factory);
+        registry.install_nomi_plugin_tool_session_provider(Arc::new(CountingPluginToolProvider {
+            calls: provider_calls.clone(),
+        })).unwrap();
+        let mut options = make_runtime_options("custom-bound");
+        options.extra["runtime_engine_binding"] = serde_json::json!({
+            "family_id":"customer.workflow", "build_id":"v1", "build_digest":"a".repeat(64),
+            "host_contract_version":1, "profile":"workflow"
+        });
+        registry.get_or_create_runtime("custom-bound", options.clone()).await.unwrap();
+        registry.get_or_create_runtime("custom-bound", options.clone()).await.unwrap();
+        assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
+        options.extra["runtime_engine_binding"]["build_digest"] = serde_json::json!("b".repeat(64));
+        assert!(registry.get_or_create_runtime("custom-bound", options).await.is_err());
+        registry.terminate_and_wait_result("custom-bound", None).await.unwrap();
     }
 
     #[tokio::test]
@@ -3160,7 +3415,7 @@ mod tests {
             }
         }));
         registry.get_or_create_runtime("shutdown-owned",make_runtime_options("shutdown-owned")).await.unwrap();
-        drop(registry.shutdown());
+        drop(registry.shutdown_and_wait());
         entered.acquire().await.unwrap().forget();
         assert!(registry.has_registered_runtime("shutdown-owned"));
         assert!(registry.get_runtime("shutdown-owned").is_none());
@@ -3169,7 +3424,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(2),async {
             while registry.has_registered_runtime("shutdown-owned") {tokio::task::yield_now().await;}
         }).await.unwrap();
-        registry.shutdown().await.unwrap();
+        registry.shutdown_and_wait().await.unwrap();
     }
 
     #[tokio::test]
@@ -3189,7 +3444,7 @@ mod tests {
         }));
         let build=tokio::spawn({let registry=registry.clone();async move {registry.get_or_create_runtime("shutdown-build",make_runtime_options("shutdown-build")).await}});
         entered.acquire().await.unwrap().forget();
-        let closing=tokio::spawn(registry.shutdown());
+        let closing=tokio::spawn(registry.shutdown_and_wait());
         assert!(!closing.is_finished());
         assert!(registry.get_or_create_runtime("shutdown-next",make_runtime_options("shutdown-next")).await.is_err());
         release.add_permits(1);
@@ -3205,9 +3460,9 @@ mod tests {
             Ok(mock_runtime(MockAgent::new(&options.conversation_id,Some(ConversationStatus::Running)).with_kill_error("exit not proven")))
         }.boxed()));
         registry.get_or_create_runtime("shutdown-failed",make_runtime_options("shutdown-failed")).await.unwrap();
-        assert!(registry.shutdown().await.is_err());
+        assert!(registry.shutdown_and_wait().await.is_err());
         let original=registry.quarantined_slot("shutdown-failed").unwrap();
-        assert!(registry.shutdown().await.is_err());
+        assert!(registry.shutdown_and_wait().await.is_err());
         assert!(Arc::ptr_eq(&original,&registry.quarantined_slot("shutdown-failed").unwrap()));
         assert!(registry.has_registered_runtime("shutdown-failed"));
         assert!(registry.get_or_create_runtime("shutdown-failed",make_runtime_options("shutdown-failed")).await.is_err());

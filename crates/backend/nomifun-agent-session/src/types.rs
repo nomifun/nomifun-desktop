@@ -116,6 +116,14 @@ pub struct MessageProjection {
     pub first_seq: u64,
     pub last_seq: u64,
     pub presentation_intent: String,
+    /// Source-authored message kind, when available (not inferred from JSON).
+    /// Nomi exposes its persisted `text`, `tool_call`, `plan`, etc. here.
+    /// Event-based projections may omit it and use presentation_intent instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_type: Option<String>,
+    /// Source message lifecycle only; never a turn or artifact delivery receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_status: Option<String>,
     pub projection: serde_json::Value,
     pub semantic_digest: String,
 }

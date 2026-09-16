@@ -411,6 +411,7 @@ impl SessionProbe for ConversationProbe {
             WakeAction::Wait(_) | WakeAction::Stop(_) => return Ok(()),
         };
         let req = SendMessageRequest {
+            preset_id: None,
             content,
             files: vec![],
             inject_skills: vec![],

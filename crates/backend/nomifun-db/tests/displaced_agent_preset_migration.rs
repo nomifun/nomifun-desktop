@@ -59,6 +59,10 @@ async fn displaced_agent_preset_migration_converges_without_replacing_the_databa
     let (displaced_checksum, original_installed_on) = create_displaced_database(&path).await;
 
     let probe = open(&path, true).await;
+    let prefix_versions: Vec<i64> = sqlx::query_scalar(
+        "SELECT version FROM _sqlx_migrations ORDER BY version",
+    ).fetch_all(&probe).await.unwrap();
+    assert_eq!(prefix_versions, (1..=88).filter(|version| *version != 27).collect::<Vec<_>>());
     assert_eq!(
         inspect_supported_migration_lineage(&probe).await.unwrap(),
         MigrationLineageStatus::UpgradeRequired
@@ -122,4 +126,60 @@ async fn unknown_migration_88_checksum_still_fails_closed() {
     assert!(inspect_supported_migration_lineage(&pool).await.is_err());
     pool.close().await;
     assert!(init_database(&path).await.is_err());
+}
+
+#[tokio::test]
+async fn altered_prefix_around_the_retired_gap_still_fails_without_changing_the_ledger() {
+    for mutation in [
+        "DELETE FROM _sqlx_migrations WHERE version = 26",
+        "DELETE FROM _sqlx_migrations WHERE version = 28",
+        "UPDATE _sqlx_migrations SET version = 27 WHERE version = 28",
+        "UPDATE _sqlx_migrations SET checksum = zeroblob(48) WHERE version = 28",
+        "UPDATE _sqlx_migrations SET success = 0 WHERE version = 88",
+        "INSERT INTO _sqlx_migrations SELECT 27, description, installed_on, success, checksum, execution_time \
+         FROM _sqlx_migrations WHERE version = 26",
+        "INSERT INTO _sqlx_migrations SELECT 89, description, installed_on, success, checksum, execution_time \
+         FROM _sqlx_migrations WHERE version = 88",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("altered-agent-preset.db");
+        create_displaced_database(&path).await;
+        let pool = open(&path, false).await;
+        sqlx::query(mutation).execute(&pool).await.unwrap();
+        let before = ledger(&pool).await;
+        let inspection_failed = inspect_supported_migration_lineage(&pool).await.is_err();
+        pool.close().await;
+        let startup_failed = match init_database(&path).await {
+            Ok(database) => {
+                database.close().await;
+                false
+            }
+            Err(_) => true,
+        };
+        let probe = open(&path, true).await;
+        let after = ledger(&probe).await;
+        probe.close().await;
+        if !inspection_failed || !startup_failed || after != before {
+            let changed_versions = before.iter().chain(after.iter())
+                .filter_map(|row| {
+                    let version = row.0;
+                    (before.iter().find(|row| row.0 == version)
+                        != after.iter().find(|row| row.0 == version)).then_some(version)
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            let retained = root.keep();
+            panic!(
+                "{mutation}: inspection_failed={inspection_failed}, startup_failed={startup_failed}, \
+                 changed ledger versions={changed_versions:?}; failed fixture retained at {}",
+                retained.display(),
+            );
+        }
+    }
+}
+
+async fn ledger(pool: &SqlitePool) -> Vec<(i64, String, String, bool, Vec<u8>, i64)> {
+    sqlx::query_as(
+        "SELECT version, description, CAST(installed_on AS TEXT), success, checksum, execution_time \
+         FROM _sqlx_migrations ORDER BY version",
+    ).fetch_all(pool).await.unwrap()
 }

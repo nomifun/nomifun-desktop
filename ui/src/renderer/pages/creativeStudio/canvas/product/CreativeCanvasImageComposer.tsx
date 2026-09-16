@@ -8,7 +8,6 @@ import { ArrowUp, BookOne, Down, Loading, SettingTwo } from '@icon-park/react';
 import { InputNumber, Radio, Select } from '@arco-design/web-react';
 import { autoUpdate, flip, offset, shift, size, useFloating } from '@floating-ui/react';
 import React, {
-  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -17,26 +16,26 @@ import React, {
 import { useTranslation } from 'react-i18next';
 
 import {
-  IMAGE_WORKBENCH_QUALITY_OPTIONS,
-  imageWorkbenchAspectRatioValue,
-  imageWorkbenchModelKey,
-  imageWorkbenchResolutionLabel,
-  imageWorkbenchSizeOptionForSettings,
-  parseImageWorkbenchModelKey,
-  type ImageWorkbenchAspectRatioOption,
-  type ImageWorkbenchInterfaceMode,
-  type ImageWorkbenchModelIdentity,
-  type ImageWorkbenchModelOption,
-  type ImageWorkbenchQuality,
-  type ImageWorkbenchSettings,
-  type ImageWorkbenchTaskSummary,
-} from '../../workbenches/image';
-import ImageSizePicker from '../../workbenches/image/ImageSizePicker';
+  IMAGE_GENERATION_QUALITY_OPTIONS,
+  imageGenerationAspectRatioValue,
+  imageGenerationModelKey,
+  imageGenerationResolutionLabel,
+  imageGenerationSizeOptionForSettings,
+  parseImageGenerationModelKey,
+  type ImageGenerationAspectRatioOption,
+  type ImageGenerationInterfaceMode,
+  type ImageGenerationModelIdentity,
+  type ImageGenerationModelOption,
+  type ImageGenerationQuality,
+  type ImageGenerationSettings,
+} from '@renderer/creation/parameters/image';
+import type { CanvasImageComposeTaskSummary } from './canvasImageComposerCanvas';
+import ImageSizePicker from '@renderer/creation/parameters/ImageSizePicker';
 import CreativeCanvasReferencePromptInput, {
-  relabelCreativeCanvasPromptMentions,
   type CreativeCanvasPromptMentionBinding,
   type CreativeCanvasReferencePromptChange,
 } from './CreativeCanvasReferencePromptInput';
+import { useCanvasReferencePromptDraft } from './useCanvasReferencePromptDraft';
 import CreativeCanvasComposerShell from './CreativeCanvasComposerShell';
 import CreativeCanvasReferenceList, {
   type CreativeCanvasImageComposerReference,
@@ -52,11 +51,11 @@ export interface CreativeCanvasImageComposerProps {
   initialPrompt: string;
   initialMentions?: readonly CreativeCanvasPromptMentionBinding[];
   references?: readonly CreativeCanvasImageComposerReference[];
-  settings: ImageWorkbenchSettings;
-  aspectRatioOptions: readonly ImageWorkbenchAspectRatioOption[];
+  settings: ImageGenerationSettings;
+  aspectRatioOptions: readonly ImageGenerationAspectRatioOption[];
   maxCount: number;
-  modelOptions: readonly ImageWorkbenchModelOption[];
-  task: ImageWorkbenchTaskSummary;
+  modelOptions: readonly ImageGenerationModelOption[];
+  task: CanvasImageComposeTaskSummary;
   disabled?: boolean;
   generateBlocked?: boolean;
   error?: string | null;
@@ -66,10 +65,10 @@ export interface CreativeCanvasImageComposerProps {
   onReferenceDisconnect?(connectionId: string): void;
   onReferencesDisconnect?(connectionIds: readonly string[]): void;
   onOpenPromptLibrary(): void;
-  onModelChange(model: ImageWorkbenchModelIdentity | null): void;
-  onInterfaceModeChange(mode: ImageWorkbenchInterfaceMode): void;
-  onQualityChange(quality: ImageWorkbenchQuality): void;
-  onAspectRatioChange(option: ImageWorkbenchAspectRatioOption): void;
+  onModelChange(model: ImageGenerationModelIdentity | null): void;
+  onInterfaceModeChange(mode: ImageGenerationInterfaceMode): void;
+  onQualityChange(quality: ImageGenerationQuality): void;
+  onAspectRatioChange(option: ImageGenerationAspectRatioOption): void;
   onCountChange(count: number): void;
   onGenerate(
     prompt: string,
@@ -116,43 +115,10 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
   onGenerate,
   onRetrySubmission,
 }) => {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const settingsHostRef = useRef<HTMLDivElement>(null);
-  const referenceMentionLabel = useCallback(
-    (ordinal: number) =>
-      t('creativeStudio.canvas.image.referenceMentionLabel', {
-        index: ordinal,
-        defaultValue: `图片${ordinal}` as const,
-      }),
-    [t]
-  );
-  const referenceAliasSignature = `${i18n.resolvedLanguage ?? i18n.language}:${references
-    .map(
-      (reference) =>
-        `${reference.nodeId}:${reference.ordinal}:${reference.mentionLabel ?? ''}:${reference.disabledReason ? 'disabled' : 'enabled'}`
-    )
-    .join(',')}`;
-  const normalizedInitialDraft = useMemo(
-    () =>
-      relabelCreativeCanvasPromptMentions(
-        initialPrompt,
-        initialMentions,
-        references,
-        referenceMentionLabel
-      ),
-    // Reference display names and thumbnails do not affect prompt aliases.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [initialMentions, initialPrompt, referenceAliasSignature, referenceMentionLabel]
-  );
-  // The route clones mention arrays on every canvas render. Object identity is
-  // not a new draft: hydrating it again can overwrite a newer native edit.
-  const hydratedDraftRef = useRef<{
-    nodeId: string;
-    draft: CreativeCanvasReferencePromptChange;
-  } | null>(null);
-  const [prompt, setPrompt] = useState(normalizedInitialDraft.value);
-  const [mentions, setMentions] = useState<CreativeCanvasPromptMentionBinding[]>(
-    () => structuredClone(normalizedInitialDraft.mentions)
+  const { prompt, mentions, labels, change, clear } = useCanvasReferencePromptDraft(
+    nodeId, initialPrompt, initialMentions, references, onPromptChange
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const { refs: settingsRefs, floatingStyles: settingsPosition, placement: settingsPlacement } = useFloating({
@@ -180,49 +146,22 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
   const canGenerate = retrySubmission
     ? !disabled && onRetrySubmission !== undefined
     : !disabled && !generateBlocked && !busy && (prompt.trim().length > 0 || hasTextInput) && settings.model !== null;
-  const modelValue = settings.model ? imageWorkbenchModelKey(settings.model) : undefined;
+  const modelValue = settings.model ? imageGenerationModelKey(settings.model) : undefined;
   const modelOptionByKey = useMemo(
-    () => new Map(modelOptions.map((option) => [imageWorkbenchModelKey(option), option])),
+    () => new Map(modelOptions.map((option) => [imageGenerationModelKey(option), option])),
     [modelOptions]
   );
-  const selectedSizeOption = imageWorkbenchSizeOptionForSettings(aspectRatioOptions, settings);
+  const selectedSizeOption = imageGenerationSizeOptionForSettings(aspectRatioOptions, settings);
   const selectedAspectRatio = selectedSizeOption
     ? selectedSizeOption.value === 'auto'
       ? selectedSizeOption.label
-      : imageWorkbenchAspectRatioValue(selectedSizeOption)
+      : imageGenerationAspectRatioValue(selectedSizeOption)
     : '';
   const selectedResolution = selectedSizeOption
-    ? imageWorkbenchResolutionLabel(selectedSizeOption)
+    ? imageGenerationResolutionLabel(selectedSizeOption)
     : '';
   const sizeSummary = [...new Set([selectedAspectRatio, selectedResolution])]
     .filter(Boolean).join(' · ');
-
-  useEffect(() => {
-    const previous = hydratedDraftRef.current;
-    if (
-      previous?.nodeId === nodeId &&
-      previous.draft.value === normalizedInitialDraft.value &&
-      previous.draft.mentions.length === normalizedInitialDraft.mentions.length &&
-      previous.draft.mentions.every((mention, index) => {
-        const next = normalizedInitialDraft.mentions[index]!;
-        return mention.id === next.id && mention.sourceNodeId === next.sourceNodeId &&
-          mention.fallbackLabel === next.fallbackLabel &&
-          mention.start === next.start && mention.end === next.end;
-      })
-    ) return;
-    hydratedDraftRef.current = { nodeId, draft: normalizedInitialDraft };
-    setPrompt(normalizedInitialDraft.value);
-    setMentions(structuredClone(normalizedInitialDraft.mentions));
-    if (normalizedInitialDraft.value !== initialPrompt) {
-      onPromptChange?.({
-        value: normalizedInitialDraft.value,
-        mentions: structuredClone(normalizedInitialDraft.mentions),
-      });
-    }
-    // onPromptChange is an inline route callback; the normalized value is the
-    // idempotency boundary that prevents a migration loop.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialPrompt, nodeId, normalizedInitialDraft]);
 
   useEffect(() => {
     setSettingsOpen(false);
@@ -265,8 +204,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
     // Mention offsets are relative to the authored string. Preserve it exactly;
     // trimming here would make otherwise valid UTF-16 ranges stale.
     onGenerate(change.value, change.mentions);
-    setPrompt('');
-    setMentions([]);
+    clear();
   };
 
   return (
@@ -299,29 +237,8 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                 })
           }
           disabled={disabled}
-          labels={{
-            input: t('creativeStudio.canvas.image.promptLabel', {
-              defaultValue: '图片创作提示词',
-            }),
-            insertReference: t('creativeStudio.canvas.image.insertReference', {
-              defaultValue: '引用已连接素材',
-            }),
-            connectedReferences: t('creativeStudio.canvas.image.connectedReferences', {
-              defaultValue: '已连接参考',
-            }),
-            emptyReferences: t('creativeStudio.canvas.image.noMatchingReferences', {
-              defaultValue: '没有匹配的已连接素材',
-            }),
-            disconnectedReference: t('creativeStudio.canvas.image.referenceDisconnected', {
-              defaultValue: '引用已断开',
-            }),
-            referenceMentionLabel,
-          }}
-          onChange={(change) => {
-            setPrompt(change.value);
-            setMentions(change.mentions);
-            onPromptChange?.(change);
-          }}
+          labels={labels}
+          onChange={change}
           onSubmit={submit}
         />
 
@@ -404,15 +321,15 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
               onChange={(key) =>
                 onModelChange(
                   typeof key === 'string'
-                    ? parseImageWorkbenchModelKey(key, modelOptions)
+                    ? parseImageGenerationModelKey(key, modelOptions)
                     : null
                 )
               }
             >
               {modelOptions.map((option) => (
                 <Select.Option
-                  key={imageWorkbenchModelKey(option)}
-                  value={imageWorkbenchModelKey(option)}
+                  key={imageGenerationModelKey(option)}
+                  value={imageGenerationModelKey(option)}
                   disabled={option.disabled}
                 >
                   <span className={composerStyles.modelOption}>
@@ -462,7 +379,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                       value={settings.interfaceMode}
                       disabled={disabled}
                       onChange={(value) =>
-                        onInterfaceModeChange(value as ImageWorkbenchInterfaceMode)
+                        onInterfaceModeChange(value as ImageGenerationInterfaceMode)
                       }
                     >
                       <Radio value='images'>{t('creativeStudio.image.interface.images')}</Radio>
@@ -485,10 +402,10 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                         })}
                         disabled={disabled}
                         onChange={(event) =>
-                          onQualityChange(event.target.value as ImageWorkbenchQuality)
+                          onQualityChange(event.target.value as ImageGenerationQuality)
                         }
                       >
-                        {IMAGE_WORKBENCH_QUALITY_OPTIONS.map((option) => (
+                        {IMAGE_GENERATION_QUALITY_OPTIONS.map((option) => (
                           <option key={option.value} value={option.value}>
                             {option.label}
                           </option>

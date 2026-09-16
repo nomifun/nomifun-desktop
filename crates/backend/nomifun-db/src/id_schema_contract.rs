@@ -61,7 +61,10 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "conversation_delivery_notify",
     "conversation_delivery_receipts",
     "conversation_execution_links",
+    "conversation_hosted_effects",
+    "conversation_mcp_effects",
     "conversation_mcp_servers",
+    "conversation_runtime_events",
     "conversations",
     "creation_tasks",
     "creative_studio_agent_proposal_receipts",
@@ -83,6 +86,7 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "idmm_action_reservations",
     "idmm_interventions",
     "installation_identity",
+    "installation_role_bindings",
     "instance_access_token",
     "javascript_runtime_selection",
     "knowledge_bases",
@@ -242,6 +246,7 @@ const UUIDV7_MANAGED_VALUE_COLUMNS: &[(&str, &str)] = &[
 /// opaque remote handles rather than relational links. Every other physical
 /// `_id` column must be present in [`LOGICAL_REFERENCES`].
 const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
+    ("installation_role_bindings", "role_id"),
     ("agent_metadata", "agent_id"),
     ("agent_metadata", "yolo_id"),
     ("agent_execution_attempts", "attempt_id"),
@@ -274,6 +279,19 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("conversation_delivery_receipts", "conversation_id"),
     ("conversation_delivery_receipts", "message_id"),
     ("conversation_delivery_receipts", "operation_id"),
+    // Immutable receipt identity survives deletion of the Conversation projection.
+    // MCP owner facts inherit their user/Conversation from the retained turn
+    // receipt below, not from a deletable Conversation projection.
+    ("conversation_mcp_effects", "user_id"),
+    ("conversation_mcp_effects", "conversation_id"),
+    ("conversation_mcp_effects", "operation_id"),
+    ("conversation_mcp_effects", "capability_id"),
+    ("conversation_hosted_effects", "user_id"),
+    ("conversation_hosted_effects", "conversation_id"),
+    ("conversation_hosted_effects", "operation_id"),
+    ("conversation_hosted_effects", "capability_id"),
+    ("conversation_runtime_events", "conversation_id"),
+    ("conversation_runtime_events", "model_operation_id"),
     ("conversations", "conversation_id"),
     ("conversations", "channel_chat_id"),
     ("cron_job_runs", "cron_job_run_id"),
@@ -700,6 +718,7 @@ macro_rules! protocol_uuidv7_ref {
 /// entries are deliberate cross-store references; the database audit reports
 /// them as externally owned instead of pretending SQLite can verify them.
 pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
+    external_ref!("installation_role_bindings", "provider_mount_id", Text, false, Opaque, "idx_installation_role_bindings_provider_mount", KeepHistory),
     text_ref!("conversations", "user_id" => "users", "user_id", false, "idx_conversations_user_id", Cascade),
     opaque_text_ref!("conversations", "active_turn_operation_id" => "conversation_delivery_receipts", "operation_id", true, "idx_conversations_active_turn_operation", Restrict)
         .with_parent_predicate("parent.kind = 'turn' AND parent.status = 'accepted'")
@@ -778,6 +797,8 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
              AND parent.plugin_product_id = child.plugin_product_id",
         ),
     text_ref!("plugin_surface_sessions", "owner_user_id" => "users", "user_id", false, "idx_plugin_surface_sessions_owner_user_id", Cascade),
+    text_ref!("plugin_surface_sessions", "conversation_id" => "conversations", "conversation_id", true, "idx_plugin_surface_sessions_conversation_id", Cascade)
+        .with_aggregate_scope("parent.user_id = child.owner_user_id"),
     text_ref!("plugin_surface_sessions", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_surface_sessions_plugin_product_id", Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
     text_ref!("plugin_surface_sessions", "active_release_id" => "plugin_releases", "release_id", false, "idx_plugin_surface_sessions_active_release_id", Restrict)
@@ -918,6 +939,9 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     // Canonical Creative Studio task history survives project deletion, while
     // creation itself still locks and validates a live project row.
     text_ref!("creation_tasks", "project_id" => "creative_studio_projects", "project_id", true, "idx_creation_tasks_project_id", KeepHistory),
+    text_ref!("creation_tasks", "conversation_id" => "conversations", "conversation_id", true, "idx_creation_tasks_conversation", KeepHistory),
+    text_ref!("creation_tasks", "message_id" => "messages", "message_id", true, "idx_creation_tasks_message", KeepHistory)
+        .with_aggregate_scope("parent.conversation_id = child.conversation_id"),
     text_ref!("creation_tasks", "template_id" => "creative_studio_templates", "template_id", true, "idx_creation_tasks_template_id", KeepHistory),
     text_ref!("creation_tasks", "template_run_id" => "creative_studio_template_runs", "template_run_id", true, "idx_creation_tasks_template_run_id", KeepHistory)
         .with_aggregate_scope("parent.template_id = child.template_id"),
@@ -975,6 +999,14 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("conversation_delivery_receipts", "projected_message_id" => "messages", "message_id", true, "idx_delivery_receipts_message_id", SetNull),
     text_ref!("conversation_delivery_receipts", "projected_conversation_id" => "conversations", "conversation_id", true, "idx_delivery_receipts_conversation_id", SetNull),
     text_ref!("conversation_delivery_receipts", "user_id" => "users", "user_id", false, "idx_delivery_receipts_user_id", KeepHistory),
+    opaque_text_ref!("conversation_runtime_events", "turn_operation_id" => "conversation_delivery_receipts", "operation_id", false, "idx_conversation_runtime_events_turn", Restrict)
+        .with_aggregate_scope("parent.conversation_id = child.conversation_id"),
+    opaque_text_ref!("conversation_mcp_effects", "turn_operation_id" => "conversation_delivery_receipts", "operation_id", false, "idx_conversation_mcp_turn", Restrict)
+        .with_parent_predicate("parent.kind = 'turn'")
+        .with_aggregate_scope("parent.conversation_id = child.conversation_id AND parent.user_id = child.user_id"),
+    opaque_text_ref!("conversation_hosted_effects", "turn_operation_id" => "conversation_delivery_receipts", "operation_id", false, "idx_conversation_hosted_turn", Restrict)
+        .with_parent_predicate("parent.kind = 'turn'")
+        .with_aggregate_scope("parent.conversation_id = child.conversation_id AND parent.user_id = child.user_id"),
     text_ref!("conversation_mcp_servers", "conversation_id" => "conversations", "conversation_id", false, "idx_conversation_mcp_servers_conversation_id", Cascade),
     text_ref!("conversation_mcp_servers", "mcp_server_id" => "mcp_servers", "mcp_server_id", false, "idx_conversation_mcp_servers_mcp_server_id", Cascade)
         .with_parent_predicate("parent.deleted_at IS NULL"),
@@ -1075,6 +1107,13 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
 /// each entry yields one column named `value`, including one row per array
 /// element where necessary.
 pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
+    // Keep a withdrawn/deleted page choice visible for explicit user repair.
+    // It is not a live Surface grant and never authorizes a missing product.
+    json_text_ref!(
+        "nomi_agent_presets", "ui_binding_json", "$.selection.plugin_id",
+        "SELECT json_extract(ui_binding_json, '$.selection.plugin_id') AS value FROM nomi_agent_presets" =>
+        "plugin_products", "plugin_product_id", "idx_nomi_agent_presets_ui_plugin", KeepHistory, AllowMissingHistoricalParent
+    ),
     json_text_ref!(
         "conversations", "model", "$.provider_id",
         "SELECT json_extract(model, '$.provider_id') AS value FROM conversations WHERE model IS NOT NULL" =>
@@ -1122,15 +1161,25 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
     ),
     json_text_ref!(
         "workshop_assets", "origin", "$.canvas_id",
-        "SELECT json_extract(origin, '$.canvas_id') AS value FROM workshop_assets WHERE json_type(origin, '$.canvas_id') = 'text' AND json_type(origin, '$.node_id') = 'text' AND json_type(origin, '$.project_id') IS NULL AND json_type(origin, '$.workbench_kind') IS NULL" =>
+        "SELECT json_extract(origin, '$.canvas_id') AS value FROM workshop_assets WHERE json_type(origin, '$.canvas_id') = 'text' AND json_type(origin, '$.node_id') = 'text' AND json_type(origin, '$.project_id') IS NULL" =>
         "creative_studio_projects", "project_id", "idx_workshop_assets_origin_canvas_id", KeepHistory, AllowMissingHistoricalParent
     ),
     // `project_id` remains a wire/storage compatibility alias only for old
-    // Canvas origins. Standalone provenance is intentionally excluded.
+    // Canvas origins.
     json_text_ref!(
         "workshop_assets", "origin", "$.project_id",
-        "SELECT json_extract(origin, '$.project_id') AS value FROM workshop_assets WHERE json_type(origin, '$.project_id') = 'text' AND json_type(origin, '$.node_id') = 'text' AND json_type(origin, '$.canvas_id') IS NULL AND json_type(origin, '$.workbench_kind') IS NULL" =>
+        "SELECT json_extract(origin, '$.project_id') AS value FROM workshop_assets WHERE json_type(origin, '$.project_id') = 'text' AND json_type(origin, '$.node_id') = 'text' AND json_type(origin, '$.canvas_id') IS NULL" =>
         "creative_studio_projects", "project_id", "idx_workshop_assets_origin_project_id", KeepHistory, AllowMissingHistoricalParent
+    ),
+    json_text_ref!(
+        "workshop_assets", "origin", "$.conversation_id",
+        "SELECT json_extract(origin, '$.conversation_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
+        "conversations", "conversation_id", "idx_workshop_assets_origin_conversation", KeepHistory, AllowMissingHistoricalParent
+    ),
+    json_text_ref!(
+        "workshop_assets", "origin", "$.message_id",
+        "SELECT json_extract(origin, '$.message_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
+        "messages", "message_id", "idx_workshop_assets_origin_message", KeepHistory, AllowMissingHistoricalParent
     ),
     json_text_ref!(
         "workshop_assets", "origin", "$.template_id",
@@ -1407,6 +1456,7 @@ pub(crate) async fn validate_id_value_contract(pool: &SqlitePool) -> Result<(), 
 /// the dataset rather than rewrite IDs.
 pub async fn validate_id_data_contract(pool: &SqlitePool) -> Result<(), DbError> {
     validate_id_value_contract(pool).await?;
+    validate_agent_ui_binding_scope(pool).await?;
     validate_plugin_kv_tombstone_values(pool).await?;
     validate_workshop_asset_origin_values(pool).await?;
     validate_creation_task_result_asset_ids(pool).await?;
@@ -1431,6 +1481,23 @@ pub async fn validate_id_data_contract(pool: &SqlitePool) -> Result<(), DbError>
     Err(DbError::Init(format!(
         "v3 ID data contract audit failed: {details}"
     )))
+}
+
+/// KEEP_HISTORY permits a removed product, not a reference to another owner.
+/// JSON references use the registry for identity/index/delete semantics and
+/// this aggregate check for restore/import scope validation.
+async fn validate_agent_ui_binding_scope(pool: &SqlitePool) -> Result<(), DbError> {
+    let invalid: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM nomi_agent_presets preset JOIN plugin_products plugin
+         ON plugin.plugin_product_id = json_extract(preset.ui_binding_json, '$.selection.plugin_id')
+         WHERE preset.owner_user_id <> plugin.owner_user_id",
+    ).fetch_one(pool).await?;
+    if invalid != 0 {
+        return Err(DbError::Init(format!(
+            "Agent UI binding contains {invalid} cross-owner plugin reference(s)"
+        )));
+    }
+    Ok(())
 }
 
 async fn require_plugin_kv_tombstone_schema(pool: &SqlitePool) -> Result<(), DbError> {
@@ -1845,6 +1912,91 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             &[
                 "BEFORE DELETE ON CONVERSATION_DELIVERY_RECEIPTS",
                 "RAISE( ABORT, 'CONVERSATION DELIVERY RECEIPTS ARE RETAINED INDEFINITELY' )",
+            ],
+        ),
+        (
+            "trg_conversation_runtime_engine_immutable",
+            &[
+                "BEFORE UPDATE OF EXTRA ON CONVERSATIONS",
+                "JSON_EXTRACT(OLD.EXTRA, '$.RUNTIME_ENGINE_BINDING') IS NOT JSON_EXTRACT(NEW.EXTRA, '$.RUNTIME_ENGINE_BINDING')",
+                "RAISE(ABORT, 'CONVERSATION RUNTIME ENGINE IS IMMUTABLE; FORK EXPLICITLY')",
+            ],
+        ),
+        (
+            "trg_conversation_runtime_event_owner",
+            &[
+                "BEFORE INSERT ON CONVERSATION_RUNTIME_EVENTS",
+                "R.OPERATION_ID = NEW.TURN_OPERATION_ID",
+                "R.CONVERSATION_ID = NEW.CONVERSATION_ID",
+                "R.KIND = 'TURN'",
+                "RAISE(ABORT, 'RUNTIME EVENT REQUIRES ITS CONVERSATION TURN RECEIPT')",
+            ],
+        ),
+        (
+            "trg_conversation_hosted_effect_admission",
+            &[
+                "BEFORE INSERT ON CONVERSATION_HOSTED_EFFECTS",
+                "NEW.STATE != 'PENDING'",
+                "C.CONVERSATION_ID = NEW.CONVERSATION_ID AND C.USER_ID = NEW.USER_ID",
+                "C.STATUS = 'RUNNING' AND C.ADMISSION_EPOCH = NEW.ADMISSION_EPOCH",
+                "C.ACTIVE_TURN_OPERATION_ID = NEW.TURN_OPERATION_ID",
+                "R.CONVERSATION_ID = C.CONVERSATION_ID AND R.USER_ID = C.USER_ID",
+                "R.KIND = 'TURN' AND R.STATUS = 'ACCEPTED'",
+                "RAISE(ABORT, 'HOSTED EFFECT REQUIRES AN EXACT LIVE CONVERSATION TURN')",
+            ],
+        ),
+        (
+            "trg_conversation_hosted_effect_update",
+            &[
+                "BEFORE UPDATE ON CONVERSATION_HOSTED_EFFECTS",
+                "NEW.ID IS NOT OLD.ID OR NEW.USER_ID IS NOT OLD.USER_ID",
+                "NEW.CONVERSATION_ID IS NOT OLD.CONVERSATION_ID OR NEW.OPERATION_ID IS NOT OLD.OPERATION_ID",
+                "NEW.TURN_OPERATION_ID IS NOT OLD.TURN_OPERATION_ID OR NEW.ADMISSION_EPOCH IS NOT OLD.ADMISSION_EPOCH",
+                "NEW.OWNER_DOMAIN IS NOT OLD.OWNER_DOMAIN OR NEW.CAPABILITY_ID IS NOT OLD.CAPABILITY_ID",
+                "NEW.ACTION_NAME IS NOT OLD.ACTION_NAME OR NEW.INPUT_SHA256 IS NOT OLD.INPUT_SHA256",
+                "NEW.RESOURCE_KEY IS NOT OLD.RESOURCE_KEY",
+                "NEW.CREATED_AT IS NOT OLD.CREATED_AT OR OLD.STATE != 'PENDING'",
+                "NEW.STATE NOT IN ('RETURNED', 'REJECTED') OR NEW.SETTLED_AT IS NULL",
+                "RAISE(ABORT, 'HOSTED EFFECT PERMITS ONLY EXACT PENDING TO TERMINAL TRANSITION')",
+            ],
+        ),
+        (
+            "trg_conversation_hosted_effect_no_delete",
+            &[
+                "BEFORE DELETE ON CONVERSATION_HOSTED_EFFECTS",
+                "RAISE(ABORT, 'HOSTED EFFECT RECEIPTS ARE RETAINED INDEFINITELY')",
+            ],
+        ),
+        (
+            "trg_conversation_mcp_effect_admission",
+            &[
+                "BEFORE INSERT ON CONVERSATION_MCP_EFFECTS",
+                "NEW.STATE != 'PENDING'",
+                "C.CONVERSATION_ID = NEW.CONVERSATION_ID AND C.USER_ID = NEW.USER_ID",
+                "C.STATUS = 'RUNNING' AND C.ADMISSION_EPOCH = NEW.ADMISSION_EPOCH",
+                "C.ACTIVE_TURN_OPERATION_ID = NEW.TURN_OPERATION_ID",
+                "R.CONVERSATION_ID = C.CONVERSATION_ID AND R.USER_ID = C.USER_ID",
+                "R.KIND = 'TURN' AND R.STATUS = 'ACCEPTED'",
+                "RAISE(ABORT, 'MCP EFFECT REQUIRES AN EXACT LIVE CONVERSATION TURN')",
+            ],
+        ),
+        (
+            "trg_conversation_mcp_effect_update",
+            &[
+                "BEFORE UPDATE ON CONVERSATION_MCP_EFFECTS",
+                "NEW.ID IS NOT OLD.ID OR NEW.USER_ID IS NOT OLD.USER_ID",
+                "NEW.CONVERSATION_ID IS NOT OLD.CONVERSATION_ID OR NEW.OPERATION_ID IS NOT OLD.OPERATION_ID",
+                "NEW.TURN_OPERATION_ID IS NOT OLD.TURN_OPERATION_ID OR NEW.ADMISSION_EPOCH IS NOT OLD.ADMISSION_EPOCH",
+                "NEW.CAPABILITY_ID IS NOT OLD.CAPABILITY_ID OR NEW.CREATED_AT IS NOT OLD.CREATED_AT",
+                "OLD.STATE != 'PENDING' OR NEW.STATE != 'SETTLED' OR NEW.SETTLED_AT IS NULL",
+                "RAISE(ABORT, 'MCP EFFECT PERMITS ONLY EXACT PENDING TO SETTLED TRANSITION')",
+            ],
+        ),
+        (
+            "trg_conversation_mcp_effect_no_delete",
+            &[
+                "BEFORE DELETE ON CONVERSATION_MCP_EFFECTS",
+                "RAISE(ABORT, 'MCP EFFECT RECEIPTS ARE RETAINED INDEFINITELY')",
             ],
         ),
         (
@@ -2571,13 +2723,15 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             &[
                 "BEFORE INSERT ON WORKSHOP_ASSETS",
                 "RAISE(ABORT, 'UNSUPPORTED CREATIVE ASSET ORIGIN ID KEY')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN CANVAS IDENTIFIER')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN LEGACY CANVAS COMPATIBILITY IDENTIFIER')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKBENCH_KIND')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN CANVAS_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN PROJECT_ID')",
+                "JSON_TYPE(NEW.ORIGIN, '$.WORKBENCH_KIND') IS NOT NULL",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN CONVERSATION_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN MESSAGE_ID')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN TEMPLATE_ID')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN TEMPLATE_RUN_ID')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN TEMPLATE_STEP_ID')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET CANVAS/STANDALONE/TEMPLATE OWNER BRANCH')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET CONVERSATION/CANVAS/TEMPLATE OWNER BRANCH')",
             ],
         ),
         (
@@ -2585,13 +2739,15 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             &[
                 "BEFORE UPDATE OF ORIGIN ON WORKSHOP_ASSETS",
                 "RAISE(ABORT, 'UNSUPPORTED CREATIVE ASSET ORIGIN ID KEY')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN CANVAS IDENTIFIER')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN LEGACY CANVAS COMPATIBILITY IDENTIFIER')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN WORKBENCH_KIND')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN CANVAS_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN PROJECT_ID')",
+                "JSON_TYPE(NEW.ORIGIN, '$.WORKBENCH_KIND') IS NOT NULL",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN CONVERSATION_ID')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN MESSAGE_ID')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN TEMPLATE_ID')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN TEMPLATE_RUN_ID')",
                 "RAISE(ABORT, 'INVALID CREATIVE ASSET ORIGIN TEMPLATE_STEP_ID')",
-                "RAISE(ABORT, 'INVALID CREATIVE ASSET CANVAS/STANDALONE/TEMPLATE OWNER BRANCH')",
+                "RAISE(ABORT, 'INVALID CREATIVE ASSET CONVERSATION/CANVAS/TEMPLATE OWNER BRANCH')",
             ],
         ),
         (
@@ -2625,6 +2781,8 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
         .iter()
         .map(|row| row.try_get("name").map_err(DbError::Query))
         .collect::<Result<_, _>>()?;
+    // Compare contracts in the same name order as SQLite. Declaration order
+    // groups related invariants and must not become a startup failure.
     let mut trigger_contracts = TRIGGER_CONTRACTS.to_vec();
     trigger_contracts.sort_by_key(|(name, _)| *name);
     let expected: Vec<String> = trigger_contracts
@@ -2872,6 +3030,8 @@ async fn require_workshop_asset_origin_id_contract(
     }
     for key in [
         "PROJECT_ID",
+        "CONVERSATION_ID",
+        "MESSAGE_ID",
         "TEMPLATE_ID",
         "TEMPLATE_RUN_ID",
         "TEMPLATE_STEP_ID",
@@ -2990,6 +3150,7 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
             "creationTaskId",
             "projectId",
             "workbenchKind",
+            "workbench_kind",
             "templateId",
             "templateRunId",
             "templateStepId",
@@ -3041,47 +3202,22 @@ async fn validate_workshop_asset_origin_values(pool: &SqlitePool) -> Result<(), 
         let has_canvas = object.contains_key("canvas_id");
         let has_legacy_canvas = object.contains_key("project_id");
         let has_node = object.contains_key("node_id");
-        let has_workbench = object.contains_key("workbench_kind");
-        if let Some(kind) = object.get("workbench_kind") {
-            let valid = kind
-                .as_str()
-                .is_some_and(|kind| matches!(kind, "image" | "video" | "audio"));
-            if !valid {
-                return Err(DbError::Init(format!(
-                    "v3 workshop asset {asset_id} origin.workbench_kind is invalid"
-                )));
+        let any_canvas = has_canvas || has_legacy_canvas || has_node;
+        let canvas_owner = (has_canvas != has_legacy_canvas) && has_node;
+        let conversation = object.contains_key("conversation_id");
+        let message = object.contains_key("message_id");
+        for key in ["conversation_id", "message_id"] {
+            if let Some(value) = object.get(key) {
+                let value=value.as_str().ok_or_else(|| DbError::Init(format!("asset {asset_id} origin.{key} must be a UUIDv7")))?;
+                nomifun_common::validate_uuidv7(value).map_err(|e| DbError::Init(e.to_string()))?;
             }
         }
-        let has_template = ["template_id", "template_run_id", "template_step_id"]
-            .iter()
-            .any(|key| object.contains_key(*key));
-        if has_canvas && has_legacy_canvas {
-            return Err(DbError::Init(format!(
-                "v3 workshop asset {asset_id} Canvas origin contains both canonical canvas_id and the legacy project_id compatibility field"
-            )));
+        let template_count = ["template_id","template_run_id","template_step_id"].iter().filter(|key|object.contains_key(**key)).count();
+        if (any_canvas && !canvas_owner) || conversation != message || (template_count != 0 && template_count != 3)
+            || usize::from(canvas_owner) + usize::from(conversation && message) + usize::from(template_count == 3) > 1 {
+            return Err(DbError::Init(format!("v3 workshop asset {asset_id} origin requires a single complete owner branch")));
         }
-        let canvas_owner = (has_canvas || has_legacy_canvas) && has_node && !has_workbench;
-        let standalone_owner = !has_canvas && !has_node && has_workbench;
-        if (has_canvas || has_legacy_canvas || has_node || has_workbench)
-            && (!canvas_owner && !standalone_owner || has_template)
-        {
-            return Err(DbError::Init(format!(
-                "v3 workshop asset {asset_id} origin has an invalid Canvas or standalone owner branch"
-            )));
-        }
-        if has_template
-            && (!["template_id", "template_run_id", "template_step_id"]
-                .iter()
-                .all(|key| object.contains_key(*key))
-                || object.contains_key("canvas_id")
-                || object.contains_key("project_id")
-                || object.contains_key("node_id")
-                || object.contains_key("workbench_kind"))
-        {
-            return Err(DbError::Init(format!(
-                "v3 workshop asset {asset_id} origin has an invalid template-step owner branch"
-            )));
-        }
+
     }
     Ok(())
 }

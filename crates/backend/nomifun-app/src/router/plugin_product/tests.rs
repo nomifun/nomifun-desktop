@@ -1,4 +1,6 @@
 use super::*;
+#[path = "tests_agent_ui.rs"]
+mod agent_ui;
 use nomifun_db::{
     SqlitePluginRuntimeRepository, SqliteProviderConnectionRepository,
     SqliteProviderModelCapabilityRepository, SqliteProviderModelRepository,
@@ -7,7 +9,7 @@ use nomifun_db::{
 
 const HTML: &str = "<!doctype html><html><head><title>Tasks</title></head><body><input aria-label='Task'><button>Add task</button><script>document.querySelector('button').onclick=()=>document.body.dataset.clicked='yes';</script></body></html>";
 
-async fn fixture() -> (
+pub(super) async fn fixture() -> (
     nomifun_db::Database,
     tempfile::TempDir,
     PluginProductService,
@@ -45,6 +47,7 @@ async fn fixture() -> (
 
 fn draft() -> Draft {
     Draft {
+        service_test_confirmation: None,
         id: uuid::Uuid::now_v7().to_string(),
         revision: 0,
         name: "Daily tasks".into(),
@@ -100,7 +103,7 @@ async fn save_creates_builds_publishes_and_enables_without_extra_user_steps() {
     let (_db, _root, service, owner) = fixture().await;
     let mut value = draft();
     service.put_draft(&owner, &mut value).await.unwrap();
-    let saved = service.save_draft(&owner, &mut value).await.unwrap();
+    let SaveOutcome::Saved(saved) = service.save_draft(&owner, &mut value, None).await.unwrap() else { panic!("UI-only save unexpectedly requested Service input") };
     assert!(matches!(
         saved.plugin.lifecycle,
         nomifun_api_types::PluginRuntimeLifecycleDto::Enabled
@@ -131,7 +134,7 @@ async fn save_creates_builds_publishes_and_enables_without_extra_user_steps() {
     let active = saved.plugin.releases.active.unwrap().release_digest;
     value.html = HTML.replace("Add task", "Add another task");
     value.base_release_digest = Some("0".repeat(64));
-    assert!(service.save_draft(&owner, &mut value).await.is_err());
+    assert!(service.save_draft(&owner, &mut value, None).await.is_err());
     assert_eq!(
         service
             .application
@@ -193,7 +196,7 @@ async fn saving_a_draft_does_not_overwrite_source_edited_elsewhere() {
     let (_db, _root, service, owner) = fixture().await;
     let mut value = draft();
     service.put_draft(&owner, &mut value).await.unwrap();
-    let saved = service.save_draft(&owner, &mut value).await.unwrap();
+    let SaveOutcome::Saved(saved) = service.save_draft(&owner, &mut value, None).await.unwrap() else { panic!("UI-only save unexpectedly requested Service input") };
     let edited = HTML.replace("Add task", "Edited elsewhere");
     service
         .application
@@ -214,7 +217,7 @@ async fn saving_a_draft_does_not_overwrite_source_edited_elsewhere() {
         .unwrap();
     value.html = HTML.replace("Add task", "Outdated draft");
     assert!(matches!(
-        service.save_draft(&owner, &mut value).await,
+        service.save_draft(&owner, &mut value, None).await,
         Err(AppError::RevisionConflict(_))
     ));
     assert_eq!(
@@ -233,7 +236,7 @@ async fn storage_survives_surface_close_and_reopen() {
     let (_db, _root, service, owner) = fixture().await;
     let mut value = draft();
     service.put_draft(&owner, &mut value).await.unwrap();
-    let saved = service.save_draft(&owner, &mut value).await.unwrap();
+    let SaveOutcome::Saved(saved) = service.save_draft(&owner, &mut value, None).await.unwrap() else { panic!("UI-only save unexpectedly requested Service input") };
     let id = &saved.plugin.plugin_id;
     let first = service.application.open_surface(&owner, id).await.unwrap();
     let request=serde_json::from_value(serde_json::json!({"call_id":"write-task","target":{"target":"host_kv","request":{"operation":"set","key":"tasks","value":[{"title":"Remember this","done":false}]}}})).unwrap();
@@ -322,7 +325,7 @@ async fn sharing_and_backup_are_single_file_importable_and_do_not_replace_the_or
     let (_db, root, service, owner) = fixture().await;
     let mut value = draft();
     service.put_draft(&owner, &mut value).await.unwrap();
-    let saved = service.save_draft(&owner, &mut value).await.unwrap();
+    let SaveOutcome::Saved(saved) = service.save_draft(&owner, &mut value, None).await.unwrap() else { panic!("UI-only save unexpectedly requested Service input") };
     let state =
         PluginRuntimeM1RouterState::new(service.application.clone()).with_product(service.clone());
     let user = || CurrentUser {
@@ -354,7 +357,7 @@ async fn sharing_and_backup_are_single_file_importable_and_do_not_replace_the_or
             .unwrap();
         let mut imported = response.0.data.unwrap();
         assert_eq!(imported.import.as_ref().unwrap().includes_data, backup);
-        let copied = service.save_draft(&owner, &mut imported).await.unwrap();
+        let SaveOutcome::Saved(copied) = service.save_draft(&owner, &mut imported, None).await.unwrap() else { panic!("UI-only save unexpectedly requested Service input") };
         assert_ne!(copied.plugin.plugin_id, saved.plugin.plugin_id);
         assert!(matches!(
             copied.plugin.lifecycle,
@@ -423,7 +426,7 @@ async fn permanent_delete_removes_linked_drafts_membership_and_running_authoring
     let (_db, _root, service, owner) = fixture().await;
     let mut value = draft();
     service.put_draft(&owner, &mut value).await.unwrap();
-    let saved = service.save_draft(&owner, &mut value).await.unwrap();
+    let SaveOutcome::Saved(saved) = service.save_draft(&owner, &mut value, None).await.unwrap() else { panic!("UI-only save unexpectedly requested Service input") };
     let id = saved.plugin.plugin_id.clone();
     let workspace = Workspace {
         revision: 1,
@@ -499,4 +502,57 @@ async fn permanent_delete_removes_linked_drafts_membership_and_running_authoring
     assert!(!organization.items.contains_key(&id));
     assert_eq!(organization.revision, 2);
     assert!(token.is_cancelled());
+}
+
+#[tokio::test]
+async fn service_confirmation_rejects_forgery_and_every_changed_admission_input() {
+    let (_db, _root, service, owner) = fixture().await;
+    let mut value = draft();
+    value.service_source = Some("export async function start() { return { async invoke() { return {}; }, async dispose() {} }; }".into());
+    service.put_draft(&owner, &mut value).await.unwrap();
+    let fake = ServiceTestAcknowledgement { release_digest: "forged".into(), receipt_id: "forged".into() };
+    assert!(service.save_draft(&owner, &mut value, Some(&fake)).await.is_err());
+    assert!(service.application.library(&owner).await.unwrap().plugins.is_empty());
+    // The no-runtime fixture proves only that background code cannot publish
+    // without an actual Service check. Real NeedsTestInput comes from the
+    // public-route Node integration test.
+    assert!(service.save_draft(&owner, &mut value, None).await.is_err());
+    let mut current = service.application.workshop(&owner, value.plugin_id.as_ref().unwrap()).await.unwrap();
+    assert!(current.plugin.releases.active.is_none());
+    let ready = current.ready.as_mut().expect("failed startup preserves Ready");
+    assert!(ready.service.is_some());
+    // Admission-only matrix: do not execute this synthetic receipt.
+    ready.test.status = nomifun_api_types::PluginRuntimeTestStatusDto::NeedsTestInput;
+    ready.test.receipt_id = Some("admission-receipt".into());
+    let acknowledgement = ServiceTestAcknowledgement {
+        release_digest: ready.release.release_digest.clone(), receipt_id: "admission-receipt".into(),
+    };
+    value.service_test_confirmation = Some(ServiceTestConfirmation {
+        expected_revision: value.revision,
+        draft_digest: draft_confirmation_digest(&value).unwrap(),
+        release_digest: acknowledgement.release_digest.clone(), receipt_id: acknowledgement.receipt_id.clone(),
+        source_digest: current.source_snapshot_digest.clone(),
+        config_revision: current.config.config_revision,
+        credential_bindings_revision: current.credential_bindings_revision,
+    });
+    validate_service_test_acknowledgement(&value, &current, &acknowledgement).unwrap();
+    for mutation in ["draft-revision", "draft-source", "source", "config", "credentials", "release", "receipt", "failed", "stale-runtime", "passed"] {
+        let mut draft = value.clone();
+        let mut workshop = current.clone();
+        match mutation {
+            "draft-revision" => draft.revision += 1,
+            "draft-source" => draft.service_source = Some("changed".into()),
+            "source" => workshop.source_snapshot_digest = Some("changed".into()),
+            "config" => workshop.config.config_revision += 1,
+            "credentials" => workshop.credential_bindings_revision += 1,
+            "release" => workshop.ready.as_mut().unwrap().release.release_digest = "changed".into(),
+            "receipt" => workshop.ready.as_mut().unwrap().test.receipt_id = Some("changed".into()),
+            "failed" => workshop.ready.as_mut().unwrap().test.status = nomifun_api_types::PluginRuntimeTestStatusDto::Failed,
+            "stale-runtime" => workshop.ready.as_mut().unwrap().test.status = nomifun_api_types::PluginRuntimeTestStatusDto::Stale,
+            _ => workshop.ready.as_mut().unwrap().test.status = nomifun_api_types::PluginRuntimeTestStatusDto::Passed,
+        }
+        assert!(validate_service_test_acknowledgement(&draft, &workshop, &acknowledgement).is_err(), "{mutation}");
+    }
+    let unchanged = service.application.workshop(&owner, value.plugin_id.as_ref().unwrap()).await.unwrap();
+    assert!(unchanged.plugin.releases.active.is_none());
 }

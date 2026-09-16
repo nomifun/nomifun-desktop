@@ -21,11 +21,8 @@ import {
   type CreativeTask,
   type CreativeTaskReference,
 } from '../../tasks';
-import {
-  useCreativeWorkbenchRuntime,
-  type CreativeWorkbenchRuntimeSnapshot,
-  type PreparedCreativeWorkbenchRun,
-} from '../../workbenches/runtime';
+import { useCanvasGenerationRuntime, type CanvasGenerationRuntimeSnapshot, type PreparedCanvasGenerationRun } from '../generation';
+
 import type { CreativeCanvasEditorHandle } from '../editor';
 import {
   canvasAudioComposeConfigForReference,
@@ -47,19 +44,19 @@ import {
 export type CanvasAudioTaskAdmission = CanvasImageMaskEditAdmission;
 
 export interface CanvasAudioTaskRuntimeBridgeHandle {
-  submit(plan: PreparedCreativeWorkbenchRun): Promise<CanvasAudioTaskAdmission>;
+  submit(plan: PreparedCanvasGenerationRun): Promise<CanvasAudioTaskAdmission>;
   retrySubmission(
     order: number,
     idempotencyKey: string
   ): Promise<CanvasAudioTaskAdmission>;
-  retryTask(taskId: string): Promise<CreativeWorkbenchRuntimeSnapshot>;
-  cancelTask(taskId: string): Promise<CreativeWorkbenchRuntimeSnapshot>;
+  retryTask(taskId: string): Promise<CanvasGenerationRuntimeSnapshot>;
+  cancelTask(taskId: string): Promise<CanvasGenerationRuntimeSnapshot>;
   recoverTask(
     reference: CreativeTaskReference
-  ): Promise<CreativeWorkbenchRuntimeSnapshot>;
+  ): Promise<CanvasGenerationRuntimeSnapshot>;
   /** Returns false only when the backend authoritatively answers 404. */
   taskExists(reference: CreativeTaskReference): Promise<boolean>;
-  snapshot(): CreativeWorkbenchRuntimeSnapshot;
+  snapshot(): CanvasGenerationRuntimeSnapshot;
 }
 
 export interface CanvasAudioTaskRuntimeBridgeProps {
@@ -67,7 +64,7 @@ export interface CanvasAudioTaskRuntimeBridgeProps {
   initialDocument: CreativeProjectDocument;
   editorRef: React.RefObject<CreativeCanvasEditorHandle | null>;
   onAsset(asset: CreativeAsset): void;
-  onSnapshot(snapshot: CreativeWorkbenchRuntimeSnapshot): void;
+  onSnapshot(snapshot: CanvasGenerationRuntimeSnapshot): void;
   onNotice(message: string): void;
 }
 
@@ -172,7 +169,7 @@ const CanvasAudioTaskRuntimeBridge = forwardRef<
     [t]
   );
 
-  const runtime = useCreativeWorkbenchRuntime({
+  const runtime = useCanvasGenerationRuntime({
     scopeKey: `${props.projectId}:canvas-audio-tasks`,
     tasks: creativeTaskClient,
     assets: creativeAssetClient,
@@ -273,7 +270,7 @@ const CanvasAudioTaskRuntimeBridge = forwardRef<
 CanvasAudioTaskRuntimeBridge.displayName = 'CanvasAudioTaskRuntimeBridge';
 
 export const canvasAudioTaskReferenceFromPlan = (
-  plan: PreparedCreativeWorkbenchRun
+  plan: PreparedCanvasGenerationRun
 ): CreativeTaskReference => creativeTaskReferenceFromInput(plan.input);
 
 export default CanvasAudioTaskRuntimeBridge;

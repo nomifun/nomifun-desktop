@@ -6,7 +6,7 @@ use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
 use nomifun_agent_contracts::UserId;
 use nomifun_api_types::{
-    AgentBindingRecordDto, AgentPresetEditorResponse, AgentPresetLibraryResponse,
+    AgentBindingRecordDto, AgentCatalogResponse, AgentPresetEditorResponse, AgentPresetLibraryResponse,
     AgentPresetRevisionImpactResponse, ApiResponse, CapabilityCatalogItemDto,
     CreateAgentPresetFromTemplateRequest, CreateAgentPresetRequest, CreateRemoteBindingRequest,
     McpToolCatalogItemDto, PutAgentBindingRequest, RemoteBindingDto,
@@ -57,6 +57,9 @@ fn control_plane_router_with_legacy_skill_route(
     include_legacy_skill_route: bool,
 ) -> Router {
     let router = Router::new()
+        .route("/api/agent-catalog", get(get_catalog))
+        .route("/api/agent-role-defaults", get(get_role_defaults))
+        .route("/api/agent-role-defaults/{role_id}", put(put_role_default))
         .route("/api/agent-preset-templates", get(list_official_templates))
         .route("/api/capabilities", get(list_capabilities))
         .route("/api/mcp-tool-mappings", get(list_mcp_tools))
@@ -120,6 +123,30 @@ async fn list_official_templates(
         ));
     }
     Ok(Json(ApiResponse::ok(control_plane.library(&owner).await?)))
+}
+
+async fn get_catalog(
+    State(control_plane): State<Arc<AgentControlPlane>>,
+    Extension(_owner): Extension<AuthenticatedOwner>,
+) -> Result<Json<ApiResponse<AgentCatalogResponse>>, ControlPlaneError> {
+    // One materialization for capability members and exact Provider candidates.
+    Ok(Json(ApiResponse::ok(control_plane.catalog()?)))
+}
+
+async fn get_role_defaults(
+    State(control_plane): State<Arc<AgentControlPlane>>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+) -> Result<Json<ApiResponse<Vec<nomifun_api_types::InstallationRoleBindingDto>>>, ControlPlaneError> {
+    Ok(Json(ApiResponse::ok(control_plane.role_defaults(&owner).await?)))
+}
+
+async fn put_role_default(
+    State(control_plane): State<Arc<AgentControlPlane>>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path(role_id): Path<String>,
+    Json(request): Json<nomifun_api_types::PutAgentRoleDefaultRequest>,
+) -> Result<Json<ApiResponse<nomifun_api_types::InstallationRoleBindingDto>>, ControlPlaneError> {
+    Ok(Json(ApiResponse::ok(control_plane.put_role_default(&owner, &role_id, request).await?)))
 }
 
 async fn list_capabilities(
@@ -340,6 +367,22 @@ mod tests {
             handler.contains("Extension(owner): Extension<AuthenticatedOwner>"),
             "impact inspection must remain authenticated and owner-scoped"
         );
+    }
+
+    #[tokio::test]
+    async fn catalog_route_returns_one_complete_projection_and_requires_owner_context() {
+        let router = control_plane_router(test_control_plane(Arc::new(InMemoryControlPlaneStore::new())));
+        let request = || Request::builder().uri("/api/agent-catalog").body(Body::empty()).unwrap();
+        let missing_owner = router.clone().oneshot(request()).await.unwrap();
+        assert!(!missing_owner.status().is_success());
+        let response = router.layer(Extension(AuthenticatedOwner(UserId::from("owner-1"))))
+            .oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        for key in ["capabilities", "skills", "mcp_tools", "roles"] {
+            assert_eq!(value["data"][key], serde_json::json!([]));
+        }
     }
 
     #[tokio::test]

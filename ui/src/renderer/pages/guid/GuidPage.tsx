@@ -23,6 +23,8 @@ import { usePendingConversation } from '@/renderer/pages/conversation/components
 import AgentResourcePicker from '@/renderer/components/agent/AgentResourcePicker';
 import {
   resolveAgentResourceSelections,
+  selectedMcpResourceIds,
+  hasFrozenMcpTools,
   type AgentResourceSelectionValue,
 } from '@/renderer/hooks/agent/agentResourceSelection';
 import { Alert, ConfigProvider } from '@arco-design/web-react';
@@ -38,10 +40,9 @@ import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import GuidAgentSelector from './components/GuidAgentSelector';
 import GuidActionRow from './components/GuidActionRow';
-import GuidCompanionPosterPreview from './components/GuidCompanionPosterPreview';
+import GuidCompanionShowcase from './components/GuidCompanionShowcase';
 import GuidInputCard from './components/GuidInputCard';
 import GuidModelSelector from './components/GuidModelSelector';
-import GuidResourceCards from './components/GuidResourceCards';
 import MentionDropdown, {
   MentionSelectorBadge,
 } from './components/MentionDropdown';
@@ -60,6 +61,9 @@ import { useGuidSend } from './hooks/useGuidSend';
 import { useTypewriterPlaceholder } from './hooks/useTypewriterPlaceholder';
 import type { GuidAgentSelection } from './types';
 import styles from './index.module.css';
+import CreationControls from '@/renderer/creation/CreationControls';
+import { CreationComposerContext } from '@/renderer/creation/CreationComposerContext';
+import { useGuidCreation } from '@/renderer/creation/useGuidCreation';
 
 type GuidNavigationState = {
   resetAgentSelection?: boolean;
@@ -102,6 +106,17 @@ const GuidPage: React.FC = () => {
     locationState: navigationState,
   });
   const advancedConfig = useGuidAdvancedConfig();
+  const clearSentInput = useCallback(() => {
+    guidInput.setInput('');
+    guidInput.setFiles([]);
+    guidInput.setDir('');
+  }, [guidInput.setInput, guidInput.setFiles, guidInput.setDir]);
+  const creation = useGuidCreation(agentSelection, guidInput.input, guidInput.files, guidInput.dir, clearSentInput);
+  useEffect(() => {
+    if (creation.draft.pendingPrompt === undefined) return;
+    guidInput.setInput(creation.draft.pendingPrompt);
+    creation.update(draft => ({ ...draft, pendingPrompt: undefined }));
+  }, [creation.draft.pendingPrompt, creation.update, guidInput.setInput]);
   const presetCapabilities = useGuidPresetCapabilities(
     agentSelection.selection.kind === 'preset'
       ? agentSelection.selection.presetId
@@ -157,27 +172,30 @@ const GuidPage: React.FC = () => {
     ? new Set(agentSelection.selectedTemplate.seed.skill_bindings.map((skill) => skill.id))
     : presetCapabilities.skillNames;
   const presetSkillNamesKey = Array.from(presetSkillNames).sort().join('\u0000');
-  const requiredMcpServerId = presetResourceKinds.has('mcp_server')
-    ? resourceSelectionValue.mcp_server
-    : undefined;
+  const requiresMcpResource = presetResourceKinds.has('mcp_server');
+  const frozenMcpTools = hasFrozenMcpTools(presetCapabilityIds);
+  const requiredMcpServerIds = useMemo(() => requiresMcpResource
+    ? selectedMcpResourceIds(resourceSelectionValue) : [],
+  [requiresMcpResource, resourceSelectionValue]);
   const effectiveCapabilityDraft = useMemo<SessionCapabilityDraft>(() => ({
     skillNames: capabilityDraft.skillNames,
-    mcpServerIds: requiredMcpServerId
-      ? Array.from(new Set([...capabilityDraft.mcpServerIds, requiredMcpServerId]))
-      : capabilityDraft.mcpServerIds,
-  }), [capabilityDraft, requiredMcpServerId]);
+    mcpServerIds: frozenMcpTools ? requiredMcpServerIds
+      : Array.from(new Set([...capabilityDraft.mcpServerIds, ...requiredMcpServerIds])),
+  }), [capabilityDraft, frozenMcpTools, requiredMcpServerIds]);
   const lockedMcpServerIds = useMemo(
-    () => new Set(requiredMcpServerId ? [requiredMcpServerId] : []),
-    [requiredMcpServerId]
+    () => new Set(requiredMcpServerIds),
+    [requiredMcpServerIds]
   );
+  const displayedCapabilityCatalog = useMemo(() => frozenMcpTools ? {
+    ...capabilityCatalog.catalog,
+    mcpServers: capabilityCatalog.catalog.mcpServers.filter((server) => lockedMcpServerIds.has(server.mcp_server_id)),
+  } : capabilityCatalog.catalog, [capabilityCatalog.catalog, frozenMcpTools, lockedMcpServerIds]);
   const handleCapabilityDraftChange = useCallback((next: SessionCapabilityDraft) => {
     setCapabilityDraft({
       skillNames: next.skillNames,
-      mcpServerIds: requiredMcpServerId
-        ? next.mcpServerIds.filter((id) => id !== requiredMcpServerId)
-        : next.mcpServerIds,
+      mcpServerIds: frozenMcpTools ? [] : next.mcpServerIds.filter((id) => !lockedMcpServerIds.has(id)),
     });
-  }, [requiredMcpServerId]);
+  }, [frozenMcpTools, lockedMcpServerIds]);
 
   useEffect(() => {
     if (capabilityCatalog.loading || capabilityCatalog.error) return;
@@ -274,6 +292,7 @@ const GuidPage: React.FC = () => {
 
   const [sendKeyPref] = useConfig('chat.sendKey');
   const sendKey = sendKeyPref ?? 'enter';
+  const submitInput = creation.draft.mode ? creation.send : send.sendMessageHandler;
 
   const handleInputKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
@@ -367,7 +386,7 @@ const GuidPage: React.FC = () => {
       if (isSubmitGesture(event, sendKey)) {
         event.preventDefault();
         if (!guidInput.input.trim() && !isAutoWorkMode) return;
-        send.sendMessageHandler();
+        void submitInput();
       }
     },
     [
@@ -375,7 +394,7 @@ const GuidPage: React.FC = () => {
       isAutoWorkMode,
       mention,
       sendKey,
-      send.sendMessageHandler,
+      submitInput,
     ]
   );
 
@@ -404,6 +423,9 @@ const GuidPage: React.FC = () => {
   }`;
 
   useLayoutEffect(() => {
+    // Returning from another page resumes the draft. Only an explicit new
+    // conversation action requests a reset.
+    if (!resetAgentRequested) return;
     guidInput.setInput('');
     guidInput.setFiles([]);
     guidInput.setLoading(false);
@@ -412,7 +434,10 @@ const GuidPage: React.FC = () => {
     }
     advancedConfig.reset();
     setResourceSelectionValue({});
+    creation.update(draft => ({ ...draft, references: [], pendingPrompt: undefined, pendingFiles: undefined }));
   }, [
+    creation.update,
+    setResourceSelectionValue,
     advancedConfig.reset,
     guidInput.setDir,
     guidInput.setFiles,
@@ -420,6 +445,7 @@ const GuidPage: React.FC = () => {
     guidInput.setLoading,
     location.key,
     navigationState?.workspace,
+    resetAgentRequested,
   ]);
 
   useEffect(() => {
@@ -502,12 +528,14 @@ const GuidPage: React.FC = () => {
   ) : null;
 
   const modelSelectorNode = (
-    <GuidModelSelector
-      isProviderModelMode
-      modelList={modelSelection.modelList}
-      current_model={modelSelection.current_model}
-      setCurrentModel={modelSelection.setCurrentModel}
-    />
+    !creation.draft.mode && (
+      <GuidModelSelector
+        isProviderModelMode
+        modelList={modelSelection.modelList}
+        current_model={modelSelection.current_model}
+        setCurrentModel={modelSelection.setCurrentModel}
+      />
+    )
   );
 
   const autoWorkButtonDisabled =
@@ -515,10 +543,10 @@ const GuidPage: React.FC = () => {
     autoWorkStartDisabled(guidInput.loading, advancedConfig.autoWork);
   const actionRowNode = (
     <GuidActionRow
-      files={guidInput.files}
       onFilesUploaded={guidInput.handleFilesUploaded}
       modelSelectorNode={modelSelectorNode}
-      loading={guidInput.loading}
+      creationControls={<CreationControls prompt={guidInput.input} onPromptChange={guidInput.setInput} files={guidInput.files} />}
+      loading={guidInput.loading || creation.loading}
       speechInputNode={
         <SpeechInputButton
           disabled={guidInput.loading}
@@ -530,31 +558,28 @@ const GuidPage: React.FC = () => {
           }}
         />
       }
-      autoWorkMode={isAutoWorkMode}
+      autoWorkMode={!creation.draft.mode && isAutoWorkMode}
       isButtonDisabled={
-        isAutoWorkMode ? autoWorkButtonDisabled : send.isButtonDisabled
+        creation.draft.mode ? creation.loading || !creation.ready || !guidInput.input.trim() : isAutoWorkMode ? autoWorkButtonDisabled : send.isButtonDisabled
       }
-      onSend={send.sendMessageHandler}
-      onOpenBrowser={send.openBrowserHandler}
+      onSend={() => void submitInput()}
+      onOpenBrowser={creation.draft.mode ? undefined : send.openBrowserHandler}
       browserDisabled={send.isBrowserButtonDisabled}
     />
   );
 
   return (
+    <CreationComposerContext.Provider value={creation}>
     <ConfigProvider
       getPopupContainer={() => guidContainerRef.current || document.body}
     >
       <div ref={guidContainerRef} className={styles.guidContainer}>
         <div className={styles.guidAdvancedControls}>
-          {advancedControlsNode}
+          {!creation.draft.mode && advancedControlsNode}
         </div>
         <div className={styles.guidPrimaryStage}>
           <div className={styles.guidLayout}>
-            <div className={styles.heroHeader}>
-              <p className='text-2xl font-semibold mb-0 text-0 text-center'>
-                {t('conversation.welcome.title')}
-              </p>
-            </div>
+            <GuidCompanionShowcase />
 
             {agentSelection.selection.kind === 'preset' && presetCapabilities.error && (
               <Alert
@@ -569,7 +594,7 @@ const GuidPage: React.FC = () => {
             <GuidInputCard
               sideTools={
                 <SessionCapabilityPicker
-                  catalog={capabilityCatalog.catalog}
+                  catalog={displayedCapabilityCatalog}
                   draft={effectiveCapabilityDraft}
                   onChange={handleCapabilityDraftChange}
                   loading={capabilityCatalog.loading}
@@ -586,7 +611,7 @@ const GuidPage: React.FC = () => {
               onPaste={guidInput.onPaste}
               onFocus={guidInput.handleTextareaFocus}
               onBlur={guidInput.handleTextareaBlur}
-              placeholder={normalPlaceholder}
+              placeholder={creation.draft.mode ? '描述你想创作的内容，可添加参考素材…' : normalPlaceholder}
               isInputActive={guidInput.isInputFocused}
               isFileDragging={guidInput.isFileDragging}
               activeBorderColor={activeBorderColor}
@@ -631,33 +656,25 @@ const GuidPage: React.FC = () => {
               }
             />
 
-            <AgentResourcePicker
+            {!creation.draft.mode && <AgentResourcePicker
               requiredKinds={resourcePickerKinds}
               capabilityIds={presetCapabilityIds}
               value={resourceSelectionValue}
               onChange={setResourceSelectionValue}
               disabled={guidInput.loading || !presetResourceResolutionReady}
-            />
+            />}
 
-            <GuidResourceCards />
+            <QuickActionButtons onOpenBugReport={() => setShowFeedbackModal(true)} />
           </div>
         </div>
 
-        <div className={styles.guidDiscoveryArea}>
-          <GuidCompanionPosterPreview />
-        </div>
-
-        <QuickActionButtons
-          onOpenBugReport={() => setShowFeedbackModal(true)}
-          inactiveBorderColor={inactiveBorderColor}
-          activeShadow={activeShadow}
-        />
         <FeedbackReportModal
           visible={showFeedbackModal}
           onCancel={() => setShowFeedbackModal(false)}
         />
       </div>
     </ConfigProvider>
+    </CreationComposerContext.Provider>
   );
 };
 

@@ -1255,6 +1255,7 @@ async fn trash_and_restore_are_exact_owner_scoped_lifecycle_transactions() {
     let active_release_digest = enabled.product.active_release_digest.clone().unwrap();
     repository
         .open_surface_session_cas(&OpenPluginRuntimeSurfaceSessionParams {
+            conversation_id: None,
             owner_user_id: owner.clone(),
             plugin_product_id: SERVICE_PLUGIN_ID.to_owned(),
             surface_session_id: Uuid::now_v7().to_string(),
@@ -2445,6 +2446,7 @@ async fn surface_sessions_are_exact_revocable_and_disable_enable_aba_safe() {
     let first_session_id = Uuid::now_v7().to_string();
     let first = repository
         .open_surface_session_cas(&OpenPluginRuntimeSurfaceSessionParams {
+            conversation_id: None,
             owner_user_id: owner.clone(),
             plugin_product_id: PLUGIN_ID.to_owned(),
             surface_session_id: first_session_id.clone(),
@@ -2481,6 +2483,7 @@ async fn surface_sessions_are_exact_revocable_and_disable_enable_aba_safe() {
     let second_session_id = Uuid::now_v7().to_string();
     let second = repository
         .open_surface_session_cas(&OpenPluginRuntimeSurfaceSessionParams {
+            conversation_id: None,
             owner_user_id: owner.clone(),
             plugin_product_id: PLUGIN_ID.to_owned(),
             surface_session_id: second_session_id.clone(),
@@ -2544,6 +2547,7 @@ async fn surface_sessions_are_exact_revocable_and_disable_enable_aba_safe() {
 
     let third = repository
         .open_surface_session_cas(&OpenPluginRuntimeSurfaceSessionParams {
+            conversation_id: None,
             owner_user_id: owner.clone(),
             plugin_product_id: PLUGIN_ID.to_owned(),
             surface_session_id: Uuid::now_v7().to_string(),
@@ -2599,6 +2603,7 @@ async fn surface_sessions_are_exact_revocable_and_disable_enable_aba_safe() {
         .is_err());
     let restarted_session = repository
         .open_surface_session_cas(&OpenPluginRuntimeSurfaceSessionParams {
+            conversation_id: None,
             owner_user_id: owner.clone(),
             plugin_product_id: PLUGIN_ID.to_owned(),
             surface_session_id: Uuid::now_v7().to_string(),
@@ -2633,6 +2638,57 @@ async fn surface_sessions_are_exact_revocable_and_disable_enable_aba_safe() {
         .await
         .unwrap()
         .is_none());
+
+    // Optional Session scope is one owner-checked logical reference, not a
+    // second execution identity. Exercise the actual repository and cleanup.
+    use nomifun_db::{IConversationRepository, SqliteConversationRepository};
+    let conversation_id = Uuid::now_v7().to_string();
+    let foreign_id = Uuid::now_v7().to_string();
+    let other_owner = insert_other_owner(database.pool()).await;
+    for (id, user) in [(&conversation_id, &owner), (&foreign_id, &other_owner)] {
+        sqlx::query("INSERT INTO conversations (conversation_id, user_id, name, type, created_at, updated_at) VALUES (?, ?, 'Surface scope', 'nomi', 1, 1)")
+            .bind(id).bind(user).execute(database.pool()).await.unwrap();
+    }
+    let mut grant = OpenPluginRuntimeSurfaceSessionParams {
+        conversation_id: Some(conversation_id.clone()),
+        owner_user_id: owner.clone(),
+        plugin_product_id: PLUGIN_ID.to_owned(),
+        surface_session_id: Uuid::now_v7().to_string(),
+        capability_digest: "6".repeat(64),
+        expected_product_revision: reenabled.product.product_revision,
+        expected_pointer_revision: reenabled.product.pointer_revision,
+        expected_active_release_id: reenabled.product.active_release_id.clone().unwrap(),
+        expected_active_release_digest: digest.clone(),
+        expected_active_release_epoch: 1,
+        issued_at_ms: 35,
+    };
+    for invalid in [foreign_id, Uuid::now_v7().to_string(), "invalid-session".into()] {
+        grant.conversation_id = Some(invalid);
+        assert!(repository.open_surface_session_cas(&grant).await.is_err());
+    }
+    grant.conversation_id = Some(conversation_id.clone());
+    let scoped = repository.open_surface_session_cas(&grant).await.unwrap();
+    assert_eq!(scoped.conversation_id.as_deref(), Some(conversation_id.as_str()));
+    // Reopening without consent clears the old scope while rotating authority.
+    grant.conversation_id = None;
+    grant.surface_session_id = Uuid::now_v7().to_string();
+    grant.capability_digest = "7".repeat(64);
+    let normal = repository.open_surface_session_cas(&grant).await.unwrap();
+    assert!(normal.conversation_id.is_none());
+    assert_eq!(normal.generation, scoped.generation + 1);
+    grant.conversation_id = Some(conversation_id.clone());
+    grant.surface_session_id = Uuid::now_v7().to_string();
+    grant.capability_digest = "8".repeat(64);
+    repository.open_surface_session_cas(&grant).await.unwrap();
+    nomifun_db::validate_id_schema_contract(database.pool()).await.unwrap();
+    nomifun_db::validate_id_data_contract(database.pool()).await.unwrap();
+    SqliteConversationRepository::new(database.pool().clone())
+        .delete_with_cleanup(&conversation_id).await.unwrap();
+    assert!(repository.resolve_surface_session(&ResolvePluginRuntimeSurfaceSessionParams {
+        plugin_product_id: PLUGIN_ID.to_owned(), capability_digest: grant.capability_digest,
+        expected_active_release_digest: digest, expected_active_release_epoch: 1,
+    }).await.unwrap().is_none(), "deleting the Session must revoke its Surface authority");
+    nomifun_db::validate_id_data_contract(database.pool()).await.unwrap();
 }
 
 #[tokio::test]

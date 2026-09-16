@@ -60,6 +60,9 @@ pub struct InvokeError {
     pub http_status: Option<u16>,
     pub retry_after_ms: Option<u64>,
     pub(crate) catalog_failure: bool,
+    /// Set only from a complete, bounded provider error envelope, never from
+    /// a diagnostic substring. Legacy callers retain the HTTP-based kind.
+    pub(crate) context_length_rejected: bool,
 }
 
 /// Render a transport error's cause chain for a diagnostic, with URL query
@@ -97,6 +100,7 @@ impl InvokeError {
             http_status: None,
             retry_after_ms: None,
             catalog_failure: false,
+            context_length_rejected: false,
         }
     }
 
@@ -131,6 +135,18 @@ impl InvokeError {
     /// Whether this error originated from a failed catalog/repository read.
     pub fn is_catalog_failure(&self) -> bool {
         self.catalog_failure
+    }
+
+    /// The provider explicitly rejected the input context length. This is not
+    /// a transient transport retry, nor proof that a streamed response had no
+    /// output; the Broker separately tracks committed semantic output.
+    pub fn is_context_length_rejected(&self) -> bool {
+        self.context_length_rejected
+            && matches!(self.http_status, Some(400 | 413 | 422))
+            && matches!(
+                self.kind,
+                InvokeErrorKind::InvalidParams | InvokeErrorKind::ProviderError
+            )
     }
 
     /// Classify a reqwest transport error: timeout → [`InvokeErrorKind::Timeout`],

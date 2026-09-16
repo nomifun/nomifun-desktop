@@ -1716,6 +1716,8 @@ fn capability_manifest(
         contributions: CapabilityContributions {
             actions,
             context_schema_refs,
+            context_phase: Default::default(),
+            ui_slot: None,
             event_schema_refs,
             resource_kinds: spec
                 .resource_kinds
@@ -2250,6 +2252,9 @@ mod tests {
     ) {
         let materialized = registry.snapshot().expect("registry snapshot");
         let payload = AgentPresetRevisionPayload {
+            runtime_engine: None,
+            context_order: Vec::new(),
+            middleware_order: Vec::new(),
             schema_version: VersionString::from(VERSION),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),

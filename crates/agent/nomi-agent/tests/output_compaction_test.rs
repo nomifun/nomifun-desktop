@@ -52,7 +52,7 @@ async fn case_1_off_passthrough() {
 
     let tool_calls = vec![make_tool_use("c1", "test_tool")];
 
-    let outcome = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false)
+    let outcome = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false, &[])
     .await
     .expect("should succeed");
 
@@ -83,7 +83,7 @@ async fn case_2_safe_sanitizes() {
 
     let tool_calls = vec![make_tool_use("c2", "test_tool")];
 
-    let outcome = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Safe, false)
+    let outcome = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Safe, false, &[])
     .await
     .expect("should succeed");
 
@@ -124,7 +124,7 @@ async fn case_3_full_folds_and_compacts() {
 
     let tool_calls = vec![make_tool_use("c3", "test_tool")];
 
-    let outcome = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Full, false)
+    let outcome = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Full, false, &[])
     .await
     .expect("should succeed");
 
@@ -163,7 +163,7 @@ async fn case_4_toon_encodes_array() {
 
     let tool_calls = vec![make_tool_use("c4", "test_tool")];
 
-    let outcome = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Full, true)
+    let outcome = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Full, true, &[])
     .await
     .expect("should succeed");
 
@@ -189,7 +189,7 @@ async fn case_5_toon_disabled_no_encoding() {
 
     let tool_calls = vec![make_tool_use("c5", "test_tool")];
 
-    let outcome = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Full, false)
+    let outcome = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Full, false, &[])
     .await
     .expect("should succeed");
 
@@ -326,12 +326,12 @@ async fn case_7_runtime_compaction_switch() {
 
     let tool_calls = vec![make_tool_use("c7", "test_tool")];
 
-    let outcome_off = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false)
+    let outcome_off = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false, &[])
     .await
     .expect("should succeed");
     let content_off = extract_tool_result_content(&outcome_off).to_string();
 
-    let outcome_full = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Full, false)
+    let outcome_full = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Full, false, &[])
     .await
     .expect("should succeed");
     let content_full = extract_tool_result_content(&outcome_full).to_string();

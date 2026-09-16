@@ -5365,6 +5365,9 @@ impl IPluginRuntimeRepository for SqlitePluginRuntimeRepository {
         validate_uuid(&params.owner_user_id, "owner_user_id")?;
         validate_uuid(&params.plugin_product_id, "plugin_product_id")?;
         validate_uuid(&params.surface_session_id, "surface_session_id")?;
+        if let Some(id) = &params.conversation_id {
+            validate_uuid(id, "conversation_id")?;
+        }
         validate_uuid(
             &params.expected_active_release_id,
             "expected_active_release_id",
@@ -5385,6 +5388,14 @@ impl IPluginRuntimeRepository for SqlitePluginRuntimeRepository {
         let mut tx = self.pool.begin().await?;
         let product =
             lock_product_for_update(&mut tx, &params.owner_user_id, &params.plugin_product_id).await?;
+        if let Some(id) = &params.conversation_id {
+            let owned: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM conversations WHERE conversation_id = ? AND user_id = ?)",
+            ).bind(id).bind(&params.owner_user_id).fetch_one(&mut *tx).await?;
+            if !owned {
+                return Err(conflict("Plugin Surface Session grant target is not owned"));
+            }
+        }
         if product.lifecycle != "enabled"
             || product.product_revision != params.expected_product_revision
             || product.pointer_revision != params.expected_pointer_revision
@@ -5416,8 +5427,8 @@ impl IPluginRuntimeRepository for SqlitePluginRuntimeRepository {
             "INSERT INTO plugin_surface_sessions (
                 surface_session_id, plugin_product_id, owner_user_id, generation,
                 capability_digest, active_release_id, active_release_digest,
-                active_release_epoch, issued_at_ms
-             ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
+                active_release_epoch, issued_at_ms, conversation_id
+             ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(plugin_product_id) DO UPDATE SET
                 surface_session_id = excluded.surface_session_id,
                 owner_user_id = excluded.owner_user_id,
@@ -5426,7 +5437,8 @@ impl IPluginRuntimeRepository for SqlitePluginRuntimeRepository {
                 active_release_id = excluded.active_release_id,
                 active_release_digest = excluded.active_release_digest,
                 active_release_epoch = excluded.active_release_epoch,
-                issued_at_ms = excluded.issued_at_ms
+                issued_at_ms = excluded.issued_at_ms,
+                conversation_id = excluded.conversation_id
              WHERE plugin_surface_sessions.owner_user_id = excluded.owner_user_id
                AND plugin_surface_sessions.generation < 9223372036854775807",
         )
@@ -5438,6 +5450,7 @@ impl IPluginRuntimeRepository for SqlitePluginRuntimeRepository {
         .bind(&params.expected_active_release_digest)
         .bind(params.expected_active_release_epoch)
         .bind(params.issued_at_ms)
+        .bind(&params.conversation_id)
         .execute(&mut *tx)
         .await
         .map_err(query_error)?;
@@ -5497,6 +5510,7 @@ impl IPluginRuntimeRepository for SqlitePluginRuntimeRepository {
         .await
         .map_err(DbError::Query)
     }
+
 
     async fn close_surface_session_cas(
         &self,

@@ -105,6 +105,9 @@ pub struct CloneConversationRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SendMessageRequest {
+    /// Saved Agent preset to resolve for this next turn, without changing an active turn.
+    #[serde(default, deserialize_with = "crate::serde_util::deserialize_optional_preset_id")]
+    pub preset_id: Option<String>,
     pub content: String,
     #[serde(default)]
     pub files: Vec<String>,

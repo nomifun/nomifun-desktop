@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    ConnectionConfigRef, ResourceBindingId, ResourceId, ResourceKind, TypedResourceBinding,
+    ConnectionConfigRef, ResolvedMcpToolLock, ResourceBindingId, ResourceId, ResourceKind, TypedResourceBinding,
 };
 use nomifun_api_types::{
     AgentBindingValueDto, AgentResourceSelectionDto, TypedResourceBindingDto,
@@ -20,8 +20,7 @@ use nomifun_api_types::{
 use nomifun_agent_control_plane::AgentControlPlane;
 pub(crate) use nomifun_agent_domain_wave3::CREATIVE_ASSET_LIBRARY_RESOURCE_ID;
 use nomifun_db::{
-    IChannelRepository, IMcpServerRepository, IProviderModelCapabilityRepository,
-    IProviderModelRepository, IProviderRepository,
+    IChannelRepository, IMcpServerRepository,
 };
 use serde_json::{Value, json};
 
@@ -123,9 +122,8 @@ trait NomiCoreResourceAuthority: Send + Sync {
 
 /// Typed registry used by Nomi-core create/switch admission.
 ///
-/// One resolver owns one canonical resource kind. More than one selection for
-/// the same kind is rejected because Kernel target bindings intentionally have
-/// cardinality one per kind.
+/// One resolver owns one canonical resource kind. Only frozen per-tool MCP
+/// mappings permit multiple resources of one kind; all others remain singular.
 #[derive(Clone, Default)]
 pub(crate) struct NomiCoreResourceBindingResolverRegistry {
     authorities: Arc<BTreeMap<String, Arc<dyn NomiCoreResourceAuthority>>>,
@@ -163,9 +161,6 @@ impl NomiCoreResourceBindingResolverRegistry {
             customer_service: Arc::clone(&services.customer_service_service),
             workshop: Arc::clone(&services.workshop_service),
             plugin_runtime: Arc::clone(&services.plugin_runtime),
-            providers: Arc::clone(&services.provider_repo),
-            provider_models: Arc::clone(&services.provider_model_repo),
-            provider_capabilities: Arc::clone(&services.provider_model_capability_repo),
             channels: Arc::new(nomifun_db::SqliteChannelRepository::new(
                 services.database.pool().clone(),
             )),
@@ -184,11 +179,23 @@ impl NomiCoreResourceBindingResolverRegistry {
         }))
     }
 
+    /// Legacy single-resource resolution. Multi-server admission additionally
+    /// requires the saved Snapshot locks, supplied by resolve_for_saved_binding.
     pub(crate) async fn resolve(
         &self,
         owner_id: &str,
         selections: &[AgentResourceSelectionDto],
         selected_capability_ids: &BTreeSet<String>,
+    ) -> Result<Vec<TypedResourceBinding>, ResourceSelectionResolutionError> {
+        self.resolve_selected(owner_id, selections, selected_capability_ids, &[]).await
+    }
+
+    async fn resolve_selected(
+        &self,
+        owner_id: &str,
+        selections: &[AgentResourceSelectionDto],
+        selected_capability_ids: &BTreeSet<String>,
+        mcp_locks: &[ResolvedMcpToolLock],
     ) -> Result<Vec<TypedResourceBinding>, ResourceSelectionResolutionError> {
         if selections.len() > MAX_RESOURCE_SELECTIONS {
             return Err(ResourceSelectionResolutionError::invalid(format!(
@@ -197,16 +204,21 @@ impl NomiCoreResourceBindingResolverRegistry {
         }
 
         let required = required_operations(selected_capability_ids);
+        let resource_provider = selected_capability_ids.contains("mcp.resource");
         let mut selections_by_kind = BTreeMap::new();
+        let mut selected_pairs = BTreeSet::new();
         for selection in selections {
             validate_selection_field("resource_kind", &selection.resource_kind)?;
             validate_selection_field("resource_id", &selection.resource_id)?;
+            if !selected_pairs.insert((selection.resource_kind.clone(), selection.resource_id.clone())) {
+                return Err(ResourceSelectionResolutionError::invalid("duplicate resource selection"));
+            }
             if selections_by_kind
                 .insert(
                     selection.resource_kind.clone(),
                     selection.resource_id.clone(),
                 )
-                .is_some()
+                .is_some() && !(selection.resource_kind == "mcp_server" && (!mcp_locks.is_empty() || resource_provider))
             {
                 return Err(ResourceSelectionResolutionError::invalid(format!(
                     "resource kind {} was selected more than once",
@@ -220,6 +232,27 @@ impl NomiCoreResourceBindingResolverRegistry {
                     json!({ "resource_kind": selection.resource_kind }),
                 ));
             }
+        }
+        if !mcp_locks.is_empty() || resource_provider {
+            let expected = mcp_locks.iter().map(|lock| lock.server_id.as_ref()).collect::<BTreeSet<_>>();
+            let actual = selections.iter().filter(|selection| selection.resource_kind == "mcp_server")
+                .map(|selection| selection.resource_id.as_str()).collect::<BTreeSet<_>>();
+            if (!resource_provider && actual != expected)
+                || !expected.is_subset(&actual)
+                || actual.len() > super::nomi_core_mcp_catalog::MAX_SESSION_SERVERS {
+                return Err(ResourceSelectionResolutionError::new("MCP_RESOURCE_SELECTION_MISMATCH",
+                    "MCP selection must contain every frozen tool server; extra servers require mcp.resource and the total is bounded to 16", Value::Null));
+            }
+            if actual.len() > 1 && selected_capability_ids.iter().any(|id|
+                !super::nomi_core_mcp_catalog::is_product_tool(id)
+                && !(resource_provider && matches!(id.as_str(), "mcp.resource" | "mcp.connect" | "mcp.oauth"))
+                && required_operations(&BTreeSet::from([id.clone()])).contains_key("mcp_server")) {
+                return Err(ResourceSelectionResolutionError::invalid(
+                    "multiple MCP servers cannot be mixed with an unmapped resource consumer"));
+            }
+            // This map is only for cross-kind relationship checks. Never
+            // expose an arbitrary last MCP server as the singular selection.
+            selections_by_kind.remove("mcp_server");
         }
         if let (Some(companion_id), Some(memory_id)) = (
             selections_by_kind.get("companion"),
@@ -239,7 +272,7 @@ impl NomiCoreResourceBindingResolverRegistry {
         let missing = required
             .keys()
             .filter(|kind| {
-                !selections_by_kind.contains_key(*kind)
+                !selections.iter().any(|selection| &selection.resource_kind == *kind)
                     && !OPTIONAL_UNBOUND_RESOURCE_KINDS.contains(&kind.as_str())
             })
             .cloned()
@@ -253,7 +286,7 @@ impl NomiCoreResourceBindingResolverRegistry {
         }
 
         let mut bindings = Vec::with_capacity(selections.len());
-        for (kind, resource_id) in &selections_by_kind {
+        for (kind, resource_id) in &selected_pairs {
             let authority = self.authorities.get(kind).ok_or_else(|| {
                 ResourceSelectionResolutionError::new(
                     "RESOURCE_SELECTION_KIND_UNSUPPORTED",
@@ -261,13 +294,21 @@ impl NomiCoreResourceBindingResolverRegistry {
                     json!({ "resource_kind": kind }),
                 )
             })?;
-            let operations = required.get(kind).cloned().unwrap_or_default();
+            let resource_capabilities = selected_capability_ids.iter().filter(|id|
+                kind != "mcp_server" || mcp_locks.is_empty()
+                || !super::nomi_core_mcp_catalog::is_product_tool(id)
+                || mcp_locks.iter().any(|lock| lock.capability_id.as_ref() == id.as_str()
+                    && lock.server_id.as_ref() == resource_id.as_str())).cloned().collect::<BTreeSet<_>>();
+            // Resource-only members must not inherit invoke from tools frozen
+            // to another server, even though per-tool policy also filters it.
+            let operations = required_operations(&resource_capabilities)
+                .get(kind).cloned().unwrap_or_default();
             let resolved = authority
                 .resolve(ResourceAuthorityRequest {
                     owner_id: owner_id.to_owned(),
                     resource_id: resource_id.clone(),
                     required_operations: operations.clone(),
-                    selected_capability_ids: selected_capability_ids.clone(),
+                    selected_capability_ids: resource_capabilities,
                     selections_by_kind: selections_by_kind.clone(),
                 })
                 .await?;
@@ -348,7 +389,7 @@ impl NomiCoreResourceBindingResolverRegistry {
             ));
         }
         binding.typed_resource_bindings = self
-            .resolve(owner.as_ref(), selections, &capability_ids)
+            .resolve_selected(owner.as_ref(), selections, &capability_ids, &snapshot.content.mcp_tool_locks)
             .await?
             .into_iter()
             .map(|binding| TypedResourceBindingDto {
@@ -379,7 +420,7 @@ fn validate_selection_field(
     Ok(())
 }
 
-const SUPPORTED_RESOURCE_KINDS: [&str; 15] = [
+const SUPPORTED_RESOURCE_KINDS: [&str; 14] = [
     "workspace",
     "knowledge_base",
     "project_memory",
@@ -393,7 +434,6 @@ const SUPPORTED_RESOURCE_KINDS: [&str; 15] = [
     "customer",
     "canvas",
     "asset_library",
-    "generation_provider",
     "plugin",
 ];
 
@@ -435,11 +475,15 @@ fn required_operations(
             "memory.companion.recall" => grant("companion_memory", "read"),
             "memory.companion.write" | "memory.companion.merge" | "memory.companion.evolve"
             | "companion.learn" | "companion.evolve" => grant("companion_memory", "write"),
-            "mcp.tool_proxy" => {
+            id if id == "mcp.tool_proxy" || super::nomi_core_mcp_catalog::is_product_tool(id) => {
                 grant("mcp_server", "connect");
                 grant("mcp_server", "invoke");
             }
-            "mcp.resource" | "connector.data.read" => grant("mcp_server", "read"),
+            "mcp.resource" => {
+                grant("mcp_server", "connect");
+                grant("mcp_server", "read");
+            }
+            "connector.data.read" => grant("mcp_server", "read"),
             "connector.data.write" => grant("mcp_server", "invoke"),
             "companion.persona" | "companion.roster" => grant("companion", "read"),
             "channel.receive" => grant("channel", "receive"),
@@ -462,10 +506,6 @@ fn required_operations(
             "workshop.asset.read" | "office.preview" => grant("asset_library", "read"),
             "workshop.asset.write" | "office.document.edit" | "office.sheet.edit"
             | "office.slides.edit" => grant("asset_library", "write"),
-            "creation.text" => grant("generation_provider", "text"),
-            "creation.image" | "creation.image_edit" => grant("generation_provider", "image"),
-            "creation.video" => grant("generation_provider", "video"),
-            "creation.audio" => grant("generation_provider", "audio"),
             "plugin.read" => grant("plugin", "read"),
             "plugin.edit" => grant("plugin", "edit"),
             "plugin.publish" => grant("plugin", "publish"),
@@ -485,9 +525,6 @@ struct ProductResourceDependencies {
     customer_service: Arc<nomifun_customer_service::CustomerServiceService>,
     workshop: Arc<nomifun_workshop::WorkshopService>,
     plugin_runtime: Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
-    providers: Arc<dyn IProviderRepository>,
-    provider_models: Arc<dyn IProviderModelRepository>,
-    provider_capabilities: Arc<dyn IProviderModelCapabilityRepository>,
     channels: Arc<dyn IChannelRepository>,
     mcp_servers: Arc<dyn IMcpServerRepository>,
     robots: Option<Arc<nomifun_robot::registry::RobotRegistry>>,
@@ -519,7 +556,6 @@ impl NomiCoreResourceAuthority for ProductResourceAuthority {
             "robot" => self.resolve_robot(request).await,
             "customer" => self.resolve_customer(request).await,
             "canvas" | "asset_library" => self.resolve_workshop(request).await,
-            "generation_provider" => self.resolve_generation_provider(request).await,
             "plugin" => self.resolve_plugin(request).await,
             _ => Err(ResourceSelectionResolutionError::invalid(format!(
                 "unsupported product resource kind {}",
@@ -789,6 +825,17 @@ impl ProductResourceAuthority {
                 "the selected MCP server is disabled",
             ));
         }
+        let selected_tools = request.selected_capability_ids.iter()
+            .filter(|id| super::nomi_core_mcp_catalog::is_product_tool(id)).collect::<BTreeSet<_>>();
+        if !selected_tools.is_empty() {
+            let tools = super::nomi_core_mcp_catalog::server_tools(server.clone()).map_err(|_| {
+                ResourceSelectionResolutionError::unavailable(self.kind, &request.resource_id, "the selected MCP catalog cannot materialize exact tool contracts")
+            })?;
+            let current = tools.into_iter().map(|tool| tool.lock.capability_id.as_ref().to_owned()).collect::<BTreeSet<_>>();
+            if selected_tools.iter().any(|id| !current.contains(id.as_str())) {
+                return Err(ResourceSelectionResolutionError::unavailable(self.kind, &request.resource_id, "selected MCP tools belong to another server or are no longer available"));
+            }
+        }
         Ok(ServerResolvedResource {
             resource_id: server.mcp_server_id.clone(),
             allowed_operations: BTreeSet::from([
@@ -929,108 +976,6 @@ impl ProductResourceAuthority {
                 BTreeMap::new(),
             )
         }
-    }
-
-    async fn resolve_generation_provider(
-        &self,
-        request: ResourceAuthorityRequest,
-    ) -> Result<ServerResolvedResource, ResourceSelectionResolutionError> {
-        let provider = self
-            .dependencies
-            .providers
-            .find_by_id(&request.resource_id)
-            .await
-            .map_err(|_| ResourceSelectionResolutionError::not_found(self.kind, &request.resource_id))?
-            .ok_or_else(|| ResourceSelectionResolutionError::not_found(self.kind, &request.resource_id))?;
-        if !provider.enabled {
-            return Err(ResourceSelectionResolutionError::unavailable(
-                self.kind,
-                &request.resource_id,
-                "the selected generation provider is disabled",
-            ));
-        }
-        let models = self
-            .dependencies
-            .provider_models
-            .list_for_provider(&provider.provider_id)
-            .await
-            .map_err(|error| ResourceSelectionResolutionError::unavailable(
-                self.kind,
-                &request.resource_id,
-                format!("provider model inventory is unavailable: {error}"),
-            ))?;
-        let enabled_models = models
-            .iter()
-            .filter(|model| model.enabled)
-            .map(|model| (model.model.clone(), model.sort_order))
-            .collect::<BTreeMap<_, _>>();
-        let capabilities = self
-            .dependencies
-            .provider_capabilities
-            .list_for_provider(&provider.provider_id)
-            .await
-            .map_err(|error| ResourceSelectionResolutionError::unavailable(
-                self.kind,
-                &request.resource_id,
-                format!("provider capability inventory is unavailable: {error}"),
-            ))?;
-        let mut tasks = Vec::new();
-        for capability in &request.selected_capability_ids {
-            let mapping = match capability.as_str() {
-                "creation.text" => Some(("creation.text", "chat")),
-                "creation.image" => Some(("creation.image", "image_generation")),
-                "creation.image_edit" => Some(("creation.image_edit", "image_edit")),
-                "creation.video" => Some(("creation.video", "video_generation")),
-                "creation.audio" => Some(("creation.audio", "speech_synthesis")),
-                _ => None,
-            };
-            if let Some(mapping) = mapping {
-                tasks.push(mapping);
-            }
-        }
-        let mut typed_parameters = BTreeMap::new();
-        let mut chosen_models = BTreeSet::new();
-        for (capability_id, task) in tasks {
-            let selected_model = capabilities
-                .iter()
-                .filter(|capability| capability.task == task)
-                .filter_map(|capability| {
-                    enabled_models
-                        .get(&capability.model)
-                        .map(|sort_order| (sort_order, capability.model.as_str()))
-                })
-                .min_by(|left, right| left.cmp(right))
-                .map(|(_, model)| model.to_owned())
-                .ok_or_else(|| {
-                    ResourceSelectionResolutionError::unavailable(
-                        self.kind,
-                        &request.resource_id,
-                        format!("the provider has no enabled model for task {task}"),
-                    )
-                })?;
-            typed_parameters.insert(format!("model.{capability_id}"), selected_model.clone());
-            chosen_models.insert(selected_model);
-        }
-        if chosen_models.len() == 1 {
-            typed_parameters.insert(
-                "model".to_owned(),
-                chosen_models.into_iter().next().expect("one model"),
-            );
-        }
-        Ok(ServerResolvedResource {
-            resource_id: provider.provider_id.clone(),
-            allowed_operations: BTreeSet::from([
-                "audio".to_owned(),
-                "image".to_owned(),
-                "text".to_owned(),
-                "video".to_owned(),
-            ]),
-            connection_config_ref: Some(ConnectionConfigRef::from(format!(
-                "provider:{}@{}",
-                provider.provider_id, provider.config_revision
-            ))),
-            typed_parameters,
-        })
     }
 
     async fn resolve_plugin(

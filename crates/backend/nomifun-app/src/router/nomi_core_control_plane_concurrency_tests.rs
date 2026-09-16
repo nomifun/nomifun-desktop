@@ -74,6 +74,8 @@ fn candidate(instructions: &str) -> (AgentPresetRevision, ResolvedSnapshotEnvelo
         model_route_refs: Default::default(),
         chat_route_identity: None,
         enabled_capabilities: vec![],
+        context_order: vec![],
+        middleware_order: vec![],
         required_resource_kinds: Default::default(),
         capability_allowlist: Default::default(),
         skill_locks: vec![],

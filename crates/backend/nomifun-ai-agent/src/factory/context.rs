@@ -95,6 +95,7 @@ mod tests {
             delegation_policy: Default::default(),
             extra,
             conversation_created_at: Some(10),
+            device_mcp_servers: Vec::new(),
             workspace_binding_lease: None,
         }
     }

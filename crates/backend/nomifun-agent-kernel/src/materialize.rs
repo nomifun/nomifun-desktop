@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use jsonschema::Validator;
 use nomifun_agent_contracts::{
-    CapabilityConsumer, CapabilityId, CapabilityManifest, CapabilityOperationLock,
+    CapabilityConsumer, CapabilityId, CapabilityKind, CapabilityManifest, CapabilityOperationLock,
     CapabilityRef, ContributionId, ContributionLock, ContributionSourceKind, DigestHex,
     ExactRoleProviderRef, ExecutionRoleId, McpBindingId, McpServerId,
     McpToolCapabilityMapping, McpToolKey, PackageId, PackageManifest, PackageRef,
@@ -11,7 +11,7 @@ use nomifun_agent_contracts::{
     PluginEffectiveState, PluginMountId, PluginRegistrarOperation,
     PluginRegistrationMetadata, PluginSourceKind, PluginSourceMetadata,
     PluginStateMethod, RoleContractManifest, RoleMemberRequirement,
-    RoleProviderContribution, ServiceHandleDescriptor, ServiceKeyDagEdge,
+    RoleProviderContribution, RoleProviderMemberContribution, ServiceHandleDescriptor, ServiceKeyDagEdge,
     ServiceKeyDagNode, ServiceKeyDagPayload, ServiceKeyId, ServiceKeyRef,
     SkillDefinition, SkillId, StableSourceIdentity, VersionString, digest_payload,
 };
@@ -218,6 +218,25 @@ impl MaterializedRegistry {
     ) -> Option<&MaterializedRoleProvider> {
         self.role_providers
             .get(&(role_id.clone(), mount_id.clone()))
+    }
+
+    /// The resource exports acquired by a Role call are part of that call's
+    /// implementation, not additional public capabilities. Compilation and
+    /// dispatch must use the same selection rule.
+    pub(crate) fn role_resource_members<'a>(
+        &self,
+        provider: &'a MaterializedRoleProvider,
+        member_id: &CapabilityId,
+    ) -> Vec<(&'a CapabilityId, &'a RoleProviderMemberContribution)> {
+        let Some(member) = provider.contribution.members.get(member_id) else {
+            return Vec::new();
+        };
+        provider.contribution.members.iter().filter(|(id, resource)| {
+            self.capability(id).is_some_and(|capability| {
+                capability.manifest.kind == CapabilityKind::ResourceProvider
+            }) && !resource.required_resource_kinds
+                .is_disjoint(&member.required_resource_kinds)
+        }).collect()
     }
 }
 
@@ -475,7 +494,7 @@ impl Materializer {
         let (role_contracts, capability_roles) =
             materialize_role_contracts(&ordered, &capabilities)?;
         let role_providers =
-            materialize_role_providers(&ordered, &role_contracts)?;
+            materialize_role_providers(&ordered, &role_contracts, &capabilities, &capability_roles)?;
         let service_dag = build_service_dag(&ordered)?;
 
         let registry_digest = digest_payload(&RegistryDigestPayload {
@@ -823,6 +842,12 @@ fn validate_registration(
     let host_ports = declared_host_ports(&registration.context);
     for capability in &manifest.contributions.capabilities {
         validate_version("capability.version", &capability.version)?;
+        if !capability.contributions.context_phase.is_session_start()
+            && (capability.kind != CapabilityKind::ContextContributor
+                || !capability.supports_consumer(nomifun_agent_contracts::CapabilityConsumer::Agent))
+        {
+            return invalid_registration(registration, "before_turn requires an Agent ContextContributor");
+        }
         if capability.package != package_ref {
             return invalid_registration(
                 registration,
@@ -1232,6 +1257,8 @@ fn materialize_role_contracts(
 fn materialize_role_providers(
     registrations: &[PluginRegistrationMetadata],
     contracts: &BTreeMap<ExecutionRoleId, MaterializedRoleContract>,
+    capabilities: &BTreeMap<CapabilityId, MaterializedCapability>,
+    capability_roles: &BTreeMap<CapabilityId, ExecutionRoleId>,
 ) -> Result<
     BTreeMap<(ExecutionRoleId, PluginMountId), MaterializedRoleProvider>,
     KernelError,
@@ -1295,6 +1322,43 @@ fn materialize_role_providers(
                     ),
                 });
             }
+            for (member_id, member) in &contribution.members {
+                let Some(implementation_ref) = &member.implementation else {
+                    continue;
+                };
+                let invalid = |reason: &str| KernelError::InvalidRoleProvider {
+                    role_id: role_id.clone(),
+                    mount_id: registration.mount_id.clone(),
+                    reason: format!("member {}: {reason}", member_id.as_ref()),
+                };
+                let implementation = capabilities.get(&implementation_ref.id)
+                    .ok_or_else(|| invalid("implementation capability is not materialized"))?;
+                if implementation.mount_id != registration.mount_id
+                    || implementation.manifest.package != package
+                    || implementation.manifest.version != implementation_ref.version
+                    || capability_roles.contains_key(&implementation_ref.id)
+                {
+                    return Err(invalid("implementation must be an exact direct capability owned by this Provider Mount"));
+                }
+                let facade = &capabilities[member_id].manifest;
+                if member.required_resource_kinds
+                    != implementation.manifest.contributions.resource_kinds
+                {
+                    return Err(invalid("mapped member resource requirements must match its implementation"));
+                }
+                // A serialized target is an externally meaningful resource
+                // identity, not a private implementation dependency.
+                if let Some(kind) = &contract.manifest.serialized_target_resource_kind {
+                    if facade.contributions.resource_kinds.contains(kind)
+                        && !member.required_resource_kinds.contains(kind)
+                    {
+                        return Err(invalid("implementation omits the contract's serialized target resource"));
+                    }
+                }
+                if !role_implementation_matches(facade, &implementation.manifest) {
+                    return Err(invalid("implementation differs from the member's action/schema/effect, resource, or dependency contract"));
+                }
+            }
             let contribution_digest =
                 digest_payload(contribution).map_err(|error| KernelError::Digest {
                     reason: error.to_string(),
@@ -1325,6 +1389,30 @@ fn materialize_role_providers(
         }
     }
     Ok(providers)
+}
+
+/// Resources used by Tool/Context implementations and runtime features may
+/// differ; the Compiler projects the selected requirements into the existing
+/// plan. ResourceProvider output kinds remain part of the callable contract.
+/// Capability dependencies remain exact until scoped subcalls close. Conflicts
+/// are checked against actual selected implementations by the Compiler.
+fn role_implementation_matches(facade: &CapabilityManifest, implementation: &CapabilityManifest) -> bool {
+    let expected = &facade.contributions;
+    let actual = &implementation.contributions;
+    facade.kind == implementation.kind
+        && (facade.kind != CapabilityKind::ResourceProvider
+            || expected.resource_kinds == actual.resource_kinds)
+        && expected.host_ports == actual.host_ports
+        && expected.event_schema_refs == actual.event_schema_refs
+        && expected.context_schema_refs == actual.context_schema_refs
+        && expected.context_phase == actual.context_phase
+        && expected.actions.len() == actual.actions.len()
+        && expected.actions.iter().all(|action| actual.actions.iter().any(|candidate| {
+            action.action_id == candidate.action_id
+                && action.input_schema == candidate.input_schema
+                && action.output_schema == candidate.output_schema
+                && action.effect_class == candidate.effect_class
+        }))
 }
 
 fn build_service_dag(

@@ -391,6 +391,7 @@ export interface PluginRuntimeSurfaceLaunchDescriptor {
   kind: PluginRuntimeKind;
 }
 
+
 export interface ClosePluginRuntimeSurfaceRequest {
   plugin_id: PluginRuntimeId;
   surface_session_id: string;

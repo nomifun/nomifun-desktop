@@ -1,8 +1,8 @@
 //! Transport and authentication wiring for the canonical Remote front door.
 //!
 //! This module owns only installation-token admission and the rmcp transport
-//! lifecycle. Product identity and execution are delegated to the canonical
-//! AgentPlatform adapter in `canonical.rs`.
+//! lifecycle. Product identity and execution are delegated to the host-injected
+//! operations in `canonical.rs`, independently of the selected Engine.
 
 use std::borrow::Cow;
 use std::sync::Arc;

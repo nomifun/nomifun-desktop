@@ -3,10 +3,10 @@ import type { ConversationCommandQueueItem } from '../useConversationCommandQueu
 type SteerPayload = Pick<ConversationCommandQueueItem, 'input' | 'files'>;
 type SteerCommand = Pick<
   ConversationCommandQueueItem,
-  'input' | 'files' | 'capability_selection'
+  'input' | 'files' | 'capability_selection' | 'requires_review'
 >;
 
-/** Preserve the submitted snapshot on failure; never restore over newer typing. */
+/** Preserve failures for review. A lost response is not permission for a new turn. */
 export async function steerOrQueue(
   command: SteerCommand,
   steer: (command: SteerPayload) => Promise<void>,
@@ -16,7 +16,10 @@ export async function steerOrQueue(
     await steer({ input: command.input, files: command.files });
     return true;
   } catch {
-    enqueue(command);
+    if (enqueue({ ...command, requires_review: true }) === null) {
+      // A full/disabled queue did not retain the draft. Never report success.
+      throw new Error('The unconfirmed steering draft could not be retained in the queue');
+    }
     return false;
   }
 }

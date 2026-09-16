@@ -7,14 +7,13 @@ use nomifun_common::{
 use nomifun_common::validate_uuidv7;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{QueryBuilder, Sqlite, SqlitePool, Transaction};
+use sqlx::{Sqlite, SqlitePool, Transaction};
 
 use crate::error::DbError;
 use crate::models::CreationTaskRow;
 use crate::repository::ICreationTaskRepository;
 use crate::repository::creation_task::{
     CreateCreativeTaskParams, CreativeTaskOwnerRef, IdempotentCreationTask,
-    ListStandaloneWorkbenchTasksParams, RetireStandaloneWorkbenchTasksParams,
     UpdateCreationTaskParams,
 };
 
@@ -32,9 +31,11 @@ impl SqliteCreationTaskRepository {
 
 #[derive(sqlx::FromRow)]
 struct CreationTaskDbRow {
+    conversation_id: Option<String>,
+    message_id: Option<String>,
     creation_task_id: String,
     project_id: Option<String>,
-    workbench_kind: Option<String>,
+
     template_id: Option<String>,
     template_run_id: Option<String>,
     template_step_id: Option<String>,
@@ -61,9 +62,10 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
 
     fn try_from(row: CreationTaskDbRow) -> Result<Self, Self::Error> {
         let CreationTaskDbRow {
+            conversation_id,
+            message_id,
             creation_task_id,
             project_id,
-            workbench_kind,
             template_id,
             template_run_id,
             template_step_id,
@@ -91,13 +93,6 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
                     "creation task {creation_task_id} has invalid project_id {id:?}: {error}"
                 ))
             })?;
-        }
-        if let Some(kind) = workbench_kind.as_deref()
-            && !matches!(kind, "image" | "video" | "audio")
-        {
-            return Err(DbError::Conflict(format!(
-                "creation task {creation_task_id} has invalid workbench_kind {kind:?}"
-            )));
         }
         if let Some(id) = template_id.as_deref() {
             CreativeStudioTemplateId::parse(id).map_err(|error| {
@@ -134,25 +129,25 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
         })?;
         let canvas_owner = project_id.is_some()
             && node_id.is_some()
-            && workbench_kind.is_none()
-            && template_id.is_none()
-            && template_run_id.is_none()
-            && template_step_id.is_none();
-        let standalone_owner = workbench_kind.is_some()
-            && node_id.is_none()
+
             && template_id.is_none()
             && template_run_id.is_none()
             && template_step_id.is_none();
         let template_owner = project_id.is_none()
-            && workbench_kind.is_none()
+
             && node_id.is_none()
             && template_id.is_some()
             && template_run_id.is_some()
             && template_step_id.is_some();
-        let owner_branches = usize::from(canvas_owner)
-            + usize::from(standalone_owner)
+        let conversation_owner = conversation_id.is_some() && message_id.is_some()
+            && project_id.is_none() && node_id.is_none()
+            && template_id.is_none() && template_run_id.is_none() && template_step_id.is_none();
+        if let Some(id) = conversation_id.as_deref() { nomifun_common::ConversationId::parse(id).map_err(|e| DbError::Conflict(e.to_string()))?; }
+        if let Some(id) = message_id.as_deref() { nomifun_common::MessageId::parse(id).map_err(|e| DbError::Conflict(e.to_string()))?; }
+        let owner_branches = usize::from(conversation_owner) + usize::from(canvas_owner)
             + usize::from(template_owner);
-        let valid_owner = request_fingerprint.is_some() && owner_branches == 1;
+        let valid_owner = request_fingerprint.is_some() && owner_branches == 1
+            && (conversation_owner || (conversation_id.is_none() && message_id.is_none()));
         if !valid_owner {
             return Err(DbError::Conflict(format!(
                 "creation task {creation_task_id} has an invalid tagged owner"
@@ -172,7 +167,7 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
         }
         if deleted_at.is_some_and(|deleted_at| {
             deleted_at < submitted_at
-                || workbench_kind.is_none()
+                || !conversation_owner
                 || node_id.is_some()
                 || template_id.is_some()
                 || template_run_id.is_some()
@@ -184,9 +179,10 @@ impl TryFrom<CreationTaskDbRow> for CreationTaskRow {
             )));
         }
         Ok(Self {
+            conversation_id,
+            message_id,
             creation_task_id,
             project_id,
-            workbench_kind,
             template_id,
             template_run_id,
             template_step_id,
@@ -224,6 +220,7 @@ fn provider_task_for_creation_capability(capability: &str) -> Option<&'static st
         "i2i" | "inpaint" => Some("image_edit"),
         "t2v" | "i2v" | "v2v" => Some("video_generation"),
         "tts" => Some("speech_synthesis"),
+        "music" => Some("music_generation"),
         "text" => Some("chat"),
         _ => None,
     }
@@ -231,12 +228,10 @@ fn provider_task_for_creation_capability(capability: &str) -> Option<&'static st
 
 #[derive(Debug, Clone)]
 enum CanonicalTaskOwner {
+    ConversationTurn { conversation_id: String, message_id: String },
     CanvasNode {
         project_id: String,
         node_id: String,
-    },
-    StandaloneWorkbench {
-        workbench_kind: String,
     },
     TemplateStep {
         template_id: String,
@@ -247,6 +242,10 @@ enum CanonicalTaskOwner {
 
 fn normalize_canonical_owner(owner: CreativeTaskOwnerRef<'_>) -> Result<CanonicalTaskOwner, DbError> {
     match owner {
+        CreativeTaskOwnerRef::ConversationTurn { conversation_id, message_id } => Ok(CanonicalTaskOwner::ConversationTurn {
+            conversation_id: nomifun_common::ConversationId::parse(conversation_id).map_err(|e| DbError::Conflict(e.to_string()))?.into_string(),
+            message_id: nomifun_common::MessageId::parse(message_id).map_err(|e| DbError::Conflict(e.to_string()))?.into_string(),
+        }),
         CreativeTaskOwnerRef::CanvasNode {
             project_id,
             node_id,
@@ -266,19 +265,6 @@ fn normalize_canonical_owner(owner: CreativeTaskOwnerRef<'_>) -> Result<Canonica
                 })?
                 .into_string(),
         }),
-        CreativeTaskOwnerRef::StandaloneWorkbench { workbench_kind } => {
-            let workbench_kind = match workbench_kind {
-                "image" | "video" | "audio" => workbench_kind.to_owned(),
-                other => {
-                    return Err(DbError::Conflict(format!(
-                        "Creative task workbench_kind {other:?} is invalid"
-                    )));
-                }
-            };
-            Ok(CanonicalTaskOwner::StandaloneWorkbench {
-                workbench_kind,
-            })
-        }
         CreativeTaskOwnerRef::TemplateStep {
             template_id,
             template_run_id,
@@ -311,22 +297,15 @@ fn normalize_canonical_owner(owner: CreativeTaskOwnerRef<'_>) -> Result<Canonica
 
 fn stored_owner_matches(stored: &CreationTaskDbRow, owner: &CanonicalTaskOwner) -> bool {
     match owner {
+        CanonicalTaskOwner::ConversationTurn { conversation_id, message_id } => stored.conversation_id.as_ref() == Some(conversation_id) && stored.message_id.as_ref() == Some(message_id)
+            && stored.project_id.is_none() && stored.node_id.is_none() && stored.template_id.is_none(),
         CanonicalTaskOwner::CanvasNode {
             project_id,
             node_id,
         } => {
             stored.project_id.as_deref() == Some(project_id)
                 && stored.node_id.as_deref() == Some(node_id)
-                && stored.workbench_kind.is_none()
-                && stored.template_id.is_none()
-                && stored.template_run_id.is_none()
-                && stored.template_step_id.is_none()
-        }
-        CanonicalTaskOwner::StandaloneWorkbench {
-            workbench_kind,
-        } => {
-            stored.workbench_kind.as_deref() == Some(workbench_kind)
-                && stored.node_id.is_none()
+
                 && stored.template_id.is_none()
                 && stored.template_run_id.is_none()
                 && stored.template_step_id.is_none()
@@ -337,7 +316,7 @@ fn stored_owner_matches(stored: &CreationTaskDbRow, owner: &CanonicalTaskOwner) 
             template_step_id,
         } => {
             stored.project_id.is_none()
-                && stored.workbench_kind.is_none()
+
                 && stored.node_id.is_none()
                 && stored.template_id.as_deref() == Some(template_id)
                 && stored.template_run_id.as_deref() == Some(template_run_id)
@@ -469,10 +448,14 @@ async fn lock_canonical_owner(
     owner: &CanonicalTaskOwner,
 ) -> Result<(), DbError> {
     match owner {
+        CanonicalTaskOwner::ConversationTurn { conversation_id, .. } => {
+            let found = sqlx::query("UPDATE conversations SET updated_at=updated_at WHERE conversation_id=?")
+                .bind(conversation_id).execute(&mut **tx).await?.rows_affected();
+            if found != 1 { return Err(DbError::NotFound(format!("Conversation {conversation_id} not found"))); }
+        }
         CanonicalTaskOwner::CanvasNode { project_id, .. } => {
             lock_creative_project(tx, project_id).await?;
         }
-        CanonicalTaskOwner::StandaloneWorkbench { .. } => {}
         CanonicalTaskOwner::TemplateStep {
             template_id,
             template_run_id,
@@ -669,45 +652,10 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
             )));
         }
 
-        let (
-            project_id,
-            workbench_kind,
-            template_id,
-            template_run_id,
-            template_step_id,
-            node_id,
-        ) = match &owner {
-            CanonicalTaskOwner::CanvasNode {
-                project_id,
-                node_id,
-            } => (
-                Some(project_id.as_str()),
-                None,
-                None,
-                None,
-                None,
-                Some(node_id.as_str()),
-            ),
-            CanonicalTaskOwner::StandaloneWorkbench { workbench_kind } => (
-                None,
-                Some(workbench_kind.as_str()),
-                None,
-                None,
-                None,
-                None,
-            ),
-            CanonicalTaskOwner::TemplateStep {
-                template_id,
-                template_run_id,
-                template_step_id,
-            } => (
-                None,
-                None,
-                Some(template_id.as_str()),
-                Some(template_run_id.as_str()),
-                Some(template_step_id.as_str()),
-                None,
-            ),
+        let (project_id, template_id, template_run_id, template_step_id, node_id) = match &owner {
+            CanonicalTaskOwner::ConversationTurn { .. } => (None, None, None, None, None),
+            CanonicalTaskOwner::CanvasNode { project_id, node_id } => (Some(project_id.as_str()), None, None, None, Some(node_id.as_str())),
+            CanonicalTaskOwner::TemplateStep { template_id, template_run_id, template_step_id } => (None, Some(template_id.as_str()), Some(template_run_id.as_str()), Some(template_step_id.as_str()), None),
         };
         // The transaction already holds the SQLite write lock. Pair this
         // check with content deletion's live-task check so neither operation
@@ -725,18 +673,38 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
                 "Creation task input asset '{asset_id}' has been permanently deleted"
             )));
         }
+        let (conversation_id, message_id) = match &owner {
+            CanonicalTaskOwner::ConversationTurn { conversation_id, message_id } => (Some(conversation_id.as_str()), Some(message_id.as_str())),
+            _ => (None, None),
+        };
+        if let (Some(conversation_id), Some(message_id)) = (conversation_id, message_id) {
+            let request: Value = serde_json::from_str(params.params).map_err(|e| DbError::Conflict(e.to_string()))?;
+            let content = serde_json::json!({"content": request.get("prompt").and_then(Value::as_str).unwrap_or_default(), "creation": {"agent": request.get("_nomifun_creation_agent"), "creation_task_id": params.creation_task_id}}).to_string();
+            // A professional submission owns its new user message. Tool calls
+            // and batch siblings attach to that existing turn without replacing
+            // its original prompt or Agent snapshot.
+            if message_id == params.creation_task_id {
+                sqlx::query("INSERT INTO messages (message_id,conversation_id,msg_id,type,content,position,status,hidden,created_at) VALUES (?, ?, ?, 'text', ?, 'right', 'finish', 0, ?) ON CONFLICT(message_id) DO NOTHING")
+                    .bind(message_id).bind(conversation_id).bind(message_id).bind(&content).bind(params.submitted_at).execute(&mut *tx).await?;
+            }
+            let actual: Option<(String,String,String)> = sqlx::query_as("SELECT conversation_id,content,position FROM messages WHERE message_id=?")
+                .bind(message_id).fetch_optional(&mut *tx).await?;
+            if actual.is_none_or(|actual| actual.0 != conversation_id || actual.2 != "right" || (message_id == params.creation_task_id && actual.1 != content)) {
+                return Err(DbError::Conflict("Generation must belong to an existing user turn in this conversation".into()));
+            }
+            sqlx::query("UPDATE conversations SET updated_at=MAX(updated_at,?) WHERE conversation_id=?").bind(params.submitted_at).bind(conversation_id).execute(&mut *tx).await?;
+        }
         let inserted = sqlx::query(
             "INSERT INTO creation_tasks \
-                (creation_task_id, project_id, workbench_kind, template_id, template_run_id, template_step_id, \
+                (creation_task_id, project_id, template_id, template_run_id, template_step_id, \
                  node_id, provider_id, model, capability, \
                  params, input_bindings, status, error, result_asset_ids, remote_task_id, attempt, submitted_at, \
-                 started_at, finished_at, request_fingerprint) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '[]', NULL, 0, ?, NULL, NULL, ?) \
+                 started_at, finished_at, request_fingerprint, conversation_id, message_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '[]', NULL, 0, ?, NULL, NULL, ?, ?, ?) \
              ON CONFLICT(creation_task_id) DO NOTHING",
         )
         .bind(params.creation_task_id)
         .bind(project_id)
-        .bind(workbench_kind)
         .bind(template_id)
         .bind(template_run_id)
         .bind(template_step_id)
@@ -749,6 +717,8 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
         .bind(params.status)
         .bind(params.submitted_at)
         .bind(params.request_fingerprint)
+        .bind(conversation_id)
+        .bind(message_id)
         .execute(&mut *tx)
         .await?
         .rows_affected()
@@ -787,210 +757,31 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
         row.map(TryInto::try_into).transpose()
     }
 
-    async fn list_standalone_workbench_tasks_page(
-        &self,
-        params: ListStandaloneWorkbenchTasksParams<'_>,
-    ) -> Result<Vec<CreationTaskRow>, DbError> {
-        if !matches!(params.workbench_kind, "image" | "video" | "audio") {
-            return Err(DbError::Conflict(format!(
-                "Creative task workbench_kind {:?} is invalid",
-                params.workbench_kind
-            )));
-        }
-        if !(1..=100).contains(&params.limit) {
-            return Err(DbError::Conflict(
-                "standalone workbench task page limit must be between 1 and 100".into(),
-            ));
-        }
-        if let Some(before) = params.before {
-            if before.submitted_at < 0 {
-                return Err(DbError::Conflict(
-                    "standalone workbench task cursor timestamp must be non-negative".into(),
-                ));
-            }
-            validate_creation_task_id(before.creation_task_id)?;
-        }
-        let fetch_limit = i64::try_from(params.limit + 1)
-            .map_err(|_| DbError::Conflict("standalone workbench task page limit overflow".into()))?;
-        let rows = if let Some(before) = params.before {
-            sqlx::query_as::<_, CreationTaskDbRow>(
-                "SELECT * FROM creation_tasks \
-                 WHERE workbench_kind = ?1 \
-                   AND deleted_at IS NULL \
-                   AND node_id IS NULL AND template_id IS NULL \
-                   AND template_run_id IS NULL AND template_step_id IS NULL \
-                   AND (?2 = 0 OR status IN ('queued', 'running')) \
-                   AND (submitted_at < ?3 OR (submitted_at = ?3 AND creation_task_id < ?4)) \
-                 ORDER BY submitted_at DESC, creation_task_id DESC LIMIT ?5",
-            )
-            .bind(params.workbench_kind)
-            .bind(i64::from(params.active_only))
-            .bind(before.submitted_at)
-            .bind(before.creation_task_id)
-            .bind(fetch_limit)
-            .fetch_all(&self.pool)
-            .await?
-        } else {
-            sqlx::query_as::<_, CreationTaskDbRow>(
-                "SELECT * FROM creation_tasks \
-                 WHERE workbench_kind = ?1 \
-                   AND deleted_at IS NULL \
-                   AND node_id IS NULL AND template_id IS NULL \
-                   AND template_run_id IS NULL AND template_step_id IS NULL \
-                   AND (?2 = 0 OR status IN ('queued', 'running')) \
-                 ORDER BY submitted_at DESC, creation_task_id DESC LIMIT ?3",
-            )
-            .bind(params.workbench_kind)
-            .bind(i64::from(params.active_only))
-            .bind(fetch_limit)
-            .fetch_all(&self.pool)
-            .await?
-        };
-        rows.into_iter().map(TryInto::try_into).collect()
+
+
+    async fn list_conversation_tasks(&self, conversation_id: &str) -> Result<Vec<CreationTaskRow>, DbError> {
+        let rows = sqlx::query_as::<_, CreationTaskDbRow>("SELECT * FROM creation_tasks WHERE conversation_id=? AND deleted_at IS NULL ORDER BY submitted_at ASC, creation_task_id ASC")
+            .bind(conversation_id).fetch_all(&self.pool).await?;
+        rows.into_iter().map(CreationTaskRow::try_from).collect()
     }
 
-    async fn retire_standalone_workbench_tasks(
+    async fn conversation_message_creation_references(
         &self,
-        params: RetireStandaloneWorkbenchTasksParams<'_>,
-    ) -> Result<Vec<CreationTaskRow>, DbError> {
-        if !matches!(params.workbench_kind, "image" | "video" | "audio") {
-            return Err(DbError::Conflict(format!(
-                "Creative task workbench_kind {:?} is invalid",
-                params.workbench_kind
-            )));
-        }
-        if params.task_ids.is_empty() || params.task_ids.len() > 100 {
-            return Err(DbError::Conflict(
-                "standalone workbench retirement requires 1 to 100 task ids".into(),
-            ));
-        }
-        if params.deleted_at < 0 {
-            return Err(DbError::Conflict(
-                "standalone workbench retirement deleted_at must be non-negative".into(),
-            ));
-        }
-        let mut seen = std::collections::HashSet::with_capacity(params.task_ids.len());
-        for task_id in params.task_ids {
-            validate_creation_task_id(task_id)?;
-            if !seen.insert(task_id.as_str()) {
-                return Err(DbError::Conflict(format!(
-                    "standalone workbench retirement contains duplicate task id {task_id}"
-                )));
-            }
-        }
-
-        let mut tx = self.pool.begin().await?;
-        // Acquire SQLite writer authority before validating the batch, so a
-        // worker cannot cross the live/terminal boundary between validation
-        // and the tombstone write.
-        let mut lock = QueryBuilder::<Sqlite>::new(
-            "UPDATE creation_tasks SET status = status WHERE creation_task_id IN (",
-        );
-        {
-            let mut ids = lock.separated(", ");
-            for task_id in params.task_ids {
-                ids.push_bind(task_id);
-            }
-        }
-        lock.push(")");
-        lock.build().execute(&mut *tx).await?;
-
-        let mut select =
-            QueryBuilder::<Sqlite>::new("SELECT * FROM creation_tasks WHERE creation_task_id IN (");
-        {
-            let mut ids = select.separated(", ");
-            for task_id in params.task_ids {
-                ids.push_bind(task_id);
-            }
-        }
-        select.push(")");
-        let rows = select
-            .build_query_as::<CreationTaskDbRow>()
-            .fetch_all(&mut *tx)
-            .await?;
-        if rows.len() != params.task_ids.len() {
-            return Err(DbError::NotFound(
-                "one or more standalone workbench tasks do not exist".into(),
-            ));
-        }
-        for row in &rows {
-            let exact_owner = row.workbench_kind.as_deref() == Some(params.workbench_kind)
-                && row.node_id.is_none()
-                && row.template_id.is_none()
-                && row.template_run_id.is_none()
-                && row.template_step_id.is_none();
-            if !exact_owner {
-                return Err(DbError::Conflict(format!(
-                    "creation task {} does not belong to the requested standalone workbench owner",
-                    row.creation_task_id
-                )));
-            }
-            if matches!(row.status.as_str(), "queued" | "running") {
-                return Err(DbError::Conflict(format!(
-                    "live creation task {} cannot be retired",
-                    row.creation_task_id
-                )));
-            }
-            if !matches!(row.status.as_str(), "failed" | "canceled" | "succeeded") {
-                return Err(DbError::Conflict(format!(
-                    "creation task {} has unsupported terminal status {:?}",
-                    row.creation_task_id, row.status
-                )));
-            }
-            if params.deleted_at < row.submitted_at {
-                return Err(DbError::Conflict(format!(
-                    "retirement timestamp predates creation task {}",
-                    row.creation_task_id
-                )));
-            }
-        }
-        if rows.iter().any(|row| row.deleted_at.is_none()) {
-            let mut update = QueryBuilder::<Sqlite>::new(
-                "UPDATE creation_tasks SET deleted_at = COALESCE(deleted_at, ",
-            );
-            update.push_bind(params.deleted_at);
-            update.push(") WHERE creation_task_id IN (");
-            {
-                let mut ids = update.separated(", ");
-                for task_id in params.task_ids {
-                    ids.push_bind(task_id);
-                }
-            }
-            update.push(")");
-            update.build().execute(&mut *tx).await?;
-        }
-
-        let mut refreshed = QueryBuilder::<Sqlite>::new(
-            "SELECT * FROM creation_tasks WHERE creation_task_id IN (",
-        );
-        {
-            let mut ids = refreshed.separated(", ");
-            for task_id in params.task_ids {
-                ids.push_bind(task_id);
-            }
-        }
-        refreshed.push(")");
-        let rows = refreshed
-            .build_query_as::<CreationTaskDbRow>()
-            .fetch_all(&mut *tx)
-            .await?;
-        let mut by_id = rows
-            .into_iter()
-            .map(|row| Ok((row.creation_task_id.clone(), CreationTaskRow::try_from(row)?)))
-            .collect::<Result<std::collections::HashMap<_, _>, DbError>>()?;
-        let ordered = params
-            .task_ids
-            .iter()
-            .map(|task_id| {
-                by_id.remove(task_id).ok_or_else(|| {
-                    DbError::Init(format!(
-                        "retired creation task {task_id} vanished before commit"
-                    ))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        tx.commit().await?;
-        Ok(ordered)
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<Option<Value>, DbError> {
+        let content: Option<String> = sqlx::query_scalar(
+            "SELECT content FROM messages WHERE conversation_id = ? AND message_id = ? AND position = 'right' AND type = 'text'",
+        )
+        .bind(conversation_id)
+        .bind(message_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        content
+            .map(|raw| serde_json::from_str::<Value>(&raw))
+            .transpose()
+            .map(|content| content.and_then(|content| content.get("creation_references").cloned()))
+            .map_err(|error| DbError::Init(format!("Invalid user message creation metadata: {error}")))
     }
 
     async fn list_all_tasks(&self) -> Result<Vec<CreationTaskRow>, DbError> {
@@ -1329,19 +1120,17 @@ mod tests {
         }
     }
 
-    fn standalone_creative_params<'a>(
+    fn canvas_reference_params<'a>(
         creation_task_id: &'a str,
-        _project_id: &'a str,
-        workbench_kind: &'a str,
+        project_id: &'a str,
+        node_id: &'a str,
         provider_id: &'a str,
         input_bindings: &'a str,
         fingerprint: &'a str,
     ) -> CreateCreativeTaskParams<'a> {
         CreateCreativeTaskParams {
             creation_task_id,
-            owner: CreativeTaskOwnerRef::StandaloneWorkbench {
-                workbench_kind,
-            },
+            owner: CreativeTaskOwnerRef::CanvasNode { project_id, node_id },
             provider_id,
             model: "image-model-v1",
             capability: "i2v",
@@ -1485,348 +1274,8 @@ mod tests {
         assert_eq!(count, 1);
     }
 
-    #[tokio::test]
-    async fn standalone_owner_and_ordered_inputs_are_frozen_by_idempotency() {
-        let (repo, db, provider_id) = repo().await;
-        let project_id = seed_creative_project(&db).await;
-        let task_id = CreationTaskId::new().into_string();
-        let first_asset = WorkshopAssetId::new().into_string();
-        let second_asset = WorkshopAssetId::new().into_string();
-        let bindings = serde_json::json!([
-            {"asset_id": first_asset, "kind": "image", "role": "first_frame"},
-            {"asset_id": second_asset, "kind": "image", "role": "last_frame"}
-        ])
-        .to_string();
-        let fingerprint = serde_json::json!({
-            "owner": {
-                "kind": "standalone_workbench",
-                "workbench_kind": "video"
-            },
-            "inputs": serde_json::from_str::<Value>(&bindings).unwrap()
-        })
-        .to_string();
 
-        let created = repo
-            .get_or_create_creative_task(standalone_creative_params(
-                &task_id,
-                &project_id,
-                "video",
-                &provider_id,
-                &bindings,
-                &fingerprint,
-            ))
-            .await
-            .unwrap();
-        assert!(created.inserted);
-        assert!(created.row.project_id.is_none());
-        assert_eq!(created.row.workbench_kind.as_deref(), Some("video"));
-        assert!(created.row.node_id.is_none());
-        assert_eq!(created.row.input_bindings.as_deref(), Some(bindings.as_str()));
 
-        let replay = repo
-            .get_or_create_creative_task(standalone_creative_params(
-                &task_id,
-                &project_id,
-                "video",
-                &provider_id,
-                &bindings,
-                &fingerprint,
-            ))
-            .await
-            .unwrap();
-        assert!(!replay.inserted);
-
-        let wrong_owner = repo
-            .get_or_create_creative_task(standalone_creative_params(
-                &task_id,
-                &project_id,
-                "image",
-                &provider_id,
-                &bindings,
-                &fingerprint,
-            ))
-            .await
-            .unwrap_err();
-        assert!(matches!(wrong_owner, DbError::Conflict(message) if message.contains("inconsistent")));
-
-        let reversed = serde_json::json!([
-            {"asset_id": second_asset, "kind": "image", "role": "last_frame"},
-            {"asset_id": first_asset, "kind": "image", "role": "first_frame"}
-        ])
-        .to_string();
-        let wrong_inputs = repo
-            .get_or_create_creative_task(standalone_creative_params(
-                &task_id,
-                &project_id,
-                "video",
-                &provider_id,
-                &reversed,
-                &fingerprint,
-            ))
-            .await
-            .unwrap_err();
-        assert!(matches!(wrong_inputs, DbError::Conflict(message) if message.contains("inconsistent")));
-    }
-
-    #[tokio::test]
-    async fn standalone_page_merges_workbench_history_across_legacy_projects() {
-        let (repo, db, provider_id) = repo().await;
-        let project_id = seed_creative_project(&db).await;
-        let other_project_id = seed_creative_project(&db).await;
-        let mut matching = Vec::new();
-        for submitted_at in [300, 200, 200, 100] {
-            let task_id = CreationTaskId::new().into_string();
-            let fingerprint = serde_json::json!({"task": task_id}).to_string();
-            let mut params = standalone_creative_params(
-                &task_id,
-                &project_id,
-                "video",
-                &provider_id,
-                "[]",
-                &fingerprint,
-            );
-            params.submitted_at = submitted_at;
-            repo.get_or_create_creative_task(params).await.unwrap();
-            matching.push((submitted_at, task_id));
-        }
-        for (other_project, kind) in [(&other_project_id, "video"), (&project_id, "image")] {
-            let task_id = CreationTaskId::new().into_string();
-            let fingerprint = serde_json::json!({"task": task_id}).to_string();
-            let mut params = standalone_creative_params(
-                &task_id,
-                other_project,
-                kind,
-                &provider_id,
-                "[]",
-                &fingerprint,
-            );
-            params.submitted_at = 400;
-            repo.get_or_create_creative_task(params).await.unwrap();
-            if kind == "video" {
-                matching.push((400, task_id));
-            }
-        }
-        matching.sort_by(|left, right| right.cmp(left));
-
-        let first = repo
-            .list_standalone_workbench_tasks_page(ListStandaloneWorkbenchTasksParams {
-                workbench_kind: "video",
-                active_only: false,
-                before: None,
-                limit: 2,
-            })
-            .await
-            .unwrap();
-        assert_eq!(first.len(), 3, "repository fetches limit + 1");
-        assert_eq!(
-            first
-                .iter()
-                .map(|row| (row.submitted_at, row.creation_task_id.clone()))
-                .collect::<Vec<_>>(),
-            matching[..3]
-        );
-
-        let visible_last = &first[1];
-        let second = repo
-            .list_standalone_workbench_tasks_page(ListStandaloneWorkbenchTasksParams {
-                workbench_kind: "video",
-                active_only: false,
-                before: Some(crate::repository::CreationTaskPageCursorRef {
-                    submitted_at: visible_last.submitted_at,
-                    creation_task_id: &visible_last.creation_task_id,
-                }),
-                limit: 2,
-            })
-            .await
-            .unwrap();
-        assert_eq!(
-            second
-                .iter()
-                .map(|row| (row.submitted_at, row.creation_task_id.clone()))
-                .collect::<Vec<_>>(),
-            matching[2..]
-        );
-
-        repo.update_task(
-            &matching[0].1,
-            UpdateCreationTaskParams {
-                status: Some("failed"),
-                error: Some(Some(r#"{"kind":"provider","message":"fixture"}"#)),
-                finished_at: Some(Some(301)),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-        let active = repo
-            .list_standalone_workbench_tasks_page(ListStandaloneWorkbenchTasksParams {
-                workbench_kind: "video",
-                active_only: true,
-                before: None,
-                limit: 100,
-            })
-            .await
-            .unwrap();
-        assert_eq!(
-            active
-                .iter()
-                .map(|row| (row.submitted_at, row.creation_task_id.clone()))
-                .collect::<Vec<_>>(),
-            matching[1..]
-        );
-    }
-
-    #[tokio::test]
-    async fn standalone_retirement_is_terminal_owner_scoped_atomic_and_idempotent() {
-        let (repo, db, provider_id) = repo().await;
-        let project_id = seed_creative_project(&db).await;
-        let mut ids = Vec::new();
-        for (index, status) in ["failed", "canceled", "queued"].into_iter().enumerate() {
-            let task_id = CreationTaskId::new().into_string();
-            let fingerprint = serde_json::json!({"task": task_id}).to_string();
-            let mut create = standalone_creative_params(
-                &task_id,
-                &project_id,
-                "video",
-                &provider_id,
-                "[]",
-                &fingerprint,
-            );
-            create.submitted_at = 100 + index as i64;
-            repo.get_or_create_creative_task(create).await.unwrap();
-            if status != "queued" {
-                repo.update_task(
-                    &task_id,
-                    UpdateCreationTaskParams {
-                        status: Some(status),
-                        finished_at: Some(Some(200 + index as i64)),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-            }
-            ids.push(task_id);
-        }
-        let retired = repo
-            .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
-                workbench_kind: "video",
-                task_ids: &ids[..2],
-                deleted_at: 500,
-            })
-            .await
-            .unwrap();
-        assert_eq!(
-            retired
-                .iter()
-                .map(|row| row.creation_task_id.as_str())
-                .collect::<Vec<_>>(),
-            ids[..2].iter().map(String::as_str).collect::<Vec<_>>()
-        );
-        assert!(retired.iter().all(|row| row.deleted_at == Some(500)));
-        let replay_fingerprint = serde_json::json!({"task": &ids[0]}).to_string();
-        let replay = repo
-            .get_or_create_creative_task(standalone_creative_params(
-                &ids[0],
-                &project_id,
-                "video",
-                &provider_id,
-                "[]",
-                &replay_fingerprint,
-            ))
-            .await
-            .unwrap();
-        assert!(!replay.inserted);
-        assert_eq!(replay.row.deleted_at, Some(500));
-        let visible = repo
-            .list_standalone_workbench_tasks_page(ListStandaloneWorkbenchTasksParams {
-                workbench_kind: "video",
-                active_only: false,
-                before: None,
-                limit: 10,
-            })
-            .await
-            .unwrap();
-        assert_eq!(visible.len(), 1);
-        assert_eq!(visible[0].creation_task_id, ids[2]);
-
-        let repeated = repo
-            .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
-                workbench_kind: "video",
-                task_ids: &ids[..2],
-                deleted_at: 600,
-            })
-            .await
-            .unwrap();
-        assert!(repeated.iter().all(|row| row.deleted_at == Some(500)));
-
-        let new_terminal_id = CreationTaskId::new().into_string();
-        let fingerprint = serde_json::json!({"task": new_terminal_id}).to_string();
-        let mut create = standalone_creative_params(
-            &new_terminal_id,
-            &project_id,
-            "video",
-            &provider_id,
-            "[]",
-            &fingerprint,
-        );
-        create.submitted_at = 150;
-        repo.get_or_create_creative_task(create).await.unwrap();
-        repo.update_task(
-            &new_terminal_id,
-            UpdateCreationTaskParams {
-                status: Some("failed"),
-                finished_at: Some(Some(151)),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-        let mixed_terminal_ids = vec![ids[0].clone(), new_terminal_id.clone()];
-        let mixed_terminal = repo
-            .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
-                workbench_kind: "video",
-                task_ids: &mixed_terminal_ids,
-                deleted_at: 700,
-            })
-            .await
-            .unwrap();
-        assert_eq!(mixed_terminal[0].deleted_at, Some(500));
-        assert_eq!(mixed_terminal[1].deleted_at, Some(700));
-
-        let mixed_live = repo
-            .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
-                workbench_kind: "video",
-                task_ids: &[ids[0].clone(), ids[2].clone()],
-                deleted_at: 700,
-            })
-            .await;
-        assert!(matches!(mixed_live, Err(DbError::Conflict(message)) if message.contains("live")));
-        assert_eq!(
-            repo.get_task(&ids[0]).await.unwrap().unwrap().deleted_at,
-            Some(500),
-            "failed mixed batch must not rewrite an existing tombstone"
-        );
-        assert!(repo.get_task(&ids[2]).await.unwrap().unwrap().deleted_at.is_none());
-
-        let wrong_owner = repo
-            .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
-                workbench_kind: "image",
-                task_ids: &[ids[0].clone()],
-                deleted_at: 800,
-            })
-            .await;
-        assert!(matches!(wrong_owner, Err(DbError::Conflict(message)) if message.contains("does not belong")));
-        let missing_id = CreationTaskId::new().into_string();
-        let missing = repo
-            .retire_standalone_workbench_tasks(RetireStandaloneWorkbenchTasksParams {
-                workbench_kind: "video",
-                task_ids: &[missing_id],
-                deleted_at: 800,
-            })
-            .await;
-        assert!(matches!(missing, Err(DbError::NotFound(_))));
-    }
 
     #[tokio::test]
     async fn exact_retry_survives_parent_removal_but_a_new_key_still_requires_a_live_project() {
@@ -2277,14 +1726,16 @@ mod tests {
     async fn deleted_asset_guards_keep_terminal_history_and_reject_new_work() {
         use crate::repository::{IWorkshopRepository, SqliteWorkshopRepository};
         let (repo, db, provider_id) = repo().await;
+        let project_id = seed_creative_project(&db).await;
+        let node_id = CreativeStudioNodeId::new().into_string();
         let workshop = SqliteWorkshopRepository::new(db.pool().clone());
         let asset_id = WorkshopAssetId::new().into_string();
         sqlx::query("INSERT INTO workshop_assets (asset_id, kind, title, tags, in_library, created_at, updated_at) VALUES (?, 'image', 'input', '[]', 1, 1, 1)")
             .bind(&asset_id).execute(db.pool()).await.unwrap();
         let bindings = serde_json::json!([{"asset_id": asset_id, "kind": "image", "role": "reference"}]).to_string();
         let task_id = CreationTaskId::new().into_string();
-        repo.get_or_create_creative_task(standalone_creative_params(
-            &task_id, "", "video", &provider_id, &bindings, r#"{"deletion-test":1}"#,
+        repo.get_or_create_creative_task(canvas_reference_params(
+            &task_id, &project_id, &node_id, &provider_id, &bindings, r#"{"deletion-test":1}"#,
         )).await.unwrap();
         let result_asset_id = WorkshopAssetId::new().into_string();
         sqlx::query("INSERT INTO workshop_assets (asset_id, kind, title, tags, in_library, created_at, updated_at) VALUES (?, 'video', 'result', '[]', 1, 1, 1)")
@@ -2315,19 +1766,21 @@ mod tests {
             status: Some("queued"), ..Default::default()
         }).await.is_err());
         let new_id = CreationTaskId::new().into_string();
-        let new_task = repo.get_or_create_creative_task(standalone_creative_params(
-            &new_id, "", "video", &provider_id, &bindings, r#"{"deletion-test":2}"#,
+        let new_task = repo.get_or_create_creative_task(canvas_reference_params(
+            &new_id, &project_id, &node_id, &provider_id, &bindings, r#"{"deletion-test":2}"#,
         )).await;
         assert!(matches!(new_task, Err(DbError::Conflict(message)) if message.contains("permanently deleted")));
         assert!(repo.get_task(&new_id).await.unwrap().is_none());
-        assert!(sqlx::query("INSERT INTO creation_tasks (creation_task_id, workbench_kind, provider_id, model, capability, params, input_bindings, status, submitted_at, request_fingerprint) VALUES (?, 'video', ?, 'image-model-v1', 'i2v', '{}', ?, 'queued', 400, '{}')")
-            .bind(&new_id).bind(&provider_id).bind(&bindings).execute(db.pool()).await.is_err());
+        assert!(sqlx::query("INSERT INTO creation_tasks (creation_task_id, project_id, node_id, provider_id, model, capability, params, input_bindings, status, submitted_at, request_fingerprint) VALUES (?, ?, ?, ?, 'image-model-v1', 'i2v', '{}', ?, 'queued', 400, '{}')")
+            .bind(&new_id).bind(&project_id).bind(&node_id).bind(&provider_id).bind(&bindings).execute(db.pool()).await.is_err());
     }
 
     #[tokio::test]
     async fn deleted_asset_and_creation_task_submission_serialize() {
         use crate::repository::{IWorkshopRepository, SqliteWorkshopRepository};
         let (repo, db, provider_id) = repo().await;
+        let project_id = seed_creative_project(&db).await;
+        let node_id = CreativeStudioNodeId::new().into_string();
         let workshop = SqliteWorkshopRepository::new(db.pool().clone());
         let asset_id = WorkshopAssetId::new().into_string();
         sqlx::query("INSERT INTO workshop_assets (asset_id, kind, title, tags, in_library, created_at, updated_at) VALUES (?, 'image', 'input', '[]', 1, 1, 1)")
@@ -2336,8 +1789,8 @@ mod tests {
         let task_id = CreationTaskId::new().into_string();
         let (deleted, submitted) = tokio::join!(
             workshop.mark_asset_content_deleted(&asset_id, 200),
-            repo.get_or_create_creative_task(standalone_creative_params(
-                &task_id, "", "video", &provider_id, &bindings, r#"{"deletion-race":1}"#,
+            repo.get_or_create_creative_task(canvas_reference_params(
+                &task_id, &project_id, &node_id, &provider_id, &bindings, r#"{"deletion-race":1}"#,
             ))
         );
         assert_ne!(deleted.is_ok(), submitted.is_ok());

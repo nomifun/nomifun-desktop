@@ -12,18 +12,10 @@
 .identity,
 .empty,
 .filterRow,
-.kindFilters,
-.scopeTabs {
+.kindFilters {
   display: flex;
 }
 
-.scopeTabs {
-  align-items: center;
-  gap: 30px;
-  border-bottom: 1px solid var(--color-border-2);
-}
-
-.scopeTabs button,
 .kindFilters button {
   border: 0;
   background: transparent;
@@ -31,30 +23,8 @@
   cursor: pointer;
 }
 
-.scopeTabs button {
-  position: relative;
-  padding: 4px 0 12px;
-  font-size: 14px;
-}
-
-.scopeTabs button[data-active='true'] {
-  color: var(--color-text-1);
-  font-weight: 600;
-}
-
-.scopeTabs button[data-active='true']::after {
-  position: absolute;
-  right: 0;
-  bottom: -1px;
-  left: 0;
-  height: 2px;
-  background: var(--color-text-1);
-  content: '';
-}
-
 .search {
   width: 100%;
-  margin-top: 16px;
 }
 
 .filterRow {

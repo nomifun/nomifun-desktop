@@ -892,6 +892,18 @@ SkillContribution          # instructions/workflow/resources
 
 或者 Skill 显式依赖已经选择的 Browser/Computer Capability。选中 Skill 不得自动安装、绑定或授权任何 Provider。
 
+2026-09-14 包内 Skill 装载增量：现有 `ResolvedSkillLock` 在 Skill/version、正文摘要和依赖 ID 之外，增加必填 `contribution_lock`、`resolved_mount_id`、`resolved_source`、`target_artifact_digest`。这些事实由同一个 Kernel Compiler 产生并进入原 Snapshot 摘要；无改动保存也比较完整 Skill 锁，同正文但制品变化不能复用旧锁。带 consumer 声明的 Skill 必须允许 Agent，声明的宿主 Surface 必须兼容保存目标；Skill 依赖仍要求显式能力选择，不自动扩权。
+
+产品宿主从现有不可变制品存储读取声明的正文/资源，通过 `nomifun-ai-agent` 的已鉴权 Session 交给 Nomi 现有 Skill 索引和工具。包内 Skill 不再投影成目录搜索名，不复制到全局目录；精确 ID 优先于偶然发现的同名目录/MCP Skill。文件路径、大小、数量和字节摘要须校验，正文须为 UTF-8；每次正文/资源读取重新检查冻结来源及当前可用性。资源实例与执行权限仍由原 Session/Kernel 持有，正文不是授权来源。
+
+本增量先接通 inline 指令与声明资源的只读消费；shell/fork/hook、模型/工具覆盖等需要受管执行能力的模式必须明确拒绝，后续按同一执行/授权接缝开放，不回退到宿主无作用域执行。现有目录 Skill 保持原适配路径，不据此宣称目录来源也已获得精确包锁。
+
+2026-09-14 包内只读命令增量：Bootstrap 将同一已装载 descriptor 注册到现有 slash command registry，使用 `/skill:<精确 Skill ID> [参数]`；`Skill` Tool 的参数仍是原精确 ID，命令前缀不是新的 capability 身份。前缀避免与内置及 UI 的 `help/exit/copy/open` 等名称冲突，不抢占名称、不使用 frontmatter 展示名或同名目录回退。命令列表只展示允许用户调用且未被显式 deny 的条目；隐藏条目的精确调用仍明确拒绝，未知 `skill:` 命令不退化为普通模型请求。
+
+命令和模型工具共享正文/资源 descriptor、来源守卫与 deny policy。显式调用还须通过当前 Session/turn 的 `Skill` 工具范围；`user-invocable: false` 不允许用户命令调用，`hide-from-slash-command-tool: true` 对包内 Skill 禁止模型工具调用但不禁止合法的用户显式调用。只读命令将已解析正文附加为同一 turn 的用户级指令，保留原输入、source message 和取消/回退所有权；不提升为 system prompt、不另起 Agent，也不扩大 Tool 集合。列表可以是启动时元数据，不能作为执行许可；撤下后的执行须明确失败。该增量不承诺冷启动之前的命令发现、多模态命令语义或剩余 Skill 执行模式已闭环。
+
+这是 Snapshot 合同演进，不给旧锁补伪造来源或 serde 默认值。生成 schema/摘要及消费者必须同批更新；旧格式非空 Skill Snapshot 不再满足新合同，应从可信 Revision/仍可用制品重新编译。当前没有旧格式自动迁移或制品跨版本保留的交付保证，也不因此自动清空用户数据库；需要保留该类历史会话的数据集必须在切换前另行完成迁移与保留验证。
+
 #### 3.4 最小调用图
 
 ```text
@@ -1083,6 +1095,7 @@ struct RoleProviderContribution {
 }
 
 struct RoleProviderMemberContribution {
+    implementation: Option<CapabilityRef>,
     supported_platforms: Vec<PlatformConstraint>,
     required_resource_kinds: BTreeSet<ResourceKind>,
 }
@@ -1093,8 +1106,105 @@ struct RoleProviderMemberContribution {
 同一可序列化 `role_providers[]` shape 必须在一期进入 `PackageContributions`、target
 first-party inventory 和 generated schema。Phase 1 的 bundled Rust registration 使用它；
 未来若开放 Node/MCP Role Provider，只能 materialize 同一 shape，不能新增第二套
-JS/MCP Provider schema。06 的 N1 `plugin-package-v1` 明确不开放 Role Contract/
-Role Provider，这一后置能力不得被当作 N1/M1 完成条件。
+JS/MCP Provider schema。06 原始 N1 阶段不开放 Role Contract/Role Provider；2026-09-14
+开放改造开始扩展该准入，不能将其反算成原始 N1/M1 已交付能力。
+
+2026-09-14 的映射合同演进：`implementation` 为可选的精确 capability 引用。
+`None` 保留既有宿主 typed export，不表示自动寻找同名实现或 fallback；JS Provider
+必须显式提供 `Some`，指向自己 Package/Mount 内独立发布、不是 Role façade 的 capability。
+用户只能在自己的 Package 命名空间发布新 Role 契约，但可实现已有系统/其他插件契约。
+契约 member 身份和实现 capability 身份分别保留，映射纳入原有 Provider contribution
+digest，实现制品由同一 source/artifact lock 保护。普通 Tool 仍不强制创建 Role。
+
+该字段按 `default + skip_serializing_if(None)` 演进现有 v1 schema；旧 bundled Provider
+序列化及摘要不变，新映射生成不同摘要并使用更新后的生成合同。此次没有新增 Node RPC，
+JS host/SDK wire version 不变；旧宿主对含 Role 的用户包仍明确拒绝，不能静默忽略映射。
+后续若扩展调用载荷/执行协议，另按对应合同版本演进，不以此数据字段替代协商。
+
+映射两端须保持 callable schema、action/effect、host port、事件/Context schema 等对外
+契约兼容，并在选择时检查实现本身的运行平台/Surface/feature。2026-09-14 资源需求演进：
+
+- Tool/Context 的私有资源需求可以不同；映射 member 的 `required_resource_kinds`
+  必须与实现 manifest 的 resource kinds 一致，不要求复制 façade 的私有需求。
+- `ResourceProvider` 的输出 resource kind 是对外类型契约，映射前后仍须相等；契约的
+  `serialized_target_resource_kind` 若被对应 façade 使用，实现不得省略该目标资源。
+- canonical Compiler 将所选 member 的资源需求投影到原有 `ResolvedCapability`，
+  再派生 authority policy 与 Snapshot 汇总。私有需求是替换，不是与旧实现需求取并集；
+  具体资源实例/凭据仍在 Session/operation 绑定，不写进 Preset。
+- runtime feature 不要求声明清单相等。所选 member 的契约/实现以及实际使用的资源工厂
+  契约/实现均须可用，其 feature 合并到同一已解析记录及运行 profile。编译和实际分发
+  使用同一资源 member 选择规则；不因 Provider 还有其他 member 就要求无关特性或资源。
+- 内部资源工厂不因此成为公开 enabled capability/模型 Tool。选择 Provider 不授予
+  operation/resource 权限；获取与调用仍经现有准入、owner/binding 校验和租约路径。
+- 无改动保存除比较精确 Provider 锁，还用同一需求投影函数校验 saved records；锁未变但
+  需求投影过时时重新编译新版本，不重写旧 Snapshot，也不静默选择其他 Provider。
+
+2026-09-14 冲突声明演进：`conflicts` 不再要求映射实现复制 façade 的清单。
+冲突不是 callable schema，也不是执行授权；在同一个 canonical Compiler 中按实际
+消费集合校验，不创建第二份能力目录或内部执行计划：
+
+- 保留已选 façade/普通 capability 的声明约束，叠加实际选中的映射实现及其隐式资源
+  工厂的约束。契约侧的冲突仍是对外约束，不能由实现删除；若仅属于某个默认实现的
+  私有限制，应声明在该实现中，不应固化到所有 Provider 共用的 façade。
+- 冲突可指向实际消费的公开 capability 或内部实现；各 Role 解析完成后检查整个
+  组装集合，不能仅检查每个 Role 内部，也不能只按模型可见列表检查。
+- 未选中的 Provider、未消费的可选成员与资源工厂不参与检查。默认 Provider 选择
+  只验证契约/可用性，不等于要求所有成员同时消费；具体 Agent 保存编译和非 Agent
+  operation 准入才检查相应消费集合，且在 JS 启动/资源获取等副作用之前失败。
+- 冲突检查所用的临时集合不加入 `enabled_capabilities`、allowlist 或 authority policy，
+  不扩大模型工具集合或操作/资源权限。Provider 制品仍由既有精确锁保护，无静默 fallback。
+- 无改动保存也调用同一冲突检查，避免复用早期漏检的计划；失败不重写已存 Revision
+  或 Snapshot。旧锁定来源若已撤下，执行仍按既有来源校验明确失败。
+
+上述资源/冲突演进本身不新增 wire 字段或 RPC。2026-09-14 后续依赖演进不再要求
+`requires` 相等：不同实现可以声明不同的内部 capability 依赖，但必须由同一 canonical
+Compiler 解析、锁定并受原授权链约束，不新增第二份 JS 计划。
+
+`ResolvedCapability` 在原记录上增加两个字段，而不是另存依赖能力副本：
+
+```rust
+enum CapabilityConsumption { Contribution, Dependency }
+
+struct ResolvedCapability {
+    // existing identity, source, artifact, schema and resource fields...
+    consumption: CapabilityConsumption,
+    dependency_refs: Vec<CapabilityRef>,
+}
+```
+
+- `Contribution` 表示 Revision 显式选择、可向相应消费者公开的贡献；仅因递归依赖
+  纳入计划的记录为 `Dependency`。同一能力兼有两种用途时只存一条 `Contribution`
+  记录。`contributions()` 是同一 Snapshot 的过滤视图，不是另一份执行/激活状态。
+- Compiler 从显式选择开始，合并 façade 的共同依赖、所选映射实现的私有依赖及实际
+  使用的隐式资源工厂需求。递归遇到 Role 时仍使用原 default/override resolver；不
+  引入未选 Provider。精确版本缺失或选择后形成的环在编译时拒绝。
+- 每条 `dependency_refs` 是父记录到目标能力的精确直接边；`dependency_path` 仍只作
+  诊断，不能作为依赖授权。隐式资源导出身份已在 Provider lock 内，不为表示它而额外
+  暴露一个公共 Tool。解析产生的全部能力进入原 allowlist/authority policy。
+- Snapshot 结构校验要求节点与 allowlist 一致、边目标存在且精确版本一致、直接边按
+  capability ID 唯一、无环，且所有内部节点可从公开根到达；这些检查独立于摘要校验。
+  `context_order` 与 MCP 公开映射只引用公开贡献。应用传入的 PluginProduct 投影不能
+  自报编译器拥有的内部用途/依赖边；该路径的依赖扩展须另作真实消费交付。
+- Nomi Tool、Context 与生命周期投影消费 `contributions()`。公开 Agent Tool、direct
+  Context 及 Role Context 入口先拒绝仅内部用途的记录，再处理资源/执行；不能仅在
+  UI 隐藏这些记录。资源工厂沿原 Role/租约准入，不强制成为公开贡献。
+- Agent Tool/Context 的受管子调用使用 §5.10 的父作用域 caller：目标须同时是精确选中实现
+  声明的直接依赖和冻结父记录中的直接边。进入图不授予任意 sibling/ancestor 调用权；
+  当前来源、操作范围、资源 owner 与撤销仍校验。非 Agent operation 和后台
+  任务尚未因此获得同等依赖调用 SDK。
+- 无改动保存从 Revision 根重新解析同一选中图，比较 Role 锁、消费用途、精确边和
+  能力/资源需求记录；相同 Provider 锁不足以证明图没变。不一致则生成新的保存结果，
+  不重写旧 Revision/Snapshot；已有 Session 不读取新默认或静默换实现。
+
+序列化默认 `Contribution` 且省略该默认值，空依赖边也省略，以保留既有无新字段记录
+的字节语义/摘要；新用途/边纳入 Snapshot 摘要和生成 schema。此变更未新增 Node RPC。
+缺字段默认值**不是旧计划迁移**：不得凭当前目录替旧 Session 补造历史依赖或改选实现。
+当前 Nomi open 仍重新编译并比较完整持久化 envelope；旧图语义不一致时明确拒绝，
+不隐式迁移或清库。要支持该类历史会话继续使用，须另行交付显式迁移或兼容执行证据。
+
+本切片不代表所有来源和消费者均支持任意内部调用。自定义产品资源解析、多 binding、
+撤下/acquire 竞态、非 Agent 依赖调用及全领域消费者仍须分别验收；相关证据见实施
+台账 §2.15，不由资源需求投影或图结构检查推断全栈目标已完成。
 
 执行对象不以 `Plugin | MCP | CLI | Skill` 枚举进入 Kernel。`PluginRegistration` 在内存中同时登记 metadata 与按现有 `CapabilityKind` 区分的窄 typed exports：
 
@@ -1147,6 +1257,10 @@ AgentPresetRevisionPayload {
 ```
 
 Agent override 不存在就表示继承 installation default；不增加 `inherit/default/latest/follow` 状态枚举。Binding 指向稳定 Mount 和 exact Role Contract，不锁死 Package version；Compiler 在创建 Snapshot 时把当前 Mount materialize 成 exact Package/version/contribution digest。
+
+2026-09-14 后续开放实施补充：无改动保存不能仅因 Revision payload 与 façade capability 未变就复用 Snapshot。保存时复用同一 Role resolver 检查当前 default/override 对应的精确 Provider 锁；所选制品、贡献或默认目标改变时生成新的 Revision/Snapshot，不修改旧版本或已有 Session。选择不变而 binding version/更新时间变化不构成重新编译理由；Provider 撤下或不兼容则由正常编译返回诊断，不回退。此处是 authoring-time 语义，不允许执行时重新读取默认。
+
+后续产品实施已加入 owner-scoped 默认管理 API/UI：Nomi 产品 DB migration 097 以一张 `installation_role_bindings` 表保存 canonical binding，并遵守产品 v3 技术主键与逻辑关联规范，不打开独立 Fresh-v4 数据库。每次 authoring 编译读取当前存储；默认写入使用 binding version CAS，失效选择不自动删除或替换。默认设置经 Kernel 同一 resolver 校验必需 member，资源实例及可选 member 留给具体消费者 admission。Nomi 启动校验从保存 Snapshot 的 Provider locks 派生本次冻结选择，不使用最新默认；这不是另存一份选择事实。独立 Fresh-v4 host 的 seed/启动期装载不因此等同于已接入该产品管理入口，全量领域消费者仍须分别推进。
 
 Fresh-v4 只增加一张 installation-wide 表，每个 Role 一行，保存 role contract ref、provider mount、binding version 和更新时间。它不构成 Provider Catalog，也不加候选、优先级或历史表。Phase 1 seed 固定：
 
@@ -1259,7 +1373,43 @@ Tool 调用固定为：
 
 不能先调用一个 façade Package handler，再由它回调 Kernel 查 Provider：当前 handler context 只有 Snapshot ref，而且已经绑定 façade Mount 的 state/service view，这会形成 Kernel ↔ Plugin 双分发和错误的 owner context。Role-backed façade 在 Registry 中是声明式 Capability contract，真正的 handler 在 Kernel 第一次选择时直接解析到 frozen Provider Mount。
 
+2026-09-14 受管依赖调用合同增量（Agent Tool）：
+
+- 上述禁止的是 façade 回调 Kernel 再找自己的 Provider，不是禁止所选实现调用**另一个声明的依赖 capability**。`CapabilityInvocationContext.dependencies` 由实际 dispatch future 创建；普通 Tool 与 Role 的 Agent action 使用同一入口。`KernelRegistry::invoke_shared` 复用现有冻结计划；Registry clone 共享 published state 与资源账本，不形成另一套 Registry。
+- 插件只提供 dependency capability ID、action ID、局部 `call_key` 和 JSON input。父请求提供 principal、Session、Snapshot、scope、correlation；目标使用自身已编译 action/resource policy。每次检查父链的权限、精确来源/Provider 与目标资格；只能调用所选实现的直接依赖，禁止祖先 capability 重入，不能因为某个 peer 也在 allowlist 中就借用它的权限。
+- `call_key` 非空、最多 128 UTF-8 字节，在一个父调用内不可重复；每个父调用最多接纳 1024 个 key，超限不启动子效果。派生 operation/idempotency 标识覆盖父标识、主体、Session、Snapshot、父 capability/action 和 key；明确的外层重试可保持标识，但没有隐式重试、持久化效果去重或回滚保证。
+- caller 的有效期属于父 dispatch future，不属于保留该对象的插件。父调用成功、失败、丢弃或上游截止时间导致 future 结束时关闭 caller，协作式子 future 被丢弃。Kernel callback 使用弱 Registry 引用，避免已注册 handler 保留 callback 造成永久所有权环；撤下在后续子调用准入时复查，不承诺能回滚已运行的外部 IO。
+- JS Tool 通过 `invoke({ actionId, input, contribution, signal, dependencies })` 的 `dependencies.invoke({ capabilityId, actionId, callKey, input })` 调用。`dependency_invoke` wire 附带父 request ID 与 Mount handle，由原 supervisor 验证同 generation、同 exact target、父请求仍在途且有受管 caller；插件自报 owner/Session/resource 字段不属于 DTO。该入口不进入 activation 的 Mount SDK。
+- 原 `PendingRequest` 持有 callback 与关闭信号，原 service `JoinSet` 持有子 future；父完成/取消/丢弃时关闭，不建第二份调用账本。子 callback 截止时间不超过父请求，保留原有 IPC/service 容量与响应写出约束。超时、generation failure 仍使用现有整 Host 清理；取消 ACK 不等于效果回滚。
+- 产品 `RuntimeBoundExtensionHost` 显式包装该 callback，受管子调用复用同一 Host 的父级 `RuntimeUseLease`，不在等待中的切换写锁之后重新排队取读锁。作用域只沿包装的 callback future 传播，不授权其他 Host 或任意 detached task 借用；不另建 runtime 管理器。
+- 此段原始切片只开放 Agent Tool；后续 Agent Context 增量见下文。非 Agent operation、Resource lifecycle 或 Candidate Test 不自动拥有生产授权。递归编译图与公开/内部消费用途沿同一 canonical 计划演进，不能因该接口存在而自动公开内部 Tool。
+
+2026-09-14 Agent Context 受管依赖增量：
+
+- direct 与 Role 的 Agent Context factory 获得同一个 `CapabilityDependencyCaller`；祖先证据区分真实 Tool invocation 与 Context access，不合成 Context action 或伪造 Tool 身份。Context 祖先复查 `enforce_access`，Tool 祖先复查 action 权限；两者均复查当前精确来源和选中 Provider。子目标继续使用原 `invoke_scoped`，只开放已声明、已冻结且已授权的依赖 action，不是任意 Context/资源方法调用。
+- JS `contributeContext({ schemaRef, input, contribution, signal, dependencies })` 使用原 `dependencies.invoke`。Host 的原 pending request 可以为 Context 持有 caller；父请求 ID、精确 Mount/generation、截止时间及关闭语义与 Tool 一致。非 Agent Context 收到的入口没有 Session caller，调用明确拒绝；不扩展 activation 的 Mount SDK。
+- Context 没有 Tool idempotency key。其子调用标识使用独立的 `kernel-context-dependency-v1` 域，包含宿主 evaluation operation ID、主体、Session、Snapshot、父 capability 和局部 key。宿主必须为不同求值提供不同 operation ID；Nomi 初始/动态 Context 每次实际求值生成唯一编号，不复用进程重建后归零的序号。显式重试同一次求值才可沿用身份；这不是持久化效果账本。
+- Context 可以消费目标 policy 已允许的 action，但阶段触发不是“一条用户消息仅执行一次”。依赖声明不授予额外资源或副作用权限；不能把 Context 当作自动重试的持久任务/后台任务执行器。无隐式重试、无效果回滚保证，已提交副作用由领域 owner 负责。
+- `RuntimeBoundExtensionHost` 对 Context caller 同样包装父级 runtime lease，复用原 task-local callback 作用域与 supervisor，不另建 Context 执行平台。现有阶段、大小/时间预算及公开/内部消费边界保持不变。
+- 本次不新增 wire method、序列化字段或第二份图；只扩展原请求回调的受管父类型及作者类型声明。Node 进程仍不是强安全沙箱。完整资源/非 Agent/后台任务发起调用仍需各自权威证据和真实消费者验证，不能从本增量推断全部开放。
+
 ContextContributor 在 Context Assembler 选择 factory 时读取同一个 lock；ResourceProvider 在资源解析/实例化时读取同一个 lock。三类路径共用 exact Provider 解析规则，但不伪装成同一种 action handler。
+
+2026-09-14 Context 阶段合同增量：
+
+- `CapabilityContributions.context_phase` 为 `session_start`（省略时的默认值）或 `before_turn`；后者只适用于支持 Agent consumer 的 ContextContributor。阶段是对外契约的一部分，Role façade 与所选 implementation 必须一致，不能借更换实现暗改调用频率。默认字段不写入 canonical JSON，既有未声明阶段的 manifest 摘要保持原值。
+- `ContextContributionInput` 沿原 Kernel Context factory、Role 分发和 JS `context_contribute` 请求传递；`before_turn` 带 `turn.source_message_id/text/image_media_types`，来源是引擎的当前用户输入。不传图片字节、任意 host context、Secret 或调用者自报的授权；类型拒绝额外字段，整个输入上限为 256 KiB。JS 的 `contributeContext({ schemaRef, contribution, input, signal })` 复用原请求取消机制。
+- 当前 Nomi 在每次主模型推理请求前消费 `before_turn`，同一用户轮次内的工具后续推理也会再次消费；不是“每条用户消息仅一次”，也不是覆盖压缩器等所有辅助模型调用的 hook。启动时仅校验/绑定动态贡献，不提前执行。结果临时合入当前 system prompt，不累积进历史消息；实际调用复查同一 Snapshot、当前精确制品/Provider 与权限，失败不回退到内置 Context。
+- 初始 Context 批次与每次动态 Context 批次分别共享 5 秒 deadline 和 64 KiB 结果上限；不是整个 Session 启动或全部内置 middleware 的统一预算。动态结果超限、超时、撤下和漂移均阻止该次主模型请求；丢弃等待沿现有 Host request ledger 协作取消，不能据此宣称强制终止任意 Node 运算。
+- 该阶段增量只开放类型化动态 Context，不构成完整 Prompt 管线或任意 TurnMiddleware 开放；用户排序由下述同一 Revision/Snapshot 合同承载，不新增 Context Registry、独立 JS 编译器或执行 owner。
+
+2026-09-14 Context 顺序合同增量：
+
+- `AgentPresetRevisionPayload.context_order` 是可省略的有序 capability ID 列表，公共 Agent document 使用相同字段。只能引用本 Revision 直接选择的、支持 Agent consumer 的 ContextContributor；重复、未选中或 Tool 等非 Context 条目由同一个 Compiler 拒绝。该字段不新增依赖、不改变 grant，也不改变 Tool/Skill 顺序。
+- Compiler 将顺序原样冻结到 `ResolvedSnapshotContent.context_order`，并计入 Revision、Snapshot 和 compiled runtime profile 摘要。空列表序列化时省略，旧 payload/Snapshot/profile 的空顺序不产生额外 canonical 字段；不从当前 Catalog 或新草稿回填旧快照。无改动保存复用时检查顺序投影一致。
+- 列表可只列部分 Context：显式列出的贡献在前，其余沿既有 capability ID 顺序排列。执行调用顺序与贡献结果在模型请求内的排列相同；`session_start`、`before_turn` 分别过滤同一顺序，不跨阶段移动。Role façade 使用其公开 capability ID 排序，所选 Provider 不得私自改变消费位置。
+- Nomi 消费保存的顺序，不在运行时重新选实现。显式列出的贡献若不被该 Runtime 准入，必须报错，不允许忽略；现有精确来源、撤销、取消、分阶段预算与大小限制继续生效。完整 Prompt 中 persona、内置 lifecycle 或其他贡献的相对位置不由此字段控制，后续完整管线必须另有实际消费合同。
+- 工作台在 Agent 设置中提供上下移动和恢复默认顺序；正常保存/回读仍使用原 authoring API。Catalog 暂时缺项时保留显式选择；用户主动移除能力时一并移除该顺序条目。此 UI 不拥有新的执行或排序存储。
 
 Computer physical action 在进入 Provider handler 前，按 `serialized_target_resource_kind` 对 Snapshot 的 exact target `ResourceId` 取得一次调用级共享 arbiter；锁属于 target，而不是某个 Provider。它只串行单次 action，不跨 observe→think→input 的模型间隔持有长 lease；ref 是否过期由 observation generation 校验。Raw trusted code 绕过正式 Provider API 不在本合同保证范围。
 
@@ -2159,6 +2309,8 @@ AP-0 术语/owner/入口冻结
 
 ## 2026-09-08 MiniApp 生命周期删除落地注记
 
+> 后续 Plugin UI 对 AgentSession 的受限访问合同见本文末尾的 2026-09-14 注记；不改变下述产品生命周期 owner。
+
 06 的 `M1-2` 生命周期删除子切片已由 `86afa7af6` 接入独立 MiniApp 产品域。该实现不把
 MiniApp 生命周期放入 AgentPreset，也不让 Agent 工作台取得 MiniApp owner 权限：
 
@@ -2222,3 +2374,101 @@ origin Operation 或 Build generation；HTTP/CLI 只是同一 application servic
 当前这两项事实不改变 05 对 typed fail-closed、AgentPreset 不绑定具体资源、
 MiniApp capability 独立 projection、以及 Windows Candidate 完成前不进行
 macOS/Linux 原生验证的约束。
+
+## 2026-09-14 Plugin UI → AgentSession 命令接缝
+
+本增量为系统页面插件化提供共享应用 API 接缝，不是新增 Agent Runtime 或第二个 Session 管理器。实际验证范围见开放实施台账 §2.19，完整页面绑定、流式观察与恢复仍单独交付。
+
+- 可信宿主 UI 调用现有 Surface open，可显式提供 `agent_session: { agent_session_id, expected_release_digest }`。省略时不授予会话访问；显式 `null` 或额外身份字段拒绝。会话必须已存在、归属当前用户且具备 canonical AgentSession 元数据；授权精确绑定用户所见的活动 UI release，不能在升级后静默复用旧确认。
+- 授权仍由原 Surface capability 及 `plugin_surface_sessions` 行承担；可空 `conversation_id` 是唯一会话引用，不另建令牌、签名根或会话执行 owner。数据库校验父项和同 owner，声明索引/逻辑关联及删除级联；普通 reopen 清空旧会话授权，会话删除撤销相应 Surface。该 schema 调整采用 fresh baseline，不引入兼容迁移、dual-read 或对用户数据集的隐式操作。
+- Bridge 的 `agent_session` target 只接受 `observe { after_seq, limit }`、`turn { input, idempotency_key }`、`cancel {}`。请求不得自报会话或 owner；宿主从已验证 Surface 取身份，沿原 `nomifun-ai-agent`/Session owner 接缝查询、发送或取消。历史分页上限 200，发送使用对象输入和最多 256 UTF-8 字节的非空幂等键；内置 HTTP 与插件入口共用会话身份校验及实际发送流程。
+- 插件发送键在现有幂等入口以 `plugin-ui:<plugin_id>:<caller_key>` 分域，不增加效果账本。视图 close/reload 不取消已接纳 turn，也不自动重发；发送结果不明时 SDK 明确报超时，调用方保留原意图键用于对账。Session 应用错误码保留为结构化错误，不依赖解析消息文本。
+- 读操作完成后再次确认 Surface 未撤销，成功结果和包含私有信息的错误均受此检查约束；这不承诺对已经接纳的副作用进行回滚。强制终止与权限撤销仍归原执行 owner。
+- `observe` 当前是持久化消息投影，不是 token 事件重放。公共 Session events 未具备重放能力时不能伪造恢复游标；后续流式 API 复用既有事件设施，须明确实时流与历史对账语义。
+- 当前一个插件只有一个活动 Surface，重开会替换原视图授权；多会话/多窗口与 UI contribution 选择须继续演进，不因本桥接存在就宣布系统页面/Shell 已可替换。SDK 在新构建 release 中物化，旧不可变 release 不被宿主偷偷改写，使用新 API 的插件须重新构建并发布。
+
+没有增加 Rust/native/Wasm 插件后端。普通 Node 与 iframe 的隔离边界也不因这个受管桥接而升级为操作系统强沙箱。
+
+### Plugin UI 实时 Session 投影（2026-09-14）
+
+事件复用既有用户作用域总线与 `/ws`，由独立只读观察任务产生 `plugin.agent-session.stream`，不新增 SSE、事件存储、Session 执行器或订阅授权表。每批至多 32 条，按 owner/会话分组；授权取既有 Surface 行、同 owner Conversation 与当前 enabled release，沿 Session port 检查 canonical 会话身份，异步检查后重查 Surface ID/generation。撤销后不投递新批次；已交付的内容无法追回，不承诺事务性撤回网络在途数据。
+
+WebSocket 的 scope envelope 包含 `plugin_id/surface_session_id/surface_generation/event`，不得包含 Surface bearer 或 DB 技术 ID。宿主 UI 精确匹配三个路由字段，只把 event 交给对应 iframe 的 MessagePort；关闭/更换视图时卸载监听。此投影仅开放原 `message.stream`，不表示所有 EventSource/EventConsumer 已开放。
+
+SDK `agentSession.subscribe(listener)` 返回退订函数，回调接收 `stream` 或 `resync_required`。序列号和订阅代数仅用于本地交付控制，不是持久化游标或授权。回调串行执行，允许异步查询历史；完成后 ACK，父页面最多保留 8 条未确认交付，每条事件至多 64 KiB。窗口耗尽时丢弃后续碎片，待已发消息被确认后合并发出重新同步通知；重复/过期 ACK 不新增额度，旧订阅事件不进入新订阅。
+
+首次订阅、重连、总线丢失或消费过慢均要求重新同步：清理临时拼接内容，调用 `observe` 分页读取持久化消息，并根据消息身份与运行状态对账。**这不是 token replay，也不保证正在运行时能复原未持久化的半条回答**；UI 必须呈现恢复中/等待最终消息，不能自动重新发起 turn。完整页面的去重、历史与实时流交错、故障恢复体验仍需单独产品验收；基础接口和局部测试不替代该验收。
+
+### 本期 JS/UI 适配性约束（2026-09-14 用户确认）
+
+本期不强制为所有底层部件交付 JS 实现。需要原生库/设备、高频共享内存或引导期权威、以现有 JS 支持实现会产生额外代理/重复执行状态的具体功能，登记为后续 Rust/部署方案评估，不做临时替代版本。公共 port 仅因本期真实消费者需要而提取，不为未来 Rust 插件建立空 SDK、loader 或平行协议。普通 UI、公开网络协议、粗粒度异步策略继续接现有应用/能力接缝；不得将天然适合 JS 的业务因语言标签整体延期。具体分项与判据见评估报告 §27.13，延期不等于实现或验收完成。
+
+### Agent 页面显式贡献与选择（2026-09-14）
+
+- 源文件 `nomifun.plugin.json` 可声明 `agent_view: { name, description }`，构建为本包 `${package.id}.ui.agent-session` capability。沿原制品、发布与 Catalog 主链，不设 UI 私有注册表；普通 HTML 不自动产生该贡献。一个产品可同时发布页面和 actions，页面声明本身不要求 Node service。
+- canonical `CapabilityContributions.ui_slot = agent_session` 标识当前支持的展示槽。发布验证要求 `kind = ui_contribution`、consumer 仅 `ui`、实际 HTML 存在；当前页面宿主不解释该贡献的执行依赖/资源图，故拒绝在该贡献混入 actions、Context、事件、资源、host port 或 requires/conflicts/runtime requirements。它们应通过产品既有独立 service/capability 接缝消费。这是当前页面形态的支持范围，不是宣称 UI 永久不能组合资源；没有消费者前不接受并静默忽略这些声明。
+- `GET /api/agent-catalog/ui/agent-session` 是同一 Catalog 的只读投影，返回精确 capability ID/version、plugin ID、活动 release digest 及展示信息。它不改变 Agent Tool 候选，不授予会话权限。Surface open 的 `agent_session.ui_capability` 可带精确引用，宿主按同一发布记录验证 slot、consumer、release 与现有 owner/Session/活动指针 CAS。
+- 实际 `/agent-sessions/:agentSessionId` 路由保留可信选择/恢复区域；显式选择后卸载内置内容并挂载既有隔离 Surface。临时选择只作用于本页面；用户也可显式保存“此 Agent 默认页面”，详见下述独立呈现绑定。内置页面保留原公共 AgentSession API，不新增业务执行器。
+- 撤下或改变 release 后卸载视图；当前路由内即使旧候选再次出现也须重新确认，不因刷新自动恢复。语言切换不重新授权；路由变化后迟到的 open 结果只关闭，不挂到新 Session。close/reload 不重发或取消 turn。关闭失败显示“服务端撤销未确认”，不把本地 iframe 卸载当成服务端成功撤权。
+
+原临时选择证据见实施台账 §2.21；预设默认页增量及验证状态见 §2.30。模板传播、无 Session 的入口、完整恢复体验、多视图和 Shell 仍未交付；不以页面容器选择测试替代真实浏览器发送/流/取消/断网恢复联合验收。
+
+#### 预设级默认页面：独立呈现绑定
+
+`GET/PUT /api/agent-presets/{preset_id}/ui-binding` 读写原预设行的 `ui_binding_json`。内容是独立 `binding_version` 与可空 `selection`；非空选择绑定 plugin ID、capability ID/version 和不可变 release digest。PUT 必须提交 `expected_binding_version` 和显式 `selection`（`null` 恢复内置默认），采用原数据库单语句 CAS，校验预设与插件的同 owner；展示字段按当前 Catalog 规范化。未配置存储的宿主明确返回 503，不假装保存成功。
+
+`GET /api/agent-sessions/{id}/ui-binding` 从原 Session 元数据派生预设，不接受客户端自报 owner/目标预设。绑定不进入执行 Revision、Snapshot 或 Session 执行配置，不重新编译/启动 Agent。保存相同的当前页不重开 Surface；临时切回不清空持久默认。并发保存冲突由用户刷新后决定，不自动重试覆盖。
+
+路由进入时只自动使用已记住且当前仍可用的精确 release，每次重新取得 Session-scoped Surface 授权。失效/升级时保留记录并提示，显示内置页，不替用户改选新版或其他插件。明确同意绑定的是不可变 release 而非 publication epoch：同一 release 停用后重新启用，下次路由进入可继续使用原默认；当前页的撤销锁存不自动解除。临时选择优先于迟到的默认读取，导航后的迟到保存响应不能挂载到新 Session。此能力仅作用于该预设，不是全安装默认、模板分发或多 Surface 支持。
+
+数据变更直接更新 fresh schema 的 `060_nomi_core_agent_control_plane.sql`，不添加旧数据兼容迁移；旧 checksum 数据集不能被当作当前 schema 使用。本次不打开、转换或重置开发者/用户数据集。JSON 插件引用登记索引和 `KEEP_HISTORY`，允许已删除插件的历史引用，恢复/导入审计仍拒绝非法身份及存在但跨 owner 的父项；保留记录本身不是授权。
+
+#### 会话前的工作台入口
+
+个人预设编辑器的“Agent 页面”页签使用同一 Catalog 投影和预设 UI binding API；允许没有 Session 或尚无稳定执行 Revision 的预设保存页面偏好，不混入 Agent 草稿。保存独立且显式，失败/冲突必须刷新后再决定；临时候选不是已保存默认。通过共同 `agentUiChoiceKey` 与 Session 页保持精确身份比较一致，不建立另一份目录。
+
+“打开已保存的 Agent 页面”要求 Agent 有稳定 Revision、草稿无未保存变化且页面选择已保存；只向原 `/api/agent-sessions` 提交 preset ID/title，创建空会话后导航原页面路由。模型/资源等仍由原 Session owner 校验，不覆写配置、不发送初始消息。需要主动选择模型/工作目录/资源时使用原引导入口。读取/保存页面不开放任何 Session grant，Surface 仅在原 Session 路由完成作用域授权后打开。
+
+组件生命周期隔离迟到的请求结果；创建失败不自动重试并提醒用户检查历史。已获得 Session ID 的导航重试复用该 ID。此入口不宣称插件已接管创建前欢迎页或资源选择，完整范围仍须独立设计和验证；不以空会话代替上述尚未交付的插件 UI。验证见台账 §2.31。
+
+### ToolSearch 发现策略（2026-09-14）
+
+Nomi Catalog 注册 `nomifun.tool-discovery` 内置包，提供 `system.tool-discovery` Role / `agent.tool-discovery` capability。内置实现与用户实现使用相同的隐藏 `tool.discovery.rank` action（`Pure`），不注册第二个模型可见 ToolSearch。用户包保留独立 capability ID，用原 `role_providers.members.implementation` 映射该成员；合同仍锁定版本、schema 摘要与 effect。源代码合同/严格 schema 由 `nomifun-ai-agent/src/tool_discovery.rs` 提供，不新建 JavaScript 协议或契约权威。
+
+输入为 `{ query, candidates: [{ name, description, aliases }], limit }`，输出为 `{ names: [...] }`。候选来自当前 Session 已经过滤的 deferred 目录，不含 schema、激活身份或可变宿主对象；只读排序可跨现有异步 Kernel/JS 边界。ToolSearch 调用所选策略后，在原目录下原子校验/激活，后续模型轮次才收到完整 schema。所有 names 必须为本次候选中的当前精确路由，不接受别名、重复、超限或已移除/重注册条目；结果不授予 Kernel 新权限。
+
+产品使用：在 Agent 设置启用 `agent.tool-discovery`，通过既有 Role 选择/默认入口指定 Provider，再保存冻结计划。仅设置 Role 默认而未启用成员不会隐式修改全部 Agent；旧 Session 不随默认改变。也支持单独选择一个符合相同隐藏合同的直接 capability，但不能同时启用多个发现策略；Nomi 组合根把与 Session 相同的选择校验接入编译器，在保存（含无改动快照复用）时拒绝多策略冲突。校验不重写计划，也不构成新的独立 preview API/UI。未选择策略的 Agent 保留原内置路径，两条内置入口共用同一个排序算法。
+
+当前一次策略调用的元数据预算为 256 KiB、query 最多 4 KiB、期限 5 秒，结果至多 5 项（沿用已有激活上限）。超出预算或策略失败明确返回错误，不截断候选、不自动切回其他 Provider；取消/超时沿原 Kernel/JS future 生命周期退出，不提交迟到结果。内置实现保留原精确名/别名/关键词排序，用户实现可改变匹配/排序启发式。
+
+发布型 Product 现也支持直接选择独立 capability。源码 `nomifun.plugin.json` 使用既有 `contributions.capabilities` 与 `schemas` 表达单一精确隐藏 action；能力 kind 为 Tool，声明 Agent + PluginService 消费者，无资源需求。Service 沿现有 `start()` / `invoke({method, payload, signal})` 接收该 action；`actions` 简写只生成可见工具，不适用于隐藏策略。Product release 仍禁止 Role 声明，不能将直接选择宣传成 Product Role Provider。
+
+Product 装配核对精确输入/输出 schema 摘要，复用原 `NomiPluginProductToolInvoker` 及发布身份检查；未绑定适配器拒绝注册，不变成内置 fallback。超时/放弃等待沿原 Service Host/Actor 取消与回收。当前源码发布到 Nomi/Node、非法输出、超时、停用后已有 Session 失败均有实际调用证据；非空候选排序及原子激活另由消费者/Registry 测试覆盖，不能合称大目录或 release 升级重开验收。
+
+可配置 schema 暴露预算、大目录性能等仍未核销。此 `Pure` 合同不宣称允许远程模型或有副作用的检索服务。普通 Node 仍非 OS 强沙箱。验证证据与剩余边界见实施台账 §2.25～2.27。
+
+### before_model 请求中间件（2026-09-14，Product 单阶段已验收）
+
+当前增量的真实消费者为 Nomi 主模型/工具循环，不覆盖压缩等独立模型调用。Product 以 Agent + PluginService 的 `TurnMiddleware` 声明精确隐藏 `agent.before_model` / `Pure` action；输入/输出 schema 由 `nomifun-agent-contracts::model_middleware` 提供，发布验证拒绝错误 kind、混合 action/context/event/资源/host port/UI slot。依赖和授权继续由原计划与运行链处理，不能据此让 JS 自授权限。
+
+输入 `{ phase: before_model, turn, system, tools: [{ name, description }] }` 不携带完整历史、schema、图片字节或原生状态。输出 `{ system?, tool_names? }` 拒绝未知字段；工具名称只能从本次仍保留的候选中选择/重排，不可重复或恢复前序移除的工具。输出在局部请求中组合，整链成功后才构造 provider 调用权限快照；失败不回退、不发该次模型请求，也不回写持久化历史或源提示词。计划模式、请求路由、资源通知及回合事实保留为宿主追加部分；未注册中间件保留原路径。
+
+初始预算为整链 5 秒、每次输入 256 KiB、patch 64 KiB。取消/超时丢弃原 Product invocation future，使用已有 Service Host/Actor 回收；不新增执行器。装配只接精确冻结的 release/schema，未绑定 adapter 不能退回默认路径；普通 `actions` 简写不是 middleware 发布方式。
+
+`middleware_order` 是原 Revision/Snapshot 内独立于 `context_order` 的可选数组，并被运行配置摘要覆盖。显式项按数组顺序执行，省略的已选中间件按 capability ID 排在其后；空数组不序列化，缺省保持既有摘要语义。排序不得重复，不得指向未选中/仅依赖用途的贡献，且编译和 Nomi 装配均核对当前请求合同与可消费来源。它不是选择或授权入口；Context 仍先于本阶段执行，可信宿主追加部分不参与排序。
+
+原 Agent 编辑器提供上下移动和恢复默认；移除 capability 时移除其排序项，目录暂不可用时保留显式项供用户处理，不静默删改。保存复用原编译链：无改动复用同一 Revision/快照，顺序改变生成新版本/快照，已有 Session 保留原冻结顺序，新 Session 使用新计划。不新增字段专用存储、执行器或阶段总线。
+
+这是 Product 单阶段交付，不是完整 Middleware 平台：N1 来源、其他阶段和独立模型调用仍未支持。真实 Node 顺序与旧/新 Session 消费证据、失败路径和检查边界见实施台账 §2.28～2.29。
+
+### Agent 参考页面草稿（2026-09-14）
+
+`POST /api/plugins/drafts/from-template/agent-session-view` 创建当前用户所有的普通 ready 草稿，使用 UUIDv7 草稿身份，不调用模型、不发布、不绑定 Session。Agent 页面入口跳转原 `/plugins/create/:draftId`；后续显式保存仍走唯一 source/build/publish 路径，`agent_view` 发布与使用授权沿上述规则，不设模板专属 runtime、Catalog 或 Node service。
+
+模板为可编辑、无外部依赖的 HTML，通过真实 `window.nomi.agentSession` SDK 读取当前页最多 50 条持久化消息、发送文本和取消。实时事件只请求刷新，不与历史游标互换，不累加 token，不创建另一个消息账本；持久化记录可原位更新，每次重读当前页后替换展示。不可呈现的结构化记录明确引导回内置视图，不输出整份内部对象。历史读取失败清空当前展示并暂停自动刷新，由用户显式恢复；晚到结果不能更新已卸载页面。
+
+原 `MessageProjection` 增加可选 `message_type` / `message_status` 来源标记：Nomi 直接从持久化消息行投影，不从 `left/right` 或正文属性猜类型；原 `projection` 正文、游标和正文 `semantic_digest` 不变。事件型 Session 投影没有这两个来源字段时省略，继续使用原 `presentation_intent` 与事件投影合同，不补数据库列、不新增消息 owner。TS 的异构 `projection` 按 `unknown` 暴露，消费者须按来源类型或事件合同收窄；来源标记是呈现信息，不是插件授权、回合完成或产物提交凭证。
+
+参考页沿此标记呈现 `text/tips/thinking/plan/tool_call/tool_group/agent_status`：文本使用安全 DOM 文本节点，思考和工具文本输出可折叠，计划保留逐项状态；工具记录的来源错误状态优先于正文中残留的成功状态。没有自动执行、权限批准、原始参数对象转储或产物 URI 打开，未知类型保留显式提示，不误标为普通回复。已有发布物保持不可变，新草稿使用新模板；已有插件作者需修改源码并沿原链重新发布。该增量的测试与未支持消息/真实浏览器边界见实施台账 §2.32。
+
+后续恢复收尾通过原插件私有 KV 的 `storage.read/compareAndSwap` 保存已授权 Session 的输入/请求键，发送前先确认意图保存。跨重载只恢复已确认记录，不自动发送；显式重试重用原键。冲突、保存结果未知或发送已接纳但清理未确认时阻止新发送并要求对账，不建立第二个 outbox 执行器。未确认编辑仍可能丢失，Session 分键不是插件 KV 内的新安全边界，保留数据不会自动随 Session 删除。关闭只退订和释放页面定时器，不取消或重启 Session。测试与剩余边界见实施台账 §2.22～2.23；不承诺无损恢复或真实浏览器故障验收已完成。

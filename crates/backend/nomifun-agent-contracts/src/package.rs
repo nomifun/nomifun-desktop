@@ -137,7 +137,17 @@ pub struct RoleContractManifest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RoleProviderMemberContribution {
+    /// An exact, independently published capability in this Provider's Package.
+    /// The Role member keeps its canonical identity; this mapping identifies
+    /// the implementation without claiming that identity. None denotes a
+    /// host-supplied typed export, not an implicit capability lookup/fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implementation: Option<CapabilityRef>,
     pub supported_platforms: Vec<PlatformConstraint>,
+    // Resources of this implementation, projected into the selected member's
+    // compiled policy. For mapped exports this must match the implementation
+    // manifest. Private Tool/Context requirements may differ from the facade;
+    // typed ResourceProvider outputs and serialized Role targets may not.
     pub required_resource_kinds: BTreeSet<ResourceKind>,
 }
 
@@ -590,11 +600,84 @@ pub struct CapabilityActionDescriptor {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilityContributions {
+    /// A UI consumer contract, not an executable Tool or host DOM reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_slot: Option<UiContributionSlot>,
     pub actions: Vec<CapabilityActionDescriptor>,
     pub context_schema_refs: Vec<CanonicalSchemaRef>,
+    #[serde(default, skip_serializing_if = "ContextContributionPhase::is_session_start")]
+    pub context_phase: ContextContributionPhase,
     pub event_schema_refs: Vec<CanonicalSchemaRef>,
     pub resource_kinds: BTreeSet<ResourceKind>,
     pub host_ports: Vec<HostPortRef>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UiContributionSlot {
+    AgentSession,
+}
+
+/// When the selected Context consumer invokes a contribution. This is part of
+/// the capability contract, not an implementation-specific scheduling hint.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextContributionPhase {
+    #[default]
+    SessionStart,
+    /// Before each main inference step for the current user turn, including
+    /// follow-up steps after tools. Not a once-per-message hook.
+    BeforeTurn,
+}
+
+impl ContextContributionPhase {
+    pub fn is_session_start(&self) -> bool {
+        *self == Self::SessionStart
+    }
+}
+
+/// Host-owned turn facts; no image bytes, credentials, arbitrary host context
+/// or authority fields cross this boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ContextTurnInput {
+    pub source_message_id: String,
+    pub text: String,
+    pub image_media_types: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ContextContributionInput {
+    #[default]
+    SessionStart,
+    BeforeTurn { turn: ContextTurnInput },
+}
+
+impl ContextContributionInput {
+    pub fn phase(&self) -> ContextContributionPhase {
+        match self {
+            Self::SessionStart => ContextContributionPhase::SessionStart,
+            Self::BeforeTurn { .. } => ContextContributionPhase::BeforeTurn,
+        }
+    }
+
+    pub fn is_session_start(&self) -> bool {
+        matches!(self, Self::SessionStart)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if let Self::BeforeTurn { turn } = self {
+            if turn.source_message_id.trim().is_empty() {
+                return Err("Context turn requires a source message identity".into());
+            }
+            let bytes = crate::canonical_json_bytes(self).map_err(|error| error.to_string())?;
+            if bytes.len() > 256 * 1024 {
+                return Err("Context turn input exceeds 256 KiB".into());
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1046,6 +1129,23 @@ mod tests {
         InProcessEntrypointMetadata, JavaScriptEntrypointMetadata, PackageEntrypointMetadata,
     };
     use crate::{DigestHex, VersionString};
+
+    #[test]
+    fn context_phase_preserves_legacy_digest_and_turn_input_rejects_authority_fields() {
+        use super::{CapabilityContributions, ContextContributionInput, ContextContributionPhase};
+        let legacy = json!({"actions": [], "context_schema_refs": [], "event_schema_refs": [], "resource_kinds": [], "host_ports": []});
+        let parsed: CapabilityContributions = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(parsed.context_phase, ContextContributionPhase::SessionStart);
+        assert_eq!(serde_json::to_value(parsed).unwrap(), legacy);
+        let valid = json!({"phase":"before_turn", "turn": {"source_message_id":"message-1", "text":"hello", "image_media_types":["image/png"]}});
+        assert!(serde_json::from_value::<ContextContributionInput>(valid.clone()).unwrap().validate().is_ok());
+        let mut invalid = valid.clone();
+        invalid["turn"]["principal"] = json!("owner");
+        assert!(serde_json::from_value::<ContextContributionInput>(invalid).is_err());
+        let mut invalid = valid;
+        invalid["turn"]["source_message_id"] = json!("");
+        assert!(serde_json::from_value::<ContextContributionInput>(invalid).unwrap().validate().is_err());
+    }
 
     #[test]
     fn package_entrypoint_preserves_first_party_in_process_metadata() {

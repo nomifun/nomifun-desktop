@@ -10,6 +10,15 @@ const flattenKeys = (value: unknown, prefix = ''): string[] => {
 };
 
 describe('Agent Settings locale contract', () => {
+  test('does not advertise replacing conversation pages while execution extension authoring remains', () => {
+    for (const locale of [en, zh]) {
+      expect(Object.hasOwn(locale, 'page')).toBe(false);
+      expect(Object.hasOwn(locale, 'view')).toBe(false);
+      expect(Object.hasOwn(locale, 'session')).toBe(false);
+      expect(locale.middlewareOrder.createBeforeTool.length).toBeGreaterThan(0);
+      expect(locale.workbench.configureChatModel.length).toBeGreaterThan(0);
+    }
+  });
   test('keeps English and Chinese keys in parity', () => {
     expect(flattenKeys(en).sort()).toEqual(flattenKeys(zh).sort());
   });

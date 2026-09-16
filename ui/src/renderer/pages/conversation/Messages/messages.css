@@ -1,3 +1,10 @@
+.conversation-image-preview .arco-image-preview-img {
+  /* Leave a visible mask around the initial fit and room for the bottom toolbar.
+     Arco scales the enclosing container, so manual zoom remains unrestricted. */
+  max-width: 80%;
+  max-height: min(80%, calc(100% - 208px));
+}
+
 .message-item {
   --conversation-message-font-size: 14px;
   --conversation-message-line-height: 22px;

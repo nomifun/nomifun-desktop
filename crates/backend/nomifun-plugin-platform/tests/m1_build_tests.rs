@@ -261,6 +261,8 @@ fn empty_files_and_unsafe_paths_fail_before_artifact_creation() {
         r"ui\app.js",
         "ui//app.js",
         "ui/NUL.js",
+        "service/plugin.exe",
+        "service/plugin",
     ] {
         assert!(
             validate_static_bundle_path(path).is_err(),

@@ -263,6 +263,7 @@ const CATALOG_TRAITS_BY_TASK: Readonly<Record<ModelTask, readonly ModelTrait[]>>
   image_generation: [],
   image_edit: [],
   video_generation: [],
+  music_generation: [],
   speech_synthesis: [],
   speech_recognition: [],
   embedding: [],

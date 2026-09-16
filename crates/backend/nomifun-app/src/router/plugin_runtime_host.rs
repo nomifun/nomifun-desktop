@@ -8,7 +8,7 @@ use nomifun_agent_contracts::{
     ResourceKind, StrictJsonValue,
 };
 use nomifun_js_host::{
-    ExtensionHostDemandPort, ExtensionHostSupervisor,
+    ExtensionHostDemandPort, ExtensionHostSupervisor, ExtensionHostDependencyCaller,
     JavaScriptHostConfig, JavaScriptHostError, JavaScriptHostState,
     JavaScriptResourceHandle, MountLoadDemand,
 };
@@ -24,6 +24,34 @@ struct BoundExtensionHost {
     supervisor: Arc<ExtensionHostSupervisor>,
 }
 
+// Only explicitly managed dependency callbacks inherit this scope. Detached
+// tasks do not inherit it, and another Host cannot borrow this Host's lease.
+tokio::task_local! {
+    static DEPENDENCY_RUNTIME: DependencyRuntime;
+}
+
+#[derive(Clone)]
+struct DependencyRuntime {
+    identity: Arc<()>,
+    lease: RuntimeUseLease,
+    supervisor: Arc<ExtensionHostSupervisor>,
+}
+
+struct RuntimeBoundDependencies {
+    runtime: DependencyRuntime,
+    caller: Arc<dyn ExtensionHostDependencyCaller>,
+}
+
+#[async_trait]
+impl ExtensionHostDependencyCaller for RuntimeBoundDependencies {
+    async fn invoke(
+        &self,
+        call: nomifun_agent_contracts::PluginDependencyCall,
+    ) -> nomifun_agent_contracts::PluginHostResponseBody {
+        DEPENDENCY_RUNTIME.scope(self.runtime.clone(), self.caller.invoke(call)).await
+    }
+}
+
 /// Shared Extension Host port bound to the process-wide committed Runtime.
 ///
 /// Kernel registrations keep this stable port, not a concrete Supervisor.
@@ -32,6 +60,7 @@ struct BoundExtensionHost {
 /// demands, stops the current Supervisor, and leaves the next demand to create
 /// a clean generation from the newly committed selection.
 pub(crate) struct RuntimeBoundExtensionHost {
+    identity: Arc<()>,
     runtime: Arc<dyn CommittedRuntimeProvider>,
     host_module: PathBuf,
     state: Mutex<Option<BoundExtensionHost>>,
@@ -58,6 +87,7 @@ impl RuntimeBoundExtensionHost {
             )));
         }
         Ok(Arc::new(Self {
+            identity: Arc::new(()),
             runtime,
             host_module,
             state: Mutex::new(None),
@@ -68,6 +98,11 @@ impl RuntimeBoundExtensionHost {
         &self,
     ) -> Result<(RuntimeUseLease, Arc<ExtensionHostSupervisor>), JavaScriptHostError>
     {
+        if let Ok(Some(parent)) = DEPENDENCY_RUNTIME.try_with(|parent| {
+            Arc::ptr_eq(&self.identity, &parent.identity).then(|| parent.clone())
+        }) {
+            return Ok((parent.lease, parent.supervisor));
+        }
         let lease = self
             .runtime
             .acquire_use(JavaScriptWorkKind::SharedExtensionHost)
@@ -189,6 +224,24 @@ impl RuntimeBoundExtensionHost {
 
 #[async_trait]
 impl ExtensionHostDemandPort for RuntimeBoundExtensionHost {
+    async fn invoke_with_dependencies(
+        &self,
+        mount: MountLoadDemand,
+        contribution: PluginHostContributionRef,
+        action_id: ActionId,
+        input: StrictJsonValue,
+        dependencies: Arc<dyn ExtensionHostDependencyCaller>,
+    ) -> Result<StrictJsonValue, JavaScriptHostError> {
+        let (lease, host) = self.demand_host().await?;
+        let caller = Arc::new(RuntimeBoundDependencies {
+            runtime: DependencyRuntime {
+                identity: Arc::clone(&self.identity), lease, supervisor: Arc::clone(&host),
+            },
+            caller: dependencies,
+        });
+        host.invoke_with_dependencies(mount, contribution, action_id, input, caller).await
+    }
+
     async fn invoke_demand(
         &self,
         mount: MountLoadDemand,
@@ -206,9 +259,17 @@ impl ExtensionHostDemandPort for RuntimeBoundExtensionHost {
         mount: MountLoadDemand,
         contribution: PluginHostContributionRef,
         schema_ref: CanonicalSchemaRef,
+        input: nomifun_agent_contracts::ContextContributionInput,
+        dependencies: Option<Arc<dyn ExtensionHostDependencyCaller>>,
     ) -> Result<StrictJsonValue, JavaScriptHostError> {
-        let (_lease, host) = self.demand_host().await?;
-        host.contribute_context_demand(mount, contribution, schema_ref)
+        let (lease, host) = self.demand_host().await?;
+        let caller = dependencies.map(|caller| Arc::new(RuntimeBoundDependencies {
+            runtime: DependencyRuntime {
+                identity: Arc::clone(&self.identity), lease: lease.clone(), supervisor: Arc::clone(&host),
+            },
+            caller,
+        }) as Arc<dyn ExtensionHostDependencyCaller>);
+        host.contribute_context_demand(mount, contribution, schema_ref, input, caller)
             .await
     }
 

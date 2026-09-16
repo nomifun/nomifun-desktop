@@ -690,6 +690,7 @@ impl ChannelMessageService {
         // need to correlate the user message back to the conversation should use
         // `conversation_id` + stream events instead of a client-provided id.
         let req = SendMessageRequest {
+            preset_id: None,
             content: text.to_owned(),
             files: vec![],
             inject_skills: vec![],

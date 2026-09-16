@@ -264,6 +264,9 @@ fn validate_module_path(
         )));
     }
 
+    if metadata.len() > 256 * 1024 * 1024 {
+        return Err(PluginRuntimePlatformError::InvalidState("Service module exceeds 256 MiB".into()));
+    }
     let bytes = fs::read(&canonical).map_err(|error| {
         PluginRuntimePlatformError::Runtime(format!(
             "Plugin Service module cannot be read: {error}"
@@ -503,6 +506,36 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(outside_error, PluginRuntimePlatformError::InvalidState(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_paths_other_than_fixed_service_entrypoint() {
+        let temp = TempDir::new().unwrap();
+        let registry = PluginRuntimeServiceModuleRegistry::new(temp.path()).unwrap();
+        for relative_path in [
+            "release-a/service/plugin",
+            "release-a/service/plugin.exe",
+            "release-a/service/main.js",
+            "release-a/other/main.mjs",
+        ] {
+            let path = temp.path().join(relative_path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "export async function start() {}").unwrap();
+
+            let error = registry
+                .register(
+                    PluginProductId::from("plugin-a"),
+                    digest("release-a"),
+                    path,
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                PluginRuntimePlatformError::InvalidState(message)
+                    if message == "Plugin Service module path must end with service/main.mjs"
+            ));
+        }
     }
 
     #[cfg(unix)]

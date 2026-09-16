@@ -1,24 +1,14 @@
 mod protocol;
 
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::sync::Arc;
 use std::time::Duration;
 
 use nomifun_api_types::{McpConnectionTestErrorCode, McpConnectionTestResult};
-use nomi_process_runtime::{ChildProcessBuilder as CmdBuilder, kill_process_tree};
-use nomifun_runtime::resolve_command_path;
-use serde::Serialize;
-use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::types::McpServerTransport;
-use protocol::{
-    JsonRpcRequest, JsonRpcResponse, SseEvent, build_http_headers, build_initialize_request,
-    build_initialized_notification, build_tools_list_request, error_result, read_sse_events, rpc_error_result,
-    run_stdio_protocol, spawn_error_result, success_result, timeout_result, wait_for_endpoint,
-    wait_for_jsonrpc_response,
-};
+use protocol::{error_result, spawn_error_result, success_result};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -41,28 +31,40 @@ pub struct McpConnectionTestService {
     timeout: Duration,
 }
 
-type HttpClientFactory = Arc<dyn Fn() -> reqwest::Client + Send + Sync>;
+type HttpClientFactory =
+    Arc<dyn Fn() -> Result<reqwest::Client, McpConnectionTestResult> + Send + Sync>;
 
 impl McpConnectionTestService {
+    /// Injected clients must disable redirects, just like the execution owner.
     pub fn new(http_client: reqwest::Client) -> Self {
         Self {
-            http_client: Arc::new(move || http_client.clone()),
+            http_client: Arc::new(move || Ok(http_client.clone())),
             timeout: CONNECTION_TIMEOUT,
         }
     }
 
     pub fn new_dynamic() -> Self {
         Self {
-            http_client: Arc::new(nomifun_net::http_client),
+            http_client: Arc::new(|| {
+                nomifun_net::http_client_no_redirect().map_err(|_| {
+                    error_result(
+                        McpConnectionTestErrorCode::ConnectionFailed,
+                        "MCP discovery client could not be initialized with redirects disabled"
+                            .into(),
+                        None,
+                    )
+                })
+            }),
             timeout: CONNECTION_TIMEOUT,
         }
     }
 
-    fn http_client(&self) -> reqwest::Client {
+    fn http_client(&self) -> Result<reqwest::Client, McpConnectionTestResult> {
         (self.http_client)()
     }
 
-    /// Override the connection test timeout (default: 30s).
+    /// Override the protocol timeout (default: 30s). Known sessions/processes
+    /// still receive a separate bounded cleanup phase after protocol timeout.
     pub fn with_timeout(self, timeout: Duration) -> Self {
         Self { timeout, ..self }
     }
@@ -71,12 +73,24 @@ impl McpConnectionTestService {
     ///
     /// Dispatches to the appropriate transport handler.  Always returns
     /// a result (never errors) -- failures are encoded in the struct.
-    pub async fn test_connection(&self, name: &str, transport: &McpServerTransport) -> McpConnectionTestResult {
-        debug!(name, transport = transport.transport_type(), "starting MCP connection test");
+    pub async fn test_connection(
+        &self,
+        name: &str,
+        transport: &McpServerTransport,
+    ) -> McpConnectionTestResult {
+        debug!(
+            name,
+            transport = transport.transport_type(),
+            "starting MCP connection test"
+        );
         match transport {
-            McpServerTransport::Stdio { command, args, env } => self.test_stdio(command, args, env).await,
-            McpServerTransport::Http { url, headers } => self.test_http(url, headers).await,
-            McpServerTransport::Sse { url, headers } => self.test_sse(url, headers).await,
+            McpServerTransport::Stdio { command, args, env } => {
+                self.test_stdio(command, args, env).await
+            }
+            McpServerTransport::Http { url, headers } => {
+                self.test_network(url, headers, false).await
+            }
+            McpServerTransport::Sse { url, headers } => self.test_network(url, headers, true).await,
         }
     }
 
@@ -88,307 +102,81 @@ impl McpConnectionTestService {
         args: &[String],
         env: &HashMap<String, String>,
     ) -> McpConnectionTestResult {
-        let program = resolve_stdio_command(command);
-        let mut cmd = CmdBuilder::new(&program);
-        cmd.args(args)
-            .envs(env.iter())
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
-
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => return spawn_error_result(command, &e),
-        };
-
-        let stdin = child.stdin.take().expect("stdin was piped");
-        let stdout = child.stdout.take().expect("stdout was piped");
-        let result = match tokio::time::timeout(self.timeout, run_stdio_protocol(stdin, stdout)).await {
-            Ok(r) => r,
-            Err(_) => timeout_result(self.timeout),
-        };
-        if let Err(error) = kill_process_tree(&mut child).await {
-            warn!(%error, "failed to clean up MCP stdio connection test process tree");
-        }
-        result
-    }
-
-    // -- HTTP (Streamable HTTP) transport ---------------------------------
-
-    async fn test_http(&self, url: &str, headers: &HashMap<String, String>) -> McpConnectionTestResult {
-        match tokio::time::timeout(self.timeout, self.test_http_inner(url, headers)).await {
-            Ok(r) => r,
-            Err(_) => timeout_result(self.timeout),
-        }
-    }
-
-    async fn test_http_inner(&self, url: &str, headers: &HashMap<String, String>) -> McpConnectionTestResult {
-        let client = self.http_client();
-        let mut req_headers = build_http_headers(headers);
-        req_headers.insert(
-            reqwest::header::CONTENT_TYPE,
-            "application/json".parse().expect("valid header"),
-        );
-        req_headers.insert(
-            reqwest::header::ACCEPT,
-            "application/json, text/event-stream".parse().expect("valid header"),
-        );
-
-        // 1. initialize
-        let init_resp = match self
-            .http_post_mcp(&client, url, &req_headers, &build_initialize_request(1))
-            .await
-        {
-            Ok(r) => r,
-            Err(result) => return result,
-        };
-        if let Some(err) = init_resp.rpc.error {
-            return rpc_error_result("initialize", &err);
-        }
-
-        // Extract session ID for subsequent requests
-        if let Some(sid) = init_resp.session_id
-            && let Ok(val) = reqwest::header::HeaderValue::from_str(&sid)
-        {
-            req_headers.insert("mcp-session-id", val);
-        }
-
-        // 2. initialized notification (fire-and-forget)
-        let _ = client
-            .post(url)
-            .headers(req_headers.clone())
-            .json(&build_initialized_notification())
-            .send()
-            .await;
-
-        // 3. tools/list
-        let tools_resp = match self
-            .http_post_mcp(&client, url, &req_headers, &build_tools_list_request(2))
-            .await
-        {
-            Ok(r) => r,
-            Err(result) => return result,
-        };
-        if let Some(err) = tools_resp.rpc.error {
-            return rpc_error_result("tools/list", &err);
-        }
-
-        success_result(tools_resp.rpc.result)
-    }
-
-    /// POST a JSON-RPC message and parse the response.
-    ///
-    /// Returns `Err(McpConnectionTestResult)` for HTTP-level failures
-    /// (connection error, 401, non-success status).
-    async fn http_post_mcp(
-        &self,
-        client: &reqwest::Client,
-        url: &str,
-        headers: &reqwest::header::HeaderMap,
-        body: &JsonRpcRequest,
-    ) -> Result<HttpMcpResponse, McpConnectionTestResult> {
-        let resp = client
-            .post(url)
-            .headers(headers.clone())
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| {
+        match crate::owner::discover_stdio(command, args, env, self.timeout).await {
+            Ok(catalog) => success_result(Some(catalog)),
+            Err(error) => {
+                let kind = match error.code() {
+                    "MCP_COMMAND_NOT_FOUND" => Some(std::io::ErrorKind::NotFound),
+                    "MCP_COMMAND_PERMISSION_DENIED" => Some(std::io::ErrorKind::PermissionDenied),
+                    "MCP_PROCESS_START_FAILED" => Some(std::io::ErrorKind::Other),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    return spawn_error_result(
+                        command,
+                        &std::io::Error::new(kind, error.message().to_owned()),
+                    );
+                }
+                let code = if error.code() == "MCP_TIMEOUT" {
+                    McpConnectionTestErrorCode::Timeout
+                } else {
+                    McpConnectionTestErrorCode::ProtocolError
+                };
                 error_result(
-                    McpConnectionTestErrorCode::ConnectionFailed,
-                    format!("Connection failed: {e}"),
-                    Some(serde_json::json!({ "transport": "http" })),
+                    code,
+                    error.message().to_owned(),
+                    Some(serde_json::json!({
+                        "transport": "stdio", "owner_code": error.code()
+                    })),
                 )
-            })?;
-
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(protocol::auth_result(resp.headers()));
-        }
-        if !resp.status().is_success() {
-            return Err(error_result(
-                McpConnectionTestErrorCode::HttpError,
-                format!("HTTP {} from server", resp.status()),
-                Some(serde_json::json!({ "status": resp.status().as_u16() })),
-            ));
-        }
-
-        let session_id = resp
-            .headers()
-            .get("mcp-session-id")
-            .and_then(|v| v.to_str().ok())
-            .map(String::from);
-
-        let rpc = protocol::parse_http_response(resp).await.map_err(|error| {
-            error_result(
-                McpConnectionTestErrorCode::ProtocolError,
-                error,
-                Some(serde_json::json!({ "transport": "http" })),
-            )
-        })?;
-        Ok(HttpMcpResponse { rpc, session_id })
-    }
-
-    // -- SSE transport ----------------------------------------------------
-
-    async fn test_sse(&self, url: &str, headers: &HashMap<String, String>) -> McpConnectionTestResult {
-        match tokio::time::timeout(self.timeout, self.test_sse_inner(url, headers)).await {
-            Ok(r) => r,
-            Err(_) => timeout_result(self.timeout),
-        }
-    }
-
-    async fn test_sse_inner(&self, url: &str, headers: &HashMap<String, String>) -> McpConnectionTestResult {
-        let client = self.http_client();
-        let mut req_headers = build_http_headers(headers);
-
-        // 1. Open SSE connection
-        let resp = match client
-            .get(url)
-            .headers(req_headers.clone())
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return error_result(
-                    McpConnectionTestErrorCode::ConnectionFailed,
-                    format!("Connection failed: {e}"),
-                    Some(serde_json::json!({ "transport": "sse" })),
-                );
             }
-        };
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            return protocol::auth_result(resp.headers());
         }
-        if !resp.status().is_success() {
-            return error_result(
-                McpConnectionTestErrorCode::HttpError,
-                format!("HTTP {} from server", resp.status()),
-                Some(serde_json::json!({ "status": resp.status().as_u16() })),
-            );
-        }
-
-        // 2. Start SSE reader task
-        let (event_tx, mut event_rx) = mpsc::channel::<SseEvent>(16);
-        let reader_handle = tokio::spawn(read_sse_events(resp, event_tx));
-
-        req_headers.insert(
-            reqwest::header::CONTENT_TYPE,
-            "application/json".parse().expect("valid header"),
-        );
-
-        let result = self.run_sse_protocol(&client, url, &req_headers, &mut event_rx).await;
-        reader_handle.abort();
-        result
     }
 
-    async fn run_sse_protocol(
+    // HTTP and legacy SSE use the same bounded owner as actual execution.
+    async fn test_network(
         &self,
-        client: &reqwest::Client,
-        base_url: &str,
-        headers: &reqwest::header::HeaderMap,
-        event_rx: &mut mpsc::Receiver<SseEvent>,
+        url: &str,
+        headers: &HashMap<String, String>,
+        legacy: bool,
     ) -> McpConnectionTestResult {
-        // 3. Wait for endpoint event
-        let endpoint = match wait_for_endpoint(event_rx, base_url).await {
-            Ok(ep) => ep,
-            Err(e) => {
-                return error_result(
-                    McpConnectionTestErrorCode::ProtocolError,
-                    e,
-                    Some(serde_json::json!({ "transport": "sse", "stage": "endpoint" })),
-                );
-            }
+        let client = match self.http_client() {
+            Ok(client) => client,
+            Err(result) => return result,
         };
-
-        // 4. initialize
-        if let Err(e) = self.sse_post(client, &endpoint, headers, &build_initialize_request(1)).await {
-            return error_result(
-                McpConnectionTestErrorCode::ProtocolError,
-                format!("Failed to send initialize: {e}"),
-                Some(serde_json::json!({ "transport": "sse", "stage": "initialize_send" })),
-            );
-        }
-        let init_resp = match wait_for_jsonrpc_response(event_rx).await {
-            Ok(r) => r,
-            Err(e) => {
-                return error_result(
-                    McpConnectionTestErrorCode::ProtocolError,
-                    format!("initialize response: {e}"),
-                    Some(serde_json::json!({ "transport": "sse", "stage": "initialize_response" })),
-                );
+        match crate::owner::discover_network(client, url, headers, legacy, self.timeout).await {
+            Ok(catalog) => success_result(Some(catalog)),
+            Err(error) => {
+                if error.code() == "MCP_CREDENTIAL_REQUIRED" {
+                    let mut challenge_headers = reqwest::header::HeaderMap::new();
+                    if let Some(challenge) = error.authentication_challenge() {
+                        if let Ok(value) = reqwest::header::HeaderValue::from_str(challenge) {
+                            challenge_headers.insert("www-authenticate", value);
+                        }
+                    }
+                    return protocol::auth_result(&challenge_headers);
+                }
+                if error.code() == "MCP_TIMEOUT" {
+                    return protocol::timeout_result(self.timeout);
+                }
+                let code = match error.code() {
+                    "MCP_CONNECTION_FAILED" | "MCP_HTTP_CLIENT_UNAVAILABLE" => {
+                        McpConnectionTestErrorCode::ConnectionFailed
+                    }
+                    "MCP_HTTP_ERROR" => McpConnectionTestErrorCode::HttpError,
+                    "MCP_RPC_ERROR" => McpConnectionTestErrorCode::RpcError,
+                    _ => McpConnectionTestErrorCode::ProtocolError,
+                };
+                error_result(
+                    code,
+                    error.message().to_owned(),
+                    Some(serde_json::json!({
+                        "transport": if legacy { "sse" } else { "http" }, "owner_code": error.code()
+                    })),
+                )
             }
-        };
-        if let Some(err) = init_resp.error {
-            return rpc_error_result("initialize", &err);
         }
-
-        // 5. initialized notification
-        let _ = self
-            .sse_post(client, &endpoint, headers, &build_initialized_notification())
-            .await;
-
-        // 6. tools/list
-        if let Err(e) = self.sse_post(client, &endpoint, headers, &build_tools_list_request(2)).await {
-            return error_result(
-                McpConnectionTestErrorCode::ProtocolError,
-                format!("Failed to send tools/list: {e}"),
-                Some(serde_json::json!({ "transport": "sse", "stage": "tools_list_send" })),
-            );
-        }
-        let tools_resp = match wait_for_jsonrpc_response(event_rx).await {
-            Ok(r) => r,
-            Err(e) => {
-                return error_result(
-                    McpConnectionTestErrorCode::ProtocolError,
-                    format!("tools/list response: {e}"),
-                    Some(serde_json::json!({ "transport": "sse", "stage": "tools_list_response" })),
-                );
-            }
-        };
-        if let Some(err) = tools_resp.error {
-            return rpc_error_result("tools/list", &err);
-        }
-
-        success_result(tools_resp.result)
     }
-
-    /// POST a JSON-RPC message to an SSE endpoint (fire-and-forget semantics).
-    async fn sse_post<T: Serialize>(
-        &self,
-        client: &reqwest::Client,
-        endpoint: &str,
-        headers: &reqwest::header::HeaderMap,
-        body: &T,
-    ) -> Result<(), String> {
-        client
-            .post(endpoint)
-            .headers(headers.clone())
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-}
-
-fn resolve_stdio_command(command: &str) -> OsString {
-    if !command.is_empty()
-        && !command.contains('/')
-        && !command.contains('\\')
-        && let Some(path) = resolve_command_path(command)
-    {
-        return path.into_os_string();
-    }
-
-    OsString::from(command)
-}
-
-/// Intermediate struct for HTTP transport response parsing.
-struct HttpMcpResponse {
-    rpc: JsonRpcResponse,
-    session_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -403,7 +191,8 @@ mod tests {
 
     #[test]
     fn service_with_timeout() {
-        let svc = McpConnectionTestService::new(reqwest::Client::new()).with_timeout(Duration::from_secs(5));
+        let svc = McpConnectionTestService::new(reqwest::Client::new())
+            .with_timeout(Duration::from_secs(5));
         assert_eq!(svc.timeout, Duration::from_secs(5));
     }
 
@@ -428,12 +217,17 @@ mod tests {
             ],
             env: HashMap::new(),
         };
-        let svc = McpConnectionTestService::new(reqwest::Client::new()).with_timeout(Duration::from_millis(100));
+        let svc = McpConnectionTestService::new(reqwest::Client::new())
+            .with_timeout(Duration::from_millis(100));
 
         let result = svc.test_connection("timeout-cleanup", &transport).await;
         assert!(!result.success);
         assert!(
-            result.error.as_deref().unwrap_or_default().contains("timed out"),
+            result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("timed out"),
             "expected timeout result, got {result:?}"
         );
 

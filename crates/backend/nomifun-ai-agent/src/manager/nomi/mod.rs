@@ -1,7 +1,6 @@
 pub mod agent;
 pub mod distill;
 pub mod history_sanitize;
-mod image_attachments;
 #[cfg(feature = "browser-use")]
 mod browser_lifecycle;
 #[cfg(feature = "browser-use")]

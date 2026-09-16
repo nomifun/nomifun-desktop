@@ -320,6 +320,7 @@ mod tests {
             prompt: "waves".into(),
             seconds: Some(5),
             size: Some("1920x1080".into()),
+            resolution: None,
             inputs: vec![input(b"hi")],
             extra: json!({"with_audio": true}),
         });
@@ -374,6 +375,7 @@ mod tests {
             prompt: "waves".into(),
             seconds: Some(5),
             size: None,
+            resolution: None,
             inputs: vec![],
             extra: json!({}),
         });
@@ -420,6 +422,7 @@ mod tests {
             prompt: "p".into(),
             seconds: None,
             size: None,
+            resolution: None,
             inputs: vec![],
             extra: json!({}),
         });
@@ -437,6 +440,7 @@ mod tests {
             prompt: "p".into(),
             seconds: Some(6),
             size: None,
+            resolution: None,
             inputs: vec![],
             extra: json!({}),
         };

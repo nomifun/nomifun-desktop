@@ -1,11 +1,11 @@
 {
   "manifest_version": "1.0.0",
   "confirmed_decision_contract_digest": "c1eeb87b010954fa19324fb59d63c9d8722d6704fe1121ea63f41d4d06d14643",
-  "canonical_schema_manifest_digest": "7a0c4ec3ffea459df3ce5fbca7d27d3ccd44d770515fe40ab90ad69f41ff06b5",
-  "cargo_lock_digest": "1354439366d5c57729cff287714895a6146c35ac75d26fc625d15955d0799681",
-  "official_preset_seed_manifest_digest": "b6162b62fd0e5711b5f3f7432cbd077987a47c4986af822f1a7fc48677a97e0b",
+  "canonical_schema_manifest_digest": "d910d0c24df56420f3c5c71263b0a6251b29d2d42b8f38ac2fa81680e04acdfc",
+  "cargo_lock_digest": "af312a59f625d1560a806f8794d638d0b3e8a65636d08de4e9a65e49e30e1fad",
+  "official_preset_seed_manifest_digest": "477236de5f2a9afcb289ba4409a3dd8eae25f1df9ef924d0fcb9ecfd6d61421b",
   "capability_availability_manifest_digest": "70ab40f20452974594d897cbf32bcbcb3b030a77b9708534aa5e93c1b76eaa8c",
-  "coding_codex_native_contract_digest": "baea06819d3d6e8bab3336ac1a4f0882745a35ad34c04546411165498bfc7bfa",
+  "coding_codex_native_contract_digest": "44258eae4e0a95cccaf2ad2ea3d1dce0d01b8711069a56ffa15bb0f165ce526f",
   "platform_matrix": {
     "target_cells": {
       "windows_desktop_x64": {

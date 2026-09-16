@@ -230,6 +230,7 @@ mod tests {
             prompt,
             seconds: None,
             size: None,
+            resolution: None,
             inputs: vec![],
             extra: json!({}),
         })
@@ -346,6 +347,7 @@ mod tests {
             prompt: "修".repeat(700),
             count: 1,
             size: None,
+            quality: None,
             inputs: vec![],
             extra: json!({}),
         });

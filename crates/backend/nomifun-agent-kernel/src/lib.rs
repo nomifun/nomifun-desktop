@@ -5,6 +5,7 @@
 mod session_capabilities;
 mod authority;
 mod compiler;
+mod dependency_call;
 mod error;
 mod materialize;
 mod plugin;
@@ -15,6 +16,7 @@ mod state;
 pub use session_capabilities::*;
 pub use authority::*;
 pub use compiler::*;
+pub use dependency_call::{CapabilityDependencyCall, CapabilityDependencyCaller};
 pub use error::*;
 pub use materialize::*;
 pub use plugin::*;

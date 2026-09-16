@@ -36,6 +36,7 @@ import VisionModelsContent from './VisionModelsContent';
 import ImageModelsContent from './ImageModelsContent';
 import ImageEditModelsContent from './ImageEditModelsContent';
 import VideoModelsContent from './VideoModelsContent';
+import MusicModelsContent from './MusicModelsContent';
 import EmbeddingModelsContent from './EmbeddingModelsContent';
 import RerankModelsContent from './RerankModelsContent';
 
@@ -49,6 +50,7 @@ type Section =
   | 'image'
   | 'image-edit'
   | 'video'
+  | 'music'
   | 'embedding'
   | 'rerank'
   | 'free'
@@ -78,6 +80,7 @@ const SECTION_KEYS: readonly Section[] = [
   'image',
   'image-edit',
   'video',
+  'music',
   'embedding',
   'rerank',
   'free',
@@ -167,6 +170,11 @@ const SECTION_GROUPS: SectionGroup[] = [
         key: 'video',
         labelKey: 'settings.modelHub.sectionVideo',
         icon: <VideoTwo theme='outline' size='16' strokeWidth={3} />,
+      },
+      {
+        key: 'music',
+        labelKey: 'settings.modelHub.sectionMusic',
+        icon: <HeadsetOne theme='outline' size='16' strokeWidth={3} />,
       },
       {
         key: 'embedding',
@@ -270,6 +278,7 @@ const ModelHubPage: React.FC = () => {
       {section === 'image' && <ImageModelsContent />}
       {section === 'image-edit' && <ImageEditModelsContent />}
       {section === 'video' && <VideoModelsContent />}
+      {section === 'music' && <MusicModelsContent />}
       {section === 'embedding' && <EmbeddingModelsContent />}
       {section === 'rerank' && <RerankModelsContent />}
       {section === 'free' && <FreeModelsContent />}

@@ -189,6 +189,32 @@ impl PluginArtifactStore {
         &self.managed_root
     }
 
+    /// Publish already captured bytes through the same scanner, manifest
+    /// verifier and content-addressed store as directory/ZIP imports.
+    pub fn import_files(
+        &self,
+        files: &BTreeMap<String, Vec<u8>>,
+        cancellation: &dyn ImportCancellation,
+    ) -> Result<ArtifactImportResult, PluginArtifactStoreError> {
+        check_canceled(cancellation)?;
+        let mut staging = self.create_staging()?;
+        let mut scanner = PackageScanner::new(self.limits, staging.path(), cancellation);
+        for (path, bytes) in files {
+            check_canceled(cancellation)?;
+            let normalized = normalize_relative_path(Path::new(path))?;
+            if &normalized != path { return Err(PluginArtifactStoreError::UnsafePackagePath { path: path.clone(), reason: "captured path must already be normalized".into() }); }
+            validate_allowed_file(&normalized)?;
+            scanner.register_file(&normalized)?;
+            scanner.check_declared_size(&normalized, bytes.len() as u64)?;
+            scanner.consume_file(&normalized, bytes.as_slice())?;
+        }
+        let artifact = self.finish_staging(scanner.finish()?, staging.path())?;
+        check_canceled(cancellation)?;
+        let result = self.publish_or_reuse(&artifact, staging.path())?;
+        if !result.already_present { staging.disarm(); }
+        Ok(result)
+    }
+
     pub fn import_directory(
         &self,
         source: impl AsRef<Path>,
@@ -316,6 +342,58 @@ impl PluginArtifactStore {
         validate_digest_segment(artifact_digest.as_ref())?;
         let artifact_root = self.artifacts_root.join(artifact_digest.as_ref());
         self.verify_published(&artifact_root, Some(artifact_digest))
+    }
+
+    /// Exact declared content only. Validate before allocating, reject path
+    /// aliases and symlinks, and verify bytes after reading (not just inventory).
+    pub fn read_declared_files(
+        &self,
+        artifact_digest: &DigestHex,
+        references: &[nomifun_agent_contracts::LogicalArtifactRef],
+        max_file_bytes: u64,
+        max_total_bytes: u64,
+        max_files: usize,
+    ) -> Result<BTreeMap<String, Vec<u8>>, PluginArtifactStoreError> {
+        if references.len() > max_files || max_file_bytes == u64::MAX {
+            return Err(PluginArtifactStoreError::InvalidLimits);
+        }
+        let stored = self.load(artifact_digest)?;
+        let mut output = BTreeMap::new();
+        let mut keys = HashSet::new();
+        let mut total = 0u64;
+        for reference in references {
+            let relative = &reference.normalized_relative_path;
+            let normalized = normalize_relative_path(Path::new(relative))?;
+            if normalized != *relative || !keys.insert(windows_collision_key(relative)?) {
+                return Err(PluginArtifactStoreError::DuplicateEntry { path: relative.clone() });
+            }
+            let entry = stored.artifact.files.iter().find(|file| file.normalized_relative_path == *relative)
+                .ok_or_else(|| PluginArtifactStoreError::UnsupportedEntry { path: relative.clone() })?;
+            if entry.digest != reference.digest {
+                return Err(PluginArtifactStoreError::PublishedArtifactMismatch { digest: artifact_digest.as_ref().to_owned() });
+            }
+            checked_size(relative, 0, entry.size_bytes, max_file_bytes)?;
+            total = checked_total_size(total, entry.size_bytes, max_total_bytes)?;
+            let mut path = stored.package_root.clone();
+            for component in relative.split('/') {
+                path.push(component);
+                let metadata = fs::symlink_metadata(&path).map_err(|e| io_error(&path, e))?;
+                if metadata.file_type().is_symlink() {
+                    return Err(PluginArtifactStoreError::UnsafeManagedPath { path });
+                }
+            }
+            let canonical = fs::canonicalize(&path).map_err(|e| io_error(&path, e))?;
+            let root = fs::canonicalize(&stored.package_root).map_err(|e| io_error(&stored.package_root, e))?;
+            if !canonical.starts_with(&root) {
+                return Err(PluginArtifactStoreError::UnsafeManagedPath { path });
+            }
+            let bytes = read_regular_bounded(&path, entry.size_bytes.min(max_file_bytes))?;
+            if bytes.len() as u64 != entry.size_bytes || hex::encode(Sha256::digest(&bytes)) != reference.digest.as_ref() {
+                return Err(PluginArtifactStoreError::PublishedArtifactMismatch { digest: artifact_digest.as_ref().to_owned() });
+            }
+            output.insert(relative.clone(), bytes);
+        }
+        Ok(output)
     }
 
     fn create_staging(&self) -> Result<StagingGuard, PluginArtifactStoreError> {

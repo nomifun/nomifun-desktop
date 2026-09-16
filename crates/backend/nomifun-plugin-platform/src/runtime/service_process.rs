@@ -1,7 +1,7 @@
 //! Production-oriented Plugin Service process adapter.
 //!
 //! This module is intentionally kept separate from the in-memory Service Host
-//! coordinator. It owns one Node process, speaks the dedicated Plugin Service
+//! coordinator. It owns one Node process, speaks the Plugin Service
 //! NDJSON protocol, and turns process-tree failure into a generation-scoped
 //! `PluginRuntimeServiceProcessError::Crashed`.
 //!
@@ -447,7 +447,7 @@ pub struct NodePluginRuntimeServiceProcessFactory {
 }
 
 /// Factory that acquires the committed Runtime admission lease for the full
-/// lifetime of every resident Service process.
+/// lifetime of every resident Node Service.
 pub struct RuntimeAwarePluginRuntimeServiceProcessFactory {
     authority: Arc<dyn CommittedRuntimeProvider>,
     resolver: Arc<dyn PluginRuntimeServiceModuleResolver>,
@@ -618,18 +618,19 @@ impl NodePluginRuntimeServiceProcessFactory {
     }
 
     fn validate_node_executable(&self) -> Result<(), PluginRuntimePlatformError> {
-        if !self.node_executable.is_absolute() {
+        let node_executable = &self.node_executable;
+        if !node_executable.is_absolute() {
             return Err(PluginRuntimePlatformError::InvalidState(
                 "Plugin Service Node executable must be absolute".into(),
             ));
         }
-        let metadata = std::fs::symlink_metadata(&self.node_executable).map_err(|error| {
+        let metadata = std::fs::symlink_metadata(node_executable).map_err(|error| {
             PluginRuntimePlatformError::Runtime(format!(
                 "cannot inspect Plugin Service Node executable {}: {error}",
-                self.node_executable.display()
+                node_executable.display()
             ))
         })?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 256 * 1024 * 1024 {
             return Err(PluginRuntimePlatformError::InvalidState(
                 "Plugin Service Node executable must be a regular non-symlink file".into(),
             ));
@@ -678,7 +679,7 @@ impl NodePluginRuntimeServiceProcessFactory {
                     path.display()
                 ))
             })?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 256 * 1024 * 1024 {
             return Err(PluginRuntimePlatformError::InvalidState(
                 "Plugin Service module must be a regular non-symlink file".into(),
             ));
@@ -759,11 +760,7 @@ impl PluginRuntimeServiceProcessFactory for NodePluginRuntimeServiceProcessFacto
             ))
         })?;
         let bootstrap_hex = hex::encode(bootstrap_json);
-        let working_directory = service_process_working_directory(
-            &module,
-            &self.node_executable,
-        )?;
-
+        let working_directory = service_process_working_directory(&module, &self.node_executable)?;
         let mut builder = ChildProcessBuilder::new(&self.node_executable);
         builder
             .arg("--input-type=module")
@@ -825,7 +822,10 @@ impl PluginRuntimeServiceProcessFactory for NodePluginRuntimeServiceProcessFacto
                 ));
             }
         };
-        validate_hello(&hello, &bootstrap, process_id, &fence)?;
+        if let Err(error) = validate_hello(&hello, &bootstrap, process_id, &fence) {
+            let _ = process.shutdown().await;
+            return Err(error);
+        }
 
         let (reader_sender, reader_events) =
             mpsc::channel(self.limits.command_queue_capacity);
@@ -885,15 +885,16 @@ fn service_process_working_directory(
         use std::os::windows::ffi::OsStrExt;
 
         // CreateProcessW does not accept an extended-length `lpCurrentDirectory`.
-        // The module itself is imported by its verified absolute file URL, so a
-        // short, stable cwd does not weaken module identity or relative imports.
+        // Node imports by verified absolute URL, so a short ancestor cwd does
+        // not weaken module identity or relative imports.
         if module_directory.as_os_str().encode_wide().count() >= 248 {
             return _node_executable
-                .parent()
+                .ancestors().skip(1)
+                .find(|path| path.as_os_str().encode_wide().count() < 248)
                 .map(PathBuf::from)
                 .ok_or_else(|| {
                     PluginRuntimePlatformError::InvalidState(
-                        "Plugin Service Node executable has no parent directory".into(),
+                        "Plugin Service executable has no short working directory".into(),
                     )
                 });
         }
@@ -969,10 +970,34 @@ struct ServiceResponseFrame {
     #[serde(default)]
     call_id: Option<String>,
     outcome: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_present_service_value")]
     value: Option<StrictJsonValue>,
     #[serde(default)]
     error: Option<ServiceWireError>,
+}
+
+// A unary invocation may return JSON null. Missing `value`
+// remains a protocol error; serde's ordinary Option would conflate the two.
+fn deserialize_present_service_value<'de, D>(deserializer: D) -> Result<Option<StrictJsonValue>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    StrictJsonValue::deserialize(deserializer).map(Some)
+}
+
+#[cfg(test)]
+#[test]
+fn service_response_keeps_null_distinct_from_missing_value() {
+    let mut frame = serde_json::json!({
+        "kind": "response", "protocol_version": SERVICE_PROTOCOL_VERSION,
+        "host_generation": 1, "request_id": "request", "call_id": "call",
+        "outcome": "success", "value": null,
+    });
+    let present: ServiceResponseFrame = serde_json::from_value(frame.clone()).unwrap();
+    assert_eq!(present.value, Some(StrictJsonValue(serde_json::Value::Null)));
+    frame.as_object_mut().unwrap().remove("value");
+    let missing: ServiceResponseFrame = serde_json::from_value(frame).unwrap();
+    assert_eq!(missing.value, None);
 }
 
 #[derive(Debug, Deserialize)]
@@ -1071,9 +1096,6 @@ enum ActorCommand {
         cancellation: PluginRuntimeCallCancellation,
         reply: oneshot::Sender<Result<StrictJsonValue, PluginRuntimeServiceProcessError>>,
     },
-    CancelCall {
-        call_id: String,
-    },
     StorageCompleted {
         request_id: String,
         result: Result<StrictJsonValue, String>,
@@ -1168,6 +1190,7 @@ impl ServiceProcessActor {
         let tick_period = self
             .limits
             .request_timeout
+            .min(self.limits.cancellation_poll_interval)
             .min(Duration::from_millis(50));
         let mut watchdog = tokio::time::interval(tick_period);
         loop {
@@ -1212,6 +1235,21 @@ impl ServiceProcessActor {
                     {
                         return ActorExit::Failed("Plugin Service request watchdog timed out".into());
                     }
+                    // Cancellation belongs to this actor even if the caller
+                    // drops its future. No caller-owned polling task or lossy
+                    // try_send is needed to reach the original Node request.
+                    let abandoned = self.pending.iter().filter_map(|(id, pending)| {
+                        match &pending.reply {
+                            PendingReply::Invoke(reply) if reply.is_closed()
+                                || pending.cancellation.as_ref().is_some_and(|c| c.is_canceled()) => Some(id.clone()),
+                            _ => None,
+                        }
+                    }).collect::<Vec<_>>();
+                    for request_id in abandoned {
+                        if let Some(exit) = self.cancel_request(&request_id).await {
+                            return exit;
+                        }
+                    }
                     if let Some(exit) = self.expire_storage_requests(now).await {
                         return exit;
                     }
@@ -1240,7 +1278,8 @@ impl ServiceProcessActor {
                     return None;
                 }
                 let call_id = invocation.call_id.as_ref().to_owned();
-                if cancellation.is_canceled() {
+                if reply.is_closed() || cancellation.is_canceled() {
+                    cancellation.cancel();
                     let _ = reply.send(Err(PluginRuntimeServiceProcessError::Rejected(
                         "Plugin Service call canceled".into(),
                     )));
@@ -1285,44 +1324,6 @@ impl ServiceProcessActor {
             ActorCommand::StorageCompleted { request_id, result } => {
                 self.finish_storage_request(request_id, result).await
             }
-            ActorCommand::CancelCall { call_id } => {
-                let Some(request_id) = self.call_to_request.remove(&call_id) else {
-                    return None;
-                };
-                if let Some(pending) = self.pending.remove(&request_id) {
-                    if let PendingReply::Invoke(reply) = pending.reply {
-                        let _ = reply.send(Err(PluginRuntimeServiceProcessError::Rejected(
-                            "Plugin Service call canceled".into(),
-                        )));
-                    }
-                }
-                self.retired_requests.insert(
-                    request_id.clone(),
-                    Instant::now() + self.limits.request_timeout,
-                );
-                let cancel_id = Uuid::now_v7().to_string();
-                let frame = CancelFrame {
-                    kind: "control",
-                    protocol_version: SERVICE_PROTOCOL_VERSION,
-                    host_generation: self.fence.host_generation,
-                    request_id: &cancel_id,
-                    operation: "cancel",
-                    target_request_id: &request_id,
-                };
-                if let Err(error) = write_json_line(&mut self.stdin, &frame).await {
-                    return Some(ActorExit::Failed(error));
-                }
-                self.pending.insert(
-                    cancel_id,
-                    PendingRequest {
-                        call_id: None,
-                        cancellation: None,
-                        deadline: Instant::now() + self.limits.request_timeout,
-                        reply: PendingReply::Cancel,
-                    },
-                );
-                None
-            }
             ActorCommand::Stop => {
                 if !self.accepting {
                     return Some(ActorExit::Stopped);
@@ -1354,6 +1355,45 @@ impl ServiceProcessActor {
                 None
             }
         }
+    }
+
+    async fn cancel_request(&mut self, request_id: &str) -> Option<ActorExit> {
+        let pending = self.pending.remove(request_id)?;
+        if let Some(call_id) = &pending.call_id
+            && self.call_to_request.get(call_id).is_some_and(|id| id == request_id)
+        {
+            self.call_to_request.remove(call_id);
+        }
+        if let Some(cancellation) = pending.cancellation {
+            cancellation.cancel();
+        }
+        if let PendingReply::Invoke(reply) = pending.reply {
+            let _ = reply.send(Err(PluginRuntimeServiceProcessError::Rejected(
+                "Plugin Service call canceled".into(),
+            )));
+        }
+        // ACK is not completion: keep the original deadline until Node also
+        // retires the invocation. An uncooperative plugin cannot gain time.
+        self.retired_requests.insert(request_id.to_owned(), pending.deadline);
+        let cancel_id = Uuid::now_v7().to_string();
+        let frame = CancelFrame {
+            kind: "control",
+            protocol_version: SERVICE_PROTOCOL_VERSION,
+            host_generation: self.fence.host_generation,
+            request_id: &cancel_id,
+            operation: "cancel",
+            target_request_id: request_id,
+        };
+        if let Err(error) = write_json_line(&mut self.stdin, &frame).await {
+            return Some(ActorExit::Failed(error));
+        }
+        self.pending.insert(cancel_id, PendingRequest {
+            call_id: None,
+            cancellation: None,
+            deadline: pending.deadline,
+            reply: PendingReply::Cancel,
+        });
+        None
     }
 
     fn handle_frame(&mut self, frame: ServiceResponseFrame) -> Option<ActorExit> {
@@ -1615,8 +1655,7 @@ impl ServiceProcessActor {
                 ActorCommand::Invoke { reply, .. } => {
                     let _ = reply.send(Err(clone_process_error(&error)));
                 }
-                ActorCommand::CancelCall { .. }
-                | ActorCommand::StorageCompleted { .. }
+                ActorCommand::StorageCompleted { .. }
                 | ActorCommand::Stop => {}
             }
         }
@@ -1717,13 +1756,12 @@ impl PluginRuntimeServiceProcess for NodePluginRuntimeServiceProcess {
         invocation: PluginRuntimeServiceInvocation,
         cancellation: PluginRuntimeCallCancellation,
     ) -> Result<StrictJsonValue, PluginRuntimeServiceProcessError> {
-        let call_id = invocation.call_id.as_ref().to_owned();
-        let (reply, mut response) = oneshot::channel();
+        let (reply, response) = oneshot::channel();
         self.inner
             .commands
             .send(ActorCommand::Invoke {
                 invocation,
-                cancellation: cancellation.clone(),
+                cancellation,
                 reply,
             })
             .await
@@ -1732,27 +1770,11 @@ impl PluginRuntimeServiceProcess for NodePluginRuntimeServiceProcess {
                     "Plugin Service command channel is closed".into(),
                 )
             })?;
-        loop {
-            tokio::select! {
-                result = &mut response => {
-                    return result.unwrap_or_else(|_| {
-                        Err(PluginRuntimeServiceProcessError::Crashed(
-                            "Plugin Service response channel is closed".into(),
-                        ))
-                    });
-                }
-                _ = tokio::time::sleep(self.inner.limits.cancellation_poll_interval) => {
-                    if cancellation.is_canceled() {
-                        let _ = self.inner.commands.send(ActorCommand::CancelCall {
-                            call_id: call_id.clone(),
-                        }).await;
-                        return Err(PluginRuntimeServiceProcessError::Rejected(
-                            "Plugin Service call canceled".into(),
-                        ));
-                    }
-                }
-            }
-        }
+        response.await.unwrap_or_else(|_| {
+            Err(PluginRuntimeServiceProcessError::Crashed(
+                "Plugin Service response channel is closed".into(),
+            ))
+        })
     }
 
     async fn stop(&self) {

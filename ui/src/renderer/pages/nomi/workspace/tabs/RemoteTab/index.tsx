@@ -52,10 +52,6 @@ const RemoteTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtte
       <RobotConnectSection
         companionId={profile.companion_id}
         companionName={profile.name}
-        model={profile.model ? {
-          id: profile.model.provider_id,
-          use_model: profile.model.model,
-        } : undefined}
         onAttentionChange={setRobotAttention}
       />
     </div>

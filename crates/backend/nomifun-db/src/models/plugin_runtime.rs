@@ -225,6 +225,7 @@ pub struct PluginRuntimeSurfaceSessionRow {
     pub plugin_product_id: String,
     pub owner_user_id: String,
     pub generation: i64,
+    pub conversation_id: Option<String>,
     pub capability_digest: String,
     pub active_release_id: String,
     pub active_release_digest: String,

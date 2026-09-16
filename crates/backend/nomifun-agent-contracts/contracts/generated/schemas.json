@@ -126,6 +126,13 @@
             "description": "Complete route facts used by the Fresh-v4 persistence writer. Legacy\nopaque IDs are not sufficient to construct a provider request.",
             "type": "object"
           },
+          "context_order": {
+            "description": "Ordered Context contributors; omitted contributors follow canonical ID order.\nThis is presentation/execution order, never an authorization grant.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "enabled_capabilities": {
             "items": {
               "$ref": "#/$defs/CapabilitySelection"
@@ -135,6 +142,13 @@
           "instructions": {
             "type": "string"
           },
+          "middleware_order": {
+            "description": "Ordered request middleware; omitted contributors follow canonical ID\norder. This controls composition, never selection or authorization.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "model_route_refs": {
             "additionalProperties": {
               "type": "string"
@@ -143,6 +157,17 @@
           },
           "persona": {
             "type": "string"
+          },
+          "runtime_engine": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AgentRuntimeEngineSelection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Execution implementation belongs to the Agent revision, not the chat composer.\nOmission preserves the default Nomi behavior of older revisions and their digests."
           },
           "schema_version": {
             "type": "string"
@@ -175,6 +200,72 @@
           "instructions"
         ],
         "type": "object"
+      },
+      "AgentRuntimeEngineSelection": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "type": "string"
+          },
+          "selector": {
+            "$ref": "#/$defs/AgentRuntimeEngineSelector"
+          }
+        },
+        "required": [
+          "selector",
+          "profile"
+        ],
+        "type": "object"
+      },
+      "AgentRuntimeEngineSelector": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "build_digest": {
+                "type": "string"
+              },
+              "build_id": {
+                "type": "string"
+              },
+              "family_id": {
+                "type": "string"
+              },
+              "selection": {
+                "const": "exact",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "family_id",
+              "build_id",
+              "build_digest"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "channel": {
+                "type": "string"
+              },
+              "family_id": {
+                "type": "string"
+              },
+              "selection": {
+                "const": "channel",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "family_id",
+              "channel"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "CapabilitySelection": {
         "additionalProperties": false,
@@ -510,6 +601,13 @@
             "description": "Complete route facts used by the Fresh-v4 persistence writer. Legacy\nopaque IDs are not sufficient to construct a provider request.",
             "type": "object"
           },
+          "context_order": {
+            "description": "Ordered Context contributors; omitted contributors follow canonical ID order.\nThis is presentation/execution order, never an authorization grant.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "enabled_capabilities": {
             "items": {
               "$ref": "#/$defs/CapabilitySelection"
@@ -519,6 +617,13 @@
           "instructions": {
             "type": "string"
           },
+          "middleware_order": {
+            "description": "Ordered request middleware; omitted contributors follow canonical ID\norder. This controls composition, never selection or authorization.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "model_route_refs": {
             "additionalProperties": {
               "type": "string"
@@ -527,6 +632,17 @@
           },
           "persona": {
             "type": "string"
+          },
+          "runtime_engine": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AgentRuntimeEngineSelection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Execution implementation belongs to the Agent revision, not the chat composer.\nOmission preserves the default Nomi behavior of older revisions and their digests."
           },
           "schema_version": {
             "type": "string"
@@ -559,6 +675,72 @@
           "instructions"
         ],
         "type": "object"
+      },
+      "AgentRuntimeEngineSelection": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "type": "string"
+          },
+          "selector": {
+            "$ref": "#/$defs/AgentRuntimeEngineSelector"
+          }
+        },
+        "required": [
+          "selector",
+          "profile"
+        ],
+        "type": "object"
+      },
+      "AgentRuntimeEngineSelector": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "build_digest": {
+                "type": "string"
+              },
+              "build_id": {
+                "type": "string"
+              },
+              "family_id": {
+                "type": "string"
+              },
+              "selection": {
+                "const": "exact",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "family_id",
+              "build_id",
+              "build_digest"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "channel": {
+                "type": "string"
+              },
+              "family_id": {
+                "type": "string"
+              },
+              "selection": {
+                "const": "channel",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "family_id",
+              "channel"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "CapabilitySelection": {
         "additionalProperties": false,
@@ -843,6 +1025,72 @@
   },
   "agent_preset_revision_payload": {
     "$defs": {
+      "AgentRuntimeEngineSelection": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "type": "string"
+          },
+          "selector": {
+            "$ref": "#/$defs/AgentRuntimeEngineSelector"
+          }
+        },
+        "required": [
+          "selector",
+          "profile"
+        ],
+        "type": "object"
+      },
+      "AgentRuntimeEngineSelector": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "build_digest": {
+                "type": "string"
+              },
+              "build_id": {
+                "type": "string"
+              },
+              "family_id": {
+                "type": "string"
+              },
+              "selection": {
+                "const": "exact",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "family_id",
+              "build_id",
+              "build_digest"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "channel": {
+                "type": "string"
+              },
+              "family_id": {
+                "type": "string"
+              },
+              "selection": {
+                "const": "channel",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "family_id",
+              "channel"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "CapabilitySelection": {
         "additionalProperties": false,
         "properties": {
@@ -1063,6 +1311,13 @@
         "description": "Complete route facts used by the Fresh-v4 persistence writer. Legacy\nopaque IDs are not sufficient to construct a provider request.",
         "type": "object"
       },
+      "context_order": {
+        "description": "Ordered Context contributors; omitted contributors follow canonical ID order.\nThis is presentation/execution order, never an authorization grant.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
       "enabled_capabilities": {
         "items": {
           "$ref": "#/$defs/CapabilitySelection"
@@ -1072,6 +1327,13 @@
       "instructions": {
         "type": "string"
       },
+      "middleware_order": {
+        "description": "Ordered request middleware; omitted contributors follow canonical ID\norder. This controls composition, never selection or authorization.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
       "model_route_refs": {
         "additionalProperties": {
           "type": "string"
@@ -1080,6 +1342,17 @@
       },
       "persona": {
         "type": "string"
+      },
+      "runtime_engine": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/AgentRuntimeEngineSelection"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Execution implementation belongs to the Agent revision, not the chat composer.\nOmission preserves the default Nomi behavior of older revisions and their digests."
       },
       "schema_version": {
         "type": "string"
@@ -1471,6 +1744,14 @@
         ],
         "type": "object"
       },
+      "CapabilityConsumption": {
+        "description": "Why a capability belongs to this plan. Membership does not imply public\nTool/Context consumption; dependencies execute through a scoped caller.",
+        "enum": [
+          "contribution",
+          "dependency"
+        ],
+        "type": "string"
+      },
       "ChatRouteIdentity": {
         "additionalProperties": false,
         "description": "The immutable identity of one model route as selected by one Preset\nRevision.\n\nThis is deliberately a value object rather than four independently-carried\nfields.  Every layer that resolves or admits a Chat route must carry this\nexact identity unchanged.",
@@ -1755,6 +2036,9 @@
               "null"
             ]
           },
+          "consumption": {
+            "$ref": "#/$defs/CapabilityConsumption"
+          },
           "contribution_id": {
             "type": "string"
           },
@@ -1764,6 +2048,13 @@
           "dependency_path": {
             "items": {
               "type": "string"
+            },
+            "type": "array"
+          },
+          "dependency_refs": {
+            "description": "Exact direct edges of the selected execution plan, not a second copy of\nthe dependency's descriptor or a grant to call arbitrary plan members.",
+            "items": {
+              "$ref": "#/$defs/ExactVersionRef"
             },
             "type": "array"
           },
@@ -1891,6 +2182,9 @@
           "body_digest": {
             "type": "string"
           },
+          "contribution_lock": {
+            "$ref": "#/$defs/ContributionLock"
+          },
           "required_capabilities": {
             "items": {
               "type": "string"
@@ -1898,14 +2192,27 @@
             "type": "array",
             "uniqueItems": true
           },
+          "resolved_mount_id": {
+            "type": "string"
+          },
+          "resolved_source": {
+            "$ref": "#/$defs/PluginSourceMetadata"
+          },
           "skill": {
             "$ref": "#/$defs/ExactVersionRef"
+          },
+          "target_artifact_digest": {
+            "type": "string"
           }
         },
         "required": [
           "skill",
           "body_digest",
-          "required_capabilities"
+          "required_capabilities",
+          "contribution_lock",
+          "resolved_mount_id",
+          "resolved_source",
+          "target_artifact_digest"
         ],
         "type": "object"
       },
@@ -1935,6 +2242,12 @@
           "compiled_runtime_profile_digest": {
             "type": "string"
           },
+          "context_order": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "enabled_capabilities": {
             "items": {
               "$ref": "#/$defs/ResolvedCapability"
@@ -1944,6 +2257,12 @@
           "mcp_tool_locks": {
             "items": {
               "$ref": "#/$defs/ResolvedMcpToolLock"
+            },
+            "type": "array"
+          },
+          "middleware_order": {
+            "items": {
+              "type": "string"
             },
             "type": "array"
           },
@@ -3628,6 +3947,7 @@
           "mount_load",
           "mount_unload",
           "capability_invoke",
+          "dependency_invoke",
           "context_contribute",
           "resource_acquire",
           "resource_release",
@@ -4218,9 +4538,6 @@
           },
           "customer-service.default": {
             "$ref": "#/$defs/OfficialPresetRoleCoverage"
-          },
-          "robot.default": {
-            "$ref": "#/$defs/OfficialPresetRoleCoverage"
           }
         },
         "type": "object"
@@ -4250,9 +4567,6 @@
             "$ref": "#/$defs/OfficialPresetSeed"
           },
           "customer-service.default": {
-            "$ref": "#/$defs/OfficialPresetSeed"
-          },
-          "robot.default": {
             "$ref": "#/$defs/OfficialPresetSeed"
           }
         },
@@ -4326,6 +4640,9 @@
             },
             "type": "array"
           },
+          "context_phase": {
+            "$ref": "#/$defs/ContextContributionPhase"
+          },
           "context_schema_refs": {
             "items": {
               "type": "string"
@@ -4350,6 +4667,17 @@
             },
             "type": "array",
             "uniqueItems": true
+          },
+          "ui_slot": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/UiContributionSlot"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A UI consumer contract, not an executable Tool or host DOM reference."
           }
         },
         "required": [
@@ -4450,6 +4778,22 @@
           "contributions"
         ],
         "type": "object"
+      },
+      "ContextContributionPhase": {
+        "description": "When the selected Context consumer invokes a contribution. This is part of\nthe capability contract, not an implementation-specific scheduling hint.",
+        "oneOf": [
+          {
+            "enum": [
+              "session_start"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "before_turn",
+            "description": "Before each main inference step for the current user turn, including\nfollow-up steps after tools. Not a once-per-message hook.",
+            "type": "string"
+          }
+        ]
       },
       "EffectClass": {
         "enum": [
@@ -4817,6 +5161,17 @@
       "RoleProviderMemberContribution": {
         "additionalProperties": false,
         "properties": {
+          "implementation": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ExactVersionRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An exact, independently published capability in this Provider's Package.\nThe Role member keeps its canonical identity; this mapping identifies\nthe implementation without claiming that identity. None denotes a\nhost-supplied typed export, not an implicit capability lookup/fallback."
+          },
           "required_resource_kinds": {
             "items": {
               "type": "string"
@@ -4942,6 +5297,12 @@
           "function_tool",
           "code_mode",
           "hidden"
+        ],
+        "type": "string"
+      },
+      "UiContributionSlot": {
+        "enum": [
+          "agent_session"
         ],
         "type": "string"
       }
@@ -5872,6 +6233,68 @@
   },
   "plugin_bridge_request": {
     "$defs": {
+      "PluginAgentSessionRequest": {
+        "description": "Public UI commands. The Surface grant supplies identity and scope separately.\nObserve is a durable message projection, not a replayable token event stream.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "after_seq": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "limit": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "operation": {
+                "const": "observe",
+                "type": "string"
+              }
+            },
+            "required": [
+              "operation",
+              "after_seq",
+              "limit"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "idempotency_key": {
+                "type": "string"
+              },
+              "input": true,
+              "operation": {
+                "const": "turn",
+                "type": "string"
+              }
+            },
+            "required": [
+              "operation",
+              "input",
+              "idempotency_key"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "const": "cancel",
+                "type": "string"
+              }
+            },
+            "required": [
+              "operation"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "PluginBridgeKvRequest": {
         "oneOf": [
           {
@@ -5957,6 +6380,24 @@
       },
       "PluginBridgeTarget": {
         "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "A host-selected Session, never an arbitrary Session ID supplied by the frame.",
+            "properties": {
+              "request": {
+                "$ref": "#/$defs/PluginAgentSessionRequest"
+              },
+              "target": {
+                "const": "agent_session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target",
+              "request"
+            ],
+            "type": "object"
+          },
           {
             "additionalProperties": false,
             "properties": {
@@ -6093,6 +6534,64 @@
   },
   "plugin_host_request_envelope": {
     "$defs": {
+      "ContextContributionInput": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "phase": {
+                "const": "session_start",
+                "type": "string"
+              }
+            },
+            "required": [
+              "phase"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "phase": {
+                "const": "before_turn",
+                "type": "string"
+              },
+              "turn": {
+                "$ref": "#/$defs/ContextTurnInput"
+              }
+            },
+            "required": [
+              "phase",
+              "turn"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ContextTurnInput": {
+        "additionalProperties": false,
+        "description": "Host-owned turn facts; no image bytes, credentials, arbitrary host context\nor authority fields cross this boundary.",
+        "properties": {
+          "image_media_types": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "source_message_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_message_id",
+          "text",
+          "image_media_types"
+        ],
+        "type": "object"
+      },
       "CredentialSlotBinding": {
         "additionalProperties": false,
         "properties": {
@@ -6150,6 +6649,29 @@
           "java_script_to_host"
         ],
         "type": "string"
+      },
+      "PluginDependencyCall": {
+        "additionalProperties": false,
+        "description": "Invocation-local input, never an ownership or resource grant.",
+        "properties": {
+          "action_id": {
+            "type": "string"
+          },
+          "call_key": {
+            "type": "string"
+          },
+          "capability_id": {
+            "type": "string"
+          },
+          "input": true
+        },
+        "required": [
+          "capability_id",
+          "action_id",
+          "call_key",
+          "input"
+        ],
+        "type": "object"
       },
       "PluginHostContributionRef": {
         "additionalProperties": false,
@@ -6258,6 +6780,38 @@
           {
             "properties": {
               "method": {
+                "const": "dependency_invoke",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "call": {
+                    "$ref": "#/$defs/PluginDependencyCall"
+                  },
+                  "mount_handle_id": {
+                    "type": "string"
+                  },
+                  "parent_request_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "mount_handle_id",
+                  "parent_request_id",
+                  "call"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
                 "const": "context_contribute",
                 "type": "string"
               },
@@ -6265,6 +6819,9 @@
                 "properties": {
                   "contribution": {
                     "$ref": "#/$defs/PluginHostContributionRef"
+                  },
+                  "input": {
+                    "$ref": "#/$defs/ContextContributionInput"
                   },
                   "schema_ref": {
                     "type": "string"
@@ -7501,6 +8058,7 @@
           "mount_load",
           "mount_unload",
           "capability_invoke",
+          "dependency_invoke",
           "context_contribute",
           "resource_acquire",
           "resource_release",
@@ -7744,6 +8302,9 @@
             },
             "type": "array"
           },
+          "context_phase": {
+            "$ref": "#/$defs/ContextContributionPhase"
+          },
           "context_schema_refs": {
             "items": {
               "type": "string"
@@ -7768,6 +8329,17 @@
             },
             "type": "array",
             "uniqueItems": true
+          },
+          "ui_slot": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/UiContributionSlot"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A UI consumer contract, not an executable Tool or host DOM reference."
           }
         },
         "required": [
@@ -7868,6 +8440,22 @@
           "contributions"
         ],
         "type": "object"
+      },
+      "ContextContributionPhase": {
+        "description": "When the selected Context consumer invokes a contribution. This is part of\nthe capability contract, not an implementation-specific scheduling hint.",
+        "oneOf": [
+          {
+            "enum": [
+              "session_start"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "before_turn",
+            "description": "Before each main inference step for the current user turn, including\nfollow-up steps after tools. Not a once-per-message hook.",
+            "type": "string"
+          }
+        ]
       },
       "CredentialSlotDeclaration": {
         "additionalProperties": false,
@@ -8393,6 +8981,17 @@
       "RoleProviderMemberContribution": {
         "additionalProperties": false,
         "properties": {
+          "implementation": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ExactVersionRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An exact, independently published capability in this Provider's Package.\nThe Role member keeps its canonical identity; this mapping identifies\nthe implementation without claiming that identity. None denotes a\nhost-supplied typed export, not an implicit capability lookup/fallback."
+          },
           "required_resource_kinds": {
             "items": {
               "type": "string"
@@ -8520,6 +9119,12 @@
           "hidden"
         ],
         "type": "string"
+      },
+      "UiContributionSlot": {
+        "enum": [
+          "agent_session"
+        ],
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -8605,6 +9210,9 @@
             },
             "type": "array"
           },
+          "context_phase": {
+            "$ref": "#/$defs/ContextContributionPhase"
+          },
           "context_schema_refs": {
             "items": {
               "type": "string"
@@ -8629,6 +9237,17 @@
             },
             "type": "array",
             "uniqueItems": true
+          },
+          "ui_slot": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/UiContributionSlot"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A UI consumer contract, not an executable Tool or host DOM reference."
           }
         },
         "required": [
@@ -8729,6 +9348,22 @@
           "contributions"
         ],
         "type": "object"
+      },
+      "ContextContributionPhase": {
+        "description": "When the selected Context consumer invokes a contribution. This is part of\nthe capability contract, not an implementation-specific scheduling hint.",
+        "oneOf": [
+          {
+            "enum": [
+              "session_start"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "before_turn",
+            "description": "Before each main inference step for the current user turn, including\nfollow-up steps after tools. Not a once-per-message hook.",
+            "type": "string"
+          }
+        ]
       },
       "CredentialSlotDeclaration": {
         "additionalProperties": false,
@@ -9199,6 +9834,17 @@
       "RoleProviderMemberContribution": {
         "additionalProperties": false,
         "properties": {
+          "implementation": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ExactVersionRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An exact, independently published capability in this Provider's Package.\nThe Role member keeps its canonical identity; this mapping identifies\nthe implementation without claiming that identity. None denotes a\nhost-supplied typed export, not an implicit capability lookup/fallback."
+          },
           "required_resource_kinds": {
             "items": {
               "type": "string"
@@ -9324,6 +9970,12 @@
           "function_tool",
           "code_mode",
           "hidden"
+        ],
+        "type": "string"
+      },
+      "UiContributionSlot": {
+        "enum": [
+          "agent_session"
         ],
         "type": "string"
       }
@@ -10563,6 +11215,9 @@
             },
             "type": "array"
           },
+          "context_phase": {
+            "$ref": "#/$defs/ContextContributionPhase"
+          },
           "context_schema_refs": {
             "items": {
               "type": "string"
@@ -10587,6 +11242,17 @@
             },
             "type": "array",
             "uniqueItems": true
+          },
+          "ui_slot": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/UiContributionSlot"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A UI consumer contract, not an executable Tool or host DOM reference."
           }
         },
         "required": [
@@ -10687,6 +11353,22 @@
           "contributions"
         ],
         "type": "object"
+      },
+      "ContextContributionPhase": {
+        "description": "When the selected Context consumer invokes a contribution. This is part of\nthe capability contract, not an implementation-specific scheduling hint.",
+        "oneOf": [
+          {
+            "enum": [
+              "session_start"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "before_turn",
+            "description": "Before each main inference step for the current user turn, including\nfollow-up steps after tools. Not a once-per-message hook.",
+            "type": "string"
+          }
+        ]
       },
       "DeclaredServiceViewDescriptor": {
         "additionalProperties": false,
@@ -11462,6 +12144,17 @@
       "RoleProviderMemberContribution": {
         "additionalProperties": false,
         "properties": {
+          "implementation": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ExactVersionRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An exact, independently published capability in this Provider's Package.\nThe Role member keeps its canonical identity; this mapping identifies\nthe implementation without claiming that identity. None denotes a\nhost-supplied typed export, not an implicit capability lookup/fallback."
+          },
           "required_resource_kinds": {
             "items": {
               "type": "string"
@@ -11630,6 +12323,12 @@
         ],
         "type": "object"
       },
+      "UiContributionSlot": {
+        "enum": [
+          "agent_session"
+        ],
+        "type": "string"
+      },
       "ValidatedPluginConfig": {
         "additionalProperties": false,
         "properties": {
@@ -11759,6 +12458,9 @@
             },
             "type": "array"
           },
+          "context_phase": {
+            "$ref": "#/$defs/ContextContributionPhase"
+          },
           "context_schema_refs": {
             "items": {
               "type": "string"
@@ -11783,6 +12485,17 @@
             },
             "type": "array",
             "uniqueItems": true
+          },
+          "ui_slot": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/UiContributionSlot"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A UI consumer contract, not an executable Tool or host DOM reference."
           }
         },
         "required": [
@@ -11883,6 +12596,22 @@
           "contributions"
         ],
         "type": "object"
+      },
+      "ContextContributionPhase": {
+        "description": "When the selected Context consumer invokes a contribution. This is part of\nthe capability contract, not an implementation-specific scheduling hint.",
+        "oneOf": [
+          {
+            "enum": [
+              "session_start"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "before_turn",
+            "description": "Before each main inference step for the current user turn, including\nfollow-up steps after tools. Not a once-per-message hook.",
+            "type": "string"
+          }
+        ]
       },
       "CredentialSlotDeclaration": {
         "additionalProperties": false,
@@ -12576,6 +13305,17 @@
       "RoleProviderMemberContribution": {
         "additionalProperties": false,
         "properties": {
+          "implementation": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ExactVersionRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An exact, independently published capability in this Provider's Package.\nThe Role member keeps its canonical identity; this mapping identifies\nthe implementation without claiming that identity. None denotes a\nhost-supplied typed export, not an implicit capability lookup/fallback."
+          },
           "required_resource_kinds": {
             "items": {
               "type": "string"
@@ -12677,6 +13417,12 @@
           "function_tool",
           "code_mode",
           "hidden"
+        ],
+        "type": "string"
+      },
+      "UiContributionSlot": {
+        "enum": [
+          "agent_session"
         ],
         "type": "string"
       }
@@ -12866,6 +13612,9 @@
             },
             "type": "array"
           },
+          "context_phase": {
+            "$ref": "#/$defs/ContextContributionPhase"
+          },
           "context_schema_refs": {
             "items": {
               "type": "string"
@@ -12890,6 +13639,17 @@
             },
             "type": "array",
             "uniqueItems": true
+          },
+          "ui_slot": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/UiContributionSlot"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A UI consumer contract, not an executable Tool or host DOM reference."
           }
         },
         "required": [
@@ -12990,6 +13750,22 @@
           "contributions"
         ],
         "type": "object"
+      },
+      "ContextContributionPhase": {
+        "description": "When the selected Context consumer invokes a contribution. This is part of\nthe capability contract, not an implementation-specific scheduling hint.",
+        "oneOf": [
+          {
+            "enum": [
+              "session_start"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "before_turn",
+            "description": "Before each main inference step for the current user turn, including\nfollow-up steps after tools. Not a once-per-message hook.",
+            "type": "string"
+          }
+        ]
       },
       "CredentialSlotDeclaration": {
         "additionalProperties": false,
@@ -13560,6 +14336,17 @@
       "RoleProviderMemberContribution": {
         "additionalProperties": false,
         "properties": {
+          "implementation": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ExactVersionRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An exact, independently published capability in this Provider's Package.\nThe Role member keeps its canonical identity; this mapping identifies\nthe implementation without claiming that identity. None denotes a\nhost-supplied typed export, not an implicit capability lookup/fallback."
+          },
           "required_resource_kinds": {
             "items": {
               "type": "string"
@@ -13661,6 +14448,12 @@
           "function_tool",
           "code_mode",
           "hidden"
+        ],
+        "type": "string"
+      },
+      "UiContributionSlot": {
+        "enum": [
+          "agent_session"
         ],
         "type": "string"
       }
@@ -14796,6 +15589,9 @@
             },
             "type": "array"
           },
+          "context_phase": {
+            "$ref": "#/$defs/ContextContributionPhase"
+          },
           "context_schema_refs": {
             "items": {
               "type": "string"
@@ -14820,6 +15616,17 @@
             },
             "type": "array",
             "uniqueItems": true
+          },
+          "ui_slot": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/UiContributionSlot"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A UI consumer contract, not an executable Tool or host DOM reference."
           }
         },
         "required": [
@@ -14920,6 +15727,22 @@
           "contributions"
         ],
         "type": "object"
+      },
+      "ContextContributionPhase": {
+        "description": "When the selected Context consumer invokes a contribution. This is part of\nthe capability contract, not an implementation-specific scheduling hint.",
+        "oneOf": [
+          {
+            "enum": [
+              "session_start"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "before_turn",
+            "description": "Before each main inference step for the current user turn, including\nfollow-up steps after tools. Not a once-per-message hook.",
+            "type": "string"
+          }
+        ]
       },
       "CredentialSlotDeclaration": {
         "additionalProperties": false,
@@ -15719,6 +16542,17 @@
       "RoleProviderMemberContribution": {
         "additionalProperties": false,
         "properties": {
+          "implementation": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ExactVersionRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An exact, independently published capability in this Provider's Package.\nThe Role member keeps its canonical identity; this mapping identifies\nthe implementation without claiming that identity. None denotes a\nhost-supplied typed export, not an implicit capability lookup/fallback."
+          },
           "required_resource_kinds": {
             "items": {
               "type": "string"
@@ -15820,6 +16654,12 @@
           "function_tool",
           "code_mode",
           "hidden"
+        ],
+        "type": "string"
+      },
+      "UiContributionSlot": {
+        "enum": [
+          "agent_session"
         ],
         "type": "string"
       }
@@ -16153,629 +16993,10 @@
     "title": "RemoteBinding",
     "type": "object"
   },
-  "runtime_command": {
-    "$defs": {
-      "FullAutoAskForApproval": {
-        "enum": [
-          "never"
-        ],
-        "type": "string"
-      },
-      "FullAutoExecutionWire": {
-        "additionalProperties": false,
-        "properties": {
-          "ask_for_approval": {
-            "$ref": "#/$defs/FullAutoAskForApproval"
-          },
-          "sandbox_policy": {
-            "$ref": "#/$defs/FullAutoSandboxPolicy"
-          }
-        },
-        "required": [
-          "ask_for_approval",
-          "sandbox_policy"
-        ],
-        "type": "object"
-      },
-      "FullAutoSandboxPolicy": {
-        "enum": [
-          "danger-full-access"
-        ],
-        "type": "string"
-      },
-      "LogicalArtifactRef": {
-        "additionalProperties": false,
-        "properties": {
-          "artifact_id": {
-            "type": "string"
-          },
-          "digest": {
-            "type": "string"
-          },
-          "normalized_relative_path": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "artifact_id",
-          "normalized_relative_path",
-          "digest"
-        ],
-        "type": "object"
-      },
-      "ResolvedSnapshotRef": {
-        "additionalProperties": false,
-        "properties": {
-          "snapshot_digest": {
-            "type": "string"
-          },
-          "snapshot_id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "snapshot_id",
-          "snapshot_digest"
-        ],
-        "type": "object"
-      },
-      "RuntimeCancelParams": {
-        "additionalProperties": false,
-        "properties": {
-          "context": {
-            "$ref": "#/$defs/RuntimeCommandContext"
-          },
-          "target_operation_id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "context",
-          "target_operation_id"
-        ],
-        "type": "object"
-      },
-      "RuntimeCheckpointBinding": {
-        "additionalProperties": false,
-        "properties": {
-          "locator": {
-            "$ref": "#/$defs/LogicalArtifactRef"
-          },
-          "protocol_version": {
-            "type": "string"
-          },
-          "resolved_snapshot_ref": {
-            "$ref": "#/$defs/ResolvedSnapshotRef"
-          },
-          "runtime_binding_id": {
-            "type": "string"
-          },
-          "runtime_bound_event_id": {
-            "type": "string"
-          },
-          "through_seq": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "runtime_binding_id",
-          "locator",
-          "runtime_bound_event_id",
-          "protocol_version",
-          "resolved_snapshot_ref",
-          "through_seq"
-        ],
-        "type": "object"
-      },
-      "RuntimeCommandContext": {
-        "additionalProperties": false,
-        "properties": {
-          "active_set_generation": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "agent_session_id": {
-            "type": "string"
-          },
-          "operation_id": {
-            "type": "string"
-          },
-          "resolved_snapshot_ref": {
-            "$ref": "#/$defs/ResolvedSnapshotRef"
-          },
-          "runtime_binding_id": {
-            "type": "string"
-          },
-          "runtime_profile_digest": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "agent_session_id",
-          "runtime_binding_id",
-          "operation_id",
-          "resolved_snapshot_ref",
-          "runtime_profile_digest",
-          "active_set_generation"
-        ],
-        "type": "object"
-      },
-      "RuntimeCreateParams": {
-        "additionalProperties": false,
-        "properties": {
-          "context": {
-            "$ref": "#/$defs/RuntimeCommandContext"
-          },
-          "enabled_capabilities": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "full_auto": {
-            "$ref": "#/$defs/FullAutoExecutionWire"
-          },
-          "profile_kind": {
-            "$ref": "#/$defs/RuntimeProfileKind"
-          },
-          "typed_resource_bindings": {
-            "items": {
-              "$ref": "#/$defs/TypedResourceBinding"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "context",
-          "profile_kind",
-          "full_auto",
-          "enabled_capabilities",
-          "typed_resource_bindings"
-        ],
-        "type": "object"
-      },
-      "RuntimeFollowUpParams": {
-        "additionalProperties": false,
-        "properties": {
-          "context": {
-            "$ref": "#/$defs/RuntimeCommandContext"
-          },
-          "idempotency_key": {
-            "type": "string"
-          },
-          "input_event_id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "context",
-          "idempotency_key",
-          "input_event_id"
-        ],
-        "type": "object"
-      },
-      "RuntimeForkParams": {
-        "additionalProperties": false,
-        "properties": {
-          "child_context": {
-            "$ref": "#/$defs/RuntimeCommandContext"
-          },
-          "self_contained_fork_base_digest": {
-            "type": "string"
-          },
-          "source_agent_session_id": {
-            "type": "string"
-          },
-          "source_through_seq": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "source_agent_session_id",
-          "child_context",
-          "source_through_seq",
-          "self_contained_fork_base_digest"
-        ],
-        "type": "object"
-      },
-      "RuntimeProfileKind": {
-        "enum": [
-          "coding_native",
-          "managed_minimal"
-        ],
-        "type": "string"
-      },
-      "RuntimeResumeParams": {
-        "additionalProperties": false,
-        "properties": {
-          "checkpoint": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/RuntimeCheckpointBinding"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "compatibility_admission_input_digest": {
-            "type": "string"
-          },
-          "context": {
-            "$ref": "#/$defs/RuntimeCommandContext"
-          }
-        },
-        "required": [
-          "context",
-          "compatibility_admission_input_digest"
-        ],
-        "type": "object"
-      },
-      "RuntimeSessionDisposeParams": {
-        "additionalProperties": false,
-        "properties": {
-          "agent_session_id": {
-            "type": "string"
-          },
-          "operation_id": {
-            "type": "string"
-          },
-          "reason": {
-            "type": "string"
-          },
-          "runtime_binding_id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "agent_session_id",
-          "runtime_binding_id",
-          "operation_id",
-          "reason"
-        ],
-        "type": "object"
-      },
-      "RuntimeStartTurnParams": {
-        "additionalProperties": false,
-        "properties": {
-          "context": {
-            "$ref": "#/$defs/RuntimeCommandContext"
-          },
-          "idempotency_key": {
-            "type": "string"
-          },
-          "input_event_id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "context",
-          "idempotency_key",
-          "input_event_id"
-        ],
-        "type": "object"
-      },
-      "RuntimeSteerParams": {
-        "additionalProperties": false,
-        "properties": {
-          "context": {
-            "$ref": "#/$defs/RuntimeCommandContext"
-          },
-          "input_event_id": {
-            "type": "string"
-          },
-          "target_turn_operation_id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "context",
-          "target_turn_operation_id",
-          "input_event_id"
-        ],
-        "type": "object"
-      },
-      "TypedResourceBinding": {
-        "additionalProperties": false,
-        "properties": {
-          "binding_id": {
-            "type": "string"
-          },
-          "connection_config_ref": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "operations": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "owner_id": {
-            "type": "string"
-          },
-          "resource_id": {
-            "type": "string"
-          },
-          "resource_kind": {
-            "type": "string"
-          },
-          "typed_parameters": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "type": "object"
-          }
-        },
-        "required": [
-          "binding_id",
-          "resource_kind",
-          "resource_id",
-          "owner_id",
-          "operations"
-        ],
-        "type": "object"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "oneOf": [
-      {
-        "properties": {
-          "method": {
-            "const": "create",
-            "type": "string"
-          },
-          "params": {
-            "$ref": "#/$defs/RuntimeCreateParams"
-          }
-        },
-        "required": [
-          "method",
-          "params"
-        ],
-        "type": "object"
-      },
-      {
-        "properties": {
-          "method": {
-            "const": "resume",
-            "type": "string"
-          },
-          "params": {
-            "$ref": "#/$defs/RuntimeResumeParams"
-          }
-        },
-        "required": [
-          "method",
-          "params"
-        ],
-        "type": "object"
-      },
-      {
-        "properties": {
-          "method": {
-            "const": "fork",
-            "type": "string"
-          },
-          "params": {
-            "$ref": "#/$defs/RuntimeForkParams"
-          }
-        },
-        "required": [
-          "method",
-          "params"
-        ],
-        "type": "object"
-      },
-      {
-        "properties": {
-          "method": {
-            "const": "start_turn",
-            "type": "string"
-          },
-          "params": {
-            "$ref": "#/$defs/RuntimeStartTurnParams"
-          }
-        },
-        "required": [
-          "method",
-          "params"
-        ],
-        "type": "object"
-      },
-      {
-        "properties": {
-          "method": {
-            "const": "steer",
-            "type": "string"
-          },
-          "params": {
-            "$ref": "#/$defs/RuntimeSteerParams"
-          }
-        },
-        "required": [
-          "method",
-          "params"
-        ],
-        "type": "object"
-      },
-      {
-        "properties": {
-          "method": {
-            "const": "follow_up",
-            "type": "string"
-          },
-          "params": {
-            "$ref": "#/$defs/RuntimeFollowUpParams"
-          }
-        },
-        "required": [
-          "method",
-          "params"
-        ],
-        "type": "object"
-      },
-      {
-        "properties": {
-          "method": {
-            "const": "cancel",
-            "type": "string"
-          },
-          "params": {
-            "$ref": "#/$defs/RuntimeCancelParams"
-          }
-        },
-        "required": [
-          "method",
-          "params"
-        ],
-        "type": "object"
-      },
-      {
-        "properties": {
-          "method": {
-            "const": "session_dispose",
-            "type": "string"
-          },
-          "params": {
-            "$ref": "#/$defs/RuntimeSessionDisposeParams"
-          }
-        },
-        "required": [
-          "method",
-          "params"
-        ],
-        "type": "object"
-      }
-    ],
-    "title": "RuntimeCommand"
-  },
   "runtime_feature_inventory": {
-    "$defs": {
-      "CodexPinnedSource": {
-        "additionalProperties": false,
-        "properties": {
-          "pinned_commit": {
-            "type": "string"
-          },
-          "repository_alias": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "repository_alias",
-          "pinned_commit"
-        ],
-        "type": "object"
-      },
-      "FullAutoAskForApproval": {
-        "enum": [
-          "never"
-        ],
-        "type": "string"
-      },
-      "FullAutoExecutionWire": {
-        "additionalProperties": false,
-        "properties": {
-          "ask_for_approval": {
-            "$ref": "#/$defs/FullAutoAskForApproval"
-          },
-          "sandbox_policy": {
-            "$ref": "#/$defs/FullAutoSandboxPolicy"
-          }
-        },
-        "required": [
-          "ask_for_approval",
-          "sandbox_policy"
-        ],
-        "type": "object"
-      },
-      "FullAutoSandboxPolicy": {
-        "enum": [
-          "danger-full-access"
-        ],
-        "type": "string"
-      },
-      "RuntimeProfileKind": {
-        "enum": [
-          "coding_native",
-          "managed_minimal"
-        ],
-        "type": "string"
-      },
-      "RuntimeRpcAllowlist": {
-        "additionalProperties": false,
-        "properties": {
-          "experimental_methods": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "methods": {
-            "items": {
-              "$ref": "#/$defs/RuntimeRpcMethod"
-            },
-            "type": "array",
-            "uniqueItems": true
-          }
-        },
-        "required": [
-          "methods",
-          "experimental_methods"
-        ],
-        "type": "object"
-      },
-      "RuntimeRpcMethod": {
-        "enum": [
-          "create",
-          "resume",
-          "fork",
-          "start_turn",
-          "steer",
-          "follow_up",
-          "cancel",
-          "session_dispose"
-        ],
-        "type": "string"
-      }
-    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
     "properties": {
-      "full_auto": {
-        "$ref": "#/$defs/FullAutoExecutionWire"
-      },
-      "native_actions": {
-        "items": {
-          "type": "string"
-        },
-        "type": "array",
-        "uniqueItems": true
-      },
-      "pinned_source": {
-        "$ref": "#/$defs/CodexPinnedSource"
-      },
-      "responses_semantics": {
-        "items": {
-          "type": "string"
-        },
-        "type": "array",
-        "uniqueItems": true
-      },
-      "rpc_allowlist": {
-        "$ref": "#/$defs/RuntimeRpcAllowlist"
-      },
       "runtime_features": {
         "items": {
           "type": "string"
@@ -16785,170 +17006,13 @@
       },
       "schema_version": {
         "type": "string"
-      },
-      "supported_profiles": {
-        "items": {
-          "$ref": "#/$defs/RuntimeProfileKind"
-        },
-        "type": "array",
-        "uniqueItems": true
       }
     },
     "required": [
       "schema_version",
-      "pinned_source",
-      "supported_profiles",
-      "runtime_features",
-      "native_actions",
-      "responses_semantics",
-      "rpc_allowlist",
-      "full_auto"
+      "runtime_features"
     ],
-    "title": "CodingRuntimeFeatureInventoryPayload",
-    "type": "object"
-  },
-  "runtime_hello": {
-    "$defs": {
-      "FullAutoAskForApproval": {
-        "enum": [
-          "never"
-        ],
-        "type": "string"
-      },
-      "FullAutoExecutionWire": {
-        "additionalProperties": false,
-        "properties": {
-          "ask_for_approval": {
-            "$ref": "#/$defs/FullAutoAskForApproval"
-          },
-          "sandbox_policy": {
-            "$ref": "#/$defs/FullAutoSandboxPolicy"
-          }
-        },
-        "required": [
-          "ask_for_approval",
-          "sandbox_policy"
-        ],
-        "type": "object"
-      },
-      "FullAutoSandboxPolicy": {
-        "enum": [
-          "danger-full-access"
-        ],
-        "type": "string"
-      },
-      "RuntimeProfileKind": {
-        "enum": [
-          "coding_native",
-          "managed_minimal"
-        ],
-        "type": "string"
-      },
-      "RuntimeRpcAllowlist": {
-        "additionalProperties": false,
-        "properties": {
-          "experimental_methods": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "methods": {
-            "items": {
-              "$ref": "#/$defs/RuntimeRpcMethod"
-            },
-            "type": "array",
-            "uniqueItems": true
-          }
-        },
-        "required": [
-          "methods",
-          "experimental_methods"
-        ],
-        "type": "object"
-      },
-      "RuntimeRpcMethod": {
-        "enum": [
-          "create",
-          "resume",
-          "fork",
-          "start_turn",
-          "steer",
-          "follow_up",
-          "cancel",
-          "session_dispose"
-        ],
-        "type": "string"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "properties": {
-      "fork_commit": {
-        "type": "string"
-      },
-      "full_auto": {
-        "$ref": "#/$defs/FullAutoExecutionWire"
-      },
-      "native_actions": {
-        "items": {
-          "type": "string"
-        },
-        "type": "array",
-        "uniqueItems": true
-      },
-      "native_features": {
-        "items": {
-          "type": "string"
-        },
-        "type": "array",
-        "uniqueItems": true
-      },
-      "protocol_schema_digest": {
-        "type": "string"
-      },
-      "protocol_version": {
-        "type": "string"
-      },
-      "rpc_allowlist": {
-        "$ref": "#/$defs/RuntimeRpcAllowlist"
-      },
-      "runtime_build_digest": {
-        "type": "string"
-      },
-      "runtime_release_digest": {
-        "type": "string"
-      },
-      "runtime_target": {
-        "type": "string"
-      },
-      "supported_profiles": {
-        "items": {
-          "$ref": "#/$defs/RuntimeProfileKind"
-        },
-        "type": "array",
-        "uniqueItems": true
-      },
-      "tracked_upstream_commit": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "runtime_release_digest",
-      "runtime_build_digest",
-      "fork_commit",
-      "tracked_upstream_commit",
-      "protocol_version",
-      "protocol_schema_digest",
-      "runtime_target",
-      "supported_profiles",
-      "native_features",
-      "native_actions",
-      "full_auto",
-      "rpc_allowlist"
-    ],
-    "title": "RuntimeHelloPayload",
+    "title": "PlatformFeatureInventoryPayload",
     "type": "object"
   },
   "runtime_selection_record": {
@@ -17725,6 +17789,17 @@
       "RoleProviderMemberContribution": {
         "additionalProperties": false,
         "properties": {
+          "implementation": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ExactVersionRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An exact, independently published capability in this Provider's Package.\nThe Role member keeps its canonical identity; this mapping identifies\nthe implementation without claiming that identity. None denotes a\nhost-supplied typed export, not an implicit capability lookup/fallback."
+          },
           "required_resource_kinds": {
             "items": {
               "type": "string"

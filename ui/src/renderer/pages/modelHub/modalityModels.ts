@@ -23,6 +23,7 @@ export type ModalityKey =
   | 'image'
   | 'image_edit'
   | 'video'
+  | 'music'
   | 'tts'
   | 'asr'
   | 'embedding'
@@ -41,6 +42,7 @@ export const MODALITY_SPECS: Record<ModalityKey, ModalitySpec> = {
   image: { task: 'image_generation', traits: [] },
   image_edit: { task: 'image_edit', traits: [] },
   video: { task: 'video_generation', traits: [] },
+  music: { task: 'music_generation', traits: [] },
   tts: { task: 'speech_synthesis', traits: [] },
   asr: { task: 'speech_recognition', traits: [] },
   embedding: { task: 'embedding', traits: [] },

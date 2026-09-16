@@ -67,15 +67,10 @@ export function useSlashCommands(conversation_id: ConversationId, options: UseSl
       return;
     }
 
-    // Skip fetch until agent is ready (agentStatus becomes non-null)
-    if (agentStatus === null || agentStatus === undefined) {
-      return;
-    }
-
     const cached = getCachedCommands(conversation_id);
-    if (cached) {
-      setCommands(cached);
-    }
+    // A new conversation must not inherit another conversation's suggestions.
+    // Cold discovery is read-only; no runtime status is required to query it.
+    setCommands(cached || []);
 
     void ipcBridge.conversation.getSlashCommands
       .invoke({ conversation_id: conversation_id })
@@ -84,6 +79,7 @@ export function useSlashCommands(conversation_id: ConversationId, options: UseSl
           return;
         }
         if (!result || !Array.isArray(result) || result.length === 0) {
+          slashCommandCache.delete(conversation_id);
           setCommands([]);
           return;
         }
@@ -102,6 +98,7 @@ export function useSlashCommands(conversation_id: ConversationId, options: UseSl
           return;
         }
         console.error('[useSlashCommands] Failed to load slash commands:', error);
+        slashCommandCache.delete(conversation_id);
         setCommands([]);
       });
 

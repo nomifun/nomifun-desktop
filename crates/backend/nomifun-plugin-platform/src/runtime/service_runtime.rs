@@ -49,8 +49,7 @@ impl PluginRuntimeServiceSpecInput {
             ));
         }
         self.descriptor
-            .clone()
-            .validate_for_platform()
+            .validate()
             .map_err(PluginRuntimePlatformError::Contract)?;
         self.storage
             .validate_for_platform(&self.plugin_product_id)
@@ -664,12 +663,15 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
                     None,
                 )
             }
-            Err(_) => (
-                PluginServiceTestOutcome::Failed,
-                Some(CanonicalErrorCode::from(
-                    "plugin_service_test_host_failed",
-                )),
-            ),
+            Err(error) => {
+                tracing::warn!(%error, "Plugin Service test host failed");
+                (
+                    PluginServiceTestOutcome::Failed,
+                    Some(CanonicalErrorCode::from(
+                        "plugin_service_test_host_failed",
+                    )),
+                )
+            }
         };
         let receipt = PluginServiceTestReceipt {
             receipt_id: input.receipt_id,
@@ -826,6 +828,9 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
         candidate: &ResolvedNodeRuntime,
     ) -> PluginRuntimePlatformResult<Vec<PluginProductId>> {
         let specs = self.host.enabled_service_specs().await;
+        if specs.is_empty() {
+            return Ok(Vec::new());
+        }
         let factory = NodePluginRuntimeServiceProcessFactory::new(
             candidate.executable_path.clone(),
             Arc::clone(&self.registry) as Arc<dyn crate::runtime::PluginRuntimeServiceModuleResolver>,
@@ -910,38 +915,6 @@ fn validate_digest(value: &DigestHex, field: &str) -> PluginRuntimePlatformResul
         Err(PluginRuntimePlatformError::InvalidState(format!(
             "{field} must be a lowercase SHA-256 digest"
         )))
-    }
-}
-
-// These validation helpers are intentionally kept at the platform boundary.
-// The contract types keep their detailed validators private because they are
-// also used by schema generation; this adapter needs the same exact checks
-// without exposing mutable internals.
-trait PlatformServiceDescriptorValidation {
-    fn validate_for_platform(&self) -> Result<(), nomifun_agent_contracts::PluginRuntimeContractError>;
-}
-
-impl PlatformServiceDescriptorValidation for PluginServiceReleaseDescriptor {
-    fn validate_for_platform(&self) -> Result<(), nomifun_agent_contracts::PluginRuntimeContractError> {
-        if self.entrypoint != "service/main.mjs" {
-            return Err(nomifun_agent_contracts::PluginRuntimeContractError::InvalidField {
-                field: "service.entrypoint",
-                reason: "Service entrypoint must be service/main.mjs".into(),
-            });
-        }
-        if self.module_digest.as_ref().len() != 64
-            || !self
-                .module_digest
-                .as_ref()
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(nomifun_agent_contracts::PluginRuntimeContractError::InvalidField {
-                field: "service.module_digest",
-                reason: "Service module digest is invalid".into(),
-            });
-        }
-        Ok(())
     }
 }
 

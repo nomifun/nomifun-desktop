@@ -363,6 +363,7 @@ fn test_session_projection_from_response(
 
 fn test_send_message_request(message: CronTurnMessage) -> SendMessageRequest {
     SendMessageRequest {
+        preset_id: None,
         content: message.content,
         files: message.files,
         inject_skills: message.inject_skills,
@@ -599,6 +600,7 @@ impl CronSessionPort for TestCronSessionPort {
                 &self.runtime_registry,
                 build_lease,
                 BackgroundTurnRuntimePreparation {
+                    companion_device_turn: None,
                     runtime_options,
                     clear_context,
                     pre_send_hook: None,
@@ -677,6 +679,7 @@ fn test_runtime_options_from_session(
             delegation_policy,
             extra: session_extra.clone().into(),
             conversation_created_at: Some(created_at),
+            device_mcp_servers: Vec::new(),
             workspace_binding_lease: None,
         },
         workspace,

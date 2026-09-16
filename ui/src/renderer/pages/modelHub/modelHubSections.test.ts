@@ -22,6 +22,7 @@ const SECTIONS = [
   'image',
   'image-edit',
   'video',
+  'music',
   'embedding',
   'rerank',
   'free',
@@ -32,7 +33,7 @@ const GROUPS = [
   { key: 'access', sections: ['models'] },
   {
     key: 'capability',
-    sections: ['chat', 'realtime', 'asr', 'tts', 'vision', 'image', 'image-edit', 'video', 'embedding', 'rerank'],
+    sections: ['chat', 'realtime', 'asr', 'tts', 'vision', 'image', 'image-edit', 'video', 'music', 'embedding', 'rerank'],
   },
   { key: 'advanced', sections: ['free', 'failover'] },
 ] as const;
@@ -41,7 +42,7 @@ const hubOf = (locale: unknown): Record<string, string> =>
   (locale as { modelHub: Record<string, string> }).modelHub;
 
 describe('model hub is a capability-first view', () => {
-  test('all nine tasks plus the vision trait projection exist independently', () => {
+  test('all ten tasks plus the vision trait projection exist independently', () => {
     const start = src.indexOf('const SECTION_KEYS');
     const list = src.slice(start, src.indexOf('];', start));
     const keys = [...list.matchAll(/'([a-z-]+)'/g)].map((m) => m[1]);

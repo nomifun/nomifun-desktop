@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+mod role;
+
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -47,7 +49,7 @@ pub enum JsKernelAdapterError {
     InvalidPackage(String),
     #[error("Plugin Package v1 has no JavaScript main.mjs entrypoint")]
     MissingEntrypoint,
-    #[error("Plugin Package v1 package {0:?} cannot publish Node Role Provider or Plugin Service")]
+    #[error("Plugin Package v1 package {0:?} cannot publish Node Plugin Service")]
     UnsupportedNodeSurface(String),
     #[error("Plugin Package v1 capability {capability:?} cannot be registered by this Kernel")]
     UnsupportedCapability { capability: CapabilityId },
@@ -97,8 +99,6 @@ impl JsKernelPluginAdapter {
         let manifest = &input.artifact.manifest.payload;
         if !manifest.package.provides_services.is_empty()
             || !manifest.package.requires_services.is_empty()
-            || !manifest.package.contributions.role_contracts.is_empty()
-            || !manifest.package.contributions.role_providers.is_empty()
         {
             return Err(JsKernelAdapterError::UnsupportedNodeSurface(
                 manifest.package.package_id.as_ref().to_owned(),
@@ -234,7 +234,8 @@ impl JsKernelPluginAdapter {
                     .iter()
                     .map(|mapping| mapping.canonical_tool_key.clone())
                     .collect(),
-                declared_role_ids: BTreeSet::new(),
+                declared_role_ids: manifest.package.contributions.role_providers
+                    .iter().map(|provider| provider.role.key.role_id.clone()).collect(),
                 declared_service_keys: BTreeSet::new(),
                 declared_host_ports: BTreeSet::from([
                     cancellation_port.id.clone(),
@@ -261,7 +262,15 @@ impl JsKernelPluginAdapter {
             },
         };
         let mut registration = PluginRegistration::new(metadata);
+        let facade_ids = manifest.package.contributions.role_contracts.iter()
+            .flat_map(|contract| contract.members.iter().map(|member| &member.capability.id))
+            .collect::<BTreeSet<_>>();
         for capability in &manifest.package.contributions.capabilities {
+            // A Role facade has only typed Provider exports. Registering a
+            // generic handler here would create a bypass around user selection.
+            if facade_ids.contains(&capability.id) {
+                continue;
+            }
             match capability.kind {
                 CapabilityKind::Tool => {
                     let handler = Arc::new(NodeToolHandler {
@@ -339,6 +348,7 @@ impl JsKernelPluginAdapter {
                 }
             }
         }
+        role::register(self, host, &mut registration)?;
         Ok(registration)
     }
 
@@ -424,6 +434,9 @@ fn registrar_operations(manifest: &PluginPackageV1Manifest) -> BTreeSet<PluginRe
     }
     if !contributions.mcp_tools.is_empty() {
         operations.insert(PluginRegistrarOperation::ContributeMcpToolMapping);
+    }
+    if !contributions.role_providers.is_empty() {
+        operations.insert(PluginRegistrarOperation::ContributeRoleProvider);
     }
     operations
 }
@@ -538,6 +551,29 @@ struct NodeToolHandler {
     contribution: PluginHostContributionRef,
 }
 
+impl NodeToolHandler {
+    async fn invoke_scoped(
+        &self,
+        action: nomifun_agent_contracts::ActionId,
+        input: StrictJsonValue,
+        dependencies: nomifun_agent_kernel::CapabilityDependencyCaller,
+    ) -> Result<StrictJsonValue, KernelError> {
+        self.host.invoke_with_dependencies(
+            self.mount.clone(), self.contribution.clone(), action, input,
+            Arc::new(NodeDependencyCaller(dependencies)),
+        ).await.map_err(|error| KernelError::CapabilityExecution { reason: error.to_string() })
+    }
+
+    async fn invoke_action(
+        &self,
+        action: nomifun_agent_contracts::ActionId,
+        input: StrictJsonValue,
+    ) -> Result<StrictJsonValue, KernelError> {
+        self.host.invoke_demand(self.mount.clone(), self.contribution.clone(), action, input)
+            .await.map_err(|error| KernelError::CapabilityExecution { reason: error.to_string() })
+    }
+}
+
 #[async_trait]
 impl CapabilityHandler for NodeToolHandler {
     async fn invoke(
@@ -546,18 +582,34 @@ impl CapabilityHandler for NodeToolHandler {
         input: StrictJsonValue,
     ) -> Result<StrictJsonValue, KernelError> {
         validate_invocation_context(&context, &self.contribution)?;
-        let action = context.action_id.clone();
-        self.host
-            .invoke_demand(
-                self.mount.clone(),
-                self.contribution.clone(),
-                action,
-                input,
-            )
-            .await
-            .map_err(|error| KernelError::CapabilityExecution {
-                reason: error.to_string(),
-            })
+        self.invoke_scoped(context.action_id, input, context.dependencies).await
+    }
+}
+
+struct NodeDependencyCaller(nomifun_agent_kernel::CapabilityDependencyCaller);
+
+#[async_trait]
+impl nomifun_js_host::ExtensionHostDependencyCaller for NodeDependencyCaller {
+    async fn invoke(
+        &self,
+        call: nomifun_agent_contracts::PluginDependencyCall,
+    ) -> nomifun_agent_contracts::PluginHostResponseBody {
+        use nomifun_agent_contracts::{PluginHostResponseBody, PluginHostSuccess, PluginHostWireError};
+        match self.0.invoke(nomifun_agent_kernel::CapabilityDependencyCall {
+            capability_id: call.capability_id,
+            action_id: call.action_id,
+            call_key: call.call_key,
+            input: call.input,
+        }).await {
+            Ok(value) => PluginHostResponseBody::Success(PluginHostSuccess::Value(value)),
+            Err(error) => PluginHostResponseBody::Failure(PluginHostWireError {
+                code: error.canonical_code(),
+                // Do not expose arbitrary provider diagnostics or secrets to a
+                // different plugin. The canonical code carries the failure kind.
+                message: "the declared dependency call was rejected or failed".into(),
+                retryable: false,
+            }),
+        }
     }
 }
 
@@ -569,17 +621,7 @@ impl CapabilityOperationHandler for NodeToolHandler {
         input: StrictJsonValue,
     ) -> Result<StrictJsonValue, KernelError> {
         validate_operation_context(&context.context, &self.contribution)?;
-        self.host
-            .invoke_demand(
-                self.mount.clone(),
-                self.contribution.clone(),
-                context.action_id,
-                input,
-            )
-            .await
-            .map_err(|error| KernelError::CapabilityExecution {
-                reason: error.to_string(),
-            })
+        self.invoke_action(context.action_id, input).await
     }
 }
 
@@ -596,12 +638,25 @@ impl CapabilityContextContributionFactory for NodeContextProxy {
         request: CapabilityContextContributionRequest,
     ) -> Result<ContextContributionResult, KernelError> {
         validate_capability_context(&request.context, &self.contribution)?;
+        self.contribute_schema(request.schema_ref, request.input, Some(request.dependencies)).await
+    }
+}
+
+impl NodeContextProxy {
+    async fn contribute_schema(
+        &self,
+        schema_ref: nomifun_agent_contracts::CanonicalSchemaRef,
+        input: nomifun_agent_contracts::ContextContributionInput,
+        dependencies: Option<nomifun_agent_kernel::CapabilityDependencyCaller>,
+    ) -> Result<ContextContributionResult, KernelError> {
         let value = self
             .host
             .contribute_context_demand(
                 self.mount.clone(),
                 self.contribution.clone(),
-                request.schema_ref,
+                schema_ref,
+                input,
+                dependencies.map(|caller| Arc::new(NodeDependencyCaller(caller)) as Arc<dyn nomifun_js_host::ExtensionHostDependencyCaller>),
             )
             .await
             .map_err(|error| KernelError::CapabilityExecution {
@@ -626,7 +681,16 @@ impl CapabilityResourceProviderFactory for NodeResourceProxy {
         request: CapabilityResourceProviderRequest,
     ) -> Result<ResourceProviderResult, KernelError> {
         validate_capability_context(&request.context, &self.contribution)?;
-        let [binding] = request.context.resource_bindings.as_slice() else {
+        self.acquire_bindings(&request.context.resource_bindings).await
+    }
+}
+
+impl NodeResourceProxy {
+    async fn acquire_bindings(
+        &self,
+        bindings: &[nomifun_agent_contracts::TypedResourceBinding],
+    ) -> Result<ResourceProviderResult, KernelError> {
+        let [binding] = bindings else {
             return Err(KernelError::InvalidPresetRevision {
                 reason: format!(
                     "ResourceProvider {} requires exactly one typed resource binding",
@@ -697,9 +761,9 @@ mod tests {
     use nomifun_agent_contracts::{ResourceBindingId, ResourceId, ResourceKind};
 
     #[test]
-    fn node_surface_is_explicitly_rejected() {
+    fn node_service_surface_is_explicitly_rejected() {
         let error = JsKernelAdapterError::UnsupportedNodeSurface("test".into());
-        assert!(error.to_string().contains("Role Provider"));
+        assert!(error.to_string().contains("Plugin Service"));
     }
 
     #[test]

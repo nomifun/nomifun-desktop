@@ -50,6 +50,22 @@ pub struct UpdatePlanArgs {
 pub struct UpdatePlanTool;
 
 impl UpdatePlanTool {
+    fn parse_input(input: &Value) -> Result<UpdatePlanArgs, ToolResult> {
+        // 1) Parse arguments.
+        let args: UpdatePlanArgs = match serde_json::from_value(input.clone()) {
+            Ok(a) => a,
+            Err(e) => {
+                return Err(ToolResult::error(format!("update_plan: invalid arguments: {e}")));
+            }
+        };
+
+        if args.plan.is_empty() {
+            return Err(ToolResult::error("update_plan: `plan` must contain at least one step."));
+        }
+
+        Ok(args)
+    }
+
     pub fn new() -> Self {
         Self
     }
@@ -133,18 +149,19 @@ impl Tool for UpdatePlanTool {
         ToolCategory::Info
     }
 
-    async fn execute(&self, input: Value) -> ToolResult {
-        // 1) Parse arguments.
-        let args: UpdatePlanArgs = match serde_json::from_value(input) {
-            Ok(a) => a,
-            Err(e) => {
-                return ToolResult::error(format!("update_plan: invalid arguments: {e}"));
-            }
-        };
+    async fn preflight_hook(
+        &self,
+        input: &Value,
+        _context: &crate::ToolExecutionContext,
+    ) -> Result<(), String> {
+        Self::parse_input(input).map(|_| ()).map_err(|error| error.content)
+    }
 
-        if args.plan.is_empty() {
-            return ToolResult::error("update_plan: `plan` must contain at least one step.");
-        }
+    async fn execute(&self, input: Value) -> ToolResult {
+        let args = match Self::parse_input(&input) {
+            Ok(args) => args,
+            Err(error) => return error,
+        };
 
         // 2) Soft constraint: at most one in_progress. More than one does NOT
         //    fail (avoids breaking the agent loop, matching codex) — we just

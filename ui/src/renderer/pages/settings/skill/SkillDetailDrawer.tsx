@@ -12,6 +12,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next';
 import { resolveSkillDisplay } from './skillDisplay';
 import { readSkillContent, stripSkillFrontmatter } from './skillDetail';
+import SkillPublicationPanel from './SkillPublicationPanel';
 
 type SkillDetailDrawerProps = {
   visible: boolean;
@@ -145,7 +146,8 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
             </div>
           </div>
 
-          <div className='flex min-h-0 flex-1 flex-col px-20px py-14px'>
+          <div className='flex min-h-0 flex-1 flex-col overflow-auto px-20px py-14px'>
+            {visible && <SkillPublicationPanel key={`${skill.source}:${skill.name}:${isAutoInjected}`} skill={skill} isAutoInjected={isAutoInjected} />}
             <div className='mb-10px flex flex-shrink-0 items-center justify-between gap-10px'>
               <div>
                 <div className='text-13px font-700 text-t-primary'>
@@ -182,7 +184,7 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
               </div>
             </div>
 
-            <div className='min-h-0 flex-1 overflow-auto rounded-14px border border-solid border-[var(--color-border-1)] bg-base p-14px'>
+            <div className='min-h-180px flex-1 shrink-0 overflow-auto rounded-14px border border-solid border-[var(--color-border-1)] bg-base p-14px'>
               {loading ? (
                 <div className='flex h-full min-h-180px items-center justify-center' data-testid='skill-detail-loading'>
                   <Spin size={24} />

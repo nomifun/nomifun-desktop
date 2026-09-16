@@ -11,7 +11,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use nomi_mcp::manager::McpManager;
 use nomi_protocol::events::ToolCategory;
-use nomi_tools::Tool;
+use nomi_tools::{Tool, ToolExecutionContext};
 use nomi_types::tool::{JsonSchema, ToolResult};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -156,6 +156,13 @@ impl Tool for McpResourceListTool {
         true
     }
 
+    async fn preflight_hook(&self, input: &Value, _context: &ToolExecutionContext) -> Result<(), String> {
+        let input: ServerInput = serde_json::from_value(input.clone())
+            .map_err(|_| "server is required".to_owned())?;
+        exact_manager(&self.managers, &input.server).map_err(|error| error.content)?;
+        Ok(())
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
         let input: ServerInput = match serde_json::from_value::<ServerInput>(input) {
             Ok(input) => input,
@@ -207,6 +214,16 @@ impl Tool for McpResourceReadTool {
 
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
         true
+    }
+
+    async fn preflight_hook(&self, input: &Value, _context: &ToolExecutionContext) -> Result<(), String> {
+        let input: ReadInput = serde_json::from_value(input.clone())
+            .map_err(|_| "server and uri are required".to_owned())?;
+        validate_exact_selector("uri", &input.uri, MAX_RESOURCE_URI_BYTES).map_err(|error| error.content)?;
+        exact_manager(&self.managers, &input.server).map_err(|error| error.content)?;
+        // This owner does not retain a trusted URI catalog. Listing remotely
+        // here would perform MCP work before the chosen gate can reject it.
+        Err("before_tool cannot authorize this resource URI without MCP discovery; use an authorized MCP tool with a discovered exact schema, or run resource reads in a session without before_tool".into())
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
@@ -322,6 +339,19 @@ mod tests {
             )])),
             requests,
         )
+    }
+
+    #[tokio::test]
+    async fn resource_preflight_checks_binding_without_rpc_and_refuses_uncached_uri() {
+        let (manager, requests) = manager("bound", true, []);
+        let context = ToolExecutionContext::from_scoped_tool_call("preflight", "resources");
+        McpResourceListTool::new(vec![manager.clone()])
+            .preflight_hook(&json!({"server":"bound"}), &context).await.unwrap();
+        assert!(McpResourceListTool::new(vec![manager.clone()])
+            .preflight_hook(&json!({"server":"other"}), &context).await.is_err());
+        assert!(McpResourceReadTool::new(vec![manager])
+            .preflight_hook(&json!({"server":"bound","uri":"secret://unlisted"}), &context).await.is_err());
+        assert!(requests.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

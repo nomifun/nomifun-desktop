@@ -42,6 +42,11 @@ impl Default for AgentKnowledgePolicy {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentResolvedSnapshot {
+    /// Optional immutable provenance for capability-platform consumers. The
+    /// Session host must re-admit this reference against saved owner artifacts;
+    /// it is neither an Engine selector nor a standalone authority grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_binding: Option<AgentBindingValueDto>,
     #[serde(deserialize_with = "crate::serde_util::deserialize_preset_id")]
     pub preset_id: String,
     pub preset_revision: i64,
@@ -93,8 +98,6 @@ pub enum OfficialPresetKeyDto {
     CodingCodex,
     #[serde(rename = "companion.default")]
     CompanionDefault,
-    #[serde(rename = "robot.default")]
-    RobotDefault,
     #[serde(rename = "customer-service.default")]
     CustomerServiceDefault,
     #[serde(rename = "creative-studio.default")]
@@ -176,9 +179,32 @@ pub struct RoleProviderSelectionDto {
     pub provider_mount_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallationRoleBindingDto {
+    pub selection: RoleProviderSelectionDto,
+    pub binding_version: u64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PutAgentRoleDefaultRequest {
+    pub selection: RoleProviderSelectionDto,
+    /// Zero creates an absent binding; otherwise exact compare-and-swap.
+    pub expected_binding_version: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPresetDocumentDto {
+    /// Versioned Agent configuration; Session creation resolves this server-side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_engine: Option<crate::RuntimeEngineSelection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_order: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub middleware_order: Vec<String>,
     pub schema_version: String,
     pub model_route_refs: BTreeMap<String, String>,
     /// Canonical provider/model route objects. Legacy route IDs remain a
@@ -308,7 +334,46 @@ pub struct CapabilityCatalogItemDto {
     pub required_capabilities: Vec<ExactCatalogRefDto>,
     pub conflicting_capabilities: Vec<ExactCatalogRefDto>,
     pub action_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub middleware_phase: Option<String>,
     pub context_contributor_count: u32,
+}
+
+/// UI consumer projection of the same active Capability Catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentUiContributionDto {
+    pub capability: ExactCatalogRefDto,
+    pub plugin_id: String,
+    pub expected_release_digest: String,
+    pub display_name: String,
+    pub description: String,
+}
+
+/// Presentation choice, not an Agent execution binding or a Surface grant.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentUiBindingDto {
+    pub binding_version: u64,
+    pub selection: Option<AgentUiContributionDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPresetUiBindingResponse {
+    pub preset_id: String,
+    pub display_name: String,
+    pub binding: AgentUiBindingDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PutAgentUiBindingRequest {
+    pub expected_binding_version: u64,
+    /// Null explicitly restores the built-in page. Display fields are read
+    /// back from the Catalog, never accepted as authoritative input.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub selection: Option<AgentUiContributionDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -336,10 +401,32 @@ pub struct McpToolCatalogItemDto {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RoleProviderCatalogItemDto {
+    pub selection: RoleProviderSelectionDto,
+    pub display_name: String,
+    pub description: String,
+    pub source_package: ExactCatalogRefDto,
+    pub source_kind: String,
+    pub supported_capabilities: Vec<ExactCatalogRefDto>,
+}
+
+/// Registered candidates, not an authorization or environment compatibility verdict.
+/// Preview/Save still use the canonical compiler for the selected Agent configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleCatalogItemDto {
+    pub role: ExactRoleContractRefDto,
+    pub capabilities: Vec<ExactCatalogRefDto>,
+    pub providers: Vec<RoleProviderCatalogItemDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentCatalogResponse {
     pub capabilities: Vec<CapabilityCatalogItemDto>,
     pub skills: Vec<SkillCatalogItemDto>,
     pub mcp_tools: Vec<McpToolCatalogItemDto>,
+    pub roles: Vec<RoleCatalogItemDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -748,6 +835,8 @@ pub struct CreateAgentSessionRequestDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentSessionResponseDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_engine_binding: Option<crate::RuntimeEngineBinding>,
     pub agent_session_id: String,
     pub agent_binding: AgentBindingValueDto,
     pub state: String,

@@ -379,6 +379,7 @@ fn video_generation_body(call: &ResolvedCall, req: &VideoGenRequest) -> Result<V
             "aspect_ratio",
             "duration",
             "image",
+            "last_frame",
             "output",
             "reference_audios",
             "reference_images",
@@ -397,6 +398,12 @@ fn video_generation_body(call: &ResolvedCall, req: &VideoGenRequest) -> Result<V
     {
         body.insert("aspect_ratio".into(), Value::String(ratio.into()));
     }
+    if let Some(resolution) = &req.resolution {
+        if !matches!(resolution.as_str(), "480p" | "720p" | "1080p") {
+            return Err(InvokeError::new(InvokeErrorKind::InvalidParams, "xAI video resolution must be 480p, 720p or 1080p"));
+        }
+        body.insert("resolution".into(), json!(resolution));
+    }
     if !body.contains_key("resolution")
         && let Some(size) = req.size.as_deref().filter(|s| matches!(*s, "480p" | "720p" | "1080p"))
     {
@@ -404,19 +411,38 @@ fn video_generation_body(call: &ResolvedCall, req: &VideoGenRequest) -> Result<V
     }
 
     if !req.inputs.is_empty() {
-        let inputs = req
-            .inputs
-            .iter()
-            .map(|input| json!({"url": data_uri(&input.mime, &input.bytes)}))
-            .collect::<Vec<_>>();
-        if inputs.len() == 1 {
-            body.insert("image".into(), inputs.into_iter().next().expect("one image"));
-        } else {
-            body.insert("reference_images".into(), Value::Array(inputs));
-            body.remove("image");
+        let mut references = Vec::new();
+        let mut first = None;
+        let mut last = None;
+        for input in &req.inputs {
+            if !input.mime.starts_with("image/") || input.bytes.is_empty() {
+                return Err(InvokeError::new(InvokeErrorKind::InvalidParams, "xAI video inputs must contain image bytes"));
+            }
+            let image = json!({"url": data_uri(&input.mime, &input.bytes)});
+            match input.role.as_str() {
+                "first_frame" | "image" if first.is_none() => first = Some(image),
+                "last_frame" if last.is_none() => last = Some(image),
+                "reference" | "reference_image" => references.push(image),
+                _ => return Err(InvokeError::new(InvokeErrorKind::InvalidParams, "unsupported or duplicated xAI video frame role")),
+            }
         }
+        if let Some(first) = first { body.insert("image".into(), first); }
+        if let Some(last) = last { body.insert("last_frame".into(), last); }
+        if !references.is_empty() { body.insert("reference_images".into(), Value::Array(references)); }
     }
-    json_request_body(&call.model_params, &req.extra, Value::Object(body))
+    let body = json_request_body(&call.model_params, &req.extra, Value::Object(body))?;
+    let reference_count = body.get("reference_images").and_then(Value::as_array).map_or(0, Vec::len);
+    if reference_count > 7 {
+        return Err(InvokeError::new(InvokeErrorKind::InvalidParams, "xAI video accepts at most seven reference images"));
+    }
+    let has_references = reference_count > 0 || body.get("reference_audios").and_then(Value::as_array).is_some_and(|refs| !refs.is_empty());
+    if call.model != "grok-imagine-video-1.5" && (body.get("last_frame").is_some() || (body.get("image").is_some() && has_references)) {
+        return Err(InvokeError::new(InvokeErrorKind::InvalidParams, "pinned last frames and combining first frames with references require grok-imagine-video-1.5"));
+    }
+    if (has_references || body.get("last_frame").is_some()) && body.get("resolution").and_then(Value::as_str) == Some("1080p") {
+        return Err(InvokeError::new(InvokeErrorKind::InvalidParams, "xAI reference/first-last-frame video supports at most 720p"));
+    }
+    Ok(body)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -752,6 +778,27 @@ mod tests {
         reqwest::Client::builder().no_proxy().build().unwrap()
     }
 
+    #[test]
+    fn video_input_roles_distinguish_pinned_frames_from_references() {
+        let mut req = VideoGenRequest { prompt: "transition".into(), seconds: Some(5), size: Some("16:9".into()), resolution: Some("720p".into()), inputs: vec![input("first_frame", "image/png", b"a"), input("last_frame", "image/png", b"b"), input("reference", "image/png", b"c")], extra: json!({}) };
+        let call = video_call("https://api.x.ai/v1", "grok-imagine-video-1.5", TaskRequest::VideoGeneration(req.clone()));
+        let body = video_generation_body(&call, &req).unwrap();
+        assert_eq!(body["image"]["url"], "data:image/png;base64,YQ==");
+        assert_eq!(body["last_frame"]["url"], "data:image/png;base64,Yg==");
+        assert_eq!(body["reference_images"][0]["url"], "data:image/png;base64,Yw==");
+        let classic = video_call("https://api.x.ai/v1", "grok-imagine-video", TaskRequest::VideoGeneration(req.clone()));
+        assert_eq!(video_generation_body(&classic, &req).unwrap_err().kind, InvokeErrorKind::InvalidParams);
+        req.resolution = Some("1080p".into());
+        assert_eq!(video_generation_body(&call, &req).unwrap_err().kind, InvokeErrorKind::InvalidParams);
+        req.resolution = None;
+        req.inputs = vec![input("reference", "image/png", b"a")];
+        let body = video_generation_body(&classic, &req).unwrap();
+        assert!(body.get("image").is_none(), "a reference must never become a pinned first frame");
+        assert_eq!(body["reference_images"].as_array().unwrap().len(), 1);
+        req.inputs = vec![input("reference", "image/png", b"a"); 8];
+        assert_eq!(video_generation_body(&call, &req).unwrap_err().kind, InvokeErrorKind::InvalidParams);
+    }
+
     fn input(role: &str, mime: &str, bytes: &[u8]) -> InputAsset {
         InputAsset { id: None, role: role.into(), bytes: bytes.into(), mime: mime.into() }
     }
@@ -816,6 +863,7 @@ mod tests {
             prompt: "add a hat".into(),
             count: 1,
             size: None,
+            quality: None,
             inputs: vec![input("image", "image/png", b"hi")],
             extra: json!({}),
         });
@@ -831,6 +879,7 @@ mod tests {
             prompt: "merge".into(),
             count: 1,
             size: None,
+            quality: None,
             inputs: vec![
                 input("image", "image/png", b"a"),
                 input("image", "image/jpeg", b"b"),
@@ -907,6 +956,7 @@ mod tests {
             prompt: "waves".into(),
             seconds: Some(6),
             size: Some("720p".into()),
+            resolution: None,
             inputs: vec![input("image", "image/png", b"hi")],
             extra: json!({}),
         });
@@ -953,6 +1003,7 @@ mod tests {
             prompt: "waves".into(),
             seconds: None,
             size: None,
+            resolution: None,
             inputs: vec![],
             extra: json!({}),
         });
@@ -1068,6 +1119,7 @@ mod tests {
             prompt: "p".into(),
             seconds: None,
             size: None,
+            resolution: None,
             inputs: vec![],
             extra: json!({}),
         });

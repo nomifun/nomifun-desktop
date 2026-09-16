@@ -55,6 +55,30 @@ const panoramaNode = (index: number, assetId: string | null) => {
 };
 
 describe('canvas image reference resolution', () => {
+  test('video mentions compile in durable connection order and fail closed after disconnect or asset loss', () => {
+    const target = testNode('video', 60);
+    const first = imageNode(61, testUuid(71));
+    const second = imageNode(62, testUuid(72));
+    const document = testDocument([target, first, second], [
+      testEdge(81, second.id, target.id), testEdge(82, first.id, target.id),
+    ]);
+    const assets = [asset(71), asset(72)];
+    const prompt = '  让 @图片2 运动';
+    const mentions = [{ sourceNodeId: first.id, start: 4, end: 8, tokenText: '@图片2' }];
+    const resolve = () => resolveCanvasImageReferences({ document }, target.id, assets);
+    expect(resolve().references.map((reference) => reference.assetId)).toEqual([testUuid(72), testUuid(71)]);
+    expect(compileCanvasImageReferencePrompt(prompt, mentions, resolve().references).providerPrompt)
+      .toBe('  让 Reference 2 运动');
+    document.connections.reverse();
+    expect(compileCanvasImageReferencePrompt(prompt, mentions, resolve().references).providerPrompt)
+      .toBe('  让 Reference 1 运动');
+    document.connections = document.connections.filter((edge) => edge.sourceNodeId !== first.id);
+    expect(compileCanvasImageReferencePrompt(prompt, mentions, resolve().references).issues[0]?.code)
+      .toBe('mention_reference_disconnected');
+    second.data.assetId = null;
+    expect(resolve().issues[0]?.code).toBe('source_asset_id_missing');
+  });
+
   test('uses connected text as prompt input without consuming image ordinals or limits', () => {
     const target = imageNode(40, null);
     const text = testNode('text', 41);

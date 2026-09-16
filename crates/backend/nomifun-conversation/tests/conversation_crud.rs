@@ -76,6 +76,39 @@ impl AgentRuntimeRegistry for NoopAgentRuntimeRegistry {
 
 struct EmptySkillResolver;
 
+#[derive(Default)]
+struct DeviceRuntimeCapture {
+    options: Mutex<Vec<nomifun_ai_agent::types::AgentRuntimeBuildOptions>>,
+}
+
+#[async_trait::async_trait]
+impl AgentRuntimeRegistry for DeviceRuntimeCapture {
+    fn get_runtime(&self, _: &str) -> Option<nomifun_ai_agent::AgentRuntimeHandle> { None }
+    async fn get_or_create_runtime(
+        &self,
+        _: &str,
+        options: nomifun_ai_agent::types::AgentRuntimeBuildOptions,
+    ) -> Result<nomifun_ai_agent::AgentRuntimeHandle, AppError> {
+        self.options.lock().unwrap().push(options);
+        Err(AppError::Internal("test stops before a real model invocation".into()))
+    }
+    fn terminate(&self, _: &str, _: Option<AgentKillReason>) -> Result<(), AppError> { Ok(()) }
+    fn terminate_and_wait_result(
+        &self, _: &str, _: Option<AgentKillReason>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AppError>> + Send>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+    fn terminate_all(&self) {}
+    fn active_runtime_count(&self) -> usize { 0 }
+}
+
+struct DeviceAdmissionHook;
+
+#[async_trait::async_trait]
+impl nomifun_conversation::service::BackgroundTurnPreSendHook for DeviceAdmissionHook {
+    async fn prepare(&self) -> Result<(), AppError> { Ok(()) }
+}
+
 #[async_trait::async_trait]
 impl SkillResolver for EmptySkillResolver {
     async fn auto_inject_names(&self) -> Vec<String> {
@@ -222,6 +255,7 @@ fn make_auto_workspace_create_req() -> CreateConversationRequest {
 
 fn make_preset_snapshot(model: &str) -> AgentResolvedSnapshot {
     AgentResolvedSnapshot {
+        canonical_binding: None,
         preset_id: nomifun_common::generate_id(),
         preset_revision: 1,
         preset_name: "Frozen test preset".to_owned(),
@@ -244,6 +278,75 @@ fn make_preset_snapshot(model: &str) -> AgentResolvedSnapshot {
 }
 
 // ── T1: Create conversation ────────────────────────────────────────
+
+#[tokio::test]
+async fn companion_device_turn_keeps_model_and_endpoint_context_off_the_conversation() {
+    let workspace = tempfile::tempdir().unwrap();
+    let (svc, broadcaster, _) = setup_with_workspace_root(workspace.path().to_path_buf()).await;
+    let companion_id = "0190f5fe-7c00-7a00-8000-000000000099";
+    let mut create = make_auto_workspace_create_req();
+    create.extra = json!({"companion_session": true, "companion_id": companion_id});
+    let conversation = svc.create(USER_ID, create).await.unwrap();
+    broadcaster.take_events();
+    let capture = Arc::new(DeviceRuntimeCapture::default());
+    let registry: Arc<dyn AgentRuntimeRegistry> = capture.clone();
+    let context = nomifun_conversation::companion_interaction::CompanionDeviceTurn {
+        from_desktop: false, resources: None,
+        companion_id: companion_id.to_owned(),
+        robot_id: "aa:bb:cc:dd:ee:ff".to_owned(),
+        connection_id: "connection-1".to_owned(),
+        request_id: "utterance-1".to_owned(),
+        agent_revision: None,
+        model: Some(nomifun_common::ProviderWithModel {
+            provider_id: USER_ID.to_owned(), model: "gpt-4o-mini".to_owned(), use_model: None,
+        }),
+        mcp_servers: vec![],
+        fallback_model: None,
+        system_prompt: "Reply through this device in natural spoken sentences.".to_owned(),
+    };
+    let request = || serde_json::from_value(json!({
+        "content": "你好", "channel_platform": "robot",
+    })).unwrap();
+    let observed = tokio::time::timeout(std::time::Duration::from_secs(10),
+        svc.send_companion_device_message(
+            USER_ID, &conversation.conversation_id, request(), context.clone(),
+            Arc::new(DeviceAdmissionHook), &registry,
+        ),
+    ).await.unwrap().unwrap();
+    assert!(!observed.delivery.replayed);
+    {
+        let captured = capture.options.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].conversation_id, conversation.conversation_id);
+        assert_eq!(captured[0].model.as_ref().unwrap().model, "gpt-4o-mini");
+        assert_eq!(captured[0].extra["system_prompt"], context.system_prompt);
+    }
+    let current = svc.get(USER_ID, &conversation.conversation_id).await.unwrap();
+    assert_eq!(current.model, conversation.model);
+    for key in ["robot_session", "robot_id", "session_mcp_servers", "interaction"] {
+        assert!(current.extra.get(key).is_none(), "must not persist {key} on Conversation");
+    }
+    assert_eq!(current.extra.get("system_prompt"), conversation.extra.get("system_prompt"));
+    let events = broadcaster.take_events();
+    let user_message = events.iter().find(|event| event.name == "message.userCreated")
+        .expect("device speech is visible in the shared Conversation");
+    assert_eq!(user_message.data["interaction"], context.provenance());
+    assert_eq!(user_message.data["conversation_id"], conversation.conversation_id);
+    let messages = svc.list_messages(USER_ID, &conversation.conversation_id,
+        serde_json::from_value(json!({})).unwrap(),
+    ).await.unwrap();
+    let stored = messages.items.iter()
+        .find(|message| message.message_id == observed.delivery.message_id)
+        .expect("device speech must also survive a history reload");
+    assert_eq!(stored.content["interaction"], context.provenance());
+
+    let replay = svc.send_companion_device_message(
+        USER_ID, &conversation.conversation_id, request(), context,
+        Arc::new(DeviceAdmissionHook), &registry,
+    ).await.unwrap();
+    assert!(replay.delivery.replayed);
+    assert_eq!(capture.options.lock().unwrap().len(), 1, "replay must not build another runtime");
+}
 
 #[tokio::test]
 async fn t1_1_create_with_defaults() {
@@ -987,6 +1090,9 @@ async fn session_capability_selection_updates_runtime_snapshot_without_rewriting
         .await
         .unwrap();
     assert!(!changed_again, "equivalent selections must not rebuild an idle runtime");
+    let (mcp_updated, _) = svc.replace_session_mcp_selection(USER_ID, &conv.conversation_id, &[]).await.unwrap();
+    assert_eq!(mcp_updated.extra["skills"], json!(["pdf", "skill-creator"]), "MCP-only changes must preserve the Skill snapshot");
+    assert_eq!(mcp_updated.agent_snapshot, conv.agent_snapshot);
 }
 
 #[tokio::test]
@@ -1098,3 +1204,6 @@ async fn update_nomi_rejects_extra_model_from_patch() {
     let unchanged = svc.get(USER_ID, &conv.conversation_id).await.unwrap();
     assert_eq!(unchanged.model.unwrap().model, "gpt-4o");
 }
+
+#[path = "conversation_crud/creation.rs"]
+mod creation;

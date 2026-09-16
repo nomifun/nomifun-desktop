@@ -9,6 +9,7 @@ repository.workspace = true
 async-trait.workspace = true
 getrandom.workspace = true
 libc.workspace = true
+jsonschema.workspace = true
 nomifun-api-types.workspace = true
 nomifun-db.workspace = true
 nomifun-js-authoring.workspace = true

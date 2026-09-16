@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use nomifun_api_types::{
@@ -270,13 +270,17 @@ async fn open_surface(
     Extension(user): Extension<CurrentUser>,
     Path(plugin_id): Path<String>,
     Json(request): Json<OpenPluginRuntimeSurfaceRequest>,
-) -> Result<Json<ApiResponse<PluginRuntimeSurfaceLaunchDescriptorDto>>, AppError> {
-    require_route_id("plugin_id", &plugin_id, &request.plugin_id)?;
+) -> Result<Json<ApiResponse<PluginRuntimeSurfaceLaunchDescriptorDto>>, Response> {
+    require_route_id("plugin_id", &plugin_id, &request.plugin_id).map_err(IntoResponse::into_response)?;
+    let selected = request.agent_session.as_ref().and_then(|grant| grant.ui_capability.as_ref()).map(|reference| nomifun_agent_contracts::CapabilityRef {
+        id: reference.id.clone().into(), version: reference.version.clone().into(),
+    });
     let descriptor = state
         .application
-        .open_surface(user.id.as_str(), &plugin_id)
+        .open_surface_with_ui_selection(user.id.as_str(), &plugin_id,
+            request.agent_session.as_ref().map(|grant| (grant.agent_session_id.as_str(), grant.expected_release_digest.as_str())), selected.as_ref())
         .await
-        .map_err(application_error)?;
+        .map_err(surface_error)?;
     Ok(Json(ApiResponse::ok(descriptor)))
 }
 
@@ -520,7 +524,7 @@ async fn call_surface_bridge(
     Extension(user): Extension<CurrentUser>,
     Path(plugin_id): Path<String>,
     Json(body): Json<PluginRuntimeSurfaceBridgeHttpRequest>,
-) -> Result<Json<ApiResponse<StrictJsonValue>>, AppError> {
+) -> Result<Json<ApiResponse<StrictJsonValue>>, Response> {
     let result = state
         .application
         .surface_bridge_request(
@@ -532,7 +536,7 @@ async fn call_surface_bridge(
             body.request,
         )
         .await
-        .map_err(application_error)?;
+        .map_err(surface_error)?;
     Ok(Json(ApiResponse::ok(result)))
 }
 
@@ -600,6 +604,7 @@ fn require_route_id(field: &'static str, route: &str, body: &str) -> Result<(), 
 
 pub(super) fn application_error(error: PluginRuntimeApplicationError) -> AppError {
     match error {
+        PluginRuntimeApplicationError::AgentSession { message, .. } => AppError::Internal(message),
         PluginRuntimeApplicationError::Invalid(message) => {
             AppError::BadRequest(format!("Plugin input is invalid: {message}"))
         }
@@ -610,6 +615,19 @@ pub(super) fn application_error(error: PluginRuntimeApplicationError) -> AppErro
             AppError::Internal(format!("Plugin runtime failed: {message}"))
         }
         PluginRuntimeApplicationError::Database(error) => error.into(),
+    }
+}
+
+// Only the scoped Surface routes can call the Session port. Retain the existing
+// HTTP error envelope without widening AppError for a plugin-specific adapter.
+fn surface_error(error: PluginRuntimeApplicationError) -> Response {
+    match error {
+        PluginRuntimeApplicationError::AgentSession { status, code, message, details } => (
+            StatusCode::from_u16(status).ok().filter(|status| status.is_client_error() || status.is_server_error())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(nomifun_api_types::ErrorResponse::new_with_details(message, code, details)),
+        ).into_response(),
+        other => application_error(other).into_response(),
     }
 }
 

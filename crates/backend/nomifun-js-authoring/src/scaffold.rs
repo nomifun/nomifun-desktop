@@ -180,6 +180,43 @@ type PluginActivationContext = Readonly<{
   mount: PluginMountContext;
   sdk: PluginSdk;
 }>;
+
+/** Input only: ownership, grants, resources and the frozen plan come from the Host. */
+type PluginDependencyCall = Readonly<{
+  capabilityId: string;
+  actionId: string;
+  /** Unique within the parent invocation; 1..128 UTF-8 bytes. No implicit retries. */
+  callKey: string;
+  input: PluginJson;
+}>;
+
+type PluginToolInvocation = Readonly<{
+  actionId: string;
+  input: PluginJson;
+  contribution: Readonly<{
+    target: PluginTargetLock;
+    capability: Readonly<{ id: string; version: string }>;
+    contribution_id: string;
+    contract_digest: string;
+  }>;
+  signal: AbortSignal;
+  /** Agent Tool calls only. Not an activation/Mount SDK or a transferable grant. */
+  dependencies: Readonly<{ invoke(call: PluginDependencyCall): Promise<PluginJson> }>;
+}>;
+
+type PluginContextContribution = Readonly<{
+  schemaRef: string;
+  input: Readonly<{ phase: "session_start" }> | Readonly<{
+    phase: "before_turn";
+    turn: Readonly<{ source_message_id: string; text: string; image_media_types: readonly string[] }>;
+  }>;
+  contribution: PluginToolInvocation["contribution"];
+  signal: AbortSignal;
+  /** Agent Context only; other admissions reject calls. Parent completion closes this handle.
+   * Targets must be direct frozen dependencies; calls do not grant resources or retry effects.
+   */
+  dependencies: PluginToolInvocation["dependencies"];
+}>;
 "#;
 
 fn validate_display_text(

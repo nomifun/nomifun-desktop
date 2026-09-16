@@ -6,13 +6,18 @@
 
 pub mod closure;
 pub mod catalog;
+pub mod chat_model;
+pub mod chat_provider_reasoning;
 pub mod deletion;
 pub mod digest;
 pub mod event;
+pub mod engine_features;
 pub mod impact;
 pub mod manifest;
 pub mod plugin_runtime;
 pub mod model_route;
+pub mod model_middleware;
+pub mod tool_middleware;
 pub mod package;
 pub mod plugin_n1;
 pub mod preset;
@@ -31,6 +36,7 @@ pub use digest::{
     ArtifactEnvelope, CanonicalDigestError, canonical_json_bytes, digest_bytes, digest_payload,
 };
 pub use event::*;
+pub use engine_features::*;
 pub use impact::*;
 pub use manifest::*;
 pub use plugin_runtime::*;

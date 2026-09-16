@@ -28,18 +28,11 @@ describe('ordinary conversation list ownership', () => {
     expect(isOrdinaryWorkConversation(conversation as never)).toBe(true);
   });
 
-  test('robot sessions never enter the ordinary work list', () => {
-    // A robot thread is a long-lived companion conversation owned by a device.
-    // It is excluded EXPLICITLY rather than incidentally via `companion_id`:
-    // that marker is what the companion group already keys on, and relying on it
-    // would silently break the day a robot thread stops carrying it.
-    const robotSession = {
+  test('device messages belong to the companion conversation', () => {
+    const companionSession = {
       execution_step_id: undefined,
-      extra: { robot_session: true, robot_id: 'aa:bb:cc:dd:ee:ff' },
+      extra: { companion_session: true, companion_id: '019b0000-0000-7000-8000-000000000001' },
     };
-    expect(isOrdinaryWorkConversation(robotSession as never)).toBe(false);
-
-    const robotIdOnly = { execution_step_id: undefined, extra: { robot_id: 'aa:bb:cc:dd:ee:ff' } };
-    expect(isOrdinaryWorkConversation(robotIdOnly as never)).toBe(false);
+    expect(isOrdinaryWorkConversation(companionSession as never)).toBe(false);
   });
 });

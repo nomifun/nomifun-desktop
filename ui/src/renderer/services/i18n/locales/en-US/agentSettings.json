@@ -1,8 +1,58 @@
 {
   "title": "Agent Workbench",
+  "runtimeEngine": {
+    "label": "Runtime engine",
+    "default": "Default engine (Nomi)",
+    "hint": "This engine executes the Agent. Save to use it for new conversations; existing conversations keep their engine. In chat, just choose an Agent.",
+    "unavailable": "The catalog or selected build is unavailable. Retry or choose another engine for this Agent. No automatic fallback is used.",
+    "codingLimit": "This Coding build provides file/Git tools, conversation-isolated snapshots, commands/interactive processes, MCP and plugin tools, and packaged Skills, subject to the Agent's saved enabled capabilities, bound resources and platform permissions. New conversations freeze that configuration; capabilities are not activated on demand. Instructions added during execution are handled at execution boundaries. Images require an enabled vision capability and a compatible model. Git push is limited to explicitly authorized pushes to configured local/file remotes; SSH/HTTPS credentials, force push and ref deletion are unavailable. These capabilities have not all completed end-to-end validation."
+  },
+  "middlewareOrder": {
+    "title": "Execution extensions",
+    "hint": "Extensions in the same stage follow this list, then the default order. Save to apply changes to new sessions only.",
+    "empty": "Select published execution extensions in Capabilities to configure their order here.",
+    "up": "Move {{name}} earlier",
+    "down": "Move {{name}} later",
+    "reset": "Restore default order",
+    "missing": "Extension is unavailable or no longer selected. Restore it or reset the order.",
+    "toolAccess": "Tool checks can read the tool name and shared parameters. They can block execution, but cannot grant permissions, replace your approval or change parameters. A failed check stops execution.",
+    "createBeforeTool": "Create a before-tool check",
+    "createHint": "Edit and publish a draft, then return to Capabilities to select it. Creating a draft does not enable it.",
+    "createFailed": "The check draft could not be created. Try again explicitly; no extension was selected.",
+    "phase": {
+      "before_model": "Before model request",
+      "before_tool": "Before tool execution",
+      "unknown": "Stage unrecognized"
+    }
+  },
+  "contextOrder": {
+    "title": "Context order",
+    "hint": "Context is added in this order within each stage, then in the default order. Save to apply changes to new sessions only.",
+    "empty": "Add context extensions in Capabilities to configure their order.",
+    "up": "Move {{name}} earlier",
+    "down": "Move {{name}} later",
+    "reset": "Restore default order",
+    "missing": "Unavailable or no longer selected. Restore the contribution or reset the order."
+  },
   "subtitle": "Configure your Agents around the work you want to do.",
   "loading": "Loading Agent Workbench…",
   "loadingEditor": "Loading the selected Agent…",
+  "providers": {
+    "defaultsTitle": "Default component implementations",
+    "defaultsHint": "Configured by the installation owner. New or re-saved Agents inherit these defaults unless overridden. Saved versions and existing sessions remain unchanged. Save each choice separately.",
+    "defaultsReload": "Reload (discard unsaved choices)",
+    "defaultsUnbound": "No default configured",
+    "defaultsMissingHint": "The previous default or its contract is unavailable. Its selection is retained. Restore the plugin or explicitly choose another implementation.",
+    "defaultsSave": "Save default implementation",
+    "defaultsLoadError": "Cannot read defaults. Check that you are the installation owner, then reload.",
+    "defaultsSaveError": "Save failed: the implementation may be unavailable or another operation changed the default. Reload and confirm your choice.",
+    "title": "Component implementations",
+    "hint": "Choose implementations for the selected capabilities. Saving checks compatibility and dependencies; execution still requires authorization. Existing sessions keep their frozen implementation. Choosing a component does not add its internal tools to the Agent.",
+    "empty": "Selected capabilities do not expose replaceable components. Add a capability with a component contract first.",
+    "inherit": "Use configured default",
+    "missing": "Previously selected implementation unavailable",
+    "missingHint": "The selected implementation or its contract is no longer in the catalog. Your choice has been kept. Choose another implementation or explicitly use the configured default."
+  },
   "freshStart": {
     "title": "Fresh v4 workspace",
     "body": "This generation starts with {{count}} official templates and an empty personal library. Previous settings are not imported; fork a template or create a new Agent here."
@@ -37,7 +87,7 @@
     },
     "label": "Agent setup",
     "saved": "Agent updated",
-    "companionHint": "Controls capabilities for local and IM Companion conversations. The official Companion is used by default."
+    "companionHint": "Changes apply to this companion's desktop, robot and IM conversations. The official Companion is used by default."
   },
   "library": {
     "ariaLabel": "Agent library",
@@ -82,12 +132,6 @@
       "default": {
         "name": "Companion",
         "description": "Choose the role, memory and communication abilities for a companion."
-      }
-    },
-    "robot": {
-      "default": {
-        "name": "Robot",
-        "description": "Choose perception, communication and action capabilities for device interactions."
       }
     },
     "customerService": {
@@ -165,6 +209,7 @@
     "selectAria": "Select {{resource}}",
     "dependencyHint": "Matching resources appear after you select {{resource}}.",
     "selectionHint": "This resource is used for this launch and can be changed before the next one.",
+    "mcpSelectionHint": "Include every server used by the Agent's authorized tools. With MCP resources selected, you may add resource servers (16 total). Selection grants no extra tools; resource reads must target a bound server.",
     "emptyOptions": "No available resource. Configure one before starting.",
     "loadFailed": "The resource list could not be loaded. Check its configuration page.",
     "configure": "Configure",
@@ -207,32 +252,6 @@
   },
   "navigation": {
     "railTitle": "Agent Workbench"
-  },
-  "session": {
-    "title": "Agent Session",
-    "open": "Open Session",
-    "loading": "Loading canonical Session projections…",
-    "backToSettings": "Agent Workbench",
-    "fork": "Fork Session",
-    "delete": "Delete Session",
-    "deleteConfirm": "Delete this Session permanently? Its transcript, projections, Runtime binding, checkpoint, and Session-owned resources will be removed.",
-    "deletedTitle": "Session deleted",
-    "deletedBody": "This AgentSession has crossed the irreversible deletion fence. Its transcript cannot be viewed, continued, observed, forked, or restored.",
-    "generation": "Active generation",
-    "lastSeq": "Last sequence",
-    "checkpoint": "Checkpoint through sequence",
-    "activeCapabilities": "Active capabilities",
-    "runtime": "Runtime Inspector",
-    "inspector": "Session Inspector",
-    "details": "Canonical event details",
-    "continuationRequired": "The frozen Snapshot is not executable on the current stack. History remains read-only; continue only by explicitly forking a new AgentSession.",
-    "empty": "No transcript projections have been committed yet.",
-    "inputPlaceholder": "Send an ordinary Turn to this Session…",
-    "send": "Send Turn",
-    "role": {
-      "user": "You",
-      "assistant": "Agent"
-    }
   },
   "workbench": {
     "categories": {
@@ -325,6 +344,9 @@
     "settingsHint": "Define its identity, model and working style",
     "manageModels": "Manage models",
     "modelNeeded": "Configure an available chat model before saving this Agent.",
+    "configureChatModel": "Configure chat model",
+    "configureModelReturn": "After configuring a model, use Back to continue editing. Your unsaved Agent inputs are kept for this return.",
+    "returnChanged": "This Agent changed while you were away. Its current saved version is open; the earlier unsaved inputs were not applied.",
     "disabledSave": "Resolve unavailable capabilities first",
     "presetBadge": "Customizable preset",
     "personalBadge": "Personal Agent",

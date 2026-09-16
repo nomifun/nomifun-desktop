@@ -815,6 +815,7 @@ async fn typed_verdict_restores_and_persists_the_exact_seeded_turn_root() {
             "new-source",
             None,
             Some(&mut context),
+            None,
         )
         .await
         .unwrap();
@@ -875,6 +876,7 @@ async fn race_tail_terminal_adjudication_discards_the_whole_accepted_turn() {
             "source-root",
             None,
             Some(&mut context),
+            None,
         )
         .await
         .unwrap();
@@ -889,6 +891,7 @@ async fn race_tail_terminal_adjudication_discards_the_whole_accepted_turn() {
             "source-root",
             None,
             Some(&mut context),
+            None,
         )
         .await
         .unwrap();
@@ -928,6 +931,7 @@ async fn checked_root_persistence_failure_becomes_state_inconsistent() {
             "new-source",
             None,
             Some(&mut context),
+            None,
         )
         .await
         .unwrap();

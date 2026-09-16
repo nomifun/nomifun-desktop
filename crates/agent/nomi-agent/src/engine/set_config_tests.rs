@@ -1120,6 +1120,8 @@ fn make_engine(model: &str) -> super::AgentEngine {
         goal: None,
         stagnation_guard: crate::loop_guard::StagnationGuard::new(crate::engine::STAGNATION_THRESHOLD),
         context_contributors: Vec::new(),
+        model_middleware: Vec::new(),
+        tool_middleware: Vec::new(),
         steering_inbox: None,
         system_resource_inbox: None,
         process_supervisor: None,

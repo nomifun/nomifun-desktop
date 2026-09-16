@@ -9,6 +9,7 @@
 }
 .workspace { display:flex; flex:1; height:100%; min-height:0; align-items:stretch; }
 .mainArea { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; container-type:inline-size; container-name:agent-editor; }
+.defaultsToolbar { display:flex; justify-content:flex-end; padding:8px 24px; flex-shrink:0; border-bottom:1px solid var(--agent-border); }
 .library { border-radius:0; overflow:hidden; }
 .editorSurface { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; background:var(--agent-surface); overflow:hidden; }
 .libraryHeader { display:flex; flex-direction:column; gap:6px; padding:8px 10px 6px; }
@@ -98,7 +99,8 @@
 .advancedCollapse { border: 0; background: transparent; }
 .collapseHint { font-size: 12px; color: var(--agent-muted); margin-left: 8px; }
 .pageError { margin-bottom: 14px; border-radius: 10px; }
-.errorBody { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; }
+.errorBody { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; font-size: 12px; }
+.errorBody p { margin: 6px 0 0; }
 .loading { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 320px; gap: 14px; color: var(--agent-muted); font-size: 13px; }
 .library button:focus-visible, .editorTabs button:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: -2px; }
 @media (max-width: 1100px) {

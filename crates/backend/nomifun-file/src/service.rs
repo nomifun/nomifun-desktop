@@ -9,6 +9,7 @@ use base64::Engine;
 use dashmap::DashMap;
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::warn;
 
 use nomifun_api_types::WebSocketMessage;
@@ -20,6 +21,7 @@ use crate::path_safety::{
     validate_path_for_write, validate_path_for_write_authority, validate_path_with_extra_root,
 };
 use crate::resource::AgentSessionWorkspaceBinding;
+use crate::agent_patch_outcome::{AgentPatchFailureObservation, AgentSessionPatchFailure, PatchPublicationFailure};
 use crate::types::{
     ContentUpdateEvent, ContentUpdateOperation, CopyResult, DirOrFile, FileMetadata, WorkspaceFlatFile, ZipEntry,
 };
@@ -102,6 +104,10 @@ pub struct AgentSessionPatchRequest {
 #[serde(deny_unknown_fields)]
 pub struct AgentSessionFilePatch {
     pub path: String,
+    /// Bind to the full previously observed bytes or explicit absence. Omit
+    /// only for legacy line-only matching; this is not a filesystem lock.
+    #[serde(default, skip_serializing_if = "crate::AgentSessionPatchSource::is_any")]
+    pub expected_source: crate::AgentSessionPatchSource,
     pub hunks: Vec<AgentSessionPatchHunk>,
 }
 
@@ -146,6 +152,13 @@ pub struct AgentSessionPatchFileResult {
     pub bytes_after: u64,
     pub hunks_applied: usize,
     pub created: bool,
+    /// Historic source version; None for creation or legacy receipts.
+    #[serde(default)]
+    pub source_sha256: Option<String>,
+    /// Bytes supplied to successful publication, not a lock on current bytes.
+    /// Re-read with expected_sha256 before relying on this version later.
+    #[serde(default)]
+    pub written_sha256: Option<String>,
 }
 
 /// A concrete implementation of [`crate::traits::IFileService`].
@@ -269,6 +282,17 @@ impl FileService {
         scope: &AgentSessionWorkspaceBinding,
         request: AgentSessionPatchRequest,
     ) -> Result<AgentSessionPatchResult, AppError> {
+        self.apply_patch_with_observation_for_agent_session(scope, request)
+            .await.map_err(|failure| failure.error)
+    }
+
+    /// Production engines must retain failure observations: Err is not proof
+    /// that no files changed. The legacy wrapper above preserves its API.
+    pub async fn apply_patch_with_observation_for_agent_session(
+        &self,
+        scope: &AgentSessionWorkspaceBinding,
+        request: AgentSessionPatchRequest,
+    ) -> Result<AgentSessionPatchResult, AgentSessionPatchFailure> {
         let _patch_guard = self.agent_patch_lock.lock().await;
         scope.require_operation(crate::resource::WRITE_OPERATION)?;
         validate_agent_patch_request_shape(&request)?;
@@ -285,13 +309,13 @@ impl FileService {
         let mut total_before = 0_u64;
         let mut total_after = 0_u64;
 
-        for file_patch in &request.files {
+        for (index, file_patch) in request.files.iter().enumerate() {
             let (path, existed) = validate_agent_patch_target(scope, &file_patch.path, &authority)?;
             if !seen_paths.insert(path.clone()) {
                 return Err(AppError::BadRequest(format!(
                     "agent patch contains duplicate target '{}'",
                     file_patch.path
-                )));
+                )).into());
             }
 
             let before = if existed {
@@ -305,36 +329,54 @@ impl FileService {
                     return Err(AppError::BadRequest(format!(
                         "patch target '{}' exceeds the {} byte per-file limit",
                         file_patch.path, MAX_AGENT_PATCH_FILE_BYTES
-                    )));
+                    )).into());
                 }
 
-                self.read_file_impl(&path.to_string_lossy(), &authority)
-                    .await?
+                let read_path = path.clone();
+                let read_authority = authority.clone();
+                let read_limit = MAX_AGENT_PATCH_FILE_BYTES.min(
+                    MAX_AGENT_PATCH_TOTAL_BYTES.saturating_sub(total_before as usize),
+                );
+                tokio::task::spawn_blocking(move || {
+                    let mut charged = 0;
+                    crate::agent_text_read::read_source(&read_path, &read_authority, read_limit, &mut charged)
+                }).await.map_err(|error| AppError::Internal(format!("patch source read failed: {error}")))??
                     .ok_or_else(|| {
-                        AppError::Internal(format!(
+                        AppError::Conflict(format!(
                             "patch target '{}' disappeared while it was being read",
                             file_patch.path
                         ))
                     })?
+                    .0
                     .into_bytes()
             } else {
                 Vec::new()
             };
 
-            let before_text = String::from_utf8(before.clone()).map_err(|_| {
+            file_patch.expected_source.check(existed, &before).map_err(|error| {
+                AgentSessionPatchFailure {
+                    error: AppError::Conflict(format!("patch target {:?}: {error}", file_patch.path)),
+                    observation: AgentPatchFailureObservation {
+                        failed_file: Some(index),
+                        ..Default::default()
+                    },
+                }
+            })?;
+            let before_text = std::str::from_utf8(&before).map_err(|_| {
                 AppError::BadRequest(format!(
                     "patch target '{}' is not valid UTF-8 text",
                     file_patch.path
                 ))
             })?;
-            let after_text = apply_agent_patch_hunks(&before_text, &file_patch.hunks)?;
+            let after_text = apply_agent_patch_hunks(before_text, &file_patch.hunks)
+                .map_err(|error| AppError::BadRequest(format!("patch target {:?}: {error}", file_patch.path)))?;
             let after = after_text.into_bytes();
 
             if after.len() > MAX_AGENT_PATCH_FILE_BYTES {
                 return Err(AppError::BadRequest(format!(
                     "patched file '{}' exceeds the {} byte per-file limit",
                     file_patch.path, MAX_AGENT_PATCH_FILE_BYTES
-                )));
+                )).into());
             }
             total_before = total_before
                 .checked_add(before.len() as u64)
@@ -348,7 +390,7 @@ impl FileService {
                 return Err(AppError::BadRequest(format!(
                     "agent patch exceeds the {} byte total limit",
                     MAX_AGENT_PATCH_TOTAL_BYTES
-                )));
+                )).into());
             }
 
             let relative_path = rel_to_api_string(path.strip_prefix(&workspace_root).map_err(|_| {
@@ -369,8 +411,8 @@ impl FileService {
         }
 
         // No write occurs above this point. If an I/O failure happens during
-        // the commit phase, restore already-touched entries through the same
-        // authority-aware write/remove paths.
+        // the commit phase, attempt to restore existing touched files and
+        // retain new creations. Return every restoration/retention observation.
         let workspace = scope.workspace_root().to_string_lossy().into_owned();
         let mut applied = Vec::with_capacity(prepared.len());
         for (index, file) in prepared.iter().enumerate() {
@@ -378,30 +420,42 @@ impl FileService {
                 .verify_agent_patch_precondition(file, &authority)
                 .await
             {
+                let mut observation = AgentPatchFailureObservation {
+                    failed_file: Some(index), published: applied.clone(), ..Default::default()
+                };
                 self.rollback_agent_patch_files(
                     scope,
                     &authority,
                     &workspace,
                     &prepared,
                     &applied,
+                    &mut observation,
                 )
                 .await;
-                return Err(error);
+                return Err(AgentSessionPatchFailure { error, observation });
             }
             let write_result = self
                 .write_agent_patch_file(
                     scope.owner_id(),
                     file,
                     &file.after,
+                    file.existed.then_some(file.before.as_slice()),
                     &workspace,
                     &authority,
                 )
                 .await;
 
-            if let Err(error) = write_result {
-                self.rollback_agent_patch_files(scope, &authority, &workspace, &prepared, &applied)
+            if let Err(failure) = write_result {
+                if failure.published { applied.push(index); }
+                let mut observation = AgentPatchFailureObservation {
+                    failed_file: Some(index), published: applied.clone(), ..Default::default()
+                };
+                if failure.temporary_cleanup_unconfirmed {
+                    observation.temporary_cleanup_unconfirmed.push(index);
+                }
+                self.rollback_agent_patch_files(scope, &authority, &workspace, &prepared, &applied, &mut observation)
                     .await;
-                return Err(error);
+                return Err(AgentSessionPatchFailure { error: failure.error, observation });
             }
             applied.push(index);
         }
@@ -416,6 +470,8 @@ impl FileService {
                     bytes_after: file.after.len() as u64,
                     hunks_applied: file.hunks_applied,
                     created: !file.existed,
+                    source_sha256: file.existed.then(|| format!("{:x}", Sha256::digest(&file.before))),
+                    written_sha256: Some(format!("{:x}", Sha256::digest(&file.after))),
                 })
                 .collect(),
             total_bytes_before: total_before,
@@ -501,34 +557,45 @@ impl FileService {
         workspace: &str,
         files: &[PreparedAgentPatchFile],
         applied: &[usize],
+        observation: &mut AgentPatchFailureObservation,
     ) {
         for index in applied.iter().rev().copied() {
             let file = &files[index];
             if file.existed {
                 if !current_file_matches(&file.path, &file.after) {
+                    observation.skipped_changed_or_unreadable.push(index);
                     continue;
                 }
-                let _ = self
+                let result = self
                     .write_agent_patch_file(
                         scope.owner_id(),
                         file,
                         &file.before,
+                        Some(&file.after),
                         workspace,
                         authority,
                     )
                     .await;
-            } else {
-                if !current_file_matches(&file.path, &file.after) {
-                    continue;
+                match result {
+                    Ok(_) => observation.restored.push(index),
+                    Err(failure) => {
+                        if failure.published {
+                            observation.restore_published_unconfirmed.push(index);
+                        } else {
+                            observation.rollback_failed.push(index);
+                        }
+                        if failure.temporary_cleanup_unconfirmed
+                            && !observation.temporary_cleanup_unconfirmed.contains(&index)
+                        {
+                            observation.temporary_cleanup_unconfirmed.push(index);
+                        }
+                    }
                 }
-                let _ = self
-                    .remove_entry_impl(
-                        scope.owner_id(),
-                        &file.path.to_string_lossy(),
-                        workspace,
-                        authority,
-                    )
-                    .await;
+            } else {
+                // No portable compare-and-unlink primitive. A prior content
+                // check does not justify deleting a concurrent replacement.
+                // Retain and report; this is deliberately not an atomic undo.
+                observation.retained_created.push(index);
             }
         }
     }
@@ -538,22 +605,23 @@ impl FileService {
         owner_id: &str,
         file: &PreparedAgentPatchFile,
         data: &[u8],
+        expected: Option<&[u8]>,
         workspace: &str,
         authority: &PathAuthority,
-    ) -> Result<bool, AppError> {
+    ) -> Result<bool, PatchPublicationFailure> {
         let path = file.path.to_string_lossy();
         if has_traversal(&path) {
             return Err(AppError::BadRequest(format!(
                 "path '{}' contains invalid traversal patterns",
                 path
-            )));
+            )).into());
         }
         let canonical = validate_path_for_write_authority(&path, authority)?;
         if canonical != file.path {
             return Err(AppError::Conflict(format!(
                 "patch target '{}' changed identity before publication",
                 file.relative_path
-            )));
+            )).into());
         }
         if let Ok(metadata) = std::fs::symlink_metadata(&canonical)
             && metadata.file_type().is_symlink()
@@ -561,10 +629,13 @@ impl FileService {
             return Err(AppError::Conflict(format!(
                 "patch target '{}' is a symbolic link",
                 file.relative_path
-            )));
+            )).into());
         }
-        write_file_sync_atomic(&canonical, data)?;
-        self.emit_content_update(owner_id, &canonical, data, workspace);
+        let result = write_file_sync_atomic(&canonical, data, expected);
+        if result.as_ref().map_or_else(|failure| failure.published, |_| true) {
+            self.emit_content_update(owner_id, &canonical, data, workspace);
+        }
+        result?;
         Ok(true)
     }
 
@@ -879,6 +950,7 @@ fn validate_agent_patch_request_shape(request: &AgentSessionPatchRequest) -> Res
 
     let mut total_patch_text = 0_usize;
     for file in &request.files {
+        file.expected_source.validate()?;
         if file.path.trim().is_empty() {
             return Err(AppError::BadRequest(
                 "agent patch file path must not be empty".to_owned(),
@@ -933,9 +1005,9 @@ fn validate_agent_patch_request_shape(request: &AgentSessionPatchRequest) -> Res
                     | AgentSessionPatchLine::Add { text }
                     | AgentSessionPatchLine::Remove { text } => text,
                 };
-                if text.contains('\n') || text.contains('\0') {
+                if text.contains(['\n', '\r', '\0']) {
                     return Err(AppError::BadRequest(format!(
-                        "agent patch file '{}' contains a line with an embedded newline or NUL",
+                        "agent patch file '{}' contains a line terminator or NUL; supply logical text without CR/LF",
                         file.path
                     )));
                 }
@@ -1003,35 +1075,22 @@ fn apply_agent_patch_hunks(
     original: &str,
     hunks: &[AgentSessionPatchHunk],
 ) -> Result<String, AppError> {
-    let (source, had_trailing_newline) = split_agent_patch_lines(original);
-    if source.len() > MAX_AGENT_PATCH_LINES_PER_FILE {
-        return Err(AppError::BadRequest(format!(
-            "patch source has too many lines; maximum is {}",
-            MAX_AGENT_PATCH_LINES_PER_FILE
-        )));
-    }
+    use crate::agent_patch_lines::{PatchLine, PatchText};
+    let source_text = PatchText::parse(original, MAX_AGENT_PATCH_LINES_PER_FILE)?;
+    let source = &source_text.lines;
 
     let mut output = Vec::with_capacity(source.len());
     let mut source_cursor = 0_usize;
 
     for hunk in hunks {
         let hunk_start = if hunk.old_lines == 0 {
-            // For an insertion, accept the common unified-diff positions:
-            // 0/1 at the beginning, or the number of source lines already
-            // consumed (with +1 also accepted for callers that describe the
-            // insertion as "before the next line").
-            if source_cursor == 0 && (hunk.old_start == 0 || hunk.old_start == 1) {
-                0
-            } else if hunk.old_start == source_cursor
-                || hunk.old_start == source_cursor.saturating_add(1)
-            {
-                source_cursor
-            } else {
-                return Err(invalid_agent_hunk(
-                    hunk,
-                    "insertion old_start must identify the current source position",
-                ));
-            }
+            // A zero-length old range is an insertion AFTER old_start source
+            // lines (0 = BOF, source.len() = EOF), as in unified diff. The old
+            // before-next-line alias is accepted only when new_start selects
+            // the current cursor unambiguously; no text/whitespace guessing.
+            if hunk.old_start == source_cursor.saturating_add(1)
+                && hunk.new_start == output.len().saturating_add(1)
+            { source_cursor } else { hunk.old_start }
         } else {
             hunk.old_start.checked_sub(1).ok_or_else(|| {
                 invalid_agent_hunk(hunk, "old_start must be at least 1 for a non-empty hunk")
@@ -1043,14 +1102,13 @@ fn apply_agent_patch_hunks(
 
         output.extend(source[source_cursor..hunk_start].iter().cloned());
         let output_start = output.len();
-        let expected_new_start = if output_start == 0 && hunk.new_lines == 0 {
-            if hunk.new_start != 0 && hunk.new_start != 1 {
-                return Err(invalid_agent_hunk(
-                    hunk,
-                    "an empty output hunk must start at new line 0 or 1",
-                ));
-            }
-            hunk.new_start
+        let expected_new_start = if hunk.new_lines == 0 {
+            // A deletion's zero-length new range is AFTER the surviving
+            // prefix, including a deletion in the middle or at EOF.
+            // Retain the prior before-next-line spelling for existing clients.
+            if hunk.new_start == output_start.saturating_add(1) {
+                hunk.new_start
+            } else { output_start }
         } else {
             output_start.checked_add(1).ok_or_else(|| {
                 AppError::BadRequest("patch output line offset overflow".to_owned())
@@ -1069,29 +1127,23 @@ fn apply_agent_patch_hunks(
         for line in &hunk.lines {
             match line {
                 AgentSessionPatchLine::Context { text } => {
-                    if source.get(source_position).map(String::as_str) != Some(text.as_str()) {
-                        return Err(invalid_agent_hunk(
-                            hunk,
-                            "context line does not match the source",
-                        ));
+                    if source.get(source_position).map(|line| line.text) != Some(text.as_str()) {
+                        return Err(agent_patch_line_mismatch(hunk, source_position, "context"));
                     }
-                    output.push(text.clone());
+                    output.push(source[source_position]);
                     source_position += 1;
                     old_consumed += 1;
                     new_produced += 1;
                 }
                 AgentSessionPatchLine::Remove { text } => {
-                    if source.get(source_position).map(String::as_str) != Some(text.as_str()) {
-                        return Err(invalid_agent_hunk(
-                            hunk,
-                            "removed line does not match the source",
-                        ));
+                    if source.get(source_position).map(|line| line.text) != Some(text.as_str()) {
+                        return Err(agent_patch_line_mismatch(hunk, source_position, "removed"));
                     }
                     source_position += 1;
                     old_consumed += 1;
                 }
                 AgentSessionPatchLine::Add { text } => {
-                    output.push(text.clone());
+                    output.push(PatchLine { text: text.as_str(), ending: source_text.preferred_ending });
                     new_produced += 1;
                 }
             }
@@ -1126,30 +1178,13 @@ fn apply_agent_patch_hunks(
             MAX_AGENT_PATCH_LINES_PER_FILE
         )));
     }
-    let output_line_count = output.len();
-    let mut result = output.join("\n");
-    if had_trailing_newline && output_line_count > 0 {
-        result.push('\n');
-    }
-    if result.len() > MAX_AGENT_PATCH_FILE_BYTES {
-        return Err(AppError::BadRequest(format!(
-            "patched file exceeds the {} byte per-file limit",
-            MAX_AGENT_PATCH_FILE_BYTES
-        )));
-    }
-    Ok(result)
+    source_text.render(&output, MAX_AGENT_PATCH_FILE_BYTES)
 }
 
-fn split_agent_patch_lines(content: &str) -> (Vec<String>, bool) {
-    if content.is_empty() {
-        return (Vec::new(), false);
-    }
-    let had_trailing_newline = content.ends_with('\n');
-    let mut lines = content.split('\n').map(str::to_owned).collect::<Vec<_>>();
-    if had_trailing_newline {
-        lines.pop();
-    }
-    (lines, had_trailing_newline)
+fn agent_patch_line_mismatch(hunk: &AgentSessionPatchHunk, source_position: usize, kind: &str) -> AppError {
+    // Report the exact coordinate without leaking a potentially secret line
+    // into durable error logs. Never fuzz-match repeated code or whitespace.
+    invalid_agent_hunk(hunk, &format!("{kind} line does not match source line {}; re-read and rebuild the hunk", source_position + 1))
 }
 
 fn invalid_agent_hunk(hunk: &AgentSessionPatchHunk, reason: &str) -> AppError {
@@ -1375,9 +1410,13 @@ fn current_file_matches(path: &Path, expected: &[u8]) -> bool {
     if metadata.len() > (MAX_AGENT_PATCH_FILE_BYTES as u64) {
         return false;
     }
-    let Ok(bytes) = std::fs::read(path) else {
+    let Ok(file) = std::fs::File::open(path) else {
         return false;
     };
+    let mut bytes = Vec::new();
+    if file.take((MAX_AGENT_PATCH_FILE_BYTES + 1) as u64).read_to_end(&mut bytes).is_err() {
+        return false;
+    }
     bytes == expected
 }
 
@@ -1387,7 +1426,7 @@ fn current_file_matches(path: &Path, expected: &[u8]) -> bool {
 /// and then replaced with a same-filesystem rename. A new file uses a
 /// no-clobber hard-link publication so a concurrent creator cannot be silently
 /// overwritten. Existing files use the platform's atomic replacement primitive.
-fn write_file_sync_atomic(path: &Path, data: &[u8]) -> Result<(), AppError> {
+fn write_file_sync_atomic(path: &Path, data: &[u8], expected: Option<&[u8]>) -> Result<(), PatchPublicationFailure> {
     let parent = path.parent().ok_or_else(|| {
         AppError::BadRequest(format!(
             "patch target '{}' has no parent directory",
@@ -1408,10 +1447,10 @@ fn write_file_sync_atomic(path: &Path, data: &[u8]) -> Result<(), AppError> {
         std::process::id(),
         sequence
     ));
-    publish_patch_file(path, data, &temporary)
+    publish_patch_file(path, data, &temporary, expected)
 }
 
-fn publish_patch_file(path: &Path, data: &[u8], temporary: &Path) -> Result<(), AppError> {
+fn publish_patch_file(path: &Path, data: &[u8], temporary: &Path, expected: Option<&[u8]>) -> Result<(), PatchPublicationFailure> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -1426,6 +1465,7 @@ fn publish_patch_file(path: &Path, data: &[u8], temporary: &Path) -> Result<(), 
             temporary.display()
         ))
     })?;
+    let mut published = false;
     let result = (|| -> Result<(), AppError> {
         file.write_all(data).map_err(|error| {
             AppError::Internal(format!(
@@ -1459,7 +1499,15 @@ fn publish_patch_file(path: &Path, data: &[u8], temporary: &Path) -> Result<(), 
                 )));
             }
         };
-        if let Some(metadata) = target_metadata {
+        if let Some(expected) = expected {
+            let metadata = target_metadata.ok_or_else(|| AppError::Conflict(format!(
+                "patch target '{}' disappeared before publication", path.display()
+            )))?;
+            if !current_file_matches(path, expected) {
+                return Err(AppError::Conflict(format!(
+                    "patch target '{}' changed before publication; re-read before retry", path.display()
+                )));
+            }
             std::fs::set_permissions(&temporary, metadata.permissions()).map_err(|error| {
                 AppError::Internal(format!(
                     "cannot preserve patch target permissions '{}': {error}",
@@ -1467,7 +1515,15 @@ fn publish_patch_file(path: &Path, data: &[u8], temporary: &Path) -> Result<(), 
                 ))
             })?;
             replace_file_path(&temporary, path)?;
+            published = true;
         } else {
+            // Creation intent is fixed during preparation. Never reinterpret
+            // a newly appeared target as an existing-file replacement.
+            if target_metadata.is_some() {
+                return Err(AppError::Conflict(format!(
+                    "patch target '{}' appeared before publication", path.display()
+                )));
+            }
             // hard_link is intentionally used for the create case: unlike
             // rename, it fails rather than replacing a target that appeared
             // after the precondition check.
@@ -1484,6 +1540,7 @@ fn publish_patch_file(path: &Path, data: &[u8], temporary: &Path) -> Result<(), 
                     ))
                 }
             })?;
+            published = true;
             std::fs::remove_file(&temporary).map_err(|error| {
                 AppError::Internal(format!(
                     "cannot remove temporary patch file '{}': {error}",
@@ -1492,9 +1549,10 @@ fn publish_patch_file(path: &Path, data: &[u8], temporary: &Path) -> Result<(), 
             })?;
         }
         #[cfg(unix)]
-        if let Some(parent) = path.parent()
-            && let Ok(directory) = std::fs::File::open(parent)
-        {
+        if let Some(parent) = path.parent() {
+            let directory = std::fs::File::open(parent).map_err(|error| {
+                AppError::Internal(format!("cannot open patch target directory for sync: {error}"))
+            })?;
             directory.sync_all().map_err(|error| {
                 AppError::Internal(format!(
                     "cannot sync patch target directory '{}': {error}",
@@ -1504,10 +1562,13 @@ fn publish_patch_file(path: &Path, data: &[u8], temporary: &Path) -> Result<(), 
         }
         Ok(())
     })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    result
+    result.map_err(|error| {
+        let temporary_cleanup_unconfirmed = match std::fs::remove_file(temporary) {
+            Ok(()) => false,
+            Err(cleanup) => cleanup.kind() != std::io::ErrorKind::NotFound,
+        };
+        PatchPublicationFailure { error, published, temporary_cleanup_unconfirmed }
+    })
 }
 
 #[cfg(not(windows))]
@@ -2284,7 +2345,7 @@ mod tests {
         fs::write(&target, "original").unwrap();
         fs::write(&temporary, "belongs to another operation").unwrap();
 
-        assert!(publish_patch_file(&target, b"patched", &temporary).is_err());
+        assert!(publish_patch_file(&target, b"patched", &temporary, None).is_err());
         assert_eq!(fs::read(&temporary).unwrap(), b"belongs to another operation");
         assert_eq!(fs::read(&target).unwrap(), b"original");
     }
@@ -3423,6 +3484,7 @@ mod tests {
                     files: vec![
                         AgentSessionFilePatch {
                             path: "a.txt".into(),
+                            expected_source: Default::default(),
                             hunks: vec![replace_hunk(
                                 1,
                                 1,
@@ -3440,6 +3502,7 @@ mod tests {
                         },
                         AgentSessionFilePatch {
                             path: "b.txt".into(),
+                            expected_source: Default::default(),
                             hunks: vec![replace_hunk(
                                 1,
                                 1,
@@ -3484,6 +3547,7 @@ mod tests {
             AgentSessionPatchRequest {
                 files: vec![AgentSessionFilePatch {
                     path: "ordered.txt".into(),
+                    expected_source: Default::default(),
                     hunks: vec![
                         replace_hunk(
                             1,
@@ -3542,6 +3606,7 @@ mod tests {
                     files: vec![
                         AgentSessionFilePatch {
                             path: "first.txt".into(),
+                            expected_source: Default::default(),
                             hunks: vec![replace_hunk(
                                 1,
                                 1,
@@ -3559,6 +3624,7 @@ mod tests {
                         },
                         AgentSessionFilePatch {
                             path: "second.txt".into(),
+                            expected_source: Default::default(),
                             hunks: vec![replace_hunk(
                                 1,
                                 1,
@@ -3621,6 +3687,7 @@ mod tests {
         let scope = patch_scope(dir.path());
         let replace = |path: &str, old: &str, new: &str| AgentSessionFilePatch {
             path: path.to_owned(),
+            expected_source: Default::default(),
             hunks: vec![replace_hunk(
                 1,
                 1,
@@ -3671,6 +3738,7 @@ mod tests {
                 AgentSessionPatchRequest {
                     files: vec![AgentSessionFilePatch {
                         path: format!("../{}", outside_file.file_name().unwrap().to_string_lossy()),
+                        expected_source: Default::default(),
                         hunks: vec![replace_hunk(
                             1,
                             1,
@@ -3713,6 +3781,7 @@ mod tests {
                 AgentSessionPatchRequest {
                     files: vec![AgentSessionFilePatch {
                         path: "link.txt".into(),
+                        expected_source: Default::default(),
                         hunks: vec![replace_hunk(
                             1,
                             1,
@@ -3753,6 +3822,7 @@ mod tests {
             files: (0..=MAX_AGENT_PATCH_FILES)
                 .map(|index| AgentSessionFilePatch {
                     path: format!("file-{index}.txt"),
+                    expected_source: Default::default(),
                     hunks: vec![tiny_hunk()],
                 })
                 .collect(),
@@ -3772,6 +3842,7 @@ mod tests {
                 AgentSessionPatchRequest {
                     files: vec![AgentSessionFilePatch {
                         path: "oversized.txt".into(),
+                        expected_source: Default::default(),
                         hunks: vec![replace_hunk(
                             1,
                             1,

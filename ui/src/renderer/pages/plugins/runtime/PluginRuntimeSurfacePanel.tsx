@@ -16,7 +16,6 @@ import { Button, Spin } from '@arco-design/web-react';
 import { CloseOne, Refresh } from '@icon-park/react';
 import React, {
   useCallback,
-  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -95,7 +94,7 @@ function parseKvRequest(value: unknown): PluginRuntimeBridgeKvRequest | null {
   };
 }
 
-function parseBridgeRequest(value: unknown): PluginRuntimeBridgeRequest | null {
+export function parseBridgeRequest(value: unknown): PluginRuntimeBridgeRequest | null {
   const request = asObject(value);
   const callId = request?.call_id;
   const target = asObject(request?.target);
@@ -406,9 +405,10 @@ const PluginRuntimeSurfacePanel: React.FC<PluginRuntimeSurfacePanelProps> = ({
     return closeBridge;
   }, [bridgeDescriptorKey, closeBridge]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     closingRef.current = closing;
-  }, [closing]);
+    if (closing) revokeBridge();
+  }, [closing, revokeBridge]);
 
   const handleFrameLoad = useCallback(() => {
     setFrameLoading(false);

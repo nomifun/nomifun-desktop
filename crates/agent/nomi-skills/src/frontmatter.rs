@@ -28,6 +28,23 @@ pub fn parse_frontmatter(input: &str) -> ParsedMarkdown {
     }
 }
 
+/// Exact hosted artifacts must not silently discard malformed execution
+/// metadata. Directory discovery retains its existing tolerant parser.
+pub fn parse_frontmatter_strict(input: &str) -> Result<ParsedMarkdown, String> {
+    match extract_frontmatter_bounds(input) {
+        Some((yaml, content)) => Ok(ParsedMarkdown {
+            frontmatter: if yaml.trim().is_empty() { FrontmatterData::default() }
+                else { serde_yaml::from_str(yaml).map_err(|error| error.to_string())? },
+            content: content.to_owned(),
+        }),
+        None if input.starts_with("---\n") || input.starts_with("---\r\n") =>
+            Err("unterminated Skill frontmatter".into()),
+        None => Ok(ParsedMarkdown {
+            frontmatter: FrontmatterData::default(), content: input.to_owned(),
+        }),
+    }
+}
+
 /// Normalize a FrontmatterData into a SkillMetadata.
 pub fn parse_skill_fields(
     frontmatter: &FrontmatterData,

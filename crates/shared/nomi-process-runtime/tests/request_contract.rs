@@ -76,6 +76,37 @@ fn capability_roots_are_canonicalized() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn symlink_cwd_cannot_escape_its_capability_root() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.path().join("linked workspace")).unwrap();
+    let mut req = request(PathBuf::from("linked workspace"));
+    req.capability = CapabilityPolicy::local_owner(root.path().to_path_buf());
+
+    let err = normalize_request(req, root.path()).unwrap_err();
+
+    assert_eq!(err.code(), "capability_denied");
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_capability_root_accepts_the_same_canonical_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("中文 workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let alias = root.path().join("workspace alias");
+    std::os::unix::fs::symlink(&workspace, &alias).unwrap();
+    let mut req = request(workspace.clone());
+    req.capability = CapabilityPolicy::local_owner(alias);
+
+    let normalized = normalize_request(req, root.path()).unwrap();
+
+    assert_eq!(normalized.cwd, workspace.canonicalize().unwrap());
+    assert_eq!(normalized.capability.cwd_roots, vec![normalized.cwd]);
+}
+
 #[test]
 fn non_directory_cwd_fails_before_spawn() {
     let root = tempfile::tempdir().unwrap();
@@ -231,4 +262,3 @@ fn outcome_variants_preserve_process_facts() {
 
     assert_eq!(outcomes.len(), 5);
 }
-

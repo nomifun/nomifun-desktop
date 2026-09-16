@@ -644,6 +644,8 @@ async fn await_browser_shutdown_step(step: Option<BrowserShutdownStep>) -> Resul
 }
 
 pub struct AppServices {
+    /// Trusted embedders may register additional engines before router assembly.
+    pub runtime_engines: Arc<crate::router::runtime_engines::RuntimeEngineHost>,
     pub database: Database,
     /// Process-lifetime cancellation shared by background domain tasks that
     /// must stop before the database is closed.
@@ -1340,6 +1342,9 @@ impl AppServices {
 
         self.request_background_shutdown();
         self.shutdown_cron_timers();
+        // Fence runtime admission immediately, before awaiting any producer or
+        // resource owner. Its owned flight runs while these owners wind down.
+        let engine_shutdown = self.agent_runtime_registry.shutdown_and_wait();
         if let Err(error) = self
             .plugin_runtime
             .shutdown_service_runtime(self.authoritative_user_id.as_ref())
@@ -1372,7 +1377,7 @@ impl AppServices {
         if let Err(error) = self.agent_execution_lifecycle.shutdown().await {
             errors.push(format!("Agent Execution cleanup failed: {error}"));
         }
-        let runtimes_stopped = match tokio::time::timeout(Duration::from_secs(15), self.agent_runtime_registry.shutdown()).await {
+        let runtimes_stopped = match tokio::time::timeout(Duration::from_secs(15), engine_shutdown).await {
             Ok(Ok(())) => true,
             Ok(Err(error)) => { errors.push(format!("Agent runtime cleanup failed: {error}")); false }
             Err(_) => { errors.push("Agent runtime cleanup timed out".into()); false }
@@ -2246,6 +2251,7 @@ impl AppServices {
             authoritative_user_id: authoritative_user_id.clone(),
             model_invoke: model_invoke_service.clone(),
             model_invoke_service: Some(model_invoke_service.clone()),
+            creation_service: Some(creation_service.clone()),
             provider_config_digest_resolver: Some(provider_config_digest_resolver),
             data_dir: data_dir.clone(),
             work_dir: work_dir.clone(),
@@ -2319,8 +2325,22 @@ impl AppServices {
         // Agent factory is now wired. Future extension/custom agents
         // that get written to `agent_metadata` will show up after the
         // relevant service calls `AgentRegistry::hydrate`.
+        let runtime_engines = Arc::new(crate::router::runtime_engines::RuntimeEngineHost::default());
+        let factory = runtime_engines.dispatch(factory);
+        let engine_policy = Arc::downgrade(&runtime_engines);
+        let context_policy = Arc::downgrade(&runtime_engines);
         let runtime_registry_concrete = Arc::new(
             InMemoryAgentRuntimeRegistry::new(factory)
+                .with_context_policy_resolver(Arc::new(move |binding| {
+                    context_policy.upgrade()
+                        .ok_or_else(|| nomifun_common::AppError::Conflict("Runtime host has shut down".into()))?
+                        .catalog()?.uses_platform_history_context(binding)
+                }))
+                .with_nomi_session_resolver(Arc::new(move |binding| {
+                    engine_policy.upgrade()
+                        .ok_or_else(|| nomifun_common::AppError::Conflict("Runtime host has shut down".into()))?
+                        .catalog()?.uses_nomi_session(binding)
+                }))
                 .with_model_config_resolver(build_agent_model_config_resolver(
                     model_invoke_service.clone(),
                 ))
@@ -2333,6 +2353,7 @@ impl AppServices {
         let background_shutdown = CancellationToken::new();
         let background_tasks = Arc::new(BackgroundTaskRegistry::new(background_shutdown.clone()));
         let services = Self {
+            runtime_engines,
             database,
             background_shutdown,
             background_tasks,
@@ -2823,8 +2844,8 @@ mod tests {
         fn terminate(&self,id:&str,reason:Option<nomifun_common::AgentKillReason>)->Result<(),nomifun_common::AppError> {self.inner.terminate(id,reason)}
         fn terminate_all(&self) {self.inner.terminate_all();}
         fn active_runtime_count(&self)->usize {self.inner.active_runtime_count()}
-        fn shutdown(&self)->futures_util::future::BoxFuture<'static,Result<(),nomifun_common::AppError>> {
-            if self.allow.load(Ordering::Acquire) {self.inner.shutdown()}
+        fn shutdown_and_wait(&self)->nomifun_ai_agent::RuntimeTeardown {
+            if self.allow.load(Ordering::Acquire) {self.inner.shutdown_and_wait()}
             else {Box::pin(async {Err(nomifun_common::AppError::Internal("fixture: Agent exit is not proven".into()))})}
         }
     }

@@ -10,6 +10,9 @@ use nomi_types::llm::{LlmEvent, LlmRequest};
 use nomi_types::message::{StopReason, TokenUsage};
 use tokio::sync::mpsc;
 
+#[path = "bootstrap/host_skill_commands.rs"]
+mod host_skill_commands;
+
 fn minimal_config() -> Config {
     Config {
         provider_label: "openai".into(),
@@ -43,6 +46,38 @@ fn null_output() -> Arc<dyn nomi_agent::output::OutputSink> {
 
 struct CapturingProvider {
     systems: Arc<Mutex<Vec<String>>>,
+}
+
+#[tokio::test]
+async fn host_skill_is_in_the_real_bootstrap_index_without_directory_fallback() {
+    struct Allow;
+    #[async_trait]
+    impl nomi_agent::host_skills::HostSkillAccess for Allow {
+        async fn authorize(&self) -> Result<(), String> { Ok(()) }
+    }
+    let workspace = tempfile::tempdir().unwrap();
+    let directory = workspace.path().join("skills/pkg.guide");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("SKILL.md"), "---\ndescription: WRONG_DIRECTORY_DESCRIPTION\n---\nwrong body").unwrap();
+    let hosted = Arc::new(nomi_agent::host_skills::HostSkill::read_only("pkg.guide", "",
+        "---\nname: cosmetic\ndescription: EXACT_HOST_DESCRIPTION\n---\npackage body",
+        Default::default(), Arc::new(Allow)).unwrap());
+    let mut config = minimal_config();
+    config.tools.enforce_builtin_allowlist = true;
+    config.tools.builtin_allowlist = vec!["Skill".into()];
+    let systems = Arc::new(Mutex::new(Vec::new()));
+    let mut result = AgentBootstrap::new(config, workspace.path().to_str().unwrap(), null_output())
+        .provider(Arc::new(CapturingProvider { systems: systems.clone() }))
+        .extra_skill_dirs(vec![workspace.path().join("skills")])
+        .host_skills(vec![hosted]).build().await.unwrap();
+    assert!(result.engine.tool_names().iter().any(|name| name == "Skill"));
+    result.engine.execute_turn("show available guidance", workspace.path().to_str().unwrap()).await.unwrap();
+    let systems = systems.lock().unwrap();
+    assert!(!systems.is_empty());
+    for prompt in systems.iter() {
+        assert!(prompt.contains("EXACT_HOST_DESCRIPTION"), "{prompt}");
+        assert!(!prompt.contains("WRONG_DIRECTORY_DESCRIPTION"));
+    }
 }
 
 #[async_trait]

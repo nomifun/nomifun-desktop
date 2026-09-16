@@ -28,7 +28,6 @@ export const OFFICIAL_PRESET_KEYS = [
   'assistant.general',
   'coding.codex',
   'companion.default',
-  'robot.default',
   'customer-service.default',
   'creative-studio.default',
 ] as const;
@@ -120,6 +119,8 @@ export interface AgentBindingValue {
  * editable catalog record.
  */
 export interface AgentResolvedSnapshot {
+  /** Frozen provenance, re-admitted by the host; not a client permission grant. */
+  canonical_binding?: AgentBindingValue;
   preset_id: AgentPresetId;
   preset_revision: number;
   preset_name: string;
@@ -164,7 +165,24 @@ export interface RoleProviderSelection {
   provider_mount_id: string;
 }
 
+export interface InstallationRoleBinding {
+  selection: RoleProviderSelection;
+  binding_version: number;
+  updated_at_ms: number;
+}
+
+export interface PutAgentRoleDefaultRequest {
+  selection: RoleProviderSelection;
+  expected_binding_version: number;
+}
+
 export interface AgentPresetDocument {
+  /** Versioned Agent configuration, resolved by the host when a session is created. */
+  runtime_engine?: RuntimeEngineSelection;
+  /** Context order within each phase; omitted contributors follow canonical ID order. */
+  context_order?: CapabilityId[];
+  /** Request middleware composition order; omitted contributors follow ID order. */
+  middleware_order?: CapabilityId[];
   schema_version: string;
   model_route_refs: Record<string, string>;
   chat_route_records: Partial<Record<typeof AGENT_CHAT_MODEL_TASK, ChatRouteRecord>>;
@@ -241,6 +259,7 @@ export interface AgentPresetLibraryResponse {
 export interface CapabilityCatalogItem {
   capability: ExactCatalogRef<'capability'>;
   kind: string;
+  middleware_phase?: 'before_model' | 'before_tool';
   display_name: string;
   description: string;
   source_package: ExactCatalogRef<'package'>;
@@ -275,10 +294,27 @@ export interface McpToolCatalogItem {
   materialization_version: string;
 }
 
+export interface RoleProviderCatalogItem {
+  selection: RoleProviderSelection;
+  display_name: string;
+  description: string;
+  source_package: ExactCatalogRef<'package'>;
+  source_kind: string;
+  supported_capabilities: ExactCatalogRef<'capability'>[];
+}
+
+/** Candidates only; the canonical compiler checks compatibility and authorization. */
+export interface RoleCatalogItem {
+  role: ExactRoleContractRef;
+  capabilities: ExactCatalogRef<'capability'>[];
+  providers: RoleProviderCatalogItem[];
+}
+
 export interface AgentCatalogResponse {
   capabilities: CapabilityCatalogItem[];
   skills: SkillCatalogItem[];
   mcp_tools: McpToolCatalogItem[];
+  roles: RoleCatalogItem[];
 }
 
 export interface AgentPresetRevision {
@@ -441,6 +477,31 @@ export interface SessionCursor {
   seq: number;
 }
 
+/** Runtime identities are extension-owned strings, not a built-in engine enum. */
+export interface RuntimeEngineDescriptor {
+  family_id: string;
+  build_id: string;
+  build_digest: string;
+  display_name: string;
+  host_contract_version: number;
+  supported_profiles: string[];
+}
+
+export interface RuntimeEngineBinding {
+  family_id: string;
+  build_id: string;
+  build_digest: string;
+  host_contract_version: number;
+  profile: string;
+}
+
+export interface RuntimeEngineSelection {
+  selector:
+    | { selection: 'exact'; family_id: string; build_id: string; build_digest: string }
+    | { selection: 'channel'; family_id: string; channel: string };
+  profile: string;
+}
+
 export interface CreateAgentSessionRequest {
   model?: { provider_id: string; model: string };
   preset_id: AgentPresetId;
@@ -465,6 +526,7 @@ export interface AgentResourceSelection {
 }
 
 export interface CreateAgentSessionResponse {
+  runtime_engine_binding?: RuntimeEngineBinding;
   agent_session_id: AgentSessionId;
   agent_binding: AgentBindingValue;
   state: string;

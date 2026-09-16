@@ -64,12 +64,19 @@ export const resourceSelectionValueFromSessionExtra = (
     } | undefined
   )?.nomi_core_session?.binding?.typed_resource_bindings;
   const value: AgentResourceSelectionValue = {};
+  const mcpServers = new Set<string>();
   for (const binding of bindings ?? []) {
     if (typeof binding.resource_kind !== 'string' || typeof binding.resource_id !== 'string') {
       continue;
     }
     const pickerKind = pickerKindForResourceKind(binding.resource_kind);
+    if (pickerKind === 'mcp_server') {
+      mcpServers.add(binding.resource_id);
+      continue;
+    }
     if (pickerKind) value[pickerKind] = binding.resource_id;
   }
+  if (mcpServers.size === 1) value.mcp_server = [...mcpServers][0];
+  else if (mcpServers.size > 1) value.mcp_servers = [...mcpServers];
   return value;
 };

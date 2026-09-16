@@ -634,6 +634,30 @@ impl Tool for ExecCommandTool {
         format!("exec_command: {}", crate::truncate_utf8(command, 80))
     }
 
+    async fn preflight_hook(
+        &self,
+        input: &Value,
+        _context: &crate::ToolExecutionContext,
+    ) -> Result<(), String> {
+        let invocation = requested_invocation(input)?;
+        let cwd = requested_workdir(input, &self.default_cwd)?;
+        let command = match invocation.command {
+            PreparedCommand::Ready(command) => command,
+            PreparedCommand::Python { .. } => return Err(
+                "before_tool preflight does not support Python script mode: interpreter verification requires starting a probe process".into()
+            ),
+        };
+        crate::bash::preflight_local_process(nomi_process_runtime::ProcessRequest {
+            owner: ProcessOwner::new(self.invocation_id, Uuid::nil()),
+            command,
+            cwd,
+            env: invocation.env,
+            transport: invocation.transport,
+            policy: ProcessPolicy::default(),
+            capability: self.capability.clone(),
+        }, &self.default_cwd)
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
         let invocation = match requested_invocation(&input) {
             Ok(invocation) => invocation,

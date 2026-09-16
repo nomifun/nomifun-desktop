@@ -14,11 +14,13 @@ import type { NavigateFunction } from 'react-router-dom';
 
 import type { TProviderWithModel } from '@/common/config/storage';
 import {
+  conversationTarget,
   parseAgentPresetId,
   parseConversationId,
   parseProviderId,
 } from '@/common/types/ids';
-import { setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
+import { sessionStorageKey, setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
+import { creationDraftStorageKey, emptyCreationDraft, useCreationDraft } from '@/renderer/creation/useCreationDraft';
 import type { ExecutableAgentPreset, GuidAgentSelection } from '../types';
 import type {
   AgentResourceSelection,
@@ -188,10 +190,9 @@ const createDeps = ({
 });
 
 const readOnlyHandoff = () => {
-  expect(sessionStorage.length).toBe(1);
-  const key = sessionStorage.key(0);
-  expect(key).not.toBeNull();
-  const handoff = JSON.parse(sessionStorage.getItem(key!) ?? '{}') as Record<
+  const key = sessionStorageKey('initial-message-nomi', conversationTarget(parseConversationId(PRESET_CONVERSATION_ID)));
+  expect(sessionStorage.getItem(key)).not.toBeNull();
+  const handoff = JSON.parse(sessionStorage.getItem(key) ?? '{}') as Record<
     string,
     unknown
   >;
@@ -231,9 +232,14 @@ describe('useGuidSend HTTP behavior', () => {
     expect(calls[1]).toMatchObject({ method: 'POST', url: '/api/agent-sessions', body: { title: 'browserWorkspace.title' } });
     expect(calls.some(call => call.url.includes('/turns') || call.url.includes('/messages'))).toBe(false);
     expect(advancedCalls).toBe(0);
-    expect(sessionStorage.length).toBe(1);
-    expect(sessionStorage.key(0)).toContain('initial-browser-open');
-    expect(sessionStorage.getItem(sessionStorage.key(0)!)).toBe('true');
+    const target = conversationTarget(parseConversationId(PRESET_CONVERSATION_ID));
+    expect(sessionStorage.getItem(sessionStorageKey('initial-browser-open', target))).toBe('true');
+    expect(sessionStorage.getItem(sessionStorageKey('initial-message-nomi', target))).toBeNull();
+    expect(JSON.parse(sessionStorage.getItem(creationDraftStorageKey(PRESET_CONVERSATION_ID))!)).toMatchObject({
+      selectedAgent: { kind: 'template', templateKey: 'chat.minimal' },
+      presetId: PRESET_ID,
+      mode: null,
+    });
     expect(navigations).toEqual([`/conversation/${PRESET_CONVERSATION_ID}`]);
   });
 
@@ -243,6 +249,17 @@ describe('useGuidSend HTTP behavior', () => {
     expect(hook.result.current.isBrowserButtonDisabled).toBe(false);
     const unavailable = renderHook(() => useGuidSend(createDeps({input: '', currentModel: null, selection: {kind: 'preset', presetId: PRESET_ID}, selectedPreset: PRESET})));
     expect(unavailable.result.current.isBrowserButtonDisabled).toBe(true);
+  });
+
+  test('launches the selected Agent without a composer-owned runtime override', async () => {
+    resetBrowserStorage();
+    const calls = installFetchRecorder();
+    const hook = renderHook(() => useGuidSend({
+      ...createDeps({ selection: { kind: 'preset', presetId: PRESET_ID }, selectedPreset: PRESET }),
+    }));
+    await act(async () => { await hook.result.current.handleSend(); });
+    expect(calls[0].body).toMatchObject({ preset_id: PRESET_ID });
+    expect(calls[0].body).not.toHaveProperty('runtime_engine');
   });
 
   test('official selection prepares its configuration only on send and launches a normal frozen session', async () => {
@@ -278,6 +295,24 @@ describe('useGuidSend HTTP behavior', () => {
     expect(calls).toHaveLength(3);
     expect(readOnlyHandoff()).toMatchObject({ input: INPUT, files: FILES });
     expect(navigations).toEqual([`/conversation/${PRESET_CONVERSATION_ID}`]);
+    const nextTurn = renderHook(() => useCreationDraft(PRESET_CONVERSATION_ID));
+    expect(nextTurn.result.current.draft.selectedAgent).toEqual({ kind: 'template', templateKey: 'chat.minimal' });
+    expect(nextTurn.result.current.draft.presetId).toBe(PRESET_ID);
+    expect(nextTurn.result.current.draft.mode).toBeNull();
+  });
+
+  test('official launch does not overwrite a draft already edited in the created conversation', async () => {
+    resetBrowserStorage();
+    installFetchRecorder();
+    const existing = { ...emptyCreationDraft(), selectedAgent: { kind: 'preset', presetId: PRESET_ID }, pendingPrompt: 'Keep my newer draft', parameters: { image: { count: 2 }, video: {}, music: { instrumental: true } } };
+    const key = creationDraftStorageKey(PRESET_CONVERSATION_ID);
+    const hook = renderHook(() => useGuidSend({
+      ...createDeps({ selection: { kind: 'template', templateKey: 'chat.minimal' }, workspaceEnabled: false }),
+      selectedTemplate: TEMPLATE,
+      applyAdvancedConfig: async () => { sessionStorage.setItem(key, JSON.stringify(existing)); },
+    }));
+    await act(async () => { await hook.result.current.handleSend(); });
+    expect(JSON.parse(sessionStorage.getItem(key)!)).toEqual(existing);
   });
 
   test('failed official preparation does not create a session or navigate away', async () => {

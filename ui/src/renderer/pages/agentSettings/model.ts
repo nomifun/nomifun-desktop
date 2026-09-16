@@ -14,10 +14,35 @@ export const TEMPLATE_I18N_PATH: Record<OfficialPresetKey, string> = {
   'assistant.general': 'assistant.general',
   'coding.codex': 'coding.codex',
   'companion.default': 'companion.default',
-  'robot.default': 'robot.default',
   'customer-service.default': 'customerService.default',
   'creative-studio.default': 'creativeStudio.default',
 };
+
+/** One explicit authoring detour in browser history; never model routes or credentials. */
+export type AgentEditingDocument = Omit<AgentPresetDocument, 'model_route_refs' | 'chat_route_records'>;
+export type TemplateEditingState = { displayName: string; document: AgentEditingDocument; activeTab: string };
+export type AgentEditorReturn = { version: 1; search: string } & (
+  | { kind: 'template'; templateKey: OfficialPresetKey; editing: TemplateEditingState }
+  | { kind: 'preset'; draft: Omit<AgentPresetDraft, 'document'> & { document: AgentEditingDocument } }
+);
+export function editingDocument(document: AgentPresetDocument): AgentEditingDocument {
+  const { model_route_refs: _routes, chat_route_records: _records, ...editing } = document;
+  return structuredClone(editing);
+}
+export function agentEditorReturn(state: unknown, search: string): AgentEditorReturn | null {
+  const value = state && typeof state === 'object' ? (state as { agentEditorReturn?: AgentEditorReturn }).agentEditorReturn : null;
+  if (!value || value.version !== 1 || value.search !== search) return null;
+  const params = new URLSearchParams(search);
+  if (value.kind === 'template' && value.editing && typeof value.editing.displayName === 'string' &&
+      Array.isArray(value.editing.document?.enabled_capabilities) &&
+      (!params.has('template') || params.get('template') === value.templateKey) && !params.has('preset')) return value;
+  if (value.kind === 'preset' && value.draft && typeof value.draft.preset_id === 'string' &&
+      Array.isArray(value.draft.document?.enabled_capabilities) &&
+      (!params.has('preset') || params.get('preset') === value.draft.preset_id) && !params.has('template')) return value;
+  return null;
+}
+
+export const isAgentModelConfigurationMissing = (error: unknown): boolean => errorCode(error) === 'MODEL_ROUTE_NOT_CONFIGURED';
 
 export const chatRouteCandidateKey = (candidate: ChatRouteCandidate): string =>
   `${candidate.model_route_id}@${candidate.model_route_revision}`;
@@ -70,7 +95,6 @@ export const RESOURCE_KIND_I18N_KEYS: Readonly<Record<string, string>> = {
   companion_memory: 'companionMemory',
   computer: 'computer',
   customer: 'customer',
-  generation_provider: 'generationProvider',
   knowledge_base: 'knowledgeBase',
   mcp_server: 'mcpConnection',
   plugin: 'pluginRuntime',
@@ -542,6 +566,7 @@ export function classifyAgentUiError(
     return 'resource';
   }
   if (
+    code === 'MODEL_ROUTE_NOT_CONFIGURED' ||
     code === 'MODEL_ROUTE_RECORD_INVALID' ||
     code === 'MODEL_ROUTE_NOT_FOUND' ||
     code === 'CAPABILITY_NOT_MATERIALIZED' ||

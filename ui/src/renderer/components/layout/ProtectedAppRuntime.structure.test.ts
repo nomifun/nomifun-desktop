@@ -16,7 +16,7 @@ const workbenchLayoutSource = readSource(new URL('./Layout.tsx', import.meta.url
 const titlebarSource = readSource(new URL('./Titlebar/index.tsx', import.meta.url));
 const windowControlsSource = readSource(new URL('./WindowControls.tsx', import.meta.url));
 const focusShellSource = readSource(
-  new URL('../../pages/creativeStudio/app/CreativeStudioFocusShell.tsx', import.meta.url)
+  new URL('../../pages/creativeStudio/app/ResourcePageBoundary.tsx', import.meta.url)
 );
 const siderSource = readSource(new URL('./Sider/index.tsx', import.meta.url));
 const legacyFocusTopBarUrl = new URL(
@@ -77,7 +77,7 @@ describe('protected application runtime boundary', () => {
   test('routes the rebuilt workshop through the shared workbench layout', () => {
     const protectedRuntimeAt = routerSource.indexOf('<Route element={<ProtectedAppRuntime />}>');
     const focusRouteAt = routerSource.indexOf(
-      '<Route path={CREATIVE_STUDIO_ROOT_PATH} element={withRouteFallback(CreativeStudioFocusShell)}>'
+      '<Route element={withRouteFallback(ResourcePageBoundary)}>'
     );
     const workbenchAt = routerSource.indexOf('<Route element={layout}>');
 
@@ -90,14 +90,14 @@ describe('protected application runtime boundary', () => {
   });
 
   test('keeps the route shell free of duplicate chrome and exposes a stable sidebar return path', () => {
-    expect(focusShellSource.includes('data-creative-studio-focus-shell')).toBe(true);
-    expect(focusShellSource.includes("classNames('creative-studio-root', styles.shell)")).toBe(true);
-    expect(focusShellSource.includes("id='creative-studio-portal-root'")).toBe(true);
+    expect(focusShellSource.includes('data-resource-page')).toBe(true);
+    expect(focusShellSource.includes('className={styles.shell}')).toBe(true);
+    expect(focusShellSource.includes("id='resource-page-portal-root'")).toBe(true);
     expect(focusShellSource.includes('<CreativeStudioTopBar')).toBe(false);
     expect(focusShellSource.includes('<Outlet />')).toBe(true);
-    expect(siderSource.includes('CreativeStudioSider')).toBe(true);
-    expect(siderSource.includes("t('creativeStudio.focus.backToWorkbench')")).toBe(true);
-    expect(siderSource.includes("t('common.loading')")).toBe(true);
+    expect(siderSource.includes('CreativeStudioSider')).toBe(false);
+    expect(siderSource.includes('handleCanvasClick')).toBe(true);
+    expect(siderSource.includes('SiderAssetLibraryEntry')).toBe(true);
     expect(siderSource.includes('requestCreativeStudioBeforeLeave')).toBe(true);
   });
 
