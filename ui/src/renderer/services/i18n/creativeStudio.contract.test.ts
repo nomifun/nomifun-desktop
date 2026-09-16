@@ -50,7 +50,6 @@ const referencedCreativeStudioKeys = (): string[] => {
   const sources = [
     ...productionSourcesIn(new URL('../../pages/creativeStudio/', import.meta.url)),
     ...[
-      '../../components/layout/Sider/SiderNav/SiderCreativeStudioEntry.tsx',
       '../../components/layout/Sider/SiderNav/SiderAssetLibraryEntry.tsx',
       '../../components/layout/Sider/index.tsx',
     ].map((path) => new URL(path, import.meta.url)),

@@ -126,7 +126,7 @@ const render = (
   );
 
 describe('unified model definition editor rendering and interactions', () => {
-  test('keeps all nine capabilities intact when editing an existing model', () => {
+  test('keeps every canonical capability intact when editing an existing model', () => {
     const definition: ModelDefinitionDraft = {
       model: 'user-entered/model-not-in-catalog',
       capabilities: MODEL_TASK_ORDER.map((task) => ({
@@ -141,8 +141,8 @@ describe('unified model definition editor rendering and interactions', () => {
     for (const task of MODEL_TASK_ORDER) {
       expect(html.includes(`data-capability-card="${task}"`)).toBe(true);
     }
-    expect((html.match(/data-capability-card=/g) ?? []).length).toBe(9);
-    expect((html.match(/data-remove-model-task=/g) ?? []).length).toBe(9);
+    expect((html.match(/data-capability-card=/g) ?? []).length).toBe(MODEL_TASK_ORDER.length);
+    expect((html.match(/data-remove-model-task=/g) ?? []).length).toBe(MODEL_TASK_ORDER.length);
     expect(html.includes('value="user-entered/model-not-in-catalog"')).toBe(true);
     expect(html.includes('data-readonly-model-id="true"')).toBe(true);
     expect(html.includes('data-primary-model-task-picker')).toBe(false);

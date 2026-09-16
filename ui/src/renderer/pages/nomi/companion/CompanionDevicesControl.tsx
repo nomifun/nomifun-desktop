@@ -1,3 +1,9 @@
+/**
+ * @license
+ * Copyright 2025-2026 NomiFun (nomifun.com)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import { Button, Message, Popover, Radio, Tag } from '@arco-design/web-react';
 import { useState } from 'react';
 import { Robot } from '@icon-park/react';
