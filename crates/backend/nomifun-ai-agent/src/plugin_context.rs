@@ -77,6 +77,7 @@ impl ContextContributor for NomiTurnContextContributor {
                         principal: self.owner.clone(),
                         session_owner: self.owner.clone(),
                         agent_session_id: self.session_id.clone(),
+                        turn_id: None,
                         correlation_id: CorrelationId::from(format!(
                             "{}:context",
                             operation_id.as_ref()

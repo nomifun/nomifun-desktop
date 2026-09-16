@@ -145,6 +145,7 @@ async fn private_context_dependencies_are_not_consumed_at_start_or_before_turn()
         principal: owner(),
         session_owner: owner(),
         agent_session_id: SESSION.into(),
+        turn_id: None,
         operation_id: "private-context".into(),
         correlation_id: "private-context".into(),
         resolved_snapshot_ref: compiled.snapshot_ref().clone(),

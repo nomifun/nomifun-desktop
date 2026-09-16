@@ -138,6 +138,7 @@ async fn invoke(
                 principal: owner.clone(),
                 session_owner: owner.clone(),
                 agent_session_id: "graph-session".into(),
+                turn_id: "graph-turn".into(),
                 operation_id: "graph-operation".into(),
                 idempotency_key: "graph-key".into(),
                 correlation_id: "graph-correlation".into(),

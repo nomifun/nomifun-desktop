@@ -288,6 +288,7 @@ impl ToolDiscoveryPolicy for KernelDiscoveryPolicy {
                     principal: self.owner.clone(),
                     session_owner: self.owner.clone(),
                     agent_session_id: self.session.clone(),
+                    turn_id: key.clone().into(),
                     operation_id: key.clone().into(),
                     idempotency_key: key.clone().into(),
                     correlation_id: key.into(),

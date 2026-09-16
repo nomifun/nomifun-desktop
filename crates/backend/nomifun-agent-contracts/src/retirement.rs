@@ -11,6 +11,26 @@ const RETIREMENT_JSON: &str =
 const SOURCE_INVENTORY_JSON: &str =
     include_str!("../contracts/target-packages/target-first-party-contributions.v1.json");
 
+/// Extension-era authoring roots retired by UARC-022. These identities are
+/// globally reserved: a different package or Plugin must not republish them
+/// after the built-in packages disappear.
+pub const RETIRED_EXTENSION_AUTHORING_CAPABILITY_IDS: [&str; 10] = [
+    "skill.catalog",
+    "skill.describe",
+    "skill.invoke",
+    "skill.hooks",
+    "connector.data.read",
+    "connector.data.write",
+    "mcp.connect",
+    "mcp.oauth",
+    "mcp.resource",
+    "mcp.tool_proxy",
+];
+
+pub fn is_retired_extension_authoring_capability(value: &str) -> bool {
+    RETIRED_EXTENSION_AUTHORING_CAPABILITY_IDS.contains(&value)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilityRetirementManifest {
@@ -158,5 +178,31 @@ mod tests {
         let mut manifest = capability_retirement_manifest();
         manifest.routes[0].source_capability_ids.clear();
         assert!(manifest.validate(&inventory).is_err());
+    }
+
+    #[test]
+    fn retired_extension_authoring_ids_are_exact_and_unique() {
+        let ids = RETIRED_EXTENSION_AUTHORING_CAPABILITY_IDS
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(ids.len(), 10);
+        for expected in [
+            "skill.catalog",
+            "skill.describe",
+            "skill.invoke",
+            "skill.hooks",
+            "connector.data.read",
+            "connector.data.write",
+            "mcp.connect",
+            "mcp.oauth",
+            "mcp.resource",
+            "mcp.tool_proxy",
+        ] {
+            assert!(is_retired_extension_authoring_capability(expected));
+        }
+        assert!(!is_retired_extension_authoring_capability("mcp.server"));
+        assert!(!is_retired_extension_authoring_capability(
+            "mcp.0199a000-0000-7000-8000-000000000001.search"
+        ));
     }
 }

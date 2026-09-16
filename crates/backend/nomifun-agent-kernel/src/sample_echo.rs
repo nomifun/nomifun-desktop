@@ -2383,6 +2383,29 @@ async fn module_freezes_multiple_contributions_and_exact_action_grant_without_wi
 }
 
 #[test]
+fn materializer_rejects_republished_retired_extension_identity() {
+    let registration = registration_for(
+        SAMPLE_PACKAGE,
+        SAMPLE_MOUNT,
+        "skill.invoke",
+        "community-skill",
+        "community.server",
+        "",
+    );
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let error = registry.replace_all(vec![registration]).unwrap_err();
+    assert!(
+        matches!(&error, KernelError::InvalidRegistration { reason, .. }
+            if reason.contains("retired extension authoring identity")),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn compiler_rejects_implicit_action_authority_and_platform_managed_roots() {
     let registry = KernelRegistry::new(
         MaterializationPolicy::stable_with_test_fixtures(VERSION),
