@@ -1,7 +1,7 @@
 import type { AgentCatalogResponse, AgentPresetDocument, OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import { createEmptyAgentPresetDocument } from '@/common/types/agentPlatform';
 import { Button, Input } from '@arco-design/web-react';
-import { BookmarkOne, Refresh, Save } from '@icon-park/react';
+import { Refresh, Save } from '@icon-park/react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import AgentCapabilityWorkspace from './AgentCapabilityWorkspace';
@@ -50,9 +50,7 @@ const OfficialTemplateOverview: React.FC<Props> = ({ template, busy, catalog, on
 
   return <main className={styles.editorSurface}>
     <header className={styles.editorHeader}>
-      <span className={styles.agentAvatar}><BookmarkOne theme='outline' size={25} /></span>
       <div className={styles.editorHeaderCopy}>
-        <div className={styles.headerEyebrow}>{t('agentSettings.workbench.presetBadge')}</div>
         <h2>{name}</h2>
         <p>{t(`agentSettings.template.${path}.description`)}</p>
       </div>

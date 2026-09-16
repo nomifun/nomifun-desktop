@@ -26,7 +26,6 @@ import {
   LinkCloud,
   MessageOne,
   Save,
-  User,
 } from '@icon-park/react';
 import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -172,7 +171,6 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
 
   return <main className={styles.editorSurface}>
     <header className={styles.editorHeader}>
-      <span className={styles.agentAvatar}><User theme='outline' size={25} /></span>
       <div className={styles.editorHeaderCopy}>
         <div className={styles.headerEyebrow}>{t('agentSettings.workbench.personalBadge')}</div>
         <h2>{draft.display_name || t('agentSettings.defaults.untitledName')}</h2>

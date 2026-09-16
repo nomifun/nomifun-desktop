@@ -62,7 +62,9 @@ describe('Agent capability transfer workspace', () => {
     expect(enabled.getByRole('button', { name: 'View Read files details' })).toBeTruthy();
     expect(enabled.queryByRole('button', { name: 'View Read a webpage details' })).toBeNull();
     expect(all.getByRole('button', { name: 'View Read a webpage details' })).toBeTruthy();
-    expect((all.getByRole('checkbox', { name: 'Add Read files' }) as HTMLInputElement).disabled).toBe(true);
+    expect(all.queryByRole('checkbox', { name: 'Add Read files' })).toBeNull();
+    expect(all.getByText(en.capabilities.enabled)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^(Enable|Disable) / })).toBeNull();
     expect(screen.queryByRole('combobox')).toBeNull();
   });
 
@@ -73,7 +75,7 @@ describe('Agent capability transfer workspace', () => {
     expect(screen.state().enabled_capabilities).toHaveLength(1);
     fireEvent.click(screen.getByRole('button', { name: 'Move in (2)' }));
     await waitFor(() => expect(screen.state().enabled_capabilities).toHaveLength(3));
-    expect((screen.getByRole('checkbox', { name: 'Add Read a webpage' }) as HTMLInputElement).disabled).toBe(true);
+    expect(screen.queryByRole('checkbox', { name: 'Add Read a webpage' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: en.workbench.undo }));
     await waitFor(() => expect(screen.state().enabled_capabilities).toHaveLength(1));
     expect(screen.state().enabled_capabilities[0].action_allowlist).toEqual(selection(read).action_allowlist);
@@ -101,30 +103,34 @@ describe('Agent capability transfer workspace', () => {
     const screen = mount(documentWith([]));
     expect((screen.getByRole('checkbox', { name: 'Add Search the web' }) as HTMLInputElement).disabled).toBe(true);
     expect(screen.getByRole('button', { name: 'View Search the web details' })).toBeTruthy();
-    expect((screen.getByRole('button', { name: 'Enable Search the web' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Enable Search the web' })).toBeNull();
   });
 
   test('local browser search is independently selectable when native model search is unavailable', async () => {
     const local = item('nomi_local_websearch');
     const screen = mount(documentWith([]), [local, unavailable]);
-    fireEvent.click(screen.getByRole('button', { name: 'Enable Nomi local web search' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Add Nomi local web search' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Move in (1)' }));
     await waitFor(() => expect(screen.state().enabled_capabilities.map(row => row.capability.id)).toEqual(['nomi_local_websearch']));
     expect((screen.getByRole('checkbox', { name: 'Add Search the web' }) as HTMLInputElement).disabled).toBe(true);
-    fireEvent.click(screen.getByRole('button', { name: 'Disable Nomi local web search' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select Nomi local web search' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Move out (1)' }));
     await waitFor(() => expect(screen.state().enabled_capabilities).toEqual([]));
   });
 
   test('system browser selection does not enable embedded browser or local search capabilities', async () => {
     const screen = mount(documentWith([]), [item('nomi_system_browser'), item('nomi_local_websearch'), item('browser.navigate')]);
-    fireEvent.click(screen.getByRole('button', { name: 'Enable Nomi signed-in Chrome' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Add Nomi signed-in Chrome' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Move in (1)' }));
     await waitFor(() => expect(screen.state().enabled_capabilities.map(row => row.capability.id)).toEqual(['nomi_system_browser']));
-    fireEvent.click(screen.getByRole('button', { name: 'Disable Nomi signed-in Chrome' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select Nomi signed-in Chrome' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Move out (1)' }));
     await waitFor(() => expect(screen.state().enabled_capabilities).toEqual([]));
   });
 
   test('an unavailable local browser runtime cannot be enabled but its details remain accessible', () => {
     const screen = mount(documentWith([]), [item('nomi_local_websearch', false)]);
-    expect((screen.getByRole('button', { name: 'Enable Nomi local web search' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('checkbox', { name: 'Add Nomi local web search' }) as HTMLInputElement).disabled).toBe(true);
     expect(screen.getByRole('button', { name: 'View Nomi local web search details' })).toBeTruthy();
     expect(screen.getByText(/No available local search runtime is currently bound/)).toBeTruthy();
     expect(screen.state().enabled_capabilities).toEqual([]);
@@ -134,7 +140,8 @@ describe('Agent capability transfer workspace', () => {
     const missing = item('plugin.missing');
     const screen = mount(documentWith([missing]));
     const left = within(screen.getByRole('region', { name: en.workbench.enabledCapabilities }));
-    fireEvent.click(left.getByRole('button', { name: /^Disable / }));
+    fireEvent.click(left.getByRole('checkbox', { name: 'Select Plugin Runtime: missing' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Move out (1)' }));
     await waitFor(() => expect(screen.state().enabled_capabilities).toEqual([]));
   });
 });
