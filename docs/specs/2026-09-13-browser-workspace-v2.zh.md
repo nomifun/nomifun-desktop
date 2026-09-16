@@ -3,6 +3,8 @@
 > 状态：**WINDOWS DELIVERED / MACOS HANDOFF READY**
 >
 > 修订日期：2026-09-16
+> macOS 内核已获用户批准改为独立 CEF child NSView；Windows 保留 WebView2。
+> 见[平台架构决策](../continuity/2026-09-16-browser-platform-architecture-decision.zh.md)。本决策不代表 Mac 验收通过。
 >
 > 适用分支：`rf/agent-capability-platform-v2`
 >
@@ -30,7 +32,7 @@ Inspect 菜单、独立 DevTools 窗口归属或用户设置；保持未受管�
 WebView2 DevTools Protocol 运输，它是观察、输入与生命周期实现细节，不是用户可见 DevTools 产品。
 网络边界保留，但只实现必要的目标校验与会话归属，不建设通用代理管理平台或用户配置面板。
 
-1. Tauri Desktop 的 Browser Workspace 使用**真实原生 child WebView**。网页直接由 WebView2、WKWebView 或
+1. Tauri Desktop 的 Browser Workspace 使用**真实原生 child WebView**。网页直接由 WebView2、CEF 或
    WebKitGTK 渲染；不使用 JPEG/PNG 连续帧、screencast、canvas 远程控制或 iframe。
 2. 用户看到的 BrowserTab 就是 Agent 操作的 BrowserTab。相同 URL、复制 cookie 或同步导航都不算同一实例。
 3. `browser.act` 的点击、悬停、键盘、滚轮与拖拽必须进入**同一个 BrowserTab 的浏览器输入管线**；DOM 只用于
@@ -738,7 +740,7 @@ native child WebView 渲染。Tauri 提供 child WebView 的创建、定位、re
 | 平台 | 原生引擎 | Agent 自动化 | 交付条件 |
 | --- | --- | --- | --- |
 | Windows | WebView2 | WebView2 CDP + shared semantic core | 首个完整交付平台 |
-| macOS 14+ | WKWebView | isolated-world bridge + native delegate/input | conformance 通过后开启 |
+| macOS 14+ | CEF child NSView（2026-09-16 用户确认） | 独立 Mac 宿主、CEF 公开输入/协议接口 | conformance 通过后开启；Windows 仍使用 WebView2 |
 | Linux | WebKitGTK | WebKit automation/script world + GTK input | X11/Wayland 分别通过后开启 |
 | Desktop WebUI | 宿主浏览器 | 无 arbitrary-site child WebView | 明确 unavailable |
 
@@ -808,7 +810,7 @@ run terminal   -> cancel/settle action -> enable native input -> publish UserRea
 ```
 
 - Windows 使用 WebView2 Controller/Composition 或 child HWND 原生输入过滤；
-- macOS 使用 NSView/NSWindow event gate；Agent 注入的 AppKit event 带仅宿主可生成的内部标记，gate 只放行该标记；
+- macOS 使用 NSView/NSWindow event gate 阻止用户对 CEF 页面输入，Agent 通过宿主拥有的 CEF 页面级输入接口；
 - Linux 使用 GTK event controller；
 - 输入 disabled 时仍允许页面渲染、Agent automation 与音视频播放；
 - 解除前必须清理可能按下的 modifier、pointer capture、drag 和 IME composition；
@@ -855,7 +857,7 @@ Browser child 使用 `browser-*` label，不匹配任何 Tauri capability：
 自定义 `invoke_handler` 命令也必须先检查宿主拥有的 WebView 身份，不能仅依赖插件 ACL；Tauri 默认允许应用自定义
 命令。该检查同时验证 WebView label 与 parent window label，禁止外部 child 调用应用命令。
 
-自动化脚本使用 platform isolated world：Windows 使用 CDP isolated world；macOS 使用 WKContentWorld；Linux 使用
+自动化脚本使用 platform isolated world：Windows 使用 WebView2 CDP isolated world；macOS 使用 CEF 的 isolated world；Linux 使用
 命名 script world：
 
 - [WKContentWorld](https://developer.apple.com/documentation/webkit/wkcontentworld)
@@ -975,25 +977,20 @@ Windows 原生输入实施约束（2026-09-16 收口）：
 
 ### 9.4 macOS 与 Linux
 
-macOS 不能照抄 WebView2：Apple 的 public WKWebView API 提供 JavaScript/content-world 与原生 View 能力，但没有
-公开的通用 CDP；WebKit 自己也指出 Web Inspector Protocol 不向 embedder 开放。因此 AppKit 输入路径必须先做
-真实 spike，不能在架构图里把“isolated world”写成已经拥有 Chromium 级自动化：
-
-- [Apple WKWebView](https://developer.apple.com/documentation/webkit/wkwebview/)
-- [Apple NSEvent](https://developer.apple.com/documentation/appkit/nsevent)
-- [WebKit：Playwright and the State of Modern E2E Testing](https://docs.webkit.org/Other/Contributor%20Meetings/Slides2023/Playwright%20and%20the%20State%20of%20Modern%20E2E%20Testing.pdf)
+macOS 使用独立 CEF 原生宿主，不复刻 WebView2 COM 架构，也不将 Windows 迁往 CEF。
+此前 WKWebView/AppKit 与 PID 定向输入的 buttons/drag 前置验证失败，用户已明确批准更换 Mac 内核；
+历史证据见 macOS native-preflight 与 repair 记录。
 
 macOS：
 
-- WKWebsiteDataStore 管理 persistent/nonPersistent profile；
-- Agent bridge 在 WKContentWorld；
-- navigation、popup、permission、download、process termination 经原生 delegate；
-- 语义层在 isolated world 取 ref/content quad，输入层在主线程构造 `NSEvent` 并通过 `NSApplication.postEvent`
-  投递给承载该 WKWebView 的同一 NSWindow；不调用私有 WebKit API，不发送系统级 CGEvent，不要求辅助功能权限；
-- event 使用宿主内部 source marker 与 sequence，NativeInputGate 阻止硬件输入但放行当前 Agent action；
-- Unicode 输入通过浏览器的 AppKit text-input 路径，不直接写 DOM；
+- CEF child NSView 直接挂载主窗口，不使用 windowless/帧流；应用 UI 仍由 Tauri 承载；
+- 每个 Conversation 使用独立 CefRequestContext 管理持久或临时存储，不读取个人浏览器 profile；
+- 观察经 CEF 宿主协议进入 isolated world；navigation、popup、permission、download、process termination 经 CEF callbacks；
+- 输入通过 CEF 公开页面级 native/protocol 接口送到同一可见实例，不发送系统级 CGEvent，不接管全局鼠标；
+- NativeInputGate 阻止用户对页面的输入，Agent host input 与 UI stop 通道保持可用；
+- Unicode/组合文本通过浏览器输入管线，不直接写 DOM；
 - trusted input、默认行为、cross-frame、focus、IME 和 drag 必须在真实签名 app 中实测，不用 `element.click()`
-  冒充完整兼容；若 AppKit 路径不能通过 conformance，macOS 不发布该动作，先做 Runtime Provider 重新裁决。
+  冒充完整兼容；必须验证沙箱、CEF framework/helper 打包签名公证、Tauri 消息循环共存和正常退出。
 
 Linux：
 
@@ -1735,7 +1732,7 @@ nomi_local_websearch.*needs_web_search | nomi_local_websearch.*ChatRouteFeature:
 ### Phase 6：macOS，Linux 可后置
 
 - 实施与回传格式见 [macOS v2 移交清单](../continuity/2026-09-16-browser-workspace-v2-macos-handoff.zh.md)；
-- macOS 实现 WKWebView semantic bridge、AppKit BrowserInputDriver、input gate、profile 与 native surface；
+- macOS 实现独立 CEF semantic bridge、BrowserInputDriver、input gate、request context 与 child NSView；
 - Windows/macOS 跑同一 conformance 与签名安装包 smoke，通过后才共同声明正式支持；
 - Linux WebKitGTK 按同一合同实现，但允许本次发布后置；X11/Wayland 未通过时明确 unavailable；
 - 任何平台都不加帧流、iframe 或 DOM-click fallback。

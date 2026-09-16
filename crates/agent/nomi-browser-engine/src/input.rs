@@ -437,7 +437,7 @@ async fn dispatch_key(
 /// Alt, Meta 顺序）+ DOM `code`,join `+`;查表后**过滤 `insert*`**（那些由 [`insert_text`] 文本路径
 /// 处理）+ **去尾冒号**（CDP 要 `selectAll` 而非 `selectAll:`）。仅 keyDown 带。
 #[cfg(target_os = "macos")]
-fn mac_editing_commands(code: &str, modifiers: u32) -> Vec<String> {
+pub fn mac_editing_commands(code: &str, modifiers: u32) -> Vec<String> {
     let mut parts: Vec<&str> = Vec::new();
     if modifiers & modifier_bits::SHIFT != 0 {
         parts.push("Shift");

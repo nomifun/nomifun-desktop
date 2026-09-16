@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::windows;
+use super::windows as native;
 #[path = "screenshot.rs"]
 mod screenshot;
 #[path = "pending_work.rs"]

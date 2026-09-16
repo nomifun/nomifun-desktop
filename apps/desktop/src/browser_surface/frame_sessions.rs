@@ -1,7 +1,7 @@
 //! OOPIF routes discovered exclusively through one embedded WebView's events.
 //! No browser-wide discovery, arbitrary target attachment or public debug port.
 
-use super::{ProtocolEvents, protocol_call, protocol_call_session, listen_frames};
+use super::{ProtocolEvents, protocol_call, protocol_call_session, listen_frames, View};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -149,7 +149,7 @@ pub(crate) struct FrameTrees {
 /// A host-only route retained by a user picker while the Agent driver is idle.
 /// No serialized session ID can construct this authority.
 pub(crate) struct OwnedFrameRoute {
-    view: tauri::Webview,
+    view: View,
     frame: Option<FrameSession>,
     routes: std::sync::Arc<std::sync::Mutex<Routes>>,
     invalid: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -297,7 +297,7 @@ pub(crate) struct FrameSessions {
 }
 
 impl FrameSessions {
-    pub(crate) async fn connect(view: &tauri::Webview) -> Result<Self, String> {
+    pub(crate) async fn connect(view: &View) -> Result<Self, String> {
         let mut events = listen_frames(view).await?;
         let routes = std::sync::Arc::new(std::sync::Mutex::new(Routes::new(events.id)));
         let receiver = events.receiver.take().ok_or(ROUTE_ERROR)?;

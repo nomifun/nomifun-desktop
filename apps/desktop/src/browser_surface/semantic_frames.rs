@@ -1,13 +1,13 @@
 //! Per-document semantic worlds and frame-local to root-viewport mapping.
 //! No input is synthesized here; the Tab driver sends native input at the result.
 
-use super::{cdp, check_cancel, windows};
+use super::{cdp, check_cancel, native, View};
 use nomi_browser_engine::{native_semantic, redact};
 use nomifun_browser_platform::runtime::*;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use tokio_util::sync::CancellationToken;
-use windows::frames::{FrameSession, FrameSessions, FrameTrees};
+use native::frames::{FrameSession, FrameSessions, FrameTrees};
 use nomi_browser_engine::frame_geometry::{ContentQuad, CHECK_FRAME_OWNER, CHECK_FRAME_HIT};
 
 #[derive(Clone)]
@@ -106,7 +106,7 @@ pub(super) struct DragSource {
 }
 
 impl DragSource {
-    pub(super) async fn cancel(&self, view: &tauri::Webview, sessions: &FrameSessions) -> Result<(), WorkspaceError> {
+    pub(super) async fn cancel(&self, view: &View, sessions: &FrameSessions) -> Result<(), WorkspaceError> {
         // The root Input drag controller tracks the current drop target, not
         // necessarily the source widget. Explicitly cancel the owned source
         // session too. Empty payload carries no data; this is never a drop or a
@@ -129,7 +129,7 @@ pub(super) struct SemanticFrames {
 }
 
 async fn command(
-    view: &tauri::Webview,
+    view: &View,
     sessions: &FrameSessions,
     session: Option<&FrameSession>,
     method: &str,
@@ -160,14 +160,14 @@ impl SemanticFrames {
             self.worlds[target].plan.session.as_ref(),
         ))
     }
-    async fn content_quad(&self,view:&tauri::Webview,sessions:&FrameSessions,index:usize)->Result<ContentQuad,WorkspaceError> {
+    async fn content_quad(&self,view:&View,sessions:&FrameSessions,index:usize)->Result<ContentQuad,WorkspaceError> {
         let world=&self.worlds[index];
         let parent=world.plan.parent.ok_or(WorkspaceError::NotActionable)?;
         let owner=world.owner.as_ref().ok_or(WorkspaceError::StaleObservation)?;
         let model=command(view,sessions,self.worlds[parent].plan.session.as_ref(),"DOM.getBoxModel",json!({"objectId":owner})).await?;
         ContentQuad::read(&model["model"]["content"])
     }
-    async fn viewport(&self,view:&tauri::Webview,sessions:&FrameSessions,index:usize)->Result<(f64,f64),WorkspaceError> {
+    async fn viewport(&self,view:&View,sessions:&FrameSessions,index:usize)->Result<(f64,f64),WorkspaceError> {
         let value=self.in_world(view,sessions,index,"function(){return {width:innerWidth,height:innerHeight};}",vec![],true).await?;
         Ok((value["width"].as_f64().ok_or(WorkspaceError::NotActionable)?,value["height"].as_f64().ok_or(WorkspaceError::NotActionable)?))
     }
@@ -197,7 +197,7 @@ impl SemanticFrames {
 
     async fn in_world(
         &self,
-        view: &tauri::Webview,
+        view: &View,
         sessions: &FrameSessions,
         index: usize,
         function: &str,
@@ -232,7 +232,7 @@ impl SemanticFrames {
 
     pub(super) async fn call(
         &self,
-        view: &tauri::Webview,
+        view: &View,
         sessions: &FrameSessions,
         function: &str,
         args: Vec<Value>,
@@ -252,7 +252,7 @@ impl SemanticFrames {
 
     pub(super) async fn select_node(
         &self,
-        view: &tauri::Webview,
+        view: &View,
         sessions: &FrameSessions,
     ) -> Result<(), WorkspaceError> {
         let node = self
@@ -279,10 +279,10 @@ impl SemanticFrames {
         Ok(())
     }
 
-    pub(super) async fn is_file_input(&self,view:&tauri::Webview,sessions:&FrameSessions,reference:&str)->Result<bool,WorkspaceError> {
+    pub(super) async fn is_file_input(&self,view:&View,sessions:&FrameSessions,reference:&str)->Result<bool,WorkspaceError> {
         Ok(self.call(view,sessions,"function(ref){const el=this._lastAriaSnapshotForQuery?.elements?.get(ref);return el instanceof HTMLInputElement && el.type==='file';}",vec![json!(self.local_ref(reference)?)]).await?==true)
     }
-    pub(super) async fn upload_choice(&self,view:&tauri::Webview,sessions:&FrameSessions,choice:windows::file_chooser::Choice,files:&nomifun_browser_platform::uploads::PreparedBrowserUpload,cancel:&CancellationToken)->Result<(),WorkspaceError> {
+    pub(super) async fn upload_choice(&self,view:&View,sessions:&FrameSessions,choice:native::file_chooser::Choice,files:&nomifun_browser_platform::uploads::PreparedBrowserUpload,cancel:&CancellationToken)->Result<(),WorkspaceError> {
         check_cancel(cancel)?;
         choice.require_current()?;
         // The clicked control may delegate to another already-observed frame
@@ -305,7 +305,7 @@ impl SemanticFrames {
         choice.require_current()
     }
 
-    pub(super) async fn upload_files(&self,view:&tauri::Webview,sessions:&FrameSessions,reference:&str,files:&nomifun_browser_platform::uploads::PreparedBrowserUpload,cancel:&CancellationToken)->Result<(),WorkspaceError> {
+    pub(super) async fn upload_files(&self,view:&View,sessions:&FrameSessions,reference:&str,files:&nomifun_browser_platform::uploads::PreparedBrowserUpload,cancel:&CancellationToken)->Result<(),WorkspaceError> {
         check_cancel(cancel)?;
         let paths=files.native_paths()?;
         let node=self.in_world(view,sessions,self.active,
@@ -325,7 +325,7 @@ impl SemanticFrames {
 
     pub(super) async fn highlight(
         &self,
-        view: &tauri::Webview,
+        view: &View,
         sessions: &FrameSessions,
         point: (f64, f64),
     ) -> Result<(), WorkspaceError> {
@@ -343,7 +343,7 @@ impl SemanticFrames {
 
     pub(super) async fn ancestors_focused(
         &self,
-        view: &tauri::Webview,
+        view: &View,
         sessions: &FrameSessions,
     ) -> Result<bool, WorkspaceError> {
         let mut index = self.active;
@@ -361,7 +361,7 @@ impl SemanticFrames {
 
     pub(super) async fn clear_highlight(
         &self,
-        view: &tauri::Webview,
+        view: &View,
         sessions: &FrameSessions,
     ) -> Result<(), WorkspaceError> {
         if self.worlds.is_empty() { return Ok(()); }
@@ -371,7 +371,7 @@ impl SemanticFrames {
 
     pub(super) async fn observe(
         &mut self,
-        view: &tauri::Webview,
+        view: &View,
         sessions: &FrameSessions,
         trees: &FrameTrees,
         target: BrowserTabTarget,
@@ -540,7 +540,7 @@ impl SemanticFrames {
 
     pub(super) async fn locate(
         &self,
-        view: &tauri::Webview,
+        view: &View,
         sessions: &FrameSessions,
         reference: &str,
         editable: bool,
@@ -548,11 +548,11 @@ impl SemanticFrames {
         Ok(self.locate_native(view, sessions, reference, editable, false).await?.point)
     }
 
-    pub(super) async fn drag_source(&self, view: &tauri::Webview, sessions: &FrameSessions, reference: &str) -> Result<DragSource, WorkspaceError> {
+    pub(super) async fn drag_source(&self, view: &View, sessions: &FrameSessions, reference: &str) -> Result<DragSource, WorkspaceError> {
         self.locate_native(view, sessions, reference, false, true).await
     }
 
-    async fn locate_native(&self, view: &tauri::Webview, sessions: &FrameSessions, reference: &str, editable: bool, source_scope: bool) -> Result<DragSource, WorkspaceError> {
+    async fn locate_native(&self, view: &View, sessions: &FrameSessions, reference: &str, editable: bool, source_scope: bool) -> Result<DragSource, WorkspaceError> {
         let (mut index, local) = self
             .refs
             .get(reference)

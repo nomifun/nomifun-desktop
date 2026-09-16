@@ -111,9 +111,9 @@ impl DesktopBrowserRuntime {
         for tab in tabs {
             if tab.popup_stop.is_cancelled() { continue; }
             let result = if drain {
-                windows::script_dialogs::drain(&tab.view).await
+                native::script_dialogs::drain(&tab.view).await
             } else {
-                windows::script_dialogs::resume(&tab.view).await
+                native::script_dialogs::resume(&tab.view).await
             };
             if let Err(error) = result {
                 if !tab.popup_stop.is_cancelled() { failure = Some(error); }
@@ -323,7 +323,7 @@ impl DesktopBrowserRuntime {
     async fn drain_tab_dialog(&self, id: &str) -> Result<(), WorkspaceError> {
         let tab = self.state.lock().await.tabs.get(id).cloned();
         match tab {
-            Some(tab) => windows::script_dialogs::drain(&tab.view).await,
+            Some(tab) => native::script_dialogs::drain(&tab.view).await,
             None => Ok(()),
         }
     }
@@ -405,10 +405,10 @@ impl DesktopBrowserRuntime {
         for tab in &tabs {
             // Closing candidates must not cover the error/empty state if a
             // later native Close fails. Layout skips these fenced views.
-            let _=tab.view.hide();
+            let _=native::hide(&tab.view).await;
             // A successful native Close is stronger than a failed preliminary
             // input freeze. On Close failure keep the exact tab for retry.
-            let _=windows::set_native_user_input_enabled(&tab.view,false).await;
+            let _=native::set_native_user_input_enabled(&tab.view,false).await;
             if let Err(error)=self.retire_native_tab(tab).await { failure=Some(error); }
         }
         for task in tasks {
@@ -422,7 +422,7 @@ impl DesktopBrowserRuntime {
         if let Some(view) = maintenance {
             let result = if let Some(error) = failure.take() { Err(error) }
                 else if cancel.is_cancelled() || self.closing.is_cancelled() { Err(RunAdmissionError::Cancelled.into()) }
-                else { windows::site_data::clear(&view, cancel.clone()).await };
+                else { native::site_data::clear(&view, cancel.clone()).await };
             if matches!(result, Err(WorkspaceError::Admission(RunAdmissionError::WorkerFailed))) { return Err(RunAdmissionError::WorkerFailed.into()); }
             self.close_site_data_view().await?;
             result?;
@@ -545,7 +545,7 @@ impl DesktopBrowserRuntime {
             return Err(RunAdmissionError::Cancelled.into());
         }
         let original = reply.target.clone();
-        windows::script_dialogs::respond(
+        native::script_dialogs::respond(
             &view,
             reply.target,
             reply.request_id,
