@@ -1,7 +1,7 @@
 # UARC-012 单一 AgentSession owner 与 API 实施记录
 
 > 开始 barrier：`9b62887aee46130a144bca7369c01823718e79c8`
-> 实现提交：由 UARC-012 closeout 固化
+> 实现提交：`82954016810ed5fabe48248adc4952d2bd5f199e`
 > 数据源：main SQLite 中的 Agent Store generation 5
 > 平台：共享 Rust/API；Windows 执行工程验证
 
