@@ -51,19 +51,6 @@ impl NomiCoreApplication {
         Self::compose_with_config(environment, &environment.config).await
     }
 
-    /// Register trusted engines compiled into this application before router assembly.
-    /// Factories implement the same lifecycle/teardown contract as the built-ins;
-    /// No executable mounting or registration is allowed after assembly. Adding
-    /// an engine requires rebuilding and repackaging the application.
-    /// Keep the Arc in the callback so register_session_hosted can capture a
-    /// weak host reference without exposing services or a second Session owner.
-    pub async fn compose_with_runtime_engines(
-        environment: &ServerEnvironment,
-        register: impl FnOnce(&Arc<crate::RuntimeEngineHost>) -> Result<(), nomifun_common::AppError>,
-    ) -> Result<Self> {
-        Self::compose_with_config_and_engines(environment, &environment.config, register).await
-    }
-
     /// Compose the Nomi core against an explicit host policy.
     ///
     /// Desktop uses this to replace the CLI's authentication policy with its
@@ -73,13 +60,12 @@ impl NomiCoreApplication {
         environment: &ServerEnvironment,
         config: &crate::AppConfig,
     ) -> Result<Self> {
-        Self::compose_with_config_and_engines(environment, config, |_| Ok(())).await
+        Self::compose_with_config_inner(environment, config).await
     }
 
-    async fn compose_with_config_and_engines(
+    async fn compose_with_config_inner(
         environment: &ServerEnvironment,
         config: &crate::AppConfig,
-        register: impl FnOnce(&Arc<crate::RuntimeEngineHost>) -> Result<(), nomifun_common::AppError>,
     ) -> Result<Self> {
         let database = init_data_layer(config).await?;
         let services = AppServices::from_config(database, config)
@@ -89,9 +75,6 @@ impl NomiCoreApplication {
                 config,
             )
             .await?;
-        if let Err(error) = register(&services.runtime_engines) {
-            return Err(cleanup_failed_composition(services, error.into()).await);
-        }
         if let Err(error) = finalize_data_layer(config) {
             return Err(cleanup_failed_composition(services, error).await);
         }

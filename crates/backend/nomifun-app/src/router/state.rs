@@ -1022,8 +1022,6 @@ async fn build_nomi_core_agent_api_state(
         Arc::new(nomifun_db::SqliteMcpServerRepository::new(
             services.database.pool().clone(),
         ));
-    services.runtime_engines.register_restart_recovery(&super::coding_runtime_host::descriptor(),
-        Arc::new(super::coding_runtime_recovery::CodingRestartRecovery::new(services.database.pool().clone())))?;
     let engine_sessions = Arc::new(super::engine_session_host::EngineSessionHost::new(
         &conversation_owner, Arc::clone(&control_plane), &services.runtime_engines, services.database.pool().clone(), services.encryption_key,
         super::engine_kernel_session::EngineKernelAssembly {
@@ -1036,12 +1034,13 @@ async fn build_nomi_core_agent_api_state(
         },
         Arc::clone(&plugin.skill_artifacts),
     ));
-    services.runtime_engines.install_session_host(Arc::clone(&engine_sessions))?;
-    services.runtime_engines.install(super::coding_runtime_host::factory(
-        engine_sessions,
-        services.database.pool().clone(),
-        Arc::clone(&plugin.schema_resolver),
-    ))?;
+    services
+        .runtime_engines
+        .install_official_driver(super::coding_runtime_host::factory(
+            engine_sessions,
+            services.database.pool().clone(),
+            Arc::clone(&plugin.schema_resolver),
+        ))?;
     conversation_owner.install_runtime_engines(Arc::clone(&services.runtime_engines), Arc::downgrade(&control_plane))?;
     services
         .agent_runtime_registry

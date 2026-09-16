@@ -644,8 +644,8 @@ async fn await_browser_shutdown_step(step: Option<BrowserShutdownStep>) -> Resul
 }
 
 pub struct AppServices {
-    /// Trusted embedders may register additional engines before router assembly.
-    pub runtime_engines: Arc<crate::router::runtime_engines::RuntimeEngineHost>,
+    /// Process-owned handle to the one immutable official Runtime provider.
+    pub(crate) runtime_engines: Arc<crate::router::runtime_engines::RuntimeEngineHost>,
     pub database: Database,
     /// Process-lifetime cancellation shared by background domain tasks that
     /// must stop before the database is closed.
@@ -2339,7 +2339,7 @@ impl AppServices {
                 .with_nomi_session_resolver(Arc::new(move |binding| {
                     engine_policy.upgrade()
                         .ok_or_else(|| nomifun_common::AppError::Conflict("Runtime host has shut down".into()))?
-                        .catalog()?.uses_nomi_session(binding)
+                        .catalog()?.uses_private_session_codec(binding)
                 }))
                 .with_model_config_resolver(build_agent_model_config_resolver(
                     model_invoke_service.clone(),

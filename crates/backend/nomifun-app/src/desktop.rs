@@ -691,14 +691,13 @@ impl DesktopServer {
     ) -> Result<(Arc<DesktopServer>, DesktopKeepAlive)> {
         // Tests and embedded callers use the same Nomi-core composition as the
         // native desktop shell.
-        Self::start_with_runtime_engines(
+        Self::start_with_host_services(
             cli,
             merged_path,
             spa_dir,
             dev_frontend_url,
             webui_asset_source,
             DesktopHostServices::default(),
-            |_| Ok(()),
         )
         .await
         .map_err(DesktopStartError::into_inner)
@@ -720,33 +719,27 @@ impl DesktopServer {
         (Arc<DesktopServer>, DesktopKeepAlive),
         DesktopStartError,
     > {
-        // The current desktop uses one Conversation-backed multi-Engine host.
-        // Historical Wrapper composition must not become the product runtime.
-        Self::start_with_runtime_engines(
+        Self::start_with_host_services(
             cli,
             merged_path,
             spa_dir,
             dev_frontend_url,
             webui_asset_source,
             host_services,
-            |_| Ok(()),
         )
         .await
     }
 
-    /// Source-composed desktop entry point with the same typed cleanup outcome
-    /// as `start_with_outcome`. The callback only registers compiled-in builds,
-    /// aliases and recovery hooks before router assembly and listener serving.
-    /// It must not start tasks or acquire resources outside platform ownership.
-    /// This is not exposed through IPC, configuration or packaged module loading.
-    pub async fn start_with_runtime_engines(
+    /// Fixed-runtime desktop entry point with the same typed cleanup outcome as
+    /// `start_with_outcome`. AppServices installs the sole official Driver;
+    /// callers can supply platform services but cannot register a Runtime.
+    async fn start_with_host_services(
         cli: &Cli,
         merged_path: &str,
         spa_dir: Option<PathBuf>,
         dev_frontend_url: Option<String>,
         webui_asset_source: Option<WebUiAssetSource>,
         host_services: DesktopHostServices,
-        register: impl FnOnce(&Arc<crate::RuntimeEngineHost>) -> Result<(), nomifun_common::AppError> + Send,
     ) -> std::result::Result<
         (Arc<DesktopServer>, DesktopKeepAlive),
         DesktopStartError,
@@ -806,10 +799,6 @@ impl DesktopServer {
                 return Err(cleanup_start_failure(keep_alive, error).await);
             }
         };
-        if let Err(error) = register(&services.runtime_engines) {
-            let keep_alive = DesktopKeepAlive::from_parts(env, services);
-            return Err(cleanup_start_failure(keep_alive, error.into()).await);
-        }
         if let Err(error) = bootstrap::finalize_data_layer(&config) {
             let keep_alive = DesktopKeepAlive::from_parts(env, services);
             return Err(cleanup_start_failure(keep_alive, error).await);

@@ -16,8 +16,9 @@ use nomifun_db::{SqlitePool, sqlx};
 use super::nomi_core_session::{NomiCoreSessionOwner, session_metadata};
 use super::runtime_engines::{RuntimeEngineHost, binding_from_extra};
 
-/// Constructed by application assembly only. Community drivers may resolve
-/// their catalog-supplied options through RuntimeEngineHost::session_host().
+/// Constructed by application assembly only. The sole official Driver receives
+/// this typed port owner from the composition root; there is no runtime
+/// registration or direct Domain-handler access path.
 pub struct EngineSessionHost {
     skill_artifacts: Arc<nomifun_plugin_platform::application::FsPluginArtifactStore>,
     owner: Weak<NomiCoreSessionOwner>,

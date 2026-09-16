@@ -1,12 +1,13 @@
-//! Engine-neutral registration and exact build resolution for trusted hosts.
+//! Exact build identity for the single official Nomi Runtime provider.
 //!
-//! The catalog owns implementations, never Session state or permissions. Resolve
-//! a selector at Session creation/fork and persist the returned exact binding in
-//! the Session owner's transaction. Resume uses `open` with that binding; it
-//! must not resolve a channel again. There is no implicit engine fallback.
+//! Production exposes one immutable provider and no family/channel selector.
+//! The former catalog is compiled only for migration tests until UARC-052
+//! removes old Coding fixtures; it is not available to product composition.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
+
+#[cfg(any(test, feature = "test-support"))]
+use std::collections::BTreeMap;
 
 use futures_util::future::BoxFuture;
 use nomifun_common::AppError;
@@ -14,6 +15,7 @@ use nomifun_common::AppError;
 use crate::runtime_registry::AgentRuntimeFactory;
 use crate::types::AgentRuntimeBuildOptions;
 use crate::{AgentRuntimeHandle, RegisteredAgentRuntime, RuntimeEngineAdmission};
+use crate::runtime_driver::OFFICIAL_NOMI_RUNTIME_FAMILY_ID;
 
 /// A host-installed implementation, not a client-supplied executable path.
 pub type RuntimeEngineFactory = Arc<
@@ -25,8 +27,13 @@ pub type RuntimeEngineFactory = Arc<
         + Sync,
 >;
 
-pub use nomifun_api_types::{RuntimeEngineBinding, RuntimeEngineDescriptor, RuntimeEngineSelector, RUNTIME_HOST_CONTRACT_VERSION};
+pub use nomifun_api_types::{
+    RUNTIME_HOST_CONTRACT_VERSION, RuntimeEngineBinding, RuntimeEngineDescriptor,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use nomifun_api_types::RuntimeEngineSelector;
 
+#[cfg(any(test, feature = "test-support"))]
 fn identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -35,6 +42,7 @@ fn identifier(value: &str) -> bool {
         })
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn digest(value: &str) -> bool {
     value.len() == 64
         && value
@@ -46,21 +54,151 @@ fn invalid(message: &str) -> AppError {
     AppError::BadRequest(format!("Runtime engine contract: {message}"))
 }
 
+/// The single source-installed Runtime provider used by production.
+///
+/// The migration-only catalog exists only in tests. This production type
+/// cannot register a second build, resolve a channel, or select a family. It
+/// freezes one exact `nomifun.nomi` build and one factory when the application
+/// composition root is constructed.
 #[derive(Clone)]
+pub struct NomiRuntimeProvider {
+    descriptor: RuntimeEngineDescriptor,
+    binding: RuntimeEngineBinding,
+    factory: AgentRuntimeFactory,
+    admission: Arc<dyn RuntimeEngineAdmission>,
+}
+
+impl NomiRuntimeProvider {
+    pub fn install(
+        descriptor: RuntimeEngineDescriptor,
+        factory: AgentRuntimeFactory,
+        admission: Arc<dyn RuntimeEngineAdmission>,
+    ) -> Result<Self, AppError> {
+        descriptor.validate()?;
+        if descriptor.family_id != OFFICIAL_NOMI_RUNTIME_FAMILY_ID {
+            return Err(invalid("only the official nomifun.nomi family may be installed"));
+        }
+        if descriptor.supported_profiles != ["default"] {
+            return Err(invalid(
+                "the official Runtime must expose exactly the default internal profile",
+            ));
+        }
+        let binding = RuntimeEngineBinding {
+            family_id: descriptor.family_id.clone(),
+            build_id: descriptor.build_id.clone(),
+            build_digest: descriptor.build_digest.clone(),
+            host_contract_version: descriptor.host_contract_version,
+            profile: "default".to_owned(),
+        };
+        binding.validate()?;
+        Ok(Self {
+            descriptor,
+            binding,
+            factory,
+            admission,
+        })
+    }
+
+    pub fn descriptor(&self) -> &RuntimeEngineDescriptor {
+        &self.descriptor
+    }
+
+    pub fn binding(&self) -> RuntimeEngineBinding {
+        self.binding.clone()
+    }
+
+    pub fn list(&self) -> Vec<RuntimeEngineDescriptor> {
+        vec![self.descriptor.clone()]
+    }
+
+    pub fn validate_binding(&self, binding: &RuntimeEngineBinding) -> Result<(), AppError> {
+        binding.validate()?;
+        if binding != &self.binding {
+            return Err(invalid(
+                "bound Runtime identity is not the installed official build",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn uses_private_session_codec(
+        &self,
+        binding: &RuntimeEngineBinding,
+    ) -> Result<bool, AppError> {
+        binding.validate()?;
+        if self.validate_binding(binding).is_err() {
+            return Ok(false);
+        }
+        Ok(self.admission.uses_nomi_session(binding))
+    }
+
+    pub fn uses_platform_history_context(
+        &self,
+        binding: &RuntimeEngineBinding,
+    ) -> Result<bool, AppError> {
+        self.validate_binding(binding)?;
+        Ok(self.admission.uses_platform_history_context(binding))
+    }
+
+    pub fn validate_snapshot(
+        &self,
+        binding: &RuntimeEngineBinding,
+        snapshot: &nomifun_agent_contracts::ResolvedSnapshotEnvelope,
+    ) -> Result<(), AppError> {
+        self.validate_binding(binding)?;
+        if !self.admission.supports_tool_hooks(binding)
+            && snapshot.content.contributions().any(|capability| {
+                capability.actions.iter().any(|action| {
+                    nomifun_agent_contracts::tool_middleware::is_tool_hook(&action.action_id)
+                })
+            })
+        {
+            return Err(invalid(
+                "the official Runtime build does not support Product tool hooks",
+            ));
+        }
+        self.admission.validate_snapshot(binding, snapshot)
+    }
+
+    pub fn validate_session_extra(
+        &self,
+        binding: &RuntimeEngineBinding,
+        extra: &serde_json::Value,
+    ) -> Result<(), AppError> {
+        self.validate_binding(binding)?;
+        self.admission.validate_session_extra(binding, extra)
+    }
+
+    pub async fn open(
+        &self,
+        binding: &RuntimeEngineBinding,
+        options: AgentRuntimeBuildOptions,
+    ) -> Result<AgentRuntimeHandle, AppError> {
+        self.validate_binding(binding)?;
+        self.admission.validate_session_extra(binding, &options.extra)?;
+        (self.factory)(options).await
+    }
+}
+
+#[derive(Clone)]
+#[cfg(any(test, feature = "test-support"))]
 struct Registration {
     descriptor: RuntimeEngineDescriptor,
     factory: RuntimeEngineFactory,
     admission: Arc<dyn RuntimeEngineAdmission>,
 }
 
-/// Mutated during trusted host composition, then shared immutably using Arc.
-/// Registration does not grant any model, workspace, tool or process authority.
+/// Migration/test-support catalog retained until UARC-052 removes the old
+/// Coding fixtures. It is absent from production builds; product composition
+/// uses [`NomiRuntimeProvider`] exclusively.
 #[derive(Clone, Default)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct RuntimeEngineCatalog {
     builds: BTreeMap<(String, String), Registration>,
     channels: BTreeMap<(String, String), String>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl RuntimeEngineCatalog {
     pub fn register(
         &mut self,
@@ -289,6 +427,92 @@ impl RuntimeEngineCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn official_descriptor() -> RuntimeEngineDescriptor {
+        RuntimeEngineDescriptor {
+            family_id: OFFICIAL_NOMI_RUNTIME_FAMILY_ID.to_owned(),
+            build_id: "official-build-1".to_owned(),
+            build_digest: "f".repeat(64),
+            display_name: "Nomi".to_owned(),
+            host_contract_version: RUNTIME_HOST_CONTRACT_VERSION,
+            supported_profiles: vec!["default".to_owned()],
+        }
+    }
+
+    fn build_options() -> AgentRuntimeBuildOptions {
+        AgentRuntimeBuildOptions {
+            user_id: nomifun_common::generate_id(),
+            conversation_id: nomifun_common::generate_id(),
+            agent_type: nomifun_common::AgentType::Nomi,
+            workspace: "workspace".into(),
+            model: None,
+            delegation_policy: Default::default(),
+            device_mcp_servers: Vec::new(),
+            extra: serde_json::json!({}),
+            conversation_created_at: None,
+            workspace_binding_lease: None,
+        }
+    }
+
+    #[test]
+    fn production_provider_rejects_non_official_family_and_multiple_profiles() {
+        let never: AgentRuntimeFactory = Arc::new(|_| {
+            Box::pin(async {
+                Err::<AgentRuntimeHandle, AppError>(AppError::Internal(
+                    "rejected provider must not open".into(),
+                ))
+            })
+        });
+        let mut descriptor = official_descriptor();
+        descriptor.family_id = "community.runtime".into();
+        assert!(NomiRuntimeProvider::install(
+            descriptor,
+            never.clone(),
+            admission(),
+        )
+        .is_err());
+
+        let mut descriptor = official_descriptor();
+        descriptor.supported_profiles.push("coding".into());
+        assert!(NomiRuntimeProvider::install(descriptor, never, admission()).is_err());
+    }
+
+    #[tokio::test]
+    async fn production_provider_freezes_one_exact_build_and_one_factory() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let factory: AgentRuntimeFactory = Arc::new({
+            let calls = calls.clone();
+            move |_| {
+                let calls = calls.clone();
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::AcqRel);
+                    Err(AppError::Conflict("fake official factory".into()))
+                })
+            }
+        });
+        let provider = NomiRuntimeProvider::install(
+            official_descriptor(),
+            factory,
+            admission(),
+        )
+        .unwrap();
+        assert_eq!(provider.list(), vec![official_descriptor()]);
+        let binding = provider.binding();
+        provider.validate_binding(&binding).unwrap();
+        for mutation in ["family", "build", "digest", "profile"] {
+            let mut changed = binding.clone();
+            match mutation {
+                "family" => changed.family_id = "community.runtime".into(),
+                "build" => changed.build_id = "other".into(),
+                "digest" => changed.build_digest = "e".repeat(64),
+                _ => changed.profile = "coding".into(),
+            }
+            assert!(provider.validate_binding(&changed).is_err(), "{mutation}");
+        }
+        assert!(provider.open(&binding, build_options()).await.is_err());
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+    }
 
     fn descriptor(family: &str, build: &str) -> RuntimeEngineDescriptor {
         RuntimeEngineDescriptor {
@@ -317,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn arbitrary_families_and_profiles_are_discoverable_without_engine_variants() {
+    fn migration_only_catalog_can_compile_old_fixture_families() {
         let mut catalog = RuntimeEngineCatalog::default();
         for family in ["example.local", "example.remote", "example.workflow"] {
             catalog

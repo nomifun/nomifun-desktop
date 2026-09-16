@@ -1084,7 +1084,14 @@ impl InMemoryAgentRuntimeRegistry {
             .get(nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY)
             .map(|value| serde_json::from_value(value.clone()))
             .transpose().map_err(|error| AppError::Conflict(format!("Invalid runtime engine binding: {error}")))?;
-        if let Some(binding) = &requested_engine_binding { binding.validate()?; }
+        if let Some(binding) = &requested_engine_binding {
+            binding.validate()?;
+            if binding.family_id != crate::OFFICIAL_NOMI_RUNTIME_FAMILY_ID {
+                return Err(AppError::BadRequest(
+                    "Only the official nomifun.nomi Runtime family is accepted".into(),
+                ));
+            }
+        }
         let bound_engine = requested_engine_binding.is_some();
         let uses_nomi_session = match requested_engine_binding.as_ref() {
             Some(binding) => self.binding_uses_nomi_session(binding)?,
@@ -2879,12 +2886,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn custom_binding_skips_nomi_provider_and_cannot_change_on_cached_slot() {
+    async fn non_official_binding_is_rejected_before_provider_or_factory() {
         let provider_calls = Arc::new(AtomicUsize::new(0));
-        let factory: AgentRuntimeFactory = Arc::new(|options| async move {
-            assert!(crate::plugin_tools::current_nomi_plugin_tool_session().is_none());
-            Ok(mock_runtime(MockAgent::new(&options.conversation_id, None)))
-        }.boxed());
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let factory: AgentRuntimeFactory = Arc::new({
+            let factory_calls = factory_calls.clone();
+            move |options| {
+                let factory_calls = factory_calls.clone();
+                async move {
+                    factory_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(mock_runtime(MockAgent::new(&options.conversation_id, None)))
+                }
+                .boxed()
+            }
+        });
         let registry = InMemoryAgentRuntimeRegistry::new(factory);
         registry.install_nomi_plugin_tool_session_provider(Arc::new(CountingPluginToolProvider {
             calls: provider_calls.clone(),
@@ -2894,12 +2909,13 @@ mod tests {
             "family_id":"customer.workflow", "build_id":"v1", "build_digest":"a".repeat(64),
             "host_contract_version":1, "profile":"workflow"
         });
-        registry.get_or_create_runtime("custom-bound", options.clone()).await.unwrap();
-        registry.get_or_create_runtime("custom-bound", options.clone()).await.unwrap();
+        assert!(registry
+            .get_or_create_runtime("custom-bound", options)
+            .await
+            .is_err());
         assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
-        options.extra["runtime_engine_binding"]["build_digest"] = serde_json::json!("b".repeat(64));
-        assert!(registry.get_or_create_runtime("custom-bound", options).await.is_err());
-        registry.terminate_and_wait_result("custom-bound", None).await.unwrap();
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(registry.active_runtime_count(), 0);
     }
 
     #[tokio::test]
