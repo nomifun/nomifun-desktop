@@ -9,7 +9,8 @@
  * pass it only to the Tauri child. Other platforms retain the original path.
  */
 
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -336,10 +337,96 @@ export function loadWindowsToolchainEnvironment(
   return initialized;
 }
 
+// The Plugin clean-start refactor intentionally replaced the historical product
+// migrations. Reusing NomiFun-dev[-nomi-core] cannot upgrade that database.
+// Give Windows dev a stable generation-specific root without deleting or
+// rewriting old data. Explicit data roots remain the caller's responsibility.
+// TODO(platform): validate the same clean-start dev policy on macOS/Linux.
+export function developmentEnvironment(environment, platform = process.platform) {
+  const result = { ...environment, NOMI_CHANNEL: 'dev' };
+  if (platform !== 'win32') return result;
+  const explicitKey = Object.keys(environment).find(
+    (key) => key.toUpperCase() === 'NOMIFUN_DATA_DIR',
+  );
+  if (explicitKey) {
+    if (!environment[explicitKey]?.trim()) {
+      throw new Error('NOMIFUN_DATA_DIR must not be empty; unset it to use the isolated development data directory');
+    }
+    return result;
+  }
+  const localAppData = getEnvironmentValue(environment, 'LOCALAPPDATA');
+  if (!localAppData) {
+    throw new Error('LOCALAPPDATA is unavailable; set NOMIFUN_DATA_DIR to an explicit development data directory');
+  }
+  result.NOMIFUN_DATA_DIR = join(localAppData, 'NomiFun-dev-plugin-v1');
+  return result;
+}
+
+// A per-run socket ties the macOS dev app to this runner without signalling
+// unrelated processes or trusting stale PIDs. Sending a stop byte requests
+// the app's ordinary ExitCoordinator shutdown; its connection closes only when
+// the app exits. The server also disappears if the runner unexpectedly dies.
+export async function createMacosDevLifetime() {
+  // macOS Unix socket paths have a small length limit; $TMPDIR can be too long.
+  const directory = mkdtempSync('/tmp/nomifun-dev-');
+  const socketPath = join(directory, 'lifetime.sock');
+  const connections = new Set();
+  let stopping = false;
+  let finishShutdown = () => {};
+  const server = createServer((socket) => {
+    connections.add(socket);
+    socket.resume();
+    socket.on('error', () => socket.destroy());
+    socket.on('end', () => socket.destroy());
+    socket.on('close', () => {
+      connections.delete(socket);
+      finishShutdown();
+    });
+    if (stopping) socket.write('q');
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(socketPath, resolve);
+    });
+  } catch (error) {
+    rmSync(directory, { recursive: true, force: true });
+    throw error;
+  }
+  let shutdown;
+  return {
+    socketPath,
+    stop() {
+      if (shutdown) return shutdown;
+      stopping = true;
+      shutdown = new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('macOS desktop did not finish graceful shutdown within 120 seconds'));
+        }, 120_000);
+        // Stop new connections. A desktop still starting will fail to connect
+        // and take the same graceful exit path instead of becoming an orphan.
+        let serverClosed = false;
+        finishShutdown = () => {
+          if (!serverClosed || connections.size !== 0) return;
+          clearTimeout(timeout);
+          rmSync(directory, { recursive: true, force: true });
+          resolve();
+        };
+        server.close(() => {
+          serverClosed = true;
+          finishShutdown();
+        });
+        for (const socket of connections) socket.write('q');
+      });
+      return shutdown;
+    },
+  };
+}
+
 async function main() {
   let environment;
   try {
-    environment = loadWindowsToolchainEnvironment(process.env);
+    environment = developmentEnvironment(loadWindowsToolchainEnvironment(process.env));
   } catch (error) {
     console.error(`[dev] ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
@@ -358,6 +445,15 @@ async function main() {
     return;
   }
 
+  if (process.platform === 'win32') {
+    console.log(`[dev] data directory: ${getEnvironmentValue(environment, 'NOMIFUN_DATA_DIR')} (existing historical directories are preserved)`);
+  }
+
+  const lifetime = process.platform === 'darwin'
+    ? await createMacosDevLifetime()
+    : null;
+  if (lifetime) environment.NOMIFUN_DEV_LIFETIME_SOCKET = lifetime.socketPath;
+
   const child = spawn(
     tauri,
     [
@@ -370,19 +466,47 @@ async function main() {
     ],
     {
       cwd: ROOT,
-      env: { ...environment, NOMI_CHANNEL: 'dev' },
+      env: environment,
       stdio: 'inherit',
       windowsHide: false,
+      // Keep terminal Ctrl-C on the runner until the app has cleaned up its
+      // managed tools; signalling the whole child group would race cleanup.
+      detached: process.platform === 'darwin',
     },
   );
+  let stopRequest;
+  const requestStop = () => {
+    if (stopRequest || !lifetime) return;
+    stopRequest = lifetime.stop().then(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGINT');
+    }).catch((error) => {
+      console.error(`[dev] ${error.message}; no forced termination was attempted`);
+      process.exitCode = 1;
+    });
+  };
+  if (lifetime) {
+    process.on('SIGINT', requestStop);
+    process.on('SIGTERM', requestStop);
+  }
   child.on('error', (error) => {
     console.error(`[dev] failed to start Tauri: ${error.message}`);
   });
 
   const result = await new Promise((complete) => {
     child.once('exit', (code, signal) => complete({ code, signal }));
+    child.once('error', () => complete({ code: 1, signal: null }));
   });
-  process.exitCode = result.code ?? (result.signal ? 1 : 0);
+  if (lifetime) {
+    try {
+      await lifetime.stop();
+    } catch (error) {
+      console.error(`[dev] ${error.message}; no forced termination was attempted`);
+      process.exitCode = 1;
+    }
+    process.off('SIGINT', requestStop);
+    process.off('SIGTERM', requestStop);
+  }
+  process.exitCode ||= result.code ?? (result.signal ? 1 : 0);
 }
 
 if (import.meta.main) {

@@ -199,25 +199,44 @@ struct RepositorySessionMcpConnector {
     oauth_enabled: bool,
 }
 
+impl RepositorySessionMcpConnector {
+    /// Shared read-only binding authorization; transport and credential work
+    /// remains exclusively in connect after this same owner check.
+    async fn authorized_rows(
+        &self,
+        bindings: &[SessionMcpBindingRef],
+    ) -> Result<Vec<McpServerRow>, SessionMcpConnectFailure> {
+        let mut rows = Vec::with_capacity(bindings.len());
+        let mut names = std::collections::BTreeSet::new();
+        for binding in bindings {
+            let row = self.repository.find_by_id(binding.resource_id()).await
+                .map_err(|_| SessionMcpConnectFailure::ResourceUnavailable)?
+                .filter(|row| row.enabled && row.deleted_at.is_none())
+                .ok_or(SessionMcpConnectFailure::ResourceUnavailable)?;
+            let expected_ref = format!("mcp-server:{}@{}", row.mcp_server_id, row.updated_at);
+            if binding.connection_config_ref() != expected_ref || !names.insert(row.name.clone()) {
+                return Err(SessionMcpConnectFailure::ResourceUnavailable);
+            }
+            rows.push(row);
+        }
+        Ok(rows)
+    }
+}
+
 #[async_trait]
 impl SessionMcpConnector for RepositorySessionMcpConnector {
+    async fn preflight(&self, bindings: &[SessionMcpBindingRef]) -> Result<(), String> {
+        self.authorized_rows(bindings).await.map(|_| ()).map_err(|_| {
+            "Selected MCP binding is unavailable, disabled or changed; select the current server revision in a new session".into()
+        })
+    }
+
     async fn connect(
         &self,
         bindings: &[SessionMcpBindingRef],
     ) -> Result<Vec<Arc<McpManager>>, SessionMcpConnectFailure> {
         let mut servers = HashMap::new();
-        for binding in bindings {
-            let row = self
-                .repository
-                .find_by_id(binding.resource_id())
-                .await
-                .map_err(|_| SessionMcpConnectFailure::ResourceUnavailable)?
-                .filter(|row| row.enabled && row.deleted_at.is_none())
-                .ok_or(SessionMcpConnectFailure::ResourceUnavailable)?;
-            let expected_ref = format!("mcp-server:{}@{}", row.mcp_server_id, row.updated_at);
-            if binding.connection_config_ref() != expected_ref {
-                return Err(SessionMcpConnectFailure::ResourceUnavailable);
-            }
+        for row in self.authorized_rows(bindings).await? {
             let mut config = row_to_mcp_server_config(&row)
                 .map_err(|_| SessionMcpConnectFailure::TransportUnavailable)?;
             if self.oauth_enabled
@@ -252,28 +271,29 @@ impl SessionMcpConnector for RepositorySessionMcpConnector {
     }
 }
 
-fn build_lazy_mcp_runtime(
+async fn build_lazy_mcp_runtime(
     plugin_session: Option<&crate::NomiPluginToolSession>,
     repository: Option<&Arc<dyn IMcpServerRepository>>,
     oauth_service: Option<&Arc<nomifun_mcp::McpOAuthService>>,
     policy: Option<nomifun_api_types::NomiMcpCapabilityPolicy>,
     deferred_tools: &[String],
+    selected_ids: &[McpServerId],
+    is_instance_owner: bool,
 ) -> Result<Option<LazyMcpRuntime>, AppError> {
     let Some(policy) = policy.filter(|policy| policy.connect) else {
         return Ok(None);
     };
-    if !deferred_tools
+    if plugin_session.is_none() && selected_ids.is_empty() { return Ok(None); }
+    if plugin_session.is_some() && !deferred_tools
         .iter()
         .any(|name| name == nomi_agent::lazy_mcp::MCP_CONNECT_TOOL_NAME)
     {
         return Ok(None);
     }
-    let session = plugin_session.ok_or_else(|| {
-        AppError::UnprocessableEntity(
-            "on-demand MCP requires a canonical server-materialized AgentSession".to_owned(),
-        )
+    let repository = repository.cloned().ok_or_else(|| {
+        AppError::UnprocessableEntity("on-demand MCP requires the host MCP repository".to_owned())
     })?;
-    let bindings = session
+    let bindings = if let Some(session) = plugin_session { session
         .target_resource_bindings()
         .iter()
         .filter(|binding| binding.resource_kind.as_ref() == "mcp_server")
@@ -289,12 +309,24 @@ fn build_lazy_mcp_runtime(
             )
             .map_err(AppError::Conflict)
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    let repository = repository.cloned().ok_or_else(|| {
-        AppError::UnprocessableEntity(
-            "on-demand MCP requires the host MCP repository".to_owned(),
-        )
-    })?;
+        .collect::<Result<Vec<_>, _>>()?
+    } else {
+        // Product conversations have one server-owned selection rather than
+        // Plugin Session metadata. Freeze exact local-owner business IDs here;
+        // the connector revalidates config revisions before any network IO.
+        if !is_instance_owner { return Ok(None); }
+        let mut bindings = Vec::new();
+        for id in selected_ids {
+            let row = repository.find_by_id(id.as_str()).await
+                .map_err(|error| AppError::Internal(error.to_string()))?
+                .filter(|row| row.enabled && !row.builtin)
+                .ok_or_else(|| AppError::Conflict(format!("selected MCP server '{id}' is unavailable")))?;
+            bindings.push(SessionMcpBindingRef::new(&row.mcp_server_id,
+                format!("mcp-server:{}@{}", row.mcp_server_id, row.updated_at))
+                .map_err(AppError::Conflict)?);
+        }
+        bindings
+    };
     LazyMcpRuntime::new(
         bindings,
         Arc::new(RepositorySessionMcpConnector {
@@ -442,15 +474,68 @@ pub(super) async fn build(
         apply_model_only_ceiling(&mut overrides);
     }
     apply_runtime_profile(&mut overrides)?;
-    apply_mcp_capability_policy(&mut overrides);
     let plugin_tool_session = crate::plugin_tools::current_nomi_plugin_tool_session();
+    if let Some(session) = plugin_tool_session.as_ref() {
+        let constraints = session.execution_constraints();
+        if let Some(instruction) = constraints.instruction() {
+            let prompt = overrides.system_prompt.get_or_insert_with(String::new);
+            prompt.push_str("\n\n");
+            prompt.push_str(instruction);
+        }
+        overrides.allowed_tools.retain(|name| constraints.allows_nomi_tool(name));
+        overrides.deferred_tools.retain(|name| constraints.allows_nomi_tool(name));
+        if constraints.restricted() {
+            overrides.enforce_tool_allowlist = true;
+            overrides.computer_use = Some(false);
+            overrides.browser_use = Some(false);
+            overrides.mcp_capabilities = Some(Default::default());
+            overrides.mcp_server_ids = Some(Vec::new());
+            overrides.session_mcp_servers.clear();
+            overrides.knowledge_mounts.clear();
+            overrides.knowledge_writeback = false;
+            overrides.knowledge_channel_write_enabled = false;
+            overrides.companion = false;
+            overrides.companion_id = None;
+        }
+        if constraints.exclude_delegation || constraints.restricted() {
+            overrides.delegation_policy = DelegationPolicy::Disabled;
+        }
+    }
+    if plugin_tool_session.as_ref().is_some_and(|session| session.has_hosted_mcp_resources()) {
+        // Canonical resources use the platform owner at invocation time, never
+        // bootstrap/native discovery. The Session installs exact resource tools
+        // later, with its own deferred identity and retained effect scope.
+        if overrides.mcp_capabilities.is_some_and(|policy| policy.tool_proxy) {
+            return Err(AppError::Conflict("Hosted MCP resources cannot use the native all-tools proxy; select frozen MCP tools instead".into()));
+        }
+        overrides.mcp_capabilities = Some(Default::default());
+        overrides.mcp_server_ids = Some(Vec::new());
+        overrides.session_mcp_servers.clear();
+        overrides.allowed_tools.retain(|name| !name.starts_with("mcp_"));
+        overrides.deferred_tools.retain(|name| !name.starts_with("mcp_"));
+    }
+    apply_mcp_capability_policy(&mut overrides);
+    if plugin_tool_session.as_ref().is_some_and(|session| session.has_frozen_mcp_tools()) {
+        // A per-tool Kernel grant must never implicitly expose every tool on
+        // the selected server through eager discovery or the native proxy.
+        if overrides.mcp_capabilities.is_none_or(|policy| policy.connect || policy.tool_proxy || policy.resource || policy.oauth)
+            || overrides.deferred_tools.iter().any(|name| name.starts_with("mcp_"))
+            || overrides.allowed_tools.iter().any(|name| name.starts_with("mcp_"))
+        {
+            return Err(AppError::Conflict("Frozen MCP tools cannot be mixed with native MCP discovery/proxy capabilities".into()));
+        }
+        overrides.mcp_server_ids = Some(Vec::new());
+        overrides.session_mcp_servers.clear();
+    }
     let lazy_mcp_runtime = build_lazy_mcp_runtime(
         plugin_tool_session.as_ref(),
         deps.mcp_server_repo.as_ref(),
         deps.mcp_oauth_service.as_ref(),
         overrides.mcp_capabilities,
         &overrides.deferred_tools,
-    )?;
+        overrides.mcp_server_ids.as_deref().unwrap_or_default(),
+        is_instance_owner,
+    ).await?;
 
     // Merge reusable preset instructions into `system_prompt` (used as
     // `custom_prompt` in Nomi's prompt builder).
@@ -507,10 +592,12 @@ pub(super) async fn build(
     // restricted principals retain their model-only ceiling.
     let image_generation_discovery: Option<Arc<dyn ImageGenerationToolDiscovery>> =
         if platform_gateway_entitled {
-            deps.model_invoke_service.as_ref().map(|invoke| {
+            deps.model_invoke_service.as_ref().zip(deps.creation_service.as_ref()).map(|(invoke, creation)| {
                 Arc::new(CatalogImageGenerationToolDiscovery::new(
                     deps.client_prefs.clone(),
                     invoke.clone(),
+                    creation.clone(),
+                    ctx.conversation_id.clone(),
                 )) as Arc<dyn ImageGenerationToolDiscovery>
             })
         } else {
@@ -518,7 +605,7 @@ pub(super) async fn build(
         };
     let (image_generation_tool, image_generation_discovery_failed) =
         match image_generation_discovery.as_ref() {
-            Some(discovery) => match discovery.discover_tool().await {
+            Some(discovery) => match discovery.discover_tool(None).await {
                 Ok(tool) => (tool, false),
                 Err(error) => {
                     warn!(
@@ -555,6 +642,16 @@ pub(super) async fn build(
         merge_session_snapshot_mcp_servers(
             &mut extra_mcp_servers,
             &overrides.session_mcp_servers,
+            &ctx.conversation_id,
+        );
+    }
+    // Device transports come from a live, revocable host grant rather than
+    // the public/persisted MCP config bag. They coexist with on-demand MCP
+    // without changing the user's declared MCP connection policy.
+    if is_instance_owner && !options.device_mcp_servers.is_empty() {
+        merge_session_snapshot_mcp_servers(
+            &mut extra_mcp_servers,
+            &options.device_mcp_servers,
             &ctx.conversation_id,
         );
     }
@@ -731,23 +828,15 @@ pub(super) async fn build(
         .iter()
         .any(|name| name == crate::web_search::WEB_SEARCH_TOOL_NAME)
     {
-        if fields.provider != "openai-responses" || !fields.supports_web_search {
-            return Err(AppError::UnprocessableEntity(
-                "web.search requires an exact openai.responses Chat model declaring the web_search trait"
-                    .to_owned(),
-            ));
-        }
-        let endpoint = fields.base_url.as_deref().ok_or_else(|| {
-            AppError::UnprocessableEntity(
-                "web.search requires the exact OpenAI Responses endpoint".to_owned(),
-            )
-        })?;
-        let provider = crate::web_search::OpenAiResponsesSearchProvider::new(
-            endpoint,
-            fields.api_key.clone(),
-            fields.model.clone(),
-        )
-        .map_err(AppError::UnprocessableEntity)?;
+        // Search resolves its own exact configured model only when invoked.
+        // An absent search provider cannot block normal Chat or media tasks.
+        let provider = crate::web_search::CatalogSearchProvider::new(
+            deps.model_invoke.clone(),
+            nomifun_model_invoke::ModelRef {
+                provider_id: selected_model.provider_id.clone(),
+                model: selected_model.model.clone(),
+            },
+        );
         Some(Box::new(crate::web_search::WebSearchTool::with_citations(
             Arc::new(provider),
             Arc::clone(&session_citations),
@@ -1029,6 +1118,13 @@ pub(super) async fn build(
         image_generation_entitled: platform_gateway_entitled,
         image_generation_discovery_failed,
         image_generation_response_in_chinese: app_language == "zh-CN",
+        creation_context: if is_instance_owner {
+            deps.creation_service.as_ref().map(|service| {
+                Arc::new(crate::creation_context::ConversationCreationContext::new(service.clone(), ctx.conversation_id.clone())
+                    .with_model_catalog(deps.model_invoke.clone(), deps.client_prefs.clone(),
+                        plugin_tool_session.as_ref().map(|session| session.media_creation_catalog_tools()).unwrap_or_default())) as Arc<dyn crate::ContextContributor>
+            })
+        } else { None },
         web_search_tool,
         #[cfg(feature = "browser-use")]
         local_web_search_tool,
@@ -1074,7 +1170,7 @@ pub(super) async fn build(
             .register_cron_sink(make_sink(owner_id, &conv_id_for_cron))
             .await;
     }
-    Ok(AgentRuntimeHandle::Nomi(Arc::new(agent)))
+    Ok(AgentRuntimeHandle::Registered(Arc::new(agent)))
 }
 
 /// Host-level default for opt-in tool capabilities ("1"/"true" enables).

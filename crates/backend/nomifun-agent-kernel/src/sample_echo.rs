@@ -31,6 +31,12 @@ use nomifun_agent_contracts::{
 };
 use serde_json::json;
 
+#[path = "invocation_preflight_tests.rs"]
+mod invocation_preflight_tests;
+
+#[path = "dependency_call_tests.rs"]
+mod dependency_call_tests;
+
 use crate::{
     AgentPresetCompiler, CapabilityHandler, CapabilityInvocationContext,
     CapabilityInvocationRequest, CompileRequest, CompilerEnvironment,
@@ -156,6 +162,8 @@ fn registration_for(
                 presentation: ToolPresentationKind::FunctionTool,
             }],
             context_schema_refs: Vec::new(),
+            context_phase: Default::default(),
+            ui_slot: None,
             event_schema_refs: Vec::new(),
             resource_kinds: BTreeSet::from([ResourceKind::from(
                 SAMPLE_RESOURCE_KIND,
@@ -511,6 +519,8 @@ fn role_capability(
         contributions: CapabilityContributions {
             actions,
             context_schema_refs,
+            context_phase: Default::default(),
+            ui_slot: None,
             event_schema_refs: Vec::new(),
             resource_kinds: BTreeSet::from([resource_kind]),
             host_ports: Vec::new(),
@@ -589,6 +599,7 @@ fn operation_role_registration(
             (
                 tool.id.clone(),
                 RoleProviderMemberContribution {
+                    implementation: None,
                     supported_platforms: vec![PlatformConstraint::Any],
                     required_resource_kinds: required_resource_kinds.clone(),
                 },
@@ -596,6 +607,7 @@ fn operation_role_registration(
             (
                 context.id.clone(),
                 RoleProviderMemberContribution {
+                    implementation: None,
                     supported_platforms: vec![PlatformConstraint::Any],
                     required_resource_kinds: required_resource_kinds.clone(),
                 },
@@ -603,6 +615,7 @@ fn operation_role_registration(
             (
                 resource.id.clone(),
                 RoleProviderMemberContribution {
+                    implementation: None,
                     supported_platforms: vec![PlatformConstraint::Any],
                     required_resource_kinds,
                 },
@@ -824,6 +837,9 @@ fn role_operation_request(
 
 fn sample_revision(owner_id: &str) -> AgentPresetRevision {
     let payload = AgentPresetRevisionPayload {
+        runtime_engine: None,
+        context_order: Vec::new(),
+        middleware_order: Vec::new(),
         schema_version: VersionString::from(VERSION),
         model_route_refs: BTreeMap::new(),
         chat_route_records: BTreeMap::new(),
@@ -1178,6 +1194,51 @@ fn managed_skill_and_mcp_backed_capability_keep_exact_provenance() {
     assert_eq!(mcp.mount_id, mount_id);
     assert_eq!(mcp.target_artifact_digest, artifact_digest);
     assert_eq!(mcp.mapping.package, capability.manifest.package);
+}
+
+#[test]
+fn middleware_order_checks_registry_kind_and_consumer_not_action_contract() {
+    use nomifun_agent_contracts::{CapabilityConsumer, capability_surface_declarations};
+
+    for (kind, consumer, supported) in [
+        (CapabilityKind::TurnMiddleware, CapabilityConsumer::Agent, true),
+        (CapabilityKind::Tool, CapabilityConsumer::Agent, false),
+        (CapabilityKind::TurnMiddleware, CapabilityConsumer::Automation, false),
+    ] {
+        let mut registration = sample_registration("middleware:");
+        let manifest = &mut registration.metadata.manifest.payload.contributions.capabilities[0];
+        manifest.kind = kind;
+        manifest.supported_surfaces = capability_surface_declarations(["test"], [consumer]);
+        // Keep the sample's unrelated action/schema, not Nomi's before_model contract.
+        refresh_manifest(&mut registration);
+        if kind != CapabilityKind::Tool {
+            // The sample's Tool handler is not a TurnMiddleware execution adapter.
+            // Rebuild the registration so materialization still checks handler kinds.
+            registration = PluginRegistration::new(registration.metadata);
+        }
+        let registry = KernelRegistry::new(
+            MaterializationPolicy::stable_with_test_fixtures(VERSION),
+            Arc::new(InMemoryPluginStatePersistence::new()),
+        ).unwrap();
+        let materialized = registry.replace_all(vec![registration]).unwrap();
+        let mut revision = sample_revision("middleware-owner");
+        revision.payload.middleware_order = vec![SAMPLE_CAPABILITY.into()];
+        revision.reference.revision_digest = revision.revision_digest().unwrap();
+        let result = AgentPresetCompiler::compile(
+            &materialized,
+            &compiler_environment(materialized.registry_digest.clone()),
+            compile_request(revision, principal("middleware-owner")),
+        );
+        if supported {
+            let compiled = result.expect("alternative Agent middleware contract should compile");
+            assert_eq!(compiled.content().middleware_order, vec![CapabilityId::from(SAMPLE_CAPABILITY)]);
+            assert_eq!(compiled.policy(&SAMPLE_CAPABILITY.into()).unwrap().allowed_actions,
+                BTreeSet::from([ActionId::from(SAMPLE_ACTION)]));
+        } else {
+            assert!(matches!(result, Err(KernelError::InvalidPresetRevision { reason })
+                if reason.contains("must be an Agent TurnMiddleware")));
+        }
+    }
 }
 
 #[test]

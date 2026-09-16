@@ -4,20 +4,28 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
+import { cleanup, fireEvent, render } from '@testing-library/react';
+import { createInstance } from 'i18next';
+import { I18nextProvider } from 'react-i18next';
+import zh from '../../../../services/i18n/locales/zh-CN/creativeStudio.json';
+import type { CreativeCanvasReferencePromptChange } from './CreativeCanvasReferencePromptInput';
 import { readFileSync } from 'node:fs';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import type { CreativeModelOption } from '../../models';
 import CreativeCanvasVideoComposer, {
   dispatchCanvasVideoComposerSubmission,
-  isCanvasVideoComposerSubmitKey,
   type CreativeCanvasVideoComposerProps,
 } from './CreativeCanvasVideoComposer';
 
 const PROVIDER_ID =
   '019b0000-0000-7000-8000-000000000009' as CreativeModelOption['providerId'];
 const noop = () => undefined;
+afterEach(cleanup);
+const i18n = createInstance();
+await i18n.init({ lng: 'zh-CN', resources: { 'zh-CN': { translation: { creativeStudio: zh } } } });
+const wrap = (content: React.ReactNode) => <I18nextProvider i18n={i18n}>{content}</I18nextProvider>;
 const model: CreativeModelOption = {
   providerId: PROVIDER_ID,
   model: 'video-v1',
@@ -52,6 +60,71 @@ const props = (
 });
 
 describe('CreativeCanvasVideoComposer', () => {
+  test('inserts a stable reference from @, preserves whitespace and blocks disconnected bindings', () => {
+    const changes: CreativeCanvasReferencePromptChange[] = [];
+    const generated: CreativeCanvasReferencePromptChange[] = [];
+    const reference = {
+      nodeId: 'cat-node', assetId: 'cat-asset', connectionId: 'cat-edge',
+      base: false, label: '猫咪', ordinal: 1,
+    };
+    const componentProps = props({
+      mode: 'i2v', references: [reference],
+      onPromptChange: (change) => changes.push(change),
+      onGenerate: (value, mentions) => generated.push({ value, mentions: [...mentions] }),
+    });
+    const view = render(wrap(<CreativeCanvasVideoComposer {...componentProps} />));
+    const input = view.getByRole('combobox', { name: '视频创作提示词' }) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: '  让 @', selectionStart: 5, selectionEnd: 5 } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(generated).toHaveLength(0);
+    const draft = changes.at(-1)!;
+    expect(draft.value).toBe('  让 @图片1 ');
+    expect(draft.mentions[0]).toMatchObject({ sourceNodeId: 'cat-node', start: 4, end: 8 });
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true });
+    expect(generated).toHaveLength(0);
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: true });
+    expect(generated).toHaveLength(0);
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(generated).toEqual([draft]);
+
+    view.rerender(wrap(<CreativeCanvasVideoComposer {...componentProps}
+      references={[]} initialPrompt={draft.value} initialMentions={draft.mentions} />));
+    expect((view.getByRole('button', { name: '生成视频' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(input.getAttribute('aria-invalid')).toBe('true');
+    expect(view.getByText(/已断开的素材引用/)).toBeTruthy();
+    fireEvent.keyDown(input, { key: 'Enter' });
+    fireEvent.click(view.getByRole('button', { name: '生成视频' }));
+    expect(generated).toHaveLength(1);
+  });
+
+  test('shares locate, disconnect and batch actions and preserves canonical retries', () => {
+    const disconnected: string[][] = [];
+    const activated: string[] = [];
+    let retries = 0;
+    const reference = {
+      nodeId: 'source', assetId: 'asset', connectionId: 'edge', base: false, label: '客厅', ordinal: 1,
+    };
+    const componentProps = props({
+      mode: 'i2v', references: [reference],
+      onReferenceActivate: (id) => activated.push(id),
+      onReferenceDisconnect: (id) => disconnected.push([id]),
+      onReferencesDisconnect: (ids) => disconnected.push([...ids]),
+    });
+    const view = render(wrap(<CreativeCanvasVideoComposer {...componentProps} />));
+    fireEvent.click(view.getByRole('button', { name: '定位参考 客厅' }));
+    fireEvent.click(view.getByRole('button', { name: '断开参考 客厅' }));
+    fireEvent.click(view.getByRole('button', { name: '批量管理' }));
+    fireEvent.click(view.getByRole('button', { name: '全选连接' }));
+    fireEvent.click(view.getByRole('button', { name: '断开所选' }));
+    expect(activated).toEqual(['source']);
+    expect(disconnected).toEqual([['edge'], ['edge']]);
+    view.rerender(wrap(<CreativeCanvasVideoComposer {...componentProps}
+      generateBlocked retrySubmission task={{ state: 'queued', pendingCount: 1 }}
+      onRetrySubmission={() => { retries += 1; }} />));
+    fireEvent.click(view.getByRole('button', { name: '生成视频' }));
+    expect(retries).toBe(1);
+  });
+
   test('renders the focused text-to-video composer', () => {
     const html = renderToStaticMarkup(
       <CreativeCanvasVideoComposer
@@ -75,10 +148,12 @@ describe('CreativeCanvasVideoComposer', () => {
       <CreativeCanvasVideoComposer
         {...props({
           mode: 'i2v',
-          reference: {
-            name: '晨雾参考图.png',
-            previewUrl: 'http://127.0.0.1:8788/assets/reference.png',
-          },
+          references: [{
+            assetId: 'reference',
+            nodeId: 'source', connectionId: 'edge', base: false, ordinal: 1,
+            label: '晨雾参考图.png',
+            thumbnailUrl: 'http://127.0.0.1:8788/assets/reference.png',
+          }],
         })}
       />
     );
@@ -96,7 +171,7 @@ describe('CreativeCanvasVideoComposer', () => {
       <CreativeCanvasVideoComposer
         {...props({
           mode: 'i2v',
-          reference: { name: '参考图', originalUrl: '/reference-original.png' },
+          references: [{ assetId: 'reference', nodeId: 'source', connectionId: 'edge', base: false, ordinal: 1, label: '参考图', originalUrl: '/reference-original.png' }],
         })}
       />
     );
@@ -104,6 +179,37 @@ describe('CreativeCanvasVideoComposer', () => {
     expect(html.includes('src="/reference-original.png"')).toBe(true);
     expect(html.match(/<img\b/g)?.length).toBe(1);
     expect(html.includes('data-creative-media-preview="image"')).toBe(true);
+  });
+
+  test('previews every linked image in keyframe order', () => {
+    const html = renderToStaticMarkup(<CreativeCanvasVideoComposer {...props({
+      mode: 'i2v', initialPrompt: 'transition',
+      modelOptions: [{ ...model, protocol: 'agnes.video_jobs' }],
+      references: ['first', 'middle', 'last'].map((id, index) => ({
+        assetId: id, nodeId: id, connectionId: id, base: false, ordinal: index + 1,
+        label: id, originalUrl: `/${id}.png`,
+      })),
+    })} />);
+    expect(html.match(/<img\b/g)?.length).toBe(3);
+    expect(html.indexOf('/first.png')).toBeLessThan(html.indexOf('/middle.png'));
+    expect(html.indexOf('/middle.png')).toBeLessThan(html.indexOf('/last.png'));
+    expect(html.includes('aria-label="生成视频" disabled')).toBe(false);
+    expect(html.includes('关键帧 · 按连线顺序')).toBe(true);
+  });
+
+  test('keeps single-image model limits visible without hiding the references', () => {
+    for (const protocol of ['openai.videos', 'siliconflow.video_jobs']) {
+      const html = renderToStaticMarkup(<CreativeCanvasVideoComposer {...props({
+        mode: 'i2v', initialPrompt: 'transition', modelOptions: [{ ...model, protocol }],
+        references: ['first', 'last'].map((assetId, index) => ({
+          assetId, nodeId: assetId, connectionId: assetId, base: false, ordinal: index + 1,
+          label: assetId, originalUrl: `/${assetId}.png`,
+        })),
+      })} />);
+      expect(html.includes('所选模型仅支持一张参考图')).toBe(true);
+      expect(html.includes('aria-label="生成视频" disabled')).toBe(true);
+      expect(html.match(/<img\b/g)?.length).toBe(2);
+    }
   });
 
   test('keeps generation disabled when no exact video model exists', () => {
@@ -129,11 +235,12 @@ describe('CreativeCanvasVideoComposer', () => {
     );
     expect(html.includes('data-mode="unsupported"')).toBe(true);
     expect(html.includes('当前节点不支持直接生成视频')).toBe(true);
-    expect(html.includes('aria-label="视频创作提示词" disabled')).toBe(true);
+    expect(html.includes('aria-label="视频创作提示词"')).toBe(true);
+    expect(/<textarea[^>]*disabled/.test(html)).toBe(true);
     expect(html.includes('aria-label="生成视频" disabled')).toBe(true);
   });
 
-  test('dispatches trimmed generation and canonical retry callbacks', () => {
+  test('preserves authored offsets for generation and canonical retry callbacks', () => {
     const generated: string[] = [];
     let retries = 0;
     expect(
@@ -147,7 +254,7 @@ describe('CreativeCanvasVideoComposer', () => {
         onGenerate: (prompt) => generated.push(prompt),
       })
     ).toBe('generated');
-    expect(generated).toEqual(['慢慢拉远']);
+    expect(generated).toEqual(['  慢慢拉远  ']);
 
     expect(
       dispatchCanvasVideoComposerSubmission({
@@ -164,7 +271,7 @@ describe('CreativeCanvasVideoComposer', () => {
       })
     ).toBe('retried');
     expect(retries).toBe(1);
-    expect(generated).toEqual(['慢慢拉远']);
+    expect(generated).toEqual(['  慢慢拉远  ']);
   });
 
   test('offers an authoritative status check for an uncertain submission', () => {
@@ -181,12 +288,6 @@ describe('CreativeCanvasVideoComposer', () => {
     expect(html.includes('任务提交结果尚未确认')).toBe(true);
     expect(html.includes('确认任务状态')).toBe(true);
     expect(html.includes('确认任务状态</button>')).toBe(true);
-  });
-
-  test('submits on Enter while preserving Shift+Enter for a newline', () => {
-    expect(isCanvasVideoComposerSubmitKey('Enter', false)).toBe(true);
-    expect(isCanvasVideoComposerSubmitKey('Enter', true)).toBe(false);
-    expect(isCanvasVideoComposerSubmitKey('a', false)).toBe(false);
   });
 
   test('wires only the supported controlled video settings', () => {
@@ -254,6 +355,9 @@ describe('CreativeCanvasVideoComposer', () => {
     expect(shellCss.includes(".positioner[data-overlay='true']")).toBe(true);
     expect(css.includes('.contextRow')).toBe(true);
     expect(css.includes('.modePill')).toBe(true);
-    expect(css.includes('.referencePreview')).toBe(true);
+    const referenceCss = readFileSync(
+      new URL('./CreativeCanvasReferenceList.module.css', import.meta.url), 'utf8'
+    );
+    expect(referenceCss.includes('.referencePreview')).toBe(true);
   });
 });

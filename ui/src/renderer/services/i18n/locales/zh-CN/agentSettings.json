@@ -1,8 +1,58 @@
 {
   "title": "Agent 工作台",
+  "runtimeEngine": {
+    "label": "运行时引擎",
+    "default": "默认引擎（Nomi）",
+    "hint": "此引擎负责执行该 Agent。保存后用于新建会话，不影响已有会话；日常对话只需选择 Agent。",
+    "unavailable": "引擎目录或所选构建不可用，请重试或为该 Agent 选择其他引擎。不会自动回退到其他引擎。",
+    "codingLimit": "此 Coding 构建提供文件/Git 工具、会话隔离快照、命令/交互进程、MCP 与插件工具及制品内 Skills，可用范围受 Agent 已保存的启用能力、绑定资源及平台权限约束。新会话会冻结这份配置，不会按需激活能力。执行中追加的指令在执行边界处理。图片需已启用的视觉能力及兼容模型。Git 推送仅限明确授权后向已配置的本地/file 远程推送；不支持 SSH/HTTPS 凭据、强制推送或删除引用。这些能力尚未全部完成端到端验证。"
+  },
+  "middlewareOrder": {
+    "title": "执行扩展",
+    "hint": "同阶段的扩展按列表顺序执行，其余使用默认顺序。保存后仅对新会话生效。",
+    "empty": "在能力配置中选入已发布的执行扩展，即可在此调整顺序。",
+    "up": "将 {{name}} 提前",
+    "down": "将 {{name}} 延后",
+    "reset": "恢复默认顺序",
+    "missing": "扩展不可用或已不在选择中，请恢复它或重置顺序。",
+    "toolAccess": "检查插件可读取工具名称和宿主提供的参数，可阻止执行，但不能授权、代替审批或修改参数。检查失败会停止执行。",
+    "createBeforeTool": "创建工具执行前检查",
+    "createHint": "编辑并发布草稿后，返回能力配置选入此 Agent。创建草稿不会启用插件。",
+    "createFailed": "检查草稿创建失败，请手动重试；未选入任何执行扩展。",
+    "phase": {
+      "before_model": "模型请求前",
+      "before_tool": "工具执行前",
+      "unknown": "阶段未识别"
+    }
+  },
+  "contextOrder": {
+    "title": "上下文顺序",
+    "hint": "同阶段按列表顺序补充上下文，其余使用默认顺序。保存后仅对新会话生效。",
+    "empty": "在能力配置中添加上下文扩展后，可调整顺序。",
+    "up": "将 {{name}} 提前",
+    "down": "将 {{name}} 延后",
+    "reset": "恢复默认顺序",
+    "missing": "贡献不可用或已不在选择中，请恢复贡献或重置顺序。"
+  },
   "subtitle": "配置和管理你的 Agent，让能力更贴合工作。",
   "loading": "正在加载 Agent 工作台…",
   "loadingEditor": "正在加载所选 Agent…",
+  "providers": {
+    "defaultsTitle": "默认部件实现",
+    "defaultsHint": "由安装所有者配置。新建或重新保存的 Agent 在未指定实现时使用这些默认值；已保存版本和已有会话不变。每项须单独保存。",
+    "defaultsReload": "重新加载（放弃未保存选择）",
+    "defaultsUnbound": "尚未配置默认实现",
+    "defaultsMissingHint": "之前的默认实现或契约已不可用，原选择仍保留。请恢复该插件，或明确选择另一个实现。",
+    "defaultsSave": "保存默认实现",
+    "defaultsLoadError": "无法读取默认实现。请确认当前账户是安装所有者，然后重新加载。",
+    "defaultsSaveError": "保存失败：所选实现可能不可用，或默认值已被其他操作修改。请重新加载并确认选择。",
+    "title": "部件实现",
+    "hint": "为所选能力选择实现。保存时检查兼容性和依赖，执行仍须通过授权；已有会话保持冻结的实现。选择部件不会把它的内部工具额外加入 Agent。",
+    "empty": "所选能力暂未提供可替换部件。请先添加具有部件契约的能力。",
+    "inherit": "使用已配置的默认实现",
+    "missing": "之前选择的实现已不可用",
+    "missingHint": "所选实现或其契约已不在目录中，原选择仍保留。请选择其他实现，或明确改为使用已配置的默认实现。"
+  },
   "freshStart": {
     "title": "全新 v4 工作区",
     "body": "本代从 {{count}} 个官方模板和空的个人列表开始。旧设定不会导入；请在这里 Fork 模板或新建 Agent。"
@@ -37,7 +87,7 @@
     },
     "label": "Agent 设定",
     "saved": "Agent 已更新",
-    "companionHint": "决定伙伴本地与 IM 对话可使用的能力；未选择时使用官方“伙伴”。"
+    "companionHint": "修改后统一应用于这位伙伴的桌面、机器人与 IM 对话；未选择时使用官方“伙伴”。"
   },
   "library": {
     "ariaLabel": "Agent 列表",
@@ -82,12 +132,6 @@
       "default": {
         "name": "伙伴",
         "description": "为日常陪伴配置角色、记忆与沟通能力。"
-      }
-    },
-    "robot": {
-      "default": {
-        "name": "机器人",
-        "description": "为设备交互选择感知、沟通与动作能力。"
       }
     },
     "customerService": {
@@ -165,6 +209,7 @@
     "selectAria": "选择{{resource}}",
     "dependencyHint": "选择{{resource}}后将显示匹配的资源。",
     "selectionHint": "启动时使用所选资源，可在下次启动前更换。",
+    "mcpSelectionHint": "包含 Agent 已授权工具所属的全部 MCP 服务器；已选择 MCP 资源能力时可另选资源服务器（合计最多 16 个）。多选不会增加工具权限，资源读取须指定已绑定服务器。",
     "emptyOptions": "没有可用资源，请先完成配置。",
     "loadFailed": "资源列表加载失败，请前往配置页检查。",
     "configure": "去配置",
@@ -207,32 +252,6 @@
   },
   "navigation": {
     "railTitle": "Agent 工作台"
-  },
-  "session": {
-    "title": "Agent 会话",
-    "open": "打开会话",
-    "loading": "正在加载 canonical Session projection…",
-    "backToSettings": "Agent 工作台",
-    "fork": "Fork 会话",
-    "delete": "删除会话",
-    "deleteConfirm": "永久删除该会话？Transcript、Projection、Runtime binding、checkpoint 与 Session-owned resource 都会被清除。",
-    "deletedTitle": "会话已删除",
-    "deletedBody": "该 AgentSession 已越过不可逆删除 fence，无法再查看 transcript、继续、观察、fork 或恢复。",
-    "generation": "Active generation",
-    "lastSeq": "最后 sequence",
-    "checkpoint": "Checkpoint through sequence",
-    "activeCapabilities": "Active capabilities",
-    "runtime": "Runtime Inspector",
-    "inspector": "Session Inspector",
-    "details": "Canonical event 详情",
-    "continuationRequired": "冻结 Snapshot 在当前执行栈不可用。历史保持只读；继续工作必须显式 fork 新 AgentSession。",
-    "empty": "尚无已提交的 transcript projection。",
-    "inputPlaceholder": "向该 Session 发送普通 Turn…",
-    "send": "发送 Turn",
-    "role": {
-      "user": "你",
-      "assistant": "Agent"
-    }
   },
   "workbench": {
     "categories": {
@@ -325,6 +344,9 @@
     "settingsHint": "定义身份、模型和工作方式",
     "manageModels": "前往模型管理",
     "modelNeeded": "先配置一个可用的聊天模型，再保存 Agent。",
+    "configureChatModel": "配置聊天模型",
+    "configureModelReturn": "配置完成后，使用返回按钮继续编辑；本次未保存的 Agent 输入会保留。",
+    "returnChanged": "离开期间此 Agent 已发生变化。已打开当前保存版本，未套用先前未保存的输入。",
     "disabledSave": "请先处理不可用的能力",
     "presetBadge": "可自定义预设",
     "personalBadge": "个人 Agent",

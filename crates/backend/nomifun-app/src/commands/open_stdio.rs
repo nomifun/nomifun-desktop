@@ -137,7 +137,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn web_urls_fail_closed_toward_the_managed_browser() {
+    async fn web_urls_fail_closed_toward_the_selected_browser_capability() {
         let result = test_server()
             .open(Parameters(OpenParams {
                 target: "https://example.com".to_string(),
@@ -148,8 +148,8 @@ mod tests {
         assert_eq!(result.is_error, Some(true));
         let rendered = serde_json::to_string(&result).unwrap();
         assert!(
-            rendered.contains("browser navigate"),
-            "must steer the agent to the managed Browser: {rendered}"
+            rendered.contains("selected conversation Browser or system-browser capability"),
+            "must steer the agent to its selected Browser capability: {rendered}"
         );
     }
 

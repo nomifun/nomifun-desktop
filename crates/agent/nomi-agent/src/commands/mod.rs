@@ -14,12 +14,15 @@ use nomi_providers::LlmProvider;
 use nomi_types::message::Message;
 
 /// Result of executing a slash command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandResult {
     /// Command handled, continue the REPL loop.
     Continue,
     /// Exit the REPL.
     Exit,
+    /// Host-resolved instructions appended to this user turn, not a system
+    /// prompt override or a second invocation of the Agent loop.
+    Prompt(String),
 }
 
 /// Context passed to slash commands during execution.
@@ -37,6 +40,13 @@ pub struct CommandContext<'a> {
 #[async_trait]
 pub trait SlashCommand: Send + Sync {
     fn name(&self) -> &str;
+    fn is_visible(&self) -> bool {
+        true
+    }
+    /// A command may not bypass the Session/turn's tool ceiling.
+    fn required_tool(&self) -> Option<&str> {
+        None
+    }
     fn aliases(&self) -> &[&str] {
         &[]
     }
@@ -62,6 +72,23 @@ impl CommandRegistry {
 
     pub fn register(&mut self, cmd: Arc<dyn SlashCommand>) {
         self.commands.push(cmd);
+    }
+
+    pub fn register_checked(&mut self, cmd: Arc<dyn SlashCommand>) -> anyhow::Result<()> {
+        for name in std::iter::once(cmd.name()).chain(cmd.aliases().iter().copied()) {
+            anyhow::ensure!(
+                !name.is_empty()
+                    && !name.starts_with('/')
+                    && !name.chars().any(char::is_whitespace),
+                "Invalid slash command name: {name}"
+            );
+            anyhow::ensure!(
+                self.find(name).is_none(),
+                "Slash command name already registered: {name}"
+            );
+        }
+        self.register(cmd);
+        Ok(())
     }
 
     pub fn find(&self, name: &str) -> Option<Arc<dyn SlashCommand>> {
@@ -120,6 +147,19 @@ mod tests {
     fn registry_find_unknown_returns_none() {
         let registry = default_registry();
         assert!(registry.find("nonexistent").is_none());
+    }
+
+    #[test]
+    fn checked_registration_never_shadows_existing_command() {
+        let mut registry = default_registry();
+        let count = registry.all().len();
+        assert!(
+            registry
+                .register_checked(Arc::new(quit::QuitCommand))
+                .is_err()
+        );
+        assert_eq!(registry.all().len(), count);
+        assert_eq!(registry.find("exit").unwrap().name(), "quit");
     }
 
     #[test]

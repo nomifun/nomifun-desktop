@@ -162,6 +162,8 @@ fn validate_coverage(
                 event,
                 ChatModelEvent::ReasoningDelta { .. }
                     | ChatModelEvent::ReasoningSignature { .. }
+                    | ChatModelEvent::ReasoningBlock { .. }
+                    | ChatModelEvent::ProviderReasoningBlock { .. }
             )
         })
     {

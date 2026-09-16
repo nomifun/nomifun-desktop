@@ -158,8 +158,8 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
         mcp_server_id: &str,
         params: UpdateMcpServerParams<'_>,
     ) -> Result<McpServerRow, DbError> {
-        let mut query = QueryBuilder::new("UPDATE mcp_servers SET updated_at = ");
-        query.push_bind(nomifun_common::now_ms());
+        let mut query = QueryBuilder::new("UPDATE mcp_servers SET updated_at = MAX(updated_at + 1, ");
+        query.push_bind(nomifun_common::now_ms()).push(")");
         if let Some(name) = params.name {
             query.push(", name = ").push_bind(name);
         }
@@ -229,7 +229,7 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
             .await?;
 
         sqlx::query(
-            "UPDATE mcp_servers SET enabled = 0, deleted_at = ?, updated_at = ? \
+            "UPDATE mcp_servers SET enabled = 0, deleted_at = ?, updated_at = MAX(updated_at + 1, ?) \
              WHERE mcp_server_id = ? AND deleted_at IS NULL",
         )
         .bind(now)
@@ -277,7 +277,7 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
         let result = sqlx::query(
             "UPDATE mcp_servers SET last_test_status = ?, \
              last_connected = COALESCE(?, last_connected), \
-             updated_at = ? WHERE mcp_server_id = ? AND deleted_at IS NULL",
+             updated_at = MAX(updated_at + 1, ?) WHERE mcp_server_id = ? AND deleted_at IS NULL",
         )
         .bind(status)
         .bind(last_connected)
@@ -295,7 +295,7 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
     async fn update_tools(&self, mcp_server_id: &str, tools: Option<&str>) -> Result<(), DbError> {
         let now = nomifun_common::now_ms();
         let result = sqlx::query(
-            "UPDATE mcp_servers SET tools = ?, updated_at = ? \
+            "UPDATE mcp_servers SET tools = ?, updated_at = MAX(updated_at + 1, ?) \
              WHERE mcp_server_id = ? AND deleted_at IS NULL",
         )
         .bind(tools)
@@ -308,6 +308,30 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
             return Err(DbError::NotFound(format!("MCP server '{mcp_server_id}' not found")));
         }
         Ok(())
+    }
+    async fn update_probe_if_revision(
+        &self,
+        mcp_server_id: &str,
+        expected_revision: TimestampMs,
+        status: &str,
+        last_connected: Option<TimestampMs>,
+        tools: Option<&str>,
+    ) -> Result<bool, DbError> {
+        let result = sqlx::query(
+            "UPDATE mcp_servers SET last_test_status = ?,
+             last_connected = COALESCE(?, last_connected), tools = ?,
+             updated_at = MAX(updated_at + 1, ?)
+             WHERE mcp_server_id = ? AND updated_at = ? AND deleted_at IS NULL",
+        )
+        .bind(status)
+        .bind(last_connected)
+        .bind(tools)
+        .bind(nomifun_common::now_ms())
+        .bind(mcp_server_id)
+        .bind(expected_revision)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 }
 

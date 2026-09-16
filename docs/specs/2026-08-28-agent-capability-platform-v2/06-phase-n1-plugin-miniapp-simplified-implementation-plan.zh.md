@@ -11,6 +11,27 @@
 > 与 Linux Desktop x64 统一在全部 Windows 开发完成后交接原生验证。手机模式不属于
 > `nomifun-desktop` 范围。
 
+## 2026-09-14 Agent Tool 受管依赖调用增量
+
+本增量按 05 §5.10 演进原有 Shared Extension Host，不建设跨插件全局命令总线、Rust 插件后端或第二个 Kernel。它覆盖下文首版“不支持插件依赖 DAG”中**运行期 Tool 子调用**的部分；不同 Provider 的递归编译依赖与消费用途仍待完成，不能据此宣布完整依赖 DAG 已开放。
+
+Host 注入的 Tool 请求增加 `dependencies`，原有插件可以继续忽略该字段。作者可使用 scaffold 中的 `PluginToolInvocation` 与 `PluginDependencyCall` 类型：
+
+```ts
+async function invoke({ input, dependencies }: PluginToolInvocation) {
+  return dependencies.invoke({
+    capabilityId: "example.lookup",
+    actionId: "lookup",
+    callKey: "lookup-once",
+    input,
+  });
+}
+```
+
+目标必须在所选实现的 manifest `requires` 中按精确版本声明，并已进入同一已授权冻结计划；示例调用本身不安装依赖、不增加权限，也不表示该 ID 是系统内置能力。普通 Agent Tool 和所选 Role Tool 共用 Kernel 校验。`callKey` 在本父调用内唯一且最多 128 UTF-8 字节，重复调用不会自动重试；父结束后的保留回调失效。activation 的 `sdk` 仍只提供原有 Mount 服务，不增加可在任意时间调用的全局依赖入口。
+
+私有 IPC 新增 JS→Host 的 `dependency_invoke`，只在 Shared Extension/Candidate Test 的 method set 声明，Build Host 不支持。method set 允许不等于拥有调用权限：未配置父 caller 的普通调用和 Candidate Test 请求仍会被拒绝，不能借测试角色访问生产 Session。实际请求与父 ID、Mount、generation、deadline/取消绑定；产品 Host 复用父 runtime 租约，完整语义见 05 §5.10。Node 仍是共同故障域与可信代码执行环境，不因该 API 获得 OS 强沙箱。
+
 ## 2026-09-06 实施启动修订
 
 本节覆盖本文中仍写成“AP 阻断”或“Plugin 三平台先完成再开发 MiniApp”的旧进度口径，
@@ -93,6 +114,18 @@ Rust crate check 通过。Windows 全量 `cargo fmt --all --check` 仍受文件�
 该切片不提前实现 dedicated Service Host、真实 MessageChannel process adapter、
 Files/Private SQLite、Share/Import、永久删除或跨平台原生验证。M1-1 Service/Bridge
 仍由后续切片领取，不能用现有内存 foundation 测试代替生产完成度。
+## 2026-09-14 Role 开放增量（原始 N1 范围之后）
+
+全栈开放改造开始允许 JS Package 声明自己命名空间的 Role contract，以及通过
+`RoleProviderMemberContribution.implementation` 实现已有契约。它沿用 Package、Catalog、
+Kernel typed export、Node Host 和精确 Provider/制品锁，不新增 JS Role 注册中心。
+Tool、Context、Resource 的 Role 分发与独立 capability 调用共享底层执行方法；契约 façade
+不注册 generic handler，防止绕过用户选择。映射定义与兼容边界见 05 §5.5。
+
+这是对下面 2026-09-07 第 1 项 Role 禁令的后续演进，不扩展 Package-authored Plugin
+Service，也不把所有旧 N1 进展改写成全栈已完成。真实产品安装、默认/Agent 选择及每个领域
+消费者仍须分别验收；Kernel/Node fixture 通过不能代替 Browser/Computer 全局替换。
+
 ## 2026-09-07 实施进展修订
 
 1. 普通 Plugin 的 Kernel↔Node Adapter 已按 canonical `CapabilityKind` 接通 Tool、

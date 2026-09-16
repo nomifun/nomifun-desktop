@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::engine_effect_scope::{EngineEffectScope, settle_optional};
 
 use nomi_agent::bootstrap::AgentBootstrap;
 use nomi_agent::companion_tools::{
@@ -54,7 +55,7 @@ use crate::image_generation::{
 use crate::protocol::events::{AgentStreamEvent, TurnCompletedEventData, TurnStopReason};
 use crate::protocol::send_error::AgentSendError;
 use crate::types::{NomiResolvedConfig, SendMessageData};
-use super::image_attachments::{ImageAttachmentError, load_image_blocks};
+use crate::model_attachments::{ImageAttachmentError, load_image_blocks};
 
 /// Process-level memory of which `(provider, model)` pairs have already been
 /// reported as running on an assumed context window.
@@ -238,6 +239,7 @@ pub struct NomiAgentManager {
     /// Canonical Agent MCP remains dormant until the deferred `mcp_connect`
     /// tool is activated and called. This handle owns its bounded cleanup.
     lazy_mcp_runtime: Option<LazyMcpRuntime>,
+    hosted_effects: Option<Arc<EngineEffectScope>>,
     /// Main-process backstop for renewable loopback MCP capabilities. Bridge
     /// children revoke on clean exit; this guard covers abrupt child/runtime
     /// teardown and construction failure.
@@ -318,11 +320,15 @@ pub struct NomiAgentManager {
     /// published, so route readiness and tool presence cannot disagree.
     image_generation_availability: std::sync::RwLock<ImageGenerationAvailability>,
     image_generation_discovery: Option<Arc<dyn ImageGenerationToolDiscovery>>,
+    hosted_media_creation_tools: HashSet<String>,
     image_generation_response_in_chinese: bool,
 }
 
 impl Drop for NomiAgentManager {
     fn drop(&mut self) {
+        if let Some(scope) = &self.hosted_effects {
+            let _ = scope.close_session();
+        }
         self.backend_output_sink.cancel_active_tool_calls(
             "The agent manager was dropped before this tool call reached a terminal state.",
         );
@@ -897,8 +903,8 @@ pub(crate) struct NomiHostWiring {
     pub image_generation_discovery_failed: bool,
     /// The app's normalized UI language captured on this runtime build.
     pub image_generation_response_in_chinese: bool,
-    /// Search tool backed by the exact authorized Chat route. `None` means the
-    /// selected route cannot satisfy `web.search`; no public fallback exists.
+    /// Authorized search tool. Its backend resolves on invocation independently
+    /// of Chat; `None` means search is outside this session's capability ceiling.
     pub web_search_tool: Option<Box<dyn nomi_tools::Tool>>,
     #[cfg(feature = "browser-use")]
     pub local_web_search_tool: Option<Box<dyn nomi_tools::Tool>>,
@@ -911,6 +917,7 @@ pub(crate) struct NomiHostWiring {
     /// The app-owned provider resolves this from persisted Session/Binding
     /// facts and the shared Kernel. Model/config JSON cannot construct it.
     pub plugin_tool_session: Option<crate::NomiPluginToolSession>,
+    pub creation_context: Option<Arc<dyn nomi_agent::context_contributor::ContextContributor>>,
 }
 
 impl Default for NomiHostWiring {
@@ -934,6 +941,7 @@ impl Default for NomiHostWiring {
 
             lazy_mcp_runtime: None,
             plugin_tool_session: None,
+            creation_context: None,
         }
     }
 }
@@ -1034,13 +1042,27 @@ impl NomiAgentManager {
         let local_web_search_tool=host_wiring.local_web_search_tool;
         let citation_render_tool = host_wiring.citation_render_tool;
         let lazy_mcp_runtime = host_wiring.lazy_mcp_runtime;
-        let plugin_tool_session = host_wiring.plugin_tool_session;
+        let plugin_tool_session = host_wiring.plugin_tool_session.map(|session| {
+            session.with_context_image_policy(
+                config_extra.compat_overrides.supports_image == Some(true),
+            )
+        }).transpose()?;
+        let hosted_media_creation_tools = plugin_tool_session.as_ref().map(|session| session.media_creation_provider_names()).unwrap_or_default();
+        let hosted_effects = plugin_tool_session.as_ref().and_then(crate::NomiPluginToolSession::effect_scope);
         let capability_state = plugin_tool_session
             .as_ref()
             .and_then(crate::NomiPluginToolSession::capability_state);
         let hosted_context_contributors = plugin_tool_session
             .as_ref()
             .map(|session| session.context_contributors().to_vec())
+            .unwrap_or_default();
+        let model_middleware = plugin_tool_session.as_ref()
+            .map(|session| session.model_middleware()).transpose()
+            .map_err(|error| AppError::Internal(format!("Nomi before_model assembly failed: {error}")))?
+            .unwrap_or_default();
+        let tool_middleware = plugin_tool_session.as_ref()
+            .map(|session| session.tool_middleware()).transpose()
+            .map_err(|error| AppError::Internal(format!("Nomi tool check assembly failed: {error}")))?
             .unwrap_or_default();
         let session_control_sink = plugin_tool_session
             .as_ref()
@@ -1192,10 +1214,32 @@ impl NomiAgentManager {
                 .push(gateway_delegate_provider_name.clone());
         }
         if let Some(session) = plugin_tool_session.as_ref() {
+            if session.has_hosted_mcp_resources() {
+                // Config files must not eagerly reconnect the resource server
+                // behind the exact platform port. Keep only the separately
+                // authorized, host-injected delegation Gateway when needed.
+                config.mcp.servers.clear();
+                if config_extra.allowed_tools.iter().any(|name| matches!(name.as_str(), "nomi_delegate" | "subagent_send" | "subagent_wait")) {
+                    if let Some(gateway) = config_extra.extra_mcp_servers.get(nomifun_api_types::GatewayMcpConfig::SERVER_NAME) {
+                        config.mcp.servers.insert(nomifun_api_types::GatewayMcpConfig::SERVER_NAME.into(), gateway.clone());
+                    }
+                }
+            }
             session.extend_tool_policy(
                 &mut config.tools.builtin_allowlist,
                 &mut config.tools.deferred_allowlist,
             );
+            session.constrain_tool_policy(
+                &mut config.tools.builtin_allowlist,
+                &mut config.tools.deferred_allowlist,
+            );
+            if session.execution_constraints().restricted() {
+                config.tools.enforce_builtin_allowlist = true;
+                config.tools.computer.enabled = false;
+                // Config files and late registrations cannot reintroduce MCP
+                // resource/discovery routes into a restricted Attempt.
+                config.mcp.servers.clear();
+            }
         }
         // 原生文件工具写根钳制（Write/Edit/ApplyPatch），按会话信任面由工厂解析：
         // 本地桌面 = None（不钳制，OS 用户全权，今日行为）；渠道/远程/对外 =
@@ -1233,6 +1277,7 @@ impl NomiAgentManager {
         let distill_cfg = Arc::new(config.clone());
 
         let mut bootstrap = AgentBootstrap::new(config, &workspace, sink)
+            .host_skills(plugin_tool_session.as_ref().map(|session| session.package_skills().to_vec()).unwrap_or_default())
             .goal(goal_spec)
             .install_embedded_agent_execution(
                 config_extra.install_embedded_agent_execution,
@@ -1289,20 +1334,9 @@ impl NomiAgentManager {
                 "the AgentSession's bound MCP server could not be connected".to_owned(),
             ));
         }
-        if lazy_mcp_runtime.is_none()
-            && mcp_resource_selected
-            && !mcp_managers.iter().any(|manager| {
-                manager
-                    .server_names()
-                    .iter()
-                    .any(|server| manager.server_supports_resources(server))
-            })
-        {
-            return Err(AppError::UnprocessableEntity(
-                "mcp.resource is selected, but the bound MCP server does not advertise resources"
-                    .to_owned(),
-            ));
-        }
+        // Resource permission does not require a configured resource server.
+        // Validate support when invoked, so empty selections and tools-only
+        // device transports do not prevent ordinary companion conversations.
         let mut engine = result.engine;
         #[cfg(feature = "browser-use")]
         if system_browser_session.is_some() {
@@ -1453,8 +1487,9 @@ impl NomiAgentManager {
                 ));
             }
         }
-
-        let mcp_tools: Vec<(&str, Box<dyn nomi_tools::Tool>)> = match lazy_mcp_runtime.as_ref() {
+        let mcp_tools: Vec<(&str, Box<dyn nomi_tools::Tool>)> = if plugin_tool_session.as_ref().is_some_and(|session| session.has_hosted_mcp_resources()) {
+            Vec::new()
+        } else { match lazy_mcp_runtime.as_ref() {
             Some(runtime) => vec![
                 (
                     nomi_agent::lazy_mcp::MCP_CONNECT_TOOL_NAME,
@@ -1483,6 +1518,7 @@ impl NomiAgentManager {
                     Box::new(McpResourceReadTool::new(mcp_managers.clone())),
                 ),
             ],
+        }
         };
         for (name, tool) in mcp_tools {
             let expected = !config_extra.enforce_tool_allowlist
@@ -1495,6 +1531,7 @@ impl NomiAgentManager {
             }
         }
         if let Some(session) = plugin_tool_session {
+            let session = session.with_creation_receipt_sink(backend_output_sink.clone(), conversation_id.clone());
             session.register_into(engine.registry_mut()).map_err(|error| {
                 AppError::Internal(format!(
                     "Nomi Plugin Tool registration failed: {error}"
@@ -1510,6 +1547,15 @@ impl NomiAgentManager {
         }
         for contributor in hosted_context_contributors {
             engine.register_context_contributor(contributor);
+        }
+        if let Some(contributor) = host_wiring.creation_context {
+            engine.register_context_contributor(contributor);
+        }
+        for middleware in model_middleware {
+            engine.register_model_middleware(middleware);
+        }
+        for middleware in tool_middleware {
+            engine.register_tool_middleware(middleware);
         }
         if let Some(sink) = session_control_sink {
             let controls: [(&str, Box<dyn nomi_tools::Tool>); 3] = [
@@ -1671,6 +1717,7 @@ impl NomiAgentManager {
             slash_commands,
             mcp_managers,
             lazy_mcp_runtime,
+            hosted_effects,
             loopback_capability_leases,
             #[cfg(feature = "browser-use")]
             browser_workspace,
@@ -1701,6 +1748,7 @@ impl NomiAgentManager {
                 image_generation_availability,
             ),
             image_generation_discovery,
+            hosted_media_creation_tools,
             image_generation_response_in_chinese,
         })
     }
@@ -1715,12 +1763,12 @@ impl NomiAgentManager {
     /// Refresh the process-owned image route before a new turn becomes active.
     /// Discovery is local-only; registry replacement happens under the engine
     /// mutex and the route state is published last.
-    async fn refresh_image_generation_capability(&self) -> ImageGenerationAvailability {
+    async fn refresh_image_generation_capability(&self, message_id: &str) -> ImageGenerationAvailability {
         let Some(discovery) = self.image_generation_discovery.as_ref() else {
             return self.image_generation_availability();
         };
 
-        let discovered = discovery.discover_tool().await;
+        let discovered = discovery.discover_tool(Some((message_id, self.backend_output_sink.clone()))).await;
         let mut engine = self.engine.lock().await;
         engine.registry_mut().unregister(IMAGE_GEN_TOOL_NAME);
         let availability = match discovered {
@@ -1771,6 +1819,10 @@ impl NomiAgentManager {
         completion_context: &CompletionEvidenceContext,
         detail: impl Into<String>,
     ) -> Result<(), AgentSendError> {
+        if let Err(error) = settle_optional(self.hosted_effects.as_ref()).await {
+            self.runtime.mark_transport_broken();
+            return Err(AgentSendError::from_app_error(error));
+        }
         let persisted = self
             .engine
             .lock()
@@ -1797,6 +1849,10 @@ impl NomiAgentManager {
         completion_context: &CompletionEvidenceContext,
         detail: impl Into<String>,
     ) -> Result<(), AgentSendError> {
+        if let Err(error) = settle_optional(self.hosted_effects.as_ref()).await {
+            self.runtime.mark_transport_broken();
+            return Err(AgentSendError::from_app_error(error));
+        }
         let persisted = self
             .engine
             .lock()
@@ -1828,6 +1884,10 @@ impl NomiAgentManager {
         self.system_browser_turn.cancel();
         if close_permanently {
             self.closing.store(true, Ordering::Release);
+        }
+        if let Some(scope) = &self.hosted_effects {
+            let result = if close_permanently { scope.close_session() } else { scope.close_turn() };
+            if result.is_err() { self.runtime.mark_transport_broken(); }
         }
         let was_running = self.runtime.status() == Some(ConversationStatus::Running);
         let runtime_turn = *self.active_turn.lock().unwrap_or_else(|e| e.into_inner());
@@ -2047,12 +2107,22 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
             process_supervisor: process_supervisor.clone(),
             mcp_managers: self.mcp_managers.clone(),
             lazy_mcp_runtime: self.lazy_mcp_runtime.clone(),
+            hosted_effects: self.hosted_effects.clone(),
             turn_teardown_fence: Arc::clone(&self.turn_teardown_fence),
             accepted_turn_recovery_required: Arc::clone(
                 &accepted_turn_recovery_required,
             ),
             armed: true,
         };
+
+        {
+            let _lifecycle = self.lifecycle_gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !turn_cancel.is_cancelled()
+                && let Some(scope) = &self.hosted_effects
+            {
+                scope.begin_turn().map_err(AgentSendError::from_app_error)?;
+            }
+        }
 
         // Catalog refresh belongs to this accepted turn's cancellation
         // domain. Previously it ran before `reset_for_new_turn`, so Stop could
@@ -2078,7 +2148,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                     .map_err(AgentSendError::from_app_error)?;
                 return Ok(());
             }
-            availability = self.refresh_image_generation_capability() => availability,
+            availability = self.refresh_image_generation_capability(&source_message_id) => availability,
         };
 
         let direct_image_intent = classify_image_generation_intent(&data.content);
@@ -2197,6 +2267,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 false,
             ))
         } else if image_generation_intent == ImageGenerationIntent::Creation
+            && self.hosted_media_creation_tools.is_empty()
             && image_generation_availability != ImageGenerationAvailability::Ready
         {
             Some((
@@ -2336,7 +2407,9 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 ImageGenerationIntent::Creation | ImageGenerationIntent::ExplicitExternal
             );
         let image_tool_allowlist = if image_generation_intent == ImageGenerationIntent::Creation {
-            Some(HashSet::from([IMAGE_GEN_TOOL_NAME.to_owned()]))
+            let mut allowed = self.hosted_media_creation_tools.clone();
+            if image_generation_availability == ImageGenerationAvailability::Ready { allowed.insert(IMAGE_GEN_TOOL_NAME.to_owned()); }
+            Some(allowed)
         } else if image_intent_classification_failed
             || ambiguous_visual_requires_tool_gate
             || plan_mode_image_request_requires_tool_gate
@@ -2435,18 +2508,12 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                         "failed to begin recoverable artifact delivery: {error}"
                     )))
                 })?;
-            if matches!(
-                image_generation_intent,
-                ImageGenerationIntent::Creation | ImageGenerationIntent::ExplicitExternal
-            ) {
-                self.backend_output_sink
-                    .require_image_artifact_for_turn()
-                    .map_err(|error| {
-                        AgentSendError::from_app_error(AppError::Internal(format!(
-                            "failed to register image-generation artifact requirement: {error}"
-                        )))
-                    })?;
-            }
+            let requirement = match image_generation_intent {
+                ImageGenerationIntent::Creation => self.backend_output_sink.require_native_creation_task_for_turn(),
+                ImageGenerationIntent::ExplicitExternal => self.backend_output_sink.require_image_artifact_for_turn(),
+                _ => Ok(()),
+            };
+            requirement.map_err(|error| AgentSendError::from_app_error(AppError::Internal(format!("failed to register generation completion requirement: {error}"))))?;
             engine.set_steering_inbox(Some(self.steering_inbox.clone()));
             engine.set_system_resource_inbox(Some(self.system_resource_inbox.clone()));
             // Completion adjudication is bound to trusted user-authored input,
@@ -2471,10 +2538,10 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
             let mut race_tail_reruns = 0usize;
             let result = loop {
                 let current_content = std::mem::take(&mut run_content);
-                // Cancellation has one fail-closed lifecycle: drop the in-flight
-                // engine/tool future immediately, then roll back the provisional
-                // turn state. Awaiting arbitrary tool code here is unsafe because a
-                // tool is not required to observe a cancellation token.
+                // Drop the engine's caller future on cancellation. Hosted Kernel
+                // calls retain their own task witness and must settle before
+                // the provisional transcript can be restored. The host waiter
+                // is bounded; timeout retains quarantine, never aborts an effect.
                 let r = tokio::select! {
                     biased;
                     _ = turn_cancel.cancelled() => {
@@ -2482,6 +2549,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                             conversation_id = %self.runtime.conversation_id(),
                             "Nomi engine.execute_turn() cancelled by stop signal"
                         );
+                        term_guard.fence_cancelled_processes().await?;
                         if completion_context.turn_root_captured() {
                             engine.abort_current_turn("Tool execution canceled by user");
                             if !engine
@@ -2505,6 +2573,10 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                         &source_message_id,
                         image_tool_allowlist.as_ref(),
                         Some(&mut completion_context),
+                        // Only the accepted user's text may select a command;
+                        // knowledge decoration cannot select one, and steering
+                        // race-tail passes cannot replay the root Skill.
+                        Some(if race_tail_reruns == 0 { &data.content } else { "" }),
                     ) => res,
                 };
 
@@ -3032,6 +3104,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 self.process_supervisor.clone(),
                 self.mcp_managers.clone(),
                 self.lazy_mcp_runtime.clone(),
+                self.hosted_effects.clone(),
             )?;
         }
         Ok(())
@@ -3058,6 +3131,7 @@ struct TurnTerminationGuard {
     process_supervisor: Option<Arc<nomi_process_runtime::ProcessSupervisor>>,
     mcp_managers: Vec<Arc<McpManager>>,
     lazy_mcp_runtime: Option<LazyMcpRuntime>,
+    hosted_effects: Option<Arc<EngineEffectScope>>,
     turn_teardown_fence: Arc<TurnTeardownFence>,
     /// Set by the engine only after it has durably registered the accepted
     /// session root. If an unwind happens before the host terminal commits,
@@ -3075,6 +3149,12 @@ enum VerifiedTurnCommitOutcome {
 }
 
 impl TurnTerminationGuard {
+    async fn settle_hosted(&self) -> Result<(), AppError> {
+        let result = settle_optional(self.hosted_effects.as_ref()).await;
+        if result.is_err() { self.runtime.mark_transport_broken(); }
+        result
+    }
+
     async fn terminalize(
         &mut self,
         terminal: impl FnOnce(
@@ -3082,6 +3162,7 @@ impl TurnTerminationGuard {
             crate::runtime_state::AgentRuntimeTurn,
         ) -> bool,
     ) -> Result<bool, AppError> {
+        self.settle_hosted().await?;
         #[cfg(feature = "browser-use")]
         super::browser_lifecycle::settle_turns(&self.native_browser_turn, &self.system_browser_turn).await?;
 
@@ -3111,6 +3192,7 @@ impl TurnTerminationGuard {
         response: &str,
         completed: TurnCompletedEventData,
     ) -> Result<bool, AppError> {
+        self.settle_hosted().await?;
         #[cfg(feature = "browser-use")]
         super::browser_lifecycle::settle_turns(&self.native_browser_turn, &self.system_browser_turn).await?;
         let result = self.publish_host_text_terminal(turn_cancel, msg_id, response, completed).await?;
@@ -3165,6 +3247,7 @@ impl TurnTerminationGuard {
         completed: TurnCompletedEventData,
         stream_error: crate::protocol::events::ErrorEventData,
     ) -> Result<bool, AppError> {
+        self.settle_hosted().await?;
         #[cfg(feature = "browser-use")]
         super::browser_lifecycle::settle_turns(&self.native_browser_turn, &self.system_browser_turn).await?;
         let result = self.fail_adjudicated_terminal(turn_cancel, completed, stream_error).await?;
@@ -3218,6 +3301,7 @@ impl TurnTerminationGuard {
         engine: &Mutex<AgentEngine>,
         completion_context: &CompletionEvidenceContext,
     ) -> Result<VerifiedTurnCommitOutcome, AppError> {
+        self.settle_hosted().await?;
         #[cfg(feature = "browser-use")]
         super::browser_lifecycle::settle_turns(&self.native_browser_turn, &self.system_browser_turn).await?;
         let result = self.commit_verified_terminal(turn_cancel, completed, stop_reason, prepared_distill, engine, completion_context).await?;
@@ -3314,6 +3398,7 @@ impl TurnTerminationGuard {
                 );
             }
         }
+        failures.record("hosted tools", self.settle_hosted().await);
         failures.finish()
     }
 }
@@ -3325,6 +3410,7 @@ impl Drop for TurnTerminationGuard {
             self.native_browser_turn.cancel();
             #[cfg(feature = "browser-use")]
             self.system_browser_turn.cancel();
+            if let Some(scope) = &self.hosted_effects { let _ = scope.close_session(); }
             // This store happens synchronously while the old send still owns
             // `turn_gate`. Therefore a queued successor can never slip between
             // the unwind and the asynchronous process-tree fence.
@@ -3357,6 +3443,7 @@ impl Drop for TurnTerminationGuard {
             let process_supervisor = self.process_supervisor.clone();
             let mcp_managers = self.mcp_managers.clone();
             let lazy_mcp_runtime = self.lazy_mcp_runtime.clone();
+            let hosted_effects = self.hosted_effects.clone();
             let turn_teardown_fence = Arc::clone(&self.turn_teardown_fence);
             #[cfg(feature = "browser-use")]
             let native_browser_turn = self.native_browser_turn.clone();
@@ -3396,6 +3483,10 @@ impl Drop for TurnTerminationGuard {
                 // cleanup (or vice versa); only the terminal publication is
                 // conditioned on the aggregate proof.
                 let mut exact = true;
+                if settle_optional(hosted_effects.as_ref()).await.is_err() {
+                    error!(conversation_id = %conversation_id, "Nomi hosted tool effects remain unproven; retaining quarantine");
+                    exact = false;
+                }
                 if let Err(error) = shutdown_mcp_runtimes_exact(
                     &mcp_managers,
                     lazy_mcp_runtime.as_ref(),
@@ -3482,6 +3573,7 @@ struct NomiTeardownResults {
     kill: Result<(), AppError>,
     mcp: Result<(), AppError>,
     process: Result<(), AppError>,
+    hosted: Result<(), AppError>,
     ssh_lease: Option<Arc<dyn crate::SshSessionLease>>,
 }
 
@@ -3569,6 +3661,7 @@ async fn finish_nomi_teardown(results: NomiTeardownResults) -> Result<(), AppErr
     failures.record("kill", results.kill);
     failures.record("MCP", results.mcp);
     failures.record("process tree", results.process);
+    failures.record("hosted tools", results.hosted);
 
 
     // Same posture for the remote session: last, and unconditional. A failed kill
@@ -3612,6 +3705,7 @@ fn schedule_nomi_cancelled_terminal_after_process_fence(
     process_supervisor: Option<Arc<nomi_process_runtime::ProcessSupervisor>>,
     mcp_managers: Vec<Arc<McpManager>>,
     lazy_mcp_runtime: Option<LazyMcpRuntime>,
+    hosted_effects: Option<Arc<EngineEffectScope>>,
 ) -> Result<(), AppError> {
     let terminalize = move || {
         backend_output_sink.cancel_active_tool_calls(
@@ -3642,6 +3736,7 @@ fn schedule_nomi_cancelled_terminal_after_process_fence(
     if process_supervisor.is_none()
         && mcp_managers.is_empty()
         && lazy_mcp_runtime.is_none()
+        && hosted_effects.is_none()
     {
         terminalize();
         return Ok(());
@@ -3655,6 +3750,10 @@ fn schedule_nomi_cancelled_terminal_after_process_fence(
         // Every fence is attempted unconditionally; only the terminal
         // publication is conditioned on the aggregate exactness proof.
         let mut exact = true;
+        if settle_optional(hosted_effects.as_ref()).await.is_err() {
+            error!("Idle Nomi hosted tool cleanup remains unproven; retaining quarantine");
+            exact = false;
+        }
         if let Err(error) =
             shutdown_mcp_runtimes_exact(&mcp_managers, lazy_mcp_runtime.as_ref()).await
         {
@@ -3691,6 +3790,7 @@ impl NomiAgentManager {
         let process_supervisor = self.process_supervisor.clone();
         let mcp_managers = self.mcp_managers.clone();
         let lazy_mcp_runtime = self.lazy_mcp_runtime.clone();
+        let hosted_effects = self.hosted_effects.clone();
         let ssh_lease = self.ssh_lease.clone();
         Box::pin(async move {
             // Every cleanup stage is attempted even if an earlier one failed.
@@ -3716,6 +3816,7 @@ impl NomiAgentManager {
                 kill: kill_result,
                 mcp: mcp_result,
                 process: process_result,
+                hosted: settle_optional(hosted_effects.as_ref()).await,
                 ssh_lease,
             })
             .await?;
@@ -3837,6 +3938,8 @@ impl NomiAgentManager {
         // Signal any in-flight engine.execute_turn() to abort so we don't clear
         // mid-turn; the engine lock below then waits for it to release.
         self.request_stop(None, "clear_context", false);
+        let _turn = self.turn_gate.lock().await;
+        settle_optional(self.hosted_effects.as_ref()).await?;
         let mut engine = self.engine.lock().await;
         if let Err(error) = engine.clear_context() {
             self.runtime.mark_transport_broken();
@@ -3847,12 +3950,29 @@ impl NomiAgentManager {
         Ok(())
     }
 
+    /// Retry admission is based on owner effects, not on whether assistant
+    /// prose was emitted. The original source identity survives wire retries.
+    pub async fn ensure_can_retry_turn(&self, source_message_id: &str) -> Result<(), AppError> {
+        let _turn = self.turn_gate.lock().await;
+        self.ensure_source_replay_safe(source_message_id).await
+    }
+
+    async fn ensure_source_replay_safe(&self, source_message_id: &str) -> Result<(), AppError> {
+        if let Some(scope) = &self.hosted_effects {
+            tokio::time::timeout(std::time::Duration::from_secs(10), scope.ensure_source_replay_safe(source_message_id))
+                .await.map_err(|_| AppError::Conflict("Effect replay proof timed out".into()))??;
+        }
+        Ok(())
+    }
+
     /// Read-only preflight for edit/resubmit. This is called before the
     /// Conversation service claims its durable destructive receipt.
     pub async fn ensure_can_rewind_last_turn(
         &self,
         expected_source_message_id: &str,
     ) -> Result<(), AppError> {
+        let _turn = self.turn_gate.lock().await;
+        self.ensure_source_replay_safe(expected_source_message_id).await?;
         let engine = self.engine.lock().await;
         if !engine.can_rewind_last_turn(expected_source_message_id) {
             return Err(AppError::BadRequest(
@@ -3876,6 +3996,9 @@ impl NomiAgentManager {
             "Rewinding last Nomi turn"
         );
         self.request_stop(None, "rewind_last_turn", false);
+        let _turn = self.turn_gate.lock().await;
+        settle_optional(self.hosted_effects.as_ref()).await?;
+        self.ensure_source_replay_safe(expected_source_message_id).await?;
         let mut engine = self.engine.lock().await;
         match engine.rewind_last_turn(expected_source_message_id) {
             Ok(true) => Ok(()),
@@ -3912,7 +4035,7 @@ fn image_artifact_delivery_error_to_send_error(
 ) -> AgentSendError {
     let lower = delivery_error.trim().to_ascii_lowercase();
     let model_skipped_required_tool =
-        lower.starts_with("accepted turn required a verified image artifact")
+        (lower.starts_with("accepted turn required a verified image artifact") || lower.starts_with("accepted turn required a durable image-generation task"))
             && !lower.contains(';');
     let model_or_image_tool_returned_no_artifact = [
         "tool returned an error",
@@ -4039,6 +4162,7 @@ mod tests {
             kill,
             mcp: Ok(()),
             process: Ok(()),
+            hosted: Ok(()),
             ssh_lease: Some(lease),
         }
     }
@@ -4509,6 +4633,23 @@ mod tests {
         }
     }
 
+    struct AcceptedMediaTaskTool { name: &'static str, sink: Arc<BackendOutputSink>, conversation_id: String }
+
+    #[async_trait::async_trait]
+    impl Tool for AcceptedMediaTaskTool {
+        fn name(&self) -> &str { self.name }
+        fn artifact_identity(&self) -> &str { "nomifun_creation_task" }
+        fn description(&self) -> &str { "Test host creation task submission" }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool { true }
+        fn input_schema(&self) -> serde_json::Value { serde_json::json!({"type":"object","properties":{}}) }
+        fn category(&self) -> ToolCategory { ToolCategory::Exec }
+        async fn execute(&self, _input: serde_json::Value) -> ToolResult {
+            let scope = self.sink.native_creation_task_scope(&self.conversation_id).unwrap();
+            self.sink.register_native_creation_task(&scope, "accepted-media-task").unwrap();
+            ToolResult::text(r#"{"creation_task_id":"accepted-media-task","status":"queued"}"#)
+        }
+    }
+
     struct MissingImageArtifactTool;
 
     #[async_trait::async_trait]
@@ -4556,7 +4697,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ImageGenerationToolDiscovery for SequencedImageToolDiscovery {
-        async fn discover_tool(&self) -> Result<Option<Box<dyn Tool>>, AppError> {
+        async fn discover_tool(&self, _turn: Option<(&str, Arc<BackendOutputSink>)>) -> Result<Option<Box<dyn Tool>>, AppError> {
             let ready = self
                 .ready
                 .lock()
@@ -4569,7 +4710,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ImageGenerationToolDiscovery for BlockingImageToolDiscovery {
-        async fn discover_tool(&self) -> Result<Option<Box<dyn Tool>>, AppError> {
+        async fn discover_tool(&self, _turn: Option<(&str, Arc<BackendOutputSink>)>) -> Result<Option<Box<dyn Tool>>, AppError> {
             self.started.add_permits(1);
             std::future::pending().await
         }
@@ -4833,6 +4974,7 @@ mod tests {
             slash_commands: Vec::new(),
             mcp_managers: Vec::new(),
             lazy_mcp_runtime: None,
+            hosted_effects: None,
             loopback_capability_leases: Default::default(),
             ssh_lease: None,
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
@@ -4855,6 +4997,7 @@ mod tests {
                 ImageGenerationAvailability::NoConfiguredModel,
             ),
             image_generation_discovery: None,
+            hosted_media_creation_tools: HashSet::new(),
             image_generation_response_in_chinese: false,
         }
     }
@@ -5139,6 +5282,7 @@ mod tests {
             slash_commands: Vec::new(),
             mcp_managers: Vec::new(),
             lazy_mcp_runtime: None,
+            hosted_effects: None,
             loopback_capability_leases: Default::default(),
             ssh_lease: None,
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
@@ -5161,6 +5305,7 @@ mod tests {
                 ImageGenerationAvailability::NoConfiguredModel,
             ),
             image_generation_discovery: None,
+            hosted_media_creation_tools: HashSet::new(),
             image_generation_response_in_chinese: false,
         };
         let attachment_dir = tempfile::tempdir().unwrap();
@@ -5454,6 +5599,76 @@ mod tests {
                     && data.content.contains("No image was generated")
         )));
         assert!(!events.iter().any(|event| matches!(event, AgentStreamEvent::ToolCall(_))));
+    }
+
+    #[tokio::test]
+    async fn native_image_restriction_preserves_authorized_kernel_creation_tools() {
+        for (name, prompt) in [
+            ("frozen_creation_image", "Generate an image of a cat"),
+            ("frozen_creation_image_edit", "修改刚才生成的图片：给小猫加一条蓝色围巾"),
+        ] {
+            let provider = Arc::new(ScriptedProvider::new(vec![
+                vec![LlmEvent::ToolUse { id: "media-call".into(), name: name.into(), input: serde_json::json!({}), extra: Default::default() }, LlmEvent::Done { stop_reason: StopReason::ToolUse, usage: Default::default() }],
+                vec![LlmEvent::TextDelta("Submitted the task.".into()), LlmEvent::Done { stop_reason: StopReason::EndTurn, usage: Default::default() }],
+            ]));
+            let mut agent = make_agent_with_provider(provider.clone());
+            *agent.image_generation_availability.get_mut().unwrap() = ImageGenerationAvailability::NotEntitled;
+            agent.hosted_media_creation_tools.insert(name.into());
+            let tool = AcceptedMediaTaskTool { name, sink: agent.backend_output_sink.clone(), conversation_id: agent.runtime.conversation_id().to_owned() };
+            assert!(agent.engine.get_mut().registry_mut().register(Box::new(tool)));
+            assert!(agent.engine.get_mut().registry_mut().register(Box::new(BrowserScreenshotOnlyTool)));
+            agent.engine.get_mut().set_host_context_value(IMAGE_ROUTE_CONTEXT_KEY, Some(IMAGE_ROUTE_NATIVE));
+            agent.send_message(SendMessageData { content: prompt.into(), msg_id: "restricted-native-kernel-creation".into(), source_message_id: None, files: vec![], inject_skills: vec![], origin: None }).await.unwrap();
+            let requests = provider.requests();
+            assert_eq!(requests.len(), 2, "native exclusion must not reject the authorized Kernel task");
+            assert_eq!(requests[0].tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(), vec![name]);
+            // Strict routes offer the authorized tool once. After its accepted
+            // receipt the response pass cannot issue a second billable task.
+            assert!(requests[1].tools.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn native_image_restriction_without_kernel_creation_still_rejects() {
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let mut agent = make_agent_with_provider(provider.clone());
+        *agent.image_generation_availability.get_mut().unwrap() = ImageGenerationAvailability::NotEntitled;
+        let mut events = agent.subscribe();
+        agent.send_message(SendMessageData { content: "Generate an image of a cat".into(), msg_id: "restricted-no-kernel".into(), source_message_id: None, files: vec![], inject_skills: vec![], origin: None }).await.unwrap();
+        assert_eq!(provider.calls(), 0);
+        assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(event,
+            AgentStreamEvent::Text(data) if data.content.contains("not permitted in this restricted Agent session"))));
+    }
+
+    #[tokio::test]
+    async fn general_media_followup_can_edit_or_animate_without_enabling_browser() {
+        for (name, prompt) in [
+            ("frozen_creation_image_edit", "把刚才的图片改成水彩"),
+            ("frozen_creation_video", "把第二张图片生成视频"),
+        ] {
+            let provider = Arc::new(ScriptedProvider::new(vec![
+                vec![LlmEvent::ToolUse { id: "media-call".into(), name: name.into(), input: serde_json::json!({}), extra: Default::default() }, LlmEvent::Done { stop_reason: StopReason::ToolUse, usage: Default::default() }],
+                vec![LlmEvent::TextDelta("Submitted the task.".into()), LlmEvent::Done { stop_reason: StopReason::EndTurn, usage: Default::default() }],
+            ]));
+            let mut agent = make_agent_with_provider(provider.clone());
+            agent.hosted_media_creation_tools.insert(name.into());
+            let tool = AcceptedMediaTaskTool { name, sink: agent.backend_output_sink.clone(), conversation_id: agent.runtime.conversation_id().to_owned() };
+            assert!(agent.engine.get_mut().registry_mut().register(Box::new(tool)));
+            assert!(agent.engine.get_mut().registry_mut().register(Box::new(BrowserScreenshotOnlyTool)));
+            agent.engine.get_mut().set_host_context_value(
+                IMAGE_ROUTE_CONTEXT_KEY,
+                Some(IMAGE_ROUTE_NATIVE),
+            );
+            // The generic visual classification still permits the task-specific
+            // action even with no text-to-image model configured.
+            agent.send_message(SendMessageData { content: prompt.into(), msg_id: "media-followup".into(), source_message_id: None, files: vec![], inject_skills: vec![], origin: None }).await.unwrap();
+            let requests = provider.requests();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(), vec![name], "the creation turn must advertise the frozen media action");
+            for request in requests {
+                assert!(request.tools.iter().all(|tool| tool.name == name), "follow-up passes may not reopen unrelated tools");
+            }
+        }
     }
 
     #[tokio::test]
@@ -7347,6 +7562,7 @@ mod tests {
                 process_supervisor: None,
                 mcp_managers: Vec::new(),
                 lazy_mcp_runtime: None,
+                hosted_effects: None,
                 turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
                 accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
                 armed: true,
@@ -7400,6 +7616,7 @@ mod tests {
                 process_supervisor: None,
                 mcp_managers: Vec::new(),
                 lazy_mcp_runtime: None,
+                hosted_effects: None,
                 turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
                 accepted_turn_recovery_required: recovery_required,
                 armed: true,
@@ -7449,6 +7666,7 @@ mod tests {
                 process_supervisor: None,
                 mcp_managers: Vec::new(),
                 lazy_mcp_runtime: None,
+                hosted_effects: None,
                 turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
                 accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
                 armed: true,

@@ -25,10 +25,43 @@ use nomifun_chat_model_broker::{
     protocol_features, recorded_conformance_fixtures,
 };
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
+
+#[test]
+fn broker_reexports_the_exact_canonical_chat_types_and_wire_values() {
+    use nomifun_agent_contracts::chat_model as canonical;
+
+    let request = basic_request(&route(ChatProtocol::OpenaiChat, "shared-contract", 1));
+    let expected = serde_json::to_value(&request).unwrap();
+    // These assignments must compile without conversion: the old broker path
+    // and the shared contract path name the same types, not matching copies.
+    let canonical_request: canonical::ChatModelRequest = request;
+    canonical_request.validate().unwrap();
+    let broker_request: ChatModelRequest = canonical_request;
+    assert_eq!(serde_json::to_value(&broker_request).unwrap(), expected);
+    let decoded: canonical::ChatModelRequest = serde_json::from_value(expected).unwrap();
+    assert_eq!(decoded, broker_request);
+
+    let event: canonical::ChatModelEvent = ChatModelEvent::OutputTextDelta { text: "increment".into() };
+    assert_eq!(serde_json::to_value(&event).unwrap(), serde_json::json!({
+        "type": "output_text_delta", "text": "increment"
+    }));
+    let broker_event: ChatModelEvent = event;
+    assert!(broker_event.is_semantic_output());
+    assert!(!broker_event.is_terminal());
+    let error: canonical::ChatModelError = ChatModelError::protocol_violation("invalid event");
+    let broker_error: ChatModelError = error;
+    assert_eq!(broker_error.retry, ChatRetryDirective::Never);
+    assert_eq!(canonical::CHAT_MODEL_CONTRACT_VERSION, "chat-model-v1");
+}
 
 enum TransportScript {
     OpenError(ChatModelError),
     Frames(Vec<Result<ProviderWireFrame, ChatModelError>>),
+    PendingOpen {
+        started: Arc<Notify>,
+        dropped: Arc<Notify>,
+    },
     PendingStream {
         started: Arc<Notify>,
         dropped: Arc<Notify>,
@@ -98,6 +131,11 @@ impl ProviderTransport for ScriptedTransport {
         match script {
             TransportScript::OpenError(error) => Err(error),
             TransportScript::Frames(frames) => Ok(Box::pin(stream::iter(frames))),
+            TransportScript::PendingOpen { started, dropped } => {
+                let _guard = NotifyOnDrop(dropped);
+                started.notify_one();
+                std::future::pending().await
+            }
             TransportScript::PendingStream { started, dropped } => {
                 Ok(Box::pin(stream::once(async move {
                     let _guard = NotifyOnDrop(dropped);
@@ -1139,6 +1177,160 @@ async fn dropping_broker_or_bridge_stream_releases_pending_provider_stream() {
             .await.expect("dropping output must release the pending provider stream");
         assert_eq!(transport.calls(), 1, "cancellation must not retry or fail over");
     }
+}
+
+#[tokio::test]
+async fn native_cancellation_drops_provider_open_and_stream_without_consumer_polling() {
+    for pending_open in [true, false] {
+        for drop_consumer in [true, false] {
+            let primary_route = route(ChatProtocol::Anthropic, "cancel-attempt", 1);
+            let started = Arc::new(Notify::new());
+            let dropped = Arc::new(Notify::new());
+            let script = if pending_open {
+                TransportScript::PendingOpen { started: started.clone(), dropped: dropped.clone() }
+            } else {
+                TransportScript::PendingStream { started: started.clone(), dropped: dropped.clone() }
+            };
+            let transport = ScriptedTransport::new([script]);
+            let transports = transport_map([(ChatProtocol::Anthropic, provider_transport(&transport))]);
+            let broker = broker(
+                StaticCausalityGate::allow(),
+                ResolvedChatRouteSet {
+                    primary: primary_route.clone(),
+                    failovers: vec![route(ChatProtocol::Anthropic, "unused-failover", 1)],
+                },
+                Arc::new(StaticCredentialStore { mismatch: false }),
+                &transports,
+                BrokerRetryPolicy::default(),
+            );
+            let parent = CancellationToken::new();
+            let cancellation = parent.child_token();
+            let mut output = Some(broker.open_chat_stream_cancellable(
+                basic_request(&primary_route), cancellation.clone(),
+            ).await.unwrap());
+            tokio::time::timeout(Duration::from_secs(2), started.notified()).await.unwrap();
+            if drop_consumer {
+                drop(output.take());
+                assert!(!cancellation.is_cancelled(), "stream drop must not cancel its caller");
+            } else {
+                cancellation.cancel();
+            }
+            // Keep the receiver alive and unpolled: cancellation must be owned
+            // by the Broker task, not by the next downstream poll.
+            tokio::time::timeout(Duration::from_secs(2), dropped.notified()).await
+                .expect("cancellation must drop the actual provider attempt");
+            if let Some(mut output) = output {
+                assert!(output.next().await.is_none());
+            }
+            assert!(!parent.is_cancelled());
+            assert_eq!(transport.calls(), 1, "cancel must never retry or fail over");
+        }
+    }
+}
+
+#[tokio::test]
+async fn pre_cancelled_request_does_not_claim_causality_or_open_provider() {
+    let primary = route(ChatProtocol::Anthropic, "pre-cancelled", 1);
+    let gate = StaticCausalityGate::allow();
+    let transport = ScriptedTransport::new([]);
+    let transports = transport_map([(ChatProtocol::Anthropic, provider_transport(&transport))]);
+    let broker = broker(
+        gate.clone(),
+        ResolvedChatRouteSet { primary: primary.clone(), failovers: vec![] },
+        Arc::new(StaticCredentialStore { mismatch: false }),
+        &transports,
+        BrokerRetryPolicy::default(),
+    );
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let error = broker.open_chat_stream_cancellable(basic_request(&primary), cancellation)
+        .await.err().expect("pre-cancelled request must fail");
+    assert_eq!(error.code, ChatModelErrorCode::Cancelled);
+    assert_eq!(error.retry, ChatRetryDirective::Never);
+    assert_eq!(gate.calls.load(Ordering::Acquire), 0);
+    assert_eq!(transport.calls(), 0);
+}
+
+struct PendingCredentialStore {
+    started: Arc<Notify>,
+    dropped: Arc<Notify>,
+}
+
+struct PendingRouteResolver {
+    started: Arc<Notify>,
+    dropped: Arc<Notify>,
+}
+
+#[async_trait]
+impl ChatRouteResolver for PendingRouteResolver {
+    async fn resolve(&self, _: &ChatRouteSelection) -> Result<ResolvedChatRouteSet, ChatModelError> {
+        let _guard = NotifyOnDrop(self.dropped.clone());
+        self.started.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn native_cancellation_interrupts_route_preparation_before_causality_claim() {
+    let primary = route(ChatProtocol::Anthropic, "pending-route", 1);
+    let gate = StaticCausalityGate::allow();
+    let started = Arc::new(Notify::new());
+    let dropped = Arc::new(Notify::new());
+    let broker = Arc::new(ChatModelBroker::new(
+        gate.clone(),
+        Arc::new(PendingRouteResolver { started: started.clone(), dropped: dropped.clone() }),
+        Arc::new(StaticCredentialStore { mismatch: false }),
+        adapters(&transport_map([])),
+        BrokerRetryPolicy::default(),
+    ).unwrap());
+    let cancellation = CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+    let task = tokio::spawn(async move {
+        broker.open_chat_stream_cancellable(basic_request(&primary), task_cancellation).await
+    });
+    tokio::time::timeout(Duration::from_secs(2), started.notified()).await.unwrap();
+    cancellation.cancel();
+    let error = tokio::time::timeout(Duration::from_secs(2), task).await.unwrap()
+        .unwrap().err().expect("cancelled preparation must fail");
+    assert_eq!(error.code, ChatModelErrorCode::Cancelled);
+    tokio::time::timeout(Duration::from_secs(2), dropped.notified()).await.unwrap();
+    assert_eq!(gate.calls.load(Ordering::Acquire), 0);
+}
+
+#[async_trait]
+impl ProviderCredentialStore for PendingCredentialStore {
+    async fn lease(
+        &self,
+        _: &ProviderCredentialRef,
+        _: &CredentialTarget,
+    ) -> Result<CredentialLease, ChatModelError> {
+        let _guard = NotifyOnDrop(self.dropped.clone());
+        self.started.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn cancellation_releases_pending_credential_acquisition() {
+    let primary = route(ChatProtocol::Anthropic, "pending-credential", 1);
+    let started = Arc::new(Notify::new());
+    let dropped = Arc::new(Notify::new());
+    let transport = ScriptedTransport::new([]);
+    let transports = transport_map([(ChatProtocol::Anthropic, provider_transport(&transport))]);
+    let broker = broker(
+        StaticCausalityGate::allow(),
+        ResolvedChatRouteSet { primary: primary.clone(), failovers: vec![] },
+        Arc::new(PendingCredentialStore { started: started.clone(), dropped: dropped.clone() }),
+        &transports,
+        BrokerRetryPolicy::default(),
+    );
+    let cancellation = CancellationToken::new();
+    let _output = broker.open_chat_stream_cancellable(basic_request(&primary), cancellation.clone())
+        .await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), started.notified()).await.unwrap();
+    cancellation.cancel();
+    tokio::time::timeout(Duration::from_secs(2), dropped.notified()).await.unwrap();
+    assert_eq!(transport.calls(), 0);
 }
 
 #[tokio::test]

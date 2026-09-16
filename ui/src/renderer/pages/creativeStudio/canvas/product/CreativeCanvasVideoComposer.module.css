@@ -2,6 +2,7 @@
   display: flex;
   min-width: 0;
   align-items: center;
+  overflow-x: auto;
   gap: 8px;
   padding: 2px 6px 8px;
 }
@@ -26,33 +27,6 @@
   border-color: color-mix(in srgb, rgb(var(--danger-6)) 32%, var(--color-border-2));
   background: color-mix(in srgb, rgb(var(--danger-6)) 10%, var(--color-bg-2));
   color: rgb(var(--danger-6));
-}
-
-.reference {
-  display: inline-flex;
-  min-width: 0;
-  max-width: 260px;
-  align-items: center;
-  gap: 6px;
-  color: var(--color-text-3);
-  font-size: 11px;
-}
-
-.referencePreview {
-  display: block;
-  width: 24px;
-  height: 24px;
-  flex: 0 0 24px;
-  overflow: hidden;
-  border: 1px solid var(--color-border-1);
-  border-radius: 6px;
-  background: var(--color-bg-3);
-}
-
-.referenceName {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .unsupported {

@@ -81,7 +81,6 @@ const renderLibrary = (overrides: Partial<React.ComponentProps<typeof CreativeAs
         onEditAsset={() => undefined}
         onDownloadAsset={() => undefined}
         onRemoveAsset={() => undefined}
-        onSetSelectedLibrary={() => undefined}
         onInsertSelected={() => undefined}
         onDownloadSelected={() => undefined}
         onRemoveSelected={() => undefined}
@@ -137,7 +136,7 @@ describe('CreativeAssetLibrary', () => {
 
     expect(html.includes('data-asset-selection-bar="true"')).toBe(true);
     expect(html.includes('已选择 2 项')).toBe(true);
-    for (const label of ['移出素材库', '插入画布', '下载', '删除']) {
+    for (const label of ['插入画布', '下载', '删除']) {
       expect(html.includes(label)).toBe(true);
     }
     expect(html.match(/type="checkbox"/g)?.length).toBe(4);
@@ -212,7 +211,7 @@ describe('CreativeAssetLibrary', () => {
       selectable: false,
       selectedIds: new Set(),
       labels: {
-        title: '我的素材',
+        title: '资产库',
         description: '收藏常用素材，按类型和标题快速查找。',
         kindFilter: '类型',
       },
@@ -227,7 +226,7 @@ describe('CreativeAssetLibrary', () => {
     });
 
     expect(html.includes('data-asset-appearance="source-page"')).toBe(true);
-    expect(html.includes('<h1>我的素材</h1>')).toBe(true);
+    expect(html.includes('<h1>资产库</h1>')).toBe(true);
     expect(html.includes('role="search"')).toBe(true);
     expect(html.includes('type="search" aria-label="搜索"')).toBe(true);
     expect(html.includes('aria-label="素材范围"')).toBe(false);

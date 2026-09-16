@@ -34,6 +34,10 @@ mod protocol_boundaries;
 mod inflight_limits;
 #[path = "extension_host/module_files.rs"]
 mod module_files;
+#[path = "extension_host/cancellation.rs"]
+mod cancellation;
+#[path = "extension_host/dependencies.rs"]
+mod dependencies;
 
 fn fixture(path: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

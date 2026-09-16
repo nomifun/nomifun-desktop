@@ -2,8 +2,8 @@
   "digest_algorithm": "sorted-json-sha256-v1",
   "payload": {
     "manifest_version": "1.0.0",
-    "target_first_party_contribution_digest": "0792960feecd590a328f53332345de584c602c3055b0132020b125d0fc75b8eb",
-    "target_runtime_feature_inventory_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
+    "target_first_party_contribution_digest": "be13bb95cf0bf1fca71ebe13d4d5f8f956f00ee0134614946b8f6009a4293bb3",
+    "target_runtime_feature_inventory_digest": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
     "templates": {
       "chat.minimal": {
         "enabled_capabilities": [],
@@ -55,6 +55,26 @@
           },
           {
             "id": "memory.project.citation",
+            "version": "1.0.0"
+          },
+          {
+            "id": "creation.image",
+            "version": "1.0.0"
+          },
+          {
+            "id": "creation.image_edit",
+            "version": "1.0.0"
+          },
+          {
+            "id": "creation.video",
+            "version": "1.0.0"
+          },
+          {
+            "id": "creation.music",
+            "version": "1.0.0"
+          },
+          {
+            "id": "creation.audio",
             "version": "1.0.0"
           }
         ],
@@ -302,19 +322,7 @@
           {
             "id": "channel.group_policy",
             "version": "1.0.0"
-          }
-        ],
-        "skill_bindings": [],
-        "required_resource_kinds": [
-          "channel",
-          "companion",
-          "companion_memory",
-          "knowledge_base"
-        ],
-        "required_runtime_features": []
-      },
-      "robot.default": {
-        "enabled_capabilities": [
+          },
           {
             "id": "robot.link",
             "version": "1.0.0"
@@ -325,22 +333,6 @@
           },
           {
             "id": "robot.display",
-            "version": "1.0.0"
-          },
-          {
-            "id": "companion.persona",
-            "version": "1.0.0"
-          },
-          {
-            "id": "memory.companion.recall",
-            "version": "1.0.0"
-          },
-          {
-            "id": "knowledge.search",
-            "version": "1.0.0"
-          },
-          {
-            "id": "knowledge.read",
             "version": "1.0.0"
           },
           {
@@ -356,15 +348,15 @@
             "version": "1.0.0"
           },
           {
-            "id": "memory.companion.write",
+            "id": "mcp.connect",
             "version": "1.0.0"
           },
           {
-            "id": "channel.receive",
+            "id": "mcp.tool_proxy",
             "version": "1.0.0"
           },
           {
-            "id": "channel.reply",
+            "id": "mcp.resource",
             "version": "1.0.0"
           }
         ],
@@ -374,6 +366,7 @@
           "companion",
           "companion_memory",
           "knowledge_base",
+          "mcp_server",
           "robot"
         ],
         "required_runtime_features": []
@@ -428,30 +421,6 @@
       "creative-studio.default": {
         "enabled_capabilities": [
           {
-            "id": "workshop.canvas.read",
-            "version": "1.0.0"
-          },
-          {
-            "id": "workshop.asset.read",
-            "version": "1.0.0"
-          },
-          {
-            "id": "workshop.canvas.edit",
-            "version": "1.0.0"
-          },
-          {
-            "id": "workshop.asset.write",
-            "version": "1.0.0"
-          },
-          {
-            "id": "workshop.template.run",
-            "version": "1.0.0"
-          },
-          {
-            "id": "creation.text",
-            "version": "1.0.0"
-          },
-          {
             "id": "creation.image",
             "version": "1.0.0"
           },
@@ -464,32 +433,29 @@
             "version": "1.0.0"
           },
           {
+            "id": "creation.music",
+            "version": "1.0.0"
+          },
+          {
             "id": "creation.audio",
             "version": "1.0.0"
           },
           {
-            "id": "plugin.read",
+            "id": "session.attachments.read",
             "version": "1.0.0"
           },
           {
-            "id": "plugin.edit",
+            "id": "workshop.asset.read",
             "version": "1.0.0"
           },
           {
-            "id": "plugin.publish",
-            "version": "1.0.0"
-          },
-          {
-            "id": "plugin.serve",
+            "id": "workshop.asset.write",
             "version": "1.0.0"
           }
         ],
         "skill_bindings": [],
         "required_resource_kinds": [
-          "asset_library",
-          "canvas",
-          "generation_provider",
-          "plugin"
+          "asset_library"
         ],
         "required_runtime_features": []
       }
@@ -504,12 +470,18 @@
       "assistant.general": {
         "required_capability_categories": [
           "attachments",
+          "generation",
           "knowledge",
           "project_memory",
           "web_research"
         ],
         "required_capability_ids": [
           "citation.render",
+          "creation.audio",
+          "creation.image",
+          "creation.image_edit",
+          "creation.music",
+          "creation.video",
           "fs.read",
           "knowledge.read",
           "knowledge.search",
@@ -614,6 +586,7 @@
           "im_channel",
           "knowledge",
           "learning_evolution",
+          "mcp",
           "persona"
         ],
         "required_capability_ids": [
@@ -628,6 +601,9 @@
           "companion.roster",
           "knowledge.read",
           "knowledge.search",
+          "mcp.connect",
+          "mcp.resource",
+          "mcp.tool_proxy",
           "memory.companion.evolve",
           "memory.companion.merge",
           "memory.companion.recall",
@@ -638,37 +614,8 @@
           "channel",
           "companion",
           "companion_memory",
-          "knowledge_base"
-        ]
-      },
-      "robot.default": {
-        "required_capability_categories": [
-          "audio_display",
-          "device_link",
-          "persona_memory_knowledge",
-          "vision_motion"
-        ],
-        "required_capability_ids": [
-          "channel.receive",
-          "channel.reply",
-          "companion.persona",
-          "knowledge.read",
-          "knowledge.search",
-          "memory.companion.recall",
-          "memory.companion.write",
-          "robot.audio",
-          "robot.device_tools",
-          "robot.display",
-          "robot.link",
-          "robot.motion",
-          "robot.vision"
-        ],
-        "required_runtime_features": [],
-        "required_resource_kinds": [
-          "channel",
-          "companion",
-          "companion_memory",
           "knowledge_base",
+          "mcp_server",
           "robot"
         ]
       },
@@ -700,34 +647,23 @@
       },
       "creative-studio.default": {
         "required_capability_categories": [
-          "canvas_asset",
+          "attachments",
           "editing",
-          "generation",
-          "plugin",
-          "templates"
+          "generation"
         ],
         "required_capability_ids": [
           "creation.audio",
           "creation.image",
           "creation.image_edit",
-          "creation.text",
+          "creation.music",
           "creation.video",
-          "plugin.edit",
-          "plugin.publish",
-          "plugin.read",
-          "plugin.serve",
+          "session.attachments.read",
           "workshop.asset.read",
-          "workshop.asset.write",
-          "workshop.canvas.edit",
-          "workshop.canvas.read",
-          "workshop.template.run"
+          "workshop.asset.write"
         ],
         "required_runtime_features": [],
         "required_resource_kinds": [
-          "asset_library",
-          "canvas",
-          "generation_provider",
-          "plugin"
+          "asset_library"
         ]
       }
     },
@@ -741,5 +677,5 @@
       "research.web"
     ]
   },
-  "payload_digest": "b6162b62fd0e5711b5f3f7432cbd077987a47c4986af822f1a7fc48677a97e0b"
+  "payload_digest": "477236de5f2a9afcb289ba4409a3dd8eae25f1df9ef924d0fcb9ecfd6d61421b"
 }

@@ -6,10 +6,16 @@
 
 import { ArrowUp, BookOne, Loading, SettingTwo } from '@icon-park/react';
 import { Popover, Select } from '@arco-design/web-react';
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { useTranslation } from 'react-i18next';
 
-import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
+import CreativeCanvasReferenceList, { type CreativeCanvasComposerReference } from './CreativeCanvasReferenceList';
+import CreativeCanvasReferencePromptInput, {
+  collectCreativeCanvasPromptMentionIssues,
+  type CreativeCanvasPromptMentionBinding,
+  type CreativeCanvasReferencePromptChange,
+} from './CreativeCanvasReferencePromptInput';
+import { useCanvasReferencePromptDraft } from './useCanvasReferencePromptDraft';
 import type {
   CreativeModelOption,
   CreativeModelSelectionRef,
@@ -27,16 +33,18 @@ export type CanvasVideoResolution = '720p' | '1080p';
 export type CanvasVideoAspectRatio = '16:9' | '9:16' | '1:1';
 export type CanvasVideoSeconds = 5 | 10;
 
-export interface CanvasVideoReferenceSummary {
-  name: string;
-  previewUrl?: string | null;
-  originalUrl?: string | null;
-}
+const EMPTY_REFERENCES: readonly CreativeCanvasComposerReference[] = [];
+const EMPTY_MENTIONS: readonly CreativeCanvasPromptMentionBinding[] = [];
 
 export interface CreativeCanvasVideoComposerProps {
   nodeId: string;
   mode: CanvasVideoComposerMode;
-  reference?: CanvasVideoReferenceSummary | null;
+  references?: readonly CreativeCanvasComposerReference[];
+  initialMentions?: readonly CreativeCanvasPromptMentionBinding[];
+  generateBlocked?: boolean;
+  onReferenceActivate?(sourceNodeId: string): void;
+  onReferenceDisconnect?(connectionId: string): void;
+  onReferencesDisconnect?(connectionIds: readonly string[]): void;
   initialPrompt: string;
   settings: CanvasVideoComposeSettings;
   modelOptions: readonly CreativeModelOption[];
@@ -44,13 +52,13 @@ export interface CreativeCanvasVideoComposerProps {
   disabled?: boolean;
   error?: string | null;
   retrySubmission?: boolean;
-  onPromptChange?(prompt: string): void;
+  onPromptChange?(change: CreativeCanvasReferencePromptChange): void;
   onOpenPromptLibrary(): void;
   onModelChange(model: CreativeModelSelectionRef | null): void;
   onResolutionChange(resolution: CanvasVideoResolution): void;
   onAspectRatioChange(aspectRatio: CanvasVideoAspectRatio): void;
   onSecondsChange(seconds: CanvasVideoSeconds): void;
-  onGenerate(prompt: string): void;
+  onGenerate(prompt: string, mentions: readonly CreativeCanvasPromptMentionBinding[]): void;
   onRetrySubmission?(): void;
   onConfirmSubmission?(): void;
 }
@@ -60,9 +68,11 @@ export interface CanvasVideoComposerSubmissionInput {
   disabled: boolean;
   busy: boolean;
   prompt: string;
+  mentions?: readonly CreativeCanvasPromptMentionBinding[];
+  hasTextInput?: boolean;
   hasModel: boolean;
   retrySubmission: boolean;
-  onGenerate(prompt: string): void;
+  onGenerate(prompt: string, mentions: readonly CreativeCanvasPromptMentionBinding[]): void;
   onRetrySubmission?(): void;
 }
 
@@ -94,11 +104,6 @@ const popupContainer = (trigger: HTMLElement): HTMLElement =>
   (trigger.closest('[data-canvas-video-composer]') as HTMLElement | null) ??
   document.body;
 
-export const isCanvasVideoComposerSubmitKey = (
-  key: string,
-  shiftKey: boolean
-): boolean => key === 'Enter' && !shiftKey;
-
 /**
  * Keep retry and generation mutually exclusive. A retry reuses the canonical
  * task identity and therefore never needs the draft prompt or model again.
@@ -112,9 +117,9 @@ export function dispatchCanvasVideoComposerSubmission(
     input.onRetrySubmission();
     return 'retried';
   }
-  const prompt = input.prompt.trim();
-  if (input.busy || !input.hasModel || !prompt) return null;
-  input.onGenerate(prompt);
+  if (input.busy || !input.hasModel || (!input.prompt.trim() && !input.hasTextInput)) return null;
+  // Preserve UTF-16 offsets until the canonical prompt compiler resolves mentions.
+  input.onGenerate(input.prompt, input.mentions ?? []);
   return 'generated';
 }
 
@@ -123,7 +128,12 @@ const CreativeCanvasVideoComposer: React.FC<
 > = ({
   nodeId,
   mode,
-  reference,
+  references = EMPTY_REFERENCES,
+  initialMentions = EMPTY_MENTIONS,
+  generateBlocked = false,
+  onReferenceActivate,
+  onReferenceDisconnect,
+  onReferencesDisconnect,
   initialPrompt,
   settings,
   modelOptions,
@@ -142,7 +152,15 @@ const CreativeCanvasVideoComposer: React.FC<
   onConfirmSubmission,
 }) => {
   const { t } = useTranslation();
-  const [prompt, setPrompt] = useState(initialPrompt);
+  const { prompt, mentions, labels, change, clear } = useCanvasReferencePromptDraft(
+    nodeId, initialPrompt, initialMentions, references, onPromptChange
+  );
+  const mentionIssues = collectCreativeCanvasPromptMentionIssues(prompt, mentions, references);
+  const hasTextInput = references.some((reference) =>
+    reference.kind === 'text' && reference.textContent?.trim() && !reference.disabledReason
+  );
+  const imageCount = references.filter((reference) => reference.kind !== 'text').length;
+  const referenceBlocked = generateBlocked || references.some((reference) => reference.disabledReason);
   const busy = task.state === 'queued' || task.state === 'running';
   const unsupported = mode === 'unsupported';
   const interactionDisabled = disabled || unsupported;
@@ -150,11 +168,21 @@ const CreativeCanvasVideoComposer: React.FC<
     ? modelOptions.find((option) => modelKey(option) === modelKey(settings.model!)) ??
       null
     : null;
+  const referenceIssue = imageCount > 1 &&
+    (selectedModel?.protocol === 'openai.videos' || selectedModel?.protocol === 'siliconflow.video_jobs')
+    ? t('creativeStudio.canvas.video.singleImageModel', {
+        defaultValue: '所选模型仅支持一张参考图，请减少连接或切换支持多图的模型。',
+      })
+    : null;
+  const keyframes = imageCount > 1 && selectedModel?.protocol === 'agnes.video_jobs';
   const canSubmit = retrySubmission
     ? !interactionDisabled && onRetrySubmission !== undefined
     : !interactionDisabled &&
       !busy &&
-      prompt.trim().length > 0 &&
+      !referenceIssue &&
+      !referenceBlocked &&
+      mentionIssues.length === 0 &&
+      (prompt.trim().length > 0 || hasTextInput) &&
       selectedModel !== null;
   const unsupportedModeLabel = unsupported
     ? t('creativeStudio.canvas.video.unsupportedMode', {
@@ -162,20 +190,21 @@ const CreativeCanvasVideoComposer: React.FC<
       })
     : null;
 
-  useEffect(() => setPrompt(initialPrompt), [initialPrompt, nodeId]);
-
-  const submit = (): void => {
+  const submit = (draft: CreativeCanvasReferencePromptChange = { value: prompt, mentions }): void => {
     const result = dispatchCanvasVideoComposerSubmission({
       mode,
-      disabled,
+      disabled: disabled || (!retrySubmission && (Boolean(referenceIssue) || referenceBlocked ||
+        collectCreativeCanvasPromptMentionIssues(draft.value, draft.mentions, references).length > 0)),
       busy,
-      prompt,
+      prompt: draft.value,
+      mentions: draft.mentions,
+      hasTextInput,
       hasModel: selectedModel !== null,
       retrySubmission,
       onGenerate,
       onRetrySubmission,
     });
-    if (result === 'generated') setPrompt('');
+    if (result === 'generated') clear();
   };
 
   const modelStatus =
@@ -195,56 +224,44 @@ const CreativeCanvasVideoComposer: React.FC<
       nodeId={nodeId}
       mode={mode}
     >
-        {unsupportedModeLabel || (mode === 'i2v' && reference) ? (
+        <CreativeCanvasReferenceList
+          key={nodeId}
+          references={references}
+          disabled={interactionDisabled}
+          onActivate={onReferenceActivate}
+          onDisconnect={onReferenceDisconnect}
+          onDisconnectMany={onReferencesDisconnect}
+        />
+        {unsupportedModeLabel || keyframes ? (
           <div className={styles.contextRow}>
-            {unsupportedModeLabel ? (
-              <span className={styles.modePill}>{unsupportedModeLabel}</span>
-            ) : null}
-            {mode === 'i2v' && reference ? (
-              <span className={styles.reference} title={reference.name}>
-                {reference.previewUrl || reference.originalUrl ? (
-                  <span className={styles.referencePreview}>
-                    <CreativeMediaPreview
-                      kind='image'
-                      src={reference.originalUrl ?? reference.previewUrl}
-                      posterSrc={reference.previewUrl}
-                      alt=''
-                    />
-                  </span>
-                ) : null}
-                <span className={styles.referenceName}>{reference.name}</span>
-              </span>
-            ) : null}
+            <span className={styles.modePill}>
+              {unsupportedModeLabel ?? t('creativeStudio.canvas.video.keyframeOrder', {
+                defaultValue: '关键帧 · 按连线顺序',
+              })}
+            </span>
           </div>
         ) : null}
-
-        <textarea
-          className={composerStyles.prompt}
+        <CreativeCanvasReferencePromptInput
+          key={`prompt:${nodeId}`}
           value={prompt}
-          maxLength={1_000_000}
-          placeholder={
-            mode === 'i2v'
-              ? t('creativeStudio.canvas.video.i2vPromptPlaceholder', {
-                  defaultValue: '描述参考图要如何运动、变化与运镜',
-                })
-              : t('creativeStudio.canvas.video.t2vPromptPlaceholder', {
-                  defaultValue: '描述要生成的视频内容、动作与镜头',
-                })
-          }
-          aria-label={t('creativeStudio.canvas.video.promptLabel', {
-            defaultValue: '视频创作提示词',
-          })}
+          mentions={mentions}
+          references={references}
+          placeholder={mode === 'i2v'
+            ? t('creativeStudio.canvas.video.i2vPromptPlaceholder', {
+                defaultValue: '描述参考图要如何运动、变化与运镜',
+              })
+            : t('creativeStudio.canvas.video.t2vPromptPlaceholder', {
+                defaultValue: '描述要生成的视频内容、动作与镜头',
+              })}
+          labels={{
+            ...labels,
+            input: t('creativeStudio.canvas.video.promptLabel', {
+              defaultValue: '视频创作提示词',
+            }),
+          }}
           disabled={interactionDisabled}
-          onChange={(event) => {
-            setPrompt(event.target.value);
-            onPromptChange?.(event.target.value);
-          }}
-          onKeyDown={(event) => {
-            if (isCanvasVideoComposerSubmitKey(event.key, event.shiftKey)) {
-              event.preventDefault();
-              submit();
-            }
-          }}
+          onChange={change}
+          onSubmit={submit}
         />
 
         <div className={composerStyles.footer}>
@@ -409,7 +426,7 @@ const CreativeCanvasVideoComposer: React.FC<
               defaultValue: '生成视频',
             })}
             disabled={!canSubmit}
-            onClick={submit}
+            onClick={() => submit()}
           >
             {busy && !retrySubmission ? (
               <Loading
@@ -436,7 +453,7 @@ const CreativeCanvasVideoComposer: React.FC<
           >
             {t('creativeStudio.canvas.video.unsupportedMessage', {
               defaultValue:
-                '当前节点不支持直接生成视频。请选择空视频节点，或为它添加一张图片参考。',
+                '当前节点不支持直接生成视频。请选择空视频节点，可连接图片作为参考。',
             })}
           </div>
         ) : null}
@@ -445,12 +462,12 @@ const CreativeCanvasVideoComposer: React.FC<
             {modelStatus}
           </div>
         ) : null}
-        {error || task.message ? (
+        {error || referenceIssue || task.message ? (
           <div
             className={composerStyles.message}
-            role={error ? 'alert' : 'status'}
+            role={error || referenceIssue ? 'alert' : 'status'}
           >
-            {error ?? task.message}
+            {error ?? referenceIssue ?? task.message}
           </div>
         ) : null}
         {retrySubmission && onConfirmSubmission ? (

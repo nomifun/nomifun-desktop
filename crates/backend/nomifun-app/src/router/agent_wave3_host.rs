@@ -22,12 +22,13 @@ use super::agent_wave3_creation_host::Wave3CreationHost;
 use super::agent_wave3_plugin_host::NomiWave3PluginHost;
 use super::agent_wave3_workshop_host::NomiWave3WorkshopHost;
 
-pub(crate) const NOMI_WAVE3_TOOL_IDS: [&str; 14] = [
+pub(crate) const NOMI_WAVE3_TOOL_IDS: [&str; 15] = [
     "creation.text",
     "creation.image",
     "creation.image_edit",
     "creation.video",
     "creation.audio",
+    "creation.music",
     "workshop.canvas.read",
     "workshop.canvas.edit",
     "workshop.asset.read",
@@ -52,6 +53,9 @@ pub(crate) fn registrations(
     creation: Arc<CreationService>,
     workshop: Arc<WorkshopService>,
     plugin_runtime: Arc<PluginRuntimeApplicationService>,
+    model_invoke: Arc<nomifun_model_invoke::ModelInvokeService>,
+    pool: nomifun_db::SqlitePool,
+    owner_id: Arc<str>,
 ) -> Result<Vec<PluginRegistration>, String> {
     let workshop_host = NomiWave3WorkshopHost::new(
         Arc::clone(&workshop),
@@ -60,7 +64,7 @@ pub(crate) fn registrations(
     let host = composed_host_port(
         Wave3OwnerBindings::default()
             .with_creation(
-                Wave3CreationHost::new(creation, Arc::clone(&workshop)).into_host_port(),
+                Wave3CreationHost::new(creation, model_invoke, pool, owner_id).into_host_port(),
             )
             .with_workshop(workshop_host.into_port())
             .with_plugin(NomiWave3PluginHost::new(plugin_runtime).into_port()),
@@ -116,7 +120,7 @@ mod tests {
         assert!(approved.iter().all(|id| {
             id.as_ref().starts_with("creation.")
                 || id.as_ref().starts_with("workshop.")
-                || id.as_ref().starts_with("plugin.product.")
+                || matches!(id.as_ref(), "plugin.read" | "plugin.edit" | "plugin.publish" | "plugin.serve")
         }));
     }
 }

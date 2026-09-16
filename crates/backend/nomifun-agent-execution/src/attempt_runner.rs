@@ -317,6 +317,7 @@ impl AgentSessionAttemptRunner {
                 operation_id,
                 authority,
                 SendMessageRequest {
+                    preset_id: None,
                     content: content.to_owned(),
                     files: vec![],
                     inject_skills: vec![],
@@ -480,7 +481,22 @@ impl AttemptRunner for AgentSessionAttemptRunner {
             use_model: Some(model),
         };
 
-        let mut extra = build_agent_extra(
+        let canonical = participant.agent_snapshot.as_ref()
+            .is_some_and(|snapshot| snapshot.canonical_binding.is_some());
+        let mut extra = if canonical {
+            // The immutable Agent owns persona, skills and capability grants.
+            // An Attempt supplies task data and a separate subtractive ceiling.
+            let constraints = nomifun_api_types::ExecutionConstraints {
+                version: 1,
+                tool_scope: tool_policy,
+                exclude_delegation: delegation_depth >= MAX_AGENT_DELEGATION_DEPTH,
+            };
+            let mut extra = json!({ nomifun_api_types::EXECUTION_CONSTRAINTS_KEY: constraints });
+            if let Some(workspace) = workspace_dir.map(str::trim).filter(|value| !value.is_empty()) {
+                extra["workspace"] = json!(workspace);
+            }
+            extra
+        } else { build_agent_extra(
             brief,
             workspace_dir,
             participant.system_prompt.as_deref(),
@@ -488,7 +504,7 @@ impl AttemptRunner for AgentSessionAttemptRunner {
             &participant.disabled_builtin_skills,
             tool_policy,
             delegation_depth >= MAX_AGENT_DELEGATION_DEPTH,
-        );
+        ) };
         if let Some(snapshot) = participant.agent_snapshot.as_ref() {
             extra["preset_id"] = Value::String(snapshot.preset_id.clone());
             extra["preset_revision"] = Value::Number(snapshot.preset_revision.into());
@@ -567,12 +583,19 @@ impl AttemptRunner for AgentSessionAttemptRunner {
         };
 
         let operation_id = format!("{attempt_creation_key}:initial-turn");
+        // Durable user input, not a replacement for the Agent's system rules.
+        // JSON boundaries preserve arbitrary brief/step text without delimiters
+        // that can be closed by the task itself. Retries encode the same input.
+        let task_input = if canonical {
+            serde_json::to_string(&json!({ "task_brief": brief, "step_spec": step_spec }))
+                .map_err(|error| AppError::Internal(format!("encode Attempt input: {error}")))?
+        } else { step_spec.to_owned() };
         self.deliver_turn(
             owner_id,
             &conversation.conversation_id,
             &operation_id,
             authority,
-            step_spec,
+            &task_input,
             "agent_execution",
             timeout,
         )

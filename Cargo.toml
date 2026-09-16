@@ -57,10 +57,10 @@ nomifun-js-host = { path = "crates/backend/nomifun-js-host" }
 nomifun-js-kernel-adapter = { path = "crates/backend/nomifun-js-kernel-adapter" }
 nomifun-js-runtime = { path = "crates/backend/nomifun-js-runtime" }
 nomifun-plugin-platform = { path = "crates/backend/nomifun-plugin-platform" }
-nomifun-codex-runtime = { path = "crates/backend/nomifun-codex-runtime" }
 nomifun-chat-model-broker = { path = "crates/backend/nomifun-chat-model-broker" }
+nomifun-coding-engine = { path = "crates/backend/nomifun-coding-engine" }
+nomifun-engine-core = { path = "crates/backend/nomifun-engine-core" }
 nomifun-agent-control-plane = { path = "crates/backend/nomifun-agent-control-plane" }
-nomifun-agent-platform = { path = "crates/backend/nomifun-agent-platform" }
 nomifun-agent-domain-support = { path = "crates/backend/nomifun-agent-domain-support" }
 nomifun-agent-domain-wave1 = { path = "crates/backend/nomifun-agent-domain-wave1" }
 nomifun-agent-domain-wave2 = { path = "crates/backend/nomifun-agent-domain-wave2" }
@@ -318,6 +318,12 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
+# Runtime attestation hashes the complete Node executable before every launch.
+# Keep the cryptographic implementation fast in development too, so two cold
+# Services fit the unchanged hook deadline without caching or skipping hashes.
+[profile.dev.package.sha2]
+opt-level = 3
+
 [profile.test]
 # Test binaries in this workspace are unusually large on Windows. Even minimal
 # line tables produced hundreds of MiB of PDB data per integration target, so
@@ -327,6 +333,9 @@ debug = false
 
 [profile.test.package."*"]
 debug = false
+
+[profile.test.package.sha2]
+opt-level = 3
 
 # Size-optimized release profile. The packaged `nomifun-desktop.exe` is the first
 # and largest file the NSIS installer writes, and an oversized *unsigned* binary

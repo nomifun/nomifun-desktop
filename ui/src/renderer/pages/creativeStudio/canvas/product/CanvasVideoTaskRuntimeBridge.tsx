@@ -21,11 +21,8 @@ import {
   type CreativeTask,
   type CreativeTaskReference,
 } from '../../tasks';
-import {
-  useCreativeWorkbenchRuntime,
-  type CreativeWorkbenchRuntimeSnapshot,
-  type PreparedCreativeWorkbenchRun,
-} from '../../workbenches/runtime';
+import { useCanvasGenerationRuntime, type CanvasGenerationRuntimeSnapshot, type PreparedCanvasGenerationRun } from '../generation';
+
 import type { CreativeCanvasEditorHandle } from '../editor';
 import {
   canvasVideoComposeConfigForReference,
@@ -47,19 +44,19 @@ import {
 export type CanvasVideoTaskAdmission = CanvasImageMaskEditAdmission;
 
 export interface CanvasVideoTaskRuntimeBridgeHandle {
-  submit(plan: PreparedCreativeWorkbenchRun): Promise<CanvasVideoTaskAdmission>;
+  submit(plan: PreparedCanvasGenerationRun): Promise<CanvasVideoTaskAdmission>;
   retrySubmission(
     order: number,
     idempotencyKey: string
   ): Promise<CanvasVideoTaskAdmission>;
-  retryTask(taskId: string): Promise<CreativeWorkbenchRuntimeSnapshot>;
-  cancelTask(taskId: string): Promise<CreativeWorkbenchRuntimeSnapshot>;
+  retryTask(taskId: string): Promise<CanvasGenerationRuntimeSnapshot>;
+  cancelTask(taskId: string): Promise<CanvasGenerationRuntimeSnapshot>;
   recoverTask(
     reference: CreativeTaskReference
-  ): Promise<CreativeWorkbenchRuntimeSnapshot>;
+  ): Promise<CanvasGenerationRuntimeSnapshot>;
   /** Returns false only when the backend authoritatively answers 404. */
   taskExists(reference: CreativeTaskReference): Promise<boolean>;
-  snapshot(): CreativeWorkbenchRuntimeSnapshot;
+  snapshot(): CanvasGenerationRuntimeSnapshot;
 }
 
 export interface CanvasVideoTaskRuntimeBridgeProps {
@@ -68,7 +65,7 @@ export interface CanvasVideoTaskRuntimeBridgeProps {
   editorRef: React.RefObject<CreativeCanvasEditorHandle | null>;
   viewportSize: CreativeSize;
   onAsset(asset: CreativeAsset): void;
-  onSnapshot(snapshot: CreativeWorkbenchRuntimeSnapshot): void;
+  onSnapshot(snapshot: CanvasGenerationRuntimeSnapshot): void;
   onNotice(message: string): void;
 }
 
@@ -175,7 +172,7 @@ const CanvasVideoTaskRuntimeBridge = forwardRef<
     [t]
   );
 
-  const runtime = useCreativeWorkbenchRuntime({
+  const runtime = useCanvasGenerationRuntime({
     scopeKey: `${props.projectId}:canvas-video-tasks`,
     tasks: creativeTaskClient,
     assets: creativeAssetClient,
@@ -276,7 +273,7 @@ const CanvasVideoTaskRuntimeBridge = forwardRef<
 CanvasVideoTaskRuntimeBridge.displayName = 'CanvasVideoTaskRuntimeBridge';
 
 export const canvasVideoTaskReferenceFromPlan = (
-  plan: PreparedCreativeWorkbenchRun
+  plan: PreparedCanvasGenerationRun
 ): CreativeTaskReference => creativeTaskReferenceFromInput(plan.input);
 
 export default CanvasVideoTaskRuntimeBridge;

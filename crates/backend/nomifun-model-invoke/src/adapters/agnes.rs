@@ -259,11 +259,22 @@ impl ProtocolAdapter for AgnesVideoJobsAdapter {
             ));
         };
         validate_video_model(&call.model)?;
-        let body = json_request_body(
+        let mut body = json_request_body(
             &call.model_params,
             &request.extra,
             build_video_body(&call.model, &call.model_params, request)?,
         )?;
+        // Typed references own the mode and images. Stale provider defaults must
+        // not shadow them through the other (single-image/keyframe) wire form.
+        if !request.inputs.is_empty() {
+            body.as_object_mut().unwrap().remove("mode");
+            if request.inputs.len() > 1 {
+                body.as_object_mut().unwrap().remove("image");
+            } else if let Some(extra) = body.get_mut("extra_body").and_then(Value::as_object_mut) {
+                extra.remove("image");
+                extra.remove("mode");
+            }
+        }
         let url = call.endpoint_url()?;
         let response = post_json(
             http,
@@ -479,14 +490,19 @@ fn build_video_body(
         )?,
     };
 
-    if request.inputs.len() > 1 {
-        return Err(InvokeError::new(
-            InvokeErrorKind::InvalidParams,
-            format!(
-                "Agnes Video v2.0 image-to-video accepts one input image, got {}",
-                request.inputs.len()
-            ),
-        ));
+    for (index, input) in request.inputs.iter().enumerate() {
+        let valid_role = match input.role.as_str() {
+            "reference" | "image" => true,
+            "first_frame" => index == 0,
+            "last_frame" => request.inputs.len() > 1 && index + 1 == request.inputs.len(),
+            _ => false,
+        };
+        if !valid_role {
+            return Err(InvokeError::new(
+                InvokeErrorKind::InvalidParams,
+                "Agnes keyframes require ordered images, with first_frame first and last_frame last",
+            ));
+        }
     }
     let mut body = json!({
         "model": model,
@@ -496,8 +512,14 @@ fn build_video_body(
         "num_frames": num_frames,
         "frame_rate": frame_rate,
     });
-    if let Some(input) = request.inputs.first() {
-        body["image"] = Value::String(image_data_uri(input, 1, VIDEO_ADAPTER_ID)?);
+    let images = request.inputs.iter().enumerate()
+        .map(|(index, input)| image_data_uri(input, index + 1, VIDEO_ADAPTER_ID))
+        .collect::<Result<Vec<_>, _>>()?;
+    if images.len() > 1 {
+        // https://agnes-ai.com/en/docs/agnes-video-v20: ordered keyframe array.
+        body["extra_body"] = json!({"image": images, "mode": "keyframes"});
+    } else if let Some(image) = images.first() {
+        body["image"] = Value::String(image.clone());
     }
     Ok(body)
 }
@@ -714,6 +736,7 @@ mod tests {
             prompt: "make it blue".into(),
             count: 1,
             size: None,
+            quality: None,
             inputs: vec![input(b"hi")],
             extra: json!({}),
         });
@@ -756,6 +779,7 @@ mod tests {
             prompt: "ocean waves".into(),
             seconds: Some(5),
             size: Some("1280x720".into()),
+            resolution: None,
             inputs: vec![input(b"hi")],
             extra: json!({}),
         });
@@ -768,6 +792,71 @@ mod tests {
         };
         assert_eq!(job.remote_id, "video_1");
         assert_eq!(job.adapter_id, VIDEO_ADAPTER_ID);
+    }
+
+    #[tokio::test]
+    async fn video_keyframes_submit_every_image_in_order_and_override_stale_defaults() {
+        for count in [2, 3] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/videos"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "video_id": "keyframes_1", "status": "queued"
+                })))
+                .expect(1)
+                .mount(&server).await;
+            let inputs = [input(b"first"), input(b"middle"), input(b"last")];
+            let expected: Vec<_> = inputs[..count].iter()
+                .map(|input| format!("data:image/png;base64,{}", encode_b64(&input.bytes)))
+                .collect();
+            let request = TaskRequest::VideoGeneration(VideoGenRequest {
+                prompt: "keyframe transition".into(), seconds: Some(5),
+                size: Some("1280x720".into()), resolution: None,
+                inputs: inputs[..count].to_vec(),
+                extra: json!({"image": "stale", "mode": "ti2vid", "extra_body": {"image": ["stale"], "mode": "ti2vid", "seed": 42}}),
+            });
+            let outcome = AgnesVideoJobsAdapter.submit(&http(), &video_call(&server, request)).await.unwrap();
+            assert!(matches!(outcome, TaskOutcome::Pending(_)));
+            let requests = server.received_requests().await.unwrap();
+            let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+            assert_eq!(body["extra_body"]["image"], json!(expected));
+            assert_eq!(body["extra_body"]["mode"], "keyframes");
+            assert_eq!(body["extra_body"]["seed"], 42);
+            assert!(body.get("image").is_none());
+            assert!(body.get("mode").is_none());
+        }
+    }
+
+    #[test]
+    fn video_keyframes_validate_all_images_and_roles_before_submission() {
+        let mut request = VideoGenRequest {
+            prompt: "transition".into(), seconds: Some(5), size: None,
+            resolution: None, inputs: vec![input(b"first"), input(b"last")], extra: json!({}),
+        };
+        request.inputs[0].role = "first_frame".into();
+        request.inputs[1].role = "last_frame".into();
+        assert!(build_video_body(VIDEO_MODEL, &json!({}), &request).is_ok());
+        request.inputs.swap(0, 1);
+        assert!(build_video_body(VIDEO_MODEL, &json!({}), &request).is_err());
+        request.inputs = vec![input(b"first"), input(b"")];
+        assert!(build_video_body(VIDEO_MODEL, &json!({}), &request).is_err());
+        request.inputs[1] = input(b"video");
+        request.inputs[1].mime = "video/mp4".into();
+        assert!(build_video_body(VIDEO_MODEL, &json!({}), &request).is_err());
+        request.inputs = vec![InputAsset { role: "last_frame".into(), ..input(b"last") }];
+        assert!(build_video_body(VIDEO_MODEL, &json!({}), &request).is_err());
+    }
+
+    #[test]
+    fn video_without_references_remains_text_to_video() {
+        let request = VideoGenRequest {
+            prompt: "ocean".into(), seconds: Some(5), size: None,
+            resolution: None, inputs: vec![], extra: json!({}),
+        };
+        let body = build_video_body(VIDEO_MODEL, &json!({}), &request).unwrap();
+        assert!(body.get("image").is_none());
+        assert!(body.get("extra_body").is_none());
+        assert_eq!(body["num_frames"], 121);
     }
 
     #[tokio::test]
@@ -792,6 +881,7 @@ mod tests {
             prompt: "ocean waves".into(),
             seconds: Some(5),
             size: None,
+            resolution: None,
             inputs: vec![],
             extra: json!({}),
         });

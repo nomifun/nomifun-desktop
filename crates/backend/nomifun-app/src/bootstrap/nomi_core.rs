@@ -6,10 +6,11 @@ use axum::Router;
 use nomifun_auth::{AuthPolicy, hash_password, validate_password, validate_username};
 
 use crate::lan_endpoint::RobotAdvertiseAddr;
-use crate::router::create_router;
+use crate::router::try_create_router;
 use crate::services::AppServices;
 
 use super::{ServerEnvironment, finalize_data_layer, init_data_layer};
+use super::composition_cleanup::cleanup_failed_composition;
 
 #[cfg(test)]
 mod registry_probe {
@@ -30,11 +31,8 @@ mod registry_probe {
 }
 
 
-/// The current product composition backed by NomiFun's in-process Nomi engine.
-///
-/// Runtime alternatives remain separate host compositions. They do not share a
-/// mutable engine selector and an existing Conversation never changes runtime
-/// families in place.
+/// The existing Conversation owner with an open, host-registered runtime catalog.
+/// An existing Conversation never changes runtime families in place.
 #[derive(Clone)]
 pub struct NomiCoreApplication {
     services: Arc<AppServices>,
@@ -53,6 +51,19 @@ impl NomiCoreApplication {
         Self::compose_with_config(environment, &environment.config).await
     }
 
+    /// Register trusted engines compiled into this application before router assembly.
+    /// Factories implement the same lifecycle/teardown contract as the built-ins;
+    /// No executable mounting or registration is allowed after assembly. Adding
+    /// an engine requires rebuilding and repackaging the application.
+    /// Keep the Arc in the callback so register_session_hosted can capture a
+    /// weak host reference without exposing services or a second Session owner.
+    pub async fn compose_with_runtime_engines(
+        environment: &ServerEnvironment,
+        register: impl FnOnce(&Arc<crate::RuntimeEngineHost>) -> Result<(), nomifun_common::AppError>,
+    ) -> Result<Self> {
+        Self::compose_with_config_and_engines(environment, &environment.config, register).await
+    }
+
     /// Compose the Nomi core against an explicit host policy.
     ///
     /// Desktop uses this to replace the CLI's authentication policy with its
@@ -62,6 +73,14 @@ impl NomiCoreApplication {
         environment: &ServerEnvironment,
         config: &crate::AppConfig,
     ) -> Result<Self> {
+        Self::compose_with_config_and_engines(environment, config, |_| Ok(())).await
+    }
+
+    async fn compose_with_config_and_engines(
+        environment: &ServerEnvironment,
+        config: &crate::AppConfig,
+        register: impl FnOnce(&Arc<crate::RuntimeEngineHost>) -> Result<(), nomifun_common::AppError>,
+    ) -> Result<Self> {
         let database = init_data_layer(config).await?;
         let services = AppServices::from_config(database, config)
             .await?
@@ -70,10 +89,16 @@ impl NomiCoreApplication {
                 config,
             )
             .await?;
-        if let Err(error) = finalize_data_layer(config) {
-            return Err(services.cleanup_after_startup_failure(error).await);
+        if let Err(error) = register(&services.runtime_engines) {
+            return Err(cleanup_failed_composition(services, error.into()).await);
         }
-        let router = create_router(&services).await;
+        if let Err(error) = finalize_data_layer(config) {
+            return Err(cleanup_failed_composition(services, error).await);
+        }
+        let router = match try_create_router(&services).await {
+            Ok(router) => router,
+            Err(error) => return Err(cleanup_failed_composition(services, error).await),
+        };
         Ok(Self::from_parts(services, router))
     }
 

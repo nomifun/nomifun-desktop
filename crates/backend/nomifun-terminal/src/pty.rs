@@ -783,4 +783,101 @@ mod tests {
         }
         panic!("PTY leader remained alive after exact force-kill");
     }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn force_kill_reaps_interactive_shell_job_group() {
+        let handle = PtyHandle::spawn(
+            SpawnParams {
+                program: "/bin/sh".to_owned(),
+                args: vec!["-i".to_owned()],
+                cwd: String::new(),
+                env: HashMap::new(),
+                cols: 80,
+                rows: 24,
+            },
+            0,
+            |_chunk| {},
+            |_exit, _scrollback| {},
+        )
+        .await
+        .expect("spawn interactive shell");
+        handle.activate();
+        handle
+            .write(b"set +H\nsleep 60 & printf '\\nNOMIFUN_JOB_PID=%s\\n' \"$!\"; wait\n")
+            .await
+            .expect("start background job");
+        let mut job_pid = None;
+        for _ in 0..150 {
+            let output = handle.scrollback();
+            job_pid = String::from_utf8_lossy(&output).lines().find_map(|line| {
+                line.trim()
+                    .strip_prefix("NOMIFUN_JOB_PID=")?
+                    .parse::<i32>()
+                    .ok()
+            });
+            if job_pid.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let job_group = job_pid.map(|pid| unsafe { libc::getpgid(pid) });
+        let job_generation = job_pid.map(|pid| macos_test_process_generation(pid).expect("live job identity"));
+        let leader = handle.pid().expect("leader pid") as i32;
+        let cleanup = handle.kill().await;
+        let job_pid = job_pid.unwrap_or_else(|| {
+            panic!(
+                "shell must report the actual background job pid: {}",
+                String::from_utf8_lossy(&handle.scrollback())
+            )
+        });
+        let generation = job_generation.expect("observed job generation");
+        for _ in 0..100 {
+            let gone = match macos_test_process_generation(job_pid) {
+                Ok(observed) => observed != generation,
+                Err(libc::ESRCH) => true,
+                Err(error) => panic!("cannot verify job identity: {error}"),
+            };
+            if gone {
+                assert_eq!(
+                    job_group,
+                    Some(job_pid),
+                    "job control creates its own group"
+                );
+                assert_ne!(job_pid, leader);
+                cleanup.expect("cleanup must prove both process groups stopped");
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // The kernel verifies the observed generation: a failed regression
+        // must not signal a different process that reused the numeric PID.
+        macos_test_kill_generation(job_pid, generation);
+        panic!("interactive PTY job survived cleanup: {cleanup:?}");
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_test_process_generation(pid: i32) -> Result<u32, i32> {
+        // Darwin PROC_PIDUNIQIDENTIFIERINFO (17): 56 bytes, pidversion at 32.
+        // Keep this test-only probe independent of production cleanup results.
+        let mut info = [0u8; 56];
+        let count = unsafe { libc::proc_pidinfo(pid, 17, 1, info.as_mut_ptr().cast(), 56) };
+        if count != 56 {
+            return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EPROTO));
+        }
+        Ok(u32::from_ne_bytes(info[32..36].try_into().unwrap()))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_test_kill_generation(pid: i32, generation: u32) {
+        type Signal = unsafe extern "C" fn(*mut [u32; 8], i32) -> i32;
+        let pointer = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"proc_signal_with_audittoken".as_ptr()) };
+        assert!(!pointer.is_null(), "PTY creation already checked this API");
+        let signal = unsafe { std::mem::transmute::<*mut libc::c_void, Signal>(pointer) };
+        let mut token = [0u32; 8];
+        token[5] = pid as u32;
+        token[7] = generation;
+        let result = unsafe { signal(&mut token, libc::SIGKILL) };
+        assert!(matches!(result, 0 | libc::ESRCH), "exact test cleanup failed: {result}");
+    }
 }

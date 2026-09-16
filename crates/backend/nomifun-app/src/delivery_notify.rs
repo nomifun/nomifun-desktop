@@ -105,6 +105,7 @@ impl DeliveryNotifyObserver {
                 ));
             }
             let req = SendMessageRequest {
+                preset_id: None,
                 content: content.clone(),
                 files: vec![],
                 inject_skills: vec![],

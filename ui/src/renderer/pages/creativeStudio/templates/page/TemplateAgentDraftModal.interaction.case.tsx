@@ -94,7 +94,7 @@ const run = async (): Promise<void> => {
 
   try {
     const portalRoot = document.createElement('div');
-    portalRoot.id = 'creative-studio-portal-root';
+    portalRoot.id = 'resource-page-portal-root';
     document.body.append(portalRoot);
 
     render(

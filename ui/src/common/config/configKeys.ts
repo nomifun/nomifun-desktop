@@ -37,6 +37,11 @@ export type ConfigKeyMap = {
   // the backend may choose from the available image models (for example by
   // round-robin); there is no separate tool enable switch.
   'models.default.imageGeneration': { provider_id: ProviderId; model: string } | undefined;
+  'models.default.imageEdit': { provider_id: ProviderId; model: string } | undefined;
+  'models.default.videoGeneration': { provider_id: ProviderId; model: string } | undefined;
+  'models.default.musicGeneration': { provider_id: ProviderId; model: string } | undefined;
+  'models.default.speechSynthesis': { provider_id: ProviderId; model: string } | undefined;
+
   'tools.speechToText': SpeechToTextConfig | undefined;
   // Install-wide speech-synthesis default. Registered backend-side as a REQUIRED
   // Provider reference (nomifun-db client_preference), so an absent key — not a

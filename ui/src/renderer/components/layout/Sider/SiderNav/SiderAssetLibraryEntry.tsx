@@ -20,7 +20,7 @@ interface SiderAssetLibraryEntryProps {
 
 /**
  * SiderAssetLibraryEntry — the 数据空间 (Data Space) group's My Assets
- * destination (`/workshop/assets`). Mirrors the sibling entries' collapsed/expanded
+ * destination (`/asset-library/materials`). Mirrors the sibling entries' collapsed/expanded
  * layout and active styling; no badge machinery.
  */
 const SiderAssetLibraryEntry: React.FC<SiderAssetLibraryEntryProps> = ({

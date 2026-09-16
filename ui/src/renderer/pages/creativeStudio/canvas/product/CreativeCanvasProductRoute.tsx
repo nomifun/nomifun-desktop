@@ -1,3 +1,4 @@
+import { effectiveImageReferenceInputLimit, imageReferenceInputPolicy } from '@renderer/creation/parameters/imageReferencePolicy';
 /**
  * @license
  * Copyright 2025-2026 NomiFun (nomifun.com)
@@ -42,9 +43,9 @@ import {
   type CreativeAssetUploadRejection,
 } from '../../assets/page/model';
 import {
-  CREATIVE_STUDIO_PROJECTS_PATH,
-  CREATIVE_STUDIO_TEMPLATES_PATH,
-} from '../../app/routes';
+  CANVASES_PATH,
+  TEMPLATES_PATH,
+} from '../../app/resourceRoutes';
 import {
   DEFAULT_CREATIVE_STUDIO_PANELS,
   isCreativeCanvasUserNode,
@@ -63,22 +64,15 @@ import type { PromptLibrarySelection } from '../../prompts';
 import { useCreativeProject } from '../../services';
 import type { CreativeTaskReference } from '../../tasks';
 import {
-  effectiveImageReferenceInputLimit,
-  imageWorkbenchSizePolicyForModel,
-  imageWorkbenchSelectableSizeOptions,
-  imageReferenceInputPolicy,
-  normalizeImageWorkbenchSettingsSize,
-  type ImageWorkbenchAspectRatioOption,
-  type ImageWorkbenchModelIdentity,
-  type ImageWorkbenchSettings,
-} from '../../workbenches/image';
-import {
-  exactWorkbenchModelOptions,
-  imageWorkbenchModelOptions,
-  type CreativeWorkbenchRuntimeSnapshot,
-  type CreativeWorkbenchReferences,
-  type PreparedCreativeWorkbenchRun,
-} from '../../workbenches/runtime';
+  imageGenerationSizePolicyForModel,
+  imageGenerationSelectableSizeOptions,
+  normalizeImageGenerationSettingsSize,
+  type ImageGenerationAspectRatioOption,
+  type ImageGenerationModelIdentity,
+  type ImageGenerationSettings,
+} from '@renderer/creation/parameters/image';
+import { type CanvasGenerationRuntimeSnapshot, type GenerationReferences, type PreparedCanvasGenerationRun } from '../generation';
+import { exactGenerationModelOptions, imageGenerationModelOptions as catalogImageModelOptions } from '@renderer/creation/modelSelection';
 import type {
   CreativeTemplateDefinitionV1,
   CreativeTemplateRunAggregateV1,
@@ -261,7 +255,7 @@ const INITIAL_SAVE: CanvasCasSaveSnapshot = {
   error: null,
 };
 
-const INITIAL_CANVAS_TASK_RUNTIME: CreativeWorkbenchRuntimeSnapshot = {
+const INITIAL_CANVAS_TASK_RUNTIME: CanvasGenerationRuntimeSnapshot = {
   state: 'idle',
   entries: [],
   submissionFailures: [],
@@ -324,7 +318,7 @@ interface PendingImageSplit {
 }
 
 interface PendingImageMaskSubmission {
-  plan: PreparedCreativeWorkbenchRun;
+  plan: PreparedCanvasGenerationRun;
   reference: CreativeTaskReference;
   failureOrder: number;
 }
@@ -337,7 +331,7 @@ interface PendingImageMaskEdit {
 
 interface PendingCanvasImageComposeSubmission {
   nodeId: string;
-  plan: PreparedCreativeWorkbenchRun;
+  plan: PreparedCanvasGenerationRun;
   failureOrder: number;
 }
 
@@ -348,7 +342,7 @@ interface CanvasImageComposeIssue {
 
 interface PendingCanvasVideoComposeSubmission {
   nodeId: string;
-  plan: PreparedCreativeWorkbenchRun;
+  plan: PreparedCanvasGenerationRun;
   failureOrder: number;
 }
 
@@ -359,7 +353,7 @@ interface CanvasVideoComposeIssue {
 
 interface PendingCanvasAudioComposeSubmission {
   nodeId: string;
-  plan: PreparedCreativeWorkbenchRun;
+  plan: PreparedCanvasGenerationRun;
   failureOrder: number;
 }
 
@@ -541,9 +535,9 @@ const canvasTextComposerReferences = (
   };
 });
 
-const canvasImageWorkbenchReferences = (
+const canvasImageGenerationReferences = (
   resolution: CanvasImageReferenceResolution
-): CreativeWorkbenchReferences => ({
+): GenerationReferences => ({
   assets: resolution.references.map((reference) => reference.asset),
   bindings: resolution.references.map((reference) => ({
     assetId: reference.assetId,
@@ -686,7 +680,7 @@ const manualUploadRejectionMessage = (
     case 'audio_unsupported':
       return t('creativeStudio.canvas.upload.audioUnsupported', {
         defaultValue:
-          '暂不支持手动上传音频；通过音频工作台生成的音频仍会进入素材库。',
+          '暂不支持手动上传音频；通过音频工作台生成的音频仍会进入资产库。',
       });
     case 'file_too_large':
       return t('creativeStudio.canvas.upload.assetTooLarge', {
@@ -784,14 +778,14 @@ const SaveRecoveryAction: React.FC<{
 
 const CanvasTaskRuntimeAction: React.FC<{
   label: string;
-  snapshot: CreativeWorkbenchRuntimeSnapshot;
+  snapshot: CanvasGenerationRuntimeSnapshot;
   busy: boolean;
   onCancel(taskId: string): void;
   onRetry(taskId: string): void;
 }> = ({ label, snapshot, busy, onCancel, onRetry }) => {
   const { t } = useTranslation();
   const taskLabel = (
-    _task: CreativeWorkbenchRuntimeSnapshot['entries'][number]['task']
+    _task: CanvasGenerationRuntimeSnapshot['entries'][number]['task']
   ) => label;
   const requestError = snapshot.entries.find(
     (entry) => entry.requestError !== null
@@ -995,7 +989,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   );
   const [imageMaskError, setImageMaskError] = useState<string | null>(null);
   const [imageTaskRuntime, setImageTaskRuntime] =
-    useState<CreativeWorkbenchRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
+    useState<CanvasGenerationRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
   const [imageTaskRuntimeReady, setImageTaskRuntimeReady] = useState(false);
   const [imageTaskRuntimeEpoch, setImageTaskRuntimeEpoch] = useState(0);
   const [imageTaskRuntimeActionBusy, setImageTaskRuntimeActionBusy] =
@@ -1006,7 +1000,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [imageComposeSubmission, setImageComposeSubmission] =
     useState<PendingCanvasImageComposeSubmission | null>(null);
   const [videoTaskRuntime, setVideoTaskRuntime] =
-    useState<CreativeWorkbenchRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
+    useState<CanvasGenerationRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
   const [videoTaskRuntimeReady, setVideoTaskRuntimeReady] = useState(false);
   const [videoTaskRuntimeEpoch, setVideoTaskRuntimeEpoch] = useState(0);
   const [videoTaskRuntimeActionBusy, setVideoTaskRuntimeActionBusy] =
@@ -1017,7 +1011,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [videoComposeSubmission, setVideoComposeSubmission] =
     useState<PendingCanvasVideoComposeSubmission | null>(null);
   const [audioTaskRuntime, setAudioTaskRuntime] =
-    useState<CreativeWorkbenchRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
+    useState<CanvasGenerationRuntimeSnapshot>(INITIAL_CANVAS_TASK_RUNTIME);
   const [audioTaskRuntimeReady, setAudioTaskRuntimeReady] = useState(false);
   const [audioTaskRuntimeEpoch, setAudioTaskRuntimeEpoch] = useState(0);
   const [audioTaskRuntimeActionBusy, setAudioTaskRuntimeActionBusy] =
@@ -1105,27 +1099,27 @@ const CreativeCanvasProductRoute: React.FC = () => {
     query: assetQuery,
   });
   const imageMaskModelOptions = useMemo(
-    () => exactWorkbenchModelOptions(modelCatalog, 'image_edit'),
+    () => exactGenerationModelOptions(modelCatalog, 'image_edit'),
     [modelCatalog]
   );
   const imageComposeModelOptions = useMemo(
-    () => imageWorkbenchModelOptions(modelCatalog, 'image_edit'),
+    () => catalogImageModelOptions(modelCatalog, 'image_edit'),
     [modelCatalog]
   );
   const imageGenerationModelOptions = useMemo(
-    () => imageWorkbenchModelOptions(modelCatalog, 'image_generation'),
+    () => catalogImageModelOptions(modelCatalog, 'image_generation'),
     [modelCatalog]
   );
   const imageGenerationExactOptions = useMemo(
-    () => exactWorkbenchModelOptions(modelCatalog, 'image_generation'),
+    () => exactGenerationModelOptions(modelCatalog, 'image_generation'),
     [modelCatalog]
   );
   const videoModelOptions = useMemo(
-    () => exactWorkbenchModelOptions(modelCatalog, 'video_generation'),
+    () => exactGenerationModelOptions(modelCatalog, 'video_generation'),
     [modelCatalog]
   );
   const audioModelOptions = useMemo(
-    () => exactWorkbenchModelOptions(modelCatalog, 'speech_synthesis'),
+    () => exactGenerationModelOptions(modelCatalog, 'speech_synthesis'),
     [modelCatalog]
   );
 
@@ -1789,7 +1783,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, [flushBeforeLeave, navigate]);
 
   const handleOpenTemplateCenter = useCallback(async () => {
-    if (await flushBeforeLeave()) navigate(CREATIVE_STUDIO_TEMPLATES_PATH);
+    if (await flushBeforeLeave()) navigate(TEMPLATES_PATH);
   }, [flushBeforeLeave, navigate]);
 
   const templateRunner = useMemo<CreativeTemplateRunnerPort>(
@@ -2026,7 +2020,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         if (!editor) {
           throw new Error(
             t('creativeStudio.canvas.errors.closedAfterUpload', {
-              defaultValue: '画布已经关闭，图片保留在素材库中。',
+              defaultValue: '画布已经关闭，图片保留在资产库中。',
             })
           );
         }
@@ -2038,7 +2032,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         if (!source) {
           throw new Error(
             t('creativeStudio.canvas.errors.imageNodeRemovedAfterUpload', {
-              defaultValue: '图片节点已被删除，上传结果保留在素材库中。',
+              defaultValue: '图片节点已被删除，上传结果保留在资产库中。',
             })
           );
         }
@@ -2057,7 +2051,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           throw new Error(
             t('creativeStudio.canvas.errors.imageNodeTaskProtected', {
               defaultValue:
-                '图片节点当前受运行任务保护；上传素材已保留在素材库中。',
+                '图片节点当前受运行任务保护；上传素材已保留在资产库中。',
             })
           );
         }
@@ -2253,7 +2247,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           throw new Error(
             t('creativeStudio.canvas.errors.cropSourceChanged', {
               defaultValue:
-                '原图片节点已被删除或替换；裁剪素材已保存在素材库中。',
+                '原图片节点已被删除或替换；裁剪素材已保存在资产库中。',
             })
           );
         }
@@ -2649,7 +2643,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
       result: Awaited<
         ReturnType<CanvasImageTaskRuntimeBridgeHandle['submit']>
       >,
-      plan: PreparedCreativeWorkbenchRun
+      plan: PreparedCanvasGenerationRun
     ) => {
       if (result.kind === 'admitted') {
         setPendingImageMaskEdit(null);
@@ -2952,7 +2946,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const applyImageComposeAdmission = useCallback(
     (
       nodeId: string,
-      plan: PreparedCreativeWorkbenchRun,
+      plan: PreparedCanvasGenerationRun,
       result: Awaited<ReturnType<CanvasImageTaskRuntimeBridgeHandle['submit']>>
     ) => {
       if (result.kind === 'admitted') {
@@ -2987,7 +2981,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
       nodeId: string,
       prompt: string,
       mentions: readonly CreativeImagePromptMention[],
-      settings: ImageWorkbenchSettings
+      settings: ImageGenerationSettings
     ) => {
       const editor = editorRef.current;
       const runtime = imageTaskRuntimeRef.current;
@@ -3181,7 +3175,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           viewportSize: measuredSize(canvasHostRef.current),
           sourceNode: source,
           sourceAsset,
-          references: canvasImageWorkbenchReferences(referenceResolution),
+          references: canvasImageGenerationReferences(referenceResolution),
           catalog: modelCatalog,
           model: selectedModel,
           prompt,
@@ -3289,7 +3283,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const applyVideoComposeAdmission = useCallback(
     (
       nodeId: string,
-      plan: PreparedCreativeWorkbenchRun,
+      plan: PreparedCanvasGenerationRun,
       result: Awaited<ReturnType<CanvasVideoTaskRuntimeBridgeHandle['submit']>>
     ) => {
       if (result.kind === 'admitted') {
@@ -3319,7 +3313,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
     async (
       nodeId: string,
       prompt: string,
-      settings: CanvasVideoComposeSettings
+      settings: CanvasVideoComposeSettings,
+      mentions: readonly CreativeImagePromptMention[] = []
     ) => {
       const editor = editorRef.current;
       const runtime = videoTaskRuntimeRef.current;
@@ -3390,19 +3385,22 @@ const CreativeCanvasProductRoute: React.FC = () => {
             })
           );
         }
-        const reference =
+        const references =
           mode.kind === 'i2v'
-            ? (knownAssetsRef.current.get(mode.assetId) ??
-              (await creativeAssetClient.get(mode.assetId)))
-            : null;
-        if (reference && reference.kind !== 'image') {
+            ? await Promise.all(
+                mode.assetIds.map((id) =>
+                  knownAssetsRef.current.get(id) ?? creativeAssetClient.get(id)
+                )
+              )
+            : [];
+        if (references.some((reference) => reference.kind !== 'image')) {
           throw new Error(
             t('creativeStudio.canvas.errors.videoReferenceResolutionFailed', {
               defaultValue: 'I2V 引用没有解析为真实图片素材。',
             })
           );
         }
-        if (reference) {
+        for (const reference of references) {
           knownAssetsRef.current = new Map(knownAssetsRef.current).set(
             reference.id,
             reference
@@ -3422,7 +3420,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
           currentSource.data.assetId !== null ||
           currentMode.kind !== mode.kind ||
           (mode.kind === 'i2v' &&
-            (currentMode.kind !== 'i2v' || currentMode.assetId !== mode.assetId))
+            (currentMode.kind !== 'i2v' ||
+              currentMode.assetIds.length !== mode.assetIds.length ||
+              currentMode.assetIds.some((id, index) => id !== mode.assetIds[index])))
         ) {
           throw new Error(
             t('creativeStudio.canvas.errors.videoSourceChangedBeforeTask', {
@@ -3430,8 +3430,32 @@ const CreativeCanvasProductRoute: React.FC = () => {
             })
           );
         }
+        // Resolve stable node identities against the graph after async hydration.
+        // Never send a stale @ alias or silently drop an invalid inbound edge.
+        const resolution = resolveCanvasImageReferences(currentState, nodeId, references);
+        const compilation = compileCanvasImageReferencePrompt(
+          prompt,
+          mentions.map((mention) => ({
+            sourceNodeId: mention.sourceNodeId,
+            start: mention.start,
+            end: mention.end,
+            tokenText: `@${mention.fallbackLabel}`,
+          })),
+          resolution.references,
+          resolution.textReferences
+        );
+        const blocker: CanvasImageGenerationBlocker | undefined = resolution.issues[0]
+          ? { code: 'reference_resolution_failed', issue: resolution.issues[0] }
+          : compilation.issues[0]
+            ? { code: 'prompt_compilation_failed', issue: compilation.issues[0] }
+            : undefined;
+        if (blocker || !compilation.ok) {
+          throw new Error(canvasImageGenerationBlockerMessage(blocker, t) ??
+            t('creativeStudio.canvas.errors.videoReferenceResolutionFailed'));
+        }
         const durableSource = withCanvasVideoComposeDraft(currentSource, {
           prompt,
+          mentions: structuredClone([...mentions]),
           settings: {
             ...settings,
             model: {
@@ -3457,19 +3481,15 @@ const CreativeCanvasProductRoute: React.FC = () => {
             task: 'video_generation',
             capability: mode.kind === 'i2v' ? 'i2v' : 't2v',
           },
-          references: reference
-            ? {
-                assets: [reference],
-                bindings: [
-                  {
-                    assetId: reference.id,
-                    kind: 'image',
-                    role: 'reference',
-                  },
-                ],
-              }
-            : { assets: [], bindings: [] },
-          prompt,
+          references: {
+            assets: resolution.references.map((reference) => reference.asset),
+            bindings: resolution.references.map((reference) => ({
+              assetId: reference.assetId,
+              kind: 'image' as const,
+              role: 'reference' as const,
+            })),
+          },
+          prompt: compilation.providerPrompt,
           settings: {
             resolution: settings.resolution,
             aspectRatio: settings.aspectRatio,
@@ -3665,7 +3685,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const applyAudioComposeAdmission = useCallback(
     (
       nodeId: string,
-      plan: PreparedCreativeWorkbenchRun,
+      plan: PreparedCanvasGenerationRun,
       result: Awaited<ReturnType<CanvasAudioTaskRuntimeBridgeHandle['submit']>>
     ) => {
       if (result.kind === 'admitted') {
@@ -4349,7 +4369,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     setRecoveryBusy(true);
     try {
       if (await flushBeforeLeave()) {
-        navigate(CREATIVE_STUDIO_PROJECTS_PATH);
+        navigate(CANVASES_PATH);
       }
     } finally {
       setRecoveryBusy(false);
@@ -4801,14 +4821,28 @@ const CreativeCanvasProductRoute: React.FC = () => {
                             }
                           : null,
                     };
-                    const referenceAsset =
-                      mode.kind === 'i2v'
-                        ? knownAssetsById.get(mode.assetId) ?? null
-                        : null;
                     const singleSelected =
                       selected && canvasState?.selection.nodeIds.length === 1;
                     const retrySubmission =
                       videoComposeSubmission?.nodeId === node.id;
+                    const referenceResolution = canvasState
+                      ? resolveCanvasImageReferences(canvasState, node.id, [...knownAssetsById.values()])
+                      : null;
+                    const composerReferences = referenceResolution && canvasState
+                      ? [
+                          ...canvasImageComposerReferences(referenceResolution.references),
+                          ...canvasTextComposerReferences(referenceResolution.textReferences, t),
+                          ...invalidCanvasImageComposerReferences(
+                            canvasState, node.id, referenceResolution, knownAssetsById, t
+                          ),
+                        ].sort((left, right) => left.ordinal - right.ordinal)
+                      : [];
+                    const referenceError = referenceResolution?.issues[0]
+                      ? canvasImageGenerationBlockerMessage({
+                          code: 'reference_resolution_failed',
+                          issue: referenceResolution.issues[0],
+                        }, t)
+                      : null;
                     return (
                       <div className={styles.nodeComposerHost} data-video-composer-host>
                         {nodeView}
@@ -4816,25 +4850,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           <CreativeCanvasVideoComposer
                             nodeId={node.id}
                             mode={mode.kind}
-                            reference={
-                              mode.kind === 'i2v'
-                                ? {
-                                    name:
-                                      referenceAsset?.title ??
-                                      t('creativeStudio.canvas.video.connectedImage', {
-                                        defaultValue: '已连接图片',
-                                      }),
-                                    previewUrl:
-                                      referenceAsset?.thumbnailUrl ??
-                                      referenceAsset?.originalUrl ??
-                                      creativeAssetClient.url(mode.assetId),
-                                    originalUrl:
-                                      referenceAsset?.originalUrl ??
-                                      creativeAssetClient.url(mode.assetId),
-                                  }
-                                : null
-                            }
+                            references={composerReferences}
                             initialPrompt={composeDraft.prompt}
+                            initialMentions={composeDraft.mentions}
+                            generateBlocked={Boolean(referenceError)}
                             settings={composeSettings}
                             modelOptions={videoModelOptions}
                             task={canvasVideoComposeTaskSummary(composeConfig)}
@@ -4853,14 +4872,24 @@ const CreativeCanvasProductRoute: React.FC = () => {
                                 ? videoComposeIssue.message
                                 : mode.kind === 'unsupported'
                                   ? mode.message
-                                  : null
+                                  : referenceError
                             }
                             retrySubmission={retrySubmission}
-                            onPromptChange={(prompt) =>
+                            onPromptChange={(change) =>
                               updateVideoComposeDraft(node.id, (current) => ({
                                 ...current,
-                                prompt,
+                                prompt: change.value,
+                                mentions: structuredClone(change.mentions),
                               }))
+                            }
+                            onReferenceActivate={(sourceNodeId) =>
+                              dispatch(canvasCommands.setSelection([sourceNodeId]))
+                            }
+                            onReferenceDisconnect={(connectionId) =>
+                              dispatch(canvasCommands.deleteEdges([connectionId]))
+                            }
+                            onReferencesDisconnect={(connectionIds) =>
+                              dispatch(canvasCommands.deleteEdges(connectionIds))
                             }
                             onOpenPromptLibrary={() =>
                               openPromptLibrary()
@@ -4889,11 +4918,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
                                 settings: { ...current.settings, seconds },
                               }))
                             }
-                            onGenerate={(prompt) =>
+                            onGenerate={(prompt, mentions) =>
                               void generateFromCanvasVideo(
                                 node.id,
                                 prompt,
-                                composeSettings
+                                composeSettings,
+                                mentions
                               )
                             }
                             onRetrySubmission={() =>
@@ -5155,12 +5185,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
                         )
                       : []),
                   ].sort((left, right) => left.ordinal - right.ordinal);
-                  const composeSizePolicy = imageWorkbenchSizePolicyForModel(resolvedModel);
-                  const composeSizeOptions = imageWorkbenchSelectableSizeOptions(
+                  const composeSizePolicy = imageGenerationSizePolicyForModel(resolvedModel);
+                  const composeSizeOptions = imageGenerationSelectableSizeOptions(
                     composeSizePolicy.options
                   );
-                  const composeSettings: ImageWorkbenchSettings =
-                    normalizeImageWorkbenchSettingsSize(
+                  const composeSettings: ImageGenerationSettings =
+                    normalizeImageGenerationSettingsSize(
                       {
                         ...composeDraft.settings,
                         model: resolvedModel
@@ -5263,7 +5293,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           onOpenPromptLibrary={() =>
                             openPromptLibrary()
                           }
-                          onModelChange={(model: ImageWorkbenchModelIdentity | null) =>
+                          onModelChange={(model: ImageGenerationModelIdentity | null) =>
                             updateImageComposeDraft(
                               node.id,
                               (current) => {
@@ -5276,9 +5306,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
                                   : null;
                                 return {
                                   ...current,
-                                  settings: normalizeImageWorkbenchSettingsSize(
+                                  settings: normalizeImageGenerationSettingsSize(
                                     { ...current.settings, model },
-                                    imageWorkbenchSizePolicyForModel(modelOption)
+                                    imageGenerationSizePolicyForModel(modelOption)
                                   ),
                                 };
                               }
@@ -5302,7 +5332,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                               })
                             )
                           }
-                          onAspectRatioChange={(option: ImageWorkbenchAspectRatioOption) =>
+                          onAspectRatioChange={(option: ImageGenerationAspectRatioOption) =>
                             updateImageComposeDraft(
                               node.id,
                               (current) => ({
@@ -5711,7 +5741,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         <p className={styles.panoramaDescription}>
           {t('creativeStudio.canvas.panorama.dialogDescription', {
             defaultValue:
-              '图片已经真实上传并保存在素材库中。检测到宽高比接近 2:1，请确认它应作为普通图片还是等距柱状全景图插入当前画布。',
+              '图片已经真实上传并保存在资产库中。检测到宽高比接近 2:1，请确认它应作为普通图片还是等距柱状全景图插入当前画布。',
           })}
         </p>
       </Modal>

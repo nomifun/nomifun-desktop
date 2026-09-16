@@ -6,6 +6,7 @@
 
 import type { CreativeAsset } from '../../assets';
 import type {
+  CreativeImagePromptMention,
   CreativeCanvasConnection,
   CreativeCanvasNode,
   CreativeGenerationStatus,
@@ -21,14 +22,8 @@ import {
   type CreativeTask,
   type CreativeTaskReference,
 } from '../../tasks';
-import {
-  prepareVideoWorkbenchRun,
-  workbenchResumeRequestsFromDocument,
-  type CreativeWorkbenchReferences,
-  type CreativeWorkbenchResumeRequest,
-  type PreparedCreativeWorkbenchRun,
-  type VideoWorkbenchOperation,
-} from '../../workbenches/runtime';
+import { prepareCanvasVideoRun, canvasResumeRequestsFromDocument, type GenerationReferences, type CanvasGenerationResumeRequest, type PreparedCanvasGenerationRun, type CanvasVideoOperation } from '../generation';
+
 import { validateCanvasConnection, type CanvasState } from '../core';
 import {
   canvasTaskResultPosition,
@@ -54,6 +49,7 @@ export interface CanvasVideoComposeSettings {
 
 export interface CanvasVideoComposeDraft {
   prompt: string;
+  mentions?: CreativeImagePromptMention[];
   settings: CanvasVideoComposeSettings;
 }
 
@@ -66,12 +62,12 @@ export interface CanvasVideoComposeTaskSummary {
 export interface PreparedCanvasVideoCompose {
   configNode: ConfigNode;
   connection: Omit<CreativeCanvasConnection, 'id'>;
-  plan: PreparedCreativeWorkbenchRun;
+  plan: PreparedCanvasGenerationRun;
 }
 
 export type CanvasVideoComposeMode =
   | { kind: 't2v' }
-  | { kind: 'i2v'; assetId: string }
+  | { kind: 'i2v'; assetIds: string[] }
   | { kind: 'unsupported'; message: string };
 
 export const DEFAULT_CANVAS_VIDEO_COMPOSE_SETTINGS: CanvasVideoComposeSettings = {
@@ -177,6 +173,7 @@ export function canvasVideoComposeDraftFromState(
   if (persisted) {
     return {
       prompt: persisted.prompt,
+      mentions: structuredClone(persisted.mentions ?? []),
       settings: {
         model: persisted.model
           ? {
@@ -211,6 +208,7 @@ export function withCanvasVideoComposeDraft(
       ...node.data,
       composer: {
         prompt: draft.prompt,
+        ...(draft.mentions?.length ? { mentions: structuredClone(draft.mentions) } : {}),
         model: draft.settings.model ? { ...draft.settings.model } : null,
         resolution: draft.settings.resolution,
         aspectRatio: draft.settings.aspectRatio,
@@ -279,7 +277,12 @@ export function canvasVideoComposeMode(
       .filter((connection) => connection.targetNodeId === sourceNodeId)
       .map((connection) => connection.sourceNodeId)
   );
-  const incoming = document.nodes.filter((node) => incomingIds.has(node.id));
+  // Keyframes follow connection order, independent of node creation/z-order.
+  const nodesById = new Map(document.nodes.map((node) => [node.id, node]));
+  const incoming = [...incomingIds].flatMap((id) => {
+    const node = nodesById.get(id);
+    return node ? [node] : [];
+  });
   if (
     incoming.some(
       (node) =>
@@ -303,17 +306,8 @@ export function canvasVideoComposeMode(
       )
     ),
   ];
-  if (imageAssetIds.length > 1) {
-    return {
-      kind: 'unsupported',
-      message: creativeStudioProductText(
-        'creativeStudio.canvas.errors.video.singleImageReferenceRequired',
-        '当前 I2V 只支持一张直接连接的真实图片。'
-      ),
-    };
-  }
   return imageAssetIds[0]
-    ? { kind: 'i2v', assetId: imageAssetIds[0] }
+    ? { kind: 'i2v', assetIds: imageAssetIds }
     : { kind: 't2v' };
 }
 
@@ -382,8 +376,8 @@ export function prepareCanvasVideoCompose(input: {
   sourceAsset: CreativeAsset | null;
   catalog: CreativeModelCatalogSnapshot;
   model: CreativeModelSelectionRef;
-  operation: VideoWorkbenchOperation;
-  references: CreativeWorkbenchReferences;
+  operation: CanvasVideoOperation;
+  references: GenerationReferences;
   prompt: string;
   settings: Omit<CanvasVideoComposeSettings, 'model'>;
 }): PreparedCanvasVideoCompose {
@@ -405,20 +399,19 @@ export function prepareCanvasVideoCompose(input: {
     );
   }
   if (input.operation.capability === 'i2v') {
-    const asset = input.references.assets[0];
-    const binding = input.references.bindings[0];
     if (
-      input.references.assets.length !== 1 ||
-      input.references.bindings.length !== 1 ||
-      asset?.kind !== 'image' ||
-      binding?.kind !== 'image' ||
-      binding.role !== 'reference' ||
-      binding.assetId !== asset.id
+      input.references.assets.length === 0 ||
+      input.references.bindings.length !== input.references.assets.length ||
+      input.references.assets.some((asset) => asset.kind !== 'image') ||
+      input.references.bindings.some((binding) =>
+        binding.kind !== 'image' || binding.role !== 'reference' ||
+        !input.references.assets.some((asset) => asset.id === binding.assetId)
+      )
     ) {
       throw new Error(
         creativeStudioProductText(
           'creativeStudio.canvas.errors.video.referenceContract',
-          '当前 i2v 只支持一张 role=reference 的真实图片引用。'
+          '图生视频需要有效的图片引用。'
         )
       );
     }
@@ -440,7 +433,7 @@ export function prepareCanvasVideoCompose(input: {
     input.viewportSize,
     { position: configPosition, locked: true }
   );
-  const plan = prepareVideoWorkbenchRun({
+  const plan = prepareCanvasVideoRun({
     catalog: input.catalog,
     canvasId: input.projectId,
     nodeId: base.id,
@@ -502,11 +495,11 @@ export function prepareCanvasVideoCompose(input: {
 
 export function canvasVideoComposeResumeRequests(
   document: CreativeProjectDocument
-): CreativeWorkbenchResumeRequest[] {
+): CanvasGenerationResumeRequest[] {
   const owners = new Set(
     document.nodes.filter(isCanvasVideoComposeConfig).map((node) => node.id)
   );
-  return workbenchResumeRequestsFromDocument(document).filter(
+  return canvasResumeRequestsFromDocument(document).filter(
     (request) =>
       request.reference.owner.kind === 'canvas_node' &&
       owners.has(request.reference.owner.nodeId)

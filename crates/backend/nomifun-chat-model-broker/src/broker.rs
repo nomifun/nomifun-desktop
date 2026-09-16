@@ -8,15 +8,17 @@ use futures::{Stream, StreamExt};
 use nomifun_agent_contracts::{ConnectionConfigRef, DigestHex, ModelRouteId};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::adapter::{ChatProtocolAdapter, ProviderWireStream};
 use crate::contracts::{
-    ChatContractError, ChatModelError, ChatModelErrorCode, ChatModelEvent, ChatProtocol,
+    ChatContractError, ChatModelError, ChatModelErrorCode, ChatModelEvent, ChatModelRequest, ChatProtocol,
     ChatRetryDirective, ChatToolCall, ResolvedChatRoute, ToolCallId,
 };
 use crate::ports::{
     ChatCausalityGate, ChatRouteResolver, CredentialTarget, ProviderCredentialStore,
 };
+use crate::provider_reasoning::ProviderReasoningRoute;
 
 const BROKER_STREAM_CAPACITY: usize = 64;
 const MAX_BUFFERED_PRE_SEMANTIC_EVENTS: usize = 32;
@@ -65,13 +67,12 @@ pub struct BrokerEventEnvelope {
 
 pub struct ChatModelStream {
     receiver: mpsc::Receiver<Result<BrokerEventEnvelope, ChatModelError>>,
+    cancellation: CancellationToken,
 }
 
-impl ChatModelStream {
-    pub(crate) fn new(
-        receiver: mpsc::Receiver<Result<BrokerEventEnvelope, ChatModelError>>,
-    ) -> Self {
-        Self { receiver }
+impl Drop for ChatModelStream {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
     }
 }
 
@@ -82,6 +83,10 @@ impl Stream for ChatModelStream {
         mut self: Pin<&mut Self>,
         context: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
+        if self.cancellation.is_cancelled() {
+            self.receiver.close();
+            return Poll::Ready(None);
+        }
         self.receiver.poll_recv(context)
     }
 }
@@ -92,6 +97,22 @@ pub trait ChatBrokerPort: Send + Sync {
         &self,
         request: crate::contracts::ChatModelRequest,
     ) -> Result<ChatModelStream, ChatModelError>;
+
+    /// Process-local cancellation covering route preparation, credential
+    /// acquisition, provider opening, streaming and backpressure. Implementors
+    /// must drop the actual attempt, not only stop forwarding its output.
+    /// Older custom ports fail closed until they implement this contract.
+    async fn open_chat_stream_cancellable(
+        &self,
+        _request: crate::contracts::ChatModelRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<ChatModelStream, ChatModelError> {
+        Err(ChatModelError::new(
+            ChatModelErrorCode::AdapterUnavailable,
+            "chat broker does not support native attempt cancellation",
+            ChatRetryDirective::Never,
+        ))
+    }
 }
 
 pub struct ChatModelBroker {
@@ -177,6 +198,8 @@ impl ChatModelBroker {
             };
             if !route.features.is_superset(&required)
                 || !adapter.features().is_superset(&required)
+                || request.input.messages.iter().any(|message| message.content.iter().any(|part|
+                    matches!(part, crate::ChatContentPart::ProviderReasoning { block } if !block.matches_route(route))))
             {
                 continue;
             }
@@ -200,24 +223,47 @@ impl ChatModelBroker {
         &self,
         request: crate::contracts::ChatModelRequest,
     ) -> Result<ChatModelStream, ChatModelError> {
-        let routes = self.prepare(&request).await?;
+        self.open_stream_cancellable(request, CancellationToken::new()).await
+    }
+
+    pub async fn open_stream_cancellable(
+        &self,
+        request: crate::contracts::ChatModelRequest,
+        cancellation: CancellationToken,
+    ) -> Result<ChatModelStream, ChatModelError> {
+        // Dropping one request must not cancel its parent Session or siblings.
+        let cancellation = cancellation.child_token();
+        let routes = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(ChatModelError::new(
+                ChatModelErrorCode::Cancelled,
+                "chat request was cancelled before opening the provider attempt",
+                ChatRetryDirective::Never,
+            )),
+            result = self.prepare(&request) => result?,
+        };
         let adapters = self.adapters.clone();
         let credential_store = Arc::clone(&self.credential_store);
         let retry_policy = self.retry_policy;
         let (sender, receiver) = mpsc::channel(BROKER_STREAM_CAPACITY);
 
+        let attempt_cancellation = cancellation.clone();
         tokio::spawn(async move {
-            run_broker(
-                request,
-                routes,
-                adapters,
-                credential_store,
-                retry_policy,
-                sender,
-            )
-            .await;
+            tokio::select! {
+                biased;
+                _ = attempt_cancellation.cancelled() => {},
+                _ = sender.closed() => {},
+                _ = run_broker(
+                    request,
+                    routes,
+                    adapters,
+                    credential_store,
+                    retry_policy,
+                    sender.clone(),
+                ) => {},
+            }
         });
-        Ok(ChatModelStream::new(receiver))
+        Ok(ChatModelStream { receiver, cancellation })
     }
 }
 
@@ -228,6 +274,14 @@ impl ChatBrokerPort for ChatModelBroker {
         request: crate::contracts::ChatModelRequest,
     ) -> Result<ChatModelStream, ChatModelError> {
         self.open_stream(request).await
+    }
+
+    async fn open_chat_stream_cancellable(
+        &self,
+        request: crate::contracts::ChatModelRequest,
+        cancellation: CancellationToken,
+    ) -> Result<ChatModelStream, ChatModelError> {
+        self.open_stream_cancellable(request, cancellation).await
     }
 }
 
@@ -366,6 +420,7 @@ async fn run_attempt(
     consume_attempt_stream(
         route,
         adapter,
+        request,
         wire_stream,
         route_attempt,
         total_attempt,
@@ -377,6 +432,7 @@ async fn run_attempt(
 async fn consume_attempt_stream(
     route: &ResolvedChatRoute,
     adapter: &dyn ChatProtocolAdapter,
+    request: &ChatModelRequest,
     mut wire_stream: ProviderWireStream,
     route_attempt: u8,
     total_attempt: u8,
@@ -385,6 +441,7 @@ async fn consume_attempt_stream(
     let mut sequence = EventSequence::default();
     let mut buffered = Vec::new();
     let mut semantic_output_committed = false;
+    let mut decoder = adapter.new_frame_decoder_for(request);
 
     loop {
         let frame = tokio::select! {
@@ -402,7 +459,11 @@ async fn consume_attempt_stream(
                 };
             }
         };
-        let events = match adapter.decode_frame(frame) {
+        let decoded = match decoder.as_mut() {
+            Some(decoder) => decoder.decode_frame(frame),
+            None => adapter.decode_frame(frame),
+        };
+        let events = match decoded {
             Ok(events) => events,
             Err(error) => {
                 return AttemptOutcome::Failed {
@@ -412,7 +473,15 @@ async fn consume_attempt_stream(
             }
         };
 
-        for event in events {
+        for mut event in events {
+            if let ChatModelEvent::ProviderReasoningBlock { block } = &mut event {
+                if let Err(message) = block.bind_route(route) {
+                    return AttemptOutcome::Failed {
+                        error: ChatModelError::protocol_violation(message).with_route(route.model_route_id.clone()),
+                        semantic_output_committed,
+                    };
+                }
+            }
             if let Err(error) = sequence.observe(&event) {
                 return AttemptOutcome::Failed {
                     error: error.with_route(route.model_route_id.clone()),
@@ -574,6 +643,16 @@ impl EventSequence {
                         "provider emitted an empty reasoning signature",
                     ));
                 }
+            }
+            ChatModelEvent::ReasoningBlock { text, encrypted_content } => {
+                if encrypted_content.as_ref().is_some_and(String::is_empty)
+                    || (text.is_empty() && encrypted_content.is_none())
+                {
+                    return Err(ChatModelError::protocol_violation("provider emitted an empty reasoning block"));
+                }
+            }
+            ChatModelEvent::ProviderReasoningBlock { block } => {
+                block.validate().map_err(ChatModelError::protocol_violation)?;
             }
             ChatModelEvent::ProviderRoundId { round_id } => {
                 if round_id.as_ref().is_empty() {

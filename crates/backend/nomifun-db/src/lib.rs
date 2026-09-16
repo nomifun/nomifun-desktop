@@ -1,11 +1,14 @@
 //! SQLite database layer: init, migrations, repository traits, and implementations.
 pub mod backup_bundle;
+pub mod conversation_context;
 mod database;
 mod error;
 mod id_schema_contract;
 pub mod models;
 mod repository;
 mod plugin_product_documents;
+mod installation_role_bindings;
+pub use installation_role_bindings::{load_installation_role_bindings, put_installation_role_binding};
 pub use plugin_product_documents::PluginProductDocuments;
 
 pub use database::{
@@ -214,10 +217,9 @@ pub use repository::{
 // 创意工坊 (Creative Workshop) + 生成引擎 (creation) repository traits + sqlite impls + params.
 pub use repository::{
     ApplyCreativeAgentProposalParams, AssetSort, CreateCreativeTaskParams,
-    CreationTaskPageCursorRef, CreativeAgentProposalCommit, CreativeTaskOwnerRef,
+    CreativeAgentProposalCommit, CreativeTaskOwnerRef,
     ICreationTaskRepository, IWorkshopRepository, IdempotentCreationTask, ListAssetsParams,
-    ListStandaloneWorkbenchTasksParams, PromptLibraryAssetIdentity,
-    RetireStandaloneWorkbenchTasksParams,
+    PromptLibraryAssetIdentity,
     SqliteCreationTaskRepository, SqliteWorkshopRepository, UpdateAssetParams,
     UpdateCreationTaskParams,
 };

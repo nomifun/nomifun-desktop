@@ -361,6 +361,11 @@
     "model": "Learning model"
   },
   "chat": {
+    "modelSaveFailed": "Could not save the conversation model. Please retry.",
+    "skillsScopeHint": "Manage this companion's skills, shared across desktop and robot conversations",
+    "mcpScopeHint": "Connection, tool calls and resource reading are included. Selected servers are shared across this companion's inputs and apply next turn.",
+    "mcpAgentRequired": "This Agent does not allow MCP connections. Choose the Companion preset or configure the Agent in the workbench.",
+    "mcpBusy": "Wait for the current reply to finish before changing MCP servers.",
     "modelConfig": "Chat model",
     "modelConfigHint": "This companion's chat model. Applies everywhere (local chat and remote connections); switching updates all its sessions.",
     "modelProvider": "Provider",
@@ -389,6 +394,13 @@
     "retry": "Retry"
   },
   "robot": {
+    "controlTarget": "Device controlled from this conversation",
+    "chooseDevice": "Choose a device",
+    "playLastReply": "Play latest reply on this device",
+    "playbackFailed": "Playback failed",
+    "playbackPermissionHint": "Allow desktop playback in device settings. Text replies stay silent by default.",
+    "speechSource": "Robot voice",
+    "visualObservation": "Visual observation",
     "title": "Robot connection",
     "hint": "Attach a physical robot to {{companionName}}: it speaks with this companion's persona, models and memories.",
     "add": "Add a robot",
@@ -399,10 +411,6 @@
     "codePlaceholder": "6 digits",
     "claim": "Bind to this companion",
     "claimOk": "The robot is now bound to {{companionName}}",
-    "agentLabel": "Robot Agent",
-    "agentBeforeClaim": "New devices use the official Robot Agent by default. After pairing, you can choose Minimal Q&A or a custom Agent without changing the companion chat Agent.",
-    "agentHint": "This Agent applies only to this physical robot and is saved separately from the companion chat Agent. It uses the companion's model. Changes save automatically; you can also edit them later in the device list.",
-    "finishSetup": "Finish setup",
     "claimNotFound": "No such activation code, or it has expired — check the number on the robot's screen again.",
     "claimTaken": "This robot is already bound to another companion. Unbind it there first.",
     "claimFailed": "Binding failed",
@@ -426,18 +434,24 @@
     "removeConfirm": "Deleting revokes the device token immediately; the robot has to report in and be bound again.",
     "removeFailed": "Failed to delete",
     "loadFailed": "Could not read the robot list — check that the robot service is running.",
-    "sessionGroup": "Robot sessions",
-    "group": {
-      "deviceUnknown": "Unknown robot",
-      "deviceMissing": "Removed robot",
-      "deviceTooltip": "Robot: {{robot}}"
-    },
     "status": {
       "offline": "Offline",
       "idle": "Online",
       "listening": "Listening",
       "speaking": "Speaking"
-    }
+    },
+    "inheritHint": "Continue {{companionName}}’s conversation, settings, memory and knowledge on this device.",
+    "permissionSaveFailed": "Could not save device permissions",
+    "permissions": {
+      "vision": "Allow photos on request",
+      "motion": "Allow movement",
+      "display": "Allow display controls",
+      "device_tools": "Allow device extensions",
+      "proactive_speech": "Allow desktop playback",
+      "continuous_vision": "Allow continuous observation"
+    },
+    "devices": "Connected devices",
+    "manageDevices": "Manage devices"
   },
   "settings": {
     "name": "Name",

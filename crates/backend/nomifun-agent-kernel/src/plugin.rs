@@ -37,6 +37,9 @@ pub struct CapabilityAccessRequest {
     pub principal: PrincipalRef,
     pub session_owner: PrincipalRef,
     pub agent_session_id: AgentSessionId,
+    /// Host identity for this access/evaluation, also namespacing Context
+    /// dependency effects. Use a new ID for a new evaluation; only an explicit
+    /// retry of that same evaluation may reuse it. This is not a durable ledger.
     pub operation_id: OperationId,
     pub correlation_id: CorrelationId,
     pub resolved_snapshot_ref: ResolvedSnapshotRef,
@@ -66,6 +69,9 @@ pub struct CapabilityOperationRequest {
 
 #[derive(Clone)]
 pub struct CapabilityInvocationContext {
+    /// Invocation-scoped access to declared, already-authorized dependencies.
+    /// It cannot outlive this handler invocation or manufacture Session authority.
+    pub dependencies: crate::CapabilityDependencyCaller,
     pub principal: PrincipalRef,
     pub agent_session_id: AgentSessionId,
     pub operation_id: OperationId,
@@ -89,7 +95,7 @@ pub struct CapabilityInvocationContext {
 
 /// Host-owned admission for a role member.
 ///
-/// Agent calls carry the session Snapshot/activation facts. Non-Agent
+/// Agent calls carry the session Snapshot/frozen enabled-set facts. Non-Agent
 /// operations carry an independently transferable exact Provider lock and the
 /// typed resources admitted for that operation. The latter is deliberately
 /// self-contained so an operation does not need a fabricated AgentSession or
@@ -224,8 +230,10 @@ pub struct CapabilityOperationInvocationContext {
 
 #[derive(Clone)]
 pub struct CapabilityContextContributionRequest {
+    pub dependencies: crate::CapabilityDependencyCaller,
     pub context: ResolvedCapabilityContext,
     pub schema_ref: CanonicalSchemaRef,
+    pub input: nomifun_agent_contracts::ContextContributionInput,
 }
 
 #[async_trait]
@@ -274,8 +282,12 @@ pub struct RoleToolInvocationContext {
 /// Typed export for a `CapabilityKind::ContextContributor` role member.
 #[derive(Clone)]
 pub struct ContextContributionRequest {
+    /// Agent Context calls share the frozen dependency graph. Non-Agent
+    /// operations have no Session authority and therefore receive no caller.
+    pub dependencies: Option<crate::CapabilityDependencyCaller>,
     pub context: ResolvedRoleMemberContext,
     pub schema_ref: CanonicalSchemaRef,
+    pub input: nomifun_agent_contracts::ContextContributionInput,
 }
 
 #[derive(Clone, Debug, PartialEq)]

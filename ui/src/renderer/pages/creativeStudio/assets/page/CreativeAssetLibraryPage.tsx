@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Button, Checkbox, Input, InputTag, Message, Modal } from '@arco-design/web-react';
+import { Button, Input, InputTag, Message, Modal } from '@arco-design/web-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -49,12 +49,11 @@ const DEFAULT_EDIT_DRAFT: CreativeAssetEditDraft = {
   title: '',
   collection: '',
   tags: [],
-  inLibrary: true,
 };
 const DEFAULT_RENAME_DRAFT: CreativeCollectionRenameDraft = { from: '', to: '' };
 
 const popupContainer = (): HTMLElement =>
-  document.getElementById('creative-studio-portal-root') ?? document.body;
+  document.getElementById('resource-page-portal-root') ?? document.body;
 
 const errorText = (reason: unknown): string =>
   reason instanceof Error ? reason.message : String(reason);
@@ -125,7 +124,7 @@ const EditAssetModal: React.FC<EditAssetModalProps> = ({
         <p className={styles.modalDescription}>
           {t('creativeStudio.assets.edit.description', {
             defaultValue:
-              '可修改后端支持的标题、合集、标签和素材库状态；素材类型与原始文件不可替换。',
+              '修改素材的标题、合集和标签。',
           })}
         </p>
         <label className={styles.field}>
@@ -156,9 +155,6 @@ const EditAssetModal: React.FC<EditAssetModalProps> = ({
             onChange={(tags) => patch({ tags: tags.map(String) })}
           />
         </label>
-        <Checkbox checked={draft.inLibrary} disabled={submitting} onChange={(inLibrary) => patch({ inLibrary })}>
-          {t('creativeStudio.assets.edit.keepInLibrary', { defaultValue: '保留在素材库' })}
-        </Checkbox>
         {!valid ? (
           <p className={styles.modalError}>
             {t('creativeStudio.assets.edit.titleRequired', { defaultValue: '标题不能为空。' })}
@@ -335,7 +331,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         textContent: input.textContent,
         collection: input.collection || undefined,
         tags: input.tags,
-        inLibrary: input.inLibrary,
+        inLibrary: true,
       });
       setTextModalOpen(false);
       setTextDraft(EMPTY_CREATIVE_TEXT_ASSET_FORM);
@@ -366,7 +362,6 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         title: draft.title,
         collection: draft.collection || null,
         tags: draft.tags,
-        inLibrary: draft.inLibrary,
       });
       void library.reload();
       setEditingAsset(null);
@@ -477,9 +472,9 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
           onPageChange: handlePageChange,
         }}
         labels={{
-          title: t('creativeStudio.assets.page.title', { defaultValue: '我的素材' }),
+          title: t('creativeStudio.assets.page.title', { defaultValue: '资产库' }),
           description: t('creativeStudio.assets.page.description', {
-            defaultValue: '收藏常用素材，按类型和标题快速查找。',
+            defaultValue: '集中管理素材，按类型和标题快速查找。',
           }),
           searchPlaceholder: t('creativeStudio.assets.page.searchPlaceholder', {
             defaultValue: '搜索素材标题',

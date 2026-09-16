@@ -8,6 +8,7 @@ use nomi_protocol::events::ToolCategory;
 use nomi_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
+use crate::file_cache::{GuardCacheAccess, cached_mtime_for_guard};
 use crate::edit::{EditOp, apply_edits};
 use crate::file_cache::{FileStateCache, file_mtime_ms, update_cache_after_write};
 
@@ -26,7 +27,124 @@ pub struct ApplyPatchTool {
     cwd: Option<std::path::PathBuf>,
 }
 
+enum PatchOperation {
+    Delete,
+    Content(String),
+    Edit(Vec<EditOp>),
+}
+
 impl ApplyPatchTool {
+    fn prepare_patch(&self, input: &Value, cache_access: GuardCacheAccess) -> Result<Vec<(String, PatchOperation)>, ToolResult> {
+        let Some(files) = input["files"].as_array() else {
+            return Err(ToolResult::error("Missing required parameter: files (array)"));
+        };
+        if files.is_empty() {
+            return Err(ToolResult::error("files array must not be empty"));
+        }
+
+        // Parse operations and validate metadata/cache admission without reading bodies.
+        let mut prepared = Vec::with_capacity(files.len());
+        for (i, f) in files.iter().enumerate() {
+            let Some(file_path) = f["file_path"].as_str() else {
+                return Err(ToolResult::error(format!("file #{}: missing file_path", i + 1)));
+            };
+            // Resolve a relative file_path against the session working directory
+            // (matching ReadTool/Grep/Glob/Bash) before validating/writing.
+            let resolved = crate::path_guard::resolve_against_cwd(file_path, self.cwd.as_deref());
+            let file_path = resolved.as_str();
+            // Write-root containment (opt-in): reject any file outside the root
+            // before validating/writing anything (keeps the all-or-nothing
+            // guarantee — a single out-of-root file aborts the whole patch).
+            if let Some(msg) = crate::path_guard::ensure_within_root(file_path, self.write_root.as_deref()) {
+                return Err(ToolResult::error(msg));
+            }
+            if f.get("content").is_some_and(|v| !v.is_string())
+                || f.get("edits").is_some_and(|v| !v.is_array())
+                || f.get("delete").is_some_and(|v| !v.is_boolean())
+            {
+                return Err(ToolResult::error(format!(
+                    "{file_path}: content must be a string, edits an array, and delete a boolean"
+                )));
+            }
+            let content_field = f.get("content").and_then(|v| v.as_str());
+            let edits_field = f.get("edits").and_then(|v| v.as_array());
+            let delete_field = f.get("delete").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            // Delete: remove the file. Mutually exclusive with content/edits, must
+            // exist, and (with a cache wired) must have been read first.
+            if delete_field {
+                if content_field.is_some() || edits_field.is_some() {
+                    return Err(ToolResult::error(format!(
+                        "{}: `delete` cannot be combined with `content` or `edits`",
+                        file_path
+                    )));
+                }
+                let path = Path::new(file_path);
+                if !path.exists() {
+                    return Err(ToolResult::error(format!("{}: cannot delete — file does not exist", file_path)));
+                }
+                if let Some(msg) = self.cache_guard(path, cache_access) {
+                    return Err(ToolResult::error(msg));
+                }
+                prepared.push((file_path.to_string(), PatchOperation::Delete));
+                continue;
+            }
+
+            match (content_field, edits_field) {
+                (Some(_), Some(_)) => {
+                    return Err(ToolResult::error(format!(
+                        "{}: specify either `content` (create/replace whole file) or `edits` (patch existing), not both",
+                        file_path
+                    )));
+                }
+                (None, None) => {
+                    return Err(ToolResult::error(format!("{}: each file needs either `content` or `edits`", file_path)));
+                }
+                // Create or replace the whole file with `content`.
+                (Some(content), None) => {
+                    let path = Path::new(file_path);
+                    // Overwriting an existing file requires must-read-first (mirrors
+                    // edits / WriteTool). Creating a new file reads nothing, so no
+                    // guard applies.
+                    if path.exists()
+                        && let Some(msg) = self.cache_guard(path, cache_access)
+                    {
+                        return Err(ToolResult::error(msg));
+                    }
+                    prepared.push((file_path.to_string(), PatchOperation::Content(content.to_string())));
+                }
+                // Patch an existing file with `edits`.
+                (None, Some(edits_arr)) => {
+                    if edits_arr.is_empty() {
+                        return Err(ToolResult::error(format!("{}: edits array must not be empty", file_path)));
+                    }
+                    let mut ops = Vec::with_capacity(edits_arr.len());
+                    for e in edits_arr {
+                        let (Some(o), Some(n)) = (e["old_string"].as_str(), e["new_string"].as_str())
+                        else {
+                            return Err(ToolResult::error(format!("{}: each edit needs old_string and new_string", file_path)));
+                        };
+                        if e.get("replace_all").is_some_and(|v| !v.is_boolean()) {
+                            return Err(ToolResult::error(format!("{file_path}: replace_all must be a boolean")));
+                        }
+                        ops.push(EditOp {
+                            old_string: o.to_string(),
+                            new_string: n.to_string(),
+                            replace_all: e["replace_all"].as_bool().unwrap_or(false),
+                        });
+                    }
+                    let path = Path::new(file_path);
+                    if let Some(msg) = self.cache_guard(path, cache_access) {
+                        return Err(ToolResult::error(msg));
+                    }
+                    prepared.push((file_path.to_string(), PatchOperation::Edit(ops)));
+                }
+            }
+        }
+
+        Ok(prepared)
+    }
+
     pub fn new(file_cache: Option<Arc<RwLock<FileStateCache>>>) -> Self {
         Self {
             file_cache,
@@ -50,19 +168,17 @@ impl ApplyPatchTool {
 
     /// Must-Read-first + staleness guard for one file (mirrors EditTool). Returns
     /// `Some(error)` if rejected, `None` if OK or no cache is wired.
-    fn cache_guard(&self, path: &Path) -> Option<String> {
+    fn cache_guard(&self, path: &Path, access: GuardCacheAccess) -> Option<String> {
         let cache_arc = self.file_cache.as_ref()?;
-        let Ok(mut cache) = cache_arc.write() else {
+        let Ok(cached_mtime) = cached_mtime_for_guard(cache_arc, path, access) else {
             return Some("File state cache is unavailable; refusing to patch".into());
         };
-        let cached = cache.get(path);
-        if cached.is_none() {
+        if cached_mtime.is_none() {
             return Some(format!(
                 "You must Read {} before patching it.",
                 path.display()
             ));
         }
-        let cached_mtime = cached.map(|s| s.mtime_ms);
         let disk_mtime = file_mtime_ms(path);
         if let (Some(c), Some(d)) = (cached_mtime, disk_mtime)
             && c != d
@@ -139,126 +255,44 @@ impl Tool for ApplyPatchTool {
         false
     }
 
-    async fn execute(&self, input: Value) -> ToolResult {
-        let Some(files) = input["files"].as_array() else {
-            return ToolResult::error("Missing required parameter: files (array)");
-        };
-        if files.is_empty() {
-            return ToolResult::error("files array must not be empty");
-        }
+    async fn preflight_hook(
+        &self,
+        input: &Value,
+        _context: &crate::ToolExecutionContext,
+    ) -> Result<(), String> {
+        self.prepare_patch(input, GuardCacheAccess::Inspect).map(|_| ()).map_err(|error| error.content)
+    }
 
-        // PHASE 1 — validate + compute the new content for every file. No writes.
-        let mut planned: Vec<(String, String)> = Vec::with_capacity(files.len());
+    async fn execute(&self, input: Value) -> ToolResult {
+        let prepared = match self.prepare_patch(&input, GuardCacheAccess::Execute) {
+            Ok(prepared) => prepared,
+            Err(error) => return error,
+        };
+        // Compute every new body before committing any file mutation.
+        let mut planned: Vec<(String, String)> = Vec::with_capacity(prepared.len());
         let mut to_delete: Vec<String> = Vec::new();
         let mut total = 0usize;
         let mut created = 0usize;
-        for (i, f) in files.iter().enumerate() {
-            let Some(file_path) = f["file_path"].as_str() else {
-                return ToolResult::error(format!("file #{}: missing file_path", i + 1));
-            };
-            // Resolve a relative file_path against the session working directory
-            // (matching ReadTool/Grep/Glob/Bash) before validating/writing.
-            let resolved = crate::path_guard::resolve_against_cwd(file_path, self.cwd.as_deref());
-            let file_path = resolved.as_str();
-            // Write-root containment (opt-in): reject any file outside the root
-            // before validating/writing anything (keeps the all-or-nothing
-            // guarantee — a single out-of-root file aborts the whole patch).
-            if let Some(msg) = crate::path_guard::ensure_within_root(file_path, self.write_root.as_deref()) {
-                return ToolResult::error(msg);
-            }
-            if f.get("content").is_some_and(|v| !v.is_string())
-                || f.get("edits").is_some_and(|v| !v.is_array())
-                || f.get("delete").is_some_and(|v| !v.is_boolean())
-            {
-                return ToolResult::error(format!(
-                    "{file_path}: content must be a string, edits an array, and delete a boolean"
-                ));
-            }
-            let content_field = f.get("content").and_then(|v| v.as_str());
-            let edits_field = f.get("edits").and_then(|v| v.as_array());
-            let delete_field = f.get("delete").and_then(|v| v.as_bool()).unwrap_or(false);
-
-            // Delete: remove the file. Mutually exclusive with content/edits, must
-            // exist, and (with a cache wired) must have been read first.
-            if delete_field {
-                if content_field.is_some() || edits_field.is_some() {
-                    return ToolResult::error(format!(
-                        "{}: `delete` cannot be combined with `content` or `edits`",
-                        file_path
-                    ));
-                }
-                let path = Path::new(file_path);
-                if !path.exists() {
-                    return ToolResult::error(format!("{}: cannot delete — file does not exist", file_path));
-                }
-                if let Some(msg) = self.cache_guard(path) {
-                    return ToolResult::error(msg);
-                }
-                to_delete.push(file_path.to_string());
-                continue;
-            }
-
-            match (content_field, edits_field) {
-                (Some(_), Some(_)) => {
-                    return ToolResult::error(format!(
-                        "{}: specify either `content` (create/replace whole file) or `edits` (patch existing), not both",
-                        file_path
-                    ));
-                }
-                (None, None) => {
-                    return ToolResult::error(format!("{}: each file needs either `content` or `edits`", file_path));
-                }
-                // Create or replace the whole file with `content`.
-                (Some(content), None) => {
-                    let path = Path::new(file_path);
-                    // Overwriting an existing file requires must-read-first (mirrors
-                    // edits / WriteTool). Creating a new file reads nothing, so no
-                    // guard applies.
-                    if path.exists()
-                        && let Some(msg) = self.cache_guard(path)
-                    {
-                        return ToolResult::error(msg);
-                    }
-                    if !path.exists() {
+        for (file_path, operation) in prepared {
+            match operation {
+                PatchOperation::Delete => to_delete.push(file_path),
+                PatchOperation::Content(content) => {
+                    if !Path::new(&file_path).exists() {
                         created += 1;
                     }
-                    planned.push((file_path.to_string(), content.to_string()));
+                    planned.push((file_path, content));
                 }
-                // Patch an existing file with `edits`.
-                (None, Some(edits_arr)) => {
-                    if edits_arr.is_empty() {
-                        return ToolResult::error(format!("{}: edits array must not be empty", file_path));
-                    }
-                    let mut ops = Vec::with_capacity(edits_arr.len());
-                    for e in edits_arr {
-                        let (Some(o), Some(n)) = (e["old_string"].as_str(), e["new_string"].as_str())
-                        else {
-                            return ToolResult::error(format!("{}: each edit needs old_string and new_string", file_path));
-                        };
-                        if e.get("replace_all").is_some_and(|v| !v.is_boolean()) {
-                            return ToolResult::error(format!("{file_path}: replace_all must be a boolean"));
-                        }
-                        ops.push(EditOp {
-                            old_string: o.to_string(),
-                            new_string: n.to_string(),
-                            replace_all: e["replace_all"].as_bool().unwrap_or(false),
-                        });
-                    }
-                    let path = Path::new(file_path);
-                    if let Some(msg) = self.cache_guard(path) {
-                        return ToolResult::error(msg);
-                    }
-                    let content = match std::fs::read_to_string(file_path) {
-                        Ok(c) => c,
-                        Err(e) => return ToolResult::error(format!("Failed to read {}: {}", file_path, e)),
+                PatchOperation::Edit(ops) => {
+                    let content = match std::fs::read_to_string(&file_path) {
+                        Ok(content) => content,
+                        Err(error) => return ToolResult::error(format!("Failed to read {file_path}: {error}")),
                     };
                     match apply_edits(&content, &ops) {
-                        Ok((new_content, n)) => {
-                            total += n;
-                            planned.push((file_path.to_string(), new_content));
+                        Ok((new_content, count)) => {
+                            total += count;
+                            planned.push((file_path, new_content));
                         }
-                        // Abort: a hunk did not apply — leave ALL files untouched.
-                        Err(msg) => return ToolResult::error(format!("{}: {}", file_path, msg)),
+                        Err(error) => return ToolResult::error(format!("{file_path}: {error}")),
                     }
                 }
             }

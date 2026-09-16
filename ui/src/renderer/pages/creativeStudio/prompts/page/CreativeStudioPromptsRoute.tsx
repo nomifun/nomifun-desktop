@@ -62,7 +62,7 @@ export interface CreativeStudioPromptsRouteProps {
   notifyError?: (message: string) => void;
 }
 
-/** Standalone `/workshop/prompts` route. It deliberately has no canvas insertion target. */
+/** Asset-library prompt route; insertion targets belong to the canvas picker. */
 export const CreativeStudioPromptsRoute: React.FC<CreativeStudioPromptsRouteProps> = ({
   port,
   assetPort = creativeAssetClient,

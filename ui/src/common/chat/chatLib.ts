@@ -131,6 +131,14 @@ export type IMessageText = IMessage<
   'text',
   {
     content: string;
+    interaction?: {
+      kind: 'robot' | 'desktop'; robot_id: string; connection_id: string; request_id: string;
+      input_modality: 'speech' | 'text'; output_mode: 'spoken' | 'desktop';
+    };
+    observations?: Array<{
+      question: string; answer: string; observed_at: number;
+      image: { id: string; path: string; mime_type: string; sha256: string };
+    }>;
     /** Backend explicitly replaced the accumulated text for this msg_id. */
     replace?: boolean;
     cronMeta?: CronMessageMeta;
@@ -544,12 +552,17 @@ export const preferTextMessageVersion = (primary: IMessageText, secondary: IMess
       fallback.content.knowledge_writeback,
       preferred.content.knowledge_writeback
     );
-    if (!knowledgeWriteback) return preferred;
+    const interaction = preferred.content.interaction ?? fallback.content.interaction;
+    const observations = (preferred.content.observations?.length ?? 0) >= (fallback.content.observations?.length ?? 0)
+      ? preferred.content.observations : fallback.content.observations;
+    if (!knowledgeWriteback && !interaction && !observations) return preferred;
     return {
       ...preferred,
       content: {
         ...preferred.content,
-        knowledge_writeback: knowledgeWriteback,
+        ...(knowledgeWriteback ? { knowledge_writeback: knowledgeWriteback } : {}),
+        ...(interaction ? { interaction } : {}),
+        ...(observations ? { observations } : {}),
       },
     };
   };
@@ -1131,6 +1144,7 @@ export const transformUserCreatedEvent = (
     created_at: event.created_at,
     content: {
       content: event.content,
+      ...(event.interaction ? { interaction: event.interaction } : {}),
     },
   };
 };

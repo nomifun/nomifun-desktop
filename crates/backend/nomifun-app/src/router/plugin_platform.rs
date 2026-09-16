@@ -28,7 +28,7 @@ use nomifun_agent_contracts::{
 };
 use nomifun_ai_agent::NomiPluginToolSchemaResolver;
 use nomifun_agent_kernel::{KernelRegistry, PluginRegistration};
-use nomifun_agent_platform::KernelCatalogProvider;
+use nomifun_agent_control_plane::KernelCatalogProvider;
 use nomifun_api_types::{
     ApiResponse, ApplyPluginCandidateRequest, BuildPluginProjectRequest,
     ConfigurePluginRequest, CreatePluginProjectRequest,
@@ -80,6 +80,18 @@ use nomifun_plugin_platform::application::{
 use tokio::sync::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 
+#[path = "plugin_registry_recovery.rs"]
+mod registry_recovery;
+#[cfg(test)]
+#[path = "plugin_platform_restore_tests.rs"]
+mod restore_tests;
+#[cfg(test)]
+#[path = "plugin_platform_graph_tests.rs"]
+mod graph_tests;
+#[cfg(test)]
+#[path = "plugin_platform_discovery_tests.rs"]
+mod discovery_tests;
+
 const AGENT_EXECUTOR_UNAVAILABLE: &str = "CAPABILITY_UNAVAILABLE";
 const PLUGIN_PLATFORM_DIRECTORY: &str = "plugin-platform";
 const PLUGIN_ARTIFACT_DIRECTORY: &str = "artifact-store";
@@ -91,7 +103,57 @@ const PLUGIN_CANDIDATE_TEST_DIRECTORY: &str = "candidate-tests";
 pub(crate) struct NomiCorePluginComposition {
     pub router: PluginRouterState,
     pub schema_resolver: Arc<dyn NomiPluginToolSchemaResolver>,
+    pub skill_artifacts: Arc<FsPluginArtifactStore>,
     pub runtime_participant: Arc<NomiCorePluginRuntimeParticipant>,
+}
+
+impl NomiCorePluginComposition {
+    pub(crate) fn mcp_catalog_publisher(
+        &self,
+        repository: Arc<dyn nomifun_db::IMcpServerRepository>,
+        host: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
+    ) -> Arc<dyn nomifun_mcp::service::McpCatalogPublisher> {
+        Arc::new(NomiCoreMcpCatalogPublisher {
+            publisher: Arc::clone(&self.runtime_participant.publisher),
+            repository,
+            host,
+        })
+    }
+}
+
+struct NomiCoreMcpCatalogPublisher {
+    publisher: Arc<NomiCorePluginRegistryPublisher>,
+    repository: Arc<dyn nomifun_db::IMcpServerRepository>,
+    host: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
+}
+
+#[async_trait]
+impl nomifun_mcp::service::McpCatalogPublisher for NomiCoreMcpCatalogPublisher {
+    async fn refresh(&self) -> Result<(), nomifun_mcp::McpError> {
+        let publisher = &self.publisher;
+        // Read inside the SAME lock as Plugin publication: an earlier read
+        // cannot overwrite a newer generation when concurrent refreshes finish.
+        let _guard = publisher.publish_lock.lock().await;
+        let next = super::nomi_core_mcp_catalog::load_registrations(
+            self.repository.as_ref(), Arc::clone(&self.host),
+        ).await.map_err(|_| nomifun_mcp::McpError::CatalogPublicationPending)?;
+        let mut current = publisher.mcp_registrations.write().await;
+        let changed = current.len() != next.len()
+            || current.iter().zip(&next).any(|(old, new)| old.metadata != new.metadata);
+        if changed {
+            let mut registrations = publisher.base_registrations.clone();
+            registrations.extend(next.iter().cloned());
+            registrations.extend(publisher.dynamic_registrations.read().await.values().cloned());
+            publisher.kernel.replace_all(registrations)
+                .map_err(|_| nomifun_mcp::McpError::CatalogPublicationPending)?;
+            // No await between the atomic Kernel swap and retaining the source
+            // set for future Plugin publications. Never rewrite Session locks.
+            *current = next;
+        }
+        drop(current);
+        publisher.refresh_agent_availability().await
+            .map_err(|_| nomifun_mcp::McpError::CatalogPublicationPending)
+    }
 }
 
 pub(crate) struct NomiCorePluginRuntimeParticipant {
@@ -517,11 +579,19 @@ pub(crate) async fn build_nomi_core_plugin_state(
     )?;
     let host: Arc<dyn ExtensionHostDemandPort> = shared_host.clone();
     let participant_kernel = Arc::clone(&kernel);
+    let (mcp_registrations, base_registrations): (Vec<_>, Vec<_>) =
+        base_registrations.into_iter().partition(|registration| {
+            registration.metadata.source.source_kind == nomifun_agent_contracts::PluginSourceKind::Bundled
+                && registration.metadata.manifest.payload.contributions.capabilities.iter()
+                    .any(|capability| super::nomi_core_mcp_catalog::is_product_tool(capability.id.as_ref()))
+        });
     let publisher = Arc::new(NomiCorePluginRegistryPublisher {
         kernel,
         catalog,
         base_registrations,
+        mcp_registrations: RwLock::new(mcp_registrations),
         dynamic_registrations: RwLock::new(BTreeMap::new()),
+        published_mounts: RwLock::new(BTreeSet::new()),
         publish_lock: Mutex::new(()),
         repository: Arc::clone(&repository),
         artifacts: Arc::clone(&artifacts),
@@ -594,9 +664,11 @@ pub(crate) async fn build_nomi_core_plugin_state(
             },
         ));
     }
+    let resolver = Arc::new(NomiCorePluginArtifactResolver { artifacts: Arc::clone(&artifacts) });
     Ok(NomiCorePluginComposition {
         router,
-        schema_resolver: Arc::new(NomiCorePluginSchemaResolver { artifacts }),
+        skill_artifacts: Arc::clone(&artifacts),
+        schema_resolver: resolver,
         runtime_participant,
     })
 }
@@ -754,12 +826,12 @@ impl PluginOperationCancellation for RuntimeBoundPluginBuildExecutor {
     }
 }
 
-struct NomiCorePluginSchemaResolver {
+struct NomiCorePluginArtifactResolver {
     artifacts: Arc<FsPluginArtifactStore>,
 }
 
 #[async_trait]
-impl NomiPluginToolSchemaResolver for NomiCorePluginSchemaResolver {
+impl NomiPluginToolSchemaResolver for NomiCorePluginArtifactResolver {
     async fn resolve(
         &self,
         capability: &ResolvedCapability,
@@ -2138,8 +2210,11 @@ struct NomiCorePluginRegistryPublisher {
     kernel: Arc<KernelRegistry>,
     catalog: Arc<KernelCatalogProvider>,
     base_registrations: Vec<PluginRegistration>,
+    mcp_registrations: RwLock<Vec<PluginRegistration>>,
     dynamic_registrations:
         RwLock<BTreeMap<PluginMountId, PluginRegistration>>,
+    // Cleanup bookkeeping only; the persisted inventory owns installation state.
+    published_mounts: RwLock<BTreeSet<PluginMountId>>,
     publish_lock: Mutex<()>,
     repository: Arc<DbPluginRepositoryAdapter>,
     artifacts: Arc<FsPluginArtifactStore>,
@@ -2154,8 +2229,20 @@ impl NomiCorePluginRegistryPublisher {
         &self,
         owner_user_id: &str,
     ) -> Result<(), PluginServiceError> {
+        let _guard = self.publish_lock.lock().await;
+        self.recover_inventory(owner_user_id).await.map(|_| ())
+    }
+
+    /// Caller holds publish_lock across the inventory read and final publication.
+    /// Rebuild from committed state so restored prerequisites also recover their
+    /// dependents, without a second dependency graph or registration cache.
+    async fn recover_inventory(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<BTreeMap<PluginMountId, PluginServiceError>, PluginServiceError> {
         let inventory = self.repository.inventory(owner_user_id).await?;
         let mut candidates = BTreeMap::new();
+        let mut rejected = BTreeMap::new();
         for mount in inventory.mounts {
             if !mount_is_materializable(&mount) {
                 continue;
@@ -2174,24 +2261,12 @@ impl NomiCorePluginRegistryPublisher {
                         %error,
                         "Plugin Mount restore remains unavailable"
                     );
+                    rejected.insert(PluginMountId::from(mount.mount_id), error);
                 }
             }
         }
-        let _guard = self.publish_lock.lock().await;
-        self.publish(BTreeMap::new()).await?;
-        for (mount_id, registration) in candidates {
-            let mut next = self.dynamic_registrations.read().await.clone();
-            next.insert(mount_id.clone(), registration);
-            if let Err(error) = self.publish(next).await {
-                tracing::warn!(
-                    mount_id = mount_id.as_ref(),
-                    code = error.code(),
-                    %error,
-                    "Plugin Mount registration conflicts with the active Kernel generation"
-                );
-            }
-        }
-        Ok(())
+        rejected.extend(self.publish_recovered(candidates).await?);
+        Ok(rejected)
     }
 
     async fn registration_for(
@@ -2216,19 +2291,84 @@ impl NomiCorePluginRegistryPublisher {
         })
     }
 
-    async fn publish(
+    async fn replace_dynamic(
         &self,
-        dynamic: BTreeMap<PluginMountId, PluginRegistration>,
-    ) -> Result<(), PluginServiceError> {
+        dynamic: &BTreeMap<PluginMountId, PluginRegistration>,
+    ) -> Result<(), nomifun_agent_kernel::KernelError> {
         let mut registrations = self.base_registrations.clone();
+        registrations.extend(self.mcp_registrations.read().await.iter().cloned());
         registrations.extend(dynamic.values().cloned());
-        self.kernel.replace_all(registrations).map_err(|error| {
-            PluginServiceError::integration(format!(
-                "Kernel Plugin publication failed: {error}"
-            ))
-        })?;
-        *self.dynamic_registrations.write().await = dynamic;
-        self.refresh_agent_availability().await
+        // Retain only the successfully published source set for MCP refreshes.
+        // Inventory remains authoritative for Plugin recovery. Acquire before
+        // replace_all so cancellation cannot leave the two generations apart.
+        let mut published = self.dynamic_registrations.write().await;
+        self.kernel.replace_all(registrations)?;
+        *published = dynamic.clone();
+        Ok(())
+    }
+
+    /// Recovery validates complete batches, never publishes a prefix ordered by
+    /// Mount ID, and never chooses an alternate Provider. Only the Kernel decides
+    /// whether the remaining declarations form a valid generation.
+    async fn publish_recovered(
+        &self,
+        mut dynamic: BTreeMap<PluginMountId, PluginRegistration>,
+    ) -> Result<BTreeMap<PluginMountId, PluginServiceError>, PluginServiceError> {
+        let mut failures = BTreeMap::new();
+        loop {
+            match self.replace_dynamic(&dynamic).await {
+                Ok(()) => {
+                    self.finish_publication(dynamic.into_keys().collect()).await?;
+                    return Ok(failures);
+                }
+                Err(error) => {
+                    let rejected = registry_recovery::rejected_mounts(&error, &dynamic);
+                    if rejected.is_empty() {
+                        // Host/global failures have no safe per-plugin recovery.
+                        // replace_all has left the previously published generation intact.
+                        return Err(PluginServiceError::integration(format!(
+                            "Kernel Plugin recovery could not isolate a registration: {error}"
+                        )));
+                    }
+                    for mount_id in rejected {
+                        dynamic.remove(&mount_id);
+                        tracing::warn!(
+                            mount_id = mount_id.as_ref(), %error,
+                            "Plugin Mount excluded from recovered Kernel generation"
+                        );
+                        failures.insert(mount_id, PluginServiceError::integration(format!(
+                            "Kernel Plugin publication rejected the Mount: {error}"
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
+    async fn finish_publication(
+        &self,
+        mounts: BTreeSet<PluginMountId>,
+    ) -> Result<(), PluginServiceError> {
+        let withdrawn = {
+            let mut published = self.published_mounts.write().await;
+            let withdrawn = published.difference(&mounts).cloned().collect::<Vec<_>>();
+            *published = mounts;
+            withdrawn
+        };
+        // The new generation rejects new dispatch to withdrawn declarations.
+        // Clean up every withdrawn dependent, not just the requested Mount.
+        let mut first_error = None;
+        for mount in withdrawn {
+            if let Err(error) = self.kernel.release_resources_for_mount(&mount).await {
+                first_error.get_or_insert_with(|| PluginServiceError::integration(format!(
+                    "Plugin resource cleanup for {} failed: {error}", mount.as_ref()
+                )));
+            }
+        }
+        if let Err(error) = self.refresh_agent_availability().await {
+            first_error.get_or_insert(error);
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     async fn refresh_agent_availability(
@@ -2270,20 +2410,15 @@ impl NomiCorePluginRegistryPublisher {
                     == nomifun_agent_contracts::PluginSourceKind::ManagedLocal
                     && capability.contribution_lock.source_kind
                         == nomifun_agent_contracts::ContributionSourceKind::PluginMount
-                    && capability.manifest.kind
-                        == nomifun_agent_contracts::CapabilityKind::Tool
-                    && capability
-                        .manifest
-                        .contributions
-                        .actions
-                        .iter()
-                        .any(|action| {
-                            action.presentation
-                                == nomifun_agent_contracts::ToolPresentationKind::FunctionTool
-                        });
+                    && nomifun_ai_agent::supports_nomi_plugin_capability(
+                        &capability.manifest,
+                    );
                 let builtin = self
                     .approved_platform_builtin_capability_ids
-                    .contains(&capability.manifest.id);
+                    .contains(&capability.manifest.id)
+                    || (capability.source.source_kind == nomifun_agent_contracts::PluginSourceKind::Bundled
+                        && capability.contribution_lock.source_kind == nomifun_agent_contracts::ContributionSourceKind::McpBinding
+                        && super::nomi_core_mcp_catalog::is_product_tool(capability.manifest.id.as_ref()));
                 (!agent_executor_available(capability.manifest.id.as_ref(), native, builtin, dynamic, runtime_available)).then(|| {
                     (
                         capability.manifest.id.clone(),
@@ -2299,54 +2434,31 @@ impl NomiCorePluginRegistryPublisher {
                 ))
             })
     }
-
-    async fn remove_stale_registration(
-        &self,
-        mount_id: &PluginMountId,
-    ) -> Result<(), PluginServiceError> {
-        let mut fallback = self.dynamic_registrations.read().await.clone();
-        fallback.remove(mount_id);
-        self.publish(fallback).await
-    }
 }
 
 #[async_trait]
 impl PluginRegistryPublisher for NomiCorePluginRegistryPublisher {
     async fn reconcile_mount(
         &self,
-        _owner_user_id: &str,
+        owner_user_id: &str,
         mount: &PluginMountRow,
     ) -> Result<(), PluginServiceError> {
         let mount_id = PluginMountId::from(mount.mount_id.clone());
-        let registration = if mount_is_materializable(mount) {
-            Some(self.registration_for(mount).await)
-        } else {
-            None
-        };
         let _guard = self.publish_lock.lock().await;
-        self.kernel
+        let cleanup = self.kernel
             .release_resources_for_mount(&mount_id)
             .await
             .map_err(|error| {
                 PluginServiceError::integration(format!(
                     "Plugin resource cleanup failed: {error}"
                 ))
-            })?;
-
-        let mut next = self.dynamic_registrations.read().await.clone();
-        next.remove(&mount_id);
-        match registration {
-            Some(Ok(registration)) => {
-                next.insert(mount_id.clone(), registration);
-            }
-            Some(Err(error)) => {
-                self.publish(next).await?;
-                return Err(error);
-            }
-            None => {}
-        }
-        if let Err(error) = self.publish(next).await {
-            self.remove_stale_registration(&mount_id).await?;
+            });
+        // Even a cleanup error must not leave a disabled/invalid declaration in
+        // the live generation. Other invalid installations do not poison a valid
+        // target's operation, but rejection of this target is returned to it.
+        let mut rejected = self.recover_inventory(owner_user_id).await?;
+        cleanup?;
+        if let Some(error) = rejected.remove(&mount_id) {
             return Err(error);
         }
         Ok(())
@@ -2422,7 +2534,8 @@ mod tests {
 
     use async_trait::async_trait;
     use nomifun_agent_contracts::{
-        ActionId, ArtifactEnvelope, ArtifactFileDigest, ArtifactId,
+        ActionId,
+        AgentSessionId, ArtifactEnvelope, ArtifactFileDigest, ArtifactId,
         CapabilityActionDescriptor, CapabilityContributions, CapabilityId,
         CapabilityKind, CapabilityManifest, CapabilityRef, CanonicalSchemaRef,
         CorrelationId, EffectClass, IdempotencyKey, OperationId, PrincipalRef,
@@ -2434,12 +2547,14 @@ mod tests {
         PackageContributions, PackageId, PackageManifest,
         PlatformConstraint, PluginPackageArtifactV1,
         PluginPackageV1Manifest, PluginSourceKind, RuntimeTarget,
-        ToolPresentationKind, VersionString, canonical_json_bytes,
+        PresetRevisionRef, RuntimeProfileKind, ToolPresentationKind, UserId,
+        VersionString, canonical_json_bytes,
         capability_surface_declarations,
     };
     use nomifun_agent_control_plane::{CatalogProvider, CatalogSnapshot};
     use nomifun_agent_kernel::{
-        CapabilityOperationRequest, InMemoryPluginStatePersistence,
+        CapabilityOperationRequest,
+        CompilerEnvironment, InMemoryPluginStatePersistence,
         MaterializationPolicy, PluginStatePersistence,
     };
     use nomifun_api_types::{
@@ -2603,7 +2718,7 @@ export async function activate() {
         }
     }
 
-    async fn test_runtime_authority() -> Arc<RuntimeAuthority> {
+    pub(super) async fn test_runtime_authority() -> Arc<RuntimeAuthority> {
         let resolution = NodeRuntimeResolver::default()
             .resolve(NodeDiscoveryRequest::default())
             .await
@@ -2643,7 +2758,7 @@ export async function activate() {
         }
     }
 
-    fn package_artifact(main: &[u8]) -> PluginPackageArtifactV1 {
+    pub(super) fn package_artifact(main: &[u8]) -> PluginPackageArtifactV1 {
         let package = ExactVersionRef {
             id: PackageId::from("test.nomicore.plugin"),
             version: VersionString::from("1.0.0"),
@@ -2702,6 +2817,67 @@ export async function activate() {
                 ..Default::default()
             },
         };
+        let context = CapabilityManifest {
+            id: CapabilityId::from("test.nomicore.plugin.context"),
+            contribution_id: "test.nomicore.plugin.context.contribution".into(),
+            kind: CapabilityKind::ContextContributor,
+            supported_surfaces: capability_surface_declarations(
+                ["desktop"], [CapabilityConsumer::Agent],
+            ),
+            contributions: CapabilityContributions {
+                context_schema_refs: vec![output_ref.clone()],
+                ..Default::default()
+            },
+            ..capability.clone()
+        };
+        let facade = CapabilityManifest {
+            id: "test.nomicore.plugin.context-facade".into(),
+            contribution_id: "test.nomicore.plugin.context-facade.contribution".into(),
+            ..context.clone()
+        };
+        let dynamic_context = CapabilityManifest {
+            id: "test.nomicore.plugin.turn-context".into(),
+            contribution_id: "test.nomicore.plugin.turn-context.contribution".into(),
+            contributions: CapabilityContributions {
+                context_phase: nomifun_agent_contracts::ContextContributionPhase::BeforeTurn,
+                ..context.contributions.clone()
+            },
+            ..context.clone()
+        };
+        let dynamic_peer = CapabilityManifest {
+            id: "test.nomicore.plugin.turn-context-peer".into(),
+            contribution_id: "test.nomicore.plugin.turn-context-peer.contribution".into(),
+            ..dynamic_context.clone()
+        };
+        let role = nomifun_agent_contracts::RoleContractManifest {
+            key: nomifun_agent_contracts::RoleContractKey {
+                role_id: "test.nomicore.plugin.context-role".into(),
+                contract_version: "1.0.0".into(),
+            },
+            members: vec![nomifun_agent_contracts::RoleMemberContract {
+                capability: CapabilityRef { id: facade.id.clone(), version: facade.version.clone() },
+                capability_manifest_digest: nomifun_agent_contracts::digest_payload(&facade).unwrap(),
+                requirement: nomifun_agent_contracts::RoleMemberRequirement::Required,
+            }],
+            serialized_target_resource_kind: None,
+        };
+        let provider = nomifun_agent_contracts::RoleProviderContribution {
+            role: nomifun_agent_contracts::ExactRoleContractRef {
+                key: role.key.clone(), contract_digest: nomifun_agent_contracts::digest_payload(&role).unwrap(),
+            },
+            display: display("Installed Context Provider", "Maps a user contract to an independently published Context."),
+            members: BTreeMap::from([(facade.id.clone(), nomifun_agent_contracts::RoleProviderMemberContribution {
+                implementation: Some(CapabilityRef { id: context.id.clone(), version: context.version.clone() }),
+                supported_platforms: vec![PlatformConstraint::Any], required_resource_kinds: BTreeSet::new(),
+            })]),
+        };
+        // Only this implementation declares the extra conflict. The facade and
+        // other candidates retain their independently defined callable contract.
+        let mut context = context;
+        context.conflicts.push(nomifun_agent_contracts::CapabilityConflict {
+            capability: CapabilityRef { id: dynamic_context.id.clone(), version: dynamic_context.version.clone() },
+            reason: "This Context implementation cannot be combined with the fixture turn Context".into(),
+        });
         PluginPackageArtifactV1::new(
             ArtifactId::from(Uuid::now_v7().to_string()),
             PluginPackageV1Manifest {
@@ -2736,7 +2912,9 @@ export async function activate() {
                     }
                     .into(),
                     contributions: PackageContributions {
-                        capabilities: vec![capability],
+                        capabilities: vec![capability, context, facade, dynamic_context, dynamic_peer],
+                        role_contracts: vec![role],
+                        role_providers: vec![provider],
                         ..Default::default()
                     },
                 },
@@ -2760,7 +2938,7 @@ export async function activate() {
         .unwrap()
     }
 
-    fn write_package(
+    pub(super) fn write_package(
         root: &Path,
         artifact: &PluginPackageArtifactV1,
         main: &[u8],
@@ -2776,6 +2954,147 @@ export async function activate() {
         )
         .unwrap();
         std::fs::write(root.join("main.mjs"), main).unwrap();
+    }
+
+    pub(super) async fn assert_installed_context_reaches_nomi_prompt(
+        kernel: Arc<KernelRegistry>,
+        schemas: Arc<dyn NomiPluginToolSchemaResolver>,
+        owner_id: &str,
+        capability_id: &str,
+        selection: Option<nomifun_api_types::RoleProviderSelectionDto>,
+        catalog: Arc<KernelCatalogProvider>,
+        skill_artifacts: Option<Arc<FsPluginArtifactStore>>,
+        conflict_peer: Option<&str>,
+    ) -> nomifun_ai_agent::NomiPluginToolSession {
+        use nomifun_agent_control_plane::{AgentControlPlane, ControlPlaneStore, InMemoryControlPlaneStore, OfficialTemplateCatalog, PresetRevisionCompiler};
+        let materialized = kernel.snapshot().unwrap();
+        let capability = materialized.capability(&CapabilityId::from(capability_id)).unwrap();
+        let principal = PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() };
+        let environment = CompilerEnvironment {
+                resolver_version: VersionString::from("1.0.0"),
+                required_runtime_protocol_version: VersionString::from("1.0.0"),
+                required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
+                runtime_feature_inventory_digest: DigestHex::from("1".repeat(64)),
+                available_runtime_features: BTreeSet::new(),
+                installation_role_bindings: BTreeMap::new(),
+                canonical_schema_manifest_digest: DigestHex::from("2".repeat(64)),
+                target_contribution_manifest_digest: materialized.registry_digest.clone(),
+                host_target: RuntimeTarget::from("x86_64-pc-windows-msvc"),
+                host_surface: "desktop".into(), availability_evidence_revision: "context-consumer-test".into(),
+        };
+        let owner = UserId::from(owner_id);
+        let templates = OfficialTemplateCatalog::load().unwrap();
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control_plane = AgentControlPlane::new(
+            store.clone(), catalog, templates.clone(),
+            PresetRevisionCompiler::new(templates).with_canonical_registry(kernel.clone(), environment.clone()),
+        );
+        let editor = control_plane.create_preset(&owner, nomifun_api_types::CreateAgentPresetRequest {
+            display_name: "Installed Context consumer".into(), description: None, fork_from_revision: None, document: None,
+        }).await.unwrap();
+        let mut draft = editor.draft;
+        draft.document.context_order = vec![capability_id.into()];
+        draft.document.enabled_capabilities = vec![nomifun_api_types::CapabilitySelectionDto {
+            capability: nomifun_api_types::ExactCatalogRefDto { id: capability_id.into(), version: capability.manifest.version.as_ref().into() },
+            action_allowlist: BTreeSet::new(),
+        }];
+        let ordered_peer = "test.nomicore.plugin.turn-context-peer";
+        if capability_id == "test.nomicore.plugin.turn-context" {
+            draft.document.enabled_capabilities.push(nomifun_api_types::CapabilitySelectionDto {
+                capability: nomifun_api_types::ExactCatalogRefDto { id: ordered_peer.into(), version: "1.0.0".into() },
+                action_allowlist: BTreeSet::new(),
+            });
+            draft.document.context_order.insert(0, ordered_peer.into());
+        }
+        if let Some(selection) = selection {
+            // Submit the public Catalog choice without reconstructing its contract/Mount.
+            draft.document.system_role_provider_overrides.insert(selection.role.key.role_id.clone(), selection);
+        }
+        if skill_artifacts.is_some() {
+            draft.document.skill_bindings = vec![nomifun_api_types::ExactCatalogRefDto {
+                id: "test.nomicore.plugin.guide".into(), version: "1.0.0".into(),
+            }];
+        }
+        let expected_document = draft.document.clone();
+        let preset_id = draft.preset_id.clone();
+        if let Some(peer_id) = conflict_peer {
+            let peer = materialized.capability(&CapabilityId::from(peer_id))
+                .expect("conflict fixture must install both capabilities, not test missing admission");
+            let mut conflicting = draft.clone();
+            conflicting.document.enabled_capabilities.push(nomifun_api_types::CapabilitySelectionDto {
+                capability: nomifun_api_types::ExactCatalogRefDto {
+                    id: peer_id.into(), version: peer.manifest.version.as_ref().into(),
+                },
+                action_allowlist: BTreeSet::new(),
+            });
+            let rejected = control_plane.save_revision(&owner, &preset_id, nomifun_api_types::SaveAgentPresetRevisionRequest {
+                draft: conflicting, expected_current_revision: None, reason: None,
+            }).await;
+            let error = rejected.err().expect("installed Provider conflict must be checked against other selected capabilities");
+            let details = error.details().unwrap();
+            assert!(details["diagnostics"].as_array().unwrap().iter().any(|diagnostic| {
+                let message = diagnostic["message"].as_str().unwrap_or_default();
+                message.contains("conflict") && message.contains("test.nomicore.plugin.context")
+                    && message.contains(peer_id)
+            }), "{details}");
+        }
+        let saved = control_plane.save_revision(&owner, &preset_id, nomifun_api_types::SaveAgentPresetRevisionRequest {
+            draft, expected_current_revision: None, reason: None,
+        }).await.unwrap();
+        let read_back = control_plane.get_revision(&owner, &preset_id, saved.revision.reference.revision).await.unwrap();
+        assert_eq!(read_back.document, expected_document);
+        let reference: PresetRevisionRef = serde_json::from_value(serde_json::to_value(&saved.revision.reference).unwrap()).unwrap();
+        let persisted = store.get_snapshot(&reference).await.unwrap().unwrap();
+        assert_eq!(persisted.content.context_order.iter().map(|id| id.as_ref()).collect::<Vec<_>>(),
+            expected_document.context_order.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(persisted.snapshot_ref.snapshot_id.as_ref(), saved.resolved_snapshot_ref.snapshot_id);
+        let revision = store.get_revision(&reference).await.unwrap().unwrap();
+        let compiled = crate::router::nomi_core_session::compile_nomi_plugin_snapshot(
+            &kernel, &environment, nomifun_agent_contracts::AgentBindingValue {
+                preset_revision_ref: reference,
+                resolved_snapshot_ref: persisted.snapshot_ref.clone(),
+                typed_resource_bindings: Vec::new(), binding_version: 1,
+            }, revision, persisted, &principal,
+        ).unwrap();
+        let compiled = Arc::new(compiled);
+        let session = nomifun_ai_agent::KernelNomiPluginToolSession::materialize(
+            kernel.clone(), compiled.clone(), principal, AgentSessionId::from(Uuid::now_v7().to_string()),
+            ScopeKey::from("session:context-consumer-test"), schemas,
+        ).await.unwrap();
+        assert!(session.actions().is_empty(), "Context must not be exposed as a model Tool");
+        if capability.manifest.contributions.context_phase == nomifun_agent_contracts::ContextContributionPhase::BeforeTurn {
+            assert!(session.initial_context_contributions().is_empty());
+            assert_eq!(session.context_contributors().len(), 1);
+            for text in ["first", "second"] {
+                let prompt = session.context_contributors()[0].pre_turn_context_for_turn_result(&nomifun_ai_agent::TurnContext {
+                    source_message_id: format!("installed-{text}"), text: text.into(),
+                    image_media_types: vec!["image/png".into()], cs_dialogue_id: Some("host-private".into()),
+                }).await.unwrap().unwrap();
+                assert!(prompt.contains(&format!("Installed dynamic context:{text}")));
+                assert!(prompt.contains(&format!("installed-{text}")));
+                assert!(!prompt.contains("host-private"));
+                if capability_id == "test.nomicore.plugin.turn-context" {
+                    assert!(prompt.find(ordered_peer).unwrap() < prompt.find(&format!(r#""capability_id":"{capability_id}""#)).unwrap());
+                    assert!(prompt.contains(&format!("Peer dynamic context:{text}")));
+                }
+            }
+        } else {
+            assert_eq!(session.initial_context_contributions().len(), 1);
+            let prompt = session.system_prompt_with_initial_context(Some("Base instructions")).unwrap().unwrap();
+            assert!(prompt.starts_with("Base instructions\n\n"));
+            assert!(prompt.contains("Context from the installed JS artifact"));
+        }
+        if let Some(artifacts) = skill_artifacts {
+            let skills = crate::router::engine_skills::compile(&compiled, &materialized, artifacts).await.unwrap();
+            assert!(skills.resources().values().any(|resource| matches!(
+                &resource.content, nomifun_engine_core::EngineContextContent::Text { text }
+                    if text.contains("Exact package reference")
+            )));
+            session.with_selected_skills(nomifun_ai_agent::nomi_skills::NomiSelectedSkills::new(
+                skills.instructions, skills.resources,
+            ).unwrap()).unwrap()
+                .with_verified_skill_commands(kernel, compiled, skills.commands).unwrap()
+        } else { session }
     }
 
     #[tokio::test]
@@ -2813,6 +3132,7 @@ export async function activate() {
         .await
         .unwrap();
         let schema_resolver = Arc::clone(&composition.schema_resolver);
+        let skill_artifacts = composition.skill_artifacts.clone();
         let state = composition.router;
         assert_eq!(state.service.list_library(&owner_user_id).await.unwrap().library_revision, 0);
         let response = plugin_read_routes(state.clone())
@@ -2957,14 +3277,54 @@ export async function activate() {
                 capabilities: {
                   "test.nomicore.plugin.echo.contribution": {
                     async invoke({ input }) { return input; }
+                  },
+                  "test.nomicore.plugin.context.contribution": {
+                    async contributeContext() {
+                      return { instructions: "Context from the installed JS artifact" };
+                    }
+                  },
+                  "test.nomicore.plugin.turn-context.contribution": {
+                    async contributeContext({ input }) {
+                      if (input.phase !== "before_turn") throw new Error("wrong context phase");
+                      return { instructions: `Installed dynamic context:${input.turn.text}`, input };
+                    }
+                  },
+                  "test.nomicore.plugin.turn-context-peer.contribution": {
+                    async contributeContext({ input }) {
+                      if (input.phase !== "before_turn") throw new Error("wrong context phase");
+                      return { instructions: `Peer dynamic context:${input.turn.text}`, input };
+                    }
                   }
                 }
               };
             }
         "#;
-        let artifact = package_artifact(main);
+        let base = package_artifact(main);
+        let body = b"---\nname: cosmetic-name\ndescription: Installed guide\n---\nONLY_IN_PACKAGE $ARGUMENTS";
+        let resource = b"Exact package reference";
+        let mut manifest = base.manifest.payload.clone();
+        let body_ref = nomifun_agent_contracts::LogicalArtifactRef {
+            artifact_id: "guide-body".into(), normalized_relative_path: "resources/guide/SKILL.md".into(), digest: sha256(body),
+        };
+        let resource_ref = nomifun_agent_contracts::LogicalArtifactRef {
+            artifact_id: "guide-reference".into(), normalized_relative_path: "resources/guide/reference.txt".into(), digest: sha256(resource),
+        };
+        manifest.package.contributions.skills.push(nomifun_agent_contracts::SkillDefinition {
+            id: "test.nomicore.plugin.guide".into(), version: "1.0.0".into(), package: manifest.package_ref(),
+            display: display("Guide", "Installed guide"), body_ref: body_ref.clone(),
+            resources: vec![nomifun_agent_contracts::SkillResourceRef { kind: nomifun_agent_contracts::SkillResourceKind::Reference, artifact: resource_ref.clone() }],
+            requires_capabilities: Vec::new(), supported_surfaces: capability_surface_declarations(["desktop"], [CapabilityConsumer::Agent]),
+        });
+        let mut files = base.files.clone();
+        for (reference, bytes) in [(&body_ref, body.as_slice()), (&resource_ref, resource.as_slice())] {
+            files.push(ArtifactFileDigest { normalized_relative_path: reference.normalized_relative_path.clone(), digest: reference.digest.clone(), size_bytes: bytes.len() as u64 });
+        }
+        let artifact = PluginPackageArtifactV1::new(base.artifact_id, manifest, files).unwrap();
         let source = data_root.path().join("incoming-plugin");
         write_package(&source, &artifact, main);
+        std::fs::create_dir_all(source.join("resources/guide")).unwrap();
+        std::fs::write(source.join(&body_ref.normalized_relative_path), body).unwrap();
+        std::fs::write(source.join(&resource_ref.normalized_relative_path), resource).unwrap();
         let mut project = state
             .service
             .import_prebuilt(
@@ -3201,6 +3561,8 @@ export async function activate() {
         let materialized_registry = kernel.snapshot().unwrap();
         let materialized = materialized_registry.capability(&capability_id).unwrap();
         let resolved = ResolvedCapability {
+            consumption: Default::default(),
+            dependency_refs: Vec::new(),
             capability: CapabilityRef {
                 id: materialized.manifest.id.clone(),
                 version: materialized.manifest.version.clone(),
@@ -3235,6 +3597,40 @@ export async function activate() {
             ..
         } = catalog.snapshot().unwrap().as_ref().clone();
         assert!(!unavailable_capabilities.contains_key(&capability_id));
+        assert!(!unavailable_capabilities.contains_key(&CapabilityId::from("test.nomicore.plugin.context")));
+        let mut skill_session = None;
+        for id in ["test.nomicore.plugin.context", "test.nomicore.plugin.context-facade", "test.nomicore.plugin.turn-context"] {
+            assert!(!unavailable_capabilities.contains_key(&CapabilityId::from(id)));
+            let api = catalog.snapshot().unwrap().as_api().unwrap();
+            let selection = api.roles.iter().find(|role| role.capabilities.iter().any(|member| member.id == id))
+                .map(|role| {
+                    assert_eq!(role.providers.len(), 1);
+                    let candidate = &role.providers[0];
+                    assert_eq!(candidate.source_kind, "managed_local");
+                    assert!(candidate.supported_capabilities.iter().any(|member| member.id == id));
+                    candidate.selection.clone()
+                });
+            assert_eq!(selection.is_some(), id.ends_with("-facade"));
+            let session = assert_installed_context_reaches_nomi_prompt(
+                Arc::clone(&kernel), Arc::clone(&schema_resolver), &owner_user_id, id, selection, Arc::clone(&catalog),
+                (id == "test.nomicore.plugin.context").then(|| skill_artifacts.clone()),
+                (id == "test.nomicore.plugin.context-facade").then_some("test.nomicore.plugin.turn-context"),
+            ).await;
+            if !session.package_skills().is_empty() {
+                let skill = &session.package_skills()[0];
+                assert_eq!(skill.metadata().name, "test.nomicore.plugin.guide");
+                assert!(skill.read(Some("hello"), None, None).await.unwrap().contains("ONLY_IN_PACKAGE hello"));
+                assert!(skill.read(None, Some(&resource_ref.normalized_relative_path), None).await.is_err(),
+                    "commands cannot expose resources outside the shared typed resource tool");
+                assert!(skill.read(None, Some("../manifest.json"), None).await.is_err());
+                let mut allowed = Vec::new();
+                let mut deferred = vec!["Skill".into()];
+                session.extend_tool_policy(&mut allowed, &mut deferred);
+                assert!(allowed.iter().any(|name| name == "Skill"));
+                assert!(!deferred.iter().any(|name| name == "Skill"));
+                skill_session = Some(session);
+            }
+        }
         let catalog_snapshot = catalog.snapshot().unwrap();
         let capability_ref = CapabilityRef {
             id: capability_id.clone(),
@@ -3273,6 +3669,11 @@ export async function activate() {
             capability.capability.id == capability_id.as_ref()
                 && capability.unavailable_code.is_none()
         }));
+
+        // Existing descriptors must not bypass withdrawal just because bytes
+        // are cached. The restarted host below restores independently.
+        kernel.replace_all(Vec::new()).unwrap();
+        assert!(skill_session.unwrap().package_skills()[0].read(None, None, None).await.unwrap_err().contains("no longer available"));
 
         drop(state);
         let mut restarted_policy = MaterializationPolicy::stable("1.0.0");

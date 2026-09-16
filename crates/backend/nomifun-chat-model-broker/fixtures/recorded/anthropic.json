@@ -96,11 +96,10 @@
         }
       ],
       "tool_choice": {"mode": "auto"},
-      "max_output_tokens": 512,
+      "max_output_tokens": 2048,
       "reasoning": {
-        "effort": "medium",
         "summary": "auto",
-        "max_reasoning_tokens": 128
+        "max_reasoning_tokens": 1024
       },
       "prompt_cache": "ephemeral",
       "response_format": {"type": "text"},

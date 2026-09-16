@@ -4,6 +4,9 @@
 //! resolved addresses must be public, and the validated addresses are pinned
 //! into a fresh, proxy-free reqwest client for that hop. This makes URL
 //! validation and the connection use the same DNS answer.
+//! A configured proxy may synthesize 198.18/15 DNS answers. Only for those
+//! domain answers, public HTTPS DNS can recover real addresses; they undergo
+//! the same checks and direct pinning. Reserved ranges never become targets.
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -16,6 +19,8 @@ use url::{Host, Url};
 mod public_dns;
 
 const DNS_TIMEOUT: Duration = Duration::from_secs(15);
+const DNS_RESPONSE_LIMIT: usize = 64 * 1024;
+const PUBLIC_DNS_ENDPOINT: &str = "https://cloudflare-dns.com/dns-query";
 
 /// Fingerprint the compiled egress implementation used by exact runtime bindings.
 pub fn implementation_digest() -> String {
@@ -148,7 +153,9 @@ impl SafeHttpClient {
         // One budget covers DNS, every redirect and the complete bounded body.
         tokio::time::timeout(self.timeout, self.get_url(url))
             .await
-            .map_err(|_| SafeHttpError::new(SafeHttpErrorKind::Timeout, "safe HTTP request timed out"))?
+            .map_err(|_| {
+                SafeHttpError::new(SafeHttpErrorKind::Timeout, "safe HTTP request timed out")
+            })?
     }
 
     /// Fetch exactly one validated, DNS-pinned hop. Redirects are returned to
@@ -343,7 +350,10 @@ impl SafeHttpClient {
 /// Parse an untrusted URL before any DNS or network operation.
 pub fn parse_untrusted_url(raw: &str) -> Result<Url, SafeHttpError> {
     let url = Url::parse(raw.trim()).map_err(|error| {
-        SafeHttpError::new(SafeHttpErrorKind::InvalidUrl, format!("invalid URL: {error}"))
+        SafeHttpError::new(
+            SafeHttpErrorKind::InvalidUrl,
+            format!("invalid URL: {error}"),
+        )
     })?;
     validate_url(url)
 }
@@ -361,11 +371,17 @@ fn validate_url(url: Url) -> Result<Url, SafeHttpError> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(SafeHttpError::new(
             SafeHttpErrorKind::InvalidUrl,
-            format!("only http(s) URLs are supported (got scheme: {})", url.scheme()),
+            format!(
+                "only http(s) URLs are supported (got scheme: {})",
+                url.scheme()
+            ),
         ));
     }
     if url.host_str().is_none() {
-        return Err(SafeHttpError::new(SafeHttpErrorKind::InvalidUrl, "URL has no host"));
+        return Err(SafeHttpError::new(
+            SafeHttpErrorKind::InvalidUrl,
+            "URL has no host",
+        ));
     }
     if !url.username().is_empty() || url.password().is_some() {
         return Err(SafeHttpError::new(
@@ -383,11 +399,8 @@ fn validate_url(url: Url) -> Result<Url, SafeHttpError> {
 }
 
 /// Validate syntax and resolve all addresses without opening a connection.
-/// Standalone DNS validation is bounded to 15 seconds.
-pub async fn validate_untrusted_url(
-    raw: &str,
-    allow_private: bool,
-) -> Result<Url, SafeHttpError> {
+/// System DNS and optional public DNS recovery are each bounded to 15 seconds.
+pub async fn validate_untrusted_url(raw: &str, allow_private: bool) -> Result<Url, SafeHttpError> {
     let url = parse_untrusted_url(raw)?;
     resolve_validated(&url, allow_private, None).await?;
     Ok(url)
@@ -437,12 +450,162 @@ async fn resolve_validated(
             format!("DNS resolution returned no addresses for {host}"),
         ));
     }
+    validate_dns_with_recovery(
+        host,
+        addrs,
+        allow_private,
+        public_dns.is_none() && !allow_private && crate::proxy::domain_uses_detected_proxy(url),
+        || recover_public_dns(host, port),
+    )
+    .await
+}
+
+fn fake_ip(ip: IpAddr) -> bool {
+    matches!(ip, IpAddr::V4(ip) if ip.octets()[0] == 198 && matches!(ip.octets()[1], 18 | 19))
+}
+
+async fn validate_dns_with_recovery<F, Fut>(
+    host: &str,
+    mut addresses: Vec<SocketAddr>,
+    allow_private: bool,
+    proxy_selected: bool,
+    recover: F,
+) -> Result<Vec<SocketAddr>, SafeHttpError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<SocketAddr>, SafeHttpError>>,
+{
+    let forbidden: Vec<_> = addresses
+        .iter()
+        .filter(|address| forbidden_ip(address.ip()))
+        .collect();
+    // Never reinterpret real private/metadata answers, or mixed private and
+    // Fake-IP answers, as a proxy artefact. NO_PROXY also keeps fail-closed DNS.
     if !allow_private
-        && let Some(address) = addrs.iter().find(|address| forbidden_ip(address.ip()))
+        && proxy_selected
+        && !forbidden.is_empty()
+        && forbidden.iter().all(|address| fake_ip(address.ip()))
+    {
+        addresses = recover().await?;
+    }
+    if addresses.is_empty() {
+        return Err(SafeHttpError::new(
+            SafeHttpErrorKind::Dns,
+            format!("DNS resolution returned no addresses for {host}"),
+        ));
+    }
+    if !allow_private
+        && let Some(address) = addresses.iter().find(|address| forbidden_ip(address.ip()))
     {
         return Err(forbidden_target(host, address.ip()));
     }
-    Ok(addrs)
+    addresses.sort_unstable();
+    addresses.dedup();
+    Ok(addresses)
+}
+
+async fn recover_public_dns(host: &str, port: u16) -> Result<Vec<SocketAddr>, SafeHttpError> {
+    tokio::time::timeout(DNS_TIMEOUT, async {
+        // This fixed HTTPS resolver is reached through the existing configured
+        // proxy client, with normal TLS verification and redirects disabled.
+        // It receives only the hostname, never the artifact URL or credentials.
+        let client = crate::http_client_no_redirect().map_err(|_| {
+            SafeHttpError::new(
+                SafeHttpErrorKind::ClientBuild,
+                "cannot initialize public DNS recovery client",
+            )
+        })?;
+        let (ipv4, ipv6) = tokio::try_join!(
+            public_dns_answer(&client, host, port, "A"),
+            public_dns_answer(&client, host, port, "AAAA"),
+        )?;
+        Ok(ipv4.into_iter().chain(ipv6).collect())
+    })
+    .await
+    .map_err(|_| SafeHttpError::new(SafeHttpErrorKind::Timeout, "public DNS recovery timed out"))?
+}
+
+async fn public_dns_answer(
+    client: &reqwest::Client,
+    host: &str,
+    port: u16,
+    record_type: &str,
+) -> Result<Vec<SocketAddr>, SafeHttpError> {
+    let mut response = client
+        .get(PUBLIC_DNS_ENDPOINT)
+        .query(&[("name", host), ("type", record_type)])
+        .header(reqwest::header::ACCEPT, "application/dns-json")
+        .send()
+        .await
+        .map_err(|_| {
+            SafeHttpError::new(SafeHttpErrorKind::Dns, "public DNS recovery request failed")
+        })?;
+    if !response.status().is_success() {
+        return Err(SafeHttpError::new(
+            SafeHttpErrorKind::Dns,
+            "public DNS recovery returned a non-success response",
+        ));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| {
+        SafeHttpError::new(
+            SafeHttpErrorKind::Dns,
+            "cannot read public DNS recovery response",
+        )
+    })? {
+        if body.len().saturating_add(chunk.len()) > DNS_RESPONSE_LIMIT {
+            return Err(SafeHttpError::new(
+                SafeHttpErrorKind::Dns,
+                "public DNS recovery response exceeds size limit",
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    parse_public_dns_answer(&body, port)
+}
+
+fn parse_public_dns_answer(body: &[u8], port: u16) -> Result<Vec<SocketAddr>, SafeHttpError> {
+    let data: serde_json::Value = serde_json::from_slice(body).map_err(|_| {
+        SafeHttpError::new(
+            SafeHttpErrorKind::Dns,
+            "invalid public DNS recovery response",
+        )
+    })?;
+    if data.get("Status").and_then(|status| status.as_u64()) != Some(0)
+        || data.get("TC").and_then(|truncated| truncated.as_bool()) == Some(true)
+    {
+        return Err(SafeHttpError::new(
+            SafeHttpErrorKind::Dns,
+            "public DNS recovery did not return a complete successful answer",
+        ));
+    }
+    let mut addresses = Vec::new();
+    for answer in data
+        .get("Answer")
+        .and_then(|answers| answers.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let kind = answer.get("type").and_then(|kind| kind.as_u64());
+        if !matches!(kind, Some(1 | 28)) {
+            continue;
+        }
+        let ip = answer
+            .get("data")
+            .and_then(|ip| ip.as_str())
+            .and_then(|ip| ip.parse::<IpAddr>().ok())
+            .filter(|ip| {
+                matches!(
+                    (kind, ip),
+                    (Some(1), IpAddr::V4(_)) | (Some(28), IpAddr::V6(_))
+                )
+            })
+            .ok_or_else(|| {
+                SafeHttpError::new(SafeHttpErrorKind::Dns, "invalid public DNS address record")
+            })?;
+        addresses.push(SocketAddr::new(ip, port));
+    }
+    Ok(addresses)
 }
 
 fn forbidden_target(host: &str, ip: IpAddr) -> SafeHttpError {
@@ -509,10 +672,150 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[tokio::test]
+    async fn fake_dns_recovery_requires_proxy_and_preserves_public_pins() {
+        let initial = vec!["198.18.0.12:443".parse().unwrap()];
+        let expected = vec![
+            "8.8.8.8:443".parse().unwrap(),
+            "1.1.1.1:443".parse().unwrap(),
+        ];
+        let recovered =
+            validate_dns_with_recovery("cdn.example", initial.clone(), false, true, || async {
+                Ok(expected.clone())
+            })
+            .await
+            .unwrap();
+        let mut sorted = expected;
+        sorted.sort_unstable();
+        assert_eq!(recovered, sorted);
+        let error = validate_dns_with_recovery("cdn.example", initial, false, false, || async {
+            panic!("NO_PROXY or absent proxy must never invoke public DNS");
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), SafeHttpErrorKind::ForbiddenTarget);
+        let public = vec!["8.8.8.8:443".parse().unwrap()];
+        assert_eq!(
+            validate_dns_with_recovery("cdn.example", public.clone(), false, true, || async {
+                panic!("ordinary public DNS must not be replaced");
+            })
+            .await
+            .unwrap(),
+            public
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_dns_recovery_never_reinterprets_or_accepts_private_answers() {
+        for address in ["127.0.0.1:443", "10.0.0.1:443", "169.254.169.254:443"] {
+            let error = validate_dns_with_recovery(
+                "cdn.example",
+                vec!["198.18.0.12:443".parse().unwrap(), address.parse().unwrap()],
+                false,
+                true,
+                || async {
+                    panic!("mixed private answers must remain blocked");
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.kind(), SafeHttpErrorKind::ForbiddenTarget);
+        }
+        for address in [
+            "198.18.0.12:443",
+            "127.0.0.1:443",
+            "169.254.169.254:443",
+            "[::1]:443",
+        ] {
+            let error = validate_dns_with_recovery(
+                "cdn.example",
+                vec!["198.19.0.2:443".parse().unwrap()],
+                false,
+                true,
+                || async {
+                    Ok(vec![
+                        "8.8.8.8:443".parse().unwrap(),
+                        address.parse().unwrap(),
+                    ])
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.kind(), SafeHttpErrorKind::ForbiddenTarget);
+        }
+        for raw in [
+            "http://198.18.0.12/file",
+            "https://198.19.0.2/file",
+            "http://127.0.0.1/file",
+        ] {
+            assert_eq!(
+                resolve_validated(&Url::parse(raw).unwrap(), false, None)
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                SafeHttpErrorKind::ForbiddenTarget
+            );
+        }
+    }
+
+    #[test]
+    fn public_dns_recovery_extracts_only_typed_addresses_and_rejects_bad_responses() {
+        let bytes = br#"{"Status":0,"Answer":[{"type":5,"data":"alias.example"},{"type":16,"data":"127.0.0.1"},{"type":1,"data":"8.8.8.8"},{"type":28,"data":"2606:4700:4700::1111"}]}"#;
+        assert_eq!(
+            parse_public_dns_answer(bytes, 443).unwrap(),
+            vec![
+                "8.8.8.8:443".parse().unwrap(),
+                "[2606:4700:4700::1111]:443".parse().unwrap()
+            ]
+        );
+        for bytes in [
+            br#"{"Status":3}"#.as_slice(),
+            br#"{"Status":0,"TC":true}"#.as_slice(),
+            br#"{"Status":0,"Answer":[{"type":1,"data":"::1"}]}"#.as_slice(),
+            br#"{"Status":0,"Answer":[{"type":28,"data":"not an address"}]}"#.as_slice(),
+        ] {
+            assert_eq!(
+                parse_public_dns_answer(bytes, 443).unwrap_err().kind(),
+                SafeHttpErrorKind::Dns
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pinned_transport_uses_validated_address_and_original_host() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 2048];
+            let count = stream.read(&mut bytes).await.unwrap();
+            let request = String::from_utf8_lossy(&bytes[..count]).to_ascii_lowercase();
+            assert!(request.contains("host: pinned-artifact.invalid:"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+        });
+        let url = Url::parse(&format!(
+            "http://pinned-artifact.invalid:{}/artifact",
+            address.port()
+        ))
+        .unwrap();
+        let response = SafeHttpClient::new(Duration::from_secs(2), 32)
+            .send(&url, &[address])
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn literal_addresses_are_resolved_without_domain_syntax() {
         for (raw, expected) in [
             ("https://8.8.8.8/", "8.8.8.8:443"),
-            ("https://[2606:4700:4700::1111]/", "[2606:4700:4700::1111]:443"),
+            (
+                "https://[2606:4700:4700::1111]/",
+                "[2606:4700:4700::1111]:443",
+            ),
             ("http://[::1]:8080/", "[::1]:8080"),
         ] {
             let url = Url::parse(raw).unwrap();
@@ -523,9 +826,19 @@ mod tests {
     #[test]
     fn reserved_and_transition_ipv6_ranges_are_not_public_egress() {
         let allowed: Vec<_> = [
-            "4000::1", "2001::1", "2001:20::1", "2002:7f00:1::", "3fff::1",
-        ].into_iter().filter(|raw| !forbidden_ip(raw.parse().unwrap())).collect();
-        assert!(allowed.is_empty(), "special IPv6 ranges were permitted: {allowed:?}");
+            "4000::1",
+            "2001::1",
+            "2001:20::1",
+            "2002:7f00:1::",
+            "3fff::1",
+        ]
+        .into_iter()
+        .filter(|raw| !forbidden_ip(raw.parse().unwrap()))
+        .collect();
+        assert!(
+            allowed.is_empty(),
+            "special IPv6 ranges were permitted: {allowed:?}"
+        );
     }
 
     #[tokio::test]
@@ -631,7 +944,11 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind(), SafeHttpErrorKind::ForbiddenTarget);
-        assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

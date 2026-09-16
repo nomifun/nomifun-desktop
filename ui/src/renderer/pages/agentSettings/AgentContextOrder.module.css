@@ -1,0 +1,10 @@
+.section { margin-bottom: 24px; }
+.section h3 { margin: 0 0 8px; }
+.section p { color: var(--color-text-3); }
+.list { margin: 12px 0; padding: 0; list-style: none; }
+.item { display: flex; align-items: center; gap: 8px; padding: 8px 0; }
+.name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.name small { display: block; color: var(--color-text-3); }
+.authoring { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 12px 0; }
+.authoring p { flex: 1 1 240px; margin: 0; font-size: 12px; line-height: 1.6; }
+.phase { flex-shrink: 0; }

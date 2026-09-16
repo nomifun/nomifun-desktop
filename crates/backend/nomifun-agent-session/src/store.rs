@@ -3544,6 +3544,8 @@ fn projection_from_row(row: StoredProjectionRow) -> Result<MessageProjection, Se
         first_seq: as_u64(row.first_seq, "projection first_seq")?,
         last_seq: as_u64(row.last_seq, "projection last_seq")?,
         presentation_intent: row.presentation_intent,
+        message_type: None,
+        message_status: None,
         projection: serde_json::from_str(&row.projection_json)?,
         semantic_digest: row.semantic_digest,
     })

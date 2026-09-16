@@ -3,10 +3,21 @@ pub(crate) mod runtime_state;
 pub mod artifact_store;
 pub mod boot_process_reaper;
 pub mod runtime_handle;
+pub mod runtime_extension;
+pub mod runtime_catalog;
+pub mod runtime_admission;
+pub mod coding_runtime;
+pub mod engine_sdk;
+mod engine_tasks;
+pub mod engine_effect_scope;
+pub mod model_attachments;
+pub mod nomi_skills;
+pub mod nomi_resources;
 pub mod capability;
 pub mod cc_switch;
 pub mod factory;
 pub mod image_generation;
+mod creation_context;
 pub mod knowledge_completer;
 pub mod knowledge_retrieval;
 pub mod knowledge_writeback;
@@ -14,6 +25,10 @@ pub mod manager;
 pub mod nomi_session_persistence;
 pub mod one_shot;
 pub mod plugin_tools;
+pub mod tool_discovery;
+pub use plugin_tools::model_middleware;
+pub use plugin_tools::tool_middleware;
+pub mod plugin_skills;
 mod plugin_tool_error_projection;
 pub mod protocol;
 pub mod registry;
@@ -43,7 +58,7 @@ pub use nomi_agent::ssh_backend::{
     SshSessionBinding, SshSessionLease,
 };
 pub use nomi_agent::requirement_tools::RequirementSink;
-pub use nomi_agent::context_contributor::ContextContributor;
+pub use nomi_agent::context_contributor::{ContextContributor, TurnContext};
 pub use nomi_agent::session_control_tools::{
     AGENT_EXECUTION_OBSERVE_TOOL_NAME, AGENT_EXECUTION_STEER_TOOL_NAME,
     AGENT_FORK_TOOL_NAME, AgentExecutionObserveTool, AgentExecutionSteerTool,
@@ -65,6 +80,12 @@ pub use nomi_config;
 pub use nomi_types;
 
 pub use runtime_state::AgentRuntimeState;
+pub use runtime_extension::{RegisteredAgentRuntime, RuntimeSteerDelivery, RuntimeTeardown};
+pub use runtime_admission::{RuntimeEngineAdmission, RuntimeEngineSupport};
+pub use runtime_catalog::{
+    RuntimeEngineBinding, RuntimeEngineCatalog, RuntimeEngineDescriptor,
+    RuntimeEngineFactory, RuntimeEngineSelector, RUNTIME_HOST_CONTRACT_VERSION,
+};
 pub use boot_process_reaper::{
     AgentProcessReapReport, ConversationProcessReapVerdict, reap_orphan_agent_processes,
 };
@@ -81,6 +102,7 @@ pub use factory::provider_config::{
 };
 pub use one_shot::{OneShotDeps, OneShotTool, OneShotTurnRequest, one_shot_handler, run_one_shot_turn};
 pub use plugin_tools::{
+    supports_nomi_plugin_capability,
     KernelNomiPluginToolSession,
     NomiHostDynamicToolDescriptor, NomiHostDynamicToolError,
     NomiHostDynamicToolInvocation,
@@ -95,7 +117,7 @@ pub use plugin_tools::{
     NomiPlatformBuiltinLifecycleAdmission,
     NomiPlatformBuiltinLifecycleInvocation,
     NomiPlatformBuiltinLifecycleInvoker,
-    NomiPluginToolSession, NomiPluginToolSessionProvider,
+    NomiHostedSessionBindings, NomiPluginToolSession, NomiPluginToolSessionProvider,
     NomiPluginToolSessionRequest, NomiPluginProductToolAction,
     NomiPluginProductToolInvocation, NomiPluginProductToolInvoker,
     NomiPluginProductToolSchemaResolver,

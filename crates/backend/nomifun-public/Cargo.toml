@@ -5,15 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[features]
-default = []
-
 [dependencies]
-# Canonical Remote MCP operations delegate to the single AgentSession
-# authority. This crate does not own a second session store.
-nomifun-agent-platform.workspace = true
+# Remote MCP operations are injected by the Conversation-backed host.
+# This crate does not own a second session store or an Engine implementation.
 nomifun-agent-contracts.workspace = true
-nomifun-agent-session.workspace = true
 nomifun-api-types.workspace = true
 # Instance API token validation and installation-owner authentication.
 nomifun-auth.workspace = true

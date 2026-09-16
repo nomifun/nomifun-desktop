@@ -60,8 +60,8 @@ describe('modality panel', () => {
     expect(panel.includes('buildModalityGroups(providers')).toBe(true);
     expect(panel.includes('providerModel.list')).toBe(false);
     // The management list reads the complete provider tree so disabled rows
-    // remain visible. Only the default image picker asks for runnable models.
-    expect(panel.includes("useModelsForTask('image_generation')")).toBe(true);
+    // remain visible. Only the task-specific default picker asks for runnable models.
+    expect(panel.includes("useModelsForTask(taskForDefault[preferenceKey])")).toBe(true);
     expect(panel.includes('modelDisabled')).toBe(true);
   });
 
@@ -146,6 +146,8 @@ describe('modality panel', () => {
 
   test('copy exists in both locales', () => {
     for (const locale of [zhSettings, enSettings]) {
+      expect(typeof locale.modelHub.creation.musicTitle).toBe('string');
+      expect(typeof locale.modelHub.creation.musicSubtitle).toBe('string');
       const modality = (locale as unknown as { modelHub: { modality: Record<string, string> } })
         .modelHub.modality;
       for (const key of MODALITY_KEYS) {

@@ -311,6 +311,11 @@ where
         }
         let call_id = request.call_id.clone();
         let result = match request.target {
+            PluginBridgeTarget::AgentSession { .. } => Err(
+                PluginRuntimePlatformError::ServiceUnavailable(
+                    "This Bridge has no host-selected Agent Session grant".into(),
+                ),
+            ),
             PluginBridgeTarget::HostKv { request } => {
                 self.kv
                     .execute(&entry.session.plugin_product_id, &entry.storage, &request)

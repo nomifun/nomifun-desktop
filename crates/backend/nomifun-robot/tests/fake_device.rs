@@ -44,7 +44,6 @@ async fn boot() -> Harness {
     let registry = Arc::new(RobotRegistry::load(dir.path()).await.unwrap());
     let speech = Arc::new(MockSpeech::new());
     let dispatcher = Arc::new(MockDispatcher::new());
-    dispatcher.set_has_fallback(false);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -76,6 +75,8 @@ async fn boot() -> Harness {
         ),
     };
     let admin_state = nomifun_robot::routes::RobotAdminState {
+        tools: tools.clone(),
+        playback_source: None,
         registry: registry.clone(),
         status: status.clone(),
         advertiser,

@@ -1,6 +1,6 @@
 {
   "welcome": {
-    "title": "NomiFun — the workspace that gets you",
+    "title": "New conversation",
     "placeholder": "Send a message, upload files, open a folder, or create a scheduled task...",
     "linkFolder": "Open Folder",
     "newConversation": "New Chat",
@@ -75,23 +75,6 @@
     "empty": "No matching messages found",
     "loadingMore": "Loading more...",
     "untitled": "Untitled conversation"
-  },
-  "emptyCards": {
-    "docsTitle": "User Guide",
-    "docsDescription": "Read setup, project, conversation, settings, and common workflow docs.",
-    "docsAction": "Open docs",
-    "videoTitle": "Intro Video",
-    "videoDescription": "Watch a short tour of how NomiFun organizes your workspace.",
-    "videoAction": "Watch video",
-    "feedbackTitle": "Feedback & Community",
-    "feedbackDescription": "Report issues, suggest improvements, or help build NomiFun through the official contact page.",
-    "feedbackAction": "Contact us"
-  },
-  "companionPoster": {
-    "eyebrow": "Desktop companions",
-    "title": "Companions stay beside your desk",
-    "description": "Preview how your companions look while they are ready to help with chats, files, and tasks.",
-    "emptyDescription": "Preview the NomiFun companion lineup here. After you create your own companion, its figure appears in this poster."
   },
   "dropdown": {
     "cliAgents": "CLI Agents",
@@ -589,7 +572,8 @@
   "notFound": "Conversation not found or has been deleted",
   "steer": {
     "button": "Send now (interject into the running reply)",
-    "fallbackQueued": "Couldn't interject into the running reply — added to the queue instead, with your attachments."
+    "fallbackQueued": "Steering delivery was not confirmed. Text and attachments are saved for review; the queue will not run automatically. Check the conversation before editing to resend or removing this draft.",
+    "reviewDelivery": "Review delivery"
   },
   "stop": {
     "button": "Stop Agent",

@@ -56,5 +56,36 @@
     "draftOn": "已预设 · 创建后启用",
     "draftOff": "未预设",
     "willMount": "将挂载 {{count}} 个知识库"
+  },
+  "showcase": {
+    "title": "我的伙伴",
+    "all": "全部伙伴 · {{count}}",
+    "manage": "管理伙伴",
+    "create": "创建伙伴",
+    "expand": "展开",
+    "collapse": "收起",
+    "search": "搜索伙伴名称",
+    "noMatches": "没有找到匹配的伙伴",
+    "openChat": "打开聊天",
+    "opening": "正在打开…",
+    "chatFailed": "暂时无法打开伙伴会话，请重试。",
+    "emptyTitle": "让第一位伙伴加入展台",
+    "emptyDescription": "选择内置形象，或用自己的图片创建伙伴。",
+    "loading": "正在加载伙伴…",
+    "loadFailed": "伙伴列表暂时无法加载",
+    "retry": "重试",
+    "closeList": "关闭伙伴列表",
+    "moreFor": "{{name}} 的更多操作"
+  },
+  "utilities": {
+    "title": "帮助与工具",
+    "help": "帮助与反馈",
+    "docs": "使用文档",
+    "video": "观看视频",
+    "community": "社区交流",
+    "running": "运行中",
+    "checking": "检查中",
+    "unavailable": "不可用",
+    "stopped": "未启用"
   }
 }

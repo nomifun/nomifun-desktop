@@ -16,7 +16,7 @@ use nomi_types::message::ContentBlock;
 /// The server-owned facts for the user turn currently crossing the provider
 /// boundary. Contributors receive text and attachment metadata, never image
 /// bytes or model-supplied authority fields.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct TurnContext {
     pub source_message_id: String,
     pub text: String,

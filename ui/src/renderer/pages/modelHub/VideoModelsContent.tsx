@@ -10,6 +10,7 @@ import ModalityModelsPanel from './ModalityModelsPanel';
 const VideoModelsContent: React.FC = () => (
   <ModalityModelsPanel
     modality='video'
+        defaultModelPreferenceKey='models.default.videoGeneration'
     titleKey='settings.modelHub.creation.videoTitle'
     subtitleKey='settings.modelHub.creation.videoSubtitle'
   />

@@ -22,7 +22,7 @@ describe('steer draft survival through the production delivery boundary', () => 
     expect(enqueue).not.toHaveBeenCalled();
   });
 
-  test('an in-flight failure queues the submitted text and attachments', async () => {
+  test('an in-flight failure holds the submitted text and attachments for review', async () => {
     let draft = command();
     const sent = { input: draft.input, files: [...draft.files] };
     let reject!: (error: Error) => void;
@@ -34,7 +34,7 @@ describe('steer draft survival through the production delivery boundary', () => 
     reject(new Error('Failed to fetch'));
     expect(await pending).toBe(false);
     expect(enqueue).toHaveBeenCalledTimes(1);
-    expect(enqueue).toHaveBeenCalledWith(command());
+    expect(enqueue).toHaveBeenCalledWith({ ...command(), requires_review: true });
     expect(enqueue).not.toHaveBeenCalledWith(draft);
   });
 
@@ -46,7 +46,7 @@ describe('steer draft survival through the production delivery boundary', () => 
       const enqueue = mock(() => {});
       expect(await steerOrQueue(command(), async () => { throw error; }, enqueue)).toBe(false);
       expect(enqueue).toHaveBeenCalledTimes(1);
-      expect(enqueue).toHaveBeenCalledWith(command());
+      expect(enqueue).toHaveBeenCalledWith({ ...command(), requires_review: true });
     }
   });
 

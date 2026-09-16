@@ -17,10 +17,6 @@ use nomifun_agent_contracts::{
     ChatRouteRecord as CanonicalChatRouteRecord, ConnectionConfigRef, DigestHex, digest_payload,
     validate_chat_route_records,
 };
-use nomifun_agent_platform::ChatOperationClaimStore;
-use nomifun_agent_session::{
-    AgentSessionStore, ChatOperationClaimRequest, SessionEventAppendResult,
-};
 use nomifun_chat_model_broker::{
     BrokerRetryPolicy, ChatBrokerPort, ChatCausalityGate, ChatModelError,
     ChatModelErrorCode, ChatModelFeature, ChatModelInvokePort, ChatProtocol,
@@ -442,6 +438,7 @@ pub(crate) async fn provider_config_digest(
 pub struct ProductionModelRepository {
     v4_pool: SqlitePool,
     provider_pool: SqlitePool,
+    nomi_core: bool,
 }
 
 impl ProductionModelRepository {
@@ -449,6 +446,7 @@ impl ProductionModelRepository {
         Self {
             v4_pool,
             provider_pool,
+            nomi_core: false,
         }
     }
 
@@ -470,9 +468,12 @@ impl ProductionModelRepository {
         &self,
         selection: &ChatRouteSelection,
     ) -> Result<Option<CanonicalChatRouteRecord>, ChatBrokerHostError> {
-        let payload_json: Option<String> = sqlx::query_scalar(
-            "SELECT payload_json FROM agent_preset_revisions WHERE revision_id = ?",
-        )
+        let query = if self.nomi_core {
+            "SELECT payload_json FROM nomi_agent_preset_revisions WHERE revision_id = ?"
+        } else {
+            "SELECT payload_json FROM agent_preset_revisions WHERE revision_id = ?"
+        };
+        let payload_json: Option<String> = sqlx::query_scalar(query)
         .bind(&selection.preset_revision_id)
         .fetch_optional(&self.v4_pool)
         .await
@@ -876,6 +877,20 @@ struct RegisteredLease {
     material: zeroize::Zeroizing<String>,
 }
 
+/// Scope the decrypted lease to the provider-opening future. Broker
+/// cancellation drops this guard even while route lookup or HTTP opening is
+/// pending; early validation errors must release it as well.
+struct AttemptCredentialGuard {
+    registry: ConnectionCredentialLeaseRegistry,
+    handle: String,
+}
+
+impl Drop for AttemptCredentialGuard {
+    fn drop(&mut self) {
+        self.registry.release(&self.handle);
+    }
+}
+
 impl ConnectionCredentialLeaseRegistry {
     pub fn new() -> Self {
         Self::default()
@@ -1034,12 +1049,15 @@ impl ChatModelInvokePort for ProductionChatModelInvoke {
         credential: CredentialLease,
     ) -> Result<ProviderWireStream, ChatModelError> {
         let credential_handle = credential.opaque_handle().to_owned();
+        let credential_guard = AttemptCredentialGuard {
+            registry: self.credentials.clone(),
+            handle: credential_handle.clone(),
+        };
         let target = self
             .routes
             .resolve_attempt_target(&request)
             .await
             .map_err(|error| {
-                self.credentials.release(&credential_handle);
                 let mut mapped = ChatModelError::new(
                     ChatModelErrorCode::AdapterUnavailable,
                     "the exact provider transport target is unavailable",
@@ -1050,10 +1068,7 @@ impl ChatModelInvokePort for ProductionChatModelInvoke {
                 mapped
             })?;
         let lease = OpaqueCredentialLease::new(&credential_handle)
-            .map_err(|error| {
-                self.credentials.release(&credential_handle);
-                invoke_error_to_chat_error(error)
-            })?;
+            .map_err(invoke_error_to_chat_error)?;
         let body = merge_chat_provider_params(
             request.body,
             &target.provider_params,
@@ -1069,6 +1084,7 @@ impl ChatModelInvokePort for ProductionChatModelInvoke {
                 body,
                 credential: lease,
                 timeout: Duration::from_secs(120),
+                idle_timeout: Duration::from_secs(120),
                 framing: target.framing,
                 region: target.region,
             })
@@ -1076,7 +1092,7 @@ impl ChatModelInvokePort for ProductionChatModelInvoke {
         // The HTTP executor has already attached the credential and returned
         // a response body stream; retain no decrypted material while the
         // provider stream is being consumed.
-        self.credentials.release(&credential_handle);
+        drop(credential_guard);
         let stream = result.map_err(invoke_error_to_chat_error)?;
         Ok(Box::pin(stream.map(|frame| {
             frame
@@ -1111,6 +1127,14 @@ fn merge_chat_provider_params(
     })?;
 
     for (key, value) in configured {
+        // Provider defaults may tune sampling, but cannot add model-owned
+        // messages/tools/thinking after the Broker's feature admission, or
+        // reinsert model/stream fields removed by the cloud wire encoder.
+        if protocol.uses_anthropic_messages() && matches!(key.as_str(),
+            "model" | "stream" | "messages" | "system" | "tools" | "tool_choice"
+            | "thinking" | "anthropic_version") {
+            continue;
+        }
         if matches!(
             key.as_str(),
             "max_tokens_field" | "chain_rounds" | "require_reasoning_content"
@@ -1154,7 +1178,7 @@ fn merge_chat_provider_params(
                 cap_json_number(body_object, "max_output_tokens", ceiling);
             }
         }
-        ChatProtocol::Anthropic | ChatProtocol::OpenaiChat => {
+        ChatProtocol::OpenaiChat => {
             if let Some(ceiling) = ceiling {
                 let key = configured_ceiling_key.unwrap_or("max_tokens");
                 for default_key in [
@@ -1169,9 +1193,21 @@ fn merge_chat_provider_params(
                 cap_json_number(body_object, key, ceiling);
             }
         }
-        ChatProtocol::Bedrock | ChatProtocol::Vertex => {
+        ChatProtocol::Anthropic | ChatProtocol::Bedrock | ChatProtocol::Vertex => {
             if let Some(ceiling) = ceiling {
                 cap_json_number(body_object, "max_tokens", ceiling);
+            }
+            let max_tokens = body_object.get("max_tokens").and_then(Value::as_u64)
+                .filter(|value| *value > 0)
+                .ok_or_else(|| ChatModelError::invalid_request("Messages output ceiling must be positive"))?;
+            if let Some(thinking) = body_object.get("thinking") {
+                let budget = thinking.get("budget_tokens").and_then(Value::as_u64);
+                if thinking.get("type").and_then(Value::as_str) != Some("enabled")
+                    || !budget.is_some_and(|budget| budget >= 1024 && budget < max_tokens) {
+                    return Err(ChatModelError::invalid_request(
+                        "Messages thinking budget must remain below the effective provider output ceiling",
+                    ));
+                }
             }
         }
     }
@@ -1238,53 +1274,8 @@ fn cap_json_number(
     }
 }
 
-/// Durable model-operation admission backed by the canonical SessionEvent
-/// store. The event's unique `(producer_id, idempotency_key)` pair is the
-/// linearization point for concurrent requests with the same operation id.
-#[derive(Clone)]
-pub struct SqliteChatOperationClaimStore {
-    sessions: Arc<AgentSessionStore>,
-}
 
-impl SqliteChatOperationClaimStore {
-    pub fn new(sessions: Arc<AgentSessionStore>) -> Self {
-        Self { sessions }
-    }
-}
 
-#[async_trait]
-impl ChatOperationClaimStore for SqliteChatOperationClaimStore {
-    async fn claim(&self, request: ChatOperationClaimRequest) -> Result<(), ChatModelError> {
-        let result = self
-            .sessions
-            .claim_chat_operation(request)
-            .await;
-        match result {
-            Ok(SessionEventAppendResult {
-                duplicate: true, ..
-            }) => Err(ChatModelError::new(
-                ChatModelErrorCode::DuplicateOperation,
-                "model operation has already been admitted",
-                ChatRetryDirective::Never,
-            )),
-            Ok(_) => Ok(()),
-            Err(error) => {
-                let code = if error.code() == Some("SESSION_DELETED") {
-                    ChatModelErrorCode::SessionTerminal
-                } else if error.code() == Some("IDEMPOTENCY_CONFLICT") {
-                    ChatModelErrorCode::DuplicateOperation
-                } else {
-                    ChatModelErrorCode::CausalityRejected
-                };
-                Err(ChatModelError::new(
-                    code,
-                    "model operation admission could not be committed",
-                    ChatRetryDirective::Never,
-                ))
-            }
-        }
-    }
-}
 
 fn repository_error_status(error: ProductionRepositoryError) -> u16 {
     match error {
@@ -1296,6 +1287,15 @@ fn repository_error_status(error: ProductionRepositoryError) -> u16 {
 }
 
 fn invoke_error_to_chat_error(error: InvokeError) -> ChatModelError {
+    if error.is_context_length_rejected() {
+        let mut mapped = ChatModelError::new(
+            ChatModelErrorCode::PromptTooLong,
+            "provider rejected the input context length",
+            ChatRetryDirective::Never,
+        );
+        mapped.provider_status = error.http_status;
+        return mapped;
+    }
     let retry = match error.kind {
         InvokeErrorKind::Auth
         | InvokeErrorKind::RateLimited
@@ -1467,6 +1467,17 @@ pub struct ChatBrokerHostComposition {
 }
 
 impl ChatBrokerHostComposition {
+    /// Default product route storage, not the isolated Fresh-v4 database.
+    pub fn for_nomi_core(pool: SqlitePool, encryption_key: [u8; 32]) -> Self {
+        Self {
+            provider_repository: Arc::new(ProductionProviderRepository::new(pool.clone())),
+            model_repository: Arc::new(ProductionModelRepository {
+                v4_pool: pool.clone(), provider_pool: pool.clone(), nomi_core: true,
+            }),
+            connection_repository: Arc::new(ProductionConnectionRepository::new(pool, ConnectionCredentialLeaseRegistry::default())),
+            encryption_key,
+        }
+    }
     pub fn new(
         v4_pool: SqlitePool,
         provider_pool: SqlitePool,
@@ -1605,6 +1616,33 @@ mod tests {
     };
     use serde_json::json;
 
+    #[tokio::test]
+    async fn cancelling_provider_open_releases_only_its_credential_lease() {
+        let registry = ConnectionCredentialLeaseRegistry::new();
+        for handle in ["cancelled-attempt", "other-attempt"] {
+            registry.leases.write().unwrap().insert(handle.to_owned(), RegisteredLease {
+                auth_scheme: "bearer".to_owned(),
+                material: zeroize::Zeroizing::new("{}".to_owned()),
+            });
+        }
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task_registry = registry.clone();
+        let task = tokio::spawn(async move {
+            let _guard = AttemptCredentialGuard {
+                registry: task_registry,
+                handle: "cancelled-attempt".to_owned(),
+            };
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        });
+        ready.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let leases = registry.leases.read().unwrap();
+        assert!(!leases.contains_key("cancelled-attempt"));
+        assert!(leases.contains_key("other-attempt"));
+    }
+
     fn selection() -> ChatRouteSelection {
         ChatRouteIdentity::new(
             "preset@1",
@@ -1633,6 +1671,9 @@ mod tests {
 
     fn revision_payload(record: ChatRouteRecord) -> AgentPresetRevisionPayload {
         AgentPresetRevisionPayload {
+            runtime_engine: None,
+            context_order: Vec::new(),
+            middleware_order: Vec::new(),
             schema_version: "1.0.0".into(),
             model_route_refs: BTreeMap::from([(
                 nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT.to_owned(),
@@ -1812,13 +1853,18 @@ mod tests {
             )
             .await
             .unwrap();
-        let pool = super::super::agent_platform_host::open_validated_pool(
-            &directory
-                .path()
-                .join(nomifun_v4_root::FRESH_V4_DATABASE_FILE),
-        )
-        .await
-        .unwrap();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(5)
+            .acquire_timeout(std::time::Duration::from_secs(5))
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(directory.path().join(nomifun_v4_root::FRESH_V4_DATABASE_FILE))
+                    .create_if_missing(false)
+                    .foreign_keys(true)
+                    .busy_timeout(std::time::Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
 
         for (preset, revision, provider, model) in [
             ("preset-a", "preset-a@1", "provider-a", "model-a"),

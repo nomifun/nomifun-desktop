@@ -10,17 +10,20 @@ import { useTranslation } from 'react-i18next';
 
 import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
 import type { CreativeCanvasPromptReferenceOption } from './CreativeCanvasReferencePromptInput';
-import styles from './CreativeCanvasImageComposer.module.css';
+import styles from './CreativeCanvasReferenceList.module.css';
 
-export interface CreativeCanvasImageComposerReference
+export interface CreativeCanvasComposerReference
   extends CreativeCanvasPromptReferenceOption {
   assetId: string | null;
   connectionId: string | null;
   base: boolean;
 }
 
+/** Compatibility name for existing image-composer callers. */
+export type CreativeCanvasImageComposerReference = CreativeCanvasComposerReference;
+
 interface CreativeCanvasReferenceListProps {
-  references: readonly CreativeCanvasImageComposerReference[];
+  references: readonly CreativeCanvasComposerReference[];
   disabled?: boolean;
   onActivate?(nodeId: string): void;
   onDisconnect?(connectionId: string): void;

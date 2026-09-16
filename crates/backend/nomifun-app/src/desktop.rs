@@ -42,20 +42,8 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::cli::Cli;
 use crate::lan_endpoint::detect_all_lan_ipv4s;
 use crate::{bootstrap, services::AppServices};
-use crate::bootstrap::FreshV4Application;
 use nomifun_auth::AuthPolicy;
 use nomifun_db::{IClientPreferenceRepository, IUserRepository};
-
-/// Host composition selected before any router or runtime state is built.
-///
-/// The product currently selects [`Self::NomiCore`]. [`Self::FreshV4`] remains
-/// an explicit, isolated host for the later migration phase; there is no
-/// per-session or per-turn runtime switching.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DesktopRuntimeComposition {
-    NomiCore,
-    FreshV4,
-}
 
 /// Stable, bookmarkable port for the LAN listener (matches the UI's
 /// `WEBUI_DEFAULT_PORT`). Falls back to an ephemeral port if occupied.
@@ -494,9 +482,6 @@ pub struct DesktopServer {
     /// clone closes the shared pool, so fatal listener failures cannot leave
     /// the backend's persistent resources alive while the host is exiting.
     database: Option<nomifun_db::Database>,
-    /// Canonical Fresh-v4 application owned by the production desktop path.
-    /// Nomi-core startup keeps this absent.
-    canonical_application: Option<FreshV4Application>,
     /// Current product application owned by the Nomi-core desktop path.
     nomi_core_application: Option<crate::bootstrap::NomiCoreApplication>,
     /// Complete startup authority. Keeping this alongside the published
@@ -549,7 +534,6 @@ enum DesktopStartupCleanupAuthority {
     Services(AppServices),
     Startup(Arc<crate::services::StartupCleanupAuthority>),
     NomiCore(crate::bootstrap::NomiCoreApplication),
-    FreshV4(FreshV4Application),
 }
 
 impl DesktopKeepAlive {
@@ -568,9 +552,6 @@ impl DesktopKeepAlive {
             }
             DesktopStartupCleanupAuthority::Startup(authority) => authority.cleanup().await,
             DesktopStartupCleanupAuthority::NomiCore(application) => {
-                application.clone().close().await
-            }
-            DesktopStartupCleanupAuthority::FreshV4(application) => {
                 application.clone().close().await
             }
         }
@@ -626,24 +607,12 @@ impl DesktopKeepAlive {
         }
     }
 
-    fn from_fresh_v4(
-        env: bootstrap::ServerEnvironment,
-        application: FreshV4Application,
-    ) -> Self {
-        Self {
-            inner: Arc::new(DesktopKeepAliveInner {
-                _env: env,
-                cleanup: DesktopStartupCleanupAuthority::FreshV4(application),
-            }),
-        }
-    }
 
     fn services(&self) -> Option<&AppServices> {
         match &self.inner.cleanup {
             DesktopStartupCleanupAuthority::Services(services) => Some(services),
             DesktopStartupCleanupAuthority::NomiCore(application) => Some(application.services()),
-            DesktopStartupCleanupAuthority::Startup(_)
-            | DesktopStartupCleanupAuthority::FreshV4(_) => None,
+            DesktopStartupCleanupAuthority::Startup(_) => None,
         }
     }
 
@@ -722,14 +691,14 @@ impl DesktopServer {
     ) -> Result<(Arc<DesktopServer>, DesktopKeepAlive)> {
         // Tests and embedded callers use the same Nomi-core composition as the
         // native desktop shell.
-        Self::start_with_composition(
+        Self::start_with_runtime_engines(
             cli,
             merged_path,
             spa_dir,
             dev_frontend_url,
             webui_asset_source,
-            DesktopRuntimeComposition::NomiCore,
             DesktopHostServices::default(),
+            |_| Ok(()),
         )
         .await
         .map_err(DesktopStartError::into_inner)
@@ -751,51 +720,39 @@ impl DesktopServer {
         (Arc<DesktopServer>, DesktopKeepAlive),
         DesktopStartError,
     > {
-        // The current desktop product runs the original in-process Nomi core.
-        // Fresh-v4/Codex composition remains an explicit future host and must
-        // not silently become the product runtime.
-        Self::start_with_composition(
+        // The current desktop uses one Conversation-backed multi-Engine host.
+        // Historical Wrapper composition must not become the product runtime.
+        Self::start_with_runtime_engines(
             cli,
             merged_path,
             spa_dir,
             dev_frontend_url,
             webui_asset_source,
-            DesktopRuntimeComposition::NomiCore,
             host_services,
+            |_| Ok(()),
         )
         .await
     }
 
-    async fn start_with_composition(
+    /// Source-composed desktop entry point with the same typed cleanup outcome
+    /// as `start_with_outcome`. The callback only registers compiled-in builds,
+    /// aliases and recovery hooks before router assembly and listener serving.
+    /// It must not start tasks or acquire resources outside platform ownership.
+    /// This is not exposed through IPC, configuration or packaged module loading.
+    pub async fn start_with_runtime_engines(
         cli: &Cli,
         merged_path: &str,
         spa_dir: Option<PathBuf>,
         dev_frontend_url: Option<String>,
         webui_asset_source: Option<WebUiAssetSource>,
-        composition: DesktopRuntimeComposition,
         host_services: DesktopHostServices,
+        register: impl FnOnce(&Arc<crate::RuntimeEngineHost>) -> Result<(), nomifun_common::AppError> + Send,
     ) -> std::result::Result<
         (Arc<DesktopServer>, DesktopKeepAlive),
         DesktopStartError,
     > {
-        let env = match composition {
-            DesktopRuntimeComposition::NomiCore => {
-                bootstrap::init_nomi_core_environment(cli, merged_path)
-            }
-            DesktopRuntimeComposition::FreshV4 => {
-                bootstrap::init_environment(cli, merged_path)
-            }
-        }
+        let env = bootstrap::init_nomi_core_environment(cli, merged_path)
             .map_err(DesktopStartError::verified)?;
-        if composition == DesktopRuntimeComposition::FreshV4 {
-            return Self::start_fresh_v4(
-                env,
-                spa_dir,
-                dev_frontend_url,
-                webui_asset_source,
-            )
-            .await;
-        }
 
         // Override the CLI-derived policy: the desktop trusts its own webview via
         // a per-boot secret, and requires login for everyone else.
@@ -849,6 +806,10 @@ impl DesktopServer {
                 return Err(cleanup_start_failure(keep_alive, error).await);
             }
         };
+        if let Err(error) = register(&services.runtime_engines) {
+            let keep_alive = DesktopKeepAlive::from_parts(env, services);
+            return Err(cleanup_start_failure(keep_alive, error.into()).await);
+        }
         if let Err(error) = bootstrap::finalize_data_layer(&config) {
             let keep_alive = DesktopKeepAlive::from_parts(env, services);
             return Err(cleanup_start_failure(keep_alive, error).await);
@@ -879,7 +840,17 @@ impl DesktopServer {
                 );
             }
         };
-        let router = crate::router::create_router(&services).await;
+        let router = match crate::router::try_create_router(&services).await {
+            Ok(router) => router,
+            Err(error) => {
+                // The reserved socket never served requests. Release it before
+                // cleanup, but retain services and the environment lock until
+                // the normal typed cleanup protocol has reached its outcome.
+                drop(loopback);
+                let keep_alive = DesktopKeepAlive::from_parts(env, services);
+                return Err(cleanup_start_failure(keep_alive, error).await);
+            }
+        };
         let application =
             crate::bootstrap::NomiCoreApplication::from_parts(services, router);
         let (router, ssh_pool, robot, database, browser_platform_shutdown) = {
@@ -929,7 +900,6 @@ impl DesktopServer {
             ssh_pool: Some(ssh_pool),
             robot,
             database: Some(database),
-            canonical_application: None,
             nomi_core_application: Some(application),
             _keep_alive: keep_alive.clone(),
             browser_platform_shutdown: Some(browser_platform_shutdown),
@@ -958,105 +928,6 @@ impl DesktopServer {
         Ok((server, keep_alive))
     }
 
-    async fn start_fresh_v4(
-        env: bootstrap::ServerEnvironment,
-        spa_dir: Option<PathBuf>,
-        dev_frontend_url: Option<String>,
-        webui_asset_source: Option<WebUiAssetSource>,
-    ) -> std::result::Result<
-        (Arc<DesktopServer>, DesktopKeepAlive),
-        DesktopStartError,
-    > {
-        env.require_fresh_v4("desktop server startup")
-            .map_err(DesktopStartError::verified)?;
-
-        let secret: Arc<str> = Arc::from(generate_random_hex_secret().as_str());
-        let mut config = env.config.clone();
-        config.auth_policy = AuthPolicy::TrustLocalToken;
-        config.local_trust_secret = Some(secret.clone());
-
-        let host = env
-            .canonical_host()
-            .map_err(DesktopStartError::verified)?;
-        let application = host
-            .compose(&config)
-            .await
-            .map_err(DesktopStartError::verified)?;
-        let user_repo = application.user_repo();
-
-        let loopback = match TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .context("failed to bind loopback listener")
-        {
-            Ok(loopback) => loopback,
-            Err(error) => {
-                let keep_alive =
-                    DesktopKeepAlive::from_fresh_v4(env, application);
-                return Err(cleanup_start_failure(keep_alive, error).await);
-            }
-        };
-        let loopback_port = match loopback.local_addr() {
-            Ok(address) => address.port(),
-            Err(error) => {
-                let keep_alive =
-                    DesktopKeepAlive::from_fresh_v4(env, application);
-                return Err(
-                    cleanup_start_failure(keep_alive, anyhow::Error::new(error)).await
-                );
-            }
-        };
-
-        let router = application.router();
-        let (initial_admin, initial_pw_set) = resolve_admin(&*user_repo).await;
-        let initial = WebUiStatus {
-            running: false,
-            local_url: format!("http://localhost:{loopback_port}"),
-            admin_username: initial_admin,
-            password_set: initial_pw_set,
-            ..Default::default()
-        };
-        let (status_tx, status_rx) = watch::channel(initial);
-        let (failure_tx, _) = watch::channel(None);
-        let (loopback_shutdown, _) = watch::channel(false);
-        let loopback_termination = ListenerTermination::new();
-        let (shutdown_complete_tx, shutdown_complete_rx) = watch::channel(false);
-        let keep_alive =
-            DesktopKeepAlive::from_fresh_v4(env, application.clone());
-
-        let server = Arc::new(DesktopServer {
-            loopback_port,
-            local_trust_secret: secret,
-            router,
-            spa_dir,
-            webui_asset_source,
-            dev_frontend_url: dev_frontend_url.map(|url| Arc::from(url.trim_end_matches('/'))),
-            runtime: Handle::current(),
-            terminal_service: None,
-            ssh_pool: None,
-            robot: None,
-            database: None,
-            canonical_application: Some(application),
-            nomi_core_application: None,
-            _keep_alive: keep_alive.clone(),
-            browser_platform_shutdown: None,
-            failure_tx,
-            loopback_shutdown,
-            listener_lifecycle: ListenerLifecycle {
-                loopback_termination,
-            },
-            fatal_reported: Arc::new(AtomicBool::new(false)),
-            shutdown_success: Arc::new(OnceCell::new()),
-            shutdown_complete_tx,
-            shutdown_complete_rx,
-            user_repo,
-            lan: Mutex::new(None),
-            status_tx,
-            status_rx,
-        });
-        server.spawn_loopback(loopback);
-        server.restore_lan_if_requested().await;
-        Ok((server, keep_alive))
-    }
 
     /// The loopback port the webview connects to (`window.__backendPort`).
     pub fn loopback_port(&self) -> u16 {
@@ -1397,11 +1268,6 @@ impl DesktopServer {
                     database.close().await;
                 }
             }
-            if let Some(application) = &self.canonical_application {
-                if let Err(error) = application.clone().close().await {
-                    errors.push(format!("Fresh-v4 runtime cleanup failed: {error:#}"));
-                }
-            }
         }
         if errors.is_empty() {
             Ok(())
@@ -1471,12 +1337,7 @@ impl DesktopServer {
         let preference_pool = self
             .database
             .as_ref()
-            .map(|database| database.pool().clone())
-            .or_else(|| {
-                self.canonical_application
-                    .as_ref()
-                    .map(|application| application.pool().clone())
-            });
+            .map(|database| database.pool().clone());
         let Some(preference_pool) = preference_pool else {
             // No host-owned persistence is available. Keep the listener
             // loopback-only rather than guessing whether LAN exposure was

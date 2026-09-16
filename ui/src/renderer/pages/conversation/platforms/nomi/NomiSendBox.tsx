@@ -9,6 +9,7 @@ import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { ipcBridge } from '@/common';
 import { uuid, uuidv7 } from '@/common/utils';
 import CommandQueuePanel from '@/renderer/components/chat/CommandQueuePanel';
+import contentStyles from '../../components/ConversationContentColumn.module.css';
 import SessionCapabilityPicker, {
   buildSessionCapabilitySelection,
   draftFromSessionCapabilitySelection,
@@ -18,8 +19,7 @@ import SessionCapabilityPicker, {
 } from '@/renderer/components/chat/SessionCapabilityPicker';
 import SendBox from '@/renderer/components/chat/SendBox';
 import FileAttachButton from '@/renderer/components/media/FileAttachButton';
-import FilePreview from '@/renderer/components/media/FilePreview';
-import HorizontalFileList from '@/renderer/components/media/HorizontalFileList';
+import ComposerAttachments from '@/renderer/components/chat/ComposerAttachments';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 import { useAutoTitle } from '@/renderer/hooks/chat/useAutoTitle';
 import { getSendBoxDraftHook, type FileOrFolderItem } from '@/renderer/hooks/chat/useSendBoxDraft';
@@ -64,7 +64,7 @@ import { allSupportedExts } from '@/renderer/services/FileService';
 import { emitter, useAddEventListener } from '@/renderer/utils/emitter';
 import { mergeFileSelectionItems } from '@/renderer/utils/file/fileSelection';
 import { buildDisplayMessage, collectSelectedFiles } from '@/renderer/utils/file/messageFiles';
-import { Message, Tag } from '@arco-design/web-react';
+import { Message, Tooltip } from '@arco-design/web-react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { NomiMessageRuntime } from './useNomiMessage';
@@ -74,6 +74,12 @@ import type { NomiModelSelection } from './useNomiModelSelection';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { evaluateNomiVisionSend } from './nomiVisionSendGuard';
 import { steerOrQueue } from './steerOrQueue';
+import CreationControls from '@/renderer/creation/CreationControls';
+import { useCreationComposer } from '@/renderer/creation/CreationComposerContext';
+import { useGenerationModel } from '@/renderer/creation/useGenerationModel';
+import { buildCreationRequest, creationAttempt, acknowledgeCreationAttempt } from '@/renderer/creation/submission';
+import { creationTasksKey, submitCreation } from '@/renderer/creation/client';
+import { mutate as mutateSWR } from 'swr';
 
 const useNomiSendBoxDraft = getSendBoxDraftHook('nomi', {
   _type: 'nomi',
@@ -124,8 +130,10 @@ const NomiSendBox: React.FC<{
   agentSelectorNode?: React.ReactNode;
   agent_name?: string;
   turnActivity: NomiMessageRuntime;
-  /** Hide model and other editable controls on locked surfaces. */
-  hideAdvancedControls?: boolean;
+  /** Product-owned controls replace session capability editing, not the toolbar. */
+  capabilityControls?: React.ReactNode;
+  modelSelectionHint?: string;
+  modelSelectionDisabled?: boolean;
   /** Existing collaboration control, rendered in the composer side rail. */
   collaboratorSelectorNode?: React.ReactNode;
   /**
@@ -139,7 +147,9 @@ const NomiSendBox: React.FC<{
   agentSelectorNode,
   agent_name,
   turnActivity,
-  hideAdvancedControls,
+  capabilityControls,
+  modelSelectionHint,
+  modelSelectionDisabled,
   collaboratorSelectorNode,
   extraRightTools,
 }) => {
@@ -212,7 +222,7 @@ const NomiSendBox: React.FC<{
   ]);
 
   const capabilitySelectionReady =
-    !hideAdvancedControls &&
+    capabilityControls === undefined &&
     initializedCapabilityConversation.current === conversation_id &&
     !capabilityCatalog.loading &&
     !capabilityCatalog.error;
@@ -298,6 +308,22 @@ const NomiSendBox: React.FC<{
     typeof tokenUsage?.context_tokens === 'number';
 
   const { atPath, uploadFile, setAtPath, setUploadFile, content, setContent } = useSendBoxDraft(conversation_id);
+  const creation = useCreationComposer();
+  const generation = useGenerationModel(creation, collectSelectedFiles(uploadFile, atPath));
+  const [creationSubmitting, setCreationSubmitting] = useState(false);
+  const creationSubmittingRef = useRef(false);
+  const isCreating = Boolean(creation?.draft.mode);
+  useEffect(() => {
+    if (creation?.draft.pendingPrompt === undefined) return;
+    setContent(creation.draft.pendingPrompt);
+    creation.update(draft => ({ ...draft, pendingPrompt: undefined }));
+  }, [creation?.draft.pendingPrompt, creation?.update, setContent]);
+
+  useEffect(() => {
+    if (!creation?.draft.pendingFiles) return;
+    setUploadFile(previous => Array.from(new Set([...previous, ...creation.draft.pendingFiles!])));
+    creation.update(draft => ({ ...draft, pendingFiles: undefined }));
+  }, [creation?.draft.pendingFiles, creation?.update, setUploadFile]);
 
   const handleContentChange = useCallback(
     (val: string) => {
@@ -315,16 +341,20 @@ const NomiSendBox: React.FC<{
   }, [conversation_id]);
 
   useEffect(() => {
-    if (!conversation_id) return;
+    if (!conversation_id || isCreating) return;
+    let cancelled = false;
     setAgentWarmed(false);
     void warmupConversationForPassiveMount(conversation_id)
-      .then(() => {
-        setAgentWarmed(true);
+      .then((warmed) => {
+        // Finished sessions hydrate without creating a runtime. Do not query
+        // runtime-only slash commands merely because hydration completed.
+        if (!cancelled) setAgentWarmed(warmed);
       })
       .catch((error) => {
-        Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
+        if (!cancelled) Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
       });
-  }, [conversation_id, t]);
+    return () => { cancelled = true; };
+  }, [conversation_id, isCreating, t]);
 
   const slash_commands = useSlashCommands(conversation_id, {
     conversation_type: 'nomi',
@@ -387,9 +417,10 @@ const NomiSendBox: React.FC<{
         input,
         files,
         capability_selection,
+        preset_id,
         initialOnly = false,
       }: Pick<ConversationCommandQueueItem, 'input' | 'files'> &
-        Partial<Pick<ConversationCommandQueueItem, 'id' | 'capability_selection'>> & {
+        Partial<Pick<ConversationCommandQueueItem, 'id' | 'capability_selection' | 'preset_id'>> & {
           initialOnly?: boolean;
         },
       execution?: ConversationCommandQueueExecution,
@@ -426,6 +457,7 @@ const NomiSendBox: React.FC<{
           files,
           idempotency_key: id,
           initial_only: initialOnly,
+          preset_id,
         });
         if (execution && !execution.isCurrent()) return;
         msg_id = res.msg_id;
@@ -577,6 +609,35 @@ const NomiSendBox: React.FC<{
 
   const onSendHandler = async (message: string) => {
     const filesToSend = collectSelectedFiles(uploadFile, atPath);
+    if (creation?.draft.mode) {
+      if (creationSubmittingRef.current) throw new Error('任务正在提交');
+      if (!generation.ready || creation.preparing) throw new Error('请先选择可用的生成模型');
+      creationSubmittingRef.current = true;
+      setCreationSubmitting(true);
+      const submittedReferences = creation.draft.references;
+      try {
+        const presetId = await creation.resolvePreset?.() ?? creation.presetId;
+        if (!presetId) throw new Error('请选择可用的创意 Agent');
+        const request = buildCreationRequest(creation.draft, message, presetId, filesToSend, generation.selected);
+        const key = creationAttempt(conversation_id, request);
+        const receipt = await submitCreation(conversation_id, request, key);
+        addOrUpdateMessage({ id: uuid(), msg_id: receipt.message_id, type: 'text', position: 'right', conversation_id, content: { content: message }, created_at: Date.now() });
+        acknowledgeCreationAttempt(conversation_id, key);
+        // A failed status refresh cannot turn a successful admission into a retry.
+        void mutateSWR(creationTasksKey(conversation_id), (previous: typeof receipt.tasks | undefined) => [...(previous || []).filter(task => !receipt.tasks.some(next => next.creation_task_id === task.creation_task_id)), ...receipt.tasks], { revalidate: true }).catch(() => {});
+        if (request.files?.length && contentRef.current === message) {
+          setUploadFile(previous => previous.filter(file => !request.files!.includes(file)));
+          setAtPath(atPathRef.current.filter(item => !request.files!.includes(typeof item === 'string' ? item : item.path)));
+        }
+        creation.update(draft => request.inputs.length && draft.references === submittedReferences ? { ...draft, references: draft.references.filter(ref => !request.inputs.some(input => input.asset_id === ref.asset_id)) } : draft);
+        emitter.emit('chat.history.refresh');
+      } catch (error) {
+        Message.error(error instanceof Error ? error.message : String(error));
+        throw error;
+      } finally { creationSubmittingRef.current = false; setCreationSubmitting(false); }
+      return;
+    }
+    const presetId = await creation?.resolvePreset?.() ?? creation?.presetId;
     if (!canSendFiles(filesToSend)) return;
     clearFiles();
     emitter.emit('nomi.selected.file.clear');
@@ -588,7 +649,7 @@ const NomiSendBox: React.FC<{
         hasPendingCommands,
       })
     ) {
-      enqueue({ input: message, files: filesToSend, capability_selection: currentCapabilitySelection });
+      enqueue({ input: message, files: filesToSend, capability_selection: currentCapabilitySelection, preset_id: presetId });
       return;
     }
 
@@ -596,6 +657,7 @@ const NomiSendBox: React.FC<{
       input: message,
       files: filesToSend,
       capability_selection: currentCapabilitySelection,
+      preset_id: presetId,
     });
   };
 
@@ -723,9 +785,8 @@ const NomiSendBox: React.FC<{
         }
       } catch (error) {
         if (msg_id) removeMessageByMsgId(msg_id);
-        // Rethrow so the caller can divert the interjection into the persisted
-        // command queue. Swallowing here (as this used to) stranded the draft:
-        // the box had already been cleared, so the text was unrecoverable.
+        // Retain a held draft for explicit review. This error may follow
+        // successful delivery, so it must never automatically start a turn.
         Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
         throw error;
       }
@@ -758,7 +819,7 @@ const NomiSendBox: React.FC<{
         enqueue
       ))
     ) {
-      Message.info(t('conversation.steer.fallbackQueued'));
+        Message.warning(t('conversation.steer.fallbackQueued'));
     }
   };
 
@@ -867,7 +928,7 @@ const NomiSendBox: React.FC<{
   };
 
   return (
-    <div className='max-w-800px w-full mx-auto flex flex-col mt-auto mb-16px'>
+    <div className={`${contentStyles.column} ${contentStyles.composer} flex flex-col mt-auto mb-16px`}>
       <CommandQueuePanel
         items={queuedCommands}
         paused={isQueuePaused}
@@ -884,7 +945,7 @@ const NomiSendBox: React.FC<{
       <SendBox
         key={conversation_id}
         sideTools={
-          hideAdvancedControls ? null : (
+          capabilityControls !== undefined ? capabilityControls : (
             <SessionCapabilityPicker
               catalog={capabilityCatalog.catalog}
               draft={capabilityDraft}
@@ -907,10 +968,12 @@ const NomiSendBox: React.FC<{
           emitter.emit('nomi.selected.file', items);
           setAtPath(items);
         }}
-        loading={isBusy}
-        disabled={!current_model?.use_model}
+        loading={isCreating ? creationSubmitting : isBusy}
+        disabled={isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing}
+        preserveDraftUntilAccepted={Boolean(creation)}
+        skipChatWarmup={isCreating}
         placeholder={
-          current_model?.use_model
+          isCreating ? '描述你想创作的内容，可添加参考素材…' : current_model?.use_model
             ? t('agent.sendbox.placeholder', {
                 backend: agent_name || 'Nomi',
                 defaultValue: `Send message to {{backend}}...`,
@@ -932,10 +995,12 @@ const NomiSendBox: React.FC<{
             showLoadedCapabilities={false}
           />
         }
+        creationTools={creation ? <CreationControls prompt={content} onPromptChange={setContent} files={collectSelectedFiles(uploadFile, atPath)} /> : undefined}
         rightTools={
-          hideAdvancedControls ? undefined : (
+          (
             <div
               className='sendbox-responsive-config-group flex flex-1 items-center justify-end gap-2 min-w-0'
+              data-composer-group
               data-testid='nomi-sendbox-config-group'
             >
               {hasContextUsage && (
@@ -948,64 +1013,34 @@ const NomiSendBox: React.FC<{
                 />
               )}
               {agentSelectorNode}
-              <NomiModelSelector
-                selection={modelSelection}
-                className='nomi-sendbox-model-btn'
-              />
+              {!isCreating && (
+                <Tooltip content={modelSelectionHint} disabled={!modelSelectionHint}>
+                  <span className='inline-flex min-w-0'>
+                    <NomiModelSelector
+                      selection={modelSelection}
+                      disabled={modelSelectionDisabled}
+                      className='nomi-sendbox-model-btn'
+                    />
+                  </span>
+                </Tooltip>
+              )}
               {extraRightTools}
             </div>
           )
         }
-        prefix={
-          <>
-            {uploadFile.length > 0 && (
-              <HorizontalFileList>
-                {uploadFile.map((path) => (
-                  <FilePreview
-                    key={path}
-                    data-testid={`nomi-file-tag-${uploadFile.indexOf(path)}`}
-                    path={path}
-                    onRemove={() => setUploadFile(uploadFile.filter((v) => v !== path))}
-                  />
-                ))}
-              </HorizontalFileList>
-            )}
-            {atPath.some((item) => (typeof item === 'string' ? false : !item.isFile)) && (
-              <div className='flex flex-wrap items-center gap-8px mb-8px'>
-                {atPath.map((item) => {
-                  if (typeof item === 'string') return null;
-                  if (!item.isFile) {
-                    const folderIndex = atPath.filter((v) => typeof v !== 'string' && !v.isFile).indexOf(item);
-                    return (
-                      <Tag
-                        key={item.path}
-                        data-testid={`nomi-folder-tag-${folderIndex}`}
-                        bordered={false}
-                        className='!bg-primary-1 !text-primary-6'
-                        closable
-                        onClose={() => {
-                          const newAtPath = atPath.filter((v) => (typeof v === 'string' ? true : v.path !== item.path));
-                          emitter.emit('nomi.selected.file', newAtPath);
-                          setAtPath(newAtPath);
-                        }}
-                      >
-                        {item.name}
-                      </Tag>
-                    );
-                  }
-                  return null;
-                })}
-              </div>
-            )}
-          </>
-        }
+        renderAttachments={(workspaceItems, onRemoveWorkspaceItem) => <ComposerAttachments
+          files={uploadFile}
+          onRemoveFile={(path) => setUploadFile(previous => previous.filter(file => file !== path))}
+          workspaceItems={workspaceItems}
+          onRemoveWorkspaceItem={onRemoveWorkspaceItem}
+        />}
         onSend={onSendHandler}
         onSteer={onSteerHandler}
-        steerAvailable
-        onEditResubmit={handleEditResubmit}
+        steerAvailable={!isCreating}
+        onEditResubmit={isCreating ? undefined : handleEditResubmit}
         slash_commands={slash_commands}
         onSlashBuiltinCommand={onSlashBuiltinCommand}
-        allowSendWhileLoading
+        allowSendWhileLoading={!isCreating}
       />
     </div>
   );

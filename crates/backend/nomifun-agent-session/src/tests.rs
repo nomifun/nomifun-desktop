@@ -629,6 +629,8 @@ fn projection_reads_legacy_events_once_and_rewrites_compactly() {
         first_seq: 3,
         last_seq: 3,
         presentation_intent: "message".to_owned(),
+        message_type: None,
+        message_status: None,
         projection: json!({
             "projection_id": "message:legacy-message",
             "correlation_id": "legacy-message",
@@ -664,6 +666,25 @@ fn projection_reads_legacy_events_once_and_rewrites_compactly() {
     assert_eq!(projection.projection["content"], "hello");
     assert_eq!(projection.projection["part_count"], 1);
     assert!(projection.projection.get("events").is_none());
+}
+
+#[test]
+fn message_source_metadata_is_optional_and_does_not_rewrite_content() {
+    let wire = json!({
+        "session_id": session_id(), "projection_id": "message:fixture",
+        "first_seq": 1, "last_seq": 1, "presentation_intent": "message",
+        "projection": {"content": "same content"}, "semantic_digest": "fixture-digest"
+    });
+    let plain: crate::MessageProjection = serde_json::from_value(wire.clone()).unwrap();
+    assert!(plain.message_type.is_none() && plain.message_status.is_none());
+    assert_eq!(serde_json::to_value(&plain).unwrap(), wire);
+    let mut typed_wire = wire.clone();
+    typed_wire["message_type"] = json!("text");
+    typed_wire["message_status"] = json!("finish");
+    let typed: crate::MessageProjection = serde_json::from_value(typed_wire.clone()).unwrap();
+    assert_eq!(typed.projection, plain.projection);
+    assert_eq!(typed.semantic_digest, plain.semantic_digest);
+    assert_eq!(serde_json::to_value(typed).unwrap(), typed_wire);
 }
 
 #[test]

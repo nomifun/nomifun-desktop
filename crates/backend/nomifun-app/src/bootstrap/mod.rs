@@ -7,12 +7,11 @@
 mod bind;
 mod boot_log;
 mod builtin_skills;
-mod canonical_host;
+mod composition_cleanup;
 mod data_root;
 mod environment;
 mod nomi_core;
 mod relocation;
-pub(crate) mod runtime_artifact;
 mod server_lock;
 mod tracing_init;
 mod v4_root;
@@ -21,7 +20,6 @@ mod work_dir;
 
 pub use bind::{PORT_FILE, PortAnnouncement, SCAN_SPAN, announce_bound_port, bind_with_fallback, write_port_file};
 pub use boot_log::{BootNoteLevel, record_boot_note};
-pub use canonical_host::{CanonicalHost, FreshV4Application, FreshV4Host};
 pub use data_root::{
     LAYOUT_MIGRATION_PENDING_MARKER, RELOCATED_DONE_MARKER,
     RELOCATED_FROM_MARKER, RelocationMarker, is_known_default_location,
@@ -32,6 +30,7 @@ pub use environment::{
     init_nomi_core_environment,
 };
 pub use nomi_core::NomiCoreApplication;
+pub use composition_cleanup::NomiCoreCompositionCleanupError;
 pub(crate) use environment::{
     acquire_distinct_work_root_lock, acquire_work_root_lock,
 };

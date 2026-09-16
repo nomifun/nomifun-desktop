@@ -21,8 +21,9 @@ describe('default image-generation model', () => {
         "defaultModelPreferenceKey='models.default.imageGeneration'",
       ),
     ).toBe(true);
-    expect(panel.includes("task='image_generation'")).toBe(true);
-    expect(panel.includes("useModelsForTask('image_generation')")).toBe(true);
+    expect(panel.includes("'models.default.imageGeneration': 'image_generation'")).toBe(true);
+    expect(panel.includes("task={taskForDefault[preferenceKey]}")).toBe(true);
+    expect(panel.includes("useModelsForTask(taskForDefault[preferenceKey])")).toBe(true);
     expect(panel.includes('disabled={noCandidates || isSavingDefault}')).toBe(
       true,
     );

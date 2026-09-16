@@ -57,6 +57,8 @@ use tracing::{debug, error, info, warn};
 
 #[path = "creative_studio_agent_session.rs"]
 pub mod creative_studio_agent_session;
+#[path = "conversation_creation.rs"]
+pub mod conversation_creation;
 
 use crate::convert::{
     TOOL_CONTENT_COMPACT_THRESHOLD_BYTES, message_needs_artifact_history_audit,
@@ -245,6 +247,7 @@ pub struct BackgroundTurnRuntimePreparation {
     pub runtime_options: AgentRuntimeBuildOptions,
     pub clear_context: bool,
     pub pre_send_hook: Option<Arc<dyn BackgroundTurnPreSendHook>>,
+    pub companion_device_turn: Option<crate::companion_interaction::CompanionDeviceTurn>,
 }
 
 /// Background keyed delivery plus an event subscription installed before the
@@ -995,6 +998,16 @@ pub struct ProductAgentResolution {
 
 #[async_trait::async_trait]
 pub trait ProductAgentSnapshotResolver: Send + Sync {
+    async fn resolve_preset(
+        &self,
+        owner_id: &str,
+        preset_id: &str,
+        requested_model: Option<&ProviderWithModel>,
+        current_binding: Option<&nomifun_api_types::AgentBindingValueDto>,
+    ) -> Result<ProductAgentResolution, AppError> {
+        let _ = (owner_id, preset_id, requested_model, current_binding);
+        Err(AppError::BadRequest("Preset resolution is unavailable".into()))
+    }
     async fn resolve(
         &self,
         owner_id: &str,
@@ -1046,6 +1059,7 @@ pub enum DeliveryNotifyRegistration {
 
 #[derive(Clone)]
 pub struct ConversationService {
+    creation_service: Arc<RwLock<Option<Arc<nomifun_creation::CreationService>>>>,
     /// Immutable installation owner used to derive the maximum runtime
     /// authority for every persisted Conversation owner.  This keeps host
     /// capability decisions inside the service and out of open `extra` JSON.
@@ -1096,6 +1110,7 @@ pub struct ConversationService {
     supervision_hook: Arc<RwLock<Option<Arc<dyn ConversationSupervisionHook>>>>,
     product_agent_snapshot_resolver:
         Arc<RwLock<Option<Arc<dyn ProductAgentSnapshotResolver>>>>,
+    companion_desktop_provider: Arc<RwLock<Option<std::sync::Weak<dyn crate::companion_interaction::CompanionDesktopTurnProvider>>>>,
     /// Spec D2 delivery-notify hook (same slot pattern): invoked after a
     /// keyed turn's terminal receipt is durably persisted. `None` (default /
     /// tests) disables completion push entirely.
@@ -1927,6 +1942,32 @@ impl ConversationService {
         })
     }
 
+    fn validate_steer_input(req: &SendMessageRequest) -> Result<(), AppError> {
+        if req.content.trim().is_empty() && req.files.is_empty() && req.inject_skills.is_empty() {
+            return Err(AppError::BadRequest("Steering input must not be empty".into()));
+        }
+        if req.content.len() > 16 * 1024 || req.files.len() > 64 || req.inject_skills.len() > 16
+            || req.files.iter().any(|path| path.is_empty() || path.len() > 4096 || path.contains('\0'))
+            || req.inject_skills.iter().any(|id| id.trim().is_empty() || id.len() > 1024 || id.contains('\0'))
+            || Self::steer_delivery_request_fields(req).to_string().len() > 60 * 1024
+        {
+            return Err(AppError::BadRequest("Steering input exceeds bounded text/context limits".into()));
+        }
+        Ok(())
+    }
+
+    fn ensure_steer_context_supported(
+        req: &SendMessageRequest,
+        runtime: &AgentRuntimeHandle,
+    ) -> Result<(), AppError> {
+        if (!req.files.is_empty() || !req.inject_skills.is_empty()) && !runtime.supports_steering_context() {
+            return Err(AppError::BadRequest(
+                "steer_unsupported: this engine cannot append attachments or Skill hints to a running turn".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn steer_delivery_request_payload(
         req: &SendMessageRequest,
         scope: &IdmmTurnScope,
@@ -1962,15 +2003,16 @@ impl ConversationService {
     }
 
     fn turn_delivery_request_payload(req: &SendMessageRequest) -> String {
-        serde_json::json!({
+        let mut payload = serde_json::json!({
             "content": &req.content,
             "files": &req.files,
             "inject_skills": &req.inject_skills,
             "hidden": req.hidden,
             "origin": &req.origin,
             "channel_platform": &req.channel_platform,
-        })
-        .to_string()
+        });
+        if let Some(preset_id) = &req.preset_id { payload["preset_id"] = serde_json::json!(preset_id); }
+        payload.to_string()
     }
 
     fn truncated_continuation_request_payload(
@@ -2259,6 +2301,7 @@ impl ConversationService {
     ) -> Self {
         Self {
             authoritative_user_id,
+            creation_service: Arc::new(RwLock::new(None)),
             workspace_root,
             user_events,
             skill_resolver,
@@ -2279,6 +2322,7 @@ impl ConversationService {
             agent_metadata_repo,
             supervision_hook: Arc::new(RwLock::new(None)),
             product_agent_snapshot_resolver: Arc::new(RwLock::new(None)),
+            companion_desktop_provider: Arc::new(RwLock::new(None)),
             turn_completion_observer: Arc::new(RwLock::new(None)),
             background_task_registrar: Arc::new(RwLock::new(None)),
             failover_provider_repo: Arc::new(RwLock::new(None)),
@@ -2342,6 +2386,14 @@ impl ConversationService {
     pub fn with_supervision_hook(&self, hook: Arc<dyn ConversationSupervisionHook>) {
         if let Ok(mut guard) = self.supervision_hook.write() {
             *guard = Some(hook);
+        }
+    }
+
+    pub fn with_companion_desktop_provider(
+        &self, provider: Arc<dyn crate::companion_interaction::CompanionDesktopTurnProvider>,
+    ) {
+        if let Ok(mut slot) = self.companion_desktop_provider.write() {
+            *slot = Some(Arc::downgrade(&provider));
         }
     }
 
@@ -3172,6 +3224,16 @@ impl ConversationService {
             .await
     }
 
+    /// Command discovery never warms up an Agent or admits a turn.
+    pub async fn get_slash_commands(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<Vec<nomifun_api_types::SlashCommandItem>, AppError> {
+        self.require_owned_conversation(user_id, conversation_id).await?;
+        self.runtime_registry.get_slash_commands(user_id, conversation_id).await
+    }
+
     pub(crate) fn runtime_handle(&self, conversation_id: &str) -> Result<AgentRuntimeHandle, AppError> {
         self.runtime_registry
             .get_runtime(conversation_id)
@@ -3422,6 +3484,7 @@ impl ConversationService {
         admission: &ConversationTurnAdmissionState,
         runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<bool, AppError> {
+        let uses_nomi = row_uses_nomi_engine(row, runtime_registry.as_ref())?;
         let conversation_id = row.conversation_id.as_str();
         let Some(provider) = self.terminal_proof_provider() else {
             return Ok(false);
@@ -3431,7 +3494,7 @@ impl ConversationService {
                 OrphanProofRequirement::LocalContainedAuthority
             }
         };
-        let decision = provider
+        let decision = if uses_nomi { provider
             .prove_orphan_generation_terminal(
                 user_id,
                 conversation_id,
@@ -3439,7 +3502,15 @@ impl ConversationService {
                 admission.epoch,
                 admission.active_operation_id.as_deref(),
             )
-            .await;
+            .await } else {
+                let extra: serde_json::Value = serde_json::from_str(&row.extra).map_err(|error| AppError::Conflict(error.to_string()))?;
+                let binding: nomifun_api_types::RuntimeEngineBinding = serde_json::from_value(extra.get(nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY)
+                    .cloned().ok_or_else(|| AppError::Conflict("registered engine orphan has no binding".into()))?)
+                    .map_err(|error| AppError::Conflict(error.to_string()))?;
+                binding.validate()?;
+                let Some(operation) = admission.active_operation_id.as_deref() else { return Ok(false) };
+                provider.prepare_registered_engine_recovery(&binding, user_id, conversation_id, admission.epoch, operation).await
+            };
         let evidence = match decision {
             TerminalProofDecision::Proven { evidence } => evidence,
             TerminalProofDecision::Unproven { reason } => {
@@ -3484,13 +3555,13 @@ impl ConversationService {
                 "restart-orphan Nomi receipt identity or state is invalid".to_owned(),
             ));
         }
-        runtime_registry
+        if uses_nomi { runtime_registry
             .rewind_persisted_nomi_live_recovery(
                 conversation_id,
                 row.created_at,
                 &receipt.message_id,
             )
-            .await?;
+            .await?; }
 
         // The prior generation is provably terminal, so its detached
         // knowledge write-back workers are gone too: settle their durable
@@ -4258,7 +4329,46 @@ impl ConversationService {
                     .to_owned(),
             ));
         }
+        // Only the trusted snapshot admission path may supply immutable host
+        // metadata. Public Conversation JSON cannot choose an implementation
+        // or impersonate a compiled AgentSession.
+        let trusted_metadata = if trusted_snapshot.is_some() {
+            let object = req.extra.as_object_mut();
+            object.map(|object| {
+                ["runtime_engine_binding", "nomi_core_session", "execution_constraints"]
+                    .into_iter()
+                    .filter_map(|key| object.remove(key).map(|value| (key, value)))
+                    .collect::<Vec<_>>()
+            }).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         reject_backend_owned_lifecycle_extra_keys(&req.extra)?;
+        if let Some((_, value)) = trusted_metadata.iter().find(|(key, _)| *key == "execution_constraints") {
+            nomifun_api_types::ExecutionConstraints::from_extra(&serde_json::json!({ "execution_constraints": value }))?;
+            if !trusted_snapshot.as_ref().is_some_and(|snapshot| snapshot.canonical_binding.is_some()) {
+                return Err(AppError::Conflict("Execution constraints require an admitted canonical Agent snapshot".into()));
+            }
+        }
+        if let Some(canonical) = trusted_snapshot.as_ref().and_then(|snapshot| snapshot.canonical_binding.as_ref()) {
+            // A frozen capability-platform snapshot cannot silently fall back
+            // to legacy Nomi when a consumer bypasses the application Session
+            // host. The host must supply both admitted metadata and exact Engine.
+            let metadata = trusted_metadata.iter().find(|(key, _)| *key == "nomi_core_session")
+                .map(|(_, value)| value);
+            let projected_binding = metadata.and_then(|value| value.get("binding")).cloned()
+                .and_then(|value| serde_json::from_value::<nomifun_api_types::AgentBindingValueDto>(value).ok());
+            if projected_binding.as_ref() != Some(canonical)
+                || !trusted_metadata.iter().any(|(key, _)| *key == "runtime_engine_binding")
+            {
+                return Err(AppError::Conflict("Canonical Agent snapshots must be admitted by the Engine-aware Session host".into()));
+            }
+        }
+        if let Some((_, value)) = trusted_metadata.iter().find(|(key, _)| *key == "runtime_engine_binding") {
+            let binding: nomifun_api_types::RuntimeEngineBinding = serde_json::from_value(value.clone())
+                .map_err(|error| AppError::BadRequest(format!("Invalid runtime binding: {error}")))?;
+            binding.validate()?;
+        }
         let authority = self.execution_authority(user_id);
         if !authority.controls_host() {
             if req.r#type != AgentType::Nomi {
@@ -4316,6 +4426,11 @@ impl ConversationService {
         let requested_model_pool = req.execution_model_pool.clone();
 
         let mut extra = req.extra;
+        if authority.controls_host() {
+            for (key, value) in trusted_metadata {
+                extra[key] = value;
+            }
+        }
         reject_execution_policy_extra_keys(&extra)?;
         reject_retired_skill_extra_keys(&extra)?;
         let requested_agent_preset_id = req
@@ -4501,6 +4616,9 @@ impl ConversationService {
         let auto_inject_names = if authority.controls_host()
             && !is_tool_free_agent_extra(&extra)
             && extra.get("product_agent_target_kind").is_none()
+            // Canonical Agents already freeze their selected Skill locks.
+            // Installation defaults cannot add Skills outside that ceiling.
+            && resolved_agent_snapshot.as_ref().is_none_or(|snapshot| snapshot.canonical_binding.is_none())
         {
             self.skill_resolver.auto_inject_names().await
         } else {
@@ -4776,6 +4894,19 @@ impl ConversationService {
                         "conversation creation key resolved outside its owner boundary".to_owned(),
                     )
                 })?;
+            let existing_extra: serde_json::Value = serde_json::from_str(&existing.extra)
+                .map_err(|error| AppError::Internal(error.to_string()))?;
+            if extra.get("runtime_engine_binding") != existing_extra.get("runtime_engine_binding") {
+                return Err(AppError::Conflict("Creation key is already bound to a different runtime engine".into()));
+            }
+            if extra.get("execution_constraints") != existing_extra.get("execution_constraints") {
+                return Err(AppError::Conflict("Creation key is already bound to different execution constraints".into()));
+            }
+            if extra.get("nomi_core_session") != existing_extra.get("nomi_core_session") {
+                // The earlier host lookup can race another creator. Engine
+                // equality alone does not imply the same Agent or resources.
+                return Err(AppError::Conflict("Creation key is already bound to different immutable Agent Session metadata".into()));
+            }
             let mut existing = existing;
             rebase_managed_workspace_in_row(&mut existing, &self.workspace_root)?;
             let mut response = row_to_response(existing, &self.workspace_root)?;
@@ -4900,51 +5031,6 @@ impl ConversationService {
         Ok(response)
     }
 
-    /// Apply a companion's configured chat model to its durable robot threads.
-    ///
-    /// Companion settings are the source of truth. `only_missing` is used for
-    /// boot repair so a fallback selected after a provider failure remains
-    /// sticky; an explicit settings change passes `false` and intentionally
-    /// retargets every robot body owned by that companion.
-    pub async fn sync_robot_thread_models_for_companion(
-        &self,
-        user_id: &str,
-        companion_id: &str,
-        model: &ProviderWithModel,
-        only_missing: bool,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
-    ) -> Result<usize, AppError> {
-        let companion_id = nomifun_common::CompanionId::parse(companion_id.to_owned())
-            .map_err(|error| AppError::BadRequest(format!("Invalid companion id: {error}")))?;
-        let rows = self
-            .conversation_repo
-            .list_robot_threads_by_companion(user_id, companion_id.as_str())
-            .await?;
-        let mut updated = 0;
-        for row in rows {
-            if only_missing && row.model.is_some() {
-                continue;
-            }
-            self.update(
-                user_id,
-                &row.conversation_id,
-                UpdateConversationRequest {
-                    name: None,
-                    pinned: None,
-                    model: Some(model.clone()),
-                    delegation_policy: None,
-                    execution_model_pool: None,
-                    decision_policy: None,
-                    execution_template_id: None,
-                    extra: None,
-                },
-                runtime_registry,
-            )
-            .await?;
-            updated += 1;
-        }
-        Ok(updated)
-    }
 
     /// List conversations with cursor-based pagination and optional filters.
     ///
@@ -5365,10 +5451,9 @@ impl ConversationService {
             .model
             .as_deref()
             .map(parse_provider_with_model)
-            .transpose()?
-            .ok_or_else(|| AppError::BadRequest("Nomi conversation has no current model".to_owned()))?;
-        let current_lead = conversation_lead_model(&current_model)?;
-        if snapshot.resolved_model.as_ref() != Some(&current_lead) {
+            .transpose()?;
+        let current_lead = current_model.as_ref().map(conversation_lead_model).transpose()?;
+        if snapshot.resolved_model.as_ref() != current_lead.as_ref() {
             return Err(AppError::BadRequest(
                 "replacement Agent snapshot must be resolved for the conversation's current model"
                     .to_owned(),
@@ -5445,6 +5530,7 @@ impl ConversationService {
 
         let auto_inject = if self.execution_authority(user_id).controls_host()
             && replacement_object.get("product_agent_target_kind").is_none()
+            && snapshot.canonical_binding.is_none()
         {
             self.skill_resolver.auto_inject_names().await
         } else {
@@ -5678,6 +5764,26 @@ impl ConversationService {
         excluded_auto_skills: &[String],
         mcp_server_ids: &[String],
     ) -> Result<(ConversationResponse, bool), AppError> {
+        self.replace_session_extensions(user_id, id, Some((enabled_skills, excluded_auto_skills)), mcp_server_ids).await
+    }
+
+    /// Change MCP bindings without replacing product-owned Skill snapshots.
+    pub async fn replace_session_mcp_selection(
+        &self,
+        user_id: &str,
+        id: &str,
+        mcp_server_ids: &[String],
+    ) -> Result<(ConversationResponse, bool), AppError> {
+        self.replace_session_extensions(user_id, id, None, mcp_server_ids).await
+    }
+
+    async fn replace_session_extensions(
+        &self,
+        user_id: &str,
+        id: &str,
+        skill_selection: Option<(&[String], &[String])>,
+        mcp_server_ids: &[String],
+    ) -> Result<(ConversationResponse, bool), AppError> {
         if !self.execution_authority(user_id).controls_host() {
             return Err(AppError::Forbidden(
                 "AgentSession capability selection requires the installation owner".to_owned(),
@@ -5726,16 +5832,23 @@ impl ConversationService {
 
         let existing_extra: serde_json::Value = serde_json::from_str(&existing.extra)
             .map_err(|error| AppError::Internal(format!("Invalid conversation extra: {error}")))?;
-        let auto_inject_names = if is_tool_free_agent_extra(&existing_extra) {
+        let canonical_snapshot = existing.agent_snapshot.as_deref()
+            .map(serde_json::from_str::<AgentResolvedSnapshot>)
+            .transpose()
+            .map_err(|error| AppError::Internal(format!("Invalid Agent snapshot: {error}")))?
+            .is_some_and(|snapshot| snapshot.canonical_binding.is_some());
+        let auto_inject_names = if canonical_snapshot || is_tool_free_agent_extra(&existing_extra) {
             Vec::new()
         } else {
             self.skill_resolver.auto_inject_names().await
         };
-        let mut desired_skills = compute_initial_skills(
-            &auto_inject_names,
-            enabled_skills,
-            excluded_auto_skills,
-        );
+        let mut desired_skills = match skill_selection {
+            Some((enabled_skills, excluded_auto_skills)) => compute_initial_skills(
+                &auto_inject_names, enabled_skills, excluded_auto_skills,
+            ),
+            None => serde_json::from_value::<Vec<String>>(existing_extra.get("skills").cloned().unwrap_or_else(|| serde_json::json!([])))
+                .map_err(|error| AppError::Internal(format!("Invalid Skill snapshot: {error}")))?,
+        };
         desired_skills.sort();
         desired_skills.dedup();
         let mut desired_mcp_ids = Vec::with_capacity(mcp_server_ids.len());
@@ -5936,6 +6049,10 @@ impl ConversationService {
                     let _ = result_tx.send(Err(error));
                     return;
                 }
+            }
+            if let Err(error) = service.cancel_conversation_creations(&conversation_id).await {
+                let _ = result_tx.send(Err(error));
+                return;
             }
             let delete_cleanup = match service
                 .conversation_repo
@@ -6221,13 +6338,15 @@ impl ConversationService {
         self.runtime_registry
             .terminate_and_wait_result(id, Some(AgentKillReason::UserCancelled))
             .await?;
-        if reset_row.r#type == AgentType::Nomi.serde_name() {
+        if row_uses_nomi_engine(&reset_row, self.runtime_registry.as_ref())? {
             self.runtime_registry
                 .reset_persisted_nomi_session(id, reset_row.created_at)
                 .await?;
         }
         self.runtime_state.clear_knowledge_signature(id);
         self.runtime_state.clear_turn_tokens(id);
+
+        self.cancel_conversation_creations(id).await?;
 
         // The repository transaction also clears ACP resume identity/context
         // usage and absorbs accepted turn receipts. Keeping those mutations in
@@ -7099,6 +7218,158 @@ impl ConversationService {
 // ── Message Flow (send / stop / warmup) ─────────────────────────────
 
 impl ConversationService {
+    /// Device-host-only entry. Endpoint authority is carried separately from
+    /// the public message DTO and never written to Conversation configuration.
+    pub async fn send_companion_device_message(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        req: SendMessageRequest,
+        context: crate::companion_interaction::CompanionDeviceTurn,
+        pre_send_hook: Arc<dyn BackgroundTurnPreSendHook>,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+    ) -> Result<ObservedIdempotentMessageDelivery, AppError> {
+        validate_public_idempotency_key(&context.request_id)?;
+        let expected_channel = if context.from_desktop { None } else { Some("robot") };
+        if req.origin.is_some() || req.hidden || req.channel_platform.as_deref() != expected_channel {
+            return Err(AppError::BadRequest("device speech must be a visible human robot turn".to_owned()));
+        }
+        self.refresh_product_agent_for_existing(user_id, conversation_id).await?;
+        let key = parse_conv_id(conversation_id)?;
+        let lease = self.begin_public_runtime_preparation(key, user_id)?;
+        let row = self.conversation_repo.get(key).await?
+            .filter(|row| row.user_id == user_id)
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
+        let extra = serde_json::from_str(&row.extra)
+            .map_err(|error| AppError::Internal(format!("invalid Companion configuration: {error}")))?;
+        context.validate_owner(&extra)?;
+        context.validate_revision(row.preset_id.as_deref(), row.preset_revision)?;
+        let mut runtime_options = self.build_runtime_options(&row)?;
+        runtime_options.extra["system_prompt"] = serde_json::json!(context.system_prompt);
+        runtime_options.device_mcp_servers = context.mcp_servers.clone();
+        if !context.mcp_servers.is_empty() {
+            let snapshot = row.agent_snapshot.as_deref()
+                .and_then(|raw| serde_json::from_str::<AgentResolvedSnapshot>(raw).ok())
+                .ok_or_else(|| AppError::Forbidden("device tools require a Companion Agent snapshot".to_owned()))?;
+            if !snapshot.enabled_capabilities.iter().any(|id| id == "robot.link") {
+                return Err(AppError::Forbidden("Companion does not allow device tools".to_owned()));
+            }
+            let tools = runtime_options.extra.get_mut("allowed_tools")
+                .and_then(serde_json::Value::as_array_mut)
+                .ok_or_else(|| AppError::Internal("Companion tool ceiling is missing".to_owned()))?;
+            if !tools.iter().any(|tool| tool.as_str() == Some("mcp.tool_proxy")) {
+                tools.push(serde_json::json!("mcp.tool_proxy"));
+            }
+        }
+        if let Some(model) = context.model.as_ref() {
+            runtime_options.model = Some(model.clone());
+        }
+        let request_id = context.idempotency_key();
+        self.send_observed_background_message_with_idempotency_key(
+            user_id, conversation_id, &request_id, req, runtime_registry, lease,
+            BackgroundTurnRuntimePreparation {
+                runtime_options,
+                clear_context: false,
+                pre_send_hook: Some(pre_send_hook),
+                companion_device_turn: Some(context),
+            },
+        ).await
+    }
+
+    pub async fn companion_device_delivery_result(
+        &self, user_id: &str, conversation_id: &str,
+        context: &crate::companion_interaction::CompanionDeviceTurn,
+    ) -> Result<Option<IdempotentMessageDelivery>, AppError> {
+        let key = parse_conv_id(conversation_id)?;
+        let operation_id = Self::public_turn_operation_id(user_id, key, &context.idempotency_key());
+        let Some(receipt) = self.conversation_repo
+            .get_delivery_receipt(user_id, key, &operation_id).await? else { return Ok(None); };
+        let payload: serde_json::Value = serde_json::from_str(&receipt.request_payload)
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+        if !context.from_desktop && payload.get("interaction") != Some(&context.provenance()) {
+            return Err(AppError::Conflict("device receipt identity mismatch".to_owned()));
+        }
+        Ok(Some(IdempotentMessageDelivery {
+            message_id: receipt.message_id, replayed: true,
+            completed: receipt.status == "completed", result_ok: receipt.result_ok,
+            result_text: receipt.result_text, result_error: receipt.result_error,
+            result_error_code: receipt.result_error_code,
+            result_error_retryable: receipt.result_error_retryable,
+        }))
+    }
+
+    pub async fn cancel_companion_device_message(
+        &self, user_id: &str, conversation_id: &str,
+        context: &crate::companion_interaction::CompanionDeviceTurn,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+    ) -> Result<(), AppError> {
+        let key = parse_conv_id(conversation_id)?;
+        let operation = Self::public_turn_operation_id(user_id, key, &context.idempotency_key());
+        let Some(guard) = self.runtime_state.begin_device_turn_stop(conversation_id, user_id, &operation)?
+            else { return Ok(()); };
+        self.spawn_admitted_turn_stop_cleanup(user_id.to_owned(), conversation_id.to_owned(),
+            Arc::clone(runtime_registry), true, false, Ok(Some(guard)))
+            .await.map_err(|_| AppError::Internal("device stop worker exited".to_owned()))?
+    }
+
+    pub fn companion_device_turn_is_active(
+        &self, user_id: &str, conversation_id: &str,
+        context: &crate::companion_interaction::CompanionDeviceTurn,
+    ) -> bool {
+        let Ok(key) = parse_conv_id(conversation_id) else { return false; };
+        let operation = Self::public_turn_operation_id(user_id, key, &context.idempotency_key());
+        self.runtime_state.active_turn_allows_cancel(conversation_id, user_id, false)
+            && self.runtime_state.active_turn_cancellation(conversation_id).is_some_and(|turn| {
+                !turn.is_cancelled() && turn.persistent_generation()
+                    .is_some_and(|(_, current)| current == Some(operation.as_str()))
+            })
+    }
+
+    /// A camera observation annotates the initiating user message. It is not
+    /// another user turn and cannot enter memory collection as the user's words.
+    pub async fn record_companion_device_observation(
+        &self, user_id: &str, conversation_id: &str,
+        context: &crate::companion_interaction::CompanionDeviceTurn,
+        question: &str, answer: &str, jpeg_base64: &str,
+    ) -> Result<(), AppError> {
+        let cancellation = CancellationToken::new();
+        let _guard = self.runtime_state.acquire_preparation_gate(conversation_id, &cancellation).await?;
+        if !self.companion_device_turn_is_active(user_id, conversation_id, context) {
+            return Err(AppError::Conflict("camera observation no longer belongs to the active turn".to_owned()));
+        }
+        let receipt = self.companion_device_delivery_result(user_id, conversation_id, context).await?
+            .ok_or_else(|| AppError::NotFound("camera turn receipt is missing".to_owned()))?;
+        let message = self.conversation_repo.get_message(conversation_id, &receipt.message_id).await?
+            .ok_or_else(|| AppError::NotFound("camera source message is missing".to_owned()))?;
+        let mut content: serde_json::Value = serde_json::from_str(&message.content)
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+        let count = content.get("observations").and_then(serde_json::Value::as_array).map_or(0, Vec::len);
+        if count >= 8 || answer.chars().count() > 12000 {
+            return Err(AppError::BadRequest("camera observation limit reached".to_owned()));
+        }
+        let conversation = self.get(user_id, conversation_id).await?;
+        context.validate_owner(&conversation.extra)?;
+        let workspace = conversation.extra.get("workspace").and_then(serde_json::Value::as_str)
+            .ok_or_else(|| AppError::Internal("Companion workspace is missing".to_owned()))?;
+        let image = ArtifactStore::new(workspace).persist_inline(
+            nomifun_ai_agent::artifact_store::ArtifactKind::Image, "image/jpeg", jpeg_base64,
+        ).map_err(|error| AppError::BadRequest(error.to_string()))?;
+        if !self.companion_device_turn_is_active(user_id, conversation_id, context) {
+            return Err(AppError::Conflict("camera turn was cancelled".to_owned()));
+        }
+        let observation = serde_json::json!({"source":context.provenance(),
+            "question":question,"answer":answer,"image":image,"observed_at":now_ms()});
+        if content.get("observations").is_none() { content["observations"] = serde_json::json!([]); }
+        content["observations"].as_array_mut().ok_or_else(|| AppError::Internal("invalid observation history".to_owned()))?
+            .push(observation);
+        self.conversation_repo.update_message(&message.message_id,
+            &nomifun_db::MessageRowUpdate { content: Some(content.to_string()), ..Default::default() },
+        ).await?;
+        self.user_events.send_to_user(user_id, WebSocketMessage::new("message.annotationUpdated",
+            serde_json::json!({"conversation_id":conversation_id,"message_id":message.message_id})));
+        Ok(())
+    }
+
     /// Trusted at-most-once execution boundary for durable internal effects.
     /// `operation_id` is a natural idempotency key used to claim one receipt;
     /// the receipt owns a separately minted canonical MessageId. It is deliberately not
@@ -7165,6 +7436,20 @@ impl ConversationService {
 
         self.refresh_product_agent_for_existing(user_id, conversation_id)
             .await?;
+
+        if req.origin.is_none() && !req.hidden && req.channel_platform.is_none() {
+            let provider = self.companion_desktop_provider.read().ok()
+                .and_then(|slot| slot.as_ref().and_then(std::sync::Weak::upgrade));
+            if let Some(provider) = provider {
+                if let Some(receipt) = self.idempotent_delivery_result_with_idempotency_key(user_id, conversation_id, idempotency_key, &req).await? {
+                    return Ok(receipt);
+                }
+                if let Some(prepared) = provider.prepare(user_id, conversation_id, idempotency_key).await? {
+                    return self.send_companion_device_message(user_id, conversation_id, req,
+                        prepared.context, prepared.pre_send_hook, runtime_registry).await.map(|result| result.delivery);
+                }
+            }
+        }
 
         let conversation_key = parse_conv_id(conversation_id)?;
         let runtime_build_lease =
@@ -7347,6 +7632,7 @@ impl ConversationService {
         }
 
         let req = SendMessageRequest {
+            preset_id: None,
             content: format!(
                 "{TRUNCATED_CONTINUATION_INSTRUCTION}\n\n{}",
                 original_delivery.content
@@ -7849,7 +8135,7 @@ impl ConversationService {
                 || (!req.hidden
                     && req.origin.is_none()
                     && req.channel_platform.is_none()));
-        let request_payload = match (
+        let mut request_payload = match (
             execution_authority.as_ref(),
             autowork_authority.as_ref(),
             truncated_continuation.as_ref(),
@@ -7866,6 +8152,15 @@ impl ConversationService {
             (None, None, None) => Self::turn_delivery_request_payload(&req),
             _ => unreachable!("conflicting authority rejected above"),
         };
+        if let Some(context) = runtime_preparation.as_ref()
+            .and_then(|preparation| preparation.companion_device_turn.as_ref())
+            .filter(|context| !context.from_desktop)
+        {
+            let mut payload: serde_json::Value = serde_json::from_str(&request_payload)
+                .map_err(|error| AppError::Internal(error.to_string()))?;
+            payload["interaction"] = context.provenance();
+            request_payload = payload.to_string();
+        }
         // Every existing receipt is an at-most-once execution boundary across
         // process restart. `accepted` is deliberately absorbing too: the old
         // owner may have crossed an irreversible model/tool boundary before
@@ -8001,6 +8296,13 @@ impl ConversationService {
             None => None,
         };
         runtime_build_lease.ensure_active()?;
+
+        if let Some(preset_id) = req.preset_id.as_deref() {
+            if send_authority != MessageSendAuthority::OwnerInteractive || req.hidden || req.origin.is_some() || req.channel_platform.is_some() || creative_studio_authority.is_some() {
+                return Err(AppError::BadRequest("Agent selection belongs to an interactive conversation turn".into()));
+            }
+            self.apply_next_turn_preset(user_id, &row, preset_id, &runtime_build_lease).await?;
+        }
 
         // Snapshot the persistent generation immediately before admission.
         // The repository consumes it with the receipt INSERT and Running
@@ -8722,10 +9024,15 @@ impl ConversationService {
             .get_message(&row.conversation_id, &user_msg_id)
             .await?;
         if let Some(existing) = existing_user_message.as_ref() {
-            let expected_content = serde_json::json!({ "content": &req.content }).to_string();
+            let mut expected_content = serde_json::json!({ "content": &req.content });
+            if let Some(context) = runtime_preparation.as_ref()
+                .and_then(|preparation| preparation.companion_device_turn.as_ref())
+            {
+                expected_content["interaction"] = context.provenance();
+            }
             if existing.position.as_deref() != Some("right")
                 || existing.r#type != "text"
-                || existing.content != expected_content
+                || !user_message_matches_requested_content(&existing.content, &expected_content)
             {
                 return Err(AppError::Conflict(
                     "internal message operation id was reused with different content".to_owned(),
@@ -8748,7 +9055,18 @@ impl ConversationService {
         // below rejects that stale send instead of stranding a turn handle.
         let (companion, companion_id, extra_channel_platform) =
             companion_context_from_extra(&row.extra)?;
-        let robot_session = robot_session_from_extra(&row.extra);
+        let device_turn = runtime_preparation.as_ref()
+            .and_then(|preparation| preparation.companion_device_turn.as_ref());
+        if let Some(context) = device_turn {
+            context.validate_revision(row.preset_id.as_deref(), row.preset_revision)?;
+            context.validate_owner(&serde_json::from_str(&row.extra)
+                .map_err(|error| AppError::Internal(format!("invalid Companion configuration: {error}")))?)?;
+        }
+        let interaction = device_turn.map(|context| context.provenance());
+        let has_device_context = device_turn.is_some();
+        let device_resources = device_turn.and_then(|context| context.resources.clone());
+        let device_fallback_model = device_turn.and_then(|context| context.fallback_model.clone());
+        let spoken_output = device_turn.is_some_and(|context| !context.from_desktop);
         let channel_platform = req
             .channel_platform
             .as_deref()
@@ -9125,42 +9443,53 @@ impl ConversationService {
             conversation_id: conversation_id.to_owned(),
             msg_id: Some(user_msg_id.clone()),
             r#type: "text".into(),
-            content: serde_json::json!({ "content": req.content }).to_string(),
+            content: match interaction.as_ref() {
+                Some(interaction) => serde_json::json!({ "content": req.content, "interaction": interaction, "agent_snapshot": row.agent_snapshot.as_deref().and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()) }),
+                None => serde_json::json!({ "content": req.content, "agent_snapshot": row.agent_snapshot.as_deref().and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()) }),
+            }.to_string(),
             position: Some("right".into()),
             status: Some("finish".into()),
             hidden: req.hidden,
             created_at: now_ms(),
         };
-        if existing_user_message.is_none() {
-            if let Err(e) = self.conversation_repo.insert_message(&user_msg).await {
-                warn!(msg_id = %user_msg_id, error = %ErrorChain(&e), "Failed to insert user message");
-                let receipt_error = format!("{}", ErrorChain(&e));
-                let receipt_completion = Self::turn_receipt_completion(
-                    durable_operation_id,
-                    durable_kind,
-                    durable_request_payload.as_deref(),
-                    false,
-                    None,
-                    Some(&receipt_error),
-                    relay_error_code::fixed_failure(relay_error_code::PREPARATION_FAILED),
-                );
-                self.release_and_complete_turn(
-                    &mut turn_handle,
-                    runtime_registry,
-                    user_id,
-                    conversation_id,
-                    &first_turn_msg_id,
-                    receipt_completion,
-                    durable_guard.clone(),
-                    companion,
-                    companion_id,
-                    origin,
-                    channel_platform,
-                )
-                .await;
-                return Err(e.into());
+        let persist_user_message = async {
+            if existing_user_message.is_none() {
+                self.conversation_repo.insert_message(&user_msg).await?;
             }
-
+            if !creative_studio_turn {
+                self.persist_ordinary_creation_references(user_id, &row, &user_msg_id, &req.files).await?;
+            }
+            Ok::<(), AppError>(())
+        }.await;
+        if let Err(e) = persist_user_message {
+            warn!(msg_id = %user_msg_id, error = %ErrorChain(&e), "Failed to persist user message or creation references");
+            let receipt_error = format!("{}", ErrorChain(&e));
+            let receipt_completion = Self::turn_receipt_completion(
+                durable_operation_id,
+                durable_kind,
+                durable_request_payload.as_deref(),
+                false,
+                None,
+                Some(&receipt_error),
+                relay_error_code::fixed_failure(relay_error_code::PREPARATION_FAILED),
+            );
+            self.release_and_complete_turn(
+                &mut turn_handle,
+                runtime_registry,
+                user_id,
+                conversation_id,
+                &first_turn_msg_id,
+                receipt_completion,
+                durable_guard.clone(),
+                companion,
+                companion_id,
+                origin,
+                channel_platform,
+            )
+            .await;
+            return Err(e);
+        }
+        if existing_user_message.is_none() {
             info!(msg_id = %user_msg_id, "User message persisted");
         }
 
@@ -9180,6 +9509,7 @@ impl ConversationService {
                     "companion": companion,
                     "companion_id": companion_id,
                     "channel_platform": channel_platform,
+                    "interaction": interaction,
                     "created_at": user_msg.created_at,
                     }),
                 ),
@@ -9238,7 +9568,16 @@ impl ConversationService {
         // global). Captured once at turn start — the config does not change
         // mid-turn, and `perform_model_failover` re-fetches the row for the
         // freshly-written model when it rebuilds.
-        let failover_extra_json = row.extra.clone();
+        let failover_extra_json = if has_device_context {
+            let mut extra: serde_json::Value = serde_json::from_str(&row.extra)
+                .map_err(|error| AppError::Internal(error.to_string()))?;
+            extra["model_failover"] = serde_json::json!({
+                "enabled": device_fallback_model.is_some(),
+                "queue": device_fallback_model.into_iter().collect::<Vec<_>>(),
+                "max_switches": 1,
+            });
+            extra.to_string()
+        } else { row.extra.clone() };
         let initial_failover_authority = runtime_options.model.clone().map(|model| {
             FailoverAuthoritySnapshot {
                 model,
@@ -9267,6 +9606,7 @@ impl ConversationService {
         self.reach_public_admission_cutpoint(PublicAdmissionCutpoint::BeforeOwnerSpawn)
             .await;
         let owner_task = tokio::spawn(async move {
+            let _device_resources = device_resources;
             let mut turn_handle = turn_handle;
             let mut runtime_observer = runtime_observer;
             let panic_user_id = user_id_owned.clone();
@@ -9283,12 +9623,14 @@ impl ConversationService {
             let mut turn_cancellation = turn_cancellation;
             let build_started_at = now_ms();
             info!(conversation_id = %conv_id, "Agent runtime build started");
-            if rebuild_runtime_for_injected_skills {
+            let recycle_device_context = service.runtime_state
+                .replace_companion_device_runtime_context(&conv_id, has_device_context);
+            if rebuild_runtime_for_injected_skills || recycle_device_context {
                 Self::terminate_runtime_until_confirmed(
                     &runtime_registry,
                     &conv_id,
                     AgentKillReason::ConfigurationChanged,
-                    "Creative Studio injected Skill refresh",
+                    "Turn-scoped Companion context or injected Skill refresh",
                 )
                 .await;
             }
@@ -9297,6 +9639,7 @@ impl ConversationService {
                 .as_ref()
                 .map(|authority| authority.model.clone());
             let mut failover_authority = initial_failover_authority;
+            let device_runtime_options = has_device_context.then(|| runtime_options.clone());
             let mut agent = match runtime_registry
                 .get_or_create_runtime_for_turn(
                     &conv_id,
@@ -9549,7 +9892,7 @@ impl ConversationService {
             // is swallowed at source (no WS error, no error tips row) — the user
             // sees only the backup model's turn. `enabled == false` / no deps →
             // `None` → relay never suppresses (current behaviour preserved).
-            let failover_config = if agent.agent_type() == AgentType::Nomi {
+            let failover_config = if agent.uses_nomi_recovery() {
                 service.resolve_failover_config(&failover_extra_json).await.filter(|c| c.enabled)
             } else {
                 None
@@ -9604,7 +9947,7 @@ impl ConversationService {
                 .with_companion_context(companion, companion_id.clone())
                 .with_origin(origin.clone())
                 .with_channel_platform(channel_platform.clone())
-                .with_robot_session(robot_session)
+                .with_spoken_output(spoken_output)
                 .with_artifact_workspace(agent.workspace());
 
                 // Execution-attempt turns: let the relay accumulate this turn's
@@ -9618,7 +9961,7 @@ impl ConversationService {
                 // provider fault(在切换上限内),也隐藏"将被同模型剔图重试"的
                 // image-unsupported 400(每轮一次)。被吞的错误进 outcome.suppressed_error,
                 // 若两种重试都未触发,则下方原样 re-surface。
-                if agent.agent_type() == AgentType::Nomi {
+                if agent.uses_nomi_recovery() {
                     let failover_within_bound = failover_config.as_ref().is_some_and(|c| {
                         failover_switches_done < c.max_switches.min(c.queue.len() as u32)
                     });
@@ -9707,7 +10050,7 @@ impl ConversationService {
                         "non-reusable agent runtime recovery",
                     )
                     .await;
-                    if agent.agent_type() == AgentType::Nomi
+                    if agent.uses_nomi_recovery()
                         && terminal_error_requires_nomi_session_recovery(terminal_code)
                     {
                         // Runtime retirement alone is not enough for any
@@ -9726,7 +10069,7 @@ impl ConversationService {
                         false,
                         outcome.final_text.clone(),
                         Some(
-                            if agent.agent_type() == AgentType::Nomi
+                            if agent.uses_nomi_recovery()
                                 && terminal_error_requires_nomi_session_recovery(terminal_code)
                             {
                                 "Agent session state could not be restored safely"
@@ -9762,7 +10105,18 @@ impl ConversationService {
                 // wrapped in the cancellable post-terminal side-effect budget:
                 // dropping it after quarantine would let the durable Running
                 // turn finalize while the old process might still execute.
-                let failover_switch = if let Some(failed_turn_authority) =
+                let replay_safe = if agent.uses_nomi_recovery() && outcome.terminal.is_error() {
+                    let source = resend_payload.source_message_id.as_deref().unwrap_or(&resend_payload.msg_id);
+                    match agent.ensure_can_retry_turn(source).await {
+                        Ok(()) => true,
+                        Err(error) => {
+                            warn!(conversation_id = %conv_id, error = %error,
+                                "Automatic resend withheld: prior source effects are not replay-safe");
+                            false
+                        }
+                    }
+                } else { false };
+                let failover_switch = if replay_safe && let Some(failed_turn_authority) =
                     failover_authority.as_ref()
                 {
                     service
@@ -9777,6 +10131,7 @@ impl ConversationService {
                             &runtime_registry,
                             turn_cancellation.turn_id(),
                             &turn_token,
+                            device_runtime_options.as_ref(),
                         )
                         .await
                 } else {
@@ -9853,7 +10208,8 @@ impl ConversationService {
                 // 未触发(已重跑过 / 非 nomi / 有响应 / 码不符 / 重建失败)则落到下方
                 // re-surface,把原始错误显示给用户。
                 if image_strip_retries_done == 0
-                    && agent.agent_type() == AgentType::Nomi
+                    && replay_safe
+                    && agent.uses_nomi_recovery()
                     && outcome.terminal.is_error()
                     && !outcome.emitted_response
                     && outcome.terminal.code()
@@ -9937,7 +10293,7 @@ impl ConversationService {
                     .with_companion_context(companion, companion_id.clone())
                     .with_origin(origin.clone())
                     .with_channel_platform(channel_platform.clone())
-                    .with_robot_session(robot_session);
+                    .with_spoken_output(spoken_output);
                     let _ = surface_relay
                         .surface_terminal_error(suppressed, &turn_cancellation)
                         .await;
@@ -10018,7 +10374,8 @@ impl ConversationService {
                 // this should be unreachable today. It is kept so that any future
                 // path producing system responses on an incomplete terminal
                 // cannot silently resurrect the overwrite.
-                if relay_error_code::incomplete_stop_code(outcome.stop_reason).is_some() {
+                if !matches!(outcome.terminal, RelayTerminal::Finish)
+                    || relay_error_code::incomplete_stop_code(outcome.stop_reason).is_some() {
                     break;
                 }
                 continuation_count += 1;
@@ -10275,14 +10632,6 @@ impl ConversationService {
         req: SendMessageRequest,
         runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<String, AppError> {
-        if req.content.trim().is_empty() {
-            return Err(AppError::BadRequest("Message content must not be empty".into()));
-        }
-        if !req.files.is_empty() {
-            return Err(AppError::BadRequest(
-                "steer_unsupported: attachments must be sent as a new turn".into(),
-            ));
-        }
         let operation_id = operation_id.trim();
         if operation_id.is_empty() {
             return Err(AppError::BadRequest(
@@ -10346,6 +10695,7 @@ impl ConversationService {
             return Ok(receipt.message_id);
         }
 
+        Self::validate_steer_input(&req)?;
         self.ensure_no_ambiguous_edit_resubmit(user_id, conv_id)
             .await?;
         let authority = self
@@ -10357,6 +10707,7 @@ impl ConversationService {
                 runtime_registry,
             )
             .await?;
+        Self::ensure_steer_context_supported(&req, &authority.runtime)?;
         let request_payload =
             Self::steer_delivery_request_payload(&req, &authority.scope);
         let claim = self
@@ -10394,7 +10745,11 @@ impl ConversationService {
                 "the Agent turn ended before the steer was delivered".to_owned(),
             ));
         }
-        match runtime.steer(req.content.clone()) {
+        match runtime.steer_with_receipt(nomifun_ai_agent::RuntimeSteerDelivery {
+            receipt_operation_id: operation_id.to_owned(), wire_turn_id: authority.scope.wire_turn_id.clone(),
+            turn_generation: authority.scope.generation, text: req.content.clone(),
+            files: req.files.clone(), inject_skills: req.inject_skills.clone(),
+        }).await {
             Ok(true) => {}
             Ok(false) => {
                 return Err(AppError::Conflict(
@@ -10410,7 +10765,8 @@ impl ConversationService {
             conversation_id: conv_id.to_owned(),
             msg_id: Some(message_id.clone()),
             r#type: "text".into(),
-            content: serde_json::json!({ "content": &req.content }).to_string(),
+            content: serde_json::json!({ "content": &req.content, "files": &req.files,
+                "inject_skills": &req.inject_skills }).to_string(),
             position: Some("right".into()),
             status: Some("finish".into()),
             hidden: req.hidden,
@@ -10448,6 +10804,8 @@ impl ConversationService {
                 "position": "right",
                 "status": "finish",
                 "hidden": req.hidden,
+                "files": &req.files,
+                "inject_skills": &req.inject_skills,
                 "origin": req.origin,
                 "companion": companion,
                 "companion_id": companion_id,
@@ -10743,6 +11101,7 @@ impl ConversationService {
         req: SendMessageRequest,
         runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<String, AppError> {
+        Self::validate_steer_input(&req)?;
         if req.content.trim().is_empty() {
             return Err(AppError::BadRequest(
                 "IDMM continuation content must not be empty".to_owned(),
@@ -10768,9 +11127,21 @@ impl ConversationService {
                 runtime_registry,
             )
             .await?;
-        match authority.runtime.steer(req.content.clone()) {
+        let steer_operation_id = format!("idmm-steer:{}", Self::mint_msg_id());
+        Self::ensure_steer_context_supported(&req, &authority.runtime)?;
+        let claim = self.conversation_repo.claim_delivery_receipt_once(user_id, conversation_id, &steer_operation_id,
+            "steer", &Self::steer_delivery_request_payload(&req, &authority.scope), now_ms()).await?;
+        if !claim.claimed_new { return Err(AppError::Conflict("IDMM steer receipt identity already exists".into())); }
+        let steer_message_id = claim.receipt.message_id;
+        match authority.runtime.steer_with_receipt(nomifun_ai_agent::RuntimeSteerDelivery {
+            receipt_operation_id: steer_operation_id.clone(), wire_turn_id: authority.scope.wire_turn_id.clone(),
+            turn_generation: authority.scope.generation, text: req.content.clone(),
+            files: req.files.clone(), inject_skills: req.inject_skills.clone(),
+        }).await {
             Ok(true) => {}
             Ok(false) => {
+                let _ = self.conversation_repo.complete_delivery_receipt(user_id, conversation_id, &steer_operation_id,
+                    false, None, Some("The active turn ended before IDMM continuation delivery"), None, None, now_ms()).await?;
                 return Err(AppError::Conflict(
                     "The active turn ended before IDMM continuation delivery"
                         .to_owned(),
@@ -10785,20 +11156,26 @@ impl ConversationService {
             authority._lease.ensure_active()?;
         }
 
-        let message_id = Self::mint_msg_id();
+        let message_id = steer_message_id;
         let message = MessageRow {
             id: 0,
             message_id: message_id.clone(),
             conversation_id: conversation_id.to_owned(),
             msg_id: Some(message_id.clone()),
             r#type: "text".to_owned(),
-            content: serde_json::json!({ "content": &req.content }).to_string(),
+            content: serde_json::json!({ "content": &req.content, "files": &req.files,
+                "inject_skills": &req.inject_skills }).to_string(),
             position: Some("right".to_owned()),
             status: Some("finish".to_owned()),
             hidden: true,
             created_at: now_ms(),
         };
         self.conversation_repo.insert_message(&message).await?;
+
+        if !self.conversation_repo.complete_delivery_receipt(user_id, conversation_id, &steer_operation_id,
+            true, None, None, None, None, now_ms()).await? {
+            return Err(AppError::Internal("failed to acknowledge IDMM steer receipt".into()));
+        }
 
         let (companion, companion_id, extra_channel_platform) =
             companion_context_from_extra(&authority.row.extra)?;
@@ -10812,8 +11189,10 @@ impl ConversationService {
                     "content": &req.content,
                     "position": "right",
                     "status": "finish",
-                    "hidden": true,
-                    "origin": "idmm",
+                "hidden": true,
+                "files": &req.files,
+                "inject_skills": &req.inject_skills,
+                "origin": "idmm",
                     "companion": companion,
                     "companion_id": companion_id,
                     "channel_platform": req.channel_platform.or(extra_channel_platform),
@@ -10841,14 +11220,6 @@ impl ConversationService {
         runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<IdempotentMessageDelivery, AppError> {
         validate_public_idempotency_key(idempotency_key)?;
-        if req.content.trim().is_empty() {
-            return Err(AppError::BadRequest("Message content must not be empty".into()));
-        }
-        if !req.files.is_empty() {
-            return Err(AppError::BadRequest(
-                "steer_unsupported: attachments must be sent as a new turn".into(),
-            ));
-        }
 
         let conv_id = parse_conv_id(conversation_id)?;
         let operation_id =
@@ -10895,6 +11266,7 @@ impl ConversationService {
         }
         let steer_fence_prefix =
             Self::public_steer_operation_prefix(user_id, conv_id);
+        Self::validate_steer_input(&req)?;
         if self
             .conversation_repo
             .has_accepted_delivery_receipt_operation_prefix(
@@ -10919,6 +11291,7 @@ impl ConversationService {
                 runtime_registry,
             )
             .await?;
+        Self::ensure_steer_context_supported(&req, &authority.runtime)?;
         let request_payload =
             Self::steer_delivery_request_payload(&req, &authority.scope);
         let claim = self
@@ -10953,7 +11326,11 @@ impl ConversationService {
                 "the Agent turn ended before the steer was delivered".to_owned(),
             ));
         }
-        match authority.runtime.steer(req.content.clone()) {
+        match authority.runtime.steer_with_receipt(nomifun_ai_agent::RuntimeSteerDelivery {
+            receipt_operation_id: operation_id.clone(), wire_turn_id: authority.scope.wire_turn_id.clone(),
+            turn_generation: authority.scope.generation, text: req.content.clone(),
+            files: req.files.clone(), inject_skills: req.inject_skills.clone(),
+        }).await {
             Ok(true) => {}
             Ok(false) => {
                 let _ = self
@@ -11003,7 +11380,8 @@ impl ConversationService {
             conversation_id: conv_id.to_owned(),
             msg_id: Some(message_id.clone()),
             r#type: "text".into(),
-            content: serde_json::json!({ "content": &req.content }).to_string(),
+            content: serde_json::json!({ "content": &req.content, "files": &req.files,
+                "inject_skills": &req.inject_skills }).to_string(),
             position: Some("right".into()),
             status: Some("finish".into()),
             hidden: req.hidden,
@@ -11043,6 +11421,8 @@ impl ConversationService {
                 "position": "right",
                 "status": "finish",
                 "hidden": req.hidden,
+                "files": &req.files,
+                "inject_skills": &req.inject_skills,
                 "origin": req.origin,
                 "companion": companion,
                 "companion_id": companion_id,
@@ -11664,13 +12044,26 @@ impl ConversationService {
         publish_completion: bool,
         deletion_owned: bool,
     ) -> oneshot::Receiver<Result<(), AppError>> {
-        let (result_tx, result_rx) = oneshot::channel();
         let stop_admission = if deletion_owned {
             self.runtime_state
                 .begin_conversation_stop_for_deletion(&conversation_id)
         } else {
             self.runtime_state.begin_conversation_stop(&conversation_id)
         };
+        self.spawn_admitted_turn_stop_cleanup(user_id, conversation_id, runtime_registry,
+            publish_completion, deletion_owned, stop_admission)
+    }
+
+    fn spawn_admitted_turn_stop_cleanup(
+        &self,
+        user_id: String,
+        conversation_id: String,
+        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+        publish_completion: bool,
+        deletion_owned: bool,
+        stop_admission: Result<Option<crate::runtime_state::ConversationStopGuard>, AppError>,
+    ) -> oneshot::Receiver<Result<(), AppError>> {
+        let (result_tx, result_rx) = oneshot::channel();
         let stop_guard = match stop_admission {
             Ok(Some(guard)) => guard,
             Ok(None) => {
@@ -12185,14 +12578,10 @@ impl ConversationService {
     /// Clear a conversation's agent context ("release model context") while
     /// **keeping** the persisted message history.
     ///
-    /// Unlike [`Self::reset`] (which also deletes DB messages), this:
-    ///  1. resets the live agent's in-memory/session context if one is running
-    ///     (ACP rotates to a fresh `session/new`, Nomi empties its engine,
-    ///     OpenClaw/Remote forget their gateway session) — see
-    ///     [`AgentRuntimeHandle::clear_context`]; and
-    ///  2. without constructing a cold runtime, clears the persisted ACP resume
-    ///     identity and the exact `conversation_id + created_at` Nomi session
-    ///     generation so a later explicit send cannot resume archived context.
+    /// Platform-history engines retire any live runtime, then atomically move
+    /// the owner's model-history floor without deleting messages or recovery
+    /// receipts. Nomi retains its private Session reset; other engines retain
+    /// their explicit live control and deny unsupported cold resets.
     ///
     /// The preparation/reset fences serialize this maintenance operation with
     /// send, warmup, stop, completion, and destructive reset. Message rows and
@@ -12265,6 +12654,39 @@ impl ConversationService {
         self.runtime_state
             .forget_cancelled_runtime_builds(conversation_id, &cancelled_build_ids);
 
+        let extra: serde_json::Value = serde_json::from_str(&row.extra)
+            .map_err(|error| AppError::Conflict(error.to_string()))?;
+        let owner_history = match extra.get(nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY) {
+            Some(value) => {
+                let binding: nomifun_api_types::RuntimeEngineBinding = serde_json::from_value(value.clone())
+                    .map_err(|error| AppError::Conflict(error.to_string()))?;
+                self.runtime_registry.binding_uses_platform_history_context(&binding)?
+            }
+            None => false,
+        };
+        if owner_history {
+            self.cancel_and_wait_for_turn_writebacks(conv_id).await?;
+            // Drop neither the maintenance fences nor exact teardown proof
+            // before committing the boundary. No cold factory is constructed.
+            self.runtime_registry.terminate_and_wait_result(
+                conversation_id, Some(AgentKillReason::UserCancelled),
+            ).await?;
+            match self.conversation_repo.clear_terminal_engine_context(
+                user_id, conv_id, &row.extra, row.created_at, now_ms(),
+            ).await? {
+                TurnLifecycleTransition::Committed | TurnLifecycleTransition::AlreadyApplied => {}
+                TurnLifecycleTransition::Stale => return Err(AppError::Conflict(
+                    "Conversation changed while clearing Engine context".into(),
+                )),
+            }
+            self.runtime_state.clear_knowledge_signature(conversation_id);
+            self.runtime_state.clear_turn_tokens(conversation_id);
+            drop(reset_guard);
+            drop(preparation_guard);
+            info!(conversation_id, "Platform Engine context cleared; transcript and recovery evidence retained");
+            return Ok(());
+        }
+
         // Reset an existing idle runtime in place. A cold Nomi conversation
         // instead uses the registry's factory-admission barrier and exact
         // created_at owner token; manufacturing a runtime just to erase the
@@ -12277,7 +12699,10 @@ impl ConversationService {
             false
         };
 
-        if row.r#type == AgentType::Nomi.serde_name() && !had_runtime {
+        if !had_runtime {
+            if !row_uses_nomi_engine(&row, self.runtime_registry.as_ref())? {
+                return Err(AppError::Conflict("Cold context reset is not provided by the bound runtime; fork explicitly".into()));
+            }
             self.runtime_registry
                 .reset_persisted_nomi_session(conversation_id, row.created_at)
                 .await?;
@@ -12362,7 +12787,7 @@ impl ConversationService {
                 Some(AgentKillReason::UserCancelled),
             )
             .await?;
-        if clear_row.r#type == AgentType::Nomi.serde_name() {
+        if row_uses_nomi_engine(&clear_row, self.runtime_registry.as_ref())? {
             self.runtime_registry
                 .reset_persisted_nomi_session(conversation_id, clear_row.created_at)
                 .await?;
@@ -12552,6 +12977,17 @@ fn is_tool_free_agent_extra(extra: &serde_json::Value) -> bool {
         && extra.get("allowed_tools").and_then(serde_json::Value::as_array).is_some_and(Vec::is_empty)
 }
 
+fn user_message_matches_requested_content(stored: &str, expected: &serde_json::Value) -> bool {
+    let Ok(mut stored) = serde_json::from_str::<serde_json::Value>(stored) else {
+        return false;
+    };
+    if let Some(object) = stored.as_object_mut() {
+        object.remove("agent_snapshot");
+        object.remove("creation_references");
+    }
+    stored == *expected
+}
+
 fn row_agent_snapshot_has_capability(
     row: &ConversationRow,
     capability: &str,
@@ -12593,7 +13029,6 @@ fn product_agent_target(
     ) {
         let default_template_key = match target_kind {
             "companion" => "companion.default",
-            "robot" => "robot.default",
             "customer" => "customer-service.default",
             "creative_studio_canvas" => "creative-studio.default",
             _ => return None,
@@ -12603,16 +13038,6 @@ fn product_agent_target(
             target_id: target_id.to_owned(),
             default_template_key: default_template_key.to_owned(),
         });
-    }
-    if object.get("robot_session").and_then(serde_json::Value::as_bool) == Some(true) {
-        return object
-            .get("robot_id")
-            .and_then(serde_json::Value::as_str)
-            .map(|robot_id| ProductAgentTarget {
-                target_kind: "robot".to_owned(),
-                target_id: robot_id.to_owned(),
-                default_template_key: "robot.default".to_owned(),
-            });
     }
     let companion_id = object.get("companion_id").and_then(serde_json::Value::as_str)?;
     let is_companion = object
@@ -12672,7 +13097,7 @@ fn apply_product_agent_resolution(
         .iter()
         .map(String::as_str)
         .collect::<HashSet<_>>();
-    if matches!(target.target_kind.as_str(), "companion" | "robot") {
+    if target.target_kind == "companion" {
         if !enabled.contains("companion.persona") {
             object.remove("system_prompt");
         }
@@ -12686,60 +13111,6 @@ fn apply_product_agent_resolution(
                 enabled.contains("companion.learn") || enabled.contains("companion.evolve"),
             ),
         );
-    }
-    if target.target_kind == "robot" {
-        let tools_enabled = [
-            "robot.display",
-            "robot.motion",
-            "robot.vision",
-            "robot.device_tools",
-        ]
-        .into_iter()
-        .any(|capability| enabled.contains(capability));
-        if !tools_enabled {
-            object.remove("selected_session_mcp_servers");
-            object.remove("session_mcp_servers");
-        } else {
-            if let Some(allowed) = object
-                .get_mut("allowed_tools")
-                .and_then(serde_json::Value::as_array_mut)
-                && !allowed.iter().any(|value| value.as_str() == Some("mcp.tool_proxy"))
-            {
-                allowed.push(serde_json::Value::String("mcp.tool_proxy".to_owned()));
-            }
-            let capabilities = [
-                "robot.display",
-                "robot.motion",
-                "robot.vision",
-                "robot.device_tools",
-            ]
-            .into_iter()
-            .filter(|capability| enabled.contains(capability))
-            .collect::<Vec<_>>()
-            .join(",");
-            for key in ["selected_session_mcp_servers", "session_mcp_servers"] {
-                let Some(servers) = object.get_mut(key).and_then(serde_json::Value::as_array_mut)
-                else {
-                    continue;
-                };
-                for server in servers {
-                    let Some(url) = server
-                        .pointer_mut("/transport/url")
-                        .and_then(|value| value.as_str())
-                        .map(str::to_owned)
-                    else {
-                        continue;
-                    };
-                    if url.contains("/robot-mcp/") {
-                        server["transport"]["url"] = serde_json::Value::String(format!(
-                            "{}{}capabilities={capabilities}",
-                            url,
-                            if url.contains('?') { "&" } else { "?" },
-                        ));
-                    }
-                }
-            }
-        }
     }
     Ok(())
 }
@@ -12997,6 +13368,7 @@ impl ConversationService {
             extra,
             // Stamp/validate the nomi session against this conversation instance.
             conversation_created_at: Some(row.created_at),
+            device_mcp_servers: Vec::new(),
             workspace_binding_lease: None,
         })
     }
@@ -14006,13 +14378,30 @@ fn reject_execution_policy_extra_keys(extra: &serde_json::Value) -> Result<(), A
     }
 }
 
+/// Bound engines need an exact source policy for Nomi's private codec. Only
+/// unbound legacy Nomi rows retain the old compatibility-kind discriminator.
+fn row_uses_nomi_engine(row: &ConversationRow, registry: &dyn AgentRuntimeRegistry) -> Result<bool, AppError> {
+    let extra: serde_json::Value = serde_json::from_str(&row.extra)
+        .map_err(|error| AppError::Internal(error.to_string()))?;
+    match extra.get(nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY) {
+        Some(value) => {
+            let binding: nomifun_api_types::RuntimeEngineBinding = serde_json::from_value(value.clone())
+                .map_err(|error| AppError::Conflict(format!("Invalid runtime binding: {error}")))?;
+            binding.validate()?;
+            registry.binding_uses_nomi_session(&binding)
+        }
+        None => Ok(row.r#type == AgentType::Nomi.serde_name()),
+    }
+}
+
 /// Backend lifecycle authority never comes from the open `extra` bag.
-///
-/// These names mirror persisted columns/receipts or private recovery markers.
-/// Reject instead of silently stripping them so every caller gets an explicit
-/// failure and no partial PATCH can make an injected fence indistinguishable
+/// Reject these keys instead of making an injected fence indistinguishable
 /// from a backend reservation after restart.
-pub(crate) const BACKEND_OWNED_LIFECYCLE_EXTRA_KEYS: [&str; 10] = [
+pub(crate) const BACKEND_OWNED_LIFECYCLE_EXTRA_KEYS: [&str; 14] = [
+    nomifun_db::conversation_context::ENGINE_CONTEXT_AFTER_MESSAGE_ID,
+    "execution_constraints",
+    "runtime_engine_binding",
+    "nomi_core_session",
     "_edit_resubmit_fence",
     "active_turn_operation_id",
     "admission_epoch",
@@ -14140,27 +14529,6 @@ fn companion_context_from_extra(
     Ok((companion, companion_id, channel_platform))
 }
 
-/// True when this conversation is a robot gateway thread.
-///
-/// `extra.robot_session` is written only by nomifun-app's robot wiring, through
-/// the service (`create_idempotent` / `update_extra`) rather than the HTTP
-/// route. It is conversation-level and stable across turns — unlike
-/// `channel_platform`, which is per-TURN and is `None` for a turn the owner
-/// types into the robot thread from the desktop chat.
-///
-/// Deliberately infallible and defaulting to `false`: this only decides whether
-/// the relay deletes bracketed stage directions, so a malformed `extra` must
-/// degrade to "leave the text alone" rather than fail a turn.
-fn robot_session_from_extra(extra: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(extra)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("robot_session")
-                .and_then(serde_json::Value::as_bool)
-        })
-        .unwrap_or(false)
-}
 
 /// Decide which knowledge-binding target a conversation mounts from
 /// (spec §3 ruling 6 / §4.5).
@@ -14326,6 +14694,21 @@ mod tests {
     const RUNTIME_PRESET_ID: &str = "0190f5fe-7c00-7a00-8000-000000000003";
 
     #[test]
+    fn creation_reference_metadata_does_not_change_idempotent_user_content() {
+        let expected = json!({"content":"Edit the first photo", "interaction":{"device":"desktop"}});
+        let mut stored = expected.clone();
+        stored["agent_snapshot"] = json!({"preset_id":"server-owned"});
+        stored["creation_references"] = json!([{"asset_id":"server-owned"}]);
+        assert!(user_message_matches_requested_content(&stored.to_string(), &expected));
+        stored["content"] = json!("Edit the other photo");
+        assert!(!user_message_matches_requested_content(&stored.to_string(), &expected));
+        stored["content"] = expected["content"].clone();
+        stored["interaction"] = json!({"device":"other"});
+        assert!(!user_message_matches_requested_content(&stored.to_string(), &expected));
+        assert!(!user_message_matches_requested_content("not json", &expected));
+    }
+
+    #[test]
     fn companion_desktop_and_im_share_one_product_agent_target() {
         let companion_id = "0190f5fe-7c00-7a00-8000-000000000099";
         let desktop = product_agent_target(&json!({
@@ -14343,6 +14726,7 @@ mod tests {
 
     fn runtime_agent_snapshot() -> AgentResolvedSnapshot {
         AgentResolvedSnapshot {
+            canonical_binding: None,
             preset_id: RUNTIME_PRESET_ID.to_owned(),
             preset_revision: 4,
             preset_name: "文案版".to_owned(),

@@ -91,6 +91,10 @@ pub struct AgentRuntimeBuildOptions {
     /// process teardown is proven.
     #[serde(skip)]
     pub workspace_binding_lease: Option<WorkspaceBindingLease>,
+    /// Host-issued device transports for this exact turn. These cannot be
+    /// recovered from persisted JSON or supplied through a public request.
+    #[serde(skip)]
+    pub device_mcp_servers: Vec<nomifun_api_types::SessionMcpServer>,
 }
 
 /// Provider-specific compat overrides resolved in the factory.
@@ -235,6 +239,7 @@ mod tests {
             delegation_policy: DelegationPolicy::Automatic,
             extra: json!({ "workspace": "/project" }),
             conversation_created_at: None,
+            device_mcp_servers: Vec::new(),
             workspace_binding_lease: None,
         };
         let json = serde_json::to_value(&opts).unwrap();

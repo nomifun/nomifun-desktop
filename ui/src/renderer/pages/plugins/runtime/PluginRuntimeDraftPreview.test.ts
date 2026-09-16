@@ -15,6 +15,9 @@ function previewRuntime(html: string) {
       storage: {
         get(key: string): Promise<unknown>;
         set(key: string, value: unknown): Promise<void>;
+        read(key: string): Promise<{ value: unknown; revision: number | null }>;
+        delete(key: string): Promise<void>;
+        compareAndSwap(key: string, revision: number | null, value?: unknown): Promise<{ applied: boolean; revision: number | null }>;
       };
     };
   };
@@ -68,5 +71,26 @@ describe('PluginRuntime draft preview isolation', () => {
     }>;
     read[0].done = true;
     expect(await runtime.storage.get('tasks')).toEqual([{ done: false }]);
+  });
+  test('versioned preview storage retains tombstone revisions and never silently overwrites conflicts', async () => {
+    const { storage } = previewRuntime('<!doctype html><html><body>Preview</body></html>');
+    expect(await storage.read('draft')).toEqual({ value: null, revision: null });
+    expect(await storage.compareAndSwap('draft', null, { text: 'first' })).toEqual({ applied: true, revision: 1 });
+    expect(await storage.compareAndSwap('draft', null, { text: 'stale' })).toEqual({ applied: false, revision: 1 });
+    const current = await storage.read('draft');
+    (current.value as { text: string }).text = 'local mutation';
+    expect(await storage.get('draft')).toEqual({ text: 'first' });
+    expect(await storage.compareAndSwap('draft', 1)).toEqual({ applied: true, revision: 2 });
+    expect(await storage.read('draft')).toEqual({ value: null, revision: 2 });
+    expect(await storage.compareAndSwap('draft', null, 'stale create')).toEqual({ applied: false, revision: 2 });
+    expect(await storage.compareAndSwap('draft', 2, 'restored')).toEqual({ applied: true, revision: 3 });
+    await storage.delete('draft');
+    expect(await storage.read('draft')).toEqual({ value: null, revision: 4 });
+    await storage.set('draft', null);
+    await storage.delete('draft');
+    expect(await storage.read('draft')).toEqual({ value: null, revision: 6 });
+    await storage.delete('draft');
+    expect(await storage.read('draft')).toEqual({ value: null, revision: 6 });
+    await expect(storage.compareAndSwap('draft', 0, 'invalid')).rejects.toThrow();
   });
 });

@@ -464,26 +464,35 @@ pub struct CreativeImageComposerDraft {
     pub count: u8,
 }
 
+fn validate_composer_mentions(
+    mentions: &[CreativeImagePromptMention],
+    prompt: &str,
+    path: &str,
+) -> Result<(), String> {
+    let mut mention_ids = BTreeSet::new();
+    let mut previous_end = 0usize;
+    let mut mentions = mentions.iter().enumerate().collect::<Vec<_>>();
+    mentions.sort_by_key(|(_, mention)| (mention.start, mention.end));
+    for (sorted_index, (index, mention)) in mentions.into_iter().enumerate() {
+        mention.validate(&format!("{path}.mentions[{index}]"), prompt)?;
+        if !mention_ids.insert(mention.id.as_str()) {
+            return Err(format!(
+                "{path}.mentions contains duplicate id {:?}",
+                mention.id
+            ));
+        }
+        if sorted_index > 0 && mention.start < previous_end {
+            return Err(format!("{path}.mentions[{index}] overlaps another mention"));
+        }
+        previous_end = mention.end;
+    }
+    Ok(())
+}
+
 impl CreativeImageComposerDraft {
     fn validate(&self, path: &str) -> Result<(), String> {
         require_string(&format!("{path}.prompt"), &self.prompt, true, 1_000_000)?;
-        let mut mention_ids = BTreeSet::new();
-        let mut previous_end = 0usize;
-        let mut mentions = self.mentions.iter().enumerate().collect::<Vec<_>>();
-        mentions.sort_by_key(|(_, mention)| (mention.start, mention.end));
-        for (sorted_index, (index, mention)) in mentions.into_iter().enumerate() {
-            mention.validate(&format!("{path}.mentions[{index}]"), &self.prompt)?;
-            if !mention_ids.insert(mention.id.as_str()) {
-                return Err(format!(
-                    "{path}.mentions contains duplicate id {:?}",
-                    mention.id
-                ));
-            }
-            if sorted_index > 0 && mention.start < previous_end {
-                return Err(format!("{path}.mentions[{index}] overlaps another mention"));
-            }
-            previous_end = mention.end;
-        }
+        validate_composer_mentions(&self.mentions, &self.prompt, path)?;
         if let Some(model) = &self.model {
             model.validate(&format!("{path}.model"))?;
         }
@@ -986,6 +995,8 @@ impl CreativeVideoNodeData {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreativeVideoComposerDraft {
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mentions: Vec<CreativeImagePromptMention>,
     pub model: Option<CreativeComposerModel>,
     pub resolution: String,
     pub aspect_ratio: String,
@@ -995,6 +1006,7 @@ pub struct CreativeVideoComposerDraft {
 impl CreativeVideoComposerDraft {
     fn validate(&self, path: &str) -> Result<(), String> {
         require_string(&format!("{path}.prompt"), &self.prompt, true, 1_000_000)?;
+        validate_composer_mentions(&self.mentions, &self.prompt, path)?;
         if let Some(model) = &self.model {
             model.validate(&format!("{path}.model"))?;
         }
@@ -1918,6 +1930,48 @@ mod tests {
         let mut unknown_nested = node_value("unknown-video-composer", "video");
         unknown_nested["data"]["composer"]["legacySetting"] = Value::Bool(true);
         assert!(serde_json::from_value::<CreativeNode>(unknown_nested).is_err());
+    }
+
+    #[test]
+    fn video_prompt_mentions_round_trip_and_validate_utf16_ranges() {
+        let mut value = node_value("video-mentions", "video");
+        value["data"]["composer"]["prompt"] = serde_json::json!("🎬 @图片1 动起来");
+        value["data"]["composer"]["mentions"] = serde_json::json!([{
+            "id": "mention-video",
+            "sourceNodeId": "source-image",
+            "fallbackLabel": "图片1",
+            "start": 3,
+            "end": 7
+        }]);
+        let video: CreativeNode = serde_json::from_value(value.clone()).unwrap();
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        document.nodes.push(video);
+        document.validate_for_project(PROJECT_ID).unwrap();
+        assert_eq!(
+            serde_json::to_value(&document.nodes[0]).unwrap()["data"]["composer"],
+            value["data"]["composer"]
+        );
+        for invalid in [
+            serde_json::json!([{
+                "id": "mention-video", "sourceNodeId": "source-image",
+                "fallbackLabel": "图片1", "start": 2, "end": 7
+            }]),
+            serde_json::json!([
+                {"id": "a", "sourceNodeId": "source-image", "fallbackLabel": "图片1", "start": 3, "end": 7},
+                {"id": "b", "sourceNodeId": "source-image", "fallbackLabel": "图片1", "start": 3, "end": 7}
+            ]),
+            serde_json::json!([
+                {"id": "a", "sourceNodeId": "source-image", "fallbackLabel": "图片1", "start": 3, "end": 7},
+                {"id": "a", "sourceNodeId": "source-image", "fallbackLabel": "图片1", "start": 3, "end": 7}
+            ]),
+        ] {
+            value["data"]["composer"]["mentions"] = invalid;
+            document.nodes[0] = serde_json::from_value(value.clone()).unwrap();
+            assert!(document
+                .validate_for_project(PROJECT_ID)
+                .unwrap_err()
+                .contains("mentions"));
+        }
     }
 
     #[test]

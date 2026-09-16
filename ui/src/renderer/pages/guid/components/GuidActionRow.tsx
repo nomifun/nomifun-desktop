@@ -5,7 +5,7 @@
  */
 
 import { ipcBridge } from '@/common';
-import { getCleanFileNames, FileService } from '@/renderer/services/FileService';
+import { FileService } from '@/renderer/services/FileService';
 import { iconColors } from '@/renderer/styles/colors';
 import { isDesktopShell } from '@/renderer/utils/platform';
 import { Button, Dropdown, Menu, Message, Tooltip } from '@arco-design/web-react';
@@ -13,14 +13,15 @@ import { ArrowUp, Earth, Plus, Robot, UploadOne } from '@icon-park/react';
 import React, { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import styles from '../index.module.css';
+import ResponsiveComposerRow from '@/renderer/components/chat/ResponsiveComposerRow';
 
 type GuidActionRowProps = {
   // File handling
-  files: string[];
   onFilesUploaded: (paths: string[]) => void;
 
   // Agent identity and session model are independent launch choices.
   modelSelectorNode: React.ReactNode;
+  creationControls?: React.ReactNode;
 
   // Send button
   loading: boolean;
@@ -36,9 +37,9 @@ type GuidActionRowProps = {
 };
 
 const GuidActionRow: React.FC<GuidActionRowProps> = ({
-  files,
   onFilesUploaded,
   modelSelectorNode,
+  creationControls,
   loading,
   isButtonDisabled,
   speechInputNode,
@@ -124,7 +125,7 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
   );
 
   return (
-    <div className={styles.actionRow}>
+    <ResponsiveComposerRow className={styles.actionRow}>
       <div className={styles.actionTools}>
         {!isWebUI && onOpenBrowser && (
           <Button type='text' size='small' disabled={loading || browserDisabled} onClick={onOpenBrowser}
@@ -145,14 +146,6 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
                 data-testid='file-upload-btn'
                 data-composer-action='attach'
               />
-              {files.length > 0 && (
-                <Tooltip
-                  className={'!max-w-max'}
-                  content={<span className='whitespace-break-spaces'>{getCleanFileNames(files).join('\n')}</span>}
-                >
-                  <span className='text-t-primary'>File({files.length})</span>
-                </Tooltip>
-              )}
             </span>
           </Dropdown>
           {isWebUI && (
@@ -166,9 +159,11 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
           )}
         </div>
       </div>
-      <div className={`${styles.actionSubmit} ${styles.actionSubmitResponsive}`}>
+      {creationControls}
+      <div data-composer-group className={`${styles.actionSubmit} ${styles.actionSubmitResponsive}`}>
         <div
           className={`${styles.actionConfigGroup} ${styles.actionConfigGroupResponsive}`}
+          data-composer-group
         >
           {modelSelectorNode}
         </div>
@@ -200,7 +195,7 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
           />
         </Tooltip>
       </div>
-    </div>
+    </ResponsiveComposerRow>
   );
 };
 

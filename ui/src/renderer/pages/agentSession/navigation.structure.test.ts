@@ -61,11 +61,12 @@ describe('Agent navigation', () => {
     expect(settingsContent.includes('agentSettings.navigation')).toBe(false);
   });
 
-  test('new AgentSession pages contain no legacy chat-container fallback', () => {
+  test('historical Agent Session links redirect to the standard conversation without a second client', () => {
     const page = read(new URL('./AgentSessionPage.tsx', import.meta.url));
-    const model = read(new URL('./model.ts', import.meta.url));
-    const legacyType = 'Conver' + 'sation';
-    expect(page.includes(legacyType)).toBe(false);
-    expect(model.includes(legacyType)).toBe(false);
+    expect(page.includes('parseConversationId(agentSessionId)')).toBe(true);
+    expect(page.includes('<Navigate replace')).toBe(true);
+    expect(page.includes('/conversation/')).toBe(true);
+    expect(page.includes('Surface')).toBe(false);
+    expect(page.includes('sessions.create')).toBe(false);
   });
 });

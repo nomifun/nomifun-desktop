@@ -14,6 +14,10 @@ use crate::error::DbError;
 
 mod published_main_migrations;
 mod displaced_agent_preset_migration;
+mod displaced_conversation_runtime_migration;
+
+#[cfg(test)]
+mod plugin_ui_upgrade_tests;
 
 /// Maximum number of connections in the pool.
 const MAX_CONNECTIONS: u32 = 5;
@@ -251,6 +255,9 @@ pub async fn inspect_supported_migration_lineage(
         return Ok(MigrationLineageStatus::UpgradeRequired);
     }
     if displaced_agent_preset_migration::is_displaced_prefix(&rows, &DB_MIGRATOR)? {
+        return Ok(MigrationLineageStatus::UpgradeRequired);
+    }
+    if displaced_conversation_runtime_migration::is_displaced_prefix(&rows, &DB_MIGRATOR)? {
         return Ok(MigrationLineageStatus::UpgradeRequired);
     }
 
@@ -543,6 +550,11 @@ fn require_quick_check_ok(rows: Vec<String>) -> Result<(), DbError> {
 /// pass sees the row that the winner committed, checksum matches (same
 /// shipped binary), and the migration is treated as already applied.
 async fn run_migrations_with_retry(conn: &mut sqlx::SqliteConnection) -> Result<(), DbError> {
+    // Authenticate the displaced runtime ledger before any migrator can apply
+    // a suffix. Unknown 095 checksums and conflicting 099 rows fail closed.
+    if displaced_conversation_runtime_migration::adopt_and_migrate(conn, &DB_MIGRATOR).await? {
+        return Ok(());
+    }
     if published_main_migrations::adopt_and_migrate(conn, &DB_MIGRATOR).await? {
         return Ok(());
     }

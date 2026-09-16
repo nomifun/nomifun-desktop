@@ -60,11 +60,13 @@ export interface ChatLayoutProps {
   /** Fallback agent name (used when no preset, e.g. from conversation.extra.agent_name) */
   agent_name?: string;
   headerExtra?: React.ReactNode;
+  /** Product-owned controls occupying the same header slot as session controls. */
+  headerControls?: React.ReactNode;
   /**
    * Hide the session-capability controls baked into the header
    * (AutoWork / IDMM / Knowledge).
-   * Used by surfaces that deliberately offer a reduced feature set — e.g. the
-   * desktop companion chat tab. Defaults to false (full conversation page).
+   * Used by minimal Agents and retained read-only transcripts. Product-owned
+   * controls use headerControls instead. Defaults to false.
    */
   hideAdvancedControls?: boolean;
   /** Whether this Agent's immutable capability ceiling permits target-scoped
@@ -341,7 +343,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
         />
       </FlexFullContainer>
       <div className='chat-layout-header-actions'>
-        {!props.hideAdvancedControls && conversation_id != null && (
+        {props.headerControls !== undefined ? props.headerControls : !props.hideAdvancedControls && conversation_id != null && (
           <>
             <AutoWorkControl target={{ kind: 'conversation', id: conversation_id }} />
             <IdmmControl target={{ kind: 'conversation', id: conversation_id }} />

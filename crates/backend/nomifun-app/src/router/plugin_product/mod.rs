@@ -1,6 +1,7 @@
 //! User-facing Plugin workflow. Authoring stays in recoverable draft documents;
 //! only the explicit save command commits a production release.
 mod authoring;
+mod templates;
 #[cfg(test)]
 mod tests;
 mod transfer;
@@ -10,6 +11,8 @@ use axum::{
     Extension, Json, Router,
     extract::{Path, State},
     routing::{get, post},
+    response::{IntoResponse, Response},
+    http::StatusCode,
 };
 use nomifun_api_types::{
     ApiResponse, BuildPluginRuntimeRequest, CreatePluginRuntimeProjectRequest, PluginRuntimeWorkshopDto, PublishPluginRuntimeRequest, ReplacePluginRuntimeSourceFileRequest,
@@ -94,12 +97,92 @@ pub(super) struct Draft {
     pub updated_at: i64,
     #[serde(default)]
     pub import: Option<transfer::ImportSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    service_test_confirmation: Option<ServiceTestConfirmation>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ExpectedRevision {
     pub expected_revision: i64,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceTestAcknowledgement {
+    release_digest: String,
+    receipt_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SaveRequest {
+    expected_revision: i64,
+    #[serde(default)]
+    acknowledge_service_test: Option<ServiceTestAcknowledgement>,
+}
+
+/// Binds user acknowledgement to the exact draft and Ready receipt that was
+/// shown. It is invalid after any draft, source, configuration or grant change.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceTestConfirmation {
+    expected_revision: i64,
+    draft_digest: String,
+    release_digest: String,
+    receipt_id: String,
+    source_digest: Option<String>,
+    config_revision: u64,
+    credential_bindings_revision: u64,
+}
+
+#[derive(Serialize)]
+struct ServiceTestInputRequired {
+    draft_id: String,
+    expected_revision: i64,
+    release_digest: String,
+    receipt_id: String,
+    display_name: String,
+}
+
+enum SaveOutcome {
+    Saved(PluginRuntimeWorkshopDto),
+    NeedsServiceTestInput(ServiceTestInputRequired),
+}
+
+fn draft_confirmation_digest(draft: &Draft) -> Result<String, AppError> {
+    nomifun_agent_contracts::digest_payload(&(
+        &draft.name, &draft.description, &draft.html, &draft.service_source,
+        &draft.source_manifest, &draft.base_release_digest, &draft.base_source_digest,
+    )).map(|digest| digest.as_ref().to_owned()).map_err(internal)
+}
+
+fn validate_service_test_acknowledgement(
+    draft: &Draft,
+    current: &PluginRuntimeWorkshopDto,
+    acknowledgement: &ServiceTestAcknowledgement,
+) -> Result<(), AppError> {
+    let stale = || AppError::RevisionConflict(
+        "The Service check confirmation is stale; save the current draft and review its new check result".into(),
+    );
+    let pending = draft.service_test_confirmation.as_ref().ok_or_else(stale)?;
+    let ready = current.ready.as_ref().ok_or_else(stale)?;
+    if pending.expected_revision != draft.revision
+        || pending.draft_digest != draft_confirmation_digest(draft)?
+        || pending.release_digest != acknowledgement.release_digest
+        || pending.receipt_id != acknowledgement.receipt_id
+        || ready.release.release_digest != pending.release_digest
+        || ready.test.receipt_id.as_deref() != Some(pending.receipt_id.as_str())
+        || ready.test.status != nomifun_api_types::PluginRuntimeTestStatusDto::NeedsTestInput
+        || ready.service.is_none()
+        || current.source_snapshot_digest != pending.source_digest
+        || current.config.config_revision != pending.config_revision
+        || current.credential_bindings_revision != pending.credential_bindings_revision
+    {
+        return Err(stale());
+    }
+    // Runtime identity is rechecked by the existing publish receipt authority.
+    Ok(())
 }
 
 impl PluginProductService {
@@ -182,6 +265,7 @@ pub(crate) fn write_routes() -> Router<PluginRuntimeM1RouterState> {
     Router::new()
         .route("/api/plugins/workspace", post(update_workspace))
         .route("/api/plugins/authoring", post(authoring::generate))
+        .route("/api/plugins/drafts/from-template/before-tool", post(templates::before_tool))
         .route("/api/plugins/drafts/{draft_id}/cancel", post(cancel))
         .route("/api/plugins/drafts/{draft_id}/save", post(save))
         .route("/api/plugins/drafts/{draft_id}/discard", post(discard))
@@ -396,8 +480,8 @@ async fn save(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
-    Json(request): Json<ExpectedRevision>,
-) -> Result<Json<ApiResponse<PluginRuntimeWorkshopDto>>, AppError> {
+    Json(request): Json<SaveRequest>,
+) -> Result<Response, AppError> {
     let service = service(&state)?;
     let _lock = service.mutations.lock().await;
     let mut draft = service.draft(user.id.as_str(), &id).await?;
@@ -407,9 +491,10 @@ async fn save(
             "The Plugin is still being created".into(),
         ));
     }
-    let result = service.save_draft(user.id.as_str(), &mut draft).await;
+    let result = service.save_draft(user.id.as_str(), &mut draft, request.acknowledge_service_test.as_ref()).await;
     match result {
-        Ok(workshop) => {
+        Ok(SaveOutcome::Saved(workshop)) => {
+            draft.service_test_confirmation = None;
             draft.status = "saved".into();
             draft.error = None;
             draft.base_release_digest = workshop
@@ -422,8 +507,17 @@ async fn save(
             if let Err(error) = service.cleanup_import_stage(&draft) {
                 tracing::warn!(%error,"Plugin import staging cleanup deferred");
             }
-            Ok(Json(ApiResponse::ok(workshop)))
+            Ok(Json(ApiResponse::ok(workshop)).into_response())
         }
+        Ok(SaveOutcome::NeedsServiceTestInput(details)) => Ok((
+            StatusCode::CONFLICT,
+            Json(nomifun_api_types::ErrorResponse::new_with_details(
+                "The Service started successfully, but its capabilities need test input. Review this check before publishing.",
+                "PLUGIN_SERVICE_TEST_INPUT_REQUIRED",
+                Some(serde_json::to_value(details).map_err(internal)?),
+            )),
+        ).into_response()),
+        Err(error) if request.acknowledge_service_test.is_some() => Err(error),
         Err(error) => {
             draft.status = "ready".into();
             draft.error = Some("save_failed".into());
@@ -438,7 +532,12 @@ impl PluginProductService {
         &self,
         owner: &str,
         draft: &mut Draft,
-    ) -> Result<PluginRuntimeWorkshopDto, AppError> {
+        acknowledgement: Option<&ServiceTestAcknowledgement>,
+    ) -> Result<SaveOutcome, AppError> {
+        if acknowledgement.is_some() && (draft.plugin_id.is_none() || draft.service_test_confirmation.is_none()) {
+            return Err(AppError::RevisionConflict("No current Service check awaits acknowledgement".into()));
+        }
+        if acknowledgement.is_none() { draft.service_test_confirmation = None; }
         let mut current = if let Some(id) = &draft.plugin_id {
             self.application
                 .workshop(owner, id)
@@ -490,7 +589,10 @@ impl PluginProductService {
                 "The saved Plugin changed since this draft was opened".into(),
             ));
         }
-        if draft.import.is_none() {
+        if let Some(acknowledgement) = acknowledgement {
+            validate_service_test_acknowledgement(draft, &current, acknowledgement)?;
+        }
+        if acknowledgement.is_none() && draft.import.is_none() {
             if draft.base_source_digest.is_some()
                 && current.source_snapshot_digest != draft.base_source_digest
             {
@@ -546,7 +648,17 @@ impl PluginProductService {
                 draft.base_source_digest = current.source_snapshot_digest.clone();
                 self.put_draft(owner, draft).await?;
             }
-            if changed || current.plugin.releases.active.is_none() || current.ready.is_some() {
+            // Source replacements advance the project generation. Reuse an
+            // unchanged Ready only when it still belongs to that exact head;
+            // a repeat save should rerun its check, not rebuild the same source.
+            if !changed && current.ready.as_ref().is_some_and(|ready| {
+                ready.project_build_generation != current.build_generation
+            }) {
+                return Err(AppError::RevisionConflict(
+                    "The Ready Release no longer matches this draft's Source generation".into(),
+                ));
+            }
+            if changed || (current.plugin.releases.active.is_none() && current.ready.is_none()) {
                 current = self
                     .application
                     .build(
@@ -572,7 +684,7 @@ impl PluginProductService {
                     .map_err(application_error)?;
             }
         }
-        if let Some(ready) = current.ready.as_ref().filter(|ready| ready.service.is_some()) {
+        if let Some(ready) = current.ready.as_ref().filter(|ready| ready.service.is_some() && acknowledgement.is_none()) {
             current = self.application.test_ready_service(owner, nomifun_api_types::TestPluginRuntimeReleaseRequest {
                 plugin_id: current.plugin.plugin_id.clone(),
                 expected_product_revision: current.plugin.product_revision,
@@ -584,8 +696,31 @@ impl PluginProductService {
                 expected_credential_bindings_revision: current.credential_bindings_revision,
                 resolved_test_input_digest: crate::cli::DEFAULT_PLUGIN_TEST_INPUT_DIGEST.into(),
             }).await.map_err(application_error)?;
-            if current.ready.as_ref().is_none_or(|ready| ready.test.status != nomifun_api_types::PluginRuntimeTestStatusDto::Passed) {
-                return Err(invalid("The plugin's background code did not pass validation. Its draft is saved; fix it before enabling."));
+            let ready = current.ready.as_ref().ok_or_else(|| invalid("The Service check lost its Ready release"))?;
+            match ready.test.status {
+                nomifun_api_types::PluginRuntimeTestStatusDto::Passed => {},
+                nomifun_api_types::PluginRuntimeTestStatusDto::NeedsTestInput => {
+                    let receipt_id = ready.test.receipt_id.clone().ok_or_else(|| invalid("The Service check has no receipt"))?;
+                    let expected_revision = draft.revision.checked_add(1).ok_or_else(|| invalid("Invalid draft revision"))?;
+                    draft.service_test_confirmation = Some(ServiceTestConfirmation {
+                        expected_revision,
+                        draft_digest: draft_confirmation_digest(draft)?,
+                        release_digest: ready.release.release_digest.clone(),
+                        receipt_id: receipt_id.clone(),
+                        source_digest: current.source_snapshot_digest.clone(),
+                        config_revision: current.config.config_revision,
+                        credential_bindings_revision: current.credential_bindings_revision,
+                    });
+                    draft.status = "ready".into();
+                    draft.error = None;
+                    self.put_draft(owner, draft).await?;
+                    return Ok(SaveOutcome::NeedsServiceTestInput(ServiceTestInputRequired {
+                        draft_id: draft.id.clone(), expected_revision: draft.revision,
+                        release_digest: ready.release.release_digest.clone(), receipt_id,
+                        display_name: draft.name.clone(),
+                    }));
+                },
+                _ => return Err(invalid("The plugin's background code did not pass validation. Its draft is saved; fix it before enabling.")),
             }
         }
         if let Some(ready) = &current.ready {
@@ -613,7 +748,7 @@ impl PluginProductService {
                             .as_ref()
                             .map(|r| r.release_digest.clone()),
                         expected_service_test_receipt_id: ready.test.receipt_id.clone(),
-                        acknowledge_test_warning: false,
+                        acknowledge_test_warning: acknowledgement.is_some(),
                     },
                 )
                 .await
@@ -651,6 +786,6 @@ impl PluginProductService {
                 .await
                 .map_err(application_error)?;
         }
-        Ok(current)
+        Ok(SaveOutcome::Saved(current))
     }
 }

@@ -136,16 +136,16 @@ describe('Nomi sendbox control layout', () => {
     const nomiChatSource = readSource(new URL('./NomiChat.tsx', import.meta.url));
     const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
     const agentSwitchBlock = chatSource.slice(
-      chatSource.indexOf('const commitAgentSwitch'),
+      chatSource.indexOf('const switchAgent'),
       chatSource.indexOf('const currentAgentLabel'),
     );
 
     expect(chatSource.includes('<GuidAgentSelector')).toBe(true);
     expect(chatSource.includes('useAgentPresets()')).toBe(true);
-    expect(agentSwitchBlock.includes('sessions.switchPreset.invoke')).toBe(true);
-    expect(agentSwitchBlock.includes('resource_selections: resolution.selections')).toBe(true);
-    expect(chatSource.includes('<AgentResourcePicker')).toBe(true);
-    expect(agentSwitchBlock.includes('refreshConversationCache(target.conversationId)')).toBe(true);
+    expect(agentSwitchBlock.includes('sessions.switchPreset.invoke')).toBe(false);
+    expect(agentSwitchBlock.includes('const resolvePreset')).toBe(true);
+    expect(agentSwitchBlock.includes('setAgentChoice(selection)')).toBe(true);
+    expect(sendBoxSource.includes('preset_id: presetId')).toBe(true);
     expect(agentSwitchBlock.includes('conversation.stop.invoke')).toBe(false);
     expect(nomiChatSource.includes('agentSelectorNode={agentSelectorNode}')).toBe(true);
     expect(sendBoxSource.includes('{agentSelectorNode}')).toBe(true);
@@ -163,21 +163,31 @@ describe('Nomi sendbox control layout', () => {
     expect(initialMessageBlock.includes('initialOnly: true')).toBe(true);
   });
 
+  test('only personal Agent selections may reuse the staged preset without preparing the current official template', () => {
+    const source = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
+    const admission = source.slice(source.indexOf('const resolvePreset = async () =>'), source.indexOf('const selectCreationMode ='));
+    expect(admission.includes("if (agentChoice.kind === 'preset' && stagedPresetId) return stagedPresetId;")).toBe(true);
+    expect(admission.includes('if (stagedPresetId) return stagedPresetId;')).toBe(false);
+    expect(admission.includes('await resolveAgentSwitchTarget(selected)')).toBe(true);
+    const resolution = source.slice(source.indexOf('const resolveAgentSwitchTarget ='), source.indexOf('// Menus edit only the next draft.'));
+    expect(resolution.includes("if (selection.kind === 'template')")).toBe(true);
+    expect(resolution.includes('await prepareOfficialAgent(')).toBe(true);
+  });
+
   test('collapses text pills to icons and expands their labels inline on desktop hover', () => {
     const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
     const modelSource = readSource(new URL('./NomiModelSelector.tsx', import.meta.url));
     const sendBoxCss = readSource(new URL('../../../../components/chat/SendBox/sendbox.css', import.meta.url));
+    const responsiveCss = readSource(new URL('../../../../components/chat/ResponsiveComposerRow.module.css', import.meta.url));
     const collaboratorSource = readSource(new URL('../../../guid/components/GuidCollaboratorSelector.tsx', import.meta.url));
 
     expect(sendBoxSource.includes('sendbox-responsive-config-group')).toBe(true);
-    expect(sendBoxCss.includes('container-name: sendbox-config')).toBe(true);
-    expect(sendBoxCss.includes('@container sendbox-config (max-width: 560px)')).toBe(true);
-    expect(sendBoxCss.includes('.sendbox-responsive-label')).toBe(true);
+    expect(sendBoxCss.includes('container-name: sendbox-config')).toBe(false);
+    expect(responsiveCss.includes("[data-compact='true']")).toBe(true);
+    expect(responsiveCss.includes('.sendbox-responsive-label')).toBe(true);
     expect(sendBoxCss.includes(".nomi-sendbox-collaboration-btn[aria-pressed='true']")).toBe(true);
-    expect(sendBoxCss.includes('max-width 160ms ease')).toBe(true);
-    expect(sendBoxCss.includes('@media (hover: hover) and (pointer: fine)')).toBe(true);
-    expect(sendBoxCss.includes('.nomi-sendbox-model-btn:hover')).toBe(true);
-    expect(sendBoxCss.includes('display: inline-flex !important')).toBe(true);
+    expect(responsiveCss.includes(':hover, :focus-visible')).toBe(true);
+    expect(responsiveCss.includes('display: inline-flex !important')).toBe(true);
 
     for (const source of [modelSource, collaboratorSource]) {
       expect(source.includes('<Tooltip')).toBe(false);

@@ -56,5 +56,36 @@
     "draftOn": "Preset · enabled after creation",
     "draftOff": "Not preset",
     "willMount": "{{count}} base(s) will be mounted"
+  },
+  "showcase": {
+    "title": "My companions",
+    "all": "All companions · {{count}}",
+    "manage": "Manage companions",
+    "create": "Create companion",
+    "expand": "Expand",
+    "collapse": "Collapse",
+    "search": "Search companions",
+    "noMatches": "No matching companions",
+    "openChat": "Open chat",
+    "opening": "Opening…",
+    "chatFailed": "Could not open this companion’s chat. Please try again.",
+    "emptyTitle": "Invite your first companion",
+    "emptyDescription": "Choose a built-in character or create a companion with your own artwork.",
+    "loading": "Loading companions…",
+    "loadFailed": "Could not load companions",
+    "retry": "Retry",
+    "closeList": "Close companion list",
+    "moreFor": "More actions for {{name}}"
+  },
+  "utilities": {
+    "title": "Help and tools",
+    "help": "Help & feedback",
+    "docs": "Documentation",
+    "video": "Watch video",
+    "community": "Community",
+    "running": "Running",
+    "checking": "Checking",
+    "unavailable": "Unavailable",
+    "stopped": "Off"
   }
 }

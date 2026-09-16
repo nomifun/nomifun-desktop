@@ -7,6 +7,7 @@
 import type { ConversationId, MessageId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import AtFileMenu from '@/renderer/components/chat/AtFileMenu';
+import ResponsiveComposerRow from '@/renderer/components/chat/ResponsiveComposerRow';
 import BtwOverlay from '@/renderer/components/chat/BtwOverlay';
 import { SessionCapabilityComposerLayout } from '@/renderer/components/chat/SessionCapabilityPicker/ComposerLayout';
 import { useInputFocusRing } from '@/renderer/hooks/chat/useInputFocusRing';
@@ -185,10 +186,14 @@ const SendBox: React.FC<{
   className?: string;
   tools?: React.ReactNode;
   rightTools?: React.ReactNode;
+  creationTools?: React.ReactNode;
+  preserveDraftUntilAccepted?: boolean;
+  skipChatWarmup?: boolean;
   sideTools?: React.ReactNode;
   /** Conversation-only: compact status control rendered inside the composer header row. */
   topRightTools?: React.ReactNode;
   prefix?: React.ReactNode;
+  renderAttachments?: (workspaceItems: FileSelectionItem[], onRemoveWorkspaceItem: (path: string) => void) => React.ReactNode;
   placeholder?: string;
   onFilesAdded?: (files: FileMetadata[]) => void;
   supportedExts?: string[];
@@ -214,10 +219,14 @@ const SendBox: React.FC<{
   onEditResubmit,
   onClearContext,
   prefix,
+  renderAttachments,
   className,
   loading,
   tools,
   rightTools,
+  creationTools,
+  preserveDraftUntilAccepted = false,
+  skipChatWarmup = false,
   sideTools,
   topRightTools,
   disabled,
@@ -984,14 +993,14 @@ const SendBox: React.FC<{
     // (Idempotent: single-flight in warmupConversation + warmedConversationRef +
     // the backend's per-conversation OnceCell, so a redundant call is a no-op.)
     const cid = conversationContext?.conversation_id;
-    if (cid && warmedConversationRef.current !== cid) {
+    if (cid && !skipChatWarmup && warmedConversationRef.current !== cid) {
       if (warmupTimerRef.current) clearTimeout(warmupTimerRef.current);
       warmupTimerRef.current = setTimeout(() => {
         warmedConversationRef.current = cid;
         warmupConversation(cid).catch(() => {});
       }, 300);
     }
-  }, [handlePasteFocus, conversationContext?.conversation_id]);
+  }, [handlePasteFocus, conversationContext?.conversation_id, skipChatWarmup]);
   const handleInputBlur = useCallback(() => {
     if (warmupTimerRef.current) {
       clearTimeout(warmupTimerRef.current);
@@ -1149,7 +1158,7 @@ const SendBox: React.FC<{
   // Builds the final message from the current draft and CLEARS the input.
   // Returns null when there's nothing to send. Mirrors the compose half of
   // sendMessageHandler so steer can reuse it.
-  const composeAndClear = (): string | null => {
+  const composeAndClear = (clear = true): string | null => {
     if (!input.trim() && domSnippets.length === 0) return null;
 
     historyDraftRef.current = null;
@@ -1177,9 +1186,11 @@ const SendBox: React.FC<{
 
     // 立即清空输入框，避免异步 onSend 完成后覆盖用户新输入
     // Clear input immediately to prevent async onSend completion from overwriting new user input
-    setInput('');
-    clearDomSnippets();
-    setReplyQuote(null);
+    if (clear) {
+      setInput('');
+      clearDomSnippets();
+      setReplyQuote(null);
+    }
 
     return finalMessage;
   };
@@ -1267,10 +1278,18 @@ const SendBox: React.FC<{
       domSnippetCount: domSnippets.length,
     });
     setIsLoading(true);
-    const finalMessage = composeAndClear();
+    const submittedDraft = input;
+    const finalMessage = composeAndClear(!preserveDraftUntilAccepted);
     if (finalMessage == null) return;
 
     onSend(finalMessage)
+      .then(() => {
+        if (preserveDraftUntilAccepted && latestInputRef.current === submittedDraft) {
+          setInputRef.current('');
+          clearDomSnippets();
+          setReplyQuote(null);
+        }
+      })
       .catch(() => {})
       .finally(() => {
         setIsLoading(false);
@@ -1618,7 +1637,7 @@ const SendBox: React.FC<{
                 ))}
               </div>
             )}
-            {unmatchedSelectedWorkspaceItems.length > 0 && onSelectedWorkspaceItemsChange && (
+            {!renderAttachments && unmatchedSelectedWorkspaceItems.length > 0 && onSelectedWorkspaceItemsChange && (
               <div className='flex flex-wrap gap-6px mb-8px'>
                 {unmatchedSelectedWorkspaceItems.map((item) => (
                   <Tag
@@ -1761,20 +1780,35 @@ const SendBox: React.FC<{
               </div>
             )}
           </div>
+          {renderAttachments?.(selectedWorkspaceItems ?? [], (path) => {
+            const item = selectedWorkspaceItems?.find(item => getSelectedItemPath(item) === path);
+            if (!item) return;
+            const keys = getSelectedItemMatchKeys(item);
+            let nextInput = input;
+            for (const query of getAllAtFileQueries(input).filter(query => keys.includes(query.query)).reverse()) {
+              nextInput = nextInput.slice(0, query.start) + nextInput.slice(query.end);
+            }
+            if (nextInput !== input) setInput(nextInput);
+            mentionOwnedPathsRef.current.delete(path);
+            externalOwnedPathsRef.current.delete(path);
+            selectedItemByPathRef.current.delete(path);
+            onSelectedWorkspaceItemsChange?.((selectedWorkspaceItems ?? []).filter(item => getSelectedItemPath(item) !== path));
+          })}
           {!isSingleLine && (
-            <div className='sendbox-bottom-row flex items-center justify-between gap-2 w-full'>
+            <ResponsiveComposerRow className='sendbox-bottom-row flex items-center justify-between gap-2 w-full'>
               <div
                 className='sendbox-tools'
               >
                 {tools}
               </div>
-              <div className='sendbox-actions flex items-center gap-2'>
+              {creationTools}
+              <div data-composer-group className='sendbox-actions flex items-center gap-2' style={{ marginLeft: 'auto', maxWidth: '100%' }}>
                 {rightTools}
                 {renderedSpeechButton}
                 {sendButtonPrefix}
                 {renderActionButtons()}
               </div>
-            </div>
+            </ResponsiveComposerRow>
           )}
         </SessionCapabilityComposerLayout>
       </div>

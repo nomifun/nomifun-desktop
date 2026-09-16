@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -42,11 +42,35 @@ use thiserror::Error;
 
 use crate::plugin_tool_error_projection::model_safe_tool_error;
 
+#[path = "plugin_context.rs"]
+mod context;
+
 const PROVIDER_NAME_PREFIX: &str = "plugin__";
 const PROVIDER_NAME_SEPARATOR: &str = "__";
 const PROVIDER_NAME_MAX_BYTES: usize = 64;
 const PROVIDER_NAME_HASH_HEX_BYTES: usize = 20;
 const MAX_INITIAL_CAPABILITY_CONTEXT_BYTES: usize = 64 * 1024;
+
+/// Capability shapes actually consumed by the Nomi managed-Plugin adapter.
+/// Catalog availability uses the same predicate as runtime materialization;
+/// declaring a kind in a Package alone does not make it executable by Nomi.
+/// Source, exact artifact, runtime readiness and authorization are checked by
+/// their existing owners, not granted by this shape check.
+pub fn supports_nomi_plugin_capability(manifest: &CapabilityManifest) -> bool {
+    manifest.supports_consumer(CapabilityConsumer::Agent)
+        && match manifest.kind {
+            CapabilityKind::Tool => manifest
+                .contributions
+                .actions
+                .iter()
+                .any(|action| action.presentation == ToolPresentationKind::FunctionTool)
+                || crate::tool_discovery::supports(manifest),
+            CapabilityKind::ContextContributor => {
+                manifest.contributions.context_schema_refs.len() == 1
+            }
+            _ => false,
+        }
+}
 
 tokio::task_local! {
     static CURRENT_NOMI_PLUGIN_TOOL_SESSION: Option<NomiPluginToolSession>;
@@ -54,6 +78,8 @@ tokio::task_local! {
 
 #[derive(Debug, Error)]
 pub enum NomiPluginToolError {
+    #[error("Hosted effect outcome is unproven: {0}")]
+    OutcomeUnknown(String),
     #[error("Nomi Plugin Tool contract error: {0}")]
     Contract(String),
     #[error("Nomi Plugin Tool schema {reference:?} could not be resolved: {reason}")]
@@ -182,6 +208,7 @@ impl NomiPlatformBuiltinToolSchemaResolver
 pub struct NomiPlatformBuiltinToolAdmission {
     targets: Arc<BTreeMap<CapabilityId, MaterializedCapability>>,
     schema_resolver: Arc<dyn NomiPlatformBuiltinToolSchemaResolver>,
+    mcp_targets: Arc<BTreeMap<CapabilityId, (MaterializedCapability, StrictJsonValue)>>,
 }
 
 impl fmt::Debug for NomiPlatformBuiltinToolAdmission {
@@ -233,7 +260,43 @@ impl NomiPlatformBuiltinToolAdmission {
         Ok(Self {
             targets: Arc::new(targets),
             schema_resolver,
+            mcp_targets: Arc::new(BTreeMap::new()),
         })
+    }
+
+    /// Supplement this Session's host approval with exact frozen MCP tools.
+    /// The product host must first validate each mapping/resource/descriptor;
+    /// schemas here are already resolved data, never a remote discovery hook.
+    /// This does not add IDs to the PlatformBuiltin approval set.
+    pub fn with_mcp_tools(
+        mut self,
+        registry: &MaterializedRegistry,
+        schemas: BTreeMap<CapabilityId, StrictJsonValue>,
+    ) -> Result<Self, NomiPluginToolError> {
+        if !self.mcp_targets.is_empty() || schemas.len() > 1024 {
+            return Err(NomiPluginToolError::Contract("MCP approval is already installed or exceeds its bound".into()));
+        }
+        let mut targets = BTreeMap::new();
+        for (id, schema) in schemas {
+            let target = registry.capability(&id).ok_or_else(|| NomiPluginToolError::Contract("MCP target is absent".into()))?;
+            let [action] = target.manifest.contributions.actions.as_slice() else {
+                return Err(NomiPluginToolError::Contract("MCP target needs one exact action".into()));
+            };
+            if target.source.source_kind != PluginSourceKind::Bundled
+                || target.contribution_lock.source_kind != ContributionSourceKind::McpBinding
+                || target.manifest.kind != CapabilityKind::Tool
+                || !target.manifest.supports_consumer(CapabilityConsumer::Agent)
+                || action.presentation != ToolPresentationKind::FunctionTool
+                || registry.mcp_for_capability(&id).is_none()
+                || self.targets.contains_key(&id)
+            {
+                return Err(NomiPluginToolError::Contract("MCP target lacks exact bundled function-tool provenance".into()));
+            }
+            validate_canonical_input_schema(&action.input_schema, &schema)?;
+            targets.insert(id, (target.clone(), schema));
+        }
+        self.mcp_targets = Arc::new(targets);
+        Ok(self)
     }
 
     pub fn approved_capability_ids(&self) -> BTreeSet<CapabilityId> {
@@ -592,6 +655,15 @@ pub struct NomiPluginToolSessionRequest {
 /// binding and delegates materialization to [`KernelNomiPluginToolSession`].
 #[async_trait]
 pub trait NomiPluginToolSessionProvider: Send + Sync {
+    /// Read-only cold discovery. Implementations must not delegate this to
+    /// resolve(): session materialization can execute Context and acquire resources.
+    async fn discover_skill_commands(
+        &self,
+        _request: NomiPluginToolSessionRequest,
+    ) -> Result<Vec<nomifun_api_types::SlashCommandItem>, AppError> {
+        Ok(Vec::new())
+    }
+
     async fn resolve(
         &self,
         request: NomiPluginToolSessionRequest,
@@ -727,14 +799,32 @@ pub struct NomiPluginToolInvocation {
 
 #[async_trait]
 pub trait NomiPluginToolInvoker: Send + Sync {
+    async fn preflight(&self, _request: NomiPluginToolInvocation) -> Result<(), NomiPluginToolError> {
+        Err(NomiPluginToolError::Contract("Plugin Tool does not provide read-only hook admission".into()))
+    }
     async fn invoke(
         &self,
         request: NomiPluginToolInvocation,
     ) -> Result<StrictJsonValue, NomiPluginToolError>;
 }
 
+/// One invocation's cooperative cancellation signal. The retained owner task
+/// outlives its waiter and continues recording the actual outcome.
+#[derive(Clone, Debug, Default)]
+pub struct NomiPluginProductCallCancellation(Arc<std::sync::atomic::AtomicBool>);
+
+impl PartialEq for NomiPluginProductCallCancellation {
+    fn eq(&self, other: &Self) -> bool { Arc::ptr_eq(&self.0, &other.0) }
+}
+impl NomiPluginProductCallCancellation {
+    pub fn cancel(&self) { self.0.store(true, std::sync::atomic::Ordering::Release); }
+    pub fn is_canceled(&self) -> bool { self.0.load(std::sync::atomic::Ordering::Acquire) }
+    pub fn shared_flag(&self) -> Arc<std::sync::atomic::AtomicBool> { self.0.clone() }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct NomiPluginProductToolInvocation {
+    cancellation: NomiPluginProductCallCancellation,
     identity: NomiPluginProductToolActionIdentity,
     operation_id: OperationId,
     idempotency_key: IdempotencyKey,
@@ -743,6 +833,8 @@ pub struct NomiPluginProductToolInvocation {
 }
 
 impl NomiPluginProductToolInvocation {
+    pub fn cancellation(&self) -> &NomiPluginProductCallCancellation { &self.cancellation }
+
     pub fn capability(&self) -> &ResolvedCapability {
         &self.identity.resolved_capability
     }
@@ -770,6 +862,9 @@ impl NomiPluginProductToolInvocation {
 
 #[async_trait]
 pub trait NomiPluginProductToolInvoker: Send + Sync {
+    async fn preflight(&self, _request: NomiPluginProductToolInvocation) -> Result<(), NomiPluginToolError> {
+        Err(NomiPluginToolError::Contract("Product Tool does not provide read-only hook admission".into()))
+    }
     async fn invoke(
         &self,
         request: NomiPluginProductToolInvocation,
@@ -819,6 +914,11 @@ impl NomiHostDynamicToolError {
 
 fn model_safe_dynamic_tool_error(error: &NomiHostDynamicToolError) -> ToolResult {
     let (code, message, retry_safe) = match error.code.as_ref() {
+        "HOSTED_EFFECT_UNPROVEN" => (
+            "HOSTED_EFFECT_UNPROVEN",
+            "The hosted effect outcome is unproven. This Session is fenced; do not retry or infer that the effect was undone.",
+            false,
+        ),
         "INVALID_PAYLOAD" => (
             "INVALID_PAYLOAD",
             "The device tool arguments are invalid.",
@@ -927,6 +1027,30 @@ struct NomiLifecycleIdentity {
     schema_ref: Option<CanonicalSchemaRef>,
 }
 
+#[path = "model_middleware.rs"]
+pub mod model_middleware;
+#[path = "tool_middleware.rs"]
+pub mod tool_middleware;
+
+/// Host-owned inputs collected before installing any execution consumer.
+/// Product tools, hidden hooks and dynamic tools receive one finalized scope.
+/// This is assembly data, not another registry or executor.
+pub struct NomiHostedSessionBindings {
+    pub effect_scope: Arc<crate::engine_effect_scope::EngineEffectScope>,
+    pub product: Option<(Vec<NomiPluginProductToolAction>, Arc<dyn NomiPluginProductToolInvoker>)>,
+    pub dynamic: Option<(Vec<NomiHostDynamicToolDescriptor>, Arc<dyn NomiHostDynamicToolInvoker>)>,
+    pub context: Vec<Arc<dyn ContextContributor>>,
+    pub session_control: Option<Arc<dyn crate::SessionControlSink>>,
+    pub mcp_resources: Option<crate::nomi_resources::NomiMcpResources>,
+}
+
+impl NomiHostedSessionBindings {
+    pub fn new(effect_scope: Arc<crate::engine_effect_scope::EngineEffectScope>) -> Self {
+        Self { effect_scope, product: None, dynamic: None, context: Vec::new(),
+            session_control: None, mcp_resources: None }
+    }
+}
+
 /// A complete set of Plugin action tools for one frozen Nomi session.
 #[derive(Clone)]
 pub struct NomiPluginToolSession {
@@ -935,6 +1059,13 @@ pub struct NomiPluginToolSession {
     #[cfg(feature = "browser-use")]
     system_browser_binding: Option<nomifun_browser_platform::system_browser::SystemBrowserBinding>,
     browser_provider: Option<nomifun_agent_contracts::ExactRoleProviderRef>,
+    execution_constraints: nomifun_api_types::ExecutionConstraints,
+    selected_skills: Option<crate::nomi_skills::NomiSelectedSkills>,
+    mcp_resources: Option<crate::nomi_resources::NomiMcpResources>,
+    effect_scope: Option<Arc<crate::engine_effect_scope::EngineEffectScope>>,
+    discovery_policy: Option<crate::tool_discovery::DiscoveryBinding>,
+    model_middleware: Vec<model_middleware::Binding>,
+    tool_middleware: Vec<tool_middleware::Binding>,
     resolved_snapshot_ref: ResolvedSnapshotRef,
     /// Exact server-compiled resource bindings for this frozen Session.
     /// Runtime factories may inspect these bindings to lazily connect
@@ -949,6 +1080,7 @@ pub struct NomiPluginToolSession {
     host_dynamic_actions: Arc<[NomiHostDynamicToolAction]>,
     host_dynamic_invoker: Option<Arc<dyn NomiHostDynamicToolInvoker>>,
     capability_state: Option<Arc<SessionCapabilityState>>,
+    pub(crate) host_skills: Arc<[Arc<nomi_agent::host_skills::HostSkill>]>,
     /// Host-owned, Session-scoped dynamic context sources. These are attached
     /// only after the provider has resolved the exact persisted Session; a
     /// Plugin manifest or model payload cannot construct one.
@@ -1002,6 +1134,57 @@ impl NomiPluginToolSession {
         }
         Ok(self.browser_provider.as_ref())
     }
+    pub(crate) fn media_creation_catalog_tools(&self) -> Vec<(String, String)> {
+        self.actions.iter().filter(|action| is_builtin_creation(&action.identity)
+            && action.capability_id().as_ref() != "creation.text")
+            .map(|action| (action.capability_id().as_ref().to_owned(), action.provider_name.clone())).collect()
+    }
+
+    pub(crate) fn media_creation_provider_names(&self) -> std::collections::HashSet<String> {
+        self.actions.iter().filter(|action| is_builtin_creation(&action.identity)
+            && action.capability_id().as_ref() != "creation.text")
+            .map(|action| action.provider_name.clone()).collect()
+    }
+
+    pub(crate) fn with_creation_receipt_sink(mut self, sink: Arc<crate::capability::backend_output_sink::BackendOutputSink>, conversation_id: String) -> Self {
+        self.invoker = Arc::new(NomiCreationReceiptInvoker { delegate: self.invoker.clone(), sink, conversation_id });
+        self
+    }
+
+    pub fn execution_constraints(&self) -> nomifun_api_types::ExecutionConstraints {
+        self.execution_constraints
+    }
+
+    /// Called after every dynamic extension, before registry installation.
+    /// Native aliases are intersected; exact host-materialized action names
+    /// are admitted only if their canonical capability passed materialization.
+    pub fn constrain_tool_policy(&self, allowed: &mut Vec<String>, deferred: &mut Vec<String>) {
+        let ceiling = self.execution_constraints;
+        let allowed_name = |name: &str| {
+            if ceiling.exclude_delegation && name == crate::subagent_gateway::gateway_delegate_provider_name() {
+                return false;
+            }
+            ceiling.allows_nomi_tool(name)
+                || (ceiling.restricted() && (self.actions.iter().any(|action| action.provider_name == name)
+                    || (name == crate::nomi_skills::RESOURCE_TOOL && self.selected_skills.is_some())))
+        };
+        allowed.retain(|name| allowed_name(name));
+        deferred.retain(|name| allowed.contains(name));
+    }
+
+    pub(crate) fn has_frozen_mcp_tools(&self) -> bool {
+        self.actions.iter().any(|action| action.identity.resolved_capability.contribution_lock.source_kind == ContributionSourceKind::McpBinding)
+    }
+
+    pub(crate) fn has_hosted_mcp_resources(&self) -> bool { self.mcp_resources.is_some() }
+
+    fn with_mcp_resources(mut self, resources: crate::nomi_resources::NomiMcpResources) -> Result<Self, NomiPluginToolError> {
+        if self.mcp_resources.is_some() || !self.execution_constraints.allows_capability("mcp.resource") {
+            return Err(NomiPluginToolError::Contract("MCP resource adapter is already installed or outside the execution ceiling".into()));
+        }
+        self.mcp_resources = Some(resources);
+        Ok(self)
+    }
     pub(crate) fn new(
         resolved_snapshot_ref: ResolvedSnapshotRef,
         mut actions: Vec<NomiPluginToolAction>,
@@ -1043,6 +1226,11 @@ impl NomiPluginToolSession {
             #[cfg(feature = "browser-use")]
             system_browser_binding: None,
             browser_provider: None,
+            execution_constraints: Default::default(),
+            effect_scope: None,
+            discovery_policy: None,
+            model_middleware: Vec::new(),
+            tool_middleware: Vec::new(),
             target_resource_bindings: Arc::from(
                 Vec::<nomifun_agent_contracts::TypedResourceBinding>::new(),
             ),
@@ -1053,9 +1241,12 @@ impl NomiPluginToolSession {
             initial_context_contributions: Arc::from(
                 Vec::<NomiInitialContextContribution>::new(),
             ),
+            selected_skills: None,
+            mcp_resources: None,
             host_dynamic_actions: Arc::from(Vec::<NomiHostDynamicToolAction>::new()),
             host_dynamic_invoker: None,
             capability_state: None,
+            host_skills: Arc::from(Vec::new()),
             context_contributors: Arc::from(
                 Vec::<Arc<dyn ContextContributor>>::new(),
             ),
@@ -1063,17 +1254,62 @@ impl NomiPluginToolSession {
         })
     }
 
-    /// Attach one host-authenticated dynamic context source to this exact
-    /// Session. The contributor is retained by the runtime and therefore its
-    /// `Drop` lifecycle is the Session disposal boundary.
-    pub fn with_context_contributor(
+    /// Install host execution bindings once, after collecting all dependencies.
+    /// No consumer is published with an unscoped invoker and later rebound.
+    pub fn bind_hosted_execution(
         mut self,
-        contributor: Arc<dyn ContextContributor>,
-    ) -> Self {
-        let mut contributors = self.context_contributors.to_vec();
-        contributors.push(contributor);
+        bindings: NomiHostedSessionBindings,
+    ) -> Result<Self, NomiPluginToolError> {
+        self = self.install_effect_scope(bindings.effect_scope)?;
+        if let Some((actions, invoker)) = bindings.product {
+            self = self.install_plugin_product_actions(actions, invoker)?;
+        }
+        if let Some((actions, invoker)) = bindings.dynamic {
+            self = self.install_host_dynamic_tools(actions, invoker)?;
+        }
+        for contributor in bindings.context {
+            self = self.with_context_contributor(contributor)?;
+        }
+        if let Some(resources) = bindings.mcp_resources {
+            self = self.with_mcp_resources(resources)?;
+        }
+        if let Some(sink) = bindings.session_control {
+            self = self.with_session_control_sink(sink);
+        }
+        self.model_middleware()?;
+        self.tool_middleware()?;
+        if matches!(self.discovery_policy, Some(crate::tool_discovery::DiscoveryBinding::Product(_))) {
+            return Err(NomiPluginToolError::Contract("Selected Product discovery policy is missing its exact action adapter".into()));
+        }
+        Ok(self)
+    }
+
+    fn install_effect_scope(
+        mut self,
+        scope: Arc<crate::engine_effect_scope::EngineEffectScope>,
+    ) -> Result<Self, NomiPluginToolError> {
+        if self.effect_scope.is_some() {
+            return Err(NomiPluginToolError::Contract("effect scope already installed".into()));
+        }
+        if self.context_contributors.len() >= 64 {
+            return Err(NomiPluginToolError::Contract("too many host context contributors".into()));
+        }
+        // Check before lifecycle/context contributors and every model round,
+        // including when a cancelled call has already produced a late receipt.
+        let mut contributors: Vec<Arc<dyn ContextContributor>> = vec![Arc::new(NomiEffectContextFence {
+            scope: scope.clone(),
+        })];
+        contributors.extend(self.context_contributors.iter().cloned());
         self.context_contributors = Arc::from(contributors);
-        self
+        self.invoker = Arc::new(OwnedNomiPluginToolInvoker {
+            delegate: self.invoker.clone(), scope: scope.clone(),
+        });
+        self.effect_scope = Some(scope);
+        Ok(self)
+    }
+
+    pub fn effect_scope(&self) -> Option<Arc<crate::engine_effect_scope::EngineEffectScope>> {
+        self.effect_scope.clone()
     }
 
     pub fn context_contributors(
@@ -1082,10 +1318,44 @@ impl NomiPluginToolSession {
         &self.context_contributors
     }
 
+    pub fn with_selected_skills(mut self, skills: crate::nomi_skills::NomiSelectedSkills) -> Result<Self, NomiPluginToolError> {
+        if self.selected_skills.is_some() {
+            return Err(NomiPluginToolError::Contract("selected Skills already installed".into()));
+        }
+        self.selected_skills = Some(skills);
+        Ok(self)
+    }
+
+    pub(crate) fn with_context_image_policy(mut self, supports_image: bool) -> Result<Self, nomifun_common::AppError> {
+        // The host has already intersected exact model support with the frozen
+        // enabled llm.vision selection. There is no runtime activation grant.
+        if let Some(resources) = &self.mcp_resources { resources.bind_image_policy(supports_image)?; }
+        if let Some(skills) = &mut self.selected_skills { skills.image_policy(supports_image); }
+        Ok(self)
+    }
+
+    /// Append a mandatory host context source without replacing lifecycle or
+    /// Robot contributors already materialized for this exact Session.
+    fn with_context_contributor(mut self, contributor: Arc<dyn ContextContributor>) -> Result<Self, NomiPluginToolError> {
+        if self.context_contributors.len() >= 64 {
+            return Err(NomiPluginToolError::Contract("too many host context contributors".into()));
+        }
+        let mut contributors = self.context_contributors.to_vec();
+        contributors.push(contributor);
+        self.context_contributors = Arc::from(contributors);
+        Ok(self)
+    }
+    pub fn model_middleware(&self) -> Result<Vec<Arc<dyn nomi_agent::model_middleware::ModelRequestMiddleware>>, NomiPluginToolError> {
+        self.model_middleware.iter().map(model_middleware::Binding::consumer).collect()
+    }
+    pub fn tool_middleware(&self) -> Result<Vec<Arc<dyn nomi_agent::tool_middleware::ToolCallMiddleware>>, NomiPluginToolError> {
+        self.tool_middleware.iter().map(tool_middleware::Binding::consumer).collect()
+    }
+
     /// Attach the native control owner for this exact host-authenticated
     /// AgentSession. It is intentionally not accepted by Plugin manifests or
     /// model input.
-    pub fn with_session_control_sink(
+    fn with_session_control_sink(
         mut self,
         sink: Arc<dyn crate::SessionControlSink>,
     ) -> Self {
@@ -1102,11 +1372,47 @@ impl NomiPluginToolSession {
     /// Add exact Plugin Product Active Release actions to this same Nomi Tool
     /// session. Plugin and Plugin Product actions share one registry/policy
     /// surface, while their invokers remain separate execution adapters.
-    pub fn with_plugin_product_actions(
+    fn install_plugin_product_actions(
         mut self,
         mut actions: Vec<NomiPluginProductToolAction>,
         invoker: Arc<dyn NomiPluginProductToolInvoker>,
     ) -> Result<Self, NomiPluginToolError> {
+        if self.plugin_product_invoker.is_some() {
+            return Err(NomiPluginToolError::Contract("Plugin Product adapter already installed".into()));
+        }
+        if self.execution_constraints.restricted() && !actions.is_empty() {
+            return Err(NomiPluginToolError::Contract("Plugin Product tools exceed the Session execution ceiling".into()));
+        }
+        // Bind every consumer to the same retained invoker, including Hidden
+        // consumers assembled below, not just the model-visible tool list.
+        let scope = self.effect_scope.clone().ok_or_else(|| NomiPluginToolError::Contract("host execution scope is missing".into()))?;
+        let invoker: Arc<dyn NomiPluginProductToolInvoker> =
+            Arc::new(OwnedNomiPluginProductToolInvoker { delegate: invoker, scope });
+        let middleware = actions.iter().filter(|a| a.identity.action == model_middleware::action()).collect::<Vec<_>>();
+        model_middleware::bind(&mut self.model_middleware, &middleware, &self.resolved_snapshot_ref, invoker.clone())?;
+        let tool_checks = actions.iter().filter(|a| a.identity.action == tool_middleware::before_action()).collect::<Vec<_>>();
+        tool_middleware::bind(&mut self.tool_middleware, &tool_checks, &self.resolved_snapshot_ref, invoker.clone())?;
+        let hidden = actions.iter().filter(|action| action.identity.action.presentation == ToolPresentationKind::Hidden
+            && action.identity.action != model_middleware::action()
+            && action.identity.action != tool_middleware::before_action()).collect::<Vec<_>>();
+        match (&self.discovery_policy, hidden.as_slice()) {
+            (Some(crate::tool_discovery::DiscoveryBinding::Product(expected)), [action])
+                if &action.identity.resolved_capability == expected
+                    && action.identity.resolved_snapshot_ref == self.resolved_snapshot_ref
+                    && action.identity.action == crate::tool_discovery::action() => {
+                self.discovery_policy = Some(crate::tool_discovery::DiscoveryBinding::Ready(
+                    expected.capability.id.clone(), Arc::new(NomiPluginProductDiscoveryPolicy {
+                        action: (*action).clone(), invoker: invoker.clone(),
+                    }),
+                ));
+            }
+            (Some(crate::tool_discovery::DiscoveryBinding::Product(_)), _) => return Err(NomiPluginToolError::Contract(
+                "Selected Product discovery policy is missing its exact action adapter".into(),
+            )),
+            (_, []) => {}
+            _ => return Err(NomiPluginToolError::Contract("Unexpected or conflicting Product discovery action".into())),
+        }
+        actions.retain(|action| action.identity.action.presentation == ToolPresentationKind::FunctionTool);
         actions.sort_by(|left, right| {
             (
                 left.capability_id(),
@@ -1177,11 +1483,14 @@ impl NomiPluginToolSession {
         self.capability_state.clone()
     }
 
-    pub fn with_host_dynamic_tools(
+    fn install_host_dynamic_tools(
         mut self,
         mut descriptors: Vec<NomiHostDynamicToolDescriptor>,
         invoker: Arc<dyn NomiHostDynamicToolInvoker>,
     ) -> Result<Self, NomiPluginToolError> {
+        if self.host_dynamic_invoker.is_some() {
+            return Err(NomiPluginToolError::Contract("dynamic Tool adapter already installed".into()));
+        }
         descriptors.sort_by(|left, right| {
             (&left.capability_id, &left.provider_name)
                 .cmp(&(&right.capability_id, &right.provider_name))
@@ -1194,6 +1503,11 @@ impl NomiPluginToolSession {
             .collect::<BTreeSet<_>>();
         let mut actions = Vec::with_capacity(descriptors.len());
         for descriptor in descriptors {
+            if self.execution_constraints.restricted()
+                || !self.execution_constraints.allows_capability(descriptor.capability_id.as_ref())
+            {
+                return Err(NomiPluginToolError::Contract("Dynamic tool exceeds the Session execution ceiling".into()));
+            }
             if descriptor.provider_name.trim().is_empty()
                 || !descriptor.input_schema.0.is_object()
                 || !names.insert(descriptor.provider_name.clone())
@@ -1217,7 +1531,8 @@ impl NomiPluginToolSession {
             });
         }
         self.host_dynamic_actions = Arc::from(actions);
-        self.host_dynamic_invoker = Some(invoker);
+        let scope = self.effect_scope.clone().ok_or_else(|| NomiPluginToolError::Contract("host execution scope is missing".into()))?;
+        self.host_dynamic_invoker = Some(Arc::new(OwnedNomiDynamicToolInvoker { delegate: invoker, scope }));
         Ok(self)
     }
 
@@ -1231,7 +1546,7 @@ impl NomiPluginToolSession {
         &self,
         base: Option<&str>,
     ) -> Result<Option<String>, NomiPluginToolError> {
-        if self.initial_context_contributions.is_empty() {
+        if self.initial_context_contributions.is_empty() && self.selected_skills.is_none() {
             return Ok(base.map(str::to_owned));
         }
         let bytes = canonical_json_bytes(
@@ -1242,9 +1557,9 @@ impl NomiPluginToolSession {
                 "initial capability context could not be encoded: {error}"
             ))
         })?;
-        if bytes.len() > MAX_INITIAL_CAPABILITY_CONTEXT_BYTES {
+        if bytes.len().saturating_add(self.selected_skills.as_ref().map_or(0, |skills| skills.prompt().len())) > MAX_INITIAL_CAPABILITY_CONTEXT_BYTES {
             return Err(NomiPluginToolError::Contract(format!(
-                "initial capability context exceeds the {MAX_INITIAL_CAPABILITY_CONTEXT_BYTES}-byte Nomi prompt limit"
+                "initial capability and Skill context exceeds the {MAX_INITIAL_CAPABILITY_CONTEXT_BYTES}-byte Nomi prompt limit"
             )));
         }
         let context = String::from_utf8(bytes).map_err(|error| {
@@ -1261,6 +1576,10 @@ impl NomiPluginToolSession {
         );
         prompt.push_str(&context);
         prompt.push_str("\n</nomifun_initial_capability_context>");
+        if let Some(skills) = &self.selected_skills {
+            prompt.push_str("\n\n");
+            prompt.push_str(skills.prompt());
+        }
         Ok(Some(prompt))
     }
 
@@ -1268,6 +1587,8 @@ impl NomiPluginToolSession {
         self.actions.len()
             + self.plugin_product_actions.len()
             + self.host_dynamic_actions.len()
+            + usize::from(self.selected_skills.as_ref().is_some_and(|skills| skills.has_resources()))
+            + if self.mcp_resources.is_some() { crate::nomi_resources::NAMES.len() } else { 0 }
     }
 
     pub fn provider_names_for(
@@ -1275,6 +1596,12 @@ impl NomiPluginToolSession {
         capability_id: &str,
         deferred: bool,
     ) -> Vec<String> {
+        if capability_id == "mcp.resource" && self.mcp_resources.as_ref().is_some_and(|resources| resources.deferred == deferred) {
+            return crate::nomi_resources::NAMES.map(str::to_owned).to_vec();
+    }
+        if self.discovery_policy.as_ref().is_some_and(|binding| binding.id().as_ref() == capability_id) {
+            return vec!["ToolSearch".into()];
+        }
         self.actions
             .iter()
             .filter(|action| {
@@ -1308,6 +1635,23 @@ impl NomiPluginToolSession {
         allowed_tools: &mut Vec<String>,
         deferred_tools: &mut Vec<String>,
     ) {
+        if let Some(resources) = &self.mcp_resources {
+            for name in crate::nomi_resources::NAMES {
+                push_unique(allowed_tools, name);
+                if resources.deferred { push_unique(deferred_tools, name); }
+            }
+        }
+        if self.selected_skills.as_ref().is_some_and(|skills| skills.has_resources()) {
+            push_unique(allowed_tools, crate::nomi_skills::RESOURCE_TOOL);
+        }
+        if self.discovery_policy.is_some() {
+            push_unique(allowed_tools, "ToolSearch");
+            deferred_tools.retain(|name| name != "ToolSearch");
+        }
+        if !self.host_skills.is_empty() {
+            push_unique(allowed_tools, "Skill");
+            deferred_tools.retain(|name| name != "Skill");
+        }
         for action in self.actions.iter() {
             push_unique(allowed_tools, &action.provider_name);
         }
@@ -1331,10 +1675,21 @@ impl NomiPluginToolSession {
         &self,
         registry: &mut ToolRegistry,
     ) -> Result<(), NomiPluginToolError> {
+        // A selected Product policy cannot silently become native discovery
+        // when a caller forgets the second existing source-adapter phase.
+        let discovery_policy = self.discovery_policy.as_ref().map(|binding| binding.policy()).transpose()?;
+        self.model_middleware()?;
+        self.tool_middleware()?;
         if self.actions.is_empty()
             && self.plugin_product_actions.is_empty()
             && self.host_dynamic_actions.is_empty()
+            && !self.selected_skills.as_ref().is_some_and(|skills| skills.has_resources())
+            && self.mcp_resources.is_none()
         {
+            if let Some(policy) = &discovery_policy {
+                registry.install_discovery_policy(policy.clone())
+                    .map_err(|message| NomiPluginToolError::Contract(message.into()))?;
+            }
             return Ok(());
         }
         let deferred_state = registry.deferred_state();
@@ -1374,8 +1729,15 @@ impl NomiPluginToolSession {
                 "host dynamic Tools are present without an execution adapter".to_owned(),
             ));
         }
+        if let Some(skills) = &self.selected_skills {
+            if skills.has_resources() { tools.push(Box::new(skills.clone())); }
+        }
+        if let Some(resources) = &self.mcp_resources {
+            let scope = self.effect_scope.clone().ok_or_else(|| NomiPluginToolError::Contract("MCP resources require a retained effect scope".into()))?;
+            tools.extend(resources.tools(deferred_state.clone(), scope));
+        }
         let inserted = registry.register_batch(tools);
-        let expected = self
+        let mut expected = self
             .actions
             .iter()
             .map(|action| action.provider_name.clone())
@@ -1391,11 +1753,19 @@ impl NomiPluginToolSession {
             )
             .collect::<BTreeSet<_>>();
         let inserted = inserted.into_iter().collect::<BTreeSet<_>>();
+        if self.selected_skills.as_ref().is_some_and(|skills| skills.has_resources()) {
+            expected.insert(crate::nomi_skills::RESOURCE_TOOL.into());
+        }
+        if self.mcp_resources.is_some() { expected.extend(crate::nomi_resources::NAMES.map(str::to_owned)); }
         if inserted != expected {
             return Err(NomiPluginToolError::Contract(
                 "Nomi registry rejected one or more exact hosted Tool routes"
                     .to_owned(),
             ));
+        }
+        if let Some(policy) = &discovery_policy {
+            registry.install_discovery_policy(policy.clone())
+                .map_err(|message| NomiPluginToolError::Contract(message.into()))?;
         }
         Ok(())
     }
@@ -1408,6 +1778,7 @@ pub struct KernelNomiPluginToolSession;
 enum NomiKernelToolSchemaSource {
     ManagedPlugin,
     PlatformBuiltin,
+    FrozenMcp,
 }
 
 impl KernelNomiPluginToolSession {
@@ -1430,6 +1801,7 @@ impl KernelNomiPluginToolSession {
             None,
             None,
             None,
+            Default::default(),
         )
         .await
     }
@@ -1462,6 +1834,7 @@ impl KernelNomiPluginToolSession {
             Some(platform_builtin_admission),
             None,
             None,
+            Default::default(),
         )
         .await
     }
@@ -1498,6 +1871,7 @@ impl KernelNomiPluginToolSession {
             Some(platform_builtin_tool_admission),
             Some(platform_builtin_context_admission),
             None,
+            Default::default(),
         )
         .await
     }
@@ -1520,6 +1894,27 @@ impl KernelNomiPluginToolSession {
             NomiPlatformBuiltinLifecycleAdmission,
         >,
     ) -> Result<NomiPluginToolSession, NomiPluginToolError> {
+        Self::materialize_for_execution(
+            kernel, compiled, owner, agent_session_id, state_scope_key,
+            plugin_schema_resolver, platform_builtin_tool_admission,
+            platform_builtin_context_admission, platform_builtin_lifecycle_admission,
+            Default::default(),
+        ).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn materialize_for_execution(
+        kernel: Arc<KernelRegistry>,
+        compiled: Arc<CompiledSnapshot>,
+        owner: PrincipalRef,
+        agent_session_id: AgentSessionId,
+        state_scope_key: ScopeKey,
+        plugin_schema_resolver: Arc<dyn NomiPluginToolSchemaResolver>,
+        platform_builtin_tool_admission: Arc<NomiPlatformBuiltinToolAdmission>,
+        platform_builtin_context_admission: Arc<NomiPlatformBuiltinContextAdmission>,
+        platform_builtin_lifecycle_admission: Arc<NomiPlatformBuiltinLifecycleAdmission>,
+        constraints: nomifun_api_types::ExecutionConstraints,
+    ) -> Result<NomiPluginToolSession, NomiPluginToolError> {
         Self::materialize_internal(
             kernel,
             compiled,
@@ -1528,8 +1923,9 @@ impl KernelNomiPluginToolSession {
             state_scope_key,
             plugin_schema_resolver,
             Some(platform_builtin_tool_admission),
-            Some(platform_builtin_context_admission),
-            Some(platform_builtin_lifecycle_admission),
+            (!constraints.restricted()).then_some(platform_builtin_context_admission),
+            (!constraints.restricted()).then_some(platform_builtin_lifecycle_admission),
+            constraints,
         )
         .await
     }
@@ -1551,6 +1947,7 @@ impl KernelNomiPluginToolSession {
         platform_builtin_lifecycle_admission: Option<
             Arc<NomiPlatformBuiltinLifecycleAdmission>,
         >,
+        constraints: nomifun_api_types::ExecutionConstraints,
     ) -> Result<NomiPluginToolSession, NomiPluginToolError> {
         validate_session_identity(
             &compiled,
@@ -1561,25 +1958,26 @@ impl KernelNomiPluginToolSession {
         let registry = kernel.snapshot()?;
 
         let active = Arc::new(SessionCapabilityState::new(&compiled));
+        let discovery_policy = if constraints.restricted() { None } else {
+            crate::tool_discovery::KernelDiscoveryPolicy::materialize(
+            kernel.clone(), compiled.clone(), active.clone(), owner.clone(), agent_session_id.clone(), state_scope_key.clone(),
+            )?
+        };
         let active_snapshot = active.snapshot()?;
-        let mut initial_context_contributions = match (
-            platform_builtin_context_admission.as_ref(),
-            compiled.content().enabled_capabilities.is_empty(),
-        ) {
-            (Some(admission), false) => {
-                assemble_initial_platform_builtin_context(
-                    &kernel,
-                    &compiled,
-                    &active_snapshot,
-                    registry.as_ref(),
-                    &owner,
-                    &agent_session_id,
-                    &state_scope_key,
-                    admission,
-                )
-                .await?
-            }
-            _ => Vec::new(),
+        let (mut initial_context_contributions, turn_context_ids) = if constraints.restricted() {
+            (Vec::new(), Vec::new())
+        } else {
+            assemble_initial_capability_context(
+                &kernel,
+                &compiled,
+                &active_snapshot,
+                registry.as_ref(),
+                &owner,
+                &agent_session_id,
+                &state_scope_key,
+                platform_builtin_context_admission.as_deref(),
+            )
+            .await?
         };
         if let Some(admission) =
             platform_builtin_lifecycle_admission.as_ref()
@@ -1641,13 +2039,24 @@ impl KernelNomiPluginToolSession {
         if let Some(contributor) = middleware_context_contributor {
             lifecycle_context_contributors.push(contributor);
         }
+        if !turn_context_ids.is_empty() {
+            lifecycle_context_contributors.push(Arc::new(context::NomiTurnContextContributor::new(
+                Arc::clone(&kernel), Arc::clone(&compiled), Arc::clone(&active),
+                owner.clone(), agent_session_id.clone(), state_scope_key.clone(), turn_context_ids,
+            )));
+        }
 
         let mut pending = Vec::new();
         for resolved in compiled
             .content()
-            .enabled_capabilities
-            .iter()
+            .contributions()
         {
+            if !constraints.allows_capability(resolved.capability.id.as_ref())
+                || (constraints.restricted()
+                    && (resolved.contribution_lock.source_kind != ContributionSourceKind::PlatformBuiltin
+                        || resolved.resolved_source.source_kind != PluginSourceKind::Bundled
+                        || !matches!(resolved.capability.id.as_ref(), "fs.read" | "fs.search" | "process.exec")))
+            { continue; }
             let schema_source = match resolved.contribution_lock.source_kind {
                 ContributionSourceKind::PluginMount => {
                     NomiKernelToolSchemaSource::ManagedPlugin
@@ -1664,6 +2073,13 @@ impl KernelNomiPluginToolSession {
                         continue;
                     }
                     NomiKernelToolSchemaSource::PlatformBuiltin
+                }
+                ContributionSourceKind::McpBinding => {
+                    let (target, _) = platform_builtin_admission.as_ref()
+                        .and_then(|admission| admission.mcp_targets.get(&resolved.capability.id))
+                        .ok_or_else(|| NomiPluginToolError::Contract("selected MCP tool has no exact host admission".into()))?;
+                    validate_exact_target(resolved, target)?;
+                    NomiKernelToolSchemaSource::FrozenMcp
                 }
                 _ => continue,
             };
@@ -1718,6 +2134,12 @@ impl KernelNomiPluginToolSession {
                     let snapshot_ref = compiled.snapshot_ref().clone();
                     async move {
                         let input_schema = match schema_source {
+                            NomiKernelToolSchemaSource::FrozenMcp => {
+                                platform_builtin_admission.as_ref()
+                                    .and_then(|admission| admission.mcp_targets.get(&resolved.capability.id))
+                                    .map(|(_, schema)| schema.clone())
+                                    .ok_or_else(|| "frozen MCP schema is absent".to_owned())
+                            }
                             NomiKernelToolSchemaSource::ManagedPlugin => {
                                 plugin_schema_resolver
                                     .resolve(
@@ -1770,7 +2192,12 @@ impl KernelNomiPluginToolSession {
                 )
             })
             .collect();
+        let creation_turn = Arc::new(NomiCreationTurnContext::default());
+        if actions.iter().any(|action| is_builtin_creation(&action.identity)) {
+            lifecycle_context_contributors.push(creation_turn.clone());
+        }
         let invoker = Arc::new(KernelNomiPluginToolInvoker {
+            creation_turn,
             kernel: Arc::clone(&kernel),
             compiled: Arc::clone(&compiled),
             active: Arc::clone(&active),
@@ -1784,6 +2211,7 @@ impl KernelNomiPluginToolSession {
             actions,
             invoker,
         )?;
+        session.execution_constraints = constraints;
         session.initial_context_contributions =
             Arc::from(initial_context_contributions);
         session.capability_state = Some(active);
@@ -1808,10 +2236,18 @@ impl KernelNomiPluginToolSession {
             session.system_browser_binding = Some(crate::system_browser::binding_from_manifest(&live.manifest)
                 .map_err(|error| NomiPluginToolError::Contract(error.to_string()))?);
         }
+        session.discovery_policy = discovery_policy;
+        session.model_middleware = if constraints.restricted() { Vec::new() } else {
+            model_middleware::selected(compiled.content())?
+        };
+        session.tool_middleware = tool_middleware::selected(compiled.content())?;
+        if constraints.restricted() && !session.tool_middleware.is_empty() {
+            return Err(NomiPluginToolError::Contract("Selected tool checks exceed the Session execution ceiling".into()));
+        }
         session.target_resource_bindings =
             Arc::from(compiled.target_resource_bindings.clone());
         for contributor in lifecycle_context_contributors {
-            session = session.with_context_contributor(contributor);
+            session = session.with_context_contributor(contributor)?;
         }
         Ok(session)
     }
@@ -1840,8 +2276,7 @@ impl KernelNomiPluginToolSession {
         let mut actions = Vec::new();
         for resolved in compiled
             .content()
-            .enabled_capabilities
-            .iter()
+            .contributions()
             .filter(|capability| {
                 capability.contribution_lock.source_kind
                     == ContributionSourceKind::PluginProductActiveRelease
@@ -1856,9 +2291,12 @@ impl KernelNomiPluginToolSession {
                 .unwrap_or_else(|| resolved.capability.id.as_ref().to_owned());
             let description = resolved.description.clone().unwrap_or_default();
             for action in &resolved.actions {
+                let hidden_consumer = resolved.actions == [crate::tool_discovery::action()]
+                    || resolved.actions == [model_middleware::action()]
+                    || resolved.actions == [tool_middleware::before_action()];
                 if (!resolved.action_allowlist.is_empty()
                     && !resolved.action_allowlist.contains(&action.action_id))
-                    || action.presentation != ToolPresentationKind::FunctionTool
+                    || (action.presentation != ToolPresentationKind::FunctionTool && !hidden_consumer)
                 {
                     continue;
                 }
@@ -1869,6 +2307,13 @@ impl KernelNomiPluginToolSession {
                         reference: action.input_schema.clone(),
                         reason,
                     })?;
+                if hidden_consumer {
+                    let output_schema = schema_resolver.resolve(owner, resolved, &action.output_schema)
+                        .await.map_err(|reason| NomiPluginToolError::Schema {
+                            reference: action.output_schema.clone(), reason,
+                        })?;
+                    validate_canonical_input_schema(&action.output_schema, &output_schema)?;
+                }
                 actions.push(build_plugin_product_action(
                     compiled.snapshot_ref().clone(),
                     resolved.clone(),
@@ -1884,7 +2329,7 @@ impl KernelNomiPluginToolSession {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn assemble_initial_platform_builtin_context(
+async fn assemble_initial_capability_context(
     kernel: &Arc<KernelRegistry>,
     compiled: &CompiledSnapshot,
     active: &nomifun_agent_kernel::ActiveCapabilitySetSnapshot,
@@ -1892,16 +2337,38 @@ async fn assemble_initial_platform_builtin_context(
     owner: &PrincipalRef,
     agent_session_id: &AgentSessionId,
     state_scope_key: &ScopeKey,
-    admission: &NomiPlatformBuiltinContextAdmission,
-) -> Result<Vec<NomiInitialContextContribution>, NomiPluginToolError> {
+    admission: Option<&NomiPlatformBuiltinContextAdmission>,
+) -> Result<(Vec<NomiInitialContextContribution>, Vec<CapabilityId>), NomiPluginToolError> {
     let mut contributions = Vec::new();
-    for resolved in &compiled.content().enabled_capabilities {
-        if resolved.contribution_lock.source_kind
-            != ContributionSourceKind::PlatformBuiltin
-            || resolved.resolved_source.source_kind
-                != PluginSourceKind::Bundled
-            || admission.target_for(resolved)?.is_none()
-        {
+    let mut turn_context_ids = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let positions = compiled.content().context_order.iter().enumerate()
+        .map(|(position, id)| (id, position)).collect::<BTreeMap<_, _>>();
+    let mut ordered = compiled.content().contributions().collect::<Vec<_>>();
+    ordered.sort_by_key(|resolved| (
+        positions.get(&resolved.capability.id).copied().unwrap_or(usize::MAX),
+        &resolved.capability.id,
+    ));
+    for resolved in ordered {
+        let managed_plugin = resolved.contribution_lock.source_kind
+            == ContributionSourceKind::PluginMount
+            && resolved.resolved_source.source_kind
+                == PluginSourceKind::ManagedLocal;
+        let approved_builtin = resolved.contribution_lock.source_kind
+            == ContributionSourceKind::PlatformBuiltin
+            && resolved.resolved_source.source_kind == PluginSourceKind::Bundled
+            && admission
+                .map(|value| value.target_for(resolved))
+                .transpose()?
+                .flatten()
+                .is_some();
+        if !managed_plugin && !approved_builtin {
+            if positions.contains_key(&resolved.capability.id) {
+                return Err(NomiPluginToolError::Contract(format!(
+                    "ordered Context {} is not admitted by this runtime",
+                    resolved.capability.id.as_ref()
+                )));
+            }
             continue;
         }
         let current = registry
@@ -1912,8 +2379,21 @@ async fn assemble_initial_platform_builtin_context(
             })?;
         validate_exact_target(resolved, current)?;
         if current.manifest.kind != CapabilityKind::ContextContributor {
+            if managed_plugin {
+                // Tools use the Tool consumer, never the prompt path.
+                continue;
+            }
             return Err(NomiPluginToolError::Contract(format!(
                 "approved initial context {} is no longer a ContextContributor",
+                resolved.capability.id.as_ref()
+            )));
+        }
+        if !current.manifest.supports_consumer(CapabilityConsumer::Agent) {
+            continue;
+        }
+        if !supports_nomi_plugin_capability(&current.manifest) {
+            return Err(NomiPluginToolError::Contract(format!(
+                "initial ContextContributor {} must declare one canonical context schema",
                 resolved.capability.id.as_ref()
             )));
         }
@@ -1924,14 +2404,21 @@ async fn assemble_initial_platform_builtin_context(
             ))
         })?;
         let capability_id = resolved.capability.id.clone();
+        if current.manifest.contributions.context_phase
+            == nomifun_agent_contracts::ContextContributionPhase::BeforeTurn
+        {
+            turn_context_ids.push(capability_id);
+            continue;
+        }
         let operation_id = OperationId::from(format!(
-            "nomi-context:{}:{}:{}",
+            "nomi-context:{}:{}:{}:{}",
             agent_session_id.as_ref(),
             compiled.snapshot_ref().snapshot_id.as_ref(),
+            uuid::Uuid::now_v7(),
             capability_id.as_ref()
         ));
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
+        let result = tokio::time::timeout_at(
+            deadline,
             kernel.contribute_context(
                 compiled,
                 active,
@@ -1955,7 +2442,7 @@ async fn assemble_initial_platform_builtin_context(
         .await
         .map_err(|_| {
             NomiPluginToolError::Contract(format!(
-                "initial ContextContributor {} exceeded its 5 second deadline",
+                "initial ContextContributor {} exceeded the shared 5 second context deadline",
                 capability_id.as_ref()
             ))
         })??;
@@ -1966,9 +2453,6 @@ async fn assemble_initial_platform_builtin_context(
             });
         }
     }
-    contributions.sort_by(|left, right| {
-        left.capability_id.cmp(&right.capability_id)
-    });
     let bytes = canonical_json_bytes(&contributions).map_err(|error| {
         NomiPluginToolError::Contract(format!(
             "initial capability context could not be encoded: {error}"
@@ -1979,7 +2463,7 @@ async fn assemble_initial_platform_builtin_context(
             "initial capability context exceeds the {MAX_INITIAL_CAPABILITY_CONTEXT_BYTES}-byte Nomi prompt limit"
         )));
     }
-    Ok(contributions)
+    Ok((contributions, turn_context_ids))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1992,7 +2476,7 @@ async fn assemble_initial_platform_builtin_lifecycle(
     admission: &NomiPlatformBuiltinLifecycleAdmission,
 ) -> Result<Vec<NomiInitialContextContribution>, NomiPluginToolError> {
     let mut results = Vec::new();
-    for resolved in &compiled.content().enabled_capabilities {
+    for resolved in compiled.content().contributions() {
         if resolved.contribution_lock.source_kind
             != ContributionSourceKind::PlatformBuiltin
             || resolved.resolved_source.source_kind
@@ -2056,8 +2540,7 @@ fn turn_middleware_identities(
     let mut identities = Vec::new();
     for resolved in compiled
         .content()
-        .enabled_capabilities
-        .iter()
+        .contributions()
     {
         if admission.target_for(resolved)?.is_none() {
             continue;
@@ -2096,7 +2579,7 @@ async fn lifecycle_context_contributors(
     admission: &Arc<NomiPlatformBuiltinLifecycleAdmission>,
 ) -> Result<Vec<Arc<dyn ContextContributor>>, NomiPluginToolError> {
     let mut contributors = Vec::new();
-    for resolved in &compiled.content().enabled_capabilities {
+    for resolved in compiled.content().contributions() {
         if admission.target_for(resolved)?.is_none() { continue; }
         let current = registry.capability(&resolved.capability.id)
             .ok_or_else(|| KernelError::CapabilityNotMaterialized {
@@ -2278,7 +2761,180 @@ impl ContextContributor for NomiLifecycleContextContributor {
     }
 }
 
+struct OwnedNomiPluginToolInvoker {
+    delegate: Arc<dyn NomiPluginToolInvoker>,
+    scope: Arc<crate::engine_effect_scope::EngineEffectScope>,
+}
+
+struct NomiEffectContextFence {
+    scope: Arc<crate::engine_effect_scope::EngineEffectScope>,
+}
+
+#[async_trait]
+impl ContextContributor for NomiEffectContextFence {
+    async fn pre_turn_context(&self) -> Option<String> { None }
+
+    async fn pre_turn_context_for_turn_result(&self, _: &TurnContext) -> Result<Option<String>, String> {
+        self.scope.ensure_turn_open().map_err(|_| "HOSTED_EFFECT_TURN_CLOSED".to_owned())?;
+        Ok(None)
+    }
+
+    fn label(&self) -> &str { "platform_hosted_effect_fence" }
+}
+
+struct OwnedNomiPluginProductToolInvoker {
+    delegate: Arc<dyn NomiPluginProductToolInvoker>,
+    scope: Arc<crate::engine_effect_scope::EngineEffectScope>,
+}
+
+/// A timed-out/cancelled waiter cannot leave dispatch open while its retained
+/// task is still running. The result task and durable owner receipt survive.
+struct NomiEffectWaitGuard {
+    scope: Arc<crate::engine_effect_scope::EngineEffectScope>,
+    received: bool,
+    cancellation: Option<NomiPluginProductCallCancellation>,
+}
+impl Drop for NomiEffectWaitGuard {
+    fn drop(&mut self) {
+        if !self.received {
+            if let Some(cancellation) = &self.cancellation { cancellation.cancel(); }
+            let _ = self.scope.close_turn();
+        }
+    }
+}
+pub(crate) async fn await_owned_effect<T>(scope: Arc<crate::engine_effect_scope::EngineEffectScope>, task: crate::engine_tasks::EngineOwnedTask<T>) -> Result<T, AppError> {
+    await_owned_effect_with_cancellation(scope, task, None).await
+}
+async fn await_owned_effect_with_cancellation<T>(
+    scope: Arc<crate::engine_effect_scope::EngineEffectScope>,
+    task: crate::engine_tasks::EngineOwnedTask<T>,
+    cancellation: Option<NomiPluginProductCallCancellation>,
+) -> Result<T, AppError> {
+    let mut guard = NomiEffectWaitGuard { scope, received: false, cancellation };
+    let result = task.result().await;
+    guard.received = result.is_ok();
+    result
+}
+
+#[async_trait]
+impl NomiPluginProductToolInvoker for OwnedNomiPluginProductToolInvoker {
+    async fn preflight(&self, request: NomiPluginProductToolInvocation) -> Result<(), NomiPluginToolError> {
+        self.delegate.preflight(request).await
+    }
+    async fn invoke(&self, request: NomiPluginProductToolInvocation) -> Result<StrictJsonValue, NomiPluginToolError> {
+        let cancellation = request.cancellation.clone();
+        let delegate = self.delegate.clone();
+        let scope = self.scope.clone();
+        let task = self.scope.spawn(async move {
+            let result = delegate.invoke(request).await;
+            if matches!(&result, Err(NomiPluginToolError::OutcomeUnknown(_))) {
+                let _ = scope.close_session();
+            }
+            result
+        }).map_err(|error| NomiPluginToolError::OutcomeUnknown(error.to_string()))?;
+        await_owned_effect_with_cancellation(self.scope.clone(), task, Some(cancellation)).await
+            .map_err(|error| NomiPluginToolError::OutcomeUnknown(error.to_string()))?
+    }
+}
+
+struct OwnedNomiDynamicToolInvoker {
+    delegate: Arc<dyn NomiHostDynamicToolInvoker>,
+    scope: Arc<crate::engine_effect_scope::EngineEffectScope>,
+}
+
+#[async_trait]
+impl NomiHostDynamicToolInvoker for OwnedNomiDynamicToolInvoker {
+    async fn invoke(&self, request: NomiHostDynamicToolInvocation) -> Result<StrictJsonValue, NomiHostDynamicToolError> {
+        let delegate = self.delegate.clone();
+        let scope = self.scope.clone();
+        let failed = |error: AppError| NomiHostDynamicToolError::new("HOSTED_EFFECT_UNPROVEN", error.to_string(), false);
+        let task = self.scope.spawn(async move {
+            let result = delegate.invoke(request).await;
+            if result.as_ref().is_err_and(|error| error.code.as_ref() == "HOSTED_EFFECT_UNPROVEN") {
+                let _ = scope.close_session();
+            }
+            result
+        }).map_err(failed)?;
+        await_owned_effect(self.scope.clone(), task).await.map_err(failed)?
+    }
+}
+
+#[async_trait]
+impl NomiPluginToolInvoker for OwnedNomiPluginToolInvoker {
+    async fn preflight(&self, request: NomiPluginToolInvocation) -> Result<(), NomiPluginToolError> {
+        self.delegate.preflight(request).await
+    }
+    async fn invoke(&self, request: NomiPluginToolInvocation) -> Result<StrictJsonValue, NomiPluginToolError> {
+        let delegate = self.delegate.clone();
+        let task = self.scope.spawn(async move { delegate.invoke(request).await })
+            .map_err(|error| NomiPluginToolError::Contract(error.to_string()))?;
+        await_owned_effect(self.scope.clone(), task).await
+            .map_err(|error| NomiPluginToolError::Contract(error.to_string()))?
+    }
+}
+
+/// Captures server-owned turn identity before the provider sees any tools.
+/// A model is never asked to choose a conversation or message owner.
+#[derive(Default)]
+struct NomiCreationTurnContext {
+    source_message_id: RwLock<Option<String>>,
+}
+
+#[async_trait]
+impl ContextContributor for NomiCreationTurnContext {
+    async fn pre_turn_context(&self) -> Option<String> { None }
+    async fn pre_turn_context_for_turn_result(&self, turn: &TurnContext) -> Result<Option<String>, String> {
+        let mut current = self.source_message_id.write().map_err(|_| "creation turn identity lock poisoned".to_owned())?;
+        *current = None;
+        let parsed = uuid::Uuid::parse_str(&turn.source_message_id).map_err(|_| "creation requires an admitted message UUID".to_owned())?;
+        if parsed.get_version_num() != 7 || parsed.to_string() != turn.source_message_id {
+            return Err("creation requires an admitted UUIDv7 message".into());
+        }
+        *current = Some(turn.source_message_id.clone());
+        Ok(None)
+    }
+    fn label(&self) -> &str { "nomifun_creation_turn_owner" }
+}
+
+fn is_builtin_creation(identity: &NomiPluginToolActionIdentity) -> bool {
+    identity.resolved_capability.contribution_lock.source_kind == ContributionSourceKind::PlatformBuiltin
+        && matches!(identity.resolved_capability.capability.id.as_ref(), "creation.text" | "creation.image" | "creation.image_edit" | "creation.video" | "creation.music" | "creation.audio")
+}
+
+fn conversation_creation_schema(mut schema: Value) -> Value {
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) { properties.remove("target"); }
+    if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) { required.retain(|key| key.as_str() != Some("target")); }
+    schema
+}
+
+struct NomiCreationReceiptInvoker {
+    delegate: Arc<dyn NomiPluginToolInvoker>,
+    sink: Arc<crate::capability::backend_output_sink::BackendOutputSink>,
+    conversation_id: String,
+}
+
+#[async_trait]
+impl NomiPluginToolInvoker for NomiCreationReceiptInvoker {
+    async fn preflight(&self, request: NomiPluginToolInvocation) -> Result<(), NomiPluginToolError> {
+        self.delegate.preflight(request).await
+    }
+
+    async fn invoke(&self, request: NomiPluginToolInvocation) -> Result<StrictJsonValue, NomiPluginToolError> {
+        let scope = if is_builtin_creation(&request.identity) {
+            Some(self.sink.native_creation_task_scope(&self.conversation_id).map_err(NomiPluginToolError::Contract)?)
+        } else { None };
+        let output = self.delegate.invoke(request).await?;
+        if let Some(scope) = scope {
+            let task_id = output.0.get("creation_task_id").and_then(Value::as_str)
+                .ok_or_else(|| NomiPluginToolError::Contract("creation host returned no durable task identity".into()))?;
+            self.sink.register_native_creation_task(&scope, task_id).map_err(NomiPluginToolError::Contract)?;
+        }
+        Ok(output)
+    }
+}
+
 struct KernelNomiPluginToolInvoker {
+    creation_turn: Arc<NomiCreationTurnContext>,
     kernel: Arc<KernelRegistry>,
     compiled: Arc<CompiledSnapshot>,
     active: Arc<SessionCapabilityState>,
@@ -2289,12 +2945,9 @@ struct KernelNomiPluginToolInvoker {
         BTreeMap<(CapabilityId, ActionId), NomiPluginToolActionIdentity>,
 }
 
-#[async_trait]
-impl NomiPluginToolInvoker for KernelNomiPluginToolInvoker {
-    async fn invoke(
-        &self,
-        request: NomiPluginToolInvocation,
-    ) -> Result<StrictJsonValue, NomiPluginToolError> {
+impl KernelNomiPluginToolInvoker {
+    fn prepare(&self, mut request: NomiPluginToolInvocation)
+        -> Result<(nomifun_agent_kernel::ActiveCapabilitySetSnapshot, CapabilityInvocationRequest), NomiPluginToolError> {
         let key = (
             request.identity.resolved_capability.capability.id.clone(),
             request.identity.action.action_id.clone(),
@@ -2305,6 +2958,13 @@ impl NomiPluginToolInvoker for KernelNomiPluginToolInvoker {
                     .to_owned(),
             ));
         }
+        if is_builtin_creation(&request.identity) {
+            let message_id = self.creation_turn.source_message_id.read()
+                .map_err(|_| NomiPluginToolError::Contract("creation turn identity lock poisoned".into()))?
+                .clone().ok_or_else(|| NomiPluginToolError::Contract("creation requires the active admitted turn".into()))?;
+            let object = request.input.0.as_object_mut().ok_or_else(|| NomiPluginToolError::Contract("creation input must be an object".into()))?;
+            object.insert("target".into(), serde_json::json!({"kind":"conversation_turn", "conversation_id": self.agent_session_id.as_ref(), "message_id": message_id}));
+        }
         let active = self.active.snapshot()?;
         let policy = self.compiled.policy(&key.0).ok_or_else(|| {
             NomiPluginToolError::Contract(format!(
@@ -2312,11 +2972,7 @@ impl NomiPluginToolInvoker for KernelNomiPluginToolInvoker {
                 key.0.as_ref()
             ))
         })?;
-        self.kernel
-            .invoke(
-                &self.compiled,
-                &active,
-                CapabilityInvocationRequest {
+        let invocation = CapabilityInvocationRequest {
                     principal: self.owner.clone(),
                     session_owner: self.owner.clone(),
                     agent_session_id: self.agent_session_id.clone(),
@@ -2330,10 +2986,20 @@ impl NomiPluginToolInvoker for KernelNomiPluginToolInvoker {
                     resource_binding_ids: policy.resource_binding_ids.clone(),
                     state_scope_key: self.state_scope_key.clone(),
                     input: request.input,
-                },
-            )
-            .await
-            .map_err(Into::into)
+                };
+        Ok((active, invocation))
+    }
+}
+
+#[async_trait]
+impl NomiPluginToolInvoker for KernelNomiPluginToolInvoker {
+    async fn preflight(&self, request: NomiPluginToolInvocation) -> Result<(), NomiPluginToolError> {
+        let (active, invocation) = self.prepare(request)?;
+        self.kernel.preflight_invocation(&self.compiled, &active, &invocation).map_err(Into::into)
+    }
+    async fn invoke(&self, request: NomiPluginToolInvocation) -> Result<StrictJsonValue, NomiPluginToolError> {
+        let (active, invocation) = self.prepare(request)?;
+        self.kernel.invoke_shared(Arc::clone(&self.compiled), &active, invocation).await.map_err(Into::into)
     }
 }
 
@@ -2345,6 +3011,41 @@ struct NomiPluginTool {
 struct NomiPluginProductTool {
     action: NomiPluginProductToolAction,
     invoker: Arc<dyn NomiPluginProductToolInvoker>,
+}
+
+impl NomiPluginProductTool {
+    fn invocation(&self, input: Value, context: &ToolExecutionContext) -> NomiPluginProductToolInvocation {
+        let key = format!("nomi-plugin-product:{}", context.operation_id());
+        NomiPluginProductToolInvocation { cancellation: Default::default(), identity: self.action.identity.clone(), operation_id: key.clone().into(),
+            idempotency_key: key.clone().into(), correlation_id: key.into(), input: StrictJsonValue(input) }
+    }
+}
+
+impl NomiPluginTool {
+    fn invocation(&self, input: Value, context: &ToolExecutionContext) -> NomiPluginToolInvocation {
+        let key = format!("nomi-plugin:{}", context.operation_id());
+        NomiPluginToolInvocation { identity: self.action.identity.clone(), operation_id: key.clone().into(),
+            idempotency_key: key.clone().into(), correlation_id: key.into(), input: StrictJsonValue(input) }
+    }
+}
+
+struct NomiPluginProductDiscoveryPolicy {
+    action: NomiPluginProductToolAction,
+    invoker: Arc<dyn NomiPluginProductToolInvoker>,
+}
+
+#[async_trait]
+impl nomi_tools::tool_search::ToolDiscoveryPolicy for NomiPluginProductDiscoveryPolicy {
+    async fn select(&self, input: nomi_tools::tool_search::ToolDiscoveryInput) -> Result<Vec<String>, String> {
+        let key = format!("nomi-discovery:{}", uuid::Uuid::now_v7());
+        let result = self.invoker.invoke(NomiPluginProductToolInvocation {
+            cancellation: Default::default(),
+            identity: self.action.identity.clone(),
+            operation_id: key.clone().into(), idempotency_key: key.clone().into(), correlation_id: key.into(),
+            input: StrictJsonValue(serde_json::to_value(input).map_err(|e| e.to_string())?),
+        }).await.map_err(|e| e.to_string())?;
+        crate::tool_discovery::decode_selection(result)
+    }
 }
 
 struct NomiHostDynamicTool {
@@ -2380,10 +3081,9 @@ impl Tool for NomiHostDynamicTool {
     }
 
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
-        matches!(
-            self.action.descriptor.effect_class,
-            EffectClass::Pure | EffectClass::ReadLocal | EffectClass::ReadSensitive
-        )
+        // The hosted attribution lane permits one unresolved call per Session.
+        // A device's read-only declaration does not grant parallel dispatch.
+        false
     }
 
     fn is_deferred(&self) -> bool {
@@ -2442,6 +3142,9 @@ impl Tool for NomiHostDynamicTool {
 
 #[async_trait]
 impl Tool for NomiPluginProductTool {
+    async fn preflight_hook(&self, input: &Value, context: &ToolExecutionContext) -> Result<(), String> {
+        self.invoker.preflight(self.invocation(input.clone(), context)).await.map_err(|e| e.to_string())
+    }
     fn name(&self) -> &str {
         &self.action.provider_name
     }
@@ -2470,12 +3173,9 @@ impl Tool for NomiPluginProductTool {
     }
 
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
-        matches!(
-            self.action.identity.action.effect_class,
-            EffectClass::Pure
-                | EffectClass::ReadLocal
-                | EffectClass::ReadSensitive
-        )
+        // The Session attribution owner admits one unresolved hosted call at
+        // a time, even if the service manifest describes it as a pure read.
+        false
     }
 
     async fn execute(&self, _input: Value) -> ToolResult {
@@ -2489,20 +3189,7 @@ impl Tool for NomiPluginProductTool {
         input: Value,
         context: &ToolExecutionContext,
     ) -> ToolResult {
-        let operation_identity = context.operation_id();
-        let operation_id =
-            OperationId::from(format!("nomi-plugin-product:{operation_identity}"));
-        let request = NomiPluginProductToolInvocation {
-            identity: self.action.identity.clone(),
-            idempotency_key: IdempotencyKey::from(format!(
-                "nomi-plugin-product:{operation_identity}"
-            )),
-            correlation_id: CorrelationId::from(format!(
-                "nomi-plugin-product:{operation_identity}"
-            )),
-            operation_id,
-            input: StrictJsonValue(input),
-        };
+        let request = self.invocation(input, context);
         match self.invoker.invoke(request).await {
             Ok(output) => match serde_json::to_string_pretty(&output.0) {
                 Ok(content) => ToolResult::text(content),
@@ -2521,6 +3208,9 @@ impl Tool for NomiPluginProductTool {
 
 #[async_trait]
 impl Tool for NomiPluginTool {
+    async fn preflight_hook(&self, input: &Value, context: &ToolExecutionContext) -> Result<(), String> {
+        self.invoker.preflight(self.invocation(input.clone(), context)).await.map_err(|e| e.to_string())
+    }
     fn name(&self) -> &str {
         &self.action.provider_name
     }
@@ -2530,7 +3220,7 @@ impl Tool for NomiPluginTool {
     }
 
     fn artifact_identity(&self) -> &str {
-        self.action.artifact_identity()
+        if is_builtin_creation(&self.action.identity) { "nomifun_creation_task" } else { self.action.artifact_identity() }
     }
 
     fn deferred_search_aliases(&self) -> Vec<String> {
@@ -2545,7 +3235,7 @@ impl Tool for NomiPluginTool {
     }
 
     fn input_schema(&self) -> JsonSchema {
-        self.action.input_schema.0.clone()
+        if is_builtin_creation(&self.action.identity) { conversation_creation_schema(self.action.input_schema.0.clone()) } else { self.action.input_schema.0.clone() }
     }
 
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
@@ -2568,20 +3258,7 @@ impl Tool for NomiPluginTool {
         input: Value,
         context: &ToolExecutionContext,
     ) -> ToolResult {
-        let operation_identity = context.operation_id();
-        let request = NomiPluginToolInvocation {
-            identity: self.action.identity.clone(),
-            operation_id: OperationId::from(format!(
-                "nomi-plugin:{operation_identity}"
-            )),
-            idempotency_key: IdempotencyKey::from(format!(
-                "nomi-plugin:{operation_identity}"
-            )),
-            correlation_id: CorrelationId::from(format!(
-                "nomi-plugin:{operation_identity}"
-            )),
-            input: StrictJsonValue(input),
-        };
+        let request = self.invocation(input, context);
         match self.invoker.invoke(request).await {
             Ok(output) => match serde_json::to_string_pretty(&output.0) {
                 Ok(content) => ToolResult::text(content),
@@ -2745,7 +3422,7 @@ fn validate_session_identity(
     Ok(())
 }
 
-fn validate_exact_target(
+pub(crate) fn validate_exact_target(
     resolved: &ResolvedCapability,
     current: &MaterializedCapability,
 ) -> Result<(), NomiPluginToolError> {
@@ -2908,6 +3585,111 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
 mod dynamic_error_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn creation_receipt_preflight_preserves_authorization_without_executing() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+        struct AdmissionOnly {
+            expected: NomiPluginToolInvocation,
+            denied: AtomicBool,
+            calls: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl NomiPluginToolInvoker for AdmissionOnly {
+            async fn preflight(&self, request: NomiPluginToolInvocation) -> Result<(), NomiPluginToolError> {
+                assert_eq!(request, self.expected, "preflight must retain exact invocation authority and input");
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                if self.denied.load(Ordering::SeqCst) {
+                    Err(NomiPluginToolError::Contract("admission denied".into()))
+                } else {
+                    Ok(())
+                }
+            }
+
+            async fn invoke(&self, _request: NomiPluginToolInvocation) -> Result<StrictJsonValue, NomiPluginToolError> {
+                panic!("preflight must never execute a tool");
+            }
+        }
+
+        let digest = "a".repeat(64);
+        let request = NomiPluginToolInvocation {
+            identity: NomiPluginToolActionIdentity {
+                resolved_snapshot_ref: ResolvedSnapshotRef {
+                    snapshot_id: uuid::Uuid::now_v7().to_string().into(),
+                    snapshot_digest: digest.clone().into(),
+                },
+                resolved_capability: serde_json::from_value(serde_json::json!({
+                    "capability": {"id": "creation.image", "version": "1.0.0"},
+                    "source_package": {"id": "nomifun.creation", "version": "1.0.0"},
+                    "contribution_id": "capability:creation.image",
+                    "contribution_lock": {
+                        "source_kind": ContributionSourceKind::PlatformBuiltin,
+                        "source_identity": "platform-builtin:creation.image",
+                        "contribution_id": "capability:creation.image",
+                        "contract_digest": digest,
+                    },
+                    "resolved_source": {
+                        "source_kind": PluginSourceKind::ManagedLocal,
+                        "source_identity": "platform-builtin:creation.image",
+                        "source_digest": digest,
+                    },
+                    "target_artifact_digest": digest,
+                    "schema_digest": digest,
+                    "dependency_path": ["creation.image"],
+                    "required_runtime_features": [],
+                })).unwrap(),
+                action: CapabilityActionDescriptor {
+                    action_id: "creation.image.invoke".into(),
+                    input_schema: format!("schema://creation.image/input@1#{digest}").into(),
+                    output_schema: format!("schema://creation.image/output@1#{digest}").into(),
+                    effect_class: EffectClass::Pure,
+                    presentation: ToolPresentationKind::FunctionTool,
+                },
+                input_schema_digest: digest.into(),
+            },
+            operation_id: "receipt-preflight-operation".into(),
+            idempotency_key: "receipt-preflight-key".into(),
+            correlation_id: "receipt-preflight-correlation".into(),
+            input: StrictJsonValue(serde_json::json!({"prompt": "a cat"})),
+        };
+        assert!(is_builtin_creation(&request.identity));
+        let delegate = Arc::new(AdmissionOnly {
+            expected: request.clone(),
+            denied: AtomicBool::new(false),
+            calls: AtomicUsize::new(0),
+        });
+        let (events, _receiver) = tokio::sync::broadcast::channel(1);
+        // No admitted output turn: attempting to reserve a creation receipt
+        // during preflight would fail even when the delegate allows the call.
+        let invoker = NomiCreationReceiptInvoker {
+            delegate: delegate.clone(),
+            sink: Arc::new(crate::capability::backend_output_sink::BackendOutputSink::new(events)),
+            conversation_id: uuid::Uuid::now_v7().to_string(),
+        };
+        invoker.preflight(request.clone()).await.unwrap();
+        delegate.denied.store(true, Ordering::SeqCst);
+        assert!(matches!(invoker.preflight(request).await,
+            Err(NomiPluginToolError::Contract(message)) if message == "admission denied"));
+        assert_eq!(delegate.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn creation_turn_context_uses_only_admitted_uuid_and_schema_hides_owner() {
+        let context = NomiCreationTurnContext::default();
+        assert!(context.source_message_id.read().unwrap().is_none());
+        assert!(context.pre_turn_context_for_turn_result(&TurnContext::default()).await.is_err());
+        let message_id = uuid::Uuid::now_v7().to_string();
+        context.pre_turn_context_for_turn_result(&TurnContext { source_message_id: message_id.clone(), ..Default::default() }).await.unwrap();
+        assert_eq!(context.source_message_id.read().unwrap().as_deref(), Some(message_id.as_str()));
+        assert!(context.pre_turn_context_for_turn_result(&TurnContext::default()).await.is_err());
+        assert!(context.source_message_id.read().unwrap().is_none());
+        let schema = conversation_creation_schema(serde_json::json!({"type":"object","additionalProperties":false,"properties":{"target":{},"prompt":{"type":"string"}},"required":["target","prompt"]}));
+        assert!(schema["properties"].get("target").is_none());
+        assert_eq!(schema["required"], serde_json::json!(["prompt"]));
+        assert_eq!(schema["additionalProperties"], false);
+    }
+
     fn payload(code: &str, retry_safe: bool) -> Value {
         let result = model_safe_dynamic_tool_error(
             &NomiHostDynamicToolError::new(
@@ -2942,5 +3724,60 @@ mod dynamic_error_tests {
         let value = payload("INVALID_PAYLOAD", true);
         assert_eq!(value["code"], "INVALID_PAYLOAD");
         assert_eq!(value["retry_safe"], false);
+    }
+}
+
+#[cfg(test)]
+mod product_waiter_cancellation_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn dropped_product_waiter_signals_cancel_but_retains_the_owner_task() {
+        let scope = Arc::new(crate::engine_effect_scope::EngineEffectScope::new(Vec::new()).unwrap());
+        scope.begin_turn().unwrap();
+        let cancellation = NomiPluginProductCallCancellation::default();
+        let completed = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let task = scope.spawn({
+            let release = release.clone();
+            let cancellation = cancellation.clone();
+            let completed = completed.clone();
+            async move {
+                entered_tx.send(()).unwrap();
+                release.notified().await;
+                assert!(cancellation.is_canceled(), "owner must see the same signal");
+                completed.fetch_add(1, Ordering::SeqCst);
+                7
+            }
+        }).unwrap();
+        entered_rx.await.unwrap();
+        let mut waiter = Box::pin(await_owned_effect_with_cancellation(
+            scope.clone(), task, Some(cancellation.clone()),
+        ));
+        assert!(futures_util::poll!(&mut waiter).is_pending());
+        drop(waiter);
+        assert!(cancellation.is_canceled());
+        assert!(scope.ensure_turn_open().is_err());
+        assert_eq!(completed.load(Ordering::SeqCst), 0);
+        assert!(scope.begin_turn().is_err(), "cancel signal is not a settlement proof");
+        release.notify_one();
+        scope.settle_turn().await.unwrap();
+        assert_eq!(completed.load(Ordering::SeqCst), 1, "original owner work must complete exactly once");
+    }
+
+    #[tokio::test]
+    async fn received_product_result_does_not_signal_cancellation() {
+        let scope = Arc::new(crate::engine_effect_scope::EngineEffectScope::new(Vec::new()).unwrap());
+        scope.begin_turn().unwrap();
+        let cancellation = NomiPluginProductCallCancellation::default();
+        let task = scope.spawn(async { 7 }).unwrap();
+        assert_eq!(await_owned_effect_with_cancellation(
+            scope.clone(), task, Some(cancellation.clone()),
+        ).await.unwrap(), 7);
+        assert!(!cancellation.is_canceled());
+        scope.ensure_turn_open().unwrap();
+        scope.settle_turn().await.unwrap();
     }
 }

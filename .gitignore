@@ -9,6 +9,10 @@
 **/build.noindex/
 **/build.*.noindex/
 /.tmp-*/
+# Local verification transcripts; preserve locally, never stage as release inputs.
+/.tmp-*.out
+/.tmp-*.err
+/.tmp-*.txt
 # Local VMware HGFS/ext4 bind-mount rollback directories
 /*.hgfs-before-bind-*/
 Cargo.lock.bak

@@ -74,6 +74,19 @@ pub trait IMcpServerRepository: Send + Sync {
     /// Updates only the tools JSON for a server.
     /// Returns `DbError::NotFound` if the ID doesn't exist.
     async fn update_tools(&self, mcp_server_id: &str, tools: Option<&str>) -> Result<(), DbError>;
+
+    /// Atomically persist a connection probe only if its configuration revision
+    /// is still current. Repositories without CAS support must fail closed.
+    async fn update_probe_if_revision(
+        &self,
+        _mcp_server_id: &str,
+        _expected_revision: nomifun_common::TimestampMs,
+        _status: &str,
+        _last_connected: Option<nomifun_common::TimestampMs>,
+        _tools: Option<&str>,
+    ) -> Result<bool, DbError> {
+        Err(DbError::Conflict("MCP repository does not support revision-fenced probes".into()))
+    }
 }
 
 /// Parameters for creating a new MCP server.

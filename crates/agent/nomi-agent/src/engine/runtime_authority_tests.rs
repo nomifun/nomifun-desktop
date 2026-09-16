@@ -284,6 +284,7 @@ async fn run_first_pass(
             source_message_id,
             None,
             Some(&mut context),
+            None,
         )
         .await
         .unwrap();
@@ -319,6 +320,7 @@ async fn a2_verdict_retracts_every_authority_the_turn_granted_itself() {
             "source-root",
             None,
             Some(&mut context),
+            None,
         )
         .await
         .unwrap();
@@ -356,6 +358,7 @@ async fn a2_rollback_leaves_the_runtime_equivalent_to_a_fresh_reload() {
             "source-root",
             None,
             Some(&mut context),
+            None,
         )
         .await
         .unwrap();
@@ -482,6 +485,7 @@ async fn a_provider_error_retracts_authority() {
             "source-root",
             None,
             Some(&mut context),
+            None,
         )
         .await
         .expect_err("the second pass must surface the provider failure");

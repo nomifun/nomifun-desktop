@@ -26,6 +26,8 @@ use helpers::{
 /// Git-based workspace snapshot service.
 pub struct SnapshotService {
     workspaces: DashMap<String, WorkspaceState>,
+    lifecycle: tokio::sync::Mutex<()>,
+    owner_namespace: Option<String>,
 }
 
 impl Default for SnapshotService {
@@ -38,7 +40,16 @@ impl SnapshotService {
     pub fn new() -> Self {
         Self {
             workspaces: DashMap::new(),
+            lifecycle: tokio::sync::Mutex::new(()),
+            owner_namespace: None,
         }
+    }
+
+    /// Independent owner namespace for temporary baseline storage. The value
+    /// is hashed, never joined as a native path. Callers should use a unique
+    /// lifetime identity when independent Sessions share one workspace.
+    pub fn for_owner(owner_namespace: impl Into<String>) -> Self {
+        Self { owner_namespace: Some(owner_namespace.into()), ..Self::new() }
     }
 
     /// Inspect the current snapshot information for an initialized workspace.
@@ -208,6 +219,7 @@ fn get_state(workspaces: &DashMap<String, WorkspaceState>, workspace: &str) -> R
 #[async_trait::async_trait]
 impl crate::traits::ISnapshotService for SnapshotService {
     async fn init(&self, workspace: &str) -> Result<SnapshotInfo, AppError> {
+        let _lifecycle = self.lifecycle.lock().await;
         // Canonicalize up front so the DashMap key is the canonical path
         // string. Two raw forms that resolve to the same directory (trailing
         // separator, case differences on Windows, `.`/`..` segments) collapse
@@ -233,6 +245,7 @@ impl crate::traits::ISnapshotService for SnapshotService {
             .map_err(|e| AppError::Internal(format!("Blocking task failed: {}", e)))?;
         }
 
+        let owner_namespace = self.owner_namespace.clone();
         let result = tokio::task::spawn_blocking(move || {
             let canonical_str = canonical.to_string_lossy().to_string();
 
@@ -263,7 +276,10 @@ impl crate::traits::ISnapshotService for SnapshotService {
                 return Ok((None, info));
             }
 
-            let temp = temp_repo_path(&canonical_str);
+            let temp = temp_repo_path(&match owner_namespace {
+                Some(owner) => format!("{owner}\0{canonical_str}"),
+                None => canonical_str,
+            });
             init_snapshot_repo(&canonical, &temp)?;
             let mode = SnapshotMode::Snapshot;
             let state = WorkspaceState {
@@ -405,21 +421,14 @@ impl crate::traits::ISnapshotService for SnapshotService {
     }
 
     async fn dispose(&self, workspace: &str) -> Result<(), AppError> {
+        let _lifecycle = self.lifecycle.lock().await;
         let key = workspace_key(workspace);
-
-        // Decrement the refcount under the shard lock. Only the call that
-        // drops it to 0 proceeds to actually remove the entry and clean up.
-        // `remove_if` holds the lock across the predicate, so the decrement and
-        // the remove decision are atomic w.r.t. a concurrent `init` bump.
-        let removed = self.workspaces.remove_if_mut(&key, |_, state| {
-            state.refcount = state.refcount.saturating_sub(1);
-            state.refcount == 0
-        });
-
-        let state = match removed {
-            // refcount hit 0 -> entry removed, proceed to clean up.
-            Some((_, s)) => s,
-            // Either not tracked (idempotent) or refcount still > 0 -> keep it.
+        let state = match self.workspaces.get_mut(&key) {
+            Some(mut state) if state.refcount > 1 => {
+                state.refcount -= 1;
+                return Ok(());
+            }
+            Some(state) => state.clone(),
             None => return Ok(()),
         };
 
@@ -431,13 +440,14 @@ impl crate::traits::ISnapshotService for SnapshotService {
                         AppError::Internal(format!("Failed to remove snapshot dir {}: {}", repo_path.display(), e))
                     })?;
                 }
-                Ok(())
+                Ok::<(), AppError>(())
             })
             .await
-            .map_err(|e| AppError::Internal(format!("Blocking task failed: {}", e)))?
-        } else {
-            // git-repo mode: nothing to clean up
-            Ok(())
+            .map_err(|e| AppError::Internal(format!("Blocking task failed: {}", e)))??;
         }
+        // Keep the owned path/refcount available if cleanup fails or a caller
+        // is cancelled; a subsequent cleanup must retry the same resource.
+        self.workspaces.remove(&key);
+        Ok(())
     }
 }

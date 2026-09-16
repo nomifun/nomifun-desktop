@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use nomi_protocol::events::ToolCategory;
@@ -10,6 +11,33 @@ use crate::{
 };
 
 const MIN_INEXACT_QUERY_CHARS: usize = 3;
+
+/// Schema-free, host-filtered metadata supplied to a discovery policy.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolDiscoveryCandidate {
+    pub name: String,
+    pub description: String,
+    pub aliases: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolDiscoveryInput {
+    pub query: String,
+    pub candidates: Vec<ToolDiscoveryCandidate>,
+    pub limit: usize,
+}
+
+/// A Session-bound policy returns routes, never schemas or authorization.
+/// The registry validates and commits the complete result after this future
+/// finishes. Dropping it (cancel/timeout) must cancel the underlying work.
+#[async_trait]
+pub trait ToolDiscoveryPolicy: Send + Sync {
+    async fn select(&self, input: ToolDiscoveryInput) -> Result<Vec<String>, String>;
+}
+
+pub use crate::registry::deferred_search::rank_tool_discovery;
 
 fn projected_match(name: &str, description: &str) -> Value {
     json!({
@@ -83,6 +111,33 @@ pub struct ToolSearchTool {
 }
 
 impl ToolSearchTool {
+    fn validate_query<'a>(&self, input: &'a Value) -> Result<&'a str, ToolResult> {
+        let query = input["query"].as_str().unwrap_or("").trim();
+        if query.is_empty() {
+            return Err(ToolResult {
+                content: "Error: query is required".to_string(),
+                is_error: true,
+                images: Vec::new(),
+            });
+        }
+        let information_chars = query.chars().filter(|ch| ch.is_alphanumeric()).count();
+        if information_chars < MIN_INEXACT_QUERY_CHARS
+            && !self.deferred_state.has_discovery_policy()
+            && !self.deferred_state.has_exact_search_term(query)
+        {
+            return Err(ToolResult {
+                content: format!(
+                    "Error: query must contain at least {MIN_INEXACT_QUERY_CHARS} letters or \
+                     digits unless it exactly matches a deferred tool name"
+                ),
+                is_error: true,
+                images: Vec::new(),
+            });
+        }
+
+        Ok(query)
+    }
+
     pub fn new(deferred_state: DeferredToolState) -> Self {
         Self { deferred_state }
     }
@@ -117,30 +172,24 @@ impl Tool for ToolSearchTool {
         true
     }
 
-    async fn execute(&self, input: Value) -> ToolResult {
-        let query = input["query"].as_str().unwrap_or("").trim();
-        if query.is_empty() {
-            return ToolResult {
-                content: "Error: query is required".to_string(),
-                is_error: true,
-                images: Vec::new(),
-            };
-        }
-        let information_chars = query.chars().filter(|ch| ch.is_alphanumeric()).count();
-        if information_chars < MIN_INEXACT_QUERY_CHARS
-            && !self.deferred_state.has_exact_search_term(query)
-        {
-            return ToolResult {
-                content: format!(
-                    "Error: query must contain at least {MIN_INEXACT_QUERY_CHARS} letters or \
-                     digits unless it exactly matches a deferred tool name"
-                ),
-                is_error: true,
-                images: Vec::new(),
-            };
-        }
+    async fn preflight_hook(
+        &self,
+        input: &Value,
+        _context: &crate::ToolExecutionContext,
+    ) -> Result<(), String> {
+        self.validate_query(input).map(|_| ()).map_err(|error| error.content)
+    }
 
-        let matched_defs = self.deferred_state.search_and_activate(query);
+    async fn execute(&self, input: Value) -> ToolResult {
+        let query = match self.validate_query(&input) {
+            Ok(query) => query,
+            Err(error) => return error,
+        };
+
+        let matched_defs = match self.deferred_state.search_and_activate_with_policy(query).await {
+            Ok(matches) => matches,
+            Err(message) => return ToolResult::error(message),
+        };
 
         if matched_defs.is_empty() {
             return ToolResult {
@@ -291,6 +340,20 @@ mod tests {
         assert!(matches[0].get("parameters").is_none());
         assert!(state.is_activated("AgentDelegateTool"));
         assert!(!state.is_activated("EnterPlanMode"));
+    }
+
+    #[tokio::test]
+    async fn hook_preflight_search_does_not_activate_catalog_entries() {
+        let state = build_state();
+        let tool = ToolSearchTool::new(state.clone());
+        let context = crate::ToolExecutionContext::from_scoped_tool_call("discovery", "call");
+        tool.preflight_hook(&json!({"query":"AgentDelegateTool"}), &context)
+            .await.unwrap();
+        assert!(state.activated_identities().is_empty());
+        assert!(tool.preflight_hook(&json!({"query":""}), &context).await.is_err());
+        assert!(state.activated_identities().is_empty());
+        assert!(!tool.execute(json!({"query":"AgentDelegateTool"})).await.is_error);
+        assert!(state.is_activated("AgentDelegateTool"));
     }
 
     #[tokio::test]

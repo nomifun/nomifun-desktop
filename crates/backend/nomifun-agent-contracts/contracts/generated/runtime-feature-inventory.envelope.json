@@ -2,14 +2,6 @@
   "digest_algorithm": "sorted-json-sha256-v1",
   "payload": {
     "schema_version": "1.0.0",
-    "pinned_source": {
-      "repository_alias": "../codex",
-      "pinned_commit": "dc2ccc6843abb09c9d297862dc10b6bd12a3935d"
-    },
-    "supported_profiles": [
-      "coding_native",
-      "managed_minimal"
-    ],
     "runtime_features": [
       "code_mode",
       "context.compact.automatic",
@@ -33,38 +25,7 @@
       "turn.interrupt",
       "turn.steer",
       "validation.feedback"
-    ],
-    "native_actions": [
-      "code.apply_patch",
-      "code.file_edit",
-      "process.exec",
-      "process.stdin",
-      "vcs.commit",
-      "vcs.push"
-    ],
-    "responses_semantics": [
-      "prompt_cache",
-      "reasoning_items",
-      "stream_items",
-      "tool_call_correlation"
-    ],
-    "rpc_allowlist": {
-      "methods": [
-        "create",
-        "resume",
-        "fork",
-        "start_turn",
-        "steer",
-        "follow_up",
-        "cancel",
-        "session_dispose"
-      ],
-      "experimental_methods": []
-    },
-    "full_auto": {
-      "ask_for_approval": "never",
-      "sandbox_policy": "danger-full-access"
-    }
+    ]
   },
-  "payload_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee"
+  "payload_digest": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6"
 }

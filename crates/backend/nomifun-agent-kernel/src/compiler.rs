@@ -16,6 +16,9 @@ use serde::Serialize;
 
 use crate::{KernelError, MaterializedRegistry};
 
+#[path = "compiler_dependencies.rs"]
+mod dependencies;
+
 
 #[derive(Clone, Debug)]
 pub struct CompilerEnvironment {
@@ -104,6 +107,15 @@ impl CompiledSnapshot {
             .find(|capability| &capability.capability.id == capability_id)
     }
 
+    pub(crate) fn require_contribution(&self, capability_id: &CapabilityId) -> Result<(), KernelError> {
+        if self.resolved_capability(capability_id)
+            .is_some_and(|value| value.consumption.is_contribution()) {
+            Ok(())
+        } else {
+            Err(KernelError::CapabilityNotInPreset { capability_id: capability_id.clone() })
+        }
+    }
+
     /// Attach one target's concrete resources without changing the immutable
     /// Preset Snapshot identity. Capabilities continue to own the required
     /// resource kinds; this step only resolves those slots for a Session,
@@ -140,11 +152,34 @@ impl CompiledSnapshot {
         for ids in by_kind.values_mut() {
             ids.sort();
         }
-        for policy in self.authority_policies.values_mut() {
+        for (capability_id, policy) in &mut self.authority_policies {
             policy.resource_binding_ids.clear();
             for resource_kind in &policy.required_resource_kinds {
-                let matches = by_kind.get(resource_kind).cloned().unwrap_or_default();
-                if matches.len() > 1 {
+                let mut matches = by_kind.get(resource_kind).cloned().unwrap_or_default();
+                // MCP mappings already freeze the server identity. A tool
+                // receives only that server, never the Session's entire set.
+                // The bundled resource provider explicitly selects one member
+                // at dispatch. Its connect/OAuth dependencies share that set;
+                // other unmapped/native consumers remain cardinality one.
+                if resource_kind.as_ref() == "mcp_server"
+                    && let Some(lock) = self.envelope.content.mcp_tool_locks.iter()
+                        .find(|lock| &lock.capability_id == capability_id)
+                {
+                    matches.retain(|id| by_id.get(id).is_some_and(|binding|
+                        binding.resource_id.as_ref() == lock.server_id.as_ref()));
+                    if matches.len() != 1 {
+                        return Err(KernelError::InvalidPresetRevision {
+                            reason: format!("MCP capability {} requires one exact frozen server binding", capability_id.as_ref()),
+                        });
+                    }
+                }
+                let resource_provider_set = resource_kind.as_ref() == "mcp_server"
+                    && matches!(capability_id.as_ref(), "mcp.resource" | "mcp.connect" | "mcp.oauth")
+                    && self.envelope.content.enabled_capabilities.iter()
+                        .any(|entry| entry.capability.id.as_ref() == "mcp.resource"
+                            && entry.contribution_lock.source_kind == nomifun_agent_contracts::ContributionSourceKind::PlatformBuiltin
+                            && entry.resolved_source.source_kind == nomifun_agent_contracts::PluginSourceKind::Bundled);
+                if matches.len() > 1 && !resource_provider_set {
                     return Err(KernelError::InvalidPresetRevision {
                         reason: format!(
                             "target has multiple bindings for resource kind {}",
@@ -169,6 +204,10 @@ impl CompiledSnapshot {
 
 #[derive(Serialize)]
 struct CompiledRuntimeProfileDigestInput {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    context_order: Vec<CapabilityId>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    middleware_order: Vec<CapabilityId>,
     profile_kind: RuntimeProfileKind,
     required_runtime_features: BTreeSet<RuntimeFeatureId>,
     capability_operation_locks: Vec<CapabilityOperationLock>,
@@ -183,6 +222,79 @@ struct CompiledRuntimeProfileDigestInput {
 pub struct AgentPresetCompiler;
 
 impl AgentPresetCompiler {
+    /// Authoring reuse uses the same Skill resolver as compilation. Artifact
+    /// replacement must invalidate reuse even when the body itself is unchanged.
+    pub fn skills_unchanged(
+        registry: &MaterializedRegistry,
+        revision: &AgentPresetRevision,
+        snapshot: &ResolvedSnapshotEnvelope,
+    ) -> bool {
+        let direct = revision.payload.enabled_capabilities.iter()
+            .map(|value| value.capability.id.clone()).collect();
+        compile_skill_locks(registry, &revision.payload.skill_bindings, &direct, &snapshot.surface)
+            .is_ok_and(|locks| locks == snapshot.content.skill_locks)
+    }
+
+    /// Validate an installation default using the same Role resolver as saves.
+    /// Only required members are checked here; optional members and actual
+    /// resource instances remain the responsibility of each consumer's admission.
+    pub fn validate_role_default(
+        registry: &MaterializedRegistry,
+        environment: &CompilerEnvironment,
+        selection: &RoleProviderSelection,
+    ) -> Result<(), KernelError> {
+        let role_id = &selection.role.key.role_id;
+        let contract = registry.role_contract(role_id)
+            .ok_or_else(|| KernelError::RoleProviderNotBound { role_id: role_id.clone() })?;
+        let required = contract.manifest.members.iter()
+            .filter(|member| member.requirement == nomifun_agent_contracts::RoleMemberRequirement::Required)
+            .map(|member| member.capability.id.clone()).collect();
+        resolve_role_provider_lock(registry, role_id, selection, &required, None, environment).map(|_| ())
+    }
+
+    /// Check the Role portion of an unchanged draft using the canonical resolver.
+    ///
+    /// This is an authoring-time reuse check, not execution admission: current
+    /// defaults apply to a newly saved Snapshot, never to an existing Session.
+    /// Resolution errors invalidate reuse so the normal compile can report them.
+    /// Recompute the selected closure and consumption facts too: matching Role
+    /// locks alone cannot prove that a saved dependency plan is still current.
+    pub fn role_providers_unchanged(
+        registry: &MaterializedRegistry,
+        environment: &CompilerEnvironment,
+        revision: &AgentPresetRevision,
+        snapshot: &ResolvedSnapshotEnvelope,
+    ) -> bool {
+        let external: BTreeSet<_> = snapshot.content.enabled_capabilities.iter()
+            .filter(|capability| capability.plugin_product_id.is_some())
+            .map(|capability| capability.capability.id.clone()).collect();
+        let roots = revision.payload.enabled_capabilities.iter()
+            .map(|selection| selection.capability.id.clone())
+            .filter(|id| !external.contains(id)).collect();
+        let Ok(graph) = dependencies::resolve(registry, environment, revision, &roots)
+            else { return false; };
+        if graph.roles != snapshot.content.resolved_role_providers {
+            return false;
+        }
+        let ceiling = graph.edges.keys().cloned().collect();
+        if validate_conflicts(registry, &ceiling, &graph.roles, &external).is_err() {
+            return false;
+        }
+        let Ok(mut capabilities) = resolved_capabilities(registry, &ceiling, &graph.paths)
+            else { return false; };
+        for capability in &mut capabilities {
+            capability.consumption = if roots.contains(&capability.capability.id) {
+                nomifun_agent_contracts::CapabilityConsumption::Contribution
+            } else {
+                nomifun_agent_contracts::CapabilityConsumption::Dependency
+            };
+            capability.dependency_refs = graph.edges[&capability.capability.id].clone();
+        }
+        apply_role_requirements(registry, &graph.roles, &mut capabilities).is_ok()
+            && capabilities.iter().eq(snapshot.content.enabled_capabilities.iter()
+                .filter(|capability| !external.contains(&capability.capability.id)))
+    }
+
     pub fn compile(
         registry: &MaterializedRegistry,
         environment: &CompilerEnvironment,
@@ -218,6 +330,33 @@ impl AgentPresetCompiler {
             .collect::<BTreeSet<_>>();
 
         validate_direct_selections(registry, &initial_plugin_direct)?;
+        for id in &request.revision.payload.context_order {
+            let valid = registry.capability(id).is_some_and(|value| {
+                value.manifest.kind == nomifun_agent_contracts::CapabilityKind::ContextContributor
+                    && value.manifest.supports_consumer(CapabilityConsumer::Agent)
+            });
+            if !valid {
+                return Err(KernelError::InvalidPresetRevision {
+                    reason: format!("context_order capability {} must be an Agent ContextContributor", id.as_ref()),
+                });
+            }
+        }
+        for id in &request.revision.payload.middleware_order {
+            // Revision validation owns unique, directly selected order entries.
+            // Product projections have already passed exact identity validation
+            // and carry no kind; the application owns their consumer support.
+            // Registry entries additionally expose a structural kind/consumer.
+            let valid = plugin_product_by_id.contains_key(id)
+                || registry.capability(id).is_some_and(|value| {
+                    value.manifest.kind == nomifun_agent_contracts::CapabilityKind::TurnMiddleware
+                        && value.manifest.supports_consumer(CapabilityConsumer::Agent)
+                });
+            if !valid {
+                return Err(KernelError::InvalidPresetRevision {
+                    reason: format!("middleware_order capability {} must be an Agent TurnMiddleware or an application-supplied Product contribution", id.as_ref()),
+                });
+            }
+        }
         validate_revision_contribution_locks(
             registry,
             &request.revision,
@@ -234,27 +373,30 @@ impl AgentPresetCompiler {
             }
         }
 
-        let mut paths = BTreeMap::<CapabilityId, Vec<CapabilityId>>::new();
-        let mut initial_ids = BTreeSet::new();
-        for root in initial_plugin_direct.keys() {
-            let bundle = dependency_bundle(registry, root)?;
-            record_dependency_paths(registry, root, &mut paths)?;
-            initial_ids.extend(bundle);
-        }
-        let ceiling = initial_ids.clone();
+        let graph = dependencies::resolve(registry, environment, &request.revision,
+            &initial_plugin_direct.keys().cloned().collect())?;
+        let ceiling = graph.edges.keys().cloned().collect::<BTreeSet<_>>();
 
         validate_capability_ceiling(registry, environment, &request.surface, &ceiling)?;
-        validate_conflicts(registry, &ceiling)?;
 
         let authority_policies = compile_authority_policies(
             registry,
             &initial_plugin_direct,
+            &ceiling,
         )?;
         let mut enabled_capabilities = resolved_capabilities(
             registry,
-            &initial_ids,
-            &paths,
+            &ceiling,
+            &graph.paths,
         )?;
+        for resolved in &mut enabled_capabilities {
+            resolved.consumption = if direct_ids.contains(&resolved.capability.id) {
+                nomifun_agent_contracts::CapabilityConsumption::Contribution
+            } else {
+                nomifun_agent_contracts::CapabilityConsumption::Dependency
+            };
+            resolved.dependency_refs = graph.edges[&resolved.capability.id].clone();
+        }
         let mut authority_policies = authority_policies;
         merge_plugin_product_authority_policies(
             &mut authority_policies,
@@ -266,15 +408,28 @@ impl AgentPresetCompiler {
             registry,
             &request.revision.payload.skill_bindings,
             &direct_ids,
+            &request.surface,
         )?;
-        let mcp_tool_locks = compile_mcp_locks(registry, &ceiling);
-        let resolved_role_providers = compile_role_provider_locks(
+        let mcp_tool_locks = compile_mcp_locks(registry, &direct_ids);
+        let resolved_role_providers = graph.roles;
+        validate_conflicts(
             registry,
-            &request.revision.payload.system_role_provider_overrides,
-            &environment.installation_role_bindings,
             &ceiling,
-            environment,
+            &resolved_role_providers,
+            &plugin_product_by_id.keys().cloned().collect(),
         )?;
+        apply_role_requirements(
+            registry,
+            &resolved_role_providers,
+            &mut enabled_capabilities,
+        )?;
+        for capability in &enabled_capabilities {
+            let policy = authority_policies.get_mut(&capability.capability.id)
+                .ok_or_else(|| KernelError::CapabilityNotInPreset {
+                    capability_id: capability.capability.id.clone(),
+                })?;
+            policy.required_resource_kinds = capability.required_resource_kinds.clone();
+        }
         let capability_allowlist = enabled_capabilities
             .iter()
             .map(|capability| capability.capability.id.clone())
@@ -298,6 +453,8 @@ impl AgentPresetCompiler {
             .collect::<BTreeSet<_>>();
         let compiled_runtime_profile_digest =
             digest_payload(&CompiledRuntimeProfileDigestInput {
+                context_order: request.revision.payload.context_order.clone(),
+                middleware_order: request.revision.payload.middleware_order.clone(),
                 profile_kind: environment.required_runtime_profile,
                 required_runtime_features: required_runtime_features.clone(),
                 capability_operation_locks: enabled_capabilities
@@ -325,6 +482,8 @@ impl AgentPresetCompiler {
                 reason: error.message,
             })?;
         let content = ResolvedSnapshotContent {
+            context_order: request.revision.payload.context_order,
+            middleware_order: request.revision.payload.middleware_order,
             schema_version: VersionString::from("1.0.0"),
             resolver_version: environment.resolver_version.clone(),
             preset_revision_ref: request.revision.reference,
@@ -415,6 +574,11 @@ fn validate_plugin_product_inputs<'a>(
             .map_err(|error| KernelError::InvalidPresetRevision {
                 reason: error.message,
             })?;
+        if !capability.consumption.is_contribution() || !capability.dependency_refs.is_empty() {
+            return Err(KernelError::InvalidPresetRevision {
+                reason: "Plugin Product projections cannot supply compiler-owned dependency graph fields".into(),
+            });
+        }
         if capability.contribution_lock.source_kind
             != ContributionSourceKind::PluginProductActiveRelease
         {
@@ -750,92 +914,6 @@ fn validate_revision_contribution_locks(
     Ok(())
 }
 
-fn dependency_bundle(
-    registry: &MaterializedRegistry,
-    root: &CapabilityId,
-) -> Result<Vec<CapabilityId>, KernelError> {
-    let mut visiting = BTreeSet::new();
-    let mut visited = BTreeSet::new();
-    let mut order = Vec::new();
-    visit_dependency(
-        registry,
-        root,
-        &mut visiting,
-        &mut visited,
-        &mut order,
-    )?;
-    Ok(order)
-}
-
-fn visit_dependency(
-    registry: &MaterializedRegistry,
-    capability_id: &CapabilityId,
-    visiting: &mut BTreeSet<CapabilityId>,
-    visited: &mut BTreeSet<CapabilityId>,
-    order: &mut Vec<CapabilityId>,
-) -> Result<(), KernelError> {
-    if visited.contains(capability_id) {
-        return Ok(());
-    }
-    if !visiting.insert(capability_id.clone()) {
-        return Err(KernelError::CapabilityDependencyCycle);
-    }
-    let capability = registry.capability(capability_id).ok_or_else(|| {
-        KernelError::CapabilityNotMaterialized {
-            capability_id: capability_id.clone(),
-            version: VersionString::from("unknown"),
-        }
-    })?;
-    let mut dependencies = capability.manifest.requires.clone();
-    dependencies.sort_by(|left, right| left.id.cmp(&right.id));
-    for dependency in dependencies {
-        visit_dependency(registry, &dependency.id, visiting, visited, order)?;
-    }
-    visiting.remove(capability_id);
-    visited.insert(capability_id.clone());
-    order.push(capability_id.clone());
-    Ok(())
-}
-
-fn record_dependency_paths(
-    registry: &MaterializedRegistry,
-    root: &CapabilityId,
-    paths: &mut BTreeMap<CapabilityId, Vec<CapabilityId>>,
-) -> Result<(), KernelError> {
-    record_path(registry, root, vec![root.clone()], paths)
-}
-
-fn record_path(
-    registry: &MaterializedRegistry,
-    current: &CapabilityId,
-    path: Vec<CapabilityId>,
-    paths: &mut BTreeMap<CapabilityId, Vec<CapabilityId>>,
-) -> Result<(), KernelError> {
-    let replace = paths
-        .get(current)
-        .is_none_or(|existing| &path < existing);
-    if replace {
-        paths.insert(current.clone(), path.clone());
-    }
-    let capability = registry.capability(current).ok_or_else(|| {
-        KernelError::CapabilityNotMaterialized {
-            capability_id: current.clone(),
-            version: VersionString::from("unknown"),
-        }
-    })?;
-    let mut dependencies = capability.manifest.requires.clone();
-    dependencies.sort_by(|left, right| left.id.cmp(&right.id));
-    for dependency in dependencies {
-        if path.contains(&dependency.id) {
-            return Err(KernelError::CapabilityDependencyCycle);
-        }
-        let mut next_path = path.clone();
-        next_path.push(dependency.id.clone());
-        record_path(registry, &dependency.id, next_path, paths)?;
-    }
-    Ok(())
-}
-
 fn validate_capability_ceiling(
     registry: &MaterializedRegistry,
     environment: &CompilerEnvironment,
@@ -900,13 +978,45 @@ fn platform_supported(
 fn validate_conflicts(
     registry: &MaterializedRegistry,
     ceiling: &BTreeSet<CapabilityId>,
+    locks: &BTreeMap<ExecutionRoleId, ResolvedRoleProviderLock>,
+    external: &BTreeSet<CapabilityId>,
 ) -> Result<(), KernelError> {
-    for capability_id in ceiling {
-        let capability = &registry.capabilities[capability_id].manifest;
+    // A conflict concerns actual consumption, not Catalog membership or public
+    // Tool visibility. Keep the facade's contract constraints and additionally
+    // check the selected implementation and the resource factories it uses.
+    // This set never becomes an allowlist or a source of authority policies.
+    let mut consumed = ceiling.clone();
+    for (role_id, lock) in locks {
+        let provider = registry.role_provider(role_id, &lock.provider.mount_id)
+            .ok_or_else(|| KernelError::RoleProviderUnavailable {
+                role_id: role_id.clone(),
+                mount_id: lock.provider.mount_id.clone(),
+            })?;
+        for id in ceiling.iter().filter(|id| registry.role_for_capability(id) == Some(role_id)) {
+            let member = provider.contribution.members.get(id)
+                .ok_or_else(|| KernelError::RoleProviderMemberUnavailable {
+                    role_id: role_id.clone(), capability_id: id.clone(),
+                })?;
+            for (member_id, implementation) in std::iter::once((id, member))
+                .chain(registry.role_resource_members(provider, id))
+            {
+                consumed.insert(member_id.clone());
+                if let Some(implementation) = &implementation.implementation {
+                    consumed.insert(implementation.id.clone());
+                }
+            }
+        }
+    }
+    for capability_id in &consumed {
+        let capability = &registry.capability(capability_id)
+            .ok_or_else(|| KernelError::CapabilityNotMaterialized {
+                capability_id: capability_id.clone(), version: "unknown".into(),
+            })?.manifest;
         if let Some(conflict) = capability
             .conflicts
             .iter()
-            .find(|conflict| ceiling.contains(&conflict.capability.id))
+            .find(|conflict| consumed.contains(&conflict.capability.id)
+                || external.contains(&conflict.capability.id))
         {
             return Err(KernelError::CapabilityConflict {
                 left: capability_id.clone(),
@@ -920,39 +1030,22 @@ fn validate_conflicts(
 fn compile_authority_policies(
     registry: &MaterializedRegistry,
     initial_direct: &BTreeMap<CapabilityId, &CapabilitySelection>,
+    ceiling: &BTreeSet<CapabilityId>,
 ) -> Result<BTreeMap<CapabilityId, CompiledCapabilityPolicy>, KernelError> {
     let mut policies = BTreeMap::<CapabilityId, CompiledCapabilityPolicy>::new();
-    for root in initial_direct.keys() {
-        let bundle = dependency_bundle(registry, root)?;
-        for capability_id in bundle {
-            let capability = &registry.capabilities[&capability_id].manifest;
-            let required_resource_kinds =
-                capability.contributions.resource_kinds.clone();
-            let declared_actions = capability
-                .contributions
-                .actions
-                .iter()
-                .map(|action| action.action_id.clone())
-                .collect::<BTreeSet<_>>();
-            let allowed_actions = initial_direct
-                .get(&capability_id)
-                .filter(|direct| !direct.action_allowlist.is_empty())
-                .map(|direct| direct.action_allowlist.clone())
-                .unwrap_or(declared_actions);
-            policies
-                .entry(capability_id)
-                .and_modify(|policy| {
-                    policy.allowed_actions.extend(allowed_actions.clone());
-                    policy
-                        .required_resource_kinds
-                        .extend(required_resource_kinds.clone());
-                })
-                .or_insert(CompiledCapabilityPolicy {
-                    allowed_actions,
-                    resource_binding_ids: BTreeSet::new(),
-                    required_resource_kinds,
-                });
-        }
+    for capability_id in ceiling {
+        let capability = &registry.capabilities[capability_id].manifest;
+        let declared_actions = capability.contributions.actions.iter()
+            .map(|action| action.action_id.clone()).collect::<BTreeSet<_>>();
+        let allowed_actions = initial_direct.get(capability_id)
+            .filter(|direct| !direct.action_allowlist.is_empty())
+            .map(|direct| direct.action_allowlist.clone())
+            .unwrap_or(declared_actions);
+        policies.insert(capability_id.clone(), CompiledCapabilityPolicy {
+            allowed_actions,
+            resource_binding_ids: BTreeSet::new(),
+            required_resource_kinds: capability.contributions.resource_kinds.clone(),
+        });
     }
     Ok(policies)
 }
@@ -967,6 +1060,8 @@ fn resolved_capabilities(
         .map(|capability_id| {
             let capability = &registry.capabilities[capability_id];
             Ok(ResolvedCapability {
+                consumption: Default::default(),
+                dependency_refs: Vec::new(),
                 capability: CapabilityRef {
                     id: capability_id.clone(),
                     version: capability.manifest.version.clone(),
@@ -1054,6 +1149,7 @@ fn compile_skill_locks(
     registry: &MaterializedRegistry,
     skill_refs: &[nomifun_agent_contracts::SkillRef],
     direct_capability_ids: &BTreeSet<CapabilityId>,
+    surface: &str,
 ) -> Result<Vec<ResolvedSkillLock>, KernelError> {
     let mut locks = Vec::with_capacity(skill_refs.len());
     for skill_ref in skill_refs {
@@ -1069,6 +1165,14 @@ fn compile_skill_locks(
                 version: skill_ref.version.clone(),
             });
         }
+        let surfaces = &skill.definition.supported_surfaces;
+        let has_consumers = surfaces.iter().any(|value| value.starts_with("consumer:"));
+        let has_hosts = surfaces.iter().any(|value| !value.starts_with("consumer:"));
+        if (has_hosts && !surfaces.contains(surface))
+            || (has_consumers && !surfaces.contains("consumer:agent"))
+        {
+            return Err(KernelError::SkillUnavailableOnSurface { skill_id: skill_ref.id.clone(), surface: surface.into() });
+        }
         for requirement in &skill.definition.requires_capabilities {
             if !direct_capability_ids.contains(&requirement.id) {
                 return Err(KernelError::SkillRequiresCapability {
@@ -1080,6 +1184,10 @@ fn compile_skill_locks(
         locks.push(ResolvedSkillLock {
             skill: skill_ref.clone(),
             body_digest: skill.definition.body_ref.digest.clone(),
+            contribution_lock: skill.contribution_lock.clone(),
+            resolved_mount_id: skill.mount_id.clone(),
+            resolved_source: skill.source.clone(),
+            target_artifact_digest: skill.target_artifact_digest.clone(),
             required_capabilities: skill
                 .definition
                 .requires_capabilities
@@ -1128,6 +1236,56 @@ fn mcp_materialization_revision(version: &VersionString) -> u64 {
         .and_then(|major| major.parse::<u64>().ok())
         .filter(|revision| *revision >= 1)
         .unwrap_or(1)
+}
+
+/// Project selected implementation requirements into the existing policy and
+/// profile. No implementation capability is added to the public Tool set and
+/// no action or resource instance is granted by selecting a Provider.
+fn apply_role_requirements(
+    registry: &MaterializedRegistry,
+    locks: &BTreeMap<ExecutionRoleId, ResolvedRoleProviderLock>,
+    capabilities: &mut [ResolvedCapability],
+) -> Result<(), KernelError> {
+    for resolved in capabilities {
+        let id = &resolved.capability.id;
+        let Some(role) = registry.role_for_capability(id) else {
+            continue;
+        };
+        let lock = locks.get(role).ok_or_else(|| KernelError::RoleProviderNotBound {
+            role_id: role.clone(),
+        })?;
+        let provider = registry.role_provider(role, &lock.provider.mount_id)
+            .ok_or_else(|| KernelError::RoleProviderUnavailable {
+                role_id: role.clone(),
+                mount_id: lock.provider.mount_id.clone(),
+            })?;
+        let member = provider.contribution.members.get(id)
+            .ok_or_else(|| KernelError::RoleProviderMemberUnavailable {
+                role_id: role.clone(),
+                capability_id: id.clone(),
+            })?;
+        // These are execution requirements of the selected implementation,
+        // not another copy of the facade manifest. Aggregates are derived from
+        // these records; provenance/schema locks keep their canonical identity.
+        resolved.required_resource_kinds = member.required_resource_kinds.clone();
+        resolved.required_runtime_features.clear();
+        for (member_id, requirement) in std::iter::once((id, member))
+            .chain(registry.role_resource_members(provider, id))
+        {
+            for capability_id in std::iter::once(member_id)
+                .chain(requirement.implementation.as_ref().map(|value| &value.id))
+            {
+                let capability = registry.capability(capability_id)
+                    .ok_or_else(|| KernelError::CapabilityNotMaterialized {
+                        capability_id: capability_id.clone(),
+                        version: "unknown".into(),
+                    })?;
+                resolved.required_runtime_features.extend(capability.manifest.requires_runtime_features
+                    .iter().map(|value| value.id.clone()));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn compile_role_provider_locks(
@@ -1191,14 +1349,23 @@ pub fn resolve_exact_role_provider_lock(
     bindings: &BTreeMap<ResourceBindingId, TypedResourceBinding>,
     environment: &CompilerEnvironment,
 ) -> Result<ResolvedRoleProviderLock, KernelError> {
-    resolve_role_provider_lock(
+    let lock = resolve_role_provider_lock(
         registry,
         role_id,
         selection,
         selected_members,
         Some(bindings),
         environment,
-    )
+    )?;
+    // Non-Agent admission has an actual selected member set too. A default
+    // binding alone is not a plan to consume every required member together.
+    validate_conflicts(
+        registry,
+        selected_members,
+        &BTreeMap::from([(role_id.clone(), lock.clone())]),
+        &BTreeSet::new(),
+    )?;
+    Ok(lock)
 }
 
 fn resolve_role_provider_lock(
@@ -1244,7 +1411,18 @@ fn resolve_role_provider_lock(
         });
     }
 
-    for capability_id in selected_members {
+    // Resource factories used internally by a selected Tool/Context must pass
+    // the same admission as explicitly selected exports, without making them
+    // public Tools or activating their unrelated Role members.
+    let mut consumed_members = selected_members.clone();
+    for id in selected_members {
+        consumed_members.extend(registry.role_resource_members(provider, id)
+            .into_iter().map(|(id, _)| id.clone()));
+    }
+    validate_capability_ceiling(
+        registry, environment, &environment.host_surface, &consumed_members,
+    )?;
+    for capability_id in &consumed_members {
         let member = provider
             .contribution
             .members
@@ -1253,6 +1431,17 @@ fn resolve_role_provider_lock(
                 role_id: role_id.clone(),
                 capability_id: capability_id.clone(),
             })?;
+        if let Some(implementation) = &member.implementation {
+            // The selected facade's availability cannot stand in for the
+            // implementation's platform/surface/features. Validation does not
+            // add the implementation to model tools or grant any authority.
+            validate_capability_ceiling(
+                registry,
+                environment,
+                &environment.host_surface,
+                &BTreeSet::from([implementation.id.clone()]),
+            )?;
+        }
         if !member.supported_platforms.is_empty()
             && !member.supported_platforms.iter().any(|constraint| {
                 provider_platform_supported(
@@ -1352,6 +1541,8 @@ mod tests {
             contract_digest: digest('a'),
         };
         ResolvedCapability {
+            consumption: Default::default(),
+            dependency_refs: Vec::new(),
             capability: CapabilityRef {
                 id: CAPABILITY_ID.into(),
                 version: VERSION.into(),
@@ -1407,6 +1598,9 @@ mod tests {
             action_allowlist,
         };
         let payload = AgentPresetRevisionPayload {
+            runtime_engine: None,
+            context_order: Vec::new(),
+            middleware_order: Vec::new(),
             schema_version: VERSION.into(),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
@@ -1466,6 +1660,72 @@ mod tests {
             created_at_ms: 2,
             resolver_run_id: OperationId::from("compiler-test"),
         }
+    }
+
+    #[test]
+    fn middleware_order_accepts_alternative_product_contract_and_freezes_it() {
+        let capability = plugin_product_capability(BTreeSet::from([ACTION_ID.into()]));
+        let mut saved_revision = revision(
+            capability.action_allowlist.clone(),
+            capability.contribution_lock.clone(),
+        );
+        let unordered = AgentPresetCompiler::compile(
+            &MaterializedRegistry::empty(),
+            &environment(),
+            compile_request(saved_revision.clone(), capability.clone()),
+        ).unwrap();
+        saved_revision.payload.middleware_order = vec![CAPABILITY_ID.into()];
+        saved_revision.reference.revision_digest = saved_revision.revision_digest().unwrap();
+        let compiled = AgentPresetCompiler::compile(
+            &MaterializedRegistry::empty(),
+            &environment(),
+            compile_request(saved_revision, capability.clone()),
+        ).expect("consumer support is not a generic compiler concern");
+
+        assert_eq!(compiled.content().middleware_order, vec![CapabilityId::from(CAPABILITY_ID)]);
+        assert_eq!(compiled.content().enabled_capabilities, vec![capability.clone()]);
+        assert_eq!(compiled.policy(&CAPABILITY_ID.into()), unordered.policy(&CAPABILITY_ID.into()));
+        assert_ne!(compiled.snapshot_ref(), unordered.snapshot_ref());
+        assert_ne!(compiled.content().compiled_runtime_profile_digest,
+            unordered.content().compiled_runtime_profile_digest);
+    }
+
+    #[test]
+    fn middleware_order_still_rejects_duplicate_and_unselected_product_entries() {
+        let capability = plugin_product_capability(BTreeSet::new());
+        for order in [vec![CAPABILITY_ID, CAPABILITY_ID], vec!["plugin.unselected"]] {
+            let mut saved_revision = revision(BTreeSet::new(), capability.contribution_lock.clone());
+            saved_revision.payload.middleware_order = order.into_iter().map(Into::into).collect();
+            saved_revision.reference.revision_digest = saved_revision.revision_digest().unwrap();
+            let error = AgentPresetCompiler::compile(
+                &MaterializedRegistry::empty(),
+                &environment(),
+                compile_request(saved_revision, capability.clone()),
+            ).expect_err("middleware order must be unique and directly selected");
+            assert!(matches!(error, KernelError::InvalidPresetRevision { reason }
+                if reason.contains("middleware_order contains duplicate or unselected")));
+        }
+    }
+
+    #[test]
+    fn middleware_order_still_rejects_product_identity_drift() {
+        let capability = plugin_product_capability(BTreeSet::new());
+        let mut saved_revision = revision(BTreeSet::new(), capability.contribution_lock.clone());
+        saved_revision.payload.middleware_order = vec![CAPABILITY_ID.into()];
+        saved_revision.payload.enabled_capabilities[0].capability.version = "2.0.0".into();
+        saved_revision.reference.revision_digest = saved_revision.revision_digest().unwrap();
+        assert!(matches!(AgentPresetCompiler::compile(
+            &MaterializedRegistry::empty(), &environment(),
+            compile_request(saved_revision.clone(), capability.clone()),
+        ), Err(KernelError::CapabilityNotMaterialized { .. })));
+
+        saved_revision.payload.enabled_capabilities[0].capability = capability.capability.clone();
+        saved_revision.contribution_locks[0].contract_digest = digest('e');
+        saved_revision.reference.revision_digest = saved_revision.revision_digest().unwrap();
+        assert!(matches!(AgentPresetCompiler::compile(
+            &MaterializedRegistry::empty(), &environment(),
+            compile_request(saved_revision, capability),
+        ), Err(KernelError::CapabilityProvenanceDrift { .. })));
     }
 
     #[test]

@@ -208,6 +208,9 @@ pub trait PluginRepository: Send + Sync {
 
 #[async_trait]
 pub trait PluginArtifactStorePort: Send + Sync {
+    async fn import_files(&self, _files: BTreeMap<String, Vec<u8>>) -> Result<ImportedPluginArtifact, PluginServiceError> {
+        Err(PluginServiceError::integration("captured artifact imports are unavailable"))
+    }
     async fn inspect_directory(
         &self,
         source: &Path,
@@ -1189,6 +1192,14 @@ impl FsPluginArtifactStore {
 
 #[async_trait]
 impl PluginArtifactStorePort for FsPluginArtifactStore {
+    async fn import_files(&self, files: BTreeMap<String, Vec<u8>>) -> Result<ImportedPluginArtifact, PluginServiceError> {
+        let store = self.store.clone();
+        let result = tokio::task::spawn_blocking(move || store.import_files(&files, &crate::NeverCancel))
+            .await.map_err(|error| PluginServiceError::integration(error.to_string()))??;
+        Ok(ImportedPluginArtifact { artifact: result.stored.artifact,
+            managed_relative_path: result.stored.managed_relative_path,
+            package_root: result.stored.package_root, already_present: result.already_present })
+    }
     async fn inspect_directory(
         &self,
         source: &Path,

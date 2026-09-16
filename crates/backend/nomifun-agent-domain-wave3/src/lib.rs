@@ -16,7 +16,7 @@ use std::sync::Arc;
 use nomifun_agent_contracts::{
     ActionId, AgentSessionId, ArtifactEnvelope, CancellationDescriptor, CanonicalSchemaRef,
     CapabilityActionDescriptor, CapabilityConsumer, CapabilityContributions, CapabilityId,
-    CapabilityKind, CapabilityManifest, ConnectionConfigRef, CorrelationId, EffectClass,
+    CapabilityKind, CapabilityManifest, CorrelationId, EffectClass,
     HostPortBindingDescriptor, HostPortId, HostPortRef, IdempotencyKey,
     InProcessEntrypointMetadata, LocalizedMetadata,
     OperationId, PackageContributions, PackageId, PackageManifest, PackageRef,
@@ -47,12 +47,6 @@ pub const PLUGIN_PACKAGE_ID: &str = "nomifun.plugin";
 pub const CANVAS_RESOURCE_KIND: &str = "canvas";
 pub const ASSET_LIBRARY_RESOURCE_KIND: &str = "asset_library";
 pub const CREATIVE_ASSET_LIBRARY_RESOURCE_ID: &str = "creative-studio-assets";
-pub const GENERATION_PROVIDER_RESOURCE_KIND: &str = "generation_provider";
-/// Model selector frozen with a `generation_provider` resource binding. The
-/// resource ID is the canonical provider ID; the selected model is data of
-/// that exact provider resource rather than free-form action input.
-pub const GENERATION_PROVIDER_MODEL_PARAMETER: &str = "model";
-pub const GENERATION_PROVIDER_MODEL_PARAMETER_PREFIX: &str = "model.";
 pub const PLUGIN_RESOURCE_KIND: &str = "plugin";
 
 pub const TARGET_PACKAGE_IDS: [&str; 4] = [
@@ -62,12 +56,13 @@ pub const TARGET_PACKAGE_IDS: [&str; 4] = [
     PLUGIN_PACKAGE_ID,
 ];
 
-pub const TARGET_CAPABILITY_IDS: [&str; 18] = [
+pub const TARGET_CAPABILITY_IDS: [&str; 19] = [
     "creation.text",
     "creation.image",
     "creation.image_edit",
     "creation.video",
     "creation.audio",
+    "creation.music",
     "workshop.canvas.read",
     "workshop.canvas.edit",
     "workshop.asset.read",
@@ -84,7 +79,7 @@ pub const TARGET_CAPABILITY_IDS: [&str; 18] = [
 ];
 
 pub const PACKAGE_IDS: [&str; 4] = TARGET_PACKAGE_IDS;
-pub const ALL_CAPABILITY_IDS: [&str; 18] = TARGET_CAPABILITY_IDS;
+pub const ALL_CAPABILITY_IDS: [&str; 19] = TARGET_CAPABILITY_IDS;
 pub const AGENT_SURFACES: &[&str] = &["desktop", "headless", "remote", "web"];
 
 /// The single host port for action-bearing Wave 3 capabilities.
@@ -114,36 +109,19 @@ const MAX_IMAGE_EDIT_INPUTS: usize = 8;
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CreationTaskTarget {
+    ConversationTurn {
+        conversation_id: String,
+        message_id: String,
+    },
     CanvasNode {
         canvas_id: String,
         node_id: String,
-    },
-    StandaloneWorkbench {
-        workbench_kind: CreationWorkbenchKind,
     },
     TemplateStep {
         template_id: String,
         template_run_id: String,
         template_step_id: String,
     },
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CreationWorkbenchKind {
-    Image,
-    Video,
-    Audio,
-}
-
-impl CreationWorkbenchKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Image => "image",
-            Self::Video => "video",
-            Self::Audio => "audio",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -179,10 +157,20 @@ pub struct CreationTextRequest {
     pub max_tokens: u32,
 }
 
+/// Exact local catalog selection. It selects a model, never a connection,
+/// credential, endpoint or a capability outside the frozen Kernel authority.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CreationModelSelection {
+    pub provider_id: String,
+    pub model: String,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CreationImageRequest {
     pub target: CreationTaskTarget,
+    pub model_selection: Option<CreationModelSelection>,
     pub prompt: String,
     #[serde(default = "default_creation_count")]
     pub count: u32,
@@ -194,20 +182,26 @@ pub struct CreationImageRequest {
 #[serde(deny_unknown_fields)]
 pub struct CreationImageEditRequest {
     pub target: CreationTaskTarget,
+    pub model_selection: Option<CreationModelSelection>,
     pub prompt: String,
     pub inputs: Vec<CreationImageInput>,
     #[serde(default = "default_creation_count")]
     pub count: u32,
     pub size: Option<String>,
+    pub quality: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CreationVideoRequest {
     pub target: CreationTaskTarget,
+    pub model_selection: Option<CreationModelSelection>,
     pub prompt: String,
     pub seconds: Option<u32>,
     pub size: Option<String>,
+    pub resolution: Option<String>,
+    #[serde(default = "default_creation_count")]
+    pub count: u32,
     pub first_frame_asset_id: Option<String>,
     pub last_frame_asset_id: Option<String>,
 }
@@ -216,8 +210,21 @@ pub struct CreationVideoRequest {
 #[serde(deny_unknown_fields)]
 pub struct CreationAudioRequest {
     pub target: CreationTaskTarget,
+    pub model_selection: Option<CreationModelSelection>,
     pub text: String,
     pub voice: Option<String>,
+    pub format: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CreationMusicRequest {
+    pub target: CreationTaskTarget,
+    pub model_selection: Option<CreationModelSelection>,
+    pub prompt: String,
+    pub lyrics: Option<String>,
+    #[serde(default)]
+    pub instrumental: bool,
     pub format: Option<String>,
 }
 
@@ -262,104 +269,6 @@ pub struct Wave3HostContext {
     pub resource_bindings: TypedResourceBindings,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GenerationProviderSelection {
-    pub provider_id: String,
-    pub model: String,
-    pub connection_config_ref: ConnectionConfigRef,
-    pub config_revision: i64,
-}
-
-/// Resolve the exact provider/model selected by the frozen resource binding.
-///
-/// Domain adapters must not accept provider identity from action input. This
-/// keeps retries on the same configured resource and prevents a model from
-/// escaping the Snapshot's authority by changing a payload field.
-pub fn generation_provider_selection(
-    context: &Wave3HostContext,
-) -> Result<GenerationProviderSelection, Wave3HostPortError> {
-    let bindings = context
-        .resource_bindings
-        .iter()
-        .filter(|binding| binding.resource_kind.as_ref() == GENERATION_PROVIDER_RESOURCE_KIND)
-        .collect::<Vec<_>>();
-    let [binding] = bindings.as_slice() else {
-        return Err(Wave3HostPortError::resource_binding_invalid(
-            "creation requires exactly one generation_provider resource binding",
-        ));
-    };
-    let accepted_capability_keys = [
-        "creation.text",
-        "creation.image",
-        "creation.image_edit",
-        "creation.video",
-        "creation.audio",
-    ]
-    .map(|capability_id| format!("{GENERATION_PROVIDER_MODEL_PARAMETER_PREFIX}{capability_id}"));
-    if binding.typed_parameters.keys().any(|key| {
-        key != GENERATION_PROVIDER_MODEL_PARAMETER
-            && !accepted_capability_keys.iter().any(|accepted| accepted == key)
-    }) {
-        return Err(Wave3HostPortError::resource_binding_invalid(
-            "generation_provider accepts only model or model.creation.* typed parameters",
-        ));
-    }
-    let capability_model_key = format!(
-        "{GENERATION_PROVIDER_MODEL_PARAMETER_PREFIX}{}",
-        context.capability_id.as_ref()
-    );
-    let model = binding
-        .typed_parameters
-        .get(&capability_model_key)
-        .or_else(|| {
-            binding
-                .typed_parameters
-                .get(GENERATION_PROVIDER_MODEL_PARAMETER)
-        })
-        .ok_or_else(|| {
-            Wave3HostPortError::resource_binding_invalid(
-                format!(
-                    "generation_provider requires {capability_model_key} or model"
-                ),
-            )
-        })?;
-    if model.trim().is_empty() || model.trim() != model {
-        return Err(Wave3HostPortError::resource_binding_invalid(
-            "generation_provider model must be non-empty and already trimmed",
-        ));
-    }
-    let connection_config_ref = binding.connection_config_ref.clone().ok_or_else(|| {
-        Wave3HostPortError::resource_binding_invalid(
-            "generation_provider requires a frozen connection_config_ref",
-        )
-    })?;
-    let expected_prefix = format!("provider:{}@", binding.resource_id.as_ref());
-    let revision = connection_config_ref
-        .as_ref()
-        .strip_prefix(&expected_prefix)
-        .ok_or_else(|| {
-            Wave3HostPortError::resource_binding_invalid(
-                "generation_provider connection_config_ref does not match its provider resource",
-            )
-        })?;
-    let config_revision = revision.parse::<i64>().map_err(|_| {
-        Wave3HostPortError::resource_binding_invalid(
-            "generation_provider connection_config_ref requires a canonical non-negative revision",
-        )
-    })?;
-    if config_revision < 0 || config_revision.to_string() != revision {
-        return Err(Wave3HostPortError::resource_binding_invalid(
-            "generation_provider connection_config_ref requires a canonical non-negative revision",
-        ));
-    }
-    Ok(GenerationProviderSelection {
-        provider_id: binding.resource_id.as_ref().to_owned(),
-        model: model.to_owned(),
-        connection_config_ref,
-        config_revision,
-    })
-}
-
 /// Typed domain-family operations accepted by the Wave 3 host.
 ///
 /// Payload schemas remain owned by each capability.  The enum prevents the
@@ -372,6 +281,7 @@ pub enum Wave3CapabilityOperation {
     CreationImageEdit(CreationImageEditRequest),
     CreationVideo(CreationVideoRequest),
     CreationAudio(CreationAudioRequest),
+    CreationMusic(CreationMusicRequest),
     WorkshopCanvasRead { input: StrictJsonValue },
     WorkshopCanvasEdit { input: StrictJsonValue },
     WorkshopAssetRead { input: StrictJsonValue },
@@ -394,6 +304,17 @@ pub struct Wave3HostRequest {
 }
 
 impl Wave3CapabilityOperation {
+    pub fn model_selection(&self) -> Option<&CreationModelSelection> {
+        match self {
+            Self::CreationImage(request) => request.model_selection.as_ref(),
+            Self::CreationImageEdit(request) => request.model_selection.as_ref(),
+            Self::CreationVideo(request) => request.model_selection.as_ref(),
+            Self::CreationMusic(request) => request.model_selection.as_ref(),
+            Self::CreationAudio(request) => request.model_selection.as_ref(),
+            _ => None,
+        }
+    }
+
     /// Return the canonical capability identity fixed by this typed variant.
     pub fn capability_id(&self) -> CapabilityId {
         CapabilityId::from(match self {
@@ -402,6 +323,7 @@ impl Wave3CapabilityOperation {
             Self::CreationImageEdit(_) => "creation.image_edit",
             Self::CreationVideo(_) => "creation.video",
             Self::CreationAudio(_) => "creation.audio",
+            Self::CreationMusic(_) => "creation.music",
             Self::WorkshopCanvasRead { .. } => "workshop.canvas.read",
             Self::WorkshopCanvasEdit { .. } => "workshop.canvas.edit",
             Self::WorkshopAssetRead { .. } => "workshop.asset.read",
@@ -431,7 +353,8 @@ impl Wave3CapabilityOperation {
             | Self::CreationImage(_)
             | Self::CreationImageEdit(_)
             | Self::CreationVideo(_)
-            | Self::CreationAudio(_) => Wave3OwnerDomain::Creation,
+            | Self::CreationAudio(_)
+            | Self::CreationMusic(_) => Wave3OwnerDomain::Creation,
             Self::WorkshopCanvasRead { .. }
             | Self::WorkshopCanvasEdit { .. }
             | Self::WorkshopAssetRead { .. }
@@ -449,12 +372,19 @@ impl Wave3CapabilityOperation {
     }
 
     pub fn validate(&self) -> Result<(), Wave3HostPortError> {
+        if let Some(selection) = self.model_selection() {
+            require_uuidv7("model_selection.provider_id", &selection.provider_id)
+                .and_then(|_| require_bounded_text("model_selection.model", &selection.model, 512, false))
+                .and_then(|_| if selection.model.trim() == selection.model { Ok(()) } else { Err("model_selection.model must not have surrounding whitespace".into()) })
+                .map_err(Wave3HostPortError::invalid_request)?;
+        }
         match self {
             Self::CreationText(request) => validate_creation_text(request),
             Self::CreationImage(request) => validate_creation_image(request),
             Self::CreationImageEdit(request) => validate_creation_image_edit(request),
             Self::CreationVideo(request) => validate_creation_video(request),
             Self::CreationAudio(request) => validate_creation_audio(request),
+            Self::CreationMusic(request) => validate_creation_music(request),
             Self::WorkshopCanvasRead { input }
             | Self::WorkshopCanvasEdit { input }
             | Self::WorkshopAssetRead { input }
@@ -700,32 +630,17 @@ struct PackageSpec {
     capabilities: &'static [CapabilitySpec],
 }
 
-const CREATION_TEXT_RESOURCES: &[&str] = &[GENERATION_PROVIDER_RESOURCE_KIND];
-const CREATION_IMAGE_RESOURCES: &[&str] = &[GENERATION_PROVIDER_RESOURCE_KIND];
-const CREATION_IMAGE_EDIT_RESOURCES: &[&str] = &[GENERATION_PROVIDER_RESOURCE_KIND];
-const CREATION_VIDEO_RESOURCES: &[&str] = &[GENERATION_PROVIDER_RESOURCE_KIND];
-const CREATION_AUDIO_RESOURCES: &[&str] = &[GENERATION_PROVIDER_RESOURCE_KIND];
+const CREATION_TEXT_RESOURCES: &[&str] = &[];
+const CREATION_IMAGE_RESOURCES: &[&str] = &[];
+const CREATION_IMAGE_EDIT_RESOURCES: &[&str] = &[];
+const CREATION_VIDEO_RESOURCES: &[&str] = &[];
+const CREATION_AUDIO_RESOURCES: &[&str] = &[];
 
-const CREATION_TEXT_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
-    resource_kind: GENERATION_PROVIDER_RESOURCE_KIND,
-    operation: "text",
-}];
-const CREATION_IMAGE_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
-    resource_kind: GENERATION_PROVIDER_RESOURCE_KIND,
-    operation: "image",
-}];
-const CREATION_IMAGE_EDIT_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
-    resource_kind: GENERATION_PROVIDER_RESOURCE_KIND,
-    operation: "image",
-}];
-const CREATION_VIDEO_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
-    resource_kind: GENERATION_PROVIDER_RESOURCE_KIND,
-    operation: "video",
-}];
-const CREATION_AUDIO_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
-    resource_kind: GENERATION_PROVIDER_RESOURCE_KIND,
-    operation: "audio",
-}];
+const CREATION_TEXT_REQUIREMENTS: &[ResourceRequirement] = &[];
+const CREATION_IMAGE_REQUIREMENTS: &[ResourceRequirement] = &[];
+const CREATION_IMAGE_EDIT_REQUIREMENTS: &[ResourceRequirement] = &[];
+const CREATION_VIDEO_REQUIREMENTS: &[ResourceRequirement] = &[];
+const CREATION_AUDIO_REQUIREMENTS: &[ResourceRequirement] = &[];
 
 const CANVAS_READ_RESOURCES: &[&str] = &[CANVAS_RESOURCE_KIND];
 const CANVAS_EDIT_RESOURCES: &[&str] = &[CANVAS_RESOURCE_KIND];
@@ -797,7 +712,7 @@ const PLUGIN_SERVE_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement 
     operation: "serve",
 }];
 
-const CREATION_CAPABILITIES: [CapabilitySpec; 5] = [
+const CREATION_CAPABILITIES: [CapabilitySpec; 6] = [
     CapabilitySpec {
         id: "creation.text",
         display_name: "Text creation",
@@ -825,17 +740,25 @@ const CREATION_CAPABILITIES: [CapabilitySpec; 5] = [
     CapabilitySpec {
         id: "creation.video",
         display_name: "Video creation",
-        description: "Create a video artifact through the selected generation provider.",
+        description: "Submit one video generation task. Each call produces one video; call this tool separately for each requested variation or clip. Returns an accepted background task, not a completed video.",
         resource_kinds: CREATION_VIDEO_RESOURCES,
         requirements: CREATION_VIDEO_REQUIREMENTS,
         effect_class: EffectClass::WriteDurable,
     },
     CapabilitySpec {
         id: "creation.audio",
-        display_name: "Audio creation",
-        description: "Create an audio artifact through the selected generation provider.",
+        display_name: "Speech synthesis",
+        description: "Synthesize spoken text. For a song or instrumental track use creation.music.",
         resource_kinds: CREATION_AUDIO_RESOURCES,
         requirements: CREATION_AUDIO_REQUIREMENTS,
+        effect_class: EffectClass::WriteDurable,
+    },
+    CapabilitySpec {
+        id: "creation.music",
+        display_name: "Music creation",
+        description: "Compose music from a prompt and optional lyrics. Returns an accepted background task, not a completed track.",
+        resource_kinds: &[],
+        requirements: &[],
         effect_class: EffectClass::WriteDurable,
     },
 ];
@@ -984,7 +907,7 @@ const PACKAGE_SPECS: [PackageSpec; 4] = [
     },
 ];
 
-/// Return the four typed resource descriptors used by the creative preset.
+/// Return shared resource descriptors for canvas, assets and plugin domains.
 pub fn typed_resource_descriptors() -> Vec<TypedResourceDescriptor> {
     vec![
         descriptor(
@@ -999,13 +922,6 @@ pub fn typed_resource_descriptors() -> Vec<TypedResourceDescriptor> {
             ASSET_LIBRARY_RESOURCE_KIND,
             true,
             ["read", "write"],
-            "select_only_owned_resource",
-        ),
-        descriptor(
-            "generation_provider",
-            GENERATION_PROVIDER_RESOURCE_KIND,
-            false,
-            ["audio", "image", "text", "video"],
             "select_only_owned_resource",
         ),
         descriptor(
@@ -1074,13 +990,6 @@ pub fn canonical_resource_bindings(owner_id: impl Into<String>) -> Vec<TypedReso
             ASSET_LIBRARY_RESOURCE_KIND,
             "creative-asset-library",
             &["read", "write"],
-            &owner_id,
-        ),
-        resource_binding(
-            "creative-generation-provider",
-            GENERATION_PROVIDER_RESOURCE_KIND,
-            "creative-generation-provider",
-            &["audio", "image", "text", "video"],
             &owner_id,
         ),
         resource_binding(
@@ -1427,6 +1336,8 @@ fn capability_manifest(
                 presentation: ToolPresentationKind::FunctionTool,
             }],
             context_schema_refs: Vec::new(),
+            context_phase: Default::default(),
+            ui_slot: None,
             event_schema_refs: Vec::new(),
             resource_kinds: spec
                 .resource_kinds
@@ -1450,6 +1361,15 @@ fn empty_config_schema() -> StrictJsonValue {
 /// Application adapters use this same resolver as manifest generation, so a
 /// typed implementation cannot silently drift from the schema advertised to
 /// models and other consumers.
+fn creation_model_selection_schema() -> Value {
+    let mut schema = strict_object_schema(json!({
+        "provider_id": uuidv7_schema(),
+        "model": bounded_string_schema(512),
+    }), &["provider_id", "model"]);
+    schema["description"] = json!("Exact provider_id and model from this turn's generation model catalog. Respect its configured default; when no default and multiple candidates exist, select a suitable listed pair for the user's request. Never invent IDs. Omit only to use the configured default or sole available model.");
+    schema
+}
+
 pub fn action_input_schema_for(capability_id: &str) -> Result<StrictJsonValue, String> {
     if find_capability(capability_id).is_none() {
         return Err(format!("unknown Wave 3 capability {capability_id}"));
@@ -1457,7 +1377,7 @@ pub fn action_input_schema_for(capability_id: &str) -> Result<StrictJsonValue, S
     Ok(StrictJsonValue(match capability_id {
         "creation.text" => strict_object_schema(
             json!({
-                "target": creation_target_schema(None),
+                "target": creation_target_schema(),
                 "prompt": bounded_string_schema(MAX_PROMPT_CHARS),
                 "system": {"type": "string", "maxLength": MAX_SYSTEM_CHARS},
                 "max_tokens": {"type": "integer", "minimum": 1, "maximum": 131072}
@@ -1466,7 +1386,8 @@ pub fn action_input_schema_for(capability_id: &str) -> Result<StrictJsonValue, S
         ),
         "creation.image" => strict_object_schema(
             json!({
-                "target": creation_target_schema(Some("image")),
+                "target": creation_target_schema(),
+                "model_selection": creation_model_selection_schema(),
                 "prompt": bounded_string_schema(MAX_PROMPT_CHARS),
                 "count": {"type": "integer", "minimum": 1, "maximum": MAX_CREATION_RESULTS},
                 "size": bounded_string_schema(128),
@@ -1476,7 +1397,8 @@ pub fn action_input_schema_for(capability_id: &str) -> Result<StrictJsonValue, S
         ),
         "creation.image_edit" => strict_object_schema(
             json!({
-                "target": creation_target_schema(Some("image")),
+                "target": creation_target_schema(),
+                "model_selection": creation_model_selection_schema(),
                 "prompt": bounded_string_schema(MAX_PROMPT_CHARS),
                 "inputs": {
                     "type": "array",
@@ -1491,17 +1413,21 @@ pub fn action_input_schema_for(capability_id: &str) -> Result<StrictJsonValue, S
                     )
                 },
                 "count": {"type": "integer", "minimum": 1, "maximum": MAX_CREATION_RESULTS},
-                "size": bounded_string_schema(128)
+                "size": bounded_string_schema(128),
+                "quality": bounded_string_schema(128)
             }),
             &["target", "prompt", "inputs"],
         ),
         "creation.video" => {
             let mut schema = strict_object_schema(
                 json!({
-                "target": creation_target_schema(Some("video")),
+                "target": creation_target_schema(),
+                "model_selection": creation_model_selection_schema(),
                 "prompt": bounded_string_schema(MAX_PROMPT_CHARS),
                 "seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
                 "size": bounded_string_schema(128),
+                "resolution": bounded_string_schema(128),
+                "count": {"type": "integer", "const": 1, "description": "One video per call. Submit separate calls for multiple clips or variations."},
                 "first_frame_asset_id": uuidv7_schema(),
                 "last_frame_asset_id": uuidv7_schema()
                 }),
@@ -1512,9 +1438,21 @@ pub fn action_input_schema_for(capability_id: &str) -> Result<StrictJsonValue, S
             });
             schema
         }
+        "creation.music" => strict_object_schema(
+            json!({
+                "target": creation_target_schema(),
+                "model_selection": creation_model_selection_schema(),
+                "prompt": bounded_string_schema(MAX_PROMPT_CHARS),
+                "lyrics": bounded_string_schema(3500),
+                "instrumental": {"type": "boolean"},
+                "format": bounded_string_schema(64)
+            }),
+            &["target", "prompt"],
+        ),
         "creation.audio" => strict_object_schema(
             json!({
-                "target": creation_target_schema(Some("audio")),
+                "target": creation_target_schema(),
+                "model_selection": creation_model_selection_schema(),
                 "text": bounded_string_schema(MAX_PROMPT_CHARS),
                 "voice": bounded_string_schema(256),
                 "format": bounded_string_schema(64)
@@ -1624,10 +1562,11 @@ pub fn action_output_schema_for(capability_id: &str) -> Result<StrictJsonValue, 
         | "creation.image"
         | "creation.image_edit"
         | "creation.video"
+        | "creation.music"
         | "creation.audio" => strict_object_schema(
             json!({
                 "creation_task_id": uuidv7_schema(),
-                "status": {"const": "succeeded"},
+                "status": {"enum": ["queued", "running", "succeeded", "failed", "canceled"]},
                 "result_asset_ids": {
                     "type": "array",
                     "maxItems": MAX_CREATION_RESULTS,
@@ -1846,8 +1785,12 @@ fn plugin_source_file_schema() -> Value {
     )
 }
 
-fn creation_target_schema(standalone_kind: Option<&str>) -> Value {
-    let mut targets = vec![
+fn creation_target_schema() -> Value {
+    let targets = vec![
+        strict_object_schema(
+            json!({"kind": {"const": "conversation_turn"}, "conversation_id": uuidv7_schema(), "message_id": uuidv7_schema()}),
+            &["kind", "conversation_id", "message_id"],
+        ),
         strict_object_schema(
             json!({
                 "kind": {"const": "canvas_node"},
@@ -1866,15 +1809,6 @@ fn creation_target_schema(standalone_kind: Option<&str>) -> Value {
             &["kind", "template_id", "template_run_id", "template_step_id"],
         ),
     ];
-    if let Some(workbench_kind) = standalone_kind {
-        targets.push(strict_object_schema(
-            json!({
-                "kind": {"const": "standalone_workbench"},
-                "workbench_kind": {"const": workbench_kind}
-            }),
-            &["kind", "workbench_kind"],
-        ));
-    }
     json!({"oneOf": targets})
 }
 
@@ -2047,6 +1981,9 @@ pub fn operation_from_input(
         "creation.audio" => Wave3CapabilityOperation::CreationAudio(
             parse_creation_request(input.0, "creation.audio")?,
         ),
+        "creation.music" => Wave3CapabilityOperation::CreationMusic(
+            parse_creation_request(input.0, "creation.music")?,
+        ),
         "workshop.canvas.read" => Wave3CapabilityOperation::WorkshopCanvasRead { input },
         "workshop.canvas.edit" => Wave3CapabilityOperation::WorkshopCanvasEdit { input },
         "workshop.asset.read" => Wave3CapabilityOperation::WorkshopAssetRead { input },
@@ -2084,7 +2021,7 @@ fn parse_creation_request<T: for<'de> Deserialize<'de>>(
 }
 
 fn validate_creation_text(request: &CreationTextRequest) -> Result<(), Wave3HostPortError> {
-    validate_creation_target(&request.target, None)
+    validate_creation_target(&request.target)
         .and_then(|_| require_bounded_text("prompt", &request.prompt, MAX_PROMPT_CHARS, false))
         .and_then(|_| {
             request.system.as_deref().map_or(Ok(()), |system| {
@@ -2102,7 +2039,7 @@ fn validate_creation_text(request: &CreationTextRequest) -> Result<(), Wave3Host
 }
 
 fn validate_creation_image(request: &CreationImageRequest) -> Result<(), Wave3HostPortError> {
-    validate_creation_target(&request.target, Some(CreationWorkbenchKind::Image))
+    validate_creation_target(&request.target)
         .and_then(|_| require_bounded_text("prompt", &request.prompt, MAX_PROMPT_CHARS, false))
         .and_then(|_| validate_creation_count(request.count))
         .and_then(|_| validate_optional_short("size", request.size.as_deref(), 128))
@@ -2113,10 +2050,11 @@ fn validate_creation_image(request: &CreationImageRequest) -> Result<(), Wave3Ho
 fn validate_creation_image_edit(
     request: &CreationImageEditRequest,
 ) -> Result<(), Wave3HostPortError> {
-    validate_creation_target(&request.target, Some(CreationWorkbenchKind::Image))
+    validate_creation_target(&request.target)
         .and_then(|_| require_bounded_text("prompt", &request.prompt, MAX_PROMPT_CHARS, false))
         .and_then(|_| validate_creation_count(request.count))
         .and_then(|_| validate_optional_short("size", request.size.as_deref(), 128))
+        .and_then(|_| validate_optional_short("quality", request.quality.as_deref(), 128))
         .and_then(|_| {
             if request.inputs.is_empty() || request.inputs.len() > MAX_IMAGE_EDIT_INPUTS {
                 return Err(format!(
@@ -2150,8 +2088,16 @@ fn validate_creation_image_edit(
 }
 
 fn validate_creation_video(request: &CreationVideoRequest) -> Result<(), Wave3HostPortError> {
-    validate_creation_target(&request.target, Some(CreationWorkbenchKind::Video))
+    validate_creation_target(&request.target)
         .and_then(|_| require_bounded_text("prompt", &request.prompt, MAX_PROMPT_CHARS, false))
+        .and_then(|_| {
+            if request.count == 1 {
+                Ok(())
+            } else {
+                Err("count must be 1: submit a separate video tool call for each clip or variation".to_owned())
+            }
+        })
+        .and_then(|_| validate_optional_short("resolution", request.resolution.as_deref(), 128))
         .and_then(|_| {
             if request.seconds.is_some_and(|seconds| seconds == 0 || seconds > 3_600) {
                 Err("seconds must be between 1 and 3600".to_owned())
@@ -2181,34 +2127,33 @@ fn validate_creation_video(request: &CreationVideoRequest) -> Result<(), Wave3Ho
 }
 
 fn validate_creation_audio(request: &CreationAudioRequest) -> Result<(), Wave3HostPortError> {
-    validate_creation_target(&request.target, Some(CreationWorkbenchKind::Audio))
+    validate_creation_target(&request.target)
         .and_then(|_| require_bounded_text("text", &request.text, MAX_PROMPT_CHARS, false))
         .and_then(|_| validate_optional_short("voice", request.voice.as_deref(), 256))
         .and_then(|_| validate_optional_short("format", request.format.as_deref(), 64))
         .map_err(Wave3HostPortError::invalid_request)
 }
 
+fn validate_creation_music(request: &CreationMusicRequest) -> Result<(), Wave3HostPortError> {
+    validate_creation_target(&request.target)
+        .and_then(|_| require_bounded_text("prompt", &request.prompt, MAX_PROMPT_CHARS, false))
+        .and_then(|_| validate_optional_short("lyrics", request.lyrics.as_deref(), 3500))
+        .and_then(|_| validate_optional_short("format", request.format.as_deref(), 64))
+        .and_then(|_| if request.instrumental && request.lyrics.as_deref().is_some_and(|lyrics| !lyrics.trim().is_empty()) { Err("instrumental music cannot contain lyrics".to_owned()) } else { Ok(()) })
+        .map_err(Wave3HostPortError::invalid_request)
+}
+
 fn validate_creation_target(
     target: &CreationTaskTarget,
-    standalone_kind: Option<CreationWorkbenchKind>,
 ) -> Result<(), String> {
     match target {
+        CreationTaskTarget::ConversationTurn { conversation_id, message_id } => {
+            require_uuidv7("target.conversation_id", conversation_id)?;
+            require_uuidv7("target.message_id", message_id)
+        }
         CreationTaskTarget::CanvasNode { canvas_id, node_id } => {
             require_uuidv7("target.canvas_id", canvas_id)?;
             require_uuidv7("target.node_id", node_id)
-        }
-        CreationTaskTarget::StandaloneWorkbench { workbench_kind } => {
-            let expected = standalone_kind.ok_or_else(|| {
-                "this creation action has no standalone workbench owner".to_owned()
-            })?;
-            if *workbench_kind != expected {
-                return Err(format!(
-                    "standalone workbench kind {} cannot own this action; expected {}",
-                    workbench_kind.as_str(),
-                    expected.as_str()
-                ));
-            }
-            Ok(())
         }
         CreationTaskTarget::TemplateStep {
             template_id,
@@ -2480,6 +2425,7 @@ mod tests {
                 CREATION_PACKAGE_ID,
                 BTreeSet::from([
                     "creation.audio".to_owned(),
+                    "creation.music".to_owned(),
                     "creation.image".to_owned(),
                     "creation.image_edit".to_owned(),
                     "creation.text".to_owned(),
@@ -2549,7 +2495,7 @@ mod tests {
                 );
                 let expected_effect = match capability.id.as_ref() {
                     "creation.text" | "creation.image" | "creation.image_edit"
-                    | "creation.video" | "creation.audio" | "workshop.asset.write" => {
+                    | "creation.video" | "creation.audio" | "creation.music" | "workshop.asset.write" => {
                         EffectClass::WriteDurable
                     }
                     "workshop.canvas.read" | "workshop.asset.read" | "office.preview"
@@ -2686,7 +2632,7 @@ mod tests {
     #[test]
     fn creative_resource_descriptors_match_the_frozen_typed_slots() {
         let descriptors = typed_resource_descriptors();
-        assert_eq!(descriptors.len(), 4);
+        assert_eq!(descriptors.len(), 3);
         assert_eq!(
             descriptors
                 .iter()
@@ -2695,27 +2641,11 @@ mod tests {
             BTreeSet::from([
                 CANVAS_RESOURCE_KIND,
                 ASSET_LIBRARY_RESOURCE_KIND,
-                GENERATION_PROVIDER_RESOURCE_KIND,
                 PLUGIN_RESOURCE_KIND,
             ])
         );
-        let provider = descriptors
-            .iter()
-            .find(|descriptor| {
-                descriptor.resource_kind.as_ref() == GENERATION_PROVIDER_RESOURCE_KIND
-            })
-            .expect("provider descriptor");
-        assert_eq!(
-            provider.operations,
-            BTreeSet::from([
-                "audio".to_owned(),
-                "image".to_owned(),
-                "text".to_owned(),
-                "video".to_owned(),
-            ])
-        );
         let bindings = canonical_resource_bindings("owner-1");
-        assert_eq!(bindings.len(), 4);
+        assert_eq!(bindings.len(), 3);
         assert!(bindings.iter().all(|binding| binding.owner_id == "owner-1"));
         assert!(bindings.iter().all(|binding| {
             descriptors
@@ -2803,6 +2733,9 @@ mod tests {
                         operation,
                         Wave3CapabilityOperation::CreationAudio(_)
                     ));
+                }
+                "creation.music" => {
+                    assert!(matches!(operation, Wave3CapabilityOperation::CreationMusic(_)));
                 }
                 "workshop.canvas.read" => {
                     assert!(matches!(
@@ -3043,7 +2976,7 @@ mod tests {
                         resource_bindings: canonical_resource_bindings(owner_id)
                             .into_iter()
                             .filter(|binding| {
-                                binding.resource_kind.as_ref() == GENERATION_PROVIDER_RESOURCE_KIND
+                                binding.resource_kind.as_ref() == ASSET_LIBRARY_RESOURCE_KIND
                             })
                             .collect(),
                     },
@@ -3089,12 +3022,7 @@ mod tests {
                 capability_id: CapabilityId::from("creation.text"),
                 action_id: ActionId::from("creation.text.invoke"),
                 state_scope_key: ScopeKey::from("session:wave3-test"),
-                resource_bindings: canonical_resource_bindings("wave3-test-owner")
-                    .into_iter()
-                    .filter(|binding| {
-                        binding.resource_kind.as_ref() == GENERATION_PROVIDER_RESOURCE_KIND
-                    })
-                    .collect(),
+                resource_bindings: Vec::new(),
             },
             operation: Wave3CapabilityOperation::CreationText(CreationTextRequest {
                 target: CreationTaskTarget::CanvasNode {
@@ -3120,6 +3048,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn video_tools_advertise_and_enforce_one_clip_per_call() {
+        let schema = action_input_schema_for("creation.video").unwrap();
+        assert_eq!(schema.0["properties"]["count"]["const"], 1);
+        let capability = CapabilityId::from("creation.video");
+        for count in [0, 2, MAX_CREATION_RESULTS] {
+            let mut input = valid_input("creation.video");
+            input.0["count"] = json!(count);
+            assert!(operation_from_input(&capability, input).is_err());
+        }
+        for count in [None, Some(1)] {
+            let mut input = valid_input("creation.video");
+            if let Some(count) = count { input.0["count"] = json!(count); }
+            let Wave3CapabilityOperation::CreationVideo(request) = operation_from_input(&capability, input).unwrap() else { panic!("expected video") };
+            assert_eq!(request.count, 1);
+        }
+    }
+
+    #[test]
+    fn all_media_tools_accept_exact_model_selection_and_reject_invalid_selectors() {
+        let selection = json!({"provider_id":"0190f5fe-7c00-7a00-8000-000000000009", "model":"configured-model"});
+        for capability in ["creation.image", "creation.image_edit", "creation.video", "creation.music", "creation.audio"] {
+            let schema = action_input_schema_for(capability).unwrap();
+            assert_eq!(schema.0["properties"]["model_selection"]["required"], json!(["provider_id", "model"]));
+            assert_eq!(schema.0["properties"]["model_selection"]["additionalProperties"], false);
+            let mut input = valid_input(capability);
+            assert!(operation_from_input(&capability.into(), input.clone()).unwrap().model_selection().is_none());
+            input.0["model_selection"] = selection.clone();
+            let operation = operation_from_input(&capability.into(), input.clone()).unwrap();
+            assert_eq!(operation.model_selection().unwrap().model, "configured-model");
+            for invalid in [json!({"model":"configured-model"}), json!({"provider_id":"made-up", "model":"configured-model"}),
+                json!({"provider_id":selection["provider_id"], "model":" "}),
+                json!({"provider_id":selection["provider_id"], "model":"configured-model", "api_key":"forbidden"})] {
+                input.0["model_selection"] = invalid;
+                assert!(operation_from_input(&capability.into(), input.clone()).is_err(), "{capability}: {input:?}");
+            }
+        }
+    }
+
     fn valid_input(capability_id: &str) -> StrictJsonValue {
         const CANVAS_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
         const NODE_ID: &str = "0190f5fe-7c00-7a00-8000-000000000002";
@@ -3139,6 +3106,7 @@ mod tests {
             }),
             "creation.video" => json!({"target": target, "prompt": "video"}),
             "creation.audio" => json!({"target": target, "text": "speak"}),
+            "creation.music" => json!({"target": target, "prompt": "instrumental", "instrumental": true}),
             _ => json!({}),
         })
     }

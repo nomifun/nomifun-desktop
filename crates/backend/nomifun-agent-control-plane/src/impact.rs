@@ -316,6 +316,8 @@ mod tests {
         };
         let snapshot = CatalogSnapshot {
             capabilities: vec![materialized_capability],
+            role_contracts: Vec::new(),
+            role_providers: Vec::new(),
             formal_capability_entries: BTreeMap::from([(
                 formal_capability.capability.clone(),
                 formal_capability,

@@ -36,6 +36,9 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+#[path = "kernel_adapter/role.rs"]
+mod role;
+
 const VERSION: &str = "1.0.0";
 const TOOL_ID: &str = "fixture.tool";
 const TOOL_ACTION: &str = "fixture.tool.invoke";
@@ -329,6 +332,9 @@ fn revision(
             revision_digest: DigestHex::from(""),
         },
         payload: AgentPresetRevisionPayload {
+            runtime_engine: None,
+            context_order: Vec::new(),
+            middleware_order: Vec::new(),
             schema_version: VersionString::from(VERSION),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),

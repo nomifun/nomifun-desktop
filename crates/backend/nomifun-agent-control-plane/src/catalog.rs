@@ -14,15 +14,21 @@ use nomifun_agent_contracts::{
 };
 use nomifun_agent_kernel::{
     MaterializedCapability, MaterializedMcpTool, MaterializedSkill,
+    MaterializedRoleContract, MaterializedRoleProvider,
 };
 use nomifun_api_types::{
     AgentCatalogResponse, CapabilityCatalogItemDto, CatalogMaterializationStateDto,
     ExactCatalogRefDto, McpToolCatalogItemDto, OfficialPresetRoleCoverageDto,
     OfficialPresetSeedDto, OfficialPresetTemplateDto, SkillCatalogItemDto,
+    RoleCatalogItemDto, RoleProviderCatalogItemDto, RoleProviderSelectionDto,
 };
 
 use crate::error::ControlPlaneError;
 use crate::wire::{wire_cast, wire_name};
+
+#[cfg(test)]
+#[path = "catalog_roles_tests.rs"]
+mod role_tests;
 
 #[derive(Clone, Debug, Default)]
 pub struct CatalogSnapshot {
@@ -32,6 +38,8 @@ pub struct CatalogSnapshot {
         BTreeMap<PluginProductId, PluginProductCapabilityCatalogPublication>,
     pub skills: Vec<MaterializedSkill>,
     pub mcp_tools: Vec<MaterializedMcpTool>,
+    pub role_contracts: Vec<MaterializedRoleContract>,
+    pub role_providers: Vec<MaterializedRoleProvider>,
     pub unavailable_capabilities: BTreeMap<CapabilityId, CanonicalErrorCode>,
     pub service_key_diagnostics: Vec<String>,
 }
@@ -429,6 +437,7 @@ impl CatalogSnapshot {
                     .manifest
                     .supports_consumer(CapabilityConsumer::Agent)
                     && capability.source.source_kind != PluginSourceKind::TestFixture
+                    && capability.manifest.contributions.ui_slot != Some(nomifun_agent_contracts::UiContributionSlot::AgentSession)
             })
             .map(|capability| {
                 let manifest = &capability.manifest;
@@ -462,6 +471,7 @@ impl CatalogSnapshot {
                 if capability
                     .entry
                     .supports_consumer(CapabilityConsumer::Agent)
+                    && capability.manifest.contributions.ui_slot != Some(nomifun_agent_contracts::UiContributionSlot::AgentSession)
                 {
                     capabilities.push(capability_catalog_item(
                         &capability.manifest,
@@ -521,10 +531,81 @@ impl CatalogSnapshot {
             .collect();
 
         Ok(AgentCatalogResponse {
+            roles: self.roles_api(&capabilities)?,
             capabilities,
             skills,
             mcp_tools,
         })
+    }
+
+    pub fn agent_ui_contributions(&self) -> Result<Vec<nomifun_api_types::AgentUiContributionDto>, ControlPlaneError> {
+        self.validate()?;
+        let mut views = Vec::new();
+        for publication in self.plugin_product_publications.values() {
+            for capability in &publication.capabilities {
+                if capability.manifest.kind != nomifun_agent_contracts::CapabilityKind::UiContribution
+                    || capability.manifest.contributions.ui_slot != Some(nomifun_agent_contracts::UiContributionSlot::AgentSession)
+                    || capability.entry.operation_lock(CapabilityConsumer::Ui).is_err()
+                { continue; }
+                views.push(nomifun_api_types::AgentUiContributionDto {
+                    capability: ExactCatalogRefDto { id: capability.manifest.id.as_ref().into(), version: capability.manifest.version.as_ref().into() },
+                    plugin_id: publication.plugin_product_id.as_ref().into(),
+                    expected_release_digest: publication.active_release.release_digest.as_ref().into(),
+                    display_name: capability.manifest.display.name.clone(),
+                    description: capability.manifest.display.description.clone(),
+                });
+            }
+        }
+        views.sort_by(|a, b| a.capability.id.cmp(&b.capability.id).then(a.capability.version.cmp(&b.capability.version)));
+        Ok(views)
+    }
+
+    fn roles_api(
+        &self,
+        capabilities: &[CapabilityCatalogItemDto],
+    ) -> Result<Vec<RoleCatalogItemDto>, ControlPlaneError> {
+        let mut roles = Vec::new();
+        for contract in &self.role_contracts {
+            // Role facades have the same consumer/source filtering as capabilities.
+            let members: Vec<ExactCatalogRefDto> = contract.manifest.members.iter()
+                .filter_map(|member| capabilities.iter().find(|item| {
+                    item.capability.id == member.capability.id.as_ref()
+                        && item.capability.version == member.capability.version.as_ref()
+                }).map(|item| item.capability.clone()))
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            let role = nomifun_agent_contracts::ExactRoleContractRef {
+                key: contract.manifest.key.clone(),
+                contract_digest: contract.contract_digest.clone(),
+            };
+            let mut providers = self.role_providers.iter()
+                .filter(|provider| provider.provider.role == role
+                    && provider.source.source_kind != PluginSourceKind::TestFixture)
+                .map(|provider| Ok(RoleProviderCatalogItemDto {
+                    selection: RoleProviderSelectionDto {
+                        role: wire_cast(&role)?,
+                        provider_mount_id: provider.provider.mount_id.as_ref().to_owned(),
+                    },
+                    display_name: provider.contribution.display.name.clone(),
+                    description: provider.contribution.display.description.clone(),
+                    source_package: wire_cast(&provider.provider.package)?,
+                    source_kind: wire_name(&provider.source.source_kind)?,
+                    supported_capabilities: members.iter().filter(|member| {
+                        provider.contribution.members.contains_key(&CapabilityId::from(member.id.clone()))
+                    }).cloned().collect(),
+                }))
+                .collect::<Result<Vec<_>, ControlPlaneError>>()?;
+            providers.sort_by(|a, b| a.selection.provider_mount_id.cmp(&b.selection.provider_mount_id));
+            roles.push(RoleCatalogItemDto {
+                role: wire_cast(&role)?,
+                capabilities: members,
+                providers,
+            });
+        }
+        roles.sort_by(|a, b| a.role.key.role_id.cmp(&b.role.key.role_id));
+        Ok(roles)
     }
 }
 
@@ -593,6 +674,7 @@ fn capability_catalog_item(
             })
             .collect(),
         action_count: manifest.contributions.actions.len() as u32,
+        middleware_phase: nomifun_agent_contracts::tool_middleware::phase_for_actions(&manifest.contributions.actions).map(str::to_owned),
         context_contributor_count: manifest
             .contributions
             .context_schema_refs

@@ -1,6 +1,6 @@
 import { ipcBridge } from '@/common';
 import type { ConversationId } from '@/common/types/ids';
-import type { AgentSessionCapabilitySelection } from '@/common/types/agentPlatform';
+import type { AgentPresetId, AgentSessionCapabilitySelection } from '@/common/types/agentPlatform';
 import { conversationTarget } from '@/common/types/ids';
 import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { uuidv7 } from '@/common/utils';
@@ -34,6 +34,9 @@ export type ConversationCommandQueueItem = {
   files: string[];
   created_at: number;
   capability_selection?: AgentSessionCapabilitySelection;
+  preset_id?: AgentPresetId;
+  /** Unconfirmed steering is retained as a draft, never an automatic new turn. */
+  requires_review?: boolean;
 };
 
 export type ConversationCommandQueueState = {
@@ -158,6 +161,8 @@ const normalizeQueueItem = (item: unknown): ConversationCommandQueueItem | null 
     input: candidate.input,
     files: uniqueFiles(candidate.files),
     created_at: candidate.created_at,
+    ...(typeof candidate.preset_id === 'string' ? { preset_id: candidate.preset_id as AgentPresetId } : {}),
+    ...(candidate.requires_review === true ? { requires_review: true } : {}),
     ...(normalizedCapabilitySelection
       ? {
           capability_selection: {
@@ -207,7 +212,7 @@ export const normalizeQueueState = (state: unknown): ConversationCommandQueueSta
 
   return {
     items,
-    isPaused: items.length > 0 ? Boolean(candidate.isPaused) : false,
+    isPaused: items.some((item) => item.requires_review) || (items.length > 0 && Boolean(candidate.isPaused)),
   };
 };
 
@@ -215,8 +220,10 @@ export const createQueuedCommandItem = ({
   input,
   files,
   capability_selection,
+  preset_id,
+  requires_review,
 }: Pick<ConversationCommandQueueItem, 'input' | 'files'> &
-  Partial<Pick<ConversationCommandQueueItem, 'capability_selection'>>): ConversationCommandQueueItem => ({
+  Partial<Pick<ConversationCommandQueueItem, 'capability_selection' | 'preset_id' | 'requires_review'>>): ConversationCommandQueueItem => ({
   // This identifier is also the durable HTTP idempotency key. It must survive
   // dequeue restoration, remounts, and accepted-response loss unchanged.
   id: uuidv7(),
@@ -224,6 +231,8 @@ export const createQueuedCommandItem = ({
   files: uniqueFiles(files),
   created_at: Date.now(),
   ...(capability_selection ? { capability_selection } : {}),
+  ...(preset_id ? { preset_id } : {}),
+  ...(requires_review ? { requires_review: true } : {}),
 });
 
 const getQueueValidationFailureReason = (state: ConversationCommandQueueState): QueueValidationFailureReason | null => {
@@ -397,7 +406,7 @@ export type ConversationCommandQueueExecution = {
 };
 
 type EnqueueCommandInput = Pick<ConversationCommandQueueItem, 'input' | 'files'> &
-  Partial<Pick<ConversationCommandQueueItem, 'capability_selection'>>;
+  Partial<Pick<ConversationCommandQueueItem, 'capability_selection' | 'preset_id' | 'requires_review'>>;
 type UpdateCommandInput = Pick<ConversationCommandQueueItem, 'input'>;
 
 const getQueueValidationMessage = (
@@ -918,6 +927,9 @@ export const useConversationCommandQueue = ({
     }
 
     const [nextCommand] = data.items;
+    // Resume/reorder/remount cannot convert a possibly delivered steer into
+    // another execution. The user must review and remove/edit the held draft.
+    if (data.items.some((item) => item.requires_review)) return;
     const executionGeneration = executionGenerationRef.current + 1;
     executionGenerationRef.current = executionGeneration;
     const isExecutionCurrent = (): boolean =>

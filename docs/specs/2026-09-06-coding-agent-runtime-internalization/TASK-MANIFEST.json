@@ -1,0 +1,933 @@
+{
+  "schema_version": "1.0.0",
+  "manifest_kind": "coding-agent-runtime-internalization-task-manifest",
+  "stage_id": "CAR",
+  "status": "implementation-in-progress",
+  "updated_on": "2026-09-15",
+  "current_delivery_scope": {
+    "platform": "macos-local-arm64",
+    "official_engines": [
+      "nomifun.nomi",
+      "nomifun.coding"
+    ],
+    "community_example_acceptance_required": false,
+    "cross_platform_policy": "Windows current shared-code native regression required; Linux runtime acceptance remains TODO",
+    "validation_policy": "Isolated native dev and app/DMG validation; real StepFun step-3.7-flash only; no Release, updater publication or push",
+    "source_baseline": "2ff02951266b12008cf1f7ea63c3b27cff9a192a",
+    "synchronized_remote_commit": "70c28b5de",
+    "source_commit": "6125f1a6453f915f1dfcdd5d4543f8d45182c5d2",
+    "handoff": "MACOS-REVALIDATION-2026-09-15.zh.md",
+    "previous_macos_record": "MACOS-CONTINUATION-2026-09-15.zh.md",
+    "status": "current-source-local-macos-baseline-verified; live-provider-blocked-missing-credential; strict-signature-failed; not-release-ready",
+    "engine_builds": {
+      "nomifun.nomi": "0.7.6-host62",
+      "nomifun.coding": "0.7.6-host2-coding-loop95"
+    },
+    "engineering_checks": {
+      "bun_run_check": "passed entire chain; previous vocabulary failure no longer applies",
+      "ui_targeted_tests": "30 passed after catalog fixture repair",
+      "engine_core_tests": "14 passed",
+      "coding_tests": "39 passed after payload fixture repair",
+      "official_engine_fixture_tests": "15 passed; 3 live provider tests ignored",
+      "migration_tests": "6 passed",
+      "macos_desktop_tests": "5 passed",
+      "macos_script_tests": "21 passed"
+    },
+    "native_dev": {
+      "startup": "passed arm64, fresh isolated data root and WebView; native Vite window",
+      "native_engine_save_binding": "passed official-template Coding save, personal change to Nomi, new binding and old Coding continuation",
+      "native_command_q_shutdown": "passed exit 0, app/runner/Vite and ports gone"
+    },
+    "live_provider": {
+      "model": "step-3.7-flash",
+      "status": "blocked: NOMIFUN_LIVE_STEPFUN_API_KEY absent",
+      "current_source_calls": "not_run",
+      "historical_evidence": "Prior StepFun eight-stage and compaction success remains attributed to previous report only"
+    },
+    "package_checks": {
+      "source_commit": "6125f1a6453f915f1dfcdd5d4543f8d45182c5d2",
+      "status": "arm64 build and native package interaction/Command-Q passed; strict bundle signature failed",
+      "host_arch": "arm64",
+      "dmg_size_bytes": 88448834,
+      "dmg_sha256": "b180461069336f3aaa025efd3699f9dd5a5c6e95b240cf12df5112824a9a0683",
+      "host_sha256": "833da569de6147c7af6e0a6d45ff06da3d5607df08167e7c913acb7fb0f64a84",
+      "release_lock_sha256": "24af389bffc728311ccd52726c14d5796162fdefc14e97cbb581bb1a3860ca7c",
+      "frontend_files": 404,
+      "resources_legal_and_mounted_host": "exact match",
+      "hdiutil_integrity": "passed",
+      "isolated_package_startup": "health 200; tauri://localhost",
+      "native_nomi_new_and_coding_resume": "passed loopback fixture, four total sessions finished, old exact bindings unchanged",
+      "native_command_q_active_terminal": "passed: app/watchdog/sh/sleep gone, all terminal row counts 0, exit 0",
+      "bundle_signature": "failed strict codesign: code has no resources but signature indicates they must be present",
+      "developer_id_signing": "not_run",
+      "notarization": "not_run",
+      "release_updater_publication": "not_run",
+      "evidence": ".git/macos-engine-70c28b5de/package-process-cleanup.json"
+    },
+    "not_run": [
+      "current_source_real_model_dual_engine_chain",
+      "current_source_real_compaction",
+      "live_model_cancel",
+      "abnormal_exit_recovery",
+      "production_user_database_migration",
+      "Windows_native_regression",
+      "Linux_acceptance",
+      "Gatekeeper_install_upgrade_uninstall",
+      "Coding_rewind_retry_revalidation"
+    ],
+    "temporary_ui_blocker": "Mac locked at first package observation; user unlocked, native checks completed"
+  },
+  "previous_windows_delivery_scope": {
+    "platform": "windows-local",
+    "official_engines": ["nomifun.nomi", "nomifun.coding"],
+    "community_example_acceptance_required": false,
+    "cross_platform_policy": "macOS and Linux TODO handoff to corresponding machines, not a local Windows blocker",
+    "validation_policy": "Windows targeted checks plus user-requested NSIS package and StepFun step-3.7-flash official-engine smoke; isolated temporary data only; no community-example or cross-platform acceptance, no real user DB migrations or overwrite installation",
+    "remote_baseline": "52857f39c",
+    "local_merge": "f6db504e6",
+    "handoff": "WINDOWS-DELIVERY-HANDOFF-2026-09-14.zh.md",
+    "package_live_report": "WINDOWS-PACKAGE-LIVE-2026-09-14.zh.md",
+    "status": "windows-development-integrated",
+    "engine_builds": {"nomifun.nomi": "0.7.6-host60", "nomifun.coding": "0.7.6-host2-coding-loop91"},
+    "engineering_checks": {
+      "windows_desktop_app_and_production_test_compile": "passed",
+      "ui_typecheck": "passed",
+      "targeted_tests_passed": 139,
+      "targeted_tests_failed": 0,
+      "contract_generation_integrity": "passed",
+      "windows_installer_contract": "passed",
+      "desktop_ui_boundary": "passed",
+      "process_runtime_boundary": "passed"
+    },
+    "package_checks": {
+      "windows_x64_nsis_build": "passed",
+      "archive_integrity": "passed",
+      "rendered_installer_contract": "passed",
+      "frontend_401_files_match": "passed",
+      "isolated_payload_startup": "backend-health-passed; renderer-CDP-and-graceful-exit-unverified",
+      "stepfun_model": "step-3.7-flash",
+      "official_engine_live_chain": "failed: both official engines first create stage CONFLICT; no tool-success evidence",
+      "live_fixture_evidence_tests": "9 passed, 0 failed"
+    },
+    "not_run": ["community_engine_example", "macOS_Linux_acceptance", "Windows_install_upgrade_uninstall_lifecycle", "coding_runtime_production_execution", "user_database_migrations"]
+  },
+  "legacy_reference_root": "docs/specs/2026-08-28-agent-capability-platform-v2/",
+  "legacy_reference_policy": "read_only",
+  "status_source": "docs/specs/2026-09-06-coding-agent-runtime-internalization/STATUS.zh.md",
+  "design_sources": [
+    "CODING-COMPACTION-CHECKPOINT-2026-09-14.zh.md",
+    "CODING-HISTORY-PREFIX-2026-09-14.zh.md",
+    "ENGINE-CONTEXT-CLEAR-2026-09-14.zh.md",
+    "ENGINE-EXACT-SESSION-POLICY-2026-09-14.zh.md",
+    "ENGINE-ACQUISITION-2026-09-14.zh.md",
+    "ENGINE-SHUTDOWN-2026-09-14.zh.md",
+    "ENGINE-COMPOSITION-2026-09-14.zh.md",
+    "CODING-COMPACTION-RECORDS-2026-09-14.zh.md",
+    "CODING-TOOL-NAME-RECOVERY-2026-09-14.zh.md",
+    "ENGINE-STREAM-DEADLINES-2026-09-14.zh.md",
+    "ENGINE-STREAM-FRAMING-2026-09-14.zh.md",
+    "ENGINE-MESSAGES-CLOUD-LOOP-2026-09-14.zh.md",
+    "ENGINE-BEDROCK-ERRORS-2026-09-14.zh.md",
+    "ENGINE-PROTOCOL-CUTOVER-2026-09-14.zh.md",
+    "ENGINE-WRAPPER-REMOVAL-2026-09-14.zh.md",
+    "ENGINE-PACKAGING-CUTOVER-2026-09-14.zh.md",
+    "ENGINE-WRAPPER-ISOLATION-2026-09-14.zh.md",
+    "ENGINE-READINESS-2026-09-14.zh.md",
+    "CODING-PATCH-SOURCE-2026-09-14.zh.md",
+    "CODING-MULTI-BATCH-CONTEXT-2026-09-14.zh.md",
+    "CODING-RESOURCE-OBSERVATIONS-2026-09-14.zh.md",
+    "00-stage-charter-and-rules.zh.md",
+    "01-audit-and-source-baseline.zh.md",
+    "02-target-architecture-and-port-contracts.zh.md",
+    "03-model-provider-adaptation.zh.md",
+    "04-tool-loop-and-coding-capabilities.zh.md",
+    "05-session-context-and-lifecycle.zh.md",
+    "06-implementation-plan-and-atomic-tasks.zh.md",
+    "07-validation-release-and-cutover.zh.md",
+    "DECISIONS.zh.md",
+    "CODEX-SOURCE-MANIFEST.json",
+    "HANDOFF-REMOTE-INTEGRATION.zh.md",
+    "LOCAL-INTEGRATION-2026-09-13.zh.md",
+    "RUNTIME-EXTENSIONS.zh.md",
+    "PRODUCTION-INTEGRATION-2026-09-13.zh.md",
+    "CODING-LOOP-2026-09-13.zh.md",
+    "CODING-CONTROL-2026-09-13.zh.md",
+    "CODING-EXTENSIONS-2026-09-13.zh.md",
+    "CODING-ACTIVATION-2026-09-13.zh.md",
+    "CODING-STEERING-2026-09-14.zh.md",
+    "CODING-BOUNDARIES-2026-09-14.zh.md",
+    "ENGINE-SDK-2026-09-14.zh.md",
+    "ENGINE-PORTS-2026-09-14.zh.md",
+    "ENGINE-JOURNAL-2026-09-14.zh.md",
+    "ENGINE-EFFECTS-2026-09-14.zh.md",
+    "ENGINE-RESOURCES-2026-09-14.zh.md",
+    "ENGINE-REFERENCE-2026-09-14.zh.md",
+    "CODING-COMPLETION-2026-09-14.zh.md",
+    "ENGINE-MCP-PORT-2026-09-14.zh.md",
+    "ENGINE-MCP-CATALOG-2026-09-14.zh.md",
+    "ENGINE-NOMI-EFFECTS-2026-09-14.zh.md",
+    "ENGINE-MCP-RECOVERY-2026-09-14.zh.md",
+    "ENGINE-NOMI-MCP-2026-09-14.zh.md",
+    "ENGINE-MCP-MULTI-SERVER-2026-09-14.zh.md",
+    "ENGINE-MCP-PROTOCOL-2026-09-14.zh.md",
+    "CODING-SKILL-IMAGES-2026-09-14.zh.md",
+    "CODING-REQUIREMENTS-2026-09-14.zh.md",
+    "CODING-INTERACTIVE-EVIDENCE-2026-09-14.zh.md",
+    "CODING-TEXT-PAGES-2026-09-14.zh.md",
+    "CODING-WORKSPACE-IMAGES-2026-09-14.zh.md",
+    "CODING-TASK-CONTINUATION-2026-09-14.zh.md",
+    "ENGINE-SKILL-PUBLICATION-2026-09-14.zh.md",
+    "ENGINE-HOSTED-EFFECTS-2026-09-14.zh.md",
+    "ENGINE-MINIAPP-PORT-2026-09-14.zh.md",
+    "ENGINE-ROBOT-PORT-2026-09-14.zh.md",
+    "CODING-INSTRUCTION-SCOPES-2026-09-14.zh.md",
+    "CODING-PATCH-CONTRACTS-2026-09-14.zh.md",
+    "CODING-PATCH-RECOVERY-2026-09-14.zh.md",
+    "CODING-PATCH-RESUME-2026-09-14.zh.md",
+    "ENGINE-ATTEMPT-CONSTRAINTS-2026-09-14.zh.md",
+    "CODING-STEERING-MEDIA-2026-09-14.zh.md",
+    "ENGINE-GIT-LIFECYCLE-2026-09-14.zh.md",
+    "ENGINE-GIT-ATTRIBUTION-2026-09-14.zh.md",
+    "ENGINE-MCP-RESOURCES-2026-09-14.zh.md",
+    "ENGINE-NOMI-RESOURCES-2026-09-14.zh.md",
+    "ENGINE-MCP-TEMPLATES-2026-09-14.zh.md",
+    "ENGINE-RESOURCE-OUTCOMES-2026-09-14.zh.md",
+    "ENGINE-MCP-TOOL-OUTCOMES-2026-09-14.zh.md",
+    "CODING-CONTEXT-LIMIT-RECOVERY-2026-09-14.zh.md",
+    "CODING-CONTEXT-TAIL-2026-09-14.zh.md",
+    "ENGINE-MODEL-STREAM-ERRORS-2026-09-14.zh.md",
+    "ENGINE-RESPONSES-LOOP-2026-09-14.zh.md",
+    "ENGINE-ANTHROPIC-LOOP-2026-09-14.zh.md",
+    "CODING-OUTPUT-LIMIT-2026-09-14.zh.md",
+    "ENGINE-PRIVATE-REASONING-2026-09-14.zh.md",
+    "ENGINE-PROCESS-BARRIERS-2026-09-14.zh.md",
+    "CODING-CONTEXT-FOLLOWUP-2026-09-14.zh.md",
+    "CODING-DISPATCH-ACCOUNTING-2026-09-14.zh.md",
+    "CODING-HISTORY-BATCHES-2026-09-14.zh.md",
+    "ENGINE-MCP-RESOURCE-SERVERS-2026-09-14.zh.md",
+    "CODING-TOOL-ARCHIVE-2026-09-14.zh.md",
+    "CODING-PERSISTED-TOOL-HISTORY-2026-09-14.zh.md",
+    "ENGINE-MCP-COMPOSITE-TEMPLATES-2026-09-14.zh.md",
+    "CODING-INCREMENTAL-RESULTS-2026-09-14.zh.md",
+    "CODING-PARALLEL-RESULTS-2026-09-14.zh.md",
+    "ENGINE-CLEANUP-ISOLATION-2026-09-14.zh.md",
+    "CODING-TOOL-CONTEXT-2026-09-14.zh.md",
+    "CODING-MODEL-BUDGET-2026-09-14.zh.md",
+    "ENGINE-MCP-MEDIA-2026-09-14.zh.md",
+    "ENGINE-NOMI-MCP-MEDIA-2026-09-14.zh.md"
+  ],
+  "local_implementation": {
+    "branch": "car/coding-engine",
+    "base_sha": "6a2a94bd192ef67eda5dd67331f6c047b1c1b315",
+    "code_commits": [
+      "b652fa29ce02c91f600d54abaecd98dfb967f9c4",
+      "c8b0193892ad7f1b73586b7570b7a2f0172c8d1b",
+      "0e33dbed53e248ef5c926b548bfde378120bb400",
+      "f3ff31b4b6168c2cc6b4b3de867b5f922a3eb8a4",
+      "449e06110c34902e070a1b7b506bdda2db9f147a4"
+    ],
+    "code_tip": "449e06110c34902e070a1b7b506bdda2db9f147a4",
+    "crate": "crates/backend/nomifun-coding-engine/",
+    "production_wired": false,
+    "targeted_test_result": "36 passed; 0 failed",
+    "local_capabilities": [
+      "kernel_snapshot_active_set_adapter",
+      "standard_coding_tool_surface",
+      "nomi_process_runtime_adapter",
+      "agents_md_context_budget",
+      "compaction_summary_contract",
+      "checkpoint_exact_binding_admission"
+    ]
+  },
+  "local_integration": {
+    "branch": "rf/agent-capability-platform-v2",
+    "target_base_sha": "08caa20d7",
+    "source_tip": "ef5e53860",
+    "imported_local_tip": "924b6dccb",
+    "previous_implementation_commit": "6d87dc232",
+    "report": "PRODUCTION-INTEGRATION-2026-09-13.zh.md",
+    "production_wired": true,
+    "production_scope": "File/Git, Session-isolated snapshot, turn-owned process.exec with bounded terminal/launch-epoch observations, selected Plugin and exact MiniApp Service function tools, frozen Robot device tools/shared local leases/live observation context, packaged Skills with immutable UTF-8 resource pages, accepted attachments, multimodal context, planning/replan/review invalidation, frozen on-demand activation/restore, full stream-envelope limits, receipt-bound text steering with atomic tool/finish admission and uncertain delivery history, bounded journal/replay and conservative receipt-backed recovery wired; unvalidated; not full CAR completion",
+    "latest_slice_validation": "not run at user request; historical passing checks below do not cover the current changes",
+    "readiness_review": "ENGINE-READINESS-2026-09-14.zh.md",
+    "readiness_review_status": "Source-only reconciliation, not completion proof. Slice77 replaces sidecar feature/profile/RPC coupling with a neutral feature vocabulary, removes external wire contracts and fixtures, retires old stage gate branches and macOS sidecar probing, and archives obsolete deletion/composition plans. Original Conversation and compiled-in independent Engines retained. Generator/Cargo/behavior/artifact evidence remains absent; validation excluded by user.",
+    "latest_slice_report": "CODING-COMPACTION-CHECKPOINT-2026-09-14.zh.md",
+    "coding_compaction_checkpoint": "Slice90 adds optional self-contained portable retained_context to ContextCompacted. Accepted inputs use exact ordered turn-local indices; historical message copies omit media bodies, private provider state and repository instruction results. Restore checks input multiplicity/order, complete contiguous tool suffix and absence of unselected prefix. Bounded4096 items/2MiB; captured and persisted before replacing live input; host reapplies existing bounded tool observation policy. Production replay can reconstruct retained batches outside its turn window; isolated archive inspection still imports no cross-turn evidence. Legacy reference-only records remain strict, no old-build migration or unbounded history retrieval; checkpoints themselves outside the window remain unavailable. Coding loop90/Nomi unchanged host59. User requested scoped closeout, no further expansion. Source/scoped rustfmt only, no tests/build/services/model/migration/commit/push; unvalidated.",
+    "coding_history_prefix": "Slice89 seeds Coding native replay with bounded data-only Fork/import messages before its earliest collected native receipt, only when no native turns were omitted by collection limits. Prefix precedes chronological replay so compaction can replace it; no post-summary reattachment or duplicate native UI rows. Shared read_message_history_before_turn resolves exact historical receipt under owner/current-generation/context-floor bounds, sharing cursor resolution with native history. Optional prefix oversized-first-row truncates, never skips to older rows; Coding projection charges serialized ChatMessage bytes and shares pure legacy projection. Session/Engine/Snapshot facts now derive from one admitted receipt. Prefix uses up to8MiB within remaining16MiB native collection budget, not a peak-memory or full-history claim. Existing mixed legacy fallback remains. Coding loop89/Nomi host59; source/scoped rustfmt only, no tests/build/services/model/migration/commit/push; unvalidated.",
+    "engine_context_clear": "Slice88 adds source-only uses_platform_history_context policy (default false, Coding true, mutually exclusive with Nomi private Session), exact catalog maintenance resolution and Registry composition. Conversation cold/hot context clear retires live runtime under existing fences, then DB transaction compares exact extra/created_at/terminal ownership and rejects retained/accepted work before advancing a backend-only message row-id floor plus admission epoch. Native/compatibility/paged history reads honor the durable floor and active turn generation; recovery events/receipts and UI transcript remain. Generic extra/CAS/capability snapshot writes cannot overwrite the floor; destructive transcript reset removes it. Platform-history Fork uses copied messages without a second system-prompt history copy; explicit archive import retains exact Engine but not parent's numeric floor. No generic private-codec reset/migration, no schema migration or dynamic loading. Coding loop88/Nomi host58. Source and scoped rustfmt only; no tests/build/services/model/migration/commit/push; unvalidated.",
+    "engine_exact_session_policy": "Slice87 replaces family-name inference with source-registered RuntimeEngineAdmission::uses_nomi_session, default false, resolved against exact Catalog build/digest/contract/profile. Registry and cold Conversation recovery/reset/clear paths share the policy; explicit unbound legacy Nomi retained. Missing/drifted builds receive no private Nomi codec authority but may use separately registered exact-build restart hooks. Completed runtime declaration mismatch triggers retained exact-slot teardown, preserving quarantine/leases on cleanup failure. No dynamic registration, Session owner change, codec migration or generic cold-reset protocol. Coding loop87/Nomi host57; source-only, no tests/build/services/model/migration/commit/push; unvalidated.",
+    "engine_acquisition": "Slice86 routes all three production runtime acquisition entry points through an owned task holding the shutdown admission reader. Dropped waiters cancel independent child tokens without aborting constructors; existing single-flight/cancellation/exact-slot cleanup preserved. Abnormal acquisition records uncertainty and closes admission before global-reader and per-Session-gate release; empty slots retain ownership and shutdown cannot prove success after uncertainty. Rechecks close/cancel around async configuration and slot reuse. Final lost delivery retains the registered slot, never kills a possibly adopted successor by Session ID; ordinary factory Err still requires partial-resource cleanup. No arbitrary caller task-local inheritance or new recovery authority. Coding loop86/Nomi host56; source and scoped rustfmt only, no build/test/service/model/migration/commit/push; unvalidated.",
+    "engine_shutdown": "Slice85 propagates module composition failures through try_create_router to desktop/full NomiCore cleanup. Production Registry shutdown_and_wait permanently fences factory admission, waits full acquisition readers before exact-slot teardown, drains up to16 runtimes concurrently, retains quarantine/leases on failure, and uses owned shared cleanup surviving dropped waiters. Custom Registry default denies unsupported proof. Host starts shutdown early and waits before SQLite close;15s waiter timeout leaves cleanup pending and storage open. Source server composition failures retain complete AppServices/boot-lock via downcastable cleanup error and serialized cleanup-only retries with cached success. No turn replay, crossboot proof, engine algorithm or selection change; Coding loop85/Nomi host55. Source/targeted rustfmt only; no tests/build/service/model/migration/commit/push; unvalidated.",
+    "engine_composition": "Slice84 adds compile-time Host channel declarations backed by the same staged Catalog and assembly lock; requires an installed extension target, rejects duplicate aliases and reserved official stable channels, publishes only the complete catalog. Evidence reference declares stable. Desktop start_with_runtime_engines accepts source registration before router/listener serving and retains typed startup cleanup on callback failure; default entry points use no-op registration. No IPC/config loader/hot registration/Session owner change or existing Session/Fork rebinding. Coding loop84/Nomi host54 include composition sources; no build/test/service/model/migration/commit/push; unvalidated.",
+    "coding_compaction_records": "Slice83 sanitizes one message at a time into bounded64MiB JSON Lines, removes tool-call provider_metadata only from summary input, plans full contiguous record-preferred chunks before model calls, and falls back to dense UTF8 chunks if record packing exceeds the unchanged remaining32-call budget. Every chunk carries byte/message/role/partial-boundary metadata; no source bytes skipped or reordered. Summary text checked before append; existing mandatory context, recent exchange retention, atomic replacement and failure preservation unchanged. Not atomic tool-batch chunking or semantic quality proof. Coding loop83, Nomi host53 unchanged; no build/test/service/model/migration/commit/push; unvalidated.",
+    "coding_tool_name_recovery": "Slice82 preflights completed batches against the exact model tool surface before internal handlers, instruction discovery or platform admission. Any unexposed name yields errors for the entire batch with no proposed call executed; optional controls are covered too. Existing ToolCompleted/archive/history paths preserve call/result pairing, dispatch remains false, completion invalidated and plan requires reconsideration. Model may correct using fresh IDs within existing step limits; no alias, hidden catalog, implicit capability activation, provider replay or authority change. Malformed protocol and missing admitted bindings remain failures. Coding loop82, Nomi host53 unchanged; no build/test/service/model/migration/commit/push; unvalidated.",
+    "model_stream_deadlines": "Slice81 separates credential/signing/HTTP setup timeout from complete-frame idle waits; production120s each, no per-request total body cap. Preserves injected client proxy/TLS and any caller-configured timeout; production client defaults to no total timeout. On-demand timer excludes consumer backpressure; partial bytes/comments do not refresh it; complete provider events can. EOF/error/timeout drops source without synthetic completion or local retry. Bounded error-body read preserves HTTP class/Retry-After and does not infer context rejection from incomplete data. JSON/AWS ready-only sources yield, AWS append bounded, shared error reader yields. Official source identities advance; no build/test/service/model/migration/commit/push; unvalidated.",
+    "packaging_cutover": "Slice75 physically removes macOS external Runtime environment/path/hello parsing, staging/copy, binary comparison and sidecar lock injection; retired flag explicitly rejected even after passthrough separator. Tauri overlay no longer maps staging resources; existing files untouched. Host architecture/signing/notarization/DMG and legal artifacts retained; known retired resource names rejected including symlinks, bad Resources root/traversal fails closed. Release-lock schema2 removes sidecars field/CLI/hash list; unknown constructor inputs rejected, v1 locks explicitly rejected without conversion. Windows signed RC and C8 Host-only creator plus related source fixtures updated. Helpers remain generic non-Engine artifacts, not a runtime-loading interface. Historical gate/sidecar checks, Wrapper crate/bridge/host/protocol removal and actual Engine/suite/platform evidence remain incomplete. No scripts/tests/build/package/service/model/migration/credentials/commit/push executed; no Engine implementation or build-ID change, Coding loop74/Nomi host47 retained; CAR-08 not complete.",
+    "latest_nomi_build_suffix": "host59",
+    "wrapper_isolation": "Slice74 moves executor-neutral KernelCatalogProvider/materialization to control-plane, with ControlPlaneError and compatibility name reexports only. Public injected Remote transport no longer defaults to AgentPlatform/AgentSession dependencies; optional legacy-agent-platform gates old adapters. App optional agent-platform/codex-runtime are activated only by non-default legacy-codex-wrapper, which also gates old bootstrap/artifact/REST/Remote launch/model claims/desktop lifecycle and historical fixtures. Shared Wave1, Nomi detached admission, Provider broker and original Conversation owner remain. Product desktop/web manifests do not request the legacy feature. Source-only isolation, not cargo tree/build/artifact proof: explicit features/workspace selection can still include old packages; physical wrapper/bridge/protocol/packaging removal and shared Wave1 test relocation remain required. Coding loop74/Nomi host47 include catalog and app/public manifests in digests. No build/test/service/model/migration/commit/push; CAR-08 not complete.",
+    "nomi_hosted_effects": "Shared EngineEffectScope retains Kernel/MiniApp/dynamic Tool tasks; authenticated MiniApp/Robot adapters write exact-turn durable receipts before owner calls; action/input fingerprint and bounded streaming result observations survive transcript rollback; cancelled wait closes turn, unknown outcome fences Session, required per-model-round guard/history blocks unsafe progression and retry/edit/restart; returned is not rollback, physical quiescence or service shutdown; bootstrap/deferred/non-Tool lifecycle and other native Tools remain incomplete; unvalidated",
+    "latest_coding_build_suffix": "host2-coding-loop90",
+    "patch_source_preconditions": "Slice73 adds per-file expected_source tagged Any/Existing{sha256}/Absent to the shared typed patch request. Omission defaults to Any for legacy line-only behavior; null/unknown shapes rejected by serde/canonical schema, existing digest requires64 lowercase hex. Owner checks the exact complete bounded source bytes/existence during preparation before any file publication, returns failed_file index and no source/digest content on mismatch; existing publication byte comparison, no-clobber creation and partial-effect receipts unchanged. Canonical production and standalone Coding schemas expose guards; model instructed to use read_file digest/absence and re-read/replan rather than remove a rejected guard. Source-integrated Rust literal constructors gain explicit default; no new test assertions or execution. Fixed pre-existing illegal escape in standard_tools read description discovered by scoped rustfmt. Guard does not grant reads, prove inspection or close external native-edit/rename races; Any remains opt-in legacy weakness, no automatic fallback. Codex pinned text_file.rs consulted for text reconstruction boundary, not a claim of copying a digest guard. Coding host2-coding-loop73 and Nomi host46 include new shared source; no build/test/service/model/migration/commit/push; unvalidated",
+    "coding_multi_batch_context": "Slice72 expands optional tool-original retention newest-first to at most three contiguous complete batches and64 total unique IDs within the unchanged32KiB tail and full input token/byte/message/reduction budgets. Preserves intervening input multiplicity/order and assistant responses, stops at duplicate historical IDs or authority-message boundaries, never skips an intervening batch. Unseen latest image batch remains mandatory under existing policy; full source still summarized, no added summary requests or effects. ContextCompacted retains existing ordered-ID field; full replay selects exact bounded contiguous suffix, legacy single-batch references supported. Isolated archive validation bounds all IDs, allows only absent historical prefix followed by exact locally visible suffix without skipping available local calls; missing prefix never imported/reconstituted and cannot be fully verified in isolation. Fixed Codex compact.rs newest-first budgeted retention reference, not a claim that Codex uses this three-tool-batch policy. Coding host2-coding-loop72, Nomi unchanged host45; no build/test/service/model/migration/commit/push; unvalidated",
+    "coding_resource_observations": "Slice71 splits local resource preparation from port execution. Local syntax/page/image-readiness rejection leaves workspace evidence unchanged; prepared requests persist Patch recovery invalidation and WorkStatus epoch before the port, invalidate scoped instructions and completion. MCP initialization can start stdio processes; this is conservative ordering, not host admission, remote dispatch or mutation proof, and may remain after host refusal or pre-IO cancellation. No successful-command/mutation counter increment or automatic retry/reread/check. Retained failed-patch targets rearm after later effects even when previously reread in the same turn; serial calls recheck the gate, nonpatch effects/process operations persist invalidation before invocation. Cleanup exceptions unchanged. No persistent all-file tracking, SDK/schema/owner change or Codex algorithm claim. Coding host2-coding-loop71, Nomi unchanged host45; no build/test/service/model/migration/commit/push; unvalidated",
+    "nomi_mcp_resource_media": "Slice70 adds Nomi mcp_resource_read format=image via optional default-unsupported NomiMcpResourceInvoker.read_image and shared EngineResourceImageRead. Initially unbound NomiResourceImageAuthority is bound once by runtime construction to resolved model image support and native vision activation Arc; shared with platform adapter, no tool-supplied authority boolean or synthetic Coding causality/Kernel vision activation. Platform independently checks frozen primary ImageInput, bundled vision selection, constraints, snapshot and resource generation before returning pixels; same scope retains observation, cleanup, receipts and bounded platform decoder through cancellation. Exact Nomi operation result identity and strict text+one PNG/JPEG image shape checked before native ToolImage conversion; no arbitrary media/base64 fallback/automatic replay. Normal resource read shares refactored observation owner and exact binding/budget checks; Skill policy unchanged. Models retain existing Nomi provider/media pruning behavior, no live capability probe or quality claim. Resolves slice69 missing Nomi image entry only; arbitrary binary parsing, server initiated MCP lifecycle and wider recovery/credentials remain absent. Coding host2-coding-loop70 reflects shared source digest, Nomi host45; no build/test/service/model/migration/commit/push; unvalidated",
+    "mcp_resource_media": "Slice69 accepts XOR text/blob contents under existing1MiB encoded/64-item envelope and512KiB aggregate decoded blob limit. Canonical URI and bounded MIME checked. Shared platform projects text/binary descriptors before model pages and durable receipt excerpts, omits raw blobs/read extension metadata, page digest domain v3 covers projection. Optional EngineResourcePort.read_image defaults unsupported; production and Coding format=image use same retained admission/task/receipt/cleanup owner, require active llm.vision, constraints and primary ImageInput, exact generation/snapshot before IO and after projection. Explicit index and original decoded SHA from preceding descriptor, MIME PNG/JPEG/WebP with magic verification, existing bounded decoder/metadata stripping/resizing, two decoding permits retained by blocking work. Typed image only, no base64 text fallback/client URL or file fetch/automatic replay. Every call reobserves remote; post-settlement decode failure never undoes effects. Nomi shares descriptors only, no image Tool yet. Arbitrary binary parsing/download, subscriptions/server-initiated lifecycle and historical receipt migration remain absent. Fixed Codex resource handler/projection layering reference, not copied permission/media policy. Coding host2-coding-loop69, Nomi host44; no build/test/service/model/migration/commit/push; unvalidated",
+    "coding_model_budget": "Slice68 removes the universal4096 output clamp from official from_limits policy: min(host candidate output envelope, context/8,16384), retaining unknown32768/4096 fallback and platform per-candidate intersection. Turn entry freezes effective request output, respecting smaller explicit limits and rejecting zero, before model/compaction work; same value governs sending and context reservation, checked at each main model boundary. Compaction keeps its smaller output allowance. Static model-visible context/output/step ceilings guide complete smaller edits and honest closure without increasing steps, truncated-output continuation counts, permissions or replay. Known-model permitted output/cost can increase; no measured benefit claim. Explicit valid source-integrated CodingModelBudget construction remains supported and Broker owns route capability checks. Fixed Codex model-info headroom separation reference, no specific Codex16384 claim/Guardian/baseline change. Coding host2-coding-loop68, Nomi unchanged host43; no build/test/service/model/migration/commit/push; unvalidated",
+    "coding_tool_context": "Slice67 adds Coding-only canonical-capability context projection for process.exec output/text and vcs.diff patch/staged_patch/unstaged_patch. Known single-text JSON keeps all operational metadata and is_error; UTF-8 head/tail excerpts share16KiB raw allowance, complete encoded result<=24KiB and strictly smaller than source, reducing allowance for JSON escaping. Explicit per-field omission metadata, not applicable patches or complete logs. Evidence/work status/patch recovery and bounded archive see the original result first; replay uses admitted capability and only available persisted observations, without byte-identical-live or full-output claims. Exact optional call_id archive filter enables retrieval, historical duplicate IDs require source_turn inspection; source_may_be_bounded and truncation notice clarify prior projection limits. Unknown structure, file/instruction/search/media/control output and oversized metadata stay under existing compaction policies; no new effect/storage/permission/event format or shared SDK. Inspired by pinned Codex tool-output truncation, no Guardian or baseline change. Coding host2-coding-loop67, Nomi unchanged host43; no build/test/service/model/migration/commit/push; unvalidated",
+    "cleanup_panic_isolation": "Slice66 guards each shared effect settlement callback including future construction/poll unwinds, independently guards production process/tool/resource/Git/MCP/hosted settlement and Coding steering close, and catches cancel panics per retained process handle. Shared scope failures and process panic uncertainty are stored before the next await; cancellation or later successful cleanup cannot erase them or establish quiescence/reopen admission. Later owners still attempted; original task/completion ownership, failure quarantine and release gates retained. No effect retries, panic-payload return, dynamic registration or physical-stop inference; abort/hung callbacks and crossboot missing witness remain outside unwind protection. Coding digest adds shared effect source; Coding host2-coding-loop66 and Nomi host43. No build/test/service/model/migration/commit/push; unvalidated",
+    "coding_parallel_results": "Slice65 collects frozen parallel-safe ReadOnly calls via FuturesUnordered, validates each indexed identity/result and serially checks search instruction scopes before recording it. Owners retain real tasks across cancelled/dropped waiters; no permission/generation changes. Model input remains original proposal-ordered independently of asynchronous result publication. New Coding ToolResultsOrdered event is emitted only after all results are recorded; replay requires exact current step, complete unique proposal-order set, no discard/repetition or later tool event. Legacy/unfinalized batches keep recorded result order and interrupted unknown placeholders, no replay or delivery/cleanup inference. Coding host2-coding-loop65, Nomi unchanged host42; no build/test/service/model/migration/commit/push; unvalidated",
+    "coding_incremental_results": "Slice64 validates each returned serial tool identity/structure before instruction postprocessing, Patch obligation clearing or the next effect. Shared record_tool_result normalizes and emits each processed result before advancing, including serial deferrals; no duplicate batch-end result emission. Successful Patch result is recorded before its recovery-clear event. Already durable prefixes survive subsequent batch errors/cancellation; never claim unreturned/uncommitted results, owner cleanup or task success. Parallel all-call waiting and ordered results remain; processed results recorded individually after instruction checks. Full batch still required for model continuation and completion/work-status accounting. MCP catalogs additionally expose composite_expansion_supported/value types. Git-specific credential owner/remote binding and HTTPS/SSH transport still absent; no ambient credential fallback. Coding host2-coding-loop64, Nomi host42; no build/test/service/model/migration/commit/push; unvalidated",
+    "mcp_composite_templates": "Slice63 expands shared template variables to JSON strings, string lists and string-valued maps, rejecting nesting/null/numbers/coercion before connections/receipts. RFC6570 non-explode and explode with named/empty semantics; empty collections omitted, empty scalar retained, composite prefixes rejected, map keys sorted independently of serde map features. Max64 variables, 4096 aggregate UTF-8 name/key/value bytes and 256 leaf strings including map keys; existing4096 template/URI bounds. Both official Engines share schema; platform retains exact server template membership, receipts, tasks, cleanup, request/page identity and no-auto-replay boundaries. Rust map constructors need JSON values/recompile; scalar JSON format remains accepted within tightened aggregate budget. No dynamic registration or extra authority. Coding host2-coding-loop63, Nomi host41; no build/test/service/model/migration/commit/push; unvalidated",
+    "coding_persisted_tool_history": "Slice62 adds shared receipt-scoped read_history_before with same-user/Session fixed-root cursor checks and existing transactional row/byte budgets. Optional CodingHistoryPort and production adapter expose one older turn to isolated load_tool_history; exact binding/turn and journal structure checked before atomic archive publication. Isolated pre-model compaction may refer to absent older prefix without claiming its verification; normal replay unchanged. Imports only recorded results, not synthetic interrupted placeholders; source_turn/original error/truncation retained, attempted state unknown. Recent64 source IDs prevent duplicate import churn; 128 entries/4MiB data budget remains, insertion order is not cross-turn chronology. No owner/tool replay, current completion/patch/cleanup evidence, private reasoning/media restoration or dynamic registration. No full-text/crossSession/Fork-parent retrieval or oversized/corrupt journal skip API. Coding host2-coding-loop62, Nomi host40; no build/test/model/service/migration/commit/push; unvalidated",
+    "coding_tool_archive": "Slice61 keeps a turn-local tool text archive separate from the compacted model window, seeded before first compaction from paired host-supplied calls/results then populated from live results including steering deferrals. Literal search and immutable scoped-ID UTF-8 pagination, max128 records/4MiB including search copies, max64KiB text/64 parts/8KiB complete arguments per record, explicit FIFO eviction/truncation/media omissions, encoded pages <=24KiB. Single-call isolated control lane, names cannot shadow, own retrieval outputs excluded, normal step/journal budgets retained. Original is_error repeated, historical attempted state unknown, no new completion/patch-read/cleanup evidence or tool replay. No private reasoning/provider metadata/typed media payloads. Inspired by pinned Codex ContextManager separation, no Guardian import or baseline change. Not full persistent or crossboot retrieval. Coding host2-coding-loop61, Nomi host39; no build/test/model/service/migration/commit/push; unvalidated",
+    "mcp_resource_servers": "Slice60 supports 1-16 frozen resource servers, resource-only or mixed with exact tool servers. All tool servers required; extras require mcp.resource. EngineResourceRead carries optional server_id, omission only when unique, normalized before dispatch/digest; Nomi rejects target before activation. Coding receives frozen index, Nomi enumerates IDs and requires selection when multiple. Each tool policy remains exact singleton; resource-only bindings do not inherit invoke from other servers. Bundled resource/connect/oauth policies share selected set; unmapped consumers remain singleton. Pages bind canonical server/query/payload and corroborate owner envelope. Existing task/receipt/cleanup/quarantine/recovery ownership unchanged, no replay or runtime mounting. Rust source consumers need field/constructor update and recompilation; JSON unique-server omission compatible, old page digests not reusable. Coding host2-coding-loop60, Nomi host39; no build/test/service/migration/commit/push; unvalidated",
+    "coding_history_batches": "Slice59 stages closed-turn replay and publishes the derived history only after all records succeed. Requires one start/final terminal, contiguous model steps, exact active-step model/tool events, reserved identities for ignored internal step-zero reads, unique turn-local proposal IDs and no duplicate admissions/results. Continuation/review/compaction/ordinary completion require complete proposal-call-result batches; only interrupted final batches retain unknown-result placeholders, never execution/rollback/retry proof. Lifecycle Cancelled/Failed zero-step outcomes remain unknown-count sentinels; successful and positive interrupted counts must match. Real results retain journal publication order, not possibly interleaved declaration-completion order. No owner cleanup/recovery authority or SDK change. Coding host2-coding-loop59, Nomi host38; no build/test/service/migration/commit/push; unvalidated",
+    "coding_dispatch_accounting": "Slice58 tracks current-batch model call IDs immediately before forwarding to the tool port, separately from reserved internal instruction reads. Engine-only deferrals still invalidate completion/replan but cannot advance workspace epochs, add command observations or satisfy patch recovery reads. Attempted errors remain conservative possible effects. Completion observations carry invocation_attempted (historical missing field defaults true); unattempted calls cannot support success or contain command evidence. Local loop fact only, not Kernel admission, owner dispatch, cleanup or boot recovery proof; no tool replay or shared port change. Coding host2-coding-loop58, Nomi unchanged host38; no build/test/service/migration/commit/push; unvalidated",
+    "coding_context_followup": "Slice57 finds the latest actual tool-call batch even after non-tool assistant follow-ups, requires complete ordered call/result pairing, and retains the batch plus trailing input/review/continuation messages in original order. Only matched accepted input occurrences are exempt from the 32 KiB optional tail budget; User-role engine notices count. Images before any assistant follow-up remain mandatory; a later response makes the whole tail optional under existing budgets, without claiming understanding/verification. Compaction now prechecks mandatory message count plus summary slot and validates final message count, preventing subsequent assembler clipping. Replay uses the same call-ID referenced suffix with no effect/media replay. Coding-only strategy; no build/test/service/migration/commit/push; unvalidated",
+    "process_owner_barriers": "Slice56 journals exact owner process dispatch before effects and quiescent barriers only under the same scope lock after all retained handles prove reaped. Later owner dispatch invalidates earlier barriers. Structured start evidence distinguishes pre-spawn/known-clean failures from unknown starts; empty maps cannot clear an unregistered-start window. Coding boot recovery correlates tool intent, host operation and owner sequence under existing exact-build/receipt/boot/journal fences; latest valid barrier can close interrupted history without command replay or task-success claims. Running/crashed work without proof remains quarantined. CodingEventBuffer now persists first identity-only tool proposal per model step so output-limit replay can corroborate partial-call IDs without retaining partial JSON. No DB migration/build/test/service/commit/push; unvalidated",
+    "provider_reasoning_continuation": "Slice55 adds typed complete Anthropic thinking/redacted blocks with bounded exact text/signature/data and private Debug output. Empty signed text is valid. Native decoder emits atomic blocks at closure; Coding exposes only visible text, keeps full blocks in live assistant context, excludes private payload from summary/history, and discards truncated-step reasoning. Anthropic round-trips native types; other adapters explicitly reject before transport, including Bedrock/Vertex for now. Shared bridge has explicit input/output types; text-only legacy consumer rejects. No crossboot secret persistence, adaptive/server-tool/native cloud envelope support or route portability claim. Engine/platform ownership and compile-time-only registration unchanged; no build/test/service/migration/commit/push; unvalidated",
+    "coding_output_limit": "Slice54 treats only canonical MaxOutputTokens as eligible for at most two changed-context continuations per turn within unchanged output/model-step/stream/context limits. Entire proposed batch, including complete calls, is discarded before any tool admission; durable ModelOutputTruncated records exact step/proposal IDs and continuation admission. Live context retains visible text only from that step, clears provider continuation and requires fresh smaller calls without replaying prior effects. Replay checks proposal IDs and absence of dispatch/results before removing calls; UI drops unpublished call cache, no synthetic tool result. Exhaustion is TurnFailed. OpenAI Chat no longer repairs malformed/empty arguments and does not complete calls on limited/refused/cancelled output; Anthropic EOF/incomplete-thinking blocks require final max_tokens, Responses explicit incomplete item snapshots require corroborated incomplete terminal. Missing closure/other bad protocol remains failure. No new runtime loading, route ownership, grant or automatic checkpoint replay; no build/test/service/migration/commit/push; unvalidated",
+    "native_anthropic_loop": "Slice53 adds attempt-local native Anthropic Messages decoding: sequential content-block admission/closure, exact tool_use IDs/names, bounded object JSON argument assembly, standard thinking/signature chunk lifecycle, cumulative usage merge and stop-reason correlation before message_stop terminal. Heartbeats count toward shared Responses/Anthropic 16MiB/65536-frame wire budget; 128 blocks, 64 unique calls, 256KiB arguments/signatures. Normalized legacy mode remains separate; incomplete/unknown/redacted/server-hosted blocks fail closed, no tool replay. Request helper requires explicit max_output_tokens and valid budgeted thinking with no forced tool choice; unsupported adaptive/effort/summary controls fail explicitly. Optional static system-prefix ephemeral cache marking added. Bedrock/Vertex inherit shared request constraints but not native response decoding. Old normalized Anthropic fixture has invalid real-world thinking settings and is not coverage evidence; no fixture changes or build/test/service/migration/commit/push; unvalidated",
+    "native_responses_loop": "Slice52 adds request-aware attempt-local native Responses decoding with stable response/item/call identities, optional monotonic sequence, bounded frames/bytes/items/arguments, text/refusal/summary lifecycle, object JSON function arguments and exact closed-item terminal snapshot correlation. Successful functions map to ToolCalls; Coding executes only after complete terminal and its existing admission. Atomic ReasoningBlock retains empty-summary encrypted continuation and block boundaries in live model history without logging blobs; no cross-boot reasoning checkpoint. store:false requests include encrypted reasoning but observed response IDs do not automatically become continuation parents. Structured function output preserves text/image/audio and failure facts; strict:false preserves canonical optional-field schemas and Kernel validation. Unset reasoning options omitted, nested Responses usage parsed. Native/normalized mixing rejected; explicit native preservation provides additional completed snapshots only. Other provider-native protocols, hosted/custom/audio-output/raw-reasoning events and partial incomplete output presentation remain incomplete; no build/test/service/migration/commit/push; unvalidated",
+    "model_stream_errors": "Slice51 classifies explicit named/root error envelopes and OpenAI Responses response.failed by machine-readable codes before normal frame decoding. PromptTooLong/Never reaches existing Coding pre-output one-shot compaction; rate-limit/transient classifications use existing Broker retry/failover limits, hard refusals do not retry. Mixed undispatched output/usage or malformed error envelopes fail closed; raw provider diagnostic messages are not echoed. Official six-protocol adapters create a fresh ChatFrameDecoder per transport attempt; success/error/cancellation/receiver closure drops raw OpenAI/Gemini accumulators, preventing stale anonymous stream association across attempts/Sessions. Legacy custom decode_frame remains compatible and stateful implementations must opt into the decoder factory or provide equivalent isolation. No natural-language inference, new route/credential ownership, tool replay or runtime loading; unvalidated",
+    "coding_context_tail": "Slice50 retains the latest complete tool exchange atomically when optional text exchange <=32 KiB and full replacement fits message/byte/token and strict shrink budgets; complete image exchange remains mandatory. Up to 64 unique calls/results, no missing-result repair. Accepted input ordered subsequence/multiplicity retained around the original suffix, provider continuation reset. Full transcript remains summary source so optional retention can fall back without unsummarized loss or extra requests. ContextCompacted stores only ordered call IDs; closed-turn replay matches existing latest complete bounded observations, never rehydrates pixels, reloads files or executes tools. Old absent field keeps summary-only behavior. Coding-only strategy, not mandatory Nomi/community policy; no build/test/service/migration/commit/push; unvalidated",
+    "coding_context_limit_recovery": "Slice49 classifies only complete bounded HTTP 400/413/422 error envelopes with exact context_length_exceeded/prompt_too_long codes before diagnostic truncation; shared Broker returns PromptTooLong with Never transport retry. Coding permits one changed-context continuation per turn only before any semantic output and with model steps remaining; recovery target is below 75% of the rejected input estimate, anchored before steering refresh. Mandatory task/instruction/input/tool/image state must fit before summary requests; summary budget, cancellation, fresh model operation and normal owner admission remain. No tool replay, Engine/Agent/route replacement or unknown-effect clearing. Other provider natural-language/HTTP200 stream errors not newly classified; recent text tools may still be summarized. No build/test/service/migration/commit/push; unvalidated",
+    "mcp_tool_outcomes": "Slice48 accepts structurally valid tools/call isError and correlated RPC errors as observed failures only after independent protocol cleanup. Conversation host persists the result and settles occupancy before projecting MCP_TOOL_RETURNED_FAILURE through existing Kernel/Engine error channels; Nomi gets fixed safe diagnostics. Shared Wave2 non-Conversation entry also projects failure without claiming new durable Conversation ownership. Permanent tool observations preserve isError across truncation and recovery exposes tool_reported_is_error; old absent flags remain unspecified, false is not task success. Failed pre-owner receipt admission releases memory occupancy, retaining possible pending SQL evidence. Initialization/catalog/schema/transport/malformed/cleanup errors remain conservative; no automatic retry, rollback or pending clearing. No build/test/service/migration/commit/push; unvalidated",
+    "mcp_resource_outcomes": "Slice47 distinguishes initialized resource capability absence, complete catalog misses and correlated structurally valid resource RPC errors from unknown owner completion. Known rejection is a typed outcome only after independent protocol cleanup succeeds; transport/initialize/malformed response/cleanup errors stay pending. Shared pages repeat host-owned is_error/failure outside remote payload; both official Engines emit failed ToolResult rather than treating Ok(page) as resource success. Permanent receipts preserve resource_outcome separately from bounded data and recovery excerpts; legacy missing metadata remains unspecified. Settlement is observed return, not no effects, rollback, physical quiescence or replay permission; source retry/edit fencing and exact-build recovery remain. No automatic retry, human pending clearing or general MCP-tool error migration; no build/test/service/migration/commit/push; unvalidated",
+    "mcp_resource_templates": "Slice46 adds bounded resources/templates/list and exact same-session template membership followed by platform scalar RFC6570-profile expansion and text read. Shared SDK query, Coding isolated control batch and canonical Nomi deferred ToolSearch inlet are connected. URI vs template+variables are exclusive, unknown/null/composite variables rejected; prefix truncation requires decoded input without percent signs. Pure local expansion precedes receipts; no client URL/file access, extra invoke grant, automatic retry or replay. Existing owner receipts, retained tasks, cleanup, byte/hash paging and 64 calls/turn remain. Active state Snapshot identity is checked on both inlets. Composite values/binary/subscriptions/server-initiated grants unavailable; no build/test/service/migration/commit/push; unvalidated",
+    "nomi_resource_port": "Slice45 migrates canonical Nomi mcp.resource list/read to the shared platform owner and UTF-8/hash projection. Native tool names and ToolSearch strategy retained with Snapshot/resource-bound deferred identity; host validates exact bundled policy and active generation, no fabricated Coding causality/canonical Tool action. EngineEffectScope retains tasks across waiter cancellation and shares cleanup/model/source-replay fences. Resource bootstrap/native config connections suppressed except separately authorized host-injected delegation Gateway. Single-server resources can combine with frozen MCP tools, not native all-tools proxy. Permanent receipt admission enforces 64 resource operations/turn; failed pre-owner receipt admission releases only memory occupancy and preserves possible durable pending evidence. Noncanonical legacy Nomi is unchanged; templates/binary/subscriptions/server-initiated grants unavailable. No build/test/service/migration/commit/push; unvalidated",
+    "mcp_resource_port": "Slice44 adds shared EngineResourcePort and retained Session resource tasks, exact bundled active ResourceProvider/policy/config/connect-read authority, single-server Agent selection and Coding list/read controls. HTTP/SSE/stdio require declared resources, complete bounded catalog and exact URI membership, text-only bounded contents. UTF-8 JSON byte pages require actual-byte SHA256 on continuation and reobserve the server; 64 requests/turn, no content cache or guaranteed full maximum-size read. Owner effects reserve durable MCP receipts before initialization/credentials/process launch; independent cleanup, cancellation ownership, activation/cleanup joins, model pending fences and exact claimed-model/resource receipt restart audit close history without replay. UI excludes unmapped resource consumers from multi-server tool mode. Canonical Nomi inlet follows in slice45 and scalar resource templates in slice46; noncanonical legacy Nomi unchanged. Blobs/subscriptions/server-initiated grants unavailable. No build/test/service/migration/commit/push; unvalidated",
+    "git_source_attribution": "Slice43 extends hosted-effect receipts with Git using additive migration099 preserving migration098 and old retained records. Conversation dispatch requires the persistent port; live-turn/epoch attribution and exact binding/input fingerprints precede push. Canonical-root digest pending uniqueness fences same-workspace cross-Session pushes. Worker result, resource journal and hosted receipt must all settle; unknown/cancel/write failure stays pending. NotApplied is conservatively returned, not no-dispatch. Nomi source replay now consults permanent evidence; selected Coding local/file push and exact-build Git restart audit are connected. No network credentials, global filesystem/remote-target transaction or human unknown-resolution protocol; no push/build/test/migration run",
+    "git_owner_lifecycle": "Platform local/file push retains Shared blocking-worker completion and owns its exclusive push lease until worker exit. Caller abandonment/worker unwind/deadline keeps unknown state; timeout requests cancellation and joins rather than dropping the worker. RAII settlement spans durable Wave2 and Conversation receipt writes; in-flight settlement is distinct from local exit. Push uses a pinned commit OID and anonymous canonical local destination, rejecting effective libgit2 URL rewrites to other destinations or network protocols. Shared Engine tool/context/cleanup gates and selected-push Nomi witness consume current-process and persistent state using admission-frozen path identity. Slice43 adds source attribution and selected Coding local/file admission; network credentials and human unknown reconciliation remain unavailable; no actual push/build/test/migration run",
+    "coding_steering_context": "Conversation and shared SDK expose explicit default-deny context-steering support, preserving accepted receipt replay before new-request validation. Coding verifies files/selected Skill hints against committed receipt and immutable locks, prepares local images under existing root/vision/decoder limits with cancellation/deadline and final durable scope fence, and enqueues atomically with tool/finish admission. Per-turn image count/bytes bounded; pixels stay live only, permanent journal/history retain references and boundary/deferred/unknown facts without reloading or re-enqueueing. Frontend failures are held review drafts, never automatically converted into new turns; marker survives resume/reorder/remount. No new Skill grant or lifecycle owner; unvalidated",
+    "attempt_execution_constraints": "Canonical Attempt brief/step_spec are durable user input, not Agent instruction overlays. Versioned subtractive Session metadata is trusted-create-only and compared on creation replay/race reuse and shared turn/resource admission. Shared Engine tool plans are filtered after canonical compilation and exact-binding guards precede actual adapters; Coding applies the plan and filters search/activation dependencies. Nomi excludes tools and general external context/lifecycle before materialization, skips Robot/MiniApp and constrains native registration after dynamic extension. ReadShell allows arbitrary selected process execution, not OS read-only isolation; fixed Skill data and image context remain usable. Legacy attempts unchanged; source implemented, unvalidated",
+    "consumer_engine_binding": "AgentResolvedSnapshot optionally preserves canonical Binding provenance; canonical projection/Cron persistence retain it. Default Cron/Channel/AgentExecution creation adapters use the application Session host; saved owner artifacts and complete projected snapshot are rechecked before host metadata/extra and revision-selected exact Engine admission. Consumers cannot override Engine or conflicting projected fields. Creation-key replay preserves existing exact Engine rather than re-resolving a mutable channel; repository reuse checks Engine and immutable Session metadata after race arbitration. ConversationService rejects canonical snapshots lacking matching admitted metadata/Engine, preventing a raw-service Nomi fallback. Remote already uses the shared owner. Legacy snapshots without provenance are not auto-migrated; Channel dedicated legacy sessions remain incomplete. Canonical Attempt task input and subtractive Session constraints are source-implemented in slice40; unvalidated",
+    "mcp_http_discovery": "Settings HTTP and legacy SSE discovery share McpSession initialization, bounded correlated responses, full catalog pagination/schema checks, server-message handling and cleanup; removed unbounded legacy HTTP body reader, ignored initialized acknowledgment and first-page-only catalog. One protocol deadline followed by separate 2s known-session cleanup; cleanup errors override catalog success. Configured/OAuth headers validated with count/byte bounds, duplicate/malformed/routing controls rejected and values sensitive; bounded HTTP auth challenges retained without waiting for error bodies. No tools/call, Agent grant or dynamic Engine mounting; direct future drop/unknown remote session allocation is not remote cleanup proof. Unvalidated; no service/build/test run",
+    "coding_search_instructions": "Before model-facing result publication, strictly decode the bounded canonical fs.search envelope and verify query/limit/path/snippet coordinates; deduplicate hit files, discover exact canonical file scopes through authorized fs.read, then refresh bounded instruction hierarchies. No implicit read grant or native fallback; malformed/changed/unreadable/over-budget scopes withhold snippets with explicit search-executed diagnostics. Truncated searches retain valid returned hits and incomplete disclosures. Changed rules or withheld snippets defer remaining serial calls; read-only parallel results are projected after all invocations settle. Durable InstructionsUpdated precedes memory changes; cancellation/event-sink failures propagate. Host raw execution receipts remain separate from Coding model/replay projection. Not a filesystem snapshot, shell path inference or semantic proof; unvalidated",
+    "mcp_stdio": "Shared MCP protocol session, product catalog and exact resource/schema admission support stdio; platform ManagedChildProcess owns tree cleanup with 250ms EOF grace and 10s close budget; successful tool/discovery result requires full-tree cleanup. Blocking launch shares request deadline; late/cancelled results retain platform cleanup ownership and never authorize restart/replay. Cleared environment plus essential allowlist and explicit configured env, child PATH resolution, argv not shell composition; not OS sandbox. Strict bounded UTF-8 newline framing (8MiB/frame, 32MiB/4096 frames per transaction), atomic stdin writes/concurrent response reads, shared server-message denial and full catalog pagination. Settings discovery migrated from unbounded legacy reader; no live service/test/build run; persistent processes/resources/newer protocol/server-initiated lifecycles remain unsupported; unvalidated",
+    "mcp_legacy_sse": "Explicit legacy SSE 2024-11-05 transport in shared owner and product catalog/admission; same-origin validated endpoint, HTTPS for non-localhost domains, no redirects/reconnect/replay, concurrent bounded POST acknowledgment and correlated stream result, whole-transaction byte/event/deadline bounds. Settings SSE discovery shares initialization, parser and complete paged catalog; no detached reader, bounded auth challenge preserved. Static routing/framing headers rejected. Local stream release is not remote shutdown or effect rollback; stdio is tracked in mcp_stdio; other server lifecycles incomplete; unvalidated",
+    "coding_patch_resume": "CodingPatchRecoveryState v1 and PatchRecoveryUpdated use permanent execution events; persist targets before invoker and clear only after acknowledged success or complete fresh observations. Exact Session/user/build/snapshot and closed source receipt checked independently of messages, visibility, 32-turn replay window or model summary. Partial old reads reset on next turn; missing state around later dispatch rejects. Cancellation/crash retains conservative obligations; boot audit validates codec without clearing owner uncertainty. No new table/migration; not cross-Session/Fork coordination, manual quarantine resolution, filesystem transaction or tool replay; unvalidated",
+    "coding_patch_recovery": "Owner distinguishes pre/postpublication failures and retains bounded zero-based publication/restore/skip/failure/temp-cleanup observations; new files retained rather than racy rollback deletion; compact structured failure survives existing error journal, lost settlement explicit and same-journal started records fence new patch keys. Coding gates subsequent effects until fresh first text page/version or typed absence for each bounded target; earlier same-batch reads cannot clear it, process cleanup resets observations, protected context invalidates plans/completion. Permanent same-Session carry-forward is tracked in coding_patch_resume; not full content inspection, transaction or native CAS; unvalidated",
+    "workspace_tool_contracts": "Canonical strict fs.write/fs.patch/vcs.status/diff/stage/commit schemas replace accidental open-object production projection; standard Coding assembly rejects opaque schemas while accepting strict process variants; Kernel validates workspace/process shapes before host dispatch; write byte bound and commit 512-character bound align with owner; no new capability grant; unvalidated",
+    "coding_patch_text": "Logical LF/CRLF/CR preservation, source BOM retention, existing EOF-newline policy, exact middle/EOF insertion and zero-length deletion coordinates with unambiguous legacy aliases; read/search/patch share line boundaries and source-byte offsets; bounded source reads and line allocation; fixed creation intent/no-clobber publication and prepublication expected-byte check, bounded rollback comparisons, optional source/published hashes; not multi-file transaction, OS CAS, complete race isolation or recovery proof; unvalidated",
+    "robot_engine_port": "Shared exact Robot device plan and retained serial Tool host, explicit selected/active link and audio grants; atomic shared weak-cached leases with precise Drop and explicit Session close; frozen raw device schema/name checked under client-selection lock, denied schema retrieval, argument validation; Coding initial/on-demand paths plus same-turn/epoch/model-name owner-receipt restart closure without replay; no physical quiescence claim; unvalidated",
+    "coding_live_context": "Optional CodingLiveContextPort and shared EngineKernelSession.robot_vision_context: existing recent bounded text observation only, exact active generation and open turn, accepted root/epoch fence, refresh before model/compaction with bounded replacement slot and cancellation/timeout; change/expiry resets provider parent and completion review, on-demand vision appears next loop; not camera capture, model inference, instructions or semantic proof; unvalidated",
+    "miniapp_engine_port": "EngineKernelSession resolves exact selected MiniApp schemas and composes real Service dispatch inside retained EngineToolHost; canonical core binding/schema digest plus host plan equality, serialized external effects, shared Nomi call/receipt owner; initial MiniApp active set and Coding durable on-demand activation/restore wired; shared model claim and cleanup reject hosted pending; bounded independent effect history and matched receipt-only Coding restart closure without replay; extra Service resources/non-Tool lifecycle remain incomplete; Robot tracked separately; unvalidated",
+    "hosted_effect_receipts": "Migration 098 source only, pending/returned/rejected with immutable identity and one pending hosted call per Session; shared admission/boot proof/Coding recovery reject pending; bounded 16-record history with omissions, no raw input retention; only typed source-audited predispatch failures may be rejected; trigger contract name ordering corrected; no migration/build/test run",
+    "skill_publication": "Skill Library logical-source preview and digest-confirmed recapture to ordinary immutable Plugin ready candidate; existing owner/trust, artifact scanner, Project/revision checks; no activation, Agent mutation, script execution or Engine installation; requires managed Node for later Plugin v1 enable; bounded UTF-8/images, no atomic filesystem snapshot or new cross-step database transaction; unvalidated",
+    "shared_selected_skills": "Exact artifact Skill reader and EngineContextResource pure data shared by Nomi/Coding; community EngineSessionHost.read_selected_skills on admitted Session; Nomi bounded permanent instructions/index, paged text and host-model/vision-activation-gated prepared images through existing native provider delivery; context contributor duplicate fixed; no real model/image/compaction evidence this slice; unvalidated",
+    "coding_task_continuation": "Latest exact-bound canonical closed-turn candidate only; explicit single-call resume_task cites current accepted input before planning/effects, imports all registered requirements with earliest origin and forces fresh planning; historical completion interpretations retained without evidence IDs, no process/tool/evidence/provider continuation replay; current input can revise imported historical scope; mandatory task context budget preflight before compaction; intent/extraction remains model-driven, not checkpoint recovery; unvalidated",
+    "coding_workspace_images": "fs.read(format=image) via platform-confined bounded byte reads and image preparation; shared EngineKernelSession adapter requires active llm.vision and exact primary ImageInput before dispatch, converts canonical builtin results to typed images before journal projection; Coding single-call batch; compaction retains newest pending image call/result exchange or fails mandatory-context budget before summary calls; no original-detail/crop/other binary formats; unvalidated",
+    "coding_text_pages": "Session-authorized fs.read with bounded UTF-8 byte pages, whole-content SHA-256 continuation guards, exact cursors and serialized-page envelope; complete bounded AGENTS instruction assembly; no atomic filesystem snapshot or write lease; unvalidated",
+    "coding_text_search": "Fresh owner-scoped literal search instead of cached UI inventory; bounded source IO, traversal and serialized result budgets; explicit skipped/incomplete disclosures; match-centered snippets with exact source byte offsets and SHA-256 for guarded read continuation; filtered scan is not workspace-wide absence proof; unvalidated",
+    "coding_interactive_evidence": "Immutable original launch epoch plus bounded stdin/EOF/resize call provenance; only a successful exclusively attributed interaction extends a previously current chain; failed/stale/overlapping/omitted provenance cannot be rehabilitated; terminal proof still required; completion observations carry bounded command chains within 64-record/32-KiB window; not a test timing/semantic oracle or restart proof; unvalidated",
+    "coding_requirements": "Append-only requirement IDs/descriptions anchored by exact quotations to accepted turn inputs; every accepted input has a source entry; replanning cannot delete registered obligations; completion covers every requirement once in addition to current plan steps; declared scope changes require a later accepted-input quote and mandatory final disclosure; provenance/coverage only, not independent semantic extraction or relevance proof; unvalidated",
+    "coding_skill_images": "Frozen artifact PNG/JPEG/WebP resources verified by inventory/hash, bounded host decoding/re-encoding, typed text/image resource index and on-demand single-call pixel results; active llm.vision plus exact primary ImageInput admission, durable activation refreshes the view; binary pixels omitted from replay/compaction; other binary formats and non-artifact Skills incomplete; unvalidated",
+    "mcp_server_protocol": "Shared HTTP owner handles bounded server ping and explicit unsupported-client-method errors on the same authenticated session/deadline; incremental SSE framing, typed response correlation, strict empty 202 acknowledgments and catalog-change/cancellation fences; no sampling/elicitation/roots grant, no recursive reply streams, no reconnect/replay; unvalidated",
+    "coding_instruction_refresh": "Shared fs.read instruction_scope provides confined canonical path and bounded complete/incomplete descendant metadata; Coding checks explicit file/directory targets, delete/stage subtrees and command cwd, rejects incomplete scopes and defers aliases without rewriting arguments; known directories and registered recursive roots refresh after effects, including removed/new instructions; actual model-slot changes invalidate provider continuation and completion even after read-only discovery; typed missing_ok absence replaces error-string inference; no implicit fs.read grant, opaque shell access and atomic rename containment remain incomplete; unvalidated",
+    "mcp_execution_port": "Current-product per-tool catalog, exact Kernel/Snapshot/resource/schema mapping and Nomi/Coding admission support up to 16 frozen HTTP, explicit legacy SSE or managed stdio servers; each tool receives only its lock's server resource; product multi-select and Session projection/pre-write overlay checks wired; remote dispatch remains serial and any unknown receipt fences the Session; Coding recovery never replays tools; resources/server-initiated lifecycle and other ecosystem effects remain incomplete; unvalidated",
+    "coding_completion": "Required bounded report_completion for tool/plan turns; exact current plan coverage, real observation references and plan/input/observation/workspace version fences; blocked reports refuse normal completion and unverified items are appended to final output; command exit is not a test/task oracle; semantic requirement coverage remains model-driven; unvalidated",
+    "shared_engine_sdk": "Production Coding consumes shared lifecycle/model/tool/task ports, exact Session/receipt facts, owned journal/model claims, bounded histories, Broker/model-limit facts, durable tool dispatch/settlement and EngineKernelSession production Snapshot/workspace/process/Kernel assembly; independent opt-in evidence-engine example now implements its own plan/research/evidence/synthesis loop on these real ports; composition callback preserves Arc for session-hosted registration; execution evidence and additional ecosystem owners remain incomplete; unvalidated",
+    "pushed": false,
+    "broker_cancellation": "implemented and targeted tests passed; live provider not exercised",
+    "runtime_extension": "RegisteredAgentRuntime and generic exact-build RuntimeEngineCatalog; Nomi uses the Registered production handle",
+    "coding_adapter": "ConversationCodingHost installed in default product owner; CodingSessionDriver consumes shared HostedAgentRuntime, Broker model port and EngineTaskGroup; real Broker/Kernel/Wave2 with joined effect cleanup and durable semantic records; latest refactor unvalidated",
+    "session_ownership": "CAR-D-019: retain current Conversation-backed Nomi-core owner; no duplicate SessionStore",
+    "runtime_configuration_ownership": "CAR-D-020: Agent workbench settings -> immutable Agent revision -> server-resolved exact Session binding; no chat composer or Fork runtime override",
+    "engine_loading_policy": "CAR-D-021: compile-time integration and application packaging only; registration freezes at assembly; no post-package mounting, dynamic installation or hot replacement",
+    "engine_admission": "mandatory RuntimeEngineAdmission registered with every factory; generic Snapshot and Session overlay validation, including Fork and runtime open",
+    "coding_context": "path-aware authorized AGENTS, retained plan state, route budgets, automatic compaction and structured replay; exact-build recovery closes only interrupted turns without command admission or with durable cleanup proof; no command replay or automatic checkpoint continuation; unvalidated",
+    "coding_live_capabilities": "same Kernel SessionCapabilityState for invocation, isolated search/activation, durable-before-memory transitions, exact-build ordered activation restoration and next-model tool refresh; unvalidated",
+    "compile_time_engine_checks": [
+      { "command": "cargo test -p nomifun-coding-engine --lib", "result": "43 passed; engine-owned bounded history and growing tool-cycle budget checks" },
+      { "command": "cargo test -p nomifun-ai-agent --lib runtime", "result": "82 passed; includes Coding adapter, generic admission before factory invocation and lifecycle quarantine" },
+      { "command": "cargo test -p nomifun-app --test coding_runtime_production", "result": "1 passed; registration frozen, live capabilities, persisted context preparation, arbitrary community engine Snapshot/overlay admission and existing production execution" },
+      { "command": "cargo test -p nomifun-app --test nomi_core_route_gap nomi_core_agent_session_projects_saved_chat_binding_without_internal_inputs -- --exact", "result": "1 passed; 37 filtered out" },
+      { "command": "git diff --check; TASK-MANIFEST.json parse", "result": "passed" }
+    ],
+      "remaining_integration": [
+      "Slice80 adds bounded incremental SSE framing and explicit incomplete-event EOF rejection. Slice81 separates setup and complete-frame idle deadlines, preserves client policy and known HTTP failure classes on bounded diagnostic body timeout, and adds JSON/AWS cooperative polling and AWS pre-append limits. No long-stream, timeout, backpressure, real provider or cancellation validation has run; source implementation is not behavior evidence.",
+      "CAR-08 source cutover includes deletion of Wrapper crates/assembly/bridge/wire/release fixture, platform-neutral feature inventory, retired legacy gate and macOS sidecar probes, archived historical deletion plans and current owner inventory. Slice77 Coding loop77/Nomi host49. Targeted serialized fixture/digest edits are not a complete Rust generator run; generator equivalence, Cargo/lock consistency, Session behavior and build/artifact evidence remain unvalidated.",
+      "Provider-specific/natural-language context-length errors, Vertex project/location production routing, other private continuation formats and hosted-tool lifecycles, exact tokenizer/estimation quality, full-text history indexing and corrupt/oversized/legacy/deleted journal coverage remain incomplete. Slice78 adds AWS exception classification; slice79 connects cloud Messages native lifecycle and wire shapes, binds typed reasoning to the actual producing route before continuation admission, and protects request structure/effective thinking budget during host parameter merge. Real Bedrock loop and consumer coverage remain unvalidated; Vertex production admission still explicitly rejects missing project/location contracts. Scoped persisted older-turn loading in slice62 and turn-local bounded tool text retrieval across compaction in slice61 are source-implemented, not exercised; no crossSession/Fork-parent history access or recovery of pre-storage truncation. Typed pre-output recovery in slice49, latest-exchange retention in slice50, explicit stream error classification and official per-attempt decoding in slice51 are source-implemented, not exercised; legacy custom stateful protocol decoders must provide isolation",
+      "MCP binary/subscriptions and authorized server-initiated user/model/workspace lifecycles beyond ping/explicit denial remain incomplete; shared text list/read and Coding controls in slice44, canonical Nomi inlet in slice45, scalar templates in slice46, mixed multi-server resources in slice60 and bounded composite template variables in slice63 are source-implemented, unvalidated. MiniApp extra Service resource contracts and lifecycle effect receipts must retain platform Service ownership; Git network credential owner and human unknown reconciliation remain incomplete (selected local/file push and source attribution implemented in slice43). Steering attachments/frozen Skill hints, HTTP/SSE/stdio catalog discovery, Coding/community Robot surfaces, MiniApp tools, hosted receipts/recovery and multiple frozen MCP tool servers are source-implemented but unvalidated",
+      "binary Skill resources beyond PNG/JPEG/WebP and library-to-package format compatibility; workspace image viewing, Skill frozen publication, immutable packaged text pagination and host-prepared image resources are source-implemented but unvalidated",
+      "cross-boot process-tree proof for interrupted commands without cleanup witness; human quarantine resolution; checkpoint continuation",
+      "File owner multi-file transactions, external native edit/rename isolation, cross-Session/Fork workspace coordination and human uncertain-effect resolution; permanent same-exact-Session patch obligations, write-ahead targets/clear events, postpublication/rollback observations, retained creations and re-observation gates are source-implemented but unvalidated",
+      "opaque shell access scope and atomic rename containment; explicit canonical/recursive and search-hit instruction discovery before returned snippets are source-implemented but unvalidated; independent requirement extraction completeness, evidence relevance and scope-change semantic interpretation beyond implemented source anchoring, append-only requirement coverage and observation identity/freshness; current interpretations remain model-driven",
+      "Complete consumer end-to-end coverage of Agent runtime inheritance: canonical snapshot Binding preservation, default Cron creation admission and existing Remote shared-owner path are source-implemented but unvalidated; legacy snapshot migration must not guess current bindings; canonical AgentExecution task input and Engine-neutral attenuation are source-implemented in slice40 but require execution coverage; Channel dedicated legacy conversations have no new Agent selection surface",
+      "successful execution evidence for the independent evidence-engine reference (source implemented, not run); extend ecosystem resource owners without dynamic mounting; latest implementation remains unvalidated",
+      "per-tool multi-platform validation and application upgrade compatibility for bundled engine builds"
+    ],
+    "agent_configuration_checks": [
+      { "command": "cargo check -p nomifun-app --tests", "result": "passed after CAR-D-020 Agent-owned runtime correction" },
+      { "command": "cargo test -p nomifun-agent-contracts -p nomifun-agent-control-plane --lib", "result": "86 + 26 passed; includes legacy payload/digest compatibility and runtime configuration digest coverage" },
+      { "command": "cargo test -p nomifun-app --test coding_runtime_production", "result": "1 passed; workbench preview/save/reload, inherited runtime, real Coding file write, immutable old Session/Fork, new Agent revision uses new engine, invalid build/profile rejected, custom Agent factory dispatch" },
+      { "command": "cargo test -p nomifun-app --test nomi_core_route_gap nomi_core_agent_session_projects_saved_chat_binding_without_internal_inputs -- --exact", "result": "1 passed; 37 filtered out" },
+      { "command": "bun test src/renderer/pages/agentSettings/AgentRuntimeEngineSelector.test.tsx src/renderer/pages/guid/hooks/useGuidSend.behavior.test.tsx src/renderer/pages/guid/GuidAgentPresetLaunch.structure.test.ts src/common/types/agentPlatform/draft.test.ts src/common/types/agentPlatform/testOrchestration.test.ts src/renderer/pages/agentSettings/model.test.ts (cwd: ui)", "result": "38 passed; 156 assertions" },
+      { "command": "bun run typecheck (cwd: ui)", "result": "failed: bun:test declarations missing and test-file typing errors; no reported production UI errors" }
+    ],
+    "checks": [
+      { "command": "cargo check -p nomifun-app --tests", "result": "passed after production integration" },
+      { "command": "cargo test -p nomifun-app --test coding_runtime_production --lib coding", "result": "production E2E 1 passed; cleanup/cancellation unit 3 passed; real file write, cold resume, exact binding, fork and custom factory dispatch" },
+      { "command": "cargo test -p nomifun-ai-agent --lib runtime_", "result": "71 passed including custom binding exclusion from Nomi provider and cached-slot drift rejection" },
+      { "command": "cargo test -p nomifun-db --test id_schema_contract", "result": "20 passed" },
+      { "command": "cargo test -p nomifun-app --test nomi_core_route_gap nomi_core_agent_session_projects_saved_chat_binding_without_internal_inputs -- --exact", "result": "1 passed; 37 filtered out" },
+      { "command": "bun test (initial production UI selection tests, before CAR-D-020)", "result": "10 passed; 45 assertions at 80e1f3ede; selector subsequently moved to Agent workbench" },
+      { "command": "bun run typecheck", "result": "failed: environment missing bun:test declarations and resulting test-file typing errors; no reported production UI errors" }
+    ],
+    "previous_slice_checks": [
+      { "command": "cargo test -p nomifun-coding-engine -p nomifun-chat-model-broker", "result": "Coding 40; Broker unit 10 and conformance 21 passed; doc-tests passed" },
+      { "command": "cargo test -p nomifun-ai-agent --lib runtime_", "result": "70 passed" },
+      { "command": "cargo test -p nomifun-ai-agent --lib coding_runtime::tests", "result": "7 passed" },
+      { "command": "cargo test -p nomifun-ai-agent --lib factory::tests", "result": "3 passed" },
+      { "command": "cargo test -p nomifun-app --lib router::chat_broker_host::tests", "result": "9 passed" },
+      { "command": "cargo test -p nomifun-app --test nomi_core_route_gap", "result": "36 passed; 2 failed: installation-token plugin route expected 403 got 200; model-selection Session creation expected 200 got workspace RESOURCE_SELECTION_REQUIRED 422" },
+      { "command": "nomi_core_route_gap test binary: installation_token_is_limited_to_headless_product_control_planes --exact", "result": "same 403 versus 200 failure reproduced in isolation; no auth logic or test assertion changed" },
+      { "command": "git diff --check; TASK-MANIFEST.json strict JSON parse", "result": "passed" }
+    ],
+    "not_run": [
+      "live paid Provider requests",
+      "Desktop visual E2E and Stable/Canary release admission",
+      "macOS/Linux validation: Windows host",
+      "full workspace suite and release packaging: outside the validated integration slice"
+    ]
+  },
+  "global_forbidden": [
+    "codex-app-server production process",
+    "Codex Sidecar production route",
+    "../codex Cargo path dependency",
+    "voice/realtime/audio migration",
+    "Codex Auth/ModelProvider/rollout product layer",
+    "old phase design document modification",
+    "legacy /api/presets compatibility alias",
+    "second AgentSession or runtime-coordinator authority (multiple Engine implementations are allowed)",
+    "same-Session Engine switching or silent Engine fallback"
+  ],
+  "tasks": [
+    {
+      "task_id": "CAR-00",
+      "sequence": 0,
+      "parallel_group": "serial-foundation",
+      "owner": "stage-owner",
+      "status": "completed",
+      "depends_on": [],
+      "goal": "Freeze Codex source selection, license obligations, NomiFun owner replacement and task boundaries without changing production code.",
+      "write_paths": [
+        "docs/specs/2026-09-06-coding-agent-runtime-internalization/"
+      ],
+      "forbidden_paths": [
+        "docs/specs/2026-08-28-agent-capability-platform-v2/",
+        "crates/",
+        "Cargo.toml",
+        "Cargo.lock",
+        "packaging/",
+        "scripts/"
+      ],
+      "deliverables": [
+        "CODEX-SOURCE-MANIFEST.json",
+        "license and NOTICE review record",
+        "verified selected source paths",
+        "verified excluded source paths",
+        "task boundary and dependency review"
+      ],
+      "checks": [
+        "strict JSON parse",
+        "selected source path existence at pinned commit",
+        "license/NOTICE presence",
+        "git diff --check"
+      ],
+      "stop_conditions": [
+        "source commit cannot be pinned",
+        "selected source has no license path",
+        "external Runtime process is required",
+        "task requires editing the legacy phase root"
+      ]
+    },
+    {
+      "task_id": "CAR-00A",
+      "sequence": 1,
+      "parallel_group": "serial-foundation",
+      "owner": "coding-engine-isolation",
+      "status": "completed",
+      "depends_on": [
+        "CAR-00"
+      ],
+      "goal": "Establish the minimal multi-Engine Build, channel alias, exact Binding and fail-closed selection contract without touching production routes.",
+      "write_paths": [
+        "crates/backend/nomifun-coding-engine/",
+        "Cargo.lock"
+      ],
+      "forbidden_paths": [
+        "docs/specs/2026-08-28-agent-capability-platform-v2/",
+        "crates/backend/nomifun-codex-runtime/",
+        "crates/backend/nomifun-app/",
+        "crates/backend/nomifun-agent-platform/",
+        "codex-app-server",
+        "Cargo path dependency on ../codex"
+      ],
+      "deliverables": [
+        "EngineFamilyId/EngineBuildId",
+        "immutable CodingEngineBuild",
+        "Stable/Canary Catalog aliases",
+        "Exact and channel selectors",
+        "EngineBinding with Session/Snapshot identity",
+        "digest mismatch and duplicate registration rejection"
+      ],
+      "checks": [
+        "stable and canary builds coexist",
+        "same immutable build can be promoted between channels",
+        "exact digest mismatch fails closed",
+        "different sessions can bind different exact builds",
+        "cargo test -p nomifun-coding-engine"
+      ],
+      "stop_conditions": [
+        "existing Session Binding can be mutated",
+        "channel resolution silently changes an existing Session",
+        "Engine failure introduces automatic fallback",
+        "a second platform-level Engine authority is created"
+      ]
+    },
+    {
+      "task_id": "CAR-01",
+      "sequence": 2,
+      "parallel_group": "serial-foundation",
+      "owner": "coding-engine-isolation",
+      "status": "completed",
+      "depends_on": [
+        "CAR-00A"
+      ],
+      "goal": "Build the isolated provider-neutral Coding Engine actor, model/tool/event ports and bounded multi-step turn loop.",
+      "write_paths": [
+        "crates/backend/nomifun-coding-engine/"
+      ],
+      "forbidden_paths": [
+        "crates/backend/nomifun-codex-runtime/",
+        "crates/backend/nomifun-app/",
+        "crates/backend/nomifun-agent-platform/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/",
+        "codex-app-server",
+        "Cargo path dependency on ../codex"
+      ],
+      "deliverables": [
+        "CodingEngineSession",
+        "CodingModelPort",
+        "CodingToolInvoker",
+        "CodingEventSink",
+        "plain-text turn",
+        "Tool Call continuation",
+        "schema/argument/result bounds",
+        "cancel/dispose/one-active-turn admission"
+      ],
+      "checks": [
+        "crate unit tests",
+        "fake model plain-text turn",
+        "one-active-turn test",
+        "cancel/dispose idempotency",
+        "Tool Call to next model step",
+        "Session/Snapshot binding mismatch rejection",
+        "schema digest mismatch rejection"
+      ],
+      "stop_conditions": [
+        "Codex API/Auth/History dependency is needed",
+        "root DB or concrete owner injection is needed",
+        "a second AgentSession or runtime-coordinator authority is proposed",
+        "production route is modified before remote integration"
+      ]
+    },
+    {
+      "task_id": "CAR-02",
+      "sequence": 3,
+      "parallel_group": "serial-foundation",
+      "owner": "model-adapter",
+      "status": "in_progress",
+      "depends_on": [
+        "CAR-01"
+      ],
+      "goal": "Adapt the Runtime model port to NomiFun ChatModelBroker with complete Coding stream semantics.",
+      "write_paths": [
+        "crates/backend/nomifun-coding-engine/src/model.rs",
+        "crates/backend/nomifun-chat-model-broker/",
+        "crates/backend/nomifun-app/src/router/chat_broker_host.rs"
+      ],
+      "forbidden_paths": [
+        "crates/backend/nomifun-codex-runtime/",
+        "codex-rs/",
+        "CodexAuth",
+        "Codex ModelProvider",
+        "provider secret values"
+      ],
+      "deliverables": [
+        "ChatBrokerPort adapter",
+        "text/reasoning/tool-call/tool-result event flow",
+        "cancellation propagation",
+        "typed compaction request",
+        "route/causality/credential validation"
+      ],
+      "checks": [
+        "broker contract tests",
+        "tool-call continuation test",
+        "semantic-output retry boundary test",
+        "cancellation propagation test",
+        "secret redaction test"
+      ],
+      "stop_conditions": [
+        "provider-specific client enters Runtime",
+        "Runtime performs retry/failover",
+        "a duplicate long-lived model DTO is introduced"
+      ]
+    },
+    {
+      "task_id": "CAR-03",
+      "sequence": 4,
+      "parallel_group": "serial-foundation",
+      "owner": "tool-loop",
+      "status": "pending_validation",
+      "depends_on": [
+        "CAR-02"
+      ],
+      "goal": "Implement bounded Tool Call assembly, canonical Capability mapping and continuation.",
+      "write_paths": [
+        "crates/backend/nomifun-coding-engine/src/tool.rs",
+        "crates/backend/nomifun-coding-engine/src/turn.rs",
+        "crates/backend/nomifun-coding-engine/src/events.rs"
+      ],
+      "forbidden_paths": [
+        "crates/backend/nomifun-codex-runtime/",
+        "crates/backend/nomifun-app/",
+        "concrete Browser/Computer handler access",
+        "global Catalog expansion"
+      ],
+      "deliverables": [
+        "bounded argument accumulator",
+        "model-facing ToolPlan",
+        "capability/action/resource mapping",
+        "Snapshot/active-set admission",
+        "Tool Result normalization",
+        "parallel policy"
+      ],
+      "checks": [
+        "Snapshot-outside-tool rejection",
+        "schema/resource mismatch test",
+        "multi-tool ordering test",
+        "tool-to-next-model-step test",
+        "read-only parallel test"
+      ],
+      "stop_conditions": [
+        "Tool calls directly invoke handlers",
+        "tool plan scans the global Catalog at runtime",
+        "effect coordination requires a new global coordinator"
+      ]
+    },
+    {
+      "task_id": "CAR-04",
+      "sequence": 5,
+      "parallel_group": "owner-slices",
+      "owner": "process-owner",
+      "status": "pending_validation",
+      "depends_on": [
+        "CAR-03"
+      ],
+      "goal": "Bring process, PTY, stdin, timeout and descendant cleanup semantics behind the NomiFun Process owner.",
+      "write_paths": [
+        "crates/backend/nomifun-coding-engine/src/process.rs",
+        "crates/shared/nomi-process-runtime/",
+        "crates/backend/nomifun-agent-domain-wave2/"
+      ],
+      "forbidden_paths": [
+        "codex-rs/core/src/guardian/",
+        "Codex approval/network permission",
+        "crates/backend/nomifun-codex-runtime/"
+      ],
+      "deliverables": [
+        "ProcessPort adapter",
+        "bounded output",
+        "stdin/write/poll",
+        "PTY capability handling",
+        "timeout/cancel",
+        "process-tree cleanup report"
+      ],
+      "checks": [
+        "long-output truncation",
+        "stdin",
+        "timeout hard-kill",
+        "cancel idempotency",
+        "Windows/Unix process cleanup"
+      ],
+      "stop_conditions": [
+        "provider secret enters argv/env",
+        "process operation creates an external Agent Runtime",
+        "cleanup cannot produce a bounded result"
+      ]
+    },
+    {
+      "task_id": "CAR-05",
+      "sequence": 5,
+      "parallel_group": "owner-slices",
+      "owner": "file-vcs-owner",
+      "status": "in_progress",
+      "follow_up": "Initial File/Patch/Git owners wired; real fs.write tested; remaining per-tool and platform validation required",
+      "depends_on": [
+        "CAR-03"
+      ],
+      "goal": "Integrate strict patch parsing and Coding file/VCS operations with NomiFun owners.",
+      "write_paths": [
+        "crates/backend/nomifun-coding-engine/src/patch.rs",
+        "crates/backend/nomifun-coding-engine/src/workspace.rs",
+        "crates/backend/nomifun-coding-engine/src/vcs.rs",
+        "crates/backend/nomifun-file/",
+        "crates/backend/nomifun-agent-domain-wave2/src/lib.rs",
+        "crates/backend/nomifun-agent-domain-wave2/tests/"
+      ],
+      "forbidden_paths": [
+        "Codex file owner",
+        "crates/backend/nomifun-codex-runtime/",
+        "raw workspace cwd fallback",
+        "legacy ConversationService"
+      ],
+      "deliverables": [
+        "strict patch parser",
+        "workspace typed binding",
+        "atomic file mutation handoff",
+        "status/diff/stage/commit mapping",
+        "bounded error normalization"
+      ],
+      "checks": [
+        "invalid patch",
+        "context mismatch",
+        "duplicate hunk",
+        "workspace containment",
+        "patch atomic failure",
+        "VCS diff/commit owner test"
+      ],
+      "stop_conditions": [
+        "a second file owner is introduced",
+        "patch bypasses Snapshot or owner admission",
+        "partial write cannot be proven absent"
+      ]
+    },
+    {
+      "task_id": "CAR-06",
+      "sequence": 5,
+      "parallel_group": "owner-slices",
+      "owner": "context-owner",
+      "status": "in_progress",
+      "follow_up": "Engine-owned bounded context is wired to the production turn loop; AGENTS, automatic compaction, checkpoint and abnormal restart remain incomplete",
+      "depends_on": [
+        "CAR-03"
+      ],
+      "goal": "Rebuild Coding context from SessionEvent and implement AGENTS.md, compaction and resume.",
+      "write_paths": [
+        "crates/backend/nomifun-coding-engine/src/context.rs",
+        "crates/backend/nomifun-coding-engine/src/compaction.rs",
+        "crates/backend/nomifun-coding-engine/src/checkpoint.rs",
+        "crates/backend/nomifun-coding-engine/src/agents_md.rs"
+      ],
+      "forbidden_paths": [
+        "Codex rollout/thread store",
+        "root SQLite",
+        "Codex realtime/audio context",
+        "crates/backend/nomifun-codex-runtime/"
+      ],
+      "deliverables": [
+        "SessionEvent history mapper",
+        "bounded Workspace/AGENTS context",
+        "NomiFun compaction task",
+        "retained facts",
+        "disposable checkpoint",
+        "resume/steer/follow-up"
+      ],
+      "checks": [
+        "history rebuild without Codex files",
+        "AGENTS precedence/containment",
+        "compaction identity preservation",
+        "checkpoint mismatch discard",
+        "steer/cancel lifecycle"
+      ],
+      "stop_conditions": [
+        "Codex history format becomes a persistence dependency",
+        "context reads unselected global Catalog",
+        "compaction deletes product SessionEvent"
+      ]
+    },
+    {
+      "task_id": "CAR-07",
+      "sequence": 6,
+      "parallel_group": "central-integration",
+      "owner": "central-integration-owner",
+      "status": "in_progress",
+      "follow_up": "Default Conversation owner, exact binding, open factories, Coding Broker/Kernel host and UI selection wired; full context/process/ecosystem coverage remains",
+      "depends_on": [
+        "CAR-04",
+        "CAR-05",
+        "CAR-06"
+      ],
+      "goal": "Connect the existing canonical Session owner to replaceable registered runtimes without a closed engine enum or duplicate Session store.",
+      "write_paths": [
+        "crates/backend/nomifun-agent-platform/",
+        "crates/backend/nomifun-ai-agent/",
+        "crates/backend/nomifun-conversation/",
+        "crates/backend/nomifun-app/src/",
+        "Cargo.toml",
+        "Cargo.lock"
+      ],
+      "forbidden_paths": [
+        "docs/specs/2026-08-28-agent-capability-platform-v2/",
+        "legacy /api/presets",
+        "same-Session dual Engine execution route"
+      ],
+      "deliverables": [
+        "AgentSession to Runtime actor wiring",
+        "Chat/Coding/Remote/Automation canonical path",
+        "platform integration tests",
+        "no-text-only bridge behavior"
+      ],
+      "checks": [
+        "open-turn-tool-continuation-complete",
+        "cancel/dispose",
+        "crash recovery",
+        "SessionEvent projection",
+        "no external Runtime process"
+      ],
+      "stop_conditions": [
+        "same Session can switch Engine or invoke two Engines",
+        "legacy service is required as a hidden fallback",
+        "central composition becomes a new God service"
+      ]
+    },
+    {
+      "task_id": "CAR-08",
+      "sequence": 7,
+      "parallel_group": "central-integration",
+      "owner": "cutover-owner",
+      "status": "in_progress",
+      "depends_on": [
+        "CAR-07"
+      ],
+      "goal": "Delete the old Codex Wrapper, Sidecar protocol, executable packaging and production reachability.",
+      "write_paths": [
+        "crates/backend/nomifun-codex-runtime/",
+        "crates/backend/nomifun-agent-contracts/contracts/runtime/",
+        "crates/backend/nomifun-agent-contracts/src/runtime.rs",
+        "crates/backend/nomifun-agent-contracts/src/event.rs",
+        "crates/backend/nomifun-app/src/bootstrap/runtime_artifact.rs",
+        "crates/backend/nomifun-app/src/router/remote_runtime.rs",
+        "scripts/desktop-build-*.sh",
+        "scripts/gate-agent-v2.mjs",
+        "scripts/release/",
+        "scripts/validation/"
+      ],
+      "forbidden_paths": [
+        "docs/specs/2026-08-28-agent-capability-platform-v2/",
+        "new Sidecar compatibility alias",
+        "new external Runtime process"
+      ],
+      "deliverables": [
+        "old crate removed from production graph",
+        "hello/native_action/session_dispose removed",
+        "sidecar artifact fields removed",
+        "old tests migrated or deleted",
+        "production reachability scan"
+      ],
+      "checks": [
+        "Cargo graph scan",
+        "Rust/Schema route scan",
+        "packaging scan",
+        "no app-server launch",
+        "no RuntimeStartTurnBrokerBridge",
+        "no runtime_sidecar/sidecar_artifact production field"
+      ],
+      "stop_conditions": [
+        "a user-facing flow still requires the old Wrapper",
+        "deletion would destroy user data",
+        "a compatibility alias is proposed instead of migration"
+      ]
+    },
+    {
+      "task_id": "CAR-09",
+      "sequence": 8,
+      "parallel_group": "post-core-ecosystem",
+      "owner": "ecosystem-owner",
+      "status": "planned",
+      "depends_on": [
+        "CAR-08"
+      ],
+      "goal": "Verify platform Capability contributions for Agent and non-Agent consumers.",
+      "write_paths": [
+        "crates/backend/nomifun-agent-kernel/src/",
+        "crates/backend/nomifun-mcp/src/",
+        "crates/backend/nomifun-mcp/tests/",
+        "crates/backend/nomifun-agent-platform/src/",
+        "crates/backend/nomifun-agent-platform/tests/"
+      ],
+      "forbidden_paths": [
+        "Agent-only Catalog",
+        "Plugin-owned AgentPreset",
+        "Plugin lifecycle takeover",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ],
+      "deliverables": [
+        "MCP materialization test",
+        "Skill no-expansion test",
+        "shared Agent/non-Agent contribution test",
+        "non-Agent-only picker filter test",
+        "ContributionLock provenance test"
+      ],
+      "checks": [
+        "Agent consumer path",
+        "non-Agent consumer path",
+        "contract mismatch",
+        "availability diagnostics",
+        "no direct implementation bypass"
+      ],
+      "stop_conditions": [
+        "Plugin/MiniApp becomes an Agent-only subsystem",
+        "Runtime starts managing Plugin/MiniApp lifecycle",
+        "a new duplicate Catalog is needed"
+      ]
+    },
+    {
+      "task_id": "CAR-10",
+      "sequence": 9,
+      "parallel_group": "release",
+      "owner": "release-owner",
+      "status": "planned",
+      "depends_on": [
+        "CAR-08",
+        "CAR-09"
+      ],
+      "goal": "Validate and release the in-process Runtime on the three first-party desktop platforms.",
+      "write_paths": [
+        "docs/specs/2026-09-06-coding-agent-runtime-internalization/",
+        "scripts/car/",
+        "packaging/car/"
+      ],
+      "forbidden_paths": [
+        "old phase documentation",
+        "Sidecar artifact packaging",
+        "Codex binary packaging"
+      ],
+      "deliverables": [
+        "Windows x64 result",
+        "macOS arm64 result",
+        "Linux Desktop x64 result",
+        "same RC bytes",
+        "secret/process cleanup evidence",
+        "Stable admission record"
+      ],
+      "checks": [
+        "build/package/install/launch",
+        "Coding read/search/patch/exec/diff",
+        "cancel/crash/dispose",
+        "Session resume",
+        "secret scan",
+        "same-artifact digest"
+      ],
+      "stop_conditions": [
+        "platform result requires a Sidecar",
+        "old Wrapper remains production reachable",
+        "a critical Coding path is metadata-only",
+        "release evidence is synthetic"
+      ]
+    }
+  ]
+}

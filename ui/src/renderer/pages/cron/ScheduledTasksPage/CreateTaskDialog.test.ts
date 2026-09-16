@@ -64,7 +64,7 @@ function fixture() {
   });
   const modelList = spyOn(models, 'useModelsForTask').mockReturnValue({ groups: [], isLoading: false, refresh: () => {} });
   const conversationList = spyOn(conversations, 'useConversationListSync').mockReturnValue({
-    conversations: [], sshConversations: [], robotConversations: [], isConversationGenerating: () => false,
+    conversations: [], sshConversations: [], isConversationGenerating: () => false,
     hasCompletionUnread: () => false, clearCompletionUnread: () => {}, setActiveConversation: () => {},
   });
   const themeValue = spyOn(theme, 'useThemeContext').mockReturnValue({

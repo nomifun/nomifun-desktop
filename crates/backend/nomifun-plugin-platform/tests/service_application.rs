@@ -469,6 +469,7 @@ fn agent_invocation(
     call_id: &str,
 ) -> PluginRuntimeAgentCapabilityInvocation {
     PluginRuntimeAgentCapabilityInvocation {
+        cancellation: Default::default(),
         owner_user_id: owner.to_owned(),
         plugin_product_id: PluginProductId::from(plugin_product_id),
         capability: CapabilityRef {
@@ -640,6 +641,7 @@ async fn service_product_runs_the_application_surface_bridge_lifecycle() {
 
     let stale_catalog = application
         .invoke_agent_capability(PluginRuntimeAgentCapabilityInvocation {
+        cancellation: Default::default(),
             owner_user_id: owner.clone(),
                 plugin_product_id: created.plugin.plugin_id.clone().into(),
             capability: CapabilityRef {
@@ -958,3 +960,9 @@ async fn callable_service_release_runs_build_publish_enable_start_and_agent_invo
     );
     assert!(!runtime.started.lock().await.is_empty());
 }
+
+#[path = "service_application/agent_capability_preflight.rs"]
+mod agent_capability_preflight;
+
+#[path = "service_application/retired_agent_view.rs"]
+mod retired_agent_view;
