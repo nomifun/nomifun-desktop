@@ -502,7 +502,6 @@ impl ScopedInstructions {
                 "workspace.files/read"
                 | "workspace.files/write"
                 | "workspace.files/delete"
-                | "workspace.files/watch"
                 | "workspace.artifacts/publish" => {
                     if let Some(path) = value.get("path").and_then(|v| v.as_str()) {
                         let recursive = binding.action_id.as_ref() == "workspace.files/delete"

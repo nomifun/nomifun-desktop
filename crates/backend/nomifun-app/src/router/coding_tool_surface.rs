@@ -1,6 +1,8 @@
 //! Projection of selected, exact Snapshot contributions into Nomi tools.
 //! No global catalog discovery and no executable/runtime loading occurs here.
-use nomifun_agent_contracts::{CapabilityKind, ContributionSourceKind, ToolPresentationKind};
+use nomifun_agent_contracts::{
+    ActionId, CapabilityId, CapabilityKind, ContributionSourceKind, ToolPresentationKind,
+};
 use nomifun_agent_kernel::{ActiveCapabilitySetSnapshot, CompiledSnapshot, MaterializedRegistry};
 use nomifun_ai_agent::NomiPluginToolSchemaResolver;
 use nomifun_chat_model_broker::ChatToolDefinition;
@@ -29,20 +31,24 @@ pub(super) async fn compile(
     {
         return Err(error("Nomi supports at most 128 selected capabilities"));
     }
+    let allowed_platform_actions = snapshot
+        .content()
+        .enabled_capabilities
+        .iter()
+        .filter(|selected| {
+            selected.contribution_lock.source_kind == ContributionSourceKind::PlatformBuiltin
+        })
+        .filter_map(|selected| {
+            snapshot.policy(&selected.capability.id).map(|policy| {
+                (
+                    selected.capability.id.clone(),
+                    policy.allowed_actions.clone(),
+                )
+            })
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
     let mut exposures = standard_coding_tool_exposures();
-    exposures.retain(|item| {
-        active.active.contains(&item.capability_id)
-            && snapshot
-                .content()
-                .enabled_capabilities
-                .iter()
-
-                .any(|selected| {
-                    selected.capability.id == item.capability_id
-                        && selected.contribution_lock.source_kind
-                            == ContributionSourceKind::PlatformBuiltin
-                })
-    });
+    retain_exact_platform_actions(&mut exposures, &active.active, &allowed_platform_actions);
     for exposure in &mut exposures {
         let capability = registry
             .capability(&exposure.capability_id)
@@ -175,6 +181,19 @@ pub(super) async fn compile(
     compile_coding_tool_plan(snapshot, active, registry, exposures).map_err(error)
 }
 
+fn retain_exact_platform_actions(
+    exposures: &mut Vec<CodingToolExposure>,
+    active_modules: &std::collections::BTreeSet<CapabilityId>,
+    allowed_actions: &std::collections::BTreeMap<CapabilityId, std::collections::BTreeSet<ActionId>>,
+) {
+    exposures.retain(|exposure| {
+        active_modules.contains(&exposure.capability_id)
+            && allowed_actions
+                .get(&exposure.capability_id)
+                .is_some_and(|allowed| allowed.contains(&exposure.action_id))
+    });
+}
+
 fn concrete_object_schema(schema: &serde_json::Value, allow_empty: bool) -> bool {
     let strict = |schema: &serde_json::Value| {
         schema.get("type").and_then(|value| value.as_str()) == Some("object")
@@ -203,4 +222,30 @@ pub(super) fn validate_session_mcp(
     extra: &serde_json::Value,
 ) -> Result<(), AppError> {
     super::nomi_core_mcp_catalog::validate_session_selection(snapshot, resources, extra)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::*;
+
+    #[test]
+    fn partial_module_grant_exposes_only_the_exact_allowed_action() {
+        let module = CapabilityId::from("workspace.files");
+        let mut exposures = standard_coding_tool_exposures();
+        retain_exact_platform_actions(
+            &mut exposures,
+            &BTreeSet::from([module.clone()]),
+            &BTreeMap::from([(
+                module.clone(),
+                BTreeSet::from([ActionId::from("workspace.files/read")]),
+            )]),
+        );
+
+        assert_eq!(exposures.len(), 1);
+        assert_eq!(exposures[0].capability_id, module);
+        assert_eq!(exposures[0].action_id.as_ref(), "workspace.files/read");
+        assert_eq!(exposures[0].definition.name, "read_file");
+    }
 }

@@ -150,13 +150,6 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         schema: process_id_schema,
     },
     StandardTool {
-        model_name: "watch_files",
-        capability_id: "workspace.files",
-        action_id: "workspace.files/watch",
-        description: "Start or stop a bounded workspace watch owned by the File domain. Events are observations, not read or write authority.",
-        schema: watch_schema,
-    },
-    StandardTool {
         model_name: "read_artifact",
         capability_id: "workspace.artifacts",
         action_id: "workspace.artifacts/read",
@@ -437,13 +430,6 @@ fn process_resize_schema() -> Value {
     },"required":["process_id","cols","rows"]})
 }
 
-fn watch_schema() -> Value {
-    json!({"type":"object","additionalProperties":false,"properties":{
-        "operation":{"type":"string","enum":["start","stop"]},
-        "path":{"type":"string","minLength":1,"maxLength":4096}
-    },"required":["operation","path"]})
-}
-
 fn artifact_read_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{
         "artifact_id":{"type":"string","pattern":"^[0-9a-f]{64}$"},
@@ -530,5 +516,34 @@ mod tests {
                 false
             );
         }
+        let expected = BTreeSet::from([
+            "workspace.files/read",
+            "workspace.files/search",
+            "workspace.files/write",
+            "workspace.files/patch",
+            "workspace.files/delete",
+            "workspace.vcs/status",
+            "workspace.vcs/diff",
+            "workspace.vcs/stage",
+            "workspace.vcs/commit",
+            "workspace.vcs/push",
+            "workspace.process/exec",
+            "workspace.process/start",
+            "workspace.process/poll",
+            "workspace.process/input",
+            "workspace.process/close_stdin",
+            "workspace.process/resize",
+            "workspace.process/cancel",
+            "workspace.artifacts/read",
+            "workspace.artifacts/publish",
+        ]);
+        assert_eq!(
+            actions
+                .iter()
+                .map(|action| action.as_ref())
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+        assert_eq!(actions.len(), 19);
     }
 }
