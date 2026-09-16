@@ -1,10 +1,17 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-pub const FRESH_V4_DATA_GENERATION: u32 = 4;
-pub const FRESH_V4_MIGRATION_HEAD: u32 = 1;
-pub const FRESH_V4_PROJECTION_SCHEMA_VERSION: u32 = 1;
-pub const FRESH_V4_BASELINE_SQL: &str = include_str!("../schema/0001_fresh_v4.sql");
+pub const AGENT_STORE_DATA_GENERATION: u32 = 5;
+pub const AGENT_STORE_MIGRATION_HEAD: u32 = 1;
+pub const AGENT_STORE_PROJECTION_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_STORE_BASELINE_SQL: &str = include_str!("../schema/0001_agent_store.sql");
+// UARC-054 removes the Fresh-v4 root coordinator. These aliases keep that
+// already-owned follow-up compiling while every new Store consumer uses the
+// canonical Agent Store identity.
+pub const FRESH_V4_DATA_GENERATION: u32 = AGENT_STORE_DATA_GENERATION;
+pub const FRESH_V4_MIGRATION_HEAD: u32 = AGENT_STORE_MIGRATION_HEAD;
+pub const FRESH_V4_PROJECTION_SCHEMA_VERSION: u32 = AGENT_STORE_PROJECTION_SCHEMA_VERSION;
+pub const FRESH_V4_BASELINE_SQL: &str = AGENT_STORE_BASELINE_SQL;
 pub const CHAT_ROUTE_RECORD_JSON_SCHEMA: &str =
     include_str!("../schema/chat-route-record.v1.json");
 
@@ -14,11 +21,19 @@ pub struct SchemaTableContract {
     pub table_name: String,
     pub owner: String,
     pub fact_class: String,
+    pub reset_scope: SchemaResetScope,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SchemaResetScope {
+    Preserve,
+    AgentData,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct FreshV4SchemaManifestPayload {
+pub struct AgentStoreSchemaManifestPayload {
     pub schema_version: String,
     pub data_generation: u32,
     pub migration_head: u32,
@@ -28,20 +43,21 @@ pub struct FreshV4SchemaManifestPayload {
     pub forbidden_table_names: Vec<String>,
 }
 
-pub fn fresh_v4_schema_manifest_payload() -> FreshV4SchemaManifestPayload {
-    FreshV4SchemaManifestPayload {
+pub fn agent_store_schema_manifest_payload() -> AgentStoreSchemaManifestPayload {
+    AgentStoreSchemaManifestPayload {
         schema_version: "1.0.0".to_owned(),
-        data_generation: FRESH_V4_DATA_GENERATION,
-        migration_head: FRESH_V4_MIGRATION_HEAD,
-        projection_schema_version: FRESH_V4_PROJECTION_SCHEMA_VERSION,
+        data_generation: AGENT_STORE_DATA_GENERATION,
+        migration_head: AGENT_STORE_MIGRATION_HEAD,
+        projection_schema_version: AGENT_STORE_PROJECTION_SCHEMA_VERSION,
         baseline_logical_path:
-            "crates/backend/nomifun-agent-contracts/schema/0001_fresh_v4.sql".to_owned(),
+            "crates/backend/nomifun-agent-contracts/schema/0001_agent_store.sql".to_owned(),
         tables: TABLES
             .iter()
-            .map(|(table_name, owner, fact_class)| SchemaTableContract {
+            .map(|(table_name, owner, fact_class, reset_scope)| SchemaTableContract {
                 table_name: (*table_name).to_owned(),
                 owner: (*owner).to_owned(),
                 fact_class: (*fact_class).to_owned(),
+                reset_scope: *reset_scope,
             })
             .collect(),
         forbidden_table_names: FORBIDDEN_TABLE_NAMES
@@ -50,87 +66,62 @@ pub fn fresh_v4_schema_manifest_payload() -> FreshV4SchemaManifestPayload {
             .collect(),
     }
 }
-const TABLES: &[(&str, &str, &str)] = &[
-    ("schema_metadata", "platform.schema", "fact"),
-    ("schema_migrations", "platform.schema", "fact"),
-    ("plugin_packages", "platform.plugin-manager", "fact"),
-    ("plugin_mounts", "platform.plugin-manager", "fact"),
-    ("plugin_configs", "platform.plugin-manager", "fact"),
-    ("plugin_states", "platform.plugin-manager", "fact"),
-    (
-        "installation_role_bindings",
-        "platform.capability-registry",
-        "fact",
-    ),
-    (
-        "capability_definitions",
-        "platform.capability-registry",
-        "fact",
-    ),
-    (
-        "capability_catalog_entries",
-        "platform.capability-registry",
-        "fact",
-    ),
-    ("skill_instructions", "platform.skill-catalog", "fact"),
-    ("mcp_servers", "plugin.mcp-connectors", "fact"),
-    (
-        "mcp_tool_materializations",
-        "plugin.mcp-connectors",
-        "fact",
-    ),
-    (
-        "agent_preset_templates",
-        "platform.agent-preset",
-        "fact",
-    ),
-    ("agent_presets", "platform.agent-preset", "fact"),
-    (
-        "agent_preset_revisions",
-        "platform.agent-preset",
-        "fact",
-    ),
-    (
-        "agent_preset_contribution_locks",
-        "platform.agent-preset",
-        "fact",
-    ),
-    ("agent_bindings", "platform.agent-preset", "fact"),
-    ("remote_bindings", "plugin.remote-ingress", "fact"),
-    ("installation_auth", "plugin.remote-ingress", "fact"),
-    ("providers", "platform.chat-model-broker", "fact"),
-    ("provider_models", "platform.chat-model-broker", "fact"),
-    (
-        "provider_connections",
-        "platform.chat-model-broker",
-        "fact",
-    ),
-    (
-        "provider_model_capabilities",
-        "platform.chat-model-broker",
-        "fact",
-    ),
-    ("client_preferences", "platform.host-configuration", "fact"),
-    ("system_settings", "platform.host-configuration", "fact"),
-    (
-        "agent_runtime_snapshots",
-        "platform.agent-preset-compiler",
-        "fact",
-    ),
-    ("agent_sessions", "platform.agent-session", "fact"),
-    ("session_events", "platform.agent-session", "fact"),
-    ("session_payloads", "platform.agent-session", "fact"),
-    ("session_heads", "platform.agent-session", "projection"),
-    (
-        "message_projection",
-        "platform.agent-session",
-        "projection",
-    ),
+pub type FreshV4SchemaManifestPayload = AgentStoreSchemaManifestPayload;
+
+pub fn fresh_v4_schema_manifest_payload() -> FreshV4SchemaManifestPayload {
+    agent_store_schema_manifest_payload()
+}
+
+const TABLES: &[(&str, &str, &str, SchemaResetScope)] = &[
+    ("schema_metadata", "platform.schema", "fact", SchemaResetScope::Preserve),
+    ("schema_migrations", "platform.schema", "fact", SchemaResetScope::Preserve),
+    ("plugin_packages", "platform.plugin-manager", "fact", SchemaResetScope::Preserve),
+    ("plugin_mounts", "platform.plugin-manager", "fact", SchemaResetScope::Preserve),
+    ("plugin_configs", "platform.plugin-manager", "fact", SchemaResetScope::Preserve),
+    ("plugin_states", "platform.plugin-manager", "fact", SchemaResetScope::Preserve),
+    ("installation_role_bindings", "platform.capability-registry", "fact", SchemaResetScope::Preserve),
+    ("capability_definitions", "platform.capability-registry", "fact", SchemaResetScope::Preserve),
+    ("capability_catalog_entries", "platform.capability-registry", "fact", SchemaResetScope::Preserve),
+    ("skill_instructions", "platform.skill-catalog", "fact", SchemaResetScope::Preserve),
+    ("mcp_servers", "plugin.mcp-connectors", "fact", SchemaResetScope::Preserve),
+    ("mcp_tool_materializations", "plugin.mcp-connectors", "fact", SchemaResetScope::Preserve),
+    ("agent_preset_templates", "platform.agent-preset", "configuration", SchemaResetScope::AgentData),
+    ("agent_presets", "platform.agent-preset", "configuration", SchemaResetScope::AgentData),
+    ("agent_preset_revisions", "platform.agent-preset", "configuration", SchemaResetScope::AgentData),
+    ("agent_preset_contribution_locks", "platform.agent-preset", "configuration", SchemaResetScope::AgentData),
+    ("agent_bindings", "platform.agent-preset", "configuration", SchemaResetScope::AgentData),
+    ("remote_bindings", "plugin.remote-ingress", "configuration", SchemaResetScope::AgentData),
+    ("installation_auth", "plugin.remote-ingress", "fact", SchemaResetScope::Preserve),
+    ("providers", "platform.chat-model-broker", "configuration", SchemaResetScope::Preserve),
+    ("provider_models", "platform.chat-model-broker", "configuration", SchemaResetScope::Preserve),
+    ("provider_connections", "platform.chat-model-broker", "configuration", SchemaResetScope::Preserve),
+    ("provider_model_capabilities", "platform.chat-model-broker", "configuration", SchemaResetScope::Preserve),
+    ("client_preferences", "platform.host-configuration", "configuration", SchemaResetScope::Preserve),
+    ("system_settings", "platform.host-configuration", "configuration", SchemaResetScope::Preserve),
+    ("agent_runtime_snapshots", "platform.agent-preset-compiler", "fact", SchemaResetScope::AgentData),
+    ("agent_sessions", "platform.agent-session", "fact", SchemaResetScope::AgentData),
+    ("agent_turns", "platform.agent-session", "fact", SchemaResetScope::AgentData),
+    ("agent_events", "platform.agent-session", "fact", SchemaResetScope::AgentData),
+    ("agent_payloads", "platform.agent-session", "fact", SchemaResetScope::AgentData),
+    ("agent_effects", "platform.agent-session", "fact", SchemaResetScope::AgentData),
+    ("agent_session_resources", "platform.agent-session", "fact", SchemaResetScope::AgentData),
+    ("agent_session_heads", "platform.agent-session", "projection", SchemaResetScope::AgentData),
+    ("agent_messages", "platform.agent-session", "projection", SchemaResetScope::AgentData),
 ];
 
 const FORBIDDEN_TABLE_NAMES: &[&str] = &[
     "conversations",
+    "messages",
+    "conversation_delivery_receipts",
+    "conversation_runtime_events",
+    "conversation_mcp_effects",
+    "conversation_hosted_effects",
+    "conversation_git_effects",
     "conversation_sessions",
+    "session_events",
+    "session_payloads",
+    "session_heads",
+    "message_projection",
     "runtime_contributions",
     "service_catalog",
     "remote_agents",
@@ -164,11 +155,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fresh_v4_baseline_builds_from_an_empty_database() {
+    fn agent_store_baseline_builds_from_an_empty_database() {
         let database = Connection::open_in_memory().expect("in-memory SQLite");
         database
-            .execute_batch(FRESH_V4_BASELINE_SQL)
-            .expect("fresh-v4 baseline");
+            .execute_batch(AGENT_STORE_BASELINE_SQL)
+            .expect("Agent Store baseline");
 
         let actual = database
             .prepare(
@@ -182,18 +173,18 @@ mod tests {
             .expect("table names");
         let expected = TABLES
             .iter()
-            .map(|(name, _, _)| (*name).to_owned())
+            .map(|(name, _, _, _)| (*name).to_owned())
             .collect::<BTreeSet<_>>();
         assert_eq!(actual, expected);
     }
 
     #[test]
     fn schema_contract_contains_no_legacy_table() {
-        let lowercase = FRESH_V4_BASELINE_SQL.to_ascii_lowercase();
+        let lowercase = AGENT_STORE_BASELINE_SQL.to_ascii_lowercase();
         for table in FORBIDDEN_TABLE_NAMES {
             assert!(
                 !lowercase.contains(&format!("create table {table}")),
-                "fresh-v4 baseline must not create {table}"
+                "Agent Store baseline must not create {table}"
             );
         }
     }
@@ -202,22 +193,57 @@ mod tests {
     fn every_table_has_one_owner_and_class() {
         let names = TABLES
             .iter()
-            .map(|(name, _, _)| *name)
+            .map(|(name, _, _, _)| *name)
             .collect::<BTreeSet<_>>();
         assert_eq!(names.len(), TABLES.len());
         assert!(
             TABLES
                 .iter()
-                .all(|(_, owner, class)| !owner.is_empty() && !class.is_empty())
+                .all(|(_, owner, class, _)| !owner.is_empty() && !class.is_empty())
         );
+    }
+
+    #[test]
+    fn reset_scope_is_total_and_preserves_only_non_agent_configuration() {
+        let agent_tables = TABLES
+            .iter()
+            .filter(|(_, _, _, scope)| *scope == SchemaResetScope::AgentData)
+            .map(|(name, _, _, _)| *name)
+            .collect::<BTreeSet<_>>();
+        for required in [
+            "agent_sessions",
+            "agent_turns",
+            "agent_events",
+            "agent_messages",
+            "agent_payloads",
+            "agent_effects",
+            "agent_session_resources",
+            "agent_presets",
+            "agent_preset_revisions",
+            "agent_runtime_snapshots",
+        ] {
+            assert!(agent_tables.contains(required), "{required} must reset");
+        }
+        for preserved in [
+            "plugin_packages",
+            "mcp_servers",
+            "providers",
+            "provider_models",
+            "client_preferences",
+            "system_settings",
+        ] {
+            assert!(TABLES.iter().any(|(name, _, _, scope)| {
+                *name == preserved && *scope == SchemaResetScope::Preserve
+            }));
+        }
     }
 
     #[test]
     fn runtime_snapshot_stores_only_canonical_content_and_envelope() {
         let database = Connection::open_in_memory().expect("in-memory SQLite");
         database
-            .execute_batch(FRESH_V4_BASELINE_SQL)
-            .expect("fresh-v4 baseline");
+            .execute_batch(AGENT_STORE_BASELINE_SQL)
+            .expect("Agent Store baseline");
 
         let columns = database
             .prepare("PRAGMA table_info(agent_runtime_snapshots)")
@@ -238,11 +264,48 @@ mod tests {
     }
 
     #[test]
+    fn payload_schema_supports_only_inline_or_content_addressed_objects() {
+        let database = Connection::open_in_memory().expect("in-memory SQLite");
+        database
+            .execute_batch(AGENT_STORE_BASELINE_SQL)
+            .expect("Agent Store baseline");
+        database
+            .execute(
+                "INSERT INTO agent_sessions (agent_session_id, owner_ref_json, state, deleted_at) \
+                 VALUES ('session-deleted', '{}', 'deleted', 1)",
+                [],
+            )
+            .unwrap();
+        let digest = "a".repeat(64);
+        let object_ref = format!("objects/{digest}");
+        database
+            .execute(
+                "INSERT INTO agent_payloads (\
+                    payload_id, session_id, media_type, byte_len, digest, \
+                    storage_kind, body, object_ref\
+                 ) VALUES (?1, 'session-deleted', 'application/octet-stream', 3, ?2, \
+                    'object', NULL, ?3)",
+                rusqlite::params!["payload-object", digest, object_ref],
+            )
+            .unwrap();
+        assert!(database
+            .execute(
+                "INSERT INTO agent_payloads (\
+                    payload_id, session_id, media_type, byte_len, digest, \
+                    storage_kind, body, object_ref\
+                 ) VALUES ('payload-invalid', 'session-deleted', 'text/plain', 1, ?1, \
+                    'object', NULL, 'objects/wrong')",
+                rusqlite::params!["b".repeat(64)],
+            )
+            .is_err());
+    }
+
+    #[test]
     fn installation_role_binding_is_one_exact_selection_per_role() {
         let database = Connection::open_in_memory().expect("in-memory SQLite");
         database
-            .execute_batch(FRESH_V4_BASELINE_SQL)
-            .expect("fresh-v4 baseline");
+            .execute_batch(AGENT_STORE_BASELINE_SQL)
+            .expect("Agent Store baseline");
 
         let columns = database
             .prepare("PRAGMA table_info(installation_role_bindings)")

@@ -14,4 +14,5 @@ thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+nomifun-db.workspace = true
 tokio.workspace = true

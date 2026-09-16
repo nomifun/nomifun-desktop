@@ -2440,6 +2440,89 @@
     "title": "ResolvedSnapshotEnvelope",
     "type": "object"
   },
+  "agent_store_schema_manifest": {
+    "$defs": {
+      "SchemaResetScope": {
+        "enum": [
+          "preserve",
+          "agent_data"
+        ],
+        "type": "string"
+      },
+      "SchemaTableContract": {
+        "additionalProperties": false,
+        "properties": {
+          "fact_class": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "reset_scope": {
+            "$ref": "#/$defs/SchemaResetScope"
+          },
+          "table_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "table_name",
+          "owner",
+          "fact_class",
+          "reset_scope"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "baseline_logical_path": {
+        "type": "string"
+      },
+      "data_generation": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "forbidden_table_names": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "migration_head": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "projection_schema_version": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "schema_version": {
+        "type": "string"
+      },
+      "tables": {
+        "items": {
+          "$ref": "#/$defs/SchemaTableContract"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "schema_version",
+      "data_generation",
+      "migration_head",
+      "projection_schema_version",
+      "baseline_logical_path",
+      "tables",
+      "forbidden_table_names"
+    ],
+    "title": "AgentStoreSchemaManifestPayload",
+    "type": "object"
+  },
   "candidate_test_receipt": {
     "$defs": {
       "CandidateTestCredentialMode": {

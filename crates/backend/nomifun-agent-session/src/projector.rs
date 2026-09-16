@@ -29,17 +29,6 @@ struct ProjectionDocument {
     terminal_effect: Option<Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyProjectionEvent {
-    #[serde(rename = "seq")]
-    _seq: u64,
-    kind: String,
-    #[serde(rename = "kind_version")]
-    _kind_version: u32,
-    payload: Value,
-}
-
 pub(crate) fn initial_head(session_id: &AgentSessionId) -> SessionHeadProjection {
     SessionHeadProjection {
         session_id: session_id.clone(),
@@ -135,18 +124,14 @@ pub(crate) fn reduce_head(
     Ok(())
 }
 
-pub(crate) fn reduce_message_projection(
+pub(crate) fn reduce_agent_messages(
     existing: Option<MessageProjection>,
     event: &SessionEventRecord,
     payload: &Value,
 ) -> Result<MessageProjection, SessionStoreError> {
     let (projection_id, presentation_intent) = projection_identity(event);
     let mut document = match existing.as_ref() {
-        Some(existing) => {
-            let (document, legacy_events) =
-                decode_projection_document(existing.projection.clone())?;
-            normalize_legacy_projection(document, legacy_events)?
-        }
+        Some(existing) => serde_json::from_value(existing.projection.clone())?,
         None => ProjectionDocument {
             projection_id: projection_id.clone(),
             correlation_id: event.correlation_id.0.clone(),
@@ -304,64 +289,6 @@ fn apply_projection_semantics(
         payload,
     )?;
     Ok(())
-}
-
-fn decode_projection_document(
-    mut value: Value,
-) -> Result<(ProjectionDocument, Option<Vec<LegacyProjectionEvent>>), SessionStoreError> {
-    let legacy_events = value
-        .as_object_mut()
-        .and_then(|object| object.remove("events"))
-        .map(serde_json::from_value)
-        .transpose()?;
-    let document = serde_json::from_value(value)?;
-    Ok((document, legacy_events))
-}
-
-fn normalize_legacy_projection(
-    mut document: ProjectionDocument,
-    legacy_events: Option<Vec<LegacyProjectionEvent>>,
-) -> Result<ProjectionDocument, SessionStoreError> {
-    let Some(events) = legacy_events else {
-        return Ok(document);
-    };
-
-    if document.part_count.is_none() {
-        let part_count = events
-            .iter()
-            .filter(|event| event.kind == "message/content-part")
-            .count() as u64;
-        if part_count > 0 {
-            document.part_count = Some(part_count);
-        }
-    }
-
-    if document.content.is_none() {
-        let mut content = String::new();
-        for event in &events {
-            match event.kind.as_str() {
-                "message/user-accepted" => {
-                    if let Some(value) = event.payload.get("content").and_then(Value::as_str) {
-                        content = value.to_owned();
-                    }
-                }
-                "message/content-part" => {
-                    if let Some(value) = event.payload.get("content").and_then(Value::as_str) {
-                        content.push_str(value);
-                    }
-                }
-                _ => {}
-            }
-        }
-        if !content.is_empty() {
-            document.content = Some(content);
-        }
-    }
-
-    for event in &events {
-        apply_projection_summaries(&mut document, &event.kind, None, &event.payload)?;
-    }
-    Ok(document)
 }
 
 fn apply_projection_summaries(

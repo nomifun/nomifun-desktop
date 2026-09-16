@@ -2,7 +2,7 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE schema_metadata (
     singleton_key TEXT PRIMARY KEY CHECK (singleton_key = 'canonical'),
-    data_generation INTEGER NOT NULL CHECK (data_generation = 4),
+    data_generation INTEGER NOT NULL CHECK (data_generation = 5),
     root_instance_id TEXT NOT NULL,
     migration_head INTEGER NOT NULL CHECK (migration_head >= 1),
     seed_manifest_digest TEXT NOT NULL CHECK (length(seed_manifest_digest) = 64),
@@ -218,7 +218,7 @@ CREATE TABLE installation_auth (
     )
 ) STRICT;
 
--- Provider configuration is part of the Fresh-v4 root.  A clean start does
+-- Provider configuration is part of the canonical Agent Store root.  A clean start does
 -- not import legacy rows, but the new host must have one canonical place for
 -- user-entered provider routes and encrypted credential material.
 CREATE TABLE providers (
@@ -410,18 +410,76 @@ CREATE TABLE agent_sessions (
         ON UPDATE RESTRICT ON DELETE RESTRICT
 ) STRICT;
 
-CREATE TABLE session_payloads (
+CREATE TABLE agent_turns (
+    session_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL CHECK (trim(turn_id) <> ''),
+    operation_id TEXT NOT NULL CHECK (trim(operation_id) <> ''),
+    idempotency_key TEXT NOT NULL CHECK (trim(idempotency_key) <> ''),
+    source_message_id TEXT,
+    admission_json TEXT CHECK (admission_json IS NULL OR json_valid(admission_json)),
+    state TEXT NOT NULL CHECK (
+        state IN ('accepted', 'running', 'completed', 'failed', 'cancelled', 'interrupted')
+    ),
+    result_json TEXT CHECK (result_json IS NULL OR json_valid(result_json)),
+    error_json TEXT CHECK (error_json IS NULL OR json_valid(error_json)),
+    started_event_id TEXT,
+    terminal_event_id TEXT,
+    accepted_at INTEGER NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER,
+    PRIMARY KEY (session_id, turn_id),
+    UNIQUE (session_id, operation_id),
+    UNIQUE (session_id, idempotency_key),
+    FOREIGN KEY (session_id) REFERENCES agent_sessions (agent_session_id)
+        ON UPDATE RESTRICT ON DELETE CASCADE,
+    FOREIGN KEY (started_event_id) REFERENCES agent_events (event_id)
+        ON UPDATE RESTRICT ON DELETE SET NULL,
+    FOREIGN KEY (terminal_event_id) REFERENCES agent_events (event_id)
+        ON UPDATE RESTRICT ON DELETE SET NULL,
+    CHECK (
+        (state IN ('accepted', 'running') AND terminal_event_id IS NULL AND finished_at IS NULL) OR
+        (state IN ('completed', 'failed', 'cancelled', 'interrupted')
+            AND terminal_event_id IS NOT NULL AND finished_at IS NOT NULL)
+    )
+) STRICT;
+
+CREATE TABLE agent_session_resources (
+    binding_id TEXT PRIMARY KEY CHECK (trim(binding_id) <> ''),
+    session_id TEXT NOT NULL,
+    resource_kind TEXT NOT NULL CHECK (trim(resource_kind) <> ''),
+    resource_id TEXT NOT NULL CHECK (trim(resource_id) <> ''),
+    owner_id TEXT NOT NULL CHECK (trim(owner_id) <> ''),
+    operations_json TEXT NOT NULL CHECK (
+        json_valid(operations_json) AND json_type(operations_json) = 'array'
+    ),
+    connection_config_ref TEXT,
+    typed_parameters_json TEXT NOT NULL CHECK (
+        json_valid(typed_parameters_json) AND json_type(typed_parameters_json) = 'object'
+    ),
+    binding_digest TEXT NOT NULL CHECK (length(binding_digest) = 64),
+    UNIQUE (session_id, binding_id),
+    FOREIGN KEY (session_id) REFERENCES agent_sessions (agent_session_id)
+        ON UPDATE RESTRICT ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE agent_payloads (
     payload_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
     media_type TEXT NOT NULL,
     byte_len INTEGER NOT NULL CHECK (byte_len >= 0),
     digest TEXT NOT NULL CHECK (length(digest) = 64),
-    body BLOB NOT NULL,
+    storage_kind TEXT NOT NULL CHECK (storage_kind IN ('inline', 'object')),
+    body BLOB,
+    object_ref TEXT,
+    CHECK (
+        (storage_kind = 'inline' AND body IS NOT NULL AND object_ref IS NULL) OR
+        (storage_kind = 'object' AND body IS NULL AND object_ref = 'objects/' || digest)
+    ),
     FOREIGN KEY (session_id) REFERENCES agent_sessions (agent_session_id)
         ON UPDATE RESTRICT ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE session_events (
+CREATE TABLE agent_events (
     session_id TEXT NOT NULL,
     seq INTEGER NOT NULL CHECK (seq >= 1),
     event_id TEXT NOT NULL UNIQUE,
@@ -443,13 +501,54 @@ CREATE TABLE session_events (
     CHECK (inline_json IS NULL OR payload_id IS NULL),
     FOREIGN KEY (session_id) REFERENCES agent_sessions (agent_session_id)
         ON UPDATE RESTRICT ON DELETE CASCADE,
-    FOREIGN KEY (payload_id) REFERENCES session_payloads (payload_id)
+    FOREIGN KEY (payload_id) REFERENCES agent_payloads (payload_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
-    FOREIGN KEY (causation_event_id) REFERENCES session_events (event_id)
+    FOREIGN KEY (causation_event_id) REFERENCES agent_events (event_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT
 ) STRICT;
 
-CREATE TABLE session_heads (
+CREATE TABLE agent_effects (
+    effect_id TEXT PRIMARY KEY CHECK (trim(effect_id) <> ''),
+    session_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL CHECK (trim(turn_id) <> ''),
+    operation_id TEXT NOT NULL CHECK (trim(operation_id) <> ''),
+    owner_domain TEXT NOT NULL CHECK (trim(owner_domain) <> ''),
+    capability_module TEXT NOT NULL CHECK (trim(capability_module) <> ''),
+    action_id TEXT NOT NULL CHECK (trim(action_id) <> ''),
+    resource_binding_id TEXT,
+    resource_key TEXT,
+    input_digest TEXT NOT NULL CHECK (length(input_digest) = 64),
+    strategy TEXT NOT NULL CHECK (
+        strategy IN ('managed_effect', 'external_uncertain_effect')
+    ),
+    state TEXT NOT NULL CHECK (
+        state IN ('pending', 'returned', 'rejected', 'cancelled', 'unknown')
+    ),
+    bounded_observation_json TEXT CHECK (
+        bounded_observation_json IS NULL OR json_valid(bounded_observation_json)
+    ),
+    started_event_id TEXT NOT NULL,
+    terminal_event_id TEXT,
+    created_at INTEGER NOT NULL,
+    settled_at INTEGER,
+    FOREIGN KEY (session_id) REFERENCES agent_sessions (agent_session_id)
+        ON UPDATE RESTRICT ON DELETE CASCADE,
+    FOREIGN KEY (session_id, turn_id) REFERENCES agent_turns (session_id, turn_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY (session_id, resource_binding_id)
+        REFERENCES agent_session_resources (session_id, binding_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY (started_event_id) REFERENCES agent_events (event_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY (terminal_event_id) REFERENCES agent_events (event_id)
+        ON UPDATE RESTRICT ON DELETE SET NULL,
+    CHECK (
+        (state = 'pending' AND terminal_event_id IS NULL AND settled_at IS NULL) OR
+        (state <> 'pending' AND terminal_event_id IS NOT NULL AND settled_at IS NOT NULL)
+    )
+) STRICT;
+
+CREATE TABLE agent_session_heads (
     session_id TEXT PRIMARY KEY,
     status TEXT NOT NULL,
     active_turn_id TEXT,
@@ -470,11 +569,11 @@ CREATE TABLE session_heads (
     unread_count INTEGER NOT NULL CHECK (unread_count >= 0),
     FOREIGN KEY (session_id) REFERENCES agent_sessions (agent_session_id)
         ON UPDATE RESTRICT ON DELETE CASCADE,
-    FOREIGN KEY (runtime_bound_event_id) REFERENCES session_events (event_id)
+    FOREIGN KEY (runtime_bound_event_id) REFERENCES agent_events (event_id)
         ON UPDATE RESTRICT ON DELETE SET NULL
 ) STRICT;
 
-CREATE TABLE message_projection (
+CREATE TABLE agent_messages (
     session_id TEXT NOT NULL,
     projection_id TEXT NOT NULL,
     first_seq INTEGER NOT NULL CHECK (first_seq >= 1),
@@ -507,9 +606,18 @@ CREATE INDEX idx_agent_preset_revisions_preset
     ON agent_preset_revisions (preset_id, revision_no);
 CREATE INDEX idx_agent_sessions_owner_state
     ON agent_sessions (owner_ref_json, state);
-CREATE INDEX idx_session_events_correlation
-    ON session_events (session_id, correlation_id, seq);
-CREATE INDEX idx_session_payloads_session
-    ON session_payloads (session_id);
-CREATE INDEX idx_message_projection_sequence
-    ON message_projection (session_id, first_seq, last_seq);
+CREATE INDEX idx_agent_turns_session_state
+    ON agent_turns (session_id, state, accepted_at);
+CREATE INDEX idx_agent_session_resources_session_kind
+    ON agent_session_resources (session_id, resource_kind, binding_id);
+CREATE INDEX idx_agent_events_correlation
+    ON agent_events (session_id, correlation_id, seq);
+CREATE INDEX idx_agent_payloads_session
+    ON agent_payloads (session_id);
+CREATE INDEX idx_agent_messages_sequence
+    ON agent_messages (session_id, first_seq, last_seq);
+CREATE INDEX idx_agent_effects_session_turn
+    ON agent_effects (session_id, turn_id, created_at);
+CREATE UNIQUE INDEX idx_agent_effects_resource_unsettled
+    ON agent_effects (owner_domain, resource_key)
+    WHERE state IN ('pending', 'unknown') AND resource_key IS NOT NULL;

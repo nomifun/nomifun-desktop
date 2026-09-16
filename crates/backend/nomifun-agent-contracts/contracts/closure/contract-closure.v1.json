@@ -13,10 +13,10 @@
     {"decision_id":"D-009","status":"confirmed","contract":"The official preset key exact-set contains seven role presets."},
     {"decision_id":"D-010","status":"confirmed","contract":"Agent Preset uses one progressive editor; package, capability, skill, and MCP navigation remain separate."},
     {"decision_id":"D-011","status":"confirmed","contract":"First final-stack gate contains chat.minimal, coding.codex, and CI-only sample.echo."},
-    {"decision_id":"D-012","status":"confirmed","contract":"v4 is a clean start with no legacy data conversion or compatibility read."},
-    {"decision_id":"D-013","status":"confirmed","contract":"First v4 cutover performs one same-filesystem whole-root rename before creating an empty v4 root."},
+    {"decision_id":"D-012","status":"confirmed","contract":"Agent Store generation 5 is a clean Agent-data start with no legacy Agent conversion or compatibility read."},
+    {"decision_id":"D-013","status":"confirmed","contract":"Agent-only reset replaces Session, Execution, Preset and logs in the same canonical SQLite while preserving non-Agent configuration."},
     {"decision_id":"D-014","status":"confirmed","contract":"Every migration slice switches all direct consumers and deletes the replaced legacy surface in the same change."},
-    {"decision_id":"D-015","status":"confirmed","contract":"Canonical semantic SessionEvent facts are authoritative; projections contain only UI state and never duplicate the Event Log."},
+    {"decision_id":"D-015","status":"confirmed","contract":"Canonical AgentSession, Turn, Event, Effect, Payload and Resource facts are authoritative; Message and Head projections are rebuildable."},
     {"decision_id":"D-016","status":"confirmed","contract":"Stable freezes a vendor-neutral seam; local install and one SDK begin only in Phase N1."},
     {"decision_id":"D-017","status":"confirmed","contract":"RemoteBinding selects an exact AgentBindingValue and uses explicit open, turn, observe, and cancel."},
     {"decision_id":"D-018","status":"confirmed","contract":"Lightweight Chat and complete Coding are structural conformance requirements, not a performance benchmark program."},
@@ -37,8 +37,8 @@
       "owns": ["dto","newtype","enum","package_plugin_spi","preset_snapshot_binding","remote_runtime_host_ports","generated_schema"]
     },
     {
-      "source_kind": "fresh_v4_schema",
-      "logical_path": "crates/backend/nomifun-agent-contracts/schema/0001_fresh_v4.sql",
+      "source_kind": "canonical_agent_store_schema",
+      "logical_path": "crates/backend/nomifun-agent-contracts/schema/0001_agent_store.sql",
       "owns": ["tables","indexes","constraints","defaults","foreign_keys","migration_lineage","schema_metadata"]
     },
     {
@@ -50,7 +50,7 @@
   "closure_resolutions": [
     {
       "resolution_id": "CR-001",
-      "canonical_rule": "Markdown explains generated artifacts; Rust types, fresh-v4 schema, and SessionEvent Registry are the only machine owners."
+      "canonical_rule": "Markdown explains generated artifacts; Rust types, the canonical Agent Store schema, and SessionEvent Registry are the only machine owners."
     },
     {
       "resolution_id": "CR-002",
@@ -74,15 +74,15 @@
     },
     {
       "resolution_id": "CR-007",
-      "canonical_rule": "Cutover archive basename is <canonical>.pre-v4-archive-<UTC timestamp>."
+      "canonical_rule": "Agent-only reset clears only tables whose schema reset_scope is agent_data and preserves all other domain configuration."
     },
     {
       "resolution_id": "CR-008",
-      "canonical_rule": "Once durable, the immutable parent marker survives mkdir or rename failure and is removed only after ready and metadata exact-match."
+      "canonical_rule": "Runtime checkpoints and content-addressed objects are derived storage; canonical SQLite facts are sufficient for safe rebuild."
     },
     {
       "resolution_id": "CR-009",
-      "canonical_rule": "Fresh initialization order is schema and schema_metadata, bundled Package materialization, seven authoring seeds, ready, then marker removal."
+      "canonical_rule": "Fresh initialization installs generation 5 schema, preserves non-Agent configuration, seeds current official Presets, and starts with empty Session and Execution collections."
     },
     {
       "resolution_id": "CR-010",

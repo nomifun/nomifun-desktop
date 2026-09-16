@@ -80,6 +80,10 @@ Integration 中止。单独 panic/quarantine 用例通过；同一 119 项库测
 通过连续重跑掩盖。它不阻止 UARC-001 inventory 完成，但会让最终 completion gate 保持失败，直到
 inventory 中该 anomaly 标为 `closed` 并附修复证据。
 
+`nomifun-db --lib` 也会在默认并行模式下让大量共享 SQLite/migration 测试排队超过 60 秒。UARC-011
+已用 `--test-threads=1` 完整通过 411/411（496.83 秒），因此该项以“明确串行 crate gate”闭合；后续
+Wave 对 `nomifun-db` 必须继续使用这一命令并独占 Cargo lease。
+
 ## 5. macOS 缺口
 
 当前没有活跃 Mac 主机，以下状态全部为 `pending`：

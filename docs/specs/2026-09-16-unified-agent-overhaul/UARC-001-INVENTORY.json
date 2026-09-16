@@ -251,6 +251,16 @@
       "observed": "The default parallel run completed compilation and most tests, then emitted five ConPTY serial-group over-60-second warnings and made no further progress; it was interrupted after more than 210 seconds.",
       "control": "The panic/quarantine case passed alone, and all 119 library tests passed with --test-threads=1 in 3.30 seconds after compilation.",
       "completion_requirement": "Make the default parallel library gate deterministic or explicitly codify a justified serial crate gate without masking a product cleanup failure."
+    },
+    {
+      "id": "windows.nomifun_db.parallel_test_hang",
+      "owner_task": "UARC-011",
+      "state": "closed",
+      "command": "cargo test -p nomifun-db --lib",
+      "observed": "The default parallel run emitted dozens of shared SQLite and migration tests over 60 seconds and stopped making progress; Integration interrupted the sample after an additional bounded observation window.",
+      "control": "All 411 library tests passed with --test-threads=1 in 496.83 seconds.",
+      "resolution": "UARC wave gates run the nomifun-db crate with --test-threads=1 under the single Cargo lease because these tests intentionally share migration, filesystem and SQLite process resources.",
+      "completion_requirement": "Closed by a deterministic serial crate gate with full 411/411 evidence."
     }
   ],
   "macos_gaps": [

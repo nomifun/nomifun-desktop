@@ -12,7 +12,7 @@
   "ordered_steps": [
     "fence_admission",
     "quiesce_and_cancel_runtime",
-    "prove_zero_outstanding",
+    "settle_or_quarantine_outstanding_effects",
     "purge_session_private_content",
     "commit_tombstone"
   ],
@@ -28,16 +28,17 @@
     "descendant_process"
   ],
   "purge_targets": [
-    "session_event",
-    "session_payload",
-    "session_head_projection",
-    "message_projection",
-    "message",
+    "agent_turn",
+    "agent_event",
+    "agent_payload",
+    "agent_effect",
+    "agent_session_head_projection",
+    "agent_message_projection",
     "session_owned_attachment",
     "session_owned_artifact",
     "runtime_binding",
     "runtime_checkpoint",
-    "session_scoped_resource"
+    "agent_session_resource"
   ],
   "final_tombstone": {
     "agent_session_id": "0199f6d4-7c00-7f00-a001-000000000004",
