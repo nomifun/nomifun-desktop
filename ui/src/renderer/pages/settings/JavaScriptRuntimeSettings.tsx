@@ -6,10 +6,10 @@
 
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import SettingsPageWrapper from '../components/SettingsPageWrapper';
-import ExecutionEnginesSettingsContent from './ExecutionEnginesSettingsContent';
+import SettingsPageWrapper from './components/SettingsPageWrapper';
+import RuntimeManager from './RuntimeManager';
 
-const RuntimeManagerSettings: React.FC = () => {
+const JavaScriptRuntimeSettings: React.FC = () => {
   const { t } = useTranslation();
 
   return (
@@ -22,9 +22,9 @@ const RuntimeManagerSettings: React.FC = () => {
           {t('settings.runtimeManager.subtitle')}
         </p>
       </header>
-      <ExecutionEnginesSettingsContent />
+      <RuntimeManager />
     </SettingsPageWrapper>
   );
 };
 
-export default RuntimeManagerSettings;
+export default JavaScriptRuntimeSettings;

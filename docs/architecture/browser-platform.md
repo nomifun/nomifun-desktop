@@ -1,5 +1,10 @@
 # Browser Workspace
 
+> The current source still implements a Conversation-scoped BrowserWorkspace, but its product model is scheduled for correction.
+> The dedicated “session browser” entry will be removed; the underlying workspace becomes a Browser resource available to any
+> authorized AgentSession, and attached Chrome becomes a provider of the same `browser` capability module. See the
+> [capability redesign, section 7](../specs/2026-09-16-agent-capability-product-redesign.zh.md), “Browser 产品模型纠正”.
+
 Status: implementing Browser Workspace v2. The [approved design](../specs/2026-09-13-browser-workspace-v2.zh.md) defines the full target; the [implementation record](../specs/2026-09-13-browser-workspace-v2-progress.zh.md) lists actual evidence and remaining work.
 
 ## Product boundary

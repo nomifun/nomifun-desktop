@@ -1,6 +1,12 @@
 # Browser Workspace v2：会话内真实内嵌浏览器产品与技术设计
 
-> 状态：**WINDOWS DELIVERED / MACOS HANDOFF READY**
+> **产品模型已被 2026-09-16 统一能力重构方案取代。** Browser 不再是专属会话入口，
+> 而是任意获授权 AgentSession 可加载的 `browser` Capability Module；managed browser 与
+> attached Chrome 是 Provider/Resource。本文只保留底层 Browser Engine、Tab、RunGuard、原生
+> Surface 和既有实现证据，不再作为产品入口、Conversation 身份或能力拆分的目标设计。
+> 新目标见 [Agent 能力模型重构 §7](2026-09-16-agent-capability-product-redesign.zh.md)“Browser 产品模型纠正”。
+
+> 历史实施状态：**WINDOWS DELIVERED / MACOS HANDOFF READY；产品入口待整改**
 >
 > 修订日期：2026-09-16
 > macOS 内核已获用户批准改为独立 CEF child NSView；Windows 保留 WebView2。

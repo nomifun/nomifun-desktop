@@ -1,5 +1,10 @@
 # 系统浏览器：连接用户当前已登录会话
 
+> **能力身份已被 2026-09-16 统一能力重构方案取代。** 已登录 Chrome 仍可作为受控 Provider，
+> 但不再是与内嵌 Browser 并列的独立 Agent Capability；两者共享 `browser` Module 的 Action
+> 授权，由 Resource Binding 选择 Provider。本文保留连接、授权、隔离和平台实现证据。
+> 新目标见 [Agent 能力模型重构 §7](2026-09-16-agent-capability-product-redesign.zh.md)“Browser 产品模型纠正”。
+
 状态：WINDOWS IMPLEMENTED AND TEMPORARY-CHROME CONFORMANCE VERIFIED / PERSONAL DATA NOT ACCESSED。
 
 这是 Browser Workspace v2 的追加范围，不替换内嵌浏览器，也不恢复旧 Browser 管理页、登录保险库或 Profile 迁移。
