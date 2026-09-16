@@ -942,6 +942,7 @@ fn invocation(
         principal: owner.clone(),
         session_owner: owner,
         agent_session_id: AgentSessionId::from(SAMPLE_AGENT_SESSION_ID),
+        turn_id: OperationId::from("sample-turn"),
         operation_id: OperationId::from(SAMPLE_OPERATION_ID),
         idempotency_key: IdempotencyKey::from(SAMPLE_IDEMPOTENCY_KEY),
         correlation_id: CorrelationId::from(SAMPLE_CORRELATION_ID),

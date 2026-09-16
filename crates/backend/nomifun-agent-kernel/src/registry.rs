@@ -545,6 +545,7 @@ impl KernelRegistry {
             return dispatch_resolved_role_tool(
                 RoleMemberDispatchTarget::AgentTool(handler),
                 context,
+                Some(request.turn_id),
                 request.action_id,
                 request.idempotency_key,
                 request.input,
@@ -592,6 +593,7 @@ impl KernelRegistry {
                     dependencies,
                     principal: request.principal,
                     agent_session_id: request.agent_session_id,
+                    turn_id: request.turn_id,
                     operation_id: request.operation_id,
                     idempotency_key: request.idempotency_key,
                     correlation_id: request.correlation_id,
@@ -996,6 +998,7 @@ impl KernelRegistry {
         dispatch_resolved_role_tool(
             target,
             context,
+            None,
             request.action_id,
             request.idempotency_key,
             request.input,
@@ -1040,6 +1043,7 @@ impl KernelRegistry {
             principal: request.principal.clone(),
             session_owner: request.session_owner.clone(),
             agent_session_id: agent_session_id.clone(),
+            turn_id: None,
             operation_id: request.operation_id.clone(),
             correlation_id: request.correlation_id.clone(),
             resolved_snapshot_ref: resolved_snapshot_ref.clone(),
@@ -1739,6 +1743,7 @@ fn agent_role_request(request: &CapabilityInvocationRequest) -> RoleMemberInvoca
 async fn dispatch_resolved_role_tool(
     target: RoleMemberDispatchTarget,
     context: ResolvedRoleMemberContext,
+    turn_id: Option<nomifun_agent_contracts::OperationId>,
     action_id: ActionId,
     idempotency_key: nomifun_agent_contracts::IdempotencyKey,
     input: nomifun_agent_contracts::StrictJsonValue,
@@ -1768,6 +1773,10 @@ async fn dispatch_resolved_role_tool(
                         dependencies: dependencies.ok_or(KernelError::RegistryPoisoned)?,
                         principal: context.principal,
                         agent_session_id,
+                        turn_id: turn_id.ok_or_else(|| KernelError::CapabilityExecution {
+                            reason: "Agent Tool dispatch resolved without a canonical Turn"
+                                .to_owned(),
+                        })?,
                         operation_id: context.operation_id,
                         idempotency_key,
                         correlation_id: context.correlation_id,

@@ -20,6 +20,8 @@ pub struct CapabilityInvocationRequest {
     pub principal: PrincipalRef,
     pub session_owner: PrincipalRef,
     pub agent_session_id: AgentSessionId,
+    /// Canonical parent Turn whose effect ledger owns this invocation.
+    pub turn_id: OperationId,
     pub operation_id: OperationId,
     pub idempotency_key: IdempotencyKey,
     pub correlation_id: CorrelationId,
@@ -37,6 +39,10 @@ pub struct CapabilityAccessRequest {
     pub principal: PrincipalRef,
     pub session_owner: PrincipalRef,
     pub agent_session_id: AgentSessionId,
+    /// Present when this evaluation is causally inside a canonical Turn.
+    /// A Context without this fact may contribute data, but cannot lend
+    /// authority to a nested Tool invocation.
+    pub turn_id: Option<OperationId>,
     /// Host identity for this access/evaluation, also namespacing Context
     /// dependency effects. Use a new ID for a new evaluation; only an explicit
     /// retry of that same evaluation may reuse it. This is not a durable ledger.
@@ -74,6 +80,7 @@ pub struct CapabilityInvocationContext {
     pub dependencies: crate::CapabilityDependencyCaller,
     pub principal: PrincipalRef,
     pub agent_session_id: AgentSessionId,
+    pub turn_id: OperationId,
     pub operation_id: OperationId,
     pub idempotency_key: IdempotencyKey,
     pub correlation_id: CorrelationId,

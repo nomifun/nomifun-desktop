@@ -50,6 +50,7 @@ impl DependencyAncestor {
                 principal: request.principal.clone(),
                 session_owner: request.session_owner.clone(),
                 agent_session_id: request.agent_session_id.clone(),
+                turn_id: Some(request.turn_id.clone()),
                 operation_id: request.operation_id.clone(),
                 correlation_id: request.correlation_id.clone(),
                 resolved_snapshot_ref: request.resolved_snapshot_ref.clone(),
@@ -138,6 +139,12 @@ impl CapabilityDependencyCaller {
         })?;
         let ancestor = inner.ancestry.last().ok_or(KernelError::RegistryPoisoned)?;
         let parent = ancestor.access();
+        let turn_id = parent.turn_id.clone().ok_or_else(|| {
+            denied(
+                "DEPENDENCY_TURN_REQUIRED",
+                "a Context evaluation without a canonical Turn cannot invoke a Tool dependency",
+            )
+        })?;
         if call.call_key.trim().is_empty() || call.call_key.len() > 128 {
             return Err(denied(
                 "DEPENDENCY_CALL_KEY_INVALID",
@@ -237,6 +244,7 @@ impl CapabilityDependencyCaller {
             principal: parent.principal.clone(),
             session_owner: parent.session_owner.clone(),
             agent_session_id: parent.agent_session_id.clone(),
+            turn_id,
             operation_id: OperationId::from(identity("operation")?),
             idempotency_key: IdempotencyKey::from(identity("effect")?),
             correlation_id: parent.correlation_id.clone(),

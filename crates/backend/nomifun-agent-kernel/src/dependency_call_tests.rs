@@ -574,6 +574,7 @@ async fn recursive_calls_keep_frozen_identity_and_each_dependency_resource_polic
     for context in contexts.iter() {
         assert_eq!(context.principal, root.principal);
         assert_eq!(context.agent_session_id, root.agent_session_id);
+        assert_eq!(context.turn_id, root.turn_id);
         assert_eq!(context.resolved_snapshot_ref, root.resolved_snapshot_ref);
         assert_eq!(context.correlation_id, root.correlation_id);
         assert_eq!(context.state_scope_key, root.state_scope_key);

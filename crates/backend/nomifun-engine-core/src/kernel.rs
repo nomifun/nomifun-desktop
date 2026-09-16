@@ -301,6 +301,7 @@ impl KernelEngineToolInvoker {
             principal: invocation.principal,
             session_owner: self.session_owner.clone(),
             agent_session_id: invocation.agent_session_id,
+            turn_id: invocation.turn_operation_id,
             operation_id: invocation.operation_id,
             idempotency_key: invocation.idempotency_key,
             correlation_id: invocation.correlation_id,
