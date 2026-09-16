@@ -3127,15 +3127,12 @@ fn validate_package_contributions(
             "capability.contribution_id",
         )?;
         validate_nonempty(capability.version.as_ref(), "capability.version")?;
-        if !capability.contributions.context_phase.is_session_start()
-            && (capability.kind != crate::CapabilityKind::ContextContributor
-                || !capability.supports_consumer(crate::CapabilityConsumer::Agent))
-        {
-            return Err(PluginN1ContractError::InvalidField {
-                field: "capability.context_phase",
-                reason: "before_turn requires an Agent ContextContributor".into(),
-            });
-        }
+        capability.validate_module_contract().map_err(|reason| {
+            PluginN1ContractError::InvalidField {
+                field: "capability.module",
+                reason,
+            }
+        })?;
         if capability.package != *package {
             return Err(PluginN1ContractError::InvalidField {
                 field: "capability.package",
@@ -3762,12 +3759,12 @@ mod tests {
     }
 
     #[test]
-    fn before_turn_context_phase_cannot_be_declared_by_a_tool() {
+    fn before_turn_requires_a_declared_agent_context_contribution() {
         let mut manifest = manifest();
         manifest.package.contributions.capabilities[0].contributions.context_phase =
             crate::ContextContributionPhase::BeforeTurn;
         assert!(matches!(manifest.validate(), Err(PluginN1ContractError::InvalidField {
-            field: "capability.context_phase", ..
+            field: "capability.module", ..
         })));
     }
 

@@ -190,9 +190,23 @@ pub struct AgentBindingValue {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilitySelection {
+    /// Exact Capability Module revision. The historical field name remains on
+    /// the v1 wire until AgentPreset vNext switches the outer document.
     pub capability: CapabilityRef,
+    /// Exact granted Action IDs. Empty means no Action authority, never all
+    /// actions declared by the Module.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub action_allowlist: BTreeSet<ActionId>,
+}
+
+impl CapabilitySelection {
+    pub fn module(&self) -> &CapabilityRef {
+        &self.capability
+    }
+
+    pub fn allowed_actions(&self) -> &BTreeSet<ActionId> {
+        &self.action_allowlist
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -542,6 +556,38 @@ impl ResolvedCapability {
                 "dependency_path must terminate at the resolved capability",
             ));
         }
+        let mut declared_actions = BTreeSet::new();
+        for action in &self.actions {
+            if action.action_id.as_ref().trim().is_empty()
+                || action.input_schema.as_ref().trim().is_empty()
+                || action.output_schema.as_ref().trim().is_empty()
+                || !declared_actions.insert(action.action_id.clone())
+            {
+                return Err(snapshot_capability_violation(
+                    &self.capability.id,
+                    "actions must have unique non-empty identities and schemas",
+                ));
+            }
+        }
+        if let Some(action_id) = self
+            .action_allowlist
+            .iter()
+            .find(|action_id| !declared_actions.contains(*action_id))
+        {
+            return Err(snapshot_capability_violation(
+                &self.capability.id,
+                format!(
+                    "action grant contains undeclared action {}",
+                    action_id.as_ref()
+                ),
+            ));
+        }
+        if !self.actions.is_empty() && self.action_allowlist.is_empty() {
+            return Err(snapshot_capability_violation(
+                &self.capability.id,
+                "an action-bearing Module must freeze an explicit non-empty action grant",
+            ));
+        }
         match self.contribution_lock.source_kind {
             ContributionSourceKind::PluginProductActiveRelease => {
                 let product_id = self.plugin_product_id.as_ref().ok_or_else(|| {
@@ -597,24 +643,6 @@ impl ResolvedCapability {
                         "catalog_digest must be 64 lowercase hexadecimal characters",
                     ));
                 }
-                let declared_actions = self
-                    .actions
-                    .iter()
-                    .map(|action| action.action_id.clone())
-                    .collect::<BTreeSet<_>>();
-                if let Some(action_id) = self
-                    .action_allowlist
-                    .iter()
-                    .find(|action_id| !declared_actions.contains(*action_id))
-                {
-                    return Err(snapshot_capability_violation(
-                        &self.capability.id,
-                        format!(
-                            "Plugin Product action allowlist contains undeclared action {}",
-                            action_id.as_ref()
-                        ),
-                    ));
-                }
                 if self.actions.is_empty() {
                     return Err(snapshot_capability_violation(
                         &self.capability.id,
@@ -627,12 +655,10 @@ impl ResolvedCapability {
                     || self.active_release.is_some()
                     || self.active_release_epoch.is_some()
                     || self.catalog_digest.is_some()
-                    || !self.actions.is_empty()
-                    || !self.action_allowlist.is_empty()
                 {
                     return Err(snapshot_capability_violation(
                         &self.capability.id,
-                        "release profile fields require Plugin Product release provenance",
+                        "Plugin Product release fields require Plugin Product release provenance",
                     ));
                 }
             }
@@ -1371,7 +1397,24 @@ fn validate_capability_selections(
 ) -> Result<(), PresetContractViolation> {
     validate_capability_ids(
         initial.iter().map(|selection| &selection.capability.id),
-    )
+    )?;
+    for grant in initial {
+        if let Some(action_id) = grant
+            .action_allowlist
+            .iter()
+            .find(|action_id| action_id.as_ref().trim().is_empty())
+        {
+            return Err(PresetContractViolation {
+                code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
+                message: format!(
+                    "capability module {} contains an empty Action grant ({})",
+                    grant.capability.id.as_ref(),
+                    action_id.as_ref()
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_contribution_locks(
@@ -1670,6 +1713,30 @@ mod tests {
         direct_too.context_order.push("child".into());
         assert_eq!(direct_too.contributions().count(), 2);
         assert!(envelope(direct_too).validate().is_ok());
+    }
+
+    #[test]
+    fn resolved_module_action_grant_is_exact_and_never_uses_empty_as_all() {
+        let mut module = resolved_capability("workspace.files", &"a".repeat(64));
+        module.actions = ["read", "patch"]
+            .into_iter()
+            .map(|action| crate::CapabilityActionDescriptor {
+                action_id: crate::ActionId::from(format!("workspace.files/{action}")),
+                input_schema: crate::CanonicalSchemaRef::from(format!("schema://workspace.files/{action}/input")),
+                output_schema: crate::CanonicalSchemaRef::from(format!("schema://workspace.files/{action}/output")),
+                effect_class: crate::EffectClass::ReadSensitive,
+                presentation: crate::ToolPresentationKind::FunctionTool,
+            })
+            .collect();
+        module.action_allowlist = BTreeSet::from([crate::ActionId::from("workspace.files/read")]);
+        assert!(module.validate().is_ok());
+
+        let mut empty = module.clone();
+        empty.action_allowlist.clear();
+        assert!(empty.validate().unwrap_err().message.contains("explicit non-empty action grant"));
+
+        module.action_allowlist = BTreeSet::from([crate::ActionId::from("workspace.files/delete")]);
+        assert!(module.validate().unwrap_err().message.contains("undeclared action"));
     }
 
     #[test]

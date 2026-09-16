@@ -158,6 +158,55 @@ pub struct CapabilitySelectionDto {
     pub action_allowlist: BTreeSet<String>,
 }
 
+/// vNext Agent authoring contract. A module grant names the exact Module
+/// version and the exact Action IDs it grants; omission never means "all".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentCapabilityGrantDto {
+    pub module: ExactCatalogRefDto,
+    pub allowed_actions: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityModuleAuthoringPolicyDto {
+    Direct,
+    DependencyOnly,
+    PlatformManaged,
+    Internal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityModuleActionDto {
+    pub action_id: String,
+    pub input_schema: String,
+    pub output_schema: String,
+    pub effect_class: String,
+    pub presentation: String,
+}
+
+/// Catalog projection used by the Module/Action workbench. `summary_kind` is
+/// presentational only; authoring and execution use the explicit fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityModuleCatalogItemDto {
+    pub module: ExactCatalogRefDto,
+    pub display_name: String,
+    pub description: String,
+    pub source_package: ExactCatalogRefDto,
+    pub authoring_policy: CapabilityModuleAuthoringPolicyDto,
+    pub summary_kind: String,
+    pub actions: Vec<CapabilityModuleActionDto>,
+    pub context_schema_refs: Vec<String>,
+    pub event_schema_refs: Vec<String>,
+    pub required_resource_kinds: BTreeSet<String>,
+    pub required_host_ports: Vec<ExactCatalogRefDto>,
+    pub required_modules: Vec<ExactCatalogRefDto>,
+    pub conflicting_modules: Vec<ExactCatalogRefDto>,
+    pub supported_surfaces: BTreeSet<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoleContractKeyDto {
@@ -1196,5 +1245,20 @@ mod snapshot_tests {
             serde_json::from_value::<SaveAgentPresetRevisionRequest>(request).is_err(),
             "the removed preview handshake must not remain accepted by the save API"
         );
+    }
+
+    #[test]
+    fn module_grant_requires_an_explicit_action_set_and_rejects_legacy_names() {
+        let grant = serde_json::from_value::<AgentCapabilityGrantDto>(json!({
+            "module": {"id": "workspace.files", "version": "1.0.0"},
+            "allowed_actions": ["workspace.files/read", "workspace.files/patch"]
+        }))
+        .expect("module grant");
+        assert_eq!(grant.allowed_actions.len(), 2);
+        assert!(serde_json::from_value::<AgentCapabilityGrantDto>(json!({
+            "capability": {"id": "retired.file-read", "version": "1.0.0"},
+            "action_allowlist": []
+        }))
+        .is_err());
     }
 }

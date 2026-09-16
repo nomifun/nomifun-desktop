@@ -2,7 +2,7 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-17
-> 当前阶段：Wave 1 / UARC-010 ready
+> 当前阶段：Wave 1 / UARC-010 active
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
@@ -48,7 +48,7 @@
 | --- | --- | --- | --- | --- | --- |
 | `UARC-000` | windows_verified | Integration | verified | n/a | barrier `2147863da`；26/26 文件归属，基线 gate 通过 |
 | `UARC-001` | integrated | Integration | verified | pending | 机器 inventory/self-test/timing/platform gap 已完成；Mac gaps 保持 pending |
-| `UARC-010` | ready | Integration | pending | n/a | Wave 1 首个串行合同任务 |
+| `UARC-010` | active | Integration | pending | n/a | Capability Module / Action / Resource 合同实施中 |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -104,7 +104,7 @@
 
 ## 8. Next ready tasks
 
-1. `UARC-010`：Capability Module / Action / Resource 合同（Integration 串行）。
+1. `UARC-010`：完成 Capability Module / Action / Resource 合同和 Kernel authority tests。
 2. `UARC-010` barrier 后执行 `UARC-011`；不得提前启动 Feature tasks。
 
 ## 9. 状态更新模板
@@ -182,3 +182,17 @@
 - Not run: no macOS host, native CEF product, DMG/signing or notarization evidence.
 - Remaining/blocker: Process Runtime default parallel test anomaly is open under `UARC-021`; no blocker for starting serial Wave 1.
 - Next ready tasks: `UARC-010` only.
+
+### 2026-09-17 UARC-010 started
+
+- Barrier/source: Wave 0 closeout `89a4f820d06aa75c4a248932b5c8f12d79988785`.
+- Owner/write set: Integration; `nomifun-agent-contracts`, `nomifun-api-types`, `nomifun-agent-kernel` only.
+- Changed: task claimed; current manifest/selection/snapshot/compiler contracts are being audited before edits.
+- Deleted: pending removal of single-action authoring assumptions and authorable transport/resource/runtime-internal forms.
+- Retained + reason: exact action schema, effect class, resource binding and Snapshot authority remain security boundaries.
+- Tests: pending contract, schema and Kernel authority gates.
+- Windows: active.
+- macOS: not applicable to this shared contract task; later Mac consumers still require platform verification.
+- Not run: no task implementation yet.
+- Remaining/blocker: implement and verify multi-contribution Module plus exact Action grants. No blocker.
+- Next ready tasks: none until UARC-010 barrier; then `UARC-011`.

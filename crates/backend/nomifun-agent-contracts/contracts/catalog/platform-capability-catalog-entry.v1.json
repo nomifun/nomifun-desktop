@@ -25,6 +25,7 @@
     "agent",
     "gateway"
   ],
+  "authoring_policy": "direct",
   "contribution_kind": "tool",
   "required_runtime_features": [],
   "typed_resource_kinds": [

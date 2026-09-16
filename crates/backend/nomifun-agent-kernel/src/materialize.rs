@@ -842,12 +842,12 @@ fn validate_registration(
     let host_ports = declared_host_ports(&registration.context);
     for capability in &manifest.contributions.capabilities {
         validate_version("capability.version", &capability.version)?;
-        if !capability.contributions.context_phase.is_session_start()
-            && (capability.kind != CapabilityKind::ContextContributor
-                || !capability.supports_consumer(nomifun_agent_contracts::CapabilityConsumer::Agent))
-        {
-            return invalid_registration(registration, "before_turn requires an Agent ContextContributor");
-        }
+        capability
+            .validate_module_contract()
+            .map_err(|reason| KernelError::InvalidRegistration {
+                mount_id: registration.mount_id.clone(),
+                reason,
+            })?;
         if capability.package != package_ref {
             return invalid_registration(
                 registration,
@@ -1399,9 +1399,9 @@ fn materialize_role_providers(
 fn role_implementation_matches(facade: &CapabilityManifest, implementation: &CapabilityManifest) -> bool {
     let expected = &facade.contributions;
     let actual = &implementation.contributions;
-    facade.kind == implementation.kind
-        && (facade.kind != CapabilityKind::ResourceProvider
-            || expected.resource_kinds == actual.resource_kinds)
+    (facade.kind != CapabilityKind::ResourceProvider
+        || (implementation.kind == CapabilityKind::ResourceProvider
+            && expected.resource_kinds == actual.resource_kinds))
         && expected.host_ports == actual.host_ports
         && expected.event_schema_refs == actual.event_schema_refs
         && expected.context_schema_refs == actual.context_schema_refs

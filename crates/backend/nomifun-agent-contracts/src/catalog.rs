@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::digest::digest_payload;
 use crate::package::{
-    CapabilityConsumer, CapabilityKind, CapabilityManifest, PackageRef,
+    CapabilityAuthoringPolicy, CapabilityConsumer, CapabilityKind, CapabilityManifest, PackageRef,
 };
 use crate::{
     ArtifactEnvelope, CapabilityRef, ContributionId, ContributionLock,
@@ -229,6 +229,9 @@ pub struct CapabilityCatalogEntry {
     pub provenance: CapabilityProvenance,
     pub host_surfaces: BTreeSet<String>,
     pub supported_consumers: BTreeSet<CapabilityConsumer>,
+    pub authoring_policy: CapabilityAuthoringPolicy,
+    /// Presentation summary only. Executable contributions come from the
+    /// manifest's action/context/event/resource sets.
     pub contribution_kind: CapabilityKind,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub required_runtime_features: BTreeSet<RuntimeFeatureId>,
@@ -273,6 +276,13 @@ impl CapabilityCatalogPublication {
                     field: "manifest.supported_surfaces",
                     reason,
                 })?;
+        let authoring_policy = self
+            .manifest
+            .authoring_policy()
+            .map_err(|reason| CapabilityCatalogContractError::InvalidField {
+                field: "manifest.supported_surfaces",
+                reason,
+            })?;
         if self.entry.capability != reference
             || self.entry.contribution_id != self.manifest.contribution_id
             || self.entry.contract_digest != manifest_digest
@@ -281,6 +291,7 @@ impl CapabilityCatalogPublication {
                     package: self.manifest.package.clone(),
                 })
             || self.entry.supported_consumers != supported_consumers
+            || self.entry.authoring_policy != authoring_policy
         {
             return Err(CapabilityCatalogContractError::InvalidField {
                 field: "publication",
@@ -462,6 +473,14 @@ impl CapabilityCatalogEntry {
                 reason: "a catalog entry must support at least one consumer".into(),
             });
         }
+        if self.authoring_policy == CapabilityAuthoringPolicy::Direct
+            && !self.supported_consumers.contains(&CapabilityConsumer::Agent)
+        {
+            return Err(CapabilityCatalogContractError::InvalidField {
+                field: "authoring_policy",
+                reason: "direct modules must support the Agent consumer".into(),
+            });
+        }
         let expected = self
             .supported_consumers
             .iter()
@@ -589,6 +608,20 @@ impl CapabilityCatalogMaterializer {
                 field: "manifest.supported_surfaces",
                 reason,
             })?;
+        input
+            .manifest
+            .validate_module_contract()
+            .map_err(|reason| CapabilityCatalogContractError::InvalidField {
+                field: "manifest",
+                reason,
+            })?;
+        let authoring_policy = input
+            .manifest
+            .authoring_policy()
+            .map_err(|reason| CapabilityCatalogContractError::InvalidField {
+                field: "manifest.supported_surfaces",
+                reason,
+            })?;
         if supported_consumers.is_empty() {
             return Err(CapabilityCatalogContractError::InvalidField {
                 field: "manifest.supported_surfaces",
@@ -615,6 +648,7 @@ impl CapabilityCatalogMaterializer {
                 .map(str::to_owned)
                 .collect(),
             supported_consumers,
+            authoring_policy,
             contribution_kind: input.manifest.kind,
             required_runtime_features: input
                 .manifest
@@ -866,6 +900,7 @@ mod tests {
         let entry = fixture();
         entry.validate().expect("catalog fixture");
         assert!(entry.supports_consumer(CapabilityConsumer::Agent));
+        assert_eq!(entry.authoring_policy, CapabilityAuthoringPolicy::Direct);
         assert!(entry.is_available_for(CapabilityConsumer::Agent));
         assert_eq!(
             entry.provenance.source_kind,
@@ -891,6 +926,7 @@ mod tests {
         let agent_entry = fixture();
         let mut gateway_only = fixture();
         gateway_only.supported_consumers = BTreeSet::from([CapabilityConsumer::Gateway]);
+        gateway_only.authoring_policy = CapabilityAuthoringPolicy::PlatformManaged;
         gateway_only.availability =
             BTreeMap::from([(CapabilityConsumer::Gateway, CatalogAvailability::Active)]);
         gateway_only.validate().expect("gateway-only entry");

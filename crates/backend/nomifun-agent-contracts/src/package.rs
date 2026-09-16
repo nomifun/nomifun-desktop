@@ -439,6 +439,52 @@ pub enum CapabilityKind {
     UiContribution,
 }
 
+/// Whether an Agent author may select a Capability Module directly.
+///
+/// `CapabilityKind` remains a catalog presentation summary. It is not an
+/// authorization switch and must not be used to infer Agent authorability.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityAuthoringPolicy {
+    Direct,
+    DependencyOnly,
+    PlatformManaged,
+    Internal,
+}
+
+impl CapabilityAuthoringPolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::DependencyOnly => "dependency_only",
+            Self::PlatformManaged => "platform_managed",
+            Self::Internal => "internal",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "direct" => Some(Self::Direct),
+            "dependency_only" => Some(Self::DependencyOnly),
+            "platform_managed" => Some(Self::PlatformManaged),
+            "internal" => Some(Self::Internal),
+            _ => None,
+        }
+    }
+}
+
 /// A platform consumer that can understand and resolve a published
 /// Capability contribution.
 ///
@@ -500,6 +546,9 @@ impl CapabilityConsumer {
 /// with an explicit namespace so older host compilers can continue matching
 /// plain host surfaces without confusing them with Catalog consumers.
 pub const CAPABILITY_CONSUMER_SURFACE_PREFIX: &str = "consumer:";
+/// Namespaced authoring declaration stored beside existing surface metadata.
+/// It is filtered from host surfaces and frozen into the manifest digest.
+pub const CAPABILITY_AUTHORING_SURFACE_PREFIX: &str = "authoring:";
 
 pub fn capability_surface_declarations<H, I, J>(
     host_surfaces: I,
@@ -520,6 +569,24 @@ where
             )
         }))
         .collect()
+}
+
+pub fn capability_module_surface_declarations<H, I, J>(
+    host_surfaces: I,
+    supported_consumers: J,
+    authoring: CapabilityAuthoringPolicy,
+) -> BTreeSet<String>
+where
+    H: AsRef<str>,
+    I: IntoIterator<Item = H>,
+    J: IntoIterator<Item = CapabilityConsumer>,
+{
+    let mut declarations = capability_surface_declarations(host_surfaces, supported_consumers);
+    declarations.insert(format!(
+        "{CAPABILITY_AUTHORING_SURFACE_PREFIX}{}",
+        authoring.as_str()
+    ));
+    declarations
 }
 
 #[derive(
@@ -708,8 +775,163 @@ impl CapabilityManifest {
         self.supported_surfaces
             .iter()
             .map(String::as_str)
-            .filter(|surface| !surface.starts_with(CAPABILITY_CONSUMER_SURFACE_PREFIX))
+            .filter(|surface| {
+                !surface.starts_with(CAPABILITY_CONSUMER_SURFACE_PREFIX)
+                    && !surface.starts_with(CAPABILITY_AUTHORING_SURFACE_PREFIX)
+            })
             .collect()
+    }
+
+    /// Resolve the explicit Module authoring policy. Existing manifests that
+    /// predate the declaration use a narrow kind-based baseline until their
+    /// owning UARC domain task republishes them as modules.
+    pub fn authoring_policy(&self) -> Result<CapabilityAuthoringPolicy, String> {
+        let consumers = self.supported_consumers()?;
+        let declarations = self
+            .supported_surfaces
+            .iter()
+            .filter_map(|surface| surface.strip_prefix(CAPABILITY_AUTHORING_SURFACE_PREFIX))
+            .collect::<Vec<_>>();
+        if declarations.len() > 1 {
+            return Err(format!(
+                "capability {} declares more than one authoring policy",
+                self.id.as_ref()
+            ));
+        }
+        declarations.first().map_or_else(
+            || Ok(self.default_authoring_policy(&consumers)),
+            |value| CapabilityAuthoringPolicy::from_str(value).ok_or_else(|| {
+                format!(
+                    "capability {} declares unknown authoring policy {}",
+                    self.id.as_ref(),
+                    value
+                )
+            }),
+        )
+    }
+
+    fn default_authoring_policy(
+        &self,
+        consumers: &BTreeSet<CapabilityConsumer>,
+    ) -> CapabilityAuthoringPolicy {
+        match self.kind {
+            CapabilityKind::Tool
+            | CapabilityKind::ContextContributor
+            | CapabilityKind::EventSource
+                if consumers.contains(&CapabilityConsumer::Agent) =>
+            {
+                CapabilityAuthoringPolicy::Direct
+            }
+            CapabilityKind::Tool
+            | CapabilityKind::ContextContributor
+            | CapabilityKind::EventSource => CapabilityAuthoringPolicy::PlatformManaged,
+            CapabilityKind::ResourceProvider
+            | CapabilityKind::EventConsumer
+            | CapabilityKind::TurnMiddleware => CapabilityAuthoringPolicy::DependencyOnly,
+            CapabilityKind::Transport
+            | CapabilityKind::Scheduler
+            | CapabilityKind::BackgroundService
+            | CapabilityKind::UiContribution => CapabilityAuthoringPolicy::PlatformManaged,
+        }
+    }
+
+    pub fn declares_actions(&self) -> bool {
+        !self.contributions.actions.is_empty()
+    }
+
+    pub fn contributes_context(&self) -> bool {
+        !self.contributions.context_schema_refs.is_empty()
+    }
+
+    pub fn contributes_events(&self) -> bool {
+        !self.contributions.event_schema_refs.is_empty()
+    }
+
+    /// Validate the capability as one Module contract. Actions, Context and
+    /// Events may coexist; `kind` is deliberately not used to make those
+    /// contribution sets mutually exclusive.
+    pub fn validate_module_contract(&self) -> Result<(), String> {
+        let consumers = self.supported_consumers()?;
+        let authoring = self.authoring_policy()?;
+        if authoring == CapabilityAuthoringPolicy::Direct {
+            if !consumers.contains(&CapabilityConsumer::Agent) {
+                return Err(format!(
+                    "direct capability module {} must support the Agent consumer",
+                    self.id.as_ref()
+                ));
+            }
+            if matches!(
+                self.kind,
+                CapabilityKind::ResourceProvider
+                    | CapabilityKind::EventConsumer
+                    | CapabilityKind::TurnMiddleware
+                    | CapabilityKind::Transport
+                    | CapabilityKind::Scheduler
+                    | CapabilityKind::BackgroundService
+                    | CapabilityKind::UiContribution
+            ) {
+                return Err(format!(
+                    "capability {} cannot expose {:?} as a direct Agent authoring root",
+                    self.id.as_ref(),
+                    self.kind
+                ));
+            }
+        }
+
+        let mut action_ids = BTreeSet::new();
+        for action in &self.contributions.actions {
+            if action.action_id.as_ref().trim().is_empty()
+                || action.input_schema.as_ref().trim().is_empty()
+                || action.output_schema.as_ref().trim().is_empty()
+            {
+                return Err(format!(
+                    "capability {} contains an incomplete action descriptor",
+                    self.id.as_ref()
+                ));
+            }
+            if !action_ids.insert(action.action_id.clone()) {
+                return Err(format!(
+                    "capability {} declares duplicate action {}",
+                    self.id.as_ref(),
+                    action.action_id.as_ref()
+                ));
+            }
+        }
+        for (field, values) in [
+            ("context_schema_refs", &self.contributions.context_schema_refs),
+            ("event_schema_refs", &self.contributions.event_schema_refs),
+        ] {
+            let mut unique = BTreeSet::new();
+            for value in values {
+                if value.as_ref().trim().is_empty() || !unique.insert(value) {
+                    return Err(format!(
+                        "capability {} contains an empty or duplicate {field}",
+                        self.id.as_ref()
+                    ));
+                }
+            }
+        }
+        let mut host_ports = BTreeSet::new();
+        for port in &self.contributions.host_ports {
+            if port.id.as_ref().trim().is_empty()
+                || port.version.as_ref().trim().is_empty()
+                || !host_ports.insert(port)
+            {
+                return Err(format!(
+                    "capability {} contains an empty or duplicate host port",
+                    self.id.as_ref()
+                ));
+            }
+        }
+        if !self.contributions.context_phase.is_session_start()
+            && (!self.contributes_context() || !consumers.contains(&CapabilityConsumer::Agent))
+        {
+            return Err(format!(
+                "capability {} before_turn context requires an Agent Context contribution",
+                self.id.as_ref()
+            ));
+        }
+        Ok(())
     }
 
     pub fn supported_consumers(&self) -> Result<BTreeSet<CapabilityConsumer>, String> {
@@ -1145,6 +1367,74 @@ mod tests {
         let mut invalid = valid;
         invalid["turn"]["source_message_id"] = json!("");
         assert!(serde_json::from_value::<ContextContributionInput>(invalid).unwrap().validate().is_err());
+    }
+
+    #[test]
+    fn module_contract_allows_actions_context_and_events_without_kind_authority() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        use super::{
+            CapabilityActionDescriptor, CapabilityAuthoringPolicy, CapabilityConsumer,
+            CapabilityContributions, CapabilityKind, CapabilityManifest, EffectClass,
+            LocalizedMetadata, PackageRef, PlatformConstraint, ToolPresentationKind,
+            capability_module_surface_declarations,
+        };
+        use crate::{
+            ActionId, CanonicalSchemaRef, CapabilityId, ContributionId, PackageId,
+            ResourceKind, StrictJsonValue,
+        };
+
+        let mut module = CapabilityManifest {
+            id: CapabilityId::from("workspace.files"),
+            contribution_id: ContributionId::from("module:workspace.files"),
+            version: VersionString::from("1.0.0"),
+            kind: CapabilityKind::Tool,
+            package: PackageRef {
+                id: PackageId::from("nomifun.workspace"),
+                version: VersionString::from("1.0.0"),
+            },
+            display: LocalizedMetadata {
+                name: "Workspace Files".into(),
+                description: "Read and update a bound workspace.".into(),
+                localized_names: BTreeMap::new(),
+                localized_descriptions: BTreeMap::new(),
+            },
+            requires: Vec::new(),
+            conflicts: Vec::new(),
+            supported_surfaces: capability_module_surface_declarations(
+                ["desktop"],
+                [CapabilityConsumer::Agent],
+                CapabilityAuthoringPolicy::Direct,
+            ),
+            requires_runtime_features: Vec::new(),
+            supported_platforms: vec![PlatformConstraint::Any],
+            config_schema: StrictJsonValue(json!({"type":"object"})),
+            contributions: CapabilityContributions {
+                actions: ["read", "patch"]
+                    .into_iter()
+                    .map(|action| CapabilityActionDescriptor {
+                        action_id: ActionId::from(format!("workspace.files/{action}")),
+                        input_schema: CanonicalSchemaRef::from(format!("schema://workspace.files/{action}/input")),
+                        output_schema: CanonicalSchemaRef::from(format!("schema://workspace.files/{action}/output")),
+                        effect_class: EffectClass::ReadSensitive,
+                        presentation: ToolPresentationKind::FunctionTool,
+                    })
+                    .collect(),
+                context_schema_refs: vec![CanonicalSchemaRef::from("schema://workspace.files/context")],
+                context_phase: Default::default(),
+                event_schema_refs: vec![CanonicalSchemaRef::from("schema://workspace.files/changed")],
+                resource_kinds: BTreeSet::from([ResourceKind::from("workspace")]),
+                host_ports: Vec::new(),
+                ui_slot: None,
+            },
+        };
+
+        module.validate_module_contract().expect("multi-contribution module");
+        assert_eq!(module.authoring_policy().unwrap(), CapabilityAuthoringPolicy::Direct);
+        assert_eq!(module.host_surfaces(), BTreeSet::from(["desktop"]));
+
+        module.kind = CapabilityKind::Transport;
+        assert!(module.validate_module_contract().unwrap_err().contains("direct Agent authoring root"));
     }
 
     #[test]
