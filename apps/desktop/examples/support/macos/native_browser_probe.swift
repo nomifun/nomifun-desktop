@@ -9,7 +9,10 @@ func probeOption(_ key:String) -> String? {
     return CommandLine.arguments[index+1]
 }
 func probeURL() -> URL {
-    guard let text=probeOption("--fixture-url"), let url=URL(string:text), url.scheme=="http", url.host=="127.0.0.1" else { fatalError("A loopback fixture URL is required") }
+    guard let text=probeOption("--fixture-url"), let url=URL(string:text), url.scheme=="http", url.host=="127.0.0.1" else {
+        FileHandle.standardError.write(Data("Native probe requires a loopback fixture URL from its runner.\n".utf8))
+        exit(2)
+    }
     return url
 }
 func writeProbeReport(_ value:[String:Any],code:Int32) -> Never {
@@ -35,6 +38,7 @@ func writeProbeReport(_ value:[String:Any],code:Int32) -> Never {
     var locked = false
     var authorized: [(NSEvent.EventType, TimeInterval)] = []
     var blocked = 0
+    var nativeEvents:[[String:Any]] = []
     var cursorBefore = NSEvent.mouseLocation
     var cursorAfter = NSEvent.mouseLocation
     var monitor: Any?
@@ -55,6 +59,9 @@ func writeProbeReport(_ value:[String:Any],code:Int32) -> Never {
             let match = self.authorized.firstIndex { $0.0 == event.type && abs($0.1-event.timestamp) < 0.000001 }
             let isAuthorized = match != nil
             if let match { self.authorized.remove(at:match) }
+            if self.locked && self.nativeEvents.count < 64 {
+                self.nativeEvents.append(["type":event.type.rawValue,"window":event.windowNumber,"authorized":isAuthorized,"x":event.locationInWindow.x,"y":event.locationInWindow.y])
+            }
             if self.locked && event.windowNumber == self.window.windowNumber && !isAuthorized {
                 self.blocked += 1
                 return nil
@@ -86,12 +93,10 @@ func writeProbeReport(_ value:[String:Any],code:Int32) -> Never {
     }
     func mouse(_ type:NSEvent.EventType, at point:NSPoint, agent:Bool = true, number:Int = 1) async {
         if probeOption("--transport") == "pid" && agent {
-            let kind:CGEventType = type == .leftMouseDown ? .leftMouseDown : type == .leftMouseUp ? .leftMouseUp : .leftMouseDragged
-            let cg = CGEvent(mouseEventSource:CGEventSource(stateID:.privateState),mouseType:kind,mouseCursorPosition:NSPoint(x:window.frame.minX+point.x,y:NSScreen.screens[0].frame.maxY-(window.frame.minY+point.y)),mouseButton:.left)!
-            cg.setIntegerValueField(.mouseEventClickState,value:1)
-            cg.setIntegerValueField(.mouseEventWindowUnderMousePointer,value:Int64(window.windowNumber))
-            cg.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent,value:Int64(window.windowNumber))
-            authorized.append((type,Double(cg.timestamp)/1_000_000_000))
+            // Preserve the addressed NSWindow when bridging to the public CG PID transport.
+            let addressed = NSEvent.mouseEvent(with:type,location:point,modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime,windowNumber:window.windowNumber,context:nil,eventNumber:number,clickCount:1,pressure:type == .leftMouseUp ? 0 : 1)!
+            guard let cg=addressed.cgEvent else { return }
+            authorized.append((type,addressed.timestamp))
             cg.postToPid(getpid())
         } else {
             let event = NSEvent.mouseEvent(with:type,location:point,modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime,windowNumber:window.windowNumber,context:nil,eventNumber:number,clickCount:1,pressure:type == .leftMouseUp ? 0 : 1)!
@@ -172,7 +177,7 @@ func writeProbeReport(_ value:[String:Any],code:Int32) -> Never {
             "system_cursor_unchanged":cursorBefore == cursorAfter,
         ]
         let passed = checks.values.allSatisfy { $0 }
-        finish(["status":passed ? "passed" : "conformance_failed","passed":passed,"checks":checks,"platform":ProcessInfo.processInfo.operatingSystemVersionString,"scale":window.backingScaleFactor,"window":window.windowNumber,"wheelWindow":wheelWindow,"responder":responder,"ime":ime,"blocked":blocked,"page":result],code:passed ? 0 : 1)
+        finish(["status":passed ? "passed" : "conformance_failed","passed":passed,"checks":checks,"platform":ProcessInfo.processInfo.operatingSystemVersionString,"scale":window.backingScaleFactor,"window":window.windowNumber,"wheelWindow":wheelWindow,"responder":responder,"ime":ime,"blocked":blocked,"nativeEvents":nativeEvents,"page":result],code:passed ? 0 : 1)
     }
     func finish(_ result:[String:Any],code:Int32) {
         window?.orderOut(nil)
@@ -253,6 +258,19 @@ func writeProbeReport(_ value:[String:Any],code:Int32) -> Never {
 }
 @main struct Main {
     @MainActor static func main() {
+        // Finder, LaunchServices and UI inspection may reopen an app without args.
+        // Treat that as a normal usage error, before creating windows or requesting access.
+        guard probeOption("--report") != nil,
+              ["input","storage","permission"].contains(probeOption("--probe") ?? ""),
+              ["appkit","pid"].contains(probeOption("--transport") ?? "") else {
+            FileHandle.standardError.write(Data("Launch this diagnostic through run-macos-browser-native-probe.mjs.\n".utf8))
+            exit(2)
+        }
+        if probeOption("--probe") == "permission" {
+            let allowed=CGPreflightPostEventAccess()
+            writeProbeReport(["status":allowed ? "permission_granted" : "permission_required","eventPostingAllowed":allowed],code:allowed ? 0 : 77)
+        }
+        _ = probeURL()
         let app=NSApplication.shared
         let delegate: NSApplicationDelegate = probeOption("--probe")=="storage" ? MacDataStoreProbe() : MacNativeInputProbe()
         app.setActivationPolicy(.regular)

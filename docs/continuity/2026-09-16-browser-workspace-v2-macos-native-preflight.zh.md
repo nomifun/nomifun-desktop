@@ -1,6 +1,6 @@
 # Browser Workspace v2：macOS 原生前置验证记录
 
-状态：**原生输入门槛未通过，尚未完成 macOS Browser Workspace 交付。**
+状态：**系统权限已生效；原生鼠标语义门槛仍未通过，尚未完成 macOS Browser Workspace 交付。**
 
 本记录执行 `2026-09-16-browser-workspace-v2-macos-work-prompt.zh.md` 与 macOS handoff 的
 “先做最小原生 spike，失败则明确 unsupported”要求。没有开启 macOS Browser availability，
@@ -32,6 +32,8 @@ macOS 退出与 PTY 清理保持原样。
 node scripts/validation/run-macos-browser-native-probe.mjs --probe storage
 node scripts/validation/run-macos-browser-native-probe.mjs --probe input --transport appkit
 node scripts/validation/run-macos-browser-native-probe.mjs --probe input --transport pid
+# 针对已经构建/授权的包检查权限，不打开网页、不发送输入：
+node scripts/validation/run-macos-browser-native-probe.mjs --probe permission --reuse-signed-app --output dist/browser-macos-validation-20260916/reproducible
 ```
 
 默认 ad-hoc 签名。可用 `--identity '<Developer ID identity>'` 指定本机签名身份。
@@ -43,7 +45,16 @@ node scripts/validation/run-macos-browser-native-probe.mjs --probe input --trans
 
 只有获得用户确认后才能增加 `--request-event-access`，发起系统事件投递授权请求。
 这个选项不修改 TCC 数据库，不自动替用户授予权限，也不授权个人浏览器接入。
-截至本记录，授权确认问题已提出，尚未收到答复，**没有执行此选项**。
+用户随后已明确允许发起授权，已执行此选项。用户报告“已授权”后，重新检查发现系统设置中
+`NomiFun` 开关为 on，而实际测试包 `NomiBrowserNativeProbe` 仍为 off；不能用另一个应用的授权
+替代 `com.nomifun.browser-native-probe` 的权限。
+
+为排除重复构建对 TCC 状态的影响，runner 新增 `--reuse-signed-app`：只验证并运行现有签名包，
+不重编译、不改写 Info.plist、不重新签名。复测前后可执行文件 SHA-256 保持
+`59d792493541ffd94262e52d79a8cae1741f6c1dec4cab45d82f4da1ef087d17`，但权限检查仍返回 false/77。
+随后用户开启了测试包开关，已确认 `eventPostingAllowed=true`。
+`permission-appkit-1789553135161.json` 返回 0；`input-pid-1789553210054.json` 已进入实际输入检查，
+不再返回 77。权限不再是当前阻塞项。
 
 ## 原生结果
 
@@ -58,7 +69,7 @@ node scripts/validation/run-macos-browser-native-probe.mjs --probe input --trans
 | 系统光标 | 前后坐标相同 | 没有调用全局 cursor warp、CGEventPost 或全局鼠标接管 |
 | mouse button mask | **失败** | trusted pointerdown 的 `buttons == 0`，期望 1 |
 | pointer-capture drag | **失败** | fixture `capturedMoves == 0` |
-| PID 定向输入 | **未执行** | `CGPreflightPostEventAccess == false`，返回 77；没有发送 PID 输入 |
+| PID 定向输入 | **执行后仍未通过** | 授权已生效；修复窗口路由后点击/焦点/中文通过，但 buttons 仍为 0、capturedMoves 仍为 0，返回 1 |
 | 持久化数据隔离 | 通过 | 两个随机 UUID data store 的 Cookie/localStorage 相互独立 |
 | 关闭后重建 | 通过 | 用同一 UUID 新建 WebView 后恢复对应数据 |
 | 清理当前 store | 通过 | A 的 Cookie/localStorage 为空；B 保持原数据 |
@@ -77,6 +88,26 @@ node scripts/validation/run-macos-browser-native-probe.mjs --probe input --trans
 还发现一个清理前提：直接在尚未初始化 WK 对象的最小进程调用 removeDataStore，本机 WebKit 曾在
 `WTF::RunLoop::dispatch` 崩溃。先初始化 nonpersistent WKWebView 后，两项旧 probe store 删除均成功。
 正式 storage probe 在真实视图生命周期之后执行清理，不能把目录删除代替 WebKit 回执。
+
+## 后续启动崩溃修复
+
+2026-09-16 18:00 的两条最新崩溃记录属于 `NomiBrowserNativeProbe`，栈为
+`_assertionFailure → probeURL → applicationDidFinishLaunching`。窗口检查工具可能自动重新启动已经退出的应用，
+这次未携带 fixture 参数，触发了 probe 中的 `fatalError`。这是测试程序的启动保护缺陷，不是权限授予失败。
+
+已修复：
+
+- 启动入口在创建窗口和请求权限前验证参数；缺少参数或 URL 无效均正常返回 2，不触发 Swift trap。
+- 停止使用会自动重开的 UI 入口检查短命 probe，改为读取单次 runner 的结果文件。
+- 新增 `--build-only`，明确返回 `built_not_run`；新增 `--probe permission` 做不打开窗口的权限检查。
+- 构建在临时 staging 中完成签名与验证后再替换旧包，避免原位编译让已授权包暂时处于无效签名状态；
+  替换失败会尝试恢复旧包，恢复失败则保留备份供排查。
+- `startup-guard-check.json` 验证无参数启动、错误 URL 与 LaunchServices 直接启动；没有新增崩溃报告。
+
+定向输入窗口定位也已修正：通过公开的 `NSEvent.mouseEvent(windowNumber:)` 构造目标窗口事件，
+再取 CGEvent 投递到当前 PID。原来的裸 CGEvent 路径没有把鼠标事件正确路由到 WKWebView。
+修正后本地 monitor 已记录正确的窗口号与 down/drag/up，网页可响应点击；仍然不能获得正确的 buttons 状态。
+没有改用全局事件投递、私有 WebKit Automation 或 DOM 合成事件。
 
 ## 自动检查
 
@@ -111,15 +142,15 @@ Cargo 串行执行。未运行 Windows-only `browser_workspace_smoke` 冒充 Mac
 它是**原生前置测试应用，不是 NomiFun 安装包**。Mach-O arm64；已用本机 Developer ID 签名，
 `codesign --verify --strict` 通过；未提交公证。
 
-- ZIP SHA-256：`7dafcc0e12875a33937d8f725d5bba3b699346c606f36fe9cc003841b93a22f7`
-- 主可执行文件 SHA-256：`8cbe97c03fd05405d31f5200ca85b7f028e55a44e666bb255b3889787a420e16`
+- ZIP SHA-256：`740878e6fe6ea7e02ef3a795f210e2c9ea04b737654f1ecb054a0e44b261f244`
+- 该 ZIP 内主可执行文件 SHA-256：`6694e21378cbaee096a35ed97e9272cd91c5c6bc27ffd09174d32a304d16acf6`
 
 早期一次性 Swift 文件、旧 spike app 和自有 HTTP server 已清理；保留上述可重现 runner 与失败证据。
 
 ## 尚未交付的项目与下一步
 
-当前阻塞点是可信鼠标输入的完整语义。下一步先获得一次系统授权确认，验证公开的进程定向输入是否满足
-按钮状态、drag、光标不干扰及取消要求；授权不等于该路径一定通过。若仍失败，应保持 unsupported，
+当前阻塞点是可信鼠标输入的完整语义，系统授权已经完成。AppKit 入队与 PID 定向投递两条已测路径
+均不能满足按钮状态与 pointer-capture drag；不能要求用户反复授权来解决这个技术缺口。应保持 unsupported，
 不要开启宿主、使用私有 WebKit API、伪造 DOM 事件或新增第二套控制平台补偿。
 
 以下均未宣称完成：生产 Tauri BrowserRuntime 适配、生产输入锁/Stop settle、Retina/多屏、跨站 iframe/
