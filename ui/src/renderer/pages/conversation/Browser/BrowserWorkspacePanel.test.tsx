@@ -7,6 +7,7 @@ import BrowserWorkspacePanel from './BrowserWorkspacePanel';
 import { navigationUrl, newerSnapshot, type BrowserClient, type BrowserCommand, type BrowserDialog, type BrowserSnapshot, type BrowserViewEvent, type BrowserShortcut } from './client';
 import words from '../../../services/i18n/locales/en-US/browserWorkspace.json';
 import type { BrowserLinkRequest } from './BrowserLinkContext';
+import { BackendHttpError } from '@/common/adapter/httpBridge';
 
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'en-US', interpolation: { escapeValue: false }, resources: { 'en-US': { translation: { browserWorkspace: words } } } });
@@ -50,6 +51,60 @@ function fixture(overrides: Partial<BrowserClient> = {}, linkRequest?: BrowserLi
 }
 
 const websitePrompt: BrowserDialog = { target, request_id: 'website-dialog-1', kind: 'prompt', message: 'Enter a project name', default_text: '默认项目', origin: 'http://localhost:3000', text_truncated: false };
+test('opening does not claim manual input is ready before the host responds', async () => {
+  let finish!: (value: BrowserSnapshot) => void;
+  const screen = fixture({ ensure: () => new Promise(resolve => { finish = resolve; }) });
+  expect(screen.getByText(words.opening)).toBeTruthy();
+  expect(screen.queryByText(words.userReady)).toBeNull();
+  expect(screen.queryByText(words.startHint)).toBeNull();
+  await act(async () => finish(initial));
+  await screen.ready();
+  expect(screen.getByText(words.userReady)).toBeTruthy();
+});
+
+test('unsupported hosts show a useful explanation without raw backend data or futile retries', async () => {
+  let ensures = 0, attaches = 0;
+  const screen = fixture({
+    async ensure() {
+      ensures++;
+      throw new BackendHttpError({ method: 'POST', path: '/api/conversations/private-id/browser', status: 501,
+        body: { code: 'BROWSER_NATIVE_SURFACE_UNAVAILABLE', error: 'native implementation detail' } });
+    },
+    async attach() { attaches++; return 1; },
+  });
+  expect(await screen.findByText(words.hostUnavailableHint)).toBeTruthy();
+  expect(screen.getByText(words.notReady)).toBeTruthy();
+  expect(screen.queryByText(words.userReady)).toBeNull();
+  expect(screen.queryByRole('button', { name: words.retry })).toBeNull();
+  expect(screen.getByRole('alert').textContent).not.toMatch(/BackendHttpError|501|private-id|implementation detail/);
+  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(true);
+  expect(ensures).toBe(1); expect(attaches).toBe(0); expect(screen.commands).toEqual([]);
+});
+
+test('transient host failures have a safe message and explicit retry can restore readiness', async () => {
+  let attempts = 0;
+  const screen = fixture({ async ensure() { if (++attempts === 1) throw new Error('internal transport details'); return initial; } });
+  expect(await screen.findByText(words.requestFailed)).toBeTruthy();
+  expect(screen.queryByText(words.userReady)).toBeNull();
+  expect(screen.getByRole('alert').textContent).not.toContain('internal transport details');
+  fireEvent.click(screen.getByRole('button', { name: words.retry }));
+  await screen.ready();
+  expect(screen.getByText(words.userReady)).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(attempts).toBe(2);
+});
+
+test('a native unavailable event hides the existing surface and clears the ready status', async () => {
+  const visibility: boolean[] = [];
+  const screen = fixture({ async update(_id, _sequence, _bounds, visible) { visibility.push(visible); } });
+  await screen.ready();
+  await waitFor(() => expect(visibility.at(-1)).toBe(true));
+  await act(async () => screen.emit({ kind: 'unavailable', code: 'BROWSER_NATIVE_SURFACE_UNAVAILABLE' }));
+  expect(screen.getByText(words.hostUnavailableHint)).toBeTruthy();
+  expect(screen.queryByText(words.userReady)).toBeNull();
+  await waitFor(() => expect(visibility.at(-1)).toBe(false));
+});
+
 test('native address shortcut focuses and selects the chrome address; new-tab draft closes without closing the page', async () => {
   const screen = fixture(); await screen.ready();
   const address = screen.getByRole('textbox', { name: words.address }) as HTMLInputElement;
@@ -662,6 +717,8 @@ test('input gate failure disables commands even when the run projection says use
   await screen.ready();
   expect(screen.commands).toEqual([]);
   expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(true);
+  expect(screen.queryByText(words.userReady)).toBeNull();
+  expect(screen.getByText(words.notReady)).toBeTruthy();
 });
 
 test.each(['dialog', 'menu', 'tooltip'])('a %s hide preempts an unsettled resize and ignores its late error', async role => {

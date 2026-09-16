@@ -26,6 +26,7 @@ func writeProbeReport(_ value:[String:Any],code:Int32) -> Never {
     report["webkit"]=Bundle(identifier:"com.apple.WebKit")?.infoDictionary?["CFBundleVersion"] ?? "unknown"
     report["probe"]=probeOption("--probe") ?? "input"
     report["transport"]=probeOption("--transport") ?? "appkit"
+    report["eventSource"]=probeOption("--event-source") ?? "default"
     guard let path=probeOption("--report"), let data=try? JSONSerialization.data(withJSONObject:report,options:[.prettyPrinted,.sortedKeys]) else { exit(2) }
     do { try data.write(to:URL(fileURLWithPath:path),options:.atomic) } catch { exit(2) }
     exit(code)
@@ -42,6 +43,15 @@ func writeProbeReport(_ value:[String:Any],code:Int32) -> Never {
     var cursorBefore = NSEvent.mouseLocation
     var cursorAfter = NSEvent.mouseLocation
     var monitor: Any?
+    // Keep one source alive for the whole gesture, so its state can accumulate.
+    // All variants remain PID-addressed; never post into the global event stream.
+    let eventSource: CGEventSource? = {
+        switch probeOption("--event-source") {
+        case "private": return CGEventSource(stateID: .privateState)
+        case "session": return CGEventSource(stateID: .combinedSessionState)
+        default: return nil
+        }
+    }()
     func applicationDidFinishLaunching(_ notification: Notification) {
         window = NSWindow(contentRect: NSRect(x: 180, y: 180, width: 960, height: 720), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.title = "Nomi WKWebView native input spike"
@@ -60,7 +70,10 @@ func writeProbeReport(_ value:[String:Any],code:Int32) -> Never {
             let isAuthorized = match != nil
             if let match { self.authorized.remove(at:match) }
             if self.locked && self.nativeEvents.count < 64 {
-                self.nativeEvents.append(["type":event.type.rawValue,"window":event.windowNumber,"authorized":isAuthorized,"x":event.locationInWindow.x,"y":event.locationInWindow.y])
+                self.nativeEvents.append(["type":event.type.rawValue,"window":event.windowNumber,"authorized":isAuthorized,"x":event.locationInWindow.x,"y":event.locationInWindow.y,
+                    "pressedButtons":NSEvent.pressedMouseButtons,
+                    "sessionLeftDown":CGEventSource.buttonState(.combinedSessionState,button:.left),
+                    "sourceLeftDown":self.eventSource.map { CGEventSource.buttonState($0.sourceStateID,button:.left) } ?? false])
             }
             if self.locked && event.windowNumber == self.window.windowNumber && !isAuthorized {
                 self.blocked += 1
@@ -96,6 +109,7 @@ func writeProbeReport(_ value:[String:Any],code:Int32) -> Never {
             // Preserve the addressed NSWindow when bridging to the public CG PID transport.
             let addressed = NSEvent.mouseEvent(with:type,location:point,modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime,windowNumber:window.windowNumber,context:nil,eventNumber:number,clickCount:1,pressure:type == .leftMouseUp ? 0 : 1)!
             guard let cg=addressed.cgEvent else { return }
+            if let eventSource { cg.setSource(eventSource) }
             authorized.append((type,addressed.timestamp))
             cg.postToPid(getpid())
         } else {
@@ -262,7 +276,9 @@ func writeProbeReport(_ value:[String:Any],code:Int32) -> Never {
         // Treat that as a normal usage error, before creating windows or requesting access.
         guard probeOption("--report") != nil,
               ["input","storage","permission"].contains(probeOption("--probe") ?? ""),
-              ["appkit","pid"].contains(probeOption("--transport") ?? "") else {
+              ["appkit","pid"].contains(probeOption("--transport") ?? ""),
+              ["default","private","session"].contains(probeOption("--event-source") ?? "default"),
+              (probeOption("--event-source") ?? "default") == "default" || probeOption("--transport") == "pid" else {
             FileHandle.standardError.write(Data("Launch this diagnostic through run-macos-browser-native-probe.mjs.\n".utf8))
             exit(2)
         }
