@@ -2,13 +2,14 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-17
-> 当前阶段：Wave 1 / UARC-013 active
+> 当前阶段：Wave 1 / UARC-014 ready
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
 > UARC-010 实现提交：`c059728ae4395fcdf72df59a54b4e53e8b7562a1`
 > UARC-011 实现提交：`fa164520f72a053e8e244721cb9682bc58b1269b`
 > UARC-012 实现提交：`82954016810ed5fabe48248adc4952d2bd5f199e`
+> UARC-013 实现提交：`5f317024d63c6845d896d379c201254101410d1b`
 > 当前主机：Windows
 > Initiative 状态：`active / Wave 1 shared contracts`
 
@@ -23,9 +24,10 @@
 - 当前 Browser 仍是 Conversation-scoped BrowserWorkspace，Guid 仍会创建浏览器专属空 Session。
 - 当前源码已经包含 macOS 独立 CEF host、原生 fixture 与部分底层验证；生产注入、产品会话闭环和
   UARC 新 Browser Resource 模型适配仍未完成。UARC-061 必须复用这套基线，不得回退到 WKWebView。
-- 当前产品仍运行旧 Nomi/Coding 双 Runtime 和旧 Capability IDs；canonical `/api/agent-sessions`
-  已切换 generation 5 Store，旧领域入口等待后续 wave/cutover 删除。
-- Wave 1 的 UARC-010/011/012 已有 Windows 定向集成证据；完整产品 gate 尚未运行。
+- 产品组合只安装一个 `nomifun.nomi` provider/factory，旧 Nomi factory 与 `nomifun.coding` family
+  已不可达；旧实现源码等待 `UARC-020/052` 提取与物理删除。旧 Capability IDs 仍待 UARC-014+。
+- canonical `/api/agent-sessions` 已切换 generation 5 Store；旧领域入口等待后续 wave/cutover 删除。
+- Wave 1 的 UARC-010/011/012/013 已有 Windows 定向集成证据；完整产品 gate 尚未运行。
 - 当前没有本轮源码重构的 macOS 编译、原生或打包证据。
 
 ## 2. 已确认产品决定
@@ -55,7 +57,8 @@
 | `UARC-010` | integrated | Integration | verified | n/a | Module 多 contribution、authoring policy、exact Action grant 已闭合 |
 | `UARC-011` | integrated | Integration | verified | n/a | generation 5 Store、main migration、effect ledger、reset gate 已闭合 |
 | `UARC-012` | integrated | Integration | verified | n/a | 单一 AgentSession owner、完整生命周期 API 与 exact receipt 已闭合 |
-| `UARC-013` | active | Integration | pending | n/a | 单一官方 Nomi Runtime Driver 与 typed host ports 实施中 |
+| `UARC-013` | integrated | Integration | verified | n/a | 单一官方 provider/factory、Driver lifecycle 与 typed host ports 已闭合 |
+| `UARC-014` | ready | Integration | pending | n/a | AgentPreset vNext Compiler 与通用 capability projection |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -96,6 +99,9 @@
 | UARC-012 Store/Conversation | 27 + 335 passed | single owner、one-active-turn、exact replay、Fork ready 与 projection rebuild |
 | UARC-012 API/App boundary | 534 + 6 passed | lifecycle DTO、canonical route reachability 与 legacy-authority non-reentry |
 | UARC-012 App check/rustfmt/boundary | passed，3,032 files | main-pool composition and no UARC legacy growth |
+| UARC-013 AI Agent/Engine Core | 552 + 14 passed | one-active-turn、cancel/cleanup、quarantine 与 typed ports |
+| UARC-013 App composition | 2 + 6 passed | one provider/factory、foreign-family rejection 与 state wiring |
+| UARC-013 App compile/boundary | lib/bin/tests passed，3,033 files | no registration API; compatibility 28→26 |
 | Windows UARC full gate | not run | 否 |
 | macOS UARC shared compile | not run | 否 |
 | macOS native Browser/Computer/Process | not run | 否 |
@@ -120,13 +126,15 @@
   Wave 1，但最终 gate 前必须闭合。
 - UARC-010 后 Control Plane 有两项旧语义测试等待 `UARC-014`：kind-only Context 和 direct
   TurnMiddleware；这是已登记的串行迁移，不是恢复兼容的理由。
+- UARC-013 的 App 全量 transition probe 为 455/515；60 项均是空 Action grant、kind-only Context
+  factory 或旧 Wave2 schema/MCP fixture，归 `UARC-014/021/022`，没有 Runtime provider/Driver 失败。
 - canonical `/api/agent-sessions` 已只写 generation 5；Cron/Channel/AutoWork/Companion/IDMM/
   AgentExecution/Remote 的旧 Conversation writers/readers 仍由 `UARC-033/034/051/054` 迁移删除。
   Fresh-v4 root coordinator aliases 仅为 `UARC-054` 保留。
 
 ## 8. Next ready tasks
 
-1. `UARC-013`：将 canonical accepted Turn 接入唯一 Nomi Runtime Driver 与 typed host ports。
+1. `UARC-014`：删除 Runtime selector/旧 Capability IDs，并让 Compiler/投影完全 contribution-driven。
 2. Wave 1 全部收口前不得启动 Feature tasks。
 
 ## 9. 状态更新模板
@@ -302,3 +310,17 @@
 - Not run: no UARC-013 implementation gate yet.
 - Remaining/blocker: fit one official Driver to the canonical accepted Turn without reopening a legacy Conversation path. No blocker.
 - Next ready tasks: none until UARC-013 barrier; then `UARC-014`.
+
+### 2026-09-17 UARC-013 integrated and gate complete
+
+- Barrier/source: UARC-012 closeout `fe44927d5`; implementation `5f317024d63c6845d896d379c201254101410d1b`.
+- Owner/write set: Integration; AI Runtime contract/registry, App provider/typed host composition, exact startup surfaces, retired examples/tests and UARC evidence.
+- Changed: one immutable `NomiRuntimeProvider`, exact build binding, internal Driver seam, typed EngineSessionHost installation, one-active-turn/cancel/cleanup/quarantine contract and pre-factory foreign-family rejection.
+- Deleted: source-extension startup callbacks, public Runtime host/factory export, register/channel APIs, `nomifun.coding` second-factory install, handle downcast branch, community Engine example and multi-Runtime production acceptance target.
+- Retained + reason: source-integrated implementation becomes the sole `nomifun.nomi` Driver and is enhanced by `UARC-020`; old Nomi/Coding sources are unreachable migration inputs with physical deletion owner `UARC-052`.
+- Tests: AI Agent 552, Engine Core 14, App provider 2 and state 6 passed; desktop/bootstrap filters, App lib/bin/test-target checks, rustfmt, UARC boundary and whitespace checks passed.
+- Windows: verified for shared provider, Driver lifecycle and composition behavior.
+- macOS: not applicable to this shared Driver contract task; later Mac consumers remain pending.
+- Not run: full App transition is 455/515 because 60 old Capability fixtures await UARC-014/021/022; no Runtime test failed. Full Wave 1 gate waits for UARC-014.
+- Remaining/blocker: no UARC-013 blocker. Do not restore the deleted registration API or second family while migrating Compiler fixtures.
+- Next ready tasks: `UARC-014` only.

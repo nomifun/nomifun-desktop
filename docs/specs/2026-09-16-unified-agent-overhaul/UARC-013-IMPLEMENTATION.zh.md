@@ -1,7 +1,7 @@
 # UARC-013 单一 Nomi Runtime Driver / Host Ports 实施记录
 
 > 开始 barrier：`fe44927d5bb86c94f5b55f1e8736f817d2c1f4c7`
-> 实现提交：由 UARC-013 closeout 固化
+> 实现提交：`5f317024d63c6845d896d379c201254101410d1b`
 > 官方 family：`nomifun.nomi`
 > 平台：共享 Rust Runtime contract；Windows 执行工程验证
 
