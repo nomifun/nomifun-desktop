@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use nomifun_ai_agent::nomi_config;
 use nomifun_ai_agent::{one_shot_completion, resolve_provider_config, user_message};
-use nomifun_common::{AppError, now_ms};
+use nomifun_common::{AppError, generate_id, now_ms};
 use nomifun_model_invoke::ModelInvokeService;
 use serde::Serialize;
 use tokio::sync::Mutex;
@@ -64,6 +64,9 @@ impl CompanionRunLocks {
 /// persisted as run history.
 #[derive(Debug, Clone, Serialize)]
 pub struct CompanionLearnResult {
+    /// Per-attempt domain receipt returned to the canonical Agent effect
+    /// ledger. A cancelled attempt is not replayed from this ID alone.
+    pub learn_run_id: String,
     pub status: String,
     pub events_processed: i64,
     pub memories_added: i64,
@@ -192,6 +195,7 @@ impl Learner {
             .await?;
 
         let mut run = CompanionLearnResult {
+            learn_run_id: generate_id(),
             status: "ok".into(),
             events_processed: 0,
             memories_added: 0,
@@ -933,12 +937,13 @@ mod tests {
             "companion_id",
             "error",
             "events_processed",
+            "learn_run_id",
             "memories_added",
             "status",
             "summary",
         ]
         .into_iter()
         .collect();
-        assert_eq!(actual_keys, expected_keys, "live result must not expose persisted run fields");
+        assert_eq!(actual_keys, expected_keys, "live result exposes only its stable receipt and bounded outcome");
     }
 }

@@ -1072,6 +1072,7 @@ mod tests {
         let expected_keys: std::collections::BTreeSet<&str> = [
             "error",
             "events_processed",
+            "learn_run_id",
             "memories_added",
             "status",
             "summary",

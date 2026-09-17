@@ -1,6 +1,6 @@
 {
   "manifest_version": "1.0.0",
-  "target_first_party_contribution_digest": "793c2932cbcef6e66ee9066d857ea2682bd3b8ce972e7d070e2ba566e49b5fbc",
+  "target_first_party_contribution_digest": "aeb36fb2687946ecf7cf67c2d75c2f9cd0a303f7c2cce3aa7813775ffb520649",
   "target_runtime_feature_inventory_digest": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
   "templates": {
     "chat.minimal": {
@@ -12,63 +12,19 @@
     "assistant.general": {
       "enabled_capabilities": [
         {
-          "id": "session.attachments.read",
+          "id": "knowledge",
           "version": "1.0.0"
         },
         {
-          "id": "knowledge.search",
+          "id": "project.memory",
           "version": "1.0.0"
         },
         {
-          "id": "knowledge.read",
+          "id": "web.research",
           "version": "1.0.0"
         },
         {
-          "id": "memory.project.read",
-          "version": "1.0.0"
-        },
-        {
-          "id": "web.search",
-          "version": "1.0.0"
-        },
-        {
-          "id": "web.fetch",
-          "version": "1.0.0"
-        },
-        {
-          "id": "citation.render",
-          "version": "1.0.0"
-        },
-        {
-          "id": "memory.project.write",
-          "version": "1.0.0"
-        },
-        {
-          "id": "memory.project.distill",
-          "version": "1.0.0"
-        },
-        {
-          "id": "memory.project.citation",
-          "version": "1.0.0"
-        },
-        {
-          "id": "creation.image",
-          "version": "1.0.0"
-        },
-        {
-          "id": "creation.image_edit",
-          "version": "1.0.0"
-        },
-        {
-          "id": "creation.video",
-          "version": "1.0.0"
-        },
-        {
-          "id": "creation.music",
-          "version": "1.0.0"
-        },
-        {
-          "id": "creation.audio",
+          "id": "creation.media",
           "version": "1.0.0"
         }
       ],
@@ -81,10 +37,6 @@
     },
     "coding.codex": {
       "enabled_capabilities": [
-        {
-          "id": "session.attachments.read",
-          "version": "1.0.0"
-        },
         {
           "id": "agent.execution.plan",
           "version": "1.0.0"
@@ -122,19 +74,7 @@
           "version": "1.0.0"
         },
         {
-          "id": "web.search",
-          "version": "1.0.0"
-        },
-        {
-          "id": "web.fetch",
-          "version": "1.0.0"
-        },
-        {
-          "id": "citation.render",
-          "version": "1.0.0"
-        },
-        {
-          "id": "llm.vision",
+          "id": "web.research",
           "version": "1.0.0"
         }
       ],
@@ -171,51 +111,19 @@
     "companion.default": {
       "enabled_capabilities": [
         {
-          "id": "companion.persona",
+          "id": "companion",
           "version": "1.0.0"
         },
         {
-          "id": "memory.companion.recall",
+          "id": "companion.memory",
           "version": "1.0.0"
         },
         {
-          "id": "knowledge.search",
+          "id": "knowledge",
           "version": "1.0.0"
         },
         {
-          "id": "knowledge.read",
-          "version": "1.0.0"
-        },
-        {
-          "id": "companion.roster",
-          "version": "1.0.0"
-        },
-        {
-          "id": "companion.learn",
-          "version": "1.0.0"
-        },
-        {
-          "id": "companion.evolve",
-          "version": "1.0.0"
-        },
-        {
-          "id": "memory.companion.write",
-          "version": "1.0.0"
-        },
-        {
-          "id": "memory.companion.merge",
-          "version": "1.0.0"
-        },
-        {
-          "id": "memory.companion.evolve",
-          "version": "1.0.0"
-        },
-        {
-          "id": "channel.reply",
-          "version": "1.0.0"
-        },
-        {
-          "id": "channel.send",
+          "id": "channel.messaging",
           "version": "1.0.0"
         },
         {
@@ -248,35 +156,15 @@
     "customer-service.default": {
       "enabled_capabilities": [
         {
-          "id": "customer_service.dialogue",
+          "id": "customer.service",
           "version": "1.0.0"
         },
         {
-          "id": "customer_service.notes.read",
+          "id": "knowledge",
           "version": "1.0.0"
         },
         {
-          "id": "knowledge.search",
-          "version": "1.0.0"
-        },
-        {
-          "id": "knowledge.read",
-          "version": "1.0.0"
-        },
-        {
-          "id": "customer_service.notes.write",
-          "version": "1.0.0"
-        },
-        {
-          "id": "customer_service.handoff",
-          "version": "1.0.0"
-        },
-        {
-          "id": "channel.reply",
-          "version": "1.0.0"
-        },
-        {
-          "id": "channel.send",
+          "id": "channel.messaging",
           "version": "1.0.0"
         }
       ],
@@ -291,35 +179,11 @@
     "creative-studio.default": {
       "enabled_capabilities": [
         {
-          "id": "creation.image",
+          "id": "creation.media",
           "version": "1.0.0"
         },
         {
-          "id": "creation.image_edit",
-          "version": "1.0.0"
-        },
-        {
-          "id": "creation.video",
-          "version": "1.0.0"
-        },
-        {
-          "id": "creation.music",
-          "version": "1.0.0"
-        },
-        {
-          "id": "creation.audio",
-          "version": "1.0.0"
-        },
-        {
-          "id": "session.attachments.read",
-          "version": "1.0.0"
-        },
-        {
-          "id": "workshop.asset.read",
-          "version": "1.0.0"
-        },
-        {
-          "id": "workshop.asset.write",
+          "id": "creative.workshop",
           "version": "1.0.0"
         }
       ],
@@ -346,21 +210,10 @@
         "web_research"
       ],
       "required_capability_ids": [
-        "citation.render",
-        "creation.audio",
-        "creation.image",
-        "creation.image_edit",
-        "creation.music",
-        "creation.video",
-        "knowledge.read",
-        "knowledge.search",
-        "memory.project.citation",
-        "memory.project.distill",
-        "memory.project.read",
-        "memory.project.write",
-        "session.attachments.read",
-        "web.fetch",
-        "web.search"
+        "creation.media",
+        "knowledge",
+        "project.memory",
+        "web.research"
       ],
       "required_runtime_features": [],
       "required_resource_kinds": [
@@ -385,11 +238,7 @@
         "agent.execution.plan",
         "agent.execution.steer",
         "agent.fork",
-        "citation.render",
-        "llm.vision",
-        "session.attachments.read",
-        "web.fetch",
-        "web.search",
+        "web.research",
         "workspace.artifacts",
         "workspace.files",
         "workspace.process",
@@ -433,18 +282,10 @@
         "persona"
       ],
       "required_capability_ids": [
-        "channel.reply",
-        "channel.send",
-        "companion.evolve",
-        "companion.learn",
-        "companion.persona",
-        "companion.roster",
-        "knowledge.read",
-        "knowledge.search",
-        "memory.companion.evolve",
-        "memory.companion.merge",
-        "memory.companion.recall",
-        "memory.companion.write"
+        "channel.messaging",
+        "companion",
+        "companion.memory",
+        "knowledge"
       ],
       "required_runtime_features": [],
       "required_resource_kinds": [
@@ -464,14 +305,9 @@
         "notes"
       ],
       "required_capability_ids": [
-        "channel.reply",
-        "channel.send",
-        "customer_service.dialogue",
-        "customer_service.handoff",
-        "customer_service.notes.read",
-        "customer_service.notes.write",
-        "knowledge.read",
-        "knowledge.search"
+        "channel.messaging",
+        "customer.service",
+        "knowledge"
       ],
       "required_runtime_features": [],
       "required_resource_kinds": [
@@ -487,14 +323,8 @@
         "generation"
       ],
       "required_capability_ids": [
-        "creation.audio",
-        "creation.image",
-        "creation.image_edit",
-        "creation.music",
-        "creation.video",
-        "session.attachments.read",
-        "workshop.asset.read",
-        "workshop.asset.write"
+        "creation.media",
+        "creative.workshop"
       ],
       "required_runtime_features": [],
       "required_resource_kinds": [

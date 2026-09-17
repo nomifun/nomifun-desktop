@@ -576,57 +576,131 @@ fn required_operations(
             }
             continue;
         }
+        let module_resource_operations = if nomifun_agent_domain_wave1::CAPABILITY_IDS
+            .contains(&capability.as_str())
+        {
+            Some(
+                action_allowlists
+                    .get(capability)
+                    .ok_or_else(|| {
+                        ResourceSelectionResolutionError::new(
+                            "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH",
+                            "a Wave 1 Module is missing its frozen exact Action grant",
+                            json!({ "capability_id": capability }),
+                        )
+                    })?
+                    .iter()
+                    .map(|action_id| {
+                        nomifun_agent_domain_wave1::required_action_resource_operations(
+                            capability,
+                            action_id.as_ref(),
+                        )
+                        .ok_or_else(|| {
+                            ResourceSelectionResolutionError::new(
+                                "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH",
+                                "a frozen Wave 1 Action has no canonical resource operation contract",
+                                json!({ "capability_id": capability, "action_id": action_id.as_ref() }),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        } else if nomifun_agent_domain_wave3::TARGET_CAPABILITY_IDS
+            .contains(&capability.as_str())
+        {
+            Some(
+                action_allowlists
+                    .get(capability)
+                    .ok_or_else(|| {
+                        ResourceSelectionResolutionError::new(
+                            "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH",
+                            "a Wave 3 Module is missing its frozen exact Action grant",
+                            json!({ "capability_id": capability }),
+                        )
+                    })?
+                    .iter()
+                    .map(|action_id| {
+                        nomifun_agent_domain_wave3::required_action_resource_operations(
+                            capability,
+                            action_id.as_ref(),
+                        )
+                        .ok_or_else(|| {
+                            ResourceSelectionResolutionError::new(
+                                "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH",
+                                "a frozen Wave 3 Action has no canonical resource operation contract",
+                                json!({ "capability_id": capability, "action_id": action_id.as_ref() }),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        } else if nomifun_agent_domain_wave4::CONVERSATION_MODULE_IDS
+            .contains(&capability.as_str())
+        {
+            match capability.as_str() {
+                nomifun_agent_domain_wave4::CHANNEL_MESSAGING_MODULE_ID => {
+                    grant(nomifun_agent_domain_wave4::CHANNEL_RESOURCE_KIND, "receive");
+                    grant(nomifun_agent_domain_wave4::CHANNEL_RESOURCE_KIND, "manage");
+                }
+                nomifun_agent_domain_wave4::COMPANION_MODULE_ID => {
+                    grant(nomifun_agent_domain_wave4::COMPANION_RESOURCE_KIND, "read");
+                }
+                nomifun_agent_domain_wave4::CUSTOMER_SERVICE_MODULE_ID => {
+                    grant(nomifun_agent_domain_wave4::CUSTOMER_RESOURCE_KIND, "read");
+                }
+                _ => {}
+            }
+            Some(
+                action_allowlists
+                    .get(capability)
+                    .ok_or_else(|| {
+                        ResourceSelectionResolutionError::new(
+                            "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH",
+                            "a conversation Module is missing its frozen exact Action grant",
+                            json!({ "capability_id": capability }),
+                        )
+                    })?
+                    .iter()
+                    .map(|action_id| {
+                        nomifun_agent_domain_wave4::required_action_resource_operations(
+                            capability,
+                            action_id.as_ref(),
+                        )
+                        .ok_or_else(|| {
+                            ResourceSelectionResolutionError::new(
+                                "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH",
+                                "a frozen conversation Action has no canonical resource operation contract",
+                                json!({ "capability_id": capability, "action_id": action_id.as_ref() }),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        } else {
+            None
+        };
+        if let Some(operation_sets) = module_resource_operations {
+            for operations in operation_sets {
+                for (resource_kind, operation) in operations {
+                    grant(resource_kind.as_ref(), &operation);
+                }
+            }
+            continue;
+        }
         match capability.as_str() {
             "agent.delegate" | "agent.execution.steer" => {
                 grant("process_session", "execute")
             }
             "agent.execution.observe" => grant("process_session", "observe"),
-            "knowledge.search" => grant("knowledge_base", "search"),
-            "knowledge.read" | "knowledge.embedding" => grant("knowledge_base", "read"),
-            "knowledge.rerank" => {
-                grant("knowledge_base", "read");
-                grant("knowledge_base", "search");
-            }
-            "knowledge.write" | "knowledge.autogen" => grant("knowledge_base", "write"),
-            "knowledge.mount" => grant("knowledge_base", "mount"),
-            "memory.project.read" | "memory.project.citation" | "memory.session.scratch" => {
-                grant("project_memory", "read")
-            }
-            "memory.project.write" | "memory.project.distill" => {
-                grant("project_memory", "write")
-            }
-            "memory.companion.recall" => grant("companion_memory", "read"),
-            "memory.companion.write" | "memory.companion.merge" | "memory.companion.evolve"
-            | "companion.learn" | "companion.evolve" => grant("companion_memory", "write"),
             id if super::nomi_core_mcp_catalog::is_product_tool(id) => {
                 grant("mcp_server", "connect");
                 grant("mcp_server", "invoke");
-            }
-            "companion.persona" | "companion.roster" => grant("companion", "read"),
-            "channel.receive" => grant("channel", "receive"),
-            "channel.reply" => grant("channel", "reply"),
-            "channel.send" => grant("channel", "send"),
-            "channel.pairing" | "channel.group_policy" => grant("channel", "manage"),
-            "customer_service.dialogue" | "customer_service.notes.read" => {
-                grant("customer", "read")
-            }
-            "customer_service.notes.write" | "customer_service.handoff" => {
-                grant("customer", "write")
             }
             "robot.link" | "robot.device_tools" => grant("robot", "link"),
             "robot.audio" => grant("robot", "audio"),
             "robot.vision" => grant("robot", "vision"),
             "robot.display" => grant("robot", "display"),
             "robot.motion" => grant("robot", "motion"),
-            "workshop.canvas.read" => grant("canvas", "read"),
-            "workshop.canvas.edit" | "workshop.template.run" => grant("canvas", "write"),
-            "workshop.asset.read" | "office.preview" => grant("asset_library", "read"),
-            "workshop.asset.write" | "office.document.edit" | "office.sheet.edit"
-            | "office.slides.edit" => grant("asset_library", "write"),
-            "plugin.read" => grant("plugin", "read"),
-            "plugin.edit" => grant("plugin", "edit"),
-            "plugin.publish" => grant("plugin", "publish"),
-            "plugin.serve" => grant("plugin", "serve"),
             _ => {}
         }
     }
@@ -858,7 +932,7 @@ impl ProductResourceAuthority {
         let customer_session = request
             .selected_capability_ids
             .iter()
-            .any(|capability| capability.starts_with("customer_service."));
+            .any(|capability| capability == "customer.service");
         let expected_domain = if customer_session {
             nomifun_db::models::CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE
         } else {
@@ -1157,16 +1231,21 @@ mod tests {
     #[tokio::test]
     async fn client_selection_derives_owner_and_capability_operations() {
         let bindings = registry("customer", &["read", "write"])
-            .resolve(
+            .resolve_selected(
                 "owner-1",
                 &[AgentResourceSelectionDto {
                     resource_kind: "customer".into(),
                     resource_id: "customer-1".into(),
                 }],
-                &BTreeSet::from([
-                    "customer_service.notes.read".into(),
-                    "customer_service.handoff".into(),
-                ]),
+                &BTreeSet::from(["customer.service".into()]),
+                &BTreeMap::from([(
+                    "customer.service".into(),
+                    BTreeSet::from([
+                        ActionId::from("customer.service/notes.read"),
+                        ActionId::from("customer.service/handoff"),
+                    ]),
+                )]),
+                &[],
             )
             .await
             .unwrap();
@@ -1176,12 +1255,52 @@ mod tests {
         assert_eq!(bindings[0].operations, BTreeSet::from(["read".into(), "write".into()]));
     }
 
+    #[test]
+    fn conversation_modules_derive_scene_operations_outside_action_grants() {
+        let capabilities = BTreeSet::from([
+            "channel.messaging".to_owned(),
+            "companion".to_owned(),
+            "customer.service".to_owned(),
+        ]);
+        let actions = BTreeMap::from([
+            (
+                "channel.messaging".to_owned(),
+                BTreeSet::from([ActionId::from("channel.messaging/send")]),
+            ),
+            (
+                "companion".to_owned(),
+                BTreeSet::from([ActionId::from("companion/evolve")]),
+            ),
+            (
+                "customer.service".to_owned(),
+                BTreeSet::from([ActionId::from("customer.service/handoff")]),
+            ),
+        ]);
+        let derived = required_operations(&capabilities, &actions).unwrap();
+        assert_eq!(
+            derived["channel"],
+            BTreeSet::from(["manage".into(), "receive".into(), "send".into()]),
+        );
+        assert_eq!(
+            derived["companion"],
+            BTreeSet::from(["read".into(), "write".into()]),
+        );
+        assert_eq!(
+            derived["customer"],
+            BTreeSet::from(["read".into(), "write".into()]),
+        );
+    }
+
     #[tokio::test]
     async fn duplicate_unused_and_missing_mandatory_selections_fail_closed() {
         let knowledge_registry = registry("knowledge_base", &["search"]);
-        let capabilities = BTreeSet::from(["knowledge.search".to_owned()]);
+        let capabilities = BTreeSet::from(["knowledge".to_owned()]);
+        let actions = BTreeMap::from([(
+            "knowledge".to_owned(),
+            BTreeSet::from([ActionId::from("knowledge/search")]),
+        )]);
         let duplicate = knowledge_registry
-            .resolve(
+            .resolve_selected(
                 "owner-1",
                 &[
                     AgentResourceSelectionDto {
@@ -1194,6 +1313,8 @@ mod tests {
                     },
                 ],
                 &capabilities,
+                &actions,
+                &[],
             )
             .await
             .unwrap_err();
@@ -1232,10 +1353,15 @@ mod tests {
     #[tokio::test]
     async fn knowledge_base_may_remain_unbound_until_the_session_mount_is_applied() {
         let bindings = registry("knowledge_base", &["search"])
-            .resolve(
+            .resolve_selected(
                 "owner-1",
                 &[],
-                &BTreeSet::from(["knowledge.search".to_owned()]),
+                &BTreeSet::from(["knowledge".to_owned()]),
+                &BTreeMap::from([(
+                    "knowledge".to_owned(),
+                    BTreeSet::from([ActionId::from("knowledge/search")]),
+                )]),
+                &[],
             )
             .await
             .unwrap();
@@ -1246,13 +1372,18 @@ mod tests {
     #[tokio::test]
     async fn authority_cannot_grant_less_than_the_server_derived_requirement() {
         let error = registry("customer", &["read"])
-            .resolve(
+            .resolve_selected(
                 "owner-1",
                 &[AgentResourceSelectionDto {
                     resource_kind: "customer".into(),
                     resource_id: "customer-1".into(),
                 }],
-                &BTreeSet::from(["customer_service.notes.write".into()]),
+                &BTreeSet::from(["customer.service".into()]),
+                &BTreeMap::from([(
+                    "customer.service".into(),
+                    BTreeSet::from([ActionId::from("customer.service/notes.write")]),
+                )]),
+                &[],
             )
             .await
             .unwrap_err();
@@ -1272,7 +1403,7 @@ mod tests {
         ])
         .unwrap();
         let error = registry
-            .resolve(
+            .resolve_selected(
                 "owner-1",
                 &[
                     AgentResourceSelectionDto {
@@ -1284,10 +1415,18 @@ mod tests {
                         resource_id: "companion-b".into(),
                     },
                 ],
-                &BTreeSet::from([
-                    "companion.persona".into(),
-                    "memory.companion.recall".into(),
+                &BTreeSet::from(["companion".into(), "companion.memory".into()]),
+                &BTreeMap::from([
+                    (
+                        "companion".into(),
+                        BTreeSet::from([ActionId::from("companion/learn")]),
+                    ),
+                    (
+                        "companion.memory".into(),
+                        BTreeSet::from([ActionId::from("companion.memory/recall")]),
+                    ),
                 ]),
+                &[],
             )
             .await
             .unwrap_err();
@@ -1486,19 +1625,18 @@ mod tests {
             nomifun_mcp::canonical_mcp_tool_capability_id(&server_id, "lookup").unwrap();
         let capabilities = BTreeSet::from([
             nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID.into(),
-            "knowledge.search".into(),
-            "memory.project.read".into(),
+            "knowledge".into(),
+            "project.memory".into(),
             nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID.into(),
             mcp_tool,
-            "companion.persona".into(),
-            "memory.companion.recall".into(),
-            "channel.receive".into(),
+            "companion".into(),
+            "companion.memory".into(),
+            "channel.messaging".into(),
             "robot.link".into(),
-            "customer_service.dialogue".into(),
-            "workshop.canvas.read".into(),
-            "workshop.asset.read".into(),
-            "creation.image".into(),
-            "plugin.read".into(),
+            "customer.service".into(),
+            "creative.workshop".into(),
+            "creation.media".into(),
+            "plugin.development".into(),
         ]);
         let action_allowlists = BTreeMap::from([
             (
@@ -1508,6 +1646,45 @@ mod tests {
             (
                 nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID.into(),
                 BTreeSet::from([ActionId::from("workspace.process/exec")]),
+            ),
+            (
+                "knowledge".into(),
+                BTreeSet::from([ActionId::from("knowledge/search")]),
+            ),
+            (
+                "project.memory".into(),
+                BTreeSet::from([ActionId::from("project.memory/read")]),
+            ),
+            (
+                "companion".into(),
+                BTreeSet::from([ActionId::from("companion/learn")]),
+            ),
+            (
+                "companion.memory".into(),
+                BTreeSet::from([ActionId::from("companion.memory/recall")]),
+            ),
+            (
+                "channel.messaging".into(),
+                BTreeSet::from([ActionId::from("channel.messaging/reply")]),
+            ),
+            (
+                "customer.service".into(),
+                BTreeSet::from([ActionId::from("customer.service/notes.read")]),
+            ),
+            (
+                "creative.workshop".into(),
+                BTreeSet::from([
+                    ActionId::from("creative.workshop/canvas.read"),
+                    ActionId::from("creative.workshop/asset.read"),
+                ]),
+            ),
+            (
+                "creation.media".into(),
+                BTreeSet::from([ActionId::from("creation.media/image")]),
+            ),
+            (
+                "plugin.development".into(),
+                BTreeSet::from([ActionId::from("plugin.development/read")]),
             ),
         ]);
         let derived = required_operations(&capabilities, &action_allowlists).unwrap();

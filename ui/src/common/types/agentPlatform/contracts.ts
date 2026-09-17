@@ -137,6 +137,7 @@ export interface AgentResolvedSnapshot {
   included_skills: string[];
   excluded_auto_skills: string[];
   enabled_capabilities: string[];
+  enabled_capability_actions: Record<string, string[]>;
   required_resource_kinds: string[];
   knowledge_policy: {
     enabled: boolean;

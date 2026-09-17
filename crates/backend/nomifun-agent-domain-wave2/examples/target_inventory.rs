@@ -19,9 +19,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     // active target and must disappear from a regenerated inventory.
     updated
         .packages
-        .retain(|target| target.package.id.as_ref() != "nomifun.mcp-connectors");
+        .retain(|target| {
+            !matches!(
+                target.package.id.as_ref(),
+                "nomifun.mcp-connectors"
+                    | "nomifun.local-websearch"
+                    | "nomifun.chat"
+                    | "nomifun.model-media"
+            )
+        });
     for registration in nomifun_agent_domain_wave1::registrations()?.into_iter()
-        .chain(nomifun_agent_domain_wave2::registrations()?) {
+        .chain(nomifun_agent_domain_wave2::registrations()?)
+        .chain(nomifun_agent_domain_wave3::registrations()?)
+        .chain(nomifun_agent_domain_wave4::registrations()?) {
         let manifest = registration.metadata.manifest.payload;
         let target = updated
             .packages
@@ -51,7 +61,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?;
     } else if updated != original {
         return Err(
-            "Wave 1/2 target inventory differs from actual registrations; run target_inventory write"
+            "Wave 1-4 target inventory differs from actual registrations; run target_inventory write"
                 .into(),
         );
     }

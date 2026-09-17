@@ -30,7 +30,6 @@ async fn cold_skill_commands_use_saved_binding_without_starting_runtime_or_conte
     let owner = services.authoritative_user_id.to_string();
     let (states, _) = build_module_states(&services).await;
     let plugins = states.plugin.service.clone();
-    let conversations = states.conversation.service.clone();
     let router = create_router_with_states(&services, states);
 
     let marker = root.path().join("unexpected-activation");
@@ -148,7 +147,13 @@ async fn cold_skill_commands_use_saved_binding_without_starting_runtime_or_conte
                             id: id.into(),
                             version: "1.0.0".into(),
                         },
-                        action_allowlist: BTreeSet::new(),
+                        action_allowlist: (id == tool.id.as_ref())
+                            .then(|| {
+                                BTreeSet::from([
+                                    "test.release-gate.plugin.echo.invoke".into(),
+                                ])
+                            })
+                            .unwrap_or_default(),
                     })
                     .collect(),
                 skill_bindings: vec![ExactCatalogRefDto {
@@ -179,38 +184,30 @@ async fn cold_skill_commands_use_saved_binding_without_starting_runtime_or_conte
     .await;
     let session_id = session.agent_session_id.as_str();
     assert_eq!(services.agent_runtime_registry.active_runtime_count(), 0);
-    let before = services
+    assert!(services
         .conversation_repo
         .get(session_id)
         .await
         .unwrap()
-        .unwrap();
-    let path = format!("/api/conversations/{session_id}/slash-commands");
+        .is_none(), "canonical command discovery must not create a legacy Conversation row");
+    let path = format!("/api/agent-sessions/{session_id}/slash-commands");
     for _ in 0..2 {
         let commands: Vec<SlashCommandItem> = get_data(&router, &path).await;
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].command, format!("skill:{SKILL}"));
         assert_eq!(commands[0].description, "Exact package guide");
     }
-    assert!(matches!(
-        conversations
-            .get_slash_commands(&Uuid::now_v7().to_string(), session_id)
-            .await,
-        Err(nomifun_common::AppError::NotFound(_))
-    ));
     assert_eq!(services.agent_runtime_registry.active_runtime_count(), 0);
     assert!(
         !marker.exists(),
         "neither the engine nor Plugin Context should activate during discovery"
     );
-    let after = services
+    assert!(services
         .conversation_repo
         .get(session_id)
         .await
         .unwrap()
-        .unwrap();
-    assert_eq!(after.extra, before.extra);
-    assert_eq!(after.agent_snapshot, before.agent_snapshot);
+        .is_none());
 
     plugins
         .set_enabled(
@@ -243,7 +240,7 @@ async fn cold_skill_commands_use_saved_binding_without_starting_runtime_or_conte
         .unwrap();
     assert_eq!(
         response.status(),
-        axum::http::StatusCode::CONFLICT,
+        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
         "withdrawal must not return cached commands or a directory fallback"
     );
     assert_eq!(services.agent_runtime_registry.active_runtime_count(), 0);

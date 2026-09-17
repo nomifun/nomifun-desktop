@@ -2257,8 +2257,6 @@ impl AppServices {
                     data_dir.clone(), authoritative_user_id.clone(),
                 )),
             #[cfg(feature = "browser-use")]
-            local_web_search: host_services.local_web_search.clone(),
-            #[cfg(feature = "browser-use")]
             system_browser: host_services.system_browser.clone().map(|host| host as Arc<dyn nomifun_browser_platform::system_browser::SystemBrowserHost>),
             client_prefs: Some(Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
                 database.pool().clone(),

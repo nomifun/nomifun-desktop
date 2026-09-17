@@ -14,6 +14,7 @@
 //! rejected and must be removed by the app-level dataset reset before this crate opens.
 
 pub mod collector;
+pub mod agent_capability;
 pub mod companion;
 pub mod archiver;
 pub mod archive_port;
@@ -41,6 +42,14 @@ pub mod store;
 mod skill_io;
 
 pub use events::CompanionEventEmitter;
+pub use agent_capability::{
+    COMPANION_AGENT_ACTION_IDS, COMPANION_EVOLVE_ACTION_ID,
+    COMPANION_LEARN_ACTION_ID, COMPANION_MEMORY_ACTION_IDS,
+    COMPANION_MEMORY_MODULE_ID, COMPANION_MEMORY_RECALL_ACTION_ID,
+    COMPANION_MEMORY_WRITE_ACTION_ID, COMPANION_MODULE_ID,
+    CompanionAgentCapabilityOwner, CompanionPersonaContext,
+    companion_action_input_schema, companion_action_resource_requirement,
+};
 pub use archive_port::CompanionArchiveSessionPort;
 pub use figures::FigureMeta;
 pub use memory_search::{

@@ -87,6 +87,7 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
     expect(panelCss.includes('width: 100%;')).toBe(true);
     expect(panelCss.includes('min-width: 0;')).toBe(true);
     expect(panelCss.includes('width: 390px;')).toBe(false);
+    expect(panelCss.includes('@container (max-width: 420px)')).toBe(true);
   });
 
   test('renders the right panel, source header, empty state and composer', () => {
@@ -251,6 +252,10 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
 describe('Creative Studio Agent model and chat boundaries', () => {
   test('reuses the one NomiFun model catalog with the exact chat task', () => {
     const composer = readFileSync(new URL('./CreativeStudioAgentComposer.tsx', import.meta.url), 'utf8');
+    const canvasPanel = readFileSync(
+      new URL('../canvas/product/agent/CreativeCanvasAgentPanel.tsx', import.meta.url),
+      'utf8'
+    );
 
     expect(composer.includes('NomiCreativeModelSelect')).toBe(true);
     expect(composer.includes("capability: 'task'")).toBe(true);
@@ -258,6 +263,8 @@ describe('Creative Studio Agent model and chat boundaries', () => {
     expect(composer.includes('useModelsForTask')).toBe(false);
     expect(composer.includes('useProvidersQuery')).toBe(false);
     expect(composer.includes('fetch(')).toBe(false);
+    expect(composer.includes('model.providerId')).toBe(false);
+    expect(canvasPanel.includes('compact')).toBe(true);
   });
 
   test('requires an explicit completed event before reporting success', async () => {

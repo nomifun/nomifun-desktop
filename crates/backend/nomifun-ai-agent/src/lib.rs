@@ -38,7 +38,6 @@ pub(crate) mod services;
 pub mod runtime_registry;
 pub mod terminal_title_completer;
 pub mod types;
-pub mod web_fetch;
 mod subagent_gateway;
 #[path = "web_search_provider.rs"]
 pub mod web_search;

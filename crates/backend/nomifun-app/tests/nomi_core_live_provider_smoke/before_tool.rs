@@ -711,7 +711,18 @@ async fn run_with_provider(
         "default",
     )?;
     let (preset, _) =
-        create_agent_preset(router, &provider, model, Some(&selection), &["fs.write"]).await?;
+        create_agent_preset(
+            router,
+            &provider,
+            model,
+            Some(&selection),
+            &[(
+                "workspace.files",
+                &["workspace.files/write"],
+                "workspace",
+            )],
+        )
+        .await?;
     select_hook(router, &preset, &capability, &provider, model).await?;
     let (session, _) = create_session(
         router,

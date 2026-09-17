@@ -120,6 +120,20 @@ export function fromApiAgentSnapshot(raw: unknown): AgentResolvedSnapshot {
   if (!Array.isArray(snapshot.required_resource_kinds)) {
     throw new TypeError('agent snapshot.required_resource_kinds must be an array');
   }
+  const rawActions = snapshot.enabled_capability_actions ?? {};
+  if (!rawActions || typeof rawActions !== 'object' || Array.isArray(rawActions)) {
+    throw new TypeError('agent snapshot.enabled_capability_actions must be an object');
+  }
+  const enabledCapabilityActions = Object.fromEntries(
+    Object.entries(rawActions as Record<string, unknown>).map(([moduleId, actions]) => {
+      if (!Array.isArray(actions)) {
+        throw new TypeError(
+          `agent snapshot.enabled_capability_actions.${moduleId} must be an array`,
+        );
+      }
+      return [moduleId, actions.map(String)];
+    }),
+  );
 
   let resolvedModel = snapshot.resolved_model;
   if (resolvedModel != null) {
@@ -144,6 +158,7 @@ export function fromApiAgentSnapshot(raw: unknown): AgentResolvedSnapshot {
       : { resolved_agent_id: parseAgentId(snapshot.resolved_agent_id) }),
     ...(resolvedModel == null ? {} : { resolved_model: resolvedModel }),
     enabled_capabilities: snapshot.enabled_capabilities.map(String),
+    enabled_capability_actions: enabledCapabilityActions,
     required_resource_kinds: snapshot.required_resource_kinds.map(String),
   } as unknown as AgentResolvedSnapshot;
 }

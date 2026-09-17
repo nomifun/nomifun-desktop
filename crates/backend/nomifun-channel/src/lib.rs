@@ -1,5 +1,6 @@
 //! External channel integration: plugin system, pairing handshake, and per-session messaging.
 pub mod action;
+pub mod agent_capability;
 pub mod channel_settings;
 pub mod constants;
 pub mod error;
@@ -22,6 +23,13 @@ pub mod think_filter;
 pub mod types;
 
 pub use routes::{ChannelRouterState, channel_routes};
+pub use agent_capability::{
+    CHANNEL_MESSAGING_ACTION_IDS, CHANNEL_MESSAGING_MODULE_ID,
+    CHANNEL_REPLY_ACTION_ID, CHANNEL_SEND_ACTION_ID,
+    ChannelAgentCapabilityOwner, ChannelCustomerBindingAuthority,
+    ChannelSceneContext, ChannelSceneIngressPort, ChannelSceneTarget,
+    channel_action_input_schema, channel_action_resource_operation,
+};
 pub use session_port::{
     ChannelCompletedTurnReceipt, ChannelSessionPort, ChannelTurnDelivery,
     ChannelTurnDeliveryReceipt, ChannelTurnReceiptState,

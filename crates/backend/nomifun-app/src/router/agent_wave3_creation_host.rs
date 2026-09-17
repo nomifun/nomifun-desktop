@@ -13,8 +13,8 @@ use std::sync::Arc;
 use nomifun_agent_contracts::StrictJsonValue;
 use nomifun_agent_domain_wave3::{
     CreationAudioRequest, CreationImageEditRequest, CreationImageRequest, CreationMusicRequest,
-    CreationModelSelection, CreationTaskTarget, CreationTextRequest, CreationVideoRequest,
-    Wave3CapabilityOperation, Wave3HostContext,
+    CreationTaskTarget, CreationTextRequest, CreationVideoRequest, Wave3CapabilityOperation,
+    Wave3HostContext,
     Wave3HostPort, Wave3HostPortError, Wave3HostRequest,
 };
 use nomifun_common::AppError;
@@ -66,9 +66,8 @@ impl Wave3HostPort for Wave3CreationHost {
             if request.context.principal.principal_kind != "user" || request.context.principal.principal_id != self.owner_id.as_ref() {
                 return Err(Wave3HostPortError::invalid_request("generation owner does not match the authenticated installation owner"));
             }
-            let model_task = capability_model_task(request.context.capability_id.as_ref())?;
+            let model_task = creation_model_task(request.context.action_id.as_ref())?;
             let creation_task_id = stable_creation_task_id(&request.context);
-            let model_selection = request.operation.model_selection().cloned();
             let (owner, mut task) = map_creation_operation(request.operation)?;
             self.validate_task_owner(&request.context, &owner).await?;
             match self.creation.get_task(&creation_task_id).await {
@@ -79,7 +78,6 @@ impl Wave3HostPort for Wave3CreationHost {
                         CreativeTaskOwner::TemplateStep { template_id, template_run_id, template_step_id } => existing.template_id.as_ref() == Some(template_id) && existing.template_run_id.as_ref() == Some(template_run_id) && existing.template_step_id.as_ref() == Some(template_step_id),
                     };
                     if !owner_matches || existing.capability != task.capability { return Err(Wave3HostPortError::invalid_request("generation replay owner or capability differs")); }
-                    validate_replay_model(model_selection.as_ref(), &existing.provider_id, &existing.model)?;
                     let request_matches = existing.params.as_object().is_some_and(|params| {
                         let unfrozen = params.iter().filter(|(key, _)| !key.starts_with("_nomifun_")).map(|(key, value)| (key.clone(), value.clone())).collect::<Map<_, _>>();
                         unfrozen == task.params
@@ -91,7 +89,7 @@ impl Wave3HostPort for Wave3CreationHost {
                 Err(AppError::NotFound(_)) => {}
                 Err(error) => return Err(map_creation_error(error)),
             }
-            let provider = self.resolve_model(model_task, model_selection.as_ref()).await?;
+            let provider = self.resolve_model(model_task).await?;
             task.params.insert(
                 "_nomifun_connection_config_ref".into(),
                 Value::String(format!("provider:{}@{}", provider.provider_id, provider.config_revision)),
@@ -126,16 +124,14 @@ impl Wave3HostPort for Wave3CreationHost {
 }
 
 impl Wave3CreationHost {
-    async fn resolve_model(&self, task: nomifun_api_types::ModelTask, selection: Option<&CreationModelSelection>) -> Result<nomifun_model_invoke::ResolvedTaskConfig, Wave3HostPortError> {
-        let result = if let Some(selection) = selection {
-            let model = nomifun_model_invoke::ModelRef { provider_id: selection.provider_id.clone(), model: selection.model.clone() };
-            match self.invoke.validate(&model, task).await {
-                Ok(()) => self.invoke.resolve_task_config(&model, task).await,
-                Err(error) => Err(error),
-            }
-        } else {
-            self.invoke.resolve_default_task_model(task, &nomifun_db::SqliteClientPreferenceRepository::new(self.pool.clone())).await
-        };
+    async fn resolve_model(&self, task: nomifun_api_types::ModelTask) -> Result<nomifun_model_invoke::ResolvedTaskConfig, Wave3HostPortError> {
+        let result = self
+            .invoke
+            .resolve_default_task_model(
+                task,
+                &nomifun_db::SqliteClientPreferenceRepository::new(self.pool.clone()),
+            )
+            .await;
         result.map_err(|error| Wave3HostPortError::new("GENERATION_MODEL_UNAVAILABLE", error.to_string()))
     }
 
@@ -153,23 +149,16 @@ impl Wave3CreationHost {
     }
 }
 
-fn validate_replay_model(selection: Option<&CreationModelSelection>, provider_id: &str, model: &str) -> Result<(), Wave3HostPortError> {
-    if selection.is_some_and(|selection| selection.provider_id != provider_id || selection.model != model) {
-        return Err(Wave3HostPortError::invalid_request("generation replay model differs from the accepted task"));
-    }
-    Ok(())
-}
-
-fn capability_model_task(capability: &str) -> Result<nomifun_api_types::ModelTask, Wave3HostPortError> {
+fn creation_model_task(action_id: &str) -> Result<nomifun_api_types::ModelTask, Wave3HostPortError> {
     use nomifun_api_types::ModelTask;
-    Ok(match capability {
-        "creation.text" => ModelTask::Chat,
-        "creation.image" => ModelTask::ImageGeneration,
-        "creation.image_edit" => ModelTask::ImageEdit,
-        "creation.video" => ModelTask::VideoGeneration,
-        "creation.music" => ModelTask::MusicGeneration,
-        "creation.audio" => ModelTask::SpeechSynthesis,
-        _ => return Err(Wave3HostPortError::invalid_request("unsupported generation capability")),
+    Ok(match action_id {
+        "creation.media/text" => ModelTask::Chat,
+        "creation.media/image" => ModelTask::ImageGeneration,
+        "creation.media/image_edit" => ModelTask::ImageEdit,
+        "creation.media/video" => ModelTask::VideoGeneration,
+        "creation.media/music" => ModelTask::MusicGeneration,
+        "creation.media/audio" => ModelTask::SpeechSynthesis,
+        _ => return Err(Wave3HostPortError::invalid_request("unsupported Creation action")),
     })
 }
 
@@ -360,6 +349,7 @@ fn stable_creation_task_id(context: &Wave3HostContext) -> String {
         context.principal.principal_id.as_str(),
         context.agent_session_id.as_ref(),
         context.capability_id.as_ref(),
+        context.action_id.as_ref(),
         context.idempotency_key.as_ref(),
     ] {
         digest.update((part.len() as u64).to_be_bytes());
@@ -390,7 +380,7 @@ mod tests {
             agent_session_id: AgentSessionId::from(generate_id()), operation_id: OperationId::from("effect"),
             idempotency_key: IdempotencyKey::from("stable-effect"), correlation_id: CorrelationId::from("turn"),
             resolved_snapshot_ref: ResolvedSnapshotRef { snapshot_id: generate_id().into(), snapshot_digest: "a".repeat(64).into() },
-            registry_generation: 1, capability_id: CapabilityId::from("creation.image"), action_id: ActionId::from("creation.image.invoke"),
+            registry_generation: 1, capability_id: CapabilityId::from(nomifun_agent_domain_wave3::CREATION_MEDIA_MODULE_ID), action_id: ActionId::from("creation.media/image"),
             state_scope_key: ScopeKey::from("session:test"), resource_bindings: vec![],
         }
     }
@@ -406,106 +396,99 @@ mod tests {
         Wave3CreationHost::new(CreationService::new(Arc::new(SqliteCreationTaskRepository::new(pool.clone()))), invoke, pool, Arc::from(owner))
     }
 
-    async fn configured_media_models(pool: &nomifun_db::SqlitePool) -> std::collections::BTreeMap<&'static str, Vec<CreationModelSelection>> {
+    async fn configured_media_models(pool: &nomifun_db::SqlitePool) -> std::collections::BTreeMap<&'static str, (String, String)> {
         use nomifun_db::{CreateProviderParams, IProviderRepository, NewProviderModel, NewProviderModelCapability};
         let providers = nomifun_db::SqliteProviderRepository::new(pool.clone());
         let encrypted = nomifun_common::encrypt_string(r#"{"api_keys":["host-test-key"]}"#, &[0; 32]).unwrap();
         let mut result = std::collections::BTreeMap::new();
-        for (capability, task, protocol, platform) in [
-            ("creation.image", "image_generation", "openai.images", "openai"),
-            ("creation.image_edit", "image_edit", "openai.images", "openai"),
-            ("creation.video", "video_generation", "openai.videos", "openai"),
-            ("creation.music", "music_generation", "minimax.music", "minimax"),
-            ("creation.audio", "speech_synthesis", "openai.audio_speech", "openai"),
+        for (action, task, protocol, platform) in [
+            ("creation.media/image", "image_generation", "openai.images", "openai"),
+            ("creation.media/image_edit", "image_edit", "openai.images", "openai"),
+            ("creation.media/video", "video_generation", "openai.videos", "openai"),
+            ("creation.media/music", "music_generation", "minimax.music", "minimax"),
+            ("creation.media/audio", "speech_synthesis", "openai.audio_speech", "openai"),
         ] {
-            let mut candidates = Vec::new();
-            for suffix in ["first", "second"] {
-                let selection = CreationModelSelection { provider_id: generate_id(), model: format!("{task}-{suffix}") };
-                providers.create(CreateProviderParams { provider_id: Some(&selection.provider_id), platform, name: &selection.model,
+            let provider_id = generate_id();
+            let model = format!("{task}-route");
+            providers.create(CreateProviderParams { provider_id: Some(&provider_id), platform, name: &model,
                     base_url: "https://example.com/v1", auth_scheme: "bearer", credentials_encrypted: &encrypted,
                     enabled: true, bedrock_config: None, sort_order: None,
-                }, &NewProviderModel { model: &selection.model, enabled: true, sort_order: 0, description: None,
+                }, &NewProviderModel { model: &model, enabled: true, sort_order: 0, description: None,
                     capabilities: &[NewProviderModelCapability { task, protocol, traits: "[]", connection_role: "default", provider_params: "{}", ..Default::default() }],
                 }, &[]).await.unwrap();
-                candidates.push(selection);
-            }
-            result.insert(capability, candidates);
+            result.insert(action, (provider_id, model));
         }
         result
     }
 
     #[tokio::test]
-    async fn exact_model_selection_supports_every_media_task_without_an_ambiguous_default() {
+    async fn product_actions_resolve_their_configured_task_routes_without_provider_input() {
         let owner = UserId::new(); let database = init_database_memory_with_owner(owner.clone()).await.unwrap();
         let host = host(database.pool().clone(), owner.as_str());
         let models = configured_media_models(database.pool()).await;
-        for (capability, candidates) in &models {
-            let task = capability_model_task(capability).unwrap();
-            assert!(host.resolve_model(task, None).await.is_err(), "multiple {capability} models must not select by order");
-            let selected = &candidates[1];
+        for (action, (provider_id, model)) in &models {
+            let task = creation_model_task(action).unwrap();
             let mut input = json!({"target":{"kind":"canvas_node", "canvas_id":generate_id(), "node_id":generate_id()},
-                "model_selection":{"provider_id":selected.provider_id,"model":selected.model}});
-            if *capability == "creation.audio" { input["text"] = json!("speak"); } else { input["prompt"] = json!("create"); }
-            if *capability == "creation.image_edit" { input["inputs"] = json!([{"asset_id":generate_id(),"role":"reference"}]); }
-            let operation = nomifun_agent_domain_wave3::operation_from_input(&CapabilityId::from(*capability), StrictJsonValue(input)).unwrap();
-            let resolved = host.resolve_model(task, operation.model_selection()).await.unwrap();
-            assert_eq!(resolved.provider_id, selected.provider_id);
-            assert_eq!(resolved.model, selected.model);
+                "prompt":"create"});
+            if *action == "creation.media/audio" { input.as_object_mut().unwrap().remove("prompt"); input["text"] = json!("speak"); }
+            if *action == "creation.media/image_edit" { input["inputs"] = json!([{"asset_id":generate_id(),"role":"reference"}]); }
+            nomifun_agent_domain_wave3::operation_from_input(
+                &CapabilityId::from(nomifun_agent_domain_wave3::CREATION_MEDIA_MODULE_ID),
+                &ActionId::from(*action),
+                StrictJsonValue(input),
+            ).unwrap();
+            let resolved = host.resolve_model(task).await.unwrap();
+            assert_eq!(resolved.provider_id, *provider_id);
+            assert_eq!(resolved.model, *model);
             assert_eq!(resolved.task, task);
-            let wrong = &models[if *capability == "creation.image" { "creation.video" } else { "creation.image" }][0];
-            assert!(host.resolve_model(task, Some(wrong)).await.is_err(), "a model for another task cannot be promoted to {capability}");
-            sqlx::query("UPDATE provider_models SET enabled=0 WHERE provider_id=? AND model=?")
-                .bind(&selected.provider_id).bind(&selected.model).execute(database.pool()).await.unwrap();
-            assert!(host.resolve_model(task, Some(selected)).await.is_err(), "disabled models cannot be invoked through explicit selection");
         }
     }
 
     #[tokio::test]
-    async fn kernel_model_arguments_persist_exact_selection_and_replay_cannot_switch_models() {
+    async fn routed_model_is_frozen_on_the_task_and_replay_survives_route_retirement() {
         let owner = UserId::new(); let database = init_database_memory_with_owner(owner.clone()).await.unwrap();
         let host = host(database.pool().clone(), owner.as_str());
         let models = configured_media_models(database.pool()).await;
-        let selected = &models["creation.image"][1];
+        let (provider_id, model) = &models["creation.media/image"];
         let canvas_id = generate_id(); let node_id = generate_id();
         let document = json!({"schema":"nomifun.creative-studio/v1", "projectId":canvas_id});
         sqlx::query("INSERT INTO creative_studio_projects(project_id,title,document_json,created_at,updated_at) VALUES (?,'Model selection',?,0,0)")
             .bind(&canvas_id).bind(document.to_string()).execute(database.pool()).await.unwrap();
         let input = json!({"target":{"kind":"canvas_node","canvas_id":canvas_id,"node_id":node_id},
-            "prompt":"a cat", "count":1, "model_selection":{"provider_id":selected.provider_id,"model":selected.model}});
-        let request = Wave3HostRequest { context: context(owner.as_str()), operation: nomifun_agent_domain_wave3::operation_from_input(&"creation.image".into(), StrictJsonValue(input.clone())).unwrap() };
+            "prompt":"a cat", "count":1});
+        let request = Wave3HostRequest { context: context(owner.as_str()), operation: nomifun_agent_domain_wave3::operation_from_input(
+            &nomifun_agent_domain_wave3::CREATION_MEDIA_MODULE_ID.into(),
+            &"creation.media/image".into(),
+            StrictJsonValue(input.clone()),
+        ).unwrap() };
         let receipt = host.invoke(request.clone()).await.unwrap();
         let task_id = receipt.0["creation_task_id"].as_str().unwrap();
         let task = host.creation.get_task(task_id).await.unwrap();
-        assert_eq!(task.provider_id, selected.provider_id); assert_eq!(task.model, selected.model);
+        assert_eq!(task.provider_id, *provider_id); assert_eq!(task.model, *model);
         assert!(task.params["_nomifun_provider_config_revision"].is_number());
         assert!(task.params.get("model_selection").is_none(), "selection is not a provider request parameter");
-        sqlx::query("UPDATE providers SET enabled=0 WHERE provider_id=?").bind(&selected.provider_id).execute(database.pool()).await.unwrap();
+        sqlx::query("UPDATE providers SET enabled=0 WHERE provider_id=?").bind(provider_id).execute(database.pool()).await.unwrap();
         assert_eq!(host.invoke(request.clone()).await.unwrap().0["creation_task_id"], task_id, "accepted replays retain their frozen model after retirement");
-        let mut changed = input;
-        changed["model_selection"] = json!({"provider_id":models["creation.image"][0].provider_id, "model":models["creation.image"][0].model});
-        let changed = Wave3HostRequest { context: request.context, operation: nomifun_agent_domain_wave3::operation_from_input(&"creation.image".into(), StrictJsonValue(changed)).unwrap() };
-        assert!(host.invoke(changed).await.unwrap_err().message.contains("replay model differs"));
+        assert!(task.params.get("provider_id").is_none());
+        assert!(task.params.get("model").is_none());
     }
 
     #[test]
     fn media_mapping_preserves_quality_resolution_count_and_music_semantics() {
         let target = CreationTaskTarget::ConversationTurn { conversation_id: generate_id(), message_id: generate_id() };
         let (_, image) = map_creation_operation(Wave3CapabilityOperation::CreationImageEdit(CreationImageEditRequest {
-            model_selection: None,
             target: target.clone(), prompt: "edit".into(), inputs: vec![], count: 2, size: None, quality: Some("high".into()),
         })).unwrap();
         assert_eq!(image.params["quality"], "high");
         let (_, video) = map_creation_operation(Wave3CapabilityOperation::CreationVideo(CreationVideoRequest {
-            model_selection: None,
             target: target.clone(), prompt: "video".into(), count: 1, size: Some("16:9".into()), resolution: Some("1080p".into()), seconds: Some(8), first_frame_asset_id: None, last_frame_asset_id: None,
         })).unwrap();
         assert_eq!(video.params["resolution"], "1080p"); assert_eq!(video.params["count"], 1);
         let (_, music) = map_creation_operation(Wave3CapabilityOperation::CreationMusic(CreationMusicRequest {
-            model_selection: None,
             target, prompt: "music".into(), lyrics: None, instrumental: true, format: Some("mp3".into()),
         })).unwrap();
         assert_eq!(music.capability, "music"); assert_eq!(music.params["instrumental"], true);
-        assert_ne!(capability_model_task("creation.music").unwrap(), capability_model_task("creation.audio").unwrap());
+        assert_ne!(creation_model_task("creation.media/music").unwrap(), creation_model_task("creation.media/audio").unwrap());
     }
 
     #[tokio::test]
@@ -513,7 +496,6 @@ mod tests {
         let owner = UserId::new(); let database = init_database_memory_with_owner(owner.clone()).await.unwrap();
         let host = host(database.pool().clone(), owner.as_str());
         let request = Wave3HostRequest { context: context(owner.as_str()), operation: Wave3CapabilityOperation::CreationImage(CreationImageRequest {
-            model_selection: None,
             target: CreationTaskTarget::CanvasNode { canvas_id: generate_id(), node_id: generate_id() }, prompt: "image".into(), count: 1, size: None, quality: None,
         }) };
         let error = host.invoke(request.clone()).await.unwrap_err(); assert_eq!(error.code, "GENERATION_MODEL_UNAVAILABLE");

@@ -398,7 +398,12 @@ impl nomifun_customer_service::CustomerServiceAgentPolicyResolver
         )
         .await?;
         Ok(nomifun_customer_service::CustomerServiceAgentPolicy {
-            capabilities: resolved.snapshot.enabled_capabilities.into_iter().collect(),
+            capabilities: resolved
+                .snapshot
+                .enabled_capability_actions
+                .into_values()
+                .flatten()
+                .collect(),
             instructions: resolved.snapshot.instructions,
         })
     }
@@ -859,6 +864,120 @@ impl NomiCorePluginToolSessionProvider {
         let compiled = Arc::new(compiled);
         Ok(Some(PreparedNomiPluginSession { owner, session_id, principal, compiled, response, constraints, resource_image_model }))
     }
+
+    async fn compile_command_request(
+        &self,
+        request: NomiPluginToolSessionRequest,
+    ) -> Result<Arc<CompiledSnapshot>, AppError> {
+        let common_owner = nomifun_common::UserId::parse(request.owner_id)
+            .map_err(|error| AppError::Forbidden(format!(
+                "invalid Nomi Plugin Tool session owner: {error}"
+            )))?;
+        let session_id = parse_agent_session_id(&request.conversation_id)
+            .map_err(|error| AppError::Conflict(error.message))?;
+        let principal = PrincipalRef {
+            principal_kind: "user".to_owned(),
+            principal_id: common_owner.as_ref().to_owned(),
+        };
+        let observation = self
+            .session_owner
+            .canonical()
+            .get(&principal, &session_id)
+            .await?;
+        let binding_dto = agent_binding_dto(&observation.session.agent_binding)
+            .map_err(|error| AppError::Conflict(error.message))?;
+        let owner = AuthenticatedOwner(UserId::from(common_owner.as_ref().to_owned()));
+        let (binding, revision, snapshot) = self
+            .control_plane
+            .saved_binding_artifacts(&owner.0, &binding_dto)
+            .await
+            .map_err(control_plane_error_to_app)?;
+        if binding != observation.session.agent_binding {
+            return Err(AppError::Conflict(
+                "Skill discovery binding differs from the canonical AgentSession binding"
+                    .to_owned(),
+            ));
+        }
+        let materialized = self
+            .kernel
+            .snapshot()
+            .map_err(|error| AppError::Conflict(error.to_string()))?;
+        super::nomi_core_tool_discovery::validate_snapshot(&materialized, &snapshot)
+            .map_err(control_plane_error_to_app)?;
+        let compiled = compile_nomi_plugin_snapshot(
+            &self.kernel,
+            &self.compiler_environment,
+            binding,
+            revision,
+            snapshot,
+            &principal,
+        )?;
+        // Cold discovery is description-only, but it must authenticate the
+        // same owner-scoped typed resources as execution. It may skip Context
+        // activation and resource acquisition; it may not skip Binding
+        // validation merely because no runtime has been started.
+        super::nomi_core_mcp_catalog::validate_resources(
+            &compiled,
+            &materialized,
+            &principal,
+        )?;
+        Ok(Arc::new(compiled))
+    }
+
+    async fn command_items(
+        &self,
+        compiled: Arc<CompiledSnapshot>,
+        extra: Option<&Value>,
+    ) -> Result<Vec<nomifun_api_types::SlashCommandItem>, AppError> {
+        let registry = self
+            .kernel
+            .snapshot()
+            .map_err(|error| AppError::Conflict(error.to_string()))?;
+        let skills = super::engine_skills::compile_commands(
+            &compiled,
+            &registry,
+            Arc::clone(&self.skill_artifacts),
+        )
+        .await?;
+        if let Some(extra) = extra {
+            skills.validate_extra(extra)?;
+        }
+        let commands = nomifun_ai_agent::plugin_skills::verified_skill_commands(
+            Arc::clone(&self.kernel),
+            compiled,
+            None,
+            skills.commands,
+        )
+        .map_err(|error| {
+            AppError::Conflict(format!("Nomi Skill discovery failed: {error}"))
+        })?;
+        let mut items = commands
+            .iter()
+            .filter(|skill| skill.metadata().user_invocable)
+            .map(|skill| nomifun_api_types::SlashCommandItem {
+                command: skill.command_name(),
+                description: skill.metadata().description.clone(),
+            })
+            .collect::<Vec<_>>();
+        items.sort_by(|a, b| a.command.cmp(&b.command));
+        Ok(items)
+    }
+
+    /// Canonical AgentSession discovery never accepts legacy Conversation
+    /// `extra`. Its saved Binding and typed resources are the complete input.
+    pub(crate) async fn discover_canonical_skill_commands(
+        &self,
+        owner: &AuthenticatedOwner,
+        session_id: &AgentSessionId,
+    ) -> Result<Vec<nomifun_api_types::SlashCommandItem>, AppError> {
+        let compiled = self
+            .compile_command_request(NomiPluginToolSessionRequest {
+                owner_id: owner.0.as_ref().to_owned(),
+                conversation_id: session_id.as_ref().to_owned(),
+            })
+            .await?;
+        self.command_items(compiled, None).await
+    }
 }
 
 struct PreparedNomiPluginSession {
@@ -880,19 +999,11 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
         let Some(prepared) = self.compile_request(request).await? else {
             return Ok(Vec::new());
         };
-        if prepared.constraints.restricted() { return Ok(Vec::new()); }
-        let registry = self.kernel.snapshot().map_err(|error| AppError::Conflict(error.to_string()))?;
-        let skills = super::engine_skills::compile_commands(&prepared.compiled, &registry, self.skill_artifacts.clone()).await?;
-        skills.validate_extra(&prepared.response.extra)?;
-        let commands = nomifun_ai_agent::plugin_skills::verified_skill_commands(
-            self.kernel.clone(), prepared.compiled, None, skills.commands,
-        ).map_err(|error| AppError::Conflict(format!("Nomi Skill discovery failed: {error}")))?;
-        let mut items = commands.iter().filter(|skill| skill.metadata().user_invocable)
-            .map(|skill| nomifun_api_types::SlashCommandItem {
-                command: skill.command_name(), description: skill.metadata().description.clone(),
-            }).collect::<Vec<_>>();
-        items.sort_by(|a, b| a.command.cmp(&b.command));
-        Ok(items)
+        if prepared.constraints.restricted() {
+            return Ok(Vec::new());
+        }
+        self.command_items(prepared.compiled, Some(&prepared.response.extra))
+            .await
     }
 
     async fn resolve(
@@ -2917,6 +3028,7 @@ mod session_boundary_tests {
             "/api/agent-sessions/{agent_session_id}/turns/cancel",
             "/api/agent-sessions/{agent_session_id}/events",
             "/api/agent-sessions/{agent_session_id}/messages",
+            "/api/agent-sessions/{agent_session_id}/slash-commands",
             "/api/agent-sessions/{agent_session_id}/forks",
         ] {
             assert!(source.contains(route), "missing {route}");
@@ -3146,6 +3258,7 @@ const NOMI_CORE_REMOTE_CANCEL_COMMAND_TIMEOUT: Duration = Duration::from_secs(30
 #[derive(Clone)]
 pub(crate) struct NomiCoreAgentApiState {
     product_agent_resolver: Arc<NomiCoreProductAgentResolver>,
+    skill_discovery: Arc<NomiCorePluginToolSessionProvider>,
     pub(crate) session_owner: Arc<NomiCoreSessionOwner>,
     pub(crate) control_plane: Arc<AgentControlPlane>,
     pub(crate) remote_repository: Arc<dyn IRemoteBindingRepository>,
@@ -3166,9 +3279,11 @@ impl NomiCoreAgentApiState {
         mcp_server_repository: Arc<dyn nomifun_db::IMcpServerRepository>,
         wave4_owners: Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
         product_agent_resolver: Arc<NomiCoreProductAgentResolver>,
+        skill_discovery: Arc<NomiCorePluginToolSessionProvider>,
     ) -> Self {
         Self {
             product_agent_resolver,
+            skill_discovery,
             session_owner,
             control_plane,
             remote_repository,
@@ -3375,6 +3490,10 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
         .route(
             "/api/agent-sessions/{agent_session_id}/capabilities",
             get(get_nomi_core_agent_session_capabilities),
+        )
+        .route(
+            "/api/agent-sessions/{agent_session_id}/slash-commands",
+            get(get_nomi_core_agent_session_slash_commands),
         )
         .route(
             "/api/agent-sessions/{agent_session_id}/preset",
@@ -5562,6 +5681,19 @@ async fn get_nomi_core_agent_session_capabilities(
             state_source: "canonical_agent_store",
         },
     )))
+}
+
+async fn get_nomi_core_agent_session_slash_commands(
+    State(state): State<NomiCoreAgentApiState>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path(agent_session_id): Path<String>,
+) -> Result<Json<ApiResponse<Vec<nomifun_api_types::SlashCommandItem>>>, NomiCoreApiError> {
+    let session_id = parse_agent_session_id(&agent_session_id)?;
+    let commands = state
+        .skill_discovery
+        .discover_canonical_skill_commands(&owner, &session_id)
+        .await?;
+    Ok(Json(ApiResponse::ok(commands)))
 }
 
 async fn switch_nomi_core_agent_session_preset(

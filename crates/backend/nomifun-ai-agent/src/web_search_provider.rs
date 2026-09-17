@@ -1,69 +1,179 @@
-//! Authorized SearchProvider-backed implementation of `web.search`.
+//! Authorized SearchProvider-backed implementation of
+//! `web.research/search`.
 //!
 //! The production owner is OpenAI Responses built-in `web_search`, using the
 //! exact search model and credential resolved on each invocation. It is
 //! independent of the conversation model. No browser
 //! scraping, consumer RSS endpoint, or model-supplied credential is accepted.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use nomi_protocol::events::ToolCategory;
-use nomi_tools::Tool;
-use nomi_types::tool::{JsonSchema, ToolResult};
 use reqwest::{Client, Url};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-pub const WEB_SEARCH_TOOL_NAME: &str = "web_search";
-pub const CITATION_RENDER_TOOL_NAME: &str = "citation_render";
+pub const WEB_RESEARCH_MODULE_ID: &str = "web.research";
+pub const WEB_RESEARCH_SEARCH_ACTION_ID: &str = "web.research/search";
+pub const WEB_RESEARCH_FETCH_ACTION_ID: &str = "web.research/fetch";
+pub const WEB_RESEARCH_ACTION_IDS: [&str; 2] = [
+    WEB_RESEARCH_SEARCH_ACTION_ID,
+    WEB_RESEARCH_FETCH_ACTION_ID,
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebResearchAction {
+    Search,
+    Fetch,
+}
+
+impl WebResearchAction {
+    pub const fn action_id(self) -> &'static str {
+        match self {
+            Self::Search => WEB_RESEARCH_SEARCH_ACTION_ID,
+            Self::Fetch => WEB_RESEARCH_FETCH_ACTION_ID,
+        }
+    }
+
+    pub fn from_action_id(action_id: &str) -> Option<Self> {
+        match action_id {
+            WEB_RESEARCH_SEARCH_ACTION_ID => Some(Self::Search),
+            WEB_RESEARCH_FETCH_ACTION_ID => Some(Self::Fetch),
+            _ => None,
+        }
+    }
+}
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_QUERY_CHARS: usize = 2048;
-const MAX_RESULTS: usize = 20;
-const DEFAULT_RESULTS: usize = 5;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SESSION_CITATIONS: usize = 64;
 
-#[derive(Clone, Debug)]
-struct CitationRecord {
-    title: String,
-    url: String,
+pub struct SessionCitationStore {
+    scope_id: String,
+    inner: Mutex<(BTreeSet<String>, VecDeque<String>)>,
 }
 
-#[derive(Default)]
-pub struct SessionCitationStore {
-    inner: Mutex<(BTreeMap<String, CitationRecord>, VecDeque<String>)>,
+impl Default for SessionCitationStore {
+    fn default() -> Self {
+        Self {
+            scope_id: uuid::Uuid::now_v7().to_string(),
+            inner: Mutex::new((BTreeSet::new(), VecDeque::new())),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DerivedWebCitation {
+    pub citation_id: String,
+    pub markdown: String,
 }
 
 impl SessionCitationStore {
-    pub(crate) fn insert(&self, id: String, title: String, url: String) {
+    pub fn for_scope(scope_id: impl Into<String>) -> Result<Self, String> {
+        let scope_id = scope_id.into();
+        if scope_id.trim().is_empty() || scope_id.len() > 512 {
+            return Err("web citation scope must contain 1 to 512 bytes".to_owned());
+        }
+        Ok(Self {
+            scope_id,
+            inner: Mutex::new((BTreeSet::new(), VecDeque::new())),
+        })
+    }
+
+    pub(crate) fn record(
+        &self,
+        provider_id: &str,
+        source_id: &str,
+        title: &str,
+        url: &str,
+    ) -> DerivedWebCitation {
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(
+                format!(
+                    "{}\0{provider_id}\0{source_id}\0{url}",
+                    self.scope_id
+                )
+                .as_bytes()
+            )
+        );
+        let citation_id = format!("web-search-{}", &digest[..16]);
         let mut inner = self
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !inner.0.contains_key(&id) {
-            inner.1.push_back(id.clone());
+        if !inner.0.contains(&citation_id) {
+            inner.1.push_back(citation_id.clone());
         }
-        inner.0.insert(id, CitationRecord { title, url });
+        inner.0.insert(citation_id.clone());
         while inner.0.len() > MAX_SESSION_CITATIONS {
             if let Some(oldest) = inner.1.pop_front() {
                 inner.0.remove(&oldest);
             }
         }
+        drop(inner);
+        DerivedWebCitation {
+            citation_id,
+            markdown: markdown_citation(title, url),
+        }
     }
 
-    fn get(&self, id: &str) -> Option<CitationRecord> {
+    #[cfg(test)]
+    fn contains(&self, id: &str) -> bool {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .0
-            .get(id)
-            .cloned()
+            .contains(id)
     }
+
+}
+
+fn markdown_citation(title: &str, url: &str) -> String {
+    let title = title
+        .replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]");
+    let destination = url.replace('<', "%3C").replace('>', "%3E");
+    format!("[{title}](<{destination}>)")
+}
+
+pub async fn search_with_derived_citations(
+    provider: &dyn SearchProvider,
+    citations: &SessionCitationStore,
+    query: &str,
+    limit: usize,
+) -> Result<Value, SearchProviderError> {
+    let response = provider.search(query, limit).await?;
+    let provider_id = provider.provider_id();
+    let results = response
+        .results
+        .into_iter()
+        .map(|result| {
+            let citation = citations.record(
+                provider_id,
+                &result.source_id,
+                &result.title,
+                &result.url,
+            );
+            json!({
+                "citation_id": citation.citation_id,
+                "citation_markdown": citation.markdown,
+                "source_id": result.source_id,
+                "title": result.title,
+                "url": result.url,
+                "snippet": result.snippet,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "query": query,
+        "answer": response.answer,
+        "results": results,
+    }))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -122,13 +232,13 @@ pub trait SearchProvider: Send + Sync {
 /// Resolve only configured, enabled search models at tool execution time.
 /// Constructing a General Agent never needs a search account, and discovery
 /// never upgrades a Chat-only model or contacts an unconfigured public service.
-pub(crate) struct CatalogSearchProvider {
+pub struct CatalogSearchProvider {
     invoke: Arc<nomifun_model_invoke::ModelInvokeService>,
     conversation_model: nomifun_model_invoke::ModelRef,
 }
 
 impl CatalogSearchProvider {
-    pub(crate) fn new(invoke: Arc<nomifun_model_invoke::ModelInvokeService>, conversation_model: nomifun_model_invoke::ModelRef) -> Self {
+    pub fn new(invoke: Arc<nomifun_model_invoke::ModelInvokeService>, conversation_model: nomifun_model_invoke::ModelRef) -> Self {
         Self { invoke, conversation_model }
     }
 
@@ -380,264 +490,10 @@ fn parse_responses_sources(
     Ok(SearchProviderResponse { answer, results })
 }
 
-#[derive(Clone)]
-pub struct WebSearchTool {
-    provider: Arc<dyn SearchProvider>,
-    citations: Arc<SessionCitationStore>,
-}
-
-impl WebSearchTool {
-    pub fn new(provider: Arc<dyn SearchProvider>) -> Self {
-        Self {
-            provider,
-            citations: Arc::new(SessionCitationStore::default()),
-        }
-    }
-
-    pub fn with_citations(
-        provider: Arc<dyn SearchProvider>,
-        citations: Arc<SessionCitationStore>,
-    ) -> Self {
-        Self {
-            provider,
-            citations,
-        }
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SearchInput {
-    query: String,
-    #[serde(default = "default_result_count")]
-    limit: usize,
-}
-
-const fn default_result_count() -> usize {
-    DEFAULT_RESULTS
-}
-
-#[async_trait]
-impl Tool for WebSearchTool {
-    fn name(&self) -> &str {
-        WEB_SEARCH_TOOL_NAME
-    }
-    fn description(&self) -> &str {
-        "Search with a configured search provider and return bounded, citable URL sources. Search is independent of the conversation model. If no search provider is configured, report that limitation; never fabricate search results."
-    }
-    fn input_schema(&self) -> JsonSchema {
-        json!({
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "minLength": 1, "maxLength": MAX_QUERY_CHARS},
-                "limit": {"type": "integer", "minimum": 1, "maximum": MAX_RESULTS}
-            },
-            "required": ["query"],
-            "additionalProperties": false
-        })
-    }
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
-        true
-    }
-    async fn execute(&self, input: Value) -> ToolResult {
-        let input = match serde_json::from_value::<SearchInput>(input) {
-            Ok(input) => input,
-            Err(_) => return search_error("INVALID_PAYLOAD", "query and optional limit are required"),
-        };
-        let query = input.query.trim();
-        if query.is_empty()
-            || input.query.chars().count() > MAX_QUERY_CHARS
-            || !(1..=MAX_RESULTS).contains(&input.limit)
-        {
-            return search_error(
-                "INVALID_PAYLOAD",
-                "query must contain 1 to 2048 characters and limit must be from 1 to 20",
-            );
-        }
-        match self.provider.search(query, input.limit).await {
-            Ok(response) => {
-                let provider_id = self.provider.provider_id();
-                let results = response
-                    .results
-                    .into_iter()
-                    .map(|result| {
-                        let digest = format!(
-                            "{:x}",
-                            Sha256::digest(
-                                format!("{provider_id}\0{}\0{}", result.source_id, result.url)
-                                    .as_bytes()
-                            )
-                        );
-                        let citation_id = format!("web-search-{}", &digest[..16]);
-                        self.citations.insert(
-                            citation_id.clone(),
-                            result.title.clone(),
-                            result.url.clone(),
-                        );
-                        json!({
-                            "citation_id": citation_id,
-                            "source_id": result.source_id,
-                            "title": result.title,
-                            "url": result.url,
-                            "snippet": result.snippet,
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                ToolResult::text(
-                    json!({
-                        "query": query,
-                        "provider": provider_id,
-                        "answer": response.answer,
-                        "results": results
-                    })
-                    .to_string(),
-                )
-            }
-            Err(error) => {
-                let internal_message =
-                    nomi_redact::redact_secrets(&error.internal_message);
-                tracing::warn!(
-                    provider = self.provider.provider_id(),
-                    error_kind = ?error.kind,
-                    error = %internal_message,
-                    "authorized web search provider failed"
-                );
-                let (code, message) = match error.kind {
-                    SearchProviderErrorKind::NotConfigured => (
-                        "WEB_SEARCH_NOT_CONFIGURED",
-                        "Web search has no available configured provider. Configure an enabled OpenAI Responses model with the web_search trait in Model Management. Chat and media generation remain available.",
-                    ),
-                    SearchProviderErrorKind::AmbiguousModel => (
-                        "WEB_SEARCH_MODEL_AMBIGUOUS",
-                        "Several independent web-search models are configured. Enable exactly one search model or select a search-capable conversation model; no model was selected automatically.",
-                    ),
-                    SearchProviderErrorKind::Timeout => (
-                        "WEB_SEARCH_TIMEOUT",
-                        "The authorized web search timed out.",
-                    ),
-                    SearchProviderErrorKind::ResponseTooLarge => (
-                        "WEB_SEARCH_RESPONSE_TOO_LARGE",
-                        "The authorized web search response exceeded its safe size limit.",
-                    ),
-                    SearchProviderErrorKind::InvalidResponse
-                    | SearchProviderErrorKind::NoSources => (
-                        "WEB_SEARCH_RESPONSE_INVALID",
-                        "The authorized web search returned an unusable response.",
-                    ),
-                    SearchProviderErrorKind::Transport
-                    | SearchProviderErrorKind::UpstreamRejected => (
-                        "WEB_SEARCH_FAILED",
-                        "The authorized web search provider could not complete the request.",
-                    ),
-                };
-                search_error(code, message)
-            }
-        }
-    }
-    fn category(&self) -> ToolCategory {
-        ToolCategory::Info
-    }
-    fn execution_timeout(&self, _input: &Value) -> Duration {
-        SEARCH_TIMEOUT + Duration::from_secs(5)
-    }
-    fn max_result_size(&self) -> usize {
-        128 * 1024
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CitationRenderInput {
-    citation_ids: Vec<String>,
-}
-
-pub struct CitationRenderTool {
-    citations: Arc<SessionCitationStore>,
-}
-
-impl CitationRenderTool {
-    pub fn new(citations: Arc<SessionCitationStore>) -> Self {
-        Self { citations }
-    }
-}
-
-#[async_trait]
-impl Tool for CitationRenderTool {
-    fn name(&self) -> &str {
-        CITATION_RENDER_TOOL_NAME
-    }
-
-    fn description(&self) -> &str {
-        "Render exact Markdown citations previously returned by this AgentSession's web_search or nomi_local_websearch tool. Unknown or expired citation IDs are rejected."
-    }
-
-    fn input_schema(&self) -> JsonSchema {
-        json!({
-            "type": "object",
-            "properties": {
-                "citation_ids": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 20,
-                    "items": {"type": "string", "minLength": 1, "maxLength": 64}
-                }
-            },
-            "required": ["citation_ids"],
-            "additionalProperties": false
-        })
-    }
-
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
-        true
-    }
-
-    async fn execute(&self, input: Value) -> ToolResult {
-        let input = match serde_json::from_value::<CitationRenderInput>(input) {
-            Ok(input) if (1..=20).contains(&input.citation_ids.len()) => input,
-            _ => return search_error("INVALID_PAYLOAD", "citation_ids must contain 1 to 20 IDs"),
-        };
-        let mut seen = BTreeSet::new();
-        let mut rendered = Vec::with_capacity(input.citation_ids.len());
-        for id in input.citation_ids {
-            let id = id.trim();
-            if id.is_empty() || !seen.insert(id.to_owned()) {
-                return search_error("INVALID_PAYLOAD", "citation IDs must be non-empty and unique");
-            }
-            let Some(record) = self.citations.get(id) else {
-                return search_error(
-                    "CITATION_NOT_FOUND",
-                    "citation ID is unknown or expired for this AgentSession",
-                );
-            };
-            rendered.push(json!({
-                "citation_id": id,
-                "title": record.title,
-                "url": record.url,
-                "markdown": format!("[{}]({})", record.title, record.url),
-            }));
-        }
-        ToolResult::text(json!({"citations": rendered}).to_string())
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::Info
-    }
-}
-
-fn search_error(code: &str, message: &str) -> ToolResult {
-    ToolResult {
-        content: json!({"code": code, "message": message}).to_string(),
-        is_error: true,
-        images: Vec::new(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{body_json, header, method, path}};
-
-    struct EmptyProvider;
 
     #[test]
     fn search_model_selection_is_independent_exact_and_never_order_based() {
@@ -671,10 +527,8 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(), AdapterRegistry::new(default_adapters()),
         ));
         let search = Arc::new(CatalogSearchProvider::new(invoke, conversation.clone()));
-        let tool = WebSearchTool::new(search.clone());
-        let unavailable = tool.execute(json!({"query":"test"})).await;
-        assert!(unavailable.is_error);
-        assert_eq!(serde_json::from_str::<Value>(&unavailable.content).unwrap()["code"], "WEB_SEARCH_NOT_CONFIGURED");
+        let unavailable = search.search("test", 5).await.unwrap_err();
+        assert_eq!(unavailable.kind, SearchProviderErrorKind::NotConfigured);
         assert!(server.received_requests().await.unwrap().is_empty());
         let search_id = nomifun_common::ProviderId::new().to_string();
         providers.create(CreateProviderParams {
@@ -694,61 +548,6 @@ mod tests {
         assert_eq!(search.conversation_model.provider_id, conversation.provider_id);
         assert_eq!(search.conversation_model.model, "chat-only");
         assert!(server.received_requests().await.unwrap().is_empty(), "model discovery must stay local");
-    }
-
-    struct LeakyFailureProvider;
-
-    #[async_trait]
-    impl SearchProvider for EmptyProvider {
-        fn provider_id(&self) -> &str {
-            "test.empty"
-        }
-
-        async fn search(
-            &self,
-            _query: &str,
-            _count: usize,
-        ) -> Result<SearchProviderResponse, SearchProviderError> {
-            Err(SearchProviderError::new(
-                SearchProviderErrorKind::Transport,
-                "not invoked",
-            ))
-        }
-    }
-
-    #[async_trait]
-    impl SearchProvider for LeakyFailureProvider {
-        fn provider_id(&self) -> &str {
-            "test.private.search"
-        }
-
-        async fn search(
-            &self,
-            _query: &str,
-            _count: usize,
-        ) -> Result<SearchProviderResponse, SearchProviderError> {
-            Err(SearchProviderError::new(
-                SearchProviderErrorKind::Transport,
-                "POST https://private-search.internal/v1/responses?token=secret-token failed; api_key=sk-012345678901234567890123",
-            ))
-        }
-    }
-
-    #[test]
-    fn tool_input_matches_the_canonical_wave1_contract() {
-        let tool = WebSearchTool::new(Arc::new(EmptyProvider));
-        assert_eq!(
-            tool.input_schema(),
-            json!({
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "query": {"type": "string", "minLength": 1, "maxLength": 2048},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 20}
-                },
-                "required": ["query"]
-            })
-        );
     }
 
     #[tokio::test]
@@ -777,25 +576,19 @@ mod tests {
             "secret-token".into(),
             "gpt-search".into(),
         ).unwrap();
-        let citations = Arc::new(SessionCitationStore::default());
-        let result = WebSearchTool::with_citations(Arc::new(provider), Arc::clone(&citations))
-            .execute(json!({"query":"rust agents","limit":2})).await;
-        assert!(!result.is_error, "{}", result.content);
-        let body: Value = serde_json::from_str(&result.content).unwrap();
-        assert_eq!(body["provider"], "openai.responses.web_search");
+        let citations = SessionCitationStore::default();
+        let body = search_with_derived_citations(&provider, &citations, "rust agents", 2)
+            .await
+            .unwrap();
         assert_eq!(body["answer"], "Grounded answer");
         assert_eq!(body["results"][0]["source_id"], "src-1");
         assert_eq!(body["results"][0]["snippet"], "");
         let citation_id = body["results"][0]["citation_id"].as_str().unwrap();
-        let rendered = CitationRenderTool::new(citations)
-            .execute(json!({"citation_ids":[citation_id]}))
-            .await;
-        assert!(!rendered.is_error, "{}", rendered.content);
-        let rendered: Value = serde_json::from_str(&rendered.content).unwrap();
         assert_eq!(
-            rendered["citations"][0]["markdown"],
-            "[Rust Agents](https://example.com/rust)"
+            body["results"][0]["citation_markdown"],
+            "[Rust Agents](<https://example.com/rust>)"
         );
+        assert!(citations.contains(citation_id));
     }
 
     #[tokio::test]
@@ -812,41 +605,36 @@ mod tests {
         assert!(error.internal_message.contains("2 MiB"));
     }
 
-    #[tokio::test]
-    async fn provider_transport_diagnostics_never_enter_model_visible_json() {
-        let result = WebSearchTool::new(Arc::new(LeakyFailureProvider))
-            .execute(json!({"query": "private endpoint", "limit": 1}))
-            .await;
-        assert!(result.is_error);
-        let payload: Value = serde_json::from_str(&result.content).unwrap();
-        assert_eq!(payload["code"], "WEB_SEARCH_FAILED");
-        assert_eq!(
-            payload["message"],
-            "The authorized web search provider could not complete the request."
+    #[test]
+    fn citations_are_result_derived_escaped_and_session_scoped() {
+        let first = SessionCitationStore::default();
+        let second = SessionCitationStore::default();
+        let one = first.record(
+            "provider",
+            "source",
+            "Title [unsafe]",
+            "https://example.com/a_(b)",
         );
-        for forbidden in [
-            "private-search.internal",
-            "secret-token",
-            "sk-012345678901234567890123",
-            "api_key",
-        ] {
-            assert!(
-                !result.content.contains(forbidden),
-                "model-visible search error leaked {forbidden}: {}",
-                result.content
-            );
-        }
+        let two = second.record(
+            "provider",
+            "source",
+            "Title [unsafe]",
+            "https://example.com/a_(b)",
+        );
+        assert_ne!(one.citation_id, two.citation_id);
+        assert_eq!(
+            one.markdown,
+            "[Title \\[unsafe\\]](<https://example.com/a_(b)>)"
+        );
+        assert!(first.contains(&one.citation_id));
+        assert!(!second.contains(&one.citation_id));
     }
 
-    #[tokio::test]
-    async fn citation_renderer_rejects_ids_not_returned_in_this_session() {
-        let result = CitationRenderTool::new(Arc::new(SessionCitationStore::default()))
-            .execute(json!({"citation_ids":["web-search-forged"]}))
-            .await;
-        assert!(result.is_error);
+    #[test]
+    fn web_research_authoring_surface_has_no_citation_or_provider_action() {
         assert_eq!(
-            serde_json::from_str::<Value>(&result.content).unwrap()["code"],
-            "CITATION_NOT_FOUND"
+            WEB_RESEARCH_ACTION_IDS,
+            ["web.research/search", "web.research/fetch"]
         );
     }
 

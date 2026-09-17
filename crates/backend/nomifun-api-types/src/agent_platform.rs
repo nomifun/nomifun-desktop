@@ -73,6 +73,11 @@ pub struct AgentResolvedSnapshot {
     pub excluded_auto_skills: Vec<String>,
     #[serde(default)]
     pub enabled_capabilities: Vec<String>,
+    /// Exact Action grants for each enabled Capability Module. The projection
+    /// is copied from the immutable ResolvedSnapshot; an absent or empty set
+    /// grants no Action authority.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub enabled_capability_actions: BTreeMap<String, BTreeSet<String>>,
     #[serde(default)]
     pub required_resource_kinds: BTreeSet<String>,
     #[serde(default)]

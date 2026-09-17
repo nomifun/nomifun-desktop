@@ -933,6 +933,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
           targetKind='creative_studio_canvas'
           targetId={props.canvasId}
           defaultTemplateKey='creative-studio.default'
+          compact
           model={model ? { id: model.providerId, use_model: model.model } : undefined}
           disabled={isRunning || isApplyingProposal}
           conversationId={activeConversationId}

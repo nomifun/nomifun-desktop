@@ -6506,6 +6506,13 @@
         "additionalProperties": false,
         "description": "Host-owned turn facts; no image bytes, credentials, arbitrary host context\nor authority fields cross this boundary.",
         "properties": {
+          "cs_dialogue_id": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "image_media_types": {
             "items": {
               "type": "string"

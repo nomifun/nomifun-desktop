@@ -1,4 +1,4 @@
-//! Durable, Session-scoped exactly-once fence for Wave 1 Companion memory.
+//! Durable, Session-scoped exactly-once fence for `companion.memory/write`.
 //!
 //! Companion memory is stored by `CompanionService`, outside the Nomi Session
 //! receipt transaction. Consequently a process can stop after the memory
@@ -13,13 +13,17 @@ use nomifun_agent_contracts::{StrictJsonValue, digest_payload};
 use nomifun_agent_domain_wave1::Wave1HostPortError;
 use sqlx::{Row, SqlitePool};
 
+use super::agent_memory_authority::{
+    COMPANION_MEMORY_MODULE_ID, COMPANION_MEMORY_WRITE_ACTION_ID,
+};
+
 pub(super) const IDEMPOTENCY_CONFLICT: &str =
-    "WAVE1_MEMORY_IDEMPOTENCY_CONFLICT";
+    "COMPANION_MEMORY_IDEMPOTENCY_CONFLICT";
 pub(super) const ACTION_IN_PROGRESS: &str =
-    "WAVE1_MEMORY_ACTION_IN_PROGRESS";
+    "COMPANION_MEMORY_ACTION_IN_PROGRESS";
 pub(super) const ACTION_OUTCOME_UNKNOWN: &str =
-    "WAVE1_MEMORY_ACTION_OUTCOME_UNKNOWN";
-const LEDGER_FAILED: &str = "WAVE1_MEMORY_IDEMPOTENCY_LEDGER_FAILED";
+    "COMPANION_MEMORY_ACTION_OUTCOME_UNKNOWN";
+const LEDGER_FAILED: &str = "COMPANION_MEMORY_IDEMPOTENCY_LEDGER_FAILED";
 
 // Reclaim only old receipts whose Session no longer exists. The grace period
 // protects a newly-created Session from a transient visibility/order gap, and
@@ -31,33 +35,33 @@ const ORPHAN_SWEEP_BATCH: i64 = 128;
 struct ReceiptKey {
     owner_user_id: String,
     agent_session_id: String,
-    capability_id: String,
+    module_id: String,
     idempotency_key: String,
 }
 
 #[derive(Debug)]
 pub(super) enum ReceiptAdmission {
-    Execute(MemoryActionGuard),
+    Execute(CompanionMemoryWriteGuard),
     Return(Result<StrictJsonValue, Wave1HostPortError>),
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct MemoryActionReceiptContext<'a> {
+pub(super) struct CompanionMemoryWriteReceiptContext<'a> {
     pub owner_user_id: &'a str,
     pub agent_session_id: &'a str,
-    pub capability_id: &'a str,
+    pub module_id: &'a str,
     pub action_id: &'a str,
     pub idempotency_key: &'a str,
     pub target_companion_id: &'a str,
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct Wave1MemoryActionLedger {
+pub(super) struct CompanionMemoryWriteLedger {
     pool: SqlitePool,
     process_lease_id: Arc<str>,
 }
 
-impl Wave1MemoryActionLedger {
+impl CompanionMemoryWriteLedger {
     pub(super) fn new(pool: SqlitePool) -> Self {
         Self {
             pool,
@@ -75,10 +79,29 @@ impl Wave1MemoryActionLedger {
 
     pub(super) async fn admit(
         &self,
-        context: MemoryActionReceiptContext<'_>,
+        context: CompanionMemoryWriteReceiptContext<'_>,
         request: &StrictJsonValue,
     ) -> Result<ReceiptAdmission, Wave1HostPortError> {
+        if context.module_id != COMPANION_MEMORY_MODULE_ID
+            || context.action_id != COMPANION_MEMORY_WRITE_ACTION_ID
+        {
+            return Err(Wave1HostPortError::new(
+                "INVALID_PAYLOAD",
+                "the Companion memory receipt owner accepts only companion.memory/write",
+            ));
+        }
+        if context.owner_user_id.trim().is_empty()
+            || context.agent_session_id.trim().is_empty()
+            || context.idempotency_key.trim().is_empty()
+            || context.target_companion_id.trim().is_empty()
+        {
+            return Err(Wave1HostPortError::new(
+                "INVALID_PAYLOAD",
+                "Companion memory receipt identities must not be blank",
+            ));
+        }
         let request_envelope = StrictJsonValue(serde_json::json!({
+            "module_id": context.module_id,
             "action_id": context.action_id,
             "target": {
                 "resource_kind": "companion_memory",
@@ -91,7 +114,7 @@ impl Wave1MemoryActionLedger {
         let key = ReceiptKey {
             owner_user_id: context.owner_user_id.to_owned(),
             agent_session_id: context.agent_session_id.to_owned(),
-            capability_id: context.capability_id.to_owned(),
+            module_id: context.module_id.to_owned(),
             idempotency_key: context.idempotency_key.to_owned(),
         };
         let now = nomifun_common::now_ms();
@@ -103,7 +126,7 @@ impl Wave1MemoryActionLedger {
         )
         .bind(&key.owner_user_id)
         .bind(&key.agent_session_id)
-        .bind(&key.capability_id)
+        .bind(&key.module_id)
         .bind(&key.idempotency_key)
         .bind(request_digest.as_ref())
         .bind(self.process_lease_id.as_ref())
@@ -117,9 +140,9 @@ impl Wave1MemoryActionLedger {
             // Cleanup is deliberately best-effort and cannot affect this new
             // receipt because it is neither old nor orphan-qualified.
             if let Err(error) = self.reclaim_old_orphans(now).await {
-                tracing::warn!(error = %error, "Wave 1 memory receipt cleanup failed");
+                tracing::warn!(error = %error, "Companion memory receipt cleanup failed");
             }
-            return Ok(ReceiptAdmission::Execute(MemoryActionGuard {
+            return Ok(ReceiptAdmission::Execute(CompanionMemoryWriteGuard {
                 ledger: self.clone(),
                 key,
                 armed: true,
@@ -135,7 +158,7 @@ impl Wave1MemoryActionLedger {
         )
         .bind(&key.owner_user_id)
         .bind(&key.agent_session_id)
-        .bind(&key.capability_id)
+        .bind(&key.module_id)
         .bind(&key.idempotency_key)
         .fetch_optional(&self.pool)
         .await
@@ -147,7 +170,7 @@ impl Wave1MemoryActionLedger {
         if existing_digest != request_digest.as_ref() {
             return Err(Wave1HostPortError::new(
                 IDEMPOTENCY_CONFLICT,
-                "the Wave 1 memory idempotency key was reused with a different request or Companion target",
+                "the Companion memory idempotency key was reused with a different request or target",
             ));
         }
 
@@ -173,7 +196,7 @@ impl Wave1MemoryActionLedger {
                 if lease == self.process_lease_id.as_ref() {
                     Err(Wave1HostPortError::new(
                         ACTION_IN_PROGRESS,
-                        "the original Wave 1 memory action is still in flight",
+                        "the original Companion memory write is still in flight",
                     ))
                 } else {
                     sqlx::query(
@@ -187,7 +210,7 @@ impl Wave1MemoryActionLedger {
                     .bind(now)
                     .bind(&key.owner_user_id)
                     .bind(&key.agent_session_id)
-                    .bind(&key.capability_id)
+                    .bind(&key.module_id)
                     .bind(&key.idempotency_key)
                     .bind(lease)
                     .execute(&self.pool)
@@ -207,7 +230,7 @@ impl Wave1MemoryActionLedger {
 
     pub(super) async fn settle(
         &self,
-        guard: &mut MemoryActionGuard,
+        guard: &mut CompanionMemoryWriteGuard,
         result: &Result<StrictJsonValue, Wave1HostPortError>,
     ) -> Result<(), Wave1HostPortError> {
         let now = nomifun_common::now_ms();
@@ -218,7 +241,7 @@ impl Wave1MemoryActionLedger {
                     Err(error) => {
                         tracing::error!(
                             error = %error,
-                            "Wave 1 memory result could not be encoded for its receipt"
+                            "Companion memory result could not be encoded for its receipt"
                         );
                         let _ = self.mark_outcome_unknown(&guard.key).await;
                         return Err(outcome_unknown());
@@ -236,7 +259,7 @@ impl Wave1MemoryActionLedger {
                 .bind(now)
                 .bind(&guard.key.owner_user_id)
                 .bind(&guard.key.agent_session_id)
-                .bind(&guard.key.capability_id)
+                .bind(&guard.key.module_id)
                 .bind(&guard.key.idempotency_key)
                 .bind(self.process_lease_id.as_ref())
                 .execute(&self.pool)
@@ -254,7 +277,7 @@ impl Wave1MemoryActionLedger {
                 .bind(now)
                 .bind(&guard.key.owner_user_id)
                 .bind(&guard.key.agent_session_id)
-                .bind(&guard.key.capability_id)
+                .bind(&guard.key.module_id)
                 .bind(&guard.key.idempotency_key)
                 .bind(self.process_lease_id.as_ref())
                 .execute(&self.pool)
@@ -274,7 +297,7 @@ impl Wave1MemoryActionLedger {
                 .bind(now)
                 .bind(&guard.key.owner_user_id)
                 .bind(&guard.key.agent_session_id)
-                .bind(&guard.key.capability_id)
+                .bind(&guard.key.module_id)
                 .bind(&guard.key.idempotency_key)
                 .bind(self.process_lease_id.as_ref())
                 .execute(&self.pool)
@@ -286,7 +309,7 @@ impl Wave1MemoryActionLedger {
             Err(error) => {
                 tracing::error!(
                     error = %error,
-                    "Wave 1 memory action finished but its receipt could not be settled"
+                    "Companion memory write finished but its receipt could not be settled"
                 );
                 let _ = self.mark_outcome_unknown(&guard.key).await;
                 return Err(outcome_unknown());
@@ -314,7 +337,7 @@ impl Wave1MemoryActionLedger {
         .bind(nomifun_common::now_ms())
         .bind(&key.owner_user_id)
         .bind(&key.agent_session_id)
-        .bind(&key.capability_id)
+        .bind(&key.module_id)
         .bind(&key.idempotency_key)
         .bind(self.process_lease_id.as_ref())
         .execute(&self.pool)
@@ -350,13 +373,13 @@ impl Wave1MemoryActionLedger {
 }
 
 #[derive(Debug)]
-pub(super) struct MemoryActionGuard {
-    ledger: Wave1MemoryActionLedger,
+pub(super) struct CompanionMemoryWriteGuard {
+    ledger: CompanionMemoryWriteLedger,
     key: ReceiptKey,
     armed: bool,
 }
 
-impl Drop for MemoryActionGuard {
+impl Drop for CompanionMemoryWriteGuard {
     fn drop(&mut self) {
         if !self.armed {
             return;
@@ -368,7 +391,7 @@ impl Drop for MemoryActionGuard {
                 if let Err(error) = ledger.mark_outcome_unknown(&key).await {
                     tracing::error!(
                         error = %error,
-                        "cancelled Wave 1 memory receipt could not be fenced"
+                        "cancelled Companion memory receipt could not be fenced"
                     );
                 }
             });
@@ -379,23 +402,19 @@ impl Drop for MemoryActionGuard {
 fn outcome_unknown() -> Wave1HostPortError {
     Wave1HostPortError::new(
         ACTION_OUTCOME_UNKNOWN,
-        "the original Wave 1 memory action may have committed; automatic replay is forbidden",
+        "the original Companion memory write may have committed; automatic replay is forbidden",
     )
 }
 
 fn ledger_error(error: impl std::fmt::Display) -> Wave1HostPortError {
     Wave1HostPortError::new(
         LEDGER_FAILED,
-        format!("Wave 1 memory idempotency ledger failed: {error}"),
+        format!("Companion memory idempotency ledger failed: {error}"),
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use nomifun_agent_domain_wave1::{
-        MEMORY_COMPANION_WRITE, MEMORY_COMPANION_WRITE_ACTION,
-    };
-
     use super::*;
 
     const OWNER_ID: &str = "0199a000-0000-7000-8000-000000000000";
@@ -407,21 +426,52 @@ mod tests {
     const DIGEST: &str =
         "0000000000000000000000000000000000000000000000000000000000000000";
 
-    fn context(idempotency_key: &str) -> MemoryActionReceiptContext<'_> {
-        MemoryActionReceiptContext {
+    fn context(idempotency_key: &str) -> CompanionMemoryWriteReceiptContext<'_> {
+        CompanionMemoryWriteReceiptContext {
             owner_user_id: OWNER_ID,
             agent_session_id: SESSION_ID,
-            capability_id: MEMORY_COMPANION_WRITE,
-            action_id: MEMORY_COMPANION_WRITE_ACTION,
+            module_id: COMPANION_MEMORY_MODULE_ID,
+            action_id: COMPANION_MEMORY_WRITE_ACTION_ID,
             idempotency_key,
             target_companion_id: "companion-a",
         }
     }
 
     #[tokio::test]
+    async fn ledger_accepts_only_the_target_companion_memory_write_action() {
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let ledger = CompanionMemoryWriteLedger::with_lease(
+            database.pool().clone(),
+            LEASE_A,
+        );
+        let request = StrictJsonValue(serde_json::json!({"content":"alpha"}));
+        for invalid in [
+            CompanionMemoryWriteReceiptContext {
+                module_id: "not.companion.memory",
+                ..context("old-module")
+            },
+            CompanionMemoryWriteReceiptContext {
+                action_id: "companion.memory/internal-maintenance",
+                ..context("retired-action")
+            },
+        ] {
+            let error = ledger.admit(invalid, &request).await.unwrap_err();
+            assert_eq!(error.code.as_ref(), "INVALID_PAYLOAD");
+        }
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM nomi_wave1_memory_action_receipts",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(count, 0, "rejected identities must not create a receipt");
+        database.close().await;
+    }
+
+    #[tokio::test]
     async fn completed_receipt_replays_after_restart_and_changed_request_conflicts() {
         let database = nomifun_db::init_database_memory().await.unwrap();
-        let first = Wave1MemoryActionLedger::with_lease(
+        let first = CompanionMemoryWriteLedger::with_lease(
             database.pool().clone(),
             LEASE_A,
         );
@@ -437,7 +487,7 @@ mod tests {
         let output = StrictJsonValue(serde_json::json!({"memory_id":"m1"}));
         first.settle(&mut guard, &Ok(output.clone())).await.unwrap();
 
-        let restarted = Wave1MemoryActionLedger::with_lease(
+        let restarted = CompanionMemoryWriteLedger::with_lease(
             database.pool().clone(),
             LEASE_B,
         );
@@ -463,7 +513,7 @@ mod tests {
         assert_eq!(
             restarted
                 .admit(
-                    MemoryActionReceiptContext {
+                    CompanionMemoryWriteReceiptContext {
                         target_companion_id: "companion-b",
                         ..context
                     },
@@ -483,7 +533,7 @@ mod tests {
         let database = nomifun_db::init_database_memory().await.unwrap();
         let context = context("crash-key");
         let request = StrictJsonValue(serde_json::json!({"content":"alpha"}));
-        let crashed = Wave1MemoryActionLedger::with_lease(
+        let crashed = CompanionMemoryWriteLedger::with_lease(
             database.pool().clone(),
             LEASE_C,
         );
@@ -496,7 +546,7 @@ mod tests {
         };
         std::mem::forget(guard);
 
-        let restarted = Wave1MemoryActionLedger::with_lease(
+        let restarted = CompanionMemoryWriteLedger::with_lease(
             database.pool().clone(),
             LEASE_D,
         );
@@ -522,7 +572,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_marks_unknown_and_concurrent_same_key_is_fenced() {
         let database = nomifun_db::init_database_memory().await.unwrap();
-        let ledger = Wave1MemoryActionLedger::with_lease(
+        let ledger = CompanionMemoryWriteLedger::with_lease(
             database.pool().clone(),
             LEASE_A,
         );
@@ -587,7 +637,7 @@ mod tests {
                  request_digest, state, output_json, created_at, updated_at
              )
              SELECT ?, '0199a000-0000-7000-8001-' || printf('%012x', value),
-                    'memory.companion.write', printf('old-%d', value),
+                    'companion.memory', printf('old-%d', value),
                     ?, 'completed', '{}', ?, ?
              FROM seq",
         )
@@ -603,7 +653,7 @@ mod tests {
                  owner_user_id, agent_session_id, capability_id, idempotency_key,
                  request_digest, state, output_json, created_at, updated_at
              ) VALUES (?, '0199a000-0000-7000-8002-000000000000',
-                       'memory.companion.write', 'recent', ?,
+                       'companion.memory', 'recent', ?,
                        'completed', '{}', ?, ?)",
         )
         .bind(OWNER_ID)
@@ -613,7 +663,7 @@ mod tests {
         .execute(database.pool())
         .await
         .unwrap();
-        let ledger = Wave1MemoryActionLedger::with_lease(
+        let ledger = CompanionMemoryWriteLedger::with_lease(
             database.pool().clone(),
             LEASE_B,
         );

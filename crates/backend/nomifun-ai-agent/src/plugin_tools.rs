@@ -1269,8 +1269,6 @@ impl NomiHostedSessionBindings {
 #[derive(Clone)]
 pub struct NomiPluginToolSession {
     #[cfg(feature = "browser-use")]
-    local_search_binding: Option<crate::local_web_search::LocalSearchBinding>,
-    #[cfg(feature = "browser-use")]
     system_browser_binding: Option<nomifun_browser_platform::system_browser::SystemBrowserBinding>,
     browser_provider: Option<nomifun_agent_contracts::ExactRoleProviderRef>,
     execution_constraints: nomifun_api_types::ExecutionConstraints,
@@ -1328,8 +1326,6 @@ impl fmt::Debug for NomiPluginToolSession {
 
 impl NomiPluginToolSession {
     #[cfg(feature = "browser-use")]
-    pub fn local_search_binding(&self)->Option<&crate::local_web_search::LocalSearchBinding> {self.local_search_binding.as_ref()}
-    #[cfg(feature = "browser-use")]
     pub fn system_browser_binding(&self) -> Option<&nomifun_browser_platform::system_browser::SystemBrowserBinding> { self.system_browser_binding.as_ref() }
     pub fn browser_provider(&self) -> Result<Option<&nomifun_agent_contracts::ExactRoleProviderRef>, NomiPluginToolError> {
         if let Some(state) = &self.capability_state {
@@ -1348,15 +1344,9 @@ impl NomiPluginToolSession {
         }
         Ok(self.browser_provider.as_ref())
     }
-    pub(crate) fn media_creation_catalog_tools(&self) -> Vec<(String, String)> {
-        self.actions.iter().filter(|action| is_builtin_creation(&action.identity)
-            && action.capability_id().as_ref() != "creation.text")
-            .map(|action| (action.capability_id().as_ref().to_owned(), action.provider_name.clone())).collect()
-    }
-
     pub(crate) fn media_creation_provider_names(&self) -> std::collections::HashSet<String> {
         self.actions.iter().filter(|action| is_builtin_creation(&action.identity)
-            && action.capability_id().as_ref() != "creation.text")
+            && action.action_id().as_ref() != "creation.media/text")
             .map(|action| action.provider_name.clone()).collect()
     }
 
@@ -1452,8 +1442,6 @@ impl NomiPluginToolSession {
         }
         Ok(Self {
             resolved_snapshot_ref,
-            #[cfg(feature = "browser-use")]
-            local_search_binding: None,
             #[cfg(feature = "browser-use")]
             system_browser_binding: None,
             browser_provider: None,
@@ -2463,15 +2451,6 @@ impl KernelNomiPluginToolSession {
             .get(&nomifun_agent_contracts::ExecutionRoleId::from("system.browser_use"))
             .map(|lock| lock.provider.clone());
         #[cfg(feature = "browser-use")]
-        if let Some(resolved)=compiled.content().enabled_capabilities.iter().find(|capability|capability.capability.id.as_ref()==crate::local_web_search::TOOL_NAME) {
-            let live=registry.capability(&resolved.capability.id).ok_or_else(||NomiPluginToolError::Contract("Local search capability disappeared".into()))?;
-            if resolved.schema_digest!=live.schema_digest || resolved.contribution_lock!=live.contribution_lock || resolved.target_artifact_digest!=live.target_artifact_digest {
-                return Err(NomiPluginToolError::Contract("Local search binding differs from the frozen Snapshot".into()));
-            }
-            session.local_search_binding=crate::local_web_search::binding_from_manifest(&live.manifest)
-                .map_err(|error|NomiPluginToolError::Contract(error.to_string()))?;
-        }
-        #[cfg(feature = "browser-use")]
         if let Some(resolved) = compiled.content().enabled_capabilities.iter().find(|capability| capability.capability.id.as_ref() == nomifun_browser_platform::system_browser::TOOL_NAME) {
             let live = registry.capability(&resolved.capability.id).ok_or_else(|| NomiPluginToolError::Contract("System browser capability disappeared".into()))?;
             if resolved.schema_digest != live.schema_digest || resolved.contribution_lock != live.contribution_lock || resolved.target_artifact_digest != live.target_artifact_digest {
@@ -3149,7 +3128,8 @@ impl ContextContributor for NomiCreationTurnContext {
 
 fn is_builtin_creation(identity: &NomiPluginToolActionIdentity) -> bool {
     identity.resolved_capability.contribution_lock.source_kind == ContributionSourceKind::PlatformBuiltin
-        && matches!(identity.resolved_capability.capability.id.as_ref(), "creation.text" | "creation.image" | "creation.image_edit" | "creation.video" | "creation.music" | "creation.audio")
+        && identity.resolved_capability.capability.id.as_ref() == "creation.media"
+        && identity.action.action_id.as_ref().starts_with("creation.media/")
 }
 
 fn conversation_creation_schema(mut schema: Value) -> Value {
@@ -3880,29 +3860,29 @@ mod dynamic_error_tests {
                     snapshot_digest: digest.clone().into(),
                 },
                 resolved_capability: serde_json::from_value(serde_json::json!({
-                    "capability": {"id": "creation.image", "version": "1.0.0"},
+                    "capability": {"id": "creation.media", "version": "1.0.0"},
                     "source_package": {"id": "nomifun.creation", "version": "1.0.0"},
-                    "contribution_id": "capability:creation.image",
+                    "contribution_id": "module:creation.media",
                     "contribution_lock": {
                         "source_kind": ContributionSourceKind::PlatformBuiltin,
-                        "source_identity": "platform-builtin:creation.image",
-                        "contribution_id": "capability:creation.image",
+                        "source_identity": "platform-builtin:creation.media",
+                        "contribution_id": "module:creation.media",
                         "contract_digest": digest,
                     },
                     "resolved_source": {
                         "source_kind": PluginSourceKind::ManagedLocal,
-                        "source_identity": "platform-builtin:creation.image",
+                        "source_identity": "platform-builtin:creation.media",
                         "source_digest": digest,
                     },
                     "target_artifact_digest": digest,
                     "schema_digest": digest,
-                    "dependency_path": ["creation.image"],
+                    "dependency_path": ["creation.media"],
                     "required_runtime_features": [],
                 })).unwrap(),
                 action: CapabilityActionDescriptor {
-                    action_id: "creation.image.invoke".into(),
-                    input_schema: format!("schema://creation.image/input@1#{digest}").into(),
-                    output_schema: format!("schema://creation.image/output@1#{digest}").into(),
+                    action_id: "creation.media/image".into(),
+                    input_schema: format!("schema://creation.media/image/input@1#{digest}").into(),
+                    output_schema: format!("schema://creation.media/image/output@1#{digest}").into(),
                     effect_class: EffectClass::Pure,
                     presentation: ToolPresentationKind::FunctionTool,
                 },

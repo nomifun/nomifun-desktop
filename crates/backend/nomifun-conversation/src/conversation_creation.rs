@@ -29,13 +29,13 @@ pub struct ConversationCreationPage {
     pub items: Vec<CreativeCreationTask>,
 }
 
-fn required_capability(operation: &str) -> Result<&'static str, AppError> {
+fn required_creation_action(operation: &str) -> Result<&'static str, AppError> {
     match operation {
-        "t2i" => Ok("creation.image"),
-        "i2i" | "inpaint" => Ok("creation.image_edit"),
-        "t2v" | "i2v" => Ok("creation.video"),
-        "music" => Ok("creation.music"),
-        "tts" => Ok("creation.audio"),
+        "t2i" => Ok("creation.media/image"),
+        "i2i" | "inpaint" => Ok("creation.media/image_edit"),
+        "t2v" | "i2v" => Ok("creation.media/video"),
+        "music" => Ok("creation.media/music"),
+        "tts" => Ok("creation.media/audio"),
         _ => Err(AppError::BadRequest(
             "Unsupported conversation generation task".into(),
         )),
@@ -250,7 +250,7 @@ impl ConversationService {
         self.ensure_public_mutation_allowed(user_id, id).await?;
         nomifun_common::CreationTaskId::parse(key)
             .map_err(|e| AppError::BadRequest(e.to_string()))?;
-        let required = required_capability(&request.capability)?;
+        let required_action = required_creation_action(&request.capability)?;
         let engine = self.creation_engine()?;
         let original_request =
             serde_json::to_value(&request).map_err(|e| AppError::BadRequest(e.to_string()))?;
@@ -287,12 +287,12 @@ impl ConversationService {
             .await?;
         if !resolution
             .snapshot
-            .enabled_capabilities
-            .iter()
-            .any(|cap| cap == required)
+            .enabled_capability_actions
+            .get("creation.media")
+            .is_some_and(|actions| actions.contains(required_action))
         {
             return Err(AppError::Forbidden(format!(
-                "This Agent does not enable {required}"
+                "This Agent does not enable {required_action}"
             )));
         }
         let params = request.params.as_object_mut().ok_or_else(|| {
@@ -540,8 +540,8 @@ impl ConversationService {
             || !self.execution_authority(user_id).controls_host()
             || row.r#type != AgentType::Nomi.serde_name()
             || row.agent_snapshot.is_none()
-            || !(row_agent_snapshot_has_capability(row, "creation.image_edit")?
-                || row_agent_snapshot_has_capability(row, "creation.video")?)
+            || !(row_agent_snapshot_has_action(row, "creation.media", "creation.media/image_edit")?
+                || row_agent_snapshot_has_action(row, "creation.media", "creation.media/video")?)
         {
             return Ok(());
         }

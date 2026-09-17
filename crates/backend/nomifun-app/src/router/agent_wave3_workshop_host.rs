@@ -297,7 +297,7 @@ mod tests {
         resource_kind: &str,
         resource_id: &str,
         operations: &[&str],
-        capability_id: &str,
+        action_id: &str,
         operation: Wave3CapabilityOperation,
     ) -> Wave3HostRequest {
         Wave3HostRequest {
@@ -315,8 +315,10 @@ mod tests {
                     snapshot_digest: DigestHex::from("b".repeat(64)),
                 },
                 registry_generation: 1,
-                capability_id: CapabilityId::from(capability_id),
-                action_id: ActionId::from(format!("{capability_id}.invoke")),
+                capability_id: CapabilityId::from(
+                    nomifun_agent_domain_wave3::CREATIVE_WORKSHOP_MODULE_ID,
+                ),
+                action_id: ActionId::from(action_id),
                 state_scope_key: ScopeKey::from("session:workshop-wave3"),
                 resource_bindings: vec![TypedResourceBinding {
                     binding_id: ResourceBindingId::from("workshop-binding"),
@@ -355,7 +357,7 @@ mod tests {
                 CANVAS_RESOURCE_KIND,
                 &canvas.canvas_id,
                 &["read", "write"],
-                "workshop.canvas.read",
+                "creative.workshop/canvas.read",
                 Wave3CapabilityOperation::WorkshopCanvasRead {
                     input: StrictJsonValue(json!({})),
                 },
@@ -370,7 +372,7 @@ mod tests {
                 CANVAS_RESOURCE_KIND,
                 &canvas.canvas_id,
                 &["read", "write"],
-                "workshop.canvas.edit",
+                "creative.workshop/canvas.edit",
                 Wave3CapabilityOperation::WorkshopCanvasEdit {
                     input: StrictJsonValue(json!({
                         "expected_revision": canvas.revision,
@@ -400,7 +402,7 @@ mod tests {
                 ASSET_LIBRARY_RESOURCE_KIND,
                 CREATIVE_ASSET_LIBRARY_RESOURCE_ID,
                 &["read", "write"],
-                "workshop.asset.write",
+                "creative.workshop/asset.write",
                 Wave3CapabilityOperation::WorkshopAssetWrite {
                     input: StrictJsonValue(json!({
                         "asset_id": asset.asset_id,
@@ -427,7 +429,7 @@ mod tests {
                 ASSET_LIBRARY_RESOURCE_KIND,
                 "another-library",
                 &["read"],
-                "workshop.asset.read",
+                "creative.workshop/asset.read",
                 Wave3CapabilityOperation::WorkshopAssetRead {
                     input: StrictJsonValue(json!({"asset_id": asset.asset_id})),
                 },
@@ -445,7 +447,7 @@ mod tests {
             CANVAS_RESOURCE_KIND,
             "0190f5fe-7c00-7000-8000-000000000010",
             &["write"],
-            "workshop.template.run",
+            "creative.workshop/template.run",
             Wave3CapabilityOperation::WorkshopTemplateRun {
                 input: StrictJsonValue(json!({})),
             },

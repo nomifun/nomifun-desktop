@@ -15,8 +15,9 @@ use std::sync::Arc;
 
 use nomifun_agent_contracts::{
     ActionId, AgentSessionId, ArtifactEnvelope, CancellationDescriptor, CanonicalSchemaRef,
-    CapabilityActionDescriptor, CapabilityConsumer, CapabilityContributions, CapabilityId,
-    CapabilityKind, CapabilityManifest, CorrelationId, EffectClass,
+    CapabilityActionDescriptor, CapabilityAuthoringPolicy, CapabilityConsumer,
+    CapabilityContributions, CapabilityId, CapabilityKind, CapabilityManifest, CorrelationId,
+    EffectClass,
     HostPortBindingDescriptor, HostPortId, HostPortRef, IdempotencyKey,
     InProcessEntrypointMetadata, LocalizedMetadata,
     OperationId, PackageContributions, PackageId, PackageManifest, PackageRef,
@@ -26,7 +27,7 @@ use nomifun_agent_contracts::{
     PluginSourceKind, PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod,
     PrincipalRef, ResolvedSnapshotRef, ResourceBindingId, ResourceId, ResourceKind, ScopeKey,
     SkillId, StrictJsonValue, ToolPresentationKind, TypedResourceBinding, TypedResourceBindings,
-    ValidatedPluginConfig, VersionString, capability_surface_declarations,
+    ValidatedPluginConfig, VersionString, capability_module_surface_declarations,
     digest_payload,
 };
 use nomifun_agent_kernel::{
@@ -44,6 +45,39 @@ pub const WORKSHOP_PACKAGE_ID: &str = "nomifun.workshop";
 pub const OFFICE_PACKAGE_ID: &str = "nomifun.office";
 pub const PLUGIN_PACKAGE_ID: &str = "nomifun.plugin";
 
+pub const CREATION_MEDIA_MODULE_ID: &str = "creation.media";
+pub const CREATIVE_WORKSHOP_MODULE_ID: &str = "creative.workshop";
+pub const OFFICE_MODULE_ID: &str = "office";
+pub const PLUGIN_DEVELOPMENT_MODULE_ID: &str = "plugin.development";
+
+pub const CREATION_MEDIA_ACTION_IDS: &[&str] = &[
+    "creation.media/text",
+    "creation.media/image",
+    "creation.media/image_edit",
+    "creation.media/video",
+    "creation.media/audio",
+    "creation.media/music",
+];
+pub const CREATIVE_WORKSHOP_ACTION_IDS: &[&str] = &[
+    "creative.workshop/canvas.read",
+    "creative.workshop/canvas.edit",
+    "creative.workshop/asset.read",
+    "creative.workshop/asset.write",
+    "creative.workshop/template.run",
+];
+pub const OFFICE_ACTION_IDS: &[&str] = &[
+    "office/preview",
+    "office/document.edit",
+    "office/sheet.edit",
+    "office/slides.edit",
+];
+pub const PLUGIN_DEVELOPMENT_ACTION_IDS: &[&str] = &[
+    "plugin.development/read",
+    "plugin.development/edit",
+    "plugin.development/publish",
+    "plugin.development/serve",
+];
+
 pub const CANVAS_RESOURCE_KIND: &str = "canvas";
 pub const ASSET_LIBRARY_RESOURCE_KIND: &str = "asset_library";
 pub const CREATIVE_ASSET_LIBRARY_RESOURCE_ID: &str = "creative-studio-assets";
@@ -56,30 +90,37 @@ pub const TARGET_PACKAGE_IDS: [&str; 4] = [
     PLUGIN_PACKAGE_ID,
 ];
 
-pub const TARGET_CAPABILITY_IDS: [&str; 19] = [
-    "creation.text",
-    "creation.image",
-    "creation.image_edit",
-    "creation.video",
-    "creation.audio",
-    "creation.music",
-    "workshop.canvas.read",
-    "workshop.canvas.edit",
-    "workshop.asset.read",
-    "workshop.asset.write",
-    "workshop.template.run",
-    "office.preview",
-    "office.document.edit",
-    "office.sheet.edit",
-    "office.slides.edit",
-    "plugin.read",
-    "plugin.edit",
-    "plugin.publish",
-    "plugin.serve",
+pub const TARGET_CAPABILITY_IDS: [&str; 4] = [
+    CREATION_MEDIA_MODULE_ID,
+    CREATIVE_WORKSHOP_MODULE_ID,
+    OFFICE_MODULE_ID,
+    PLUGIN_DEVELOPMENT_MODULE_ID,
+];
+
+pub const TARGET_ACTION_IDS: [&str; 19] = [
+    "creation.media/text",
+    "creation.media/image",
+    "creation.media/image_edit",
+    "creation.media/video",
+    "creation.media/audio",
+    "creation.media/music",
+    "creative.workshop/canvas.read",
+    "creative.workshop/canvas.edit",
+    "creative.workshop/asset.read",
+    "creative.workshop/asset.write",
+    "creative.workshop/template.run",
+    "office/preview",
+    "office/document.edit",
+    "office/sheet.edit",
+    "office/slides.edit",
+    "plugin.development/read",
+    "plugin.development/edit",
+    "plugin.development/publish",
+    "plugin.development/serve",
 ];
 
 pub const PACKAGE_IDS: [&str; 4] = TARGET_PACKAGE_IDS;
-pub const ALL_CAPABILITY_IDS: [&str; 19] = TARGET_CAPABILITY_IDS;
+pub const ALL_CAPABILITY_IDS: [&str; 4] = TARGET_CAPABILITY_IDS;
 pub const AGENT_SURFACES: &[&str] = &["desktop", "headless", "remote", "web"];
 
 /// The single host port for action-bearing Wave 3 capabilities.
@@ -157,20 +198,10 @@ pub struct CreationTextRequest {
     pub max_tokens: u32,
 }
 
-/// Exact local catalog selection. It selects a model, never a connection,
-/// credential, endpoint or a capability outside the frozen Kernel authority.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CreationModelSelection {
-    pub provider_id: String,
-    pub model: String,
-}
-
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CreationImageRequest {
     pub target: CreationTaskTarget,
-    pub model_selection: Option<CreationModelSelection>,
     pub prompt: String,
     #[serde(default = "default_creation_count")]
     pub count: u32,
@@ -182,7 +213,6 @@ pub struct CreationImageRequest {
 #[serde(deny_unknown_fields)]
 pub struct CreationImageEditRequest {
     pub target: CreationTaskTarget,
-    pub model_selection: Option<CreationModelSelection>,
     pub prompt: String,
     pub inputs: Vec<CreationImageInput>,
     #[serde(default = "default_creation_count")]
@@ -195,7 +225,6 @@ pub struct CreationImageEditRequest {
 #[serde(deny_unknown_fields)]
 pub struct CreationVideoRequest {
     pub target: CreationTaskTarget,
-    pub model_selection: Option<CreationModelSelection>,
     pub prompt: String,
     pub seconds: Option<u32>,
     pub size: Option<String>,
@@ -210,7 +239,6 @@ pub struct CreationVideoRequest {
 #[serde(deny_unknown_fields)]
 pub struct CreationAudioRequest {
     pub target: CreationTaskTarget,
-    pub model_selection: Option<CreationModelSelection>,
     pub text: String,
     pub voice: Option<String>,
     pub format: Option<String>,
@@ -220,7 +248,6 @@ pub struct CreationAudioRequest {
 #[serde(deny_unknown_fields)]
 pub struct CreationMusicRequest {
     pub target: CreationTaskTarget,
-    pub model_selection: Option<CreationModelSelection>,
     pub prompt: String,
     pub lyrics: Option<String>,
     #[serde(default)]
@@ -304,46 +331,54 @@ pub struct Wave3HostRequest {
 }
 
 impl Wave3CapabilityOperation {
-    pub fn model_selection(&self) -> Option<&CreationModelSelection> {
-        match self {
-            Self::CreationImage(request) => request.model_selection.as_ref(),
-            Self::CreationImageEdit(request) => request.model_selection.as_ref(),
-            Self::CreationVideo(request) => request.model_selection.as_ref(),
-            Self::CreationMusic(request) => request.model_selection.as_ref(),
-            Self::CreationAudio(request) => request.model_selection.as_ref(),
-            _ => None,
-        }
-    }
-
-    /// Return the canonical capability identity fixed by this typed variant.
+    /// Return the product Module identity fixed by this typed variant.
     pub fn capability_id(&self) -> CapabilityId {
         CapabilityId::from(match self {
-            Self::CreationText(_) => "creation.text",
-            Self::CreationImage(_) => "creation.image",
-            Self::CreationImageEdit(_) => "creation.image_edit",
-            Self::CreationVideo(_) => "creation.video",
-            Self::CreationAudio(_) => "creation.audio",
-            Self::CreationMusic(_) => "creation.music",
-            Self::WorkshopCanvasRead { .. } => "workshop.canvas.read",
-            Self::WorkshopCanvasEdit { .. } => "workshop.canvas.edit",
-            Self::WorkshopAssetRead { .. } => "workshop.asset.read",
-            Self::WorkshopAssetWrite { .. } => "workshop.asset.write",
-            Self::WorkshopTemplateRun { .. } => "workshop.template.run",
-            Self::OfficePreview { .. } => "office.preview",
-            Self::OfficeDocumentEdit { .. } => "office.document.edit",
-            Self::OfficeSheetEdit { .. } => "office.sheet.edit",
-            Self::OfficeSlidesEdit { .. } => "office.slides.edit",
-            Self::PluginRead { .. } => "plugin.read",
-            Self::PluginEdit { .. } => "plugin.edit",
-            Self::PluginPublish { .. } => "plugin.publish",
-            Self::PluginServe { .. } => "plugin.serve",
+            Self::CreationText(_)
+            | Self::CreationImage(_)
+            | Self::CreationImageEdit(_)
+            | Self::CreationVideo(_)
+            | Self::CreationAudio(_)
+            | Self::CreationMusic(_) => CREATION_MEDIA_MODULE_ID,
+            Self::WorkshopCanvasRead { .. }
+            | Self::WorkshopCanvasEdit { .. }
+            | Self::WorkshopAssetRead { .. }
+            | Self::WorkshopAssetWrite { .. }
+            | Self::WorkshopTemplateRun { .. } => CREATIVE_WORKSHOP_MODULE_ID,
+            Self::OfficePreview { .. }
+            | Self::OfficeDocumentEdit { .. }
+            | Self::OfficeSheetEdit { .. }
+            | Self::OfficeSlidesEdit { .. } => OFFICE_MODULE_ID,
+            Self::PluginRead { .. }
+            | Self::PluginEdit { .. }
+            | Self::PluginPublish { .. }
+            | Self::PluginServe { .. } => PLUGIN_DEVELOPMENT_MODULE_ID,
         })
     }
 
-    /// Return the canonical action identity paired with this operation.
+    /// Return the exact product Action identity paired with this operation.
     pub fn action_id(&self) -> ActionId {
-        action_id(self.capability_id().as_ref())
-            .expect("every Wave 3 operation is action-bearing")
+        ActionId::from(match self {
+            Self::CreationText(_) => "creation.media/text",
+            Self::CreationImage(_) => "creation.media/image",
+            Self::CreationImageEdit(_) => "creation.media/image_edit",
+            Self::CreationVideo(_) => "creation.media/video",
+            Self::CreationAudio(_) => "creation.media/audio",
+            Self::CreationMusic(_) => "creation.media/music",
+            Self::WorkshopCanvasRead { .. } => "creative.workshop/canvas.read",
+            Self::WorkshopCanvasEdit { .. } => "creative.workshop/canvas.edit",
+            Self::WorkshopAssetRead { .. } => "creative.workshop/asset.read",
+            Self::WorkshopAssetWrite { .. } => "creative.workshop/asset.write",
+            Self::WorkshopTemplateRun { .. } => "creative.workshop/template.run",
+            Self::OfficePreview { .. } => "office/preview",
+            Self::OfficeDocumentEdit { .. } => "office/document.edit",
+            Self::OfficeSheetEdit { .. } => "office/sheet.edit",
+            Self::OfficeSlidesEdit { .. } => "office/slides.edit",
+            Self::PluginRead { .. } => "plugin.development/read",
+            Self::PluginEdit { .. } => "plugin.development/edit",
+            Self::PluginPublish { .. } => "plugin.development/publish",
+            Self::PluginServe { .. } => "plugin.development/serve",
+        })
     }
 
     /// Return the first-party owner domain for the operation.
@@ -372,12 +407,6 @@ impl Wave3CapabilityOperation {
     }
 
     pub fn validate(&self) -> Result<(), Wave3HostPortError> {
-        if let Some(selection) = self.model_selection() {
-            require_uuidv7("model_selection.provider_id", &selection.provider_id)
-                .and_then(|_| require_bounded_text("model_selection.model", &selection.model, 512, false))
-                .and_then(|_| if selection.model.trim() == selection.model { Ok(()) } else { Err("model_selection.model must not have surrounding whitespace".into()) })
-                .map_err(Wave3HostPortError::invalid_request)?;
-        }
         match self {
             Self::CreationText(request) => validate_creation_text(request),
             Self::CreationImage(request) => validate_creation_image(request),
@@ -403,7 +432,7 @@ impl Wave3CapabilityOperation {
                 } else {
                     Err(Wave3HostPortError::invalid_request(format!(
                         "{} input must be a JSON object",
-                        self.capability_id().as_ref()
+                        self.action_id().as_ref()
                     )))
                 }
             }
@@ -415,10 +444,14 @@ impl Wave3HostRequest {
     /// Validate the complete boundary before an owner receives the request.
     pub fn validate(&self) -> Result<(), Wave3HostPortError> {
         let capability_id = &self.context.capability_id;
-        let Some(spec) = find_capability(capability_id.as_ref()) else {
+        let Some(action) = find_action(
+            capability_id.as_ref(),
+            self.context.action_id.as_ref(),
+        ) else {
             return Err(Wave3HostPortError::invalid_request(format!(
-                "unknown Wave 3 capability {}",
-                capability_id.as_ref()
+                "unknown Wave 3 Module/Action pair {} / {}",
+                capability_id.as_ref(),
+                self.context.action_id.as_ref(),
             )));
         };
         let operation_capability_id = self.operation.capability_id();
@@ -439,7 +472,7 @@ impl Wave3HostRequest {
         validate_resource_bindings_contract(
             capability_id,
             &self.context.principal.principal_id,
-            spec.requirements,
+            action.requirements,
             &self.context.resource_bindings,
         )
     }
@@ -625,9 +658,10 @@ struct CapabilitySpec {
 struct PackageSpec {
     id: &'static str,
     mount_id: &'static str,
+    module_id: &'static str,
     display_name: &'static str,
     description: &'static str,
-    capabilities: &'static [CapabilitySpec],
+    actions: &'static [CapabilitySpec],
 }
 
 const CREATION_TEXT_RESOURCES: &[&str] = &[];
@@ -712,33 +746,33 @@ const PLUGIN_SERVE_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement 
     operation: "serve",
 }];
 
-const CREATION_CAPABILITIES: [CapabilitySpec; 6] = [
+const CREATION_ACTIONS: [CapabilitySpec; 6] = [
     CapabilitySpec {
-        id: "creation.text",
+        id: "creation.media/text",
         display_name: "Text creation",
-        description: "Create bounded text output through the selected generation provider.",
+        description: "Create bounded text output using the configured text route.",
         resource_kinds: CREATION_TEXT_RESOURCES,
         requirements: CREATION_TEXT_REQUIREMENTS,
         effect_class: EffectClass::WriteDurable,
     },
     CapabilitySpec {
-        id: "creation.image",
+        id: "creation.media/image",
         display_name: "Image creation",
-        description: "Create an image artifact through the selected generation provider.",
+        description: "Create an image artifact using the configured image route.",
         resource_kinds: CREATION_IMAGE_RESOURCES,
         requirements: CREATION_IMAGE_REQUIREMENTS,
         effect_class: EffectClass::WriteDurable,
     },
     CapabilitySpec {
-        id: "creation.image_edit",
+        id: "creation.media/image_edit",
         display_name: "Image editing",
-        description: "Create an edited image from an owned asset through the selected provider.",
+        description: "Create an edited image from an owned asset using the configured image-edit route.",
         resource_kinds: CREATION_IMAGE_EDIT_RESOURCES,
         requirements: CREATION_IMAGE_EDIT_REQUIREMENTS,
         effect_class: EffectClass::WriteDurable,
     },
     CapabilitySpec {
-        id: "creation.video",
+        id: "creation.media/video",
         display_name: "Video creation",
         description: "Submit one video generation task. Each call produces one video; call this tool separately for each requested variation or clip. Returns an accepted background task, not a completed video.",
         resource_kinds: CREATION_VIDEO_RESOURCES,
@@ -746,15 +780,15 @@ const CREATION_CAPABILITIES: [CapabilitySpec; 6] = [
         effect_class: EffectClass::WriteDurable,
     },
     CapabilitySpec {
-        id: "creation.audio",
+        id: "creation.media/audio",
         display_name: "Speech synthesis",
-        description: "Synthesize spoken text. For a song or instrumental track use creation.music.",
+        description: "Synthesize spoken text. For a song or instrumental track use the Music action.",
         resource_kinds: CREATION_AUDIO_RESOURCES,
         requirements: CREATION_AUDIO_REQUIREMENTS,
         effect_class: EffectClass::WriteDurable,
     },
     CapabilitySpec {
-        id: "creation.music",
+        id: "creation.media/music",
         display_name: "Music creation",
         description: "Compose music from a prompt and optional lyrics. Returns an accepted background task, not a completed track.",
         resource_kinds: &[],
@@ -763,9 +797,9 @@ const CREATION_CAPABILITIES: [CapabilitySpec; 6] = [
     },
 ];
 
-const WORKSHOP_CAPABILITIES: [CapabilitySpec; 5] = [
+const WORKSHOP_ACTIONS: [CapabilitySpec; 5] = [
     CapabilitySpec {
-        id: "workshop.canvas.read",
+        id: "creative.workshop/canvas.read",
         display_name: "Read Canvas",
         description: "Read the selected Canvas revision and bounded graph.",
         resource_kinds: CANVAS_READ_RESOURCES,
@@ -773,7 +807,7 @@ const WORKSHOP_CAPABILITIES: [CapabilitySpec; 5] = [
         effect_class: EffectClass::ReadSensitive,
     },
     CapabilitySpec {
-        id: "workshop.canvas.edit",
+        id: "creative.workshop/canvas.edit",
         display_name: "Edit Canvas",
         description: "Apply a bounded edit to the selected Canvas revision.",
         resource_kinds: CANVAS_EDIT_RESOURCES,
@@ -781,7 +815,7 @@ const WORKSHOP_CAPABILITIES: [CapabilitySpec; 5] = [
         effect_class: EffectClass::WriteReversible,
     },
     CapabilitySpec {
-        id: "workshop.asset.read",
+        id: "creative.workshop/asset.read",
         display_name: "Read asset",
         description: "Read metadata for an owned asset in the selected library.",
         resource_kinds: ASSET_READ_RESOURCES,
@@ -789,7 +823,7 @@ const WORKSHOP_CAPABILITIES: [CapabilitySpec; 5] = [
         effect_class: EffectClass::ReadSensitive,
     },
     CapabilitySpec {
-        id: "workshop.asset.write",
+        id: "creative.workshop/asset.write",
         display_name: "Write asset",
         description: "Write an owned asset reference into the selected library.",
         resource_kinds: ASSET_WRITE_RESOURCES,
@@ -797,53 +831,53 @@ const WORKSHOP_CAPABILITIES: [CapabilitySpec; 5] = [
         effect_class: EffectClass::WriteDurable,
     },
     CapabilitySpec {
-        id: "workshop.template.run",
+        id: "creative.workshop/template.run",
         display_name: "Run template",
-        description: "Run a selected Canvas template with owned assets and a provider.",
+        description: "Run a selected Canvas template with owned assets and configured creation routes.",
         resource_kinds: TEMPLATE_RUN_RESOURCES,
         requirements: TEMPLATE_RUN_REQUIREMENTS,
         effect_class: EffectClass::ExecuteLocal,
     },
 ];
 
-const OFFICE_CAPABILITIES: [CapabilitySpec; 4] = [
+const OFFICE_ACTIONS: [CapabilitySpec; 4] = [
     CapabilitySpec {
-        id: "office.preview",
+        id: "office/preview",
         display_name: "Office preview",
-        description: "Read a bounded office document preview from the selected workspace.",
+        description: "Read a bounded preview from the selected asset library.",
         resource_kinds: OFFICE_PREVIEW_RESOURCES,
         requirements: OFFICE_PREVIEW_REQUIREMENTS,
         effect_class: EffectClass::ReadSensitive,
     },
     CapabilitySpec {
-        id: "office.document.edit",
+        id: "office/document.edit",
         display_name: "Edit document",
-        description: "Apply a document edit in the selected workspace.",
+        description: "Create a document revision in the selected asset library.",
         resource_kinds: OFFICE_DOCUMENT_EDIT_RESOURCES,
         requirements: OFFICE_DOCUMENT_EDIT_REQUIREMENTS,
         effect_class: EffectClass::WriteReversible,
     },
     CapabilitySpec {
-        id: "office.sheet.edit",
+        id: "office/sheet.edit",
         display_name: "Edit sheet",
-        description: "Apply a sheet edit in the selected workspace.",
+        description: "Create a sheet revision in the selected asset library.",
         resource_kinds: OFFICE_SHEET_EDIT_RESOURCES,
         requirements: OFFICE_SHEET_EDIT_REQUIREMENTS,
         effect_class: EffectClass::WriteReversible,
     },
     CapabilitySpec {
-        id: "office.slides.edit",
+        id: "office/slides.edit",
         display_name: "Edit slides",
-        description: "Apply a slides edit in the selected workspace.",
+        description: "Create a slides revision in the selected asset library.",
         resource_kinds: OFFICE_SLIDES_EDIT_RESOURCES,
         requirements: OFFICE_SLIDES_EDIT_REQUIREMENTS,
         effect_class: EffectClass::WriteReversible,
     },
 ];
 
-const PLUGIN_CAPABILITIES: [CapabilitySpec; 4] = [
+const PLUGIN_ACTIONS: [CapabilitySpec; 4] = [
     CapabilitySpec {
-        id: "plugin.read",
+        id: "plugin.development/read",
         display_name: "Read Plugin",
         description: "Read the selected Plugin source and published metadata.",
         resource_kinds: PLUGIN_READ_RESOURCES,
@@ -851,7 +885,7 @@ const PLUGIN_CAPABILITIES: [CapabilitySpec; 4] = [
         effect_class: EffectClass::ReadSensitive,
     },
     CapabilitySpec {
-        id: "plugin.edit",
+        id: "plugin.development/edit",
         display_name: "Edit Plugin",
         description: "Apply an edit to the selected Plugin working copy.",
         resource_kinds: PLUGIN_EDIT_RESOURCES,
@@ -859,7 +893,7 @@ const PLUGIN_CAPABILITIES: [CapabilitySpec; 4] = [
         effect_class: EffectClass::WriteReversible,
     },
     CapabilitySpec {
-        id: "plugin.publish",
+        id: "plugin.development/publish",
         display_name: "Publish Plugin",
         description: "Publish the selected Plugin snapshot.",
         resource_kinds: PLUGIN_PUBLISH_RESOURCES,
@@ -867,7 +901,7 @@ const PLUGIN_CAPABILITIES: [CapabilitySpec; 4] = [
         effect_class: EffectClass::ExternalTransmit,
     },
     CapabilitySpec {
-        id: "plugin.serve",
+        id: "plugin.development/serve",
         display_name: "Serve Plugin",
         description: "Read the selected published Plugin for serving.",
         resource_kinds: PLUGIN_SERVE_RESOURCES,
@@ -880,30 +914,34 @@ const PACKAGE_SPECS: [PackageSpec; 4] = [
     PackageSpec {
         id: CREATION_PACKAGE_ID,
         mount_id: "domain-creation",
+        module_id: CREATION_MEDIA_MODULE_ID,
         display_name: "Creation",
-        description: "Bundled multimodal creation capabilities.",
-        capabilities: &CREATION_CAPABILITIES,
+        description: "Create text, images, video, speech, and music through product actions.",
+        actions: &CREATION_ACTIONS,
     },
     PackageSpec {
         id: WORKSHOP_PACKAGE_ID,
         mount_id: "domain-workshop",
+        module_id: CREATIVE_WORKSHOP_MODULE_ID,
         display_name: "Workshop",
-        description: "Bundled Canvas, asset, and template capabilities.",
-        capabilities: &WORKSHOP_CAPABILITIES,
+        description: "Read and edit Canvases and assets, and run creative templates.",
+        actions: &WORKSHOP_ACTIONS,
     },
     PackageSpec {
         id: OFFICE_PACKAGE_ID,
         mount_id: "domain-office",
+        module_id: OFFICE_MODULE_ID,
         display_name: "Office",
-        description: "Bundled office preview and editing capabilities.",
-        capabilities: &OFFICE_CAPABILITIES,
+        description: "Preview Office assets and create document, sheet, and slides revisions.",
+        actions: &OFFICE_ACTIONS,
     },
     PackageSpec {
         id: PLUGIN_PACKAGE_ID,
         mount_id: "domain-plugin",
+        module_id: PLUGIN_DEVELOPMENT_MODULE_ID,
         display_name: "Plugin",
-        description: "Bundled Plugin read, edit, publish, and serve capabilities.",
-        capabilities: &PLUGIN_CAPABILITIES,
+        description: "Read, edit, publish, and inspect serving state for a selected Plugin.",
+        actions: &PLUGIN_ACTIONS,
     },
 ];
 
@@ -1019,71 +1057,97 @@ pub fn office_asset_library_binding(owner_id: impl Into<String>) -> TypedResourc
     )
 }
 
-/// Return the resource kinds required by a capability in the canonical
-/// inventory.
+/// Return the union of resource kinds used by a product Module.
 pub fn required_resource_kinds(capability_id: &str) -> Option<BTreeSet<ResourceKind>> {
-    find_capability(capability_id).map(|spec| {
-        spec.resource_kinds
+    find_module(capability_id).map(|spec| {
+        spec.actions
             .iter()
+            .flat_map(|action| action.resource_kinds.iter())
             .map(|kind| ResourceKind::from(*kind))
             .collect()
     })
 }
 
-/// Return the canonical action identity for an action-bearing capability.
-pub fn action_id(capability_id: &str) -> Option<ActionId> {
-    find_capability(capability_id).map(|_| ActionId::from(format!("{capability_id}.invoke")))
+/// Return the exact Action identities published by a product Module.
+pub fn action_ids(capability_id: &str) -> BTreeSet<ActionId> {
+    find_module(capability_id)
+        .map(|spec| {
+            spec.actions
+                .iter()
+                .map(|action| ActionId::from(action.id))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn required_action_resource_operations(
+    capability_id: &str,
+    action_id: &str,
+) -> Option<Vec<(ResourceKind, String)>> {
+    let action = find_action(capability_id, action_id)?;
+    Some(
+        action
+            .requirements
+            .iter()
+            .map(|requirement| {
+                (
+                    ResourceKind::from(requirement.resource_kind),
+                    requirement.operation.to_owned(),
+                )
+            })
+            .collect(),
+    )
 }
 
 fn validate_capability_specs(spec: &PackageSpec) -> Result<(), String> {
     let resource_metadata = resource_binding_metadata();
-    let mut capability_ids = BTreeSet::new();
+    let mut action_ids = BTreeSet::new();
 
-    for capability in spec.capabilities {
-        if !capability_ids.insert(capability.id) {
+    for action in spec.actions {
+        if !action_ids.insert(action.id) {
             return Err(format!(
-                "duplicate Wave 3 capability {} in package {}",
-                capability.id, spec.id
+                "duplicate Wave 3 action {} in package {}",
+                action.id, spec.id
             ));
         }
 
-        let declared_kinds = capability
+        let declared_kinds = action
             .resource_kinds
             .iter()
             .copied()
             .collect::<BTreeSet<_>>();
-        let required_kinds = capability
+        let required_kinds = action
             .requirements
             .iter()
             .map(|requirement| requirement.resource_kind)
             .collect::<BTreeSet<_>>();
         if declared_kinds != required_kinds {
             return Err(format!(
-                "Wave 3 capability {} resource kinds do not match its requirements",
-                capability.id
+                "Wave 3 action {} resource kinds do not match its requirements",
+                action.id
             ));
         }
 
         let mut requirement_keys = BTreeSet::new();
-        for requirement in capability.requirements {
+        for requirement in action.requirements {
             if !requirement_keys.insert((requirement.resource_kind, requirement.operation)) {
                 return Err(format!(
-                    "Wave 3 capability {} declares duplicate resource requirement {}:{}",
-                    capability.id, requirement.resource_kind, requirement.operation
+                    "Wave 3 action {} declares duplicate resource requirement {}:{}",
+                    action.id, requirement.resource_kind, requirement.operation
                 ));
             }
             let Some(operations) =
                 resource_metadata.get(&ResourceKind::from(requirement.resource_kind))
             else {
                 return Err(format!(
-                    "Wave 3 capability {} requires unknown resource kind {}",
-                    capability.id, requirement.resource_kind
+                    "Wave 3 action {} requires unknown resource kind {}",
+                    action.id, requirement.resource_kind
                 ));
             };
             if !operations.contains(requirement.operation) {
                 return Err(format!(
-                    "Wave 3 capability {} requires unsupported operation {} on {}",
-                    capability.id, requirement.operation, requirement.resource_kind
+                    "Wave 3 action {} requires unsupported operation {} on {}",
+                    action.id, requirement.operation, requirement.resource_kind
                 ));
             }
         }
@@ -1133,11 +1197,27 @@ pub fn plugin_registration() -> Result<PluginRegistration, String> {
     registration_for(&PACKAGE_SPECS[3], unconfigured_host_port())
 }
 
-fn find_capability(capability_id: &str) -> Option<&'static CapabilitySpec> {
+fn find_module(capability_id: &str) -> Option<&'static PackageSpec> {
     PACKAGE_SPECS
         .iter()
-        .flat_map(|package| package.capabilities.iter())
-        .find(|capability| capability.id == capability_id)
+        .find(|package| package.module_id == capability_id)
+}
+
+fn find_action(capability_id: &str, action_id: &str) -> Option<&'static CapabilitySpec> {
+    find_module(capability_id)?
+        .actions
+        .iter()
+        .find(|action| action.id == action_id)
+}
+
+fn find_action_by_id(action_id: &str) -> Option<(&'static PackageSpec, &'static CapabilitySpec)> {
+    PACKAGE_SPECS.iter().find_map(|package| {
+        package
+            .actions
+            .iter()
+            .find(|action| action.id == action_id)
+            .map(|action| (package, action))
+    })
 }
 
 fn registration_for(
@@ -1147,11 +1227,7 @@ fn registration_for(
     validate_capability_specs(spec)?;
     let package = package_ref(spec.id);
     let config_schema = empty_config_schema();
-    let capabilities = spec
-        .capabilities
-        .iter()
-        .map(|capability| capability_manifest(&package, capability))
-        .collect::<Result<Vec<_>, _>>()?;
+    let capabilities = vec![capability_manifest(&package, spec)?];
     let source = PluginSourceMetadata {
         source_kind: PluginSourceKind::Bundled,
         source_identity: spec.id.to_owned(),
@@ -1235,11 +1311,7 @@ fn registration_for(
                 PluginRegistrarOperation::BindHostPort,
                 PluginRegistrarOperation::ContributeCapability,
             ]),
-            declared_capability_ids: spec
-                .capabilities
-                .iter()
-                .map(|capability| CapabilityId::from(capability.id))
-                .collect(),
+            declared_capability_ids: BTreeSet::from([CapabilityId::from(spec.module_id)]),
             declared_skill_ids: BTreeSet::<SkillId>::new(),
             declared_mcp_tool_keys: BTreeSet::new(),
             declared_role_ids: BTreeSet::new(),
@@ -1249,20 +1321,15 @@ fn registration_for(
         context,
     };
     let mut registration = PluginRegistration::new(metadata);
-    for capability in spec.capabilities {
-        registration
-            .add_capability_handler(
-                CapabilityId::from(capability.id),
-                Arc::new(Wave3CapabilityHandler {
-                    capability_id: CapabilityId::from(capability.id),
-                    action_id: action_id(capability.id)
-                        .expect("every Wave 3 capability is action-bearing"),
-                    requirements: capability.requirements,
-                    host_port: Arc::clone(&action_host_port),
-                }),
-            )
-            .map_err(|error| error.to_string())?;
-    }
+    registration
+        .add_capability_handler(
+            CapabilityId::from(spec.module_id),
+            Arc::new(Wave3CapabilityHandler {
+                capability_id: CapabilityId::from(spec.module_id),
+                host_port: Arc::clone(&action_host_port),
+            }),
+        )
+        .map_err(|error| error.to_string())?;
     Ok(registration)
 }
 
@@ -1282,7 +1349,7 @@ fn package_display(spec: &PackageSpec) -> LocalizedMetadata {
     }
 }
 
-fn capability_display(spec: &CapabilitySpec) -> LocalizedMetadata {
+fn capability_display(spec: &PackageSpec) -> LocalizedMetadata {
     LocalizedMetadata {
         name: spec.display_name.to_owned(),
         description: spec.description.to_owned(),
@@ -1293,17 +1360,39 @@ fn capability_display(spec: &CapabilitySpec) -> LocalizedMetadata {
 
 fn capability_manifest(
     package: &PackageRef,
-    spec: &CapabilitySpec,
+    spec: &PackageSpec,
 ) -> Result<CapabilityManifest, String> {
-    let input_schema = action_input_schema_for(spec.id)?.0;
-    let output_schema = action_output_schema_for(spec.id)?.0;
-    let input_digest = digest_payload(&input_schema).map_err(|error| error.to_string())?;
-    let output_digest = digest_payload(&output_schema).map_err(|error| error.to_string())?;
+    let actions = spec
+        .actions
+        .iter()
+        .map(|action| {
+            let input_schema = action_input_schema_for(action.id)?.0;
+            let output_schema = action_output_schema_for(action.id)?.0;
+            let input_digest = digest_payload(&input_schema).map_err(|error| error.to_string())?;
+            let output_digest =
+                digest_payload(&output_schema).map_err(|error| error.to_string())?;
+            Ok(CapabilityActionDescriptor {
+                action_id: ActionId::from(action.id),
+                input_schema: CanonicalSchemaRef::from(format!(
+                    "schema://{}/input@1#{}",
+                    action.id,
+                    input_digest.as_ref()
+                )),
+                output_schema: CanonicalSchemaRef::from(format!(
+                    "schema://{}/output@1#{}",
+                    action.id,
+                    output_digest.as_ref()
+                )),
+                effect_class: action.effect_class,
+                presentation: ToolPresentationKind::FunctionTool,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     Ok(CapabilityManifest {
-        id: CapabilityId::from(spec.id),
+        id: CapabilityId::from(spec.module_id),
         contribution_id: nomifun_agent_contracts::ContributionId::from(format!(
-            "capability:{}",
-            spec.id
+            "module:{}",
+            spec.module_id
         )),
         version: VersionString::from(PACKAGE_VERSION),
         kind: CapabilityKind::Tool,
@@ -1311,37 +1400,24 @@ fn capability_manifest(
         display: capability_display(spec),
         requires: Vec::new(),
         conflicts: Vec::new(),
-        supported_surfaces: capability_surface_declarations(
+        supported_surfaces: capability_module_surface_declarations(
             AGENT_SURFACES.iter().copied(),
             [CapabilityConsumer::Agent],
+            CapabilityAuthoringPolicy::Direct,
         ),
         requires_runtime_features: Vec::new(),
         supported_platforms: vec![PlatformConstraint::Any],
         config_schema: empty_config_schema(),
         contributions: CapabilityContributions {
-            actions: vec![CapabilityActionDescriptor {
-                action_id: action_id(spec.id)
-                    .expect("every Wave 3 capability is action-bearing"),
-                input_schema: CanonicalSchemaRef::from(format!(
-                    "schema://{}/input@1#{}",
-                    spec.id,
-                    input_digest.as_ref()
-                )),
-                output_schema: CanonicalSchemaRef::from(format!(
-                    "schema://{}/output@1#{}",
-                    spec.id,
-                    output_digest.as_ref()
-                )),
-                effect_class: spec.effect_class,
-                presentation: ToolPresentationKind::FunctionTool,
-            }],
+            actions,
             context_schema_refs: Vec::new(),
             context_phase: Default::default(),
             ui_slot: None,
             event_schema_refs: Vec::new(),
             resource_kinds: spec
-                .resource_kinds
+                .actions
                 .iter()
+                .flat_map(|action| action.resource_kinds.iter())
                 .map(|kind| ResourceKind::from(*kind))
                 .collect(),
             host_ports: vec![host_port(WAVE3_CAPABILITY_HOST_PORT_ID)],
@@ -1361,21 +1437,11 @@ fn empty_config_schema() -> StrictJsonValue {
 /// Application adapters use this same resolver as manifest generation, so a
 /// typed implementation cannot silently drift from the schema advertised to
 /// models and other consumers.
-fn creation_model_selection_schema() -> Value {
-    let mut schema = strict_object_schema(json!({
-        "provider_id": uuidv7_schema(),
-        "model": bounded_string_schema(512),
-    }), &["provider_id", "model"]);
-    schema["description"] = json!("Exact provider_id and model from this turn's generation model catalog. Respect its configured default; when no default and multiple candidates exist, select a suitable listed pair for the user's request. Never invent IDs. Omit only to use the configured default or sole available model.");
-    schema
-}
-
-pub fn action_input_schema_for(capability_id: &str) -> Result<StrictJsonValue, String> {
-    if find_capability(capability_id).is_none() {
-        return Err(format!("unknown Wave 3 capability {capability_id}"));
-    }
-    Ok(StrictJsonValue(match capability_id {
-        "creation.text" => strict_object_schema(
+pub fn action_input_schema_for(action_id: &str) -> Result<StrictJsonValue, String> {
+    let (_, action) = find_action_by_id(action_id)
+        .ok_or_else(|| format!("unknown Wave 3 action {action_id}"))?;
+    let mut schema = match action_id {
+        "creation.media/text" => strict_object_schema(
             json!({
                 "target": creation_target_schema(),
                 "prompt": bounded_string_schema(MAX_PROMPT_CHARS),
@@ -1384,10 +1450,9 @@ pub fn action_input_schema_for(capability_id: &str) -> Result<StrictJsonValue, S
             }),
             &["target", "prompt"],
         ),
-        "creation.image" => strict_object_schema(
+        "creation.media/image" => strict_object_schema(
             json!({
                 "target": creation_target_schema(),
-                "model_selection": creation_model_selection_schema(),
                 "prompt": bounded_string_schema(MAX_PROMPT_CHARS),
                 "count": {"type": "integer", "minimum": 1, "maximum": MAX_CREATION_RESULTS},
                 "size": bounded_string_schema(128),
@@ -1395,10 +1460,9 @@ pub fn action_input_schema_for(capability_id: &str) -> Result<StrictJsonValue, S
             }),
             &["target", "prompt"],
         ),
-        "creation.image_edit" => strict_object_schema(
+        "creation.media/image_edit" => strict_object_schema(
             json!({
                 "target": creation_target_schema(),
-                "model_selection": creation_model_selection_schema(),
                 "prompt": bounded_string_schema(MAX_PROMPT_CHARS),
                 "inputs": {
                     "type": "array",
@@ -1418,11 +1482,10 @@ pub fn action_input_schema_for(capability_id: &str) -> Result<StrictJsonValue, S
             }),
             &["target", "prompt", "inputs"],
         ),
-        "creation.video" => {
+        "creation.media/video" => {
             let mut schema = strict_object_schema(
                 json!({
                 "target": creation_target_schema(),
-                "model_selection": creation_model_selection_schema(),
                 "prompt": bounded_string_schema(MAX_PROMPT_CHARS),
                 "seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
                 "size": bounded_string_schema(128),
@@ -1438,10 +1501,9 @@ pub fn action_input_schema_for(capability_id: &str) -> Result<StrictJsonValue, S
             });
             schema
         }
-        "creation.music" => strict_object_schema(
+        "creation.media/music" => strict_object_schema(
             json!({
                 "target": creation_target_schema(),
-                "model_selection": creation_model_selection_schema(),
                 "prompt": bounded_string_schema(MAX_PROMPT_CHARS),
                 "lyrics": bounded_string_schema(3500),
                 "instrumental": {"type": "boolean"},
@@ -1449,29 +1511,28 @@ pub fn action_input_schema_for(capability_id: &str) -> Result<StrictJsonValue, S
             }),
             &["target", "prompt"],
         ),
-        "creation.audio" => strict_object_schema(
+        "creation.media/audio" => strict_object_schema(
             json!({
                 "target": creation_target_schema(),
-                "model_selection": creation_model_selection_schema(),
                 "text": bounded_string_schema(MAX_PROMPT_CHARS),
                 "voice": bounded_string_schema(256),
                 "format": bounded_string_schema(64)
             }),
             &["target", "text"],
         ),
-        "workshop.canvas.read" => strict_object_schema(json!({}), &[]),
-        "workshop.canvas.edit" => strict_object_schema(
+        "creative.workshop/canvas.read" => strict_object_schema(json!({}), &[]),
+        "creative.workshop/canvas.edit" => strict_object_schema(
             json!({
                 "expected_revision": revision_schema(),
                 "document": canvas_document_schema()
             }),
             &["expected_revision", "document"],
         ),
-        "workshop.asset.read" => strict_object_schema(
+        "creative.workshop/asset.read" => strict_object_schema(
             json!({"asset_id": uuidv7_schema()}),
             &["asset_id"],
         ),
-        "workshop.asset.write" => strict_object_schema(
+        "creative.workshop/asset.write" => strict_object_schema(
             json!({
                 "asset_id": uuidv7_schema(),
                 "title": bounded_string_schema(1_000),
@@ -1486,7 +1547,7 @@ pub fn action_input_schema_for(capability_id: &str) -> Result<StrictJsonValue, S
             }),
             &["asset_id"],
         ),
-        "workshop.template.run" => strict_object_schema(
+        "creative.workshop/template.run" => strict_object_schema(
             json!({
                 "templateId": uuidv7_schema(),
                 "templateRevision": {"type": "integer", "minimum": 1},
@@ -1500,11 +1561,65 @@ pub fn action_input_schema_for(capability_id: &str) -> Result<StrictJsonValue, S
             }),
             &["templateId", "templateRevision", "inputs", "referenceAssetIds"],
         ),
-        "plugin.read" => strict_object_schema(
+        "office/preview" => strict_object_schema(
+            json!({
+                "asset_id": uuidv7_schema(),
+                "max_chars": {"type": "integer", "minimum": 1, "maximum": 65_536}
+            }),
+            &["asset_id"],
+        ),
+        "office/document.edit" => strict_object_schema(
+            json!({
+                "source_asset_id": uuidv7_schema(),
+                "title": bounded_string_schema(1_000),
+                "content": bounded_string_schema(1_048_576),
+                "collection": bounded_string_schema(1_000)
+            }),
+            &["title", "content"],
+        ),
+        "office/sheet.edit" => strict_object_schema(
+            json!({
+                "source_asset_id": uuidv7_schema(),
+                "title": bounded_string_schema(1_000),
+                "columns": {
+                    "type": "array", "minItems": 1, "maxItems": 256,
+                    "items": bounded_string_schema(256)
+                },
+                "rows": {
+                    "type": "array", "maxItems": 10_000,
+                    "items": {
+                        "type": "array", "maxItems": 256,
+                        "items": {"type": ["string", "number", "boolean", "null"]}
+                    }
+                },
+                "collection": bounded_string_schema(1_000)
+            }),
+            &["title", "columns", "rows"],
+        ),
+        "office/slides.edit" => strict_object_schema(
+            json!({
+                "source_asset_id": uuidv7_schema(),
+                "title": bounded_string_schema(1_000),
+                "slides": {
+                    "type": "array", "minItems": 1, "maxItems": 500,
+                    "items": strict_object_schema(
+                        json!({
+                            "title": bounded_string_schema(1_000),
+                            "body": bounded_string_schema(65_536),
+                            "speaker_notes": bounded_string_schema(65_536)
+                        }),
+                        &["title", "body"],
+                    )
+                },
+                "collection": bounded_string_schema(1_000)
+            }),
+            &["title", "slides"],
+        ),
+        "plugin.development/read" => strict_object_schema(
             json!({"path": bounded_string_schema(4_096)}),
             &[],
         ),
-        "plugin.edit" => strict_object_schema(
+        "plugin.development/edit" => strict_object_schema(
             json!({
                 "expected_product_revision": {"type": "integer", "minimum": 0},
                 "project_id": uuidv7_schema(),
@@ -1524,7 +1639,7 @@ pub fn action_input_schema_for(capability_id: &str) -> Result<StrictJsonValue, S
                 "content",
             ],
         ),
-        "plugin.publish" => strict_object_schema(
+        "plugin.development/publish" => strict_object_schema(
             json!({
                 "expected_product_revision": {"type": "integer", "minimum": 0},
                 "expected_pointer_revision": {"type": "integer", "minimum": 0},
@@ -1544,26 +1659,29 @@ pub fn action_input_schema_for(capability_id: &str) -> Result<StrictJsonValue, S
                 "acknowledge_test_warning",
             ],
         ),
-        "plugin.serve" => strict_object_schema(json!({}), &[]),
+        "plugin.development/serve" => strict_object_schema(json!({}), &[]),
         _ => json!({
             "type": "object",
             "additionalProperties": true
         }),
-    }))
+    };
+    schema["title"] = json!(action.display_name);
+    schema["description"] = json!(action.description);
+    Ok(StrictJsonValue(schema))
 }
 
 /// Return the canonical output schema embedded in one Wave 3 action reference.
-pub fn action_output_schema_for(capability_id: &str) -> Result<StrictJsonValue, String> {
-    if find_capability(capability_id).is_none() {
-        return Err(format!("unknown Wave 3 capability {capability_id}"));
+pub fn action_output_schema_for(action_id: &str) -> Result<StrictJsonValue, String> {
+    if find_action_by_id(action_id).is_none() {
+        return Err(format!("unknown Wave 3 action {action_id}"));
     }
-    Ok(StrictJsonValue(match capability_id {
-        "creation.text"
-        | "creation.image"
-        | "creation.image_edit"
-        | "creation.video"
-        | "creation.music"
-        | "creation.audio" => strict_object_schema(
+    Ok(StrictJsonValue(match action_id {
+        "creation.media/text"
+        | "creation.media/image"
+        | "creation.media/image_edit"
+        | "creation.media/video"
+        | "creation.media/music"
+        | "creation.media/audio" => strict_object_schema(
             json!({
                 "creation_task_id": uuidv7_schema(),
                 "status": {"enum": ["queued", "running", "succeeded", "failed", "canceled"]},
@@ -1576,16 +1694,16 @@ pub fn action_output_schema_for(capability_id: &str) -> Result<StrictJsonValue, 
             }),
             &["creation_task_id", "status", "result_asset_ids"],
         ),
-        "workshop.canvas.read" => strict_object_schema(
+        "creative.workshop/canvas.read" => strict_object_schema(
             json!({
                 "canvas": canvas_summary_schema(),
                 "document": canvas_document_schema()
             }),
             &["canvas", "document"],
         ),
-        "workshop.canvas.edit" => canvas_summary_schema(),
-        "workshop.asset.read" | "workshop.asset.write" => workshop_asset_schema(),
-        "workshop.template.run" => strict_object_schema(
+        "creative.workshop/canvas.edit" => canvas_summary_schema(),
+        "creative.workshop/asset.read" | "creative.workshop/asset.write" => workshop_asset_schema(),
+        "creative.workshop/template.run" => strict_object_schema(
             json!({
                 "kind": {"const": "nomifun.creative-studio.template-run"},
                 "version": {"const": 1},
@@ -1616,11 +1734,32 @@ pub fn action_output_schema_for(capability_id: &str) -> Result<StrictJsonValue, 
             }),
             &["kind", "version", "revision", "templateSnapshot", "request", "promptDrafts", "record"],
         ),
-        "plugin.read" => json!({
+        "office/preview" => strict_object_schema(
+            json!({
+                "asset_id": uuidv7_schema(),
+                "title": bounded_string_schema(1_000),
+                "format": {"enum": ["document", "sheet", "slides", "text"]},
+                "content": bounded_string_schema(65_536),
+                "truncated": {"type": "boolean"}
+            }),
+            &["asset_id", "title", "format", "content", "truncated"],
+        ),
+        "office/document.edit" | "office/sheet.edit" | "office/slides.edit" =>
+            strict_object_schema(
+                json!({
+                    "asset_id": uuidv7_schema(),
+                    "source_asset_id": {"oneOf": [uuidv7_schema(), {"type": "null"}]},
+                    "title": bounded_string_schema(1_000),
+                    "format": {"enum": ["document", "sheet", "slides"]},
+                    "created_at": {"type": "integer", "minimum": 0}
+                }),
+                &["asset_id", "source_asset_id", "title", "format", "created_at"],
+            ),
+        "plugin.development/read" => json!({
             "oneOf": [plugin_workshop_schema(), plugin_source_file_schema()]
         }),
-        "plugin.edit" | "plugin.publish" => plugin_workshop_schema(),
-        "plugin.serve" => plugin_workshop_schema(),
+        "plugin.development/edit" | "plugin.development/publish" => plugin_workshop_schema(),
+        "plugin.development/serve" => plugin_workshop_schema(),
         _ => json!({
             "type": "object",
             "additionalProperties": true
@@ -1634,17 +1773,21 @@ pub fn resolve_action_schema(
     capability_id: &str,
     reference: &CanonicalSchemaRef,
 ) -> Result<StrictJsonValue, String> {
-    for (role, schema) in [
-        ("input", action_input_schema_for(capability_id)?),
-        ("output", action_output_schema_for(capability_id)?),
-    ] {
-        let expected = schema_ref(capability_id, role, &schema.0)?;
-        if expected == *reference {
-            return Ok(schema);
+    let module = find_module(capability_id)
+        .ok_or_else(|| format!("unknown Wave 3 Module {capability_id}"))?;
+    for action in module.actions {
+        for (role, schema) in [
+            ("input", action_input_schema_for(action.id)?),
+            ("output", action_output_schema_for(action.id)?),
+        ] {
+            let expected = schema_ref(action.id, role, &schema.0)?;
+            if expected == *reference {
+                return Ok(schema);
+            }
         }
     }
     Err(format!(
-        "schema reference {} does not match {capability_id}'s canonical input or output schema",
+        "schema reference {} does not match any canonical Action schema in {capability_id}",
         reference.as_ref()
     ))
 }
@@ -1854,15 +1997,15 @@ fn resource_binding(
 
 fn host_port_binding() -> Result<HostPortBindingDescriptor, String> {
     let request_schema = json!({
-        "anyOf": ALL_CAPABILITY_IDS
+        "anyOf": TARGET_ACTION_IDS
             .iter()
-            .map(|capability_id| action_input_schema_for(capability_id).map(|schema| schema.0))
+            .map(|action_id| action_input_schema_for(action_id).map(|schema| schema.0))
             .collect::<Result<Vec<_>, _>>()?
     });
     let response_schema = json!({
-        "anyOf": ALL_CAPABILITY_IDS
+        "anyOf": TARGET_ACTION_IDS
             .iter()
-            .map(|capability_id| action_output_schema_for(capability_id).map(|schema| schema.0))
+            .map(|action_id| action_output_schema_for(action_id).map(|schema| schema.0))
             .collect::<Result<Vec<_>, _>>()?
     });
     Ok(HostPortBindingDescriptor {
@@ -1882,8 +2025,6 @@ fn host_port_binding() -> Result<HostPortBindingDescriptor, String> {
 
 struct Wave3CapabilityHandler {
     capability_id: CapabilityId,
-    action_id: ActionId,
-    requirements: &'static [ResourceRequirement],
     host_port: Arc<dyn Wave3HostPort>,
 }
 
@@ -1899,18 +2040,24 @@ impl CapabilityHandler for Wave3CapabilityHandler {
     {
         Box::pin(async move {
             if context.capability_id != self.capability_id
-                || context.action_id != self.action_id
+                || find_action(context.capability_id.as_ref(), context.action_id.as_ref()).is_none()
             {
                 return Err(KernelError::ActionNotDeclared {
                     capability_id: context.capability_id,
                     action_id: context.action_id,
                 });
             }
-            let operation = operation_from_input(&self.capability_id, input)?;
+            let action = find_action(self.capability_id.as_ref(), context.action_id.as_ref())
+                .expect("declared Action was checked above");
+            let operation = operation_from_input(
+                &self.capability_id,
+                &context.action_id,
+                input,
+            )?;
             validate_resource_bindings(
                 &self.capability_id,
                 &context.principal.principal_id,
-                self.requirements,
+                action.requirements,
                 &context.resource_bindings,
             )?;
             let request = Wave3HostRequest {
@@ -1923,7 +2070,7 @@ impl CapabilityHandler for Wave3CapabilityHandler {
                     resolved_snapshot_ref: context.resolved_snapshot_ref,
                     registry_generation: context.registry_generation,
                     capability_id: self.capability_id.clone(),
-                    action_id: self.action_id.clone(),
+                    action_id: context.action_id.clone(),
                     state_scope_key: context.state_scope_key,
                     resource_bindings: context.resource_bindings,
                 },
@@ -1958,6 +2105,7 @@ fn wave3_host_error_to_kernel(error: Wave3HostPortError) -> KernelError {
 /// typed operation variant accepted by the host port.
 pub fn operation_from_input(
     capability_id: &CapabilityId,
+    action_id: &ActionId,
     input: StrictJsonValue,
 ) -> Result<Wave3CapabilityOperation, KernelError> {
     if !input.0.is_object() {
@@ -1965,41 +2113,41 @@ pub fn operation_from_input(
             format!("{} input must be a JSON object", capability_id.as_ref()),
         )));
     }
-    let operation = match capability_id.as_ref() {
-        "creation.text" => Wave3CapabilityOperation::CreationText(
-            parse_creation_request(input.0, "creation.text")?,
+    let operation = match (capability_id.as_ref(), action_id.as_ref()) {
+        (CREATION_MEDIA_MODULE_ID, "creation.media/text") => Wave3CapabilityOperation::CreationText(
+            parse_creation_request(input.0, "creation.media/text")?,
         ),
-        "creation.image" => Wave3CapabilityOperation::CreationImage(
-            parse_creation_request(input.0, "creation.image")?,
+        (CREATION_MEDIA_MODULE_ID, "creation.media/image") => Wave3CapabilityOperation::CreationImage(
+            parse_creation_request(input.0, "creation.media/image")?,
         ),
-        "creation.image_edit" => Wave3CapabilityOperation::CreationImageEdit(
-            parse_creation_request(input.0, "creation.image_edit")?,
+        (CREATION_MEDIA_MODULE_ID, "creation.media/image_edit") => Wave3CapabilityOperation::CreationImageEdit(
+            parse_creation_request(input.0, "creation.media/image_edit")?,
         ),
-        "creation.video" => Wave3CapabilityOperation::CreationVideo(
-            parse_creation_request(input.0, "creation.video")?,
+        (CREATION_MEDIA_MODULE_ID, "creation.media/video") => Wave3CapabilityOperation::CreationVideo(
+            parse_creation_request(input.0, "creation.media/video")?,
         ),
-        "creation.audio" => Wave3CapabilityOperation::CreationAudio(
-            parse_creation_request(input.0, "creation.audio")?,
+        (CREATION_MEDIA_MODULE_ID, "creation.media/audio") => Wave3CapabilityOperation::CreationAudio(
+            parse_creation_request(input.0, "creation.media/audio")?,
         ),
-        "creation.music" => Wave3CapabilityOperation::CreationMusic(
-            parse_creation_request(input.0, "creation.music")?,
+        (CREATION_MEDIA_MODULE_ID, "creation.media/music") => Wave3CapabilityOperation::CreationMusic(
+            parse_creation_request(input.0, "creation.media/music")?,
         ),
-        "workshop.canvas.read" => Wave3CapabilityOperation::WorkshopCanvasRead { input },
-        "workshop.canvas.edit" => Wave3CapabilityOperation::WorkshopCanvasEdit { input },
-        "workshop.asset.read" => Wave3CapabilityOperation::WorkshopAssetRead { input },
-        "workshop.asset.write" => Wave3CapabilityOperation::WorkshopAssetWrite { input },
-        "workshop.template.run" => Wave3CapabilityOperation::WorkshopTemplateRun { input },
-        "office.preview" => Wave3CapabilityOperation::OfficePreview { input },
-        "office.document.edit" => Wave3CapabilityOperation::OfficeDocumentEdit { input },
-        "office.sheet.edit" => Wave3CapabilityOperation::OfficeSheetEdit { input },
-        "office.slides.edit" => Wave3CapabilityOperation::OfficeSlidesEdit { input },
-        "plugin.read" => Wave3CapabilityOperation::PluginRead { input },
-        "plugin.edit" => Wave3CapabilityOperation::PluginEdit { input },
-        "plugin.publish" => Wave3CapabilityOperation::PluginPublish { input },
-        "plugin.serve" => Wave3CapabilityOperation::PluginServe { input },
-        other => {
+        (CREATIVE_WORKSHOP_MODULE_ID, "creative.workshop/canvas.read") => Wave3CapabilityOperation::WorkshopCanvasRead { input },
+        (CREATIVE_WORKSHOP_MODULE_ID, "creative.workshop/canvas.edit") => Wave3CapabilityOperation::WorkshopCanvasEdit { input },
+        (CREATIVE_WORKSHOP_MODULE_ID, "creative.workshop/asset.read") => Wave3CapabilityOperation::WorkshopAssetRead { input },
+        (CREATIVE_WORKSHOP_MODULE_ID, "creative.workshop/asset.write") => Wave3CapabilityOperation::WorkshopAssetWrite { input },
+        (CREATIVE_WORKSHOP_MODULE_ID, "creative.workshop/template.run") => Wave3CapabilityOperation::WorkshopTemplateRun { input },
+        (OFFICE_MODULE_ID, "office/preview") => Wave3CapabilityOperation::OfficePreview { input },
+        (OFFICE_MODULE_ID, "office/document.edit") => Wave3CapabilityOperation::OfficeDocumentEdit { input },
+        (OFFICE_MODULE_ID, "office/sheet.edit") => Wave3CapabilityOperation::OfficeSheetEdit { input },
+        (OFFICE_MODULE_ID, "office/slides.edit") => Wave3CapabilityOperation::OfficeSlidesEdit { input },
+        (PLUGIN_DEVELOPMENT_MODULE_ID, "plugin.development/read") => Wave3CapabilityOperation::PluginRead { input },
+        (PLUGIN_DEVELOPMENT_MODULE_ID, "plugin.development/edit") => Wave3CapabilityOperation::PluginEdit { input },
+        (PLUGIN_DEVELOPMENT_MODULE_ID, "plugin.development/publish") => Wave3CapabilityOperation::PluginPublish { input },
+        (PLUGIN_DEVELOPMENT_MODULE_ID, "plugin.development/serve") => Wave3CapabilityOperation::PluginServe { input },
+        (module, action) => {
             return Err(KernelError::CapabilityExecution {
-                reason: format!("{other} does not expose an action host operation"),
+                reason: format!("{module} does not expose Action {action}"),
             });
         }
     };
@@ -2298,10 +2446,12 @@ fn validate_resource_bindings_contract(
         ));
     }
 
-    let expected_kinds = requirements
-        .iter()
-        .map(|requirement| ResourceKind::from(requirement.resource_kind))
-        .collect::<BTreeSet<_>>();
+    let declared_kinds = required_resource_kinds(capability_id.as_ref()).ok_or_else(|| {
+        Wave3HostPortError::invalid_request(format!(
+            "unknown Wave 3 Module {}",
+            capability_id.as_ref()
+        ))
+    })?;
     let declared_operations = resource_binding_metadata();
     let mut seen_binding_ids = BTreeSet::new();
     let mut seen_resource_kinds = BTreeSet::new();
@@ -2339,7 +2489,7 @@ fn validate_resource_bindings_contract(
                 binding.resource_kind.as_ref()
             )));
         }
-        if !expected_kinds.contains(&binding.resource_kind) {
+        if !declared_kinds.contains(&binding.resource_kind) {
             return Err(Wave3HostPortError::resource_binding_invalid(format!(
                 "{} received unexpected resource kind {}",
                 capability_id.as_ref(),
@@ -2423,42 +2573,19 @@ mod tests {
         let expected = BTreeMap::from([
             (
                 CREATION_PACKAGE_ID,
-                BTreeSet::from([
-                    "creation.audio".to_owned(),
-                    "creation.music".to_owned(),
-                    "creation.image".to_owned(),
-                    "creation.image_edit".to_owned(),
-                    "creation.text".to_owned(),
-                    "creation.video".to_owned(),
-                ]),
+                BTreeSet::from([CREATION_MEDIA_MODULE_ID.to_owned()]),
             ),
             (
                 WORKSHOP_PACKAGE_ID,
-                BTreeSet::from([
-                    "workshop.asset.read".to_owned(),
-                    "workshop.asset.write".to_owned(),
-                    "workshop.canvas.edit".to_owned(),
-                    "workshop.canvas.read".to_owned(),
-                    "workshop.template.run".to_owned(),
-                ]),
+                BTreeSet::from([CREATIVE_WORKSHOP_MODULE_ID.to_owned()]),
             ),
             (
                 OFFICE_PACKAGE_ID,
-                BTreeSet::from([
-                    "office.document.edit".to_owned(),
-                    "office.preview".to_owned(),
-                    "office.sheet.edit".to_owned(),
-                    "office.slides.edit".to_owned(),
-                ]),
+                BTreeSet::from([OFFICE_MODULE_ID.to_owned()]),
             ),
             (
                 PLUGIN_PACKAGE_ID,
-                BTreeSet::from([
-                    "plugin.edit".to_owned(),
-                    "plugin.publish".to_owned(),
-                    "plugin.read".to_owned(),
-                    "plugin.serve".to_owned(),
-                ]),
+                BTreeSet::from([PLUGIN_DEVELOPMENT_MODULE_ID.to_owned()]),
             ),
         ]);
 
@@ -2488,32 +2615,21 @@ mod tests {
             );
             for capability in &manifest.contributions.capabilities {
                 assert_eq!(capability.kind, CapabilityKind::Tool);
-                assert_eq!(capability.contributions.actions.len(), 1);
+                assert_eq!(capability.authoring_policy().unwrap(), CapabilityAuthoringPolicy::Direct);
                 assert_eq!(
-                    capability.contributions.actions[0].action_id.as_ref(),
-                    format!("{}.invoke", capability.id.as_ref())
+                    capability.contributions.actions.len(),
+                    action_ids(capability.id.as_ref()).len()
                 );
-                let expected_effect = match capability.id.as_ref() {
-                    "creation.text" | "creation.image" | "creation.image_edit"
-                    | "creation.video" | "creation.audio" | "creation.music" | "workshop.asset.write" => {
-                        EffectClass::WriteDurable
-                    }
-                    "workshop.canvas.read" | "workshop.asset.read" | "office.preview"
-                    | "plugin.read" | "plugin.serve" => EffectClass::ReadSensitive,
-                    "workshop.canvas.edit" | "office.document.edit" | "office.sheet.edit"
-                    | "office.slides.edit" | "plugin.edit" => EffectClass::WriteReversible,
-                    "workshop.template.run" => EffectClass::ExecuteLocal,
-                    "plugin.publish" => EffectClass::ExternalTransmit,
-                    other => panic!("unexpected Wave 3 capability {other}"),
-                };
-                assert_eq!(
-                    capability.contributions.actions[0].effect_class,
-                    expected_effect
-                );
-                assert_eq!(
-                    capability.contributions.actions[0].presentation,
-                    ToolPresentationKind::FunctionTool
-                );
+                for action in &capability.contributions.actions {
+                    let expected_effect = find_action(
+                        capability.id.as_ref(),
+                        action.action_id.as_ref(),
+                    )
+                    .expect("published action belongs to the Module")
+                    .effect_class;
+                    assert_eq!(action.effect_class, expected_effect);
+                    assert_eq!(action.presentation, ToolPresentationKind::FunctionTool);
+                }
                 assert_eq!(
                     capability.contributions.host_ports,
                     vec![host_port(WAVE3_CAPABILITY_HOST_PORT_ID)]
@@ -2557,6 +2673,38 @@ mod tests {
     }
 
     #[test]
+    fn persistent_attachment_and_provider_operation_grants_are_not_published() {
+        let registrations = registrations().unwrap();
+        let capability_ids = registrations
+            .iter()
+            .flat_map(|registration| {
+                registration
+                    .metadata
+                    .manifest
+                    .payload
+                    .contributions
+                    .capabilities
+                    .iter()
+            })
+            .map(|capability| capability.id.as_ref())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            capability_ids,
+            TARGET_CAPABILITY_IDS.into_iter().collect::<BTreeSet<_>>()
+        );
+        assert!(!capability_ids.contains("session.attachments.read"));
+        assert!(capability_ids.iter().all(|id| !id.starts_with("llm.")));
+        for retired in [
+            "creation.image",
+            "workshop.canvas.read",
+            "office.preview",
+            "plugin.read",
+        ] {
+            assert!(!capability_ids.contains(retired));
+        }
+    }
+
+    #[test]
     fn registrations_pass_kernel_materialization_without_partial_publication() {
         let registry = KernelRegistry::new(
             MaterializationPolicy::stable(CONTRACT_VERSION),
@@ -2573,45 +2721,25 @@ mod tests {
 
     #[test]
     fn creative_agent_actions_export_exact_resolvable_schemas_without_director() {
-        let creative_ids = BTreeSet::from([
-            "creation.audio",
-            "creation.image",
-            "creation.image_edit",
-            "creation.text",
-            "creation.video",
-            "plugin.edit",
-            "plugin.publish",
-            "plugin.read",
-            "plugin.serve",
-            "workshop.asset.read",
-            "workshop.asset.write",
-            "workshop.canvas.edit",
-            "workshop.canvas.read",
-            "workshop.template.run",
-        ]);
-        assert!(!creative_ids.contains("workshop.director"));
-
         let manifests = registrations()
             .expect("registrations")
             .into_iter()
             .flat_map(|registration| registration.metadata.manifest.payload.contributions.capabilities)
             .map(|manifest| (manifest.id.as_ref().to_owned(), manifest))
             .collect::<BTreeMap<_, _>>();
-        for capability_id in creative_ids {
-            let manifest = manifests.get(capability_id).expect("creative manifest");
-            let action = manifest
-                .contributions
-                .actions
-                .first()
-                .expect("creative action");
-            for reference in [&action.input_schema, &action.output_schema] {
-                let schema = resolve_action_schema(capability_id, reference)
-                    .expect("manifest schema ref resolves from same source");
-                assert_ne!(
-                    schema.0.get("additionalProperties"),
-                    Some(&json!(true)),
-                    "{capability_id} must not publish the old permissive object schema"
-                );
+        assert_eq!(manifests.keys().cloned().collect::<BTreeSet<_>>(), TARGET_CAPABILITY_IDS.into_iter().map(str::to_owned).collect());
+        for (capability_id, manifest) in manifests {
+            for action in &manifest.contributions.actions {
+                for reference in [&action.input_schema, &action.output_schema] {
+                    let schema = resolve_action_schema(&capability_id, reference)
+                        .expect("manifest schema ref resolves from same source");
+                    assert_ne!(
+                        schema.0.get("additionalProperties"),
+                        Some(&json!(true)),
+                        "{} must not publish a permissive object schema",
+                        action.action_id.as_ref(),
+                    );
+                }
             }
         }
     }
@@ -2662,8 +2790,9 @@ mod tests {
 
     #[test]
     fn operation_input_rejects_non_objects_with_the_canonical_request_error() {
-        let target = valid_input("creation.text").0["target"].clone();
-        for capability_id in ALL_CAPABILITY_IDS {
+        let target = valid_input("creation.media/text").0["target"].clone();
+        for action_id in TARGET_ACTION_IDS {
+            let (module, _) = find_action_by_id(action_id).expect("known action");
             for input in [
                 json!(null),
                 json!(true),
@@ -2674,7 +2803,8 @@ mod tests {
                 json!([target, "prompt", null, 4096]),
             ] {
                 let error = operation_from_input(
-                    &CapabilityId::from(capability_id),
+                    &CapabilityId::from(module.module_id),
+                    &ActionId::from(action_id),
                     StrictJsonValue(input),
                 )
                 .expect_err("Wave 3 action inputs must be objects");
@@ -2685,149 +2815,147 @@ mod tests {
 
     #[test]
     fn operation_mapping_and_resource_requirements_match_the_frozen_inventory() {
-        for capability in PACKAGE_SPECS
+        for (package, action) in PACKAGE_SPECS
             .iter()
-            .flat_map(|package| package.capabilities.iter())
+            .flat_map(|package| package.actions.iter().map(move |action| (package, action)))
         {
-            let capability_id = CapabilityId::from(capability.id);
-            let expected_kinds = required_resource_kinds(capability.id).expect("known capability");
+            let capability_id = CapabilityId::from(package.module_id);
+            let action_id = ActionId::from(action.id);
+            let expected_kinds = required_resource_kinds(package.module_id).expect("known Module");
             let bindings = canonical_resource_bindings("wave3-test-owner")
                 .into_iter()
                 .filter(|binding| expected_kinds.contains(&binding.resource_kind))
                 .collect::<Vec<_>>();
-            let operation = operation_from_input(&capability_id, valid_input(capability.id))
-                .expect("every Wave 3 capability has a typed operation");
+            let operation = operation_from_input(&capability_id, &action_id, valid_input(action.id))
+                .expect("every Wave 3 Action has a typed operation");
             assert_eq!(operation.capability_id(), capability_id);
-            assert_eq!(
-                operation.action_id(),
-                action_id(capability.id).expect("every Wave 3 capability has an action id")
-            );
+            assert_eq!(operation.action_id(), action_id);
 
-            match capability.id {
-                "creation.text" => {
+            match action.id {
+                "creation.media/text" => {
                     assert!(matches!(
                         operation,
                         Wave3CapabilityOperation::CreationText(_)
                     ));
                 }
-                "creation.image" => {
+                "creation.media/image" => {
                     assert!(matches!(
                         operation,
                         Wave3CapabilityOperation::CreationImage(_)
                     ));
                 }
-                "creation.image_edit" => {
+                "creation.media/image_edit" => {
                     assert!(matches!(
                         operation,
                         Wave3CapabilityOperation::CreationImageEdit(_)
                     ));
                 }
-                "creation.video" => {
+                "creation.media/video" => {
                     assert!(matches!(
                         operation,
                         Wave3CapabilityOperation::CreationVideo(_)
                     ));
                 }
-                "creation.audio" => {
+                "creation.media/audio" => {
                     assert!(matches!(
                         operation,
                         Wave3CapabilityOperation::CreationAudio(_)
                     ));
                 }
-                "creation.music" => {
+                "creation.media/music" => {
                     assert!(matches!(operation, Wave3CapabilityOperation::CreationMusic(_)));
                 }
-                "workshop.canvas.read" => {
+                "creative.workshop/canvas.read" => {
                     assert!(matches!(
                         operation,
                         Wave3CapabilityOperation::WorkshopCanvasRead { .. }
                     ));
                 }
-                "workshop.canvas.edit" => {
+                "creative.workshop/canvas.edit" => {
                     assert!(matches!(
                         operation,
                         Wave3CapabilityOperation::WorkshopCanvasEdit { .. }
                     ));
                 }
-                "workshop.asset.read" => {
+                "creative.workshop/asset.read" => {
                     assert!(matches!(
                         operation,
                         Wave3CapabilityOperation::WorkshopAssetRead { .. }
                     ));
                 }
-                "workshop.asset.write" => {
+                "creative.workshop/asset.write" => {
                     assert!(matches!(
                         operation,
                         Wave3CapabilityOperation::WorkshopAssetWrite { .. }
                     ));
                 }
-                "workshop.template.run" => {
+                "creative.workshop/template.run" => {
                     assert!(matches!(
                         operation,
                         Wave3CapabilityOperation::WorkshopTemplateRun { .. }
                     ));
                 }
-                "office.preview" => {
+                "office/preview" => {
                     assert!(matches!(
                         operation,
                         Wave3CapabilityOperation::OfficePreview { .. }
                     ));
                 }
-                "office.document.edit" => {
+                "office/document.edit" => {
                     assert!(matches!(
                         operation,
                         Wave3CapabilityOperation::OfficeDocumentEdit { .. }
                     ));
                 }
-                "office.sheet.edit" => {
+                "office/sheet.edit" => {
                     assert!(matches!(
                         operation,
                         Wave3CapabilityOperation::OfficeSheetEdit { .. }
                     ));
                 }
-                "office.slides.edit" => {
+                "office/slides.edit" => {
                     assert!(matches!(
                         operation,
                         Wave3CapabilityOperation::OfficeSlidesEdit { .. }
                     ));
                 }
-                "plugin.read" => {
+                "plugin.development/read" => {
                     assert!(matches!(
                         operation,
                         Wave3CapabilityOperation::PluginRead { .. }
                     ));
                 }
-                "plugin.edit" => {
+                "plugin.development/edit" => {
                     assert!(matches!(
                         operation,
                         Wave3CapabilityOperation::PluginEdit { .. }
                     ));
                 }
-                "plugin.publish" => {
+                "plugin.development/publish" => {
                     assert!(matches!(
                         operation,
                         Wave3CapabilityOperation::PluginPublish { .. }
                     ));
                 }
-                "plugin.serve" => {
+                "plugin.development/serve" => {
                     assert!(matches!(
                         operation,
                         Wave3CapabilityOperation::PluginServe { .. }
                     ));
                 }
-                other => panic!("unexpected Wave 3 capability {other}"),
+                other => panic!("unexpected Wave 3 Action {other}"),
             }
 
             validate_resource_bindings(
                 &capability_id,
                 "wave3-test-owner",
-                capability.requirements,
+                action.requirements,
                 &bindings,
             )
             .unwrap_or_else(|error| {
                 panic!(
                     "{} resource requirements no longer fit canonical bindings: {error}",
-                    capability.id
+                    action.id
                 )
             });
         }
@@ -2868,11 +2996,13 @@ mod tests {
             }
         }
 
-        fn request_for(capability_id: &str) -> Wave3HostRequest {
-            let capability_id = CapabilityId::from(capability_id);
-            let input = valid_input(capability_id.as_ref());
-            let operation =
-                operation_from_input(&capability_id, input).expect("known Wave 3 operation");
+        fn request_for(action_id: &str) -> Wave3HostRequest {
+            let (module, _) = find_action_by_id(action_id).expect("known Wave 3 Action");
+            let capability_id = CapabilityId::from(module.module_id);
+            let action_id = ActionId::from(action_id);
+            let input = valid_input(action_id.as_ref());
+            let operation = operation_from_input(&capability_id, &action_id, input)
+                .expect("known Wave 3 operation");
             let owner_id = "wave3-test-owner";
             let required_kinds = required_resource_kinds(capability_id.as_ref())
                 .expect("known Wave 3 resource requirements");
@@ -2896,7 +3026,7 @@ mod tests {
                     },
                     registry_generation: 1,
                     capability_id: capability_id.clone(),
-                    action_id: action_id(capability_id.as_ref()).expect("action id"),
+                    action_id,
                     state_scope_key: ScopeKey::from("session:wave3-test"),
                     resource_bindings,
                 },
@@ -2915,7 +3045,7 @@ mod tests {
                 ),
             })),
         );
-        let error = poll_ready(host.invoke(request_for("creation.text")))
+        let error = poll_ready(host.invoke(request_for("creation.media/text")))
             .expect_err("bound Creation owner should receive the request");
         assert_eq!(error.code, "CREATION_OWNER_REACHED");
         assert_eq!(
@@ -2924,12 +3054,12 @@ mod tests {
         );
 
         let missing_owner = composed_host_port(Wave3OwnerBindings::default());
-        let error = poll_ready(missing_owner.invoke(request_for("plugin.read")))
+        let error = poll_ready(missing_owner.invoke(request_for("plugin.development/read")))
             .expect_err("missing Plugin owner must fail closed");
         assert_eq!(error.code, WAVE3_HOST_PORT_UNAVAILABLE);
         assert_eq!(
             error.message,
-            "no production owner is bound for plugin.read"
+            "no production owner is bound for plugin.development"
         );
 
         let owner_error = Wave3HostPortError::new("OWNER_ACTION_FAILED", "owner rejected action");
@@ -2941,7 +3071,7 @@ mod tests {
             })),
         );
         assert_eq!(
-            poll_ready(failing_host.invoke(request_for("office.preview")))
+            poll_ready(failing_host.invoke(request_for("office/preview")))
                 .expect_err("owner errors must propagate unchanged"),
             owner_error
         );
@@ -2950,9 +3080,14 @@ mod tests {
     #[test]
     fn host_request_validation_rejects_cross_capability_and_invalid_resource_operations() {
         let mut request = {
-            let capability_id = CapabilityId::from("creation.text");
-            let operation =
-                operation_from_input(&capability_id, valid_input("creation.text")).unwrap();
+            let capability_id = CapabilityId::from(CREATION_MEDIA_MODULE_ID);
+            let action_id = ActionId::from("creation.media/text");
+            let operation = operation_from_input(
+                &capability_id,
+                &action_id,
+                valid_input("creation.media/text"),
+            )
+            .unwrap();
             let mut request = {
                 let owner_id = "wave3-test-owner";
                 Wave3HostRequest {
@@ -2971,7 +3106,7 @@ mod tests {
                         },
                         registry_generation: 1,
                         capability_id,
-                        action_id: ActionId::from("creation.text.invoke"),
+                        action_id,
                         state_scope_key: ScopeKey::from("session:wave3-test"),
                         resource_bindings: canonical_resource_bindings(owner_id)
                             .into_iter()
@@ -2983,7 +3118,7 @@ mod tests {
                     operation,
                 }
             };
-            request.context.action_id = ActionId::from("creation.image.invoke");
+            request.context.action_id = ActionId::from("creation.media/image");
             request
         };
         let error = request
@@ -2991,7 +3126,7 @@ mod tests {
             .expect_err("cross-capability action identity must reject");
         assert_eq!(error.code, WAVE3_ACTION_OPERATION_MISMATCH);
 
-        request.context.action_id = ActionId::from("creation.text.invoke");
+        request.context.action_id = ActionId::from("creation.media/text");
         request.context.resource_bindings[0]
             .operations
             .insert("not-declared".to_owned());
@@ -3019,8 +3154,8 @@ mod tests {
                     snapshot_digest: "digest".into(),
                 },
                 registry_generation: 1,
-                capability_id: CapabilityId::from("creation.text"),
-                action_id: ActionId::from("creation.text.invoke"),
+                capability_id: CapabilityId::from(CREATION_MEDIA_MODULE_ID),
+                action_id: ActionId::from("creation.media/text"),
                 state_scope_key: ScopeKey::from("session:wave3-test"),
                 resource_bindings: Vec::new(),
             },
@@ -3044,45 +3179,55 @@ mod tests {
         assert_eq!(result.code, "WAVE3_HOST_PORT_UNAVAILABLE");
         assert_eq!(
             result.message,
-            "no production host adapter is bound for creation.text"
+            "no production host adapter is bound for creation.media"
         );
     }
 
     #[test]
     fn video_tools_advertise_and_enforce_one_clip_per_call() {
-        let schema = action_input_schema_for("creation.video").unwrap();
+        let schema = action_input_schema_for("creation.media/video").unwrap();
         assert_eq!(schema.0["properties"]["count"]["const"], 1);
-        let capability = CapabilityId::from("creation.video");
+        let capability = CapabilityId::from(CREATION_MEDIA_MODULE_ID);
+        let action = ActionId::from("creation.media/video");
         for count in [0, 2, MAX_CREATION_RESULTS] {
-            let mut input = valid_input("creation.video");
+            let mut input = valid_input("creation.media/video");
             input.0["count"] = json!(count);
-            assert!(operation_from_input(&capability, input).is_err());
+            assert!(operation_from_input(&capability, &action, input).is_err());
         }
         for count in [None, Some(1)] {
-            let mut input = valid_input("creation.video");
+            let mut input = valid_input("creation.media/video");
             if let Some(count) = count { input.0["count"] = json!(count); }
-            let Wave3CapabilityOperation::CreationVideo(request) = operation_from_input(&capability, input).unwrap() else { panic!("expected video") };
+            let Wave3CapabilityOperation::CreationVideo(request) = operation_from_input(&capability, &action, input).unwrap() else { panic!("expected video") };
             assert_eq!(request.count, 1);
         }
     }
 
     #[test]
-    fn all_media_tools_accept_exact_model_selection_and_reject_invalid_selectors() {
-        let selection = json!({"provider_id":"0190f5fe-7c00-7a00-8000-000000000009", "model":"configured-model"});
-        for capability in ["creation.image", "creation.image_edit", "creation.video", "creation.music", "creation.audio"] {
-            let schema = action_input_schema_for(capability).unwrap();
-            assert_eq!(schema.0["properties"]["model_selection"]["required"], json!(["provider_id", "model"]));
-            assert_eq!(schema.0["properties"]["model_selection"]["additionalProperties"], false);
-            let mut input = valid_input(capability);
-            assert!(operation_from_input(&capability.into(), input.clone()).unwrap().model_selection().is_none());
-            input.0["model_selection"] = selection.clone();
-            let operation = operation_from_input(&capability.into(), input.clone()).unwrap();
-            assert_eq!(operation.model_selection().unwrap().model, "configured-model");
-            for invalid in [json!({"model":"configured-model"}), json!({"provider_id":"made-up", "model":"configured-model"}),
-                json!({"provider_id":selection["provider_id"], "model":" "}),
-                json!({"provider_id":selection["provider_id"], "model":"configured-model", "api_key":"forbidden"})] {
-                input.0["model_selection"] = invalid;
-                assert!(operation_from_input(&capability.into(), input.clone()).is_err(), "{capability}: {input:?}");
+    fn media_actions_hide_provider_mechanics_and_reject_routing_fields() {
+        for &action in CREATION_MEDIA_ACTION_IDS {
+            let schema = action_input_schema_for(action).unwrap();
+            assert!(schema.0["properties"].get("provider_id").is_none());
+            assert!(schema.0["properties"].get("model").is_none());
+            assert!(schema.0["properties"].get("model_selection").is_none());
+            let base = valid_input(action);
+            operation_from_input(
+                &CapabilityId::from(CREATION_MEDIA_MODULE_ID),
+                &ActionId::from(action),
+                base.clone(),
+            )
+            .expect("product action resolves without caller-owned provider mechanics");
+            for forbidden in ["provider_id", "model", "model_selection", "api_key", "base_url"] {
+                let mut input = base.clone();
+                input.0[forbidden] = json!("forbidden");
+                assert!(
+                    operation_from_input(
+                        &CapabilityId::from(CREATION_MEDIA_MODULE_ID),
+                        &ActionId::from(action),
+                        input,
+                    )
+                    .is_err(),
+                    "{action} accepted provider field {forbidden}",
+                );
             }
         }
     }
@@ -3097,16 +3242,22 @@ mod tests {
             "node_id": NODE_ID,
         });
         StrictJsonValue(match capability_id {
-            "creation.text" => json!({"target": target, "prompt": "hello"}),
-            "creation.image" => json!({"target": target, "prompt": "image"}),
-            "creation.image_edit" => json!({
+            "creation.media/text" => json!({"target": target, "prompt": "hello"}),
+            "creation.media/image" => json!({"target": target, "prompt": "image"}),
+            "creation.media/image_edit" => json!({
                 "target": target,
                 "prompt": "edit",
                 "inputs": [{"asset_id": ASSET_ID, "role": "reference"}],
             }),
-            "creation.video" => json!({"target": target, "prompt": "video"}),
-            "creation.audio" => json!({"target": target, "text": "speak"}),
-            "creation.music" => json!({"target": target, "prompt": "instrumental", "instrumental": true}),
+            "creation.media/video" => json!({"target": target, "prompt": "video"}),
+            "creation.media/audio" => json!({"target": target, "text": "speak"}),
+            "creation.media/music" => json!({"target": target, "prompt": "instrumental", "instrumental": true}),
+            "creative.workshop/asset.read" => json!({"asset_id": ASSET_ID}),
+            "creative.workshop/asset.write" => json!({"asset_id": ASSET_ID}),
+            "office/preview" => json!({"asset_id": ASSET_ID}),
+            "office/document.edit" => json!({"title": "Brief", "content": "Hello"}),
+            "office/sheet.edit" => json!({"title": "Budget", "columns": ["Item"], "rows": [["Coffee"]]}),
+            "office/slides.edit" => json!({"title": "Deck", "slides": [{"title": "Intro", "body": "Hello"}]}),
             _ => json!({}),
         })
     }

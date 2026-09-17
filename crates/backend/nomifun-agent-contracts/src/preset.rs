@@ -45,8 +45,8 @@ pub fn is_direct_creation_agent<'a>(capabilities: impl IntoIterator<Item = &'a s
     let mut has_generation = false;
     for capability in capabilities {
         match capability {
-            "creation.image" | "creation.image_edit" | "creation.video" | "creation.music" | "creation.audio" => has_generation = true,
-            "session.attachments.read" | "workshop.asset.read" | "workshop.asset.write" => {}
+            "creation.media" => has_generation = true,
+            "creative.workshop" | "office" => {}
             _ => return false,
         }
     }
@@ -1192,13 +1192,10 @@ impl OfficialPresetSeedManifestPayload {
             .map(|capability| capability.id.as_ref())
             .collect::<BTreeSet<_>>();
         for capability in [
-            "companion.persona",
-            "knowledge.search",
-            "knowledge.read",
-            "memory.companion.recall",
-            "memory.companion.write",
-            "channel.reply",
-            "channel.send",
+            "companion",
+            "companion.memory",
+            "knowledge",
+            "channel.messaging",
         ] {
             if !companion_union.contains(capability) {
                 return Err(PresetContractViolation {
@@ -1983,9 +1980,10 @@ mod tests {
 
     #[test]
     fn direct_creation_does_not_require_chat_and_general_assistants_still_do() {
-        assert!(is_direct_creation_agent(["creation.image", "creation.video", "creation.music", "creation.audio", "creation.image_edit", "session.attachments.read", "workshop.asset.read", "workshop.asset.write"]));
-        assert!(!is_direct_creation_agent(["creation.image", "web.search"]));
-        assert!(!is_direct_creation_agent(["session.attachments.read"]));
+        assert!(is_direct_creation_agent(["creation.media", "creative.workshop"]));
+        assert!(is_direct_creation_agent(["creation.media", "office"]));
+        assert!(!is_direct_creation_agent(["creation.media", "web.research"]));
+        assert!(!is_direct_creation_agent(["creative.workshop"]));
         assert!(!is_direct_creation_agent(std::iter::empty()));
     }
 

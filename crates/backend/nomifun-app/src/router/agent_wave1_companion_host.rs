@@ -9,16 +9,15 @@ use std::sync::Arc;
 
 use nomifun_agent_contracts::{StrictJsonValue, TypedResourceBinding};
 use nomifun_agent_domain_wave1::{
-    COMPANION_MEMORY_RESOURCE_KIND, Wave1CompanionMemoryEvolveRequest,
-    Wave1CompanionMemoryMergeRequest, Wave1CompanionMemoryWriteRequest,
-    Wave1ContextHostContext, Wave1HostContext, Wave1HostPortError,
+    Wave1CompanionMemoryRecallRequest, Wave1CompanionMemoryWriteRequest,
+    Wave1HostContext, Wave1HostPortError,
 };
 use nomifun_common::{AppError, CompanionId};
 use nomifun_companion::CompanionService;
 use sqlx::SqlitePool;
 
 use super::agent_wave1_memory_receipts::{
-    MemoryActionReceiptContext, ReceiptAdmission, Wave1MemoryActionLedger,
+    CompanionMemoryWriteLedger, CompanionMemoryWriteReceiptContext, ReceiptAdmission,
 };
 
 const RECALL_PER_KIND: i64 = 20;
@@ -28,30 +27,30 @@ const MAX_RECALL_MEMORIES: usize = 120;
 #[derive(Clone)]
 pub(super) struct Wave1CompanionMemoryHost {
     service: Arc<CompanionService>,
-    receipts: Wave1MemoryActionLedger,
+    receipts: CompanionMemoryWriteLedger,
 }
 
 impl Wave1CompanionMemoryHost {
     pub(super) fn new(service: Arc<CompanionService>, receipt_pool: SqlitePool) -> Self {
         Self {
             service,
-            receipts: Wave1MemoryActionLedger::new(receipt_pool),
+            receipts: CompanionMemoryWriteLedger::new(receipt_pool),
         }
     }
 
     pub(super) async fn recall(
         &self,
-        context: Wave1ContextHostContext,
+        context: Wave1HostContext,
+        request: Wave1CompanionMemoryRecallRequest,
     ) -> Result<StrictJsonValue, Wave1HostPortError> {
-        let companion_id = self
-            .resolve_context_binding(&context, "read")
-            .await?;
+        let companion_id = self.resolve_action_binding(&context, "read").await?;
         let mut memories = self
             .service
             .recall_memories_for_agent(
                 companion_id.as_str(),
-                RECALL_PER_KIND,
-                RECALL_CHAR_BUDGET,
+                i64::try_from(request.per_kind.unwrap_or(RECALL_PER_KIND as usize))
+                    .unwrap_or(RECALL_PER_KIND),
+                request.char_budget.unwrap_or(RECALL_CHAR_BUDGET),
             )
             .await
             .map_err(companion_memory_error)?;
@@ -96,88 +95,9 @@ impl Wave1CompanionMemoryHost {
         result
     }
 
-    pub(super) async fn merge(
-        &self,
-        context: Wave1HostContext,
-        request: Wave1CompanionMemoryMergeRequest,
-    ) -> Result<StrictJsonValue, Wave1HostPortError> {
-        let companion_id = self.resolve_action_binding(&context, "write").await?;
-        let request_json = StrictJsonValue(serde_json::json!({
-            "memory_ids": &request.memory_ids,
-            "merged_content": &request.merged_content,
-            "kind": &request.kind,
-        }));
-        let admission = self
-            .receipts
-            .admit(receipt_context(&context, companion_id.as_str()), &request_json)
-            .await?;
-        let mut guard = match admission {
-            ReceiptAdmission::Execute(guard) => guard,
-            ReceiptAdmission::Return(result) => return result,
-        };
-        let result = self
-            .service
-            .merge_companion_memories_for_agent(
-                companion_id.as_str(),
-                &request.memory_ids,
-                &request.merged_content,
-                &request.kind,
-            )
-            .await
-            .map_err(companion_memory_error)
-            .and_then(strict_json);
-        self.receipts.settle(&mut guard, &result).await?;
-        result
-    }
-
-    pub(super) async fn evolve(
-        &self,
-        context: Wave1HostContext,
-        request: Wave1CompanionMemoryEvolveRequest,
-    ) -> Result<StrictJsonValue, Wave1HostPortError> {
-        let companion_id = self.resolve_action_binding(&context, "write").await?;
-        let request_json = StrictJsonValue(serde_json::json!({
-            "memory_id": &request.memory_id,
-            "content": &request.content,
-        }));
-        let admission = self
-            .receipts
-            .admit(receipt_context(&context, companion_id.as_str()), &request_json)
-            .await?;
-        let mut guard = match admission {
-            ReceiptAdmission::Execute(guard) => guard,
-            ReceiptAdmission::Return(result) => return result,
-        };
-        let result = self
-            .service
-            .evolve_companion_memory_for_agent(
-                companion_id.as_str(),
-                &request.memory_id,
-                &request.content,
-            )
-            .await
-            .map_err(companion_memory_error)
-            .and_then(strict_json);
-        self.receipts.settle(&mut guard, &result).await?;
-        result
-    }
-
     async fn resolve_action_binding(
         &self,
         context: &Wave1HostContext,
-        operation: &str,
-    ) -> Result<CompanionId, Wave1HostPortError> {
-        self.resolve_binding(
-            &context.principal.principal_id,
-            &context.resource_bindings,
-            operation,
-        )
-        .await
-    }
-
-    async fn resolve_context_binding(
-        &self,
-        context: &Wave1ContextHostContext,
         operation: &str,
     ) -> Result<CompanionId, Wave1HostPortError> {
         self.resolve_binding(
@@ -200,30 +120,21 @@ impl Wave1CompanionMemoryHost {
                 "the Agent principal does not own this Companion dataset",
             ));
         }
-        let matching = bindings
-            .iter()
-            .filter(|binding| {
-                binding.resource_kind.as_ref() == COMPANION_MEMORY_RESOURCE_KIND
-            })
-            .collect::<Vec<_>>();
-        let [binding] = matching.as_slice() else {
-            return Err(Wave1HostPortError::new(
-                "PRESET_RESOURCE_NOT_BOUND",
-                "Companion memory requires exactly one selected Companion",
-            ));
+        let action = match operation {
+            "read" => super::agent_memory_authority::ProductMemoryAction::CompanionRecall,
+            "write" => super::agent_memory_authority::ProductMemoryAction::CompanionWrite,
+            _ => {
+                return Err(Wave1HostPortError::invalid_request(
+                    "unsupported Companion memory operation",
+                ));
+            }
         };
-        if binding.owner_id != principal_id {
-            return Err(Wave1HostPortError::new(
-                "RESOURCE_OWNER_MISMATCH",
-                "the selected Companion belongs to a different owner",
-            ));
-        }
-        if !binding.operations.contains(operation) {
-            return Err(Wave1HostPortError::new(
-                "PRESET_RESOURCE_NOT_BOUND",
-                format!("the selected Companion does not grant {operation}"),
-            ));
-        }
+        let binding = super::agent_memory_authority::authorize_memory_resource(
+            principal_id,
+            action,
+            bindings,
+        )
+        .map_err(companion_memory_error)?;
         let companion_id = CompanionId::try_from(binding.resource_id.as_ref()).map_err(|_| {
             Wave1HostPortError::new(
                 "INVALID_PAYLOAD",
@@ -246,11 +157,11 @@ impl Wave1CompanionMemoryHost {
 fn receipt_context<'a>(
     context: &'a Wave1HostContext,
     companion_id: &'a str,
-) -> MemoryActionReceiptContext<'a> {
-    MemoryActionReceiptContext {
+) -> CompanionMemoryWriteReceiptContext<'a> {
+    CompanionMemoryWriteReceiptContext {
         owner_user_id: &context.principal.principal_id,
         agent_session_id: context.agent_session_id.as_ref(),
-        capability_id: context.capability_id.as_ref(),
+        module_id: context.capability_id.as_ref(),
         action_id: context.action_id.as_ref(),
         idempotency_key: context.idempotency_key.as_ref(),
         target_companion_id: companion_id,

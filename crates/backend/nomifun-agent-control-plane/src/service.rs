@@ -38,12 +38,11 @@ fn required_chat_features<'a>(
 ) -> BTreeSet<ChatRouteFeature> {
     capability_ids
         .into_iter()
-        .filter_map(|capability_id| match capability_id {
-            "llm.vision" => Some(ChatRouteFeature::ImageInput),
-            // Web search is an independently resolved tool, not a required
-            // serializer feature of the conversation's selected Chat model.
-            _ => None,
-        })
+        // Web Research and media Creation resolve through their own owners.
+        // Current-turn image input is Session input and is checked against the
+        // selected Chat route when that turn is admitted, not as a persistent
+        // Agent capability.
+        .filter_map(|_| None)
         .collect()
 }
 
@@ -1965,23 +1964,9 @@ mod tests {
 
     #[test]
     fn web_search_does_not_constrain_the_conversation_chat_route() {
-        let required = required_chat_features(["web.search", "creation.image", "citation.render"]);
+        let required = required_chat_features(["web.research", "creation.media"]);
         assert!(required.is_empty());
         ensure_chat_route_supports(&chat_route_with(ChatRouteProtocol::OpenaiChat, []), &required).unwrap();
-        assert_eq!(required_chat_features(["web.search", "llm.vision"]), BTreeSet::from([ChatRouteFeature::ImageInput]));
-    }
-
-    #[test]
-    fn selected_chat_route_must_satisfy_direct_model_features() {
-        let required = required_chat_features(["llm.vision", "web.search"]);
-        assert_eq!(required, BTreeSet::from([ChatRouteFeature::ImageInput]));
-        let missing_feature = chat_route_with(ChatRouteProtocol::OpenaiChat, []);
-        let error = ensure_chat_route_supports(&missing_feature, &required).unwrap_err();
-        assert_eq!(error.code().as_ref(), "MODEL_ROUTE_FEATURES_MISSING");
-        for protocol in [ChatRouteProtocol::OpenaiChat, ChatRouteProtocol::OpenaiResponses] {
-            let compatible = chat_route_with(protocol, [ChatRouteFeature::ImageInput]);
-            ensure_chat_route_supports(&compatible, &required).unwrap();
-        }
     }
 
     #[tokio::test]
@@ -2238,7 +2223,14 @@ mod tests {
         assert!(repeated.draft.document.model_route_refs.is_empty());
         let reference: PresetRevisionRef = wire_cast(&binding.preset_revision_ref).unwrap();
         let snapshot = store.get_snapshot(&reference).await.unwrap().unwrap();
-        assert_eq!(snapshot.content.enabled_capabilities.len(), 8);
+        assert_eq!(snapshot.content.enabled_capabilities.len(), 2);
+        let creation = snapshot
+            .content
+            .enabled_capabilities
+            .iter()
+            .find(|capability| capability.capability.id.as_ref() == "creation.media")
+            .unwrap();
+        assert!(creation.action_allowlist.is_empty(), "this isolated catalog fixture declares no actions");
     }
 
     #[tokio::test]
@@ -2441,7 +2433,7 @@ mod tests {
         let mut registry = MaterializedRegistry::empty();
         let mut catalog = CatalogSnapshot::default();
         for selected in &templates.seed(key).unwrap().enabled_capabilities {
-            let schema = if selected.id.as_ref() == "creation.image" && updated_schema {
+            let schema = if selected.id.as_ref() == "creation.media" && updated_schema {
                 json!({"type":"object", "additionalProperties":false, "properties":{"model_selection":{"type":"object"}}})
             } else { json!({"type":"object", "additionalProperties":false}) };
             let (capability, entry) = catalog_capability_with_schema(selected.id.as_ref(), [CapabilityConsumer::Agent], schema);

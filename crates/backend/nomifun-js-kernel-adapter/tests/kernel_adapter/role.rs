@@ -167,7 +167,7 @@ async fn dynamic_context_input_reaches_direct_and_selected_role_javascript() {
         assert_eq!(host.process_count(), 0, "wrong phase must not start a JS process");
         for text in ["first", "second"] {
             let input = ContextContributionInput::BeforeTurn { turn: ContextTurnInput {
-                source_message_id: format!("source-{text}"), text: text.into(), image_media_types: vec!["image/png".into()],
+                source_message_id: format!("source-{text}"), text: text.into(), image_media_types: vec!["image/png".into()], cs_dialogue_id: None,
             }};
             let result = registry.contribute_context_with_input(&snapshot, &active,
                 access(&snapshot, active.generation, &owner, id), input.clone()).await.unwrap().value.unwrap();
@@ -178,7 +178,7 @@ async fn dynamic_context_input_reaches_direct_and_selected_role_javascript() {
         if !mapped {
             let pending = registry.contribute_context_with_input(&snapshot, &active,
                 access(&snapshot, active.generation, &owner, id), ContextContributionInput::BeforeTurn {
-                    turn: ContextTurnInput { source_message_id: "pending".into(), text: "wait-for-cancel".into(), image_media_types: vec![] },
+                    turn: ContextTurnInput { source_message_id: "pending".into(), text: "wait-for-cancel".into(), image_media_types: vec![], cs_dialogue_id: None },
                 });
             assert!(tokio::time::timeout(Duration::from_millis(100), pending).await.is_err());
             let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
@@ -195,7 +195,7 @@ async fn dynamic_context_input_reaches_direct_and_selected_role_javascript() {
         registry.replace_all(Vec::new()).unwrap();
         assert!(registry.contribute_context_with_input(&snapshot, &active,
             access(&snapshot, active.generation, &owner, id), ContextContributionInput::BeforeTurn {
-                turn: ContextTurnInput { source_message_id: "gone".into(), text: "gone".into(), image_media_types: vec![] },
+                turn: ContextTurnInput { source_message_id: "gone".into(), text: "gone".into(), image_media_types: vec![], cs_dialogue_id: None },
             }).await.is_err());
         if let JavaScriptHostState::Running { generation, .. } = host.state() {
             host.stop_generation(generation).await.unwrap();

@@ -271,6 +271,7 @@ fn make_preset_snapshot(model: &str) -> AgentResolvedSnapshot {
         included_skills: Vec::new(),
         excluded_auto_skills: Vec::new(),
         enabled_capabilities: Vec::new(),
+        enabled_capability_actions: Default::default(),
         required_resource_kinds: BTreeSet::new(),
         knowledge_policy: Default::default(),
         warnings: Vec::new(),

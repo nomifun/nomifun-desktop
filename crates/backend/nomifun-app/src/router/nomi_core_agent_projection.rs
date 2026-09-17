@@ -84,6 +84,21 @@ pub fn project(input: ProjectionInput<'_>) -> Result<NomiCoreAgentProjection, Ap
         .contributions()
         .map(|capability| capability.capability.id.as_ref().to_owned())
         .collect::<Vec<_>>();
+    let enabled_capability_actions = input
+        .snapshot
+        .content
+        .contributions()
+        .map(|capability| {
+            (
+                capability.capability.id.as_ref().to_owned(),
+                capability
+                    .action_allowlist
+                    .iter()
+                    .map(|action| action.as_ref().to_owned())
+                    .collect(),
+            )
+        })
+        .collect();
     let required_resource_kinds = input
         .snapshot
         .content
@@ -126,6 +141,7 @@ pub fn project(input: ProjectionInput<'_>) -> Result<NomiCoreAgentProjection, Ap
         included_skills,
         excluded_auto_skills: Vec::new(),
         enabled_capabilities,
+        enabled_capability_actions,
         required_resource_kinds,
         knowledge_policy: AgentKnowledgePolicy {
             enabled: knowledge_enabled,

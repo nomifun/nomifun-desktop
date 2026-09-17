@@ -3,6 +3,7 @@
 pub(crate) mod agent_role_host;
 pub(crate) mod agent_wave1_host;
 pub(crate) mod agent_wave1_companion_host;
+pub(crate) mod agent_memory_authority;
 pub(crate) mod agent_wave1_memory_receipts;
 pub(crate) mod agent_wave2_host;
 pub(crate) mod agent_wave2_mcp;
@@ -12,7 +13,6 @@ pub(crate) mod agent_wave3_host;
 pub(crate) mod agent_wave3_plugin_host;
 pub(crate) mod agent_wave3_template_runner;
 pub(crate) mod agent_wave3_workshop_host;
-pub(crate) mod agent_wave4_host;
 pub(crate) mod nomi_core_wave4;
 pub(crate) mod chat_broker_host;
 pub(crate) mod legacy_conversation_port;

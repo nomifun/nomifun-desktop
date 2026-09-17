@@ -2017,6 +2017,19 @@ impl KnowledgeService {
         self.row_to_info(row).await
     }
 
+    /// Resolve only the stable registry identity needed by the Agent
+    /// Knowledge owner. Unlike [`Self::get_base_info`], this performs no tree
+    /// walk. The owner compares the result with its frozen Resource Binding
+    /// before any provider-backed read or persistent write, so changing a
+    /// registry row cannot retarget an already-running AgentSession.
+    pub(crate) async fn agent_resource_identity(
+        &self,
+        id: &KnowledgeBaseId,
+    ) -> Result<(String, PathBuf), AppError> {
+        let row = self.require_base(id.as_str()).await?;
+        Ok((row.name, PathBuf::from(row.root_path)))
+    }
+
     /// Create a base. With `root_path = None` the directory is provisioned
     /// under `{data_dir}/knowledge/{id}/` (managed); otherwise the given
     /// existing directory is registered as an external reference. External
