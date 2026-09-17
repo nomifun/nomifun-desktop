@@ -1033,25 +1033,24 @@ async fn build_nomi_core_agent_api_state(
             Arc::clone(&plugin.schema_resolver),
         ))?;
     conversation_owner.install_runtime_engines(Arc::clone(&services.runtime_engines), Arc::downgrade(&control_plane))?;
+    let plugin_tool_sessions = Arc::new(NomiCorePluginToolSessionProvider::new(
+        Arc::clone(&conversation_owner),
+        Arc::clone(&control_plane),
+        Arc::clone(&kernel),
+        environment,
+        plugin.schema_resolver,
+        platform_builtin_tool_admission,
+        platform_builtin_context_admission,
+        platform_builtin_lifecycle_admission,
+        robot_owner,
+        Arc::clone(&services.plugin_runtime),
+        Arc::clone(&builtin_plan.wave2_owner),
+        Arc::clone(&plugin.skill_artifacts),
+        services.database.pool().clone(),
+    ));
     services
         .agent_runtime_registry
-        .install_nomi_plugin_tool_session_provider(Arc::new(
-            NomiCorePluginToolSessionProvider::new(
-                Arc::clone(&conversation_owner),
-                Arc::clone(&control_plane),
-                Arc::clone(&kernel),
-                environment,
-                plugin.schema_resolver,
-                platform_builtin_tool_admission,
-                platform_builtin_context_admission,
-                platform_builtin_lifecycle_admission,
-                robot_owner,
-                Arc::clone(&services.plugin_runtime),
-                Arc::clone(&builtin_plan.wave2_owner),
-                Arc::clone(&plugin.skill_artifacts),
-                services.database.pool().clone(),
-            ),
-        ))?;
+        .install_nomi_plugin_tool_session_provider(plugin_tool_sessions.clone())?;
     let remote_repository: Arc<dyn IRemoteBindingRepository> = Arc::new(
         SqliteRemoteBindingRepository::new(services.database.pool().clone()),
     );
@@ -1068,6 +1067,7 @@ async fn build_nomi_core_agent_api_state(
             mcp_server_repository,
             Arc::clone(&wave4_owners),
             product_agent_resolver,
+            plugin_tool_sessions,
         ),
         plugin_state,
         plugin_runtime_participant,

@@ -40,7 +40,7 @@
 
 .option {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
   align-items: center;
   gap: 8px;
@@ -56,10 +56,6 @@
   white-space: nowrap;
 }
 
-.option:has(.optionRawModel) {
-  grid-template-columns: auto minmax(20px, 1fr) auto;
-}
-
 .menuOption .option {
   box-sizing: border-box;
   min-height: 36px;
@@ -71,26 +67,6 @@
   overflow: visible;
   overflow-wrap: anywhere;
   white-space: normal;
-}
-
-.optionProtocol {
-  grid-column: 3;
-  overflow: hidden;
-  max-width: 140px;
-  color: var(--color-text-4);
-  font-size: var(--workbench-small-size, 10px);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.optionRawModel {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--color-text-4);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: var(--workbench-small-size, 9px);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .selectionMeta {

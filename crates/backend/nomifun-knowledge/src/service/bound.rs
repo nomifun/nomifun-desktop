@@ -83,6 +83,33 @@ pub struct BoundKnowledgeReadService {
 }
 
 impl BoundKnowledgeReadService {
+    pub(super) async fn load_documents(
+        &self,
+        knowledge_base: &BoundKnowledgeBase,
+    ) -> Result<Vec<RetrievalDocument>, AppError> {
+        let kb_id = knowledge_base.knowledge_base_id.clone();
+        let kb_name = knowledge_base.name.clone();
+        let root = knowledge_base.root.clone();
+        let lock_root = root.clone();
+        let timeout = AppError::Timeout(format!(
+            "bound knowledge search timed out for {}",
+            knowledge_base.knowledge_base_id
+        ));
+        bounded_root_blocking(&lock_root, SEARCH_WALK_BUDGET, Err(timeout), move || {
+            AnchoredKnowledgeFs::open(&root)?.search_documents(
+                &kb_id,
+                &kb_name,
+                RetrievalLoadLimits {
+                    max_entries: MAX_BOUND_KNOWLEDGE_SEARCH_ENTRIES,
+                    max_documents: MAX_BOUND_KNOWLEDGE_SEARCH_DOCUMENTS,
+                    max_file_bytes: MAX_BOUND_KNOWLEDGE_SEARCH_FILE_BYTES,
+                    max_total_bytes: MAX_BOUND_KNOWLEDGE_SEARCH_TOTAL_BYTES,
+                },
+            )
+        })
+        .await
+    }
+
     pub async fn search(
         &self,
         knowledge_base: &BoundKnowledgeBase,
@@ -101,36 +128,7 @@ impl BoundKnowledgeReadService {
             ));
         }
 
-        let kb_id = knowledge_base.knowledge_base_id.clone();
-        let kb_name = knowledge_base.name.clone();
-        let root = knowledge_base.root.clone();
-        let lock_root = root.clone();
-        let timeout = AppError::Timeout(format!(
-            "bound knowledge search timed out for {}",
-            knowledge_base.knowledge_base_id
-        ));
-        let documents = bounded_root_blocking(
-            &lock_root,
-            SEARCH_WALK_BUDGET,
-            Err(timeout),
-            move || {
-                AnchoredKnowledgeFs::open(&root)?.search_documents(
-                    &kb_id,
-                    &kb_name,
-                    RetrievalLoadLimits {
-                        max_entries:
-                            MAX_BOUND_KNOWLEDGE_SEARCH_ENTRIES,
-                        max_documents:
-                            MAX_BOUND_KNOWLEDGE_SEARCH_DOCUMENTS,
-                        max_file_bytes:
-                            MAX_BOUND_KNOWLEDGE_SEARCH_FILE_BYTES,
-                        max_total_bytes:
-                            MAX_BOUND_KNOWLEDGE_SEARCH_TOTAL_BYTES,
-                    },
-                )
-            },
-        )
-        .await?;
+        let documents = self.load_documents(knowledge_base).await?;
 
         Ok(local_keyword_candidates(documents, query, limit)
             .into_iter()

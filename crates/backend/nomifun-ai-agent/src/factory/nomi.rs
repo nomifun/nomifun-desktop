@@ -531,54 +531,12 @@ pub(super) async fn build(
         overrides.vision_input,
         &mut fields.compat_overrides.supports_image,
     )?;
-    let session_citations = Arc::new(crate::web_search::SessionCitationStore::default());
-    #[cfg(feature = "browser-use")]
-    let local_web_search_tool:Option<Box<dyn nomi_tools::Tool>>=if overrides.allowed_tools.iter().any(|name|name==crate::local_web_search::TOOL_NAME) {
-        let provider=deps.local_web_search.as_ref().ok_or_else(||AppError::UnprocessableEntity("No verified local search runtime is bound".into()))?;
-        let binding=plugin_tool_session.as_ref().and_then(|session|session.local_search_binding()).cloned()
-            .ok_or_else(||AppError::UnprocessableEntity("Local search requires an exact Snapshot runtime binding".into()))?;
-        provider.validate_binding(&binding).await.map_err(|error|AppError::Conflict(error.to_string()))?;
-        let provider=Arc::new(provider.for_locale(app_language.clone()).map_err(|error|AppError::Conflict(error.to_string()))?);
-        Some(Box::new(crate::local_web_search::LocalWebSearchTool::new(provider,binding,session_citations.clone())
-            .map_err(|error|AppError::Conflict(error.to_string()))?))
-    } else {None};
     #[cfg(feature = "browser-use")]
     let system_browser_session = crate::system_browser::bind_selected(
         &overrides.allowed_tools, deps.system_browser.clone(),
         plugin_tool_session.as_ref().and_then(|session| session.system_browser_binding()).cloned(),
         &options.user_id, &ctx.conversation_id,
     ).await?;
-    let web_search_tool: Option<Box<dyn nomi_tools::Tool>> = if overrides
-        .allowed_tools
-        .iter()
-        .any(|name| name == crate::web_search::WEB_SEARCH_TOOL_NAME)
-    {
-        // Search resolves its own exact configured model only when invoked.
-        // An absent search provider cannot block normal Chat or media tasks.
-        let provider = crate::web_search::CatalogSearchProvider::new(
-            deps.model_invoke.clone(),
-            nomifun_model_invoke::ModelRef {
-                provider_id: selected_model.provider_id.clone(),
-                model: selected_model.model.clone(),
-            },
-        );
-        Some(Box::new(crate::web_search::WebSearchTool::with_citations(
-            Arc::new(provider),
-            Arc::clone(&session_citations),
-        )))
-    } else {
-        None
-    };
-    let citation_render_tool: Option<Box<dyn nomi_tools::Tool>> = overrides
-        .allowed_tools
-        .iter()
-        .any(|name| name == crate::web_search::CITATION_RENDER_TOOL_NAME)
-        .then(|| {
-            Box::new(crate::web_search::CitationRenderTool::new(
-                session_citations,
-            )) as Box<dyn nomi_tools::Tool>
-        });
-
     let session_directory = deps.data_dir.join("nomi-sessions");
     let output_ceiling = fields
         .output_limit
@@ -846,14 +804,9 @@ pub(super) async fn build(
         creation_context: if is_instance_owner {
             deps.creation_service.as_ref().map(|service| {
                 Arc::new(crate::creation_context::ConversationCreationContext::new(service.clone(), ctx.conversation_id.clone())
-                    .with_model_catalog(deps.model_invoke.clone(), deps.client_prefs.clone(),
-                        plugin_tool_session.as_ref().map(|session| session.media_creation_catalog_tools()).unwrap_or_default())) as Arc<dyn crate::ContextContributor>
+                    ) as Arc<dyn crate::ContextContributor>
             })
         } else { None },
-        web_search_tool,
-        #[cfg(feature = "browser-use")]
-        local_web_search_tool,
-        citation_render_tool,
         plugin_tool_session,
     };
     let agent = NomiAgentManager::new_with_host_wiring(

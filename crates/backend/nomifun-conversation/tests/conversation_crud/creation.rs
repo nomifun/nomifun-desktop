@@ -26,7 +26,15 @@ impl nomifun_conversation::ProductAgentSnapshotResolver for CreationPresetResolv
         snapshot.preset_id = preset_id.to_owned();
         snapshot.preset_revision = self.revision.load(std::sync::atomic::Ordering::SeqCst) as i64;
         snapshot.resolved_model = None;
-        snapshot.enabled_capabilities = vec!["creation.image".into(), "creation.video".into(), "creation.music".into()];
+        snapshot.enabled_capabilities = vec!["creation.media".into()];
+        snapshot.enabled_capability_actions = std::collections::BTreeMap::from([(
+            "creation.media".into(),
+            std::collections::BTreeSet::from([
+                "creation.media/image".into(),
+                "creation.media/video".into(),
+                "creation.media/music".into(),
+            ]),
+        )]);
         Ok(nomifun_conversation::ProductAgentResolution {
             snapshot,
             runtime_extra: self.runtime_extra.clone(),

@@ -4,8 +4,9 @@
 use super::agent_wave1_companion_host::Wave1CompanionMemoryHost;
 use nomifun_agent_contracts::{canonical_json_bytes, digest_payload};
 use nomifun_agent_domain_wave1::{
-    Wave1CapabilityOperation, Wave1ContextHostRequest, Wave1FetchRequest, Wave1HostPort,
-    Wave1HostPortError, Wave1HostRequest, Wave1KnowledgeReadRequest, Wave1MemoryMutationRequest,
+    Wave1CapabilityOperation, Wave1FetchRequest, Wave1HostPort, Wave1HostPortError,
+    Wave1HostRequest, Wave1KnowledgeAutogenRequest, Wave1KnowledgeReadRequest,
+    Wave1KnowledgeWriteRequest, Wave1MemoryMutationRequest, Wave1ProjectMemoryReadRequest,
     Wave1SearchRequest,
 };
 use nomifun_agent_kernel::{MAX_PLUGIN_STATE_BYTES, MAX_PLUGIN_STATE_KEY_BYTES};
@@ -25,15 +26,20 @@ use std::sync::Arc;
 #[derive(Clone)]
 struct Wave1ApplicationHost {
     fetcher: nomifun_knowledge::source_url::HttpFetcher,
-    knowledge_reader: nomifun_knowledge::BoundKnowledgeReadService,
+    knowledge: Arc<nomifun_knowledge::KnowledgeService>,
+    search: Option<Arc<dyn nomifun_ai_agent::web_search::SearchProvider>>,
     companion_memory: Option<Wave1CompanionMemoryHost>,
 }
 
-impl Default for Wave1ApplicationHost {
-    fn default() -> Self {
+impl Wave1ApplicationHost {
+    fn new(
+        knowledge: Arc<nomifun_knowledge::KnowledgeService>,
+        search: Option<Arc<dyn nomifun_ai_agent::web_search::SearchProvider>>,
+    ) -> Self {
         Self {
             fetcher: nomifun_knowledge::source_url::HttpFetcher::default(),
-            knowledge_reader: nomifun_knowledge::BoundKnowledgeReadService::default(),
+            knowledge,
+            search,
             companion_memory: None,
         }
     }
@@ -51,27 +57,30 @@ const MAX_MEMORY_CAS_ATTEMPTS: usize = 8;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Wave1MemoryOperation {
     ProjectWrite,
-    ProjectDistill,
 }
 
 impl Wave1MemoryOperation {
     fn label(self) -> &'static str {
         match self {
             Self::ProjectWrite => "project.write",
-            Self::ProjectDistill => "project.distill",
         }
     }
 
     fn capability_id(self) -> &'static str {
         match self {
-            Self::ProjectWrite => nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
-            Self::ProjectDistill => nomifun_agent_domain_wave1::MEMORY_PROJECT_DISTILL,
+            Self::ProjectWrite => nomifun_agent_domain_wave1::PROJECT_MEMORY_MODULE_ID,
+        }
+    }
+
+    fn action_id(self) -> &'static str {
+        match self {
+            Self::ProjectWrite => nomifun_agent_domain_wave1::PROJECT_MEMORY_WRITE_ACTION_ID,
         }
     }
 
     fn package_id(self) -> &'static str {
         match self {
-            Self::ProjectWrite | Self::ProjectDistill => {
+            Self::ProjectWrite => {
                 nomifun_agent_domain_wave1::PROJECT_MEMORY_PACKAGE_ID
             }
         }
@@ -79,16 +88,8 @@ impl Wave1MemoryOperation {
 
     fn mount_id(self) -> &'static str {
         match self {
-            Self::ProjectWrite | Self::ProjectDistill => {
+            Self::ProjectWrite => {
                 nomifun_agent_domain_wave1::PROJECT_MEMORY_MOUNT_ID
-            }
-        }
-    }
-
-    fn resource_kind(self) -> &'static str {
-        match self {
-            Self::ProjectWrite | Self::ProjectDistill => {
-                nomifun_agent_domain_wave1::PROJECT_MEMORY_RESOURCE_KIND
             }
         }
     }
@@ -96,7 +97,6 @@ impl Wave1MemoryOperation {
     fn from_label(label: &str) -> Option<Self> {
         match label {
             "project.write" => Some(Self::ProjectWrite),
-            "project.distill" => Some(Self::ProjectDistill),
             _ => None,
         }
     }
@@ -110,6 +110,9 @@ impl Wave1HostPort for Wave1ApplicationHost {
     ) -> Result<nomifun_agent_contracts::StrictJsonValue, Wave1HostPortError> {
         let nomifun_agent_domain_wave1::Wave1HostRequest { context, operation } = request;
         match operation {
+            Wave1CapabilityOperation::ResearchSearch(request) => {
+                self.search_web(context, request).await
+            }
             Wave1CapabilityOperation::ResearchFetch(Wave1FetchRequest { url }) => {
                 let page = self
                     .fetcher
@@ -131,54 +134,40 @@ impl Wave1HostPort for Wave1ApplicationHost {
             Wave1CapabilityOperation::KnowledgeRead(request) => {
                 self.read_knowledge(context, request).await
             }
+            Wave1CapabilityOperation::KnowledgeWrite(request) => {
+                self.write_knowledge(context, request).await
+            }
+            Wave1CapabilityOperation::KnowledgeAutogen(request) => {
+                self.autogen_knowledge(context, request).await
+            }
+            Wave1CapabilityOperation::ProjectMemoryRead(request) => {
+                self.read_memory(context, request).await
+            }
             Wave1CapabilityOperation::ProjectMemoryWrite(request) => {
                 self.persist_memory(context, Wave1MemoryOperation::ProjectWrite, request)
                     .await
             }
-            Wave1CapabilityOperation::ProjectMemoryDistill(request) => {
-                self.persist_memory(context, Wave1MemoryOperation::ProjectDistill, request)
-                    .await
+            Wave1CapabilityOperation::CompanionMemoryRecall(request) => {
+                self.companion_memory()?.recall(context, request).await
             }
             Wave1CapabilityOperation::CompanionMemoryWrite(request) => {
                 self.companion_memory()?.write(context, request).await
             }
-            Wave1CapabilityOperation::CompanionMemoryMerge(request) => {
-                self.companion_memory()?.merge(context, request).await
-            }
-            Wave1CapabilityOperation::CompanionMemoryEvolve(request) => {
-                self.companion_memory()?.evolve(context, request).await
-            }
-            operation => Err(Wave1HostPortError::unavailable(format!(
-                "no Nomi Wave 1 owner is wired for {}",
-                operation.capability_id().as_ref()
-            ))),
         }
     }
 
-    async fn contribute_context(
-        &self,
-        request: Wave1ContextHostRequest,
-    ) -> Result<nomifun_agent_contracts::StrictJsonValue, Wave1HostPortError> {
-        if request.context.capability_id.as_ref()
-            != nomifun_agent_domain_wave1::MEMORY_COMPANION_RECALL
-        {
-            return Err(Wave1HostPortError::unavailable(format!(
-                "no Nomi Wave 1 context owner is wired for {}",
-                request.context.capability_id.as_ref()
-            )));
-        }
-        self.companion_memory()?.recall(request.context).await
-    }
 }
 
 impl Wave1ApplicationHost {
     fn with_companion_memory(
+        knowledge: Arc<nomifun_knowledge::KnowledgeService>,
+        search: Option<Arc<dyn nomifun_ai_agent::web_search::SearchProvider>>,
         service: Arc<nomifun_companion::CompanionService>,
         receipt_pool: SqlitePool,
     ) -> Self {
         Self {
             companion_memory: Some(Wave1CompanionMemoryHost::new(service, receipt_pool)),
-            ..Self::default()
+            ..Self::new(knowledge, search)
         }
     }
 
@@ -190,28 +179,43 @@ impl Wave1ApplicationHost {
         })
     }
 
+    async fn search_web(
+        &self,
+        context: nomifun_agent_domain_wave1::Wave1HostContext,
+        request: Wave1SearchRequest,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, Wave1HostPortError> {
+        let provider = self.search.as_ref().ok_or_else(|| {
+            Wave1HostPortError::unavailable(
+                "Web Research has no configured provider on this host",
+            )
+        })?;
+        let citations = nomifun_ai_agent::web_search::SessionCitationStore::for_scope(
+            context.agent_session_id.as_ref(),
+        )
+        .map_err(Wave1HostPortError::invalid_request)?;
+        nomifun_ai_agent::web_search::search_with_derived_citations(
+            provider.as_ref(),
+            &citations,
+            &request.query,
+            request.limit.unwrap_or(5),
+        )
+        .await
+        .map(nomifun_agent_contracts::StrictJsonValue)
+        .map_err(wave1_search_error)
+    }
+
     async fn search_knowledge(
         &self,
         context: nomifun_agent_domain_wave1::Wave1HostContext,
         request: Wave1SearchRequest,
     ) -> Result<nomifun_agent_contracts::StrictJsonValue, Wave1HostPortError> {
-        let knowledge_base = resolve_bound_knowledge_base(
-            &context,
-            nomifun_agent_domain_wave1::KNOWLEDGE_SEARCH,
-            "search",
-        )?;
-        let hits = self
-            .knowledge_reader
-            .search(
-                &knowledge_base,
-                &request.query,
-                request.limit.unwrap_or(DEFAULT_KNOWLEDGE_SEARCH_LIMIT),
-            )
+        let service = self.authorized_knowledge(&context)?;
+        let hits = service
+            .search(&request.query, request.limit.unwrap_or(DEFAULT_KNOWLEDGE_SEARCH_LIMIT))
             .await
             .map_err(wave1_bound_knowledge_error)?;
         Ok(nomifun_agent_contracts::StrictJsonValue(
             serde_json::json!({
-                "resource_id": knowledge_base.knowledge_base_id(),
                 "total": hits.len(),
                 "hits": hits,
             }),
@@ -223,30 +227,155 @@ impl Wave1ApplicationHost {
         context: nomifun_agent_domain_wave1::Wave1HostContext,
         request: Wave1KnowledgeReadRequest,
     ) -> Result<nomifun_agent_contracts::StrictJsonValue, Wave1HostPortError> {
-        let knowledge_base = resolve_bound_knowledge_base(
-            &context,
-            nomifun_agent_domain_wave1::KNOWLEDGE_READ,
-            "read",
-        )?;
-        let handle_resource_id = nomifun_knowledge::decode_doc_handle(&request.handle)
-            .map(|(knowledge_base_id, _)| knowledge_base_id)
-            .ok_or_else(|| {
-                Wave1HostPortError::new("INVALID_PAYLOAD", "invalid knowledge document handle")
-            })?;
-        if &handle_resource_id != knowledge_base.knowledge_base_id() {
-            return Err(Wave1HostPortError::new(
-                "PRESET_RESOURCE_NOT_BOUND",
-                "knowledge document handle points to a different bound resource",
-            ));
-        }
         let document = self
-            .knowledge_reader
-            .read(&knowledge_base, &request.handle)
+            .authorized_knowledge(&context)?
+            .read(&request.handle)
             .await
             .map_err(wave1_bound_knowledge_error)?;
         Ok(nomifun_agent_contracts::StrictJsonValue(serde_json::json!(
             document
         )))
+    }
+
+    async fn write_knowledge(
+        &self,
+        context: nomifun_agent_domain_wave1::Wave1HostContext,
+        request: Wave1KnowledgeWriteRequest,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, Wave1HostPortError> {
+        let target = match (request.handle, request.base, request.rel_path) {
+            (Some(handle), None, None) => nomifun_knowledge::WriteTargetSpec::Handle(handle),
+            (None, Some(base), Some(rel_path)) => nomifun_knowledge::WriteTargetSpec::Path {
+                kb_id: nomifun_common::KnowledgeBaseId::parse(base)
+                    .map_err(|error| {
+                        Wave1HostPortError::invalid_request(format!(
+                            "knowledge base identity is invalid: {error}"
+                        ))
+                    })?,
+                rel_path,
+            },
+            _ => {
+                return Err(Wave1HostPortError::invalid_request(
+                    "knowledge/write requires either handle or base plus rel_path",
+                ));
+            }
+        };
+        let result = self
+            .authorized_knowledge(&context)?
+            .write(nomifun_knowledge::AgentKnowledgeWriteRequest {
+                target,
+                content: request.content,
+            })
+            .await
+            .map_err(wave1_application_error)?;
+        serde_json::to_value(result)
+            .map(nomifun_agent_contracts::StrictJsonValue)
+            .map_err(|error| Wave1HostPortError::unavailable(error.to_string()))
+    }
+
+    async fn autogen_knowledge(
+        &self,
+        context: nomifun_agent_domain_wave1::Wave1HostContext,
+        request: Wave1KnowledgeAutogenRequest,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, Wave1HostPortError> {
+        let service = self.authorized_knowledge(&context)?;
+        let resources = service
+            .authority()
+            .resource_ids_for(nomifun_knowledge::KnowledgeAction::Autogen);
+        let [resource_id] = resources.as_slice() else {
+            return Err(Wave1HostPortError::new(
+                "PRESET_RESOURCE_NOT_BOUND",
+                "knowledge/autogen requires exactly one writable Knowledge resource",
+            ));
+        };
+        let result = service
+            .autogen(resource_id, request.overwrite_readme)
+            .await
+            .map_err(wave1_application_error)?;
+        serde_json::to_value(result)
+            .map(nomifun_agent_contracts::StrictJsonValue)
+            .map_err(|error| Wave1HostPortError::unavailable(error.to_string()))
+    }
+
+    fn authorized_knowledge(
+        &self,
+        context: &nomifun_agent_domain_wave1::Wave1HostContext,
+    ) -> Result<nomifun_knowledge::AuthorizedKnowledgeService, Wave1HostPortError> {
+        let resources = context
+            .resource_bindings
+            .iter()
+            .filter(|binding| {
+                binding.resource_kind.as_ref()
+                    == nomifun_agent_domain_wave1::KNOWLEDGE_BASE_RESOURCE_KIND
+            })
+            .map(agent_knowledge_resource)
+            .collect::<Result<Vec<_>, _>>()?;
+        let authority = nomifun_knowledge::AgentKnowledgeAuthority::new(
+            context.principal.principal_id.clone(),
+            resources,
+        )
+        .map_err(wave1_application_error)?;
+        Ok(nomifun_knowledge::AuthorizedKnowledgeService::new(
+            Arc::clone(&self.knowledge),
+            authority,
+        ))
+    }
+
+    async fn read_memory(
+        &self,
+        context: nomifun_agent_domain_wave1::Wave1HostContext,
+        request: Wave1ProjectMemoryReadRequest,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, Wave1HostPortError> {
+        use nomifun_agent_contracts::{StateKey, VersionString};
+
+        if context.capability_id.as_ref()
+            != nomifun_agent_domain_wave1::PROJECT_MEMORY_MODULE_ID
+            || context.action_id.as_ref()
+                != nomifun_agent_domain_wave1::PROJECT_MEMORY_READ_ACTION_ID
+        {
+            return Err(Wave1HostPortError::invalid_request(
+                "project.memory/read identity does not match the host context",
+            ));
+        }
+        let operation = Wave1MemoryOperation::ProjectWrite;
+        let descriptor = context.state.descriptor();
+        if descriptor.package_id.as_ref() != operation.package_id()
+            || descriptor.mount_id.as_ref() != operation.mount_id()
+        {
+            return Err(Wave1HostPortError::unavailable(
+                "project memory state handle is mounted in a different namespace",
+            ));
+        }
+        let binding = exact_memory_binding(
+            &context,
+            super::agent_memory_authority::ProductMemoryAction::ProjectRead,
+        )?;
+        let scope = nomifun_agent_contracts::ScopeKey::from(format!(
+            "resource:{}",
+            binding.resource_id.as_ref()
+        ));
+        let current = context
+            .state
+            .get(&scope, &StateKey::from(MEMORY_STATE_KEY))
+            .await
+            .map_err(|error| {
+                Wave1HostPortError::unavailable(format!(
+                    "project memory state could not be read: {error}"
+                ))
+            })?;
+        let mut entries = decode_memory_state(
+            current.as_ref(),
+            &VersionString::from(MEMORY_STATE_FORMAT_VERSION),
+            operation,
+            &binding,
+        )?;
+        let limit = request.limit.unwrap_or(MAX_MEMORY_ENTRIES).min(MAX_MEMORY_ENTRIES);
+        if entries.len() > limit {
+            entries.drain(..entries.len() - limit);
+        }
+        Ok(nomifun_agent_contracts::StrictJsonValue(serde_json::json!({
+            "resource_id": binding.resource_id,
+            "entries": entries,
+        })))
     }
 
     /// Persist the bounded memory mutation in the package's namespace-scoped
@@ -264,8 +393,7 @@ impl Wave1ApplicationHost {
         };
 
         let state = context.state.clone();
-        let expected_action = nomifun_agent_domain_wave1::action_id(operation.capability_id())
-            .expect("every memory mutation has a canonical action");
+        let expected_action = nomifun_agent_contracts::ActionId::from(operation.action_id());
         if context.capability_id.as_ref() != operation.capability_id()
             || context.action_id != expected_action
         {
@@ -291,63 +419,12 @@ impl Wave1ApplicationHost {
         }
 
         // Project memory is shared by the exact bound resource, not by a
-        // transient Session. Companion memory intentionally does not enter
-        // this PluginState path; it is owned by the persistent CompanionStore
-        // adapter above.
-        let matching_bindings = context
-            .resource_bindings
-            .iter()
-            .filter(|binding| binding.resource_kind.as_ref() == operation.resource_kind())
-            .collect::<Vec<_>>();
-        let binding = match matching_bindings.as_slice() {
-            [binding] => *binding,
-            [] => {
-                return Err(Wave1HostPortError::new(
-                    "PRESET_RESOURCE_NOT_BOUND",
-                    format!(
-                        "{} has no bound {} resource",
-                        operation.label(),
-                        operation.resource_kind()
-                    ),
-                ));
-            }
-            _ => {
-                return Err(Wave1HostPortError::new(
-                    "PRESET_RESOURCE_NOT_BOUND",
-                    format!(
-                        "{} requires exactly one bound {} resource",
-                        operation.label(),
-                        operation.resource_kind()
-                    ),
-                ));
-            }
-        };
-        if binding.owner_id != context.principal.principal_id {
-            return Err(Wave1HostPortError::new(
-                "RESOURCE_OWNER_MISMATCH",
-                format!(
-                    "{} resource {} is owned by a different principal",
-                    operation.label(),
-                    binding.resource_id.as_ref()
-                ),
-            ));
-        }
-        if !binding.operations.contains("write") {
-            return Err(Wave1HostPortError::new(
-                "PRESET_RESOURCE_NOT_BOUND",
-                format!(
-                    "{} resource binding {} does not grant write",
-                    operation.label(),
-                    binding.binding_id.as_ref()
-                ),
-            ));
-        }
-        if binding.resource_id.as_ref().trim().is_empty() {
-            return Err(Wave1HostPortError::new(
-                "INVALID_PAYLOAD",
-                format!("{} resource ID must not be blank", operation.label()),
-            ));
-        }
+        // transient Session. The independent memory authority validates the
+        // owner, action, resource kind, cardinality, and operation grant.
+        let binding = exact_memory_binding(
+            &context,
+            super::agent_memory_authority::ProductMemoryAction::ProjectWrite,
+        )?;
 
         let scope = nomifun_agent_contracts::ScopeKey::from(format!(
             "resource:{}",
@@ -373,7 +450,7 @@ impl Wave1ApplicationHost {
             ));
         }
         let request_value = memory_request_value(request);
-        let request_digest = memory_request_digest(operation, binding, &request_value)?;
+        let request_digest = memory_request_digest(operation, &binding, &request_value)?;
         let mut entry = serde_json::json!({
             "operation": operation.label(),
             "request": request_value,
@@ -390,7 +467,7 @@ impl Wave1ApplicationHost {
                 )
             })?;
             let revision = current.as_ref().map(|entry| entry.revision).unwrap_or(0);
-            let mut entries = decode_memory_state(current.as_ref(), &format, operation, binding)?;
+            let mut entries = decode_memory_state(current.as_ref(), &format, operation, &binding)?;
             if let Some(previous) = entries.iter().find(|previous| {
                 previous
                     .get("idempotency_key")
@@ -511,98 +588,20 @@ impl Wave1ApplicationHost {
     }
 }
 
-fn resolve_bound_knowledge_base(
-    context: &nomifun_agent_domain_wave1::Wave1HostContext,
-    capability_id: &str,
-    operation: &str,
-) -> Result<nomifun_knowledge::BoundKnowledgeBase, Wave1HostPortError> {
-    resolve_bound_knowledge_base_parts(
-        &context.principal.principal_id,
-        &context.capability_id,
-        &context.action_id,
-        &context.resource_bindings,
-        capability_id,
-        operation,
-    )
-}
-
-fn resolve_bound_knowledge_base_parts(
-    principal_id: &str,
-    actual_capability_id: &nomifun_agent_contracts::CapabilityId,
-    actual_action_id: &nomifun_agent_contracts::ActionId,
-    resource_bindings: &[nomifun_agent_contracts::TypedResourceBinding],
-    capability_id: &str,
-    operation: &str,
-) -> Result<nomifun_knowledge::BoundKnowledgeBase, Wave1HostPortError> {
-    let expected_action = nomifun_agent_domain_wave1::action_id(capability_id)
-        .expect("every Knowledge owner capability has a canonical action");
-    if actual_capability_id.as_ref() != capability_id || actual_action_id != &expected_action {
-        return Err(Wave1HostPortError::new(
-            "INVALID_PAYLOAD",
-            format!("{capability_id} operation identity does not match the host context"),
-        ));
-    }
-
-    let matching_bindings = resource_bindings
-        .iter()
-        .filter(|binding| {
-            binding.resource_kind.as_ref()
-                == nomifun_agent_domain_wave1::KNOWLEDGE_BASE_RESOURCE_KIND
-        })
-        .collect::<Vec<_>>();
-    let binding = match matching_bindings.as_slice() {
-        [binding] => *binding,
-        [] => {
-            return Err(Wave1HostPortError::new(
-                "PRESET_RESOURCE_NOT_BOUND",
-                format!(
-                    "{capability_id} has no bound {} resource",
-                    nomifun_agent_domain_wave1::KNOWLEDGE_BASE_RESOURCE_KIND
-                ),
-            ));
-        }
-        _ => {
-            return Err(Wave1HostPortError::new(
-                "PRESET_RESOURCE_NOT_BOUND",
-                format!(
-                    "{capability_id} requires exactly one bound {} resource",
-                    nomifun_agent_domain_wave1::KNOWLEDGE_BASE_RESOURCE_KIND
-                ),
-            ));
-        }
-    };
-    if binding.owner_id != principal_id {
-        return Err(Wave1HostPortError::new(
-            "RESOURCE_OWNER_MISMATCH",
-            format!(
-                "knowledge resource {} is owned by a different principal",
-                binding.resource_id.as_ref()
-            ),
-        ));
-    }
-    if !binding.operations.contains(operation) {
-        return Err(Wave1HostPortError::new(
-            "PRESET_RESOURCE_NOT_BOUND",
-            format!(
-                "knowledge resource binding {} does not grant {operation}",
-                binding.binding_id.as_ref()
-            ),
-        ));
-    }
-
+fn agent_knowledge_resource(
+    binding: &nomifun_agent_contracts::TypedResourceBinding,
+) -> Result<nomifun_knowledge::AgentKnowledgeResource, Wave1HostPortError> {
     let knowledge_base_id = nomifun_common::KnowledgeBaseId::parse(
         binding.resource_id.as_ref().to_owned(),
     )
     .map_err(|error| {
-        Wave1HostPortError::new(
-            "INVALID_PAYLOAD",
-            format!("knowledge resource ID must be a canonical UUIDv7: {error}"),
-        )
+        Wave1HostPortError::invalid_request(format!(
+            "knowledge resource identity is invalid: {error}"
+        ))
     })?;
     let root = binding
         .typed_parameters
         .get(KNOWLEDGE_ROOT_PARAMETER)
-        .map(String::as_str)
         .filter(|root| !root.trim().is_empty())
         .ok_or_else(|| {
             Wave1HostPortError::new(
@@ -613,22 +612,34 @@ fn resolve_bound_knowledge_base_parts(
                 ),
             )
         })?;
-    let name = match binding.typed_parameters.get(KNOWLEDGE_NAME_PARAMETER) {
-        Some(name) if name.trim().is_empty() => {
-            return Err(Wave1HostPortError::new(
-                "INVALID_PAYLOAD",
-                format!(
-                    "knowledge resource binding {} has a blank {KNOWLEDGE_NAME_PARAMETER}",
-                    binding.binding_id.as_ref()
-                ),
-            ));
-        }
-        Some(name) => name.trim().to_owned(),
-        None => knowledge_base_id.as_str().to_owned(),
-    };
+    let name = binding
+        .typed_parameters
+        .get(KNOWLEDGE_NAME_PARAMETER)
+        .map(String::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| knowledge_base_id.as_str().to_owned());
+    nomifun_knowledge::AgentKnowledgeResource::from_operation_names(
+        binding.binding_id.as_ref(),
+        binding.owner_id.clone(),
+        knowledge_base_id,
+        name,
+        PathBuf::from(root),
+        binding.operations.iter(),
+    )
+    .map_err(wave1_application_error)
+}
 
-    nomifun_knowledge::BoundKnowledgeBase::new(knowledge_base_id, name, PathBuf::from(root))
-        .map_err(wave1_application_error)
+fn exact_memory_binding(
+    context: &nomifun_agent_domain_wave1::Wave1HostContext,
+    action: super::agent_memory_authority::ProductMemoryAction,
+) -> Result<nomifun_agent_contracts::TypedResourceBinding, Wave1HostPortError> {
+    super::agent_memory_authority::authorize_memory_resource(
+        &context.principal.principal_id,
+        action,
+        &context.resource_bindings,
+    )
+    .map_err(wave1_application_error)
 }
 
 fn validate_memory_request(
@@ -975,8 +986,7 @@ fn memory_request_digest(
     let fingerprint = serde_json::json!({
         "operation": operation.label(),
         "capability_id": operation.capability_id(),
-        "action_id": nomifun_agent_domain_wave1::action_id(operation.capability_id())
-            .expect("every memory mutation has a canonical action"),
+        "action_id": operation.action_id(),
         "resource_kind": binding.resource_kind.as_ref(),
         "resource_id": binding.resource_id.as_ref(),
         "request": request,
@@ -1000,6 +1010,40 @@ fn wave1_application_error(error: nomifun_common::AppError) -> Wave1HostPortErro
         _ => "CAPABILITY_UNAVAILABLE",
     };
     Wave1HostPortError::new(CanonicalErrorCode::from(code), error.to_string())
+}
+
+fn wave1_search_error(
+    error: nomifun_ai_agent::web_search::SearchProviderError,
+) -> Wave1HostPortError {
+    use nomifun_ai_agent::web_search::SearchProviderErrorKind;
+    tracing::warn!(kind = ?error.kind, "Web Research provider failed");
+    let (code, message) = match error.kind {
+        SearchProviderErrorKind::NotConfigured => (
+            "WEB_RESEARCH_NOT_CONFIGURED",
+            "Web Research has no configured provider on this host",
+        ),
+        SearchProviderErrorKind::AmbiguousModel => (
+            "WEB_RESEARCH_ROUTE_AMBIGUOUS",
+            "Web Research has no unique configured route",
+        ),
+        SearchProviderErrorKind::Timeout => (
+            "WEB_RESEARCH_TIMEOUT",
+            "The authorized web search timed out",
+        ),
+        SearchProviderErrorKind::ResponseTooLarge => (
+            "WEB_RESEARCH_RESPONSE_TOO_LARGE",
+            "The authorized web search response exceeded its safe limit",
+        ),
+        SearchProviderErrorKind::InvalidResponse | SearchProviderErrorKind::NoSources => (
+            "WEB_RESEARCH_RESPONSE_INVALID",
+            "The authorized web search returned no usable sources",
+        ),
+        SearchProviderErrorKind::Transport | SearchProviderErrorKind::UpstreamRejected => (
+            "WEB_RESEARCH_UNAVAILABLE",
+            "The authorized web search provider is temporarily unavailable",
+        ),
+    };
+    Wave1HostPortError::new(code, message)
 }
 
 fn wave1_bound_knowledge_error(error: nomifun_common::AppError) -> Wave1HostPortError {
@@ -1034,11 +1078,18 @@ fn wave1_bound_knowledge_error(error: nomifun_common::AppError) -> Wave1HostPort
 /// composition; this function deliberately does not construct Fresh-v4 MCP or
 /// pass the legacy application pool into a Fresh repository adapter.
 pub(crate) fn wave1_registrations_for_nomi_core(
+    knowledge_service: Arc<nomifun_knowledge::KnowledgeService>,
+    search_provider: Option<Arc<dyn nomifun_ai_agent::web_search::SearchProvider>>,
     companion_service: Arc<nomifun_companion::CompanionService>,
     receipt_pool: SqlitePool,
 ) -> anyhow::Result<Vec<nomifun_agent_kernel::PluginRegistration>> {
     nomifun_agent_domain_wave1::registrations_with_host_port(Arc::new(
-        Wave1ApplicationHost::with_companion_memory(companion_service, receipt_pool),
+        Wave1ApplicationHost::with_companion_memory(
+            knowledge_service,
+            search_provider,
+            companion_service,
+            receipt_pool,
+        ),
     ))
     .map_err(anyhow::Error::msg)
 }

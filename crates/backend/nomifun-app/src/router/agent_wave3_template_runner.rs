@@ -1,4 +1,4 @@
-//! Server-side execution owner for `workshop.template.run`.
+//! Server-side execution owner for `creative.workshop/template.run`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Weak};

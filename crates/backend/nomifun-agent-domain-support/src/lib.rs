@@ -976,44 +976,12 @@ pub fn check_platform_availability(
 pub fn c7_package_specs() -> Vec<PackageSpec> {
     vec![
         PackageSpec {
-            id: "nomifun.model-media",
-            display_name: "Model Media",
-            description: "Provider-backed multimodal model capabilities.",
-            mount_id: "domain-model-media",
-            capabilities: &MODEL_MEDIA_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
-            id: "nomifun.web-research",
-            display_name: "Web Research",
-            description: "Search and fetch web sources for an AgentSession.",
-            mount_id: "domain-web-research",
-            capabilities: &WEB_RESEARCH_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
-            id: "nomifun.local-websearch",
-            display_name: "Nomi Local Web Search",
-            description: "Isolated browser-backed public web search.",
-            mount_id: "domain-local-websearch",
-            capabilities: &LOCAL_WEBSEARCH_CAPABILITIES,
-            supported_surfaces: &["desktop","headless"],
-        },
-        PackageSpec {
             id: "nomifun.system-browser",
             display_name: "Nomi System Browser",
             description: "Operate user-authorized tabs in an explicitly connected system browser.",
             mount_id: "domain-system-browser",
             capabilities: &SYSTEM_BROWSER_CAPABILITIES,
             supported_surfaces: &["desktop"],
-        },
-        PackageSpec {
-            id: "nomifun.chat",
-            display_name: "Chat Attachments",
-            description: "Read attachment context for a chat Session.",
-            mount_id: "domain-chat",
-            capabilities: &CHAT_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
         },
         PackageSpec {
             id: "nomifun.agent-execution",
@@ -1029,30 +997,6 @@ pub fn c7_package_specs() -> Vec<PackageSpec> {
             description: "Use explicitly bound remote SSH resources.",
             mount_id: "domain-ssh",
             capabilities: &SSH_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
-            id: "nomifun.knowledge",
-            display_name: "Knowledge",
-            description: "Search, read, and write owned knowledge bases.",
-            mount_id: "domain-knowledge",
-            capabilities: &KNOWLEDGE_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
-            id: "nomifun.project-memory",
-            display_name: "Project Memory",
-            description: "Read and maintain project-scoped memory.",
-            mount_id: "domain-project-memory",
-            capabilities: &PROJECT_MEMORY_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
-            id: "nomifun.companion-memory",
-            display_name: "Companion Memory",
-            description: "Read and maintain explicitly bound companion memory.",
-            mount_id: "domain-companion-memory",
-            capabilities: &COMPANION_MEMORY_CAPABILITIES,
             supported_surfaces: &["desktop", "headless"],
         },
         PackageSpec {
@@ -1096,67 +1040,11 @@ pub fn c7_package_specs() -> Vec<PackageSpec> {
             supported_surfaces: &["desktop", "headless"],
         },
         PackageSpec {
-            id: "nomifun.companion",
-            display_name: "Companion",
-            description: "Bind persona and companion actions to a Session.",
-            mount_id: "domain-companion",
-            capabilities: &COMPANION_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
-            id: "nomifun.channel",
-            display_name: "Channels",
-            description: "Receive and send through paired channels.",
-            mount_id: "domain-channel",
-            capabilities: &CHANNEL_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
-            id: "nomifun.customer-service",
-            display_name: "Customer Service",
-            description: "Handle customer dialogue and owned notes.",
-            mount_id: "domain-customer-service",
-            capabilities: &CUSTOMER_SERVICE_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
             id: "nomifun.robot",
             display_name: "Robot",
             description: "Connect to paired robot devices and media.",
             mount_id: "domain-robot",
             capabilities: &ROBOT_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
-            id: "nomifun.creation",
-            display_name: "Creation",
-            description: "Create text, image, video, and audio artifacts.",
-            mount_id: "domain-creation",
-            capabilities: &CREATION_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
-            id: "nomifun.workshop",
-            display_name: "Creative Workshop",
-            description: "Read and edit owned canvases and assets.",
-            mount_id: "domain-workshop",
-            capabilities: &WORKSHOP_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
-            id: "nomifun.office",
-            display_name: "Office",
-            description: "Preview and edit owned office artifacts.",
-            mount_id: "domain-office",
-            capabilities: &OFFICE_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
-            id: "nomifun.plugin",
-            display_name: "Plugin",
-            description: "Read, edit, publish, and serve owned Plugins.",
-            mount_id: "domain-plugin",
-            capabilities: &PLUGIN_CAPABILITIES,
             supported_surfaces: &["desktop", "headless"],
         },
         PackageSpec {
@@ -1181,40 +1069,9 @@ pub fn c7_package_specs() -> Vec<PackageSpec> {
 const PROCESS_SESSION: &[&str] = &["process_session"];
 const SSH_HOST: &[&str] = &["ssh_host"];
 const COMPUTER: &[&str] = &["computer"];
-const KNOWLEDGE_BASE: &[&str] = &["knowledge_base"];
-const PROJECT_MEMORY: &[&str] = &["project_memory"];
-const COMPANION_MEMORY: &[&str] = &["companion_memory"];
-const CHANNEL: &[&str] = &["channel"];
-const CUSTOMER: &[&str] = &["customer"];
 const ROBOT: &[&str] = &["robot"];
-const CANVAS: &[&str] = &["canvas"];
-const ASSET_LIBRARY: &[&str] = &["asset_library"];
-const PLUGIN: &[&str] = &["plugin"];
-
-const WEB_RESEARCH_CAPABILITIES: [CapabilitySpec; 3] = [
-    CapabilitySpec::tool("web.search", EffectClass::ExternalTransmit, &[]),
-    CapabilitySpec::tool("web.fetch", EffectClass::ExternalTransmit, &[]),
-    CapabilitySpec::context("citation.render"),
-];
-const LOCAL_WEBSEARCH_CAPABILITIES: [CapabilitySpec; 1] = [
-    CapabilitySpec::tool("nomi_local_websearch",EffectClass::ExternalTransmit,&[]),
-];
 const SYSTEM_BROWSER_CAPABILITIES: [CapabilitySpec; 1] = [
     CapabilitySpec::tool("nomi_system_browser",EffectClass::ExternalTransmit,&[]),
-];
-const MODEL_MEDIA_CAPABILITIES: [CapabilitySpec; 9] = [
-    CapabilitySpec::transport("llm.realtime"),
-    CapabilitySpec::tool("llm.embedding", EffectClass::ExternalTransmit, &[]),
-    CapabilitySpec::tool("llm.rerank", EffectClass::ExternalTransmit, &[]),
-    CapabilitySpec::tool("llm.image.generate", EffectClass::ExternalTransmit, &[]),
-    CapabilitySpec::tool("llm.image.edit", EffectClass::ExternalTransmit, &[]),
-    CapabilitySpec::tool("llm.video.generate", EffectClass::ExternalTransmit, &[]),
-    CapabilitySpec::tool("llm.audio.tts", EffectClass::ExternalTransmit, &[]),
-    CapabilitySpec::tool("llm.audio.asr", EffectClass::ExternalTransmit, &[]),
-    CapabilitySpec::context("llm.vision"),
-];
-const CHAT_CAPABILITIES: [CapabilitySpec; 1] = [
-    CapabilitySpec::context("session.attachments.read"),
 ];
 const AGENT_EXECUTION_CAPABILITIES: [CapabilitySpec; 5] = [
     CapabilitySpec::tool("agent.delegate", EffectClass::ExecuteLocal, PROCESS_SESSION),
@@ -1229,29 +1086,6 @@ const SSH_CAPABILITIES: [CapabilitySpec; 5] = [
     CapabilitySpec::tool("ssh.fs.write", EffectClass::WriteDurable, SSH_HOST),
     CapabilitySpec::tool("ssh.exec", EffectClass::ExecuteLocal, SSH_HOST),
     CapabilitySpec::tool("ssh.sudo", EffectClass::ExecuteLocal, SSH_HOST),
-];
-const KNOWLEDGE_CAPABILITIES: [CapabilitySpec; 8] = [
-    CapabilitySpec::tool("knowledge.search", EffectClass::ReadSensitive, KNOWLEDGE_BASE),
-    CapabilitySpec::tool("knowledge.read", EffectClass::ReadSensitive, KNOWLEDGE_BASE),
-    CapabilitySpec::tool("knowledge.write", EffectClass::WriteDurable, KNOWLEDGE_BASE),
-    CapabilitySpec::resource_provider("knowledge.mount", KNOWLEDGE_BASE),
-    CapabilitySpec::background("knowledge.source.sync"),
-    CapabilitySpec::tool("knowledge.autogen", EffectClass::WriteDurable, KNOWLEDGE_BASE),
-    CapabilitySpec::tool("knowledge.embedding", EffectClass::ReadSensitive, KNOWLEDGE_BASE),
-    CapabilitySpec::tool("knowledge.rerank", EffectClass::ReadSensitive, KNOWLEDGE_BASE),
-];
-const PROJECT_MEMORY_CAPABILITIES: [CapabilitySpec; 5] = [
-    CapabilitySpec::context("memory.project.read"),
-    CapabilitySpec::tool("memory.project.write", EffectClass::WriteDurable, PROJECT_MEMORY),
-    CapabilitySpec::tool("memory.project.distill", EffectClass::WriteDurable, PROJECT_MEMORY),
-    CapabilitySpec::context("memory.project.citation"),
-    CapabilitySpec::resource_provider("memory.session.scratch", PROJECT_MEMORY),
-];
-const COMPANION_MEMORY_CAPABILITIES: [CapabilitySpec; 4] = [
-    CapabilitySpec::context("memory.companion.recall"),
-    CapabilitySpec::tool("memory.companion.write", EffectClass::WriteDurable, COMPANION_MEMORY),
-    CapabilitySpec::tool("memory.companion.merge", EffectClass::WriteDurable, COMPANION_MEMORY),
-    CapabilitySpec::tool("memory.companion.evolve", EffectClass::WriteDurable, COMPANION_MEMORY),
 ];
 const BROWSER_CAPABILITIES: [CapabilitySpec; 7] = [
     CapabilitySpec::context("browser.observe"),
@@ -1289,25 +1123,6 @@ const IDMM_CAPABILITIES: [CapabilitySpec; 3] = [
     CapabilitySpec::middleware("idmm.intervene"),
     CapabilitySpec::middleware("idmm.fallback_policy"),
 ];
-const COMPANION_CAPABILITIES: [CapabilitySpec; 4] = [
-    CapabilitySpec::context("companion.persona"),
-    CapabilitySpec::context("companion.roster"),
-    CapabilitySpec::tool("companion.learn", EffectClass::WriteDurable, COMPANION_MEMORY),
-    CapabilitySpec::tool("companion.evolve", EffectClass::WriteDurable, COMPANION_MEMORY),
-];
-const CHANNEL_CAPABILITIES: [CapabilitySpec; 5] = [
-    CapabilitySpec::event_source("channel.receive"),
-    CapabilitySpec::tool("channel.reply", EffectClass::ExternalTransmit, CHANNEL),
-    CapabilitySpec::tool("channel.send", EffectClass::ExternalTransmit, CHANNEL),
-    CapabilitySpec::transport("channel.pairing"),
-    CapabilitySpec::middleware("channel.group_policy"),
-];
-const CUSTOMER_SERVICE_CAPABILITIES: [CapabilitySpec; 4] = [
-    CapabilitySpec::middleware("customer_service.dialogue"),
-    CapabilitySpec::tool("customer_service.notes.read", EffectClass::ReadSensitive, CUSTOMER),
-    CapabilitySpec::tool("customer_service.notes.write", EffectClass::WriteDurable, CUSTOMER),
-    CapabilitySpec::tool("customer_service.handoff", EffectClass::ExternalTransmit, CUSTOMER),
-];
 const ROBOT_CAPABILITIES: [CapabilitySpec; 6] = [
     CapabilitySpec::resource_provider("robot.link", ROBOT),
     CapabilitySpec::background("robot.audio"),
@@ -1315,33 +1130,6 @@ const ROBOT_CAPABILITIES: [CapabilitySpec; 6] = [
     CapabilitySpec::tool("robot.display", EffectClass::Physical, ROBOT),
     CapabilitySpec::tool("robot.motion", EffectClass::Physical, ROBOT),
     CapabilitySpec::tool("robot.device_tools", EffectClass::Physical, ROBOT),
-];
-const CREATION_CAPABILITIES: [CapabilitySpec; 6] = [
-    CapabilitySpec::tool("creation.text", EffectClass::WriteDurable, &[]),
-    CapabilitySpec::tool("creation.image", EffectClass::WriteDurable, &[]),
-    CapabilitySpec::tool("creation.image_edit", EffectClass::WriteDurable, &[]),
-    CapabilitySpec::tool("creation.video", EffectClass::WriteDurable, &[]),
-    CapabilitySpec::tool("creation.audio", EffectClass::WriteDurable, &[]),
-    CapabilitySpec::tool("creation.music", EffectClass::WriteDurable, &[]),
-];
-const WORKSHOP_CAPABILITIES: [CapabilitySpec; 5] = [
-    CapabilitySpec::tool("workshop.canvas.read", EffectClass::ReadSensitive, CANVAS),
-    CapabilitySpec::tool("workshop.canvas.edit", EffectClass::WriteReversible, CANVAS),
-    CapabilitySpec::tool("workshop.asset.read", EffectClass::ReadSensitive, ASSET_LIBRARY),
-    CapabilitySpec::tool("workshop.asset.write", EffectClass::WriteDurable, ASSET_LIBRARY),
-    CapabilitySpec::tool("workshop.template.run", EffectClass::ExecuteLocal, CANVAS),
-];
-const OFFICE_CAPABILITIES: [CapabilitySpec; 4] = [
-    CapabilitySpec::tool("office.preview", EffectClass::ReadSensitive, ASSET_LIBRARY),
-    CapabilitySpec::tool("office.document.edit", EffectClass::WriteReversible, ASSET_LIBRARY),
-    CapabilitySpec::tool("office.sheet.edit", EffectClass::WriteReversible, ASSET_LIBRARY),
-    CapabilitySpec::tool("office.slides.edit", EffectClass::WriteReversible, ASSET_LIBRARY),
-];
-const PLUGIN_CAPABILITIES: [CapabilitySpec; 4] = [
-    CapabilitySpec::tool("plugin.read", EffectClass::ReadSensitive, PLUGIN),
-    CapabilitySpec::tool("plugin.edit", EffectClass::WriteReversible, PLUGIN),
-    CapabilitySpec::tool("plugin.publish", EffectClass::ExternalTransmit, PLUGIN),
-    CapabilitySpec::tool("plugin.serve", EffectClass::ExternalTransmit, PLUGIN),
 ];
 const NOTIFICATION_CAPABILITIES: [CapabilitySpec; 2] = [
     CapabilitySpec::event_consumer("notification.webhook"),
@@ -1436,14 +1224,6 @@ mod tests {
                     .iter()
             })
             .collect::<Vec<_>>();
-        let knowledge_search = capabilities
-            .iter()
-            .find(|capability| capability.id.as_ref() == "knowledge.search")
-            .expect("knowledge.search manifest");
-        assert!(knowledge_search.host_surfaces().contains("desktop"));
-        assert!(knowledge_search.supports_consumer(CapabilityConsumer::Agent));
-        assert!(knowledge_search.supports_consumer(CapabilityConsumer::Gateway));
-
         let browser_render = capabilities
             .iter()
             .find(|capability| capability.id.as_ref() == "browser.render_content")
@@ -1551,7 +1331,7 @@ mod tests {
     #[test]
     fn c7_inventory_has_unique_packages_and_capabilities() {
         let registrations = registrations(c7_package_specs()).unwrap();
-        assert_eq!(registrations.len(), 25);
+        assert_eq!(registrations.len(), 11);
         validate_inventory(&registrations).unwrap();
         let capability_ids = registrations
             .iter()

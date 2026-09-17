@@ -711,6 +711,8 @@ pub struct ContextTurnInput {
     pub source_message_id: String,
     pub text: String,
     pub image_media_types: Vec<String>,
+    #[serde(default)]
+    pub cs_dialogue_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -737,6 +739,13 @@ impl ContextContributionInput {
         if let Self::BeforeTurn { turn } = self {
             if turn.source_message_id.trim().is_empty() {
                 return Err("Context turn requires a source message identity".into());
+            }
+            if turn.cs_dialogue_id.as_deref().is_some_and(|id| {
+                id.trim().is_empty() || id != id.trim() || id.chars().count() > 512
+            }) {
+                return Err(
+                    "Context turn customer-service dialogue identity is invalid".into(),
+                );
             }
             let bytes = crate::canonical_json_bytes(self).map_err(|error| error.to_string())?;
             if bytes.len() > 256 * 1024 {

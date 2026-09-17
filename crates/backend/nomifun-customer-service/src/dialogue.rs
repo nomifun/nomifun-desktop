@@ -24,10 +24,13 @@ use nomifun_common::text_search::expand_query;
 use nomifun_common::{AppError, KnowledgeBaseId, now_ms};
 use nomifun_db::models::{CsAgentRow, CsAuditEventRow};
 use nomifun_db::{CsDialogueKey, ICustomerServiceRepository, NoteMatchChannel};
-use nomifun_knowledge::KnowledgeService;
+use nomifun_knowledge::{
+    KNOWLEDGE_READ_ACTION_ID, KNOWLEDGE_SEARCH_ACTION_ID, KnowledgeService,
+};
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::tools::build_cs_tools;
+use crate::agent_capability::CUSTOMER_SERVICE_NOTES_READ_ACTION_ID;
 
 /// Hard wall-clock budget for one engine turn.
 pub const TURN_TIMEOUT_SECS: u64 = 120;
@@ -56,6 +59,7 @@ pub trait TurnRunner: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct CustomerServiceAgentPolicy {
+    /// Exact target Action IDs, never Context/lifecycle capability fragments.
     pub capabilities: BTreeSet<String>,
     pub instructions: String,
 }
@@ -348,21 +352,20 @@ impl CsDialogueEngine {
             kb_ids,
         );
         tools.retain(|tool| match tool.name.as_str() {
-            "knowledge_search" => allows("knowledge.search"),
-            "knowledge_read" => allows("knowledge.read"),
-            "cs_notes_search" => allows("customer_service.notes.read"),
+            "knowledge_search" => allows(KNOWLEDGE_SEARCH_ACTION_ID),
+            "knowledge_read" => allows(KNOWLEDGE_READ_ACTION_ID),
+            "cs_notes_search" => allows(CUSTOMER_SERVICE_NOTES_READ_ACTION_ID),
             _ => false,
         });
-        let notes = if allows("customer_service.notes.read") {
+        let notes = if allows(CUSTOMER_SERVICE_NOTES_READ_ACTION_ID) {
             self.pre_retrieved_notes(&agent.cs_agent_id, &user_text).await
         } else {
             Vec::new()
         };
-        let mut system_prompt = if allows("customer_service.dialogue") {
-            build_system_prompt_with_notes(&agent, &notes)
-        } else {
-            "You are the selected Agent for this conversation. Answer the visitor directly within the capabilities granted to this Agent.".to_owned()
-        };
+        // Dialogue policy belongs to the selected customer scene. It is not an
+        // Agent grant and cannot be disabled by removing a synthetic
+        // `customer_service.dialogue` capability from the Action allowlist.
+        let mut system_prompt = build_system_prompt_with_notes(&agent, &notes);
         if let Some(policy) = policy.as_ref()
             && !policy.instructions.trim().is_empty()
         {
@@ -476,7 +479,7 @@ fn build_system_prompt(agent: &CsAgentRow) -> String {
 
 /// Build the exact customer-service dialogue policy for a selected customer
 /// resource. The Agent capability adapter exposes this to Nomi-core so the
-/// `customer_service.dialogue` middleware uses the same policy as Channel
+/// scene-derived dialogue middleware uses the same policy as Channel
 /// ingress rather than inventing a second prompt contract.
 pub fn build_agent_dialogue_context(agent: &CsAgentRow) -> String {
     let mut prompt = build_system_prompt(agent);
@@ -642,6 +645,8 @@ mod tests {
 
     struct MinimalPolicy;
 
+    struct ExactActionPolicy;
+
     #[async_trait::async_trait]
     impl CustomerServiceAgentPolicyResolver for MinimalPolicy {
         async fn resolve(
@@ -657,8 +662,27 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl CustomerServiceAgentPolicyResolver for ExactActionPolicy {
+        async fn resolve(
+            &self,
+            _cs_agent_id: &str,
+            _provider_id: &str,
+            _model: &str,
+        ) -> Result<CustomerServiceAgentPolicy, AppError> {
+            Ok(CustomerServiceAgentPolicy {
+                capabilities: BTreeSet::from([
+                    KNOWLEDGE_SEARCH_ACTION_ID.to_owned(),
+                    KNOWLEDGE_READ_ACTION_ID.to_owned(),
+                    CUSTOMER_SERVICE_NOTES_READ_ACTION_ID.to_owned(),
+                ]),
+                instructions: String::new(),
+            })
+        }
+    }
+
     #[tokio::test]
-    async fn selected_agent_policy_removes_customer_tools_and_business_prompt() {
+    async fn selected_agent_policy_removes_ungranted_tools_but_keeps_scene_dialogue_policy() {
         let fx = fixture().await;
         let agent = create_agent(&fx.repo, 1).await;
         let runner = StubRunner::new(None, 0);
@@ -677,7 +701,35 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert!(calls[0].tool_names.is_empty());
         assert!(calls[0].system_prompt.contains("MINIMAL_CUSTOMER_AGENT"));
-        assert!(!calls[0].system_prompt.contains("你是客服"));
+        assert!(calls[0].system_prompt.contains("你是客服"));
+    }
+
+    #[tokio::test]
+    async fn selected_agent_policy_admits_tools_by_exact_action_id() {
+        let fx = fixture().await;
+        let agent = create_agent(&fx.repo, 1).await;
+        let runner = StubRunner::new(None, 0);
+        let engine = CsDialogueEngine::new(
+            Arc::clone(&fx.repo),
+            Arc::clone(&fx.knowledge),
+            runner.clone(),
+        );
+        engine.with_agent_policy_resolver(Arc::new(ExactActionPolicy));
+        let (plugin, visitor) = ids();
+        engine
+            .handle_visitor_message(&agent.cs_agent_id, &plugin, &visitor, "chat", "hello")
+            .await
+            .unwrap();
+
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(
+            calls[0].tool_names,
+            vec![
+                "knowledge_search".to_owned(),
+                "knowledge_read".to_owned(),
+                "cs_notes_search".to_owned(),
+            ]
+        );
     }
 
     /// ① 跨访客并发：两个不同访客的回合重叠执行（barrier 证明）。

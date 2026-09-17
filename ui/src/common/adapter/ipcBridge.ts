@@ -748,6 +748,13 @@ export const agentPlatform = {
       ),
       fromApiAgentSessionCapabilities
     ),
+    getSlashCommands: httpGet<
+      Array<{ command: string; description: string }>,
+      { agent_session_id: string }
+    >(
+      (params) =>
+        `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/slash-commands`
+    ),
     switchPreset: httpPut<
       SwitchAgentSessionPresetResponse,
       {
@@ -1168,6 +1175,9 @@ export const conversation = {
     },
   },
   getSlashCommands: httpGet<Array<{ command: string; description: string }>, { conversation_id: ConversationId }>(
+    // UARC-051 owns the Conversation-to-AgentSession cutover. Until then the
+    // renderer is displaying Conversation-owned IDs, which must stay on the
+    // Conversation authority instead of being reinterpreted as Store IDs.
     (p) => `/api/conversations/${p.conversation_id}/slash-commands`
   ),
   askSideQuestion: httpPost<ConversationSideQuestionResult, { conversation_id: ConversationId; question: string }>(

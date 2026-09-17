@@ -360,7 +360,9 @@ async fn slash_commands_no_active_task() {
 
     let req = get_with_token(&format!("/api/conversations/{conv_id}/slash-commands"), &token);
     let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["data"], json!([]));
 }
 
 // ── Stop + Warmup (no active runtime → idempotent success) ───────

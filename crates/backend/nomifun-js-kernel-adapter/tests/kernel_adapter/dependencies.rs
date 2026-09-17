@@ -184,6 +184,7 @@ async fn invoke_parent(
             source_message_id: "context-dependency-message".into(),
             text: request.input.0.to_string(),
             image_media_types: Vec::new(),
+            cs_dialogue_id: None,
         },
     };
     registry

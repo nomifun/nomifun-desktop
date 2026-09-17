@@ -71,6 +71,12 @@ describe('CreativeModelSelect integration boundary', () => {
     expect(component.includes("role={status === 'error' ? 'alert' : 'status'}")).toBe(true);
   });
 
+  test('keeps provider transport mechanics out of the product selector', () => {
+    expect(component.includes('option.rawModelId')).toBe(false);
+    expect(component.includes('option.protocol')).toBe(false);
+    expect(component.includes('selected.protocol')).toBe(false);
+  });
+
   test('puts an empty-catalog explanation in both the field and status region', () => {
     const providerId = parseProviderId('0190f5fe-7c00-7a00-8000-00000000000a');
     const chatOnlyProvider: IProvider = {

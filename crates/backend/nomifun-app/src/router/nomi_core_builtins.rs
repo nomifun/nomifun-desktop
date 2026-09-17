@@ -24,44 +24,6 @@ use nomifun_agent_domain_wave4::Wave4TurnMiddlewareHostPort;
 
 use crate::services::AppServices;
 
-#[cfg(all(test,feature="browser-use"))]
-mod local_search_binding_tests {
-    use super::*;
-    use tower::ServiceExt;
-
-    #[tokio::test]
-    #[ignore="requires NOMIFUN_SEARCH_CHROME; local probe only, no public search"]
-    async fn admitted_runtime_reaches_the_real_http_catalog() {
-        let chrome=std::path::PathBuf::from(std::env::var_os("NOMIFUN_SEARCH_CHROME").expect("Chromium binary"));
-        let product=nomi_browser_engine::headless_page::probe_runtime(chrome.clone()).await.unwrap();
-        let mut host=crate::DesktopHostServices::default();
-        host.set_browser_release(chrome,product).await.unwrap();
-        let expected=host.local_web_search.as_ref().unwrap().binding().clone();
-        let root=tempfile::tempdir().unwrap();
-        let services=AppServices::try_from_config_with_host(nomifun_db::init_database_memory().await.unwrap(),&crate::AppConfig {
-            data_dir:root.path().join("data"),work_dir:root.path().join("work"),
-            auth_policy:nomifun_auth::AuthPolicy::TrustLocalToken,
-            local_trust_secret:Some(Arc::from("local-search-binding-test")),..Default::default()
-        },host).await
-            .unwrap_or_else(|_|panic!("isolated application startup failed"));
-        let plan=build(&services).await.unwrap();
-        let registration=plan.registrations.iter().find(|registration|registration.metadata.manifest.payload.package_id.as_ref()==nomifun_agent_domain_wave1::LOCAL_WEBSEARCH_PACKAGE_ID).unwrap();
-        let manifest=&registration.metadata.manifest.payload.contributions.capabilities[0];
-        assert_eq!(nomifun_ai_agent::local_web_search::binding_from_manifest(manifest).unwrap(),Some(expected));
-        let router=crate::compatibility::create_router(&services).await;
-        let response=router.oneshot(axum::http::Request::builder().uri("/api/capabilities")
-            .header("x-nomi-local-trust","local-search-binding-test").body(axum::body::Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(response.status(),axum::http::StatusCode::OK);
-        let body=axum::body::to_bytes(response.into_body(),512*1024).await.unwrap();
-        let catalog:serde_json::Value=serde_json::from_slice(&body).unwrap();
-        let local=catalog["data"].as_array().unwrap().iter().find(|entry|entry["capability"]["id"]=="nomi_local_websearch").unwrap();
-        assert_eq!(local["materialization_state"],"materialized");
-        assert_eq!(local["required_resource_kinds"],serde_json::json!([]));
-        services.shutdown_browser_platform().await.unwrap();
-        services.database.close().await;
-    }
-}
-
 pub(crate) struct NomiCoreBuiltinPlan {
     pub registrations: Vec<PluginRegistration>,
     pub tool_capability_ids: BTreeSet<CapabilityId>,
@@ -127,7 +89,15 @@ pub(crate) async fn build(
     )?;
     registrations.push(super::nomi_core_tool_discovery::registration()?);
 
+    #[cfg(feature = "browser-use")]
+    let wave1_search = services.local_web_search.as_ref().map(|provider| {
+        Arc::clone(provider) as Arc<dyn nomifun_ai_agent::web_search::SearchProvider>
+    });
+    #[cfg(not(feature = "browser-use"))]
+    let wave1_search = None;
     let wave1 = super::agent_wave1_host::wave1_registrations_for_nomi_core(
+        Arc::clone(&services.knowledge_service),
+        wave1_search,
         Arc::clone(&services.companion_service),
         services.database.pool().clone(),
     )?;
@@ -141,43 +111,16 @@ pub(crate) async fn build(
             ),
         )?;
     }
-    #[cfg(feature = "browser-use")]
-    if let Some(provider) = services.local_web_search.as_ref() {
-        for registration in &mut registrations {
-            let mut manifest = registration.metadata.manifest.payload.clone();
-            if let Some(capability) = manifest
-                .contributions
-                .capabilities
-                .iter_mut()
-                .find(|capability| {
-                    capability.id.as_ref() == nomifun_ai_agent::local_web_search::TOOL_NAME
-                })
-            {
-                capability
-                    .config_schema
-                    .0
-                    .as_object_mut()
-                    .ok_or_else(|| anyhow::anyhow!("Local search schema must be an object"))?
-                    .insert(
-                        nomifun_ai_agent::local_web_search::BINDING_ANNOTATION.into(),
-                        serde_json::to_value(provider.binding())?,
-                    );
-                registration.metadata.manifest =
-                    nomifun_agent_contracts::ArtifactEnvelope::new(manifest)?;
-            }
-        }
-    }
     let wave1_tools = [
-        nomifun_agent_domain_wave1::MEMORY_COMPANION_WRITE,
-        nomifun_agent_domain_wave1::MEMORY_COMPANION_MERGE,
-        nomifun_agent_domain_wave1::MEMORY_COMPANION_EVOLVE,
+        nomifun_agent_domain_wave1::WEB_RESEARCH_MODULE_ID,
+        nomifun_agent_domain_wave1::KNOWLEDGE_MODULE_ID,
+        nomifun_agent_domain_wave1::PROJECT_MEMORY_MODULE_ID,
+        nomifun_agent_domain_wave1::COMPANION_MEMORY_MODULE_ID,
     ]
     .into_iter()
     .map(CapabilityId::from)
     .collect::<BTreeSet<_>>();
-    let wave1_context = BTreeSet::from([CapabilityId::from(
-        nomifun_agent_domain_wave1::MEMORY_COMPANION_RECALL,
-    )]);
+    let wave1_context = BTreeSet::new();
 
     let wave2_owner = super::nomi_core_wave2::action_host_port(services, effect_store);
     let wave2_ports =
@@ -280,24 +223,15 @@ pub(crate) async fn build(
     );
     let wave4_tools = super::nomi_core_wave4::nomi_core_wave4_tool_capability_ids()
         .into_iter()
-        .chain(
-            [
-                nomifun_agent_domain_wave4::CUSTOMER_SERVICE_NOTES_READ,
-                nomifun_agent_domain_wave4::CUSTOMER_SERVICE_NOTES_WRITE,
-                nomifun_agent_domain_wave4::CUSTOMER_SERVICE_HANDOFF,
-            ]
-            .into_iter()
-            .map(CapabilityId::from),
-        )
+        .chain([CapabilityId::from(
+            nomifun_agent_domain_wave4::CUSTOMER_SERVICE_MODULE_ID,
+        )])
         .collect::<BTreeSet<_>>();
     let mut wave4_context =
         super::nomi_core_wave4::nomi_core_wave4_context_capability_ids();
     let mut lifecycle_capability_ids =
         super::nomi_core_wave4::nomi_core_wave4_lifecycle_capability_ids()
             .into_iter()
-            .chain([CapabilityId::from(
-                nomifun_agent_domain_wave4::CUSTOMER_SERVICE_DIALOGUE,
-            )])
             .collect::<BTreeSet<_>>();
     let robot_owner = services.robot.as_ref().map(|robot| {
         Arc::new(super::nomi_core_robot::NomiCoreRobotWave4Owner::new(
@@ -320,7 +254,7 @@ pub(crate) async fn build(
     let lifecycle_invoker: Arc<dyn NomiPlatformBuiltinLifecycleInvoker> =
         Arc::new(NomiCoreLifecycleInvoker {
             wave4: Arc::clone(&wave4),
-            customer_service: customer_service_owner,
+            customer_service: Arc::clone(&customer_service_owner),
             robot: robot_owner.clone(),
         });
 

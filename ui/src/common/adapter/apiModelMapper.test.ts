@@ -29,6 +29,7 @@ const snapshot = (overrides: Record<string, unknown> = {}) => ({
   included_skills: [],
   excluded_auto_skills: [],
   enabled_capabilities: [],
+  enabled_capability_actions: {},
 
   required_resource_kinds: ['workspace'],
   knowledge_policy: {
@@ -119,6 +120,7 @@ describe('fromApiConversation Agent lineage boundary', () => {
     expect(mapped.agent_snapshot?.preset_id).toBe(PRESET_ID);
     expect(mapped.agent_snapshot?.preset_revision).toBe(3);
     expect(mapped.agent_snapshot?.required_resource_kinds).toEqual(['workspace']);
+    expect(mapped.agent_snapshot?.enabled_capability_actions).toEqual({});
   });
 
   test('rejects partial lineage and non-canonical top-level preset ids', () => {

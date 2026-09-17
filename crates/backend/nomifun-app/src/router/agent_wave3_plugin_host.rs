@@ -264,7 +264,7 @@ mod tests {
     fn request(
         owner_id: &str,
         plugin_id: &str,
-        capability_id: &str,
+        action_id: &str,
         operation: Wave3CapabilityOperation,
     ) -> Wave3HostRequest {
         Wave3HostRequest {
@@ -282,8 +282,10 @@ mod tests {
                     snapshot_digest: DigestHex::from("a".repeat(64)),
                 },
                 registry_generation: 1,
-                capability_id: CapabilityId::from(capability_id),
-                action_id: ActionId::from(format!("{capability_id}.invoke")),
+                capability_id: CapabilityId::from(
+                    nomifun_agent_domain_wave3::PLUGIN_DEVELOPMENT_MODULE_ID,
+                ),
+                action_id: ActionId::from(action_id),
                 state_scope_key: ScopeKey::from("session:plugin-wave3"),
                 resource_bindings: vec![TypedResourceBinding {
                     binding_id: ResourceBindingId::from("plugin-binding"),
@@ -338,7 +340,7 @@ mod tests {
             .invoke(request(
                 &owner_id,
                 &plugin_id,
-                "plugin.edit",
+                "plugin.development/edit",
                 Wave3CapabilityOperation::PluginEdit {
                     input: StrictJsonValue(json!({
                         "expected_product_revision": created.plugin.product_revision,
@@ -370,7 +372,7 @@ mod tests {
             .invoke(request(
                 &owner_id,
                 &plugin_id,
-                "plugin.read",
+                "plugin.development/read",
                 Wave3CapabilityOperation::PluginRead {
                     input: StrictJsonValue(json!({ "path": "ui/index.html" })),
                 },
@@ -407,7 +409,7 @@ mod tests {
             .invoke(request(
                 &owner_id,
                 &built.plugin.plugin_id,
-                "plugin.publish",
+                "plugin.development/publish",
                 Wave3CapabilityOperation::PluginPublish {
                     input: StrictJsonValue(json!({
                         "expected_product_revision": built.plugin.product_revision,
@@ -448,7 +450,7 @@ mod tests {
             .invoke(request(
                 &owner_id,
                 &enabled.plugin.plugin_id,
-                "plugin.serve",
+                "plugin.development/serve",
                 Wave3CapabilityOperation::PluginServe {
                     input: StrictJsonValue(json!({})),
                 },

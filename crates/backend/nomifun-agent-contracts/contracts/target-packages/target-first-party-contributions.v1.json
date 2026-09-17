@@ -29,104 +29,6 @@
     },
     {
       "package": {
-        "id": "nomifun.local-websearch",
-        "version": "1.0.0"
-      },
-      "source": {
-        "source_kind": "bundled",
-        "source_identity": "nomifun.local-websearch"
-      },
-      "capabilities": [
-        {
-          "capability": {
-            "id": "nomi_local_websearch",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        }
-      ],
-      "skills": [],
-      "mcp_tools": []
-    },
-    {
-      "package": {
-        "id": "nomifun.model-media",
-        "version": "1.0.0"
-      },
-      "source": {
-        "source_kind": "bundled",
-        "source_identity": "nomifun.model-media"
-      },
-      "capabilities": [
-        {
-          "capability": {
-            "id": "llm.realtime",
-            "version": "1.0.0"
-          },
-          "kind": "transport"
-        },
-        {
-          "capability": {
-            "id": "llm.embedding",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "llm.rerank",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "llm.image.generate",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "llm.image.edit",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "llm.video.generate",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "llm.audio.tts",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "llm.audio.asr",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "llm.vision",
-            "version": "1.0.0"
-          },
-          "kind": "context_contributor"
-        }
-      ],
-      "skills": [],
-      "mcp_tools": []
-    },
-    {
-      "package": {
         "id": "nomifun.web-research",
         "version": "1.0.0"
       },
@@ -137,45 +39,10 @@
       "capabilities": [
         {
           "capability": {
-            "id": "web.search",
+            "id": "web.research",
             "version": "1.0.0"
           },
           "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "web.fetch",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "citation.render",
-            "version": "1.0.0"
-          },
-          "kind": "context_contributor"
-        }
-      ],
-      "skills": [],
-      "mcp_tools": []
-    },
-    {
-      "package": {
-        "id": "nomifun.chat",
-        "version": "1.0.0"
-      },
-      "source": {
-        "source_kind": "bundled",
-        "source_identity": "nomifun.chat"
-      },
-      "capabilities": [
-        {
-          "capability": {
-            "id": "session.attachments.read",
-            "version": "1.0.0"
-          },
-          "kind": "context_contributor"
         }
       ],
       "skills": [],
@@ -333,56 +200,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "knowledge.search",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "knowledge.read",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "knowledge.write",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "knowledge.mount",
-            "version": "1.0.0"
-          },
-          "kind": "resource_provider"
-        },
-        {
-          "capability": {
-            "id": "knowledge.source.sync",
-            "version": "1.0.0"
-          },
-          "kind": "background_service"
-        },
-        {
-          "capability": {
-            "id": "knowledge.autogen",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "knowledge.embedding",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "knowledge.rerank",
+            "id": "knowledge",
             "version": "1.0.0"
           },
           "kind": "tool"
@@ -403,38 +221,10 @@
       "capabilities": [
         {
           "capability": {
-            "id": "memory.project.read",
-            "version": "1.0.0"
-          },
-          "kind": "context_contributor"
-        },
-        {
-          "capability": {
-            "id": "memory.project.write",
+            "id": "project.memory",
             "version": "1.0.0"
           },
           "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "memory.project.distill",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "memory.project.citation",
-            "version": "1.0.0"
-          },
-          "kind": "context_contributor"
-        },
-        {
-          "capability": {
-            "id": "memory.session.scratch",
-            "version": "1.0.0"
-          },
-          "kind": "resource_provider"
         }
       ],
       "skills": [],
@@ -452,28 +242,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "memory.companion.recall",
-            "version": "1.0.0"
-          },
-          "kind": "context_contributor"
-        },
-        {
-          "capability": {
-            "id": "memory.companion.write",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "memory.companion.merge",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "memory.companion.evolve",
+            "id": "companion.memory",
             "version": "1.0.0"
           },
           "kind": "tool"
@@ -580,7 +349,7 @@
                 "id": "browser.render_content",
                 "version": "1.0.0"
               },
-              "capability_manifest_digest": "20ca337897fcf5037a958349d48721065090d16a839f82626c5c25a0843b73f8",
+              "capability_manifest_digest": "a95472178b366b047dea887b49131dcfdd2f267594ef2329279084f2bb35154d",
               "requirement": "optional"
             },
             {
@@ -617,7 +386,7 @@
               "role_id": "system.browser_use",
               "contract_version": "2.0.0"
             },
-            "contract_digest": "bae61f165d620d17ab9df4c245d207c1f465e6ed46603e7c36af1d63b2ecc8f9"
+            "contract_digest": "09c1f46cf7a83b3f6c295e41a7f87ab1faf6798f34633442311812f02ebc1ceb"
           },
           "display": {
             "name": "Browser Use",
@@ -1052,28 +821,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "companion.persona",
-            "version": "1.0.0"
-          },
-          "kind": "context_contributor"
-        },
-        {
-          "capability": {
-            "id": "companion.roster",
-            "version": "1.0.0"
-          },
-          "kind": "context_contributor"
-        },
-        {
-          "capability": {
-            "id": "companion.learn",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "companion.evolve",
+            "id": "companion",
             "version": "1.0.0"
           },
           "kind": "tool"
@@ -1094,38 +842,10 @@
       "capabilities": [
         {
           "capability": {
-            "id": "channel.receive",
-            "version": "1.0.0"
-          },
-          "kind": "event_source"
-        },
-        {
-          "capability": {
-            "id": "channel.reply",
+            "id": "channel.messaging",
             "version": "1.0.0"
           },
           "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "channel.send",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "channel.pairing",
-            "version": "1.0.0"
-          },
-          "kind": "transport"
-        },
-        {
-          "capability": {
-            "id": "channel.group_policy",
-            "version": "1.0.0"
-          },
-          "kind": "turn_middleware"
         }
       ],
       "skills": [],
@@ -1143,28 +863,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "customer_service.dialogue",
-            "version": "1.0.0"
-          },
-          "kind": "turn_middleware"
-        },
-        {
-          "capability": {
-            "id": "customer_service.notes.read",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "customer_service.notes.write",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "customer_service.handoff",
+            "id": "customer.service",
             "version": "1.0.0"
           },
           "kind": "tool"
@@ -1241,42 +940,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "creation.text",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "creation.image",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "creation.image_edit",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "creation.video",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "creation.audio",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "creation.music",
+            "id": "creation.media",
             "version": "1.0.0"
           },
           "kind": "tool"
@@ -1297,35 +961,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "workshop.canvas.read",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "workshop.canvas.edit",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "workshop.asset.read",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "workshop.asset.write",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "workshop.template.run",
+            "id": "creative.workshop",
             "version": "1.0.0"
           },
           "kind": "tool"
@@ -1346,28 +982,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "office.preview",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "office.document.edit",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "office.sheet.edit",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "office.slides.edit",
+            "id": "office",
             "version": "1.0.0"
           },
           "kind": "tool"
@@ -1388,28 +1003,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "plugin.read",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "plugin.edit",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "plugin.publish",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "plugin.serve",
+            "id": "plugin.development",
             "version": "1.0.0"
           },
           "kind": "tool"

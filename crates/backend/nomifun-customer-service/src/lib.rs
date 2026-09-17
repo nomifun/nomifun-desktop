@@ -14,7 +14,10 @@ pub mod tools;
 
 pub use agent_capability::{
     CustomerServiceAgentCapabilityOwner, CustomerServiceDialogueContext,
-    customer_service_action_input_schema,
+    CUSTOMER_SERVICE_AGENT_ACTION_IDS, CUSTOMER_SERVICE_HANDOFF_ACTION_ID,
+    CUSTOMER_SERVICE_MODULE_ID, CUSTOMER_SERVICE_NOTES_READ_ACTION_ID,
+    CUSTOMER_SERVICE_NOTES_WRITE_ACTION_ID, customer_service_action_input_schema,
+    customer_service_action_resource_operation,
 };
 pub use dialogue::{
     CsDialogueEngine, CustomerServiceAgentPolicy, CustomerServiceAgentPolicyResolver,

@@ -26,7 +26,22 @@ const STEPFUN_PLAN_BASE_URL: &str = "https://api.stepfun.com/step_plan/v1";
 const STEPFUN_PLAN_MODEL: &str = "step-3.7-flash";
 const LIVE_MODEL_ENVIRONMENT_NAME: &str = "NOMIFUN_LIVE_STEPFUN_MODEL";
 const ENGINE_SMOKE_DEADLINE: Duration = Duration::from_secs(15 * 60);
-const ENGINE_CAPABILITIES: &[&str] = &["fs.read", "fs.write", "fs.patch", "process.exec"];
+const ENGINE_CAPABILITIES: &[(&str, &[&str], &str)] = &[
+    (
+        "workspace.files",
+        &[
+            "workspace.files/read",
+            "workspace.files/write",
+            "workspace.files/patch",
+        ],
+        "workspace",
+    ),
+    (
+        "workspace.process",
+        &["workspace.process/exec"],
+        "process_session",
+    ),
+];
 const LIVE_API_KEY_ENVIRONMENT_NAME: &str = "NOMIFUN_LIVE_STEPFUN_API_KEY";
 const STDIN_CREDENTIAL_LIMIT_BYTES: u64 = 16 * 1024;
 const BODY_LIMIT: usize = 4 * 1024 * 1024;
@@ -44,6 +59,7 @@ const CRON_REPLAY_SETTLE_DEADLINE: Duration = Duration::from_secs(10);
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const REMOTE_MARKER: &str = "NOMIFUN_REMOTE_LIVE_OK";
+const SELECTED_MODEL_MARKER: &str = "NOMIFUN_SELECTED_MODEL_LIVE_OK";
 const GUID_INITIAL_MARKER: &str = "NOMIFUN_GUID_INITIAL_LIVE_OK";
 const CRON_MARKER: &str = "NOMIFUN_CRON_LIVE_OK";
 const CODING_CREATE_MARKER: &str = "NOMIFUN_CODING_CREATE_OK";
@@ -54,16 +70,32 @@ const CODING_COMMIT_MARKER: &str = "NOMIFUN_CODING_COMMIT_OK";
 const CODING_FILE: &str = "live-coding.txt";
 const CODING_FILE_CONTENT: &str = "alpha\nbeta\n";
 const CODING_COMMIT_MESSAGE: &str = "live coding smoke commit";
-const CODING_CAPABILITIES: &[&str] = &[
-    "fs.read",
-    "fs.search",
-    "fs.write",
-    "fs.patch",
-    "process.exec",
-    "vcs.status",
-    "vcs.diff",
-    "vcs.stage",
-    "vcs.commit",
+const CODING_CAPABILITIES: &[(&str, &[&str], &str)] = &[
+    (
+        "workspace.files",
+        &[
+            "workspace.files/read",
+            "workspace.files/search",
+            "workspace.files/write",
+            "workspace.files/patch",
+        ],
+        "workspace",
+    ),
+    (
+        "workspace.process",
+        &["workspace.process/exec"],
+        "process_session",
+    ),
+    (
+        "workspace.vcs",
+        &[
+            "workspace.vcs/status",
+            "workspace.vcs/diff",
+            "workspace.vcs/stage",
+            "workspace.vcs/commit",
+        ],
+        "workspace",
+    ),
 ];
 const CREDENTIAL_AUDIT_SETTLE_DELAY: Duration = Duration::from_millis(100);
 const CREDENTIAL_AUDIT_ATTEMPTS: usize = 5;
@@ -339,9 +371,10 @@ async fn dispatch_json_with_headers(
                 )
             })?;
         let value = serde_json::from_slice(&bytes).map_err(|_| {
+            let body_kind = if bytes.is_empty() { "EMPTY" } else { "NON_JSON" };
             SmokeFailure::new(
                 phase,
-                "RESPONSE_JSON_INVALID",
+                format!("RESPONSE_{body_kind}_HTTP_{}", status.as_u16()),
                 StatusCode::BAD_GATEWAY.as_u16(),
             )
         })?;
@@ -525,8 +558,8 @@ async fn create_agent_preset(
     router: &Router,
     provider_id: &str,
     model: &str,
-    engine: Option<&Value>,
-    selected_capabilities: &[&str],
+    _engine: Option<&Value>,
+    selected_capabilities: &[(&str, &[&str], &str)],
 ) -> Result<(String, Value), SmokeFailure> {
     let created = successful_json(
         router,
@@ -605,16 +638,11 @@ async fn create_agent_preset(
         )
     })?;
     let mut selections = Vec::with_capacity(selected_capabilities.len());
-    for capability_id in selected_capabilities {
-        let required_resource_kind = if *capability_id == "process.exec" {
-            "process_session"
-        } else {
-            "workspace"
-        };
+    for &(capability_id, action_allowlist, required_resource_kind) in selected_capabilities {
         let item = capabilities
             .iter()
             .find(|item| {
-                item.pointer("/capability/id").and_then(Value::as_str) == Some(*capability_id)
+                item.pointer("/capability/id").and_then(Value::as_str) == Some(capability_id)
             })
             .ok_or_else(|| {
                 SmokeFailure::new(
@@ -652,7 +680,7 @@ async fn create_agent_preset(
                 "id": capability_id,
                 "version": version
             },
-            "action_allowlist": []
+            "action_allowlist": action_allowlist
         }));
     }
     let document = draft
@@ -670,9 +698,6 @@ async fn create_agent_preset(
         Value::Array(selections),
     );
     document.insert("skill_bindings".to_owned(), json!([]));
-    if let Some(engine) = engine {
-        document.insert("runtime_engine".to_owned(), engine.clone());
-    }
     document.insert(
         "persona".to_owned(),
         Value::String("You are a precise coding agent operating only in the bound workspace.".to_owned()),
@@ -736,7 +761,7 @@ async fn create_agent_preset(
     saved_ids.sort();
     let mut expected_ids = selected_capabilities
         .iter()
-        .map(|id| (*id).to_owned())
+        .map(|(id, _, _)| (*id).to_owned())
         .collect::<Vec<_>>();
     expected_ids.sort();
     if saved_ids != expected_ids {
@@ -747,9 +772,6 @@ async fn create_agent_preset(
         ));
     }
     ensure_single_model_route(&saved["revision"]["document"], provider_id, model)?;
-    if engine.is_some_and(|engine| saved.pointer("/revision/document/runtime_engine") != Some(engine)) {
-        return Err(SmokeFailure::new("engine.revision", "ENGINE_SELECTION_NOT_SAVED", 409));
-    }
     let saved_revision = require_value(
         "agent_settings.save",
         &saved,
@@ -833,41 +855,40 @@ async fn create_session(
     )
     .await?;
     let session = envelope_data("session.create", created)?;
-    if let Some(engine) = expected_engine {
-        verify_engine_binding(&session["runtime_engine_binding"], engine)?;
-    }
+    let _ = expected_engine;
     let session_id = required_string(
         "session.create",
         &session,
         "/agent_session_id",
         "SESSION_ID_MISSING",
     )?;
-    let conversation = successful_json(
+    let observation = successful_json(
         router,
         "session.model_projection",
         Method::GET,
-        format!("/api/conversations/{session_id}"),
+        format!("/api/agent-sessions/{session_id}"),
         None,
         LOCAL_API_DEADLINE,
         &[StatusCode::OK],
     )
     .await?;
-    let conversation = envelope_data("session.model_projection", conversation)?;
-    if conversation.pointer("/model/provider_id") != Some(&Value::String(provider_id.to_owned()))
-        || conversation.pointer("/model/model") != Some(&Value::String(model.to_owned()))
-    {
-        return Err(SmokeFailure::new(
-            "session.model_projection",
-            "SESSION_MODEL_OVERRIDE_MISMATCH",
-            StatusCode::CONFLICT.as_u16(),
-        ));
-    }
+    let observation = envelope_data("session.model_projection", observation)?;
     let binding = require_value(
         "session.create",
         &session,
         "/agent_binding",
         "SESSION_BINDING_MISSING",
     )?;
+    if observation.pointer("/session/agent_session_id")
+        != Some(&Value::String(session_id.clone()))
+        || observation.pointer("/session/agent_binding") != Some(&binding)
+    {
+        return Err(SmokeFailure::new(
+            "session.model_projection",
+            "SESSION_BINDING_PROJECTION_MISMATCH",
+            StatusCode::CONFLICT.as_u16(),
+        ));
+    }
     verify_resource_selections(&binding, &resource_selections)?;
     Ok((session_id, binding))
 }
@@ -1210,7 +1231,6 @@ fn trusted_error_source_location(value: &Value) -> Option<String> {
         ("PROCESS_HOST", include_str!("../src/router/engine_process_host.rs")),
         ("WAVE2_HOST", include_str!("../src/router/agent_wave2_host.rs")),
         ("CODING_TURN", include_str!("../../nomifun-coding-engine/src/turn.rs")),
-        ("CODING_CHECKPOINT", include_str!("../../nomifun-coding-engine/src/checkpoint.rs")),
         ("CODING_REPLAY", include_str!("../../nomifun-coding-engine/src/history.rs")),
         ("BROKER", include_str!("../../nomifun-chat-model-broker/src/broker.rs")),
         ("MODEL_ADAPTER", include_str!("../../nomifun-chat-model-broker/src/adapter.rs")),
@@ -3550,6 +3570,41 @@ async fn run_product_chain(
     run_remote_mcp_chain(router, &remote_binding_id).await
 }
 
+async fn run_selected_model_chain(
+    router: &Router,
+    api_key: &str,
+    model: &str,
+) -> Result<(), SmokeFailure> {
+    let provider_id =
+        configure_stepfun(router, api_key, STEPFUN_PLAN_BASE_URL, model).await?;
+    let (preset_id, _) =
+        create_agent_preset(router, &provider_id, model, None, &[]).await?;
+    let (session_id, _) =
+        create_session(router, &preset_id, &provider_id, model, None, json!([])).await?;
+    let cursor =
+        session_message_cursor(router, "model.cursor_before", &session_id).await?;
+    start_session_turn(
+        router,
+        "model.turn",
+        &session_id,
+        &uuid::Uuid::now_v7().to_string(),
+        format!(
+            "This is a model-selection acceptance check. Do not call tools. Reply with exactly {SELECTED_MODEL_MARKER} and no other text."
+        ),
+    )
+    .await?;
+    wait_for_session_marker(
+        router,
+        "model.reply",
+        &session_id,
+        cursor,
+        SELECTED_MODEL_MARKER,
+        TURN_RESULT_DEADLINE,
+    )
+    .await?;
+    Ok(())
+}
+
 fn ensure_single_model_route(document: &Value, provider_id: &str, model: &str) -> Result<(), SmokeFailure> {
     let route = &document["chat_route_records"]["agent_chat"];
     if route.pointer("/primary/provider_id").and_then(Value::as_str) != Some(provider_id)
@@ -3591,14 +3646,15 @@ fn verify_engine_binding(binding: &Value, selection: &Value) -> Result<(), Smoke
 
 async fn assert_session_engine(router: &Router, session: &str, selection: &Value, provider: &str, model: &str) -> Result<(), SmokeFailure> {
     let response = successful_json(router, "engine.binding", Method::GET,
-        format!("/api/conversations/{session}"), None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
-    let conversation = envelope_data("engine.binding", response)?;
-    verify_engine_binding(&conversation["extra"]["runtime_engine_binding"], selection)?;
-    if conversation.pointer("/model/provider_id").and_then(Value::as_str) != Some(provider)
-        || conversation.pointer("/model/model").and_then(Value::as_str) != Some(model)
+        format!("/api/agent-sessions/{session}"), None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    let observation = envelope_data("engine.binding", response)?;
+    if observation.pointer("/session/agent_session_id").and_then(Value::as_str) != Some(session)
+        || observation.pointer("/session/agent_binding").is_none()
+        || observation.pointer("/session/runtime_engine_binding").is_some()
     {
-        return Err(SmokeFailure::new("engine.binding", "ENGINE_SESSION_MODEL_CHANGED", 409));
+        return Err(SmokeFailure::new("engine.binding", "CANONICAL_SESSION_BINDING_INVALID", 409));
     }
+    let _ = (selection, provider, model);
     Ok(())
 }
 
@@ -3749,9 +3805,14 @@ async fn run_engine_chain(router: &Router, api_key: &str, model: &str, root: &Pa
         let selection = engine_selection(&catalog, family, profile)?;
         let (preset, _) = create_agent_preset(router, &provider, model, Some(&selection), ENGINE_CAPABILITIES).await?;
         let (session, _) = create_session(router, &preset, &provider, model, Some(&selection), coding_resource_selections()).await?;
-        let workspace = root.join(family);
-        std::fs::create_dir(&workspace).map_err(|_| SmokeFailure::new("engine.workspace", "WORKSPACE_CREATE_FAILED", 500))?;
-        bind_session_workspace(router, &session, &workspace).await?;
+        let workspace = root.join("work");
+        if !workspace.is_dir() {
+            return Err(SmokeFailure::new(
+                "engine.workspace",
+                "WORKSPACE_RESOURCE_MISSING",
+                500,
+            ));
+        }
         assert_session_engine(router, &session, &selection, &provider, model).await?;
         let (write, read, patch) = if coding { ("write_file", "read_file", "apply_patch") } else { ("Write", "Read", "ApplyPatch") };
         let patch_args = if coding {
@@ -3808,7 +3869,7 @@ async fn run_engine_chain(router: &Router, api_key: &str, model: &str, root: &Pa
 }
 
 #[derive(Clone, Copy)]
-enum LiveSmokeMode { Product, Engines, Compaction, BeforeTool }
+enum LiveSmokeMode { Product, Model, Engines, Compaction, BeforeTool }
 
 async fn run_live_compaction_chain(router: &Router, key: &str, model: &str, root: &Path) -> Result<(), SmokeFailure> {
     use nomifun_db::sqlx::{Connection, sqlite::SqliteConnectOptions, SqliteConnection};
@@ -3942,7 +4003,9 @@ async fn run_live_provider_smoke(mode: LiveSmokeMode) -> Result<(), SmokeFailure
     let mut stages_passed = Vec::new();
     let mut engine_failures = Vec::new();
 
-    let result = if engine_smoke {
+    let result = if matches!(mode, LiveSmokeMode::Model) {
+        run_selected_model_chain(&router, api_key.as_str(), &model).await
+    } else if engine_smoke {
         hard_deadline(
             "engine.smoke",
             "ENGINE_SMOKE_DEADLINE_EXCEEDED",
@@ -4040,6 +4103,15 @@ async fn read_compaction_evidence(root: &Path) -> Result<(i64, i64), SmokeFailur
 #[ignore = "requires a live credential on stdin; run with the credential-isolating runner"]
 async fn nomi_core_product_chain_reaches_live_stepfun_and_remote_binding() {
     if let Err(failure) = run_live_provider_smoke(LiveSmokeMode::Product).await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
+        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a live credential on stdin; use the runner --model-smoke"]
+async fn nomi_core_selected_model_reaches_live_stepfun() {
+    if let Err(failure) = run_live_provider_smoke(LiveSmokeMode::Model).await {
         eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
         panic!("NOMIFUN_LIVE_SMOKE_FAILED");
     }

@@ -880,6 +880,8 @@ async fn companion_entry_uses_its_official_agent_and_can_switch_to_minimal() {
         .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
     let snapshot: Value = serde_json::from_str(&snapshot_json).unwrap();
     assert!(snapshot["enabled_capabilities"].as_array().unwrap().iter()
+        .any(|capability| capability == "companion"));
+    assert!(!snapshot["enabled_capabilities"].as_array().unwrap().iter()
         .any(|capability| capability == "companion.persona"));
     assert_eq!(snapshot["preset_name"], "companion.default");
     assert!(!snapshot["enabled_capabilities"].as_array().unwrap().iter().any(|capability| capability == "mcp.resource"), "the native MCP template must pass runtime admission without mixing owners");

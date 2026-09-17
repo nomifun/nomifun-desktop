@@ -10,6 +10,7 @@
   overflow: hidden;
   background: var(--color-bg-2);
   color: var(--color-text-1);
+  container-type: inline-size;
 }
 .header {
   display: flex;
@@ -37,11 +38,24 @@
   gap: 8px;
   font-size: 14px;
   font-weight: 650;
+  white-space: nowrap;
 }
 
 .headerActions {
+  min-width: 0;
   flex: 0 0 auto;
   gap: 2px;
+}
+
+@container (max-width: 420px) {
+  .header {
+    gap: 6px;
+    padding-inline: 12px 8px;
+  }
+
+  .title > span {
+    display: none;
+  }
 }
 
 .body {

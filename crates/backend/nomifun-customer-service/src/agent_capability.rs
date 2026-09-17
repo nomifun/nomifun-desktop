@@ -12,8 +12,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use nomifun_agent_domain_wave4::{
-    CUSTOMER_RESOURCE_KIND, CUSTOMER_SERVICE_HANDOFF, CUSTOMER_SERVICE_NOTES_READ,
-    CUSTOMER_SERVICE_NOTES_WRITE, Wave4CapabilityOperation, Wave4HostPort, Wave4HostPortError,
+    CUSTOMER_RESOURCE_KIND, Wave4CapabilityOperation, Wave4HostPort, Wave4HostPortError,
     Wave4HostRequest, Wave4TurnMiddlewareHostPort, Wave4TurnMiddlewareHostRequest,
     typed_resource_binding,
 };
@@ -30,6 +29,33 @@ use crate::service::{
 
 const DEFAULT_NOTE_LIMIT: usize = 50;
 const MAX_NOTE_LIMIT: usize = 200;
+
+/// Stable product Module identity. Dialogue policy is deliberately absent:
+/// it is derived from the selected customer scene binding and is never an
+/// Agent grant.
+pub const CUSTOMER_SERVICE_MODULE_ID: &str = "customer.service";
+pub const CUSTOMER_SERVICE_NOTES_READ_ACTION_ID: &str = "customer.service/notes.read";
+pub const CUSTOMER_SERVICE_NOTES_WRITE_ACTION_ID: &str = "customer.service/notes.write";
+pub const CUSTOMER_SERVICE_HANDOFF_ACTION_ID: &str = "customer.service/handoff";
+
+pub const CUSTOMER_SERVICE_AGENT_ACTION_IDS: [&str; 3] = [
+    CUSTOMER_SERVICE_NOTES_READ_ACTION_ID,
+    CUSTOMER_SERVICE_NOTES_WRITE_ACTION_ID,
+    CUSTOMER_SERVICE_HANDOFF_ACTION_ID,
+];
+
+/// Translate one target Action into the resource operation it needs. The
+/// scene-derived dialogue Context always receives `read` separately and never
+/// appears in this Action map.
+pub fn customer_service_action_resource_operation(action_id: &str) -> Option<&'static str> {
+    match action_id {
+        CUSTOMER_SERVICE_NOTES_READ_ACTION_ID => Some("read"),
+        CUSTOMER_SERVICE_NOTES_WRITE_ACTION_ID | CUSTOMER_SERVICE_HANDOFF_ACTION_ID => {
+            Some("write")
+        }
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CustomerServiceDialogueContext {
@@ -60,6 +86,30 @@ impl CustomerServiceAgentCapabilityOwner {
 
     pub fn service(&self) -> &Arc<CustomerServiceService> {
         &self.service
+    }
+
+    /// Resolve a target-generation customer scene binding from exact Agent
+    /// Actions. `read` is included independently of the Action set because the
+    /// dialogue middleware is a property of the selected customer scene, not a
+    /// permission the Agent may author.
+    pub async fn resolve_scene_binding(
+        &self,
+        principal_id: &str,
+        cs_agent_id: &str,
+        allowed_action_ids: &BTreeSet<String>,
+    ) -> Result<TypedResourceBinding, Wave4HostPortError> {
+        self.require_owner(principal_id)?;
+        let mut operations = BTreeSet::from(["read".to_owned()]);
+        for action_id in allowed_action_ids {
+            let operation = customer_service_action_resource_operation(action_id).ok_or_else(|| {
+                Wave4HostPortError::resource_binding_invalid(format!(
+                    "customer scene cannot derive resource authority from undeclared Action {action_id}",
+                ))
+            })?;
+            operations.insert(operation.to_owned());
+        }
+        self.resolve_resource_binding(principal_id, cs_agent_id, operations)
+            .await
     }
 
     /// Resolve a user selection into the only server-authored `customer`
@@ -98,8 +148,8 @@ impl CustomerServiceAgentCapabilityOwner {
         ))
     }
 
-    /// Resolve the non-Tool `customer_service.dialogue` contribution for the
-    /// same selected resource used by notes and handoff actions.
+    /// Resolve dialogue Context from the selected customer scene binding. This
+    /// is not an Agent Tool or an authorable Capability.
     pub async fn dialogue_context(
         &self,
         principal_id: &str,
@@ -181,27 +231,34 @@ impl CustomerServiceAgentCapabilityOwner {
             .map_err(map_service_error)
     }
 
-    async fn invoke_owned(
+    /// Invoke one target-generation Action against an exact customer binding.
+    /// Notes and handoff return durable domain receipts; dropped in-flight
+    /// calls are additionally protected by the canonical Agent effect ledger.
+    pub async fn invoke_target_action(
         &self,
-        request: Wave4HostRequest,
+        principal_id: &str,
+        idempotency_key: &str,
+        action_id: &str,
+        bindings: &[TypedResourceBinding],
+        input: StrictJsonValue,
     ) -> Result<StrictJsonValue, Wave4HostPortError> {
-        request.validate()?;
-        if request.context.principal.principal_kind != "user" {
-            return Err(Wave4HostPortError::resource_owner_mismatch(
-                "customer-service Agent capabilities require a user principal",
+        self.require_owner(principal_id)?;
+        if idempotency_key.trim().is_empty() {
+            return Err(Wave4HostPortError::invalid_request(
+                "customer-service Action idempotency key must be non-empty",
             ));
         }
-        self.require_owner(&request.context.principal.principal_id)?;
-        let customer = request
-            .context
-            .resource_bindings
-            .iter()
-            .find(|binding| binding.resource_kind.as_ref() == CUSTOMER_RESOURCE_KIND)
-            .ok_or_else(|| {
-                Wave4HostPortError::resource_not_bound(
-                    "customer-service capability requires one selected customer resource",
-                )
-            })?;
+        if !input.0.is_object() {
+            return Err(Wave4HostPortError::invalid_request(
+                "customer-service Action input must be an object",
+            ));
+        }
+        let operation = customer_service_action_resource_operation(action_id).ok_or_else(|| {
+            Wave4HostPortError::action_operation_mismatch(format!(
+                "undeclared customer-service Action {action_id}",
+            ))
+        })?;
+        let customer = exact_customer_binding(bindings, principal_id, operation)?;
         let cs_agent_id = customer.resource_id.as_ref().to_owned();
         let agent = self.resolve_agent(&cs_agent_id).await?;
         if !agent.enabled {
@@ -211,8 +268,8 @@ impl CustomerServiceAgentCapabilityOwner {
             ));
         }
 
-        let value = match request.operation {
-            Wave4CapabilityOperation::CustomerServiceNotesRead { input } => {
+        let value = match action_id {
+            CUSTOMER_SERVICE_NOTES_READ_ACTION_ID => {
                 let input: NotesReadInput = parse_input(input.0)?;
                 let mut notes = self
                     .service
@@ -234,25 +291,27 @@ impl CustomerServiceAgentCapabilityOwner {
                 notes.truncate(input.limit.unwrap_or(DEFAULT_NOTE_LIMIT).clamp(1, MAX_NOTE_LIMIT));
                 json!({ "cs_agent_id": cs_agent_id, "notes": notes })
             }
-            Wave4CapabilityOperation::CustomerServiceNotesWrite { input } => {
+            CUSTOMER_SERVICE_NOTES_WRITE_ACTION_ID => {
                 let request_value = input.0;
                 let request_digest = digest_payload(&json!({
+                    "module_id": CUSTOMER_SERVICE_MODULE_ID,
+                    "action_id": action_id,
                     "cs_agent_id": cs_agent_id.clone(),
                     "input": request_value.clone(),
                 }))
                 .map_err(|error| {
                     Wave4HostPortError::invalid_request(format!(
-                        "notes.write request could not be digested: {error}"
+                        "notes.write request could not be digested: {error}",
                     ))
                 })?;
                 let input: NotesWriteInput = parse_input(request_value)?;
                 let receipt = self
                     .service
                     .write_note_idempotent(AgentCsNoteWriteInput {
-                        owner_user_id: request.context.principal.principal_id,
+                        owner_user_id: principal_id.to_owned(),
                         cs_agent_id: cs_agent_id.clone(),
-                        capability_id: CUSTOMER_SERVICE_NOTES_WRITE.to_owned(),
-                        idempotency_key: request.context.idempotency_key.as_ref().to_owned(),
+                        capability_id: CUSTOMER_SERVICE_MODULE_ID.to_owned(),
+                        idempotency_key: idempotency_key.to_owned(),
                         request_digest: request_digest.as_ref().to_owned(),
                         cs_note_id: input.cs_note_id,
                         kind: input.kind,
@@ -269,15 +328,15 @@ impl CustomerServiceAgentCapabilityOwner {
                     "note": receipt.note,
                 })
             }
-            Wave4CapabilityOperation::CustomerServiceHandoff { input } => {
+            CUSTOMER_SERVICE_HANDOFF_ACTION_ID => {
                 let input: HandoffInput = parse_input(input.0)?;
                 let result = self
                     .service
                     .request_handoff(RequestCsHandoffInput {
                         cs_agent_id: cs_agent_id.clone(),
                         cs_dialogue_id: input.cs_dialogue_id,
-                        requested_by: request.context.principal.principal_id,
-                        idempotency_key: request.context.idempotency_key.as_ref().to_owned(),
+                        requested_by: principal_id.to_owned(),
+                        idempotency_key: idempotency_key.to_owned(),
                         reason: input.reason,
                         summary: input.summary.unwrap_or_default(),
                     })
@@ -285,9 +344,35 @@ impl CustomerServiceAgentCapabilityOwner {
                     .map_err(map_service_error)?;
                 json!({
                     "cs_agent_id": cs_agent_id,
+                    "receipt_id": result.handoff.cs_handoff_id.clone(),
                     "created": result.created,
                     "handoff": result.handoff,
                 })
+            }
+            _ => unreachable!("validated customer-service Action"),
+        };
+        Ok(StrictJsonValue(value))
+    }
+
+    async fn invoke_owned(
+        &self,
+        request: Wave4HostRequest,
+    ) -> Result<StrictJsonValue, Wave4HostPortError> {
+        request.validate()?;
+        if request.context.principal.principal_kind != "user" {
+            return Err(Wave4HostPortError::resource_owner_mismatch(
+                "customer-service Agent capabilities require a user principal",
+            ));
+        }
+        let (action_id, input) = match request.operation {
+            Wave4CapabilityOperation::CustomerServiceNotesRead { input } => {
+                (CUSTOMER_SERVICE_NOTES_READ_ACTION_ID, input)
+            }
+            Wave4CapabilityOperation::CustomerServiceNotesWrite { input } => {
+                (CUSTOMER_SERVICE_NOTES_WRITE_ACTION_ID, input)
+            }
+            Wave4CapabilityOperation::CustomerServiceHandoff { input } => {
+                (CUSTOMER_SERVICE_HANDOFF_ACTION_ID, input)
             }
             _ => {
                 return Err(Wave4HostPortError::action_operation_mismatch(
@@ -295,7 +380,14 @@ impl CustomerServiceAgentCapabilityOwner {
                 ));
             }
         };
-        Ok(StrictJsonValue(value))
+        self.invoke_target_action(
+            &request.context.principal.principal_id,
+            request.context.idempotency_key.as_ref(),
+            action_id,
+            &request.context.resource_bindings,
+            input,
+        )
+        .await
     }
 }
 
@@ -374,6 +466,46 @@ impl Wave4TurnMiddlewareHostPort for CustomerServiceAgentCapabilityOwner {
     }
 }
 
+fn exact_customer_binding<'a>(
+    bindings: &'a [TypedResourceBinding],
+    principal_id: &str,
+    operation: &str,
+) -> Result<&'a TypedResourceBinding, Wave4HostPortError> {
+    let mut matches = bindings
+        .iter()
+        .filter(|binding| binding.resource_kind.as_ref() == CUSTOMER_RESOURCE_KIND);
+    let binding = matches.next().ok_or_else(|| {
+        Wave4HostPortError::resource_not_bound(
+            "customer-service Action requires one selected customer resource",
+        )
+    })?;
+    if matches.next().is_some() {
+        return Err(Wave4HostPortError::resource_binding_invalid(
+            "customer-service Action received duplicate customer resources",
+        ));
+    }
+    if binding.owner_id != principal_id {
+        return Err(Wave4HostPortError::resource_owner_mismatch(format!(
+            "customer resource belongs to {}, not {principal_id}",
+            binding.owner_id,
+        )));
+    }
+    if binding.resource_id.as_ref().trim().is_empty()
+        || binding.connection_config_ref.is_some()
+        || !binding.typed_parameters.is_empty()
+        || binding
+            .operations
+            .iter()
+            .any(|operation| !matches!(operation.as_str(), "read" | "write"))
+        || !binding.operations.contains(operation)
+    {
+        return Err(Wave4HostPortError::resource_not_bound(format!(
+            "customer resource does not grant operation {operation}",
+        )));
+    }
+    Ok(binding)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NotesReadInput {
@@ -422,10 +554,12 @@ fn map_service_error(error: AppError) -> Wave4HostPortError {
 }
 
 /// Canonical strict input schema bytes for Nomi's bundled Tool bridge.
-pub fn customer_service_action_input_schema(capability_id: &str) -> Option<Value> {
-    match capability_id {
-        CUSTOMER_SERVICE_NOTES_READ | CUSTOMER_SERVICE_NOTES_WRITE | CUSTOMER_SERVICE_HANDOFF => {
-            Some(nomifun_agent_domain_wave4::action_input_schema(capability_id).0)
+pub fn customer_service_action_input_schema(action_id: &str) -> Option<Value> {
+    match action_id {
+        CUSTOMER_SERVICE_NOTES_READ_ACTION_ID
+        | CUSTOMER_SERVICE_NOTES_WRITE_ACTION_ID
+        | CUSTOMER_SERVICE_HANDOFF_ACTION_ID => {
+            Some(nomifun_agent_domain_wave4::action_input_schema(action_id).0)
         }
         _ => None,
     }
@@ -440,10 +574,7 @@ mod tests {
         OperationId, PrincipalRef, ResolvedSnapshotRef, ResourceBindingId, ResourceId,
         ResourceKind, ScopeKey, TypedResourceBinding,
     };
-    use nomifun_agent_domain_wave4::{
-        CUSTOMER_SERVICE_HANDOFF_ACTION, CUSTOMER_SERVICE_NOTES_READ_ACTION,
-        CUSTOMER_SERVICE_NOTES_WRITE_ACTION, WAVE4_RESOURCE_OWNER_MISMATCH, WAVE4_RESOURCE_NOT_BOUND,
-    };
+    use nomifun_agent_domain_wave4::{WAVE4_RESOURCE_NOT_BOUND, WAVE4_RESOURCE_OWNER_MISMATCH};
     use nomifun_common::{ChannelPluginId, ChannelUserId, UserId};
     use nomifun_db::{CsDialogueKey, ICustomerServiceRepository, SqliteCustomerServiceRepository};
 
@@ -547,8 +678,8 @@ mod tests {
             .invoke(request(
                 &owner_id,
                 &cs_agent_id,
-                CUSTOMER_SERVICE_NOTES_WRITE,
-                CUSTOMER_SERVICE_NOTES_WRITE_ACTION,
+                CUSTOMER_SERVICE_MODULE_ID,
+                CUSTOMER_SERVICE_NOTES_WRITE_ACTION_ID,
                 Wave4CapabilityOperation::CustomerServiceNotesWrite {
                     input: StrictJsonValue(json!({
                         "kind": "faq",
@@ -574,8 +705,8 @@ mod tests {
             .invoke(request(
                 &owner_id,
                 &cs_agent_id,
-                CUSTOMER_SERVICE_NOTES_READ,
-                CUSTOMER_SERVICE_NOTES_READ_ACTION,
+                CUSTOMER_SERVICE_MODULE_ID,
+                CUSTOMER_SERVICE_NOTES_READ_ACTION_ID,
                 Wave4CapabilityOperation::CustomerServiceNotesRead {
                     input: StrictJsonValue(json!({ "cs_note_id": created_note_id })),
                 },
@@ -592,8 +723,8 @@ mod tests {
             .invoke(request(
                 &foreign_owner,
                 &cs_agent_id,
-                CUSTOMER_SERVICE_NOTES_READ,
-                CUSTOMER_SERVICE_NOTES_READ_ACTION,
+                CUSTOMER_SERVICE_MODULE_ID,
+                CUSTOMER_SERVICE_NOTES_READ_ACTION_ID,
                 Wave4CapabilityOperation::CustomerServiceNotesRead {
                     input: StrictJsonValue(json!({})),
                 },
@@ -616,8 +747,8 @@ mod tests {
             request(
                 &owner_id,
                 &cs_agent_id,
-                CUSTOMER_SERVICE_NOTES_WRITE,
-                CUSTOMER_SERVICE_NOTES_WRITE_ACTION,
+                CUSTOMER_SERVICE_MODULE_ID,
+                CUSTOMER_SERVICE_NOTES_WRITE_ACTION_ID,
                 Wave4CapabilityOperation::CustomerServiceNotesWrite {
                     input: StrictJsonValue(json!({
                         "kind": "fact",
@@ -668,7 +799,7 @@ mod tests {
              WHERE owner_user_id = ? AND capability_id = ? AND idempotency_key = ?",
         )
         .bind(&owner_id)
-        .bind(CUSTOMER_SERVICE_NOTES_WRITE)
+        .bind(CUSTOMER_SERVICE_MODULE_ID)
         .bind("notes-write-response-lost")
         .fetch_one(database.pool())
         .await
@@ -708,8 +839,8 @@ mod tests {
             request(
                 &owner_id,
                 &cs_agent_id,
-                CUSTOMER_SERVICE_NOTES_WRITE,
-                CUSTOMER_SERVICE_NOTES_WRITE_ACTION,
+                CUSTOMER_SERVICE_MODULE_ID,
+                CUSTOMER_SERVICE_NOTES_WRITE_ACTION_ID,
                 Wave4CapabilityOperation::CustomerServiceNotesWrite {
                     input: StrictJsonValue(json!({ "content": "cancel-safe fact" })),
                 },
@@ -747,8 +878,8 @@ mod tests {
             owner.invoke(request(
                 &owner_id,
                 &cs_agent_id,
-                CUSTOMER_SERVICE_HANDOFF,
-                CUSTOMER_SERVICE_HANDOFF_ACTION,
+                CUSTOMER_SERVICE_MODULE_ID,
+                CUSTOMER_SERVICE_HANDOFF_ACTION_ID,
                 Wave4CapabilityOperation::CustomerServiceHandoff {
                     input: StrictJsonValue(json!({
                         "cs_dialogue_id": dialogue_id,
@@ -802,22 +933,11 @@ mod tests {
         assert_eq!(binding.owner_id, owner_id);
         assert!(binding.typed_parameters.is_empty());
         assert!(binding.connection_config_ref.is_none());
-        let registration =
-            nomifun_agent_domain_wave4::customer_service_registration().unwrap();
-        let schema_ref = registration
-            .metadata
-            .manifest
-            .payload
-            .contributions
-            .capabilities
-            .iter()
-            .find(|capability| {
-                capability.id.as_ref()
-                    == nomifun_agent_domain_wave4::CUSTOMER_SERVICE_DIALOGUE
-            })
-            .and_then(|capability| capability.contributions.context_schema_refs.first())
-            .cloned()
-            .unwrap();
+        let schema_ref = nomifun_agent_domain_wave4::scene_context_schema_ref(
+            nomifun_agent_domain_wave4::CUSTOMER_SERVICE_DIALOGUE,
+        )
+        .unwrap()
+        .unwrap();
         let apply_middleware = |turn_input| {
             owner.apply(Wave4TurnMiddlewareHostRequest {
                 principal: PrincipalRef {
@@ -878,5 +998,39 @@ mod tests {
 
         let unbound = Wave4HostPortError::resource_not_bound("customer required");
         assert_eq!(unbound.code, WAVE4_RESOURCE_NOT_BOUND);
+    }
+
+    #[tokio::test]
+    async fn scene_binding_derives_dialogue_read_and_only_real_agent_actions() {
+        let (_database, service, _repo, owner_id, cs_agent_id, _dialogue_id) = fixture().await;
+        let owner = CustomerServiceAgentCapabilityOwner::new(owner_id.clone(), service);
+
+        let notes_only = owner
+            .resolve_scene_binding(
+                &owner_id,
+                &cs_agent_id,
+                &BTreeSet::from([CUSTOMER_SERVICE_NOTES_WRITE_ACTION_ID.to_owned()]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            notes_only.operations,
+            BTreeSet::from(["read".to_owned(), "write".to_owned()]),
+        );
+
+        let dialogue_as_grant = owner
+            .resolve_scene_binding(
+                &owner_id,
+                &cs_agent_id,
+                &BTreeSet::from([
+                    nomifun_agent_domain_wave4::CUSTOMER_SERVICE_DIALOGUE.to_owned(),
+                ]),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            dialogue_as_grant.code,
+            nomifun_agent_domain_wave4::WAVE4_RESOURCE_BINDING_INVALID,
+        );
     }
 }

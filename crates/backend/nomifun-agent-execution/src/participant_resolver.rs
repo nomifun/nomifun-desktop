@@ -595,6 +595,7 @@ mod tests {
             included_skills: vec![],
             excluded_auto_skills: vec![],
             enabled_capabilities: vec![],
+            enabled_capability_actions: Default::default(),
                         required_resource_kinds: Default::default(),
             knowledge_policy: AgentKnowledgePolicy::default(),
             warnings: vec![],

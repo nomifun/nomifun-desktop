@@ -67,6 +67,7 @@ fn context_input(
             source_message_id: "context-parent".into(),
             text: json!({"action": action, "input": input}).to_string(),
             image_media_types: Vec::new(),
+            cs_dialogue_id: None,
         },
     }
 }

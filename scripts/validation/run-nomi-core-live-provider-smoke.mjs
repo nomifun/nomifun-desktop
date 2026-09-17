@@ -16,6 +16,7 @@
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --browser
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --browser --compile-only
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --browser-gui --data-dir C:/new-disposable-gui-data
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --model-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --engine-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --engine-smoke --engine-family=coding
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --before-tool-smoke
@@ -57,6 +58,7 @@ const MODEL_ENVIRONMENT_NAME = 'NOMIFUN_LIVE_STEPFUN_MODEL';
 const DEFAULT_MODEL = 'step-3.7-flash';
 const ALLOWED_MODELS = new Set([DEFAULT_MODEL]);
 const ENGINE_TEST_NAME = 'nomi_core_official_engines_reach_live_stepfun';
+const MODEL_TEST_NAME = 'nomi_core_selected_model_reaches_live_stepfun';
 const BEFORE_TOOL_TEST_NAME = 'nomi_core_product_before_tool_reaches_live_stepfun';
 const BEFORE_TOOL_STAGE_PHASES = ['before_tool.publish_select', 'before_tool.allow', 'before_tool.deny', 'before_tool.continuation'];
 const COMPACTION_TEST_NAME = 'coding_compaction_reaches_live_stepfun_without_discarding_history';
@@ -72,6 +74,7 @@ const FAILURE_SENTINEL =
 const compileOnly = process.argv.includes('--compile-only');
 const selfTest = process.argv.includes('--self-test');
 const engineSmoke = process.argv.includes('--engine-smoke');
+const modelSmoke = process.argv.includes('--model-smoke');
 const compactionSmoke = process.argv.includes('--compaction-smoke');
 const beforeToolSmoke = process.argv.includes('--before-tool-smoke');
 const retainNativeFixture = process.argv.includes('--retain-native-fixture');
@@ -401,7 +404,7 @@ async function resolveToolchainEnvironment() {
 
 async function main() {
   const userArgs = process.argv.slice(2);
-  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--engine-smoke', '--compaction-smoke', '--before-tool-smoke', '--retain-native-fixture', '--engine-family=all', '--engine-family=nomi', '--engine-family=coding'];
+  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--engine-smoke', '--compaction-smoke', '--before-tool-smoke', '--retain-native-fixture', '--engine-family=all', '--engine-family=nomi', '--engine-family=coding'];
   if (userArgs.some((arg, index) => {
     if (arg === '--data-dir') return !browserGui || !userArgs[index + 1] || userArgs[index + 1].startsWith('--');
     if (index > 0 && userArgs[index - 1] === '--data-dir') return false;
@@ -411,7 +414,7 @@ async function main() {
     process.exitCode = 2;
     return;
   }
-  if (([browser, browserGui, engineSmoke, compactionSmoke, beforeToolSmoke].filter(Boolean).length > 1) || familyArgs.length > 1 || (familyArgs.length && !engineSmoke) || (retainNativeFixture && !beforeToolSmoke)) {
+  if (([browser, browserGui, modelSmoke, engineSmoke, compactionSmoke, beforeToolSmoke].filter(Boolean).length > 1) || familyArgs.length > 1 || (familyArgs.length && !engineSmoke) || (retainNativeFixture && !beforeToolSmoke)) {
     emitFailure('live_smoke_status=not_run', 'RUNNER_ENGINE_SELECTION_INVALID', 400);
     process.exitCode = 2;
     return;
@@ -565,11 +568,11 @@ async function main() {
 
   let test;
   try {
-    console.log(`live_smoke_phase=execute mode=${browserGui ? 'browser_gui' : browser ? 'browser_frontend' : beforeToolSmoke ? 'before_tool' : compactionSmoke ? 'coding_compaction' : engineSmoke ? 'official_engines' : 'product_chain'} model=${model}`);
+    console.log(`live_smoke_phase=execute mode=${browserGui ? 'browser_gui' : browser ? 'browser_frontend' : modelSmoke ? 'selected_model' : beforeToolSmoke ? 'before_tool' : compactionSmoke ? 'coding_compaction' : engineSmoke ? 'official_engines' : 'product_chain'} model=${model}`);
     test = await runCaptured(
       executable,
       browserGui ? [guiDataDir, '--live-frontend'] : browser ? ['--live-agent-only'] : [
-        beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : compactionSmoke ? COMPACTION_TEST_NAME : engineSmoke ? ENGINE_TEST_NAME : PRODUCT_TEST_NAME,
+        modelSmoke ? MODEL_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : compactionSmoke ? COMPACTION_TEST_NAME : engineSmoke ? ENGINE_TEST_NAME : PRODUCT_TEST_NAME,
         '--exact',
         '--ignored',
         '--test-threads=1',
@@ -644,7 +647,7 @@ async function main() {
       return;
     }
     // libtest exits successfully even when an exact filter matches zero tests.
-    const selected = beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : compactionSmoke ? COMPACTION_TEST_NAME : engineSmoke ? ENGINE_TEST_NAME : PRODUCT_TEST_NAME;
+    const selected = modelSmoke ? MODEL_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : compactionSmoke ? COMPACTION_TEST_NAME : engineSmoke ? ENGINE_TEST_NAME : PRODUCT_TEST_NAME;
     if (!selectedTestPassed(test.stdout, selected)) {
       emitFailure('live_smoke_status=not_run', 'SELECTED_TEST_DID_NOT_PASS', 503);
       process.exitCode = 2;
@@ -678,7 +681,7 @@ async function main() {
       process.exitCode = 2;
       return;
     }
-    console.log(`live_smoke_mode=${beforeToolSmoke ? 'before_tool' : compactionSmoke ? 'coding_compaction' : engineSmoke ? 'official_engines' : 'product_chain'} model=${model}`);
+    console.log(`live_smoke_mode=${modelSmoke ? 'selected_model' : beforeToolSmoke ? 'before_tool' : compactionSmoke ? 'coding_compaction' : engineSmoke ? 'official_engines' : 'product_chain'} model=${model}`);
     if (engineSmoke) console.log(`live_smoke_engines=${engineFamily === 'all' ? 'nomifun.nomi,nomifun.coding' : `nomifun.${engineFamily}`} scope=${engineFamily === 'all' ? 'full' : 'focused'}`);
     console.log('live_smoke_status=pass code=OK status=200');
     process.exitCode = 0;

@@ -100,8 +100,6 @@ pub struct AgentFactoryDeps {
     #[cfg(feature = "browser-use")]
     pub browser_runtime_resolver: Option<BrowserRuntimeResolver>,
     #[cfg(feature = "browser-use")]
-    pub local_web_search: Option<Arc<crate::local_web_search::BrowserSearchProvider>>,
-    #[cfg(feature = "browser-use")]
     pub system_browser: Option<Arc<dyn nomifun_browser_platform::system_browser::SystemBrowserHost>>,
     /// Client-preferences repo for reading user-facing settings at session-build
     /// time — currently the `agent.computerUse` toggle that gates the nomi

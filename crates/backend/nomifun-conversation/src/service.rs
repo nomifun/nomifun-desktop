@@ -3224,7 +3224,9 @@ impl ConversationService {
             .await
     }
 
-    /// Command discovery never warms up an Agent or admits a turn.
+    /// Command discovery never warms up an Agent or admits a turn. The legacy
+    /// Conversation route remains owned by UARC-051 while new AgentSession UI
+    /// uses the canonical route.
     pub async fn get_slash_commands(
         &self,
         user_id: &str,
@@ -9079,7 +9081,11 @@ impl ConversationService {
             .is_some_and(|delivery| delivery.creative_studio_turn);
         if creative_studio_turn
             && !req.inject_skills.is_empty()
-            && !row_agent_snapshot_has_capability(&row, "workshop.canvas.read")?
+            && !row_agent_snapshot_has_action(
+                &row,
+                "creative.workshop",
+                "creative.workshop/canvas.read",
+            )?
         {
             req.inject_skills.clear();
         }
@@ -12982,9 +12988,10 @@ fn user_message_matches_requested_content(stored: &str, expected: &serde_json::V
     stored == *expected
 }
 
-fn row_agent_snapshot_has_capability(
+fn row_agent_snapshot_has_action(
     row: &ConversationRow,
-    capability: &str,
+    module_id: &str,
+    action_id: &str,
 ) -> Result<bool, AppError> {
     let Some(raw) = row.agent_snapshot.as_deref() else {
         return Ok(true);
@@ -12996,9 +13003,9 @@ fn row_agent_snapshot_has_capability(
         ))
     })?;
     Ok(snapshot
-        .enabled_capabilities
-        .iter()
-        .any(|enabled| enabled == capability))
+        .enabled_capability_actions
+        .get(module_id)
+        .is_some_and(|actions| actions.contains(action_id)))
 }
 
 fn product_agent_target(
@@ -13095,18 +13102,16 @@ fn apply_product_agent_resolution(
         .map(String::as_str)
         .collect::<HashSet<_>>();
     if target.target_kind == "companion" {
-        if !enabled.contains("companion.persona") {
+        if !enabled.contains("companion") {
             object.remove("system_prompt");
         }
         object.insert(
             "companion_memory_enabled".to_owned(),
-            serde_json::Value::Bool(enabled.iter().any(|id| id.starts_with("memory.companion."))),
+            serde_json::Value::Bool(enabled.contains("companion.memory")),
         );
         object.insert(
             "companion_skills_enabled".to_owned(),
-            serde_json::Value::Bool(
-                enabled.contains("companion.learn") || enabled.contains("companion.evolve"),
-            ),
+            serde_json::Value::Bool(enabled.contains("companion")),
         );
     }
     Ok(())
@@ -14736,6 +14741,7 @@ mod tests {
             included_skills: Vec::new(),
             excluded_auto_skills: Vec::new(),
             enabled_capabilities: Vec::new(),
+            enabled_capability_actions: Default::default(),
             required_resource_kinds: std::collections::BTreeSet::new(),
             knowledge_policy: Default::default(),
             warnings: Vec::new(),

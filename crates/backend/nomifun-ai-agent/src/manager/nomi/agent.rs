@@ -895,14 +895,6 @@ pub(crate) struct NomiHostWiring {
     pub image_generation_discovery_failed: bool,
     /// The app's normalized UI language captured on this runtime build.
     pub image_generation_response_in_chinese: bool,
-    /// Authorized search tool. Its backend resolves on invocation independently
-    /// of Chat; `None` means search is outside this session's capability ceiling.
-    pub web_search_tool: Option<Box<dyn nomi_tools::Tool>>,
-    #[cfg(feature = "browser-use")]
-    pub local_web_search_tool: Option<Box<dyn nomi_tools::Tool>>,
-    /// Renderer sharing this Session's bounded search-citation store.
-    pub citation_render_tool: Option<Box<dyn nomi_tools::Tool>>,
-
     /// Exact ordinary Plugin Tool actions frozen for this Nomi Session.
     ///
     /// The app-owned provider resolves this from persisted Session/Binding
@@ -925,11 +917,6 @@ impl Default for NomiHostWiring {
             image_generation_entitled: true,
             image_generation_discovery_failed: false,
             image_generation_response_in_chinese: false,
-            web_search_tool: None,
-            #[cfg(feature = "browser-use")]
-            local_web_search_tool: None,
-            citation_render_tool: None,
-
             plugin_tool_session: None,
             creation_context: None,
         }
@@ -1027,10 +1014,6 @@ impl NomiAgentManager {
         };
         let image_generation_response_in_chinese =
             host_wiring.image_generation_response_in_chinese;
-        let web_search_tool = host_wiring.web_search_tool;
-        #[cfg(feature = "browser-use")]
-        let local_web_search_tool=host_wiring.local_web_search_tool;
-        let citation_render_tool = host_wiring.citation_render_tool;
         let plugin_tool_session = host_wiring.plugin_tool_session.map(|session| {
             session.with_context_image_policy(
                 config_extra.compat_overrides.supports_image == Some(true),
@@ -1463,37 +1446,6 @@ impl NomiAgentManager {
         }
         // The registry retains the exact Preset ceiling and deferred placement
         // established by bootstrap, including deny-all for zero-tool Agents.
-        engine.registry_mut().register(Box::new(crate::web_fetch::WebFetchTool::default()));
-        if let Some(tool) = web_search_tool {
-            let registered = engine.registry_mut().register(tool);
-            if config_extra.allowed_tools.iter().any(|name| name == "web_search")
-                && !registered
-            {
-                return Err(AppError::Internal(
-                    "authorized web_search tool could not be registered under the session policy"
-                        .to_owned(),
-                ));
-            }
-        }
-        #[cfg(feature = "browser-use")]
-        if let Some(tool)=local_web_search_tool {
-            if !engine.registry_mut().register(tool) {
-                return Err(AppError::Conflict("Local search was rejected by the exact Agent capability policy".into()));
-            }
-        }
-        if let Some(tool) = citation_render_tool {
-            let registered = engine.registry_mut().register(tool);
-            if config_extra
-                .allowed_tools
-                .iter()
-                .any(|name| name == crate::web_search::CITATION_RENDER_TOOL_NAME)
-                && !registered
-            {
-                return Err(AppError::Internal(
-                    "citation_render could not be registered under the session policy".to_owned(),
-                ));
-            }
-        }
         if let Some(session) = plugin_tool_session {
             let session = session.with_creation_receipt_sink(backend_output_sink.clone(), conversation_id.clone());
             session.register_into(engine.registry_mut()).map_err(|error| {
@@ -7089,77 +7041,9 @@ mod tests {
         }
     }
 
-    struct FixedSearchProvider;
-
-    #[async_trait::async_trait]
-    impl crate::web_search::SearchProvider for FixedSearchProvider {
-        fn provider_id(&self) -> &str {
-            "test.authorized.search"
-        }
-
-        async fn search(
-            &self,
-            _query: &str,
-            _count: usize,
-        ) -> Result<
-            crate::web_search::SearchProviderResponse,
-            crate::web_search::SearchProviderError,
-        > {
-            Ok(crate::web_search::SearchProviderResponse {
-                answer: "Grounded answer".to_owned(),
-                results: vec![crate::web_search::SearchProviderResult {
-                    source_id: "source-1".to_owned(),
-                    title: "Source".to_owned(),
-                    url: "https://example.com/source".to_owned(),
-                    snippet: "Evidence".to_owned(),
-                }],
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn authorized_search_provider_registers_only_inside_the_session_policy() {
-        for selected in [false, true] {
-            let root = tempfile::tempdir().unwrap();
-            let mut config = make_test_config();
-            config.session_directory = root.path().join("sessions");
-            config.enforce_tool_allowlist = true;
-            config.allowed_tools = selected
-                .then(|| vec!["web_search".to_owned()])
-                .unwrap_or_default();
-            let agent = NomiAgentManager::new_with_host_wiring(
-                "authorized-search-test".into(),
-                root.path().to_string_lossy().into_owned(),
-                config,
-                None,
-                None,
-                None,
-                None,
-                Vec::new(),
-                None,
-                None,
-                Vec::new(),
-                None,
-                NomiHostWiring {
-                    web_search_tool: Some(Box::new(crate::web_search::WebSearchTool::new(
-                        Arc::new(FixedSearchProvider),
-                    ))),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-            let mut engine = agent.engine.lock().await;
-            assert_eq!(engine.registry_mut().get("web_search").is_some(), selected);
-            drop(engine);
-            agent.kill_and_wait(None).await.unwrap();
-        }
-    }
-
     #[tokio::test]
     async fn repaired_builtins_register_and_execute_without_widening_preset_scope() {
         let names = [
-            "web_fetch",
             "cron_create",
             "cron_list",
             "cron_delete",
