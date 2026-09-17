@@ -1,4 +1,5 @@
-//! Source-turn attribution, not a replacement for Plugin Product/Robot/Git owners.
+//! Source-turn attribution for the remaining legacy Conversation-backed
+//! Plugin Product and Robot owners.
 //! Pending dispatch is never cleared by engine completion or application restart.
 use async_trait::async_trait;
 use nomifun_common::AppError;
@@ -24,14 +25,12 @@ pub(crate) enum Domain {
     // existing effects remain visible to recovery and replay protection.
     PluginProduct,
     Robot,
-    Git,
 }
 impl Domain {
     fn as_str(self) -> &'static str {
         match self {
             Self::PluginProduct => "miniapp",
             Self::Robot => "robot",
-            Self::Git => "git",
         }
     }
 }
@@ -56,39 +55,7 @@ impl HostedEffectReceipts {
         input: &Value,
         domain: Domain,
     ) -> Result<Receipt, AppError> {
-        self.begin_scoped(
-            user, session, operation, capability, action, input, domain, None,
-        )
-        .await
-    }
-
-    pub(crate) async fn begin_git(
-        &self,
-        context: &nomifun_agent_domain_wave2::Wave2HostContext,
-        root: &std::path::Path,
-        input: &Value,
-    ) -> Result<Receipt, AppError> {
-        if context.principal.principal_kind != "user"
-            || context.capability_id.as_ref() != "vcs.push"
-            || context.action_id.as_ref() != "vcs.push.invoke"
-        {
-            return Err(failure());
-        }
-        // Hash the exact admitted bindings/snapshot as well as the request.
-        // Source turn and epoch come only from the live platform Conversation.
-        let fingerprint = json!({"input":input,"bindings":context.resource_bindings,
-            "snapshot":context.resolved_snapshot_ref,"generation":context.registry_generation});
-        let resource = git_workspace_key(root)?;
-        self.begin_scoped(
-            &context.principal.principal_id,
-            context.agent_session_id.as_ref(),
-            context.operation_id.as_ref(),
-            "vcs.push",
-            "vcs.push.invoke",
-            &fingerprint,
-            Domain::Git,
-            Some(&resource),
-        )
+        self.begin_scoped(user, session, operation, capability, action, input, domain)
         .await
     }
 
@@ -102,7 +69,6 @@ impl HostedEffectReceipts {
         action: &str,
         input: &Value,
         domain: Domain,
-        resource: Option<&str>,
     ) -> Result<Receipt, AppError> {
         if [user, session, operation, capability, action]
             .iter()
@@ -121,7 +87,7 @@ impl HostedEffectReceipts {
              AND r.user_id = c.user_id AND r.conversation_id = c.conversation_id AND r.kind = 'turn' AND r.status = 'accepted' \
              AND (SELECT COUNT(*) FROM conversation_hosted_effects e WHERE e.conversation_id = c.conversation_id AND e.turn_operation_id = c.active_turn_operation_id) < 512 \
              RETURNING turn_operation_id, admission_epoch")
-            .bind(operation).bind(domain.as_str()).bind(capability).bind(action).bind(input_sha256).bind(resource).bind(nomifun_common::now_ms())
+            .bind(operation).bind(domain.as_str()).bind(capability).bind(action).bind(input_sha256).bind(Option::<&str>::None).bind(nomifun_common::now_ms())
             .bind(user).bind(session).fetch_optional(&self.pool).await.map_err(|_| failure())?;
         let (turn, epoch) = row.ok_or_else(failure)?;
         Ok(Receipt {
@@ -186,18 +152,6 @@ impl HostedEffectReceipts {
         }
         Ok(())
     }
-    pub(crate) async fn ensure_git_workspace_settled(
-        &self,
-        root: &std::path::Path,
-    ) -> Result<(), AppError> {
-        let resource = git_workspace_key(root)?;
-        let (pending,): (i64,) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM conversation_hosted_effects WHERE owner_domain = 'git' AND resource_key = ? AND state = 'pending')")
-            .bind(resource).fetch_one(&self.pool).await.map_err(|_| failure())?;
-        if pending != 0 {
-            return Err(failure());
-        }
-        Ok(())
-    }
     pub(crate) async fn replay_safe(
         &self,
         user: &str,
@@ -213,7 +167,7 @@ impl HostedEffectReceipts {
             WHERE e.user_id = ? AND e.conversation_id = ? AND r.message_id = ? AND r.kind = 'turn' AND e.state != 'rejected')")
             .bind(user).bind(session).bind(source).fetch_one(&self.pool).await.map_err(|_| failure())?;
         if dispatched != 0 {
-            return Err(AppError::Conflict("The source already dispatched a hosted Plugin Product/Robot/Git call. Automatic retry or edit/resubmit cannot reverse its effects; inspect state and send a new instruction.".into()));
+            return Err(AppError::Conflict("The source already dispatched a hosted Plugin Product/Robot call. Automatic retry or edit/resubmit cannot reverse its effects; inspect state and send a new instruction.".into()));
         }
         Ok(())
     }
@@ -257,19 +211,6 @@ impl HostedEffectReceipts {
             session,
         })
     }
-}
-
-/// Root was canonicalized at Session admission; do not re-resolve it during
-/// cleanup, when the path may have been renamed or removed.
-fn git_workspace_key(root: &std::path::Path) -> Result<String, AppError> {
-    if !root.is_absolute() {
-        return Err(failure());
-    }
-    let root = root.to_str().ok_or_else(failure)?;
-    let mut hash = Sha256::new();
-    hash.update(b"nomifun-git-workspace-v1\0");
-    hash.update(root.as_bytes());
-    Ok(format!("{:x}", hash.finalize()))
 }
 
 fn bounded(value: &Value) -> Result<Value, AppError> {

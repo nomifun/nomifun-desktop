@@ -1627,7 +1627,11 @@ async fn effect_store_rejects_read_only_lifecycles_and_managed_uncertainty() {
         "tool/call-started",
         "tool-effect-strategy",
         Some(turn_ack.event_id),
-        json!({"tool": "files.write"}),
+        json!({
+            "operation_id": "effect-operation-managed",
+            "capability_id": "workspace.files",
+            "action_id": "workspace.files/write"
+        }),
     );
     let tool_ack = store.append_event(&tool).await.unwrap().ack.unwrap();
 
@@ -1720,6 +1724,157 @@ async fn effect_store_rejects_read_only_lifecycles_and_managed_uncertainty() {
 }
 
 #[tokio::test]
+async fn effect_store_requires_exact_tool_causation_and_immutable_terminal_identity() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, ready_event) = create_ready(&store, "effect-identity").await;
+    let turn = append(
+        &session.agent_session_id,
+        "event-effect-identity-turn",
+        "session-api",
+        "effect-identity-turn",
+        "turn/started",
+        "turn-effect-identity",
+        Some(ready_event),
+        json!({}),
+    );
+    let turn_ack = store.append_event(&turn).await.unwrap().ack.unwrap();
+    let tool = append(
+        &session.agent_session_id,
+        "event-effect-identity-tool",
+        "capability-host",
+        "effect-identity-tool",
+        "tool/call-started",
+        "tool-effect-identity",
+        Some(turn_ack.event_id.clone()),
+        json!({
+            "operation_id": "effect-identity-operation",
+            "capability_id": "workspace.files",
+            "action_id": "workspace.files/write"
+        }),
+    );
+    let tool_ack = store.append_event(&tool).await.unwrap().ack.unwrap();
+    let unrelated_tool = append(
+        &session.agent_session_id,
+        "event-effect-unrelated-tool",
+        "capability-host",
+        "effect-unrelated-tool",
+        "tool/call-started",
+        "tool-effect-unrelated",
+        Some(turn_ack.event_id.clone()),
+        json!({
+            "operation_id": "other-operation",
+            "capability_id": "workspace.files",
+            "action_id": "workspace.files/delete"
+        }),
+    );
+    let unrelated_tool_ack = store
+        .append_event(&unrelated_tool)
+        .await
+        .unwrap()
+        .ack
+        .unwrap();
+
+    let started = EffectEventRequest {
+        agent_session_id: session.agent_session_id.clone(),
+        effect_id: "effect-identity-1".to_owned(),
+        turn_id: OperationId("turn-effect-identity".to_owned()),
+        operation_id: OperationId("effect-identity-operation".to_owned()),
+        owner_domain: "workspace".to_owned(),
+        capability_module: CapabilityId("workspace.files".to_owned()),
+        action_id: ActionId("workspace.files/write".to_owned()),
+        resource_binding_id: None,
+        resource_key: Some("workspace:file.txt".to_owned()),
+        input_digest: digest('6'),
+        recorded_at: 30,
+        event_id: event_id("event-effect-identity-started"),
+        producer_id: EventProducerId("capability-host".to_owned()),
+        idempotency_key: IdempotencyKey("effect-identity-idem".to_owned()),
+        correlation_id: CorrelationId("effect-identity-1".to_owned()),
+        strategy: EffectStrategy::ManagedEffect,
+        causation_event_id: Some(tool_ack.event_id.clone()),
+        payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
+    };
+
+    let mut wrong_kind_cause = started.clone();
+    wrong_kind_cause.event_id = event_id("event-effect-wrong-kind-cause");
+    wrong_kind_cause.causation_event_id = Some(turn_ack.event_id);
+    assert!(store.record_effect_started(wrong_kind_cause).await.is_err());
+
+    let mut cross_tool_cause = started.clone();
+    cross_tool_cause.event_id = event_id("event-effect-cross-tool-cause");
+    cross_tool_cause.causation_event_id = Some(unrelated_tool_ack.event_id.clone());
+    assert!(store.record_effect_started(cross_tool_cause).await.is_err());
+
+    let started_ack = store
+        .record_effect_started(started.clone())
+        .await
+        .unwrap()
+        .ack
+        .unwrap();
+    for field in [
+        "effect_id",
+        "turn_id",
+        "operation_id",
+        "owner_domain",
+        "capability_module",
+        "action_id",
+        "input_digest",
+        "strategy",
+        "resource_binding_id",
+        "resource_key",
+        "causation_event_id",
+    ] {
+        let mut terminal = EffectEventRequest {
+            event_id: event_id(&format!("event-effect-identity-mutated-{field}")),
+            producer_id: EventProducerId("owning-plugin".to_owned()),
+            causation_event_id: Some(started_ack.event_id.clone()),
+            recorded_at: 31,
+            ..started.clone()
+        };
+        match field {
+            "effect_id" => terminal.effect_id = "effect-identity-other".to_owned(),
+            "turn_id" => terminal.turn_id = OperationId("turn-other".to_owned()),
+            "operation_id" => terminal.operation_id = OperationId("operation-other".to_owned()),
+            "owner_domain" => terminal.owner_domain = "other".to_owned(),
+            "capability_module" => {
+                terminal.capability_module = CapabilityId("workspace.vcs".to_owned())
+            }
+            "action_id" => terminal.action_id = ActionId("workspace.files/delete".to_owned()),
+            "input_digest" => terminal.input_digest = digest('7'),
+            "strategy" => terminal.strategy = EffectStrategy::ExternalUncertainEffect,
+            "resource_binding_id" => {
+                terminal.resource_binding_id =
+                    Some(ResourceBindingId("binding-effect-identity".to_owned()))
+            }
+            "resource_key" => terminal.resource_key = Some("workspace:other.txt".to_owned()),
+            "causation_event_id" => {
+                terminal.causation_event_id = Some(unrelated_tool_ack.event_id.clone())
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            store
+                .record_effect_terminal(terminal, EffectTerminalState::Succeeded)
+                .await
+                .is_err(),
+            "mutating {field} must fail closed"
+        );
+    }
+
+    let terminal = EffectEventRequest {
+        event_id: event_id("event-effect-identity-succeeded"),
+        producer_id: EventProducerId("owning-plugin".to_owned()),
+        causation_event_id: Some(started_ack.event_id),
+        recorded_at: 32,
+        ..started
+    };
+    store
+        .record_effect_terminal(terminal, EffectTerminalState::Succeeded)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn external_uncertain_effect_is_terminal_until_owning_plugin_reconciles() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();
     let (session, ready_event) = create_ready(&store, "effect").await;
@@ -1742,7 +1897,11 @@ async fn external_uncertain_effect_is_terminal_until_owning_plugin_reconciles() 
         "tool/call-started",
         "tool-1",
         Some(turn_ack.event_id),
-        json!({"tool": "files.write"}),
+        json!({
+            "operation_id": "effect-operation-1",
+            "capability_id": "workspace.files",
+            "action_id": "workspace.files/write"
+        }),
     );
     let tool_ack = store.append_event(&tool).await.unwrap().ack.unwrap();
 
@@ -1812,6 +1971,35 @@ async fn external_uncertain_effect_is_terminal_until_owning_plugin_reconciles() 
     assert!(
         store.record_effect_started(competing).await.is_err(),
         "an unknown external effect must fence a new effect on the same resource"
+    );
+
+    let wrong_reconcile_identity = EffectEventRequest {
+        event_id: event_id("event-effect-reconciled-wrong-identity"),
+        producer_id: EventProducerId("owning-plugin".to_owned()),
+        action_id: ActionId("workspace.files/delete".to_owned()),
+        causation_event_id: Some(uncertain_ack.event_id.clone()),
+        ..started.clone()
+    };
+    assert!(
+        store
+            .reconcile_effect(
+                wrong_reconcile_identity,
+                EffectReconcileOutcome::StillUncertain
+            )
+            .await
+            .is_err()
+    );
+    let wrong_reconcile_cause = EffectEventRequest {
+        event_id: event_id("event-effect-reconciled-wrong-cause"),
+        producer_id: EventProducerId("owning-plugin".to_owned()),
+        causation_event_id: Some(started.event_id.clone()),
+        ..started.clone()
+    };
+    assert!(
+        store
+            .reconcile_effect(wrong_reconcile_cause, EffectReconcileOutcome::StillUncertain)
+            .await
+            .is_err()
     );
 
     let reconcile = EffectEventRequest {

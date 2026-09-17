@@ -13,7 +13,7 @@ mod tests {
         RuntimeTarget, UserId, VersionString, digest_payload,
     };
     use nomifun_agent_domain_wave2::{
-        CONTRACT_VERSION, Wave2HostPort, Wave2HostPortError, Wave2HostRequest, action_id,
+        CONTRACT_VERSION, Wave2HostPort, Wave2HostPortError, Wave2HostRequest,
         registrations_with_host_port,
     };
     use nomifun_agent_kernel::{
@@ -67,7 +67,6 @@ mod tests {
                     input,
                 }
                 | nomifun_agent_domain_wave2::Wave2CapabilityOperation::Ssh { input }
-                | nomifun_agent_domain_wave2::Wave2CapabilityOperation::McpConnectors { input }
                 | nomifun_agent_domain_wave2::Wave2CapabilityOperation::Browser { input }
                 | nomifun_agent_domain_wave2::Wave2CapabilityOperation::ComputerA11y { input } => {
                     input
@@ -108,8 +107,8 @@ mod tests {
             principal_kind: "user".to_owned(),
             principal_id: "coding-owner".to_owned(),
         };
-        let capability_id = CapabilityId::from("fs.read");
-        let action_id = action_id(capability_id.as_ref()).unwrap();
+        let capability_id = CapabilityId::from("workspace.files");
+        let action_id = ActionId::from("workspace.files/read");
         let binding_id = ResourceBindingId::from("workspace-binding");
         let binding = nomifun_agent_contracts::TypedResourceBinding {
             binding_id: binding_id.clone(),
@@ -148,7 +147,7 @@ mod tests {
             payload,
             contribution_locks: vec![
                 materialized
-                    .capability(&CapabilityId::from("fs.read"))
+                    .capability(&CapabilityId::from("workspace.files"))
                     .unwrap()
                     .contribution_lock
                     .clone(),
@@ -217,7 +216,7 @@ mod tests {
                 })),
                 deferred: false,
             },
-            capability_id: CapabilityId::from("fs.read"),
+            capability_id: CapabilityId::from("workspace.files"),
             action_id,
         }
     }
@@ -226,6 +225,30 @@ mod tests {
     fn adapter_type_keeps_session_scope_explicit() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<KernelEngineToolInvoker>();
+    }
+
+    #[test]
+    fn workspace_process_terminal_failure_is_model_visible_without_legacy_identity() {
+        assert!(is_workspace_process_action(
+            &CapabilityId::from("workspace.process"),
+            &ActionId::from("workspace.process/exec"),
+        ));
+        assert!(!is_workspace_process_action(
+            &CapabilityId::from("process.exec"),
+            &ActionId::from("process.exec.invoke"),
+        ));
+        assert!(process_result_is_error(
+            true,
+            &json!({"state":"exited", "success":false, "exit_code":7}),
+        ));
+        assert!(!process_result_is_error(
+            true,
+            &json!({"state":"running", "success":null}),
+        ));
+        assert!(!process_result_is_error(
+            true,
+            &json!({"state":"exited", "success":true, "exit_code":0}),
+        ));
     }
 
     #[tokio::test]
@@ -282,8 +305,8 @@ mod tests {
         assert_eq!(
             *fixture.seen.lock().unwrap(),
             vec![(
-                "fs.read".to_owned(),
-                "fs.read.invoke".to_owned(),
+                "workspace.files".to_owned(),
+                "workspace.files/read".to_owned(),
                 "coding-session".to_owned(),
                 vec!["workspace-binding".to_owned()]
             )]
@@ -305,8 +328,8 @@ mod tests {
                     input_schema: StrictJsonValue(json!({"type": "object"})),
                     deferred: false,
                 },
-                capability_id: CapabilityId::from("fs.write"),
-                action_id: action_id("fs.write").unwrap(),
+                capability_id: CapabilityId::from("workspace.vcs"),
+                action_id: ActionId::from("workspace.vcs/status"),
             }],
         )
         .unwrap_err();
@@ -320,7 +343,7 @@ mod tests {
         assert_eq!(original.generation, 0);
         assert_eq!(original.active, fixture.snapshot.content().capability_allowlist);
         let mut forged = original.clone();
-        forged.active.insert(CapabilityId::from("fs.write"));
+        forged.active.insert(CapabilityId::from("workspace.vcs"));
         assert_eq!(fixture.active.snapshot().unwrap(), original);
         assert!(compile_engine_tool_plan(
             &fixture.snapshot,
@@ -350,7 +373,7 @@ mod tests {
     fn selected_capability_does_not_override_its_action_allowlist() {
         let fixture = kernel_fixture();
         let mut snapshot = (*fixture.snapshot).clone();
-        snapshot.authority_policies.get_mut(&CapabilityId::from("fs.read"))
+        snapshot.authority_policies.get_mut(&CapabilityId::from("workspace.files"))
             .unwrap().allowed_actions.clear();
         assert!(compile_engine_tool_plan(
             &snapshot,

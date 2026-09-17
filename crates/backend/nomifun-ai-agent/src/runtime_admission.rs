@@ -109,8 +109,7 @@ impl RuntimeEngineAdmission for RuntimeEngineSupport {
             (self.skills, !content.skill_locks.is_empty(), "Skills"),
             (self.mcp, !content.mcp_tool_locks.is_empty()
                 || content.enabled_capabilities.iter()
-                    .any(|entry| entry.capability.id.as_ref() == "mcp.resource"
-                        || entry.contribution_lock.source_kind == ContributionSourceKind::McpBinding), "MCP"),
+                    .any(|entry| entry.contribution_lock.source_kind == ContributionSourceKind::McpBinding), "MCP"),
             (self.plugin_products, content.enabled_capabilities.iter()
                 .any(|entry| entry.contribution_lock.source_kind == ContributionSourceKind::PluginProductActiveRelease), "Plugin Products"),
         ] {

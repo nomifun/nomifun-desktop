@@ -804,7 +804,11 @@ async fn build_nomi_core_agent_api_state(
     Arc<dyn nomifun_mcp::service::McpCatalogPublisher>,
 )> {
     const CONTRACT_VERSION: &str = "1.0.0";
-    let builtin_plan = super::nomi_core_builtins::build(services).await?;
+    let builtin_plan = super::nomi_core_builtins::build(
+        services,
+        conversation_owner.canonical().store().clone(),
+    )
+    .await?;
     let wave4_owners = Arc::clone(&builtin_plan.wave4_owners);
     let robot_owner = builtin_plan.robot_owner.clone();
     wave4_owners

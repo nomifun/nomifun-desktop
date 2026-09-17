@@ -130,8 +130,6 @@ fn make_factory(
         provider_config_digest_resolver: None,
         data_dir: PathBuf::from("/tmp/nomi-test"),
         work_dir: PathBuf::from("/tmp/nomi-test"),
-        mcp_server_repo: None,
-        mcp_oauth_service: None,
         requirement_sink: None,
         companion_sink: None,
         knowledge_retrieval: None,

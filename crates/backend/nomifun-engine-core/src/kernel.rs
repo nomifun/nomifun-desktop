@@ -296,7 +296,10 @@ impl KernelEngineToolInvoker {
             &invocation.binding,
             invocation.active_set_generation,
         )?;
-        let is_process = invocation.binding.capability_id.as_ref() == "process.exec";
+        let is_process = is_workspace_process_action(
+            &invocation.binding.capability_id,
+            &invocation.binding.action_id,
+        );
         let request = CapabilityInvocationRequest {
             principal: invocation.principal,
             session_owner: self.session_owner.clone(),
@@ -327,11 +330,21 @@ impl KernelEngineToolInvoker {
             })?,
             // A successfully dispatched command is not necessarily a
             // successful command. Preserve nonzero exit as model feedback.
-            is_process
-                && output.0.get("state").and_then(serde_json::Value::as_str) != Some("running")
-                && output.0.get("success").and_then(serde_json::Value::as_bool) != Some(true),
+            process_result_is_error(is_process, &output.0),
         ))
     }
+}
+
+fn is_workspace_process_action(capability_id: &CapabilityId, action_id: &ActionId) -> bool {
+    capability_id.as_ref() == nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID
+        && nomifun_agent_domain_wave2::WORKSPACE_PROCESS_ACTION_IDS
+            .contains(&action_id.as_ref())
+}
+
+fn process_result_is_error(is_process: bool, output: &serde_json::Value) -> bool {
+    is_process
+        && output.get("state").and_then(serde_json::Value::as_str) != Some("running")
+        && output.get("success").and_then(serde_json::Value::as_bool) != Some(true)
 }
 
 #[async_trait]

@@ -1197,7 +1197,6 @@ impl OfficialPresetSeedManifestPayload {
             "knowledge.read",
             "memory.companion.recall",
             "memory.companion.write",
-            "channel.receive",
             "channel.reply",
             "channel.send",
         ] {

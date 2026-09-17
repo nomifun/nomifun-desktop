@@ -79,6 +79,12 @@ pub fn list_workspace_level(
             "Path traversal outside workspace is not allowed".into(),
         ));
     }
+    if canonical_browse.starts_with(&canonical_base) {
+        crate::path_safety::reject_workspace_owner_canonical_path(
+            &canonical_base,
+            &canonical_browse,
+        )?;
+    }
 
     // Check depth limit.
     let depth = relative_path_obj.components().count();
@@ -228,6 +234,32 @@ mod tests {
         ));
         assert!(list_workspace_level(dir.path(), "./.nomifun/artifacts", None).is_err());
         assert!(list_workspace_level(dir.path(), "nested//path", None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_alias_cannot_browse_workspace_owner_namespace() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".nomifun/artifacts")).unwrap();
+        fs::write(dir.path().join(".nomifun/artifacts/receipt"), "owned").unwrap();
+        std::os::unix::fs::symlink(".nomifun", dir.path().join("alias")).unwrap();
+        assert!(matches!(
+            list_workspace_level(dir.path(), "alias/artifacts", None),
+            Err(AppError::NotFound(_))
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn junction_alias_cannot_browse_workspace_owner_namespace() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".nomifun/artifacts")).unwrap();
+        fs::write(dir.path().join(".nomifun/artifacts/receipt"), "owned").unwrap();
+        junction::create(dir.path().join(".nomifun"), dir.path().join("alias")).unwrap();
+        assert!(matches!(
+            list_workspace_level(dir.path(), "alias/artifacts", None),
+            Err(AppError::NotFound(_))
+        ));
     }
 
     #[test]

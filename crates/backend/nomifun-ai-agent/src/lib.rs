@@ -71,12 +71,6 @@ pub use nomi_agent::subagent_tools::{
     ParentScopedSubagentRegistry, SubagentHandle, SubagentHost, SubagentRunState,
     SubagentSendTool, SubagentWaitTool,
 };
-pub use nomi_agent::mcp_capability_tools::{
-    MCP_RESOURCE_LIST_TOOL_NAME, MCP_RESOURCE_READ_TOOL_NAME,
-};
-pub use nomi_agent::lazy_mcp::{
-    MCP_CONNECT_TOOL_NAME, MCP_GENERIC_PROXY_TOOL_NAME,
-};
 pub use nomi_config;
 pub use nomi_types;
 

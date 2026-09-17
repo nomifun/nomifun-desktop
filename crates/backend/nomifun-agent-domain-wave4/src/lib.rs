@@ -16,7 +16,7 @@ use std::sync::Arc;
 use nomifun_agent_contracts::{
     ActionId, AgentSessionId, ArtifactEnvelope, CapabilityActionDescriptor,
     CapabilityConsumer, CapabilityContributions, CapabilityId, CapabilityKind,
-    CapabilityManifest,
+    CapabilityManifest, CapabilityRef,
     CanonicalSchemaRef, CancellationDescriptor, CorrelationId, DigestHex,
     DeclaredServiceViewDescriptor, DomainOutboxPortDescriptor, EffectClass,
     HostPortBindingDescriptor, IdempotencyKey,
@@ -1400,6 +1400,18 @@ pub fn registrations_with_host_ports(
     action_host_port: Arc<dyn Wave4HostPort>,
     context_host_port: Arc<dyn Wave4ContextHostPort>,
 ) -> Result<Vec<PluginRegistration>, String> {
+    registrations_with_all_host_ports(
+        action_host_port,
+        context_host_port,
+        unconfigured_turn_middleware_host_port(),
+    )
+}
+
+pub fn registrations_with_all_host_ports(
+    action_host_port: Arc<dyn Wave4HostPort>,
+    context_host_port: Arc<dyn Wave4ContextHostPort>,
+    turn_middleware_host_port: Arc<dyn Wave4TurnMiddlewareHostPort>,
+) -> Result<Vec<PluginRegistration>, String> {
     PACKAGE_SPECS
         .iter()
         .map(|spec| {
@@ -1407,6 +1419,7 @@ pub fn registrations_with_host_ports(
                 spec,
                 Arc::clone(&action_host_port),
                 Arc::clone(&context_host_port),
+                Arc::clone(&turn_middleware_host_port),
             )
         })
         .collect()
@@ -1423,10 +1436,23 @@ pub fn channel_registration_with_host_ports(
     action_host_port: Arc<dyn Wave4HostPort>,
     context_host_port: Arc<dyn Wave4ContextHostPort>,
 ) -> Result<PluginRegistration, String> {
+    channel_registration_with_all_host_ports(
+        action_host_port,
+        context_host_port,
+        unconfigured_turn_middleware_host_port(),
+    )
+}
+
+pub fn channel_registration_with_all_host_ports(
+    action_host_port: Arc<dyn Wave4HostPort>,
+    context_host_port: Arc<dyn Wave4ContextHostPort>,
+    turn_middleware_host_port: Arc<dyn Wave4TurnMiddlewareHostPort>,
+) -> Result<PluginRegistration, String> {
     registration_for(
         &PACKAGE_SPECS[0],
         action_host_port,
         context_host_port,
+        turn_middleware_host_port,
     )
 }
 
@@ -1445,6 +1471,7 @@ pub fn companion_registration_with_host_ports(
         &PACKAGE_SPECS[1],
         action_host_port,
         context_host_port,
+        unconfigured_turn_middleware_host_port(),
     )
 }
 
@@ -1465,10 +1492,23 @@ pub fn customer_service_registration_with_host_ports(
     action_host_port: Arc<dyn Wave4HostPort>,
     context_host_port: Arc<dyn Wave4ContextHostPort>,
 ) -> Result<PluginRegistration, String> {
+    customer_service_registration_with_all_host_ports(
+        action_host_port,
+        context_host_port,
+        unconfigured_turn_middleware_host_port(),
+    )
+}
+
+pub fn customer_service_registration_with_all_host_ports(
+    action_host_port: Arc<dyn Wave4HostPort>,
+    context_host_port: Arc<dyn Wave4ContextHostPort>,
+    turn_middleware_host_port: Arc<dyn Wave4TurnMiddlewareHostPort>,
+) -> Result<PluginRegistration, String> {
     registration_for(
         &PACKAGE_SPECS[2],
         action_host_port,
         context_host_port,
+        turn_middleware_host_port,
     )
 }
 
@@ -1487,6 +1527,7 @@ pub fn robot_registration_with_host_ports(
         &PACKAGE_SPECS[3],
         action_host_port,
         context_host_port,
+        unconfigured_turn_middleware_host_port(),
     )
 }
 
@@ -1495,6 +1536,7 @@ pub fn notification_registration() -> Result<PluginRegistration, String> {
         &PACKAGE_SPECS[4],
         unconfigured_host_port(),
         unconfigured_context_host_port(),
+        unconfigured_turn_middleware_host_port(),
     )
 }
 
@@ -1512,6 +1554,7 @@ fn registration_for(
     spec: &PackageSpec,
     action_host_port: Arc<dyn Wave4HostPort>,
     context_host_port: Arc<dyn Wave4ContextHostPort>,
+    turn_middleware_host_port: Arc<dyn Wave4TurnMiddlewareHostPort>,
 ) -> Result<PluginRegistration, String> {
     let package = package_ref(spec.id);
     let config_schema = object_schema(false);
@@ -1704,6 +1747,16 @@ fn registration_for(
                     }),
                 )
                 .map_err(|error| error.to_string())?,
+            CapabilityKind::TurnMiddleware => registration
+                .add_capability_context_factory(
+                    capability_id.clone(),
+                    Arc::new(Wave4CapabilityTurnMiddlewareFactory {
+                        capability_id,
+                        requirements: capability.requirements,
+                        host_port: Arc::clone(&turn_middleware_host_port),
+                    }),
+                )
+                .map_err(|error| error.to_string())?,
             CapabilityKind::ResourceProvider => registration
                 .add_capability_resource_factory(
                     capability_id.clone(),
@@ -1796,7 +1849,7 @@ fn capability_manifest(
         kind: spec.kind,
         package: package.clone(),
         display: localized(spec.display_name, spec.description),
-        requires: Vec::new(),
+        requires: internal_capability_dependencies(spec.id),
         conflicts: Vec::new(),
         supported_surfaces: capability_surface_declarations(
             AGENT_SURFACES.iter().copied(),
@@ -1807,6 +1860,21 @@ fn capability_manifest(
         config_schema: object_schema(false),
         contributions,
     })
+}
+
+fn internal_capability_dependencies(capability_id: &str) -> Vec<CapabilityRef> {
+    let ids: &[&str] = match capability_id {
+        CHANNEL_REPLY | CHANNEL_SEND => &[CHANNEL_RECEIVE, CHANNEL_GROUP_POLICY],
+        ROBOT_VISION => &[ROBOT_LINK],
+        ROBOT_DISPLAY | ROBOT_MOTION | ROBOT_DEVICE_TOOLS => &[ROBOT_LINK, ROBOT_AUDIO],
+        _ => &[],
+    };
+    ids.iter()
+        .map(|id| CapabilityRef {
+            id: CapabilityId::from(*id),
+            version: VersionString::from(CONTRACT_VERSION),
+        })
+        .collect()
 }
 
 fn action_id_for(capability_id: &str) -> ActionId {
@@ -2159,6 +2227,68 @@ impl CapabilityContextContributionFactory for Wave4CapabilityContextFactory {
                 .contribute(host_request)
                 .await
                 .map(|value| ContextContributionResult { value })
+                .map_err(wave4_host_error_to_kernel)
+        })
+    }
+}
+
+struct Wave4CapabilityTurnMiddlewareFactory {
+    capability_id: CapabilityId,
+    requirements: &'static [ResourceRequirement],
+    host_port: Arc<dyn Wave4TurnMiddlewareHostPort>,
+}
+
+impl CapabilityContextContributionFactory for Wave4CapabilityTurnMiddlewareFactory {
+    fn contribute<'life0, 'async_trait>(
+        &'life0 self,
+        request: CapabilityContextContributionRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ContextContributionResult, KernelError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: Sync + 'async_trait,
+    {
+        Box::pin(async move {
+            validate_resource_bindings(
+                &self.capability_id,
+                &request.context.principal.principal_id,
+                self.requirements,
+                &request.context.resource_bindings,
+            )?;
+            let nomifun_agent_contracts::ContextContributionInput::BeforeTurn { turn } =
+                request.input
+            else {
+                return Err(KernelError::CapabilityExecution {
+                    reason: format!(
+                        "TurnMiddleware {} requires canonical BeforeTurn input",
+                        self.capability_id.as_ref()
+                    ),
+                });
+            };
+            let host_request = Wave4TurnMiddlewareHostRequest {
+                principal: request.context.principal,
+                agent_session_id: request.context.agent_session_id,
+                operation_id: request.context.operation_id,
+                correlation_id: request.context.correlation_id,
+                resolved_snapshot_ref: request.context.resolved_snapshot_ref,
+                registry_generation: request.context.registry_generation,
+                registry_digest: request.context.registry_digest,
+                capability_id: self.capability_id.clone(),
+                state_scope_key: request.context.state_scope_key,
+                resource_bindings: request.context.resource_bindings,
+                schema_ref: request.schema_ref,
+                turn_input: StrictJsonValue(serde_json::json!({
+                    "source_message_id": turn.source_message_id,
+                    "text": turn.text,
+                    "image_media_types": turn.image_media_types,
+                })),
+            };
+            host_request
+                .validate()
+                .map_err(wave4_host_error_to_kernel)?;
+            self.host_port
+                .apply(host_request)
+                .await
+                .map(|value| ContextContributionResult { value: Some(value) })
                 .map_err(wave4_host_error_to_kernel)
         })
     }

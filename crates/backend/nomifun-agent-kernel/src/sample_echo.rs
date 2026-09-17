@@ -849,6 +849,7 @@ fn role_operation_request(
     RoleMemberInvocationRequest {
         principal: owner.clone(),
         session_owner: owner,
+        turn_id: None,
         operation_id: OperationId::from(format!("operation:{capability_id}")),
         correlation_id: CorrelationId::from(format!("correlation:{capability_id}")),
         capability_id: CapabilityId::from(capability_id),

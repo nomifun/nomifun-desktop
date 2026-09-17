@@ -1,25 +1,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use nomi_agent::session::{Session, SessionManager};
-use nomi_agent::lazy_mcp::{
-    LazyMcpRuntime, SessionMcpBindingRef, SessionMcpConnectFailure, SessionMcpConnector,
-};
 use nomi_config::config::{McpServerConfig, TransportType};
-use nomi_mcp::manager::McpManager;
 use nomifun_api_types::{
-    GatewayMcpConfig, McpServerId, NomiBuildExtra, NomiRuntimeProfile, SessionMcpServer,
-    SessionMcpTransport,
+    GatewayMcpConfig, NomiBuildExtra, NomiRuntimeProfile, SessionMcpServer,
 };
 use nomifun_common::{
     AppError, DelegationPolicy, ExecutionAuthority, LoopbackCapabilityLease,
     LoopbackCapabilityLeaseSet,
 };
-use nomifun_db::IMcpServerRepository;
 use nomifun_db::ISettingsRepository;
-use nomifun_db::models::McpServerRow;
-use nomifun_runtime::resolve_command_path;
 use tracing::{debug, info, warn};
 
 use crate::runtime_handle::AgentRuntimeHandle;
@@ -135,208 +126,14 @@ fn apply_runtime_profile(overrides: &mut NomiBuildExtra) -> Result<(), AppError>
     Ok(())
 }
 
-fn apply_mcp_capability_policy(overrides: &mut NomiBuildExtra) {
-    let Some(policy) = overrides.mcp_capabilities else {
-        return;
-    };
-    // Canonical Agents persist only exact, owner-validated MCP business IDs.
-    // Re-read transport and credentials from the owning repositories; never
-    // consume SessionMcpServer here because its env/headers may contain secrets.
-    overrides.session_mcp_servers.clear();
-    if overrides.mcp_server_ids.is_none() {
-        // `None` historically meant all enabled servers. Canonical Agents fail
-        // closed to an empty selection instead.
-        overrides.mcp_server_ids = Some(Vec::new());
-    }
-    if !policy.connect {
-        overrides.mcp_server_ids = Some(Vec::new());
-    }
-}
-
-async fn apply_mcp_oauth_credentials(
-    servers: &mut HashMap<String, McpServerConfig>,
-    service: Option<&Arc<nomifun_mcp::McpOAuthService>>,
-    enabled: bool,
-) -> Result<(), AppError> {
-    if !enabled || servers.is_empty() {
+fn reject_retired_device_mcp_transport(servers: &[SessionMcpServer]) -> Result<(), AppError> {
+    if servers.is_empty() {
         return Ok(());
     }
-    let remote_endpoints = servers
-        .values_mut()
-        .filter_map(|config| config.url.as_ref().cloned().map(|url| (url, config)))
-        .collect::<Vec<_>>();
-    if remote_endpoints.is_empty() {
-        return Ok(());
-    }
-    let service = service.ok_or_else(|| {
-        AppError::UnprocessableEntity(
-            "mcp.oauth is selected, but the host MCP credential authority is unavailable"
-                .to_owned(),
-        )
-    })?;
-    for (endpoint, config) in remote_endpoints {
-        let headers = config.headers.get_or_insert_with(HashMap::new);
-        if headers
-            .keys()
-            .any(|name| name.eq_ignore_ascii_case("authorization"))
-        {
-            continue;
-        }
-        if let Some(token) = service.get_token(&endpoint).await.map_err(|_| {
-            AppError::UnprocessableEntity(
-                "the selected MCP OAuth credential could not be resolved".to_owned(),
-            )
-        })? {
-            insert_oauth_authorization(headers, token)?;
-        }
-    }
-    Ok(())
-}
-
-struct RepositorySessionMcpConnector {
-    repository: Arc<dyn IMcpServerRepository>,
-    oauth_service: Option<Arc<nomifun_mcp::McpOAuthService>>,
-    oauth_enabled: bool,
-}
-
-impl RepositorySessionMcpConnector {
-    /// Shared read-only binding authorization; transport and credential work
-    /// remains exclusively in connect after this same owner check.
-    async fn authorized_rows(
-        &self,
-        bindings: &[SessionMcpBindingRef],
-    ) -> Result<Vec<McpServerRow>, SessionMcpConnectFailure> {
-        let mut rows = Vec::with_capacity(bindings.len());
-        let mut names = std::collections::BTreeSet::new();
-        for binding in bindings {
-            let row = self.repository.find_by_id(binding.resource_id()).await
-                .map_err(|_| SessionMcpConnectFailure::ResourceUnavailable)?
-                .filter(|row| row.enabled && row.deleted_at.is_none())
-                .ok_or(SessionMcpConnectFailure::ResourceUnavailable)?;
-            let expected_ref = format!("mcp-server:{}@{}", row.mcp_server_id, row.updated_at);
-            if binding.connection_config_ref() != expected_ref || !names.insert(row.name.clone()) {
-                return Err(SessionMcpConnectFailure::ResourceUnavailable);
-            }
-            rows.push(row);
-        }
-        Ok(rows)
-    }
-}
-
-#[async_trait]
-impl SessionMcpConnector for RepositorySessionMcpConnector {
-    async fn preflight(&self, bindings: &[SessionMcpBindingRef]) -> Result<(), String> {
-        self.authorized_rows(bindings).await.map(|_| ()).map_err(|_| {
-            "Selected MCP binding is unavailable, disabled or changed; select the current server revision in a new session".into()
-        })
-    }
-
-    async fn connect(
-        &self,
-        bindings: &[SessionMcpBindingRef],
-    ) -> Result<Vec<Arc<McpManager>>, SessionMcpConnectFailure> {
-        let mut servers = HashMap::new();
-        for row in self.authorized_rows(bindings).await? {
-            let mut config = row_to_mcp_server_config(&row)
-                .map_err(|_| SessionMcpConnectFailure::TransportUnavailable)?;
-            if self.oauth_enabled
-                && let Some(endpoint) = config.url.as_deref()
-            {
-                let service = self
-                    .oauth_service
-                    .as_ref()
-                    .ok_or(SessionMcpConnectFailure::CredentialUnavailable)?;
-                let headers = config.headers.get_or_insert_with(HashMap::new);
-                if !headers
-                    .keys()
-                    .any(|name| name.eq_ignore_ascii_case("authorization"))
-                {
-                    let token = service
-                        .get_token(endpoint)
-                        .await
-                        .map_err(|_| SessionMcpConnectFailure::CredentialUnavailable)?
-                        .ok_or(SessionMcpConnectFailure::CredentialUnavailable)?;
-                    insert_oauth_authorization(headers, token)
-                        .map_err(|_| SessionMcpConnectFailure::CredentialUnavailable)?;
-                }
-            }
-            if servers.insert(row.name, config).is_some() {
-                return Err(SessionMcpConnectFailure::ResourceUnavailable);
-            }
-        }
-        let manager = McpManager::connect_all(&servers)
-            .await
-            .map_err(|_| SessionMcpConnectFailure::TransportUnavailable)?;
-        Ok(vec![Arc::new(manager)])
-    }
-}
-
-async fn build_lazy_mcp_runtime(
-    plugin_session: Option<&crate::NomiPluginToolSession>,
-    repository: Option<&Arc<dyn IMcpServerRepository>>,
-    oauth_service: Option<&Arc<nomifun_mcp::McpOAuthService>>,
-    policy: Option<nomifun_api_types::NomiMcpCapabilityPolicy>,
-    deferred_tools: &[String],
-    selected_ids: &[McpServerId],
-    is_instance_owner: bool,
-) -> Result<Option<LazyMcpRuntime>, AppError> {
-    let Some(policy) = policy.filter(|policy| policy.connect) else {
-        return Ok(None);
-    };
-    if plugin_session.is_none() && selected_ids.is_empty() { return Ok(None); }
-    if plugin_session.is_some() && !deferred_tools
-        .iter()
-        .any(|name| name == nomi_agent::lazy_mcp::MCP_CONNECT_TOOL_NAME)
-    {
-        return Ok(None);
-    }
-    let repository = repository.cloned().ok_or_else(|| {
-        AppError::UnprocessableEntity("on-demand MCP requires the host MCP repository".to_owned())
-    })?;
-    let bindings = if let Some(session) = plugin_session { session
-        .target_resource_bindings()
-        .iter()
-        .filter(|binding| binding.resource_kind.as_ref() == "mcp_server")
-        .map(|binding| {
-            let config_ref = binding.connection_config_ref.as_ref().ok_or_else(|| {
-                AppError::Conflict(
-                    "the bound MCP server has no frozen connection-config reference".to_owned(),
-                )
-            })?;
-            SessionMcpBindingRef::new(
-                binding.resource_id.as_ref(),
-                config_ref.as_ref(),
-            )
-            .map_err(AppError::Conflict)
-        })
-        .collect::<Result<Vec<_>, _>>()?
-    } else {
-        // Product conversations have one server-owned selection rather than
-        // Plugin Session metadata. Freeze exact local-owner business IDs here;
-        // the connector revalidates config revisions before any network IO.
-        if !is_instance_owner { return Ok(None); }
-        let mut bindings = Vec::new();
-        for id in selected_ids {
-            let row = repository.find_by_id(id.as_str()).await
-                .map_err(|error| AppError::Internal(error.to_string()))?
-                .filter(|row| row.enabled && !row.builtin)
-                .ok_or_else(|| AppError::Conflict(format!("selected MCP server '{id}' is unavailable")))?;
-            bindings.push(SessionMcpBindingRef::new(&row.mcp_server_id,
-                format!("mcp-server:{}@{}", row.mcp_server_id, row.updated_at))
-                .map_err(AppError::Conflict)?);
-        }
-        bindings
-    };
-    LazyMcpRuntime::new(
-        bindings,
-        Arc::new(RepositorySessionMcpConnector {
-            repository,
-            oauth_service: oauth_service.cloned(),
-            oauth_enabled: policy.oauth,
-        }),
-    )
-    .map(Some)
-    .map_err(AppError::Conflict)
+    Err(AppError::Conflict(
+        "device MCP transport injection is retired; Robot tools require exact materialized Actions"
+            .to_owned(),
+    ))
 }
 
 async fn verify_chat_config_digest(
@@ -367,24 +164,6 @@ async fn verify_chat_config_digest(
             "the provider configuration changed after the Agent Snapshot was resolved".to_owned(),
         ));
     }
-    Ok(())
-}
-
-fn insert_oauth_authorization(
-    headers: &mut HashMap<String, String>,
-    token: String,
-) -> Result<(), AppError> {
-    let authorization = format!("Bearer {token}");
-    // Validate before handing the value to the MCP transport. Its generic
-    // invalid-header error includes the rejected value; doing this here keeps
-    // an invalid stored OAuth secret out of runtime warnings, model-visible
-    // errors, and logs.
-    reqwest::header::HeaderValue::from_bytes(authorization.as_bytes()).map_err(|_| {
-        AppError::UnprocessableEntity(
-            "the selected MCP OAuth credential has an invalid header value".to_owned(),
-        )
-    })?;
-    headers.insert("Authorization".to_owned(), authorization);
     Ok(())
 }
 
@@ -514,11 +293,10 @@ pub(super) async fn build(
         overrides.allowed_tools.retain(|name| !name.starts_with("mcp_"));
         overrides.deferred_tools.retain(|name| !name.starts_with("mcp_"));
     }
-    apply_mcp_capability_policy(&mut overrides);
     if plugin_tool_session.as_ref().is_some_and(|session| session.has_frozen_mcp_tools()) {
         // A per-tool Kernel grant must never implicitly expose every tool on
         // the selected server through eager discovery or the native proxy.
-        if overrides.mcp_capabilities.is_none_or(|policy| policy.connect || policy.tool_proxy || policy.resource || policy.oauth)
+        if overrides.mcp_capabilities.is_some_and(|policy| policy.connect || policy.tool_proxy || policy.resource || policy.oauth)
             || overrides.deferred_tools.iter().any(|name| name.starts_with("mcp_"))
             || overrides.allowed_tools.iter().any(|name| name.starts_with("mcp_"))
         {
@@ -527,16 +305,6 @@ pub(super) async fn build(
         overrides.mcp_server_ids = Some(Vec::new());
         overrides.session_mcp_servers.clear();
     }
-    let lazy_mcp_runtime = build_lazy_mcp_runtime(
-        plugin_tool_session.as_ref(),
-        deps.mcp_server_repo.as_ref(),
-        deps.mcp_oauth_service.as_ref(),
-        overrides.mcp_capabilities,
-        &overrides.deferred_tools,
-        overrides.mcp_server_ids.as_deref().unwrap_or_default(),
-        is_instance_owner,
-    ).await?;
-
     // Merge reusable preset instructions into `system_prompt` (used as
     // `custom_prompt` in Nomi's prompt builder).
     if let Some(rules) = overrides.preset_rules.take() {
@@ -619,52 +387,9 @@ pub(super) async fn build(
             None => (None, false),
         };
 
-    let (mut extra_mcp_servers, loopback_capability_leases) = if lazy_mcp_runtime.is_some() {
-        (HashMap::new(), LoopbackCapabilityLeaseSet::new())
-    } else {
-        resolve_mcp_servers(&overrides, &ctx.conversation_id)
-    };
-    if lazy_mcp_runtime.is_none()
-        && is_instance_owner
-        && let Some(repo) = deps.mcp_server_repo.as_ref()
-    {
-        for (name, config) in load_user_mcp_servers(
-            repo.as_ref(),
-            overrides.mcp_server_ids.as_deref(),
-            &ctx.conversation_id,
-        )
-        .await
-        {
-            extra_mcp_servers.entry(name).or_insert(config);
-        }
-    }
-    if lazy_mcp_runtime.is_none() && is_instance_owner {
-        merge_session_snapshot_mcp_servers(
-            &mut extra_mcp_servers,
-            &overrides.session_mcp_servers,
-            &ctx.conversation_id,
-        );
-    }
-    // Device transports come from a live, revocable host grant rather than
-    // the public/persisted MCP config bag. They coexist with on-demand MCP
-    // without changing the user's declared MCP connection policy.
-    if is_instance_owner && !options.device_mcp_servers.is_empty() {
-        merge_session_snapshot_mcp_servers(
-            &mut extra_mcp_servers,
-            &options.device_mcp_servers,
-            &ctx.conversation_id,
-        );
-    }
-    if lazy_mcp_runtime.is_none() {
-        apply_mcp_oauth_credentials(
-            &mut extra_mcp_servers,
-            deps.mcp_oauth_service.as_ref(),
-            overrides
-                .mcp_capabilities
-                .is_some_and(|policy| policy.oauth),
-        )
-        .await?;
-    }
+    let (extra_mcp_servers, loopback_capability_leases) =
+        resolve_mcp_servers(&overrides, &ctx.conversation_id);
+    reject_retired_device_mcp_transport(&options.device_mcp_servers)?;
 
     // Per-surface write policy (spec §3.2 unit 5): companion → direct, external
     // IM channel → disabled (P1; opt-in re-enable is P2), regular chat → the
@@ -1129,7 +854,6 @@ pub(super) async fn build(
         #[cfg(feature = "browser-use")]
         local_web_search_tool,
         citation_render_tool,
-        lazy_mcp_runtime,
         plugin_tool_session,
     };
     let agent = NomiAgentManager::new_with_host_wiring(
@@ -1492,277 +1216,6 @@ pub(crate) fn resolve_bedrock_config(
     }
 }
 
-async fn load_user_mcp_servers(
-    repo: &dyn IMcpServerRepository,
-    selected_ids: Option<&[McpServerId]>,
-    conversation_id: &str,
-) -> HashMap<String, McpServerConfig> {
-    let rows_result = match selected_ids {
-        Some(ids) => {
-            let ids = ids.iter().map(ToString::to_string).collect::<Vec<_>>();
-            repo.list_by_ids_any(&ids).await
-        }
-        None => repo.list().await,
-    };
-    let rows = match rows_result {
-        Ok(r) => r,
-        Err(err) => {
-            warn!(
-                conversation_id,
-                error = %err,
-                "user_mcp: list() failed; skipping injection"
-            );
-            return HashMap::new();
-        }
-    };
-
-    let mut servers = HashMap::new();
-    for row in rows {
-        let selected = selected_ids
-            .map(|ids| {
-                ids.iter()
-                    .any(|id| id.as_str() == row.mcp_server_id)
-            })
-            .unwrap_or(row.enabled);
-        if !selected || row.builtin {
-            continue;
-        }
-
-        match row_to_mcp_server_config(&row) {
-            Ok(config) => {
-                servers.insert(row.name.clone(), config);
-            }
-            Err(err) => {
-                warn!(
-                    conversation_id,
-                    mcp_server_id = %row.mcp_server_id,
-                    server_name = %row.name,
-                    error = %err,
-                    "user_mcp: failed to convert row; skipping"
-                );
-            }
-        }
-    }
-
-    servers
-}
-
-fn row_to_mcp_server_config(row: &McpServerRow) -> Result<McpServerConfig, String> {
-    let value: serde_json::Value = serde_json::from_str(&row.transport_config)
-        .map_err(|e| format!("invalid transport_config JSON: {e}"))?;
-
-    match row.transport_type.as_str() {
-        "stdio" => {
-            let command = value
-                .get("command")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "stdio: missing command".to_owned())?;
-            let resolved_command = resolve_stdio_command(command);
-            let args = value
-                .get("args")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(ToOwned::to_owned))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let env = value
-                .get("env")
-                .and_then(|v| v.as_object())
-                .map(|obj| {
-                    obj.iter()
-                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
-                        .collect::<HashMap<_, _>>()
-                })
-                .unwrap_or_default();
-
-            Ok(McpServerConfig {
-                transport: TransportType::Stdio,
-                command: Some(resolved_command),
-                args: Some(args),
-                env: Some(env),
-                url: None,
-                headers: None,
-                deferred: Some(false),
-                request_timeout_secs: None,
-            })
-        }
-        "http" | "streamable_http" => {
-            let url = value
-                .get("url")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "http: missing url".to_owned())?;
-            let headers = value
-                .get("headers")
-                .and_then(|v| v.as_object())
-                .map(|obj| {
-                    obj.iter()
-                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
-                        .collect::<HashMap<_, _>>()
-                })
-                .unwrap_or_default();
-
-            Ok(McpServerConfig {
-                transport: TransportType::StreamableHttp,
-                command: None,
-                args: None,
-                env: None,
-                url: Some(url.to_owned()),
-                headers: Some(headers),
-                deferred: Some(false),
-                request_timeout_secs: None,
-            })
-        }
-        "sse" => {
-            let url = value
-                .get("url")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "sse: missing url".to_owned())?;
-            let headers = value
-                .get("headers")
-                .and_then(|v| v.as_object())
-                .map(|obj| {
-                    obj.iter()
-                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
-                        .collect::<HashMap<_, _>>()
-                })
-                .unwrap_or_default();
-
-            Ok(McpServerConfig {
-                transport: TransportType::Sse,
-                command: None,
-                args: None,
-                env: None,
-                url: Some(url.to_owned()),
-                headers: Some(headers),
-                deferred: Some(false),
-                request_timeout_secs: None,
-            })
-        }
-        other => Err(format!("unsupported transport_type: {other}")),
-    }
-}
-
-fn session_server_to_mcp_server_config(
-    server: &SessionMcpServer,
-) -> Result<McpServerConfig, String> {
-    match &server.transport {
-        SessionMcpTransport::Stdio { command, args, env } => {
-            if command.is_empty() {
-                return Err("stdio: missing command".to_owned());
-            }
-            Ok(McpServerConfig {
-                transport: TransportType::Stdio,
-                command: Some(resolve_stdio_command(command)),
-                args: Some(args.clone()),
-                env: Some(env.clone()),
-                url: None,
-                headers: None,
-                deferred: Some(false),
-                request_timeout_secs: None,
-            })
-        }
-        SessionMcpTransport::Http { url, headers } => {
-            if url.is_empty() {
-                return Err("http: missing url".to_owned());
-            }
-            Ok(McpServerConfig {
-                transport: TransportType::StreamableHttp,
-                command: None,
-                args: None,
-                env: None,
-                url: Some(url.clone()),
-                headers: Some(headers.clone()),
-                deferred: Some(false),
-                request_timeout_secs: None,
-            })
-        }
-        SessionMcpTransport::Sse { url, headers } => {
-            if url.is_empty() {
-                return Err("sse: missing url".to_owned());
-            }
-            Ok(McpServerConfig {
-                transport: TransportType::Sse,
-                command: None,
-                args: None,
-                env: None,
-                url: Some(url.clone()),
-                headers: Some(headers.clone()),
-                deferred: Some(false),
-                request_timeout_secs: None,
-            })
-        }
-        SessionMcpTransport::StreamableHttp { url, headers } => {
-            if url.is_empty() {
-                return Err("streamable_http: missing url".to_owned());
-            }
-            Ok(McpServerConfig {
-                transport: TransportType::StreamableHttp,
-                command: None,
-                args: None,
-                env: None,
-                url: Some(url.clone()),
-                headers: Some(headers.clone()),
-                deferred: Some(false),
-                request_timeout_secs: None,
-            })
-        }
-    }
-}
-
-fn merge_session_snapshot_mcp_servers(
-    extra_mcp_servers: &mut HashMap<String, McpServerConfig>,
-    session_mcp_servers: &[SessionMcpServer],
-    conversation_id: &str,
-) {
-    for server in session_mcp_servers {
-        match session_server_to_mcp_server_config(server) {
-            Ok(config) => {
-                if extra_mcp_servers
-                    .insert(server.name.clone(), config)
-                    .is_some()
-                {
-                    debug!(
-                        conversation_id = %conversation_id,
-                        server_name = %server.name,
-                        "session_mcp: session snapshot overrides repo-backed MCP config"
-                    );
-                }
-            }
-            Err(err) => {
-                warn!(
-                    conversation_id = %conversation_id,
-                    mcp_server_id = %server.mcp_server_id,
-                    server_name = %server.name,
-                    error = %err,
-                    "session_mcp: failed to convert session snapshot; skipping"
-                );
-            }
-        }
-    }
-}
-
-fn resolve_stdio_command(command: &str) -> String {
-    let trimmed = command.trim();
-    if trimmed.is_empty() {
-        return command.to_owned();
-    }
-
-    let path = std::path::Path::new(trimmed);
-    if path.is_absolute()
-        || trimmed.contains(std::path::MAIN_SEPARATOR)
-        || trimmed.contains('/')
-        || trimmed.contains('\\')
-    {
-        return trimmed.to_owned();
-    }
-
-    resolve_command_path(trimmed)
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(|| trimmed.to_owned())
-}
-
 fn resolve_mcp_servers(
     overrides: &NomiBuildExtra,
     conversation_id: &str,
@@ -1835,6 +1288,7 @@ fn gateway_mcp_to_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nomifun_api_types::{McpServerId, SessionMcpTransport};
 
     #[tokio::test]
     async fn canonical_chat_digest_mismatch_fails_closed_without_provider_details() {
@@ -1947,51 +1401,19 @@ mod tests {
     }
 
     #[test]
-    fn canonical_mcp_policy_preserves_exact_ids_and_drops_secret_transport_snapshots() {
-        let bound_id = McpServerId::new();
-        let bound_server = SessionMcpServer {
-            mcp_server_id: bound_id.clone(),
-            name: "session-bound".to_owned(),
-            transport: SessionMcpTransport::Http {
-                url: "https://mcp.example.test".to_owned(),
-                headers: HashMap::new(),
+    fn device_mcp_transport_cannot_reintroduce_a_runtime_proxy() {
+        reject_retired_device_mcp_transport(&[]).unwrap();
+        let error = reject_retired_device_mcp_transport(&[SessionMcpServer {
+            mcp_server_id: McpServerId::new(),
+            name: "legacy-device-proxy".into(),
+            transport: SessionMcpTransport::Stdio {
+                command: "device-proxy".into(),
+                args: Vec::new(),
+                env: HashMap::new(),
             },
-        };
-        let mut connected = NomiBuildExtra {
-            mcp_server_ids: Some(vec![bound_id.clone()]),
-            session_mcp_servers: vec![bound_server.clone()],
-            mcp_capabilities: Some(nomifun_api_types::NomiMcpCapabilityPolicy {
-                connect: true,
-                tool_proxy: true,
-                resource: true,
-                oauth: true,
-            }),
-            ..Default::default()
-        };
-        apply_mcp_capability_policy(&mut connected);
-        assert_eq!(connected.mcp_server_ids, Some(vec![bound_id]));
-        assert!(connected.session_mcp_servers.is_empty());
-
-        connected.mcp_capabilities = Some(Default::default());
-        apply_mcp_capability_policy(&mut connected);
-        assert_eq!(connected.mcp_server_ids, Some(Vec::new()));
-    }
-
-    #[test]
-    fn oauth_header_validation_never_echoes_a_rejected_secret() {
-        let mut headers = HashMap::new();
-        insert_oauth_authorization(&mut headers, "valid-token".to_owned())
-            .expect("valid OAuth bearer token");
-        assert_eq!(
-            headers.get("Authorization").map(String::as_str),
-            Some("Bearer valid-token")
-        );
-
-        let secret = "must-not-leak\r\nforged: value";
-        let error = insert_oauth_authorization(&mut HashMap::new(), secret.to_owned())
-            .expect_err("header injection must be rejected before MCP transport construction");
-        assert!(!error.to_string().contains(secret));
-        assert!(!error.to_string().contains("must-not-leak"));
+        }])
+        .unwrap_err();
+        assert!(error.to_string().contains("exact materialized Actions"));
     }
 
     fn gateway_config(port: u16, binary: &str, owner: &str) -> GatewayMcpConfig {
@@ -2420,54 +1842,6 @@ mod tests {
         let (result, leases) = resolve_mcp_servers(&overrides, "conv-3");
         assert!(result.is_empty());
         assert!(leases.is_empty());
-    }
-
-    #[test]
-    fn session_snapshot_overrides_repo_backed_mcp_config() {
-        let mut servers = HashMap::from([(
-            "demo-mcp".to_owned(),
-            McpServerConfig {
-                transport: TransportType::Stdio,
-                command: Some("npx".into()),
-                args: Some(vec!["-y".into(), "@old/server".into()]),
-                env: Some(HashMap::new()),
-                url: None,
-                headers: None,
-                deferred: Some(false),
-                request_timeout_secs: None,
-            },
-        )]);
-
-        let snapshot = vec![SessionMcpServer {
-            mcp_server_id: McpServerId::new(),
-            name: "demo-mcp".into(),
-            transport: SessionMcpTransport::Stdio {
-                command: "uvx".into(),
-                args: vec!["new-server".into()],
-                env: HashMap::from([("TOKEN".into(), "abc".into())]),
-            },
-        }];
-
-        merge_session_snapshot_mcp_servers(&mut servers, &snapshot, "conv-override");
-
-        let server = servers.get("demo-mcp").expect("snapshot should remain");
-        assert_eq!(server.transport, TransportType::Stdio);
-        // `resolve_command_path` may resolve to an absolute path; on Windows
-        // that includes the `.exe` extension.
-        let command = server
-            .command
-            .as_deref()
-            .expect("stdio command should exist");
-        let command = command.replace('\\', "/").to_lowercase();
-        assert!(
-            command == "uvx" || command.ends_with("/uvx") || command.ends_with("/uvx.exe"),
-            "unexpected stdio command path: {command}",
-        );
-        assert_eq!(server.args.as_deref(), Some(&["new-server".to_owned()][..]));
-        assert_eq!(
-            server.env.as_ref().and_then(|env| env.get("TOKEN")),
-            Some(&"abc".to_owned())
-        );
     }
 
     #[test]

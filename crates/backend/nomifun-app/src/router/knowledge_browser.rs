@@ -159,6 +159,7 @@ impl KnowledgeBrowserPort {
             member: RoleMemberInvocationRequest {
                 principal: self.principal.clone(),
                 session_owner: self.principal.clone(),
+                turn_id: None,
                 operation_id: id.clone().into(),
                 correlation_id: id.clone().into(),
                 capability_id: MEMBER.into(),

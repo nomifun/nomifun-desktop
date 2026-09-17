@@ -42,7 +42,6 @@ mod task_continuation;
 pub use task_continuation::CodingPriorTask;
 pub use requirements::{CodingInputCitation, CodingRequirementOrigin, CodingTaskRequirement};
 pub use planning::{CodingPlan, CodingPlanStatus, CodingPlanStep};
-mod process;
 mod standard_tools;
 mod stream_limits;
 mod steering;
@@ -75,10 +74,6 @@ pub use kernel::{
     compile_coding_tool_plan, CodingToolExposure, KernelCodingToolInvoker,
 };
 pub use model::{BrokerCodingModelPort, CodingModelPort, CodingModelStream};
-pub use process::{
-    CodingCleanupReport, CodingProcessOutput, CodingProcessPoll, CodingProcessRequest,
-    CodingProcessSession, CodingProcessTransport, ManagedCodingProcessOwner,
-};
 pub use standard_tools::standard_coding_tool_exposures;
 pub use tool::{
     input_schema_digest, CodingEffectClass, CodingToolBinding, CodingToolInvocation,

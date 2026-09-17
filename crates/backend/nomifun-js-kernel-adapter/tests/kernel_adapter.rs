@@ -340,7 +340,6 @@ fn revision(
             enabled_capabilities: vec![
                 selection(TOOL_ID, &[TOOL_ACTION, RELEASE_COUNT_ACTION]),
                 selection(CONTEXT_ID, &[]),
-                selection(RESOURCE_ID, &[]),
             ],
 
             skill_bindings: Vec::new(),
@@ -349,7 +348,7 @@ fn revision(
             instructions: "Exercise direct typed exports.".into(),
             starter_prompts: Vec::new(),
         },
-        contribution_locks: [TOOL_ID, CONTEXT_ID, RESOURCE_ID]
+        contribution_locks: [TOOL_ID, CONTEXT_ID]
             .into_iter()
             .map(|id| {
                 materialized
@@ -394,7 +393,7 @@ fn access(
         principal: owner.clone(),
         session_owner: owner.clone(),
         agent_session_id: AgentSessionId::from("fixture-session"),
-        turn_id: None,
+        turn_id: Some(OperationId::from("fixture-turn")),
         operation_id: OperationId::from(format!(
             "fixture-access:{}",
             capability_id.as_ref()
@@ -412,6 +411,18 @@ fn access(
             .clone(),
         capability_id,
         state_scope_key: ScopeKey::from("session:fixture-session"),
+    }
+}
+
+fn fixture_binding(owner: &PrincipalRef) -> TypedResourceBinding {
+    TypedResourceBinding {
+        binding_id: ResourceBindingId::from("fixture-binding"),
+        resource_kind: ResourceKind::from(RESOURCE_KIND),
+        resource_id: ResourceId::from("fixture-resource"),
+        owner_id: owner.principal_id.clone(),
+        operations: BTreeSet::from(["acquire".into()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::from([("path".into(), "fixture".into())]),
     }
 }
 
@@ -436,18 +447,7 @@ fn compile_snapshot(
     .unwrap()
     .with_target_resource_bindings(
         owner,
-        vec![TypedResourceBinding {
-            binding_id: ResourceBindingId::from("fixture-binding"),
-            resource_kind: ResourceKind::from(RESOURCE_KIND),
-            resource_id: ResourceId::from("fixture-resource"),
-            owner_id: owner.principal_id.clone(),
-            operations: BTreeSet::from(["acquire".into()]),
-            connection_config_ref: None,
-            typed_parameters: BTreeMap::from([(
-                "path".into(),
-                "fixture".into(),
-            )]),
-        }],
+        vec![fixture_binding(owner)],
     )
     .unwrap()
 }
@@ -647,27 +647,8 @@ async fn one_kernel_registry_dispatches_javascript_tool_context_and_resource() {
             .is_err()
     );
 
-    let first = registry
-        .acquire_resource(
-            &compiled,
-            &active,
-            access(&compiled, active.generation, &owner, RESOURCE_ID),
-        )
-        .await
-        .unwrap();
-    let second = registry
-        .acquire_resource(
-            &compiled,
-            &active,
-            access(&compiled, active.generation, &owner, RESOURCE_ID),
-        )
-        .await
-        .unwrap();
-    assert!(Arc::ptr_eq(&first.handle, &second.handle));
-    assert_eq!(
-        first.handle.identity().resource_id.as_ref(),
-        "fixture-resource"
-    );
+    assert!(context.0["resourceBindings"].as_array().unwrap().is_empty());
+    assert!(invoked.0["resourceBindings"].as_array().unwrap().is_empty());
 
     registry
         .release_resources(&ScopeKey::from("session:fixture-session"))
@@ -698,7 +679,7 @@ async fn one_kernel_registry_dispatches_javascript_tool_context_and_resource() {
         )
         .await
         .unwrap();
-    assert_eq!(release_count.0["releaseCount"], 1);
+    assert_eq!(release_count.0["releaseCount"], 0);
 
     let JavaScriptHostState::Running { generation, .. } = host.state() else {
         panic!("typed JavaScript capability demand must start the shared Host");
@@ -708,7 +689,7 @@ async fn one_kernel_registry_dispatches_javascript_tool_context_and_resource() {
 }
 
 #[tokio::test]
-async fn compatible_replace_does_not_reuse_an_old_artifact_resource_handle() {
+async fn compatible_replace_starts_a_fresh_artifact_host_generation() {
     let main_path = fixture("main.mjs").canonicalize().unwrap();
     let main = tokio::fs::read(&main_path).await.unwrap();
     let package_root = main_path.parent().unwrap().to_path_buf();
@@ -765,16 +746,29 @@ async fn compatible_replace_does_not_reuse_an_old_artifact_resource_handle() {
     let first_active = SessionCapabilityState::new(&first_snapshot)
         .snapshot()
         .unwrap();
-    let first = registry
-        .acquire_resource(
+    let request = |snapshot: &nomifun_agent_kernel::CompiledSnapshot,
+                   active_generation: u64,
+                   suffix: &str| CapabilityInvocationRequest {
+        principal: owner.clone(),
+        session_owner: owner.clone(),
+        agent_session_id: AgentSessionId::from("fixture-session"),
+        turn_id: OperationId::from("fixture-turn"),
+        operation_id: OperationId::from(format!("fixture-{suffix}-operation")),
+        idempotency_key: IdempotencyKey::from(format!("fixture-{suffix}-key")),
+        correlation_id: CorrelationId::from(format!("fixture-{suffix}-correlation")),
+        resolved_snapshot_ref: snapshot.snapshot_ref().clone(),
+        active_set_generation: active_generation,
+        capability_id: CapabilityId::from(TOOL_ID),
+        action_id: ActionId::from(TOOL_ACTION),
+        resource_binding_ids: BTreeSet::new(),
+        state_scope_key: ScopeKey::from("session:fixture-session"),
+        input: StrictJsonValue(json!({"generation": suffix})),
+    };
+    registry
+        .invoke(
             &first_snapshot,
             &first_active,
-            access(
-                &first_snapshot,
-                first_active.generation,
-                &owner,
-                RESOURCE_ID,
-            ),
+            request(&first_snapshot, first_active.generation, "first"),
         )
         .await
         .unwrap();
@@ -783,7 +777,7 @@ async fn compatible_replace_does_not_reuse_an_old_artifact_resource_handle() {
         ..
     } = host.state()
     else {
-        panic!("first resource acquisition must start the shared Host");
+        panic!("first Tool invocation must start the shared Host");
     };
     host.stop_generation(first_generation).await.unwrap();
 
@@ -798,26 +792,12 @@ async fn compatible_replace_does_not_reuse_an_old_artifact_resource_handle() {
     let second_active = SessionCapabilityState::new(&second_snapshot)
         .snapshot()
         .unwrap();
-    let second = registry
-        .acquire_resource(
+    registry
+        .invoke(
             &second_snapshot,
             &second_active,
-            access(
-                &second_snapshot,
-                second_active.generation,
-                &owner,
-                RESOURCE_ID,
-            ),
+            request(&second_snapshot, second_active.generation, "second"),
         )
-        .await
-        .unwrap();
-    assert!(
-        !Arc::ptr_eq(&first.handle, &second.handle),
-        "a compatible contract cannot reuse a resource handle from an old Artifact"
-    );
-
-    registry
-        .release_resources(&ScopeKey::from("session:fixture-session"))
         .await
         .unwrap();
     let JavaScriptHostState::Running {
@@ -825,7 +805,8 @@ async fn compatible_replace_does_not_reuse_an_old_artifact_resource_handle() {
         ..
     } = host.state()
     else {
-        panic!("second resource acquisition must start a new Host generation");
+        panic!("second Tool invocation must start a new Host generation");
     };
+    assert_ne!(first_generation, second_generation);
     host.stop_generation(second_generation).await.unwrap();
 }

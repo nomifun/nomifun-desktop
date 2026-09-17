@@ -118,7 +118,10 @@ mod system_browser_binding_tests {
     }
 }
 
-pub(crate) async fn build(services: &AppServices) -> anyhow::Result<NomiCoreBuiltinPlan> {
+pub(crate) async fn build(
+    services: &AppServices,
+    effect_store: nomifun_agent_session::AgentSessionStore,
+) -> anyhow::Result<NomiCoreBuiltinPlan> {
     let mut registrations = nomifun_agent_domain_support::registrations(
         nomifun_agent_domain_support::c7_package_specs(),
     )?;
@@ -131,17 +134,36 @@ pub(crate) async fn build(services: &AppServices) -> anyhow::Result<NomiCoreBuil
     replace_package_registrations(&mut registrations, wave1);
     #[cfg(feature = "browser-use")]
     if let Some(provider) = services.system_browser.as_ref() {
-        bind_system_browser(&mut registrations,
-            nomifun_browser_platform::system_browser::SystemBrowserHost::binding(provider.as_ref()))?;
+        bind_system_browser(
+            &mut registrations,
+            nomifun_browser_platform::system_browser::SystemBrowserHost::binding(
+                provider.as_ref(),
+            ),
+        )?;
     }
     #[cfg(feature = "browser-use")]
-    if let Some(provider)=services.local_web_search.as_ref() {
+    if let Some(provider) = services.local_web_search.as_ref() {
         for registration in &mut registrations {
-            let mut manifest=registration.metadata.manifest.payload.clone();
-            if let Some(capability)=manifest.contributions.capabilities.iter_mut().find(|capability|capability.id.as_ref()==nomifun_ai_agent::local_web_search::TOOL_NAME) {
-                capability.config_schema.0.as_object_mut().ok_or_else(||anyhow::anyhow!("Local search schema must be an object"))?
-                    .insert(nomifun_ai_agent::local_web_search::BINDING_ANNOTATION.into(),serde_json::to_value(provider.binding())?);
-                registration.metadata.manifest=nomifun_agent_contracts::ArtifactEnvelope::new(manifest)?;
+            let mut manifest = registration.metadata.manifest.payload.clone();
+            if let Some(capability) = manifest
+                .contributions
+                .capabilities
+                .iter_mut()
+                .find(|capability| {
+                    capability.id.as_ref() == nomifun_ai_agent::local_web_search::TOOL_NAME
+                })
+            {
+                capability
+                    .config_schema
+                    .0
+                    .as_object_mut()
+                    .ok_or_else(|| anyhow::anyhow!("Local search schema must be an object"))?
+                    .insert(
+                        nomifun_ai_agent::local_web_search::BINDING_ANNOTATION.into(),
+                        serde_json::to_value(provider.binding())?,
+                    );
+                registration.metadata.manifest =
+                    nomifun_agent_contracts::ArtifactEnvelope::new(manifest)?;
             }
         }
     }
@@ -157,36 +179,56 @@ pub(crate) async fn build(services: &AppServices) -> anyhow::Result<NomiCoreBuil
         nomifun_agent_domain_wave1::MEMORY_COMPANION_RECALL,
     )]);
 
-    let wave2_owner = super::nomi_core_wave2::action_host_port(services);
-    let mut wave2_ports=nomifun_agent_domain_wave2::Wave2RoleHostPorts::with_actions(wave2_owner.clone());
-    #[cfg(feature="browser-use")]
-    if let Some(runtime)=services.headless_render.as_ref() {
-        wave2_ports.browser_operation_tools=super::knowledge_browser::RenderRoleHost::new(runtime.clone(),services.authoritative_user_id.as_ref());
-    }
-    let mut wave2 = nomifun_agent_domain_wave2::registrations_with_role_host_ports(wave2_ports)
-    .map_err(anyhow::Error::msg)?;
-    // MCP connection/OAuth/resource lifecycle is platform-managed, while
-    // every callable remote tool is published below as its own frozen,
-    // namespaced Action. Never republish the retired broad MCP/connector
-    // capability package even while older domain inventory is being removed.
-    remove_retired_extension_packages(&mut wave2);
-    remove_retired_extension_packages(&mut registrations);
-    #[cfg(feature="browser-use")]
-    if let Some(runtime)=services.headless_render.as_ref() {
-        if let Some(browser)=wave2.iter_mut().find(|registration|registration.metadata.manifest.payload.package_id.as_ref()==nomifun_agent_domain_wave2::BROWSER_PACKAGE_ID) {
-            let digest=nomifun_agent_contracts::digest_payload(&runtime.binding())?;
-            browser.metadata.source.source_digest=Some(digest.clone());
-            browser.metadata.context.source.source_digest=Some(digest);
+    let wave2_owner = super::nomi_core_wave2::action_host_port(services, effect_store);
+    let wave2_ports =
+        nomifun_agent_domain_wave2::Wave2RoleHostPorts::with_actions(wave2_owner.clone());
+    #[cfg(feature = "browser-use")]
+    let wave2_ports = {
+        let mut ports = wave2_ports;
+        if let Some(runtime) = services.headless_render.as_ref() {
+            ports.browser_operation_tools = super::knowledge_browser::RenderRoleHost::new(
+                runtime.clone(),
+                services.authoritative_user_id.as_ref(),
+            );
         }
-    }
+        ports
+    };
+    let wave2 = nomifun_agent_domain_wave2::registrations_with_role_host_ports(wave2_ports)
+        .map_err(anyhow::Error::msg)?;
+    #[cfg(feature = "browser-use")]
+    let wave2 = {
+        let mut registrations = wave2;
+        if let Some(runtime) = services.headless_render.as_ref()
+            && let Some(browser) = registrations.iter_mut().find(|registration| {
+                registration.metadata.manifest.payload.package_id.as_ref()
+                    == nomifun_agent_domain_wave2::BROWSER_PACKAGE_ID
+            })
+        {
+            let digest = nomifun_agent_contracts::digest_payload(&runtime.binding())?;
+            browser.metadata.source.source_digest = Some(digest.clone());
+            browser.metadata.context.source.source_digest = Some(digest);
+        }
+        registrations
+    };
     replace_package_registrations(&mut registrations, wave2);
     let mcp_registrations = super::nomi_core_mcp_catalog::load_registrations(
         &nomifun_db::SqliteMcpServerRepository::new(services.database.pool().clone()),
         wave2_owner.clone(),
-    ).await?;
-    let mcp_tools = mcp_registrations.iter().flat_map(|registration|
-        registration.metadata.manifest.payload.contributions.capabilities.iter().map(|capability| capability.id.clone())
-    ).collect::<BTreeSet<_>>();
+    )
+    .await?;
+    let mcp_tools = mcp_registrations
+        .iter()
+        .flat_map(|registration| {
+            registration
+                .metadata
+                .manifest
+                .payload
+                .contributions
+                .capabilities
+                .iter()
+                .map(|capability| capability.id.clone())
+        })
+        .collect::<BTreeSet<_>>();
     registrations.extend(mcp_registrations);
     let wave2_tools = super::nomi_core_wave2::tool_capability_ids();
     let wave2_lifecycle = super::nomi_core_wave2::event_capability_ids();
@@ -227,8 +269,11 @@ pub(crate) async fn build(services: &AppServices) -> anyhow::Result<NomiCoreBuil
     replace_package_registrations(
         &mut registrations,
         vec![
-            nomifun_agent_domain_wave4::customer_service_registration_with_host_port(
+            nomifun_agent_domain_wave4::customer_service_registration_with_all_host_ports(
                 customer_action_host,
+                nomifun_agent_domain_wave4::unconfigured_context_host_port(),
+                customer_service_owner.clone()
+                    as Arc<dyn nomifun_agent_domain_wave4::Wave4TurnMiddlewareHostPort>,
             )
             .map_err(anyhow::Error::msg)?,
         ],
@@ -350,63 +395,6 @@ fn replace_package_registrations(
     current.extend(replacements);
 }
 
-fn remove_retired_extension_packages(registrations: &mut Vec<PluginRegistration>) {
-    registrations.retain(|registration| {
-        !matches!(
-            registration
-                .metadata
-                .manifest
-                .payload
-                .package_id
-                .as_ref(),
-            "nomifun.skills" | "nomifun.mcp-connectors"
-        )
-    });
-}
-
-#[cfg(test)]
-mod extension_cutover_tests {
-    use super::*;
-
-    #[test]
-    fn production_composition_removes_legacy_skill_and_broad_mcp_packages() {
-        let mut registrations = nomifun_agent_domain_support::registrations(
-            nomifun_agent_domain_support::c7_package_specs(),
-        )
-        .unwrap();
-        remove_retired_extension_packages(&mut registrations);
-
-        let packages = registrations
-            .iter()
-            .map(|registration| registration.metadata.manifest.payload.package_id.as_ref())
-            .collect::<BTreeSet<_>>();
-        assert!(!packages.contains("nomifun.skills"));
-        assert!(!packages.contains("nomifun.mcp-connectors"));
-        let capabilities = registrations
-            .iter()
-            .flat_map(|registration| {
-                &registration
-                    .metadata
-                    .manifest
-                    .payload
-                    .contributions
-                    .capabilities
-            })
-            .map(|capability| capability.id.as_ref())
-            .collect::<BTreeSet<_>>();
-        for retired in [
-            concat!("skill", ".", "catalog"),
-            concat!("skill", ".", "describe"),
-            concat!("skill", ".", "invoke"),
-            concat!("skill", ".", "hooks"),
-        ] {
-            assert!(!capabilities.contains(retired));
-        }
-        for retired in nomifun_mcp::RETIRED_MCP_AUTHORING_CAPABILITY_IDS {
-            assert!(!capabilities.contains(retired));
-        }
-    }
-}
 
 struct NomiWave1SchemaResolver;
 

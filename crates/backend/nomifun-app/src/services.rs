@@ -21,10 +21,10 @@ use nomifun_conversation::{
 };
 use nomifun_db::{
     Database, IAgentMetadataRepository, IInstanceTokenRepository,
-    IConversationRepository, IMcpServerRepository, IProviderModelCapabilityRepository,
+    IConversationRepository, IProviderModelCapabilityRepository,
     IProviderModelRepository, IProviderRepository,
     IUserRepository, SqliteAgentMetadataRepository,
-    SqliteConversationRepository, SqliteInstanceTokenRepository, SqliteMcpServerRepository,
+    SqliteConversationRepository, SqliteInstanceTokenRepository,
     SqliteProviderModelCapabilityRepository, SqliteProviderModelRepository,
     SqliteProviderRepository,
     SqliteTerminalRepository, SqliteUserRepository,
@@ -1707,11 +1707,6 @@ impl AppServices {
         // write; there is deliberately no second profile/backfill writer.
         let managed_model_refresh_task =
             nomifun_system::ManagedModelRefreshTask::start(managed_model_service.clone());
-        // User-configured MCP servers — injected into ACP `session/new`
-        // so the agent gets the operator's tools (ELECTRON-1JG fix).
-        let mcp_server_repo: Arc<dyn IMcpServerRepository> =
-            Arc::new(SqliteMcpServerRepository::new(database.pool().clone()));
-
         let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> =
             Arc::new(SqliteAgentMetadataRepository::new(database.pool().clone()));
         let agent_registry = AgentRegistry::new(agent_metadata_repo);
@@ -2275,14 +2270,6 @@ impl AppServices {
             settings_repo: Some(Arc::new(nomifun_db::SqliteSettingsRepository::new(
                 database.pool().clone(),
             )) as Arc<dyn nomifun_db::ISettingsRepository>),
-            mcp_server_repo: Some(mcp_server_repo),
-            mcp_oauth_service: Some(Arc::new(
-                nomifun_mcp::McpOAuthService::new_dynamic(Arc::new(
-                    nomifun_db::SqliteOAuthTokenRepository::new(
-                        database.pool().clone(),
-                    ),
-                )),
-            )),
             requirement_sink: Some(requirement_sink),
             // Native cron tools: agent schedules/lists/deletes its own recurring
             // prompts. The closure resolves the process CronService lazily (it is

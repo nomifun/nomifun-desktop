@@ -25,7 +25,8 @@ use nomifun_agent_domain_wave4::{
     COMPANION_MEMORY_RESOURCE_KIND, COMPANION_PERSONA,
     COMPANION_RESOURCE_KIND, COMPANION_ROSTER, Wave4CapabilityOperation,
     Wave4ContextHostPort, Wave4ContextHostRequest, Wave4HostPort,
-    Wave4HostPortError, Wave4HostRequest,
+    Wave4HostPortError, Wave4HostRequest, Wave4TurnMiddlewareHostPort,
+    Wave4TurnMiddlewareHostRequest,
 };
 use nomifun_channel::error::ChannelError;
 use nomifun_channel::group_policy::GroupPolicyFence;
@@ -1278,6 +1279,37 @@ impl Wave4HostPort for NomiCoreChannelWave4Owner {
     }
 }
 
+impl Wave4TurnMiddlewareHostPort for NomiCoreChannelWave4Owner {
+    fn apply<'a>(
+        &'a self,
+        request: Wave4TurnMiddlewareHostRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave4HostPortError>> + Send + 'a>> {
+        Box::pin(async move {
+            request.validate()?;
+            if request.capability_id.as_ref() != CHANNEL_GROUP_POLICY {
+                return Err(Wave4HostPortError::action_operation_mismatch(
+                    "Channel TurnMiddleware owner received another capability",
+                ));
+            }
+            self.activate_lifecycle(NomiCoreChannelLifecycleRequest {
+                principal: request.principal,
+                agent_session_id: request.agent_session_id,
+                operation_id: request.operation_id,
+                correlation_id: request.correlation_id,
+                resolved_snapshot_ref: request.resolved_snapshot_ref,
+                registry_generation: request.registry_generation,
+                registry_digest: request.registry_digest,
+                capability_id: request.capability_id,
+                state_scope_key: request.state_scope_key,
+                resource_bindings: request.resource_bindings,
+                schema_ref: Some(request.schema_ref),
+                turn_input: request.turn_input,
+            })
+            .await
+        })
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn combined_support(
     channel: &NomiCoreChannelWave4Owner,
@@ -1343,9 +1375,10 @@ impl NomiCoreWave4Owners {
         &self,
     ) -> Result<Vec<nomifun_agent_kernel::PluginRegistration>, String> {
         Ok(vec![
-            nomifun_agent_domain_wave4::channel_registration_with_host_ports(
+            nomifun_agent_domain_wave4::channel_registration_with_all_host_ports(
                 Arc::clone(&self.action_port),
                 Arc::clone(&self.context_port),
+                Arc::clone(&self.channel) as Arc<dyn Wave4TurnMiddlewareHostPort>,
             )?,
             nomifun_agent_domain_wave4::companion_registration_with_host_ports(
                 Arc::clone(&self.action_port),

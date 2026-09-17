@@ -17,7 +17,7 @@ pub enum CodingCompactedItem {
 }
 
 fn invalid(message: impl std::fmt::Display) -> CodingEngineError {
-    CodingEngineError::Checkpoint(format!("compaction replacement: {message}"))
+    CodingEngineError::ReplayContract(format!("compaction replacement: {message}"))
 }
 
 /// Capture the selected replacement without its summary. Reverse matching

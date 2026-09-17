@@ -9,6 +9,7 @@ pub use agent_patch_source::AgentSessionPatchSource;
 pub use artifact_store::{
     ARTIFACT_RELATIVE_ROOT, MAX_ARTIFACT_READ_BYTES, PublishedWorkspaceArtifact,
     WORKSPACE_OWNER_DIRECTORY, WorkspaceArtifactRead, WorkspaceArtifactStore,
+    artifact_publication_outcome_unknown, is_workspace_owner_component,
 };
 pub use agent_patch_outcome::{AgentPatchFailureObservation, AgentSessionPatchFailure};
 pub use agent_instruction_scope::{AgentInstructionScope, AgentInstructionScopeRequest};
@@ -49,4 +50,4 @@ pub use types::{
 };
 pub use watch_service::FileWatchService;
 pub use workspace_listing::{MAX_DIR_DEPTH, list_workspace_level};
-pub use vcs_stage::WorkspaceVcsStageOwner;
+pub use vcs_stage::{WorkspaceVcsStageOwner, vcs_stage_outcome_unknown};

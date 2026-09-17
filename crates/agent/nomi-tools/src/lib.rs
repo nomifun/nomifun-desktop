@@ -116,6 +116,7 @@ pub(crate) fn atomic_write(file_path: &str, content: &str) -> std::io::Result<()
 /// boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolExecutionContext {
+    turn_id: String,
     operation_id: String,
 }
 
@@ -125,19 +126,27 @@ impl ToolExecutionContext {
     /// Derive an invocation identity from both the durable turn/message scope
     /// and the provider's call id. Some providers reuse short ids such as
     /// `call_0` in later turns, so the scope is part of the hash.
-    pub fn from_scoped_tool_call(execution_scope: &str, tool_call_id: &str) -> Self {
+    pub fn from_scoped_tool_call(turn_id: &str, tool_call_id: &str) -> Self {
         use sha2::{Digest, Sha256};
 
         let mut hasher = Sha256::new();
         hasher.update(Self::DOMAIN);
-        hasher.update((execution_scope.len() as u64).to_be_bytes());
-        hasher.update(execution_scope.as_bytes());
+        hasher.update((turn_id.len() as u64).to_be_bytes());
+        hasher.update(turn_id.as_bytes());
         hasher.update((tool_call_id.len() as u64).to_be_bytes());
         hasher.update(tool_call_id.as_bytes());
         let digest = hasher.finalize();
         Self {
+            turn_id: turn_id.to_owned(),
             operation_id: format!("tool-call-v1-{digest:x}"),
         }
+    }
+
+    /// Canonical host-owned Agent Turn identity. This remains independent from
+    /// the derived tool-operation identity and is never sourced from model
+    /// arguments or reconstructed from the operation hash.
+    pub fn turn_id(&self) -> &str {
+        &self.turn_id
     }
 
     /// Stable, bounded visible-ASCII identity for this exact tool invocation.
@@ -368,6 +377,9 @@ mod tests {
         assert_eq!(first, retry);
         assert_ne!(first, next_turn);
         assert_ne!(first, next_call);
+        assert_eq!(first.turn_id(), "turn-a");
+        assert_eq!(next_turn.turn_id(), "turn-b");
+        assert_ne!(first.turn_id(), first.operation_id());
         assert!(first.operation_id().len() <= 128);
         assert!(
             first

@@ -221,6 +221,50 @@ pub enum PathAuthority {
     /// `allowed_roots` behaviour). For untrusted / external surfaces, or the
     /// default the UI/file-routes pass (`allowed_roots ∪ workspace`).
     Confined(Vec<PathBuf>),
+    /// Agent workspace authority with the platform-owned `.nomifun` subtree
+    /// excluded even when a symlink/junction aliases it under another name.
+    Workspace(PathBuf),
+}
+
+pub(crate) fn reject_workspace_owner_canonical_path(
+    canonical_root: &Path,
+    canonical_target: &Path,
+) -> Result<(), AppError> {
+    let relative = canonical_target.strip_prefix(canonical_root).map_err(|_| {
+        AppError::Forbidden("workspace path is outside the bound resource".into())
+    })?;
+    if relative.components().next().is_some_and(|component| {
+        matches!(component, Component::Normal(value)
+            if crate::artifact_store::is_workspace_owner_component(value))
+    }) {
+        return Err(AppError::NotFound("workspace path was not found".into()));
+    }
+    Ok(())
+}
+
+/// Validate the nearest existing ancestor so a missing write target cannot
+/// enter `.nomifun` through an already-present alias directory.
+pub(crate) fn validate_workspace_candidate(path: &Path, root: &Path) -> Result<(), AppError> {
+    let canonical_root = std::fs::canonicalize(root).map_err(|error| {
+        AppError::BadRequest(format!("cannot resolve workspace root: {error}"))
+    })?;
+    let mut probe = path;
+    let canonical_probe = loop {
+        match std::fs::canonicalize(probe) {
+            Ok(value) => break value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                probe = probe.parent().ok_or_else(|| {
+                    AppError::BadRequest("workspace path has no existing ancestor".into())
+                })?;
+            }
+            Err(error) => {
+                return Err(AppError::BadRequest(format!(
+                    "cannot resolve workspace path ancestor: {error}"
+                )));
+            }
+        }
+    };
+    reject_workspace_owner_canonical_path(&canonical_root, &canonical_probe)
 }
 
 /// Authority-aware variant of [`validate_path`]: the target must exist.
@@ -235,6 +279,14 @@ pub fn validate_path_authority(path: &str, authority: &PathAuthority) -> Result<
         PathAuthority::Confined(roots) => {
             let refs: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
             validate_path(path, &refs)
+        }
+        PathAuthority::Workspace(root) => {
+            let canonical_root = std::fs::canonicalize(root).map_err(|error| {
+                AppError::BadRequest(format!("cannot resolve workspace root: {error}"))
+            })?;
+            let canonical = validate_path(path, &[root.as_path()])?;
+            reject_workspace_owner_canonical_path(&canonical_root, &canonical)?;
+            Ok(canonical)
         }
     }
 }
@@ -269,6 +321,14 @@ pub fn validate_path_for_write_authority(
         PathAuthority::Confined(roots) => {
             let refs: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
             validate_path_for_write(path, &refs)
+        }
+        PathAuthority::Workspace(root) => {
+            let canonical_root = std::fs::canonicalize(root).map_err(|error| {
+                AppError::BadRequest(format!("cannot resolve workspace root: {error}"))
+            })?;
+            let target = validate_path_for_write(path, &[root.as_path()])?;
+            reject_workspace_owner_canonical_path(&canonical_root, &target)?;
+            Ok(target)
         }
     }
 }

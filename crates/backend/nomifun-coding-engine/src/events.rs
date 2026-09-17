@@ -92,15 +92,6 @@ pub enum CodingEngineEvent {
         inputs: Vec<crate::CodingSteeringInput>,
         reason: String,
     },
-    /// Historical journal compatibility only. New turns never emit this event
-    /// or restore authority from it; the platform supplies the frozen enabled
-    /// set from the saved Snapshot.
-    CapabilitiesActivated {
-        previous_generation: u64,
-        generation: u64,
-        capability_id: CapabilityId,
-        activated_bundle: Vec<CapabilityId>,
-    },
     CompletionReview {
         status: crate::CodingWorkStatus,
     },

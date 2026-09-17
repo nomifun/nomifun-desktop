@@ -114,15 +114,17 @@ impl AgentSessionWorkspaceBinding {
     /// parent component, NUL byte, or portable separator escape.
     pub fn resolve_relative_path(&self, relative_path: &str) -> Result<PathBuf, AppError> {
         let relative = crate::artifact_store::normalized_workspace_relative(relative_path, true)?;
-        Ok(if relative.as_os_str().is_empty() {
+        let resolved = if relative.as_os_str().is_empty() {
             self.workspace_root.clone()
         } else {
             self.workspace_root.join(relative)
-        })
+        };
+        crate::path_safety::validate_workspace_candidate(&resolved, &self.workspace_root)?;
+        Ok(resolved)
     }
 
     pub fn authority(&self) -> PathAuthority {
-        PathAuthority::Confined(vec![self.workspace_root.clone()])
+        PathAuthority::Workspace(self.workspace_root.clone())
     }
 }
 
@@ -199,5 +201,31 @@ mod tests {
         assert!(scope.resolve_relative_path("./nested/file.txt").is_err());
         #[cfg(windows)]
         assert!(scope.resolve_relative_path(".NOMIFUN/artifacts/receipt").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_alias_into_workspace_owner_namespace() {
+        let root = tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".nomifun/artifacts")).unwrap();
+        std::fs::write(root.path().join(".nomifun/artifacts/receipt"), "owned").unwrap();
+        std::os::unix::fs::symlink(".nomifun", root.path().join("alias")).unwrap();
+        let scope = AgentSessionWorkspaceBinding::new(valid_session_id(), binding(), root.path())
+            .unwrap();
+        assert!(scope.resolve_relative_path("alias/artifacts/receipt").is_err());
+        assert!(scope.resolve_relative_path("alias/artifacts/new").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_junction_alias_into_workspace_owner_namespace() {
+        let root = tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".nomifun/artifacts")).unwrap();
+        std::fs::write(root.path().join(".nomifun/artifacts/receipt"), "owned").unwrap();
+        junction::create(root.path().join(".nomifun"), root.path().join("alias")).unwrap();
+        let scope = AgentSessionWorkspaceBinding::new(valid_session_id(), binding(), root.path())
+            .unwrap();
+        assert!(scope.resolve_relative_path("alias/artifacts/receipt").is_err());
+        assert!(scope.resolve_relative_path("alias/artifacts/new").is_err());
     }
 }

@@ -10,6 +10,7 @@ description = "Engine-neutral model/tool ports and platform process ownership fo
 async-trait.workspace = true
 nomi-process-runtime.workspace = true
 nomifun-agent-contracts.workspace = true
+nomifun-agent-domain-wave2.workspace = true
 nomifun-agent-kernel.workspace = true
 nomifun-chat-model-broker.workspace = true
 serde.workspace = true
@@ -20,5 +21,4 @@ tokio-util.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-nomifun-agent-domain-wave2.workspace = true
 tempfile.workspace = true

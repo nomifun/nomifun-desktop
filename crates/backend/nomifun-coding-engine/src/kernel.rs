@@ -147,7 +147,6 @@ mod tests {
                     input,
                 }
                 | nomifun_agent_domain_wave2::Wave2CapabilityOperation::Ssh { input }
-                | nomifun_agent_domain_wave2::Wave2CapabilityOperation::McpConnectors { input }
                 | nomifun_agent_domain_wave2::Wave2CapabilityOperation::Browser { input }
                 | nomifun_agent_domain_wave2::Wave2CapabilityOperation::ComputerA11y { input } => {
                     input
@@ -189,19 +188,8 @@ mod tests {
             principal_kind: "user".to_owned(),
             principal_id: "coding-owner".to_owned(),
         };
-        let target_modules = materialized
-            .capability(&CapabilityId::from("workspace.files"))
-            .is_some();
-        let capability_id = CapabilityId::from(if target_modules {
-            "workspace.files"
-        } else {
-            "fs.read"
-        });
-        let action_id = ActionId::from(if target_modules {
-            "workspace.files/read"
-        } else {
-            "fs.read.invoke"
-        });
+        let capability_id = CapabilityId::from("workspace.files");
+        let action_id = ActionId::from("workspace.files/read");
         let binding_id = ResourceBindingId::from("workspace-binding");
         let binding = nomifun_agent_contracts::TypedResourceBinding {
             binding_id: binding_id.clone(),
@@ -401,20 +389,8 @@ mod tests {
                     input_schema: StrictJsonValue(json!({"type": "object"})),
                     deferred: false,
                 },
-                capability_id: CapabilityId::from(if fixture.capability_id.as_ref()
-                    == "workspace.files"
-                {
-                    "workspace.vcs"
-                } else {
-                    "fs.write"
-                }),
-                action_id: ActionId::from(if fixture.capability_id.as_ref()
-                    == "workspace.files"
-                {
-                    "workspace.vcs/status"
-                } else {
-                    "fs.write.invoke"
-                }),
+                capability_id: CapabilityId::from("workspace.vcs"),
+                action_id: ActionId::from("workspace.vcs/status"),
             }],
         )
         .unwrap_err();

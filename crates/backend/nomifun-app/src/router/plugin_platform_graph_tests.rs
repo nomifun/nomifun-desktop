@@ -281,7 +281,8 @@ async fn installed_heterogeneous_providers_freeze_private_graphs_across_save_ope
             .unwrap();
         assert_eq!(
             facade.contribution_lock.source_kind,
-            ContributionSourceKind::PluginProductActiveRelease
+            ContributionSourceKind::PluginMount,
+            "the selected Role member keeps its executable mount provenance"
         );
         assert_eq!(
             facade.action_allowlist,
@@ -295,10 +296,12 @@ async fn installed_heterogeneous_providers_freeze_private_graphs_across_save_ope
                 .collect::<Vec<_>>(),
             vec![ACTION]
         );
-        assert!(facade.plugin_product_id.is_some());
-        assert!(facade.active_release.is_some());
-        assert!(facade.active_release_epoch.is_some_and(|epoch| epoch > 0));
-        assert!(facade.catalog_digest.is_some());
+        assert!(facade.resolved_mount_id.is_some());
+        assert!(facade.contribution_lock.mount_id.is_some());
+        assert!(facade.plugin_product_id.is_none());
+        assert!(facade.active_release.is_none());
+        assert!(facade.active_release_epoch.is_none());
+        assert!(facade.catalog_digest.is_none());
         for dependency in frozen
             .content
             .enabled_capabilities

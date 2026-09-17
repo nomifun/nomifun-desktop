@@ -173,13 +173,7 @@ impl CompiledSnapshot {
                         });
                     }
                 }
-                let resource_provider_set = resource_kind.as_ref() == "mcp_server"
-                    && matches!(capability_id.as_ref(), "mcp.resource" | "mcp.connect" | "mcp.oauth")
-                    && self.envelope.content.enabled_capabilities.iter()
-                        .any(|entry| entry.capability.id.as_ref() == "mcp.resource"
-                            && entry.contribution_lock.source_kind == nomifun_agent_contracts::ContributionSourceKind::PlatformBuiltin
-                            && entry.resolved_source.source_kind == nomifun_agent_contracts::PluginSourceKind::Bundled);
-                if matches.len() > 1 && !resource_provider_set {
+                if matches.len() > 1 {
                     return Err(KernelError::InvalidPresetRevision {
                         reason: format!(
                             "target has multiple bindings for resource kind {}",

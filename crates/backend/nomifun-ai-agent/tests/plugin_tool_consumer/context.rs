@@ -369,6 +369,7 @@ async fn setup() -> (
 
 fn turn(text: &str) -> TurnContext {
     TurnContext {
+        turn_id: format!("turn-{text}"),
         source_message_id: format!("message-{text}"),
         text: text.into(),
         image_media_types: vec!["image/png".into()],

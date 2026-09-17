@@ -20,7 +20,7 @@ use nomifun_api_types::{
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::catalog::{CatalogProvider, OfficialTemplateCatalog};
+use crate::catalog::{CatalogProvider, CatalogSnapshot, OfficialTemplateCatalog};
 use crate::compiler::{PresetRevisionCompiler, revision_api};
 use crate::error::ControlPlaneError;
 use crate::impact::{
@@ -490,6 +490,7 @@ impl AgentControlPlane {
                 serde_json::to_value(record)?,
             );
         }
+        let catalog = self.catalog.snapshot()?;
         let document = nomifun_api_types::AgentPresetDocumentDto {
             context_order: Vec::new(),
             middleware_order: Vec::new(),
@@ -499,7 +500,7 @@ impl AgentControlPlane {
             enabled_capabilities: seed
                 .enabled_capabilities
                 .iter()
-                .map(selection_api)
+                .map(|reference| template_selection_api(reference, &catalog))
                 .collect::<Result<Vec<_>, _>>()?,
             skill_bindings: seed.skill_bindings.iter().map(exact_ref_api).collect(),
             system_role_provider_overrides: BTreeMap::new(),
@@ -729,19 +730,16 @@ impl AgentControlPlane {
         let Some(seed) = self.templates.seed(key) else { return Ok(None); };
         let Some(revision) = self.current_revision(&stored).await? else { return Ok(None); };
         let payload = &revision.payload;
-        let capabilities = payload.enabled_capabilities.iter().map(|item| item.capability.clone()).collect::<Vec<_>>();
-        // Internal companion defaults published before the MCP owner split
-        // included the now-incompatible platform resource provider. Recognize
-        // that exact former seed so existing shared conversations refresh too.
-        let previous_companion_seed = key == OfficialPresetKey::CompanionDefault
-            && capabilities.len() == seed.enabled_capabilities.len() + 1
-            && capabilities.iter().any(|item| item.id.as_ref() == "mcp.resource" && item.version.as_ref() == "1.0.0")
-            && capabilities.iter().filter(|item| item.id.as_ref() != "mcp.resource").cloned().collect::<Vec<_>>() == seed.enabled_capabilities;
+        let catalog = self.catalog.snapshot()?;
+        let expected_capabilities = seed
+            .enabled_capabilities
+            .iter()
+            .map(|reference| template_selection(reference, &catalog))
+            .collect::<Result<Vec<_>, _>>()?;
         let exact = payload.persona.is_empty() && payload.instructions.is_empty()
             && payload.starter_prompts.is_empty() && payload.system_role_provider_overrides.is_empty()
             && payload.skill_bindings == seed.skill_bindings
-            && payload.enabled_capabilities.iter().all(|item| item.action_allowlist.is_empty())
-            && (capabilities == seed.enabled_capabilities || previous_companion_seed);
+            && payload.enabled_capabilities == expected_capabilities;
         Ok(exact.then_some(key))
     }
 
@@ -754,13 +752,15 @@ impl AgentControlPlane {
         preset_id: Option<&str>,
         model: Option<&nomifun_api_types::AgentChatModelSelectionDto>,
     ) -> Result<(), ControlPlaneError> {
+        let catalog = self.catalog.snapshot()?;
         let (mut document, template_key, source_snapshot) = match (template_id, preset_id) {
             (Some(id), None) => {
                 let key = parse_official_key(id).ok_or_else(|| not_found("OfficialPresetTemplate"))?;
                 let seed = self.templates.seed(key).ok_or_else(|| not_found("OfficialPresetTemplate"))?;
                 let mut document = empty_document();
                 document.enabled_capabilities = seed.enabled_capabilities.iter()
-                    .map(selection_api).collect::<Result<Vec<_>, _>>()?;
+                    .map(|reference| template_selection_api(reference, &catalog))
+                    .collect::<Result<Vec<_>, _>>()?;
                 document.skill_bindings = seed.skill_bindings.iter().map(exact_ref_api).collect();
                 (document, Some(key), None)
             }
@@ -777,7 +777,6 @@ impl AgentControlPlane {
             _ => return Err(ControlPlaneError::canonical("AGENT_PRESET_NOT_FOUND",
                 axum::http::StatusCode::BAD_REQUEST, "select exactly one Agent")),
         };
-        let catalog = self.catalog.snapshot()?;
         let mut diagnostics = Vec::new();
         crate::compiler::validate_direct_catalog_availability(&wire_cast(&document)?, &catalog, &mut diagnostics);
         if !diagnostics.is_empty() {
@@ -837,6 +836,10 @@ impl AgentControlPlane {
             &catalog,
         )?;
         let snapshot = compilation.snapshot.ok_or_else(|| {
+            tracing::warn!(
+                diagnostics = ?compilation.diagnostics,
+                "official template expansion failed compiler validation"
+            );
             ControlPlaneError::with_details(
                 "PRESET_REVISION_SAVE_FAILED",
                 axum::http::StatusCode::UNPROCESSABLE_ENTITY,
@@ -1290,6 +1293,10 @@ impl AgentControlPlane {
             &catalog,
         )?;
         let snapshot = compilation.snapshot.ok_or_else(|| {
+            tracing::warn!(
+                diagnostics = ?compilation.diagnostics,
+                "official template expansion failed compiler validation"
+            );
             ControlPlaneError::with_details(
                 "PRESET_REVISION_SAVE_FAILED",
                 axum::http::StatusCode::UNPROCESSABLE_ENTITY,
@@ -1656,13 +1663,37 @@ fn binding_record_api(
     })
 }
 
-fn selection_api(
+fn template_selection(
     reference: &nomifun_agent_contracts::CapabilityRef,
-) -> Result<nomifun_api_types::CapabilitySelectionDto, ControlPlaneError> {
-    wire_cast(&CapabilitySelection {
+    catalog: &CatalogSnapshot,
+) -> Result<CapabilitySelection, ControlPlaneError> {
+    let manifest = catalog.find_capability(reference).ok_or_else(|| {
+        ControlPlaneError::canonical(
+            "CAPABILITY_NOT_MATERIALIZED",
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "official template capability {}@{} is unavailable",
+                reference.id.as_ref(),
+                reference.version.as_ref()
+            ),
+        )
+    })?;
+    Ok(CapabilitySelection {
         capability: reference.clone(),
-        action_allowlist: BTreeSet::new(),
+        action_allowlist: manifest
+            .contributions
+            .actions
+            .iter()
+            .map(|action| action.action_id.clone())
+            .collect(),
     })
+}
+
+fn template_selection_api(
+    reference: &nomifun_agent_contracts::CapabilityRef,
+    catalog: &CatalogSnapshot,
+) -> Result<nomifun_api_types::CapabilitySelectionDto, ControlPlaneError> {
+    wire_cast(&template_selection(reference, catalog)?)
 }
 
 fn exact_ref_api<T>(reference: &ExactVersionRef<T>) -> ExactCatalogRefDto
@@ -1812,16 +1843,16 @@ mod tests {
         StaticRevisionImpactCatalogProvider,
     };
     use nomifun_agent_contracts::{
-        CapabilityCatalogEntry, CapabilityCatalogMaterialization,
+        ActionId, CapabilityActionDescriptor, CapabilityCatalogEntry, CapabilityCatalogMaterialization,
         CapabilityCatalogMaterializer, CapabilityContributions,
         CapabilityConsumer, CapabilityId, CapabilityKind,
         CapabilityManifest, CapabilityOwner, CapabilityProvenance,
         CapabilityRef, CapabilityReleaseState, CatalogAvailability,
-        ContributionId, ContributionLock, ContributionSourceKind, DigestHex,
+        ContributionId, ContributionLock, ContributionSourceKind, DigestHex, EffectClass,
         LocalizedMetadata, PackageId, PackageRef, PlatformConstraint,
         PluginMountId, PluginSourceKind, PluginSourceMetadata,
         RuntimeProfileKind, RuntimeTarget, StableSourceIdentity,
-        StrictJsonValue, VersionString, capability_surface_declarations,
+        StrictJsonValue, ToolPresentationKind, VersionString, capability_surface_declarations,
         digest_payload,
     };
     use nomifun_agent_kernel::{
@@ -2083,6 +2114,38 @@ mod tests {
     }
 
     #[test]
+    fn official_template_selection_freezes_exact_catalog_actions() {
+        let (mut capability, entry) = catalog_capability("workspace.files", [CapabilityConsumer::Agent]);
+        capability.manifest.contributions.actions = ["read", "write"]
+            .into_iter()
+            .map(|action| CapabilityActionDescriptor {
+                action_id: ActionId::from(format!("workspace.files/{action}")),
+                input_schema: format!("schema://workspace.files/{action}/input").into(),
+                output_schema: format!("schema://workspace.files/{action}/output").into(),
+                effect_class: EffectClass::ReadLocal,
+                presentation: ToolPresentationKind::FunctionTool,
+            })
+            .collect();
+        let reference = CapabilityRef {
+            id: capability.manifest.id.clone(),
+            version: capability.manifest.version.clone(),
+        };
+        let catalog = CatalogSnapshot {
+            capabilities: vec![capability],
+            formal_capability_entries: BTreeMap::from([(entry.capability.clone(), entry)]),
+            ..Default::default()
+        };
+        let selection = template_selection(&reference, &catalog).unwrap();
+        assert_eq!(
+            selection.action_allowlist,
+            BTreeSet::from([
+                ActionId::from("workspace.files/read"),
+                ActionId::from("workspace.files/write"),
+            ])
+        );
+    }
+
+    #[test]
     fn shared_catalog_resolves_agent_and_gateway_and_filters_agent_only_view() {
         let (shared, shared_entry) = catalog_capability(
             "knowledge.search",
@@ -2338,7 +2401,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn former_internal_companion_seed_is_recognized_without_reclassifying_personal_agents() {
+    async fn retired_companion_capability_is_not_recognized_as_current_official_seed() {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let control = template_control_plane(store.clone(), OfficialPresetKey::CompanionDefault, false);
         let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
@@ -2350,15 +2413,15 @@ mod tests {
         let reference: PresetRevisionRef = wire_cast(created.preset.current_stable_revision.as_ref().unwrap()).unwrap();
         let mut former = store.get_revision(&reference).await.unwrap().unwrap();
         let snapshot = store.get_snapshot(&reference).await.unwrap().unwrap();
-        // Model the already-persisted previous official payload. This test does
-        // not ask today's compiler to admit the prohibited combination.
+        // A historical broad MCP authority must not be accepted as the
+        // current official template merely because the remaining fields match.
         former.payload.enabled_capabilities.push(serde_json::from_value(json!({
             "capability": { "id": "mcp.resource", "version": "1.0.0" },
             "action_allowlist": []
         })).unwrap());
         former.reference.revision += 1;
         let stored = store.append_revision(Some(&reference), former.clone(), snapshot.clone(), "companion.default".into(), None).await.unwrap();
-        assert_eq!(control.internal_official_template(&owner, id).await.unwrap(), Some(OfficialPresetKey::CompanionDefault));
+        assert_eq!(control.internal_official_template(&owner, id).await.unwrap(), None);
         former.payload.instructions = "User-specific behavior".into();
         former.reference.revision += 1;
         let stored = store.append_revision(stored.preset.current_stable_revision.as_ref(), former, snapshot, "companion.default".into(), None).await.unwrap();

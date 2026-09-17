@@ -38,7 +38,7 @@ impl CodingPriorTask {
         operation: &str,
         events: &[CodingEngineEvent],
     ) -> Result<Option<Self>, CodingEngineError> {
-        let fail = |reason: &str| CodingEngineError::Checkpoint(reason.into());
+        let fail = |reason: &str| CodingEngineError::ReplayContract(reason.into());
         let Some(CodingEngineEvent::TurnStarted {
             binding,
             turn_operation_id,
