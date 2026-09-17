@@ -424,6 +424,7 @@ fn new_wave2_effect_request(
     input_digest: DigestHex,
     resource_key: String,
     strategy: nomifun_agent_session::EffectStrategy,
+    causation_event_id: nomifun_agent_contracts::EventId,
 ) -> nomifun_agent_session::EffectEventRequest {
     nomifun_agent_session::EffectEventRequest {
         agent_session_id: context.agent_session_id.clone(),
@@ -450,7 +451,7 @@ fn new_wave2_effect_request(
         )),
         correlation_id: nomifun_agent_contracts::CorrelationId::from(effect_id.to_owned()),
         strategy,
-        causation_event_id: None,
+        causation_event_id: Some(causation_event_id),
         payload: nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(
             StrictJsonValue(json!({})),
         ),
@@ -518,6 +519,20 @@ async fn begin_wave2_effect_with_strategy(
         );
     }
 
+    let causation_event_id = store
+        .effect_causation_event_id(
+            &context.agent_session_id,
+            &context.turn_id,
+            &context.operation_id,
+            &context.capability_id,
+            &context.action_id,
+        )
+        .await
+        .map_err(|error| {
+            Wave2HostPortError::unavailable(format!(
+                "canonical Tool causation could not be proven for the workspace effect: {error}"
+            ))
+        })?;
     let request = new_wave2_effect_request(
         &effect_id,
         context,
@@ -525,6 +540,7 @@ async fn begin_wave2_effect_with_strategy(
         input_digest.clone(),
         resource_key.clone(),
         strategy,
+        causation_event_id,
     );
     match store.record_effect_started(request.clone()).await {
         Ok(_) => Ok(Wave2EffectAdmission::Reserved(Wave2EffectReservation {
@@ -1016,6 +1032,14 @@ impl Wave2ApplicationHost {
                                 .await?;
                                 Ok(output)
                             }
+                            Err(owner_error)
+                                if owner_error.code == "EFFECT_OUTCOME_UNKNOWN" =>
+                            {
+                                // The index may already contain the staged
+                                // mutation. Preserve the durable pending fence
+                                // until an explicit index observation settles it.
+                                Err(owner_error)
+                            }
                             Err(owner_error) => {
                                 let _ = finish_wave2_effect(
                                     &reservation,
@@ -1363,20 +1387,8 @@ impl Wave2ApplicationHost {
         })?.clone();
         tokio::task::spawn_blocking(move || {
             let (repository, workspace_prefix) = scoped_repository(&workspace)?;
-            let mut index = repository.index().map_err(|error| {
-                Wave2HostPortError::new(
-                    "CAPABILITY_UNAVAILABLE",
-                    format!("workspace.vcs/stage could not open the Git index: {error}"),
-                )
-            })?;
-            let staged_paths = owner.stage(&repository, &mut index, &workspace_prefix, &relative)
+            let staged_paths = owner.stage_and_write(&repository, &workspace_prefix, &relative)
                 .map_err(|error| operation_error("workspace.vcs/stage", error))?;
-            index.write().map_err(|error| {
-                Wave2HostPortError::new(
-                    "CAPABILITY_UNAVAILABLE",
-                    format!("workspace.vcs/stage could not persist the Git index: {error}"),
-                )
-            })?;
             Ok::<_, Wave2HostPortError>(StrictJsonValue(json!({
                 "path": path_label,
                 "paths": staged_paths,
@@ -1957,8 +1969,9 @@ fn workspace_typed_binding<'a>(
 
 fn operation_error(capability_id: &str, error: AppError) -> Wave2HostPortError {
     let code = match &error {
-        AppError::Conflict(message)
-            if message.starts_with("artifact publication outcome is unknown") =>
+        error
+            if nomifun_file::artifact_publication_outcome_unknown(error)
+                || nomifun_file::vcs_stage_outcome_unknown(error) =>
         {
             "EFFECT_OUTCOME_UNKNOWN"
         }
@@ -2226,19 +2239,12 @@ mod tests {
     }
 
     async fn test_effect_store() -> nomifun_agent_session::AgentSessionStore {
-        static STORE: tokio::sync::OnceCell<nomifun_agent_session::AgentSessionStore> =
-            tokio::sync::OnceCell::const_new();
-        STORE
-            .get_or_init(|| async {
-                let database = nomifun_db::init_database_memory()
-                    .await
-                    .expect("in-memory Agent Store database");
-                nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
-                    .await
-                    .expect("canonical Agent Session Store")
-            })
+        let database = nomifun_db::init_database_memory()
             .await
-            .clone()
+            .expect("in-memory Agent Store database");
+        nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+            .await
+            .expect("canonical Agent Session Store")
     }
 
     async fn test_host(root: &Path) -> Wave2ApplicationHost {
@@ -2263,13 +2269,10 @@ mod tests {
         store: &nomifun_agent_session::AgentSessionStore,
         context: &Wave2HostContext,
     ) {
-        if store
+        let session_exists = store
             .get_live_session(&context.agent_session_id)
             .await
-            .is_ok()
-        {
-            return;
-        }
+            .is_ok();
         let preset_ref = PresetRevisionRef {
             preset_id: AgentPresetId::from("wave2-workspace-test"),
             revision: 1,
@@ -2295,42 +2298,78 @@ mod tests {
             next_seq: 1,
         };
         let session_key = format!("workspace-test-session:{}", context.agent_session_id.as_ref());
-        store
-            .create_session(nomifun_agent_session::CreateSessionRequest::new(
-                session,
-                1,
-                OperationId::from(format!("{session_key}:create")),
-                EventProducerId::from("session_api"),
-                IdempotencyKey::from(format!("{session_key}:create")),
-                CorrelationId::from(format!("{session_key}:create")),
-            ))
+        if !session_exists {
+            let created = store
+                .create_session(nomifun_agent_session::CreateSessionRequest::new(
+                    session,
+                    1,
+                    OperationId::from(format!("{session_key}:create")),
+                    EventProducerId::from("session_api"),
+                    IdempotencyKey::from(format!("{session_key}:create")),
+                    CorrelationId::from(format!("{session_key}:create")),
+                ))
+                .await
+                .expect("create durable effect test Session");
+            store
+                .append_event(&SessionEventAppend {
+                    agent_session_id: context.agent_session_id.clone(),
+                    event_id: EventId::from(format!("{session_key}:ready")),
+                    producer_id: EventProducerId::from("runtime_supervisor"),
+                    idempotency_key: IdempotencyKey::from(format!("{session_key}:ready")),
+                    runtime_binding_id: None,
+                    runtime_producer_seq: None,
+                    semantic_event: SemanticSessionEventDraft {
+                        kind: SessionEventKind("session/ready".to_owned()),
+                        kind_version: 1,
+                        correlation_id: CorrelationId::from(format!("{session_key}:ready")),
+                        causation_event_id: Some(created.opening_ack.event_id),
+                        payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
+                    },
+                })
+                .await
+                .expect("mark durable effect test Session ready");
+        }
+        let receipt = store
+            .read_turn_receipt(&context.agent_session_id, &context.turn_id)
             .await
-            .expect("create durable effect test Session");
-        let (_, turn) = store
-            .start_turn(
-                &context.agent_session_id,
-                EventProducerId::from("session_api"),
-                IdempotencyKey::from(format!("{session_key}:turn")),
-                context.turn_id.clone(),
-                StrictJsonValue(json!({"content": "exercise a workspace effect"})),
-            )
-            .await
-            .expect("start durable effect test Turn");
-        let turn_event_id = turn
-            .ack
-            .expect("turn start acknowledgement")
-            .event_id;
+            .expect("read durable effect test Turn");
+        let turn_event_id = match receipt.started_event {
+            Some(started) => started.event_id,
+            None => store
+                .start_turn(
+                    &context.agent_session_id,
+                    EventProducerId::from("session_api"),
+                    IdempotencyKey::from(format!(
+                        "{session_key}:turn:{}",
+                        context.turn_id.as_ref()
+                    )),
+                    context.turn_id.clone(),
+                    StrictJsonValue(json!({"content": "exercise a workspace effect"})),
+                )
+                .await
+                .expect("start durable effect test Turn")
+                .1
+                .ack
+                .expect("turn start acknowledgement")
+                .event_id,
+        };
+        let tool_key = format!(
+            "{session_key}:tool:{}:{}:{}",
+            context.operation_id.as_ref(),
+            context.capability_id.as_ref(),
+            context.action_id.as_ref()
+        );
         let tool = SessionEventAppend {
             agent_session_id: context.agent_session_id.clone(),
-            event_id: EventId::from(format!("{session_key}:tool")),
+            event_id: EventId::from(tool_key.clone()),
             producer_id: EventProducerId::from("capability_host"),
-            idempotency_key: IdempotencyKey::from(format!("{session_key}:tool")),
+            idempotency_key: IdempotencyKey::from(tool_key.clone()),
             runtime_binding_id: None,
             runtime_producer_seq: None,
             semantic_event: SemanticSessionEventDraft {
                 kind: SessionEventKind("tool/call-started".to_owned()),
                 kind_version: 1,
-                correlation_id: CorrelationId::from(format!("{session_key}:tool")),
+                correlation_id: CorrelationId::from(tool_key),
                 causation_event_id: Some(turn_event_id),
                 payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
                     "operation_id": context.operation_id.as_ref(),
@@ -2354,8 +2393,23 @@ mod tests {
         let capability_id = action_id.split('/').next().ok_or_else(|| {
             Wave2HostPortError::invalid_payload("test Action ID has no Module prefix")
         })?;
+        let action_identity_changed = context.action_id.as_ref() != action_id;
         context.capability_id = CapabilityId::from(capability_id.to_owned());
         context.action_id = ActionId::from(action_id.to_owned());
+        if action_identity_changed && context.idempotency_key.as_ref() == "idempotency-1" {
+            context.operation_id = OperationId::from(format!(
+                "{}:{action_id}",
+                context.operation_id.as_ref()
+            ));
+            context.idempotency_key = IdempotencyKey::from(format!(
+                "{}:{action_id}",
+                context.idempotency_key.as_ref()
+            ));
+            context.correlation_id = CorrelationId::from(format!(
+                "{}:{action_id}",
+                context.correlation_id.as_ref()
+            ));
+        }
         if effectful_workspace_action(action_id) {
             let store = host
                 .effect_store
@@ -2615,7 +2669,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(denied.code, "INVALID_PAYLOAD");
+        assert_eq!(denied.code, "RESOURCE_NOT_FOUND");
     }
 
     #[tokio::test]

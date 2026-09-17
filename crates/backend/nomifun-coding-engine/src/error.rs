@@ -60,8 +60,8 @@ pub enum CodingEngineError {
     #[error("Nomi context is {actual} bytes, above the {limit} byte limit")]
     ContextTooLarge { limit: usize, actual: usize },
 
-    #[error("Nomi replay/checkpoint data is invalid: {0}")]
-    Checkpoint(String),
+    #[error("Nomi replay contract is invalid: {0}")]
+    ReplayContract(String),
 
     #[error("Nomi compaction failed: {0}")]
     Compaction(String),

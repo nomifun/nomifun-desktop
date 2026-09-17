@@ -717,6 +717,17 @@ impl FileService {
                     .filter_map(|root| std::fs::canonicalize(root).ok())
                     .any(|root| candidate.starts_with(root))
             }
+            PathAuthority::Workspace(root) => {
+                let candidate = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    match std::env::current_dir() {
+                        Ok(current_dir) => current_dir.join(path),
+                        Err(_) => path.to_path_buf(),
+                    }
+                };
+                crate::path_safety::validate_workspace_candidate(&candidate, root).is_ok()
+            }
         }
     }
 
@@ -3497,6 +3508,50 @@ mod tests {
             root,
         )
         .unwrap()
+    }
+
+    async fn assert_owner_alias_is_not_agent_accessible(root: &std::path::Path) {
+        let svc = make_service();
+        let scope = patch_scope(root);
+        assert!(
+            svc.read_file_for_agent_session(&scope, "alias/artifacts/receipt")
+                .await
+                .is_err()
+        );
+        assert!(
+            svc.write_file_for_agent_session(
+                &scope,
+                "alias/artifacts/replacement",
+                b"attacker",
+            )
+            .await
+            .is_err()
+        );
+        assert!(!root.join(".nomifun/artifacts/replacement").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join(".nomifun/artifacts/receipt")).unwrap(),
+            "owned"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_file_owner_rejects_symlink_alias_into_nomifun() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".nomifun/artifacts")).unwrap();
+        std::fs::write(root.path().join(".nomifun/artifacts/receipt"), "owned").unwrap();
+        std::os::unix::fs::symlink(".nomifun", root.path().join("alias")).unwrap();
+        assert_owner_alias_is_not_agent_accessible(root.path()).await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn agent_file_owner_rejects_junction_alias_into_nomifun() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".nomifun/artifacts")).unwrap();
+        std::fs::write(root.path().join(".nomifun/artifacts/receipt"), "owned").unwrap();
+        junction::create(root.path().join(".nomifun"), root.path().join("alias")).unwrap();
+        assert_owner_alias_is_not_agent_accessible(root.path()).await;
     }
 
     fn replace_hunk(

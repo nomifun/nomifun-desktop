@@ -88,9 +88,9 @@ pub trait EngineResourcePort: Send + Sync + std::fmt::Debug {
     /// and original decoded SHA-256), not base64 model text. The page digest
     /// covers the projected representation; omitted extension metadata is not
     /// a complete remote snapshot. Images require the separate explicit port.
-    /// Production requires the selected, active mcp.resource ResourceProvider
-    /// and an explicitly selected bound server with connect/read (implicit
-    /// selection only when unique). This is NOT tool-call authority.
+    /// Production requires a selected namespaced MCP ResourceProvider
+    /// contribution and an explicitly selected bound server with connect/read.
+    /// This is resource-read authority, never broad tool-call authority.
     /// Dropping a read future abandons its result, not the platform-owned task.
     /// Engines must settle owned reads before the next model call or cleanup;
     /// uncertain owner outcomes must never be retried automatically.

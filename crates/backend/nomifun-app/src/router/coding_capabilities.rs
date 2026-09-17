@@ -1,16 +1,14 @@
 //! Live context and resource access under the admitted Conversation turn.
-//! Kernel capabilities are fixed; legacy activation journals fail closed.
+//! Kernel capabilities are fixed by the compiled Snapshot; no activation
+//! journal is read or reconstructed here.
 use std::sync::{Arc, Weak, atomic::Ordering};
 
 use async_trait::async_trait;
-use nomifun_agent_kernel::{CompiledSnapshot, SessionCapabilityState};
-use nomifun_api_types::RuntimeEngineBinding;
 use nomifun_chat_model_broker::ChatCausality;
 use nomifun_coding_engine::CodingEngineError;
-use nomifun_common::AppError;
-use nomifun_db::{SqlitePool, sqlx};
+use nomifun_db::sqlx;
 
-use super::{ActiveTurn, ConversationCodingHost, error};
+use super::{ActiveTurn, ConversationCodingHost};
 
 pub(super) struct HostPort(pub(super) Weak<ConversationCodingHost>);
 impl std::fmt::Debug for HostPort {
@@ -151,30 +149,4 @@ impl nomifun_engine_core::EngineResourcePort for HostPort {
         task.result().await.map_err(|error| fail(error.to_string()))?
             .map_err(|error| fail(error.to_string()))
     }
-}
-
-pub(super) async fn restore(
-    pool: &SqlitePool,
-    options: &nomifun_ai_agent::types::AgentRuntimeBuildOptions,
-    _binding: &RuntimeEngineBinding,
-    _compiled: &CompiledSnapshot,
-    _state: &SessionCapabilityState,
-) -> Result<(), AppError> {
-    // Fixed enabled capabilities have no activation history to replay. Keep
-    // legacy Sessions unavailable rather than inventing generation zero for
-    // their old transitions or migrating their exact Engine build identity.
-    let (has_legacy_activation,): (i64,) = sqlx::query_as(
-        "SELECT EXISTS(SELECT 1 FROM conversation_runtime_events \
-         WHERE conversation_id = ? AND json_extract(event_json, '$.event') = 'capabilities_activated')",
-    )
-    .bind(&options.conversation_id)
-    .fetch_one(pool)
-    .await
-    .map_err(error)?;
-    if has_legacy_activation != 0 {
-        return Err(error(
-            "Session unavailable: legacy capabilities_activated journal is incompatible with fixed enabled_capabilities; automatic replay and exact-build migration are not supported",
-        ));
-    }
-    Ok(())
 }

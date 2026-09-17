@@ -2094,6 +2094,7 @@ impl AgentEngine {
         // reduce the root user message to a summary) from inside this very loop.
         let round_requirement = user_content.clone();
         let turn_context = crate::context_contributor::TurnContext::from_user_content(
+            msg_id,
             source_message_id,
             &round_requirement,
             self.host_context

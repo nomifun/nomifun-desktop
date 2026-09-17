@@ -455,9 +455,15 @@ impl EngineSessionHost {
         let response = owner
             .get_session(&options.user_id, &options.conversation_id)
             .await?;
+        let persisted_binding = binding_from_extra(&response.extra)?;
         if response.conversation_id != options.conversation_id
-            || binding_from_extra(&response.extra)?.as_ref() != Some(binding)
+            || persisted_binding.as_ref() != Some(binding)
         {
+            tracing::warn!(
+                requested_binding = ?binding,
+                persisted_binding = ?persisted_binding,
+                "durable Session engine binding mismatch"
+            );
             return Err(conflict(
                 "durable Session engine binding differs from runtime request",
             ));

@@ -12,7 +12,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    ConnectionConfigRef, ResolvedMcpToolLock, ResourceBindingId, ResourceId, ResourceKind, TypedResourceBinding,
+    ActionId, CapabilityId, ConnectionConfigRef, ResolvedMcpToolLock, ResourceBindingId,
+    ResourceId, ResourceKind, TypedResourceBinding,
 };
 use nomifun_api_types::{
     AgentBindingValueDto, AgentResourceSelectionDto, TypedResourceBindingDto,
@@ -37,6 +38,8 @@ const MAX_RESOURCE_FIELD_BYTES: usize = 512;
 // may start without a base and gain its conversation-scoped, read/write policy
 // through the knowledge binding control before the first task is delivered.
 const OPTIONAL_UNBOUND_RESOURCE_KINDS: [&str; 1] = ["knowledge_base"];
+
+type FrozenActionAllowlists = BTreeMap<String, BTreeSet<ActionId>>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResourceSelectionResolutionError {
@@ -182,13 +185,21 @@ impl NomiCoreResourceBindingResolverRegistry {
     /// Single-resource resolution for capability-owned resources and explicit
     /// resource-only MCP bindings. Per-tool MCP invoke authority additionally
     /// requires saved Snapshot locks, supplied by `resolve_for_saved_binding`.
-    pub(crate) async fn resolve(
+    #[cfg(test)]
+    async fn resolve(
         &self,
         owner_id: &str,
         selections: &[AgentResourceSelectionDto],
         selected_capability_ids: &BTreeSet<String>,
     ) -> Result<Vec<TypedResourceBinding>, ResourceSelectionResolutionError> {
-        self.resolve_selected(owner_id, selections, selected_capability_ids, &[]).await
+        self.resolve_selected(
+            owner_id,
+            selections,
+            selected_capability_ids,
+            &FrozenActionAllowlists::new(),
+            &[],
+        )
+        .await
     }
 
     async fn resolve_selected(
@@ -196,6 +207,7 @@ impl NomiCoreResourceBindingResolverRegistry {
         owner_id: &str,
         selections: &[AgentResourceSelectionDto],
         selected_capability_ids: &BTreeSet<String>,
+        action_allowlists: &FrozenActionAllowlists,
         mcp_locks: &[ResolvedMcpToolLock],
     ) -> Result<Vec<TypedResourceBinding>, ResourceSelectionResolutionError> {
         if selections.len() > MAX_RESOURCE_SELECTIONS {
@@ -241,7 +253,7 @@ impl NomiCoreResourceBindingResolverRegistry {
             ));
         }
 
-        let mut required = required_operations(selected_capability_ids);
+        let mut required = required_operations(selected_capability_ids, action_allowlists)?;
         let selected_mcp_servers = selections
             .iter()
             .filter(|selection| selection.resource_kind == "mcp_server")
@@ -340,7 +352,7 @@ impl NomiCoreResourceBindingResolverRegistry {
                     && lock.server_id.as_ref() == resource_id.as_str())).cloned().collect::<BTreeSet<_>>();
             // Resource-only members must not inherit invoke from tools frozen
             // to another server, even though per-tool policy also filters it.
-            let mut operations = required_operations(&resource_capabilities)
+            let mut operations = required_operations(&resource_capabilities, action_allowlists)?
                 .get(kind).cloned().unwrap_or_default();
             if kind == "mcp_server" {
                 operations.extend(["connect".to_owned(), "read".to_owned()]);
@@ -398,7 +410,7 @@ impl NomiCoreResourceBindingResolverRegistry {
         mut binding: AgentBindingValueDto,
         selections: &[AgentResourceSelectionDto],
     ) -> Result<AgentBindingValueDto, ResourceSelectionResolutionError> {
-        let (_, revision, snapshot) = control_plane
+        let (_, _revision, snapshot) = control_plane
             .saved_binding_artifacts(owner, &binding)
             .await
             .map_err(|error| {
@@ -408,13 +420,24 @@ impl NomiCoreResourceBindingResolverRegistry {
                     json!({ "control_plane_code": error.code().as_ref() }),
                 )
             })?;
-        let capability_ids = revision
-            .payload
+        let capability_ids = snapshot
+            .content
             .enabled_capabilities
             .iter()
-            .map(|selection| selection.capability.id.as_ref().to_owned())
+            .map(|capability| capability.capability.id.as_ref().to_owned())
             .collect::<BTreeSet<_>>();
-        let derived_kinds = required_operations(&capability_ids)
+        let action_allowlists = snapshot
+            .content
+            .enabled_capabilities
+            .iter()
+            .map(|capability| {
+                (
+                    capability.capability.id.as_ref().to_owned(),
+                    capability.action_allowlist.clone(),
+                )
+            })
+            .collect::<FrozenActionAllowlists>();
+        let derived_kinds = required_operations(&capability_ids, &action_allowlists)?
             .into_keys()
             .map(ResourceKind::from)
             .collect::<BTreeSet<_>>();
@@ -437,7 +460,13 @@ impl NomiCoreResourceBindingResolverRegistry {
             ));
         }
         binding.typed_resource_bindings = self
-            .resolve_selected(owner.as_ref(), selections, &capability_ids, &snapshot.content.mcp_tool_locks)
+            .resolve_selected(
+                owner.as_ref(),
+                selections,
+                &capability_ids,
+                &action_allowlists,
+                &snapshot.content.mcp_tool_locks,
+            )
             .await?
             .into_iter()
             .map(|binding| TypedResourceBindingDto {
@@ -487,7 +516,8 @@ const SUPPORTED_RESOURCE_KINDS: [&str; 14] = [
 
 fn required_operations(
     capability_ids: &BTreeSet<String>,
-) -> BTreeMap<String, BTreeSet<String>> {
+    action_allowlists: &FrozenActionAllowlists,
+) -> Result<BTreeMap<String, BTreeSet<String>>, ResourceSelectionResolutionError> {
     let mut required = BTreeMap::<String, BTreeSet<String>>::new();
     let mut grant = |kind: &str, operation: &str| {
         required
@@ -496,16 +526,61 @@ fn required_operations(
             .insert(operation.to_owned());
     };
     for capability in capability_ids {
+        if nomifun_agent_domain_wave2::WORKSPACE_EXECUTION_CAPABILITY_IDS
+            .contains(&capability.as_str())
+        {
+            let actions = action_allowlists.get(capability).ok_or_else(|| {
+                ResourceSelectionResolutionError::new(
+                    "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH",
+                    "a Workspace Module is missing its frozen exact Action grant",
+                    json!({ "capability_id": capability }),
+                )
+            })?;
+            let resource_kinds =
+                nomifun_agent_domain_wave2::required_resource_kinds(capability).ok_or_else(|| {
+                    ResourceSelectionResolutionError::new(
+                        "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH",
+                        "a Workspace Module has no canonical resource declaration",
+                        json!({ "capability_id": capability }),
+                    )
+                })?;
+            if resource_kinds.len() != 1 {
+                return Err(ResourceSelectionResolutionError::new(
+                    "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH",
+                    "a Workspace Module must declare exactly one canonical resource kind",
+                    json!({ "capability_id": capability }),
+                ));
+            }
+            let resource_kind = resource_kinds
+                .iter()
+                .next()
+                .expect("exactly one Workspace resource kind");
+            let capability_id = CapabilityId::from(capability.clone());
+            for action_id in actions {
+                let operation =
+                    nomifun_agent_domain_wave2::required_action_resource_operation(
+                        &capability_id,
+                        action_id,
+                    )
+                    .ok_or_else(|| {
+                        ResourceSelectionResolutionError::new(
+                            "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH",
+                            "a frozen Workspace Action has no canonical resource operation",
+                            json!({
+                                "capability_id": capability,
+                                "action_id": action_id.as_ref(),
+                            }),
+                        )
+                    })?;
+                grant(resource_kind.as_ref(), operation);
+            }
+            continue;
+        }
         match capability.as_str() {
-            "fs.read" | "fs.search" | "fs.watch" | "fs.snapshot" | "vcs.status" | "vcs.diff"
-            | "workspace.bind" => grant("workspace", "read"),
-            "fs.write" | "fs.patch" | "fs.delete" | "vcs.stage" | "vcs.commit"
-            | "vcs.push" | "workspace.artifacts" => grant("workspace", "write"),
-            "process.exec" | "agent.delegate" | "agent.execution.steer" | "process.session" => {
+            "agent.delegate" | "agent.execution.steer" => {
                 grant("process_session", "execute")
             }
             "agent.execution.observe" => grant("process_session", "observe"),
-            "terminal.pty" => grant("terminal", "use"),
             "knowledge.search" => grant("knowledge_base", "search"),
             "knowledge.read" | "knowledge.embedding" => grant("knowledge_base", "read"),
             "knowledge.rerank" => {
@@ -555,7 +630,7 @@ fn required_operations(
             _ => {}
         }
     }
-    required
+    Ok(required)
 }
 
 struct ProductResourceDependencies {
@@ -1124,8 +1199,18 @@ mod tests {
             .unwrap_err();
         assert_eq!(duplicate.code(), "RESOURCE_SELECTION_INVALID");
 
+        let workspace_module = nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID.to_owned();
         let missing = registry("workspace", &["read"])
-            .resolve("owner-1", &[], &BTreeSet::from(["fs.read".to_owned()]))
+            .resolve_selected(
+                "owner-1",
+                &[],
+                &BTreeSet::from([workspace_module.clone()]),
+                &BTreeMap::from([(
+                    workspace_module,
+                    BTreeSet::from([ActionId::from("workspace.files/read")]),
+                )]),
+                &[],
+            )
             .await
             .unwrap_err();
         assert_eq!(missing.code(), "RESOURCE_SELECTION_REQUIRED");
@@ -1233,6 +1318,7 @@ mod tests {
                 "owner-1",
                 &selections,
                 &BTreeSet::from([capability_id]),
+                &FrozenActionAllowlists::new(),
                 &[lock],
             )
             .await
@@ -1259,17 +1345,150 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn workspace_modules_derive_only_their_frozen_exact_action_operations() {
+        for (module_id, action_id, resource_kind, operation) in [
+            (
+                nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID,
+                "workspace.files/read",
+                "workspace",
+                "read",
+            ),
+            (
+                nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID,
+                "workspace.files/delete",
+                "workspace",
+                "write",
+            ),
+            (
+                nomifun_agent_domain_wave2::WORKSPACE_VCS_MODULE_ID,
+                "workspace.vcs/status",
+                "workspace",
+                "read",
+            ),
+            (
+                nomifun_agent_domain_wave2::WORKSPACE_VCS_MODULE_ID,
+                "workspace.vcs/push",
+                "workspace",
+                "write",
+            ),
+            (
+                nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID,
+                "workspace.process/poll",
+                "process_session",
+                "execute",
+            ),
+            (
+                nomifun_agent_domain_wave2::WORKSPACE_ARTIFACTS_MODULE_ID,
+                "workspace.artifacts/read",
+                "workspace",
+                "read",
+            ),
+            (
+                nomifun_agent_domain_wave2::WORKSPACE_ARTIFACTS_MODULE_ID,
+                "workspace.artifacts/publish",
+                "workspace",
+                "write",
+            ),
+        ] {
+            let capability_ids = BTreeSet::from([module_id.to_owned()]);
+            let action_allowlists = BTreeMap::from([(
+                module_id.to_owned(),
+                BTreeSet::from([ActionId::from(action_id)]),
+            )]);
+            let bindings = registry(resource_kind, &[operation])
+                .resolve_selected(
+                    "owner-1",
+                    &[AgentResourceSelectionDto {
+                        resource_kind: resource_kind.into(),
+                        resource_id: "resource-1".into(),
+                    }],
+                    &capability_ids,
+                    &action_allowlists,
+                    &[],
+                )
+                .await
+                .unwrap();
+            assert_eq!(bindings.len(), 1);
+            assert_eq!(bindings[0].operations, BTreeSet::from([operation.into()]));
+        }
+
+        let module_id = nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID;
+        let capability_ids = BTreeSet::from([module_id.to_owned()]);
+        let bindings = registry("workspace", &["read", "write"])
+            .resolve_selected(
+                "owner-1",
+                &[AgentResourceSelectionDto {
+                    resource_kind: "workspace".into(),
+                    resource_id: "resource-1".into(),
+                }],
+                &capability_ids,
+                &BTreeMap::from([(
+                    module_id.to_owned(),
+                    BTreeSet::from([
+                        ActionId::from("workspace.files/read"),
+                        ActionId::from("workspace.files/delete"),
+                    ]),
+                )]),
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            bindings[0].operations,
+            BTreeSet::from(["read".into(), "write".into()])
+        );
+    }
+
+    #[test]
+    fn retired_workspace_capability_ids_never_derive_resource_authority() {
+        let retired = BTreeSet::from(
+            [
+                "fs.read",
+                "fs.search",
+                "fs.watch",
+                "fs.snapshot",
+                "fs.write",
+                "fs.patch",
+                "fs.delete",
+                "vcs.status",
+                "vcs.diff",
+                "vcs.stage",
+                "vcs.commit",
+                "vcs.push",
+                "workspace.bind",
+                "process.exec",
+                "process.session",
+                "terminal.pty",
+            ]
+            .map(str::to_owned),
+        );
+        assert!(
+            required_operations(&retired, &FrozenActionAllowlists::new())
+                .unwrap()
+                .is_empty()
+        );
+
+        let error = required_operations(
+            &BTreeSet::from([
+                nomifun_agent_domain_wave2::WORKSPACE_ARTIFACTS_MODULE_ID.to_owned(),
+            ]),
+            &FrozenActionAllowlists::new(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH");
+    }
+
     #[test]
     fn all_published_resource_kinds_have_capability_operation_derivation() {
         let server_id = nomifun_api_types::McpServerId::parse(MCP_SERVER_A).unwrap();
         let mcp_tool =
             nomifun_mcp::canonical_mcp_tool_capability_id(&server_id, "lookup").unwrap();
         let capabilities = BTreeSet::from([
-            "fs.read".into(),
+            nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID.into(),
             "knowledge.search".into(),
             "memory.project.read".into(),
-            "process.exec".into(),
-            "terminal.pty".into(),
+            nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID.into(),
             mcp_tool,
             "companion.persona".into(),
             "memory.companion.recall".into(),
@@ -1281,10 +1500,24 @@ mod tests {
             "creation.image".into(),
             "plugin.read".into(),
         ]);
-        let derived = required_operations(&capabilities);
+        let action_allowlists = BTreeMap::from([
+            (
+                nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID.into(),
+                BTreeSet::from([ActionId::from("workspace.files/read")]),
+            ),
+            (
+                nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID.into(),
+                BTreeSet::from([ActionId::from("workspace.process/exec")]),
+            ),
+        ]);
+        let derived = required_operations(&capabilities, &action_allowlists).unwrap();
+        let expected = SUPPORTED_RESOURCE_KINDS
+            .into_iter()
+            .filter(|kind| *kind != "terminal")
+            .collect::<BTreeSet<_>>();
         assert_eq!(
             derived.keys().map(String::as_str).collect::<BTreeSet<_>>(),
-            SUPPORTED_RESOURCE_KINDS.into_iter().collect()
+            expected
         );
     }
 

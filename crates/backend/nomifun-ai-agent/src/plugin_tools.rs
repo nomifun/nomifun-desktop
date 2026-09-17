@@ -34,7 +34,7 @@ use nomifun_agent_kernel::{
     KernelError, KernelRegistry,
     MaterializedCapability, MaterializedRegistry, SessionCapabilityState,
 };
-use nomifun_common::AppError;
+use nomifun_common::{AgentToolPolicy, AppError};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -69,6 +69,32 @@ fn has_function_tool_action(manifest: &CapabilityManifest) -> bool {
         .actions
         .iter()
         .any(|action| action.presentation == ToolPresentationKind::FunctionTool)
+}
+
+fn restricted_workspace_action_allowed(
+    policy: AgentToolPolicy,
+    capability_id: &CapabilityId,
+    action_id: &ActionId,
+) -> bool {
+    match policy {
+        AgentToolPolicy::Full => true,
+        AgentToolPolicy::ReadOnly => {
+            capability_id.as_ref() == "workspace.files"
+                && matches!(
+                    action_id.as_ref(),
+                    "workspace.files/read" | "workspace.files/search"
+                )
+        }
+        AgentToolPolicy::ReadShell => {
+            (capability_id.as_ref() == "workspace.files"
+                && matches!(
+                    action_id.as_ref(),
+                    "workspace.files/read" | "workspace.files/search"
+                ))
+                || (capability_id.as_ref() == "workspace.process"
+                    && action_id.as_ref() == "workspace.process/exec")
+        }
+    }
 }
 
 fn middleware_phase(manifest: &CapabilityManifest) -> Option<&'static str> {
@@ -968,10 +994,21 @@ impl NomiPluginProductToolAction {
 #[derive(Clone, Debug, PartialEq)]
 pub struct NomiPluginToolInvocation {
     identity: NomiPluginToolActionIdentity,
+    turn_id: OperationId,
     operation_id: OperationId,
     idempotency_key: IdempotencyKey,
     correlation_id: CorrelationId,
     input: StrictJsonValue,
+}
+
+impl NomiPluginToolInvocation {
+    pub fn turn_id(&self) -> &OperationId {
+        &self.turn_id
+    }
+
+    pub fn operation_id(&self) -> &OperationId {
+        &self.operation_id
+    }
 }
 
 #[async_trait]
@@ -2251,11 +2288,12 @@ impl KernelNomiPluginToolSession {
             .content()
             .contributions()
         {
-            if !constraints.allows_capability(resolved.capability.id.as_ref())
+            if (!constraints.restricted()
+                && !constraints.allows_capability(resolved.capability.id.as_ref()))
                 || (constraints.restricted()
-                    && (resolved.contribution_lock.source_kind != ContributionSourceKind::PlatformBuiltin
-                        || resolved.resolved_source.source_kind != PluginSourceKind::Bundled
-                        || !matches!(resolved.capability.id.as_ref(), "fs.read" | "fs.search" | "process.exec")))
+                    && (resolved.contribution_lock.source_kind
+                        != ContributionSourceKind::PlatformBuiltin
+                        || resolved.resolved_source.source_kind != PluginSourceKind::Bundled))
             { continue; }
             let schema_source = match resolved.contribution_lock.source_kind {
                 ContributionSourceKind::PluginMount => {
@@ -2304,6 +2342,12 @@ impl KernelNomiPluginToolSession {
             })?;
             for action in &manifest.contributions.actions {
                 if !policy.allowed_actions.contains(&action.action_id)
+                    || (constraints.restricted()
+                        && !restricted_workspace_action_allowed(
+                            constraints.tool_scope,
+                            &manifest.id,
+                            &action.action_id,
+                        ))
                     || action.presentation != ToolPresentationKind::FunctionTool
                 {
                     continue;
@@ -3155,6 +3199,14 @@ struct KernelNomiPluginToolInvoker {
 impl KernelNomiPluginToolInvoker {
     fn prepare(&self, mut request: NomiPluginToolInvocation)
         -> Result<(nomifun_agent_kernel::ActiveCapabilitySetSnapshot, CapabilityInvocationRequest), NomiPluginToolError> {
+        if request.turn_id.as_ref().trim().is_empty()
+            || request.turn_id.as_ref() == request.operation_id.as_ref()
+        {
+            return Err(NomiPluginToolError::Contract(
+                "Plugin Tool requires an independent host-owned Agent Turn identity"
+                    .to_owned(),
+            ));
+        }
         let key = (
             request.identity.resolved_capability.capability.id.clone(),
             request.identity.action.action_id.clone(),
@@ -3183,7 +3235,7 @@ impl KernelNomiPluginToolInvoker {
                     principal: self.owner.clone(),
                     session_owner: self.owner.clone(),
                     agent_session_id: self.agent_session_id.clone(),
-                    turn_id: request.operation_id.clone(),
+                    turn_id: request.turn_id,
                     operation_id: request.operation_id,
                     idempotency_key: request.idempotency_key,
                     correlation_id: request.correlation_id,
@@ -3232,7 +3284,7 @@ impl NomiPluginProductTool {
 impl NomiPluginTool {
     fn invocation(&self, input: Value, context: &ToolExecutionContext) -> NomiPluginToolInvocation {
         let key = format!("nomi-plugin:{}", context.operation_id());
-        NomiPluginToolInvocation { identity: self.action.identity.clone(), operation_id: key.clone().into(),
+        NomiPluginToolInvocation { identity: self.action.identity.clone(), turn_id: context.turn_id().to_owned().into(), operation_id: key.clone().into(),
             idempotency_key: key.clone().into(), correlation_id: key.into(), input: StrictJsonValue(input) }
     }
 }
@@ -3856,11 +3908,14 @@ mod dynamic_error_tests {
                 },
                 input_schema_digest: digest.into(),
             },
+            turn_id: "canonical-agent-turn".into(),
             operation_id: "receipt-preflight-operation".into(),
             idempotency_key: "receipt-preflight-key".into(),
             correlation_id: "receipt-preflight-correlation".into(),
             input: StrictJsonValue(serde_json::json!({"prompt": "a cat"})),
         };
+        assert_eq!(request.turn_id().as_ref(), "canonical-agent-turn");
+        assert_ne!(request.turn_id(), request.operation_id());
         assert!(is_builtin_creation(&request.identity));
         let delegate = Arc::new(AdmissionOnly {
             expected: request.clone(),
@@ -3880,6 +3935,56 @@ mod dynamic_error_tests {
         assert!(matches!(invoker.preflight(request).await,
             Err(NomiPluginToolError::Contract(message)) if message == "admission denied"));
         assert_eq!(delegate.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn restricted_workspace_policy_grants_exact_actions_not_whole_modules() {
+        let files = CapabilityId::from("workspace.files");
+        let process = CapabilityId::from("workspace.process");
+        for action in ["workspace.files/read", "workspace.files/search"] {
+            assert!(restricted_workspace_action_allowed(
+                AgentToolPolicy::ReadOnly,
+                &files,
+                &ActionId::from(action),
+            ));
+            assert!(restricted_workspace_action_allowed(
+                AgentToolPolicy::ReadShell,
+                &files,
+                &ActionId::from(action),
+            ));
+        }
+        for action in [
+            "workspace.files/write",
+            "workspace.files/patch",
+            "workspace.files/delete",
+        ] {
+            assert!(!restricted_workspace_action_allowed(
+                AgentToolPolicy::ReadOnly,
+                &files,
+                &ActionId::from(action),
+            ));
+            assert!(!restricted_workspace_action_allowed(
+                AgentToolPolicy::ReadShell,
+                &files,
+                &ActionId::from(action),
+            ));
+        }
+        assert!(restricted_workspace_action_allowed(
+            AgentToolPolicy::ReadShell,
+            &process,
+            &ActionId::from("workspace.process/exec"),
+        ));
+        for action in [
+            "workspace.process/start",
+            "workspace.process/input",
+            "workspace.process/cancel",
+        ] {
+            assert!(!restricted_workspace_action_allowed(
+                AgentToolPolicy::ReadShell,
+                &process,
+                &ActionId::from(action),
+            ));
+        }
     }
 
     #[tokio::test]

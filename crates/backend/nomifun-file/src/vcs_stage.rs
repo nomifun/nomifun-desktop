@@ -1,4 +1,5 @@
 use std::ffi::{OsStr, OsString};
+use std::fs::File;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -12,11 +13,110 @@ use same_file::Handle as SameFileHandle;
 use crate::artifact_store::is_workspace_owner_component;
 
 const MAX_STAGE_ENTRIES: usize = 100_000;
+const VCS_STAGE_OUTCOME_UNKNOWN: &str = "vcs stage publication outcome is unknown";
+
+pub fn vcs_stage_outcome_unknown(error: &AppError) -> bool {
+    error.to_string().contains(VCS_STAGE_OUTCOME_UNKNOWN)
+}
 
 pub struct WorkspaceVcsStageOwner {
     root: PathBuf,
     root_identity: SameFileHandle,
     dir: Arc<Dir>,
+}
+
+struct GitIndexTransaction {
+    index_path: PathBuf,
+    lock_path: PathBuf,
+    working_path: PathBuf,
+    working_lock_path: PathBuf,
+    index: Option<Index>,
+    committed: bool,
+}
+
+impl GitIndexTransaction {
+    fn begin(repository: &Repository) -> Result<Self, AppError> {
+        let current = repository.index().map_err(git_error)?;
+        let index_path = current
+            .path()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| AppError::Conflict("Git repository has no on-disk index".into()))?;
+        drop(current);
+
+        let lock_path = append_path_suffix(&index_path, ".lock");
+        let working_path = append_path_suffix(&lock_path, ".nomifun-stage");
+        let working_lock_path = append_path_suffix(&working_path, ".lock");
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+            .map_err(|error| {
+                AppError::Conflict(format!(
+                    "Git index is already locked by another writer: {error}"
+                ))
+            })?;
+        let result = (|| {
+            lock.sync_all().map_err(io_error)?;
+            drop(lock);
+            let _ = std::fs::remove_file(&working_path);
+            let _ = std::fs::remove_file(&working_lock_path);
+            if index_path.exists() {
+                std::fs::copy(&index_path, &working_path).map_err(io_error)?;
+            }
+            let index = Index::open(&working_path).map_err(git_error)?;
+            Ok(Self {
+                index_path,
+                lock_path: lock_path.clone(),
+                working_path: working_path.clone(),
+                working_lock_path: working_lock_path.clone(),
+                index: Some(index),
+                committed: false,
+            })
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&lock_path);
+            let _ = std::fs::remove_file(&working_path);
+            let _ = std::fs::remove_file(&working_lock_path);
+        }
+        result
+    }
+
+    fn index_mut(&mut self) -> &mut Index {
+        self.index.as_mut().expect("open Git index transaction")
+    }
+
+    fn commit(mut self) -> Result<(), AppError> {
+        self.index_mut().write().map_err(git_error)?;
+        self.index.take();
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.working_path)
+            .and_then(|file| file.sync_all())
+            .map_err(io_error)?;
+        replace_index_file(&self.working_path, &self.index_path).map_err(|error| {
+            AppError::Internal(format!("{VCS_STAGE_OUTCOME_UNKNOWN}: {error}"))
+        })?;
+        std::fs::remove_file(&self.lock_path).map_err(|error| {
+            AppError::Internal(format!("{VCS_STAGE_OUTCOME_UNKNOWN}: {error}"))
+        })?;
+        sync_parent_directory(&self.index_path).map_err(|error| {
+            AppError::Internal(format!("{VCS_STAGE_OUTCOME_UNKNOWN}: {error}"))
+        })?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for GitIndexTransaction {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.lock_path);
+        }
+        let _ = std::fs::remove_file(&self.working_path);
+        let _ = std::fs::remove_file(&self.working_lock_path);
+    }
 }
 
 impl WorkspaceVcsStageOwner {
@@ -57,7 +157,47 @@ impl WorkspaceVcsStageOwner {
         Ok(())
     }
 
-    pub fn stage(
+    pub fn stage_and_write(
+        &self,
+        repository: &Repository,
+        repository_prefix: &str,
+        relative: &Path,
+    ) -> Result<Vec<String>, AppError> {
+        self.stage_and_write_with_hook(repository, repository_prefix, relative, || {})
+    }
+
+    fn stage_and_write_with_hook<F: FnOnce()>(
+        &self,
+        repository: &Repository,
+        repository_prefix: &str,
+        relative: &Path,
+        after_resolve: F,
+    ) -> Result<Vec<String>, AppError> {
+        let mut transaction = GitIndexTransaction::begin(repository)?;
+        let staged = self.stage_with_hook(
+            repository,
+            transaction.index_mut(),
+            repository_prefix,
+            relative,
+            after_resolve,
+        )?;
+        transaction.commit()?;
+        // libgit2 caches the repository-owned Index object. The transaction
+        // publishes through the standard on-disk lock protocol, so force that
+        // cache to observe the committed file before this owner returns.
+        repository
+            .index()
+            .and_then(|mut index| index.read(true))
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "{VCS_STAGE_OUTCOME_UNKNOWN}: repository index cache refresh failed: {error}"
+                ))
+            })?;
+        Ok(staged)
+    }
+
+    #[cfg(test)]
+    fn stage(
         &self,
         repository: &Repository,
         index: &mut Index,
@@ -84,11 +224,17 @@ impl WorkspaceVcsStageOwner {
                 let identity = dir_identity(&directory)?;
                 after_resolve();
                 self.verify_root()?;
-                for path in indexed_paths_for_target(index, &repo_target)? {
+                let indexed = indexed_paths_for_target(index, &repo_target)?;
+                let mut staged = indexed
+                    .iter()
+                    .map(|path| portable(path))
+                    .collect::<Result<Vec<_>, _>>()?;
+                for path in indexed {
                     index.remove_path(&path).map_err(git_error)?;
                 }
-                let mut staged = Vec::new();
-                collect_directory(repository, index, &directory, &repo_target, &mut staged)?;
+                let mut added = Vec::new();
+                collect_directory(repository, index, &directory, &repo_target, &mut added)?;
+                staged.extend(added);
                 let Resolved::Directory(reopened) = resolve_nofollow(&self.dir, &relative)
                     .map_err(io_error)?
                 else {
@@ -102,7 +248,7 @@ impl WorkspaceVcsStageOwner {
                     ));
                 }
                 self.verify_root()?;
-                Ok(staged)
+                normalize_stage_receipt(staged, repository_prefix)
             }
             Ok(Resolved::File { parent, name }) => {
                 after_resolve();
@@ -124,7 +270,7 @@ impl WorkspaceVcsStageOwner {
                     ));
                 }
                 self.verify_root()?;
-                Ok(vec![path])
+                normalize_stage_receipt(vec![path], repository_prefix)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 after_resolve();
@@ -139,7 +285,7 @@ impl WorkspaceVcsStageOwner {
                     removed.push(portable(&path)?);
                 }
                 self.verify_root()?;
-                Ok(removed)
+                normalize_stage_receipt(removed, repository_prefix)
             }
             Err(error) => Err(AppError::Forbidden(format!(
                 "VCS stage path is not a pinned regular file/directory: {error}"
@@ -301,13 +447,102 @@ fn indexed_paths_for_target(index: &Index, target: &str) -> Result<Vec<PathBuf>,
                 .is_some_and(|suffix| suffix.starts_with('/'))
         {
             output.push(PathBuf::from(candidate));
+            if output.len() > MAX_STAGE_ENTRIES {
+                return Err(AppError::Conflict(format!(
+                    "VCS stage exceeds {MAX_STAGE_ENTRIES} entries"
+                )));
+            }
         }
+    }
+    Ok(output)
+}
+
+fn normalize_stage_receipt(
+    repository_paths: Vec<String>,
+    repository_prefix: &str,
+) -> Result<Vec<String>, AppError> {
+    let prefix = repository_prefix.trim_matches('/');
+    let mut output = repository_paths
+        .into_iter()
+        .map(|path| {
+            if prefix.is_empty() {
+                return Ok(path);
+            }
+            path.strip_prefix(prefix)
+                .and_then(|suffix| suffix.strip_prefix('/'))
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    AppError::Conflict(format!(
+                        "Git index path {path:?} escaped workspace prefix {prefix:?}"
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    output.sort();
+    output.dedup();
+    if output.len() > MAX_STAGE_ENTRIES {
+        return Err(AppError::Conflict(format!(
+            "VCS stage exceeds {MAX_STAGE_ENTRIES} entries"
+        )));
     }
     Ok(output)
 }
 
 fn join_repo_path(prefix: &str, path: &str) -> String { match (prefix.is_empty(), path.is_empty()) { (true, _) => path.into(), (_, true) => prefix.into(), _ => format!("{prefix}/{path}") } }
 fn portable(path: &Path) -> Result<String, AppError> { path.components().map(|component| match component { Component::Normal(value) => value.to_str().map(str::to_owned).ok_or_else(|| AppError::BadRequest("VCS path is not UTF-8".into())), _ => Err(AppError::BadRequest("VCS path is not normalized".into())) }).collect::<Result<Vec<_>, _>>().map(|parts| parts.join("/")) }
+fn append_path_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+#[cfg(not(windows))]
+fn replace_index_file(source: &Path, target: &Path) -> Result<(), AppError> {
+    std::fs::rename(source, target).map_err(io_error)
+}
+
+#[cfg(windows)]
+fn replace_index_file(source: &Path, target: &Path) -> Result<(), AppError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let target = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both paths are NUL-terminated and retained for the call.
+    if unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            target.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(io_error(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+fn sync_parent_directory(path: &Path) -> Result<(), AppError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::Conflict("Git index has no parent directory".into()))?;
+    match File::open(parent).and_then(|directory| directory.sync_all()) {
+        Ok(()) => Ok(()),
+        #[cfg(windows)]
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
+        Err(error) => Err(io_error(error)),
+    }
+}
 fn io_error(error: std::io::Error) -> AppError { AppError::Conflict(error.to_string()) }
 fn git_error(error: git2::Error) -> AppError { AppError::Conflict(error.to_string()) }
 
@@ -325,10 +560,50 @@ mod tests {
         fs::write(root.path().join("src/lib.rs"), "safe").unwrap();
         let repository = repo(root.path());
         let owner = WorkspaceVcsStageOwner::new(root.path()).unwrap();
-        let mut index = repository.index().unwrap();
-        owner.stage(&repository, &mut index, "", Path::new("src")).unwrap();
+        owner
+            .stage_and_write(&repository, "", Path::new("src"))
+            .unwrap();
+        let index = repository.index().unwrap();
         let entry = index.get_path(Path::new("src/lib.rs"), 0).unwrap();
         assert_eq!(repository.find_blob(entry.id).unwrap().content(), b"safe");
+    }
+
+    #[test]
+    fn repository_index_lock_prevents_second_host_lost_update() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("first.txt"), "first").unwrap();
+        fs::write(root.path().join("second.txt"), "second").unwrap();
+        let repository = repo(root.path());
+        let first_owner = WorkspaceVcsStageOwner::new(root.path()).unwrap();
+        let second_owner = WorkspaceVcsStageOwner::new(root.path()).unwrap();
+        let root_path = root.path().to_path_buf();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first = std::thread::spawn(move || {
+            let repository = Repository::open(root_path).unwrap();
+            first_owner.stage_and_write_with_hook(
+                &repository,
+                "",
+                Path::new("first.txt"),
+                || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+            )
+        });
+        entered_rx.recv().unwrap();
+        assert!(second_owner
+            .stage_and_write(&repository, "", Path::new("second.txt"))
+            .is_err());
+        release_tx.send(()).unwrap();
+        first.join().unwrap().unwrap();
+
+        second_owner
+            .stage_and_write(&repository, "", Path::new("second.txt"))
+            .unwrap();
+        let index = repository.index().unwrap();
+        assert!(index.get_path(Path::new("first.txt"), 0).is_some());
+        assert!(index.get_path(Path::new("second.txt"), 0).is_some());
     }
 
     #[test]
@@ -347,15 +622,67 @@ mod tests {
         fs::remove_file(root.path().join("deleted.txt")).unwrap();
         fs::create_dir_all(root.path().join(".nomifun/artifacts")).unwrap();
         fs::write(root.path().join(".nomifun/artifacts/receipt"), "owned").unwrap();
-        owner
+        let receipt = owner
             .stage(&repository, &mut index, "", Path::new(""))
             .unwrap();
+        assert_eq!(receipt, vec!["deleted.txt"]);
         assert!(index.get_path(Path::new("deleted.txt"), 0).is_none());
         assert!(
             index
                 .iter()
                 .all(|entry| !entry.path.starts_with(b".nomifun/"))
         );
+    }
+
+    #[test]
+    fn nested_workspace_receipt_is_complete_sorted_and_workspace_relative() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("projects/demo");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("deleted.txt"), "delete me").unwrap();
+        fs::write(workspace.join("kept.txt"), "before").unwrap();
+        let repository = repo(root.path());
+        let owner = WorkspaceVcsStageOwner::new(&workspace).unwrap();
+        owner
+            .stage_and_write(&repository, "projects/demo", Path::new(""))
+            .unwrap();
+
+        fs::remove_file(workspace.join("deleted.txt")).unwrap();
+        fs::write(workspace.join("kept.txt"), "after").unwrap();
+        fs::write(workspace.join("new.txt"), "new").unwrap();
+        let receipt = owner
+            .stage_and_write(&repository, "projects/demo", Path::new(""))
+            .unwrap();
+        assert_eq!(receipt, vec!["deleted.txt", "kept.txt", "new.txt"]);
+
+        let index = repository.index().unwrap();
+        assert!(
+            index
+                .get_path(Path::new("projects/demo/deleted.txt"), 0)
+                .is_none()
+        );
+        assert!(
+            index
+                .get_path(Path::new("projects/demo/kept.txt"), 0)
+                .is_some()
+        );
+        assert!(
+            index
+                .get_path(Path::new("projects/demo/new.txt"), 0)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn receipt_limit_counts_unique_union_not_before_and_after_duplicates() {
+        let unique = MAX_STAGE_ENTRIES / 2 + 1;
+        let mut paths = (0..unique)
+            .map(|index| format!("workspace/file-{index:06}"))
+            .collect::<Vec<_>>();
+        paths.extend(paths.clone());
+        let receipt = normalize_stage_receipt(paths, "workspace").unwrap();
+        assert_eq!(receipt.len(), unique);
+        assert_eq!(receipt.first().map(String::as_str), Some("file-000000"));
     }
 
     #[cfg(unix)]

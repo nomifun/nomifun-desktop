@@ -11,6 +11,7 @@ async-trait = { workspace = true }
 nomifun-agent-contracts = { path = "../nomifun-agent-contracts" }
 nomifun-agent-kernel = { path = "../nomifun-agent-kernel" }
 serde_json = { workspace = true }
+serde = { workspace = true }
 jsonschema = { workspace = true }
 
 [dev-dependencies]

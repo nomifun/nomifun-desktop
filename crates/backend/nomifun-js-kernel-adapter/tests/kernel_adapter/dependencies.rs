@@ -133,6 +133,7 @@ async fn dependency_contexts_cannot_start_js_through_direct_or_role_public_entri
     let member = RoleMemberInvocationRequest {
         principal: owner.clone(),
         session_owner: owner.clone(),
+        turn_id: Some("private-role-turn".into()),
         operation_id: "private-role-context".into(),
         correlation_id: "private-role-context".into(),
         capability_id: MEMBERS[1].into(),
@@ -350,7 +351,12 @@ async fn run_dependency_cases(context: bool) {
         let value = invoke_parent(&registry, &snapshot, &active, request.clone(), context)
             .await
             .unwrap();
-        assert_eq!(value.0["contributionId"], "fixture.grandchild.contribution");
+        assert_eq!(
+            value.0["contributionId"],
+            "fixture.grandchild.contribution",
+            "unexpected dependency response: {:?}",
+            value.0
+        );
         assert_eq!(value.0["input"]["value"], 17);
         assert_eq!(builtin_calls.load(Ordering::SeqCst), 0);
 

@@ -14,6 +14,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use nomifun_agent_contracts::{
     ActionId, AgentSessionId, ArtifactEnvelope, CapabilityActionDescriptor,
     CapabilityAuthoringPolicy, CapabilityConsumer, CapabilityContributions, CapabilityId,
@@ -76,6 +78,61 @@ pub const WORKSPACE_FILES_MODULE_ID: &str = "workspace.files";
 pub const WORKSPACE_VCS_MODULE_ID: &str = "workspace.vcs";
 pub const WORKSPACE_PROCESS_MODULE_ID: &str = "workspace.process";
 pub const WORKSPACE_ARTIFACTS_MODULE_ID: &str = "workspace.artifacts";
+pub const WORKSPACE_FILES_CHANGED_EVENT_SCHEMA_ID: &str = "workspace.files/changed";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceFileChangeKind {
+    Created,
+    Modified,
+    Removed,
+    Renamed,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceFileChangedEvent {
+    pub path: String,
+    pub kind: WorkspaceFileChangeKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceFilesChangedBatch {
+    pub capability_id: String,
+    pub event_schema: String,
+    pub events: Vec<WorkspaceFileChangedEvent>,
+    pub dropped_event_count: u64,
+}
+
+impl WorkspaceFilesChangedBatch {
+    pub fn new(events: Vec<WorkspaceFileChangedEvent>, dropped_event_count: u64) -> Self {
+        Self {
+            capability_id: WORKSPACE_FILES_MODULE_ID.to_owned(),
+            event_schema: WORKSPACE_FILES_CHANGED_EVENT_SCHEMA_ID.to_owned(),
+            events,
+            dropped_event_count,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.capability_id != WORKSPACE_FILES_MODULE_ID
+            || self.event_schema != WORKSPACE_FILES_CHANGED_EVENT_SCHEMA_ID
+            || self.events.len() > 256
+            || self.events.iter().any(|event| {
+                event.path.is_empty()
+                    || event.path.len() > 4096
+                    || event.path.starts_with('/')
+                    || event.path.contains(['\0', '\\'])
+                    || event.path.split('/').any(|part| part.is_empty() || part == "..")
+            })
+        {
+            return Err("workspace.files changed batch violates its canonical contract".into());
+        }
+        Ok(())
+    }
+}
 
 pub const WORKSPACE_FILES_ACTION_IDS: &[&str] = &[
     "workspace.files/read",
@@ -1781,10 +1838,24 @@ fn canonical_schema(schema_owner: &str, role: &str) -> StrictJsonValue {
     if schema_owner == WORKSPACE_FILES_MODULE_ID && role == "event" {
         return strict_object_schema(
             serde_json::json!({
-                "path":{"type":"string","minLength":1,"maxLength":4096},
-                "kind":{"type":"string","enum":["created","modified","removed","renamed","other"]}
+                "capability_id":{"type":"string","const":WORKSPACE_FILES_MODULE_ID},
+                "event_schema":{"type":"string","const":WORKSPACE_FILES_CHANGED_EVENT_SCHEMA_ID},
+                "events":{
+                    "type":"array",
+                    "maxItems":256,
+                    "items":{
+                        "type":"object",
+                        "additionalProperties":false,
+                        "properties":{
+                            "path":{"type":"string","minLength":1,"maxLength":4096},
+                            "kind":{"type":"string","enum":["created","modified","removed","renamed","other"]}
+                        },
+                        "required":["path","kind"]
+                    }
+                },
+                "dropped_event_count":{"type":"integer","minimum":0}
             }),
-            &["path", "kind"],
+            &["capability_id", "event_schema", "events", "dropped_event_count"],
         );
     }
     match role {
@@ -3396,6 +3467,28 @@ mod tests {
             .find(|capability| capability.id.as_ref() == WORKSPACE_FILES_MODULE_ID)
             .unwrap();
         assert_eq!(manifest.contributions.event_schema_refs.len(), 1);
+        let batch = WorkspaceFilesChangedBatch::new(
+            vec![WorkspaceFileChangedEvent {
+                path: "src/lib.rs".into(),
+                kind: WorkspaceFileChangeKind::Modified,
+            }],
+            0,
+        );
+        batch.validate().unwrap();
+        let payload = serde_json::to_value(&batch).unwrap();
+        let schema = canonical_schema(WORKSPACE_FILES_MODULE_ID, "event");
+        jsonschema::options()
+            .build(&schema.0)
+            .unwrap()
+            .validate(&payload)
+            .unwrap();
+        let mut drifted = payload;
+        drifted["events"][0]["kind"] = json!("modify");
+        assert!(jsonschema::options()
+            .build(&schema.0)
+            .unwrap()
+            .validate(&drifted)
+            .is_err());
     }
 
     #[test]
@@ -3620,6 +3713,7 @@ mod tests {
         let role_member_request = |capability_id: &str| RoleMemberInvocationRequest {
             principal: principal.clone(),
             session_owner: principal.clone(),
+            turn_id: Some(OperationId::from("browser-provider-turn")),
             operation_id: OperationId::from(format!("{capability_id}:operation")),
             correlation_id: CorrelationId::from(format!("{capability_id}:correlation")),
             capability_id: CapabilityId::from(capability_id),

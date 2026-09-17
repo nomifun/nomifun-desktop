@@ -7254,12 +7254,6 @@ impl ConversationService {
             if !snapshot.enabled_capabilities.iter().any(|id| id == "robot.link") {
                 return Err(AppError::Forbidden("Companion does not allow device tools".to_owned()));
             }
-            let tools = runtime_options.extra.get_mut("allowed_tools")
-                .and_then(serde_json::Value::as_array_mut)
-                .ok_or_else(|| AppError::Internal("Companion tool ceiling is missing".to_owned()))?;
-            if !tools.iter().any(|tool| tool.as_str() == Some("mcp.tool_proxy")) {
-                tools.push(serde_json::json!("mcp.tool_proxy"));
-            }
         }
         if let Some(model) = context.model.as_ref() {
             runtime_options.model = Some(model.clone());
@@ -13064,6 +13058,9 @@ fn apply_product_agent_resolution(
         AppError::Internal("resolved product Agent runtime policy must be an object".to_owned())
     })?;
     for key in [
+        "runtime_engine_binding",
+        "nomi_core_session",
+        "execution_constraints",
         "chat_config_revision_digest",
         "allowed_tools",
         "enforce_tool_allowlist",

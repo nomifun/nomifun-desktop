@@ -74,6 +74,7 @@ async fn invoke_hidden(loaded: &NomiPluginToolSession, middleware: bool) -> bool
         loaded.model_middleware().unwrap()[0].before_model(nomi_agent::model_middleware::BeforeModelInput {
             phase: "before_model",
             turn: nomi_agent::context_contributor::TurnContext {
+                turn_id: "hosted-hidden-turn".into(),
                 source_message_id: "hosted-hidden-source".into(), text: "question".into(), ..Default::default()
             },
             system: "base".into(), tools: Vec::new(),

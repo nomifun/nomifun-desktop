@@ -426,6 +426,18 @@ impl EngineKernelSession {
                 {
                     return Ok::<_, AppError>(None);
                 }
+                if !self
+                    .compiled
+                    .target_resource_bindings
+                    .iter()
+                    .any(|binding| binding.resource_kind.as_ref() == "robot")
+                {
+                    // Device authority is attached per accepted turn. A base
+                    // Companion Session without a selected device remains
+                    // usable and exposes no Robot tools until that owner lease
+                    // is present.
+                    return Ok::<_, AppError>(None);
+                }
                 let owner = self
                     .robot
                     .clone()

@@ -42,6 +42,16 @@ impl WorkspaceMediaTools {
     }
 }
 
+fn is_workspace_image_read(
+    capability_id: &str,
+    action_id: &str,
+    format: Option<&str>,
+) -> bool {
+    capability_id == "workspace.files"
+        && action_id == "workspace.files/read"
+        && format == Some("image")
+}
+
 #[async_trait]
 impl EngineToolInvoker for WorkspaceMediaTools {
     async fn invoke(
@@ -49,14 +59,16 @@ impl EngineToolInvoker for WorkspaceMediaTools {
         invocation: EngineToolInvocation,
         cancellation: CancellationToken,
     ) -> Result<EngineToolResult, EngineToolError> {
-        let image = invocation.binding.capability_id.as_ref() == "fs.read"
-            && invocation
+        let image = is_workspace_image_read(
+            invocation.binding.capability_id.as_ref(),
+            invocation.binding.action_id.as_ref(),
+            invocation
                 .call
                 .arguments
                 .0
                 .get("format")
-                .and_then(|v| v.as_str())
-                == Some("image");
+                .and_then(|value| value.as_str()),
+        );
         if !image {
             return self.inner.invoke(invocation, cancellation).await;
         }
@@ -72,10 +84,10 @@ impl EngineToolInvoker for WorkspaceMediaTools {
             .find(|item| item.capability.id == invocation.binding.capability_id);
         if !selected.is_some_and(|item| {
             item.contribution_lock.source_kind == ContributionSourceKind::PlatformBuiltin
-        }) || invocation.binding.action_id.as_ref() != "fs.read.invoke"
+        })
         {
             return Err(error(
-                "Workspace media projection requires the canonical platform fs.read contribution",
+                "Workspace media projection requires the canonical platform workspace.files/read contribution",
             ));
         }
         let generation = invocation.active_set_generation;
@@ -149,5 +161,34 @@ impl EngineToolInvoker for WorkspaceMediaTools {
         };
         projected.validate_for(&projected.call_id)?;
         Ok(projected)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_workspace_image_read;
+
+    #[test]
+    fn image_projection_requires_the_exact_workspace_files_read_action() {
+        assert!(is_workspace_image_read(
+            "workspace.files",
+            "workspace.files/read",
+            Some("image")
+        ));
+        assert!(!is_workspace_image_read(
+            "workspace.files",
+            "workspace.files/search",
+            Some("image")
+        ));
+        assert!(!is_workspace_image_read(
+            "fs.read",
+            "fs.read.invoke",
+            Some("image")
+        ));
+        assert!(!is_workspace_image_read(
+            "workspace.files",
+            "workspace.files/read",
+            None
+        ));
     }
 }

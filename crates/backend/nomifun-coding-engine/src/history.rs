@@ -50,7 +50,7 @@ fn replay_into(
             )
         })
     {
-        return Err(CodingEngineError::Checkpoint(
+        return Err(CodingEngineError::ReplayContract(
             "replay requires exactly one turn start and one final terminal".into(),
         ));
     }
@@ -70,7 +70,7 @@ fn replay_into(
                     if steering_receipts.len() >= 16
                         || !steering_receipts.insert(input.receipt_operation_id.clone())
                     {
-                        return Err(CodingEngineError::Checkpoint(
+                        return Err(CodingEngineError::ReplayContract(
                             "duplicate or excessive steering receipts in history".into(),
                         ));
                     }
@@ -98,7 +98,7 @@ fn replay_into(
                 ..
             } if *step > 0 => {
                 if batch.discarded {
-                    return Err(CodingEngineError::Checkpoint(
+                    return Err(CodingEngineError::ReplayContract(
                         "tool dispatch after output-limit discard".into(),
                     ));
                 }
@@ -120,7 +120,7 @@ fn replay_into(
                 ..
             } if *step > 0 => {
                 if batch.discarded {
-                    return Err(CodingEngineError::Checkpoint(
+                    return Err(CodingEngineError::ReplayContract(
                         "tool delta after output-limit discard".into(),
                     ));
                 }
@@ -135,7 +135,7 @@ fn replay_into(
                     batch.proposal_order.push(call_id.clone());
                 }
                 if batch.proposed.len() > 64 {
-                    return Err(CodingEngineError::Checkpoint(
+                    return Err(CodingEngineError::ReplayContract(
                         "excessive tool proposals in history".into(),
                     ));
                 }
@@ -156,7 +156,7 @@ fn replay_into(
                             .collect::<std::collections::BTreeSet<_>>()
                     || batch.discarded
                 {
-                    return Err(CodingEngineError::Checkpoint(
+                    return Err(CodingEngineError::ReplayContract(
                         "output-limit discard contradicts tool history".into(),
                     ));
                 }
@@ -172,7 +172,7 @@ fn replay_into(
             }
             CodingEngineEvent::OutputTextDelta { text, .. } => {
                 if batch.discarded {
-                    return Err(CodingEngineError::Checkpoint(
+                    return Err(CodingEngineError::ReplayContract(
                         "model text after output-limit discard".into(),
                     ));
                 }
@@ -186,7 +186,7 @@ fn replay_into(
             }
             CodingEngineEvent::ToolCallCompleted { step, call } if *step > 0 => {
                 if batch.discarded {
-                    return Err(CodingEngineError::Checkpoint(
+                    return Err(CodingEngineError::ReplayContract(
                         "tool call after output-limit discard".into(),
                     ));
                 }
@@ -210,7 +210,7 @@ fn replay_into(
                     .insert(call.call_id.clone(), call.clone())
                     .is_some()
                 {
-                    return Err(CodingEngineError::Checkpoint(
+                    return Err(CodingEngineError::ReplayContract(
                         "duplicate persisted tool call".into(),
                     ));
                 }
@@ -225,7 +225,7 @@ fn replay_into(
             CodingEngineEvent::ToolCompleted { step, result } if *step > 0 => {
                 result.validate_for(&result.call_id)?;
                 if !batch.calls.contains_key(&result.call_id) {
-                    return Err(CodingEngineError::Checkpoint(
+                    return Err(CodingEngineError::ReplayContract(
                         "persisted tool result has no call".into(),
                     ));
                 }
@@ -313,15 +313,15 @@ fn replay_into(
                     retained_inputs.clone()
                 } else {
                     let exchange = crate::context_tail::selected(history, local_ids)
-                        .map_err(|error| CodingEngineError::Checkpoint(error.to_string()))?
+                        .map_err(|error| CodingEngineError::ReplayContract(error.to_string()))?
                         .ok_or_else(|| {
-                            CodingEngineError::Checkpoint(
+                            CodingEngineError::ReplayContract(
                                 "Compaction references do not match a bounded contiguous tool suffix".into(),
                             )
                         })?;
                     exchange
                         .with_required_inputs(&retained_inputs)
-                        .map_err(|error| CodingEngineError::Checkpoint(error.to_string()))?
+                        .map_err(|error| CodingEngineError::ReplayContract(error.to_string()))?
                 };
                 // The summary covers the whole model view, including previous
                 // turns. Do not prepend that same old history a second time.
@@ -345,7 +345,7 @@ fn replay_into(
             CodingEngineEvent::CompletionReported { report } => {
                 batch.notices.push(crate::context_lifecycle::text_message(ChatRole::User,
                     format!("Historical completion account (model assessment with observation references, not fresh proof for this turn): {}",
-                        serde_json::to_string(report).map_err(|error| CodingEngineError::Checkpoint(error.to_string()))?)));
+                        serde_json::to_string(report).map_err(|error| CodingEngineError::ReplayContract(error.to_string()))?)));
             }
             CodingEngineEvent::InstructionsUpdated { context } => {
                 batch.notices.push(crate::context_lifecycle::text_message(ChatRole::User,
@@ -524,7 +524,7 @@ impl ReplayBatch {
 }
 
 fn invalid(message: &str) -> CodingEngineError {
-    CodingEngineError::Checkpoint(message.into())
+    CodingEngineError::ReplayContract(message.into())
 }
 
 #[cfg(test)]
@@ -576,7 +576,7 @@ mod tests {
             }],
         )
         .unwrap_err();
-        assert!(matches!(error, CodingEngineError::Checkpoint(message)
+        assert!(matches!(error, CodingEngineError::ReplayContract(message)
             if message.contains("no durable terminal")));
         assert!(history.is_empty());
     }

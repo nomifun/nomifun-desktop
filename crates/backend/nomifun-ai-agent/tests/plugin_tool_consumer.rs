@@ -789,6 +789,14 @@ async fn session(
     compiled: nomifun_agent_kernel::CompiledSnapshot,
     schemas: Arc<SchemaMap>,
 ) -> nomifun_ai_agent::NomiPluginToolSession {
+    try_session(kernel, compiled, schemas).await.unwrap()
+}
+
+async fn try_session(
+    kernel: Arc<KernelRegistry>,
+    compiled: nomifun_agent_kernel::CompiledSnapshot,
+    schemas: Arc<SchemaMap>,
+) -> Result<nomifun_ai_agent::NomiPluginToolSession, NomiPluginToolError> {
     KernelNomiPluginToolSession::materialize(
         kernel,
         Arc::new(compiled),
@@ -798,7 +806,6 @@ async fn session(
         schemas,
     )
     .await
-    .unwrap()
 }
 
 async fn session_with_platform_builtins(

@@ -77,8 +77,7 @@
         "skill_bindings": [],
         "required_resource_kinds": [
           "knowledge_base",
-          "project_memory",
-          "workspace"
+          "project_memory"
         ],
         "required_runtime_features": []
       },
@@ -143,7 +142,6 @@
         ],
         "skill_bindings": [],
         "required_resource_kinds": [
-          "mcp_server",
           "process_session",
           "workspace"
         ],
@@ -191,10 +189,6 @@
             "version": "1.0.0"
           },
           {
-            "id": "channel.receive",
-            "version": "1.0.0"
-          },
-          {
             "id": "companion.roster",
             "version": "1.0.0"
           },
@@ -227,22 +221,6 @@
             "version": "1.0.0"
           },
           {
-            "id": "channel.pairing",
-            "version": "1.0.0"
-          },
-          {
-            "id": "channel.group_policy",
-            "version": "1.0.0"
-          },
-          {
-            "id": "robot.link",
-            "version": "1.0.0"
-          },
-          {
-            "id": "robot.audio",
-            "version": "1.0.0"
-          },
-          {
             "id": "robot.display",
             "version": "1.0.0"
           },
@@ -265,7 +243,6 @@
           "companion",
           "companion_memory",
           "knowledge_base",
-          "mcp_server",
           "robot"
         ],
         "required_runtime_features": []
@@ -286,10 +263,6 @@
           },
           {
             "id": "knowledge.read",
-            "version": "1.0.0"
-          },
-          {
-            "id": "channel.receive",
             "version": "1.0.0"
           },
           {
@@ -394,14 +367,12 @@
         "required_runtime_features": [],
         "required_resource_kinds": [
           "knowledge_base",
-          "project_memory",
-          "workspace"
+          "project_memory"
         ]
       },
       "coding.codex": {
         "required_capability_categories": [
           "file_operations",
-          "mcp",
           "native_responses",
           "plan_goal",
           "shell_process_pty",
@@ -451,7 +422,6 @@
           "validation.feedback"
         ],
         "required_resource_kinds": [
-          "mcp_server",
           "process_session",
           "workspace"
         ]
@@ -462,13 +432,9 @@
           "im_channel",
           "knowledge",
           "learning_evolution",
-          "mcp",
           "persona"
         ],
         "required_capability_ids": [
-          "channel.group_policy",
-          "channel.pairing",
-          "channel.receive",
           "channel.reply",
           "channel.send",
           "companion.evolve",
@@ -488,7 +454,6 @@
           "companion",
           "companion_memory",
           "knowledge_base",
-          "mcp_server",
           "robot"
         ]
       },
@@ -501,7 +466,6 @@
           "notes"
         ],
         "required_capability_ids": [
-          "channel.receive",
           "channel.reply",
           "channel.send",
           "customer_service.dialogue",
@@ -550,5 +514,5 @@
       "research.web"
     ]
   },
-  "payload_digest": "cc34c6936c0990f5912eaa2bc7b349d80bc6c988cef75898657cf6b63405d923"
+  "payload_digest": "1ed0e7cfe38657b0ee91ba58fdba1b14a6e19d03b2832cff871b7535f81a03b2"
 }

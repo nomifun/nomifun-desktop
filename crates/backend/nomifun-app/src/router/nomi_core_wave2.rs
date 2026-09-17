@@ -20,6 +20,7 @@ use nomifun_agent_contracts::{
 };
 use nomifun_agent_domain_wave2::{
     Wave2HostContext, Wave2HostPort, Wave2HostPortError, Wave2HostRequest,
+    WorkspaceFileChangeKind, WorkspaceFileChangedEvent, WorkspaceFilesChangedBatch,
 };
 use nomifun_ai_agent::ContextContributor;
 use nomifun_api_types::TypedResourceBindingDto;
@@ -29,8 +30,7 @@ use nomifun_file::{
     WORKSPACE_RESOURCE_KIND, WORKSPACE_ROOT_PARAMETER,
     WORKSPACE_WRITE_OPERATION,
 };
-use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use serde::Serialize;
+use notify::{event::ModifyKind, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::json;
 
 use super::agent_wave2_host::Wave2ApplicationHost;
@@ -62,11 +62,15 @@ pub(crate) fn event_capability_ids() -> BTreeSet<CapabilityId> {
     BTreeSet::from([CapabilityId::from(WORKSPACE_FILES)])
 }
 
-pub(crate) fn action_host_port(services: &crate::services::AppServices) -> Arc<NomiCoreWave2Host> {
+pub(crate) fn action_host_port(
+    services: &crate::services::AppServices,
+    effect_store: nomifun_agent_session::AgentSessionStore,
+) -> Arc<NomiCoreWave2Host> {
     Arc::new(NomiCoreWave2Host {
         mcp: Some(super::nomi_core_mcp::NomiCoreMcpHost::for_services(services)),
         ..Default::default()
-    })
+    }
+    .with_effect_store(effect_store))
 }
 
 pub(crate) fn schema_resolver(
@@ -582,23 +586,17 @@ fn exact_session_workspace_root(
     Ok(canonical)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-struct WorkspaceWatchEvent {
-    path: String,
-    operation: &'static str,
-}
-
 #[derive(Default)]
 struct WatchQueue {
-    events: VecDeque<WorkspaceWatchEvent>,
+    events: VecDeque<WorkspaceFileChangedEvent>,
     debounce: HashMap<String, Instant>,
     dropped: u64,
 }
 
 impl WatchQueue {
-    fn push(&mut self, event: WorkspaceWatchEvent) {
+    fn push(&mut self, event: WorkspaceFileChangedEvent) {
         let now = Instant::now();
-        let debounce_key = format!("{}\0{}", event.operation, event.path);
+        let debounce_key = format!("{:?}\0{}", event.kind, event.path);
         if self
             .debounce
             .get(&debounce_key)
@@ -610,7 +608,9 @@ impl WatchQueue {
             self.debounce
                 .retain(|_, previous| now.duration_since(*previous) < WATCH_DEBOUNCE);
         }
-        self.debounce.insert(debounce_key, now);
+        if self.debounce.len() < MAX_DEBOUNCE_IDENTITIES {
+            self.debounce.insert(debounce_key, now);
+        }
         if self.events.len() == MAX_WATCH_EVENTS {
             self.events.pop_front();
             self.dropped = self.dropped.saturating_add(1);
@@ -618,7 +618,7 @@ impl WatchQueue {
         self.events.push_back(event);
     }
 
-    fn drain(&mut self) -> (Vec<WorkspaceWatchEvent>, u64) {
+    fn drain(&mut self) -> (Vec<WorkspaceFileChangedEvent>, u64) {
         let events = self.events.drain(..).collect();
         let dropped = std::mem::take(&mut self.dropped);
         (events, dropped)
@@ -649,7 +649,7 @@ impl NomiWorkspaceWatchContext {
                     queue.dropped = queue.dropped.saturating_add(1);
                     return;
                 };
-                let Some(operation) = watch_operation(&event.kind) else {
+                let Some(kind) = watch_operation(&event.kind) else {
                     return;
                 };
                 let mut queue = callback_queue
@@ -660,13 +660,15 @@ impl NomiWorkspaceWatchContext {
                         continue;
                     };
                     if relative.components().next().is_some_and(|component| {
-                        component.as_os_str().to_str()
-                            == Some(nomifun_file::WORKSPACE_OWNER_DIRECTORY)
+                        nomifun_file::is_workspace_owner_component(component.as_os_str())
                     }) {
                         continue;
                     }
                     let path = relative.to_string_lossy().replace('\\', "/");
-                    queue.push(WorkspaceWatchEvent { path, operation });
+                    if path.is_empty() {
+                        continue;
+                    }
+                    queue.push(WorkspaceFileChangedEvent { path, kind });
                 }
             },
         )
@@ -690,13 +692,13 @@ impl NomiWorkspaceWatchContext {
     }
 
     #[cfg(test)]
-    fn push_for_test(&self, path: &str, operation: &'static str) {
+    fn push_for_test(&self, path: &str, kind: WorkspaceFileChangeKind) {
         self.queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(WorkspaceWatchEvent {
+            .push(WorkspaceFileChangedEvent {
                 path: path.to_owned(),
-                operation,
+                kind,
             });
     }
 }
@@ -720,12 +722,9 @@ impl ContextContributor for NomiWorkspaceWatchContext {
         if events.is_empty() && dropped == 0 {
             return None;
         }
-        serde_json::to_string(&json!({
-            "capability_id": WORKSPACE_FILES,
-            "event_schema": "workspace.files/changed",
-            "events": events,
-            "dropped_event_count": dropped,
-        }))
+        let batch = WorkspaceFilesChangedBatch::new(events, dropped);
+        batch.validate().ok()?;
+        serde_json::to_string(&batch)
         .ok()
         .map(|payload| {
             format!(
@@ -739,12 +738,13 @@ impl ContextContributor for NomiWorkspaceWatchContext {
     }
 }
 
-fn watch_operation(kind: &EventKind) -> Option<&'static str> {
+fn watch_operation(kind: &EventKind) -> Option<WorkspaceFileChangeKind> {
     match kind {
-        EventKind::Create(_) => Some("create"),
-        EventKind::Modify(_) => Some("modify"),
-        EventKind::Remove(_) => Some("remove"),
-        EventKind::Any | EventKind::Other => Some("change"),
+        EventKind::Create(_) => Some(WorkspaceFileChangeKind::Created),
+        EventKind::Modify(ModifyKind::Name(_)) => Some(WorkspaceFileChangeKind::Renamed),
+        EventKind::Modify(_) => Some(WorkspaceFileChangeKind::Modified),
+        EventKind::Remove(_) => Some(WorkspaceFileChangeKind::Removed),
+        EventKind::Any | EventKind::Other => Some(WorkspaceFileChangeKind::Other),
         EventKind::Access(_) => None,
     }
 }
@@ -848,7 +848,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let watch = NomiWorkspaceWatchContext::start(root.path()).unwrap();
         for index in 0..=MAX_WATCH_EVENTS {
-            watch.push_for_test(&format!("src/{index}.rs"), "modify");
+            watch.push_for_test(
+                &format!("src/{index}.rs"),
+                WorkspaceFileChangeKind::Modified,
+            );
         }
         let context = watch.pre_turn_context().await.unwrap();
         assert!(!context.contains(&root.path().to_string_lossy().into_owned()));
@@ -860,8 +863,26 @@ mod tests {
         assert_eq!(json["capability_id"], WORKSPACE_FILES);
         assert_eq!(json["event_schema"], "workspace.files/changed");
         assert_eq!(json["events"].as_array().unwrap().len(), MAX_WATCH_EVENTS);
+        assert_eq!(json["events"][0]["kind"], "modified");
         assert_eq!(json["dropped_event_count"], 1);
+        let batch: WorkspaceFilesChangedBatch = serde_json::from_value(json).unwrap();
+        batch.validate().unwrap();
         assert!(watch.pre_turn_context().await.is_none());
+    }
+
+    #[test]
+    fn watch_debounce_identity_map_has_a_hard_bound() {
+        let mut queue = WatchQueue::default();
+        let total = MAX_DEBOUNCE_IDENTITIES + 128;
+        for index in 0..total {
+            queue.push(WorkspaceFileChangedEvent {
+                path: format!("src/{index}.rs"),
+                kind: WorkspaceFileChangeKind::Modified,
+            });
+        }
+        assert!(queue.debounce.len() <= MAX_DEBOUNCE_IDENTITIES);
+        assert_eq!(queue.events.len(), MAX_WATCH_EVENTS);
+        assert_eq!(queue.dropped, (total - MAX_WATCH_EVENTS) as u64);
     }
 
     #[tokio::test]

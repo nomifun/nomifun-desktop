@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use nomifun_api_types::McpConnectionTestErrorCode;
 use nomifun_mcp::McpConnectionTestService;
 use nomifun_mcp::McpServerTransport;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -96,11 +97,8 @@ async fn http_unreachable_url_returns_connection_error() {
     let result = svc.test_connection("test-http", &transport).await;
 
     assert!(!result.success);
-    let error = result.error.as_deref().unwrap();
-    assert!(
-        error.contains("Connection failed"),
-        "expected connection failure in: {error}"
-    );
+    assert_eq!(result.error.as_deref(), Some("MCP request failed"));
+    assert_eq!(result.code, Some(McpConnectionTestErrorCode::ConnectionFailed));
 }
 
 #[tokio::test]
@@ -114,11 +112,11 @@ async fn sse_unreachable_url_returns_connection_error() {
     let result = svc.test_connection("test-sse", &transport).await;
 
     assert!(!result.success);
-    let error = result.error.as_deref().unwrap();
-    assert!(
-        error.contains("Connection failed"),
-        "expected connection failure in: {error}"
+    assert_eq!(
+        result.error.as_deref(),
+        Some("MCP legacy SSE connection failed")
     );
+    assert_eq!(result.code, Some(McpConnectionTestErrorCode::ConnectionFailed));
 }
 
 // ---------------------------------------------------------------------------
@@ -198,7 +196,7 @@ async fn sse_401_returns_needs_auth() {
 }
 
 #[tokio::test]
-async fn sse_connection_test_uses_string_jsonrpc_ids() {
+async fn sse_connection_test_round_trips_jsonrpc_ids() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<String>();
@@ -222,7 +220,7 @@ async fn sse_connection_test_uses_string_jsonrpc_ids() {
 
     let result = svc.test_connection("string-id-sse", &transport).await;
 
-    assert!(result.success, "expected string-id SSE server to connect: {result:?}");
+    assert!(result.success, "expected SSE fixture to connect: {result:?}");
     let tools = result.tools.unwrap();
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name, "strict_string_id_tool");
@@ -256,16 +254,20 @@ async fn handle_string_id_sse_connection(
         return Ok(());
     }
 
-    if request.starts_with("POST /messages ") {
+    if request.starts_with("POST /messages ") || request.starts_with("POST /messages?") {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let method = body["method"].as_str().unwrap_or_default();
         match method {
             "initialize" | "tools/list" => {
-                let Some(id) = body["id"].as_str() else {
+                let Some(id) = body
+                    .get("id")
+                    .filter(|id| id.is_string() || id.is_u64())
+                    .cloned()
+                else {
                     write_http_response(
                         &mut stream,
                         "400 Bad Request",
-                        "Bad request: id expected a string",
+                        "Bad request: id expected a JSON-RPC string or integer",
                     )
                     .await?;
                     return Ok(());
@@ -285,7 +287,15 @@ async fn handle_string_id_sse_connection(
                         "id": id,
                         "result": {
                             "tools": [
-                                { "name": "strict_string_id_tool", "description": "Requires string JSON-RPC ids" }
+                                {
+                                    "name": "strict_string_id_tool",
+                                    "description": "Round-trips JSON-RPC ids",
+                                    "inputSchema": {
+                                        "type": "object",
+                                        "additionalProperties": false,
+                                        "properties": {}
+                                    }
+                                }
                             ]
                         }
                     }),

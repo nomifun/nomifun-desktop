@@ -109,6 +109,15 @@ impl TurnTerminalProofProvider for BootTerminalProofProvider {
         if let Err(reason) = self.remote_effects_settled(user_id, conversation_id).await {
             return TerminalProofDecision::Unproven { reason };
         }
+        if !self.reap_report.registry_fully_processed()
+            || !self
+                .reap_report
+                .conversation_tree_proven_empty(conversation_id)
+        {
+            return TerminalProofDecision::Unproven {
+                reason: "registered engine process-tree termination is not proven".into(),
+            };
+        }
         let key = (
             binding.family_id.clone(),
             binding.build_id.clone(),
@@ -119,7 +128,7 @@ impl TurnTerminalProofProvider for BootTerminalProofProvider {
                 reason: "exact engine build has no compiled restart recovery extension".into(),
             };
         };
-        recovery
+        match recovery
             .prepare_interrupted_turn(
                 binding,
                 user_id,
@@ -128,6 +137,14 @@ impl TurnTerminalProofProvider for BootTerminalProofProvider {
                 operation_id,
             )
             .await
+        {
+            TerminalProofDecision::Proven { evidence } => TerminalProofDecision::Proven {
+                evidence: format!(
+                    "server-lock authority + exact boot-frozen generation + reaped durable process registry; {evidence}"
+                ),
+            },
+            unproven => unproven,
+        }
     }
 
     async fn prove_orphan_generation_terminal(
@@ -190,11 +207,44 @@ impl TurnTerminalProofProvider for BootTerminalProofProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use nomifun_ai_agent::reap_orphan_agent_processes;
 
     const USER: &str = "user-1";
     const CONV: &str = "conv-1";
+
+    struct ProvenRecovery(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl nomifun_conversation::terminal_proof::RegisteredEngineRestartRecovery
+        for ProvenRecovery
+    {
+        async fn prepare_interrupted_turn(
+            &self,
+            _binding: &nomifun_api_types::RuntimeEngineBinding,
+            _user_id: &str,
+            _conversation_id: &str,
+            _admission_epoch: i64,
+            _operation_id: &str,
+        ) -> TerminalProofDecision {
+            self.0.fetch_add(1, Ordering::AcqRel);
+            TerminalProofDecision::Proven {
+                evidence: "compiled recovery".into(),
+            }
+        }
+    }
+
+    fn registered_binding() -> nomifun_api_types::RuntimeEngineBinding {
+        nomifun_api_types::RuntimeEngineBinding {
+            family_id: "nomifun.nomi".into(),
+            build_id: "test-build".into(),
+            build_digest: "a".repeat(64),
+            host_contract_version: nomifun_api_types::RUNTIME_HOST_CONTRACT_VERSION,
+            profile: "default".into(),
+        }
+    }
 
     fn frozen_map(epoch: i64, operation: Option<&str>) -> HashMap<String, FrozenOrphanGeneration> {
         HashMap::from([(
@@ -229,6 +279,45 @@ mod tests {
                 "{requirement:?}: {decision:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn registered_engine_requires_reaped_tree_before_compiled_recovery() {
+        let binding = registered_binding();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registered = std::collections::HashMap::from([(
+            (
+                binding.family_id.clone(),
+                binding.build_id.clone(),
+                binding.build_digest.clone(),
+            ),
+            Arc::new(ProvenRecovery(Arc::clone(&calls)))
+                as Arc<dyn nomifun_conversation::terminal_proof::RegisteredEngineRestartRecovery>,
+        )]);
+        let provider = BootTerminalProofProvider {
+            frozen: frozen_map(7, Some("op-a")),
+            reap_report: empty_reap_report().await,
+            registered: registered.clone(),
+            mcp_receipts: None,
+            hosted_receipts: None,
+        };
+        let decision = provider
+            .prepare_registered_engine_recovery(&binding, USER, CONV, 7, "op-a")
+            .await;
+        assert!(matches!(decision, TerminalProofDecision::Proven { .. }));
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+
+        let unproven = BootTerminalProofProvider {
+            frozen: frozen_map(7, Some("op-a")),
+            reap_report: AgentProcessReapReport::default(),
+            registered,
+            mcp_receipts: None,
+            hosted_receipts: None,
+        }
+        .prepare_registered_engine_recovery(&binding, USER, CONV, 7, "op-a")
+        .await;
+        assert!(matches!(unproven, TerminalProofDecision::Unproven { .. }));
+        assert_eq!(calls.load(Ordering::Acquire), 1);
     }
 
     #[tokio::test]

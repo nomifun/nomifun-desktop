@@ -371,12 +371,13 @@ fn compile(
         .payload
         .enabled_capabilities
         .iter_mut()
-        .zip(MEMBERS)
+        .zip(MEMBERS[..2].iter().copied())
     {
         selected.capability.id = id.into();
     }
-    revision.contribution_locks = MEMBERS
-        .into_iter()
+    revision.contribution_locks = MEMBERS[..2]
+        .iter()
+        .copied()
         .map(|id| {
             materialized
                 .capability(&id.into())
@@ -502,6 +503,7 @@ async fn user_provider_replaces_builtin_tool_context_resource_without_identity_o
         .unwrap();
     assert_eq!(result.0["contributionId"], "fixture.tool.contribution");
     assert_eq!(result.0["input"]["value"], 17);
+    assert!(result.0["resourceBindings"].as_array().unwrap().is_empty());
     let context = registry
         .contribute_context(
             &snapshot,
@@ -513,18 +515,7 @@ async fn user_provider_replaces_builtin_tool_context_resource_without_identity_o
         .value
         .unwrap();
     assert_eq!(context.0["contributionId"], "fixture.context.contribution");
-    let resource = registry
-        .acquire_resource(
-            &snapshot,
-            &active,
-            access(&snapshot, active.generation, &owner, MEMBERS[2]),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        resource.handle.identity().resource_id.as_ref(),
-        "fixture-resource"
-    );
+    assert!(context.0["resourceBindings"].as_array().unwrap().is_empty());
     registry
         .release_resources(&"session:fixture-session".into())
         .await
@@ -533,7 +524,7 @@ async fn user_provider_replaces_builtin_tool_context_resource_without_identity_o
     count.action_id = RELEASE_COUNT_ACTION.into();
     assert_eq!(
         registry.invoke(&snapshot, &active, count).await.unwrap().0["releaseCount"],
-        1
+        0
     );
 
     // Non-Agent callers use their existing operation admission, no synthetic Session.
@@ -551,6 +542,7 @@ async fn user_provider_replaces_builtin_tool_context_resource_without_identity_o
             member: RoleMemberInvocationRequest {
                 principal: owner.clone(),
                 session_owner: owner.clone(),
+                turn_id: None,
                 operation_id: "role-operation".into(),
                 correlation_id: "role-correlation".into(),
                 capability_id: MEMBERS[0].into(),

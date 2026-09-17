@@ -13,7 +13,16 @@ use sha2::{Digest, Sha256};
 /// Composition owner for exactly one immutable official Runtime provider.
 #[derive(Default)]
 pub(crate) struct RuntimeEngineHost {
-    provider: OnceLock<Arc<NomiRuntimeProvider>>,
+    installed: OnceLock<InstalledRuntime>,
+}
+
+struct InstalledRuntime {
+    provider: Arc<NomiRuntimeProvider>,
+    restart_recovery: Arc<dyn nomifun_conversation::terminal_proof::RegisteredEngineRestartRecovery>,
+}
+
+struct NomiRestartRecovery {
+    binding: RuntimeEngineBinding,
 }
 
 impl RuntimeEngineHost {
@@ -32,6 +41,7 @@ impl RuntimeEngineHost {
             host_contract_version: descriptor.host_contract_version,
             profile: "default".into(),
         };
+        let restart_binding = binding.clone();
         let factory: AgentRuntimeFactory = Arc::new(move |options| {
             let factory = factory.clone();
             let binding = binding.clone();
@@ -46,8 +56,13 @@ impl RuntimeEngineHost {
             factory,
             Arc::new(NomiAdmission),
         )?;
-        self.provider
-            .set(Arc::new(provider))
+        self.installed
+            .set(InstalledRuntime {
+                provider: Arc::new(provider),
+                restart_recovery: Arc::new(NomiRestartRecovery {
+                    binding: restart_binding,
+                }),
+            })
             .map_err(|_| AppError::Conflict("official Runtime factory installed twice".into()))
     }
 
@@ -72,8 +87,9 @@ impl RuntimeEngineHost {
     }
 
     pub(crate) fn provider(&self) -> Result<&Arc<NomiRuntimeProvider>, AppError> {
-        self.provider
+        self.installed
             .get()
+            .map(|installed| &installed.provider)
             .ok_or_else(|| AppError::Conflict("official Runtime provider is not assembled".into()))
     }
 
@@ -86,7 +102,19 @@ impl RuntimeEngineHost {
     pub(crate) fn restart_recovery_hooks(
         &self,
     ) -> Result<nomifun_conversation::terminal_proof::RegisteredEngineRecoveryMap, AppError> {
-        Ok(Default::default())
+        let installed = self
+            .installed
+            .get()
+            .ok_or_else(|| AppError::Conflict("official Runtime provider is not assembled".into()))?;
+        let binding = installed.provider.binding();
+        Ok(std::collections::HashMap::from([(
+            (
+                binding.family_id,
+                binding.build_id,
+                binding.build_digest,
+            ),
+            Arc::clone(&installed.restart_recovery),
+        )]))
     }
 
     pub(crate) fn default_binding(&self) -> Result<RuntimeEngineBinding, AppError> {
@@ -104,6 +132,48 @@ impl RuntimeEngineHost {
         let binding = self.agent_binding()?;
         self.provider()?.validate_snapshot(&binding, snapshot)?;
         Ok(binding)
+    }
+}
+
+#[async_trait::async_trait]
+impl nomifun_conversation::terminal_proof::RegisteredEngineRestartRecovery
+    for NomiRestartRecovery
+{
+    async fn prepare_interrupted_turn(
+        &self,
+        binding: &RuntimeEngineBinding,
+        user_id: &str,
+        conversation_id: &str,
+        admission_epoch: i64,
+        operation_id: &str,
+    ) -> nomifun_conversation::terminal_proof::TerminalProofDecision {
+        use nomifun_conversation::terminal_proof::TerminalProofDecision;
+
+        if binding != &self.binding {
+            return TerminalProofDecision::Unproven {
+                reason: "interrupted turn binding differs from the installed Nomi build".into(),
+            };
+        }
+        if nomifun_common::UserId::parse(user_id.to_owned()).is_err()
+            || nomifun_common::ConversationId::parse(conversation_id.to_owned()).is_err()
+            || admission_epoch < 0
+            || operation_id.trim().is_empty()
+            || operation_id.len() > 1_024
+        {
+            return TerminalProofDecision::Unproven {
+                reason: "interrupted turn identity is not canonical".into(),
+            };
+        }
+        // BootTerminalProofProvider invokes this hook only after its exact
+        // boot-frozen generation, reaped-process and durable effect fences.
+        // The source-integrated Driver owns no separate resumable process or
+        // effect authority, so Conversation may now close the accepted turn
+        // as interrupted. A later user turn can explicitly use the durable
+        // continuation evidence; this hook never replays work.
+        TerminalProofDecision::Proven {
+            evidence: "exact Nomi build has no surviving private recovery authority"
+                .to_owned(),
+        }
     }
 }
 
@@ -284,6 +354,27 @@ mod tests {
                 .uses_private_session_codec(&installed)
                 .unwrap()
         );
+        let hooks = host.restart_recovery_hooks().unwrap();
+        assert_eq!(hooks.len(), 1);
+        let recovery = hooks
+            .get(&(
+                installed.family_id.clone(),
+                installed.build_id.clone(),
+                installed.build_digest.clone(),
+            ))
+            .unwrap();
+        assert!(matches!(
+            recovery
+                .prepare_interrupted_turn(
+                    &installed,
+                    "0190f5fe-7c00-7a00-8000-000000000001",
+                    "0190f5fe-7c00-7a00-8000-000000000002",
+                    1,
+                    "turn-operation",
+                )
+                .await,
+            nomifun_conversation::terminal_proof::TerminalProofDecision::Proven { .. }
+        ));
 
         let mut foreign = installed;
         foreign.family_id = ["nomifun", ".coding"].concat();

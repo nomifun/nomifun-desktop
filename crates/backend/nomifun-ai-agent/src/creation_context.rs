@@ -295,6 +295,7 @@ mod tests {
         let context = ConversationCreationContext::new(engine, conversation);
         let text = context
             .pre_turn_context_for_turn_result(&TurnContext {
+                turn_id: "creation-turn-first".into(),
                 source_message_id: first_message.clone(),
                 ..Default::default()
             })
@@ -309,6 +310,7 @@ mod tests {
         assert!(
             context
                 .pre_turn_context_for_turn_result(&TurnContext {
+                    turn_id: "creation-turn-second".into(),
                     source_message_id: second_message,
                     ..Default::default()
                 })

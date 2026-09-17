@@ -1288,6 +1288,44 @@ impl AgentSessionStore {
         row.map(effect_from_row).transpose()
     }
 
+    pub async fn effect_causation_event_id(
+        &self,
+        session_id: &AgentSessionId,
+        turn_id: &OperationId,
+        operation_id: &OperationId,
+        capability_module: &nomifun_agent_contracts::CapabilityId,
+        action_id: &nomifun_agent_contracts::ActionId,
+    ) -> Result<EventId, SessionStoreError> {
+        require_live_session(&self.pool, session_id.as_ref()).await?;
+        let rows = sqlx::query_scalar::<_, String>(
+            "SELECT e.event_id FROM agent_events e \
+             JOIN agent_turns t ON t.session_id = e.session_id \
+              AND t.turn_id = ? AND t.started_event_id = e.causation_event_id \
+              AND t.state IN ('accepted', 'running') \
+             WHERE e.session_id = ? AND e.kind = 'tool/call-started' \
+              AND json_extract(e.inline_json, '$.operation_id') = ? \
+              AND json_extract(e.inline_json, '$.capability_id') = ? \
+              AND json_extract(e.inline_json, '$.action_id') = ? \
+             ORDER BY e.seq LIMIT 2",
+        )
+        .bind(turn_id.as_ref())
+        .bind(session_id.as_ref())
+        .bind(operation_id.as_ref())
+        .bind(capability_module.as_ref())
+        .bind(action_id.as_ref())
+        .fetch_all(&self.pool)
+        .await?;
+        match rows.as_slice() {
+            [event_id] => Ok(EventId::from(event_id.clone())),
+            [] => Err(SessionStoreError::InvalidEvent(
+                "effect requires its exact committed tool/call-started predecessor".into(),
+            )),
+            _ => Err(SessionStoreError::InvalidEvent(
+                "effect tool/call-started predecessor is ambiguous".into(),
+            )),
+        }
+    }
+
     pub async fn observe(
         &self,
         session_id: &AgentSessionId,
@@ -3442,6 +3480,7 @@ async fn validate_effect_transition_tx(
                     "read-only operations must not emit effect lifecycle events".to_owned(),
                 ));
             }
+            validate_effect_started_causation_tx(tx, append).await?;
             Ok(())
         }
         "effect/succeeded" | "effect/failed" | "effect/uncertain" => {
@@ -3460,6 +3499,7 @@ async fn validate_effect_transition_tx(
                     "effect lifecycle must retain the original idempotency key".to_owned(),
                 ));
             }
+            validate_effect_identity_transition(started, append, &started.event_id)?;
             let strategy = started_strategy.ok_or_else(|| {
                 SessionStoreError::InvalidEvent(
                     "effect/started must declare a lifecycle strategy".to_owned(),
@@ -3501,10 +3541,157 @@ async fn validate_effect_transition_tx(
                     "effect reconciliation must use the original idempotency key".to_owned(),
                 ));
             }
+            let terminal = terminal.expect("reconciled effect has uncertain terminal");
+            validate_effect_identity_transition(started, append, &terminal.event_id)?;
             Ok(())
         }
         _ => Ok(()),
     }
+}
+
+async fn validate_effect_started_causation_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    append: &SessionEventAppend,
+) -> Result<(), SessionStoreError> {
+    let causation_event_id = append
+        .semantic_event
+        .causation_event_id
+        .as_ref()
+        .ok_or_else(|| {
+            SessionStoreError::InvalidEvent(
+                "effect/started requires its exact tool/call-started causation event".to_owned(),
+            )
+        })?;
+    let tool = event_by_event_id_tx(tx, causation_event_id.as_ref())
+        .await?
+        .map(event_from_row)
+        .transpose()?
+        .ok_or_else(|| {
+            SessionStoreError::InvalidEvent(
+                "effect/started causation event is not committed".to_owned(),
+            )
+        })?;
+    if tool.agent_session_id != append.agent_session_id
+        || tool.kind.0 != "tool/call-started"
+    {
+        return Err(SessionStoreError::InvalidEvent(
+            "effect/started causation must be a tool/call-started event in the same AgentSession"
+                .to_owned(),
+        ));
+    }
+
+    let payload = effect_payload_from_append(append)?;
+    let turn_id = effect_required_string(payload, "turn_id")?;
+    let operation_id = effect_required_string(payload, "operation_id")?;
+    let capability_module = effect_required_string(payload, "capability_module")?;
+    let action_id = effect_required_string(payload, "action_id")?;
+    let turn_started_event_id = sqlx::query_scalar::<_, String>(
+        "SELECT started_event_id FROM agent_turns \
+         WHERE session_id = ? AND turn_id = ? AND state IN ('accepted', 'running')",
+    )
+    .bind(append.agent_session_id.as_ref())
+    .bind(turn_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| {
+        SessionStoreError::InvalidEvent(
+            "effect/started references a Turn that is not active in the canonical Store"
+                .to_owned(),
+        )
+    })?;
+    if tool.causation_event_id.as_ref().map(EventId::as_ref)
+        != Some(turn_started_event_id.as_str())
+    {
+        return Err(SessionStoreError::InvalidEvent(
+            "effect/started tool causation does not belong to its declared Turn".to_owned(),
+        ));
+    }
+    let SessionEventPayloadRef::InlineJson(tool_payload) = &tool.payload else {
+        return Err(SessionStoreError::InvalidEvent(
+            "effect/started tool causation requires inline canonical identity".to_owned(),
+        ));
+    };
+    for (field, expected) in [
+        ("operation_id", operation_id),
+        ("capability_id", capability_module),
+        ("action_id", action_id),
+    ] {
+        if tool_payload.0.get(field).and_then(Value::as_str) != Some(expected) {
+            return Err(SessionStoreError::InvalidEvent(format!(
+                "effect/started causation tool identity differs at {field}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_effect_identity_transition(
+    started: &SessionEventRecord,
+    append: &SessionEventAppend,
+    expected_causation_event_id: &EventId,
+) -> Result<(), SessionStoreError> {
+    if append.semantic_event.causation_event_id.as_ref() != Some(expected_causation_event_id) {
+        return Err(SessionStoreError::InvalidEvent(
+            "effect lifecycle causation does not reference its immediate predecessor".to_owned(),
+        ));
+    }
+    if append.semantic_event.correlation_id != started.correlation_id {
+        return Err(SessionStoreError::InvalidEvent(
+            "effect lifecycle correlation changed after effect/started".to_owned(),
+        ));
+    }
+    let started_payload = effect_payload_from_event(started)?;
+    let next_payload = effect_payload_from_append(append)?;
+    for field in [
+        "effect_id",
+        "turn_id",
+        "operation_id",
+        "owner_domain",
+        "capability_module",
+        "action_id",
+        "input_digest",
+        "strategy",
+        "resource_binding_id",
+        "resource_key",
+    ] {
+        if started_payload.get(field) != next_payload.get(field) {
+            return Err(SessionStoreError::InvalidEvent(format!(
+                "effect lifecycle identity changed at {field}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn effect_payload_from_append(
+    append: &SessionEventAppend,
+) -> Result<&Value, SessionStoreError> {
+    let SessionEventPayloadRef::InlineJson(payload) = &append.semantic_event.payload else {
+        return Err(SessionStoreError::InvalidEvent(
+            "effect lifecycle payload must be inline canonical JSON".to_owned(),
+        ));
+    };
+    Ok(&payload.0)
+}
+
+fn effect_payload_from_event(event: &SessionEventRecord) -> Result<&Value, SessionStoreError> {
+    let SessionEventPayloadRef::InlineJson(payload) = &event.payload else {
+        return Err(SessionStoreError::InvalidEvent(
+            "effect lifecycle payload must be inline canonical JSON".to_owned(),
+        ));
+    };
+    Ok(&payload.0)
+}
+
+fn effect_required_string<'a>(
+    payload: &'a Value,
+    field: &str,
+) -> Result<&'a str, SessionStoreError> {
+    payload.get(field).and_then(Value::as_str).ok_or_else(|| {
+        SessionStoreError::InvalidEvent(format!(
+            "effect ledger payload is missing {field}"
+        ))
+    })
 }
 
 async fn project_effect_fact_tx(

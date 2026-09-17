@@ -55,6 +55,9 @@ impl ContextContributor for NomiTurnContextContributor {
             },
         };
         input.validate()?;
+        if turn.turn_id.trim().is_empty() {
+            return Err("Dynamic Context requires a canonical Turn identity".to_owned());
+        }
         let active = self.active.snapshot().map_err(|error| error.to_string())?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let mut contributions = Vec::new();
@@ -77,7 +80,7 @@ impl ContextContributor for NomiTurnContextContributor {
                         principal: self.owner.clone(),
                         session_owner: self.owner.clone(),
                         agent_session_id: self.session_id.clone(),
-                        turn_id: None,
+                        turn_id: Some(OperationId::from(turn.turn_id.clone())),
                         correlation_id: CorrelationId::from(format!(
                             "{}:context",
                             operation_id.as_ref()

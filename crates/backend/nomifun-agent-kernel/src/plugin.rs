@@ -126,6 +126,9 @@ pub enum RoleMemberAdmission {
 pub struct RoleMemberInvocationRequest {
     pub principal: PrincipalRef,
     pub session_owner: PrincipalRef,
+    /// Canonical Agent Turn for Agent-admitted members. Operation-admitted
+    /// members have no Agent Turn and must leave this absent.
+    pub turn_id: Option<OperationId>,
     pub operation_id: OperationId,
     pub correlation_id: CorrelationId,
     pub capability_id: CapabilityId,

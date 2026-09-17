@@ -329,6 +329,7 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
             .saved_binding_artifacts(&owner, &binding)
             .await
             .map_err(control_plane_error_to_app)?;
+        let target_engine = self.runtime_engines.validate_agent(&snapshot)?;
         let editor = self
             .control_plane
             .editor(
@@ -340,13 +341,25 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
             .map_err(control_plane_error_to_app)?;
         let common_owner = nomifun_common::UserId::parse(owner_id.to_owned())
             .map_err(|error| AppError::Forbidden(format!("invalid product Agent owner: {error}")))?;
-        let projected = super::nomi_core_agent_projection::project_saved_artifacts(
+        let mut projected = super::nomi_core_agent_projection::project_saved_artifacts(
             &common_owner,
             binding,
             revision,
             snapshot,
             Some(&editor.preset.display_name),
         )?;
+        attach_session_metadata(
+            &mut projected.projection.request.extra,
+            &projected.binding,
+            None,
+        )
+        .map_err(|error| AppError::Conflict(error.message))?;
+        projected.projection.request.extra[nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY] =
+            serde_json::to_value(&target_engine)
+                .map_err(|error| AppError::Internal(error.to_string()))?;
+        self.runtime_engines
+            .catalog()?
+            .validate_session_extra(&target_engine, &projected.projection.request.extra)?;
         Ok(ProductAgentResolution {
             snapshot: projected.projection.snapshot,
             runtime_extra: projected.projection.request.extra,

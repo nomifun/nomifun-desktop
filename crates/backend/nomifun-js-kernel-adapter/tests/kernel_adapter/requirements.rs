@@ -777,6 +777,7 @@ async fn context_and_non_agent_operations_consume_the_selected_resource_requirem
             member: RoleMemberInvocationRequest {
                 principal: owner.clone(),
                 session_owner: owner.clone(),
+                turn_id: None,
                 operation_id: "resource-operation".into(),
                 correlation_id: "resource-correlation".into(),
                 capability_id: MEMBERS[0].into(),

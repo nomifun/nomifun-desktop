@@ -39,12 +39,16 @@ pub(crate) fn descriptor() -> RuntimeEngineDescriptor {
                 concat!(
                     include_str!("../../../../../Cargo.lock"),
                     include_str!("../../Cargo.toml"),
+                    include_str!("../../../nomifun-coding-engine/src/lib.rs"),
                     include_str!("../../../nomifun-public/Cargo.toml"),
                     include_str!("../../../nomifun-agent-control-plane/src/kernel_catalog.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/engine_features.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/runtime.rs"),
+                    include_str!("../../../nomifun-agent-contracts/src/package.rs"),
+                    include_str!("../../../nomifun-agent-contracts/src/retirement.rs"),
                     include_str!("../../../nomifun-agent-contracts/contracts/engine/platform-feature-inventory.payload.json"),
                     include_str!("agent_wave1_host.rs"),
+                    include_str!("../../../nomifun-agent-domain-wave1/src/lib.rs"),
                     include_str!("agent_wave1_companion_host.rs"),
                     include_str!("agent_wave1_memory_receipts.rs"),
                     include_str!("nomi_core_builtins.rs"),
@@ -56,6 +60,7 @@ pub(crate) fn descriptor() -> RuntimeEngineDescriptor {
                     include_str!("../../../nomifun-coding-engine/src/turn.rs"),
                     include_str!("../../../nomifun-coding-engine/src/kernel.rs"),
                     include_str!("../../../nomifun-agent-kernel/src/compiler.rs"),
+                    include_str!("../../../nomifun-agent-kernel/src/plugin.rs"),
                     include_str!("../../../nomifun-agent-kernel/src/session_capabilities.rs"),
                     include_str!("nomi_core_resource_bindings.rs"),
                     include_str!("nomi_core_session.rs"),
@@ -82,7 +87,6 @@ pub(crate) fn descriptor() -> RuntimeEngineDescriptor {
                     include_str!("../../../nomifun-coding-engine/src/requirements.rs"),
                     include_str!("../../../nomifun-coding-engine/src/task_continuation.rs"),
                     include_str!("../../../nomifun-coding-engine/src/completion.rs"),
-                    include_str!("../../../nomifun-coding-engine/src/process.rs"),
                     include_str!("../../../nomifun-agent-domain-wave2/src/lib.rs"),
                     include_str!("../../../nomifun-agent-domain-wave2/src/process_schema.rs"),
                     include_str!("../../../nomifun-agent-domain-wave2/src/workspace_schema.rs"),
@@ -122,6 +126,8 @@ pub(crate) fn descriptor() -> RuntimeEngineDescriptor {
                     include_str!("../../../nomifun-chat-model-broker/src/contracts.rs"),
                     include_str!("../../../nomifun-chat-model-broker/src/responses_bridge.rs"),
                     include_str!("../../../nomifun-ai-agent/src/runtime_admission.rs"),
+                    include_str!("../../../nomifun-ai-agent/src/plugin_tools.rs"),
+                    include_str!("../../../nomifun-ai-agent/src/tool_discovery.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/tool_middleware.rs"),
                     include_str!("coding_runtime_history.rs"),
                     include_str!("coding_patch_recovery.rs"),
@@ -135,6 +141,7 @@ pub(crate) fn descriptor() -> RuntimeEngineDescriptor {
                     include_str!("../../../nomifun-ai-agent/src/runtime_extension.rs"),
                     include_str!("../../../nomifun-ai-agent/src/runtime_catalog.rs"),
                     include_str!("runtime_engines.rs"),
+                    include_str!("mod.rs"),
                     include_str!("../desktop.rs"),
                     include_str!("../services.rs"),
                     include_str!("../bootstrap/nomi_core.rs"),
@@ -175,6 +182,7 @@ pub(crate) fn descriptor() -> RuntimeEngineDescriptor {
                     include_str!("plugin_platform.rs"),
                     include_str!("state.rs"),
                     include_str!("../../../nomifun-mcp/src/service.rs"),
+                    include_str!("../../../nomifun-mcp/src/identity.rs"),
                     include_str!("../../../nomifun-mcp/src/routes.rs"),
                     include_str!("../../../nomifun-db/src/repository/sqlite_mcp_server.rs"),
                     include_str!("agent_wave2_mcp.rs"),
@@ -197,6 +205,8 @@ pub(crate) fn descriptor() -> RuntimeEngineDescriptor {
                     include_str!("../../../nomifun-file/src/agent_patch_source.rs"),
                     include_str!("../../../nomifun-file/src/agent_patch_outcome.rs"),
                     include_str!("../../../nomifun-file/src/service.rs"),
+                    include_str!("../../../nomifun-file/src/artifact_store.rs"),
+                    include_str!("../../../nomifun-file/src/vcs_stage.rs"),
                     include_str!("../../../nomifun-file/src/agent_text_search.rs"),
                     include_str!("../../../nomifun-file/src/resource.rs"),
                     include_str!("../../../nomifun-file/src/path_safety.rs"),
@@ -209,6 +219,7 @@ pub(crate) fn descriptor() -> RuntimeEngineDescriptor {
                     include_str!("engine_tool_host.rs"),
                     include_str!("engine_kernel_session.rs"),
                     include_str!("../../../nomifun-ai-agent/src/engine_effect_scope.rs"),
+                    include_str!("../../../nomifun-agent-session/src/store.rs"),
                     include_str!("engine_mcp_resources.rs"),
                     include_str!("engine_mcp_media.rs"),
                     include_str!("engine_workspace_media.rs"),
@@ -250,7 +261,6 @@ pub(crate) fn factory(
             let resources = session_host.open_kernel_session(&admitted)?;
             let compiled = resources.compiled().clone();
             let active = resources.active_state().clone();
-            capabilities::restore(&pool, &options, &binding, &compiled, &active).await?;
             // Compile the exact selected surface once. This preview does not
             // mutate the Kernel active set or expose inactive tools to a model.
             let preview = active.snapshot().map_err(error)?;
@@ -620,7 +630,7 @@ impl CodingRuntimeHost for ConversationCodingHost {
                 .map_err(|_| error("terminal root state poisoned"))? = Some(root.to_owned());
             return Ok(());
         }
-        if matches!(event, CodingEngineEvent::CapabilitiesActivated { .. } | CodingEngineEvent::TurnInputScope { .. } | CodingEngineEvent::SteeringInputs { .. } | CodingEngineEvent::SteeringDeferred { .. }) {
+        if matches!(event, CodingEngineEvent::TurnInputScope { .. } | CodingEngineEvent::SteeringInputs { .. } | CodingEngineEvent::SteeringDeferred { .. }) {
             return Err(error("control records must be committed by the platform owner"));
         }
         if matches!(event, CodingEngineEvent::ToolStarted { step, .. } if *step > 0) {
@@ -816,5 +826,33 @@ impl super::engine_tool_host::EngineToolObservationPolicy for CodingToolObservat
 impl CodingToolInvoker for JoinedTools {
     async fn invoke(&self, invocation: CodingToolInvocation, cancellation: CancellationToken) -> Result<CodingToolResult, CodingEngineError> {
         nomifun_engine_core::EngineToolInvoker::invoke(self.0.as_ref(), invocation, cancellation).await.map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod build_identity_tests {
+    #[test]
+    fn runtime_digest_covers_module_roots_and_wave_two_effect_owners() {
+        let source = include_str!("coding_runtime_host.rs");
+        for required in [
+            "../../../nomifun-coding-engine/src/lib.rs",
+            "mod.rs",
+            "../../../nomifun-agent-contracts/src/package.rs",
+            "../../../nomifun-agent-contracts/src/retirement.rs",
+            "../../../nomifun-agent-kernel/src/plugin.rs",
+            "../../../nomifun-agent-domain-wave1/src/lib.rs",
+            "../../../nomifun-agent-domain-wave2/src/lib.rs",
+            "../../../nomifun-ai-agent/src/plugin_tools.rs",
+            "../../../nomifun-ai-agent/src/tool_discovery.rs",
+            "../../../nomifun-mcp/src/identity.rs",
+            "../../../nomifun-file/src/artifact_store.rs",
+            "../../../nomifun-file/src/vcs_stage.rs",
+            "../../../nomifun-agent-session/src/store.rs",
+        ] {
+            assert!(
+                source.contains(&format!("include_str!(\"{required}\")")),
+                "Runtime build digest omitted {required}"
+            );
+        }
     }
 }

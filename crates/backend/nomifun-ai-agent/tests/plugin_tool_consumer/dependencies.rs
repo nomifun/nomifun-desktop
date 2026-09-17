@@ -34,7 +34,7 @@ impl CapabilityContextContributionFactory for Relay {
 }
 
 #[tokio::test]
-async fn nomi_initial_and_turn_contexts_consume_private_dependencies_with_distinct_evaluation_ids()
+async fn initial_context_rejects_tool_dependencies_and_turn_contexts_use_distinct_evaluation_ids()
 {
     for phase in [
         nomifun_agent_contracts::ContextContributionPhase::SessionStart,
@@ -102,6 +102,17 @@ async fn nomi_initial_and_turn_contexts_consume_private_dependencies_with_distin
         // Rebuild the same Session twice; a restarted in-memory sequence must
         // not alias two evaluations to the same dependency effect identity.
         for _ in 0..2 {
+            if phase == nomifun_agent_contracts::ContextContributionPhase::SessionStart {
+                let error = match try_session(kernel.clone(), compiled.clone(), schemas.clone()).await {
+                    Ok(_) => panic!("SessionStart Context must not invoke a Tool dependency"),
+                    Err(error) => error,
+                };
+                let NomiPluginToolError::Kernel(error) = error else {
+                    panic!("SessionStart Tool dependency returned a non-Kernel error")
+                };
+                assert_eq!(error.canonical_code().as_ref(), "DEPENDENCY_TURN_REQUIRED");
+                continue;
+            }
             let loaded = session(kernel.clone(), compiled.clone(), schemas.clone()).await;
             assert!(
                 !loaded
@@ -109,27 +120,20 @@ async fn nomi_initial_and_turn_contexts_consume_private_dependencies_with_distin
                     .iter()
                     .any(|action| action.capability_id().as_ref() == CHILD)
             );
-            if phase == nomifun_agent_contracts::ContextContributionPhase::BeforeTurn {
-                let value = loaded.context_contributors()[0]
-                    .pre_turn_context_for_turn_result(
-                        &nomi_agent::context_contributor::TurnContext {
-                            source_message_id: "same-source".into(),
-                            text: "turn".into(),
-                            image_media_types: Vec::new(),
-                            cs_dialogue_id: None,
-                        },
-                    )
-                    .await
-                    .unwrap()
-                    .unwrap();
-                assert!(value.contains("context-dependency:turn"));
-            } else {
-                let value = loaded
-                    .system_prompt_with_initial_context(Some("base"))
-                    .unwrap()
-                    .unwrap();
-                assert!(value.contains("context-dependency:startup"));
-            }
+            let value = loaded.context_contributors()[0]
+                .pre_turn_context_for_turn_result(
+                    &nomi_agent::context_contributor::TurnContext {
+                        turn_id: "turn-same-source".into(),
+                        source_message_id: "same-source".into(),
+                        text: "turn".into(),
+                        image_media_types: Vec::new(),
+                        cs_dialogue_id: None,
+                    },
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(value.contains("context-dependency:turn"));
             let caller = retained.lock().unwrap().take().unwrap();
             assert_eq!(
                 caller
@@ -146,9 +150,16 @@ async fn nomi_initial_and_turn_contexts_consume_private_dependencies_with_distin
                 "DEPENDENCY_PARENT_CLOSED"
             );
         }
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let expected_calls = usize::from(
+            phase == nomifun_agent_contracts::ContextContributionPhase::BeforeTurn,
+        ) * 2;
+        assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
         let evidence = evidence.lock().unwrap();
-        assert_ne!(evidence[0].idempotency_key, evidence[1].idempotency_key);
+        if phase == nomifun_agent_contracts::ContextContributionPhase::BeforeTurn {
+            assert_ne!(evidence[0].idempotency_key, evidence[1].idempotency_key);
+        } else {
+            assert!(evidence.is_empty());
+        }
         for item in evidence.iter() {
             assert_eq!(item.agent_session_id, SESSION);
             assert_eq!(item.capability_id, CHILD);

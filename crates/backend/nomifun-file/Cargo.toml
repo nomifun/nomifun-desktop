@@ -25,9 +25,11 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 same-file.workspace = true
+fs2.workspace = true
 tracing.workspace = true
 dashmap.workspace = true
 dirs.workspace = true
+uuid.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

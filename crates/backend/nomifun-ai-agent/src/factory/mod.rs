@@ -12,7 +12,7 @@ use nomi_agent::companion_tools::{CompanionMemorySink, CompanionSkillSink};
 use nomi_agent::requirement_tools::RequirementSink;
 use nomifun_api_types::{GatewayMcpConfig, ModelTask};
 use nomifun_common::{AppError, ExecutionAuthority};
-use nomifun_db::{IClientPreferenceRepository, IMcpServerRepository, ISettingsRepository};
+use nomifun_db::{IClientPreferenceRepository, ISettingsRepository};
 use nomifun_model_invoke::{ModelInvokeService, ModelRef};
 
 use crate::runtime_handle::AgentRuntimeHandle;
@@ -115,14 +115,6 @@ pub struct AgentFactoryDeps {
     /// setting. `Option` lets tests omit the repository and use the host/default
     /// locale.
     pub settings_repo: Option<Arc<dyn ISettingsRepository>>,
-    /// User-configured MCP servers repository. Used by the nomi factory to
-    /// inject enabled servers into the session's MCP client set.
-    /// `None` for tests/composition paths that do not need MCP injection.
-    pub mcp_server_repo: Option<Arc<dyn IMcpServerRepository>>,
-    /// OAuth credential resolver for MCP servers selected through canonical
-    /// Agent resource bindings. The service returns tokens only for the exact
-    /// stored endpoint; secrets never enter Agent bindings or model input.
-    pub mcp_oauth_service: Option<Arc<nomifun_mcp::McpOAuthService>>,
     /// Optional sink enabling nomi native requirement tools. When `Some`,
     /// `requirement_complete` / `requirement_update_status` are registered into
     /// the in-process engine. `None` (e.g. standalone) leaves them unregistered.

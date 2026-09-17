@@ -1043,7 +1043,7 @@ impl KernelRegistry {
             principal: request.principal.clone(),
             session_owner: request.session_owner.clone(),
             agent_session_id: agent_session_id.clone(),
-            turn_id: None,
+            turn_id: request.turn_id.clone(),
             operation_id: request.operation_id.clone(),
             correlation_id: request.correlation_id.clone(),
             resolved_snapshot_ref: resolved_snapshot_ref.clone(),
@@ -1531,6 +1531,7 @@ fn role_request_from_access(
     RoleMemberInvocationRequest {
         principal: request.principal,
         session_owner: request.session_owner,
+        turn_id: request.turn_id,
         operation_id: request.operation_id,
         correlation_id: request.correlation_id,
         capability_id: request.capability_id,
@@ -1727,6 +1728,7 @@ fn agent_role_request(request: &CapabilityInvocationRequest) -> RoleMemberInvoca
     RoleMemberInvocationRequest {
         principal: request.principal.clone(),
         session_owner: request.session_owner.clone(),
+        turn_id: Some(request.turn_id.clone()),
         operation_id: request.operation_id.clone(),
         correlation_id: request.correlation_id.clone(),
         capability_id: request.capability_id.clone(),

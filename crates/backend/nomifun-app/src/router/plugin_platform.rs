@@ -3067,6 +3067,7 @@ export async function activate() {
             assert_eq!(session.context_contributors().len(), 1);
             for text in ["first", "second"] {
                 let prompt = session.context_contributors()[0].pre_turn_context_for_turn_result(&nomifun_ai_agent::TurnContext {
+                    turn_id: format!("installed-turn-{text}"),
                     source_message_id: format!("installed-{text}"), text: text.into(),
                     image_media_types: vec!["image/png".into()], cs_dialogue_id: Some("host-private".into()),
                 }).await.unwrap().unwrap();
