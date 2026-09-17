@@ -1024,14 +1024,6 @@ pub fn c7_package_specs() -> Vec<PackageSpec> {
             supported_surfaces: &["desktop", "headless"],
         },
         PackageSpec {
-            id: "nomifun.workspace-execution",
-            display_name: "Workspace Execution",
-            description: "Operate on explicitly bound workspaces and processes.",
-            mount_id: "domain-workspace-execution",
-            capabilities: &WORKSPACE_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
             id: "nomifun.ssh",
             display_name: "SSH",
             description: "Use explicitly bound remote SSH resources.",
@@ -1061,22 +1053,6 @@ pub fn c7_package_specs() -> Vec<PackageSpec> {
             description: "Read and maintain explicitly bound companion memory.",
             mount_id: "domain-companion-memory",
             capabilities: &COMPANION_MEMORY_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
-            id: "nomifun.skills",
-            display_name: "Skills",
-            description: "Expose catalogued skill guidance and hooks.",
-            mount_id: "domain-skills",
-            capabilities: &SKILL_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
-            id: "nomifun.mcp-connectors",
-            display_name: "MCP Connectors",
-            description: "Materialize MCP tools as canonical capabilities.",
-            mount_id: "domain-mcp-connectors",
-            capabilities: &MCP_CAPABILITIES,
             supported_surfaces: &["desktop", "headless"],
         },
         PackageSpec {
@@ -1202,9 +1178,7 @@ pub fn c7_package_specs() -> Vec<PackageSpec> {
     ]
 }
 
-const WORKSPACE: &[&str] = &["workspace"];
 const PROCESS_SESSION: &[&str] = &["process_session"];
-const TERMINAL: &[&str] = &["terminal"];
 const SSH_HOST: &[&str] = &["ssh_host"];
 const COMPUTER: &[&str] = &["computer"];
 const KNOWLEDGE_BASE: &[&str] = &["knowledge_base"];
@@ -1216,7 +1190,6 @@ const ROBOT: &[&str] = &["robot"];
 const CANVAS: &[&str] = &["canvas"];
 const ASSET_LIBRARY: &[&str] = &["asset_library"];
 const PLUGIN: &[&str] = &["plugin"];
-const MCP_SERVER: &[&str] = &["mcp_server"];
 
 const WEB_RESEARCH_CAPABILITIES: [CapabilitySpec; 3] = [
     CapabilitySpec::tool("web.search", EffectClass::ExternalTransmit, &[]),
@@ -1250,25 +1223,6 @@ const AGENT_EXECUTION_CAPABILITIES: [CapabilitySpec; 5] = [
     CapabilitySpec::tool("agent.execution.steer", EffectClass::WriteDurable, PROCESS_SESSION),
     CapabilitySpec::tool("agent.execution.observe", EffectClass::ReadLocal, PROCESS_SESSION),
 ];
-const WORKSPACE_CAPABILITIES: [CapabilitySpec; 17] = [
-    CapabilitySpec::tool("fs.read", EffectClass::ReadLocal, WORKSPACE),
-    CapabilitySpec::tool("fs.search", EffectClass::ReadLocal, WORKSPACE),
-    CapabilitySpec::tool("fs.write", EffectClass::WriteDurable, WORKSPACE),
-    CapabilitySpec::tool("fs.patch", EffectClass::WriteReversible, WORKSPACE),
-    CapabilitySpec::tool("fs.delete", EffectClass::Destructive, WORKSPACE),
-    CapabilitySpec::event_source_with_resources("fs.watch", WORKSPACE),
-    CapabilitySpec::tool("fs.snapshot", EffectClass::ReadLocal, WORKSPACE),
-    CapabilitySpec::resource_provider("workspace.bind", WORKSPACE),
-    CapabilitySpec::resource_provider("workspace.artifacts", WORKSPACE),
-    CapabilitySpec::tool("vcs.status", EffectClass::ReadLocal, WORKSPACE),
-    CapabilitySpec::tool("vcs.diff", EffectClass::ReadLocal, WORKSPACE),
-    CapabilitySpec::tool("vcs.stage", EffectClass::WriteReversible, WORKSPACE),
-    CapabilitySpec::tool("vcs.commit", EffectClass::WriteDurable, WORKSPACE),
-    CapabilitySpec::tool("vcs.push", EffectClass::ExternalTransmit, WORKSPACE),
-    CapabilitySpec::tool("process.exec", EffectClass::ExecuteLocal, PROCESS_SESSION),
-    CapabilitySpec::resource_provider("process.session", PROCESS_SESSION),
-    CapabilitySpec::resource_provider("terminal.pty", TERMINAL),
-];
 const SSH_CAPABILITIES: [CapabilitySpec; 5] = [
     CapabilitySpec::resource_provider("ssh.connect", SSH_HOST),
     CapabilitySpec::tool("ssh.fs.read", EffectClass::ReadSensitive, SSH_HOST),
@@ -1298,20 +1252,6 @@ const COMPANION_MEMORY_CAPABILITIES: [CapabilitySpec; 4] = [
     CapabilitySpec::tool("memory.companion.write", EffectClass::WriteDurable, COMPANION_MEMORY),
     CapabilitySpec::tool("memory.companion.merge", EffectClass::WriteDurable, COMPANION_MEMORY),
     CapabilitySpec::tool("memory.companion.evolve", EffectClass::WriteDurable, COMPANION_MEMORY),
-];
-const SKILL_CAPABILITIES: [CapabilitySpec; 4] = [
-    CapabilitySpec::context("skill.catalog"),
-    CapabilitySpec::context("skill.describe"),
-    CapabilitySpec::tool("skill.invoke", EffectClass::ExecuteLocal, &[]),
-    CapabilitySpec::middleware("skill.hooks"),
-];
-const MCP_CAPABILITIES: [CapabilitySpec; 6] = [
-    CapabilitySpec::transport("mcp.connect"),
-    CapabilitySpec::tool("mcp.tool_proxy", EffectClass::ExternalTransmit, MCP_SERVER),
-    CapabilitySpec::resource_provider("mcp.resource", MCP_SERVER),
-    CapabilitySpec::transport("mcp.oauth"),
-    CapabilitySpec::tool("connector.data.read", EffectClass::ReadSensitive, MCP_SERVER),
-    CapabilitySpec::tool("connector.data.write", EffectClass::WriteDurable, MCP_SERVER),
 ];
 const BROWSER_CAPABILITIES: [CapabilitySpec; 7] = [
     CapabilitySpec::context("browser.observe"),
@@ -1611,7 +1551,7 @@ mod tests {
     #[test]
     fn c7_inventory_has_unique_packages_and_capabilities() {
         let registrations = registrations(c7_package_specs()).unwrap();
-        assert_eq!(registrations.len(), 28);
+        assert_eq!(registrations.len(), 25);
         validate_inventory(&registrations).unwrap();
         let capability_ids = registrations
             .iter()
