@@ -608,6 +608,20 @@
 - macOS: snapshot contract is shared; CEF native behavior remains `UARC-061`.
 - Remaining/blocker: review findings are fully specified and require no product decision.
 
+### 2026-09-18 Wave 5 exact defaults and resource-status seams granted
+
+- Barrier/source: Wave 5 start `90ba8f95f`; completed UI/device lanes exposed two final cross-surface contracts.
+- Owner/write set: Integration adds official-template draft materialization to `UARC-050`, and Computer automatic
+  resource plus Robot resource-status picker files to `UARC-042`. Agent contracts/generated outputs remain globally
+  integration-only.
+- Changed: official seeds can carry exact Action allowlists without client-side risk inference; `computer` resolves only
+  to server-owned `local-desktop`; Robot choices can present live connection/permission/missing-hardware guidance.
+- Deleted: expand-all-template behavior and an unresolvable Computer resource requirement.
+- Retained + reason: server compile remains authoritative, while UI resource choices carry identities only.
+- Tests: pending official seed contract/compiler/UI tests and Computer/Robot resource selection interactions.
+- Windows: required for Wave 5 acceptance; macOS native availability remains `UARC-062`.
+- Remaining/blocker: write sets are complete; implementation remains with Integration.
+
 ### 2026-09-18 UARC-042 hosted-effect rejection seam granted
 
 - Barrier/source: Wave 5 start `90ba8f95f`; the completed owner exposed one final receipt-classification call site.
