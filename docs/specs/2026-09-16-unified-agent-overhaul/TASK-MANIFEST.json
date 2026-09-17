@@ -307,7 +307,7 @@
       "status": "active",
       "depends_on": ["UARC-014"],
       "lane": "feature-platform-services",
-      "write_set": ["crates/backend/nomifun-cron/**", "crates/backend/nomifun-webhook/**", "crates/backend/nomifun-public/**", "crates/backend/nomifun-ssh/**", "crates/backend/nomifun-gateway/**"],
+      "write_set": ["crates/backend/nomifun-cron/**", "crates/backend/nomifun-webhook/**", "crates/backend/nomifun-public/**", "crates/backend/nomifun-ssh/**", "crates/backend/nomifun-gateway/**", "crates/shared/nomi-ssh/**"],
       "delete_set": ["scheduler/notification/remote transports exposed as Agent grants", "ssh.connect authoring capability"],
       "retained_set": ["Schedule actions", "typed remote ingress", "SSH action/resource boundary"],
       "ui_surface": ["Schedule/notification/SSH capability configuration where currently exposed"],
