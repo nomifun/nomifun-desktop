@@ -1,4 +1,8 @@
 use super::*;
+use crate::product::{
+    BrowserProviderDescriptor, BrowserProviderKind, BrowserResourceBinding,
+    BrowserResourceOperation,
+};
 use crate::run_guard::BrowserInputState;
 use crate::runtime::*;
 use std::sync::atomic::AtomicUsize;
@@ -88,18 +92,30 @@ impl BrowserRuntime for Runtime {
             }
         }
         let mut snapshot = self.snapshot.lock().await;
-        if matches!(command, BrowserTabCommand::ClearSiteData { .. }) {
-            snapshot.tabs.clear(); snapshot.active_tab_id=None;
+        if let BrowserTabCommand::CloseAll { runtime_generation }
+        | BrowserTabCommand::OpenDownloads { runtime_generation }
+        | BrowserTabCommand::ClearSiteData { runtime_generation } = &command
+        {
+            if *runtime_generation != snapshot.runtime_generation {
+                return Err(WorkspaceError::StaleTarget);
+            }
         }
-        if let BrowserTabCommand::CloseAll { runtime_generation } = &command {
-            if *runtime_generation!=snapshot.runtime_generation { return Err(WorkspaceError::StaleTarget); }
-            if self.fail_close_once.swap(false,Ordering::SeqCst) {
+        if matches!(command, BrowserTabCommand::CloseAll { .. }) {
+            if self.fail_close_once.swap(false, Ordering::SeqCst) {
                 snapshot.tabs.pop();
-                snapshot.active_tab_id=snapshot.tabs.first().map(|tab|tab.target.tab_id.clone());
-                snapshot.revision+=1;
+                snapshot.active_tab_id = snapshot
+                    .tabs
+                    .first()
+                    .map(|tab| tab.target.tab_id.clone());
+                snapshot.revision += 1;
                 return Err(WorkspaceError::NativeCommandFailed);
             }
-            snapshot.tabs.clear();snapshot.active_tab_id=None;
+            snapshot.tabs.clear();
+            snapshot.active_tab_id = None;
+        }
+        if matches!(command, BrowserTabCommand::ClearSiteData { .. }) {
+            snapshot.tabs.clear();
+            snapshot.active_tab_id = None;
         }
         if let BrowserTabCommand::Create { url } = command {
             let id = format!("tab-{}", snapshot.tabs.len());
@@ -127,8 +143,12 @@ impl BrowserRuntime for Runtime {
     }
     async fn close(&self) -> Result<(), WorkspaceError> {
         if let Some(clear) = &self.clear {
-            if clear.calls.load(Ordering::SeqCst)>0 && !clear.completed.load(Ordering::SeqCst) {
-                clear.closed_before_completion.store(true, Ordering::SeqCst);
+            if clear.calls.load(Ordering::SeqCst) > 0
+                && !clear.completed.load(Ordering::SeqCst)
+            {
+                clear
+                    .closed_before_completion
+                    .store(true, Ordering::SeqCst);
             }
         }
         if self.fail_close_once.swap(false, Ordering::SeqCst) {
@@ -139,185 +159,68 @@ impl BrowserRuntime for Runtime {
     }
 }
 
-#[tokio::test]
-async fn close_all_is_user_only_and_never_creates_or_replaces_a_runtime() {
-    let factory=Arc::new(Factory::default());
-    let service=BrowserWorkspaceService::new(factory.clone());
-    let workspace=service.ensure(key("u","close-all"),"provider".into(),BrowserProfile::Ephemeral).await.unwrap();
-    let generation=workspace.slot.request.runtime_generation;
-    let command=|| BrowserTabCommand::CloseAll {runtime_generation:generation};
-    assert_eq!(workspace.user_command(command()).await,Err(WorkspaceError::TabNotFound));
-    assert_eq!(factory.creates.load(Ordering::SeqCst),0);
-    let before=workspace.user_command(create()).await.unwrap();
-    workspace.user_command(create()).await.unwrap();
-    assert_eq!(workspace.user_command(BrowserTabCommand::CloseAll {runtime_generation:generation+1}).await,Err(WorkspaceError::StaleTarget));
-    let run=workspace.begin_run().await.unwrap();
-    assert_eq!(workspace.agent_command(&run,command()).await,Err(WorkspaceError::UnsupportedAction));
-    assert_eq!(workspace.user_command(command()).await,Err(WorkspaceError::Admission(RunAdmissionError::UserInputLocked)));
-    workspace.finish_run(&run).await.unwrap();
-    let cleared=workspace.user_command(command()).await.unwrap();
-    assert!(cleared.tabs.is_empty());assert!(cleared.active_tab_id.is_none());
-    assert_eq!(cleared.runtime_generation,before.runtime_generation);
-    assert!(workspace.user_command(command()).await.unwrap().tabs.is_empty());
-    workspace.user_command(create()).await.unwrap();
-    assert_eq!(factory.creates.load(Ordering::SeqCst),1);
+fn descriptor(id: &str) -> BrowserProviderDescriptor {
+    BrowserProviderDescriptor::new(
+        id,
+        BrowserProviderKind::Managed,
+        format!("{id}-immutable-lock"),
+        BrowserCapabilityAction::all(),
+    )
+    .unwrap()
 }
 
-#[tokio::test]
-async fn partially_failed_close_all_keeps_the_same_runtime_for_explicit_retry() {
-    let factory=Arc::new(Factory::default());
-    let service=BrowserWorkspaceService::new(factory.clone());
-    let workspace=service.ensure(key("u","close-all-retry"),"provider".into(),BrowserProfile::Ephemeral).await.unwrap();
-    let original=workspace.user_command(create()).await.unwrap();
-    workspace.user_command(create()).await.unwrap();
-    let command=|| BrowserTabCommand::CloseAll {runtime_generation:original.runtime_generation};
-    factory.fail_close_once.store(true,Ordering::SeqCst);
-    assert_eq!(workspace.user_command(command()).await,Err(WorkspaceError::NativeCommandFailed));
-    let retained=workspace.snapshot().await.unwrap().runtime.unwrap();
-    assert_eq!(retained.tabs.len(),1);assert_eq!(retained.runtime_generation,original.runtime_generation);
-    assert!(workspace.user_command(command()).await.unwrap().tabs.is_empty());
-    assert_eq!(factory.creates.load(Ordering::SeqCst),1);
+fn authority(
+    principal: &str,
+    session: &str,
+    provider_id: &str,
+    actions: impl IntoIterator<Item = BrowserCapabilityAction>,
+) -> BrowserSessionAuthority {
+    BrowserSessionAuthority::new(
+        principal,
+        session,
+        actions,
+        BrowserResourceBinding::new(
+            format!("binding-{session}"),
+            format!("resource-{session}"),
+            principal,
+            descriptor(provider_id),
+            BrowserCapabilityAction::all().map(BrowserCapabilityAction::resource_operation),
+        )
+        .unwrap(),
+    )
+    .unwrap()
 }
 
-#[tokio::test]
-async fn downloads_folder_is_user_only_and_bound_to_existing_runtime() {
-    let factory = Arc::new(Factory::default());
-    let service = BrowserWorkspaceService::new(factory.clone());
-    let workspace = service.ensure(key("u", "downloads-folder"), "provider".into(), BrowserProfile::Ephemeral).await.unwrap();
-    let generation = workspace.runtime_generation();
-    let command = || BrowserTabCommand::OpenDownloads { runtime_generation: generation };
-    assert_eq!(workspace.user_command(command()).await, Err(WorkspaceError::TabNotFound));
-    assert_eq!(factory.creates.load(Ordering::SeqCst), 0);
-    let before = workspace.user_command(create()).await.unwrap();
-    assert_eq!(workspace.user_command(BrowserTabCommand::OpenDownloads { runtime_generation: generation + 1 }).await, Err(WorkspaceError::StaleTarget));
-    let run = workspace.begin_run().await.unwrap();
-    assert_eq!(workspace.user_command(command()).await, Err(WorkspaceError::Admission(RunAdmissionError::UserInputLocked)));
-    assert_eq!(workspace.agent_command(&run, command()).await, Err(WorkspaceError::UnsupportedAction));
-    workspace.finish_run(&run).await.unwrap();
-    let after = workspace.user_command(command()).await.unwrap();
-    assert_eq!(after.tabs, before.tabs);
-    workspace.user_command(BrowserTabCommand::CloseAll { runtime_generation: generation }).await.unwrap();
-    assert!(workspace.user_command(command()).await.unwrap().tabs.is_empty());
-    assert_eq!(factory.creates.load(Ordering::SeqCst), 1);
-    service.shutdown().await.unwrap();
+fn service(factory: Arc<Factory>, provider_ids: &[&str]) -> BrowserResourceService {
+    assert!(!provider_ids.is_empty());
+    BrowserResourceService::new(factory)
 }
 
-#[test]
-fn downloads_folder_command_never_accepts_a_path_or_url() {
-    for extra in ["path", "url", "directory"] {
-        let mut value = serde_json::json!({"command":"open_downloads","runtime_generation":1});
-        value[extra] = serde_json::json!("C:/Windows/notepad.exe");
-        assert!(serde_json::from_value::<BrowserTabCommand>(value).is_err());
-    }
+fn service_with_profiles(
+    factory: Arc<Factory>,
+    data_dir: &std::path::Path,
+) -> (BrowserResourceService, BrowserProfileStore) {
+    let store = BrowserProfileStore::new(data_dir.to_path_buf()).unwrap();
+    (
+        BrowserResourceService::new(factory).with_profile_store(store.clone()),
+        store,
+    )
 }
 
-#[tokio::test]
-async fn site_data_clear_requires_idle_user_and_existing_exact_runtime() {
-    let factory=Arc::new(Factory::default());
-    let service=BrowserWorkspaceService::new(factory.clone());
-    let workspace=service.ensure(key("u","site-data"),"provider".into(),BrowserProfile::Ephemeral).await.unwrap();
-    let generation=workspace.runtime_generation();
-    let command=||BrowserTabCommand::ClearSiteData{runtime_generation:generation};
-    assert_eq!(workspace.user_command(command()).await,Err(WorkspaceError::TabNotFound));
-    assert_eq!(factory.creates.load(Ordering::SeqCst),0);
-    workspace.user_command(create()).await.unwrap();
-    assert_eq!(workspace.user_command(BrowserTabCommand::ClearSiteData{runtime_generation:generation+1}).await,Err(WorkspaceError::StaleTarget));
-    let run=workspace.begin_run().await.unwrap();
-    assert_eq!(workspace.agent_command(&run,command()).await,Err(WorkspaceError::UnsupportedAction));
-    assert_eq!(workspace.user_command(command()).await,Err(WorkspaceError::Admission(RunAdmissionError::UserInputLocked)));
-    workspace.finish_run(&run).await.unwrap();
-    workspace.user_command(command()).await.unwrap();
-    assert_eq!(factory.creates.load(Ordering::SeqCst),1);
-    service.shutdown().await.unwrap();
+fn profile_path(store: &BrowserProfileStore, key: &BrowserResourceKey) -> std::path::PathBuf {
+    let BrowserProfile::Persistent(path) = store
+        .profile_for(key, BrowserProfilePersistence::Persistent)
+        .unwrap()
+    else {
+        panic!("persistent profile")
+    };
+    path
 }
 
-// This exercises the real Workspace/coordinator with a controlled asynchronous
-// Runtime; it is scheduler ownership evidence, not a WebView2 callback mock.
-async fn dropped_clear_request_still_owns_work(close_after: bool) {
-    let clear=Arc::new(DelayedClear::default());
-    let factory=Arc::new(Factory {clear:Some(clear.clone()),..Default::default()});
-    let service=BrowserWorkspaceService::new(factory.clone());
-    let workspace=service.ensure(key("u","detached-clear"),"provider".into(),BrowserProfile::Ephemeral).await.unwrap();
-    workspace.user_command(create()).await.unwrap();
-    let owned=workspace.clone();
-    let caller=tokio::spawn(async move {owned.user_command(BrowserTabCommand::ClearSiteData {runtime_generation:owned.runtime_generation()}).await});
-    clear.started.notified().await;
-    caller.abort();assert!(caller.await.unwrap_err().is_cancelled());
-    let owned=workspace.clone();
-    let mut next=tokio::spawn(async move {
-        if close_after {owned.close().await}
-        else {let run=owned.begin_run().await?;owned.finish_run(&run).await.map_err(WorkspaceError::from)}
-    });
-    assert!(tokio::time::timeout(std::time::Duration::from_millis(50),&mut next).await.is_err(),"the next lifecycle operation must wait for native settlement");
-    assert!(!clear.completed.load(Ordering::SeqCst));
-    assert!(!clear.closed_before_completion.load(Ordering::SeqCst));
-    clear.release.notify_one();
-    next.await.unwrap().unwrap();
-    assert!(clear.completed.load(Ordering::SeqCst));
-    assert_eq!(clear.calls.load(Ordering::SeqCst),1,"losing an HTTP waiter must not replay the clear");
-    assert!(!clear.closed_before_completion.load(Ordering::SeqCst));
-    assert_eq!(factory.creates.load(Ordering::SeqCst),1);
-    service.shutdown().await.unwrap();
+fn all_actions() -> [BrowserCapabilityAction; 7] {
+    BrowserCapabilityAction::all()
 }
 
-#[tokio::test(start_paused = true)]
-async fn site_data_clear_survives_dropped_request_before_agent_start() {
-    dropped_clear_request_still_owns_work(false).await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn site_data_clear_survives_dropped_request_before_workspace_close() {
-    dropped_clear_request_still_owns_work(true).await;
-}
-
-#[test]
-fn site_data_clear_cannot_select_another_profile_or_directory() {
-    for extra in ["path","profile","directory","user_id","conversation_id","url"] {
-        let mut payload=serde_json::json!({"command":"clear_site_data","runtime_generation":1});
-        payload[extra]=serde_json::json!("another-owner");
-        assert!(serde_json::from_value::<BrowserTabCommand>(payload).is_err());
-    }
-}
-
-#[tokio::test]
-async fn failed_native_close_retains_authority_and_blocks_replacement_until_retry() {
-    let factory = Arc::new(Factory::default());
-    let service = BrowserWorkspaceService::new(factory.clone());
-    let workspace = service
-        .ensure(key("u", "c"), "a".into(), BrowserProfile::Ephemeral)
-        .await
-        .unwrap();
-    workspace.user_command(create()).await.unwrap();
-    factory.fail_close_once.store(true, Ordering::SeqCst);
-    assert_eq!(
-        service.close(&key("u", "c")).await,
-        Err(WorkspaceError::NativeCommandFailed)
-    );
-    assert!(matches!(
-        service
-            .ensure(key("u", "c"), "a".into(), BrowserProfile::Ephemeral)
-            .await,
-        Err(WorkspaceError::WorkspaceClosed)
-    ));
-    assert_eq!(
-        workspace.user_command(create()).await,
-        Err(WorkspaceError::WorkspaceClosed)
-    );
-    service.close(&key("u", "c")).await.unwrap();
-    let next = service
-        .ensure(key("u", "c"), "a".into(), BrowserProfile::Ephemeral)
-        .await
-        .unwrap();
-    assert!(!Arc::ptr_eq(&next, &workspace));
-    service.shutdown().await.unwrap();
-}
-
-fn key(user: &str, conversation: &str) -> BrowserWorkspaceKey {
-    BrowserWorkspaceKey {
-        user_id: user.into(),
-        conversation_id: conversation.into(),
-    }
-}
 fn create() -> BrowserTabCommand {
     BrowserTabCommand::Create {
         url: "http://localhost:3000".into(),
@@ -325,190 +228,492 @@ fn create() -> BrowserTabCommand {
 }
 
 #[tokio::test]
-async fn website_dialog_user_command_cannot_bypass_agent_run_authority() {
-    let service = BrowserWorkspaceService::new(Arc::new(Factory::default()));
-    let workspace = service.ensure(key("dialog-user", "dialog-thread"), "a".into(), BrowserProfile::Ephemeral).await.unwrap();
-    let snapshot = workspace.user_command(create()).await.unwrap();
-    let command = BrowserTabCommand::Dialog { target: snapshot.tabs[0].target.clone(), request_id: "dialog".into(), accept: true, text: None };
-    let run = workspace.begin_run().await.unwrap();
-    assert_eq!(workspace.user_command(command.clone()).await, Err(WorkspaceError::Admission(RunAdmissionError::UserInputLocked)));
-    assert_eq!(workspace.agent_command(&run, command).await, Err(WorkspaceError::UnsupportedAction));
-    let cancel = BrowserTabCommand::CancelDownload { target: snapshot.tabs[0].target.clone(), download_id: "download".into() };
-    assert_eq!(workspace.user_command(cancel.clone()).await, Err(WorkspaceError::Admission(RunAdmissionError::UserInputLocked)));
-    assert_eq!(workspace.agent_command(&run, cancel).await, Err(WorkspaceError::UnsupportedAction));
-    let external = BrowserTabCommand::OpenExternal { target: snapshot.tabs[0].target.clone() };
-    assert_eq!(workspace.user_command(external.clone()).await, Err(WorkspaceError::Admission(RunAdmissionError::UserInputLocked)));
-    assert_eq!(workspace.agent_command(&run, external).await, Err(WorkspaceError::UnsupportedAction));
-    workspace.finish_run(&run).await.unwrap();
-    service.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn user_workspace_binds_once_and_user_reopen_cannot_clear_exact_provider() {
+async fn provider_or_resource_existence_never_grants_agent_actions() {
     let factory = Arc::new(Factory::default());
-    let service = BrowserWorkspaceService::new(factory.clone());
-    let user = service
-        .ensure_user(key("u", "c"), BrowserProfile::Ephemeral)
-        .await
-        .unwrap();
-    let page = user.user_command(create()).await.unwrap();
-    let agent = service
-        .ensure(key("u", "c"), "exact-a".into(), BrowserProfile::Ephemeral)
-        .await
-        .unwrap();
-    assert!(Arc::ptr_eq(&user, &agent));
-    let reopened = service
-        .ensure_user(key("u", "c"), BrowserProfile::Ephemeral)
-        .await
-        .unwrap();
-    assert!(Arc::ptr_eq(&user, &reopened));
-    assert!(matches!(
-        service
-            .ensure(key("u", "c"), "exact-b".into(), BrowserProfile::Ephemeral)
-            .await,
-        Err(WorkspaceError::ProviderChanged)
-    ));
-    assert_eq!(reopened.snapshot().await.unwrap().runtime, Some(page));
-    assert_eq!(factory.creates.load(Ordering::SeqCst), 1);
-    service.close(&key("u", "c")).await.unwrap();
-    let replacement = service
-        .ensure(key("u", "c"), "exact-b".into(), BrowserProfile::Ephemeral)
-        .await
-        .unwrap();
-    assert!(!Arc::ptr_eq(&user, &replacement));
-    service.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn first_tab_created_during_run_is_locked_and_survives_following_turns() {
-    let factory = Arc::new(Factory::default());
-    let service = BrowserWorkspaceService::new(factory.clone());
-    let workspace = service
+    let service = service(factory.clone(), &["managed"]);
+    let resource = service
         .ensure(
-            key("u", "c"),
-            "provider-a".into(),
+            authority("alice", "delegated-session", "managed", []),
             BrowserProfile::Ephemeral,
         )
         .await
         .unwrap();
+    let run = resource.begin_run().await.unwrap();
+    assert_eq!(
+        resource.agent_command(&run, create()).await,
+        Err(WorkspaceError::ActionDenied)
+    );
     assert_eq!(factory.creates.load(Ordering::SeqCst), 0);
-    workspace
-        .set_surface(
-            BrowserSurfaceBounds {
-                x: 0.0,
-                y: 0.0,
-                width: 640.0,
-                height: 480.0,
-            },
-            false,
-            Default::default(),
-        )
+    resource.finish_run(&run).await.unwrap();
+}
+
+#[tokio::test]
+async fn managed_resource_owner_rejects_an_attached_provider_binding() {
+    let factory = Arc::new(Factory::default());
+    let service = service(factory, &["managed"]);
+    let provider = BrowserProviderDescriptor::new(
+        "attached",
+        BrowserProviderKind::AttachedChrome,
+        "attached-lock",
+        BrowserCapabilityAction::all(),
+    )
+    .unwrap();
+    let resource = BrowserResourceBinding::new(
+        "binding",
+        "installation-connection",
+        "alice",
+        provider,
+        BrowserCapabilityAction::all().map(BrowserCapabilityAction::resource_operation),
+    )
+    .unwrap();
+    let authority = BrowserSessionAuthority::new(
+        "alice",
+        "session",
+        [BrowserCapabilityAction::Observe],
+        resource,
+    )
+    .unwrap();
+    assert!(matches!(
+        service.ensure(authority, BrowserProfile::Ephemeral).await,
+        Err(WorkspaceError::NativeUnavailable)
+    ));
+}
+
+#[tokio::test]
+async fn delegated_agent_session_uses_the_same_authorized_resource_path() {
+    let factory = Arc::new(Factory::default());
+    let service = service(factory.clone(), &["managed"]);
+    let granted = authority(
+        "alice",
+        "delegated-session",
+        "managed",
+        [BrowserCapabilityAction::Navigate],
+    );
+    let resource = service
+        .ensure(granted, BrowserProfile::Ephemeral)
         .await
         .unwrap();
-    assert_eq!(
-        factory.creates.load(Ordering::SeqCst),
-        0,
-        "unmounting an unopened pane must not create a browser"
-    );
-    let first_run = workspace.begin_run().await.unwrap();
-    let tabs = workspace.agent_command(&first_run, create()).await.unwrap();
+    let run = resource.begin_run().await.unwrap();
+    let snapshot = resource.agent_command(&run, create()).await.unwrap();
+    assert_eq!(snapshot.tabs.len(), 1);
     assert!(factory.initial_locked.load(Ordering::SeqCst));
     assert_eq!(
-        workspace.user_command(create()).await,
-        Err(WorkspaceError::Admission(
-            RunAdmissionError::UserInputLocked
-        ))
+        resource.user_command(create()).await,
+        Err(WorkspaceError::Admission(RunAdmissionError::UserInputLocked))
     );
-    workspace.finish_run(&first_run).await.unwrap();
+    resource.finish_run(&run).await.unwrap();
     assert_eq!(
-        workspace.snapshot().await.unwrap().runtime.as_ref(),
-        Some(&tabs)
-    );
-    let next_run = workspace.begin_run().await.unwrap();
-    assert_eq!(
-        workspace.agent_command(&first_run, create()).await,
-        Err(WorkspaceError::Admission(RunAdmissionError::StaleRun))
-    );
-    workspace.finish_run(&next_run).await.unwrap();
-    assert_eq!(factory.creates.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        workspace.snapshot().await.unwrap().run.input_state,
+        resource.snapshot().await.unwrap().run.input_state,
         BrowserInputState::UserReady
     );
-    service.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn provider_changes_and_other_users_cannot_reuse_workspace_authority() {
-    let service = BrowserWorkspaceService::new(Arc::new(Factory::default()));
-    let one = service
-        .ensure(key("u", "c"), "a".into(), BrowserProfile::Ephemeral)
+async fn two_agent_sessions_have_distinct_resources_runtimes_and_profiles() {
+    let factory = Arc::new(Factory::default());
+    let service = service(factory.clone(), &["managed"]);
+    let first_authority = authority("alice", "session-a", "managed", all_actions());
+    let second_authority = authority("alice", "session-b", "managed", all_actions());
+    let first_profile = BrowserProfile::for_agent_session(
+        std::path::Path::new("owned"),
+        &first_authority.key(),
+        false,
+    );
+    let second_profile = BrowserProfile::for_agent_session(
+        std::path::Path::new("owned"),
+        &second_authority.key(),
+        false,
+    );
+    assert_ne!(first_profile, second_profile);
+    let first = service
+        .ensure(first_authority, first_profile)
         .await
         .unwrap();
-    let same = service
-        .ensure(key("u", "c"), "a".into(), BrowserProfile::Ephemeral)
+    let second = service
+        .ensure(second_authority, second_profile)
         .await
         .unwrap();
-    assert!(Arc::ptr_eq(&one, &same));
-    assert!(matches!(
+    assert!(!Arc::ptr_eq(&first, &second));
+    let first_snapshot = first.user_command(create()).await.unwrap();
+    let second_snapshot = second.user_command(create()).await.unwrap();
+    assert_ne!(
+        first_snapshot.runtime_generation,
+        second_snapshot.runtime_generation
+    );
+    assert_eq!(factory.creates.load(Ordering::SeqCst), 2);
+
+    service
+        .close_agent_session("alice", "session-a")
+        .await
+        .unwrap();
+    assert!(service
+        .get(&authority("alice", "session-a", "managed", all_actions()))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(service
+        .get(&authority("alice", "session-b", "managed", all_actions()))
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
         service
-            .ensure(key("u", "c"), "b".into(), BrowserProfile::Ephemeral)
-            .await,
-        Err(WorkspaceError::ProviderChanged)
-    ));
-    let other = service
-        .ensure(
-            key("other-user", "c"),
-            "a".into(),
-            BrowserProfile::Ephemeral,
+            .ensure(
+                authority("alice", "session-a", "managed", all_actions()),
+                BrowserProfile::Ephemeral,
+            )
+            .await
+            .err(),
+        Some(WorkspaceError::WorkspaceClosed)
+    );
+}
+
+#[tokio::test]
+async fn restart_delete_removes_only_exact_persistent_frozen_profiles() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let (service, store) = service_with_profiles(Arc::new(Factory::default()), data_dir.path());
+    let exact = BrowserResourceKey {
+        principal_id: "alice".into(),
+        agent_session_id: "restart-session".into(),
+        resource_binding_id: "persistent-binding".into(),
+    };
+    let foreign = BrowserResourceKey {
+        principal_id: "bob".into(),
+        ..exact.clone()
+    };
+    let other_session = BrowserResourceKey {
+        agent_session_id: "other-session".into(),
+        ..exact.clone()
+    };
+    let other_binding = BrowserResourceKey {
+        resource_binding_id: "other-binding".into(),
+        ..exact.clone()
+    };
+    let ephemeral = BrowserResourceKey {
+        resource_binding_id: "ephemeral-binding".into(),
+        ..exact.clone()
+    };
+    for key in [&exact, &foreign, &other_session, &other_binding, &ephemeral] {
+        let path = profile_path(&store, key);
+        std::fs::create_dir_all(path.join("nested")).unwrap();
+        std::fs::write(path.join("nested/state"), key.resource_binding_id.as_bytes()).unwrap();
+    }
+
+    // The process-local map is intentionally empty: deletion must derive the
+    // profile identities from the frozen binding set after restart.
+    service
+        .delete_agent_session(
+            "alice",
+            "restart-session",
+            &[
+                BrowserProfileBinding::persistent("persistent-binding").unwrap(),
+                BrowserProfileBinding::ephemeral("ephemeral-binding").unwrap(),
+            ],
         )
         .await
         .unwrap();
-    let run = one.begin_run().await.unwrap();
-    assert_eq!(
-        other.agent_command(&run, create()).await,
-        Err(WorkspaceError::Admission(RunAdmissionError::StaleRun))
+
+    assert!(!profile_path(&store, &exact).exists());
+    assert!(profile_path(&store, &foreign).exists());
+    assert!(profile_path(&store, &other_session).exists());
+    assert!(profile_path(&store, &other_binding).exists());
+    assert!(
+        profile_path(&store, &ephemeral).exists(),
+        "ephemeral policy must never authorize persistent-directory deletion"
     );
-    one.finish_run(&run).await.unwrap();
-    service.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn explicit_close_revokes_old_handles_and_recreate_uses_new_generation() {
-    let service = BrowserWorkspaceService::new(Arc::new(Factory::default()));
-    let workspace = service
-        .ensure(key("u", "c"), "a".into(), BrowserProfile::Ephemeral)
+async fn native_close_failure_blocks_profile_delete_until_exact_retry() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let factory = Arc::new(Factory::default());
+    let (service, store) = service_with_profiles(factory.clone(), data_dir.path());
+    let bound = authority("alice", "delete-retry", "managed", all_actions());
+    let key = bound.key();
+    let binding_id = key.resource_binding_id.clone();
+    let profile = store
+        .profile_for(&key, BrowserProfilePersistence::Persistent)
+        .unwrap();
+    let profile_path = profile_path(&store, &key);
+    std::fs::create_dir_all(&profile_path).unwrap();
+    std::fs::write(profile_path.join("state"), b"persistent").unwrap();
+    let resource = service.ensure(bound, profile).await.unwrap();
+    resource.user_command(create()).await.unwrap();
+
+    factory.fail_close_once.store(true, Ordering::SeqCst);
+    let bindings = [BrowserProfileBinding::persistent(binding_id).unwrap()];
+    assert_eq!(
+        service
+            .delete_agent_session("alice", "delete-retry", &bindings)
+            .await,
+        Err(WorkspaceError::NativeCommandFailed)
+    );
+    assert!(profile_path.exists());
+    service
+        .delete_agent_session("alice", "delete-retry", &bindings)
         .await
         .unwrap();
-    let old = workspace.user_command(create()).await.unwrap();
-    let run = workspace.begin_run().await.unwrap();
-    service.close(&key("u", "c")).await.unwrap();
+    assert!(!profile_path.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn profile_symlink_fails_closed_and_retry_deletes_only_replacement_directory() {
+    use std::os::unix::fs::symlink;
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let (service, store) = service_with_profiles(Arc::new(Factory::default()), data_dir.path());
+    let key = BrowserResourceKey {
+        principal_id: "alice".into(),
+        agent_session_id: "symlink-session".into(),
+        resource_binding_id: "symlink-binding".into(),
+    };
+    let profile = profile_path(&store, &key);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(outside.path().join("sentinel"), b"outside").unwrap();
+    symlink(outside.path(), &profile).unwrap();
+    let bindings = [BrowserProfileBinding::persistent("symlink-binding").unwrap()];
+
     assert_eq!(
-        workspace.agent_command(&run, create()).await,
-        Err(WorkspaceError::WorkspaceClosed)
+        service
+            .delete_agent_session("alice", "symlink-session", &bindings)
+            .await,
+        Err(WorkspaceError::ProfileCleanupFailed)
     );
-    assert_eq!(
-        workspace.user_command(create()).await,
-        Err(WorkspaceError::WorkspaceClosed)
-    );
-    let next = service
-        .ensure(key("u", "c"), "a".into(), BrowserProfile::Ephemeral)
+    assert_eq!(std::fs::read(outside.path().join("sentinel")).unwrap(), b"outside");
+    std::fs::remove_file(&profile).unwrap();
+    std::fs::create_dir(&profile).unwrap();
+    std::fs::write(profile.join("state"), b"retry").unwrap();
+    service
+        .delete_agent_session("alice", "symlink-session", &bindings)
         .await
         .unwrap();
-    assert!(
-        next.user_command(create())
+    assert!(!profile.exists());
+    assert_eq!(std::fs::read(outside.path().join("sentinel")).unwrap(), b"outside");
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn profile_junction_fails_closed_and_retry_deletes_only_replacement_directory() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let (service, store) = service_with_profiles(Arc::new(Factory::default()), data_dir.path());
+    let key = BrowserResourceKey {
+        principal_id: "alice".into(),
+        agent_session_id: "junction-session".into(),
+        resource_binding_id: "junction-binding".into(),
+    };
+    let profile = profile_path(&store, &key);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(outside.path().join("sentinel"), b"outside").unwrap();
+    junction::create(outside.path(), &profile).unwrap();
+    let bindings = [BrowserProfileBinding::persistent("junction-binding").unwrap()];
+
+    assert_eq!(
+        service
+            .delete_agent_session("alice", "junction-session", &bindings)
+            .await,
+        Err(WorkspaceError::ProfileCleanupFailed)
+    );
+    assert_eq!(std::fs::read(outside.path().join("sentinel")).unwrap(), b"outside");
+    junction::delete(&profile).unwrap();
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::write(profile.join("state"), b"retry").unwrap();
+    service
+        .delete_agent_session("alice", "junction-session", &bindings)
+        .await
+        .unwrap();
+    assert!(!profile.exists());
+    assert_eq!(std::fs::read(outside.path().join("sentinel")).unwrap(), b"outside");
+}
+
+#[tokio::test]
+async fn exact_provider_and_authority_cannot_change_on_a_live_resource() {
+    let factory = Arc::new(Factory::default());
+    let service = service(factory, &["managed", "attached"]);
+    let original = authority(
+        "alice",
+        "session",
+        "managed",
+        [BrowserCapabilityAction::Observe],
+    );
+    let resource = service
+        .ensure(original.clone(), BrowserProfile::Ephemeral)
+        .await
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        &resource,
+        &service
+            .ensure(original.clone(), BrowserProfile::Ephemeral)
             .await
             .unwrap()
-            .runtime_generation
-            > old.runtime_generation
+    ));
+
+    let widened = authority("alice", "session", "managed", all_actions());
+    assert!(matches!(
+        service.ensure(widened, BrowserProfile::Ephemeral).await,
+        Err(WorkspaceError::ActionDenied)
+    ));
+
+    let changed_provider = authority(
+        "alice",
+        "session",
+        "attached",
+        [BrowserCapabilityAction::Observe],
     );
-    service.shutdown().await.unwrap();
     assert!(matches!(
         service
-            .ensure(key("u", "c"), "a".into(), BrowserProfile::Ephemeral)
+            .ensure(changed_provider, BrowserProfile::Ephemeral)
             .await,
+        Err(WorkspaceError::ProviderChanged)
+    ));
+}
+
+#[tokio::test]
+async fn close_all_is_user_only_and_never_creates_or_replaces_a_runtime() {
+    let factory = Arc::new(Factory::default());
+    let service = service(factory.clone(), &["managed"]);
+    let bound = authority("alice", "close-all", "managed", all_actions());
+    let resource = service
+        .ensure(bound, BrowserProfile::Ephemeral)
+        .await
+        .unwrap();
+    let generation = resource.runtime_generation();
+    let command = || BrowserTabCommand::CloseAll {
+        runtime_generation: generation,
+    };
+    assert_eq!(
+        resource.user_command(command()).await,
+        Err(WorkspaceError::TabNotFound)
+    );
+    assert_eq!(factory.creates.load(Ordering::SeqCst), 0);
+    resource.user_command(create()).await.unwrap();
+    resource.user_command(create()).await.unwrap();
+    let run = resource.begin_run().await.unwrap();
+    assert_eq!(
+        resource.agent_command(&run, command()).await,
+        Err(WorkspaceError::UnsupportedAction)
+    );
+    resource.finish_run(&run).await.unwrap();
+    assert!(resource.user_command(command()).await.unwrap().tabs.is_empty());
+    assert_eq!(factory.creates.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn failed_native_close_retains_resource_until_exact_retry() {
+    let factory = Arc::new(Factory::default());
+    let service = service(factory.clone(), &["managed"]);
+    let bound = authority("alice", "close-retry", "managed", all_actions());
+    let key = bound.key();
+    let resource = service
+        .ensure(bound.clone(), BrowserProfile::Ephemeral)
+        .await
+        .unwrap();
+    resource.user_command(create()).await.unwrap();
+    factory.fail_close_once.store(true, Ordering::SeqCst);
+    assert_eq!(
+        service.close(&key).await,
+        Err(WorkspaceError::NativeCommandFailed)
+    );
+    assert!(matches!(
+        service.ensure(bound.clone(), BrowserProfile::Ephemeral).await,
         Err(WorkspaceError::WorkspaceClosed)
     ));
+    assert_eq!(
+        resource.user_command(create()).await,
+        Err(WorkspaceError::WorkspaceClosed)
+    );
+    service.close(&key).await.unwrap();
+    let replacement = service
+        .ensure(bound, BrowserProfile::Ephemeral)
+        .await
+        .unwrap();
+    assert!(!Arc::ptr_eq(&resource, &replacement));
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropped_site_data_clear_keeps_native_cleanup_authority() {
+    let clear = Arc::new(DelayedClear::default());
+    let factory = Arc::new(Factory {
+        clear: Some(clear.clone()),
+        ..Default::default()
+    });
+    let service = Arc::new(service(factory.clone(), &["managed"]));
+    let bound = authority("alice", "clear", "managed", all_actions());
+    let resource = service
+        .ensure(bound, BrowserProfile::Ephemeral)
+        .await
+        .unwrap();
+    resource.user_command(create()).await.unwrap();
+    let generation = resource.runtime_generation();
+    let caller = tokio::spawn({
+        let resource = resource.clone();
+        async move {
+            resource
+                .user_command(BrowserTabCommand::ClearSiteData {
+                    runtime_generation: generation,
+                })
+                .await
+        }
+    });
+    clear.started.notified().await;
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    let close = tokio::spawn({
+        let resource = resource.clone();
+        async move { resource.close().await }
+    });
+    tokio::task::yield_now().await;
+    assert!(!close.is_finished());
+    assert!(!clear.closed_before_completion.load(Ordering::SeqCst));
+    clear.release.notify_one();
+    close.await.unwrap().unwrap();
+    assert!(clear.completed.load(Ordering::SeqCst));
+    assert_eq!(clear.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.creates.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn human_close_rejects_active_run_without_cancelling_it() {
+    let factory = Arc::new(Factory::default());
+    let service = Arc::new(service(factory, &["managed"]));
+    let bound = authority("alice", "idle-close", "managed", all_actions());
+    let key = bound.key();
+    let resource = service
+        .ensure(bound.clone(), BrowserProfile::Ephemeral)
+        .await
+        .unwrap();
+    resource.user_command(create()).await.unwrap();
+    let run = resource.begin_run().await.unwrap();
+    assert_eq!(
+        service
+            .close_idle(key.clone(), resource.runtime_generation())
+            .await,
+        Err(WorkspaceError::Admission(RunAdmissionError::UserInputLocked))
+    );
+    assert!(resource.agent_command(&run, create()).await.is_ok());
+    resource.finish_run(&run).await.unwrap();
+    service
+        .close_idle(key, resource.runtime_generation())
+        .await
+        .unwrap();
+    assert!(resource.native_close_proven().await);
+    assert!(service.get(&bound).await.unwrap().is_none());
+}
+
+#[test]
+fn resource_operations_reject_provider_and_web_search_controls() {
+    for operation in [
+        "connect",
+        "provider",
+        "grant",
+        "search",
+        "web_search",
+        "research_search",
+    ] {
+        assert_eq!(BrowserResourceOperation::parse(operation), None);
+    }
 }
 
 #[test]
@@ -520,63 +725,13 @@ fn native_bounds_reject_invalid_geometry() {
         height: 600.0,
     };
     assert!(bounds.is_valid());
-    assert!(
-        !BrowserSurfaceBounds {
-            width: f64::NAN,
-            ..bounds
-        }
-        .is_valid()
-    );
+    assert!(!BrowserSurfaceBounds { width: f64::NAN, ..bounds }.is_valid());
     assert!(!BrowserSurfaceBounds { x: -1.0, ..bounds }.is_valid());
-    assert!(
-        !BrowserSurfaceBounds {
-            height: 0.0,
-            ..bounds
-        }
-        .is_valid()
-    );
-    assert!(
-        !BrowserSurfaceBounds {
-            x: 32_000.0,
-            width: 1024.0,
-            ..bounds
-        }
-        .is_valid()
-    );
-}
-
-#[tokio::test]
-async fn human_close_rejects_active_and_settling_runs_without_cancelling_them() {
-    let service=Arc::new(BrowserWorkspaceService::new(Arc::new(Factory::default())));
-    let workspace=service.ensure(key("u","idle-close"),"old".into(),BrowserProfile::Ephemeral).await.unwrap();
-    workspace.user_command(create()).await.unwrap();
-    let run=workspace.begin_run().await.unwrap();
-    assert_eq!(service.close_idle(key("u","idle-close"),1).await,Err(WorkspaceError::Admission(RunAdmissionError::UserInputLocked)));
-    assert!(workspace.agent_command(&run,create()).await.is_ok(),"rejected user close must not cancel Agent authority");
-    workspace.settle_run(&run).await.unwrap();
-    assert_eq!(service.close_idle(key("u","idle-close"),1).await,Err(WorkspaceError::Admission(RunAdmissionError::UserInputLocked)));
-    workspace.finish_run(&run).await.unwrap();
-    service.close_idle(key("u","idle-close"),1).await.unwrap();
-    assert!(workspace.native_close_proven().await);
-    assert!(service.get(&key("u","idle-close")).await.is_none());
-}
-
-#[tokio::test]
-async fn failed_human_close_retains_authority_until_retry_then_allows_new_provider() {
-    let factory=Arc::new(Factory::default());
-    let service=Arc::new(BrowserWorkspaceService::new(factory.clone()));
-    let key=key("u","close-retry");
-    let old=service.ensure(key.clone(),"old".into(),BrowserProfile::Ephemeral).await.unwrap();
-    let generation=old.user_command(create()).await.unwrap().runtime_generation;
-    factory.fail_close_once.store(true,Ordering::SeqCst);
-    assert_eq!(service.close_idle(key.clone(),generation).await,Err(WorkspaceError::NativeCommandFailed));
-    assert!(!old.native_close_proven().await);
-    assert!(Arc::ptr_eq(&old,&service.get(&key).await.unwrap()));
-    assert!(matches!(service.ensure(key.clone(),"new".into(),BrowserProfile::Ephemeral).await,Err(WorkspaceError::WorkspaceClosed)));
-    service.close_idle(key.clone(),generation).await.unwrap();
-    assert!(old.native_close_proven().await);
-    let new=service.ensure(key,"new".into(),BrowserProfile::Ephemeral).await.unwrap();
-    assert!(new.user_command(create()).await.unwrap().runtime_generation>generation);
-    assert!(matches!(old.begin_run().await,Err(WorkspaceError::WorkspaceClosed)));
-    service.shutdown().await.unwrap();
+    assert!(!BrowserSurfaceBounds { height: 0.0, ..bounds }.is_valid());
+    assert!(!BrowserSurfaceBounds {
+        x: 32_000.0,
+        width: 1024.0,
+        ..bounds
+    }
+    .is_valid());
 }

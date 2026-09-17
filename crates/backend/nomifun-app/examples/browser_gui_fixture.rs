@@ -11,7 +11,7 @@ use axum::{
 use nomifun_app::{DesktopHostServices, DesktopServer};
 use nomifun_browser_platform::{
     runtime::{BrowserRuntime, BrowserRuntimeFactory, CreateBrowserRuntime, WorkspaceError},
-    workspace::BrowserWorkspaceService,
+    workspace::BrowserResourceService,
 };
 use serde_json::{Value, json};
 use std::{
@@ -281,7 +281,7 @@ async fn main() -> anyhow::Result<()> {
         log_level: Some("off".into()),
         command: None,
     };
-    let browser_workspaces = Arc::new(BrowserWorkspaceService::new(Arc::new(
+    let browser_resources = Arc::new(BrowserResourceService::new(Arc::new(
         PreparatoryBrowserFactory,
     )));
     let (app, keep_alive) = DesktopServer::start_with_outcome(
@@ -291,7 +291,7 @@ async fn main() -> anyhow::Result<()> {
         None,
         None,
         DesktopHostServices {
-            browser_workspaces: Some(browser_workspaces),
+            browser_resources: Some(browser_resources),
             ..Default::default()
         },
     )
@@ -303,15 +303,14 @@ async fn main() -> anyhow::Result<()> {
         let editor = api(&app,"/api/agent-presets/from-template/chat.minimal",json!({"reuse_existing":false,"display_name":"浏览器主界面验收","model_route_refs":{},"chat_route_records":{},"model":{"provider_id":provider,"model":"browser-gui-fixture"}})).await?;
         let preset = editor["preset"]["preset_id"].as_str().ok_or_else(|| anyhow::anyhow!("preset missing"))?.to_owned();
         let mut draft=editor["draft"].clone();
-        draft["document"]["enabled_capabilities"]=json!([
-            {"capability":{"id":"browser.observe","version":"1.0.0"}},
-            {"capability":{"id":"browser.navigate","version":"1.0.0"}},
-            {"capability":{"id":"browser.act","version":"1.0.0"}}
-        ]);
+        draft["document"]["enabled_capabilities"]=json!([{
+            "capability":{"id":"browser","version":"1.0.0"},
+            "action_allowlist":["browser/observe","browser/navigate","browser/act"]
+        }]);
         let revision_path=format!("/api/agent-presets/{preset}/revisions");
         let saved=api(&app,&revision_path,json!({"expected_current_revision":draft["current_revision"].clone(),"draft":draft,"reason":"deterministic native Browser GUI acceptance"})).await?;
-        anyhow::ensure!(saved["revision"]["document"]["enabled_capabilities"].as_array().is_some_and(|values|values.len()==3),"Browser fixture revision missing selected capabilities");
-        let session = api(&app,"/api/agent-sessions",json!({"preset_id":preset,"title":"浏览器主界面验收","model":{"provider_id":provider,"model":"browser-gui-fixture"}})).await?;
+        anyhow::ensure!(saved["revision"]["document"]["enabled_capabilities"].as_array().is_some_and(|values|values.len()==1),"Browser fixture revision missing selected Module");
+        let session = api(&app,"/api/agent-sessions",json!({"preset_id":preset,"title":"浏览器主界面验收","resource_selections":[{"resource_kind":"browser","resource_id":"managed-browser"}],"model":{"provider_id":provider,"model":"browser-gui-fixture"}})).await?;
         Ok::<_,anyhow::Error>(session["agent_session_id"].clone())
     }.await;
     let cleanup = app.shutdown_all().await;

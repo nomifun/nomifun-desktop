@@ -8,9 +8,9 @@
  * KnowledgeControl — Per-session knowledge-base mounting popover.
  *
  * Trigger button + popover panel are deliberately aligned with the sibling
- * conversation-header controls (AutoWork / IDMM / MultiAgent): a compact
+ * conversation-header capability controls: a compact
  * `Button size='mini' shape='round'` with an icon + label + tri-state status
- * dot, and a popover whose layout mirrors IdmmControl's design language
+ * dot, and a popover using the shared capability-control design language
  * (icon-chip header + status pill + rounded `bg-fill-1` card sections), instead
  * of the earlier bespoke square icon-button + full-bleed-divider panel.
  *
@@ -83,16 +83,16 @@ export const defaultKnowledgeBinding = (): IKnowledgeBinding => ({
   kb_ids: [],
 });
 
-// ─── Shared visual tokens (mirror IdmmControl's panel design language) ───────
+// ─── Shared capability-panel visual tokens ──────────────────────────────────
 
-/** Rounded card section — identical token to IdmmControl's `sectionClass`. */
+/** Rounded card section shared by capability panels. */
 const sectionClass =
   'flex flex-col gap-8px rounded-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-1)] px-12px py-10px';
 const fieldStackClass = 'min-w-0 flex flex-col gap-4px';
 const fieldLabelClass = 'text-[var(--color-text-1)] text-11px font-600 leading-15px';
 const subtleInsetClass =
   'rounded-8px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-1)] px-10px py-8px';
-/** Tinted surface — mirrors IdmmControl's `watchTone`; `--primary-6` is an RGB triplet. */
+/** Tinted surface; `--primary-6` is an RGB triplet. */
 const tintBg = (color: string, amount = 12): string =>
   `color-mix(in srgb, rgb(${color}) ${amount}%, var(--color-bg-1))`;
 const lineClamp2Style: React.CSSProperties = {
@@ -476,10 +476,10 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
   const showSearch = shouldShowKnowledgeBaseSearch(bases.length);
   const panel = (
     <div className='box-border flex w-340px max-h-500px flex-col gap-10px overflow-hidden p-12px'>
-      {/* Header — identical structure to IdmmControl: icon chip + title on the
+      {/* Header uses the shared capability-panel structure: icon chip + title on the
           left, status pill on the right, hint below. The earlier "container
           misalignment" was Arco's own popover-shell padding (now zeroed via
-          .knowledge-control-popover in arco-override.css, same fix IdmmControl
+          .knowledge-control-popover in arco-override.css
           already uses), NOT this row's layout. */}
       <div className='flex flex-col gap-6px'>
         <div className='flex items-center justify-between gap-10px'>
@@ -617,7 +617,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
     </div>
   );
 
-  // ─── Trigger button (aligned with AutoWork / IDMM / MultiAgent) ────────────
+  // ─── Trigger button aligned with the other capability controls ────────────
   const button = (
     <Button
       size='mini'

@@ -43,9 +43,6 @@ mod subagent_gateway;
 pub mod web_search;
 #[cfg(feature = "browser-use")]
 pub mod local_web_search;
-#[cfg(feature = "browser-use")]
-pub mod system_browser;
-
 // ── Agent-layer re-exports (the seam) ──────────────────────────────────────
 // Backend crates reach the agent (nomi-*) layer ONLY through nomifun-ai-agent.
 // When the agent layer is later extracted into its own repo, these re-exports

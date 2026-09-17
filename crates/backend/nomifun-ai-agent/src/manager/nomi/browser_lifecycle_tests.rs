@@ -1,7 +1,12 @@
 use nomifun_browser_platform::{
+    bound_resource::BoundBrowserProviderResource,
+    product::{
+        BrowserCapabilityAction, BrowserProviderDescriptor, BrowserResourceBinding,
+        BrowserSessionAuthority,
+    },
     run_guard::{BrowserInputState, NativeInputGate, RunAdmissionError},
     runtime::*,
-    workspace::{BrowserWorkspace, BrowserWorkspaceService},
+    workspace::{BrowserResource, BrowserResourceService},
 };
 
 struct BrowserFixture {
@@ -113,7 +118,7 @@ impl BrowserRuntime for BrowserFixture {
 
 async fn attach_browser(
     agent: &mut NomiAgentManager,
-) -> (Arc<BrowserWorkspace>, Arc<BrowserFixture>) {
+) -> (Arc<BrowserResource>, Arc<BrowserFixture>) {
     let fixture = Arc::new(BrowserFixture {
         navigations: AtomicUsize::new(0),
         runtime: agent.runtime.clone(),
@@ -123,14 +128,26 @@ async fn attach_browser(
         lock_entered: tokio::sync::Semaphore::new(0),
         lock_release: tokio::sync::Semaphore::new(0),
     });
-    let service = BrowserWorkspaceService::new(Arc::new(BrowserFixtureFactory(fixture.clone())));
+    let service = BrowserResourceService::new(Arc::new(BrowserFixtureFactory(fixture.clone())));
+    let provider = BrowserProviderDescriptor::managed("managed-test", "managed-test-lock").unwrap();
+    let binding = BrowserResourceBinding::new(
+        "browser-binding",
+        "browser-resource",
+        "owner",
+        provider,
+        BrowserCapabilityAction::all().map(BrowserCapabilityAction::resource_operation),
+    )
+    .unwrap();
+    let authority = BrowserSessionAuthority::new(
+        "owner",
+        "conv-auto-continue",
+        BrowserCapabilityAction::all(),
+        binding,
+    )
+    .unwrap();
     let workspace = service
         .ensure(
-            BrowserWorkspaceKey {
-                user_id: "owner".into(),
-                conversation_id: "conv-auto-continue".into(),
-            },
-            "native".into(),
+            authority,
             BrowserProfile::Ephemeral,
         )
         .await
@@ -141,7 +158,7 @@ async fn attach_browser(
         })
         .await
         .unwrap();
-    agent.browser_workspace = Some(workspace.clone());
+    agent.browser_resource = Some(BoundBrowserProviderResource::Managed(workspace.clone()));
     (workspace, fixture)
 }
 
@@ -161,15 +178,19 @@ async fn retained_browser_invocation_cannot_adopt_a_new_turn() {
     let provider=Arc::new(BlockingProvider::new());
     let mut agent=make_agent_with_provider(provider);
     let (workspace,fixture)=attach_browser(&mut agent).await;
-    agent.native_browser_turn.begin(workspace.clone()).await.unwrap();
-    let old=agent.native_browser_turn.current().unwrap();
-    agent.native_browser_turn.finish().await.unwrap();
-    agent.native_browser_turn.begin(workspace).await.unwrap();
+    let resource = BoundBrowserProviderResource::Managed(workspace.clone());
+    agent.browser_turn.begin(&resource).await.unwrap();
+    let old=agent.browser_turn.current().unwrap();
+    agent.browser_turn.finish().await.unwrap();
+    agent.browser_turn.begin(&resource).await.unwrap();
     let before=fixture.navigations.load(Ordering::SeqCst);
+    let crate::manager::nomi::browser_lifecycle::BrowserTurn::Managed(old) = old else {
+        panic!("managed turn")
+    };
     assert!(matches!(old.command(BrowserTabCommand::Create{url:"https://example.com".into()}).await,Err(WorkspaceError::Admission(RunAdmissionError::StaleRun))));
     assert!(matches!(old.tabs().await,Err(WorkspaceError::Admission(RunAdmissionError::StaleRun))));
     assert_eq!(before,fixture.navigations.load(Ordering::SeqCst));
-    agent.native_browser_turn.finish().await.unwrap();
+    agent.browser_turn.finish().await.unwrap();
 }
 
 #[tokio::test]
@@ -199,19 +220,11 @@ async fn model_browser_call_uses_the_current_conversation_runtime() {
     let (workspace, fixture) = attach_browser(&mut agent).await;
     fixture.navigations.store(0, Ordering::SeqCst);
     let tool = crate::manager::nomi::browser_tool::ConversationBrowserTool::new(
-        agent.native_browser_turn.clone(),
-        nomifun_agent_kernel::ActiveCapabilitySetSnapshot {
-            resolved_snapshot_ref: nomifun_agent_contracts::ResolvedSnapshotRef {
-                snapshot_id: "native-tool-test".into(),
-                snapshot_digest: "fixture-digest".into(),
-            },
-            generation: 0,
-            active: [nomifun_agent_contracts::CapabilityId::from(
-                "browser.navigate",
-            )]
+        agent.browser_turn.clone(),
+        [nomifun_agent_contracts::ActionId::from("browser/navigate")]
             .into_iter()
             .collect(),
-        },
+        nomifun_browser_platform::product::BrowserProviderKind::Managed,
     );
     assert!(
         agent

@@ -20,8 +20,8 @@ use futures_util::{
     FutureExt,
     future::{BoxFuture, Shared},
 };
-use nomifun_browser_platform::system_browser::{
-    SystemBrowserCommand as Command, SystemBrowserRuntimeError as Error,
+use nomifun_browser_platform::attached_browser::{
+    AttachedBrowserCommand as Command, AttachedBrowserRuntimeError as Error,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -539,7 +539,7 @@ impl AttachedBrowser {
                         state.object.clear();
                     }
                     let mut world = CreateIsolatedWorldParams::new(frame.to_owned());
-                    world.world_name = Some("nomifun-system-browser-semantic".into());
+                    world.world_name = Some("nomifun-attached-browser-semantic".into());
                     world.grant_univeral_access = Some(false);
                     let world = conn
                         .send(&state.session, &world)
@@ -548,7 +548,7 @@ impl AttachedBrowser {
                     let context = world["executionContextId"]
                         .as_i64()
                         .ok_or(Error::ExecutionFailed)?;
-                    state.group = format!("nomi-system-observe-{}", nomifun_common::generate_id());
+                    state.group = format!("nomi-attached-observe-{}", nomifun_common::generate_id());
                     let mut evaluate = EvaluateParams::new(format!(
                         "if (location.protocol !== 'http:' && location.protocol !== 'https:' && location.href !== 'about:blank') throw new Error('Unsupported document');\n{}",
                         native_semantic::initialization_expression()

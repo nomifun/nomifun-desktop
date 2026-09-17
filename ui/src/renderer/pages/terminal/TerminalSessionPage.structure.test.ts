@@ -8,10 +8,19 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
 const source = readFileSync(new URL('./TerminalSessionPage.tsx', import.meta.url), 'utf8');
+const terminalRowSource = readFileSync(new URL('../conversation/SessionList/TerminalRow.tsx', import.meta.url), 'utf8');
 const xtermSource = readFileSync(new URL('./XtermView.tsx', import.meta.url), 'utf8');
 const sendBoxSource = readFileSync(new URL('./TerminalSendBox.tsx', import.meta.url), 'utf8');
 
 describe('TerminalSessionPage workspace rail collapse wiring', () => {
+  test('keeps terminal header scoped to Knowledge and CLI lifecycle controls', () => {
+    expect(source.includes('<KnowledgeControl')).toBe(true);
+    expect(source.includes('AutoWorkControl')).toBe(false);
+    expect(source.includes('IdmmControl')).toBe(false);
+    expect(terminalRowSource.includes('autoworkState')).toBe(false);
+    expect(terminalRowSource.includes('idmmState')).toBe(false);
+  });
+
   test('keeps terminal file auto-expand scoped to the current terminal session', () => {
     expect(source.includes('autoExpandOnFiles: true')).toBe(true);
     expect(source.includes('target: workspaceTarget')).toBe(true);

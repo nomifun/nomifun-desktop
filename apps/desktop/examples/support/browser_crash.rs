@@ -1,6 +1,6 @@
 //! Fault injection targets only a disposable fixture renderer, never user data.
 use nomifun_browser_platform::{
-    run_guard::BrowserInputState, runtime::*, workspace::BrowserWorkspaceService,
+    run_guard::BrowserInputState, runtime::*, workspace::BrowserResourceService,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -11,15 +11,16 @@ fn message(error: impl std::fmt::Display) -> String {
 
 pub(super) async fn verify(app: &tauri::AppHandle, url: &str) -> Result<Value, String> {
     let service =
-        BrowserWorkspaceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
-    let key = BrowserWorkspaceKey {
-        user_id: "crash-fixture".into(),
-        conversation_id: "crash-fixture".into(),
-    };
+        BrowserResourceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
+    let authority = super::browser_resource_fixture::authority(
+        "crash-fixture",
+        "crash-fixture",
+        "native-crash-fixture",
+    );
+    let key = authority.key();
     let workspace = service
         .ensure(
-            key.clone(),
-            "native-crash-fixture".into(),
+            authority,
             BrowserProfile::Ephemeral,
         )
         .await

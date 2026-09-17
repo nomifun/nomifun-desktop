@@ -14,7 +14,7 @@ describe('GuidPage advanced controls', () => {
     const source = readSource(new URL('./GuidPage.tsx', import.meta.url));
 
     expect(source.includes('<AutoWorkControl')).toBe(true);
-    expect(source.includes('<IdmmControl')).toBe(true);
+    expect(source.includes('IdmmControl')).toBe(false);
     expect(source.includes('<AgentResourcePicker')).toBe(true);
     expect(source.includes('<KnowledgeControl')).toBe(true);
     expect(source.includes('knowledgeEnabled && (')).toBe(true);
@@ -27,7 +27,7 @@ describe('GuidPage advanced controls', () => {
     const source = readSource(new URL('./hooks/useGuidAdvancedConfig.ts', import.meta.url));
 
     expect(source.includes('autoWork: AutoWorkDraftValue')).toBe(true);
-    expect(source.includes('idmm: IIdmmConfig')).toBe(true);
+    expect(source.includes('IIdmmConfig')).toBe(false);
     expect(source.includes('knowledge: IKnowledgeBinding')).toBe(true);
   });
 

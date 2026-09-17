@@ -65,7 +65,6 @@ export type EntityKind =
   | 'preview-snapshot'
   | 'conversation-artifact'
   | 'mcp-server'
-  | 'idmm-intervention'
   | 'requirement'
   | 'persisted-artifact'
   | 'user'
@@ -128,7 +127,6 @@ export type ChannelSessionId = EntityId<'channel-session'>;
 export type AttachmentId = EntityId<'attachment'>;
 export type PreviewSnapshotId = EntityId<'preview-snapshot'>;
 export type PersistedArtifactId = EntityId<'persisted-artifact'>;
-export type IdmmInterventionId = EntityId<'idmm-intervention'>;
 export type UserId = EntityId<'user'>;
 export type AssetId = EntityId<'asset'>;
 export type CreationTaskId = EntityId<'creation-task'>;
@@ -276,8 +274,6 @@ export const parsePreviewSnapshotId = (value: unknown): PreviewSnapshotId =>
   parseEntityId('preview-snapshot', value);
 export const parsePersistedArtifactId = (value: unknown): PersistedArtifactId =>
   parseEntityId('persisted-artifact', value);
-export const parseIdmmInterventionId = (value: unknown): IdmmInterventionId =>
-  parseEntityId('idmm-intervention', value);
 export const parseUserId = (value: unknown): UserId => parseEntityId('user', value);
 export const parseAssetId = (value: unknown): AssetId => parseEntityId('asset', value);
 export const parseCreationTaskId = (value: unknown): CreationTaskId =>

@@ -33,51 +33,9 @@ pub(crate) struct NomiCoreBuiltinPlan {
     pub schema_resolver: Arc<dyn NomiPlatformBuiltinToolSchemaResolver>,
     pub lifecycle_invoker: Arc<dyn NomiPlatformBuiltinLifecycleInvoker>,
     pub wave4_owners: Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
+    pub wave5_owner: Arc<super::agent_wave5_host::NomiCoreWave5Host>,
     pub wave2_owner: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
     pub robot_owner: Option<Arc<super::nomi_core_robot::NomiCoreRobotWave4Owner>>,
-}
-
-#[cfg(feature = "browser-use")]
-fn bind_system_browser(
-    registrations: &mut [PluginRegistration],
-    binding: nomifun_browser_platform::system_browser::SystemBrowserBinding,
-) -> anyhow::Result<()> {
-    use nomifun_browser_platform::system_browser::{BINDING_ANNOTATION, TOOL_NAME};
-    let registration = registrations.iter_mut().find(|entry|
-        entry.metadata.manifest.payload.package_id.as_ref() == nomifun_agent_domain_wave1::SYSTEM_BROWSER_PACKAGE_ID)
-        .ok_or_else(|| anyhow::anyhow!("System browser package is missing"))?;
-    let mut manifest = registration.metadata.manifest.payload.clone();
-    let capability = manifest.contributions.capabilities.iter_mut().find(|capability| capability.id.as_ref() == TOOL_NAME)
-        .ok_or_else(|| anyhow::anyhow!("System browser capability is missing"))?;
-    capability.config_schema.0.as_object_mut().ok_or_else(|| anyhow::anyhow!("System browser schema must be an object"))?
-        .insert(BINDING_ANNOTATION.into(), serde_json::to_value(binding)?);
-    registration.metadata.manifest = nomifun_agent_contracts::ArtifactEnvelope::new(manifest)?;
-    Ok(())
-}
-
-#[cfg(all(test, feature = "browser-use"))]
-mod system_browser_binding_tests {
-    use super::*;
-    use nomifun_browser_platform::system_browser::{BINDING_ANNOTATION, SystemBrowserBinding};
-
-    #[test]
-    fn binding_annotation_is_injected_only_into_the_system_browser_package() {
-        let mut registrations = nomifun_agent_domain_wave1::registrations().unwrap();
-        let binding = SystemBrowserBinding { schema_version: 1, runtime_digest: "a".repeat(64) };
-        bind_system_browser(&mut registrations, binding.clone()).unwrap();
-        for registration in registrations {
-            assert!(registration.metadata.manifest.verify().unwrap());
-            for manifest in &registration.metadata.manifest.payload.contributions.capabilities {
-                let annotation = manifest.config_schema.0.get(BINDING_ANNOTATION);
-                if manifest.id.as_ref() == nomifun_agent_domain_wave1::NOMI_SYSTEM_BROWSER {
-                    assert_eq!(serde_json::from_value::<SystemBrowserBinding>(annotation.unwrap().clone()).unwrap(), binding);
-                    assert!(super::super::nomi_core_agent_projection::native_capability_available(manifest));
-                } else {
-                    assert!(annotation.is_none(), "System-browser authority cannot be copied onto another capability");
-                }
-            }
-        }
-    }
 }
 
 pub(crate) async fn build(
@@ -102,15 +60,6 @@ pub(crate) async fn build(
         services.database.pool().clone(),
     )?;
     replace_package_registrations(&mut registrations, wave1);
-    #[cfg(feature = "browser-use")]
-    if let Some(provider) = services.system_browser.as_ref() {
-        bind_system_browser(
-            &mut registrations,
-            nomifun_browser_platform::system_browser::SystemBrowserHost::binding(
-                provider.as_ref(),
-            ),
-        )?;
-    }
     let wave1_tools = [
         nomifun_agent_domain_wave1::WEB_RESEARCH_MODULE_ID,
         nomifun_agent_domain_wave1::KNOWLEDGE_MODULE_ID,
@@ -122,37 +71,11 @@ pub(crate) async fn build(
     .collect::<BTreeSet<_>>();
     let wave1_context = BTreeSet::new();
 
-    let wave2_owner = super::nomi_core_wave2::action_host_port(services, effect_store);
+    let wave2_owner = super::nomi_core_wave2::action_host_port(services, effect_store.clone());
     let wave2_ports =
         nomifun_agent_domain_wave2::Wave2RoleHostPorts::with_actions(wave2_owner.clone());
-    #[cfg(feature = "browser-use")]
-    let wave2_ports = {
-        let mut ports = wave2_ports;
-        if let Some(runtime) = services.headless_render.as_ref() {
-            ports.browser_operation_tools = super::knowledge_browser::RenderRoleHost::new(
-                runtime.clone(),
-                services.authoritative_user_id.as_ref(),
-            );
-        }
-        ports
-    };
     let wave2 = nomifun_agent_domain_wave2::registrations_with_role_host_ports(wave2_ports)
         .map_err(anyhow::Error::msg)?;
-    #[cfg(feature = "browser-use")]
-    let wave2 = {
-        let mut registrations = wave2;
-        if let Some(runtime) = services.headless_render.as_ref()
-            && let Some(browser) = registrations.iter_mut().find(|registration| {
-                registration.metadata.manifest.payload.package_id.as_ref()
-                    == nomifun_agent_domain_wave2::BROWSER_PACKAGE_ID
-            })
-        {
-            let digest = nomifun_agent_contracts::digest_payload(&runtime.binding())?;
-            browser.metadata.source.source_digest = Some(digest.clone());
-            browser.metadata.context.source.source_digest = Some(digest);
-        }
-        registrations
-    };
     replace_package_registrations(&mut registrations, wave2);
     let mcp_registrations = super::nomi_core_mcp_catalog::load_registrations(
         &nomifun_db::SqliteMcpServerRepository::new(services.database.pool().clone()),
@@ -258,6 +181,28 @@ pub(crate) async fn build(
             robot: robot_owner.clone(),
         });
 
+    // Notification and Remote remain platform packages with zero Agent
+    // capabilities. Installing their empty target manifests removes the old
+    // EventConsumer/Transport authoring identities without deleting the real
+    // outbox and ingress owners.
+    replace_package_registrations(
+        &mut registrations,
+        vec![nomifun_agent_domain_wave4::notification_registration()
+            .map_err(anyhow::Error::msg)?],
+    );
+
+    let wave5_owner = Arc::new(super::agent_wave5_host::NomiCoreWave5Host::new(
+        services.authoritative_user_id.clone(),
+        effect_store,
+        Arc::clone(&services.requirement_service),
+    ));
+    let wave5 = nomifun_agent_domain_wave5::registrations_with_host_port(
+        Arc::clone(&wave5_owner) as Arc<dyn nomifun_agent_domain_wave5::Wave5HostPort>,
+    )
+    .map_err(anyhow::Error::msg)?;
+    replace_package_registrations(&mut registrations, wave5);
+    let wave5_tools = nomifun_agent_domain_wave5::target_capability_ids();
+
     let schema_router = NomiPlatformBuiltinToolSchemaRouter::new([
         (
             wave1_tools.clone(),
@@ -277,12 +222,18 @@ pub(crate) async fn build(
             Arc::new(NomiWave4SchemaResolver)
                 as Arc<dyn NomiPlatformBuiltinToolSchemaResolver>,
         ),
+        (
+            wave5_tools.clone(),
+            Arc::new(NomiWave5SchemaResolver)
+                as Arc<dyn NomiPlatformBuiltinToolSchemaResolver>,
+        ),
     ])?;
     let tool_capability_ids = wave1_tools
         .into_iter()
         .chain(wave2_tools)
         .chain(wave3_tools)
         .chain(wave4_tools)
+        .chain(wave5_tools)
         .collect();
     let mut host_dynamic_tool_capability_ids = robot_owner
         .as_ref()
@@ -306,6 +257,7 @@ pub(crate) async fn build(
         schema_resolver: Arc::new(schema_router),
         lifecycle_invoker,
         wave4_owners: wave4,
+        wave5_owner,
         wave2_owner,
         robot_owner,
     })
@@ -328,7 +280,6 @@ fn replace_package_registrations(
     });
     current.extend(replacements);
 }
-
 
 struct NomiWave1SchemaResolver;
 
@@ -363,6 +314,22 @@ impl NomiPlatformBuiltinToolSchemaResolver for NomiWave4SchemaResolver {
                     capability.capability.id.as_ref()
                 )
             })
+    }
+}
+
+struct NomiWave5SchemaResolver;
+
+#[async_trait::async_trait]
+impl NomiPlatformBuiltinToolSchemaResolver for NomiWave5SchemaResolver {
+    async fn resolve(
+        &self,
+        capability: &ResolvedCapability,
+        reference: &CanonicalSchemaRef,
+    ) -> Result<StrictJsonValue, String> {
+        nomifun_agent_domain_wave5::resolve_action_schema(
+            capability.capability.id.as_ref(),
+            reference,
+        )
     }
 }
 

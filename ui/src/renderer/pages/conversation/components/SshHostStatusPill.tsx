@@ -215,7 +215,7 @@ const SshHostStatusPill: React.FC<Props> = ({ conversationId, sshHostId }) => {
     >
       <span className='inline-flex items-center gap-6px leading-none'>
         {/* The icon carries the phase colour, matching the sidebar host icon —
-            the same "no separate dot" treatment AutoWork / IDMM use. */}
+            the same "no separate dot" treatment as other capability controls. */}
         <Server theme='outline' size='14' fill={dotColor} className='block' style={{ lineHeight: 0 }} />
         <span className='text-12px max-w-140px truncate'>{host.name}</span>
       </span>

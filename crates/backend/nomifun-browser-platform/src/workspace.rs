@@ -1,7 +1,8 @@
-//! Conversation lifetime authority. Agent turns borrow the same persistent runtime.
+//! AgentSession Browser Resource authority. Agent turns and the visible panel
+//! borrow the same provider-backed runtime.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -14,13 +15,18 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    product::{
+        BrowserCapabilityAction, BrowserProviderKind, BrowserSessionAuthority,
+    },
     run_guard::{
         BrowserRunCoordinator, BrowserRunGuard, BrowserRunSnapshot, NativeInputGate,
         RunAdmissionError,
     },
     runtime::{
-        BrowserProfile, BrowserRuntime, BrowserRuntimeFactory, BrowserRuntimeSnapshot,
-        BrowserTabCommand, BrowserWorkspaceKey, CreateBrowserRuntime, WorkspaceError,
+        BrowserProfile, BrowserProfileBinding, BrowserProfilePersistence,
+        BrowserProfileStore, BrowserResourceKey, BrowserRuntime, BrowserRuntimeFactory,
+        BrowserRuntimeSnapshot, BrowserTabCommand, CreateBrowserRuntime, WorkspaceError,
+        is_bounded_profile_identity,
     },
 };
 
@@ -95,27 +101,31 @@ impl NativeInputGate for RuntimeSlot {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct BrowserWorkspaceSnapshot {
-    pub conversation_id: String,
+pub struct BrowserResourceSnapshot {
+    pub agent_session_id: String,
+    pub resource_binding_id: String,
+    pub provider_id: String,
+    pub provider_kind: BrowserProviderKind,
     pub run: BrowserRunSnapshot,
     pub runtime: Option<BrowserRuntimeSnapshot>,
 }
 
-pub struct BrowserWorkspace {
-    key: BrowserWorkspaceKey,
-    provider_lock: std::sync::Mutex<Option<String>>,
+pub struct BrowserResource {
+    key: BrowserResourceKey,
+    authority: BrowserSessionAuthority,
     slot: Arc<RuntimeSlot>,
     coordinator: Arc<BrowserRunCoordinator>,
     closing: AtomicBool,
 }
 
-impl BrowserWorkspace {
+impl BrowserResource {
     pub fn runtime_generation(&self)->u64 {self.slot.request.runtime_generation}
     pub async fn has_active_run(&self)->bool {self.coordinator.has_active_run().await}
     pub async fn screenshot(self: &Arc<Self>, run: &BrowserRunGuard, tab_id: Option<String>) -> Result<crate::runtime::BrowserScreenshot, WorkspaceError> {
         let workspace = self.clone();
         self.coordinator.agent_operation(run, move |cancel| async move {
             Ok(async {
+                workspace.authority.authorize(BrowserCapabilityAction::RenderContent)?;
                 if workspace.closing.load(Ordering::Acquire) { return Err(WorkspaceError::WorkspaceClosed); }
                 let runtime = workspace.slot.ensure().await?;
                 runtime.automation().ok_or(WorkspaceError::UnsupportedAction)?.screenshot(tab_id, cancel).await
@@ -126,10 +136,18 @@ impl BrowserWorkspace {
     pub async fn agent_snapshot(
         self: &Arc<Self>,
         run: &BrowserRunGuard,
-    ) -> Result<BrowserWorkspaceSnapshot, WorkspaceError> {
+    ) -> Result<BrowserResourceSnapshot, WorkspaceError> {
         let workspace = self.clone();
         self.coordinator
-            .agent_operation(run, move |_| async move { Ok(workspace.snapshot().await) })
+            .agent_operation(run, move |_| async move {
+                Ok(async {
+                    workspace
+                        .authority
+                        .authorize(BrowserCapabilityAction::Observe)?;
+                    workspace.snapshot().await
+                }
+                .await)
+            })
             .await?
     }
     pub fn run_changes(&self) -> tokio::sync::watch::Receiver<u64> {
@@ -154,6 +172,7 @@ impl BrowserWorkspace {
         self.coordinator
             .agent_operation(run, move |cancel| async move {
                 Ok(async {
+                    workspace.authority.authorize(BrowserCapabilityAction::Observe)?;
                     if workspace.closing.load(Ordering::Acquire) {
                         return Err(WorkspaceError::WorkspaceClosed);
                     }
@@ -178,6 +197,7 @@ impl BrowserWorkspace {
         self.coordinator
             .agent_operation(run, move |cancel| async move {
                 Ok(async {
+                    workspace.authority.authorize(BrowserCapabilityAction::Act)?;
                     if workspace.closing.load(Ordering::Acquire) {
                         return Err(WorkspaceError::WorkspaceClosed);
                     }
@@ -192,14 +212,18 @@ impl BrowserWorkspace {
             })
             .await?
     }
-    pub fn key(&self) -> &BrowserWorkspaceKey {
+    pub fn key(&self) -> &BrowserResourceKey {
         &self.key
+    }
+    pub fn authority(&self) -> &BrowserSessionAuthority {
+        &self.authority
     }
     pub async fn evaluate(self: &Arc<Self>, run: &BrowserRunGuard, request: crate::runtime::BrowserEvaluation)
         -> Result<crate::runtime::BrowserEvaluationResult, WorkspaceError> {
         let workspace = self.clone();
         self.coordinator.agent_operation(run, move |cancel| async move {
             Ok(async {
+                workspace.authority.authorize(BrowserCapabilityAction::Evaluate)?;
                 if workspace.closing.load(Ordering::Acquire) { return Err(WorkspaceError::WorkspaceClosed); }
                 let runtime = workspace.slot.ensure().await?;
                 runtime.automation().ok_or(WorkspaceError::UnsupportedAction)?.evaluate(request, cancel).await
@@ -211,6 +235,7 @@ impl BrowserWorkspace {
         let workspace = self.clone();
         self.coordinator.agent_operation(run, move |cancel| async move {
             Ok(async {
+                workspace.authority.authorize(BrowserCapabilityAction::Act)?;
                 if workspace.closing.load(Ordering::Acquire) { return Err(WorkspaceError::WorkspaceClosed); }
                 let runtime = workspace.slot.ensure().await?;
                 runtime.automation().ok_or(WorkspaceError::UnsupportedAction)?.respond_dialog(reply, cancel).await
@@ -225,6 +250,7 @@ impl BrowserWorkspace {
         let workspace=self.clone();
         self.coordinator.agent_operation(run,move |cancel|async move {
             Ok(async {
+                workspace.authority.authorize(BrowserCapabilityAction::Upload)?;
                 if workspace.closing.load(Ordering::Acquire) {return Err(WorkspaceError::WorkspaceClosed);}
                 let runtime=workspace.slot.ensure().await?;
                 let automation=runtime.automation().ok_or(WorkspaceError::UnsupportedAction)?;
@@ -241,6 +267,7 @@ impl BrowserWorkspace {
         let workspace=self.clone();
         self.coordinator.agent_operation(run,move |cancel|async move {
             Ok(async {
+                workspace.authority.authorize(BrowserCapabilityAction::Download)?;
                 if workspace.closing.load(Ordering::Acquire) {return Err(WorkspaceError::WorkspaceClosed);}
                 let runtime=workspace.slot.ensure().await?;
                 let automation=runtime.automation().ok_or(WorkspaceError::UnsupportedAction)?;
@@ -250,15 +277,23 @@ impl BrowserWorkspace {
         }).await?
     }
 
-    pub async fn snapshot(&self) -> Result<BrowserWorkspaceSnapshot, WorkspaceError> {
+    pub async fn snapshot(&self) -> Result<BrowserResourceSnapshot, WorkspaceError> {
         let state = self.slot.inner.lock().await;
         let runtime = match &state.runtime {
             Some(runtime) => Some(runtime.snapshot().await?),
             None => None,
         };
         drop(state);
-        Ok(BrowserWorkspaceSnapshot {
-            conversation_id: self.key.conversation_id.clone(),
+        Ok(BrowserResourceSnapshot {
+            agent_session_id: self.key.agent_session_id.clone(),
+            resource_binding_id: self.key.resource_binding_id.clone(),
+            provider_id: self
+                .authority
+                .resource()
+                .provider()
+                .provider_id()
+                .to_owned(),
+            provider_kind: self.authority.resource().provider().kind(),
             run: self.coordinator.snapshot().await,
             runtime,
         })
@@ -327,6 +362,7 @@ impl BrowserWorkspace {
         self: &Arc<Self>,
         command: BrowserTabCommand,
     ) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
+        self.authority.authorize(action_for_tab_command(&command))?;
         if self.closing.load(Ordering::Acquire) {
             return Err(WorkspaceError::WorkspaceClosed);
         }
@@ -346,6 +382,7 @@ impl BrowserWorkspace {
         if matches!(command, BrowserTabCommand::Permission { .. } | BrowserTabCommand::Dialog { .. } | BrowserTabCommand::CancelDownload { .. } | BrowserTabCommand::OpenExternal { .. } | BrowserTabCommand::CloseAll { .. } | BrowserTabCommand::OpenDownloads { .. } | BrowserTabCommand::ClearSiteData { .. }) {
             return Err(WorkspaceError::UnsupportedAction);
         }
+        self.authority.authorize(action_for_tab_command(&command))?;
         if self.closing.load(Ordering::Acquire) {
             return Err(WorkspaceError::WorkspaceClosed);
         }
@@ -406,73 +443,100 @@ impl BrowserWorkspace {
     }
 }
 
-pub struct BrowserWorkspaceService {
+pub struct BrowserResourceService {
     factory: Arc<dyn BrowserRuntimeFactory>,
-    workspaces: Mutex<BTreeMap<BrowserWorkspaceKey, Arc<BrowserWorkspace>>>,
+    profile_store: Option<BrowserProfileStore>,
+    resources: Mutex<BTreeMap<BrowserResourceKey, Arc<BrowserResource>>>,
+    lifecycle: Mutex<()>,
+    retired_sessions: Mutex<BTreeSet<(String, String)>>,
     next_generation: AtomicU64,
     stopping: AtomicBool,
 }
 
-impl BrowserWorkspaceService {
-    pub async fn get(&self, key: &BrowserWorkspaceKey) -> Option<Arc<BrowserWorkspace>> {
-        self.workspaces.lock().await.get(key).cloned()
+impl BrowserResourceService {
+    pub async fn get_for_agent_session(
+        &self,
+        principal_id: &str,
+        agent_session_id: &str,
+    ) -> Result<Option<Arc<BrowserResource>>, WorkspaceError> {
+        let resources = self.resources.lock().await;
+        let mut matches = resources.iter().filter(|(key, _)| {
+            key.principal_id == principal_id && key.agent_session_id == agent_session_id
+        });
+        let resource = matches.next().map(|(_, resource)| Arc::clone(resource));
+        if matches.next().is_some() {
+            return Err(WorkspaceError::ProviderChanged);
+        }
+        Ok(resource)
+    }
+
+    pub async fn get(
+        &self,
+        authority: &BrowserSessionAuthority,
+    ) -> Result<Option<Arc<BrowserResource>>, WorkspaceError> {
+        let resource = self.resources.lock().await.get(&authority.key()).cloned();
+        if let Some(resource) = &resource {
+            ensure_same_authority(&resource.authority, authority)?;
+        }
+        Ok(resource)
     }
     pub fn new(factory: Arc<dyn BrowserRuntimeFactory>) -> Self {
         Self {
             factory,
-            workspaces: Mutex::new(BTreeMap::new()),
+            profile_store: None,
+            resources: Mutex::new(BTreeMap::new()),
+            lifecycle: Mutex::new(()),
+            retired_sessions: Mutex::new(BTreeSet::new()),
             next_generation: AtomicU64::new(1),
             stopping: AtomicBool::new(false),
         }
     }
 
-    /// The authenticated host supplies user/Conversation/profile and exact provider.
-    /// ensure does not launch a browser; opening the first tab does.
+    pub fn with_profile_store(mut self, profile_store: BrowserProfileStore) -> Self {
+        self.profile_store = Some(profile_store);
+        self
+    }
+
+    /// The authenticated host supplies an immutable AgentSession Action grant,
+    /// exact Resource binding, profile and provider lock. `ensure` does not
+    /// launch a browser; opening the first tab does.
     pub async fn ensure(
         &self,
-        key: BrowserWorkspaceKey,
-        provider_lock: String,
+        authority: BrowserSessionAuthority,
         profile: BrowserProfile,
-    ) -> Result<Arc<BrowserWorkspace>, WorkspaceError> {
-        if provider_lock.is_empty() {
-            return Err(WorkspaceError::ProviderChanged);
+    ) -> Result<Arc<BrowserResource>, WorkspaceError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        let key = authority.key();
+        if authority.resource().provider().kind() != BrowserProviderKind::Managed {
+            return Err(WorkspaceError::NativeUnavailable);
         }
-        self.ensure_bound(key, Some(provider_lock), profile).await
-    }
-
-    pub async fn ensure_user(
-        &self,
-        key: BrowserWorkspaceKey,
-        profile: BrowserProfile,
-    ) -> Result<Arc<BrowserWorkspace>, WorkspaceError> {
-        self.ensure_bound(key, None, profile).await
-    }
-
-    async fn ensure_bound(
-        &self,
-        key: BrowserWorkspaceKey,
-        provider_lock: Option<String>,
-        profile: BrowserProfile,
-    ) -> Result<Arc<BrowserWorkspace>, WorkspaceError> {
-        let mut workspaces = self.workspaces.lock().await;
+        if let Some(store) = &self.profile_store {
+            let persistence = match &profile {
+                BrowserProfile::Persistent(_) => BrowserProfilePersistence::Persistent,
+                BrowserProfile::Ephemeral => BrowserProfilePersistence::Ephemeral,
+            };
+            if store.profile_for(&key, persistence)? != profile {
+                return Err(WorkspaceError::ProfileCleanupInvalid);
+            }
+        }
+        if self
+            .retired_sessions
+            .lock()
+            .await
+            .contains(&(key.principal_id.clone(), key.agent_session_id.clone()))
+        {
+            return Err(WorkspaceError::WorkspaceClosed);
+        }
+        let mut resources = self.resources.lock().await;
         if self.stopping.load(Ordering::Acquire) {
             return Err(WorkspaceError::WorkspaceClosed);
         }
-        if let Some(workspace) = workspaces.get(&key) {
-            if workspace.closing.load(Ordering::Acquire) {
+        if let Some(resource) = resources.get(&key) {
+            if resource.closing.load(Ordering::Acquire) {
                 return Err(WorkspaceError::WorkspaceClosed);
             }
-            if let Some(provider) = &provider_lock {
-                let mut bound = workspace
-                    .provider_lock
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner());
-                if bound.as_ref().is_some_and(|current| current != provider) {
-                    return Err(WorkspaceError::ProviderChanged);
-                }
-                *bound = Some(provider.clone());
-            }
-            return Ok(workspace.clone());
+            ensure_same_authority(&resource.authority, &authority)?;
+            return Ok(resource.clone());
         }
         let slot = Arc::new(RuntimeSlot {
             factory: self.factory.clone(),
@@ -488,52 +552,178 @@ impl BrowserWorkspaceService {
                 closed: false,
             }),
         });
-        let workspace = Arc::new(BrowserWorkspace {
+        let resource = Arc::new(BrowserResource {
             key: key.clone(),
-            provider_lock: std::sync::Mutex::new(provider_lock),
+            authority,
             coordinator: BrowserRunCoordinator::new(slot.clone()),
             slot,
             closing: AtomicBool::new(false),
         });
-        workspaces.insert(key, workspace.clone());
-        Ok(workspace)
+        resources.insert(key, resource.clone());
+        Ok(resource)
     }
 
-    pub async fn close(&self, key: &BrowserWorkspaceKey) -> Result<(), WorkspaceError> {
-        let workspace = self.workspaces.lock().await.get(key).cloned();
-        if let Some(workspace) = workspace {
-            workspace.close().await?;
-            let mut workspaces = self.workspaces.lock().await;
-            if workspaces
+    pub async fn close(&self, key: &BrowserResourceKey) -> Result<(), WorkspaceError> {
+        let resource = self.resources.lock().await.get(key).cloned();
+        if let Some(resource) = resource {
+            resource.close().await?;
+            let mut resources = self.resources.lock().await;
+            if resources
                 .get(key)
-                .is_some_and(|current| Arc::ptr_eq(current, &workspace))
+                .is_some_and(|current| Arc::ptr_eq(current, &resource))
             {
-                workspaces.remove(key);
+                resources.remove(key);
             }
         }
         Ok(())
     }
 
+    /// Canonical AgentSession deletion/resource-lease cleanup. Every Browser
+    /// binding for the exact principal and Session is closed; another Session
+    /// is never selected by resource id or profile path.
+    pub async fn close_agent_session(
+        &self,
+        principal_id: &str,
+        agent_session_id: &str,
+    ) -> Result<(), WorkspaceError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.close_agent_session_locked(principal_id, agent_session_id)
+            .await
+            .map(|_| ())
+    }
+
+    /// Destructive canonical AgentSession owner operation. The caller supplies
+    /// only authenticated identities and the frozen managed-Browser binding
+    /// policies; profile paths are recomputed from the host-owned store.
+    ///
+    /// Native resources and run guards settle first. Any close, authority, or
+    /// filesystem failure is returned so the Session tombstone cannot commit.
+    /// Replays are exact and absorb already-removed profile directories.
+    pub async fn delete_agent_session(
+        &self,
+        principal_id: &str,
+        agent_session_id: &str,
+        bindings: &[BrowserProfileBinding],
+    ) -> Result<(), WorkspaceError> {
+        if !is_bounded_profile_identity(principal_id)
+            || !is_bounded_profile_identity(agent_session_id)
+        {
+            return Err(WorkspaceError::ProfileCleanupInvalid);
+        }
+        let mut frozen = BTreeMap::new();
+        for binding in bindings {
+            if frozen
+                .insert(
+                    binding.resource_binding_id().to_owned(),
+                    binding.persistence(),
+                )
+                .is_some()
+            {
+                return Err(WorkspaceError::ProfileCleanupInvalid);
+            }
+        }
+
+        let _lifecycle = self.lifecycle.lock().await;
+        let live = self
+            .close_agent_session_locked(principal_id, agent_session_id)
+            .await?;
+        for (key, profile) in live {
+            let Some(persistence) = frozen.get(&key.resource_binding_id) else {
+                return Err(WorkspaceError::ProfileCleanupInvalid);
+            };
+            if !matches!(
+                (*persistence, &profile),
+                (BrowserProfilePersistence::Persistent, BrowserProfile::Persistent(_))
+                    | (BrowserProfilePersistence::Ephemeral, BrowserProfile::Ephemeral)
+            ) {
+                return Err(WorkspaceError::ProfileCleanupInvalid);
+            }
+        }
+
+        let persistent = frozen
+            .into_iter()
+            .filter_map(|(resource_binding_id, persistence)| {
+                (persistence == BrowserProfilePersistence::Persistent).then(|| {
+                    BrowserResourceKey {
+                        principal_id: principal_id.to_owned(),
+                        agent_session_id: agent_session_id.to_owned(),
+                        resource_binding_id,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        if persistent.is_empty() {
+            return Ok(());
+        }
+        let store = self
+            .profile_store
+            .clone()
+            .ok_or(WorkspaceError::ProfileCleanupUnavailable)?;
+        tokio::task::spawn_blocking(move || {
+            for key in persistent {
+                store.delete_persistent_profile(&key)?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| WorkspaceError::ProfileCleanupFailed)?
+    }
+
+    async fn close_agent_session_locked(
+        &self,
+        principal_id: &str,
+        agent_session_id: &str,
+    ) -> Result<Vec<(BrowserResourceKey, BrowserProfile)>, WorkspaceError> {
+        self.retired_sessions.lock().await.insert((
+            principal_id.to_owned(),
+            agent_session_id.to_owned(),
+        ));
+        let resources = self
+            .resources
+            .lock()
+            .await
+            .iter()
+            .filter_map(|(key, resource)| {
+                (key.principal_id == principal_id
+                    && key.agent_session_id == agent_session_id)
+                    .then(|| {
+                        (
+                            key.clone(),
+                            resource.slot.request.profile.clone(),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        let mut failure = None;
+        for (key, _) in &resources {
+            if let Err(error) = self.close(key).await {
+                failure = Some(error);
+            }
+        }
+        failure.map_or(Ok(resources), Err)
+    }
+
     /// Infrastructure for an explicitly confirmed human browser rebuild.
     /// The application must also retire its idle cached Agent before exposing
-    /// a replacement Workspace; this is not an Agent or public unlock API.
-    pub async fn close_idle(self: &Arc<Self>,key:BrowserWorkspaceKey,expected_generation:u64)->Result<(),WorkspaceError> {
+    /// a replacement Resource; this is not an Agent or public unlock API.
+    pub async fn close_idle(self: &Arc<Self>,key:BrowserResourceKey,expected_generation:u64)->Result<(),WorkspaceError> {
         let service=self.clone();
         tokio::spawn(async move {
-            let workspace=service.workspaces.lock().await.get(&key).cloned();
-            if let Some(workspace)=workspace {
-                if workspace.runtime_generation()!=expected_generation {return Err(WorkspaceError::StaleTarget);}
-                workspace.close_idle().await?;
-                let mut workspaces=service.workspaces.lock().await;
-                if workspaces.get(&key).is_some_and(|current|Arc::ptr_eq(current,&workspace)) {workspaces.remove(&key);}
+            let resource=service.resources.lock().await.get(&key).cloned();
+            if let Some(resource)=resource {
+                if resource.runtime_generation()!=expected_generation {return Err(WorkspaceError::StaleTarget);}
+                resource.close_idle().await?;
+                let mut resources=service.resources.lock().await;
+                if resources.get(&key).is_some_and(|current|Arc::ptr_eq(current,&resource)) {resources.remove(&key);}
             }
             Ok(())
         }).await.map_err(|_|WorkspaceError::Admission(RunAdmissionError::WorkerFailed))?
     }
 
     pub async fn shutdown(&self) -> Result<(), WorkspaceError> {
+        let _lifecycle = self.lifecycle.lock().await;
         self.stopping.store(true, Ordering::Release);
-        let keys: Vec<_> = self.workspaces.lock().await.keys().cloned().collect();
+        let keys: Vec<_> = self.resources.lock().await.keys().cloned().collect();
         let mut failure = None;
         for key in keys {
             if let Err(error) = self.close(&key).await {
@@ -541,6 +731,40 @@ impl BrowserWorkspaceService {
             }
         }
         failure.map_or(Ok(()), Err)
+    }
+}
+
+fn ensure_same_authority(
+    current: &BrowserSessionAuthority,
+    requested: &BrowserSessionAuthority,
+) -> Result<(), WorkspaceError> {
+    if current.resource().provider() != requested.resource().provider() {
+        return Err(WorkspaceError::ProviderChanged);
+    }
+    if current != requested {
+        return Err(WorkspaceError::ActionDenied);
+    }
+    Ok(())
+}
+
+fn action_for_tab_command(command: &BrowserTabCommand) -> BrowserCapabilityAction {
+    match command {
+        BrowserTabCommand::Create { .. }
+        | BrowserTabCommand::Navigate { .. }
+        | BrowserTabCommand::Back { .. }
+        | BrowserTabCommand::Forward { .. }
+        | BrowserTabCommand::Reload { .. }
+        | BrowserTabCommand::StopLoading { .. } => BrowserCapabilityAction::Navigate,
+        BrowserTabCommand::Activate { .. } | BrowserTabCommand::Close { .. } => {
+            BrowserCapabilityAction::Act
+        }
+        BrowserTabCommand::OpenDownloads { .. }
+        | BrowserTabCommand::CancelDownload { .. } => BrowserCapabilityAction::Download,
+        BrowserTabCommand::CloseAll { .. }
+        | BrowserTabCommand::ClearSiteData { .. }
+        | BrowserTabCommand::OpenExternal { .. }
+        | BrowserTabCommand::Permission { .. }
+        | BrowserTabCommand::Dialog { .. } => BrowserCapabilityAction::Act,
     }
 }
 

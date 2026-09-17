@@ -106,9 +106,11 @@ async fn prompt_answer_and_recovery_writes_share_bounded_deadlines() {
     let shell = connection
         .open_shell_with_rules(
             ".",
-            vec![AnswerRule::sudo(zeroize::Zeroizing::new(
-                "x".repeat(64 * 1024),
-            ))],
+            vec![AnswerRule::exact_once(
+                "Password:",
+                zeroize::Zeroizing::new("x".repeat(64 * 1024)),
+            )
+            .unwrap()],
         )
         .await
         .unwrap();

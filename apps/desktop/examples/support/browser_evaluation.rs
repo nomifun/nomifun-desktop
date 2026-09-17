@@ -1,5 +1,5 @@
 //! Real WebView2 developer evaluation, distinct from native user input.
-use nomifun_browser_platform::{runtime::*, workspace::BrowserWorkspaceService};
+use nomifun_browser_platform::{runtime::*, workspace::BrowserResourceService};
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 pub(super) static EXECUTION_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -9,9 +9,10 @@ pub(super) const HTML: &str = r#"<!doctype html><meta charset=utf-8><title>Devel
 <script>window.pageOnly=42;let clicks=0;clicker.onclick=e=>{if(e.isTrusted)document.getElementById('clicks').textContent=String(++clicks);};</script>"#;
 
 pub(super) async fn verify(app: &tauri::AppHandle, url: &str) -> Result<serde_json::Value, String> {
-    let service = BrowserWorkspaceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
-    let key = BrowserWorkspaceKey { user_id: "evaluation-fixture".into(), conversation_id: "evaluation-fixture".into() };
-    let workspace = service.ensure(key.clone(), "fixture".into(), BrowserProfile::Ephemeral).await.map_err(|e|e.to_string())?;
+    let service = BrowserResourceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
+    let authority = super::browser_resource_fixture::authority("evaluation-fixture", "evaluation-fixture", "fixture");
+    let key = authority.key();
+    let workspace = service.ensure(authority, BrowserProfile::Ephemeral).await.map_err(|e|e.to_string())?;
     let result = async {
         workspace.user_command(BrowserTabCommand::Create { url:url.into() }).await.map_err(|e|e.to_string())?;
         let target = super::wait_workspace_page(&workspace, url).await?;

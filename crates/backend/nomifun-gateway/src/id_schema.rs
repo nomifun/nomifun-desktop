@@ -133,12 +133,3 @@ impl From<SessionTargetKind> for nomifun_api_types::AutoWorkTargetKind {
         }
     }
 }
-
-impl From<SessionTargetKind> for nomifun_api_types::IdmmTargetKind {
-    fn from(value: SessionTargetKind) -> Self {
-        match value {
-            SessionTargetKind::Conversation => Self::Conversation,
-            SessionTargetKind::Terminal => Self::Terminal,
-        }
-    }
-}

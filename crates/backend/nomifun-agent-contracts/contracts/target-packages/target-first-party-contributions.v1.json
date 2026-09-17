@@ -8,27 +8,6 @@
   "packages": [
     {
       "package": {
-        "id": "nomifun.system-browser",
-        "version": "1.0.0"
-      },
-      "source": {
-        "source_kind": "bundled",
-        "source_identity": "nomifun.system-browser"
-      },
-      "capabilities": [
-        {
-          "capability": {
-            "id": "nomi_system_browser",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        }
-      ],
-      "skills": [],
-      "mcp_tools": []
-    },
-    {
-      "package": {
         "id": "nomifun.web-research",
         "version": "1.0.0"
       },
@@ -60,35 +39,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "agent.delegate",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "agent.fork",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "agent.execution.plan",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "agent.execution.steer",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "agent.execution.observe",
+            "id": "agent.collaboration",
             "version": "1.0.0"
           },
           "kind": "tool"
@@ -151,35 +102,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "ssh.connect",
-            "version": "1.0.0"
-          },
-          "kind": "resource_provider"
-        },
-        {
-          "capability": {
-            "id": "ssh.fs.read",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "ssh.fs.write",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "ssh.exec",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "ssh.sudo",
+            "id": "ssh",
             "version": "1.0.0"
           },
           "kind": "tool"
@@ -263,49 +186,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "browser.observe",
-            "version": "1.0.0"
-          },
-          "kind": "context_contributor"
-        },
-        {
-          "capability": {
-            "id": "browser.navigate",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "browser.act",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "browser.render_content",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "browser.download",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "browser.upload",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "browser.evaluate",
+            "id": "browser",
             "version": "1.0.0"
           },
           "kind": "tool"
@@ -322,61 +203,14 @@
           "members": [
             {
               "capability": {
-                "id": "browser.observe",
+                "id": "browser",
                 "version": "1.0.0"
               },
-              "capability_manifest_digest": "a29d4af00f34f37b29a50e23535dc9df3955f8aa678deb25702b4c3afb09777d",
+              "capability_manifest_digest": "d4dafd8f47e2b44f32ef57ee9e21b41101578c6039db1d7dd82fb031942b78f3",
               "requirement": "required"
-            },
-            {
-              "capability": {
-                "id": "browser.navigate",
-                "version": "1.0.0"
-              },
-              "capability_manifest_digest": "7833baae893f7421245daa3b437ea46e36d37658041cb82f594830d2a7d126df",
-              "requirement": "required"
-            },
-            {
-              "capability": {
-                "id": "browser.act",
-                "version": "1.0.0"
-              },
-              "capability_manifest_digest": "8312476443273f9f24be24b82bc69dddd97e84382722ab1557cdaa247bd37354",
-              "requirement": "required"
-            },
-            {
-              "capability": {
-                "id": "browser.render_content",
-                "version": "1.0.0"
-              },
-              "capability_manifest_digest": "a95472178b366b047dea887b49131dcfdd2f267594ef2329279084f2bb35154d",
-              "requirement": "optional"
-            },
-            {
-              "capability": {
-                "id": "browser.download",
-                "version": "1.0.0"
-              },
-              "capability_manifest_digest": "d6195364c7c792960c3c38632b35b3bce97a4dd83eb072c78678176bdee8fe20",
-              "requirement": "optional"
-            },
-            {
-              "capability": {
-                "id": "browser.upload",
-                "version": "1.0.0"
-              },
-              "capability_manifest_digest": "d951bbab2f7c97dde605f081f152e9bf065dfd56c5c4953d79a9a43c4b311fa2",
-              "requirement": "optional"
-            },
-            {
-              "capability": {
-                "id": "browser.evaluate",
-                "version": "1.0.0"
-              },
-              "capability_manifest_digest": "8f7f3cf7f3ba769bcaf7e0d257e7e90df8bf375180b63b35c8f4373e7740c38d",
-              "requirement": "optional"
             }
-          ]
+          ],
+          "serialized_target_resource_kind": "browser"
         }
       ],
       "role_providers": [
@@ -386,14 +220,14 @@
               "role_id": "system.browser_use",
               "contract_version": "2.0.0"
             },
-            "contract_digest": "09c1f46cf7a83b3f6c295e41a7f87ab1faf6798f34633442311812f02ebc1ceb"
+            "contract_digest": "b6cfef1c913d4885cadeb97cfab8015eef34e33b6ce0d027e9d911c38934073c"
           },
           "display": {
             "name": "Browser Use",
             "description": "Bundled first-party execution-role provider."
           },
           "members": {
-            "browser.act": {
+            "browser": {
               "supported_platforms": [
                 {
                   "constraint": "targets",
@@ -408,109 +242,9 @@
                   ]
                 }
               ],
-              "required_resource_kinds": []
-            },
-            "browser.download": {
-              "supported_platforms": [
-                {
-                  "constraint": "targets",
-                  "host_targets": [
-                    "aarch64-apple-darwin",
-                    "x86_64-apple-darwin",
-                    "x86_64-pc-windows-msvc",
-                    "x86_64-unknown-linux-gnu"
-                  ],
-                  "host_surfaces": [
-                    "desktop"
-                  ]
-                }
-              ],
-              "required_resource_kinds": []
-            },
-            "browser.evaluate": {
-              "supported_platforms": [
-                {
-                  "constraint": "targets",
-                  "host_targets": [
-                    "aarch64-apple-darwin",
-                    "x86_64-apple-darwin",
-                    "x86_64-pc-windows-msvc",
-                    "x86_64-unknown-linux-gnu"
-                  ],
-                  "host_surfaces": [
-                    "desktop"
-                  ]
-                }
-              ],
-              "required_resource_kinds": []
-            },
-            "browser.navigate": {
-              "supported_platforms": [
-                {
-                  "constraint": "targets",
-                  "host_targets": [
-                    "aarch64-apple-darwin",
-                    "x86_64-apple-darwin",
-                    "x86_64-pc-windows-msvc",
-                    "x86_64-unknown-linux-gnu"
-                  ],
-                  "host_surfaces": [
-                    "desktop"
-                  ]
-                }
-              ],
-              "required_resource_kinds": []
-            },
-            "browser.observe": {
-              "supported_platforms": [
-                {
-                  "constraint": "targets",
-                  "host_targets": [
-                    "aarch64-apple-darwin",
-                    "x86_64-apple-darwin",
-                    "x86_64-pc-windows-msvc",
-                    "x86_64-unknown-linux-gnu"
-                  ],
-                  "host_surfaces": [
-                    "desktop"
-                  ]
-                }
-              ],
-              "required_resource_kinds": []
-            },
-            "browser.render_content": {
-              "supported_platforms": [
-                {
-                  "constraint": "targets",
-                  "host_targets": [
-                    "aarch64-apple-darwin",
-                    "x86_64-apple-darwin",
-                    "x86_64-pc-windows-msvc",
-                    "x86_64-unknown-linux-gnu"
-                  ],
-                  "host_surfaces": [
-                    "desktop"
-                  ]
-                }
-              ],
-              "required_resource_kinds": []
-            },
-            "browser.upload": {
-              "supported_platforms": [
-                {
-                  "constraint": "targets",
-                  "host_targets": [
-                    "aarch64-apple-darwin",
-                    "x86_64-apple-darwin",
-                    "x86_64-pc-windows-msvc",
-                    "x86_64-unknown-linux-gnu"
-                  ],
-                  "host_surfaces": [
-                    "desktop"
-                  ]
-                }
-              ],
-              "required_resource_kinds": []
+              "required_resource_kinds": [
+                "browser"
+              ]
             }
           }
         }
@@ -702,28 +436,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "requirements.read",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "requirements.write",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "requirements.status",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "requirements.claim",
+            "id": "requirements",
             "version": "1.0.0"
           },
           "kind": "tool"
@@ -734,76 +447,20 @@
     },
     {
       "package": {
-        "id": "nomifun.autowork-scheduler",
+        "id": "nomifun.automation-schedule",
         "version": "1.0.0"
       },
       "source": {
         "source_kind": "bundled",
-        "source_identity": "nomifun.autowork-scheduler"
+        "source_identity": "nomifun.automation-schedule"
       },
       "capabilities": [
         {
           "capability": {
-            "id": "autowork.runner",
-            "version": "1.0.0"
-          },
-          "kind": "scheduler"
-        },
-        {
-          "capability": {
-            "id": "schedule.store",
+            "id": "automation.schedule",
             "version": "1.0.0"
           },
           "kind": "tool"
-        },
-        {
-          "capability": {
-            "id": "schedule.timer",
-            "version": "1.0.0"
-          },
-          "kind": "scheduler"
-        },
-        {
-          "capability": {
-            "id": "schedule.agent_trigger",
-            "version": "1.0.0"
-          },
-          "kind": "scheduler"
-        }
-      ],
-      "skills": [],
-      "mcp_tools": []
-    },
-    {
-      "package": {
-        "id": "nomifun.idmm",
-        "version": "1.0.0"
-      },
-      "source": {
-        "source_kind": "bundled",
-        "source_identity": "nomifun.idmm"
-      },
-      "capabilities": [
-        {
-          "capability": {
-            "id": "idmm.observe",
-            "version": "1.0.0"
-          },
-          "kind": "turn_middleware"
-        },
-        {
-          "capability": {
-            "id": "idmm.intervene",
-            "version": "1.0.0"
-          },
-          "kind": "turn_middleware"
-        },
-        {
-          "capability": {
-            "id": "idmm.fallback_policy",
-            "version": "1.0.0"
-          },
-          "kind": "turn_middleware"
         }
       ],
       "skills": [],
@@ -1021,22 +678,7 @@
         "source_kind": "bundled",
         "source_identity": "nomifun.notification"
       },
-      "capabilities": [
-        {
-          "capability": {
-            "id": "notification.webhook",
-            "version": "1.0.0"
-          },
-          "kind": "event_consumer"
-        },
-        {
-          "capability": {
-            "id": "notification.desktop",
-            "version": "1.0.0"
-          },
-          "kind": "event_consumer"
-        }
-      ],
+      "capabilities": [],
       "skills": [],
       "mcp_tools": []
     },
@@ -1049,43 +691,7 @@
         "source_kind": "bundled",
         "source_identity": "nomifun.remote-ingress"
       },
-      "capabilities": [
-        {
-          "capability": {
-            "id": "remote.mcp",
-            "version": "1.0.0"
-          },
-          "kind": "transport"
-        },
-        {
-          "capability": {
-            "id": "remote.rest",
-            "version": "1.0.0"
-          },
-          "kind": "transport"
-        },
-        {
-          "capability": {
-            "id": "ingress.web",
-            "version": "1.0.0"
-          },
-          "kind": "transport"
-        },
-        {
-          "capability": {
-            "id": "ingress.mobile",
-            "version": "1.0.0"
-          },
-          "kind": "transport"
-        },
-        {
-          "capability": {
-            "id": "ingress.channel",
-            "version": "1.0.0"
-          },
-          "kind": "transport"
-        }
-      ],
+      "capabilities": [],
       "skills": [],
       "mcp_tools": []
     }

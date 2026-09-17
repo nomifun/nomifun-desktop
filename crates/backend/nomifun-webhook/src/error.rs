@@ -13,4 +13,13 @@ pub enum WebhookError {
 
     #[error("remote rejected the webhook: {0}")]
     Remote(String),
+
+    #[error("webhook delivery outcome is unknown: {0}")]
+    OutcomeUnknown(String),
+}
+
+impl WebhookError {
+    pub const fn outcome_unknown(&self) -> bool {
+        matches!(self, Self::OutcomeUnknown(_))
+    }
 }

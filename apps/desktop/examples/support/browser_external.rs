@@ -1,11 +1,12 @@
 //! One local test page is dispatched through the real default-browser handler.
-use nomifun_browser_platform::{runtime::*, workspace::BrowserWorkspaceService};
+use nomifun_browser_platform::{runtime::*, workspace::BrowserResourceService};
 use std::sync::{Arc, atomic::Ordering};
 
 pub(super) async fn verify_downloads(app: &tauri::AppHandle, url: &str) -> Result<serde_json::Value, String> {
-    let service = BrowserWorkspaceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
-    let key = BrowserWorkspaceKey { user_id: "downloads-folder-fixture".into(), conversation_id: "downloads-folder-fixture".into() };
-    let workspace = service.ensure(key.clone(), "fixture".into(), BrowserProfile::Ephemeral).await.map_err(|e| e.to_string())?;
+    let service = BrowserResourceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
+    let authority = super::browser_resource_fixture::authority("downloads-folder-fixture", "downloads-folder-fixture", "fixture");
+    let key = authority.key();
+    let workspace = service.ensure(authority, BrowserProfile::Ephemeral).await.map_err(|e| e.to_string())?;
     let result = async {
         let before = workspace.user_command(BrowserTabCommand::Create { url: url.into() }).await.map_err(|e| e.to_string())?;
         let target = super::wait_workspace_page(&workspace, url).await?;
@@ -30,9 +31,10 @@ pub(super) async fn verify_downloads(app: &tauri::AppHandle, url: &str) -> Resul
 }
 
 pub(super) async fn verify(app: &tauri::AppHandle, url: &str) -> Result<serde_json::Value, String> {
-    let service=BrowserWorkspaceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
-    let key=BrowserWorkspaceKey {user_id:"external-fixture".into(),conversation_id:"external-fixture".into()};
-    let workspace=service.ensure(key.clone(),"fixture".into(),BrowserProfile::Ephemeral).await.map_err(|e|e.to_string())?;
+    let service=BrowserResourceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
+    let authority=super::browser_resource_fixture::authority("external-fixture","external-fixture","fixture");
+    let key=authority.key();
+    let workspace=service.ensure(authority,BrowserProfile::Ephemeral).await.map_err(|e|e.to_string())?;
     let result=async {
         workspace.user_command(BrowserTabCommand::Create {url:url.into()}).await.map_err(|e|e.to_string())?;
         let target=super::wait_workspace_page(&workspace,url).await?;

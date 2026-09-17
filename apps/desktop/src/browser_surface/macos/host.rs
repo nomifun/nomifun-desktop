@@ -82,7 +82,7 @@ fn valid_url(input: &str) -> Result<url::Url, WorkspaceError> {
 impl DesktopBrowserRuntime {
     fn request_presentation(&self, state: &mut RuntimeState) {
         if !state.input_enabled && !state.presentation_requested && state.active.is_some() {
-            if state.visible || self.app.emit_to("main", "browser-workspace-open", &self.request.key.conversation_id).is_ok() { state.presentation_requested = true; }
+            if state.visible || self.app.emit_to("main", "browser-workspace-open", &self.request.key.agent_session_id).is_ok() { state.presentation_requested = true; }
         }
     }
     fn snapshot_locked(&self, state: &RuntimeState) -> BrowserRuntimeSnapshot {

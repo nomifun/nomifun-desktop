@@ -1,12 +1,12 @@
 //! Production host installation across initial documents, navigation and popup.
 use nomifun_browser_platform::{
     runtime::*,
-    workspace::{BrowserWorkspace, BrowserWorkspaceService},
+    workspace::{BrowserResource, BrowserResourceService},
 };
 use std::{sync::Arc, time::Duration};
 use tauri::Manager;
 
-async fn dialog(workspace: &BrowserWorkspace, message: &str) -> Result<BrowserDialog, String> {
+async fn dialog(workspace: &BrowserResource, message: &str) -> Result<BrowserDialog, String> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let snapshot = workspace
@@ -43,7 +43,7 @@ fn reply(dialog: BrowserDialog, accept: bool, text: Option<&str>) -> BrowserDial
     }
 }
 async fn element(
-    workspace: &Arc<BrowserWorkspace>,
+    workspace: &Arc<BrowserResource>,
     run: &nomifun_browser_platform::run_guard::BrowserRunGuard,
     name: &str,
 ) -> Result<BrowserElementRef, String> {
@@ -63,16 +63,16 @@ pub(super) async fn verify(
     app: &tauri::AppHandle,
     base: &str,
 ) -> Result<serde_json::Value, String> {
-    let service = Arc::new(BrowserWorkspaceService::new(Arc::new(
+    let service = Arc::new(BrowserResourceService::new(Arc::new(
         super::host::DesktopBrowserHost::new(app.clone()),
     )));
     let workspace = service
         .ensure(
-            BrowserWorkspaceKey {
-                user_id: "navigation-dialog-user".into(),
-                conversation_id: "navigation-dialog-conversation".into(),
-            },
-            "native-webview2-v2".into(),
+            super::browser_resource_fixture::authority(
+                "navigation-dialog-user",
+                "navigation-dialog-conversation",
+                "native-webview2-v2",
+            ),
             BrowserProfile::Ephemeral,
         )
         .await

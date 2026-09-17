@@ -13,8 +13,6 @@ import { LayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import * as preview from '@/renderer/pages/conversation/Preview';
 import * as knowledgeTab from '@/renderer/pages/conversation/Workspace/KnowledgePanel/useSessionKnowledgeTab';
 import * as knowledge from '@/renderer/pages/conversation/components/KnowledgeControl';
-import * as idmm from '@/renderer/pages/conversation/components/IdmmControl';
-import * as autowork from '@/renderer/pages/conversation/components/AutoWorkControl';
 import * as xterm from './XtermView';
 import * as composer from './TerminalSendBox';
 import * as workspaceRail from './TerminalWorkspaceRail';
@@ -63,10 +61,8 @@ function fixture() {
   const reconnected = event<void>(ipcBridge.terminal.onReconnected);
   // Keep the page/router real; unrelated capability/preview UIs and the PTY
   // renderer are leaf seams. No module or fetch mocks escape this fixture.
-  for (const module of [knowledge, idmm, autowork]) {
-    const spy = spyOn(module, 'default').mockImplementation(() => null);
-    restore.push(() => spy.mockRestore());
-  }
+  const knowledgeControl = spyOn(knowledge, 'default').mockImplementation(() => null);
+  restore.push(() => knowledgeControl.mockRestore());
   const provider = spyOn(preview, 'PreviewProvider').mockImplementation(({ children }) => <>{children}</>);
   const context = spyOn(preview, 'usePreviewContext').mockReturnValue({ isOpen: false } as ReturnType<typeof preview.usePreviewContext>);
   const tabs = spyOn(knowledgeTab, 'useSessionKnowledgeTab').mockReturnValue([]);

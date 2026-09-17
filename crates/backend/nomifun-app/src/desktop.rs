@@ -651,9 +651,9 @@ pub struct DesktopHostServices {
     #[cfg(feature = "browser-use")]
     pub headless_render: Option<Arc<crate::headless_render::HeadlessRenderRuntime>>,
     #[cfg(feature = "browser-use")]
-    pub browser_workspaces: Option<Arc<nomifun_browser_platform::workspace::BrowserWorkspaceService>>,
+    pub browser_resources: Option<Arc<nomifun_browser_platform::workspace::BrowserResourceService>>,
     #[cfg(feature = "browser-use")]
-    pub system_browser: Option<Arc<crate::system_browser::SystemBrowserService>>,
+    pub attached_chrome: Option<Arc<crate::AttachedChromeProviderService>>,
 }
 
 #[cfg(feature = "browser-use")]
@@ -923,15 +923,17 @@ impl DesktopServer {
         self.loopback_port
     }
 
-    /// Trusted desktop Surface commands can attach only a workspace already
-    /// authorized by the Conversation API or the Agent factory.
+    /// Trusted desktop Surface commands can attach only a Browser Resource
+    /// already authorized for the exact AgentSession.
     #[cfg(feature = "browser-use")]
-    pub async fn browser_workspace_for_local_surface(&self, conversation_id: &str) -> Result<Arc<nomifun_browser_platform::workspace::BrowserWorkspace>> {
+    pub async fn browser_resource_for_local_surface(&self, agent_session_id: &str) -> Result<Arc<nomifun_browser_platform::workspace::BrowserResource>> {
         let services = self._keep_alive.services().ok_or_else(|| anyhow::anyhow!("Native browser is unavailable."))?;
-        let workspaces = services.browser_workspaces.as_ref().ok_or_else(|| anyhow::anyhow!("Native browser is unavailable."))?;
-        workspaces.get(&nomifun_browser_platform::runtime::BrowserWorkspaceKey {
-            user_id: services.authoritative_user_id.to_string(), conversation_id: conversation_id.into(),
-        }).await.ok_or_else(|| anyhow::anyhow!("Conversation browser is not available."))
+        let resources = services.browser_resources.as_ref().ok_or_else(|| anyhow::anyhow!("Native browser is unavailable."))?;
+        resources
+            .get_for_agent_session(services.authoritative_user_id.as_ref(), agent_session_id)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+            .ok_or_else(|| anyhow::anyhow!("AgentSession Browser Resource is not available."))
     }
 
     /// Keep the robot endpoint advertiser in step with the LAN listener.

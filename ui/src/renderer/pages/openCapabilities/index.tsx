@@ -108,13 +108,6 @@ const MCP_DOMAIN_OPTIONS: McpDomainOption[] = [
     defaultDesc: '开启、关闭和查看需求 AutoWork 状态。',
   },
   {
-    id: 'idmm',
-    titleKey: 'settings.openCapabilities.domainIdmmTitle',
-    defaultTitle: 'IDMM',
-    descKey: 'settings.openCapabilities.domainIdmmDesc',
-    defaultDesc: '模型调度、活动和智能分配相关能力。',
-  },
-  {
     id: 'cron',
     titleKey: 'settings.openCapabilities.domainCronTitle',
     defaultTitle: '计划任务',

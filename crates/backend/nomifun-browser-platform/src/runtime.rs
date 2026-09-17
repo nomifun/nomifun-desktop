@@ -1,6 +1,12 @@
-//! Browser Workspace v2 host ports. No native handle or debugging endpoint is wire data.
+//! Browser Resource host ports. No native handle or debugging endpoint is wire data.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    ffi::OsStr,
+    fs::Metadata,
+    io,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -27,10 +33,12 @@ pub enum WorkspaceError {
     ObservationLimit,
     #[error("The native browser is unavailable on this host.")]
     NativeUnavailable,
-    #[error("The conversation browser has been closed.")]
+    #[error("The AgentSession browser resource has been closed.")]
     WorkspaceClosed,
-    #[error("The selected browser provider does not match this workspace.")]
+    #[error("The selected browser provider does not match this resource.")]
     ProviderChanged,
+    #[error("The Browser grant or resource binding does not authorize this action.")]
+    ActionDenied,
     #[error("The browser tab no longer exists.")]
     TabNotFound,
     #[error("The browser tab limit has been reached.")]
@@ -49,6 +57,12 @@ pub enum WorkspaceError {
     DownloadDenied,
     #[error("The native browser command failed.")]
     NativeCommandFailed,
+    #[error("The Browser profile cleanup request is not an exact frozen binding set.")]
+    ProfileCleanupInvalid,
+    #[error("Persistent Browser profile cleanup is not configured on this host.")]
+    ProfileCleanupUnavailable,
+    #[error("The persistent Browser profile could not be deleted safely.")]
+    ProfileCleanupFailed,
     #[error(transparent)]
     Admission(#[from] RunAdmissionError),
 }
@@ -63,8 +77,9 @@ impl WorkspaceError {
             Self::UnsupportedAction => "BROWSER_UNSUPPORTED_ACTION",
             Self::ObservationLimit => "BROWSER_OBSERVATION_LIMIT",
             Self::NativeUnavailable => "BROWSER_NATIVE_SURFACE_UNAVAILABLE",
-            Self::WorkspaceClosed => "BROWSER_WORKSPACE_CLOSED",
+            Self::WorkspaceClosed => "BROWSER_RESOURCE_CLOSED",
             Self::ProviderChanged => "BROWSER_PROVIDER_CHANGED",
+            Self::ActionDenied => "BROWSER_ACTION_DENIED",
             Self::TabNotFound => "BROWSER_TAB_NOT_FOUND",
             Self::TabLimit => "BROWSER_TAB_LIMIT",
             Self::StaleTarget => "BROWSER_STALE_TARGET",
@@ -74,6 +89,9 @@ impl WorkspaceError {
             Self::DownloadLimit => "BROWSER_DOWNLOAD_LIMIT",
             Self::DownloadDenied => "BROWSER_DOWNLOAD_DENIED",
             Self::NativeCommandFailed => "BROWSER_NATIVE_COMMAND_FAILED",
+            Self::ProfileCleanupInvalid => "BROWSER_PROFILE_CLEANUP_INVALID",
+            Self::ProfileCleanupUnavailable => "BROWSER_PROFILE_CLEANUP_UNAVAILABLE",
+            Self::ProfileCleanupFailed => "BROWSER_PROFILE_CLEANUP_FAILED",
             Self::Admission(error) => match error {
                 RunAdmissionError::Busy => "BROWSER_RUN_BUSY",
                 RunAdmissionError::StaleRun => "BROWSER_STALE_RUN",
@@ -86,11 +104,81 @@ impl WorkspaceError {
     }
 }
 
-/// Supplied by the authenticated application composition, never from tool JSON.
+/// Canonical identity of one Browser Resource. It is supplied by the
+/// authenticated AgentSession owner, never by model or page input.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct BrowserWorkspaceKey {
-    pub user_id: String,
-    pub conversation_id: String,
+pub struct BrowserResourceKey {
+    pub principal_id: String,
+    pub agent_session_id: String,
+    pub resource_binding_id: String,
+}
+
+impl BrowserResourceKey {
+    pub(crate) fn validate_profile_identity(&self) -> Result<(), WorkspaceError> {
+        for value in [
+            self.principal_id.as_str(),
+            self.agent_session_id.as_str(),
+            self.resource_binding_id.as_str(),
+        ] {
+            if !is_bounded_profile_identity(value) {
+                return Err(WorkspaceError::ProfileCleanupInvalid);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrowserProfilePersistence {
+    Persistent,
+    Ephemeral,
+}
+
+/// Frozen managed-Browser binding identity supplied by the authenticated
+/// AgentSession owner during deletion. It contains no caller-selected path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrowserProfileBinding {
+    resource_binding_id: String,
+    persistence: BrowserProfilePersistence,
+}
+
+impl BrowserProfileBinding {
+    pub fn new(
+        resource_binding_id: impl Into<String>,
+        persistence: BrowserProfilePersistence,
+    ) -> Result<Self, WorkspaceError> {
+        let resource_binding_id = resource_binding_id.into();
+        if !is_bounded_profile_identity(&resource_binding_id) {
+            return Err(WorkspaceError::ProfileCleanupInvalid);
+        }
+        Ok(Self {
+            resource_binding_id,
+            persistence,
+        })
+    }
+
+    pub fn persistent(resource_binding_id: impl Into<String>) -> Result<Self, WorkspaceError> {
+        Self::new(resource_binding_id, BrowserProfilePersistence::Persistent)
+    }
+
+    pub fn ephemeral(resource_binding_id: impl Into<String>) -> Result<Self, WorkspaceError> {
+        Self::new(resource_binding_id, BrowserProfilePersistence::Ephemeral)
+    }
+
+    pub fn resource_binding_id(&self) -> &str {
+        &self.resource_binding_id
+    }
+
+    pub const fn persistence(&self) -> BrowserProfilePersistence {
+        self.persistence
+    }
+}
+
+pub(crate) fn is_bounded_profile_identity(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,69 +190,225 @@ pub enum BrowserProfile {
 
 impl BrowserProfile {
     /// Identity comes from the authenticated host, never a page or tool argument.
-    /// A project path is not a browser identity: conversations never share data.
+    /// A project path is not a browser identity: AgentSessions never share data.
     /// No old profile is read or migrated, and temporary work stays ephemeral.
-    pub fn for_conversation(
+    pub fn for_agent_session(
         data_dir: &std::path::Path,
-        key: &BrowserWorkspaceKey,
-        temporary: bool,
+        key: &BrowserResourceKey,
+        ephemeral: bool,
     ) -> Self {
         use sha2::{Digest, Sha256};
-        if temporary {
+        if ephemeral {
             return Self::Ephemeral;
         }
         let mut digest = Sha256::new();
-        digest.update(b"nomifun.browser.conversation-profile.v1\0");
-        for value in [&key.user_id, &key.conversation_id] {
+        digest.update(b"nomifun.browser.agent-session-profile.v1\0");
+        for value in [
+            &key.principal_id,
+            &key.agent_session_id,
+            &key.resource_binding_id,
+        ] {
             digest.update((value.len() as u64).to_be_bytes());
             digest.update(value.as_bytes());
         }
         Self::Persistent(
-            data_dir.join("browser-v2").join("conversations")
+            data_dir.join("browser-v3").join("agent-sessions")
                 .join(format!("{:x}", digest.finalize())),
         )
     }
+}
+
+/// Host-owned root used only to derive and delete canonical Browser profiles.
+/// Deletion APIs accept this opaque owner once at service composition and
+/// never accept a model-, route-, or caller-supplied filesystem path.
+#[derive(Clone, Debug)]
+pub struct BrowserProfileStore {
+    data_dir: PathBuf,
+}
+
+impl BrowserProfileStore {
+    pub fn new(data_dir: impl Into<PathBuf>) -> Result<Self, WorkspaceError> {
+        let data_dir = data_dir.into();
+        let metadata = std::fs::symlink_metadata(&data_dir)
+            .map_err(|_| WorkspaceError::ProfileCleanupUnavailable)?;
+        if !metadata.is_dir() || path_is_link_or_reparse(&metadata) {
+            return Err(WorkspaceError::ProfileCleanupUnavailable);
+        }
+        let data_dir = std::fs::canonicalize(data_dir)
+            .map_err(|_| WorkspaceError::ProfileCleanupUnavailable)?;
+        Ok(Self { data_dir })
+    }
+
+    pub fn profile_for(
+        &self,
+        key: &BrowserResourceKey,
+        persistence: BrowserProfilePersistence,
+    ) -> Result<BrowserProfile, WorkspaceError> {
+        key.validate_profile_identity()?;
+        Ok(BrowserProfile::for_agent_session(
+            &self.data_dir,
+            key,
+            persistence == BrowserProfilePersistence::Ephemeral,
+        ))
+    }
+
+    pub(crate) fn delete_persistent_profile(
+        &self,
+        key: &BrowserResourceKey,
+    ) -> Result<(), WorkspaceError> {
+        let BrowserProfile::Persistent(profile) =
+            self.profile_for(key, BrowserProfilePersistence::Persistent)?
+        else {
+            unreachable!("persistent policy always derives a persistent profile")
+        };
+        delete_exact_profile_tree(&self.data_dir, &profile)
+            .map_err(|_| WorkspaceError::ProfileCleanupFailed)
+    }
+}
+
+fn delete_exact_profile_tree(data_dir: &Path, profile: &Path) -> io::Result<()> {
+    let expected_root = data_dir.join("browser-v3").join("agent-sessions");
+    if profile.parent() != Some(expected_root.as_path()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Browser profile is outside the canonical profile root",
+        ));
+    }
+    let profile_name = profile.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "Browser profile has no identity")
+    })?;
+    let Some(browser_root) = plain_child(data_dir, OsStr::new("browser-v3"))? else {
+        return Ok(());
+    };
+    let Some(session_root) =
+        plain_child(&browser_root, OsStr::new("agent-sessions"))?
+    else {
+        return Ok(());
+    };
+    let Some(profile) = plain_child(&session_root, profile_name)? else {
+        return Ok(());
+    };
+    validate_plain_profile_tree(&profile)?;
+    std::fs::remove_dir_all(&profile)?;
+    match std::fs::symlink_metadata(&profile) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::Other,
+            "Browser profile still exists after deletion",
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+fn plain_child(parent: &Path, name: &OsStr) -> io::Result<Option<PathBuf>> {
+    require_plain_directory(parent)?;
+    let path = parent.join(name);
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_dir() && !path_is_link_or_reparse(&metadata) => {
+            Ok(Some(path))
+        }
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Browser profile storage is not a plain directory",
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn require_plain_directory(path: &Path) -> io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || path_is_link_or_reparse(&metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Browser profile storage is not a plain directory",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_plain_profile_tree(path: &Path) -> io::Result<()> {
+    require_plain_directory(path)?;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        if path_is_link_or_reparse(&metadata) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Browser profile contains a link or reparse point",
+            ));
+        }
+        if metadata.is_dir() {
+            validate_plain_profile_tree(&entry.path())?;
+        } else if !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Browser profile contains a special filesystem entry",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn path_is_link_or_reparse(metadata: &Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+#[cfg(windows)]
+fn path_is_link_or_reparse(metadata: &Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 #[cfg(test)]
 mod profile_tests {
     use super::*;
 
-    fn profile(user: &str, conversation: &str) -> BrowserProfile {
-        BrowserProfile::for_conversation(std::path::Path::new("owned-data"), &BrowserWorkspaceKey {
-            user_id: user.into(), conversation_id: conversation.into(),
+    fn profile(principal: &str, session: &str, binding: &str) -> BrowserProfile {
+        BrowserProfile::for_agent_session(std::path::Path::new("owned-data"), &BrowserResourceKey {
+            principal_id: principal.into(),
+            agent_session_id: session.into(),
+            resource_binding_id: binding.into(),
         }, false)
     }
 
     #[test]
-    fn conversation_profile_is_stable_and_isolates_users_and_conversations() {
-        assert_eq!(profile("alice", "one"), profile("alice", "one"));
-        assert_ne!(profile("alice", "one"), profile("alice", "two"));
-        assert_ne!(profile("alice", "one"), profile("bob", "one"));
-        assert_ne!(profile("ab", "c"), profile("a", "bc"));
+    fn agent_session_profile_is_stable_and_isolates_principals_sessions_and_bindings() {
+        assert_eq!(profile("alice", "one", "binding"), profile("alice", "one", "binding"));
+        assert_ne!(profile("alice", "one", "binding"), profile("alice", "two", "binding"));
+        assert_ne!(profile("alice", "one", "binding"), profile("bob", "one", "binding"));
+        assert_ne!(profile("alice", "one", "binding-a"), profile("alice", "one", "binding-b"));
+        assert_ne!(profile("ab", "c", "d"), profile("a", "bc", "d"));
     }
 
     #[test]
-    fn conversation_profile_is_opaque_and_never_selects_a_legacy_directory() {
-        let BrowserProfile::Persistent(path) = profile("../用户", "C:\\outside/../../secret") else {
-            panic!("persistent conversation");
+    fn agent_session_profile_is_opaque_and_never_selects_a_legacy_directory() {
+        let BrowserProfile::Persistent(path) = profile("../用户", "C:\\outside/../../secret", "binding") else {
+            panic!("persistent AgentSession");
         };
-        assert_eq!(path.parent().unwrap(), std::path::Path::new("owned-data/browser-v2/conversations"));
+        assert_eq!(path.parent().unwrap(), std::path::Path::new("owned-data/browser-v3/agent-sessions"));
         let hash = path.file_name().unwrap().to_str().unwrap();
         assert_eq!(hash.len(), 64);
         assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 
     #[test]
-    fn temporary_conversation_never_selects_persistent_storage() {
-        let key = BrowserWorkspaceKey { user_id: "alice".into(), conversation_id: "one".into() };
-        assert_eq!(BrowserProfile::for_conversation(std::path::Path::new("owned-data"), &key, true), BrowserProfile::Ephemeral);
+    fn temporary_agent_session_never_selects_persistent_storage() {
+        let key = BrowserResourceKey {
+            principal_id: "alice".into(),
+            agent_session_id: "one".into(),
+            resource_binding_id: "binding".into(),
+        };
+        assert_eq!(BrowserProfile::for_agent_session(std::path::Path::new("owned-data"), &key, true), BrowserProfile::Ephemeral);
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct CreateBrowserRuntime {
-    pub key: BrowserWorkspaceKey,
+    pub key: BrowserResourceKey,
     pub runtime_generation: u64,
     pub profile: BrowserProfile,
     /// New tabs inherit the runtime gate before they are made visible.
@@ -280,7 +524,7 @@ pub enum BrowserTabCommand {
     CloseAll { runtime_generation: u64 },
     /// User-only OS Downloads folder handoff. The host resolves the path.
     OpenDownloads { runtime_generation: u64 },
-    /// User-only, confirmed conversation-wide site data removal; closes pages.
+    /// User-only, confirmed AgentSession-resource site data removal; closes pages.
     ClearSiteData { runtime_generation: u64 },
     Navigate {
         target: BrowserTabTarget,

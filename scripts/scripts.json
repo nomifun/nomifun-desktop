@@ -35,7 +35,7 @@
     },
     "check:automation-session-boundary": {
       "group": "check",
-      "desc": "审计 Cron、AutoWork、AgentExecution、Channel、Companion、IDMM 的旧 Session/runtime 依赖与迁移边界"
+      "desc": "审计 Cron、AutoWork、AgentExecution、Channel、Companion 的 Session/runtime 依赖与迁移边界"
     },
     "check:nomi-core-live-provider": {
       "group": "check",

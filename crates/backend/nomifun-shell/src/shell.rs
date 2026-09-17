@@ -318,8 +318,8 @@ fn validate_agent_launch_is_not_web(target: &str) -> Result<(), ShellError> {
     if lower.contains("http:") || lower.contains("https:") {
         return Err(ShellError::InvalidTarget(format!(
             "opening web URLs through the operating-system browser is not available to Agent \
-             tools ({target:?}). Use the selected conversation Browser or system-browser \
-             capability to read or interact with web pages."
+             tools ({target:?}). Use the bound Browser Module actions to read or interact \
+             with web pages."
         )));
     }
     Ok(())

@@ -39,7 +39,7 @@ const PLUGIN_REJECTION_FENCES = new Map([
   ['scripts/gate-agent-v2.mjs', /docs\/specs\/2026-08-28-agent-capability-platform-v2\/06-phase-n1-plugin-miniapp-simplified-implementation-plan\.zh\.md/],
 ]);
 
-// Persistence compatibility, NOT active API/type exemptions. Only these ten
+// Persistence compatibility, NOT active API/type exemptions. Only these
 // complete source lines may retain the old codec. SQL checksums, stored tool
 // names, call IDs and rejection receipts must survive the internal rename.
 const PLUGIN_PERSISTED_LINES = new Map([
@@ -51,9 +51,6 @@ const PLUGIN_PERSISTED_LINES = new Map([
   ]],
   ['crates/backend/nomifun-app/src/router/hosted_effect_receipts.rs', [
     'Self::PluginProduct => "miniapp",',
-  ]],
-  ['crates/backend/nomifun-app/src/router/coding_runtime_recovery.rs', [
-    '|| !matches!(domain.as_str(), "miniapp" | "robot" | "git")',
   ]],
   ['crates/backend/nomifun-db/migrations/102_conversation_hosted_effects.sql', [
     "owner_domain TEXT NOT NULL CHECK(owner_domain IN ('miniapp', 'robot')),",

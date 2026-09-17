@@ -1,6 +1,6 @@
 //! Real managed UserReady browser, native picker and lifecycle boundaries.
 use super::windows::user_file_picker::NativeFilePicker;
-use nomifun_browser_platform::{runtime::*, workspace::BrowserWorkspaceService};
+use nomifun_browser_platform::{runtime::*, workspace::BrowserResourceService};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tauri::Manager;
@@ -30,15 +30,16 @@ pub(super) async fn verify(
     check: Check,
 ) -> Result<Value, String> {
     let service =
-        BrowserWorkspaceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
-    let key = BrowserWorkspaceKey {
-        user_id: "user-files-fixture".into(),
-        conversation_id: "user-files-fixture".into(),
-    };
+        BrowserResourceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
+    let authority = super::browser_resource_fixture::authority(
+        "user-files-fixture",
+        "user-files-fixture",
+        "native-user-files",
+    );
+    let key = authority.key();
     let workspace = service
         .ensure(
-            key.clone(),
-            "native-user-files".into(),
+            authority,
             BrowserProfile::Ephemeral,
         )
         .await

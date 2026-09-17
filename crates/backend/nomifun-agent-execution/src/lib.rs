@@ -7,6 +7,7 @@
 //! integration concepts.
 
 mod attempt_runner;
+mod automation;
 mod artifact_contract;
 mod control_steps;
 mod conversation_effect;
@@ -25,6 +26,11 @@ mod scheduler;
 mod template_routes;
 
 pub use attempt_runner::AgentExecutionSessionPort;
+pub use automation::{
+    AgentExecutionAutomationPort, AutomationExecutionAdmission, AutomationExecutionReceipt,
+    AutomationExecutionRequest, AutomationExecutionSource, admit_frozen_automation_workspace,
+    resolve_frozen_automation_workspace,
+};
 pub use delivery::AgentExecutionDelivery;
 pub use engine::AgentExecutionEngine;
 pub use lifecycle::AgentExecutionLifecycle;

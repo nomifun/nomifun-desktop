@@ -134,7 +134,9 @@ impl AgentExecutionEngine {
             config.model_invoke,
             config.workspace_root.clone(),
         ));
-        let conversation_effects = Arc::new(ProductionConversationEffects { session });
+        let conversation_effects = Arc::new(ProductionConversationEffects {
+            session: session.clone(),
+        });
         let deps = AgentExecutionEngineDeps::new(
             config.repository,
             config.template_repository,
@@ -147,6 +149,7 @@ impl AgentExecutionEngine {
             publisher,
             config.workspace_root,
             config.lifecycle,
+            session,
         );
         Self::from_dependencies(deps)
     }

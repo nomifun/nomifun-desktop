@@ -28,7 +28,7 @@ describe('SshHostStatusPill structure', () => {
     expect(pillSource.includes('text-12px')).toBe(true);
     expect(pillSource.includes("data-testid='ssh-host-status-pill'")).toBe(true);
     // A disabled Arco button swallows pointer events, so the tooltip needs a
-    // wrapper span (same treatment as AutoWork / IDMM / Knowledge).
+    // wrapper span (same treatment as other capability controls).
     expect(pillSource.includes("<span className='inline-flex'>{button}</span>")).toBe(true);
   });
 

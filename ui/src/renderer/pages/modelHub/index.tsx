@@ -65,8 +65,7 @@ type Section =
 const LEGACY_SECTIONS: Record<string, Section> = {
   speech: 'asr',
   creation: 'image',
-  // 「全局模型设置」曾是 IDMM 全局默认 + 故障转移队列 + 决策活动的三 tab 宿主。
-  // 全局 IDMM 那套已整体删除,剩下的只有故障转移队列,所以这一栏就叫它自己。
+  // 旧全局模型设置已收敛，只保留故障转移队列。
   global: 'failover',
 };
 

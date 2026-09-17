@@ -16,7 +16,8 @@ use std::sync::Arc;
 
 use nomifun_agent_contracts::{
     ActionId, AgentSessionId, ArtifactEnvelope, CapabilityActionDescriptor,
-    CapabilityConsumer, CapabilityContributions, CapabilityId, CapabilityKind,
+    CapabilityAuthoringPolicy, CapabilityConsumer, CapabilityContributions, CapabilityId,
+    CapabilityKind,
     CapabilityManifest,
     CancellationDescriptor, CanonicalErrorCode, CanonicalSchemaRef, CorrelationId,
     D026AdmissionOutcome, D026OrderingCaseKind, D026OrderingOutcome,
@@ -31,11 +32,9 @@ use nomifun_agent_contracts::{
     PluginRegistrarDescriptor, PluginRegistrarOperation, PluginRegistrationMetadata,
     PluginSourceKind, PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod,
     RemoteAuthMutation, RemoteOperation, ResourceBindingId, ResourceId, ResourceKind, ScopeKey,
-    ServiceHandleDescriptor, ServiceKeyRef, ServiceRequirement, StrictJsonValue,
+    StrictJsonValue,
     TypedCommandPortDescriptor, TypedResourceBinding, TypedResourceBindings, RuntimeTarget,
-    VersionString, REMOTE_AUTH_REQUIRED, agent_core_mount_id,
-    agent_core_package_ref, agent_session_command_service_ref,
-    agent_session_query_service_ref, capability_surface_declarations,
+    VersionString, REMOTE_AUTH_REQUIRED, capability_module_surface_declarations,
 };
 use nomifun_agent_kernel::{
     CapabilityHandler, CapabilityInvocationContext, DeclaredServiceView, KernelError,
@@ -48,87 +47,78 @@ pub const PACKAGE_VERSION: &str = VERSION;
 const SOURCE_KIND: PluginSourceKind = PluginSourceKind::Bundled;
 
 pub const AGENT_EXECUTION_PACKAGE: &str = "nomifun.agent-execution";
-pub const AUTOWORK_SCHEDULER_PACKAGE: &str = "nomifun.autowork-scheduler";
-pub const IDMM_PACKAGE: &str = "nomifun.idmm";
+pub const AUTOMATION_SCHEDULE_PACKAGE: &str = "nomifun.automation-schedule";
 pub const REMOTE_INGRESS_PACKAGE: &str = "nomifun.remote-ingress";
 pub const REQUIREMENTS_PACKAGE: &str = "nomifun.requirements";
 
 pub const AGENT_EXECUTION_PACKAGE_ID: &str = AGENT_EXECUTION_PACKAGE;
-pub const AUTOWORK_SCHEDULER_PACKAGE_ID: &str = AUTOWORK_SCHEDULER_PACKAGE;
-pub const IDMM_PACKAGE_ID: &str = IDMM_PACKAGE;
+pub const AUTOMATION_SCHEDULE_PACKAGE_ID: &str = AUTOMATION_SCHEDULE_PACKAGE;
 pub const REMOTE_INGRESS_PACKAGE_ID: &str = REMOTE_INGRESS_PACKAGE;
 pub const REQUIREMENTS_PACKAGE_ID: &str = REQUIREMENTS_PACKAGE;
 pub const REMOTE_INGRESS_MOUNT_ID: &str = "nomifun-remote-ingress";
 
-pub const AGENT_DELEGATE: &str = "agent.delegate";
-pub const AGENT_FORK: &str = "agent.fork";
-pub const AGENT_EXECUTION_PLAN: &str = "agent.execution.plan";
-pub const AGENT_EXECUTION_STEER: &str = "agent.execution.steer";
-pub const AGENT_EXECUTION_OBSERVE: &str = "agent.execution.observe";
+/// Product Modules. AgentExecution plan/observe/steer are Runtime/role-derived
+/// authorities and therefore are not authoring capabilities.
+pub const AGENT_COLLABORATION_MODULE_ID: &str = "agent.collaboration";
+pub const AUTOMATION_SCHEDULE_MODULE_ID: &str = "automation.schedule";
+pub const REQUIREMENTS_MODULE_ID: &str = "requirements";
 
-pub const AUTOWORK_RUNNER: &str = "autowork.runner";
-pub const SCHEDULE_STORE: &str = "schedule.store";
-pub const SCHEDULE_TIMER: &str = "schedule.timer";
-pub const SCHEDULE_AGENT_TRIGGER: &str = "schedule.agent_trigger";
+pub const AGENT_DELEGATE_ACTION_ID: &str = "agent/delegate";
+pub const AGENT_FORK_ACTION_ID: &str = "agent/fork";
+pub const SCHEDULE_LIST_ACTION_ID: &str = "automation.schedule/list";
+pub const SCHEDULE_CREATE_ACTION_ID: &str = "automation.schedule/create";
+pub const SCHEDULE_UPDATE_ACTION_ID: &str = "automation.schedule/update";
+pub const SCHEDULE_DELETE_ACTION_ID: &str = "automation.schedule/delete";
+pub const REQUIREMENTS_READ_ACTION_ID: &str = "requirements/read";
+pub const REQUIREMENTS_WRITE_ACTION_ID: &str = "requirements/write";
+pub const REQUIREMENTS_STATUS_ACTION_ID: &str = "requirements/status";
+pub const REQUIREMENTS_CLAIM_ACTION_ID: &str = "requirements/claim";
 
-pub const IDMM_OBSERVE: &str = "idmm.observe";
-pub const IDMM_INTERVENE: &str = "idmm.intervene";
-pub const IDMM_FALLBACK_POLICY: &str = "idmm.fallback_policy";
-
+/// Platform-only Remote operation vocabulary. These are transport commands,
+/// never Agent Module or Action grants.
+pub const REMOTE_OPEN_ACTION: &str = "remote.open";
+pub const REMOTE_TURN_ACTION: &str = "remote.turn";
+pub const REMOTE_OBSERVE_ACTION: &str = "remote.observe";
+pub const REMOTE_CANCEL_ACTION: &str = "remote.cancel";
 pub const REMOTE_MCP: &str = "remote.mcp";
 pub const REMOTE_REST: &str = "remote.rest";
 pub const INGRESS_WEB: &str = "ingress.web";
 pub const INGRESS_MOBILE: &str = "ingress.mobile";
 pub const INGRESS_CHANNEL: &str = "ingress.channel";
 
-pub const REQUIREMENTS_READ: &str = "requirements.read";
-pub const REQUIREMENTS_WRITE: &str = "requirements.write";
-pub const REQUIREMENTS_STATUS: &str = "requirements.status";
-pub const REQUIREMENTS_CLAIM: &str = "requirements.claim";
+pub const SCHEDULER_RESOURCE_KIND: &str = "scheduler";
+const SCHEDULER_RESOURCES: &[&str] = &[SCHEDULER_RESOURCE_KIND];
 
-/// Resource kind used by AgentExecution capabilities that operate on a
-/// session-backed process/PTY lane.
-pub const PROCESS_SESSION_RESOURCE_KIND: &str = "process_session";
-
-const PROCESS_SESSION_RESOURCES: &[&str] = &[PROCESS_SESSION_RESOURCE_KIND];
-
-pub const AGENT_DELEGATE_ACTION: &str = "agent.delegate.invoke";
-pub const AGENT_FORK_ACTION: &str = "agent.fork.invoke";
-pub const AGENT_EXECUTION_PLAN_ACTION: &str = "agent.execution.plan.invoke";
-pub const AGENT_EXECUTION_STEER_ACTION: &str = "agent.execution.steer.invoke";
-pub const AGENT_EXECUTION_OBSERVE_ACTION: &str = "agent.execution.observe.invoke";
-pub const SCHEDULE_STORE_ACTION: &str = "schedule.store.invoke";
-pub const REQUIREMENTS_READ_ACTION: &str = "requirements.read.invoke";
-pub const REQUIREMENTS_WRITE_ACTION: &str = "requirements.write.invoke";
-pub const REQUIREMENTS_STATUS_ACTION: &str = "requirements.status.invoke";
-pub const REQUIREMENTS_CLAIM_ACTION: &str = "requirements.claim.invoke";
-
-pub const REMOTE_OPEN_ACTION: &str = "remote.open";
-pub const REMOTE_TURN_ACTION: &str = "remote.turn";
-pub const REMOTE_OBSERVE_ACTION: &str = "remote.observe";
-pub const REMOTE_CANCEL_ACTION: &str = "remote.cancel";
-
-pub const TARGET_CAPABILITY_FAMILIES: [&str; 10] = [
-    "agent-execution",
-    "autowork.runner",
-    "idmm.intervene",
-    "idmm.observe",
-    "remote.mcp",
-    "remote.rest",
-    "requirements",
-    "schedule.agent-trigger",
-    "schedule.store",
-    "schedule.timer",
+pub const TARGET_CAPABILITY_FAMILIES: [&str; 3] = [
+    AGENT_COLLABORATION_MODULE_ID,
+    AUTOMATION_SCHEDULE_MODULE_ID,
+    REQUIREMENTS_MODULE_ID,
 ];
 
-pub const PACKAGE_IDS: [&str; 5] = [
+pub const PACKAGE_IDS: [&str; 4] = [
     AGENT_EXECUTION_PACKAGE,
-    AUTOWORK_SCHEDULER_PACKAGE,
-    IDMM_PACKAGE,
+    AUTOMATION_SCHEDULE_PACKAGE,
     REMOTE_INGRESS_PACKAGE,
     REQUIREMENTS_PACKAGE,
 ];
-pub const TARGET_PACKAGE_IDS: [&str; 5] = PACKAGE_IDS;
+pub const TARGET_PACKAGE_IDS: [&str; 4] = PACKAGE_IDS;
+pub const TARGET_CAPABILITY_IDS: [&str; 3] = [
+    AGENT_COLLABORATION_MODULE_ID,
+    AUTOMATION_SCHEDULE_MODULE_ID,
+    REQUIREMENTS_MODULE_ID,
+];
+pub const ALL_CAPABILITY_IDS: [&str; 3] = TARGET_CAPABILITY_IDS;
+pub const AGENT_EXECUTION_CAPABILITY_IDS: [&str; 1] = [AGENT_COLLABORATION_MODULE_ID];
+pub const AUTOMATION_SCHEDULE_CAPABILITY_IDS: [&str; 1] = [AUTOMATION_SCHEDULE_MODULE_ID];
+pub const REMOTE_INGRESS_CAPABILITY_IDS: [&str; 0] = [];
+pub const REQUIREMENTS_CAPABILITY_IDS: [&str; 1] = [REQUIREMENTS_MODULE_ID];
+
+pub const REMOTE_OPERATION_IDS: [&str; 4] = [
+    REMOTE_OPEN_ACTION,
+    REMOTE_TURN_ACTION,
+    REMOTE_OBSERVE_ACTION,
+    REMOTE_CANCEL_ACTION,
+];
 
 const REMOTE_TRANSPORT_PORT: &str = "remote.transport";
 const REMOTE_ADMISSION_PORT: &str = "remote.admission";
@@ -137,75 +127,10 @@ const REMOTE_OPEN_PORT: &str = "remote.open";
 const REMOTE_TURN_PORT: &str = "remote.turn";
 const REMOTE_OBSERVE_PORT: &str = "remote.observe";
 const REMOTE_CANCEL_PORT: &str = "remote.cancel";
-
-/// The exact capability IDs owned by the five target packages in the frozen
-/// first-party inventory.
-pub const TARGET_CAPABILITY_IDS: [&str; 21] = [
-    AGENT_DELEGATE,
-    AGENT_FORK,
-    AGENT_EXECUTION_PLAN,
-    AGENT_EXECUTION_STEER,
-    AGENT_EXECUTION_OBSERVE,
-    AUTOWORK_RUNNER,
-    SCHEDULE_STORE,
-    SCHEDULE_TIMER,
-    SCHEDULE_AGENT_TRIGGER,
-    IDMM_OBSERVE,
-    IDMM_INTERVENE,
-    IDMM_FALLBACK_POLICY,
-    REMOTE_MCP,
-    REMOTE_REST,
-    INGRESS_WEB,
-    INGRESS_MOBILE,
-    INGRESS_CHANNEL,
-    REQUIREMENTS_READ,
-    REQUIREMENTS_WRITE,
-    REQUIREMENTS_STATUS,
-    REQUIREMENTS_CLAIM,
-];
-pub const ALL_CAPABILITY_IDS: [&str; 21] = TARGET_CAPABILITY_IDS;
-
-pub const AGENT_EXECUTION_CAPABILITY_IDS: [&str; 5] = [
-    AGENT_DELEGATE,
-    AGENT_FORK,
-    AGENT_EXECUTION_PLAN,
-    AGENT_EXECUTION_STEER,
-    AGENT_EXECUTION_OBSERVE,
-];
-pub const AUTOWORK_CAPABILITY_IDS: [&str; 4] = [
-    AUTOWORK_RUNNER,
-    SCHEDULE_STORE,
-    SCHEDULE_TIMER,
-    SCHEDULE_AGENT_TRIGGER,
-];
-pub const IDMM_CAPABILITY_IDS: [&str; 3] =
-    [IDMM_OBSERVE, IDMM_INTERVENE, IDMM_FALLBACK_POLICY];
-pub const REMOTE_INGRESS_CAPABILITY_IDS: [&str; 5] = [
-    REMOTE_MCP,
-    REMOTE_REST,
-    INGRESS_WEB,
-    INGRESS_MOBILE,
-    INGRESS_CHANNEL,
-];
-pub const REQUIREMENTS_CAPABILITY_IDS: [&str; 4] = [
-    REQUIREMENTS_READ,
-    REQUIREMENTS_WRITE,
-    REQUIREMENTS_STATUS,
-    REQUIREMENTS_CLAIM,
-];
-
-/// The four Remote operations that are admitted by the canonical transport.
-pub const REMOTE_OPERATION_IDS: [&str; 4] = [
-    REMOTE_OPEN_ACTION,
-    REMOTE_TURN_ACTION,
-    REMOTE_OBSERVE_ACTION,
-    REMOTE_CANCEL_ACTION,
-];
-
 /// The single host port for action-bearing Wave 5 capabilities.
 ///
 /// Wave 5 owns the capability vocabulary and input boundary, while the
-/// application owns AgentExecution, scheduling, IDMM, and requirements facts.
+/// application owns AgentExecution, scheduling, and requirements facts.
 /// Keeping this port in the domain crate avoids a dependency on the
 /// application composition root and prevents a synthetic success result when
 /// no owner has been wired.
@@ -214,6 +139,7 @@ pub const WAVE5_HOST_PORT_UNAVAILABLE: &str = "WAVE5_HOST_PORT_UNAVAILABLE";
 pub const WAVE5_INVALID_REQUEST: &str = "WAVE5_INVALID_REQUEST";
 pub const WAVE5_ACTION_OPERATION_MISMATCH: &str = "WAVE5_ACTION_OPERATION_MISMATCH";
 pub const WAVE5_RESOURCE_BINDING_INVALID: &str = "WAVE5_RESOURCE_BINDING_INVALID";
+pub const WAVE5_EFFECT_OUTCOME_UNKNOWN: &str = "WAVE5_EFFECT_OUTCOME_UNKNOWN";
 const WAVE5_INVALID_RESPONSE: &str = "WAVE5_INVALID_RESPONSE";
 
 /// Kernel-authorized invocation context projected to the application owner.
@@ -225,6 +151,7 @@ const WAVE5_INVALID_RESPONSE: &str = "WAVE5_INVALID_RESPONSE";
 pub struct Wave5HostContext {
     pub principal: nomifun_agent_contracts::PrincipalRef,
     pub agent_session_id: AgentSessionId,
+    pub turn_id: OperationId,
     pub operation_id: OperationId,
     pub idempotency_key: IdempotencyKey,
     pub correlation_id: CorrelationId,
@@ -250,10 +177,10 @@ pub enum Wave5OwnerDomain {
 pub enum Wave5CapabilityOperation {
     AgentDelegate { input: StrictJsonValue },
     AgentFork { input: StrictJsonValue },
-    AgentExecutionPlan { input: StrictJsonValue },
-    AgentExecutionSteer { input: StrictJsonValue },
-    AgentExecutionObserve { input: StrictJsonValue },
-    ScheduleStore { input: StrictJsonValue },
+    ScheduleList { input: StrictJsonValue },
+    ScheduleCreate { input: StrictJsonValue },
+    ScheduleUpdate { input: StrictJsonValue },
+    ScheduleDelete { input: StrictJsonValue },
     RequirementsRead { input: StrictJsonValue },
     RequirementsWrite { input: StrictJsonValue },
     RequirementsStatus { input: StrictJsonValue },
@@ -263,32 +190,44 @@ pub enum Wave5CapabilityOperation {
 impl Wave5CapabilityOperation {
     pub fn capability_id(&self) -> CapabilityId {
         CapabilityId::from(match self {
-            Self::AgentDelegate { .. } => AGENT_DELEGATE,
-            Self::AgentFork { .. } => AGENT_FORK,
-            Self::AgentExecutionPlan { .. } => AGENT_EXECUTION_PLAN,
-            Self::AgentExecutionSteer { .. } => AGENT_EXECUTION_STEER,
-            Self::AgentExecutionObserve { .. } => AGENT_EXECUTION_OBSERVE,
-            Self::ScheduleStore { .. } => SCHEDULE_STORE,
-            Self::RequirementsRead { .. } => REQUIREMENTS_READ,
-            Self::RequirementsWrite { .. } => REQUIREMENTS_WRITE,
-            Self::RequirementsStatus { .. } => REQUIREMENTS_STATUS,
-            Self::RequirementsClaim { .. } => REQUIREMENTS_CLAIM,
+            Self::AgentDelegate { .. } | Self::AgentFork { .. } => {
+                AGENT_COLLABORATION_MODULE_ID
+            }
+            Self::ScheduleList { .. }
+            | Self::ScheduleCreate { .. }
+            | Self::ScheduleUpdate { .. }
+            | Self::ScheduleDelete { .. } => AUTOMATION_SCHEDULE_MODULE_ID,
+            Self::RequirementsRead { .. }
+            | Self::RequirementsWrite { .. }
+            | Self::RequirementsStatus { .. }
+            | Self::RequirementsClaim { .. } => REQUIREMENTS_MODULE_ID,
         })
     }
 
     pub fn action_id(&self) -> ActionId {
-        action_id(self.capability_id().as_ref())
-            .expect("every Wave 5 action operation has a canonical action")
+        ActionId::from(match self {
+            Self::AgentDelegate { .. } => AGENT_DELEGATE_ACTION_ID,
+            Self::AgentFork { .. } => AGENT_FORK_ACTION_ID,
+            Self::ScheduleList { .. } => SCHEDULE_LIST_ACTION_ID,
+            Self::ScheduleCreate { .. } => SCHEDULE_CREATE_ACTION_ID,
+            Self::ScheduleUpdate { .. } => SCHEDULE_UPDATE_ACTION_ID,
+            Self::ScheduleDelete { .. } => SCHEDULE_DELETE_ACTION_ID,
+            Self::RequirementsRead { .. } => REQUIREMENTS_READ_ACTION_ID,
+            Self::RequirementsWrite { .. } => REQUIREMENTS_WRITE_ACTION_ID,
+            Self::RequirementsStatus { .. } => REQUIREMENTS_STATUS_ACTION_ID,
+            Self::RequirementsClaim { .. } => REQUIREMENTS_CLAIM_ACTION_ID,
+        })
     }
 
     pub fn owner_domain(&self) -> Wave5OwnerDomain {
         match self {
-            Self::AgentDelegate { .. }
-            | Self::AgentFork { .. }
-            | Self::AgentExecutionPlan { .. }
-            | Self::AgentExecutionSteer { .. }
-            | Self::AgentExecutionObserve { .. } => Wave5OwnerDomain::AgentExecution,
-            Self::ScheduleStore { .. } => Wave5OwnerDomain::Schedule,
+            Self::AgentDelegate { .. } | Self::AgentFork { .. } => {
+                Wave5OwnerDomain::AgentExecution
+            }
+            Self::ScheduleList { .. }
+            | Self::ScheduleCreate { .. }
+            | Self::ScheduleUpdate { .. }
+            | Self::ScheduleDelete { .. } => Wave5OwnerDomain::Schedule,
             Self::RequirementsRead { .. }
             | Self::RequirementsWrite { .. }
             | Self::RequirementsStatus { .. }
@@ -300,10 +239,10 @@ impl Wave5CapabilityOperation {
         match self {
             Self::AgentDelegate { input }
             | Self::AgentFork { input }
-            | Self::AgentExecutionPlan { input }
-            | Self::AgentExecutionSteer { input }
-            | Self::AgentExecutionObserve { input }
-            | Self::ScheduleStore { input }
+            | Self::ScheduleList { input }
+            | Self::ScheduleCreate { input }
+            | Self::ScheduleUpdate { input }
+            | Self::ScheduleDelete { input }
             | Self::RequirementsRead { input }
             | Self::RequirementsWrite { input }
             | Self::RequirementsStatus { input }
@@ -321,18 +260,19 @@ pub struct Wave5HostRequest {
 impl Wave5HostRequest {
     pub fn validate(&self) -> Result<(), Wave5HostPortError> {
         let capability_id = &self.context.capability_id;
-        let Some(spec) = capability_spec(capability_id.as_ref()) else {
+        let Some(module) = module_spec(capability_id.as_ref()) else {
             return Err(Wave5HostPortError::invalid_request(format!(
-                "unknown Wave 5 capability {}",
+                "unknown Wave 5 Module {}",
                 capability_id.as_ref()
             )));
         };
-        if spec.actions.is_empty() {
+        let Some(action) = action_spec(module.id, self.context.action_id.as_ref()) else {
             return Err(Wave5HostPortError::action_operation_mismatch(format!(
-                "{} is transport/scheduler/middleware owned and has no action host operation",
-                capability_id.as_ref()
+                "{} does not declare Action {}",
+                capability_id.as_ref(),
+                self.context.action_id.as_ref(),
             )));
-        }
+        };
         if self.operation.capability_id() != *capability_id
             || self.operation.action_id() != self.context.action_id
         {
@@ -354,7 +294,7 @@ impl Wave5HostRequest {
         validate_resource_bindings_contract(
             capability_id,
             &self.context.principal.principal_id,
-            spec.requirements,
+            action.requirements,
             &self.context.resource_bindings,
         )
     }
@@ -672,7 +612,7 @@ impl RemoteDrainDescriptor {
     }
 }
 
-/// Return the five bundled registrations owned by Wave 5.
+/// Return the three Agent Modules plus the non-grant Remote transport package.
 pub fn registrations() -> Result<Vec<PluginRegistration>, String> {
     registrations_with_host_port(unconfigured_host_port())
 }
@@ -684,35 +624,28 @@ pub fn registrations_with_host_port(
         registration_for(
             AGENT_EXECUTION_PACKAGE,
             "nomifun-agent-execution",
-            agent_execution_capabilities(),
+            agent_execution_modules(),
             agent_execution_ports(),
             Some(Arc::clone(&action_host_port)),
         )?,
         registration_for(
-            AUTOWORK_SCHEDULER_PACKAGE,
-            "nomifun-autowork-scheduler",
-            autowork_capabilities(),
-            autowork_ports(),
+            AUTOMATION_SCHEDULE_PACKAGE,
+            "nomifun-automation-schedule",
+            automation_schedule_modules(),
+            automation_schedule_ports(),
             Some(Arc::clone(&action_host_port)),
-        )?,
-        registration_for(
-            IDMM_PACKAGE,
-            "nomifun-idmm",
-            idmm_capabilities(),
-            idmm_ports(),
-            None,
         )?,
         registration_for(
             REMOTE_INGRESS_PACKAGE,
             REMOTE_INGRESS_MOUNT_ID,
-            remote_capabilities(),
+            Vec::new(),
             remote_ports(),
             None,
         )?,
         registration_for(
             REQUIREMENTS_PACKAGE,
             "nomifun-requirements",
-            requirements_capabilities(),
+            requirements_modules(),
             requirements_ports(),
             Some(action_host_port),
         )?,
@@ -723,29 +656,19 @@ pub fn agent_execution_registration() -> Result<PluginRegistration, String> {
     registration_for(
         AGENT_EXECUTION_PACKAGE,
         "nomifun-agent-execution",
-        agent_execution_capabilities(),
+        agent_execution_modules(),
         agent_execution_ports(),
         Some(unconfigured_host_port()),
     )
 }
 
-pub fn autowork_registration() -> Result<PluginRegistration, String> {
+pub fn automation_schedule_registration() -> Result<PluginRegistration, String> {
     registration_for(
-        AUTOWORK_SCHEDULER_PACKAGE,
-        "nomifun-autowork-scheduler",
-        autowork_capabilities(),
-        autowork_ports(),
+        AUTOMATION_SCHEDULE_PACKAGE,
+        "nomifun-automation-schedule",
+        automation_schedule_modules(),
+        automation_schedule_ports(),
         Some(unconfigured_host_port()),
-    )
-}
-
-pub fn idmm_registration() -> Result<PluginRegistration, String> {
-    registration_for(
-        IDMM_PACKAGE,
-        "nomifun-idmm",
-        idmm_capabilities(),
-        idmm_ports(),
-        None,
     )
 }
 
@@ -753,7 +676,7 @@ pub fn remote_ingress_registration() -> Result<PluginRegistration, String> {
     registration_for(
         REMOTE_INGRESS_PACKAGE,
         REMOTE_INGRESS_MOUNT_ID,
-        remote_capabilities(),
+        Vec::new(),
         remote_ports(),
         None,
     )
@@ -763,7 +686,7 @@ pub fn requirements_registration() -> Result<PluginRegistration, String> {
     registration_for(
         REQUIREMENTS_PACKAGE,
         "nomifun-requirements",
-        requirements_capabilities(),
+        requirements_modules(),
         requirements_ports(),
         Some(unconfigured_host_port()),
     )
@@ -799,12 +722,16 @@ pub struct TypedResourceDescriptor {
 /// Return the resource slots declared by this wave.
 pub fn typed_resource_descriptors() -> Vec<TypedResourceDescriptor> {
     vec![TypedResourceDescriptor {
-        slot_key: PROCESS_SESSION_RESOURCE_KIND,
-        resource_kind: ResourceKind::from(PROCESS_SESSION_RESOURCE_KIND),
-        required: false,
-        operations: BTreeSet::from(["execute".to_owned(), "observe".to_owned()]),
-        binding_policy: "leave_unbound",
-    }]
+            slot_key: SCHEDULER_RESOURCE_KIND,
+            resource_kind: ResourceKind::from(SCHEDULER_RESOURCE_KIND),
+            required: true,
+            operations: BTreeSet::from([
+                "delete".to_owned(),
+                "read".to_owned(),
+                "write".to_owned(),
+            ]),
+            binding_policy: "bind_one",
+        }]
 }
 
 pub fn all_resource_descriptors() -> Vec<TypedResourceDescriptor> {
@@ -828,13 +755,14 @@ pub fn resource_binding_metadata() -> BTreeMap<ResourceKind, BTreeSet<String>> {
 /// This creates no process and does not resolve a product resource. It is only
 /// a typed contract fixture for callers constructing an AgentBinding revision.
 pub fn canonical_resource_bindings(owner_id: impl Into<String>) -> TypedResourceBindings {
+    let owner_id = owner_id.into();
     vec![typed_resource_binding(
-        "wave5-process-session",
-        PROCESS_SESSION_RESOURCE_KIND,
-        "wave5-process-session",
-        owner_id,
-        ["execute", "observe"],
-    )]
+            "wave5-scheduler",
+            SCHEDULER_RESOURCE_KIND,
+            "installation-scheduler",
+            &owner_id,
+            ["delete", "read", "write"],
+        )]
 }
 
 pub fn resource_bindings(owner_id: impl Into<String>) -> TypedResourceBindings {
@@ -872,15 +800,8 @@ pub fn capability_ids_by_package() -> BTreeMap<PackageId, BTreeSet<CapabilityId>
                 .collect(),
         ),
         (
-            PackageId::from(AUTOWORK_SCHEDULER_PACKAGE),
-            AUTOWORK_CAPABILITY_IDS
-                .into_iter()
-                .map(CapabilityId::from)
-                .collect(),
-        ),
-        (
-            PackageId::from(IDMM_PACKAGE),
-            IDMM_CAPABILITY_IDS
+            PackageId::from(AUTOMATION_SCHEDULE_PACKAGE),
+            AUTOMATION_SCHEDULE_CAPABILITY_IDS
                 .into_iter()
                 .map(CapabilityId::from)
                 .collect(),
@@ -903,65 +824,59 @@ pub fn capability_ids_by_package() -> BTreeMap<PackageId, BTreeSet<CapabilityId>
 }
 
 pub fn required_resource_kinds(id: &str) -> Option<BTreeSet<ResourceKind>> {
-    capability_spec(id).map(|spec| {
-        spec.resource_kinds
+    module_spec(id).map(|spec| {
+        spec.actions
             .iter()
+            .flat_map(|action| action.resource_kinds.iter())
             .map(|kind| ResourceKind::from(*kind))
             .collect()
     })
 }
 
-/// Map a deletion-contract family to its canonical catalog IDs.
-pub fn canonical_capability_ids_for_family(family: &str) -> BTreeSet<CapabilityId> {
-    let ids: &[&str] = match family {
-        "agent-execution" => &[
-            AGENT_DELEGATE,
-            AGENT_FORK,
-            AGENT_EXECUTION_PLAN,
-            AGENT_EXECUTION_STEER,
-            AGENT_EXECUTION_OBSERVE,
-        ],
-        "autowork.runner" => &[AUTOWORK_RUNNER],
-        "idmm.observe" => &[IDMM_OBSERVE],
-        "idmm.intervene" => &[IDMM_INTERVENE],
-        "idmm.fallback_policy" => &[IDMM_FALLBACK_POLICY],
-        "remote.mcp" => &[REMOTE_MCP],
-        "remote.rest" => &[REMOTE_REST],
-        "ingress.web" => &[INGRESS_WEB],
-        "ingress.mobile" => &[INGRESS_MOBILE],
-        "ingress.channel" => &[INGRESS_CHANNEL],
-        "requirements" => &[
-            REQUIREMENTS_READ,
-            REQUIREMENTS_WRITE,
-            REQUIREMENTS_STATUS,
-            REQUIREMENTS_CLAIM,
-        ],
-        "schedule.agent-trigger" => &[SCHEDULE_AGENT_TRIGGER],
-        "schedule.store" => &[SCHEDULE_STORE],
-        "schedule.timer" => &[SCHEDULE_TIMER],
-        _ => &[],
-    };
-    ids.iter().map(|id| CapabilityId::from(*id)).collect()
+pub fn required_action_resource_operations(
+    module_id: &str,
+    action_id: &str,
+) -> Option<Vec<(ResourceKind, String)>> {
+    action_spec(module_id, action_id).map(|action| {
+        action
+            .requirements
+            .iter()
+            .map(|requirement| {
+                (
+                    ResourceKind::from(requirement.resource_kind),
+                    requirement.operation.to_owned(),
+                )
+            })
+            .collect()
+    })
 }
 
-/// Return the canonical action identity for an action-bearing Wave 5
-/// capability.  Middleware and transport contributions intentionally have no
-/// model action.
-pub fn action_id(id: &str) -> Option<ActionId> {
-    let action = match id {
-        AGENT_DELEGATE => AGENT_DELEGATE_ACTION,
-        AGENT_FORK => AGENT_FORK_ACTION,
-        AGENT_EXECUTION_PLAN => AGENT_EXECUTION_PLAN_ACTION,
-        AGENT_EXECUTION_STEER => AGENT_EXECUTION_STEER_ACTION,
-        AGENT_EXECUTION_OBSERVE => AGENT_EXECUTION_OBSERVE_ACTION,
-        SCHEDULE_STORE => SCHEDULE_STORE_ACTION,
-        REQUIREMENTS_READ => REQUIREMENTS_READ_ACTION,
-        REQUIREMENTS_WRITE => REQUIREMENTS_WRITE_ACTION,
-        REQUIREMENTS_STATUS => REQUIREMENTS_STATUS_ACTION,
-        REQUIREMENTS_CLAIM => REQUIREMENTS_CLAIM_ACTION,
+/// Map an authoring family to its one canonical product Module.
+pub fn canonical_capability_ids_for_family(family: &str) -> BTreeSet<CapabilityId> {
+    let module = match family {
+        "agent.collaboration" => Some(AGENT_COLLABORATION_MODULE_ID),
+        "automation.schedule" => Some(AUTOMATION_SCHEDULE_MODULE_ID),
+        "requirements" => Some(REQUIREMENTS_MODULE_ID),
+        _ => None,
+    };
+    module.into_iter().map(CapabilityId::from).collect()
+}
+
+/// Resolve an exact Action ID to its product Module.
+pub fn module_id_for_action(action_id: &str) -> Option<CapabilityId> {
+    let module = match action_id {
+        AGENT_DELEGATE_ACTION_ID | AGENT_FORK_ACTION_ID => AGENT_COLLABORATION_MODULE_ID,
+        SCHEDULE_LIST_ACTION_ID
+        | SCHEDULE_CREATE_ACTION_ID
+        | SCHEDULE_UPDATE_ACTION_ID
+        | SCHEDULE_DELETE_ACTION_ID => AUTOMATION_SCHEDULE_MODULE_ID,
+        REQUIREMENTS_READ_ACTION_ID
+        | REQUIREMENTS_WRITE_ACTION_ID
+        | REQUIREMENTS_STATUS_ACTION_ID
+        | REQUIREMENTS_CLAIM_ACTION_ID => REQUIREMENTS_MODULE_ID,
         _ => return None,
     };
-    Some(ActionId::from(action))
+    Some(CapabilityId::from(module))
 }
 
 /// Check the surface portion of the Remote availability contract.  Remote
@@ -1084,13 +999,7 @@ pub fn remote_transport_descriptor() -> RemoteTransportDescriptor {
         RemoteOperation::Cancel,
     ]);
     RemoteTransportDescriptor {
-        capability_ids: BTreeSet::from([
-            CapabilityId::from(REMOTE_MCP),
-            CapabilityId::from(REMOTE_REST),
-            CapabilityId::from(INGRESS_WEB),
-            CapabilityId::from(INGRESS_MOBILE),
-            CapabilityId::from(INGRESS_CHANNEL),
-        ]),
+        capability_ids: BTreeSet::new(),
         operations,
         binding_fields: BTreeSet::from([
             "remote_binding_id".to_owned(),
@@ -1172,13 +1081,7 @@ pub fn drain_descriptor() -> DrainDescriptor {
 
 pub fn remote_availability_descriptor() -> RemoteAvailabilityDescriptor {
     RemoteAvailabilityDescriptor {
-        capability_ids: BTreeSet::from([
-            CapabilityId::from(REMOTE_MCP),
-            CapabilityId::from(REMOTE_REST),
-            CapabilityId::from(INGRESS_WEB),
-            CapabilityId::from(INGRESS_MOBILE),
-            CapabilityId::from(INGRESS_CHANNEL),
-        ]),
+        capability_ids: BTreeSet::new(),
         supported_surfaces: BTreeSet::from([
             "channel".to_owned(),
             "desktop".to_owned(),
@@ -1217,15 +1120,19 @@ pub fn remote_forbidden_binding_fields() -> BTreeSet<String> {
 }
 
 #[derive(Clone, Copy)]
-struct CapabilitySpec {
+struct ActionSpec {
     id: &'static str,
-    kind: CapabilityKind,
     effect: EffectClass,
     resource_kinds: &'static [&'static str],
     requirements: &'static [ResourceRequirement],
-    surfaces: &'static [&'static str],
-    host_ports: &'static [&'static str],
-    actions: &'static [&'static str],
+}
+
+#[derive(Clone, Copy)]
+struct ModuleSpec {
+    id: &'static str,
+    display_name: &'static str,
+    description: &'static str,
+    actions: &'static [ActionSpec],
 }
 
 #[derive(Clone, Copy)]
@@ -1241,19 +1148,6 @@ struct PortSpec {
 }
 
 const GENERAL_SURFACES: &[&str] = &["desktop", "headless", "remote"];
-const REMOTE_SURFACES: &[&str] = &[
-    "channel",
-    "desktop",
-    "headless",
-    "im",
-    "im-client",
-    "mobile",
-    "remote",
-    "robot",
-    "robot-firmware",
-    "web",
-    "web-browser-client",
-];
 
 const AGENT_PORTS: PortSpec = PortSpec {
     host_ports: &[WAVE5_CAPABILITY_HOST_PORT_ID, "agent-execution.dispatch"],
@@ -1261,16 +1155,10 @@ const AGENT_PORTS: PortSpec = PortSpec {
     outbox_ports: &["agent-execution.outbox"],
 };
 
-const AUTOWORK_PORTS: PortSpec = PortSpec {
-    host_ports: &[WAVE5_CAPABILITY_HOST_PORT_ID, "autowork.scheduler"],
-    command_ports: &["autowork.agent-trigger"],
-    outbox_ports: &["autowork.outbox"],
-};
-
-const IDMM_PORTS: PortSpec = PortSpec {
-    host_ports: &["idmm.supervision"],
-    command_ports: &["idmm.intervention"],
-    outbox_ports: &["idmm.outbox"],
+const AUTOMATION_SCHEDULE_PORTS: PortSpec = PortSpec {
+    host_ports: &[WAVE5_CAPABILITY_HOST_PORT_ID],
+    command_ports: &[],
+    outbox_ports: &[],
 };
 
 const REMOTE_PORTS: PortSpec = PortSpec {
@@ -1294,172 +1182,127 @@ const REQUIREMENTS_PORTS: PortSpec = PortSpec {
     outbox_ports: &["requirements.outbox"],
 };
 
-const fn tool_spec(id: &'static str) -> CapabilitySpec {
-    CapabilitySpec {
-        id,
-        kind: CapabilityKind::Tool,
-        effect: EffectClass::WriteReversible,
+const SCHEDULER_READ_REQUIREMENT: &[ResourceRequirement] = &[ResourceRequirement {
+    resource_kind: SCHEDULER_RESOURCE_KIND,
+    operation: "read",
+}];
+const SCHEDULER_WRITE_REQUIREMENT: &[ResourceRequirement] = &[ResourceRequirement {
+    resource_kind: SCHEDULER_RESOURCE_KIND,
+    operation: "write",
+}];
+const SCHEDULER_DELETE_REQUIREMENT: &[ResourceRequirement] = &[ResourceRequirement {
+    resource_kind: SCHEDULER_RESOURCE_KIND,
+    operation: "delete",
+}];
+
+const AGENT_COLLABORATION_ACTIONS: &[ActionSpec] = &[
+    ActionSpec {
+        id: AGENT_DELEGATE_ACTION_ID,
+        effect: EffectClass::ExecuteLocal,
         resource_kinds: &[],
         requirements: &[],
-        surfaces: GENERAL_SURFACES,
-        host_ports: &[WAVE5_CAPABILITY_HOST_PORT_ID],
-        actions: &[],
-    }
-}
-
-const fn scheduler_spec(id: &'static str) -> CapabilitySpec {
-    CapabilitySpec {
-        id,
-        kind: CapabilityKind::Scheduler,
+    },
+    ActionSpec {
+        id: AGENT_FORK_ACTION_ID,
         effect: EffectClass::WriteDurable,
         resource_kinds: &[],
         requirements: &[],
-        surfaces: GENERAL_SURFACES,
-        host_ports: &[],
-        actions: &[],
-    }
-}
+    },
+];
 
-const fn middleware_spec(id: &'static str) -> CapabilitySpec {
-    CapabilitySpec {
-        id,
-        kind: CapabilityKind::TurnMiddleware,
-        effect: EffectClass::ReadLocal,
+const AUTOMATION_SCHEDULE_ACTIONS: &[ActionSpec] = &[
+    ActionSpec {
+        id: SCHEDULE_LIST_ACTION_ID,
+        effect: EffectClass::ReadSensitive,
+        resource_kinds: SCHEDULER_RESOURCES,
+        requirements: SCHEDULER_READ_REQUIREMENT,
+    },
+    ActionSpec {
+        id: SCHEDULE_CREATE_ACTION_ID,
+        effect: EffectClass::WriteDurable,
+        resource_kinds: SCHEDULER_RESOURCES,
+        requirements: SCHEDULER_WRITE_REQUIREMENT,
+    },
+    ActionSpec {
+        id: SCHEDULE_UPDATE_ACTION_ID,
+        effect: EffectClass::WriteDurable,
+        resource_kinds: SCHEDULER_RESOURCES,
+        requirements: SCHEDULER_WRITE_REQUIREMENT,
+    },
+    ActionSpec {
+        id: SCHEDULE_DELETE_ACTION_ID,
+        effect: EffectClass::WriteDurable,
+        resource_kinds: SCHEDULER_RESOURCES,
+        requirements: SCHEDULER_DELETE_REQUIREMENT,
+    },
+];
+
+const REQUIREMENTS_ACTIONS: &[ActionSpec] = &[
+    ActionSpec {
+        id: REQUIREMENTS_READ_ACTION_ID,
+        effect: EffectClass::ReadSensitive,
         resource_kinds: &[],
         requirements: &[],
-        surfaces: GENERAL_SURFACES,
-        host_ports: &[],
-        actions: &[],
-    }
-}
-
-const fn remote_spec(id: &'static str) -> CapabilitySpec {
-    CapabilitySpec {
-        id,
-        kind: CapabilityKind::Transport,
-        effect: EffectClass::ExternalTransmit,
+    },
+    ActionSpec {
+        id: REQUIREMENTS_WRITE_ACTION_ID,
+        effect: EffectClass::WriteDurable,
         resource_kinds: &[],
         requirements: &[],
-        surfaces: REMOTE_SURFACES,
-        host_ports: &[
-            REMOTE_TRANSPORT_PORT,
-            REMOTE_ADMISSION_PORT,
-            REMOTE_DRAIN_PORT,
-        ],
-        actions: &[],
-    }
+    },
+    ActionSpec {
+        id: REQUIREMENTS_STATUS_ACTION_ID,
+        effect: EffectClass::WriteDurable,
+        resource_kinds: &[],
+        requirements: &[],
+    },
+    ActionSpec {
+        id: REQUIREMENTS_CLAIM_ACTION_ID,
+        effect: EffectClass::WriteDurable,
+        resource_kinds: &[],
+        requirements: &[],
+    },
+];
+
+const MODULES: &[ModuleSpec] = &[
+    ModuleSpec {
+        id: AGENT_COLLABORATION_MODULE_ID,
+        display_name: "Agent Collaboration",
+        description: "Delegate work or fork an Agent session through AgentExecution.",
+        actions: AGENT_COLLABORATION_ACTIONS,
+    },
+    ModuleSpec {
+        id: AUTOMATION_SCHEDULE_MODULE_ID,
+        display_name: "Automation Schedule",
+        description: "List and explicitly mutate durable automation schedules.",
+        actions: AUTOMATION_SCHEDULE_ACTIONS,
+    },
+    ModuleSpec {
+        id: REQUIREMENTS_MODULE_ID,
+        display_name: "Requirements",
+        description: "Read and explicitly mutate long-lived product requirements.",
+        actions: REQUIREMENTS_ACTIONS,
+    },
+];
+
+fn agent_execution_modules() -> Vec<ModuleSpec> {
+    vec![MODULES[0]]
 }
 
-fn agent_execution_capabilities() -> Vec<CapabilitySpec> {
-    vec![
-        CapabilitySpec {
-            actions: &[AGENT_DELEGATE_ACTION],
-            effect: EffectClass::ExecuteLocal,
-            resource_kinds: PROCESS_SESSION_RESOURCES,
-            requirements: &[ResourceRequirement {
-                resource_kind: PROCESS_SESSION_RESOURCE_KIND,
-                operation: "execute",
-            }],
-            ..tool_spec(AGENT_DELEGATE)
-        },
-        CapabilitySpec {
-            actions: &[AGENT_FORK_ACTION],
-            effect: EffectClass::WriteDurable,
-            ..tool_spec(AGENT_FORK)
-        },
-        CapabilitySpec {
-            actions: &[AGENT_EXECUTION_PLAN_ACTION],
-            effect: EffectClass::WriteDurable,
-            ..tool_spec(AGENT_EXECUTION_PLAN)
-        },
-        CapabilitySpec {
-            actions: &[AGENT_EXECUTION_STEER_ACTION],
-            effect: EffectClass::WriteDurable,
-            resource_kinds: PROCESS_SESSION_RESOURCES,
-            requirements: &[ResourceRequirement {
-                resource_kind: PROCESS_SESSION_RESOURCE_KIND,
-                operation: "execute",
-            }],
-            ..tool_spec(AGENT_EXECUTION_STEER)
-        },
-        CapabilitySpec {
-            actions: &[AGENT_EXECUTION_OBSERVE_ACTION],
-            effect: EffectClass::ReadLocal,
-            resource_kinds: PROCESS_SESSION_RESOURCES,
-            requirements: &[ResourceRequirement {
-                resource_kind: PROCESS_SESSION_RESOURCE_KIND,
-                operation: "observe",
-            }],
-            ..tool_spec(AGENT_EXECUTION_OBSERVE)
-        },
-    ]
+fn automation_schedule_modules() -> Vec<ModuleSpec> {
+    vec![MODULES[1]]
 }
 
-fn autowork_capabilities() -> Vec<CapabilitySpec> {
-    vec![
-        scheduler_spec(AUTOWORK_RUNNER),
-        CapabilitySpec {
-            actions: &[SCHEDULE_STORE_ACTION],
-            effect: EffectClass::WriteDurable,
-            ..tool_spec(SCHEDULE_STORE)
-        },
-        scheduler_spec(SCHEDULE_TIMER),
-        scheduler_spec(SCHEDULE_AGENT_TRIGGER),
-    ]
-}
-
-fn idmm_capabilities() -> Vec<CapabilitySpec> {
-    vec![
-        middleware_spec(IDMM_OBSERVE),
-        middleware_spec(IDMM_INTERVENE),
-        middleware_spec(IDMM_FALLBACK_POLICY),
-    ]
-}
-
-fn remote_capabilities() -> Vec<CapabilitySpec> {
-    vec![
-        remote_spec(REMOTE_MCP),
-        remote_spec(REMOTE_REST),
-        remote_spec(INGRESS_WEB),
-        remote_spec(INGRESS_MOBILE),
-        remote_spec(INGRESS_CHANNEL),
-    ]
-}
-
-fn requirements_capabilities() -> Vec<CapabilitySpec> {
-    vec![
-        CapabilitySpec {
-            actions: &[REQUIREMENTS_READ_ACTION],
-            effect: EffectClass::ReadSensitive,
-            ..tool_spec(REQUIREMENTS_READ)
-        },
-        CapabilitySpec {
-            actions: &[REQUIREMENTS_WRITE_ACTION],
-            ..tool_spec(REQUIREMENTS_WRITE)
-        },
-        CapabilitySpec {
-            actions: &[REQUIREMENTS_STATUS_ACTION],
-            effect: EffectClass::ReadLocal,
-            ..tool_spec(REQUIREMENTS_STATUS)
-        },
-        CapabilitySpec {
-            actions: &[REQUIREMENTS_CLAIM_ACTION],
-            effect: EffectClass::WriteDurable,
-            ..tool_spec(REQUIREMENTS_CLAIM)
-        },
-    ]
+fn requirements_modules() -> Vec<ModuleSpec> {
+    vec![MODULES[2]]
 }
 
 fn agent_execution_ports() -> PortSpec {
     AGENT_PORTS
 }
 
-fn autowork_ports() -> PortSpec {
-    AUTOWORK_PORTS
-}
-
-fn idmm_ports() -> PortSpec {
-    IDMM_PORTS
+fn automation_schedule_ports() -> PortSpec {
+    AUTOMATION_SCHEDULE_PORTS
 }
 
 fn remote_ports() -> PortSpec {
@@ -1470,39 +1313,27 @@ fn requirements_ports() -> PortSpec {
     REQUIREMENTS_PORTS
 }
 
-fn capability_spec(id: &str) -> Option<CapabilitySpec> {
-    [
-        agent_execution_capabilities(),
-        autowork_capabilities(),
-        idmm_capabilities(),
-        remote_capabilities(),
-        requirements_capabilities(),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|spec| spec.id == id)
+fn module_spec(id: &str) -> Option<&'static ModuleSpec> {
+    MODULES.iter().find(|module| module.id == id)
+}
+
+fn action_spec(module_id: &str, action_id: &str) -> Option<&'static ActionSpec> {
+    module_spec(module_id)?
+        .actions
+        .iter()
+        .find(|action| action.id == action_id)
 }
 
 fn registration_for(
     package_id: &'static str,
     mount_id: &'static str,
-    capabilities: Vec<CapabilitySpec>,
+    modules: Vec<ModuleSpec>,
     ports: PortSpec,
     action_host_port: Option<Arc<dyn Wave5HostPort>>,
 ) -> Result<PluginRegistration, String> {
     let package = package_ref(package_id);
-    let required_service_refs = required_agent_session_services(package_id);
-    let required_service_handles = required_service_refs
-        .iter()
-        .cloned()
-        .map(|service| ServiceHandleDescriptor {
-            service,
-            provider_package: agent_core_package_ref(),
-            provider_mount_id: agent_core_mount_id(),
-        })
-        .collect();
     let port_ids = all_port_ids(&ports);
-    let capability_manifests = capabilities
+    let capability_manifests = modules
         .iter()
         .map(|spec| capability_manifest(spec, &package, &port_ids))
         .collect::<Vec<_>>();
@@ -1517,11 +1348,7 @@ fn registration_for(
         requires_runtime_features: Vec::new(),
         config_schema: config_schema.clone(),
         provides_services: Vec::new(),
-        requires_services: required_service_refs
-            .iter()
-            .cloned()
-            .map(|service| ServiceRequirement { service })
-            .collect(),
+        requires_services: Vec::new(),
         entrypoint: InProcessEntrypointMetadata {
             entrypoint_profile: "trusted-in-process".to_owned(),
             entrypoint_id: format!("{package_id}.entrypoint"),
@@ -1559,11 +1386,15 @@ fn registration_for(
         },
         registrar: PluginRegistrarDescriptor {
             identity: identity.clone(),
-            allowed_operations: BTreeSet::from([
-                PluginRegistrarOperation::BindHostPort,
-                PluginRegistrarOperation::ContributeCapability,
-            ]),
-            declared_capability_ids: capabilities
+            allowed_operations: if modules.is_empty() {
+                BTreeSet::from([PluginRegistrarOperation::BindHostPort])
+            } else {
+                BTreeSet::from([
+                    PluginRegistrarOperation::BindHostPort,
+                    PluginRegistrarOperation::ContributeCapability,
+                ])
+            },
+            declared_capability_ids: modules
                 .iter()
                 .map(|spec| CapabilityId::from(spec.id))
                 .collect(),
@@ -1589,7 +1420,7 @@ fn registration_for(
             },
             declared_services: DeclaredServiceViewDescriptor {
                 provided_services: Vec::new(),
-                required_service_handles,
+                required_service_handles: Vec::new(),
             },
             host_ports: ports
                 .host_ports
@@ -1617,7 +1448,7 @@ fn registration_for(
         },
     };
     let mut registration = PluginRegistration::new(metadata);
-    for spec in &capabilities {
+    for spec in &modules {
         if spec.actions.is_empty() {
             continue;
         }
@@ -1635,7 +1466,7 @@ fn registration_for(
                     action_ids: spec
                         .actions
                         .iter()
-                        .map(|action| ActionId::from(*action))
+                        .map(|action| ActionId::from(action.id))
                         .collect(),
                     host_port: Arc::clone(host_port),
                 }),
@@ -1645,90 +1476,63 @@ fn registration_for(
     Ok(registration)
 }
 
-fn required_agent_session_services(package_id: &str) -> Vec<ServiceKeyRef> {
-    match package_id {
-        AGENT_EXECUTION_PACKAGE | AUTOWORK_SCHEDULER_PACKAGE => {
-            vec![agent_session_command_service_ref()]
-        }
-        IDMM_PACKAGE => vec![agent_session_query_service_ref()],
-        REMOTE_INGRESS_PACKAGE => vec![
-            agent_session_command_service_ref(),
-            agent_session_query_service_ref(),
-        ],
-        REQUIREMENTS_PACKAGE => Vec::new(),
-        _ => Vec::new(),
-    }
-}
-
 fn capability_manifest(
-    spec: &CapabilitySpec,
+    spec: &ModuleSpec,
     package: &PackageRef,
     declared_port_ids: &BTreeSet<HostPortId>,
 ) -> CapabilityManifest {
-    let capability_id = CapabilityId::from(spec.id);
     let actions = spec
         .actions
         .iter()
         .map(|action| CapabilityActionDescriptor {
-            action_id: ActionId::from(*action),
-            input_schema: schema_ref(spec.id, "input"),
-            output_schema: schema_ref(spec.id, "output"),
-            effect_class: spec.effect,
-            presentation: if spec.kind == CapabilityKind::Transport
-                || spec.kind == CapabilityKind::Scheduler
-                || spec.kind == CapabilityKind::TurnMiddleware
-            {
-                nomifun_agent_contracts::ToolPresentationKind::Hidden
-            } else {
-                nomifun_agent_contracts::ToolPresentationKind::FunctionTool
-            },
+            action_id: ActionId::from(action.id),
+            input_schema: action_schema_ref(
+                action.id,
+                "input",
+                &action_input_schema_for(action.id)
+                    .expect("built-in Wave 5 Action has an input schema"),
+            ),
+            output_schema: action_schema_ref(action.id, "output", &object_schema(true)),
+            effect_class: action.effect,
+            presentation: nomifun_agent_contracts::ToolPresentationKind::FunctionTool,
         })
         .collect();
-    let context_schema_refs = if spec.kind == CapabilityKind::TurnMiddleware {
-        vec![schema_ref(spec.id, "context")]
-    } else {
-        Vec::new()
-    };
-    let event_schema_refs = if spec.kind == CapabilityKind::Scheduler {
-        vec![schema_ref(spec.id, "event")]
-    } else {
-        Vec::new()
-    };
     CapabilityManifest {
-        id: capability_id,
+        id: CapabilityId::from(spec.id),
         contribution_id: nomifun_agent_contracts::ContributionId::from(format!(
-            "capability:{}",
+            "module:{}",
             spec.id
         )),
         version: VersionString::from(VERSION),
-        kind: spec.kind,
+        kind: CapabilityKind::Tool,
         package: package.clone(),
-        display: display(spec.id, "Wave 5 capability contribution."),
+        display: display(spec.display_name, spec.description),
         requires: Vec::new(),
         conflicts: Vec::new(),
-        supported_surfaces: capability_surface_declarations(
-            spec.surfaces.iter().copied(),
+        supported_surfaces: capability_module_surface_declarations(
+            GENERAL_SURFACES.iter().copied(),
             [CapabilityConsumer::Agent],
+            CapabilityAuthoringPolicy::Direct,
         ),
         requires_runtime_features: Vec::new(),
         supported_platforms: vec![PlatformConstraint::Any],
         config_schema: schema_value(),
         contributions: CapabilityContributions {
             actions,
-            context_schema_refs,
+            context_schema_refs: Vec::new(),
             context_phase: Default::default(),
             ui_slot: None,
-            event_schema_refs,
+            event_schema_refs: Vec::new(),
             resource_kinds: spec
-                .resource_kinds
+                .actions
                 .iter()
+                .flat_map(|action| action.resource_kinds.iter())
                 .map(|kind| ResourceKind::from(*kind))
                 .collect(),
-            host_ports: spec
-                .host_ports
-                .iter()
-                .filter(|id| declared_port_ids.contains(&HostPortId::from(**id)))
-                .map(|id| host_port(id))
+            host_ports: [WAVE5_CAPABILITY_HOST_PORT_ID]
+                .into_iter()
+                .filter(|id| declared_port_ids.contains(&HostPortId::from(*id)))
+                .map(host_port)
                 .collect(),
         },
     }
@@ -1759,10 +1563,16 @@ impl CapabilityHandler for Wave5CapabilityHandler {
                     action_id: context.action_id,
                 });
             }
+            let operation = operation_from_input(
+                &self.capability_id,
+                &context.action_id,
+                input,
+            )?;
             let request = Wave5HostRequest {
                 context: Wave5HostContext {
                     principal: context.principal,
                     agent_session_id: context.agent_session_id,
+                    turn_id: context.turn_id,
                     operation_id: context.operation_id,
                     idempotency_key: context.idempotency_key,
                     correlation_id: context.correlation_id,
@@ -1775,7 +1585,7 @@ impl CapabilityHandler for Wave5CapabilityHandler {
                     services: context.services,
                     resource_bindings: context.resource_bindings,
                 },
-                operation: operation_from_input(&self.capability_id, input)?,
+                operation,
             };
             request
                 .validate()
@@ -1800,33 +1610,59 @@ impl CapabilityHandler for Wave5CapabilityHandler {
     }
 }
 
-/// Convert a canonical capability ID and object payload into one exact typed
-/// action operation. Remote capability IDs intentionally have no match.
+/// Convert one exact Module/Action pair and object payload into a typed
+/// owner command. Platform-only transports have no match.
 pub fn operation_from_input(
     capability_id: &CapabilityId,
+    action_id: &ActionId,
     input: StrictJsonValue,
 ) -> Result<Wave5CapabilityOperation, KernelError> {
-    let operation = match capability_id.as_ref() {
-        AGENT_DELEGATE => Wave5CapabilityOperation::AgentDelegate { input },
-        AGENT_FORK => Wave5CapabilityOperation::AgentFork { input },
-        AGENT_EXECUTION_PLAN => Wave5CapabilityOperation::AgentExecutionPlan { input },
-        AGENT_EXECUTION_STEER => Wave5CapabilityOperation::AgentExecutionSteer { input },
-        AGENT_EXECUTION_OBSERVE => Wave5CapabilityOperation::AgentExecutionObserve { input },
-        SCHEDULE_STORE => Wave5CapabilityOperation::ScheduleStore { input },
-        REQUIREMENTS_READ => Wave5CapabilityOperation::RequirementsRead { input },
-        REQUIREMENTS_WRITE => Wave5CapabilityOperation::RequirementsWrite { input },
-        REQUIREMENTS_STATUS => Wave5CapabilityOperation::RequirementsStatus { input },
-        REQUIREMENTS_CLAIM => Wave5CapabilityOperation::RequirementsClaim { input },
-        other => {
-            return Err(KernelError::CapabilityExecution {
-                reason: format!("{other} does not expose an action host operation"),
+    let operation = match (capability_id.as_ref(), action_id.as_ref()) {
+        (AGENT_COLLABORATION_MODULE_ID, AGENT_DELEGATE_ACTION_ID) => {
+            Wave5CapabilityOperation::AgentDelegate { input }
+        }
+        (AGENT_COLLABORATION_MODULE_ID, AGENT_FORK_ACTION_ID) => {
+            Wave5CapabilityOperation::AgentFork { input }
+        }
+        (AUTOMATION_SCHEDULE_MODULE_ID, SCHEDULE_LIST_ACTION_ID) => {
+            Wave5CapabilityOperation::ScheduleList { input }
+        }
+        (AUTOMATION_SCHEDULE_MODULE_ID, SCHEDULE_CREATE_ACTION_ID) => {
+            Wave5CapabilityOperation::ScheduleCreate { input }
+        }
+        (AUTOMATION_SCHEDULE_MODULE_ID, SCHEDULE_UPDATE_ACTION_ID) => {
+            Wave5CapabilityOperation::ScheduleUpdate { input }
+        }
+        (AUTOMATION_SCHEDULE_MODULE_ID, SCHEDULE_DELETE_ACTION_ID) => {
+            Wave5CapabilityOperation::ScheduleDelete { input }
+        }
+        (REQUIREMENTS_MODULE_ID, REQUIREMENTS_READ_ACTION_ID) => {
+            Wave5CapabilityOperation::RequirementsRead { input }
+        }
+        (REQUIREMENTS_MODULE_ID, REQUIREMENTS_WRITE_ACTION_ID) => {
+            Wave5CapabilityOperation::RequirementsWrite { input }
+        }
+        (REQUIREMENTS_MODULE_ID, REQUIREMENTS_STATUS_ACTION_ID) => {
+            Wave5CapabilityOperation::RequirementsStatus { input }
+        }
+        (REQUIREMENTS_MODULE_ID, REQUIREMENTS_CLAIM_ACTION_ID) => {
+            Wave5CapabilityOperation::RequirementsClaim { input }
+        }
+        (module, action) => {
+            return Err(KernelError::ActionNotDeclared {
+                capability_id: CapabilityId::from(module),
+                action_id: ActionId::from(action),
             });
         }
     };
     if !operation.input().0.is_object() {
         return Err(KernelError::capability_execution_failed(
             WAVE5_INVALID_REQUEST,
-            format!("{} input must be a JSON object", capability_id.as_ref()),
+            format!(
+                "{} / {} input must be a JSON object",
+                capability_id.as_ref(),
+                action_id.as_ref()
+            ),
         ));
     }
     Ok(operation)
@@ -2002,6 +1838,160 @@ fn display(name: &str, description: &str) -> LocalizedMetadata {
     }
 }
 
+/// Canonical model-visible input schema for one exact Action.
+/// Schedule schemas mirror `nomifun-cron`'s deny-unknown typed inputs and do
+/// not expose platform timer, provider, model or Session implementation fields.
+pub fn action_input_schema_for(action_id: &str) -> Result<StrictJsonValue, String> {
+    let string = || serde_json::json!({"type": "string", "minLength": 1});
+    let optional_string = || {
+        serde_json::json!({
+            "anyOf": [
+                {"type": "string"},
+                {"type": "null"}
+            ]
+        })
+    };
+    let schema = match action_id {
+        SCHEDULE_LIST_ACTION_ID => strict_object_schema(serde_json::json!({}), &[]),
+        SCHEDULE_CREATE_ACTION_ID => strict_object_schema(
+            serde_json::json!({
+                "name": string(),
+                "schedule": string(),
+                "schedule_description": optional_string(),
+                "message": string()
+            }),
+            &["name", "schedule", "message"],
+        ),
+        SCHEDULE_UPDATE_ACTION_ID => strict_object_schema(
+            serde_json::json!({
+                "cron_job_id": string(),
+                "name": string(),
+                "schedule": string(),
+                "schedule_description": optional_string(),
+                "message": string()
+            }),
+            &["cron_job_id", "name", "schedule", "message"],
+        ),
+        SCHEDULE_DELETE_ACTION_ID => strict_object_schema(
+            serde_json::json!({"cron_job_id": string()}),
+            &["cron_job_id"],
+        ),
+        AGENT_DELEGATE_ACTION_ID | AGENT_FORK_ACTION_ID => strict_object_schema(
+            serde_json::json!({
+                "goal": {"type":"string","minLength":1,"maxLength":65536}
+            }),
+            &["goal"],
+        ),
+        REQUIREMENTS_READ_ACTION_ID => StrictJsonValue(serde_json::json!({
+            "oneOf": [
+                {
+                    "type":"object","additionalProperties":false,
+                    "properties":{
+                        "operation":{"const":"get","type":"string"},
+                        "requirement_id":{"type":"string","minLength":36,"maxLength":36}
+                    },
+                    "required":["operation","requirement_id"]
+                },
+                {
+                    "type":"object","additionalProperties":false,
+                    "properties":{
+                        "operation":{"const":"list","type":"string"},
+                        "tag":{"type":["string","null"],"maxLength":256},
+                        "status":{"type":["string","null"],"enum":["pending","in_progress","done","failed","cancelled","needs_review",null]},
+                        "query":{"type":["string","null"],"maxLength":4096},
+                        "page":{"type":["integer","null"],"minimum":1},
+                        "page_size":{"type":["integer","null"],"minimum":1,"maximum":200}
+                    },
+                    "required":["operation"]
+                }
+            ]
+        })),
+        REQUIREMENTS_WRITE_ACTION_ID => StrictJsonValue(serde_json::json!({
+            "oneOf": [
+                {
+                    "type":"object","additionalProperties":false,
+                    "properties":{
+                        "operation":{"const":"create","type":"string"},
+                        "title":{"type":"string","minLength":1,"maxLength":2048},
+                        "content":{"type":["string","null"],"maxLength":65536},
+                        "tag":{"type":"string","minLength":1,"maxLength":256}
+                    },
+                    "required":["operation","title","tag"]
+                },
+                {
+                    "type":"object","additionalProperties":false,
+                    "properties":{
+                        "operation":{"const":"update","type":"string"},
+                        "requirement_id":{"type":"string","minLength":36,"maxLength":36},
+                        "title":{"type":["string","null"],"maxLength":2048},
+                        "content":{"type":["string","null"],"maxLength":65536},
+                        "tag":{"type":["string","null"],"maxLength":256}
+                    },
+                    "required":["operation","requirement_id"]
+                },
+                {
+                    "type":"object","additionalProperties":false,
+                    "properties":{
+                        "operation":{"const":"delete","type":"string"},
+                        "requirement_id":{"type":"string","minLength":36,"maxLength":36}
+                    },
+                    "required":["operation","requirement_id"]
+                }
+            ]
+        })),
+        REQUIREMENTS_STATUS_ACTION_ID => strict_object_schema(
+            serde_json::json!({
+                "requirement_id":{"type":"string","minLength":36,"maxLength":36},
+                "status":{"type":"string","enum":["pending","done","failed","cancelled","needs_review"]},
+                "completion_note":{"type":["string","null"],"maxLength":65536}
+            }),
+            &["requirement_id","status"],
+        ),
+        REQUIREMENTS_CLAIM_ACTION_ID => strict_object_schema(
+            serde_json::json!({
+                "tag":{"type":"string","minLength":1,"maxLength":256}
+            }),
+            &["tag"],
+        ),
+        _ => return Err(format!("unknown Wave 5 Action {action_id}")),
+    };
+    Ok(schema)
+}
+
+pub fn resolve_action_schema(
+    module_id: &str,
+    reference: &CanonicalSchemaRef,
+) -> Result<StrictJsonValue, String> {
+    let module = module_spec(module_id)
+        .ok_or_else(|| format!("unknown Wave 5 Module {module_id}"))?;
+    for action in module.actions {
+        let input = action_input_schema_for(action.id)?;
+        if action_schema_ref(action.id, "input", &input) == *reference {
+            return Ok(input);
+        }
+        let output = object_schema(true);
+        if action_schema_ref(action.id, "output", &output) == *reference {
+            return Ok(output);
+        }
+    }
+    Err(format!(
+        "schema {} is not owned by Wave 5 Module {module_id}",
+        reference.as_ref()
+    ))
+}
+
+fn strict_object_schema(
+    properties: serde_json::Value,
+    required: &[&str],
+) -> StrictJsonValue {
+    StrictJsonValue(serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": properties,
+        "required": required,
+    }))
+}
+
 fn package_ref(package_id: &str) -> PackageRef {
     PackageRef {
         id: PackageId::from(package_id),
@@ -2072,6 +2062,19 @@ fn schema_ref(subject: &str, role: &str) -> CanonicalSchemaRef {
     ))
 }
 
+fn action_schema_ref(
+    subject: &str,
+    role: &str,
+    schema: &StrictJsonValue,
+) -> CanonicalSchemaRef {
+    let digest = nomifun_agent_contracts::digest_payload(schema)
+        .expect("the built-in Action schema is canonicalizable");
+    CanonicalSchemaRef::from(format!(
+        "schema://{subject}/{role}@{VERSION}#{}",
+        digest.as_ref()
+    ))
+}
+
 fn all_port_ids(ports: &PortSpec) -> BTreeSet<HostPortId> {
     ports
         .host_ports
@@ -2086,319 +2089,21 @@ fn all_port_ids(ports: &PortSpec) -> BTreeSet<HostPortId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_agent_contracts::{
-        AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, CapabilityRef,
-        CapabilitySelection, DigestHex, PresetRevisionRef, PrincipalRef, RuntimeProfileKind,
-        StateKey, UserId,
-    };
-    use nomifun_agent_kernel::{
-        AgentPresetCompiler, CapabilityInvocationRequest, CompileRequest, CompilerEnvironment,
-        HostPluginStateApi, InMemoryPluginStatePersistence, KernelRegistry,
-        MaterializationPolicy, ServiceKey, SessionCapabilityState,
-    };
 
-    fn principal() -> PrincipalRef {
-        PrincipalRef {
-            principal_kind: "user".to_owned(),
-            principal_id: "wave5-test-owner".to_owned(),
-        }
-    }
-
-    trait TestAgentSessionService: Send + Sync {}
-
-    struct TestAgentSessionServiceImpl;
-
-    impl TestAgentSessionService for TestAgentSessionServiceImpl {}
-
-    fn test_agent_core_registration() -> PluginRegistration {
-        let package = agent_core_package_ref();
-        let mount_id = agent_core_mount_id();
-        let command_ref = agent_session_command_service_ref();
-        let query_ref = agent_session_query_service_ref();
-        let config_schema = schema_value();
-        let source = PluginSourceMetadata {
-            source_kind: PluginSourceKind::Bundled,
-            source_identity: package.id.as_ref().to_owned(),
-            source_digest: None,
-        };
-        let identity = PluginIdentityDescriptor {
-            package: package.clone(),
-            mount_id: mount_id.clone(),
-        };
-        let cancellation_port = host_port("host.plugin.cancel");
-        let task_port = host_port("host.plugin.tasks");
-        let manifest = PackageManifest {
-            schema_version: VersionString::from(VERSION),
-            host_contract_version: VersionString::from(VERSION),
-            package_id: package.id.clone(),
-            package_version: package.version.clone(),
-            display: display(
-                "Test Agent Session Core",
-                "Test-only provider for Wave 5 ServiceKey materialization.",
-            ),
-            package_dependencies: Vec::new(),
-            requires_runtime_features: Vec::new(),
-            config_schema: config_schema.clone(),
-            provides_services: vec![
-                nomifun_agent_contracts::ServiceProvision {
-                    service: command_ref.clone(),
-                },
-                nomifun_agent_contracts::ServiceProvision {
-                    service: query_ref.clone(),
-                },
-            ],
-            requires_services: Vec::new(),
-            entrypoint: InProcessEntrypointMetadata {
-                entrypoint_profile: "trusted-in-process".to_owned(),
-                entrypoint_id: "platform.agent-core.test".to_owned(),
-                contract_version: VersionString::from(VERSION),
-            }
-            .into(),
-            contributions: PackageContributions::default(),
-        };
-        let metadata = PluginRegistrationMetadata {
-            manifest: ArtifactEnvelope::new(manifest).expect("test provider manifest"),
-            mount_id: mount_id.clone(),
-            source: source.clone(),
-            boot_state: PluginBootState {
-                criticality: PluginBootCriticality::Required,
-                desired_state: PluginDesiredState::Enabled,
-                effective_state: PluginEffectiveState::Active,
-                diagnostic_code: None,
-            },
-            registrar: PluginRegistrarDescriptor {
-                identity: identity.clone(),
-                allowed_operations: BTreeSet::from([
-                    PluginRegistrarOperation::ProvideService,
-                    PluginRegistrarOperation::BindHostPort,
-                ]),
-                declared_capability_ids: BTreeSet::new(),
-                declared_skill_ids: BTreeSet::new(),
-                declared_mcp_tool_keys: BTreeSet::new(),
-                declared_role_ids: BTreeSet::new(),
-                declared_service_keys: BTreeSet::from([
-                    command_ref.id.clone(),
-                    query_ref.id.clone(),
-                ]),
-                declared_host_ports: BTreeSet::from([
-                    cancellation_port.id.clone(),
-                    task_port.id.clone(),
-                ]),
-            },
-            context: PluginContextDescriptor {
-                identity,
-                source,
-                validated_config: nomifun_agent_contracts::ValidatedPluginConfig {
-                    schema_digest: nomifun_agent_contracts::digest_payload(&config_schema)
-                        .expect("test provider config digest"),
-                    config_revision: 1,
-                    value: empty_object(),
-                },
-                state: PluginStateHandleDescriptor {
-                    package_id: package.id,
-                    mount_id: mount_id.clone(),
-                    methods: PluginStateMethod::REQUIRED.into_iter().collect(),
-                },
-                declared_services: DeclaredServiceViewDescriptor {
-                    provided_services: vec![command_ref.clone(), query_ref.clone()],
-                    required_service_handles: Vec::new(),
-                },
-                host_ports: Vec::new(),
-                typed_command_ports: Vec::new(),
-                domain_outbox_ports: Vec::new(),
-                cancellation: CancellationDescriptor {
-                    cancellation_port,
-                    scope_key: ScopeKey::from(format!("mount:{}", mount_id.as_ref())),
-                },
-                managed_task_registration: ManagedTaskRegistrationDescriptor {
-                    registrar_port: task_port,
-                    scope_key: ScopeKey::from(format!("mount:{}", mount_id.as_ref())),
-                },
-            },
-        };
-        let command_key =
-            ServiceKey::<dyn TestAgentSessionService>::from_ref(command_ref);
-        let query_key =
-            ServiceKey::<dyn TestAgentSessionService>::from_ref(query_ref);
-        let service =
-            Arc::new(TestAgentSessionServiceImpl) as Arc<dyn TestAgentSessionService>;
-        let mut registration = PluginRegistration::new(metadata);
-        registration
-            .provide_service(&command_key, Arc::clone(&service))
-            .expect("test command service");
-        registration
-            .provide_service(&query_key, service)
-            .expect("test query service");
-        registration
-    }
-
-    fn materializable_registrations(
-        host: Arc<dyn Wave5HostPort>,
-    ) -> Vec<PluginRegistration> {
-        let mut registrations = vec![test_agent_core_registration()];
-        registrations.extend(
-            registrations_with_host_port(host)
-                .expect("Wave 5 registrations should build"),
-        );
-        registrations
-    }
-
-    fn compiled_schedule(
-        registry: &KernelRegistry,
-        owner: &PrincipalRef,
-    ) -> (
-        nomifun_agent_kernel::CompiledSnapshot,
-        nomifun_agent_kernel::ActiveCapabilitySetSnapshot,
-    ) {
-        let materialized = registry.snapshot().expect("registry snapshot");
-        let payload = AgentPresetRevisionPayload {
-            context_order: Vec::new(),
-            middleware_order: Vec::new(),
-            schema_version: VersionString::from(VERSION),
-            model_route_refs: BTreeMap::new(),
-            chat_route_records: BTreeMap::new(),
-            enabled_capabilities: vec![CapabilitySelection {
-                capability: CapabilityRef {
-                    id: CapabilityId::from(SCHEDULE_STORE),
-                    version: VersionString::from(VERSION),
-                },
-                action_allowlist: BTreeSet::from([ActionId::from(SCHEDULE_STORE_ACTION)]),
-            }],
-
-            skill_bindings: Vec::new(),
-            system_role_provider_overrides: BTreeMap::new(),
-            persona: "Wave 5 test".to_owned(),
-            instructions: "Invoke the selected capability.".to_owned(),
-            starter_prompts: Vec::new(),
-        };
-        let contribution_locks = vec![materialized
-            .capability(&CapabilityId::from(SCHEDULE_STORE))
-            .expect("selected schedule.store capability is materialized")
-            .contribution_lock
-            .clone()];
-        let mut revision = AgentPresetRevision {
-            reference: PresetRevisionRef {
-                preset_id: AgentPresetId::from("wave5-test"),
-                revision: 1,
-                revision_digest: DigestHex::from(""),
-            },
-            payload,
-            contribution_locks,
-            created_by: UserId::from(owner.principal_id.clone()),
-            created_at_ms: 1,
-            reason: None,
-        };
-        revision.reference.revision_digest =
-            revision.revision_digest().expect("revision digest");
-        let snapshot = AgentPresetCompiler::compile(
-            &materialized,
-            &CompilerEnvironment {
-                resolver_version: VersionString::from(VERSION),
-                required_runtime_protocol_version: VersionString::from(VERSION),
-                required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
-                runtime_feature_inventory_digest: DigestHex::from("runtime"),
-                available_runtime_features: BTreeSet::new(),
-                installation_role_bindings: BTreeMap::new(),
-                canonical_schema_manifest_digest: DigestHex::from("schema"),
-                target_contribution_manifest_digest: DigestHex::from("target"),
-                host_target: RuntimeTarget::from("windows-desktop-x64"),
-                host_surface: "desktop".to_owned(),
-                availability_evidence_revision: "wave5-test".to_owned(),
-            },
-            CompileRequest {
-                plugin_product_capabilities: Vec::new(),
-                revision,
-                principal: owner.clone(),
-                scene: "wave5-test".to_owned(),
-                surface: "desktop".to_owned(),
-                audience: "test".to_owned(),
-                created_at_ms: 2,
-                resolver_run_id: OperationId::from("wave5-resolve"),
-            },
-        )
-        .expect("compile schedule.store");
-        let active = SessionCapabilityState::new(&snapshot)
-            .snapshot()
-            .expect("initial active set");
-        (snapshot, active)
-    }
-
-    struct StateBackedHost;
-
-    impl Wave5HostPort for StateBackedHost {
-        fn invoke<'a>(
-            &'a self,
-            request: Wave5HostRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave5HostPortError>> + Send + 'a>>
-        {
-            Box::pin(async move {
-                request.validate()?;
-                let services = request.context.services.descriptors();
-                let state = request.context.state;
-                let scope = request.context.state_scope_key;
-                let key = StateKey::from("wave5-test-state");
-                let entry = state
-                    .get(&scope, &key)
-                    .await
-                    .map_err(|error| Wave5HostPortError::new("STATE_READ_FAILED", error.to_string()))?;
-                let descriptor = state.descriptor();
-                Ok(StrictJsonValue(serde_json::json!({
-                    "package_id": descriptor.package_id,
-                    "mount_id": descriptor.mount_id,
-                    "state_scope": scope,
-                    "state_key": key,
-                    "present": entry.is_some(),
-                    "service_ids": services
-                        .iter()
-                        .map(|service| service.service.id.as_ref())
-                        .collect::<Vec<_>>(),
-                    "service_provider_mounts": services
-                        .iter()
-                        .map(|service| service.provider_mount_id.as_ref())
-                        .collect::<Vec<_>>(),
-                })))
-            })
-        }
-    }
-
-    struct ResultHost(Result<StrictJsonValue, Wave5HostPortError>);
-
-    impl Wave5HostPort for ResultHost {
-        fn invoke<'a>(
-            &'a self,
-            _request: Wave5HostRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave5HostPortError>> + Send + 'a>>
-        {
-            // No owner validation: the test must exercise the handler boundary.
-            Box::pin(async move { self.0.clone() })
-        }
+    fn action_ids(capability: &CapabilityManifest) -> BTreeSet<String> {
+        capability
+            .contributions
+            .actions
+            .iter()
+            .map(|action| action.action_id.as_ref().to_owned())
+            .collect()
     }
 
     #[test]
-    fn registrations_cover_the_exact_wave_five_target_set() {
-        let registrations = registrations().expect("Wave 5 registrations must build");
-        assert_eq!(registrations.len(), 5);
-
-        let expected_packages = [
-            AGENT_EXECUTION_PACKAGE,
-            AUTOWORK_SCHEDULER_PACKAGE,
-            IDMM_PACKAGE,
-            REMOTE_INGRESS_PACKAGE,
-            REQUIREMENTS_PACKAGE,
-        ];
-        let package_ids = registrations
-            .iter()
-            .map(|registration| registration.metadata.manifest.payload.package_id.clone())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            package_ids,
-            expected_packages
-                .into_iter()
-                .map(PackageId::from)
-                .collect::<BTreeSet<_>>()
-        );
-
-        let capability_ids = registrations
+    fn catalog_contains_only_three_product_modules() {
+        let registrations = registrations().expect("Wave 5 registrations");
+        assert_eq!(registrations.len(), 4);
+        let capabilities = registrations
             .iter()
             .flat_map(|registration| {
                 registration
@@ -2408,577 +2113,213 @@ mod tests {
                     .contributions
                     .capabilities
                     .iter()
-                    .map(|capability| capability.id.clone())
             })
-            .collect::<BTreeSet<_>>();
-        assert_eq!(capability_ids, target_capability_ids());
+            .collect::<Vec<_>>();
+        assert_eq!(capabilities.len(), 3);
         assert_eq!(
-            capability_ids.len(),
-            TARGET_CAPABILITY_IDS.len(),
-            "every target capability must have one canonical owner"
+            capabilities
+                .iter()
+                .map(|capability| capability.id.clone())
+                .collect::<BTreeSet<_>>(),
+            target_capability_ids()
         );
-        assert!(registrations.iter().all(|registration| {
-            registration
-                .handler_ids()
-                .iter()
-                .all(|capability| capability_ids.contains(capability))
-        }));
-    }
-
-    #[test]
-    fn each_target_package_contains_its_complete_inventory_slice() {
-        let registrations = registrations().unwrap();
-        let expected = [
-            (
-                AGENT_EXECUTION_PACKAGE,
-                [
-                    AGENT_DELEGATE,
-                    AGENT_FORK,
-                    AGENT_EXECUTION_PLAN,
-                    AGENT_EXECUTION_STEER,
-                    AGENT_EXECUTION_OBSERVE,
-                ]
-                .as_slice(),
-            ),
-            (
-                AUTOWORK_SCHEDULER_PACKAGE,
-                [
-                    AUTOWORK_RUNNER,
-                    SCHEDULE_STORE,
-                    SCHEDULE_TIMER,
-                    SCHEDULE_AGENT_TRIGGER,
-                ]
-                .as_slice(),
-            ),
-            (
-                IDMM_PACKAGE,
-                [IDMM_OBSERVE, IDMM_INTERVENE, IDMM_FALLBACK_POLICY].as_slice(),
-            ),
-            (
-                REMOTE_INGRESS_PACKAGE,
-                [
-                    REMOTE_MCP,
-                    REMOTE_REST,
-                    INGRESS_WEB,
-                    INGRESS_MOBILE,
-                    INGRESS_CHANNEL,
-                ]
-                .as_slice(),
-            ),
-            (
-                REQUIREMENTS_PACKAGE,
-                [
-                    REQUIREMENTS_READ,
-                    REQUIREMENTS_WRITE,
-                    REQUIREMENTS_STATUS,
-                    REQUIREMENTS_CLAIM,
-                ]
-                .as_slice(),
-            ),
-        ];
-
-        for (registration, (package_id, expected_capabilities)) in
-            registrations.iter().zip(expected)
-        {
-            let manifest = &registration.metadata.manifest.payload;
-            assert_eq!(manifest.package_id.as_ref(), package_id);
-            assert_eq!(
-                manifest.config_schema.0,
-                serde_json::json!({"type": "object", "additionalProperties": false})
-            );
-            assert_eq!(
-                registration.metadata.context.validated_config.value.0,
-                serde_json::json!({})
-            );
-            let actual = manifest
-                .contributions
-                .capabilities
-                .iter()
-                .map(|capability| capability.id.as_ref())
-                .collect::<BTreeSet<_>>();
-            let expected = expected_capabilities.iter().copied().collect::<BTreeSet<_>>();
-            assert_eq!(actual, expected);
-
-            for capability in &manifest.contributions.capabilities {
-                if capability.kind == CapabilityKind::Tool {
-                    assert_eq!(capability.contributions.actions.len(), 1);
-                    assert_eq!(
-                        capability.contributions.actions[0].action_id,
-                        action_id(capability.id.as_ref()).expect("action-bearing capability")
-                    );
-                    assert!(registration.handler_ids().contains(&capability.id));
-                    assert!(capability
-                        .contributions
-                        .host_ports
-                        .iter()
-                        .any(|port| port.id.as_ref() == WAVE5_CAPABILITY_HOST_PORT_ID));
-                } else {
-                    assert!(capability.contributions.actions.is_empty());
-                    assert!(!registration.handler_ids().contains(&capability.id));
-                    assert!(!capability
-                        .contributions
-                        .host_ports
-                        .iter()
-                        .any(|port| port.id.as_ref() == WAVE5_CAPABILITY_HOST_PORT_ID));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn agent_session_service_dependencies_match_the_target_map() {
-        let registrations = registrations().expect("Wave 5 registrations");
-        let expected = [
-            (
-                AGENT_EXECUTION_PACKAGE,
-                vec![agent_session_command_service_ref()],
-            ),
-            (
-                AUTOWORK_SCHEDULER_PACKAGE,
-                vec![agent_session_command_service_ref()],
-            ),
-            (IDMM_PACKAGE, vec![agent_session_query_service_ref()]),
-            (
-                REMOTE_INGRESS_PACKAGE,
-                vec![
-                    agent_session_command_service_ref(),
-                    agent_session_query_service_ref(),
-                ],
-            ),
-            (REQUIREMENTS_PACKAGE, Vec::new()),
-        ];
-
-        for (registration, (package_id, expected_services)) in
-            registrations.iter().zip(expected)
-        {
-            let manifest = &registration.metadata.manifest.payload;
-            assert_eq!(manifest.package_id.as_ref(), package_id);
-            assert_eq!(
-                manifest
-                    .requires_services
-                    .iter()
-                    .map(|requirement| requirement.service.clone())
-                    .collect::<Vec<_>>(),
-                expected_services
-            );
-            assert!(registration
-                .metadata
-                .context
-                .declared_services
-                .required_service_handles
-                .iter()
-                .all(|handle| {
-                    handle.provider_package == agent_core_package_ref()
-                        && handle.provider_mount_id == agent_core_mount_id()
-                }));
-        }
-    }
-
-    #[test]
-    fn remote_capabilities_are_transport_only_and_available_on_remote_surfaces() {
-        let registrations = registrations().unwrap();
-        let remote = &registrations[3];
-        let capabilities = &remote.metadata.manifest.payload.contributions.capabilities;
-        assert_eq!(capabilities.len(), 5);
         assert!(capabilities.iter().all(|capability| {
-            capability.kind == CapabilityKind::Transport
-                && capability
-                    .supported_surfaces
-                    .contains("web-browser-client")
-                && capability.supported_platforms == vec![PlatformConstraint::Any]
+            capability.kind == CapabilityKind::Tool
+                && capability.authoring_policy() == Ok(CapabilityAuthoringPolicy::Direct)
         }));
 
-        let availability = remote_availability_descriptor();
-        assert!(availability.is_remote_only());
-        assert!(availability.is_available_on("mobile"));
-        assert!(availability.is_available_on("web-browser-client"));
-        assert!(availability.is_available_on("robot-firmware"));
-        assert!(availability.is_available_on("im-client"));
-        assert!(availability.transport_only);
-        assert!(!availability.local_runtime_required);
-        assert!(availability.is_remote_client_surface("mobile"));
-        assert!(!availability.is_remote_client_surface("desktop"));
+        let by_id = capabilities
+            .into_iter()
+            .map(|capability| (capability.id.as_ref(), capability))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            action_ids(by_id[AGENT_COLLABORATION_MODULE_ID]),
+            BTreeSet::from([
+                AGENT_DELEGATE_ACTION_ID.to_owned(),
+                AGENT_FORK_ACTION_ID.to_owned(),
+            ])
+        );
+        assert_eq!(
+            action_ids(by_id[AUTOMATION_SCHEDULE_MODULE_ID]),
+            BTreeSet::from([
+                SCHEDULE_LIST_ACTION_ID.to_owned(),
+                SCHEDULE_CREATE_ACTION_ID.to_owned(),
+                SCHEDULE_UPDATE_ACTION_ID.to_owned(),
+                SCHEDULE_DELETE_ACTION_ID.to_owned(),
+            ])
+        );
+        assert_eq!(
+            action_ids(by_id[REQUIREMENTS_MODULE_ID]),
+            BTreeSet::from([
+                REQUIREMENTS_READ_ACTION_ID.to_owned(),
+                REQUIREMENTS_WRITE_ACTION_ID.to_owned(),
+                REQUIREMENTS_STATUS_ACTION_ID.to_owned(),
+                REQUIREMENTS_CLAIM_ACTION_ID.to_owned(),
+            ])
+        );
     }
 
     #[test]
-    fn remote_transport_exposes_only_the_canonical_binding_and_operations() {
-        let descriptor = remote_transport_descriptor();
-        assert!(descriptor.is_exact_contract());
-        assert_eq!(
-            descriptor.capability_ids,
-            REMOTE_INGRESS_CAPABILITY_IDS
-                .into_iter()
-                .map(CapabilityId::from)
-                .collect()
-        );
-        assert_eq!(
-            descriptor.operations,
-            BTreeSet::from([
-                RemoteOperation::Open,
-                RemoteOperation::Turn,
-                RemoteOperation::Observe,
-                RemoteOperation::Cancel,
-            ])
-        );
-        assert_eq!(
-            descriptor.binding_fields,
-            BTreeSet::from([
-                "agent_binding".to_owned(),
-                "name".to_owned(),
-                "owner_user_id".to_owned(),
-                "remote_binding_id".to_owned(),
-            ])
-        );
-        assert_eq!(descriptor.typed_command_ports.len(), 4);
-        for operation in [
-            RemoteOperation::Open,
-            RemoteOperation::Turn,
-            RemoteOperation::Observe,
-            RemoteOperation::Cancel,
-        ] {
-            assert!(descriptor.supports_operation(operation));
-            assert!(descriptor.port_for_operation(operation).is_some());
-        }
-        assert!(descriptor
-            .forbidden_binding_fields
-            .iter()
-            .all(|field| !descriptor.binding_fields.contains(field)));
-        let mutations: [fn(&mut RemoteTransportDescriptor); 6] = [
-            |value| value.transport_port.version = "2.0.0".into(),
-            |value| value.admission_port.version = "2.0.0".into(),
-            |value| value.drain_port.version = "2.0.0".into(),
-            |value| value.typed_command_ports[0].port.version = "2.0.0".into(),
-            |value| value.typed_command_ports[0].command_schema = "schema://wrong/command".into(),
-            |value| value.typed_command_ports[0].receipt_schema = "schema://wrong/receipt".into(),
-        ];
-        for mutate in mutations {
-            let mut changed = descriptor.clone();
-            mutate(&mut changed);
-            assert!(
-                !changed.is_exact_contract(),
-                "changed port contract must be rejected"
-            );
-        }
-        let mut reordered = descriptor;
-        reordered.typed_command_ports.reverse();
+    fn platform_controllers_and_remote_transports_are_not_agent_grants() {
+        let remote = remote_ingress_registration().expect("remote transport registration");
         assert!(
-            reordered.is_exact_contract(),
-            "port order is not part of the contract"
-        );
-    }
-
-    #[test]
-    fn action_mapping_is_one_to_one_and_remote_is_not_an_action() {
-        let expected = [
-            (
-                AGENT_DELEGATE,
-                AGENT_DELEGATE_ACTION,
-                Wave5OwnerDomain::AgentExecution,
-            ),
-            (
-                AGENT_FORK,
-                AGENT_FORK_ACTION,
-                Wave5OwnerDomain::AgentExecution,
-            ),
-            (
-                AGENT_EXECUTION_PLAN,
-                AGENT_EXECUTION_PLAN_ACTION,
-                Wave5OwnerDomain::AgentExecution,
-            ),
-            (
-                AGENT_EXECUTION_STEER,
-                AGENT_EXECUTION_STEER_ACTION,
-                Wave5OwnerDomain::AgentExecution,
-            ),
-            (
-                AGENT_EXECUTION_OBSERVE,
-                AGENT_EXECUTION_OBSERVE_ACTION,
-                Wave5OwnerDomain::AgentExecution,
-            ),
-            (SCHEDULE_STORE, SCHEDULE_STORE_ACTION, Wave5OwnerDomain::Schedule),
-            (
-                REQUIREMENTS_READ,
-                REQUIREMENTS_READ_ACTION,
-                Wave5OwnerDomain::Requirements,
-            ),
-            (
-                REQUIREMENTS_WRITE,
-                REQUIREMENTS_WRITE_ACTION,
-                Wave5OwnerDomain::Requirements,
-            ),
-            (
-                REQUIREMENTS_STATUS,
-                REQUIREMENTS_STATUS_ACTION,
-                Wave5OwnerDomain::Requirements,
-            ),
-            (
-                REQUIREMENTS_CLAIM,
-                REQUIREMENTS_CLAIM_ACTION,
-                Wave5OwnerDomain::Requirements,
-            ),
-        ];
-
-        for (capability_id, action, owner_domain) in expected {
-            let operation = operation_from_input(
-                &CapabilityId::from(capability_id),
-                StrictJsonValue(serde_json::json!({})),
-            )
-            .expect("action capability must map to a typed operation");
-            assert_eq!(operation.capability_id().as_ref(), capability_id);
-            assert_eq!(operation.action_id().as_ref(), action);
-            assert_eq!(operation.owner_domain(), owner_domain);
-            let error = operation_from_input(
-                &CapabilityId::from(capability_id),
-                StrictJsonValue(serde_json::json!([])),
-            )
-            .expect_err("direct operation conversion must reject non-object input");
-            assert_eq!(error.canonical_code().as_ref(), WAVE5_INVALID_REQUEST);
-        }
-        for capability_id in REMOTE_INGRESS_CAPABILITY_IDS {
-            assert!(operation_from_input(
-                &CapabilityId::from(capability_id),
-                StrictJsonValue(serde_json::json!({})),
-            )
-            .is_err());
-        }
-    }
-
-    #[test]
-    fn admission_and_drain_descriptors_match_the_frozen_contracts() {
-        let admission = remote_admission_descriptor();
-        assert!(admission.ordering.validate_exact_contract());
-        assert_eq!(
-            admission.rejected_after_fence_code.as_ref(),
-            REMOTE_AUTH_REQUIRED
-        );
-        assert_eq!(admission.binding_mutation_count, 0);
-        assert_eq!(admission.session_mutation_count, 0);
-        assert_eq!(admission.effect_replay_count, 0);
-        assert!(admission.replacement_requires_same_owner);
-        assert!(admission.replacement_requires_explicit_session_id);
-        assert!(!admission.implicit_lookup_allowed);
-        assert_eq!(
-            admission.request_operations,
-            BTreeSet::from([
-                RemoteOperation::Open,
-                RemoteOperation::Turn,
-                RemoteOperation::Observe,
-                RemoteOperation::Cancel,
-            ])
-        );
-        assert_eq!(
-            admission.auth_mutations,
-            BTreeSet::from([RemoteAuthMutation::Rotate, RemoteAuthMutation::Revoke])
-        );
-        assert!(admission
-            .forbidden_auth_state
-            .iter()
-            .all(|field| !field.is_empty()));
-
-        let drain = remote_drain_descriptor();
-        assert!(drain.is_exact_contract());
-        assert_eq!(drain.sequences.sequences.len(), 2);
-        assert!(drain.sequences.sequences.iter().all(|sequence| {
-            sequence.outstanding_after.is_exact_zero()
-        }));
-    }
-
-    #[test]
-    fn registrations_materialize_and_export_only_action_handlers() {
-        let registry = nomifun_agent_kernel::KernelRegistry::new(
-            nomifun_agent_kernel::MaterializationPolicy::stable(VERSION),
-            Arc::new(nomifun_agent_kernel::InMemoryPluginStatePersistence::new()),
-        )
-        .expect("state persistence should initialize");
-        let materialized = registry
-            .replace_all(materializable_registrations(unconfigured_host_port()))
-            .expect("Wave 5 metadata should materialize");
-
-        assert_eq!(materialized.packages.len(), PACKAGE_IDS.len() + 1);
-        assert_eq!(materialized.capabilities.len(), TARGET_CAPABILITY_IDS.len());
-        for registration in registrations().expect("registrations should rebuild") {
-            let declared_actions = registration
+            remote
                 .metadata
                 .manifest
                 .payload
                 .contributions
                 .capabilities
-                .iter()
-                .filter(|capability| !capability.contributions.actions.is_empty())
-                .map(|capability| capability.id.clone())
-                .collect::<BTreeSet<_>>();
-            assert_eq!(registration.handler_ids(), declared_actions);
-        }
+                .is_empty()
+        );
+        assert!(remote_transport_descriptor().is_exact_contract());
+        assert!(remote_admission_descriptor().is_exact_contract());
+        assert!(remote_drain_descriptor().is_exact_contract());
     }
 
-    #[tokio::test]
-    async fn unconfigured_action_host_fails_closed_without_a_synthetic_receipt() {
-        let registry = KernelRegistry::new(
-            MaterializationPolicy::stable(VERSION),
-            Arc::new(InMemoryPluginStatePersistence::new()),
-        )
-        .expect("state persistence should initialize");
-        registry
-            .replace_all(materializable_registrations(unconfigured_host_port()))
-            .expect("Wave 5 metadata should materialize");
-        let owner = principal();
-        let (snapshot, active) = compiled_schedule(&registry, &owner);
-        let result = registry
-            .invoke(
-                &snapshot,
-                &active,
-                CapabilityInvocationRequest {
-                    principal: owner.clone(),
-                    session_owner: owner,
-                    agent_session_id: AgentSessionId::from("wave5-test-session"),
-                    turn_id: OperationId::from("wave5-test-turn"),
-                    operation_id: OperationId::from("wave5-test-operation"),
-                    idempotency_key: IdempotencyKey::from("wave5-test-idempotency"),
-                    correlation_id: CorrelationId::from("wave5-test-correlation"),
-                    resolved_snapshot_ref: snapshot.snapshot_ref().clone(),
-                    active_set_generation: active.generation,
-                    capability_id: CapabilityId::from(SCHEDULE_STORE),
-                    action_id: ActionId::from(SCHEDULE_STORE_ACTION),
-                    resource_binding_ids: BTreeSet::new(),
-                    state_scope_key: nomifun_agent_contracts::ScopeKey::from(
-                        "session:wave5-test",
-                    ),
-                    input: StrictJsonValue(serde_json::json!({})),
-                },
-            )
-            .await
-            .expect_err("unconfigured Wave 5 actions must fail closed");
-        assert_eq!(result.canonical_code().as_ref(), WAVE5_HOST_PORT_UNAVAILABLE);
-        assert!(result.capability_execution_failure().is_some());
-        assert!(!result.to_string().contains("accepted"));
-    }
-
-    #[tokio::test]
-    async fn action_host_receives_the_kernel_authorized_state_handle() {
-        let registry = KernelRegistry::new(
-            MaterializationPolicy::stable(VERSION),
-            Arc::new(InMemoryPluginStatePersistence::new()),
-        )
-        .expect("state persistence should initialize");
-        registry
-            .replace_all(materializable_registrations(Arc::new(StateBackedHost)))
-            .expect("Wave 5 metadata should materialize");
-        let owner = principal();
-        let (snapshot, active) = compiled_schedule(&registry, &owner);
-        let result = registry
-            .invoke(
-                &snapshot,
-                &active,
-                CapabilityInvocationRequest {
-                    principal: owner.clone(),
-                    session_owner: owner,
-                    agent_session_id: AgentSessionId::from("wave5-state-session"),
-                    turn_id: OperationId::from("wave5-state-turn"),
-                    operation_id: OperationId::from("wave5-state-operation"),
-                    idempotency_key: IdempotencyKey::from("wave5-state-idempotency"),
-                    correlation_id: CorrelationId::from("wave5-state-correlation"),
-                    resolved_snapshot_ref: snapshot.snapshot_ref().clone(),
-                    active_set_generation: active.generation,
-                    capability_id: CapabilityId::from(SCHEDULE_STORE),
-                    action_id: ActionId::from(SCHEDULE_STORE_ACTION),
-                    resource_binding_ids: BTreeSet::new(),
-                    state_scope_key: nomifun_agent_contracts::ScopeKey::from(
-                        "session:wave5-state",
-                    ),
-                    input: StrictJsonValue(serde_json::json!({})),
-                },
-            )
-            .await
-            .expect("state-backed action host should receive the request");
-        assert_eq!(result.0["package_id"], serde_json::json!("nomifun.autowork-scheduler"));
-        assert_eq!(
-            result.0["mount_id"],
-            serde_json::json!("nomifun-autowork-scheduler")
-        );
-        assert_eq!(
-            result.0["state_scope"],
-            serde_json::json!("session:wave5-state")
-        );
-        assert_eq!(result.0["state_key"], serde_json::json!("wave5-test-state"));
-        assert_eq!(result.0["present"], serde_json::json!(false));
-        assert_eq!(
-            result.0["service_ids"],
-            serde_json::json!(["service.agent-session-command.v1"])
-        );
-        assert_eq!(
-            result.0["service_provider_mounts"],
-            serde_json::json!(["platform-agent-core"])
-        );
-    }
-
-    #[tokio::test]
-    async fn action_handler_preserves_typed_errors_and_rejects_invalid_boundaries() {
-        use serde_json::json;
-
-        let diagnostic = "internal owner diagnostic";
-        let operation_id = "wave5-error-operation";
-        for (input, response, operation_id, expected_code) in [
-            (json!(null), Ok(json!({})), operation_id, WAVE5_INVALID_REQUEST),
-            (json!({}), Ok(json!({})), " ", WAVE5_INVALID_REQUEST),
-            (json!({}), Ok(json!(false)), operation_id, WAVE5_INVALID_RESPONSE),
+    #[test]
+    fn exact_actions_map_to_one_typed_owner_operation() {
+        let cases = [
             (
-                json!({}),
-                Err(Wave5HostPortError::new(REMOTE_AUTH_REQUIRED, diagnostic)),
-                operation_id,
-                REMOTE_AUTH_REQUIRED,
+                AGENT_COLLABORATION_MODULE_ID,
+                AGENT_DELEGATE_ACTION_ID,
+                Wave5OwnerDomain::AgentExecution,
             ),
             (
-                json!({}),
-                Err(Wave5HostPortError::new(
-                    nomifun_agent_contracts::RESOURCE_OWNER_MISMATCH,
-                    diagnostic,
-                )),
-                operation_id,
-                nomifun_agent_contracts::RESOURCE_OWNER_MISMATCH,
+                AGENT_COLLABORATION_MODULE_ID,
+                AGENT_FORK_ACTION_ID,
+                Wave5OwnerDomain::AgentExecution,
             ),
-        ] {
-            let owner_error = response.is_err();
-            let registry = KernelRegistry::new(
-                MaterializationPolicy::stable(VERSION),
-                Arc::new(InMemoryPluginStatePersistence::new()),
+            (
+                AUTOMATION_SCHEDULE_MODULE_ID,
+                SCHEDULE_LIST_ACTION_ID,
+                Wave5OwnerDomain::Schedule,
+            ),
+            (
+                AUTOMATION_SCHEDULE_MODULE_ID,
+                SCHEDULE_CREATE_ACTION_ID,
+                Wave5OwnerDomain::Schedule,
+            ),
+            (
+                AUTOMATION_SCHEDULE_MODULE_ID,
+                SCHEDULE_UPDATE_ACTION_ID,
+                Wave5OwnerDomain::Schedule,
+            ),
+            (
+                AUTOMATION_SCHEDULE_MODULE_ID,
+                SCHEDULE_DELETE_ACTION_ID,
+                Wave5OwnerDomain::Schedule,
+            ),
+            (
+                REQUIREMENTS_MODULE_ID,
+                REQUIREMENTS_READ_ACTION_ID,
+                Wave5OwnerDomain::Requirements,
+            ),
+            (
+                REQUIREMENTS_MODULE_ID,
+                REQUIREMENTS_WRITE_ACTION_ID,
+                Wave5OwnerDomain::Requirements,
+            ),
+            (
+                REQUIREMENTS_MODULE_ID,
+                REQUIREMENTS_STATUS_ACTION_ID,
+                Wave5OwnerDomain::Requirements,
+            ),
+            (
+                REQUIREMENTS_MODULE_ID,
+                REQUIREMENTS_CLAIM_ACTION_ID,
+                Wave5OwnerDomain::Requirements,
+            ),
+        ];
+        for (module, action, owner) in cases {
+            let operation = operation_from_input(
+                &CapabilityId::from(module),
+                &ActionId::from(action),
+                empty_object(),
             )
-            .expect("state persistence should initialize");
-            registry
-                .replace_all(materializable_registrations(Arc::new(ResultHost(
-                    response.map(StrictJsonValue),
-                ))))
-                .expect("Wave 5 metadata should materialize");
-            let owner = principal();
-            let (snapshot, active) = compiled_schedule(&registry, &owner);
-            let result = registry
-                .invoke(
-                    &snapshot,
-                    &active,
-                    CapabilityInvocationRequest {
-                        principal: owner.clone(),
-                        session_owner: owner,
-                        agent_session_id: AgentSessionId::from("wave5-error-session"),
-                        turn_id: OperationId::from("wave5-error-turn"),
-                        operation_id: OperationId::from(operation_id),
-                        idempotency_key: IdempotencyKey::from("wave5-error-idempotency"),
-                        correlation_id: CorrelationId::from("wave5-error-correlation"),
-                        resolved_snapshot_ref: snapshot.snapshot_ref().clone(),
-                        active_set_generation: active.generation,
-                        capability_id: CapabilityId::from(SCHEDULE_STORE),
-                        action_id: ActionId::from(SCHEDULE_STORE_ACTION),
-                        resource_binding_ids: BTreeSet::new(),
-                        state_scope_key: ScopeKey::from("session:wave5-error"),
-                        input: StrictJsonValue(input),
-                    },
-                )
-                .await
-                .expect_err("invalid boundary or owner error must reject");
-            assert_eq!(result.canonical_code().as_ref(), expected_code);
-            let failure = result.capability_execution_failure().expect("typed failure");
-            if owner_error {
-                assert_eq!(failure.message, diagnostic);
-            }
-            assert!(!result.to_string().contains(diagnostic));
+            .expect("known exact action");
+            assert_eq!(operation.capability_id(), CapabilityId::from(module));
+            assert_eq!(operation.action_id(), ActionId::from(action));
+            assert_eq!(operation.owner_domain(), owner);
         }
+
+        assert!(
+            operation_from_input(
+                &CapabilityId::from(REQUIREMENTS_MODULE_ID),
+                &ActionId::from(AGENT_DELEGATE_ACTION_ID),
+                empty_object(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn action_resources_are_exact_and_do_not_widen_siblings() {
+        assert_eq!(
+            action_spec(
+                AUTOMATION_SCHEDULE_MODULE_ID,
+                SCHEDULE_LIST_ACTION_ID,
+            )
+            .unwrap()
+            .requirements[0]
+            .operation,
+            "read"
+        );
+        assert_eq!(
+            action_spec(
+                AUTOMATION_SCHEDULE_MODULE_ID,
+                SCHEDULE_DELETE_ACTION_ID,
+            )
+            .unwrap()
+            .requirements[0]
+            .operation,
+            "delete"
+        );
+        assert!(
+            action_spec(AGENT_COLLABORATION_MODULE_ID, AGENT_FORK_ACTION_ID)
+                .unwrap()
+                .requirements
+                .is_empty()
+        );
+        assert!(
+            action_spec(AGENT_COLLABORATION_MODULE_ID, AGENT_DELEGATE_ACTION_ID)
+                .unwrap()
+                .requirements
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn schedule_action_schemas_are_closed_and_owner_typed() {
+        let list = action_input_schema_for(SCHEDULE_LIST_ACTION_ID).unwrap();
+        assert_eq!(list.0["additionalProperties"], false);
+        assert_eq!(list.0["required"], serde_json::json!([]));
+
+        let create = action_input_schema_for(SCHEDULE_CREATE_ACTION_ID).unwrap();
+        assert_eq!(create.0["additionalProperties"], false);
+        assert_eq!(
+            create.0["required"],
+            serde_json::json!(["name", "schedule", "message"])
+        );
+        let properties = create.0["properties"].as_object().unwrap();
+        assert_eq!(
+            properties.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "message".to_owned(),
+                "name".to_owned(),
+                "schedule".to_owned(),
+                "schedule_description".to_owned(),
+            ])
+        );
+        for forbidden in ["provider_id", "model", "session_id", "timer"] {
+            assert!(!properties.contains_key(forbidden));
+        }
+
+        let update = action_input_schema_for(SCHEDULE_UPDATE_ACTION_ID).unwrap();
+        assert!(update.0["properties"].get("cron_job_id").is_some());
+        let delete = action_input_schema_for(SCHEDULE_DELETE_ACTION_ID).unwrap();
+        assert_eq!(
+            delete.0["required"],
+            serde_json::json!(["cron_job_id"])
+        );
     }
 }

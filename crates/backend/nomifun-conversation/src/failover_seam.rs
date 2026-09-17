@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use nomifun_api_types::{ExecutionModelPool, ExecutionModelRef};
 use nomifun_common::{
-    AgentKillReason, AgentType, AppError, ConversationStatus, ErrorChain, ProviderWithModel, now_ms,
+    AgentKillReason, AgentType, ErrorChain, ProviderWithModel, now_ms,
 };
 use nomifun_db::ConversationRowUpdate;
 use nomifun_ai_agent::{AgentRuntimeHandle, AgentRuntimeRegistry};
@@ -25,7 +25,7 @@ use crate::convert::string_to_enum;
 use crate::model_failover::{
     get_global_failover_config, next_failover_model, read_conversation_failover_override,
 };
-use crate::service::{ConversationService, parse_conv_id};
+use crate::service::ConversationService;
 use crate::stream_relay::RelayOutcome;
 use crate::runtime_options::provider_model_from_conversation_row;
 
@@ -685,109 +685,6 @@ impl ConversationService {
         .await
     }
 
-    /// Validate an IDMM failover observation without taking turn ownership.
-    ///
-    /// Only the send-loop that owns [`crate::runtime_state::AgentTurnHandle`]
-    /// may switch models and rebuild a runtime. An out-of-band IDMM probe can
-    /// observe a live turn, but it must never turn that observation into a new
-    /// execution. In particular, a stale wake-up for a Finished conversation
-    /// must fail closed instead of rebuilding and sending "Please continue.".
-    ///
-    /// `Ok(false)` means that the observation was current but deliberately not
-    /// acted on. Missing/stale lifecycle authority is reported as `Conflict`.
-    pub async fn idmm_failover_conversation(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
-    ) -> Result<bool, AppError> {
-        let conv_id = parse_conv_id(conversation_id)?;
-        self.ensure_public_mutation_allowed(user_id, conv_id).await?;
-
-        // A preparation-only lease cannot authorize a build or a turn. It only
-        // closes the stale-read window against stop/reset/delete while the
-        // lifecycle snapshots below are checked.
-        let lease = self.begin_public_runtime_preparation(conv_id, user_id)?;
-        let cancellation = lease.cancellation_token();
-        let runtime_state = self.runtime_state();
-        let _preparation_guard = runtime_state
-            .acquire_preparation_gate(conv_id, &cancellation)
-            .await?;
-        lease.ensure_active()?;
-
-        let row = self
-            .conversation_repo()
-            .get(conv_id)
-            .await?
-            .filter(|row| row.user_id == user_id)
-            .ok_or_else(|| {
-                AppError::NotFound(format!("Conversation {conversation_id} not found"))
-            })?;
-        if row.status.as_deref() != Some("running") {
-            return Err(AppError::Conflict(
-                "IDMM failover observation requires a durable Running Conversation".to_owned(),
-            ));
-        }
-
-        let admission = self
-            .conversation_repo()
-            .get_turn_admission_state(user_id, conv_id)
-            .await?;
-        if let Some(operation_id) = admission.active_operation_id.as_deref() {
-            let receipt = self
-                .conversation_repo()
-                .get_delivery_receipt(user_id, conv_id, operation_id)
-                .await?
-                .ok_or_else(|| {
-                    AppError::Conflict(
-                        "IDMM failover observation has no matching durable turn receipt"
-                            .to_owned(),
-                    )
-                })?;
-            if receipt.user_id != user_id
-                || receipt.conversation_id != conv_id
-                || receipt.operation_id != operation_id
-                || receipt.kind != "turn"
-                || receipt.status != "accepted"
-            {
-                return Err(AppError::Conflict(
-                    "IDMM failover observation lost its durable turn receipt authority"
-                        .to_owned(),
-                ));
-            }
-        }
-
-        let active_turn = runtime_state
-            .active_turn_cancellation(conv_id)
-            .ok_or_else(|| {
-                AppError::Conflict(
-                    "IDMM failover observation has no active turn owner".to_owned(),
-                )
-            })?;
-        if active_turn.is_cancelled() || !runtime_registry.has_registered_runtime(conv_id) {
-            return Err(AppError::Conflict(
-                "IDMM failover observation lost its runtime authority".to_owned(),
-            ));
-        }
-
-        let runtime = runtime_registry.get_runtime(conv_id).ok_or_else(|| {
-            AppError::Conflict(
-                "IDMM failover observation requires a live non-quarantined runtime".to_owned(),
-            )
-        })?;
-        if runtime.status() != Some(ConversationStatus::Running) {
-            return Err(AppError::Conflict(
-                "IDMM failover observation requires a Running runtime".to_owned(),
-            ));
-        }
-
-        lease.ensure_active()?;
-        info!(
-            conversation_id,
-            "IDMM failover observation declined; the active send-loop exclusively owns failover"
-        );
-        Ok(false)
-    }
 }
 
 #[cfg(test)]

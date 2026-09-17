@@ -2835,7 +2835,7 @@ fn main() -> std::process::ExitCode {
     // the LAN listener can require login. Only the data dir + log level flow
     // from here; the listeners bind their own ports.
     let mut cli = nomifun_app::cli::Cli::parse_from(["nomifun-desktop"]);
-    cli.data_dir = data_dir;
+    cli.data_dir = data_dir.clone();
     // Opt-in verbose backend logging without a custom build, e.g.
     //   NOMI_LOG_LEVEL=debug            (everything)
     //   NOMI_LOG_LEVEL=info             (default)
@@ -2884,14 +2884,23 @@ fn main() -> std::process::ExitCode {
         .setup(move |app| {
             let app_handle = app.handle().clone();
             #[cfg(windows)]
-            let browser_workspaces = Some(Arc::new(
-                nomifun_browser_platform::workspace::BrowserWorkspaceService::new(Arc::new(
+            let browser_resources = Some(Arc::new(
+                nomifun_browser_platform::workspace::BrowserResourceService::new(Arc::new(
                     browser_surface::host::DesktopBrowserHost::new(app_handle.clone()),
-                )),
+                ))
+                .with_profile_store(
+                    nomifun_browser_platform::runtime::BrowserProfileStore::new(
+                        data_dir.clone(),
+                    )?,
+                ),
             ));
             #[cfg(not(windows))]
-            let browser_workspaces = None;
-            app.manage(browser_workspaces.clone());
+            let browser_resources = None;
+            #[cfg(windows)]
+            let attached_chrome = Some(nomifun_app::AttachedChromeProviderService::new());
+            #[cfg(not(windows))]
+            let attached_chrome = None;
+            app.manage(browser_resources.clone());
             #[cfg(target_os = "macos")]
             app.manage(ExplicitDesktopDataRoot(explicit_desktop_data_root));
             let coordinator = app.state::<Arc<ExitCoordinator>>().inner().clone();
@@ -3000,9 +3009,11 @@ fn main() -> std::process::ExitCode {
                     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                         || -> anyhow::Result<()> {
                             runtime.block_on(async move {
-                                let mut host_services=nomifun_app::DesktopHostServices { browser_workspaces, ..Default::default() };
-                                #[cfg(windows)]
-                                { host_services.system_browser = Some(nomifun_app::system_browser::SystemBrowserService::new()); }
+                                let mut host_services=nomifun_app::DesktopHostServices {
+                                    browser_resources,
+                                    attached_chrome,
+                                    ..Default::default()
+                                };
                                 #[cfg(windows)]
                                 headless_browser_runtime::prepare(&mut host_services).await;
                                 let (server, keep_alive) = match DesktopServer::start_with_outcome(

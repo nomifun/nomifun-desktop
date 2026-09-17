@@ -480,16 +480,8 @@ pub fn registration(spec: PackageSpec) -> Result<PluginRegistration, DomainRegis
 }
 
 fn supported_consumers(capability_id: &str) -> BTreeSet<CapabilityConsumer> {
-    match capability_id {
-        "knowledge.search" => BTreeSet::from([
-            CapabilityConsumer::Agent,
-            CapabilityConsumer::Gateway,
-        ]),
-        "browser.render_content" => {
-            BTreeSet::from([CapabilityConsumer::Knowledge])
-        }
-        _ => BTreeSet::from([CapabilityConsumer::Agent]),
-    }
+    let _ = capability_id;
+    BTreeSet::from([CapabilityConsumer::Agent])
 }
 
 pub fn registrations(
@@ -976,68 +968,12 @@ pub fn check_platform_availability(
 pub fn c7_package_specs() -> Vec<PackageSpec> {
     vec![
         PackageSpec {
-            id: "nomifun.system-browser",
-            display_name: "Nomi System Browser",
-            description: "Operate user-authorized tabs in an explicitly connected system browser.",
-            mount_id: "domain-system-browser",
-            capabilities: &SYSTEM_BROWSER_CAPABILITIES,
-            supported_surfaces: &["desktop"],
-        },
-        PackageSpec {
-            id: "nomifun.agent-execution",
-            display_name: "Agent Execution",
-            description: "Coordinate bounded AgentSession execution.",
-            mount_id: "domain-agent-execution",
-            capabilities: &AGENT_EXECUTION_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
-            id: "nomifun.ssh",
-            display_name: "SSH",
-            description: "Use explicitly bound remote SSH resources.",
-            mount_id: "domain-ssh",
-            capabilities: &SSH_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
-            id: "nomifun.browser",
-            display_name: "Browser",
-            description: "Use the process-wide managed browser resource.",
-            mount_id: "domain-browser",
-            capabilities: &BROWSER_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
             id: "nomifun.computer-a11y",
             display_name: "Computer Accessibility",
             description: "Use the process-wide desktop accessibility resource.",
             mount_id: "domain-computer-a11y",
             capabilities: &COMPUTER_CAPABILITIES,
             supported_surfaces: &["desktop"],
-        },
-        PackageSpec {
-            id: "nomifun.requirements",
-            display_name: "Requirements",
-            description: "Read and update owned requirements.",
-            mount_id: "domain-requirements",
-            capabilities: &REQUIREMENT_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
-            id: "nomifun.autowork-scheduler",
-            display_name: "AutoWork Scheduler",
-            description: "Schedule AgentSession triggers with durable bindings.",
-            mount_id: "domain-autowork-scheduler",
-            capabilities: &AUTOWORK_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
-            id: "nomifun.idmm",
-            display_name: "IDMM",
-            description: "Observe and steer bounded AgentSession turns.",
-            mount_id: "domain-idmm",
-            capabilities: &IDMM_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
         },
         PackageSpec {
             id: "nomifun.robot",
@@ -1066,62 +1002,13 @@ pub fn c7_package_specs() -> Vec<PackageSpec> {
     ]
 }
 
-const PROCESS_SESSION: &[&str] = &["process_session"];
-const SSH_HOST: &[&str] = &["ssh_host"];
 const COMPUTER: &[&str] = &["computer"];
 const ROBOT: &[&str] = &["robot"];
-const SYSTEM_BROWSER_CAPABILITIES: [CapabilitySpec; 1] = [
-    CapabilitySpec::tool("nomi_system_browser",EffectClass::ExternalTransmit,&[]),
-];
-const AGENT_EXECUTION_CAPABILITIES: [CapabilitySpec; 5] = [
-    CapabilitySpec::tool("agent.delegate", EffectClass::ExecuteLocal, PROCESS_SESSION),
-    CapabilitySpec::tool("agent.fork", EffectClass::WriteDurable, &[]),
-    CapabilitySpec::tool("agent.execution.plan", EffectClass::WriteDurable, &[]),
-    CapabilitySpec::tool("agent.execution.steer", EffectClass::WriteDurable, PROCESS_SESSION),
-    CapabilitySpec::tool("agent.execution.observe", EffectClass::ReadLocal, PROCESS_SESSION),
-];
-const SSH_CAPABILITIES: [CapabilitySpec; 5] = [
-    CapabilitySpec::resource_provider("ssh.connect", SSH_HOST),
-    CapabilitySpec::tool("ssh.fs.read", EffectClass::ReadSensitive, SSH_HOST),
-    CapabilitySpec::tool("ssh.fs.write", EffectClass::WriteDurable, SSH_HOST),
-    CapabilitySpec::tool("ssh.exec", EffectClass::ExecuteLocal, SSH_HOST),
-    CapabilitySpec::tool("ssh.sudo", EffectClass::ExecuteLocal, SSH_HOST),
-];
-const BROWSER_CAPABILITIES: [CapabilitySpec; 7] = [
-    CapabilitySpec::context("browser.observe"),
-    CapabilitySpec::tool("browser.navigate", EffectClass::ExternalTransmit, &[]),
-    CapabilitySpec::tool("browser.act", EffectClass::WriteReversible, &[]),
-    CapabilitySpec::tool(
-        "browser.render_content",
-        EffectClass::ExternalTransmit,
-        &[],
-    ),
-    CapabilitySpec::tool("browser.download", EffectClass::WriteDurable, &[]),
-    CapabilitySpec::tool("browser.upload", EffectClass::ExternalTransmit, &[]),
-    CapabilitySpec::tool("browser.evaluate", EffectClass::ExecuteLocal, &[]),
-];
 const COMPUTER_CAPABILITIES: [CapabilitySpec; 4] = [
     CapabilitySpec::context("computer.observe"),
     CapabilitySpec::tool("computer.input", EffectClass::Physical, COMPUTER),
     CapabilitySpec::tool("computer.launch", EffectClass::ExecuteLocal, COMPUTER),
     CapabilitySpec::context("a11y.observe"),
-];
-const REQUIREMENT_CAPABILITIES: [CapabilitySpec; 4] = [
-    CapabilitySpec::tool("requirements.read", EffectClass::ReadSensitive, &[]),
-    CapabilitySpec::tool("requirements.write", EffectClass::WriteDurable, &[]),
-    CapabilitySpec::tool("requirements.status", EffectClass::ReadLocal, &[]),
-    CapabilitySpec::tool("requirements.claim", EffectClass::WriteDurable, &[]),
-];
-const AUTOWORK_CAPABILITIES: [CapabilitySpec; 4] = [
-    CapabilitySpec::scheduler("autowork.runner"),
-    CapabilitySpec::tool("schedule.store", EffectClass::WriteDurable, &[]),
-    CapabilitySpec::scheduler("schedule.timer"),
-    CapabilitySpec::scheduler("schedule.agent_trigger"),
-];
-const IDMM_CAPABILITIES: [CapabilitySpec; 3] = [
-    CapabilitySpec::middleware("idmm.observe"),
-    CapabilitySpec::middleware("idmm.intervene"),
-    CapabilitySpec::middleware("idmm.fallback_policy"),
 ];
 const ROBOT_CAPABILITIES: [CapabilitySpec; 6] = [
     CapabilitySpec::resource_provider("robot.link", ROBOT),
@@ -1210,30 +1097,6 @@ mod tests {
     }
 
     #[test]
-    fn capability_manifest_separates_host_surfaces_from_consumer_support() {
-        let registrations = registrations(c7_package_specs()).unwrap();
-        let capabilities = registrations
-            .iter()
-            .flat_map(|registration| {
-                registration
-                    .metadata
-                    .manifest
-                    .payload
-                    .contributions
-                    .capabilities
-                    .iter()
-            })
-            .collect::<Vec<_>>();
-        let browser_render = capabilities
-            .iter()
-            .find(|capability| capability.id.as_ref() == "browser.render_content")
-            .expect("browser.render_content manifest");
-        assert!(browser_render.host_surfaces().contains("desktop"));
-        assert!(!browser_render.supports_consumer(CapabilityConsumer::Agent));
-        assert!(browser_render.supports_consumer(CapabilityConsumer::Knowledge));
-    }
-
-    #[test]
     fn host_constraints_are_typed_and_fail_closed() {
         let capability = CapabilitySpec::tool(
             "support.windows",
@@ -1282,30 +1145,6 @@ mod tests {
     #[test]
     fn canonical_platform_inventory_matches_release_boundaries() {
         let specs = c7_package_specs();
-        let browser = specs
-            .iter()
-            .find(|spec| spec.id == "nomifun.browser")
-            .unwrap();
-        let browser_capability = browser
-            .capabilities
-            .iter()
-            .find(|capability| capability.id == "browser.navigate")
-            .unwrap();
-        assert!(capability_available_on_host(
-            "x86_64-unknown-linux-gnu",
-            "desktop",
-            browser_capability,
-        ));
-        // Browser is source-neutral at the canonical Capability layer.
-        // First-party headless availability is a Provider concern.
-        assert!(capability_available_on_host(
-            "x86_64-unknown-linux-gnu",
-            "headless",
-            browser_capability,
-        ));
-        assert!(browser_capability.host_targets.is_empty());
-        assert!(browser_capability.host_surfaces.is_empty());
-
         let computer = specs
             .iter()
             .find(|spec| spec.id == "nomifun.computer-a11y")
@@ -1329,9 +1168,11 @@ mod tests {
     }
 
     #[test]
-    fn c7_inventory_has_unique_packages_and_capabilities() {
-        let registrations = registrations(c7_package_specs()).unwrap();
-        assert_eq!(registrations.len(), 11);
+    fn support_inventory_has_unique_packages_and_capabilities() {
+        let specs = c7_package_specs();
+        let expected = specs.len();
+        let registrations = registrations(specs).unwrap();
+        assert_eq!(registrations.len(), expected);
         validate_inventory(&registrations).unwrap();
         let capability_ids = registrations
             .iter()

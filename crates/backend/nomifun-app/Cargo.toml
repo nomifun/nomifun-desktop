@@ -85,10 +85,6 @@ name = "cron_e2e"
 path = "tests/cron_e2e.rs"
 
 [[test]]
-name = "idmm_e2e"
-path = "tests/idmm_e2e.rs"
-
-[[test]]
 name = "message_e2e"
 path = "tests/message_e2e.rs"
 
@@ -223,7 +219,6 @@ nomifun-skill-library.workspace = true
 nomifun-channel.workspace = true
 nomifun-cron.workspace = true
 nomifun-requirement.workspace = true
-nomifun-idmm.workspace = true
 nomifun-knowledge.workspace = true
 nomifun-agent-execution.workspace = true
 nomifun-companion.workspace = true
@@ -320,16 +315,6 @@ required-features = ["browser-use"]
 name = "browser_workspace"
 path = "tests/browser_workspace.rs"
 required-features = ["browser-use"]
-
-[[test]]
-name = "system_browser"
-path = "tests/system_browser.rs"
-required-features = ["browser-use"]
-
-[[test]]
-name = "system_browser_agent"
-path = "tests/system_browser_agent.rs"
-required-features = ["browser-conformance"]
 
 [[test]]
 name = "local_websearch_agent"

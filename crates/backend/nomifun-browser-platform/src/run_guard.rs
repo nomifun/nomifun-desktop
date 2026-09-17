@@ -1,4 +1,4 @@
-//! Conversation-scoped browser input admission, driven by authoritative Agent runs.
+//! AgentSession Browser Resource input admission, driven by authoritative Agent runs.
 //!
 //! The host owns this coordinator; no renderer command may start or finish a run.
 //! Dropping a caller's future never releases native input: operations and lifecycle
@@ -63,7 +63,7 @@ struct Run {
     cancelled: CancellationToken,
 }
 
-/// Unforgeable, in-process authority for one run on one Conversation. Even if a
+/// Unforgeable, in-process authority for one run on one Browser Resource. Even if a
 /// caller reuses an external run ID, it cannot reuse a completed run's authority.
 #[derive(Clone)]
 pub struct BrowserRunGuard(Arc<RunAuthority>);

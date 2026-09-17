@@ -2513,18 +2513,15 @@ async fn resolve_mount_data_dir(
     Ok(resolved)
 }
 
-/// A bundled system-browser declaration is usable only with its exact native
-/// host binding. Generic builtin/dynamic Tool approval cannot grant it.
 fn agent_executor_available(id: &str, native: bool, builtin: bool, dynamic: bool, runtime: bool) -> bool {
-    if id == "nomi_system_browser" { native } else { native || builtin || (dynamic && runtime) }
+    let _ = id;
+    native || builtin || (dynamic && runtime)
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn system_browser_cannot_borrow_generic_builtin_or_dynamic_availability() {
-        assert!(!super::agent_executor_available("nomi_system_browser", false, true, true, true));
-        assert!(super::agent_executor_available("nomi_system_browser", true, false, false, false));
+    fn executor_availability_requires_one_real_execution_owner() {
         assert!(super::agent_executor_available("fs.read", false, true, false, false));
         assert!(super::agent_executor_available("plugin.tool", false, false, true, true));
         assert!(!super::agent_executor_available("plugin.tool", false, false, true, false));

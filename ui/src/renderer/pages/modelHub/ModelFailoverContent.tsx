@@ -29,7 +29,7 @@ const DEFAULT_CONFIG: IModelFailoverConfig = {
  * provider+model candidates the conversation send-loop falls back through when a
  * NOMI session hits a pre-response provider fault. Persisted as one JSON blob
  * under the `agent.model_failover` client preference, via the same
- * idmm-settings-style channel as the IDMM defaults tab.
+ * settings-style channel as the retired global defaults tab.
  */
 const ModelFailoverContent: React.FC = () => {
   const { t } = useTranslation();

@@ -11,7 +11,9 @@ use nomifun_db::{
     init_database_memory,
 };
 use nomifun_requirement::CompletionNotifier;
-use nomifun_webhook::{CompletionNotifierImpl, WebhookSender};
+use nomifun_webhook::{
+    CompletionNotifierImpl, NotificationDeliveryStatus, WebhookSender,
+};
 
 #[derive(Default)]
 struct RecordingSender {
@@ -117,9 +119,17 @@ fn notifier(ctx: &Ctx) -> CompletionNotifierImpl {
 async fn notifies_bound_enabled_webhook_with_template_fields() {
     let ctx = ctx().await;
     let wh_id = add_webhook(&ctx, true).await;
-    bind_tag(&ctx, "alpha", Some(wh_id)).await;
+    bind_tag(&ctx, "alpha", Some(wh_id.clone())).await;
 
-    notifier(&ctx).notify_completion(&requirement("alpha")).await;
+    let status = notifier(&ctx)
+        .notify_completion_with_status(&requirement("alpha"))
+        .await;
+    assert_eq!(
+        status,
+        NotificationDeliveryStatus::Delivered {
+            webhook_id: wh_id
+        }
+    );
 
     let calls = ctx.sender.calls.lock().unwrap();
     assert_eq!(calls.len(), 1, "bound + enabled → one send");
@@ -156,7 +166,14 @@ async fn needs_review_is_not_reported_as_completed_and_respects_event_filter() {
     ctx.tags.upsert("alpha", &TagSettingPatch {
         notify_events: Some("done,failed".into()), ..Default::default()
     }).await.unwrap();
-    notifier(&ctx).notify_completion(&row).await;
+    let status = notifier(&ctx).notify_completion_with_status(&row).await;
+    assert!(matches!(
+        status,
+        NotificationDeliveryStatus::SkippedFiltered {
+            event,
+            ..
+        } if event == "needs_review"
+    ));
     assert_eq!(ctx.sender.calls.lock().unwrap().len(), 1, "excluded events must not send");
 }
 
@@ -165,7 +182,10 @@ async fn skips_when_tag_unbound() {
     let ctx = ctx().await;
     add_webhook(&ctx, true).await;
     // no bind_tag → tag "alpha" has no setting
-    notifier(&ctx).notify_completion(&requirement("alpha")).await;
+    let status = notifier(&ctx)
+        .notify_completion_with_status(&requirement("alpha"))
+        .await;
+    assert_eq!(status, NotificationDeliveryStatus::SkippedUnbound);
     assert!(ctx.sender.calls.lock().unwrap().is_empty());
 }
 
@@ -173,8 +193,14 @@ async fn skips_when_tag_unbound() {
 async fn skips_when_webhook_disabled() {
     let ctx = ctx().await;
     let wh_id = add_webhook(&ctx, false).await; // disabled
-    bind_tag(&ctx, "alpha", Some(wh_id)).await;
-    notifier(&ctx).notify_completion(&requirement("alpha")).await;
+    bind_tag(&ctx, "alpha", Some(wh_id.clone())).await;
+    let status = notifier(&ctx)
+        .notify_completion_with_status(&requirement("alpha"))
+        .await;
+    assert_eq!(
+        status,
+        NotificationDeliveryStatus::SkippedDisabled { webhook_id: wh_id }
+    );
     assert!(ctx.sender.calls.lock().unwrap().is_empty());
 }
 
@@ -182,6 +208,9 @@ async fn skips_when_webhook_disabled() {
 async fn skips_when_binding_has_no_webhook() {
     let ctx = ctx().await;
     bind_tag(&ctx, "alpha", None).await; // setting exists but no webhook bound
-    notifier(&ctx).notify_completion(&requirement("alpha")).await;
+    let status = notifier(&ctx)
+        .notify_completion_with_status(&requirement("alpha"))
+        .await;
+    assert_eq!(status, NotificationDeliveryStatus::SkippedUnbound);
     assert!(ctx.sender.calls.lock().unwrap().is_empty());
 }

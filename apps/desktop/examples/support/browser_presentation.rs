@@ -1,5 +1,5 @@
 //! Real native presentation notifications across human and Agent lifetimes.
-use nomifun_browser_platform::{runtime::*, workspace::BrowserWorkspaceService};
+use nomifun_browser_platform::{runtime::*, workspace::BrowserResourceService};
 use std::sync::{Arc, Mutex};
 use tauri::{Listener, Manager};
 use tokio_util::sync::CancellationToken;
@@ -42,13 +42,15 @@ pub(super) async fn verify(app: &tauri::AppHandle, url: &str) -> Result<serde_js
         Ok(())
     };
     let service =
-        BrowserWorkspaceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
-    let key = BrowserWorkspaceKey {
-        user_id: "presentation-fixture".into(),
-        conversation_id: "automatic-native".into(),
-    };
+        BrowserResourceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
+    let authority = super::browser_resource_fixture::authority(
+        "presentation-fixture",
+        "automatic-native",
+        "native-presentation",
+    );
+    let key = authority.key();
     let workspace = service
-        .ensure_user(key.clone(), BrowserProfile::Ephemeral)
+        .ensure(authority, BrowserProfile::Ephemeral)
         .await
         .map_err(message)?;
     let result = async {

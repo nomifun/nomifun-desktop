@@ -167,6 +167,7 @@ async fn legacy_preset_tables_are_absent_from_the_current_schema() {
 /// repository, owns their shape.
 const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "agent_bindings",
+    "agent_deletion_audits",
     "agent_effects",
     "agent_events",
     "agent_execution_attempts",
@@ -323,6 +324,7 @@ fn is_canonical_agent_store_table(table: &str) -> bool {
     matches!(
         table,
         "agent_bindings"
+            | "agent_deletion_audits"
             | "agent_effects"
             | "agent_events"
             | "agent_messages"

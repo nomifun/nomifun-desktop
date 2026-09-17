@@ -52,7 +52,10 @@ impl ContextContributor for NomiTurnContextContributor {
                 source_message_id: turn.source_message_id.clone(),
                 text: turn.text.clone(),
                 image_media_types: turn.image_media_types.clone(),
-                cs_dialogue_id: turn.cs_dialogue_id.clone(),
+                // Customer-service dialogue identity is host-private routing
+                // authority. Plugin Context contributors receive the public
+                // turn facts but cannot observe or echo that private handle.
+                cs_dialogue_id: None,
             },
         };
         input.validate()?;

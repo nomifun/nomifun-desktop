@@ -112,8 +112,7 @@ async fn real_dialogs_resume_exact_input_and_stop_preserves_existing_modal() {
         for _ in 0..40 {if evaluate(&diagnostics,&session,"!!document.getElementById('counter')").await==true {break;}tokio::time::sleep(Duration::from_millis(25)).await;}
         evaluate(&diagnostics,&session,"window.afterDialog=0;window.fixtureNonce=crypto.randomUUID();true").await;
         let nonce=evaluate(&diagnostics,&session,"fixtureNonce").await;
-        let choices=browser.tabs_for_user().await.unwrap();
-        let grant=browser.grant_tab(&choices.tabs.iter().find(|tab|tab.url==url).unwrap().choice_id).await.unwrap();
+        let grant=browser.tabs_for_provider().await.unwrap().into_iter().find(|tab|tab.info.url==url).unwrap().grant;
         let cancel=CancellationToken::new();
         for (kind,script,accept,text,expected) in [
             ("alert","alert('fixture alert');window.dialogResult='alert-done'",true,None,json!("alert-done")),

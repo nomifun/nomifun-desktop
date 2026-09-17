@@ -1,42 +1,36 @@
-//! User-only inventory and opaque tab grants. Never append this inventory to
-//! Agent output. No page/session is attached merely to populate the chooser.
+//! Opaque installation-level attached-Chrome tab handles. Inventory is
+//! available only after the application's Browser Module/Resource admission.
+//! No page is attached merely to enumerate.
 
 use super::{AttachError, AttachedBrowser, Connection, ROOT_SESSION};
 use chromiumoxide::cdp::browser_protocol::target::{GetTargetInfoParams, GetTargetsParams};
-use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
 
 const MAX_TABS: usize = 4096;
 const MAX_INVENTORY_BYTES: usize = 4 * 1024 * 1024;
 
-#[derive(Clone, Serialize)]
-pub struct UserTabChoice {
-    pub choice_id: String,
-    pub title: String,
-    pub url: String,
-}
-
-#[derive(Serialize)]
-pub struct UserTabInventory {
-    pub tabs: Vec<UserTabChoice>,
-}
-
-#[derive(Serialize)]
+#[derive(Clone)]
 pub struct GrantedTabInfo {
     pub tab_id: String,
     pub title: String,
     pub url: String,
 }
 
-pub(super) struct OfferedTab {
+/// Host-only tab handle for the installation-level attached Chrome Provider.
+/// It is never serialized and does not represent an Agent Action grant.
+pub struct AttachedProviderTab {
+    pub grant: GrantedTab,
+    pub info: GrantedTabInfo,
+}
+
+pub(super) struct DiscoveredTab {
     target_id: String,
     title: String,
     url: String,
 }
 
-/// Not deserializable: only a successful user selection can mint this object.
-/// The application host must also bind it to its user/conversation/run. This
+/// Not deserializable: only the connected engine can mint this object.
+/// The application host must also bind it to its principal/AgentSession/run. This
 /// low-level grant is not a replacement for the Agent invocation boundary.
 #[derive(Clone)]
 pub struct GrantedTab {
@@ -76,15 +70,13 @@ impl AttachedBrowser {
             .ok_or(AttachError::ConnectionFailed)
     }
 
-    /// Only the local authenticated user chooser may receive this output. Each
-    /// refresh invalidates all prior selection tokens, including on failure.
-    pub async fn tabs_for_user(&self) -> Result<UserTabInventory, AttachError> {
+    /// Enumerate current page tabs for an already connected installation-level
+    /// Provider. Connecting the Provider is the user's one explicit consent
+    /// step; AgentSessions do not mint a second per-tab authorization grant.
+    /// Canonical Browser Module and Resource authority is still checked by the
+    /// application host before this method is reachable.
+    pub async fn tabs_for_provider(&self) -> Result<Vec<AttachedProviderTab>, AttachError> {
         let _operation = self.operations.lock().await;
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .offered_tabs
-            .clear();
         let connection = self.current_connection()?;
         let value = connection
             .send(ROOT_SESSION, &GetTargetsParams::default())
@@ -97,12 +89,11 @@ impl AttachedBrowser {
         if targets.len() > MAX_TABS {
             return Err(AttachError::InventoryLimit);
         }
-        let mut offered = HashMap::new();
         let mut tabs = Vec::new();
         let mut bytes = 0usize;
         let mut targets_seen = std::collections::HashSet::new();
         for target in targets {
-            let Some(tab) = offered_tab(target) else {
+            let Some(tab) = discovered_tab(target) else {
                 continue;
             };
             if !targets_seen.insert(tab.target_id.clone()) {
@@ -112,98 +103,51 @@ impl AttachedBrowser {
             if bytes > MAX_INVENTORY_BYTES {
                 return Err(AttachError::InventoryLimit);
             }
-            let choice_id = nomifun_common::generate_id();
-            tabs.push(UserTabChoice {
-                choice_id: choice_id.clone(),
-                title: tab.title.clone(),
-                url: tab.url.clone(),
+            let grant = GrantedTab {
+                incarnation: self.incarnation.clone(),
+                target_id: tab.target_id,
+                id: nomifun_common::generate_id(),
+                browser_identity: self.browser_identity,
+            };
+            tabs.push(AttachedProviderTab {
+                info: GrantedTabInfo {
+                    tab_id: grant.id.clone(),
+                    title: tab.title,
+                    url: tab.url,
+                },
+                grant,
             });
-            offered.insert(choice_id, tab);
         }
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.connection.is_none() || connection.registry().is_connection_closed() {
-            return Err(AttachError::ConnectionFailed);
-        }
-        state.offered_tabs = offered;
-        Ok(UserTabInventory { tabs })
-    }
-
-    /// Revalidate the exact chosen target before granting it. Never interpret
-    /// a raw CDP target ID, default selected page, URL or ordinal as a choice.
-    pub async fn grant_tab(&self, choice_id: &str) -> Result<GrantedTab, AttachError> {
-        let _operation = self.operations.lock().await;
-        let connection = self.current_connection()?;
-        let (target_id, shown_url) = {
-            let state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let offered = state
-                .offered_tabs
-                .get(choice_id)
-                .ok_or(AttachError::StaleSelection)?;
-            (offered.target_id.clone(), offered.url.clone())
-        };
-        let current = target_info(&connection, &target_id).await?;
-        if current.url != shown_url || !self.is_connected() {
-            return Err(AttachError::StaleSelection);
-        }
-        Ok(GrantedTab {
-            incarnation: self.incarnation.clone(),
-            target_id,
-            id: nomifun_common::generate_id(),
-            browser_identity: self.browser_identity,
-        })
-    }
-
-    /// Scoped metadata seam for the owning host. Later observation/actions use
-    /// the same opaque grant; the full user chooser is never their fallback.
-    pub async fn granted_tab_metadata(
-        &self,
-        grant: &GrantedTab,
-    ) -> Result<GrantedTabInfo, AttachError> {
-        let _operation = self.operations.lock().await;
-        if grant.incarnation != self.incarnation {
-            return Err(AttachError::TabNotAuthorized);
-        }
-        let connection = self.current_connection()?;
-        let tab = target_info(&connection, &grant.target_id).await?;
         if !self.is_connected() {
             return Err(AttachError::ConnectionFailed);
         }
-        Ok(GrantedTabInfo {
-            tab_id: grant.id.clone(),
-            title: tab.title,
-            url: tab.url,
-        })
+        Ok(tabs)
     }
+
 }
 
 pub(super) async fn target_info(
     connection: &Connection,
     target_id: &str,
-) -> Result<OfferedTab, AttachError> {
+) -> Result<DiscoveredTab, AttachError> {
     let params = GetTargetInfoParams::builder()
         .target_id(target_id.to_owned())
         .build();
     let result = connection
         .send(ROOT_SESSION, &params)
         .await
-        .map_err(|_| AttachError::StaleSelection)?;
+        .map_err(|_| AttachError::StaleTarget)?;
     let tab = result
         .get("targetInfo")
-        .and_then(offered_tab)
-        .ok_or(AttachError::StaleSelection)?;
+        .and_then(discovered_tab)
+        .ok_or(AttachError::StaleTarget)?;
     if tab.target_id != target_id {
-        return Err(AttachError::StaleSelection);
+        return Err(AttachError::StaleTarget);
     }
     Ok(tab)
 }
 
-fn offered_tab(value: &Value) -> Option<OfferedTab> {
+fn discovered_tab(value: &Value) -> Option<DiscoveredTab> {
     if value.get("type")?.as_str()? != "page" {
         return None;
     }
@@ -225,7 +169,7 @@ fn offered_tab(value: &Value) -> Option<OfferedTab> {
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return None;
     }
-    Some(OfferedTab {
+    Some(DiscoveredTab {
         target_id: target_id.into(),
         title: title.into(),
         url: url.into(),

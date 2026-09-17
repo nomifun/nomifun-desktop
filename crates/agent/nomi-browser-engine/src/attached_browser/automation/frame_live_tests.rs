@@ -181,7 +181,7 @@ async fn repeated_observe_keeps_worlds_and_window_listeners_stable(
             match receiver.try_recv() {
                 Ok(event) => {
                     let context = &event.params["context"];
-                    if context["name"] == "nomifun-system-browser-semantic" {
+                    if context["name"] == "nomifun-attached-browser-semantic" {
                         worlds.push((
                             session.clone(),
                             context["id"].as_i64().unwrap(),
@@ -260,7 +260,7 @@ async fn repeated_observe_keeps_worlds_and_window_listeners_stable(
             loop {
                 match receiver.try_recv() {
                     Ok(event) => assert_ne!(
-                        event.params["context"]["name"], "nomifun-system-browser-semantic",
+                        event.params["context"]["name"], "nomifun-attached-browser-semantic",
                         "Observe allocated a new semantic context in an unchanged document"
                     ),
                     Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
@@ -332,10 +332,9 @@ async fn real_granted_frames_have_trusted_input_and_reject_occluded_or_replaced_
         assert!(targets["targetInfos"].as_array().unwrap().iter().any(|target|target["type"]=="iframe"&&target["url"].as_str().is_some_and(|url|url.starts_with("http://localhost:")&&url.ends_with("/foreign"))),"cross-site fixture did not create a real OOPIF: {targets}");
         attached=Some(AttachedBrowser::connect_port_file(&profile.join("DevToolsActivePort")).await.unwrap());
         let browser=attached.as_ref().unwrap();
-        let choices=browser.tabs_for_user().await.unwrap();
-        assert!(choices.tabs.iter().any(|tab|tab.url==private_url),"unselected sentinel tab missing");
-        let choice=choices.tabs.iter().find(|tab|tab.url==url).unwrap();
-        granted=Some(browser.grant_tab(&choice.choice_id).await.unwrap());
+        let tabs=browser.tabs_for_provider().await.unwrap();
+        assert!(tabs.iter().any(|tab|tab.info.url==private_url),"installation-provider sentinel tab missing");
+        granted=Some(tabs.into_iter().find(|tab|tab.info.url==url).unwrap().grant);
         let grant=granted.as_ref().unwrap();
         let cancel=CancellationToken::new();
         repeated_observe_keeps_worlds_and_window_listeners_stable(browser,grant,&cancel).await;

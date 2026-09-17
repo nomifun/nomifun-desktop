@@ -9,11 +9,8 @@ use nomifun_agent_contracts::{
 use nomifun_ai_agent::AgentService;
 use nomifun_common::{CompanionId, ConversationId, UserId};
 use nomifun_companion::CompanionService;
-use nomifun_cron::service::CronService;
 use nomifun_db::IProviderRepository;
-use nomifun_idmm::IdmmService;
 use nomifun_knowledge::KnowledgeService;
-use nomifun_requirement::{AutoWorkRunner, RequirementService};
 use nomifun_system::{
     ClientPrefService, ModelFetchService, ProviderService, SettingsService,
 };
@@ -63,12 +60,6 @@ pub struct CompatibilityCapabilityHost {
     /// Plugin product implementation.
     pub capability_admission: Arc<dyn CapabilityAdmissionPort>,
     pub conversation: Arc<dyn ConversationCapabilityPort>,
-    pub cron_service: Arc<CronService>,
-    /// MUST be the router-state instance with its session-owner and
-    /// terminal-driver attachments from `build_requirement_state`; AutoWork
-    /// config tools need those attachments and the bare singleton would error
-    /// "not attached".
-    pub requirement_service: Arc<RequirementService>,
     pub companion_service: Arc<CompanionService>,
     /// Singleton terminal service (owns the live PTY map shared with the
     /// terminal routes + AutoWork runner).
@@ -82,9 +73,6 @@ pub struct CompatibilityCapabilityHost {
     /// selection never infers a task from a model name.
     pub provider_model_capability_repo:
         Arc<dyn nomifun_db::IProviderModelCapabilityRepository>,
-    /// IDMM supervision config (same instance as `/api/idmm` so save also
-    /// arms/stops the live supervisor).
-    pub idmm_service: Arc<IdmmService>,
     /// Canonical Creative Studio project/asset service, the same singleton the
     /// `/api/creative-studio/*` routes use.
     pub workshop_service: Arc<nomifun_workshop::WorkshopService>,
@@ -94,8 +82,6 @@ pub struct CompatibilityCapabilityHost {
     /// Knowledge base registry + bindings (same instance the conversation
     /// service mounts from at task start).
     pub knowledge_service: Arc<KnowledgeService>,
-    /// AutoWork live-loop control shared with the REST routes.
-    pub auto_work_runner: Arc<AutoWorkRunner>,
     /// System domain services shared with the REST routes.
     pub settings_service: SettingsService,
     pub client_pref_service: ClientPrefService,

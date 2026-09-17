@@ -23,9 +23,17 @@ use nomi_ssh::shell::{RemoteShell, ShellOutcome};
 use nomifun_ai_agent::{RemoteCommandOutput, RemoteFileStat, SshBackend};
 use zeroize::Zeroizing;
 
-use crate::pool::{SshConnectionPool, SshLink};
+use crate::pool::{SshActionLease, SshConnectionPool, SshLink};
 use crate::service::{DecryptedCredential, SshServiceError};
 use crate::state::SshLinkState;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SshActionDispatchError {
+    #[error("{0}")]
+    Rejected(String),
+    #[error("{0}")]
+    OutcomeUnknown(String),
+}
 
 /// Why a dial did not produce a usable link.
 ///
@@ -52,6 +60,13 @@ pub enum SshDialError {
     /// The pool is quiescing; it will not open new sockets it cannot close.
     #[error("the ssh connection pool is shutting down")]
     ShuttingDown,
+    /// Canonical AgentSession deletion is permanent for the process lifetime.
+    #[error("the AgentSession is retired and cannot acquire SSH resources")]
+    SessionRetired,
+    /// The exact link lost a close race. A later explicit acquire may create a
+    /// fresh link unless its AgentSession was also retired.
+    #[error("the SSH link is retiring and cannot be acquired")]
+    LinkRetired,
 }
 
 impl SshDialError {
@@ -70,7 +85,9 @@ impl SshDialError {
             | SshDialError::InvalidInput(_)
             | SshDialError::Auth(_)
             | SshDialError::HostKey(_)
-            | SshDialError::ShuttingDown => false,
+            | SshDialError::ShuttingDown
+            | SshDialError::SessionRetired
+            | SshDialError::LinkRetired => false,
         }
     }
 }
@@ -119,8 +136,9 @@ pub struct SshConnectionHandle {
 
 impl SshConnectionHandle {
     /// Dial, authenticate (host-key policy `AcceptNew` writes unknown keys to the
-    /// operator's known_hosts), open a persistent shell rooted at `remote_cwd`
-    /// (with the optional sudo answer rule installed), and open SFTP.
+    /// operator's known_hosts), open a persistent unprivileged shell rooted at
+    /// `remote_cwd`, and open SFTP. Sudo answer rules are installed only on the
+    /// short-lived shell created by the explicit `ssh/sudo` action.
     pub async fn connect(
         cred: DecryptedCredential,
         known_hosts: std::path::PathBuf,
@@ -132,9 +150,7 @@ impl SshConnectionHandle {
         let fingerprint = conn.fingerprint.clone();
         let conn = Arc::new(conn);
 
-        let shell = conn
-            .open_shell_with_rules(remote_cwd, sudo_rules(&cred))
-            .await?;
+        let shell = conn.open_shell(remote_cwd).await?;
         let fs = Arc::new(conn.open_sftp().await?);
 
         Ok(SshConnectionHandle {
@@ -172,9 +188,8 @@ impl SshConnectionHandle {
     pub(crate) async fn reopen_channels(
         &self,
         cwd: &str,
-        rules: Vec<AnswerRule>,
     ) -> Result<Self, SshDialError> {
-        let shell = self.conn.open_shell_with_rules(cwd, rules).await?;
+        let shell = self.conn.open_shell(cwd).await?;
         let fs = Arc::new(self.conn.open_sftp().await?);
         Ok(SshConnectionHandle {
             shell,
@@ -183,16 +198,106 @@ impl SshConnectionHandle {
             fingerprint: self.fingerprint.clone(),
         })
     }
+
+    pub(crate) async fn run_unprivileged(
+        &self,
+        command: &str,
+        timeout_ms: u64,
+    ) -> Result<RemoteCommandOutput, SshActionDispatchError> {
+        const GUARD_FAILURE: &str = "__NOMIFUN_UNPRIVILEGED_EXEC_UNAVAILABLE__";
+        let wrapped = unprivileged_shell_command(command, GUARD_FAILURE);
+        let output = self
+            .shell
+            .run(&wrapped, std::time::Duration::from_millis(timeout_ms))
+            .await
+            .map(remote_output)
+            .map_err(|error| {
+                SshActionDispatchError::OutcomeUnknown(format!(
+                    "ssh/exec dispatch did not produce a terminal receipt: {error}"
+                ))
+            })?;
+        if output.stdout.lines().any(|line| line.trim() == GUARD_FAILURE) {
+            return Err(SshActionDispatchError::Rejected(
+                "ssh/exec requires a non-root Linux host with util-linux setpriv no-new-privileges support"
+                    .into(),
+            ));
+        }
+        Ok(output)
+    }
+
+    /// Authenticate sudo in a dedicated command, remove the responder, then
+    /// run untrusted input with `sudo -n` on the same PTY. A model command can
+    /// never print a fake prompt while a credential responder is installed.
+    pub(crate) async fn run_ephemeral_sudo(
+        &self,
+        cwd: &str,
+        command: &str,
+        timeout_ms: u64,
+        credential: &DecryptedCredential,
+    ) -> Result<RemoteCommandOutput, SshActionDispatchError> {
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(timeout_ms);
+        let shell = self
+            .conn
+            .open_shell(cwd)
+            .await
+            .map_err(|error| SshActionDispatchError::Rejected(error.to_string()))?;
+        let remaining = || deadline.saturating_duration_since(tokio::time::Instant::now());
+        let validation = match &credential.sudo_password {
+            Some(password) => {
+                let prompt = format!(
+                    "__NOMIFUN_SUDO_AUTH_{}__:",
+                    nomifun_common::generate_id()
+                );
+                let rule = AnswerRule::exact_once(
+                    &prompt,
+                    Zeroizing::new(password.as_str().to_owned()),
+                )
+                .map_err(|error| {
+                    SshActionDispatchError::Rejected(format!(
+                        "build exact sudo prompt responder: {error}"
+                    ))
+                })?;
+                let command = format!(
+                    "sudo -k -S -p {} -v",
+                    shell_single_quote(&prompt)
+                );
+                shell.run_with_rules(&command, remaining(), &[rule]).await
+            }
+            None => shell.run("sudo -k -n -v", remaining()).await,
+        }
+        .map_err(|error| SshActionDispatchError::Rejected(error.to_string()))?;
+        if validation.timed_out || validation.exit_code != 0 {
+            let _ = shell.close(crate::state::SSH_CLOSE_BUDGET).await;
+            return Err(SshActionDispatchError::Rejected(
+                "sudo authentication failed without exposing credential output".into(),
+            ));
+        }
+        let elevated = format!("sudo -n -- sh -lc {}", shell_single_quote(command));
+        let result = shell
+            .run(&elevated, remaining())
+            .await
+            .map(remote_output)
+            .map_err(|error| {
+                SshActionDispatchError::OutcomeUnknown(format!(
+                    "ssh/sudo dispatch did not produce a terminal receipt: {error}"
+                ))
+            });
+        let _ = shell.close(crate::state::SSH_CLOSE_BUDGET).await;
+        result
+    }
 }
 
-/// The host's sudo auto-answer rule, if it stored a sudo password. Rebuilt from a
-/// freshly decrypted credential every time a shell is opened, so nothing above
-/// the transport has to keep the password between dials.
-pub(crate) fn sudo_rules(cred: &DecryptedCredential) -> Vec<AnswerRule> {
-    match &cred.sudo_password {
-        Some(pw) => vec![AnswerRule::sudo(Zeroizing::new(pw.as_str().to_string()))],
-        None => Vec::new(),
-    }
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn unprivileged_shell_command(command: &str, failure_marker: &str) -> String {
+    format!(
+        "( if [ \"$(id -u)\" = 0 ] || ! command -v setpriv >/dev/null 2>&1; then printf '{}\\n'; exit 125; fi; setpriv --no-new-privs /bin/sh -lc {} )",
+        failure_marker,
+        shell_single_quote(command),
+    )
 }
 
 /// The `SshBackend` the pool hands out: it resolves the link's *current* handle
@@ -223,7 +328,10 @@ impl SshLinkBackend {
     /// permanently dead link, and the operator fixing the host would change
     /// nothing. The host's dial gate bounds the retry rate, and a link that has
     /// left the pool (its host was deleted) is never revived.
-    async fn handle(&self) -> Result<Arc<SshConnectionHandle>, String> {
+    async fn handle(
+        &self,
+        _action_lease: &SshActionLease,
+    ) -> Result<Arc<SshConnectionHandle>, String> {
         if let Some(handle) = self.link.current_handle().await {
             return Ok(handle);
         }
@@ -250,8 +358,13 @@ impl SshLinkBackend {
     /// cwd is remembered for replay after a reconnect, a resync failure recycles
     /// the shell, and a lost transport starts the ladder now rather than at the
     /// next liveness tick.
-    async fn run(&self, command: &str, timeout_ms: u64) -> Result<RemoteCommandOutput, String> {
-        let handle = self.handle().await?;
+    async fn run(
+        &self,
+        action_lease: &SshActionLease,
+        command: &str,
+        timeout_ms: u64,
+    ) -> Result<RemoteCommandOutput, String> {
+        let handle = self.handle(action_lease).await?;
         let shell = Arc::clone(handle.shell());
         match shell.run(command, std::time::Duration::from_millis(timeout_ms)).await {
             Ok(outcome) => {
@@ -298,53 +411,69 @@ impl SshBackend for SshLinkBackend {
         command: &str,
         timeout_ms: u64,
     ) -> Result<RemoteCommandOutput, String> {
-        self.run(command, timeout_ms).await
+        let action_lease = self.pool.action_lease(&self.link)?;
+        self.run(&action_lease, command, timeout_ms).await
     }
 
     async fn read_file(&self, path: &str) -> Result<Vec<u8>, String> {
-        self.handle()
+        let action_lease = self.pool.action_lease(&self.link)?;
+        let result = self
+            .handle(&action_lease)
             .await?
             .fs()
             .read_file(path)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string());
+        drop(action_lease);
+        result
     }
 
     async fn write_file(&self, path: &str, bytes: Vec<u8>) -> Result<(), String> {
-        self.handle()
+        let action_lease = self.pool.action_lease(&self.link)?;
+        let result = self
+            .handle(&action_lease)
             .await?
             .fs()
             .write_file_atomic(path, &bytes)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string());
+        drop(action_lease);
+        result
     }
 
     async fn grep(&self, pattern: &str, path: &str) -> Result<String, String> {
         validate_backend_path(path)?;
+        let action_lease = self.pool.action_lease(&self.link)?;
         let out = self
-            .run(&grep_command(pattern, path), GREP_TIMEOUT_MS)
+            .run(&action_lease, &grep_command(pattern, path), GREP_TIMEOUT_MS)
             .await?;
         command_stdout(out, "search")
     }
 
     async fn list_files(&self, glob: &str) -> Result<Vec<String>, String> {
         validate_backend_path(glob)?;
-        let out = self.run(&list_command(glob), LIST_TIMEOUT_MS).await?;
+        let action_lease = self.pool.action_lease(&self.link)?;
+        let out = self
+            .run(&action_lease, &list_command(glob), LIST_TIMEOUT_MS)
+            .await?;
         command_stdout(out, "listing").map(|stdout| list_lines(&stdout))
     }
 
     async fn stat(&self, path: &str) -> Result<RemoteFileStat, String> {
+        let action_lease = self.pool.action_lease(&self.link)?;
         let s = self
-            .handle()
+            .handle(&action_lease)
             .await?
             .fs()
             .stat(path)
             .await
             .map_err(|e| e.to_string())?;
-        Ok(RemoteFileStat {
+        let result = RemoteFileStat {
             size: s.size,
             is_dir: s.is_dir,
-        })
+        };
+        drop(action_lease);
+        Ok(result)
     }
 }
 
@@ -576,5 +705,20 @@ mod tests {
         assert!(validate_backend_path("/srv/**/*.rs").is_ok());
         let error = validate_backend_path("bad\npath").expect_err("control characters are invalid");
         assert!(error.contains("invalid SSH input"), "{error}");
+    }
+
+    #[test]
+    fn ordinary_agent_exec_is_kernel_fenced_from_setuid_elevation() {
+        let wrapped = unprivileged_shell_command(
+            "s'u'do id; /usr/bin/sudo id",
+            "__GUARD_FAILED__",
+        );
+        assert!(wrapped.contains("$(id -u)"));
+        assert!(wrapped.starts_with("( if "));
+        assert!(wrapped.ends_with(" )"));
+        assert!(wrapped.contains("command -v setpriv"));
+        assert!(wrapped.contains("setpriv --no-new-privs /bin/sh -lc"));
+        assert!(!wrapped.contains("exec setpriv"));
+        assert!(wrapped.contains("__GUARD_FAILED__"));
     }
 }

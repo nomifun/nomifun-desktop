@@ -2,7 +2,7 @@
 
 use nomifun_browser_platform::{
     runtime::BrowserSurfaceBounds,
-    workspace::{BrowserWorkspace, BrowserWorkspaceSnapshot},
+    workspace::{BrowserResource, BrowserResourceSnapshot},
 };
 use std::sync::{
     Arc,
@@ -21,7 +21,7 @@ pub(crate) struct BrowserSurfaceState {
 struct Attachment {
     id: u64,
     sequence: u64,
-    workspace: Arc<BrowserWorkspace>,
+    resource: Arc<BrowserResource>,
     bounds: BrowserSurfaceBounds,
     stop: CancellationToken,
     layout: CancellationToken,
@@ -30,7 +30,7 @@ struct Attachment {
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum BrowserViewEvent {
-    Snapshot { snapshot: BrowserWorkspaceSnapshot },
+    Snapshot { snapshot: BrowserResourceSnapshot },
     Unavailable { code: &'static str },
 }
 
@@ -70,7 +70,7 @@ async fn detach(current: &Mutex<Option<Attachment>>, id: u64) -> Result<(), Stri
         // Hide never waits for a page operation. Retain ownership on failure
         // so a retry cannot orphan a visible native surface.
         attachment
-            .workspace
+            .resource
             .set_surface(attachment.bounds, false, attachment.layout.clone())
             .await
             .map_err(|error| error.to_string())?;
@@ -87,7 +87,7 @@ async fn update(
     visible: bool,
     validation: Result<(), String>,
 ) -> Result<(), String> {
-    let (workspace, bounds, visible, layout) = {
+    let (resource, bounds, visible, layout) = {
         let mut current = current.lock().await;
         let Some(attachment) = current
             .as_mut()
@@ -106,14 +106,14 @@ async fn update(
             attachment.bounds = bounds;
         }
         (
-            attachment.workspace.clone(),
+            attachment.resource.clone(),
             attachment.bounds,
             visible,
             attachment.layout.clone(),
         )
     };
     // No attachment mutex across a possibly input-blocked visible resize.
-    let result = workspace
+    let result = resource
         .set_surface(bounds, visible, layout.clone())
         .await
         .map_err(|error| error.to_string());
@@ -136,8 +136,8 @@ pub(crate) async fn browser_surface_attach(
     require_main(&view)?;
     validate_bounds(&view, bounds)?;
     let id = state.next.fetch_add(1, Ordering::AcqRel) + 1;
-    let workspace = server
-        .browser_workspace_for_local_surface(&conversation_id)
+    let resource = server
+        .browser_resource_for_local_surface(&conversation_id)
         .await
         .map_err(|error| error.to_string())?;
     let mut current = state.current.lock().await;
@@ -149,13 +149,13 @@ pub(crate) async fn browser_surface_attach(
         previous.layout.cancel();
         previous.layout = CancellationToken::new();
         previous
-            .workspace
+            .resource
             .set_surface(previous.bounds, false, previous.layout.clone())
             .await
             .map_err(|error| error.to_string())?;
     }
-    let mut run = workspace.run_changes();
-    let mut page = workspace
+    let mut run = resource.run_changes();
+    let mut page = resource
         .runtime_changes()
         .await
         .map_err(|error| error.to_string())?;
@@ -166,7 +166,7 @@ pub(crate) async fn browser_surface_attach(
     *current = Some(Attachment {
         id,
         sequence: 0,
-        workspace: workspace.clone(),
+        resource: resource.clone(),
         bounds,
         stop: stop.clone(),
         layout: CancellationToken::new(),
@@ -182,7 +182,7 @@ pub(crate) async fn browser_surface_attach(
             }
             run.borrow_and_update();
             page.borrow_and_update();
-            let snapshot = workspace.snapshot().await;
+            let snapshot = resource.snapshot().await;
             if stop.is_cancelled() {
                 break;
             }
@@ -255,7 +255,11 @@ mod tests {
     use nomifun_browser_platform::{
         run_guard::{NativeInputGate, RunAdmissionError},
         runtime::*,
-        workspace::BrowserWorkspaceService,
+        product::{
+            BrowserCapabilityAction, BrowserProviderDescriptor, BrowserResourceBinding,
+            BrowserSessionAuthority,
+        },
+        workspace::BrowserResourceService,
     };
     use std::sync::atomic::AtomicBool;
 
@@ -342,14 +346,25 @@ mod tests {
         BrowserSurfaceBounds,
     ) {
         let surface = Arc::new(Surface::default());
-        let service = BrowserWorkspaceService::new(Arc::new(Factory(surface.clone())));
-        let workspace = service
+        let service = BrowserResourceService::new(Arc::new(Factory(surface.clone())));
+        let authority = BrowserSessionAuthority::new(
+            "surface-test",
+            "surface-test",
+            BrowserCapabilityAction::all(),
+            BrowserResourceBinding::new(
+                "surface-test",
+                "managed-browser",
+                "surface-test",
+                BrowserProviderDescriptor::managed("managed", "native-test").unwrap(),
+                BrowserCapabilityAction::all()
+                    .map(BrowserCapabilityAction::resource_operation),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let resource = service
             .ensure(
-                BrowserWorkspaceKey {
-                    user_id: "surface-test".into(),
-                    conversation_id: "surface-test".into(),
-                },
-                "native-test".into(),
+                authority,
                 BrowserProfile::Ephemeral,
             )
             .await
@@ -363,7 +378,7 @@ mod tests {
         let current = Arc::new(Mutex::new(Some(Attachment {
             id: 1,
             sequence: 0,
-            workspace,
+            resource,
             bounds,
             stop: CancellationToken::new(),
             layout: CancellationToken::new(),
@@ -402,14 +417,14 @@ mod tests {
         let (current,surface,bounds)=fixture().await;
         surface.release.notify_one();
         update(&current,1,1,bounds,true,Ok(())).await.unwrap();
-        let workspace=current.lock().await.as_ref().unwrap().workspace.clone();
+        let resource=current.lock().await.as_ref().unwrap().resource.clone();
         surface.fail_close.store(true,Ordering::SeqCst);
         surface.fail_hide.store(true,Ordering::SeqCst);
-        assert_eq!(workspace.close().await,Err(WorkspaceError::NativeCommandFailed));
+        assert_eq!(resource.close().await,Err(WorkspaceError::NativeCommandFailed));
         assert!(detach(&current,1).await.is_err());
         assert!(current.lock().await.is_some());
         surface.fail_close.store(false,Ordering::SeqCst);
-        workspace.close().await.unwrap();
+        resource.close().await.unwrap();
         detach(&current,1).await.unwrap();
         assert!(current.lock().await.is_none());
         assert!(!surface.visible.load(Ordering::SeqCst));
@@ -420,14 +435,14 @@ mod tests {
         let (current,surface,bounds)=fixture().await;
         surface.release.notify_one();
         update(&current,1,1,bounds,true,Ok(())).await.unwrap();
-        let workspace=current.lock().await.as_ref().unwrap().workspace.clone();
+        let resource=current.lock().await.as_ref().unwrap().resource.clone();
         surface.fail_close.store(true,Ordering::SeqCst);
-        assert!(workspace.close().await.is_err());
+        assert!(resource.close().await.is_err());
         detach(&current,1).await.unwrap();
         assert!(current.lock().await.is_none());
         assert!(!surface.visible.load(Ordering::SeqCst));
         surface.fail_close.store(false,Ordering::SeqCst);
-        workspace.close().await.unwrap();
+        resource.close().await.unwrap();
     }
 
     #[tokio::test]

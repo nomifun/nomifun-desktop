@@ -102,23 +102,19 @@ const DOMAIN_SPECS = [
   {
     id: 'requirement-autowork',
     crate: 'crates/backend/nomifun-requirement',
-    adapter: 'crates/backend/nomifun-requirement/src/conversation_port.rs',
+    adapter: 'crates/backend/nomifun-requirement/src/execution_port.rs',
     consumer: 'crates/backend/nomifun-requirement/src/auto_work_runner.rs',
-    port: 'AutoWorkConversationPort',
-    methods: 7,
-    canonicalCoverage: 3,
+    port: 'AutoWorkExecutionPort',
+    methods: 2,
+    canonicalCoverage: 2,
     rank: 4,
-    readiness: 'blocked-by-automation-contract',
-    blockers: [
-      'AutoWork requires a durable claim-scoped turn authority',
-      'attachment activation and runtime preparation are Conversation-owned',
-      'reconciliation must distinguish accepted, missing, and ambiguous receipts',
-    ],
+    readiness: 'integrated-through-agent-execution',
+    blockers: [],
     appComposition: {
       function: 'build_requirement_state',
       evidence: [
         /conversation_owner\s*:\s*Arc<\s*NomiCoreSessionOwner\s*>/,
-        /Arc<\s*dyn\s+nomifun_requirement::AutoWorkConversationPort\s*>\s*=\s*conversation_owner\.clone\(\)/,
+        /Arc<\s*dyn\s+nomifun_requirement::AutoWorkExecutionPort\s*>\s*=\s*agent_execution/,
       ],
     },
     compatibilityFactory: null,
@@ -146,30 +142,6 @@ const DOMAIN_SPECS = [
       ],
     },
     compatibilityFactory: 'conversation_companion_ports',
-  },
-  {
-    id: 'idmm',
-    crate: 'crates/backend/nomifun-idmm',
-    adapter: 'crates/backend/nomifun-idmm/src/probe.rs',
-    consumer: 'crates/backend/nomifun-idmm/src/service.rs',
-    port: 'ConversationSessionPort',
-    methods: 7,
-    canonicalCoverage: 3,
-    rank: 6,
-    readiness: 'blocked-by-supervision-contract',
-    blockers: [
-      'IDMM needs an exact active-turn scope query',
-      'IDMM needs scoped continuation/steering and provider failover commands',
-      'canonical Session currently exposes no live event subscription primitive',
-    ],
-    appComposition: {
-      function: 'build_idmm_state',
-      evidence: [
-        /conversation_owner\s*:\s*Arc<\s*NomiCoreSessionOwner\s*>/,
-        /conversation_session\s*:\s*conversation_owner/,
-      ],
-    },
-    compatibilityFactory: null,
   },
 ];
 

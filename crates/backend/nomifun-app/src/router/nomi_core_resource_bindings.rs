@@ -31,6 +31,9 @@ pub(crate) const DEFAULT_WORKSPACE_RESOURCE_ID: &str = "default-workspace";
 pub(crate) const DEFAULT_PROJECT_MEMORY_RESOURCE_ID: &str = "default-project-memory";
 pub(crate) const MANAGED_PROCESS_SESSION_RESOURCE_ID: &str = "managed-process-session";
 pub(crate) const MANAGED_TERMINAL_RESOURCE_ID: &str = "managed-terminal";
+pub(crate) const MANAGED_BROWSER_RESOURCE_ID: &str = "managed-browser";
+pub(crate) const ATTACHED_CHROME_RESOURCE_ID: &str = "attached-chrome";
+pub(crate) const INSTALLATION_SCHEDULER_RESOURCE_ID: &str = "installation-scheduler";
 
 const MAX_RESOURCE_SELECTIONS: usize = 32;
 const MAX_RESOURCE_FIELD_BYTES: usize = 512;
@@ -170,7 +173,12 @@ impl NomiCoreResourceBindingResolverRegistry {
             mcp_servers: Arc::new(nomifun_db::SqliteMcpServerRepository::new(
                 services.database.pool().clone(),
             )),
+            ssh_hosts: services.ssh_pool.host_service(),
             robots: services.robot.as_ref().map(|robot| Arc::clone(&robot.registry)),
+            #[cfg(feature = "browser-use")]
+            managed_browser_available: services.browser_resources.is_some(),
+            #[cfg(feature = "browser-use")]
+            attached_chrome: services.attached_chrome.clone(),
         });
 
         Self::from_authorities(SUPPORTED_RESOURCE_KINDS.into_iter().map(|kind| {
@@ -497,7 +505,7 @@ fn validate_selection_field(
     Ok(())
 }
 
-const SUPPORTED_RESOURCE_KINDS: [&str; 14] = [
+const SUPPORTED_RESOURCE_KINDS: [&str; 17] = [
     "workspace",
     "knowledge_base",
     "project_memory",
@@ -512,6 +520,9 @@ const SUPPORTED_RESOURCE_KINDS: [&str; 14] = [
     "canvas",
     "asset_library",
     "plugin",
+    "ssh_host",
+    "browser",
+    "scheduler",
 ];
 
 fn required_operations(
@@ -528,11 +539,13 @@ fn required_operations(
     for capability in capability_ids {
         if nomifun_agent_domain_wave2::WORKSPACE_EXECUTION_CAPABILITY_IDS
             .contains(&capability.as_str())
+            || capability == nomifun_agent_domain_wave2::SSH_MODULE_ID
+            || capability == nomifun_agent_domain_wave2::BROWSER_MODULE_ID
         {
             let actions = action_allowlists.get(capability).ok_or_else(|| {
                 ResourceSelectionResolutionError::new(
                     "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH",
-                    "a Workspace Module is missing its frozen exact Action grant",
+                    "a Wave 2 Module is missing its frozen exact Action grant",
                     json!({ "capability_id": capability }),
                 )
             })?;
@@ -540,21 +553,21 @@ fn required_operations(
                 nomifun_agent_domain_wave2::required_resource_kinds(capability).ok_or_else(|| {
                     ResourceSelectionResolutionError::new(
                         "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH",
-                        "a Workspace Module has no canonical resource declaration",
+                        "a Wave 2 Module has no canonical resource declaration",
                         json!({ "capability_id": capability }),
                     )
                 })?;
             if resource_kinds.len() != 1 {
                 return Err(ResourceSelectionResolutionError::new(
                     "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH",
-                    "a Workspace Module must declare exactly one canonical resource kind",
+                    "a Wave 2 Module must declare exactly one canonical resource kind",
                     json!({ "capability_id": capability }),
                 ));
             }
             let resource_kind = resource_kinds
                 .iter()
                 .next()
-                .expect("exactly one Workspace resource kind");
+                .expect("exactly one Wave 2 resource kind");
             let capability_id = CapabilityId::from(capability.clone());
             for action_id in actions {
                 let operation =
@@ -565,7 +578,7 @@ fn required_operations(
                     .ok_or_else(|| {
                         ResourceSelectionResolutionError::new(
                             "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH",
-                            "a frozen Workspace Action has no canonical resource operation",
+                            "a frozen Wave 2 Action has no canonical resource operation",
                             json!({
                                 "capability_id": capability,
                                 "action_id": action_id.as_ref(),
@@ -599,6 +612,35 @@ fn required_operations(
                             ResourceSelectionResolutionError::new(
                                 "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH",
                                 "a frozen Wave 1 Action has no canonical resource operation contract",
+                                json!({ "capability_id": capability, "action_id": action_id.as_ref() }),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        } else if nomifun_agent_domain_wave5::TARGET_CAPABILITY_IDS
+            .contains(&capability.as_str())
+        {
+            Some(
+                action_allowlists
+                    .get(capability)
+                    .ok_or_else(|| {
+                        ResourceSelectionResolutionError::new(
+                            "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH",
+                            "a Wave 5 Module is missing its frozen exact Action grant",
+                            json!({ "capability_id": capability }),
+                        )
+                    })?
+                    .iter()
+                    .map(|action_id| {
+                        nomifun_agent_domain_wave5::required_action_resource_operations(
+                            capability,
+                            action_id.as_ref(),
+                        )
+                        .ok_or_else(|| {
+                            ResourceSelectionResolutionError::new(
+                                "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH",
+                                "a frozen Wave 5 Action has no canonical resource operation contract",
                                 json!({ "capability_id": capability, "action_id": action_id.as_ref() }),
                             )
                         })
@@ -718,7 +760,12 @@ struct ProductResourceDependencies {
     plugin_runtime: Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
     channels: Arc<dyn IChannelRepository>,
     mcp_servers: Arc<dyn IMcpServerRepository>,
+    ssh_hosts: nomifun_ssh::SshHostService,
     robots: Option<Arc<nomifun_robot::registry::RobotRegistry>>,
+    #[cfg(feature = "browser-use")]
+    managed_browser_available: bool,
+    #[cfg(feature = "browser-use")]
+    attached_chrome: Option<Arc<crate::AttachedChromeProviderService>>,
 }
 
 struct ProductResourceAuthority {
@@ -740,6 +787,9 @@ impl NomiCoreResourceAuthority for ProductResourceAuthority {
             "process_session" => self.resolve_process_session(&request),
             "terminal" => self.resolve_terminal(&request),
             "project_memory" => self.resolve_project_memory(&request),
+            "scheduler" => self.resolve_scheduler(&request),
+            "browser" => self.resolve_browser(&request),
+            "ssh_host" => self.resolve_ssh(request).await,
             "knowledge_base" => self.resolve_knowledge(request).await,
             "companion" | "companion_memory" => self.resolve_companion(request).await,
             "channel" => self.resolve_channel(request).await,
@@ -835,6 +885,126 @@ impl ProductResourceAuthority {
             &["read", "write"],
             BTreeMap::new(),
         )
+    }
+
+    fn resolve_scheduler(
+        &self,
+        request: &ResourceAuthorityRequest,
+    ) -> Result<ServerResolvedResource, ResourceSelectionResolutionError> {
+        self.fixed(
+            request,
+            INSTALLATION_SCHEDULER_RESOURCE_ID,
+            &["read", "write", "delete"],
+            BTreeMap::new(),
+        )
+    }
+
+    #[cfg(feature = "browser-use")]
+    fn resolve_browser(
+        &self,
+        request: &ResourceAuthorityRequest,
+    ) -> Result<ServerResolvedResource, ResourceSelectionResolutionError> {
+        let provider_kind = match request.resource_id.as_str() {
+            MANAGED_BROWSER_RESOURCE_ID if self.dependencies.managed_browser_available => {
+                "managed"
+            }
+            MANAGED_BROWSER_RESOURCE_ID => {
+                return Err(ResourceSelectionResolutionError::unavailable(
+                    self.kind,
+                    &request.resource_id,
+                    "the managed Browser Provider is unavailable on this host",
+                ));
+            }
+            ATTACHED_CHROME_RESOURCE_ID => {
+                let service = self.dependencies.attached_chrome.as_ref().ok_or_else(|| {
+                    ResourceSelectionResolutionError::unavailable(
+                        self.kind,
+                        &request.resource_id,
+                        "the attached Chrome Provider is unavailable on this host",
+                    )
+                })?;
+                if service
+                    .snapshot(&request.owner_id)
+                    .map_err(|error| {
+                        ResourceSelectionResolutionError::unavailable(
+                            self.kind,
+                            &request.resource_id,
+                            error.to_string(),
+                        )
+                    })?
+                    .is_none()
+                {
+                    return Err(ResourceSelectionResolutionError::unavailable(
+                        self.kind,
+                        &request.resource_id,
+                        "connect the installation-level attached Chrome Provider first",
+                    ));
+                }
+                "attached_chrome"
+            }
+            _ => {
+                return Err(ResourceSelectionResolutionError::not_found(
+                    self.kind,
+                    &request.resource_id,
+                ));
+            }
+        };
+        Ok(ServerResolvedResource {
+            resource_id: request.resource_id.clone(),
+            allowed_operations: nomifun_browser_platform::product::BrowserCapabilityAction::all()
+                .map(|action| action.resource_operation().as_str().to_owned())
+                .into_iter()
+                .collect(),
+            connection_config_ref: None,
+            typed_parameters: BTreeMap::from([
+                ("provider_kind".to_owned(), provider_kind.to_owned()),
+                ("persistence".to_owned(), "persistent".to_owned()),
+            ]),
+        })
+    }
+
+    #[cfg(not(feature = "browser-use"))]
+    fn resolve_browser(
+        &self,
+        request: &ResourceAuthorityRequest,
+    ) -> Result<ServerResolvedResource, ResourceSelectionResolutionError> {
+        Err(ResourceSelectionResolutionError::unavailable(
+            self.kind,
+            &request.resource_id,
+            "Browser Providers are unavailable in this host build",
+        ))
+    }
+
+    async fn resolve_ssh(
+        &self,
+        request: ResourceAuthorityRequest,
+    ) -> Result<ServerResolvedResource, ResourceSelectionResolutionError> {
+        let id = nomifun_common::SshHostId::parse(request.resource_id.clone()).map_err(|_| {
+            ResourceSelectionResolutionError::not_found(self.kind, &request.resource_id)
+        })?;
+        self.dependencies
+            .ssh_hosts
+            .get(&request.owner_id, &id)
+            .await
+            .map_err(|error| match error {
+                nomifun_ssh::SshServiceError::NotFound => {
+                    ResourceSelectionResolutionError::not_found(self.kind, &request.resource_id)
+                }
+                other => ResourceSelectionResolutionError::unavailable(
+                    self.kind,
+                    &request.resource_id,
+                    other.to_string(),
+                ),
+            })?;
+        Ok(ServerResolvedResource {
+            resource_id: request.resource_id,
+            allowed_operations: nomifun_ssh::SSH_HOST_RESOURCE_OPERATIONS
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            connection_config_ref: None,
+            typed_parameters: BTreeMap::from([("remote_cwd".to_owned(), ".".to_owned())]),
+        })
     }
 
     async fn resolve_knowledge(
@@ -1628,6 +1798,9 @@ mod tests {
             "knowledge".into(),
             "project.memory".into(),
             nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID.into(),
+            nomifun_agent_domain_wave2::SSH_MODULE_ID.into(),
+            nomifun_agent_domain_wave2::BROWSER_MODULE_ID.into(),
+            nomifun_agent_domain_wave5::AUTOMATION_SCHEDULE_MODULE_ID.into(),
             mcp_tool,
             "companion".into(),
             "companion.memory".into(),
@@ -1646,6 +1819,20 @@ mod tests {
             (
                 nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID.into(),
                 BTreeSet::from([ActionId::from("workspace.process/exec")]),
+            ),
+            (
+                nomifun_agent_domain_wave2::SSH_MODULE_ID.into(),
+                BTreeSet::from([ActionId::from("ssh/exec")]),
+            ),
+            (
+                nomifun_agent_domain_wave2::BROWSER_MODULE_ID.into(),
+                BTreeSet::from([ActionId::from("browser/observe")]),
+            ),
+            (
+                nomifun_agent_domain_wave5::AUTOMATION_SCHEDULE_MODULE_ID.into(),
+                BTreeSet::from([ActionId::from(
+                    nomifun_agent_domain_wave5::SCHEDULE_LIST_ACTION_ID,
+                )]),
             ),
             (
                 "knowledge".into(),
@@ -1699,20 +1886,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conversation_browser_does_not_require_or_accept_a_saved_browser_binding() {
-        let capabilities = [
-            "browser.observe", "browser.navigate", "browser.act", "browser.download",
-            "browser.upload", "browser.render_content", "browser.evaluate",
-        ].into_iter().map(String::from).collect::<BTreeSet<_>>();
-        // The canonical manifests and the HTTP resource resolver must agree.
-        for id in &capabilities {
-            assert!(nomifun_agent_domain_wave2::required_resource_kinds(id).unwrap().is_empty());
-        }
-        let registry = NomiCoreResourceBindingResolverRegistry::from_authorities([]).unwrap();
-        assert!(registry.resolve("owner-1", &[], &capabilities).await.unwrap().is_empty());
-        let error = registry.resolve("owner-1", &[AgentResourceSelectionDto {
-            resource_kind: "browser".into(), resource_id: "model-selected-browser".into(),
-        }], &capabilities).await.unwrap_err();
-        assert_eq!(error.code(), "RESOURCE_SELECTION_UNUSED");
+    async fn browser_module_requires_one_server_resolved_resource_binding() {
+        let capabilities = BTreeSet::from([
+            nomifun_agent_domain_wave2::BROWSER_MODULE_ID.to_owned(),
+        ]);
+        let actions = BTreeMap::from([(
+            nomifun_agent_domain_wave2::BROWSER_MODULE_ID.to_owned(),
+            BTreeSet::from([
+                ActionId::from("browser/observe"),
+                ActionId::from("browser/navigate"),
+            ]),
+        )]);
+        assert_eq!(
+            nomifun_agent_domain_wave2::required_resource_kinds(
+                nomifun_agent_domain_wave2::BROWSER_MODULE_ID,
+            ),
+            Some(BTreeSet::from([ResourceKind::from("browser")]))
+        );
+        let registry = registry("browser", &["observe", "navigate"]);
+        let missing = registry
+            .resolve_selected("owner-1", &[], &capabilities, &actions, &[])
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code(), "RESOURCE_SELECTION_REQUIRED");
+        let bindings = registry
+            .resolve_selected(
+                "owner-1",
+                &[AgentResourceSelectionDto {
+                    resource_kind: "browser".into(),
+                    resource_id: "managed-browser".into(),
+                }],
+                &capabilities,
+                &actions,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(bindings[0].resource_kind.as_ref(), "browser");
+        assert_eq!(
+            bindings[0].operations,
+            BTreeSet::from(["navigate".into(), "observe".into()])
+        );
     }
 }

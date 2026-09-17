@@ -759,8 +759,8 @@ pub struct KnowledgeService {
     /// sources. Rendered entries use the separate canonical operation port
     /// below and never select this backend.
     fetcher: Arc<dyn PageFetcher>,
-    /// Consumer-owned typed port for the canonical hidden
-    /// `browser.render_content` operation. The default implementation fails
+    /// Consumer-owned typed port for the Knowledge headless render service.
+    /// The default implementation fails
     /// closed; it is never replaced by the ordinary HTTP fetcher.
     browser_render_content_port: RwLock<Arc<dyn BrowserRenderContentPort>>,
     /// mtime-keyed content cache for `search_bases` (perf only; see
@@ -1944,7 +1944,7 @@ impl KnowledgeService {
         *self.completer.write().expect("knowledge completer lock poisoned") = Some(completer);
     }
 
-    /// Late-wire the canonical hidden `browser.render_content` operation.
+    /// Late-wire the Knowledge headless rendering service.
     ///
     /// The application composition supplies an adapter that performs
     /// non-Agent operation admission and dispatches against one exact
@@ -7255,8 +7255,7 @@ impl KnowledgeService {
     /// Fetch one source URL and condense/truncate the body to snapshot size.
     /// Errors come back as the ready-to-aggregate `"{url}: {error}"` line.
     ///
-    /// **P1-R2 canonical routing**: `rendered == true` is a non-Agent
-    /// `browser.render_content` operation and must go through the injected
+    /// `rendered == true` is a non-Agent Knowledge service operation and must go through the injected
     /// typed port. If that port is unavailable, this entry fails closed; it
     /// never falls back to the ordinary HTTP fetcher. Plain entries keep the
     /// independent HTTP path.
@@ -7275,7 +7274,7 @@ impl KnowledgeService {
                     tracing::warn!(
                         url,
                         error = %error,
-                        "canonical browser.render_content failed for knowledge source"
+                        "Knowledge headless rendering failed for source"
                     );
                     format!("{url}: {error}")
                 })?;
@@ -9682,7 +9681,7 @@ fn derive_kind(managed: bool, source: Option<&KnowledgeSource>) -> &'static str 
 /// no dedicated syntactic check here because the `kind != "url"` guard below
 /// rejects every non-URL source outright (rendered or not), and the per-entry
 /// URL validation guarantees an http(s) URL. At fetch time, `rendered=true`
-/// requires the canonical `browser.render_content` port; a missing port is a
+/// requires the Knowledge headless rendering port; a missing port is a
 /// visible fail-closed fetch error, never an HTTP fallback.
 fn validate_source(source: &KnowledgeSource) -> Result<(), AppError> {
     if source.kind != "url" {
@@ -14560,7 +14559,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&unavailable, AppError::Conflict(message) if message.contains("browser.render_content")),
+            matches!(&unavailable, AppError::Conflict(message) if message.contains("headless rendering")),
             "{unavailable}"
         );
 
@@ -19097,7 +19096,7 @@ mod tests {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        // The canonical port returns raw HTML, as browser.render_content does.
+        // The headless rendering port returns raw HTML.
         struct MarkerRenderContentPort;
         #[async_trait::async_trait]
         impl BrowserRenderContentPort for MarkerRenderContentPort {
@@ -19192,7 +19191,7 @@ mod tests {
         assert_eq!(fetch.failed, 1);
         assert!(
             fetch.errors.iter().any(|error| {
-                error.contains("browser.render_content")
+                error.contains("headless rendering")
                     && error.contains("unavailable")
             }),
             "missing canonical port must be visible: {:?}",

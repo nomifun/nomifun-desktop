@@ -33,7 +33,10 @@ use nomifun_file::{
 use notify::{event::ModifyKind, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::json;
 
-use super::agent_wave2_host::Wave2ApplicationHost;
+use super::agent_wave2_host::{
+    Wave2ApplicationHost, Wave2EffectAdmission, Wave2EffectCompletion,
+    begin_wave2_exclusive_effect, finish_wave2_effect,
+};
 
 const WORKSPACE_FILES: &str = nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID;
 const WORKSPACE_VCS: &str = nomifun_agent_domain_wave2::WORKSPACE_VCS_MODULE_ID;
@@ -52,7 +55,13 @@ const MAX_DEBOUNCE_IDENTITIES: usize = 1024;
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(200);
 
 pub(crate) fn tool_capability_ids() -> BTreeSet<CapabilityId> {
-    [WORKSPACE_FILES, WORKSPACE_VCS, WORKSPACE_PROCESS, WORKSPACE_ARTIFACTS]
+    [
+        WORKSPACE_FILES,
+        WORKSPACE_VCS,
+        WORKSPACE_PROCESS,
+        WORKSPACE_ARTIFACTS,
+        nomifun_agent_domain_wave2::SSH_MODULE_ID,
+    ]
         .into_iter()
         .map(CapabilityId::from)
         .collect()
@@ -68,6 +77,7 @@ pub(crate) fn action_host_port(
 ) -> Arc<NomiCoreWave2Host> {
     Arc::new(NomiCoreWave2Host {
         mcp: Some(super::nomi_core_mcp::NomiCoreMcpHost::for_services(services)),
+        ssh: Some(nomifun_ssh::SshActionOwner::new(services.ssh_pool.clone())),
         ..Default::default()
     }
     .with_effect_store(effect_store))
@@ -205,6 +215,7 @@ pub(crate) fn canonical_workspace_root(root: &Path) -> Result<PathBuf, AppError>
 #[derive(Default)]
 pub(crate) struct NomiCoreWave2Host {
     mcp: Option<super::nomi_core_mcp::NomiCoreMcpHost>,
+    ssh: Option<nomifun_ssh::SshActionOwner>,
     effect_store: Option<nomifun_agent_session::AgentSessionStore>,
     roots: Mutex<HashMap<PathBuf, Arc<Wave2ApplicationHost>>>,
     processes: Mutex<HashMap<(String, String, String), Arc<super::engine_process_host::EngineProcessScope>>>,
@@ -318,6 +329,146 @@ impl NomiCoreWave2Host {
         if failures.is_empty() { Ok(()) } else { Err(AppError::Conflict(failures.join("; "))) }
     }
 
+    async fn invoke_ssh(
+        &self,
+        request: Wave2HostRequest,
+    ) -> Result<StrictJsonValue, Wave2HostPortError> {
+        let owner = self.ssh.as_ref().ok_or_else(|| {
+            Wave2HostPortError::unavailable("the canonical SSH owner is unavailable")
+        })?;
+        let typed = request.into_typed()?;
+        let input = match &typed.operation {
+            nomifun_agent_domain_wave2::Wave2TypedCapabilityOperation::SshFsRead { input }
+            | nomifun_agent_domain_wave2::Wave2TypedCapabilityOperation::SshFsWrite { input }
+            | nomifun_agent_domain_wave2::Wave2TypedCapabilityOperation::SshExec { input }
+            | nomifun_agent_domain_wave2::Wave2TypedCapabilityOperation::SshSudo { input } => {
+                input.clone()
+            }
+            _ => {
+                return Err(Wave2HostPortError::new(
+                    "ACTION_OPERATION_MISMATCH",
+                    "the SSH owner received a non-SSH operation",
+                ));
+            }
+        };
+        let [binding] = typed.context.resource_bindings.as_slice() else {
+            return Err(Wave2HostPortError::resource_not_bound(
+                "the SSH Module requires exactly one ssh_host binding",
+            ));
+        };
+        if binding.resource_kind.as_ref() != nomifun_ssh::SSH_HOST_RESOURCE_KIND
+            || binding.connection_config_ref.is_some()
+            || binding
+                .typed_parameters
+                .keys()
+                .any(|key| key != "remote_cwd")
+        {
+            return Err(Wave2HostPortError::invalid_payload(
+                "the ssh_host binding contains non-canonical authority fields",
+            ));
+        }
+        let ssh_host_id = nomifun_common::SshHostId::parse(binding.resource_id.as_ref())
+            .map_err(|error| {
+                Wave2HostPortError::invalid_payload(format!(
+                    "the ssh_host resource identity is invalid: {error}"
+                ))
+            })?;
+        let remote_cwd = binding
+            .typed_parameters
+            .get("remote_cwd")
+            .cloned()
+            .unwrap_or_else(|| ".".to_owned());
+        let resource = nomifun_ssh::AgentSshHostResource::from_operation_names(
+            binding.binding_id.as_ref(),
+            binding.owner_id.clone(),
+            ssh_host_id,
+            remote_cwd,
+            binding.operations.iter(),
+        )
+        .map_err(ssh_action_error)?;
+        let authority = nomifun_ssh::AgentSshAuthority::bound(
+            typed.context.principal.principal_id.clone(),
+            resource,
+        )
+        .map_err(ssh_action_error)?;
+        let action_context = nomifun_ssh::SshActionContext {
+            principal_id: typed.context.principal.principal_id.clone(),
+            agent_session_id: typed.context.agent_session_id.as_ref().to_owned(),
+            operation_id: typed.context.operation_id.as_ref().to_owned(),
+        };
+        let dispatch = async {
+            let value = match typed.operation {
+                nomifun_agent_domain_wave2::Wave2TypedCapabilityOperation::SshFsRead { input } => {
+                    let input = serde_json::from_value::<nomifun_ssh::SshFsReadInput>(input.0)
+                        .map_err(|error| nomifun_ssh::SshActionError::InvalidInput(error.to_string()))?;
+                    serde_json::to_value(owner.fs_read(&authority, &action_context, input).await?)
+                }
+                nomifun_agent_domain_wave2::Wave2TypedCapabilityOperation::SshFsWrite { input } => {
+                    let input = serde_json::from_value::<nomifun_ssh::SshFsWriteInput>(input.0)
+                        .map_err(|error| nomifun_ssh::SshActionError::InvalidInput(error.to_string()))?;
+                    serde_json::to_value(owner.fs_write(&authority, &action_context, input).await?)
+                }
+                nomifun_agent_domain_wave2::Wave2TypedCapabilityOperation::SshExec { input } => {
+                    let input = serde_json::from_value::<nomifun_ssh::SshExecInput>(input.0)
+                        .map_err(|error| nomifun_ssh::SshActionError::InvalidInput(error.to_string()))?;
+                    serde_json::to_value(owner.exec(&authority, &action_context, input).await?)
+                }
+                nomifun_agent_domain_wave2::Wave2TypedCapabilityOperation::SshSudo { input } => {
+                    let input = serde_json::from_value::<nomifun_ssh::SshSudoInput>(input.0)
+                        .map_err(|error| nomifun_ssh::SshActionError::InvalidInput(error.to_string()))?;
+                    serde_json::to_value(owner.sudo(&authority, &action_context, input).await?)
+                }
+                _ => unreachable!("SSH operation checked above"),
+            }
+            .map_err(|error| nomifun_ssh::SshActionError::External(error.to_string()))?;
+            Ok::<_, nomifun_ssh::SshActionError>(StrictJsonValue(value))
+        };
+
+        if typed.context.action_id.as_ref() == nomifun_ssh::SSH_FS_READ_ACTION_ID {
+            return dispatch.await.map_err(ssh_action_error);
+        }
+        let store = self.effect_store.as_ref().ok_or_else(|| {
+            Wave2HostPortError::unavailable(
+                "canonical Agent Effect store is not mounted for SSH effects",
+            )
+        })?;
+        match begin_wave2_exclusive_effect(
+            store,
+            &typed.context,
+            binding,
+            &input,
+            nomifun_agent_session::EffectStrategy::ExternalUncertainEffect,
+        )
+        .await?
+        {
+            Wave2EffectAdmission::Replay(output) => Ok(output),
+            Wave2EffectAdmission::Reserved(reservation) => match dispatch.await {
+                Ok(output) => {
+                    finish_wave2_effect(
+                        &reservation,
+                        Wave2EffectCompletion::Succeeded(&output),
+                    )
+                    .await?;
+                    Ok(output)
+                }
+                Err(error) => {
+                    let unknown = matches!(error, nomifun_ssh::SshActionError::OutcomeUnknown(_));
+                    let error = ssh_action_error(error);
+                    finish_wave2_effect(
+                        &reservation,
+                        if unknown {
+                            Wave2EffectCompletion::Uncertain(&error)
+                        } else {
+                            Wave2EffectCompletion::Failed(&error)
+                        },
+                    )
+                    .await?;
+                    Err(error)
+                }
+            },
+        }
+    }
+
     fn host_for(
         &self,
         context: &Wave2HostContext,
@@ -367,6 +518,30 @@ impl NomiCoreWave2Host {
     }
 }
 
+fn ssh_action_error(error: nomifun_ssh::SshActionError) -> Wave2HostPortError {
+    use nomifun_ssh::SshActionError;
+    match error {
+        SshActionError::HostUnbound => Wave2HostPortError::resource_not_bound(error.to_string()),
+        SshActionError::ResourceOwnerMismatch => {
+            Wave2HostPortError::owner_mismatch(error.to_string())
+        }
+        SshActionError::ResourceOperationDenied { .. } => {
+            Wave2HostPortError::resource_not_bound(error.to_string())
+        }
+        SshActionError::InvalidResource(_)
+        | SshActionError::InvalidContext(_)
+        | SshActionError::InvalidInput(_) => {
+            Wave2HostPortError::invalid_payload(error.to_string())
+        }
+        SshActionError::OutcomeUnknown(_) => {
+            Wave2HostPortError::new("EFFECT_OUTCOME_UNKNOWN", error.to_string())
+        }
+        SshActionError::External(_) => {
+            Wave2HostPortError::new("SSH_ACTION_REJECTED", error.to_string())
+        }
+    }
+}
+
 impl Wave2HostPort for NomiCoreWave2Host {
     fn invoke<'a>(
         &'a self,
@@ -380,6 +555,12 @@ impl Wave2HostPort for NomiCoreWave2Host {
         >,
     > {
         Box::pin(async move {
+            if matches!(
+                &request.operation,
+                nomifun_agent_domain_wave2::Wave2CapabilityOperation::Ssh { .. }
+            ) {
+                return self.invoke_ssh(request).await;
+            }
             let input = match &request.operation {
                 nomifun_agent_domain_wave2::Wave2CapabilityOperation::WorkspaceExecution {
                     input,

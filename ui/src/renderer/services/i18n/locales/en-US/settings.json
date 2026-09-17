@@ -1537,8 +1537,6 @@
     "domainRequirementDesc": "Manage requirements, task workspaces, and requirement automation.",
     "domainAutoworkTitle": "AutoWork",
     "domainAutoworkDesc": "Enable, disable, and inspect requirement AutoWork state.",
-    "domainIdmmTitle": "IDMM",
-    "domainIdmmDesc": "Model dispatch, activity, and intelligent model allocation capabilities.",
     "domainCronTitle": "Scheduled tasks",
     "domainCronDesc": "Create, read, and maintain scheduled tasks.",
     "domainMcpTitle": "MCP servers",

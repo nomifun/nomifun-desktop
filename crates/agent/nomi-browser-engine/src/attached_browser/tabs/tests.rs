@@ -1,5 +1,8 @@
 use super::*;
 use futures_util::{SinkExt, StreamExt};
+use nomifun_browser_platform::attached_browser::{
+    AttachedBrowserCommand, AttachedBrowserRuntimeError,
+};
 use serde_json::json;
 use std::{
     sync::{Arc, Mutex},
@@ -7,6 +10,7 @@ use std::{
 };
 use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tokio_util::sync::CancellationToken;
 
 struct Peer {
     _directory: tempfile::TempDir,
@@ -14,6 +18,7 @@ struct Peer {
     commands: Arc<Mutex<Vec<Value>>>,
     task: tokio::task::JoinHandle<()>,
 }
+
 impl Drop for Peer {
     fn drop(&mut self) {
         self.task.abort();
@@ -100,75 +105,51 @@ async fn peer() -> (AttachedBrowser, Peer) {
 }
 
 #[tokio::test]
-async fn user_inventory_has_opaque_choices_and_granted_output_is_single_tab_only() {
+async fn installation_provider_inventory_mints_opaque_handles_without_attaching_pages() {
     let (browser, peer) = peer().await;
-    let inventory = browser.tabs_for_user().await.unwrap();
-    assert_eq!(inventory.tabs.len(), 2);
-    assert!(
-        !serde_json::to_string(&inventory)
-            .unwrap()
-            .contains("raw-target")
-    );
+    let tabs = browser.tabs_for_provider().await.unwrap();
+    assert_eq!(tabs.len(), 2);
+    assert_eq!(tabs[0].info.title, "Selected app");
+    assert_eq!(tabs[1].info.title, "Private unrelated page");
+    for tab in &tabs {
+        assert_eq!(tab.info.tab_id, tab.grant.id());
+        assert!(!tab.info.tab_id.contains("raw-target"));
+        let key = tab.grant.target_key();
+        assert_eq!(key.len(), 64);
+        assert!(key.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
     assert_eq!(
         peer.commands.lock().unwrap().len(),
         2,
-        "inventory never attaches pages"
+        "inventory only probes version and lists current targets"
     );
-    let grant = browser
-        .grant_tab(&inventory.tabs[0].choice_id)
-        .await
-        .unwrap();
-    let result = browser.granted_tab_metadata(&grant).await.unwrap();
-    let repeated = browser
-        .grant_tab(&inventory.tabs[0].choice_id)
-        .await
-        .unwrap();
-    let other = browser
-        .grant_tab(&inventory.tabs[1].choice_id)
-        .await
-        .unwrap();
-    assert!(grant.same_target(&repeated));
-    assert!(!grant.same_target(&other));
-    let encoded = serde_json::to_string(&result).unwrap();
-    assert!(encoded.contains("Selected app"));
-    assert!(!encoded.contains("Private unrelated") && !encoded.contains("raw-target"));
-    assert_eq!(result.tab_id, grant.id());
     browser.disconnect().await.unwrap();
 }
 
 #[tokio::test]
-async fn raw_target_url_ordinal_unknown_and_expired_choices_do_not_issue_commands() {
-    let (browser, peer) = peer().await;
-    let first = browser.tabs_for_user().await.unwrap();
-    let fresh = browser.tabs_for_user().await.unwrap();
-    let before = peer.commands.lock().unwrap().len();
-    for denied in [
-        "raw-target-A",
-        "https://fixture.test/a",
-        "0",
-        "missing",
-        &first.tabs[0].choice_id,
-    ] {
-        assert_eq!(
-            browser.grant_tab(denied).await.err(),
-            Some(AttachError::StaleSelection)
-        );
-    }
-    assert_eq!(peer.commands.lock().unwrap().len(), before);
-    browser.grant_tab(&fresh.tabs[0].choice_id).await.unwrap();
-    browser.disconnect().await.unwrap();
-}
-
-#[tokio::test]
-async fn a_grant_from_another_connection_is_rejected_before_protocol_io() {
+async fn handle_from_another_installation_connection_is_rejected_before_protocol_io() {
     let (first, _first_peer) = peer().await;
     let (second, second_peer) = peer().await;
-    let choice = first.tabs_for_user().await.unwrap().tabs.remove(0);
-    let grant = first.grant_tab(&choice.choice_id).await.unwrap();
+    let grant = first
+        .tabs_for_provider()
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .grant;
     let before = second_peer.commands.lock().unwrap().len();
     assert_eq!(
-        second.granted_tab_metadata(&grant).await.err(),
-        Some(AttachError::TabNotAuthorized)
+        second
+            .execute_granted(
+                &grant,
+                AttachedBrowserCommand::Observe {
+                    tab_id: grant.id().into(),
+                },
+                &CancellationToken::new(),
+            )
+            .await,
+        Err(AttachedBrowserRuntimeError::TabDenied)
     );
     assert_eq!(second_peer.commands.lock().unwrap().len(), before);
     first.disconnect().await.unwrap();
@@ -176,69 +157,44 @@ async fn a_grant_from_another_connection_is_rejected_before_protocol_io() {
 }
 
 #[tokio::test]
-async fn navigation_or_closure_between_offer_and_selection_requires_refresh() {
+async fn closed_or_privileged_target_never_falls_back_to_another_page() {
     let (browser, peer) = peer().await;
-    let inventory = browser.tabs_for_user().await.unwrap();
-    peer.targets.lock().unwrap()[0]["url"] = json!("https://changed.test/new-account");
-    assert_eq!(
-        browser.grant_tab(&inventory.tabs[0].choice_id).await.err(),
-        Some(AttachError::StaleSelection)
-    );
-    peer.targets.lock().unwrap().remove(1);
-    assert_eq!(
-        browser.grant_tab(&inventory.tabs[1].choice_id).await.err(),
-        Some(AttachError::StaleSelection)
-    );
-    browser.disconnect().await.unwrap();
-}
-
-#[tokio::test]
-async fn closed_granted_tab_never_falls_back_to_another_page() {
-    let (browser, peer) = peer().await;
-    let inventory = browser.tabs_for_user().await.unwrap();
     let grant = browser
-        .grant_tab(&inventory.tabs[0].choice_id)
+        .tabs_for_provider()
         .await
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .grant;
     peer.targets.lock().unwrap().remove(0);
-    assert_eq!(
-        browser.granted_tab_metadata(&grant).await.err(),
-        Some(AttachError::StaleSelection)
-    );
-    let commands = peer.commands.lock().unwrap();
-    assert_eq!(
-        commands.last().unwrap()["params"]["targetId"],
-        "raw-target-A"
-    );
-    drop(commands);
-    browser.disconnect().await.unwrap();
-    assert_eq!(
-        browser.granted_tab_metadata(&grant).await.err(),
-        Some(AttachError::ConnectionFailed)
-    );
-}
-
-#[tokio::test]
-async fn user_navigation_to_a_privileged_document_cannot_extend_a_page_grant() {
-    use nomifun_browser_platform::system_browser::{
-        SystemBrowserCommand, SystemBrowserRuntimeError,
-    };
-    let (browser, peer) = peer().await;
-    let choice = browser.tabs_for_user().await.unwrap().tabs.remove(0);
-    let grant = browser.grant_tab(&choice.choice_id).await.unwrap();
-    peer.targets.lock().unwrap()[0]["url"] = json!("chrome://settings");
     assert_eq!(
         browser
             .execute_granted(
                 &grant,
-                SystemBrowserCommand::Observe {
-                    tab_id: grant.id().into()
+                AttachedBrowserCommand::Observe {
+                    tab_id: grant.id().into(),
                 },
-                &tokio_util::sync::CancellationToken::new()
+                &CancellationToken::new(),
             )
-            .await
-            .err(),
-        Some(SystemBrowserRuntimeError::TabDenied)
+            .await,
+        Err(AttachedBrowserRuntimeError::TabDenied)
+    );
+    peer.targets
+        .lock()
+        .unwrap()
+        .insert(0, target("raw-target-A", "Settings", "chrome://settings"));
+    assert_eq!(
+        browser
+            .execute_granted(
+                &grant,
+                AttachedBrowserCommand::Observe {
+                    tab_id: grant.id().into(),
+                },
+                &CancellationToken::new(),
+            )
+            .await,
+        Err(AttachedBrowserRuntimeError::TabDenied)
     );
     assert!(peer.commands.lock().unwrap().iter().all(|command| {
         !command["method"]
@@ -250,30 +206,39 @@ async fn user_navigation_to_a_privileged_document_cannot_extend_a_page_grant() {
 }
 
 #[tokio::test]
-async fn inventory_filters_privileged_targets_and_limits_do_not_preserve_old_choices() {
+async fn provider_inventory_filters_privileged_targets_and_is_bounded() {
     let (browser, peer) = peer().await;
     peer.targets.lock().unwrap().extend([
         target("settings", "Settings", "chrome://settings"),
         target("file", "File", "file:///private"),
-        target("credentials", "Secret", "https://user:password@fixture.test"),
+        target(
+            "credentials",
+            "Secret",
+            "https://user:password@fixture.test",
+        ),
         json!({"type":"service_worker","targetId":"worker","title":"Worker","url":"https://fixture.test"}),
     ]);
-    let initial = browser.tabs_for_user().await.unwrap();
-    assert_eq!(initial.tabs.len(), 2);
-    *peer.targets.lock().unwrap() = vec![target("many", "A", "https://fixture.test"); MAX_TABS + 1];
+    assert_eq!(browser.tabs_for_provider().await.unwrap().len(), 2);
+
+    *peer.targets.lock().unwrap() =
+        vec![target("many", "A", "https://fixture.test"); MAX_TABS + 1];
     assert_eq!(
-        browser.tabs_for_user().await.err(),
+        browser.tabs_for_provider().await.err(),
         Some(AttachError::InventoryLimit)
     );
+    *peer.targets.lock().unwrap() = vec![
+        target("duplicate", "A", "https://fixture.test/a"),
+        target("duplicate", "B", "https://fixture.test/b"),
+    ];
     assert_eq!(
-        browser.grant_tab(&initial.tabs[0].choice_id).await.err(),
-        Some(AttachError::StaleSelection)
+        browser.tabs_for_provider().await.err(),
+        Some(AttachError::ConnectionFailed)
     );
     browser.disconnect().await.unwrap();
 }
 
 #[tokio::test]
-async fn disconnect_waits_for_operation_clones_and_blocks_queued_inventory() {
+async fn disconnect_waits_for_operations_and_blocks_queued_provider_inventory() {
     let (browser, _peer) = peer().await;
     let browser = Arc::new(browser);
     let operation = browser.operations.lock().await;
@@ -293,7 +258,7 @@ async fn disconnect_waits_for_operation_clones_and_blocks_queued_inventory() {
             .is_err()
     );
     let queued = browser.clone();
-    let listing = tokio::spawn(async move { queued.tabs_for_user().await });
+    let listing = tokio::spawn(async move { queued.tabs_for_provider().await });
     drop(in_flight);
     drop(operation);
     close.await.unwrap().unwrap();
@@ -304,12 +269,12 @@ async fn disconnect_waits_for_operation_clones_and_blocks_queued_inventory() {
 }
 
 #[tokio::test]
-async fn synchronous_disconnect_fence_interrupts_an_unanswered_inventory_read() {
+async fn synchronous_disconnect_fence_interrupts_unanswered_provider_inventory() {
     let (browser, peer) = peer().await;
     peer.targets.lock().unwrap()[0]["pause_inventory"] = json!(true);
     let browser = Arc::new(browser);
     let listing_browser = browser.clone();
-    let listing = tokio::spawn(async move { listing_browser.tabs_for_user().await });
+    let listing = tokio::spawn(async move { listing_browser.tabs_for_provider().await });
     tokio::time::timeout(Duration::from_secs(2), async {
         while peer.commands.lock().unwrap().len() < 2 {
             tokio::task::yield_now().await;

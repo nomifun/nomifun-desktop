@@ -220,6 +220,69 @@ async fn create_turn(
     (session, turn_ack.event_id)
 }
 
+async fn create_pending_effect(
+    store: &AgentSessionStore,
+    key: &str,
+    strategy: EffectStrategy,
+) -> (AgentSessionLiveRecord, EffectEventRequest, EventId) {
+    let operation_id = format!("effect-operation-{key}");
+    let turn_id = format!("effect-turn-{key}");
+    let (session, ready_event) = create_ready(store, key).await;
+    let turn = append(
+        &session.agent_session_id,
+        &format!("event-effect-turn-{key}"),
+        "session-api",
+        &format!("effect-turn-{key}"),
+        "turn/started",
+        &turn_id,
+        Some(ready_event),
+        json!({"operation_id": turn_id}),
+    );
+    let turn_ack = store.append_event(&turn).await.unwrap().ack.unwrap();
+    let tool = append(
+        &session.agent_session_id,
+        &format!("event-effect-tool-{key}"),
+        "runtime-supervisor",
+        &format!("effect-tool-{key}"),
+        "tool/call-started",
+        &format!("tool-{key}"),
+        Some(turn_ack.event_id),
+        json!({
+            "operation_id": operation_id,
+            "capability_id": "workspace.files",
+            "action_id": "workspace.files/write"
+        }),
+    );
+    let tool_ack = store.append_event(&tool).await.unwrap().ack.unwrap();
+    let request = EffectEventRequest {
+        agent_session_id: session.agent_session_id.clone(),
+        effect_id: format!("effect-{key}"),
+        turn_id: OperationId::from(turn_id),
+        operation_id: OperationId::from(operation_id),
+        owner_domain: "workspace".to_owned(),
+        capability_module: CapabilityId::from("workspace.files"),
+        action_id: ActionId::from("workspace.files/write"),
+        resource_binding_id: None,
+        resource_key: Some(format!("workspace:{key}")),
+        input_digest: digest('7'),
+        recorded_at: 1_788_000_000_010,
+        event_id: event_id(&format!("event-effect-started-{key}")),
+        producer_id: EventProducerId::from("capability-host"),
+        idempotency_key: IdempotencyKey::from(format!("effect-started-{key}")),
+        correlation_id: CorrelationId::from(format!("effect-{key}")),
+        strategy,
+        causation_event_id: Some(tool_ack.event_id),
+        payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
+    };
+    let started = store
+        .record_effect_started(request.clone())
+        .await
+        .unwrap()
+        .ack
+        .unwrap();
+    (session, request, started.event_id)
+}
+
 #[tokio::test]
 async fn shared_agent_store_schema_and_session_creation_are_exact_and_idempotent() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();
@@ -1698,7 +1761,7 @@ async fn effect_store_rejects_read_only_lifecycles_and_managed_uncertainty() {
             .record_effect_terminal(uncertain, EffectTerminalState::Uncertain)
             .await,
         Err(SessionStoreError::InvalidEvent(message))
-            if message == "only external_uncertain_effect may end as uncertain"
+            if message == "managed effects require process-restart proof before becoming uncertain"
     ));
 
     let failed = EffectEventRequest {
@@ -2234,11 +2297,9 @@ async fn fork_is_self_contained_and_parent_deletion_leaves_child_live() {
         owner_ref: owner(),
         requested_at: 1_788_000_000_200,
     };
+    store.fence_delete(&delete).await.unwrap();
     store
-        .delete_session(
-            &delete,
-            1_788_000_000_300,
-        )
+        .complete_delete(&delete, 1_788_000_000_300)
         .await
         .unwrap();
     assert!(store.get_live_session(&child_id).await.is_ok());
@@ -2255,7 +2316,14 @@ async fn deletion_fence_blocks_late_work_and_commits_exact_tombstone() {
         requested_at: 1_788_000_001_000,
     };
     store.fence_delete(&command).await.unwrap();
-    assert_eq!(store.deleting_sessions().await.unwrap().len(), 1);
+    assert_eq!(
+        store
+            .get_deleting_session(&session.agent_session_id)
+            .await
+            .unwrap()
+            .agent_session_id,
+        session.agent_session_id
+    );
 
     let late = append(
         &session.agent_session_id,
@@ -2318,7 +2386,7 @@ async fn deletion_fence_blocks_late_work_and_commits_exact_tombstone() {
 }
 
 #[tokio::test]
-async fn interrupted_delete_recovery_finishes_tombstone_idempotently() {
+async fn interrupted_delete_requires_owner_cleanup_before_explicit_completion() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();
     let (session, _) = create_ready(&store, "delete-recovery").await;
     let command = DeleteAgentSessionCommand {
@@ -2328,29 +2396,429 @@ async fn interrupted_delete_recovery_finishes_tombstone_idempotently() {
         requested_at: 1_788_000_002_000,
     };
     store.fence_delete(&command).await.unwrap();
-
-    let recovered = store
-        .recover_deleting_sessions(1_788_000_002_100)
+    let reentered = store.fence_delete(&command).await.unwrap();
+    assert_eq!(reentered.live.agent_session_id, session.agent_session_id);
+    assert!(store.inspect_tombstone(&session.agent_session_id).await.unwrap().is_none());
+    let completed = store
+        .complete_delete(&command, 1_788_000_002_100)
         .await
         .unwrap();
-    assert_eq!(recovered.len(), 1);
-    assert_eq!(
-        recovered[0].operation_id.as_ref(),
-        format!(
-            "delete-recovery:{}",
-            session.agent_session_id.as_ref()
-        )
-    );
-    assert_eq!(
-        recovered[0].tombstone.agent_session_id,
-        session.agent_session_id
-    );
-    assert!(store.deleting_sessions().await.unwrap().is_empty());
-    assert!(
+    assert_eq!(completed.operation_id, command.operation_id);
+    assert_eq!(completed.tombstone.agent_session_id, session.agent_session_id);
+}
+
+#[tokio::test]
+async fn delete_fence_allows_existing_effect_to_settle_but_blocks_new_work() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, started, started_event_id) =
+        create_pending_effect(&store, "delete-effect", EffectStrategy::ManagedEffect).await;
+    let command = DeleteAgentSessionCommand {
+        operation_id: OperationId::from("delete-effect-operation"),
+        agent_session_id: session.agent_session_id.clone(),
+        owner_ref: owner(),
+        requested_at: 1_788_000_003_000,
+    };
+    store.fence_delete(&command).await.unwrap();
+    let blockers = store
+        .delete_blockers(&session.agent_session_id)
+        .await
+        .unwrap();
+    assert_eq!(blockers.effects.len(), 1);
+    assert_eq!(blockers.effects[0].state, AgentEffectState::Pending);
+    assert!(matches!(
         store
-            .recover_deleting_sessions(1_788_000_002_200)
+            .complete_delete(&command, 1_788_000_003_100)
+            .await,
+        Err(SessionStoreError::Conflict(_))
+    ));
+
+    let terminal = EffectEventRequest {
+        recorded_at: 1_788_000_003_050,
+        event_id: event_id("event-effect-delete-effect-succeeded"),
+        producer_id: EventProducerId::from("owning-plugin"),
+        causation_event_id: Some(started_event_id),
+        payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+            "receipt": "committed-before-delete-fence"
+        }))),
+        ..started
+    };
+    store
+        .record_effect_terminal(terminal, EffectTerminalState::Succeeded)
+        .await
+        .unwrap();
+    assert!(store
+        .delete_blockers(&session.agent_session_id)
+        .await
+        .unwrap()
+        .is_empty());
+    store
+        .complete_delete(&command, 1_788_000_003_100)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn unknown_effect_must_be_explicitly_reconciled_while_delete_is_fenced() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, started, started_event_id) = create_pending_effect(
+        &store,
+        "delete-unknown-effect",
+        EffectStrategy::ExternalUncertainEffect,
+    )
+    .await;
+    let command = DeleteAgentSessionCommand {
+        operation_id: OperationId::from("delete-unknown-effect-operation"),
+        agent_session_id: session.agent_session_id.clone(),
+        owner_ref: owner(),
+        requested_at: 1_788_000_004_000,
+    };
+    store.fence_delete(&command).await.unwrap();
+    let uncertain = EffectEventRequest {
+        recorded_at: 1_788_000_004_010,
+        event_id: event_id("event-delete-effect-uncertain"),
+        producer_id: EventProducerId::from("runtime-supervisor"),
+        causation_event_id: Some(started_event_id),
+        ..started.clone()
+    };
+    let uncertain_event_id = store
+        .record_effect_terminal(uncertain, EffectTerminalState::Uncertain)
+        .await
+        .unwrap()
+        .ack
+        .unwrap()
+        .event_id;
+    assert_eq!(
+        store
+            .delete_blockers(&session.agent_session_id)
             .await
             .unwrap()
-            .is_empty()
+            .effects[0]
+            .state,
+        AgentEffectState::Unknown
     );
+    assert!(store
+        .complete_delete(&command, 1_788_000_004_020)
+        .await
+        .is_err());
+
+    let reconcile = EffectEventRequest {
+        recorded_at: 1_788_000_004_015,
+        event_id: event_id("event-delete-effect-reconciled"),
+        producer_id: EventProducerId::from("owning-plugin"),
+        causation_event_id: Some(uncertain_event_id),
+        ..started
+    };
+    store
+        .reconcile_effect(
+            reconcile,
+            EffectReconcileOutcome::ConfirmedFailed {
+                error: nomifun_agent_contracts::CanonicalErrorCode::from(
+                    "EXTERNAL_EFFECT_CONFIRMED_FAILED",
+                ),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(store
+        .delete_blockers(&session.agent_session_id)
+        .await
+        .unwrap()
+        .is_empty());
+    store
+        .complete_delete(&command, 1_788_000_004_020)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn restart_quarantines_managed_pending_effect_without_claiming_failure() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _, _) =
+        create_pending_effect(&store, "managed-restart", EffectStrategy::ManagedEffect).await;
+    let command = DeleteAgentSessionCommand {
+        operation_id: OperationId::from("delete-managed-restart"),
+        agent_session_id: session.agent_session_id.clone(),
+        owner_ref: owner(),
+        requested_at: 1_788_000_004_100,
+    };
+    store.fence_delete(&command).await.unwrap();
+    assert_eq!(
+        store
+            .quarantine_pending_effects_for_delete(
+                &owner(),
+                &session.agent_session_id,
+                1_788_000_004_110,
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    let blockers = store
+        .delete_blockers(&session.agent_session_id)
+        .await
+        .unwrap();
+    assert_eq!(blockers.effects[0].state, AgentEffectState::Unknown);
+    store
+        .override_unknown_effect_for_delete(
+            &owner(),
+            &session.agent_session_id,
+            &blockers.effects[0].effect_id,
+            &digest('d'),
+            1_788_000_004_120,
+        )
+        .await
+        .unwrap();
+    assert!(store
+        .delete_blockers(&session.agent_session_id)
+        .await
+        .unwrap()
+        .is_empty());
+    let retained_state: String = sqlx::query_scalar(
+        "SELECT state FROM agent_effects WHERE session_id = ? AND effect_id = ?",
+    )
+    .bind(session.agent_session_id.as_ref())
+    .bind(&blockers.effects[0].effect_id)
+    .fetch_one(store.test_pool())
+    .await
+    .unwrap();
+    assert_eq!(retained_state, "unknown", "override must not falsify outcome");
+}
+
+#[tokio::test]
+async fn resource_cleanup_uncertainty_survives_store_restart_and_blocks_purge() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "delete-cleanup-unknown").await;
+    let command = DeleteAgentSessionCommand {
+        operation_id: OperationId::from("delete-cleanup-unknown-operation"),
+        agent_session_id: session.agent_session_id.clone(),
+        owner_ref: owner(),
+        requested_at: 1_788_000_005_000,
+    };
+    store.fence_delete(&command).await.unwrap();
+    store
+        .record_resource_cleanup_started(&session.agent_session_id, "ssh")
+        .await
+        .unwrap();
+    store
+        .record_resource_cleanup_uncertain(
+            &session.agent_session_id,
+            "ssh",
+            1_788_000_005_010,
+        )
+        .await
+        .unwrap();
+
+    let restarted = AgentSessionStore::from_pool(store.test_pool().clone())
+        .await
+        .unwrap();
+    let blockers = restarted
+        .delete_blockers(&session.agent_session_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        blockers.resource_cleanup_uncertainties,
+        vec![crate::ResourceCleanupUncertainty {
+            owner_domain: "ssh".to_owned(),
+            recorded_at: 1_788_000_005_010,
+        }]
+    );
+    assert!(matches!(
+        restarted
+            .complete_delete(&command, 1_788_000_005_020)
+            .await,
+        Err(SessionStoreError::Conflict(message)) if message.contains("resource cleanup uncertainty")
+    ));
+    assert!(restarted
+        .inspect_tombstone(&session.agent_session_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(restarted
+        .get_deleting_session(&session.agent_session_id)
+        .await
+        .is_ok());
+
+    restarted
+        .override_resource_cleanup_for_delete(
+            &owner(),
+            &session.agent_session_id,
+            "ssh",
+            &digest('c'),
+            1_788_000_005_015,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        restarted
+            .record_resource_cleanup_succeeded(&session.agent_session_id, "ssh")
+            .await,
+        Err(SessionStoreError::Conflict(_))
+    ), "manual risk acceptance must not be rewritten as cleanup success");
+    assert!(restarted
+        .delete_blockers(&session.agent_session_id)
+        .await
+        .unwrap()
+        .is_empty());
+    restarted
+        .complete_delete(&command, 1_788_000_005_020)
+        .await
+        .unwrap();
+    let reopened = AgentSessionStore::from_pool(restarted.test_pool().clone())
+        .await
+        .unwrap();
+    let audits = reopened
+        .deletion_audits(&owner(), &session.agent_session_id)
+        .await
+        .unwrap();
+    assert_eq!(audits.len(), 1);
+    assert_eq!(audits[0].target_kind, "resource_cleanup");
+    assert_eq!(audits[0].target_id, "ssh");
+    assert_eq!(audits[0].reason_digest, digest('c'));
+    assert_eq!(audits[0].recorded_at, 1_788_000_005_015);
+    let private_event_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_events WHERE session_id = ?",
+    )
+    .bind(session.agent_session_id.as_ref())
+    .fetch_one(reopened.test_pool())
+    .await
+    .unwrap();
+    assert_eq!(private_event_count, 0, "tombstone must purge private events");
+}
+
+#[tokio::test]
+async fn canonical_autowork_config_is_owner_scoped_cas_and_boot_listable() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "autowork-config").await;
+    assert_eq!(
+        store
+            .automation_config(&session.agent_session_id)
+            .await
+            .unwrap(),
+        crate::AgentSessionAutomationConfig::default()
+    );
+    let command = crate::CommitAgentSessionAutomationConfig {
+        agent_session_id: session.agent_session_id.clone(),
+        owner_ref: owner(),
+        expected_revision: 0,
+        enabled: true,
+        tag: Some("release".to_owned()),
+        max_requirements: Some(3),
+        operation_id: Some("autowork-config-enable".to_owned()),
+        recorded_at: 1_788_000_006_000,
+    };
+    let saved = store
+        .commit_automation_config(command.clone())
+        .await
+        .unwrap();
+    assert_eq!(saved.revision, 1);
+    assert_eq!(
+        store
+            .commit_automation_config(command.clone())
+            .await
+            .unwrap(),
+        saved
+    );
+    let listed = store
+        .list_enabled_automation_configs(&owner())
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].session.agent_session_id, session.agent_session_id);
+    assert_eq!(listed[0].config, saved);
+
+    let disabled = store
+        .commit_automation_config(crate::CommitAgentSessionAutomationConfig {
+            agent_session_id: session.agent_session_id.clone(),
+            owner_ref: owner(),
+            expected_revision: 1,
+            enabled: false,
+            tag: Some("release".to_owned()),
+            max_requirements: Some(3),
+            operation_id: Some("autowork-config-disable".to_owned()),
+            recorded_at: 1_788_000_006_010,
+        })
+        .await
+        .unwrap();
+    assert_eq!(disabled.revision, 2);
+    assert!(!disabled.enabled);
+    assert_eq!(
+        store
+            .commit_automation_config(command.clone())
+            .await
+            .unwrap(),
+        saved,
+        "A -> B -> replay(A) must return A's historical receipt"
+    );
+    assert_eq!(
+        store
+            .automation_config(&session.agent_session_id)
+            .await
+            .unwrap(),
+        disabled,
+        "historical replay must not roll the current config back"
+    );
+    let mut changed_replay = command.clone();
+    changed_replay.tag = Some("changed".to_owned());
+    assert!(matches!(
+        store.commit_automation_config(changed_replay).await,
+        Err(SessionStoreError::IdempotencyConflict(_))
+    ));
+
+    let mut stale = command.clone();
+    stale.operation_id = Some("autowork-config-stale".to_owned());
+    stale.tag = Some("other".to_owned());
+    assert!(matches!(
+        store.commit_automation_config(stale).await,
+        Err(SessionStoreError::Conflict(_))
+    ));
+    let mut foreign = command;
+    foreign.owner_ref.principal_id = "foreign".to_owned();
+    foreign.expected_revision = 1;
+    foreign.operation_id = Some("autowork-config-foreign".to_owned());
+    assert!(store.commit_automation_config(foreign).await.is_err());
+}
+
+#[tokio::test]
+async fn restart_quarantines_unfinished_resource_cleanup_before_retry() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "delete-cleanup-started").await;
+    let command = DeleteAgentSessionCommand {
+        operation_id: OperationId::from("delete-cleanup-started-operation"),
+        agent_session_id: session.agent_session_id.clone(),
+        owner_ref: owner(),
+        requested_at: 1_788_000_007_000,
+    };
+    store.fence_delete(&command).await.unwrap();
+    store
+        .record_resource_cleanup_started(&session.agent_session_id, "ssh")
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .delete_blockers(&session.agent_session_id)
+            .await
+            .unwrap()
+            .resource_cleanup_pending,
+        vec!["ssh"]
+    );
+    let restarted = AgentSessionStore::from_pool(store.test_pool().clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        restarted
+            .quarantine_pending_resource_cleanups_for_delete(
+                &owner(),
+                &session.agent_session_id,
+                1_788_000_007_010,
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    let blockers = restarted
+        .delete_blockers(&session.agent_session_id)
+        .await
+        .unwrap();
+    assert!(blockers.resource_cleanup_pending.is_empty());
+    assert_eq!(blockers.resource_cleanup_uncertainties.len(), 1);
 }

@@ -343,8 +343,8 @@ async fn shell_open_external(
     if !lower.starts_with("mailto:") {
         return json!({
             "error": "opening web URLs through the operating-system browser is not available \
-                      to Agent tools. Use the selected conversation Browser or system-browser capability to read \
-                      or interact with web pages; only mailto: links may be opened here."
+                      to Agent tools. Use the bound Browser Module actions to read or interact \
+                      with web pages; only mailto: links may be opened here."
         });
     }
     match deps.shell.open_external(&p.url).await {

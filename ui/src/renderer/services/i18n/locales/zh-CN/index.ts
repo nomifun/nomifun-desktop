@@ -16,7 +16,6 @@ import tools from './tools.json';
 import google from './google.json';
 import cron from './cron.json';
 import requirements from './requirements.json';
-import idmm from './idmm.json';
 import starOffice from './starOffice.json';
 import guid from './guid.json';
 import creation from './creation.json';
@@ -53,7 +52,6 @@ export default {
   google,
   cron,
   requirements,
-  idmm,
   starOffice,
   guid,
   creation,

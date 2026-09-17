@@ -7,7 +7,7 @@ use axum::{
     routing::{get, post},
 };
 use nomifun_browser_platform::{
-    run_guard::BrowserInputState, runtime::*, workspace::BrowserWorkspaceService,
+    run_guard::BrowserInputState, runtime::*, workspace::BrowserResourceService,
 };
 use serde_json::{Value, json};
 use std::sync::{
@@ -334,7 +334,7 @@ async fn start_turn(
 async fn user_ready(
     router: &nomifun_app::DesktopServer,
     id: &str,
-    workspace: &nomifun_browser_platform::workspace::BrowserWorkspace,
+    workspace: &nomifun_browser_platform::workspace::BrowserResource,
     view: &tauri::Webview,
 ) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
@@ -517,7 +517,7 @@ async fn verify(app: &tauri::AppHandle, root: &tempfile::TempDir) -> Result<Valu
             .with_graceful_shutdown(server_stop.cancelled_owned())
             .await
     });
-    let workspaces = Arc::new(BrowserWorkspaceService::new(Arc::new(
+    let browser_resources = Arc::new(BrowserResourceService::new(Arc::new(
         super::host::DesktopBrowserHost::new(app.clone()),
     )));
     let cli = nomifun_app::cli::Cli {
@@ -538,7 +538,7 @@ async fn verify(app: &tauri::AppHandle, root: &tempfile::TempDir) -> Result<Valu
         None,
         None,
         nomifun_app::DesktopHostServices {
-            browser_workspaces: Some(workspaces.clone()),
+            browser_resources: Some(browser_resources.clone()),
             ..Default::default()
         },
     )
@@ -562,7 +562,7 @@ async fn verify(app: &tauri::AppHandle, root: &tempfile::TempDir) -> Result<Valu
                             .upgrade()
                             .ok_or("Backend closed before presentation")?;
                         let workspace = backend
-                            .browser_workspace_for_local_surface(&id)
+                            .browser_resource_for_local_surface(&id)
                             .await
                             .map_err(error)?;
                         workspace
@@ -594,12 +594,9 @@ async fn verify(app: &tauri::AppHandle, root: &tempfile::TempDir) -> Result<Valu
         let preset=editor["preset"]["preset_id"].as_str().ok_or("Preset id missing")?;
         let mut draft=editor["draft"].clone();
         let catalog=api(&router,"GET","/api/capabilities",json!(null)).await?;
-        let mut selections=vec![];
-        for id in ["browser.navigate","browser.observe","browser.act","browser.upload"] {
-            let item=catalog.as_array().and_then(|items|items.iter().find(|item|item["capability"]["id"]==id)).ok_or("Browser capability missing")?;
-            if item["materialization_state"]!="materialized" {return Err(format!("{id} not materialized: {item}"));}
-            selections.push(json!({"capability":item["capability"],"action_allowlist":[]}));
-        }
+        let item=catalog.as_array().and_then(|items|items.iter().find(|item|item["capability"]["id"]=="browser")).ok_or("Browser Module missing")?;
+        if item["materialization_state"]!="materialized" {return Err(format!("browser not materialized: {item}"));}
+        let selections=vec![json!({"capability":item["capability"],"action_allowlist":["browser/navigate","browser/observe","browser/act","browser/upload"]})];
         draft["document"]["enabled_capabilities"]=json!(selections);
         draft["document"]["skill_bindings"]=json!([]);
         api(&router,"POST",&format!("/api/agent-presets/{preset}/revisions"),json!({"expected_current_revision":editor["revision"]["reference"],"draft":draft,"reason":"native browser agent integration"})).await?;
@@ -608,7 +605,7 @@ async fn verify(app: &tauri::AppHandle, root: &tempfile::TempDir) -> Result<Valu
         api(&router,"PATCH",&format!("/api/conversations/{id}"),json!({"extra":{"workspace":work.to_string_lossy()}})).await?;
         api(&router,"POST",&format!("/api/agent-sessions/{id}/turns"),json!({"input":{"content":"Use the Browser to open the local fixture, observe, type, click and read diagnostics."},"idempotency_key":uuid::Uuid::new_v4().to_string()})).await?;
         tokio::time::timeout(std::time::Duration::from_secs(40),model.terminal_entered.acquire()).await.map_err(|_|format!("Model did not reach terminal gate; calls={}, failure={:?}",model.calls.load(Ordering::SeqCst),model.failure.lock().unwrap()))?.map_err(error)?.forget();
-        let workspace=router.browser_workspace_for_local_surface(id).await.map_err(error)?;
+        let workspace=router.browser_resource_for_local_surface(id).await.map_err(error)?;
         let snapshot=workspace.snapshot().await.map_err(error)?;
         if snapshot.run.input_state!=BrowserInputState::AgentRunning { return Err("Browser unlocked before Agent terminal".into()); }
         let runtime=snapshot.runtime.ok_or("Agent did not create a native runtime")?;
@@ -720,7 +717,7 @@ async fn verify(app: &tauri::AppHandle, root: &tempfile::TempDir) -> Result<Valu
         permit(&model.shutdown_disconnected,"application-owned model transport shutdown").await?;
         if app.get_webview(&target.tab_id).is_some() {return Err("Application shutdown retained the native browser child".into());}
         model.shutdown_release.add_permits(1);
-        Ok(json!({"model":"local_scripted_protocol","model_calls":model.calls.load(Ordering::SeqCst),"selected_capabilities":["browser.navigate","browser.observe","browser.act","browser.upload"],"native_target":target,"auto_open_once":true,"shown_before_input":true,"native_input_and_diagnostics":true,"terminal_before_unlock":true,"same_page_after_terminal":true,"normal_history_reply":true,"cancelled_model_reply_ignored":true,"next_turn_fresh_same_page":true,"cancelled_native_navigation":true,"user_navigation_after_stop":true,"native_upload_snapshot":true,"active_agent_shutdown":true}))
+        Ok(json!({"model":"local_scripted_protocol","model_calls":model.calls.load(Ordering::SeqCst),"selected_module":"browser","selected_actions":["browser/navigate","browser/observe","browser/act","browser/upload"],"native_target":target,"auto_open_once":true,"shown_before_input":true,"native_input_and_diagnostics":true,"terminal_before_unlock":true,"same_page_after_terminal":true,"normal_history_reply":true,"cancelled_model_reply_ignored":true,"next_turn_fresh_same_page":true,"cancelled_native_navigation":true,"user_navigation_after_stop":true,"native_upload_snapshot":true,"active_agent_shutdown":true}))
     }.await;
     app.unlisten(event);
     model.stop.cancel();

@@ -1,14 +1,14 @@
 //! Real close-all lifecycle on disposable profiles, never the user's browser.
-use nomifun_browser_platform::{run_guard::BrowserInputState,runtime::*,workspace::BrowserWorkspaceService};
+use nomifun_browser_platform::{run_guard::BrowserInputState,runtime::*,workspace::BrowserResourceService};
 use serde_json::{json,Value};
 use std::{sync::Arc,time::Duration};
 use tauri::Manager;
 
 pub async fn verify(app:&tauri::AppHandle,url:&str)->Result<Value,String> {
     let profile=tempfile::Builder::new().prefix("nomifun-close-all-").tempdir().map_err(|e|e.to_string())?;
-    let service=BrowserWorkspaceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
-    let workspace=service.ensure(BrowserWorkspaceKey{user_id:"close-all".into(),conversation_id:"selected".into()},"provider".into(),BrowserProfile::Persistent(profile.path().to_owned())).await.map_err(|e|e.to_string())?;
-    let other=service.ensure(BrowserWorkspaceKey{user_id:"close-all".into(),conversation_id:"unrelated".into()},"provider".into(),BrowserProfile::Ephemeral).await.map_err(|e|e.to_string())?;
+    let service=BrowserResourceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
+    let workspace=service.ensure(super::browser_resource_fixture::authority("close-all","selected","provider"),BrowserProfile::Persistent(profile.path().to_owned())).await.map_err(|e|e.to_string())?;
+    let other=service.ensure(super::browser_resource_fixture::authority("close-all","unrelated","provider"),BrowserProfile::Ephemeral).await.map_err(|e|e.to_string())?;
     let result:Result<Value,String>=async {
         let first=workspace.user_command(BrowserTabCommand::Create {url:url.into()}).await.map_err(|e|e.to_string())?;
         let first_id=first.active_tab_id.clone().ok_or("Missing first page")?;
@@ -76,7 +76,7 @@ pub async fn verify(app:&tauri::AppHandle,url:&str)->Result<Value,String> {
 
 async fn verify_pending_creation(app:&tauri::AppHandle,url:&str)->Result<(),String> {
     let runtime=super::host::DesktopBrowserHost::new(app.clone()).create(CreateBrowserRuntime {
-        key:BrowserWorkspaceKey{user_id:"close-all-create".into(),conversation_id:"pending".into()},
+        key:super::browser_resource_fixture::key("close-all-create","pending"),
         runtime_generation:77,profile:BrowserProfile::Ephemeral,user_input_enabled:true,
     }).await.map_err(|e|e.to_string())?;
     let result:Result<(),String>=async {

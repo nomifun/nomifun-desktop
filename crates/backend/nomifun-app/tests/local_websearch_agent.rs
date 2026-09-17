@@ -46,7 +46,7 @@ fn model_reply(model: &Model, body: &Value, step: usize) -> Result<(Value, &'sta
     }
     if names
         .iter()
-        .any(|name| matches!(*name, "web_search" | "Browser" | "nomi_system_browser"))
+        .any(|name| matches!(*name, "web_search" | "Browser"))
     {
         return Err("local search selection enabled another browser/search tool".into());
     }

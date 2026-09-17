@@ -16,7 +16,7 @@ use nomifun_api_types::{
     AgentExecutionTemplateParticipantInput, AnswerExecutionDecisionRequest,
     ConfigureExecutionStepRequest, ConversationResponse, CreateAgentExecutionRequest,
     CreateAgentExecutionTemplateRequest, CreateExecutionFromTemplateRequest, ExecutionModelPool,
-    ExecutionParticipant, ExecutionStep, PlannedExecution,
+    ExecutionParticipant, ExecutionStep, PlannedExecution, PlannedExecutionStep,
     ReassignExecutionStepRequest, RenameAgentExecutionRequest, ReplanAgentExecutionRequest,
     AgentResolvedSnapshot, RetryExecutionStepRequest,
     SteerExecutionStepRequest, UpdateExecutionStepRequest, VersionedAgentExecutionCommand,
@@ -28,6 +28,7 @@ use nomifun_common::{
     ExecutionAttemptStatus, ExecutionStepKind, ExecutionStepStatus, MAX_AGENT_EXECUTION_MODELS,
     MAX_AGENT_EXECUTION_PARALLELISM, MAX_AGENT_EXECUTION_PARTICIPANTS,
     MAX_AGENT_EXECUTION_STEPS, NOMI_AGENT_ID, ParticipantAssignmentSource, ProviderId,
+    RequirementId, StepFailurePolicy,
     generate_id, now_ms,
 };
 use nomifun_db::{
@@ -46,7 +47,13 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::attempt_runner::AttemptRunner;
+use crate::attempt_runner::{
+    AgentExecutionSessionPort, AttemptRunner, MISSING_DELIVERY_RECEIPT_CODE,
+};
+use crate::automation::{
+    AgentExecutionAutomationPort, AutomationExecutionReceipt, AutomationExecutionRequest,
+    AutomationExecutionSource,
+};
 use crate::artifact_contract::validate_required_artifacts;
 use crate::conversation_effect::AttemptConversationEffects;
 use crate::domain_mapper;
@@ -127,6 +134,10 @@ enum InitialPlanningCommand {
         supplemental_context: Option<serde_json::Value>,
     },
     Explicit { plan: PlannedExecution },
+    Automation {
+        source: AutomationExecutionSource,
+        plan: PlannedExecution,
+    },
 }
 
 pub(crate) struct AgentExecutionEngineDeps {
@@ -143,6 +154,7 @@ pub(crate) struct AgentExecutionEngineDeps {
     pub(crate) conversation_effects: Arc<dyn ConversationEffects>,
     pub(crate) attempt_timeout: Duration,
     pub(crate) lifecycle: AgentExecutionLifecycle,
+    pub(crate) session: Arc<dyn AgentExecutionSessionPort>,
 }
 
 impl AgentExecutionEngineDeps {
@@ -161,6 +173,7 @@ impl AgentExecutionEngineDeps {
         publisher: AgentExecutionEventPublisher,
         data_dir: PathBuf,
         lifecycle: AgentExecutionLifecycle,
+        session: Arc<dyn AgentExecutionSessionPort>,
     ) -> Self {
         Self {
             repository,
@@ -175,6 +188,7 @@ impl AgentExecutionEngineDeps {
             conversation_effects,
             attempt_timeout: DEFAULT_ATTEMPT_TIMEOUT,
             lifecycle,
+            session,
         }
     }
 }
@@ -188,6 +202,8 @@ pub struct AgentExecutionEngine {
     publisher: AgentExecutionEventPublisher,
     scheduler: ExecutionScheduler,
     lifecycle: AgentExecutionLifecycle,
+    session: Arc<dyn AgentExecutionSessionPort>,
+    automation_transition: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AgentExecutionEngine {
@@ -214,6 +230,8 @@ impl AgentExecutionEngine {
             publisher: deps.publisher,
             scheduler: ExecutionScheduler::new(scheduler_deps),
             lifecycle: deps.lifecycle,
+            session: deps.session,
+            automation_transition: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -399,6 +417,7 @@ impl AgentExecutionEngine {
             execution_request,
             participants,
             context,
+            None,
         )
         .await
     }
@@ -421,7 +440,7 @@ impl AgentExecutionEngine {
                 request.lead_model.as_ref(),
             )?;
         }
-        self.persist_execution(owner_id, actor, request, participants, None)
+        self.persist_execution(owner_id, actor, request, participants, None, None)
             .await
     }
 
@@ -432,6 +451,7 @@ impl AgentExecutionEngine {
         request: CreateAgentExecutionRequest,
         participants: Vec<NewAgentExecutionParticipant>,
         supplemental_context: Option<serde_json::Value>,
+        automation_source: Option<AutomationExecutionSource>,
     ) -> Result<AgentExecution, AppError> {
         if let Some(conversation_id) = request.lead_conversation_id.as_deref() {
             canonical_id::<ConversationId>("lead_conversation_id", conversation_id)?;
@@ -448,18 +468,29 @@ impl AgentExecutionEngine {
                 "explicit execution steps must not be empty".to_owned(),
             ));
         }
-        let initial_plan = match request.steps {
-            Some(steps) => InitialPlanningCommand::Explicit {
+        let initial_plan = match (request.steps, automation_source) {
+            (Some(steps), Some(source)) => InitialPlanningCommand::Automation {
+                source,
                 plan: PlannedExecution { steps },
             },
-            None => InitialPlanningCommand::Automatic {
+            (Some(steps), None) => InitialPlanningCommand::Explicit {
+                plan: PlannedExecution { steps },
+            },
+            (None, Some(_)) => {
+                return Err(AppError::Internal(
+                    "automation execution requires one explicit durable plan".to_owned(),
+                ));
+            }
+            (None, None) => InitialPlanningCommand::Automatic {
                 supplemental_context,
             },
         };
         // Do not create an aggregate that can never leave Planning. The
         // original declarative plan remains the persisted recovery input;
         // generated step IDs are intentionally materialized only at commit.
-        if let InitialPlanningCommand::Explicit { plan } = &initial_plan {
+        if let InitialPlanningCommand::Explicit { plan }
+        | InitialPlanningCommand::Automation { plan, .. } = &initial_plan
+        {
             let resolved = participants_from_new("preflight", 0, &participants)?;
             plan_materializer::materialize(plan.clone(), &resolved)?;
         }
@@ -1347,6 +1378,23 @@ impl AgentExecutionEngine {
         command: VersionedAgentExecutionCommand,
     ) -> Result<(), AppError> {
         let before = self.detail(owner_id, execution_id).await?;
+        let row = self
+            .repository
+            .get_execution(owner_id, execution_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Agent Execution {execution_id}")))?;
+        let initial: InitialPlanningCommand = serde_json::from_str(&row.initial_plan_input)
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "invalid persisted initial planning input for {execution_id}: {error}"
+                ))
+            })?;
+        if matches!(initial, InitialPlanningCommand::Automation { .. }) {
+            return Err(AppError::Conflict(
+                "AutoWork AgentExecution is durable Requirement audit evidence and cannot be deleted"
+                    .to_owned(),
+            ));
+        }
         if before.execution.version != command.expected_version {
             return Err(AppError::Conflict(
                 "stale Agent Execution version".to_owned(),
@@ -1958,6 +2006,8 @@ impl AgentExecutionEngine {
         if detail.execution.version != request.expected_execution_version {
             return Err(AppError::Conflict("stale Agent Execution version".to_owned()));
         }
+        self.reject_automation_manual_recovery(owner_id, execution_id, "retry")
+            .await?;
         if detail.execution.status == AgentExecutionStatus::Cancelled {
             return Err(AppError::Conflict(
                 "a cancelled Agent Execution cannot be reopened".to_owned(),
@@ -2011,6 +2061,8 @@ impl AgentExecutionEngine {
         if detail.execution.version != request.expected_execution_version {
             return Err(AppError::Conflict("stale Agent Execution version".to_owned()));
         }
+        self.reject_automation_manual_recovery(owner_id, execution_id, "adopt output for")
+            .await?;
         if detail.execution.status == AgentExecutionStatus::Cancelled {
             return Err(AppError::Conflict(
                 "a cancelled Agent Execution cannot be reopened".to_owned(),
@@ -2517,7 +2569,8 @@ impl AgentExecutionEngine {
                 ))
             })?;
             let plan = match &command {
-                InitialPlanningCommand::Explicit { plan } => plan.clone(),
+                InitialPlanningCommand::Explicit { plan }
+                | InitialPlanningCommand::Automation { plan, .. } => plan.clone(),
                 InitialPlanningCommand::Automatic {
                     supplemental_context,
                 } => {
@@ -2733,6 +2786,568 @@ impl AgentExecutionEngine {
 
     async fn publish(&self) {
         self.publisher.drain(self.repository.clone()).await;
+    }
+}
+
+impl AgentExecutionEngine {
+    /// Product `agent.collaboration` boundary. A calling Attempt appends work
+    /// to its exact aggregate; an ordinary AgentSession creates one aggregate
+    /// whose lead keeps the frozen Session Snapshot and exact resolved model.
+    pub async fn collaborate_from_session(
+        &self,
+        owner_id: &str,
+        agent_session_id: &str,
+        goal: String,
+        single_step: bool,
+    ) -> Result<AgentExecution, AppError> {
+        canonical_id::<ConversationId>("agent_session_id", agent_session_id)?;
+        let goal = non_empty("goal", goal)?;
+        let links = self
+            .repository
+            .resolve_conversation_link(owner_id, agent_session_id)
+            .await?;
+        let mut attempts = links
+            .iter()
+            .filter(|link| link.active && link.relation == "attempt");
+        if let Some(link) = attempts.next() {
+            if attempts.next().is_some() {
+                return Err(AppError::Conflict(
+                    "AgentSession belongs to multiple active execution Attempts".into(),
+                ));
+            }
+            let attempt_id = link.attempt_id.clone().ok_or_else(|| {
+                AppError::Internal("active Attempt link has no Attempt identity".into())
+            })?;
+            let actor = AgentExecutionActor::agent(agent_session_id, Some(attempt_id));
+            let steps = single_step.then(|| vec![collaboration_step(&goal)]);
+            return self
+                .delegate_from_attempt(
+                    owner_id,
+                    &actor,
+                    agent_session_id,
+                    goal,
+                    ExecutionModelPool::Automatic,
+                    None,
+                    steps,
+                )
+                .await
+                .map(|(detail, _)| detail.execution);
+        }
+
+        let session = self.session.get(owner_id, agent_session_id).await?;
+        let snapshot = session.agent_snapshot.as_ref().ok_or_else(|| {
+            AppError::Conflict(
+                "Agent collaboration requires an immutable Agent Snapshot".into(),
+            )
+        })?;
+        let resolved_model = snapshot.resolved_model.as_ref().ok_or_else(|| {
+            AppError::Conflict(
+                "Agent collaboration Snapshot has no exact resolved model".into(),
+            )
+        })?;
+        let lead_model = nomifun_api_types::ExecutionModelRef {
+            provider_id: resolved_model.provider_id.clone(),
+            model: resolved_model.model.clone(),
+        };
+        let model_pool = ExecutionModelPool::Single {
+            model: lead_model.clone(),
+        };
+        let mut participants = self.resolver.resolve(&model_pool, Some(&lead_model)).await?;
+        ParticipantResolver::prepend_frozen_snapshot(
+            &mut participants,
+            snapshot,
+            Some(&lead_model),
+        )?;
+        let actor = AgentExecutionActor::agent(agent_session_id, None);
+        self.persist_execution(
+                owner_id,
+                &actor,
+                CreateAgentExecutionRequest {
+                    goal: goal.clone(),
+                    work_dir: None,
+                    model_pool,
+                    delegation_policy: nomifun_common::DelegationPolicy::Automatic,
+                    adaptation_policy: nomifun_common::AdaptationPolicy::Adaptive,
+                    decision_policy: DecisionPolicy::Automatic,
+                    max_parallel: single_step.then_some(1),
+                    lead_conversation_id: Some(agent_session_id.to_owned()),
+                    lead_model: Some(lead_model),
+                    steps: single_step.then(|| vec![collaboration_step(&goal)]),
+                },
+                participants,
+                None,
+                None,
+            )
+            .await
+    }
+
+    async fn find_automation_execution(
+        &self,
+        owner_id: &str,
+        source: &AutomationExecutionSource,
+    ) -> Result<Option<AgentExecutionDetail>, AppError> {
+        validate_automation_source(source)?;
+        let mut offset = 0;
+        let mut matching_id: Option<String> = None;
+        loop {
+            let rows = self
+                .repository
+                .list_executions(owner_id, MAX_LIST_LIMIT, offset)
+                .await?;
+            let page_len = rows.len();
+            for row in rows {
+                let command: InitialPlanningCommand =
+                    serde_json::from_str(&row.initial_plan_input).map_err(|error| {
+                        AppError::Internal(format!(
+                            "invalid persisted initial planning input for {}: {error}",
+                            row.execution_id
+                        ))
+                    })?;
+                if matches!(
+                    command,
+                    InitialPlanningCommand::Automation {
+                        source: ref persisted,
+                        ..
+                    } if persisted == source
+                ) {
+                    if matching_id.replace(row.execution_id.clone()).is_some() {
+                        return Err(AppError::Conflict(format!(
+                            "automation source {} generation {} owns multiple Agent Executions",
+                            source.requirement_id, source.claim_generation
+                        )));
+                    }
+                }
+            }
+            if page_len < MAX_LIST_LIMIT as usize {
+                break;
+            }
+            offset += MAX_LIST_LIMIT;
+        }
+        match matching_id {
+            Some(execution_id) => self.detail(owner_id, &execution_id).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// AutoWork recovery is owned by the exact Requirement claim generation.
+    /// Generic UI recovery commands do not carry that authority and therefore
+    /// cannot reopen or adopt output into an automation aggregate.
+    async fn reject_automation_manual_recovery(
+        &self,
+        owner_id: &str,
+        execution_id: &str,
+        operation: &str,
+    ) -> Result<(), AppError> {
+        let row = self
+            .repository
+            .get_execution(owner_id, execution_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Agent Execution {execution_id}")))?;
+        let command: InitialPlanningCommand = serde_json::from_str(&row.initial_plan_input)
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "invalid persisted initial planning input for {execution_id}: {error}"
+                ))
+            })?;
+        reject_automation_manual_recovery_command(&command, operation)
+    }
+
+    async fn ensure_automation_execution(
+        &self,
+        owner_id: &str,
+        request: &AutomationExecutionRequest,
+    ) -> Result<String, AppError> {
+        validate_automation_request(request)?;
+        let _transition = self.automation_transition.lock().await;
+        if let Some(existing) = self
+            .find_automation_execution(owner_id, &request.source)
+            .await?
+        {
+            if existing.execution.lead_conversation_id.as_deref()
+                != Some(request.lead_session_id.as_str())
+                || existing.execution.goal != request.goal.trim()
+                || request.workspace.as_deref().is_some_and(|workspace| {
+                    existing.execution.work_dir.as_deref() != Some(workspace)
+                })
+            {
+                return Err(AppError::Conflict(format!(
+                    "automation source {} generation {} was replayed with different input",
+                    request.source.requirement_id, request.source.claim_generation
+                )));
+            }
+            return Ok(existing.execution.execution_id);
+        }
+
+        let session = self.session.get(owner_id, &request.lead_session_id).await?;
+        if session.conversation_id != request.lead_session_id {
+            return Err(AppError::Conflict(
+                "AgentSession lookup returned a different automation lead".to_owned(),
+            ));
+        }
+        let snapshot = session.agent_snapshot.as_ref().ok_or_else(|| {
+            AppError::Conflict(
+                "AutoWork requires an immutable Agent snapshot on its bound Session".to_owned(),
+            )
+        })?;
+        let effective_workspace =
+            automation_workspace(owner_id, snapshot, request.workspace.as_deref())?;
+        let resolved_model = snapshot.resolved_model.as_ref().ok_or_else(|| {
+            AppError::Conflict(
+                "AutoWork bound Agent snapshot has no resolved model".to_owned(),
+            )
+        })?;
+        let lead_model = nomifun_api_types::ExecutionModelRef {
+            provider_id: resolved_model.provider_id.clone(),
+            model: resolved_model.model.clone(),
+        };
+        let model_pool = ExecutionModelPool::Single {
+            model: lead_model.clone(),
+        };
+        let mut participants = self.resolver.resolve(&model_pool, Some(&lead_model)).await?;
+        ParticipantResolver::prepend_frozen_snapshot(
+            &mut participants,
+            snapshot,
+            Some(&lead_model),
+        )?;
+        let goal = request.goal.trim().to_owned();
+        let execution = self
+            .persist_execution(
+                owner_id,
+                &AgentExecutionActor::system(),
+                CreateAgentExecutionRequest {
+                    goal: goal.clone(),
+                    work_dir: effective_workspace,
+                    model_pool,
+                    delegation_policy: nomifun_common::DelegationPolicy::Automatic,
+                    adaptation_policy: nomifun_common::AdaptationPolicy::Adaptive,
+                    decision_policy: DecisionPolicy::AskUser,
+                    max_parallel: Some(1),
+                    lead_conversation_id: Some(request.lead_session_id.clone()),
+                    lead_model: Some(lead_model),
+                    steps: Some(vec![PlannedExecutionStep {
+                        title: format!("Requirement {}", request.source.requirement_id),
+                        spec: goal,
+                        profile: None,
+                        kind: ExecutionStepKind::Agent,
+                        agent_mode: Some(nomifun_common::AgentStepMode::Normal),
+                        depends_on: Vec::new(),
+                        participant_index: Some(0),
+                        assignment_rationale: Some(
+                            "AutoWork exact bound Agent snapshot".to_owned(),
+                        ),
+                        role: Some("requirement_owner".to_owned()),
+                        tool_policy: nomifun_common::AgentToolPolicy::Full,
+                        fanout_group: None,
+                        control_policy: None,
+                        failure_policy: StepFailurePolicy::FailExecution,
+                    }]),
+                },
+                participants,
+                None,
+                Some(request.source.clone()),
+            )
+            .await?;
+        Ok(execution.execution_id)
+    }
+
+    async fn preflight_automation_execution(
+        &self,
+        owner_id: &str,
+        request: &AutomationExecutionRequest,
+    ) -> Result<(), AppError> {
+        validate_automation_request(request)?;
+        if let Some(existing) = self
+            .find_automation_execution(owner_id, &request.source)
+            .await?
+        {
+            if existing.execution.lead_conversation_id.as_deref()
+                != Some(request.lead_session_id.as_str())
+                || existing.execution.goal != request.goal.trim()
+                || request.workspace.as_deref().is_some_and(|workspace| {
+                    existing.execution.work_dir.as_deref() != Some(workspace)
+                })
+            {
+                return Err(AppError::Conflict(format!(
+                    "automation source {} generation {} was replayed with different input",
+                    request.source.requirement_id, request.source.claim_generation
+                )));
+            }
+            return Ok(());
+        }
+        let session = self.session.get(owner_id, &request.lead_session_id).await?;
+        if session.conversation_id != request.lead_session_id {
+            return Err(AppError::Conflict(
+                "AgentSession lookup returned a different automation lead".to_owned(),
+            ));
+        }
+        let snapshot = session.agent_snapshot.as_ref().ok_or_else(|| {
+            AppError::Conflict(
+                "AutoWork requires an immutable Agent snapshot on its bound Session".to_owned(),
+            )
+        })?;
+        automation_workspace(owner_id, snapshot, request.workspace.as_deref())?;
+        if snapshot.resolved_model.is_none() {
+            return Err(AppError::Conflict(
+                "AutoWork bound Agent snapshot has no resolved model".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn automation_receipt(
+        &self,
+        owner_id: &str,
+        execution_id: &str,
+    ) -> Result<Option<AutomationExecutionReceipt>, AppError> {
+        let detail = self.detail(owner_id, execution_id).await?;
+        let receipt = match detail.execution.status {
+            AgentExecutionStatus::Planning | AgentExecutionStatus::Running => return Ok(None),
+            AgentExecutionStatus::Paused | AgentExecutionStatus::WaitingInput => return Ok(None),
+            AgentExecutionStatus::Completed => AutomationExecutionReceipt::Completed {
+                execution_id: execution_id.to_owned(),
+                summary: detail.execution.summary,
+            },
+            AgentExecutionStatus::CompletedWithFailures => {
+                AutomationExecutionReceipt::CompletedWithFailures {
+                    execution_id: execution_id.to_owned(),
+                    summary: detail.execution.summary,
+                }
+            }
+            AgentExecutionStatus::Failed => {
+                let outcome_unknown = detail.attempts.iter().rev().find_map(|attempt| {
+                    attempt
+                        .error
+                        .as_ref()
+                        .filter(|error| is_automation_outcome_unknown_error(error))
+                });
+                if let Some(error) = outcome_unknown {
+                    AutomationExecutionReceipt::OutcomeUnknown {
+                        execution_id: execution_id.to_owned(),
+                        error: Some(error.clone()),
+                    }
+                } else {
+                    AutomationExecutionReceipt::Failed {
+                        execution_id: execution_id.to_owned(),
+                        error: detail.execution.summary.or_else(|| {
+                            detail
+                                .attempts
+                                .iter()
+                                .rev()
+                                .find_map(|attempt| attempt.error.clone())
+                        }),
+                    }
+                }
+            }
+            AgentExecutionStatus::Cancelled => AutomationExecutionReceipt::Cancelled {
+                execution_id: execution_id.to_owned(),
+                replay_safe: automation_cancellation_replay_safe(detail.attempts.len()),
+            },
+        };
+        Ok(Some(receipt))
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentExecutionAutomationPort for AgentExecutionEngine {
+    async fn preflight_automation(
+        &self,
+        owner_id: &str,
+        request: &AutomationExecutionRequest,
+    ) -> Result<(), AppError> {
+        self.preflight_automation_execution(owner_id, request).await
+    }
+
+    async fn admit_automation(
+        &self,
+        owner_id: &str,
+        request: AutomationExecutionRequest,
+    ) -> Result<crate::automation::AutomationExecutionAdmission, AppError> {
+        let execution_id = self.ensure_automation_execution(owner_id, &request).await?;
+        Ok(crate::automation::AutomationExecutionAdmission { execution_id })
+    }
+
+    async fn await_automation(
+        &self,
+        owner_id: &str,
+        admission: &crate::automation::AutomationExecutionAdmission,
+    ) -> Result<AutomationExecutionReceipt, AppError> {
+        loop {
+            if let Some(receipt) = self
+                .automation_receipt(owner_id, &admission.execution_id)
+                .await?
+            {
+                return Ok(receipt);
+            }
+            tokio::select! {
+                _ = self.lifecycle.cancelled() => {
+                    return Err(AppError::Conflict(
+                        "AgentExecution shut down while AutoWork awaited its canonical receipt"
+                            .to_owned(),
+                    ));
+                }
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+            }
+        }
+    }
+
+    async fn cancel_automation(
+        &self,
+        owner_id: &str,
+        source: &AutomationExecutionSource,
+    ) -> Result<Option<AutomationExecutionReceipt>, AppError> {
+        let Some(detail) = self.find_automation_execution(owner_id, source).await? else {
+            return Ok(None);
+        };
+        if detail.execution.status.is_terminal() {
+            self.scheduler
+                .reconcile_conversation_cleanup_strict(
+                    &detail.execution.execution_id,
+                )
+                .await?;
+            return self
+                .automation_receipt(owner_id, &detail.execution.execution_id)
+                .await;
+        }
+        let cancelled = self.cancel(
+            owner_id,
+            &AgentExecutionActor::system(),
+            &detail.execution.execution_id,
+            VersionedAgentExecutionCommand {
+                expected_version: detail.execution.version,
+            },
+        )
+        .await;
+        match cancelled {
+            Ok(cancelled) => {
+                self.scheduler
+                    .reconcile_conversation_cleanup_strict(
+                        &cancelled.execution.execution_id,
+                    )
+                    .await?;
+                self.automation_receipt(owner_id, &cancelled.execution.execution_id)
+                    .await
+            }
+            Err(error) if is_automation_cancel_cas_conflict(&error) => {
+                // Cancellation is a CAS. A terminal transition may win after
+                // the source lookup but before that CAS. Re-read by the exact
+                // immutable automation source and return its winner rather
+                // than manufacturing cancellation or leaking a stale race.
+                let Some(latest) = self.find_automation_execution(owner_id, source).await? else {
+                    return Err(error);
+                };
+                if latest.execution.status.is_terminal() {
+                    self.scheduler
+                        .reconcile_conversation_cleanup_strict(
+                            &latest.execution.execution_id,
+                        )
+                        .await?;
+                    self.automation_receipt(owner_id, &latest.execution.execution_id)
+                        .await
+                } else {
+                    Err(error)
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+fn reject_automation_manual_recovery_command(
+    command: &InitialPlanningCommand,
+    operation: &str,
+) -> Result<(), AppError> {
+    if matches!(command, InitialPlanningCommand::Automation { .. }) {
+        return Err(AppError::Conflict(format!(
+            "cannot {operation} an AutoWork AgentExecution without the exact atomic Requirement observer"
+        )));
+    }
+    Ok(())
+}
+
+fn is_automation_outcome_unknown_error(error: &str) -> bool {
+    error
+        .strip_prefix(MISSING_DELIVERY_RECEIPT_CODE)
+        .is_some_and(|suffix| suffix.starts_with(": "))
+}
+
+fn automation_cancellation_replay_safe(attempt_count: usize) -> bool {
+    // Every external model/tool effect is owned by an Attempt. Zero durable
+    // Attempts therefore proves both zero admission and zero effects; any
+    // admitted Attempt is fail-closed regardless of its displayed state.
+    attempt_count == 0
+}
+
+fn is_automation_cancel_cas_conflict(error: &AppError) -> bool {
+    matches!(error, AppError::Conflict(_) | AppError::RevisionConflict(_))
+}
+
+fn validate_automation_source(source: &AutomationExecutionSource) -> Result<(), AppError> {
+    RequirementId::try_from(source.requirement_id.as_str()).map_err(|error| {
+        AppError::BadRequest(format!("invalid automation requirement_id: {error}"))
+    })?;
+    if source.claim_generation <= 0 {
+        return Err(AppError::BadRequest(
+            "automation claim_generation must be positive".to_owned(),
+        ));
+    }
+    if source.operation_id.trim().is_empty()
+        || source.operation_id.len() > 128
+        || source.operation_id.bytes().any(|byte| !byte.is_ascii_graphic())
+    {
+        return Err(AppError::BadRequest(
+            "automation operation_id must contain 1-128 visible ASCII bytes".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_automation_request(request: &AutomationExecutionRequest) -> Result<(), AppError> {
+    validate_automation_source(&request.source)?;
+    canonical_id::<ConversationId>("lead_session_id", &request.lead_session_id)?;
+    if request.goal.trim().is_empty() {
+        return Err(AppError::BadRequest(
+            "automation goal must not be empty".to_owned(),
+        ));
+    }
+    if request
+        .workspace
+        .as_deref()
+        .is_some_and(|workspace| workspace.trim().is_empty())
+    {
+        return Err(AppError::BadRequest(
+            "automation workspace must be absent or non-empty".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn automation_workspace(
+    owner_id: &str,
+    snapshot: &AgentResolvedSnapshot,
+    requested: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    crate::automation::admit_frozen_automation_workspace(
+        owner_id,
+        snapshot.canonical_binding.as_ref(),
+        requested,
+    )
+}
+
+fn collaboration_step(goal: &str) -> PlannedExecutionStep {
+    PlannedExecutionStep {
+        title: "Delegated Agent work".to_owned(),
+        spec: goal.to_owned(),
+        profile: None,
+        kind: ExecutionStepKind::Agent,
+        agent_mode: Some(nomifun_common::AgentStepMode::Normal),
+        depends_on: Vec::new(),
+        participant_index: Some(0),
+        assignment_rationale: Some("Exact calling Agent collaboration grant".to_owned()),
+        role: Some("delegate".to_owned()),
+        tool_policy: nomifun_common::AgentToolPolicy::Full,
+        fanout_group: None,
+        control_policy: None,
+        failure_policy: StepFailurePolicy::FailExecution,
     }
 }
 
@@ -3471,8 +4086,12 @@ fn explicit_cancel_payload() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        InitialPlanningCommand, attempt_delegation_operation_id, explicit_cancel_payload,
-        runtime_model_pair, validate_max_parallel,
+        AutomationExecutionSource, InitialPlanningCommand,
+        attempt_delegation_operation_id, automation_cancellation_replay_safe,
+        explicit_cancel_payload, is_automation_cancel_cas_conflict,
+        is_automation_outcome_unknown_error,
+        reject_automation_manual_recovery_command, runtime_model_pair,
+        validate_automation_source, validate_max_parallel,
     };
     use nomifun_api_types::{ExecutionModelPool, ExecutionModelRef};
     use nomifun_common::MAX_AGENT_EXECUTION_PARALLELISM;
@@ -3514,6 +4133,75 @@ mod tests {
         );
         assert!(validate_max_parallel(Some(0)).is_err());
         assert!(validate_max_parallel(Some(MAX_AGENT_EXECUTION_PARALLELISM + 1)).is_err());
+    }
+
+    #[test]
+    fn automation_source_is_typed_and_never_accepts_a_raw_claim_capability() {
+        let source = AutomationExecutionSource {
+            requirement_id: "0190f5fe-7c00-7a00-8000-000000000031".to_owned(),
+            claim_generation: 4,
+            operation_id: format!("autowork:{}", "a".repeat(64)),
+        };
+        validate_automation_source(&source).unwrap();
+
+        let mut invalid = source.clone();
+        invalid.claim_generation = 0;
+        assert!(validate_automation_source(&invalid).is_err());
+        invalid = source;
+        invalid.operation_id = "contains a secret-shaped space".to_owned();
+        assert!(validate_automation_source(&invalid).is_err());
+    }
+
+    #[test]
+    fn automation_manual_recovery_commands_fail_closed() {
+        let command: InitialPlanningCommand = serde_json::from_value(serde_json::json!({
+            "mode": "automation",
+            "source": {
+                "requirement_id": "0190f5fe-7c00-7a00-8000-000000000031",
+                "claim_generation": 4,
+                "operation_id": format!("autowork:{}", "a".repeat(64)),
+            },
+            "plan": {
+                "steps": [{"title":"execute", "spec":"perform exact work"}]
+            }
+        }))
+        .unwrap();
+        assert!(reject_automation_manual_recovery_command(&command, "retry").is_err());
+        assert!(
+            reject_automation_manual_recovery_command(&command, "adopt output for").is_err()
+        );
+
+        let explicit: InitialPlanningCommand = serde_json::from_value(serde_json::json!({
+            "mode": "explicit",
+            "plan": {
+                "steps": [{"title":"execute", "spec":"perform exact work"}]
+            }
+        }))
+        .unwrap();
+        assert!(reject_automation_manual_recovery_command(&explicit, "retry").is_ok());
+    }
+
+    #[test]
+    fn automation_receipt_preserves_unknown_outcome_marker_and_cancel_evidence() {
+        assert!(is_automation_outcome_unknown_error(
+            "agent_delivery_receipt_missing: receipt absent"
+        ));
+        assert!(!is_automation_outcome_unknown_error(
+            "agent_delivery_receipt_missing"
+        ));
+        assert!(!is_automation_outcome_unknown_error("ordinary failure"));
+        assert!(automation_cancellation_replay_safe(0));
+        assert!(!automation_cancellation_replay_safe(1));
+        assert!(!automation_cancellation_replay_safe(8));
+        assert!(is_automation_cancel_cas_conflict(
+            &nomifun_common::AppError::Conflict("completion won".to_owned())
+        ));
+        assert!(is_automation_cancel_cas_conflict(
+            &nomifun_common::AppError::RevisionConflict("completion won".to_owned())
+        ));
+        assert!(!is_automation_cancel_cas_conflict(
+            &nomifun_common::AppError::Internal("repository failed".to_owned())
+        ));
     }
 
     #[test]

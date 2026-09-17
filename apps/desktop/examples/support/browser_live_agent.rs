@@ -7,7 +7,7 @@ use axum::{
     routing::{get, post},
 };
 use nomifun_browser_platform::{
-    run_guard::BrowserInputState, runtime::BrowserSurfaceBounds, workspace::BrowserWorkspaceService,
+    run_guard::BrowserInputState, runtime::BrowserSurfaceBounds, workspace::BrowserResourceService,
 };
 use serde_json::{Value, json};
 use std::{
@@ -204,7 +204,7 @@ async fn verify(
             .with_graceful_shutdown(stopped.cancelled_owned())
             .await
     });
-    let workspaces = Arc::new(BrowserWorkspaceService::new(Arc::new(
+    let browser_resources = Arc::new(BrowserResourceService::new(Arc::new(
         super::host::DesktopBrowserHost::new(app.clone()),
     )));
     let cli = nomifun_app::cli::Cli {
@@ -225,7 +225,7 @@ async fn verify(
         None,
         None,
         nomifun_app::DesktopHostServices {
-            browser_workspaces: Some(workspaces.clone()),
+            browser_resources: Some(browser_resources.clone()),
             ..Default::default()
         },
     )
@@ -251,7 +251,7 @@ async fn verify(
                     let result = async {
                         let server = weak.upgrade().ok_or(())?;
                         let workspace = server
-                            .browser_workspace_for_local_surface(&id)
+                            .browser_resource_for_local_surface(&id)
                             .await
                             .map_err(|_| ())?;
                         workspace
@@ -306,11 +306,13 @@ async fn verify(
         let editor=api(&server,"POST","/api/agent-presets/from-template/chat.minimal",json!({"reuse_existing":false,"display_name":"Frontend browser live fixture","model_route_refs":{},"chat_route_records":{},"model":{"provider_id":provider,"model":"step-3.7-flash"}})).await?;
         let preset=text(&editor["preset"],"preset_id")?;
         let catalog=api(&server,"GET","/api/capabilities",Value::Null).await?;
-        let mut selections=vec![];
-        for id in ["browser.navigate","browser.observe","browser.act","fs.read","fs.write","fs.patch"] {
-            let item=catalog.as_array().and_then(|items|items.iter().find(|item|item["capability"]["id"]==id && item["materialization_state"]=="materialized")).ok_or("LIVE_CAPABILITY_MISSING")?;
-            selections.push(json!({"capability":item["capability"],"action_allowlist":[]}));
-        }
+        let items=catalog.as_array().ok_or("LIVE_CAPABILITY_CATALOG_INVALID")?;
+        let browser=items.iter().find(|item|item["capability"]["id"]=="browser" && item["materialization_state"]=="materialized").ok_or("LIVE_BROWSER_MODULE_MISSING")?;
+        let files=items.iter().find(|item|item["capability"]["id"]=="workspace.files" && item["materialization_state"]=="materialized").ok_or("LIVE_WORKSPACE_FILES_MODULE_MISSING")?;
+        let selections=vec![
+            json!({"capability":browser["capability"],"action_allowlist":["browser/navigate","browser/observe","browser/act"]}),
+            json!({"capability":files["capability"],"action_allowlist":["workspace.files/read","workspace.files/write","workspace.files/patch"]}),
+        ];
         let mut draft=editor["draft"].clone();
         draft["document"]["persona"]=json!("You are a precise frontend developer working only in the supplied temporary workspace.");
         draft["document"]["instructions"]=json!("Use the real Browser for page interaction and workspace file tools for editing. Do not read unrelated files, automate DOM events, or replace browser interaction with HTTP requests.");
@@ -330,7 +332,7 @@ async fn verify(
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         if !running || !presented.load(Ordering::Acquire) || failed.load(Ordering::Acquire) {return Err("LIVE_PRESENTATION_NOT_PROVEN".into());}
-        let workspace=server.browser_workspace_for_local_surface(&id).await.map_err(|_|"LIVE_WORKSPACE_MISSING")?;
+        let workspace=server.browser_resource_for_local_surface(&id).await.map_err(|_|"LIVE_WORKSPACE_MISSING")?;
         let snapshot=workspace.snapshot().await.map_err(|_|"LIVE_SNAPSHOT_FAILED")?;
         if snapshot.run.input_state!=BrowserInputState::UserReady {return Err("LIVE_TERMINAL_NOT_UNLOCKED".into());}
         let runtime=snapshot.runtime.ok_or("LIVE_NATIVE_RUNTIME_MISSING")?;

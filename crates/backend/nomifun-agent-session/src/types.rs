@@ -340,6 +340,87 @@ pub struct AgentEffectRecord {
     pub settled_at: Option<i64>,
 }
 
+/// A durable effect that prevents physical Session deletion until its outcome
+/// is settled or explicitly reconciled.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentEffectDeleteBlocker {
+    pub effect_id: String,
+    pub owner_domain: String,
+    pub state: AgentEffectState,
+}
+
+/// A resource owner reported an unprovable cleanup outcome after the Session
+/// admission fence committed. This quarantine is persisted with the Session
+/// and must never be cleared by a process restart or an automatic retry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceCleanupUncertainty {
+    pub owner_domain: String,
+    pub recorded_at: i64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionDeleteBlockers {
+    pub effects: Vec<AgentEffectDeleteBlocker>,
+    pub resource_cleanup_pending: Vec<String>,
+    pub resource_cleanup_uncertainties: Vec<ResourceCleanupUncertainty>,
+}
+
+impl AgentSessionDeleteBlockers {
+    pub fn is_empty(&self) -> bool {
+        self.effects.is_empty()
+            && self.resource_cleanup_pending.is_empty()
+            && self.resource_cleanup_uncertainties.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionAutomationConfig {
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_requirements: Option<u32>,
+    pub revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitAgentSessionAutomationConfig {
+    pub agent_session_id: AgentSessionId,
+    pub owner_ref: PrincipalRef,
+    pub expected_revision: u64,
+    pub enabled: bool,
+    pub tag: Option<String>,
+    pub max_requirements: Option<u32>,
+    pub operation_id: Option<String>,
+    pub recorded_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnabledAgentSessionAutomationConfig {
+    pub session: AgentSessionLiveRecord,
+    pub config: AgentSessionAutomationConfig,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentDeletionAuditRecord {
+    pub audit_id: String,
+    pub agent_session_id: AgentSessionId,
+    pub owner_ref: PrincipalRef,
+    pub target_kind: String,
+    pub target_id: String,
+    pub authority: String,
+    pub risk_acknowledged: bool,
+    pub reason_digest: DigestHex,
+    pub recorded_at: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointAdmission {

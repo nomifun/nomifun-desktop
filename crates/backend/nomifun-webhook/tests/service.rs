@@ -9,7 +9,7 @@ use nomifun_db::{
     ITagSettingRepository, IWebhookRepository, SqliteTagSettingRepository, SqliteWebhookRepository,
     init_database_memory,
 };
-use nomifun_webhook::{WebhookSender, WebhookService};
+use nomifun_webhook::{NotificationBindingState, WebhookSender, WebhookService};
 
 #[derive(Default)]
 struct MockSender {
@@ -273,4 +273,49 @@ async fn tag_setting_upsert_validates_webhook_exists() {
         .await
         .unwrap();
     assert!(cleared.webhook_id.is_none());
+}
+
+#[tokio::test]
+async fn notification_binding_projection_distinguishes_unbound_bound_and_disabled() {
+    let s = svc(Arc::new(MockSender::default())).await;
+    assert_eq!(
+        s.notification_binding_state("alpha").await.unwrap(),
+        NotificationBindingState::Unbound {
+            tag: "alpha".into()
+        }
+    );
+
+    let webhook = s.create(create_req()).await.unwrap();
+    s.upsert_tag_setting(
+        "alpha",
+        UpsertTagSettingRequest {
+            webhook_id: Some(Some(webhook.webhook_id.clone())),
+            notify_events: Some(vec!["done".into()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        s.notification_binding_state("alpha").await.unwrap(),
+        NotificationBindingState::Bound {
+            enabled: true,
+            notify_events,
+            ..
+        } if notify_events == vec!["done".to_owned()]
+    ));
+
+    s.update(
+        &webhook.webhook_id,
+        UpdateWebhookRequest {
+            enabled: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        s.notification_binding_state("alpha").await.unwrap(),
+        NotificationBindingState::Bound { enabled: false, .. }
+    ));
 }

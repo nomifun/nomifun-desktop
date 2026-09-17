@@ -52,20 +52,18 @@ pub type ProviderConfigDigestResolver =
 pub type BrowserRuntimeResolver = Arc<
     dyn Fn(BrowserRuntimeRequest) -> BoxFuture<
             'static,
-            Result<Option<Arc<nomifun_browser_platform::workspace::BrowserWorkspace>>, AppError>,
+            Result<Option<nomifun_browser_platform::bound_resource::BoundBrowserProviderResource>, AppError>,
         > + Send
         + Sync,
 >;
 
 #[cfg(feature = "browser-use")]
 pub struct BrowserRuntimeRequest {
-    pub user_id: String,
-    pub conversation_id: String,
-    pub temporary: bool,
-    /// Derived from the compiled capability selection, never model input.
-    pub selected: bool,
-    /// Taken from the recompiled, exact Session Snapshot, never model input.
+    pub principal_id: String,
+    pub agent_session_id: String,
+    pub action_allowlist: std::collections::BTreeSet<nomifun_agent_contracts::ActionId>,
     pub provider: Option<nomifun_agent_contracts::ExactRoleProviderRef>,
+    pub resource_binding: Option<nomifun_agent_contracts::TypedResourceBinding>,
 }
 
 /// Dependencies needed by the agent factory to construct agents.
@@ -99,8 +97,6 @@ pub struct AgentFactoryDeps {
     /// Installed even when this host has no native browser surface.
     #[cfg(feature = "browser-use")]
     pub browser_runtime_resolver: Option<BrowserRuntimeResolver>,
-    #[cfg(feature = "browser-use")]
-    pub system_browser: Option<Arc<dyn nomifun_browser_platform::system_browser::SystemBrowserHost>>,
     /// Client-preferences repo for reading user-facing settings at session-build
     /// time — currently the `agent.computerUse` toggle that gates the nomi
     /// Computer tool. `Option` so tests can omit it (then the default applies).

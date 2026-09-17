@@ -237,13 +237,9 @@ pub struct NomiAgentManager {
     /// teardown and construction failure.
     loopback_capability_leases: nomifun_common::LoopbackCapabilityLeaseSet,
     #[cfg(feature = "browser-use")]
-    browser_workspace: Option<Arc<nomifun_browser_platform::workspace::BrowserWorkspace>>,
+    browser_resource: Option<nomifun_browser_platform::bound_resource::BoundBrowserProviderResource>,
     #[cfg(feature = "browser-use")]
-    system_browser_session: Option<Arc<crate::system_browser::SystemBrowserSession>>,
-    #[cfg(feature = "browser-use")]
-    native_browser_turn: super::browser_lifecycle::NativeBrowserTurnSlot,
-    #[cfg(feature = "browser-use")]
-    system_browser_turn: crate::system_browser::SystemBrowserTurnSlot,
+    browser_turn: super::browser_lifecycle::BrowserTurnSlot,
     stop_generation: AtomicU64,
     /// This runtime's claim on the pooled SSH link behind an SSH-bound session.
     /// Held for the runtime's whole life and released — never closed — at
@@ -870,9 +866,7 @@ pub(crate) fn map_engine_stop_reason(
 /// ownership.
 pub(crate) struct NomiHostWiring {
     #[cfg(feature = "browser-use")]
-    pub browser_workspace: Option<Arc<nomifun_browser_platform::workspace::BrowserWorkspace>>,
-    #[cfg(feature = "browser-use")]
-    pub system_browser_session: Option<Arc<crate::system_browser::SystemBrowserSession>>,
+    pub browser_resource: Option<nomifun_browser_platform::bound_resource::BoundBrowserProviderResource>,
     /// A ready remote backend when the session is SSH-bound (the factory already
     /// connected it via the SshBackendProvider). Selects the remote tool family.
     pub ssh_backend: Option<Arc<dyn crate::SshBackend>>,
@@ -907,9 +901,7 @@ impl Default for NomiHostWiring {
     fn default() -> Self {
         Self {
             #[cfg(feature = "browser-use")]
-            browser_workspace: None,
-            #[cfg(feature = "browser-use")]
-            system_browser_session: None,
+            browser_resource: None,
             ssh_backend: None,
             ssh_lease: None,
             image_generation_tool: None,
@@ -980,15 +972,9 @@ impl NomiAgentManager {
         let runtime = AgentRuntimeState::new(conversation_id.clone(), workspace.clone(), 128);
         let loopback_capability_leases = config_extra.loopback_capability_leases.clone();
         #[cfg(feature = "browser-use")]
-        let browser_workspace = host_wiring.browser_workspace;
+        let browser_resource = host_wiring.browser_resource;
         #[cfg(feature = "browser-use")]
-        let system_browser_session = if config_extra.allowed_tools.iter().any(|name| name == nomifun_browser_platform::system_browser::TOOL_NAME) {
-            Some(host_wiring.system_browser_session.ok_or_else(|| AppError::Conflict("Selected system browser Tool has no frozen host binding".into()))?)
-        } else { None };
-        #[cfg(feature = "browser-use")]
-        let native_browser_turn = super::browser_lifecycle::NativeBrowserTurnSlot::default();
-        #[cfg(feature = "browser-use")]
-        let system_browser_turn = crate::system_browser::SystemBrowserTurnSlot::default();
+        let browser_turn = super::browser_lifecycle::BrowserTurnSlot::default();
         let ssh_lease = host_wiring.ssh_lease;
         let image_generation_entitled = host_wiring.image_generation_entitled
             && ((!config_extra.enforce_tool_allowlist && config_extra.allowed_tools.is_empty())
@@ -1301,20 +1287,25 @@ impl NomiAgentManager {
         let mcp_managers = result.mcp_managers.clone();
         let mut engine = result.engine;
         #[cfg(feature = "browser-use")]
-        if system_browser_session.is_some() {
-            if !engine.registry_mut().register(Box::new(crate::system_browser::SystemBrowserTool::new(system_browser_turn.clone()))) {
-                return Err(AppError::Conflict("System browser Tool was rejected by the Agent capability policy".into()));
+        if let Some(resource) = browser_resource.as_ref() {
+            if !config_extra.allowed_tools.iter().any(|name| name == "Browser") {
+                return Err(AppError::Conflict(
+                    "The Browser Resource is bound but the frozen native Tool policy omitted Browser.".into(),
+                ));
             }
-        }
-        #[cfg(feature = "browser-use")]
-        if browser_workspace.is_some() && config_extra.enforce_tool_allowlist
-            && config_extra.allowed_tools.iter().any(|name|name=="Browser") {
-            let capabilities=capability_state.clone().ok_or_else(||AppError::Conflict("Native browser requires an exact Agent capability snapshot.".into()))?;
-            let available=capabilities.snapshot().map_err(|error|AppError::Conflict(error.to_string()))?;
-            if available.active.iter().any(|id|matches!(id.as_ref(),"browser.observe"|"browser.navigate"|"browser.act"|"browser.upload"|"browser.download"|"browser.evaluate")) {
-                let uploads=available.active.iter().any(|id|id.as_ref()=="browser.upload");
-                let downloads=available.active.iter().any(|id|id.as_ref()=="browser.download");
-                let mut tool=super::browser_tool::ConversationBrowserTool::new(native_browser_turn.clone(),available);
+            let actions = resource
+                .authority()
+                .granted_actions()
+                .map(|action| nomifun_agent_contracts::ActionId::from(action.action_id()))
+                .collect::<std::collections::BTreeSet<_>>();
+            if !actions.is_empty() {
+                let uploads = actions.contains(&nomifun_agent_contracts::ActionId::from("browser/upload"));
+                let downloads = actions.contains(&nomifun_agent_contracts::ActionId::from("browser/download"));
+                let mut tool=super::browser_tool::ConversationBrowserTool::new(
+                    browser_turn.clone(),
+                    actions,
+                    resource.provider_kind(),
+                );
                 if uploads {
                     let scope=nomifun_browser_platform::uploads::BrowserUploadScope::open(std::path::Path::new(&workspace))
                         .map_err(|error|AppError::Conflict(error.to_string()))?;
@@ -1326,7 +1317,7 @@ impl NomiAgentManager {
                     tool = tool.with_download_scope(Arc::new(scope));
                 }
                 if !engine.registry_mut().register(Box::new(tool)) {
-                    return Err(AppError::Conflict("Native Browser tool was rejected by the Agent capability policy.".into()));
+                    return Err(AppError::Conflict("Browser Tool was rejected by the Agent capability policy.".into()));
                 }
             }
         }
@@ -1635,13 +1626,9 @@ impl NomiAgentManager {
             hosted_effects,
             loopback_capability_leases,
             #[cfg(feature = "browser-use")]
-            browser_workspace,
+            browser_resource,
             #[cfg(feature = "browser-use")]
-            system_browser_session,
-            #[cfg(feature = "browser-use")]
-            native_browser_turn,
-            #[cfg(feature = "browser-use")]
-            system_browser_turn,
+            browser_turn,
             stop_generation: AtomicU64::new(0),
             ssh_lease,
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
@@ -1794,9 +1781,7 @@ impl NomiAgentManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.stop_generation.fetch_add(1, Ordering::AcqRel);
         #[cfg(feature = "browser-use")]
-        self.native_browser_turn.cancel();
-        #[cfg(feature = "browser-use")]
-        self.system_browser_turn.cancel();
+        self.browser_turn.cancel();
         if close_permanently {
             self.closing.store(true, Ordering::Release);
         }
@@ -1954,14 +1939,10 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
         // even if the engine future panics and its mutex guard unwinds.
         let process_supervisor = self.process_supervisor.clone();
         #[cfg(feature = "browser-use")]
-        if let Some(workspace) = &self.browser_workspace {
-            self.native_browser_turn.begin(workspace.clone()).await.map_err(AgentSendError::from_app_error)?;
-        }
-        #[cfg(feature = "browser-use")]
-        if let Some(session) = &self.system_browser_session {
-            if let Err(error) = self.system_browser_turn.begin(session.clone()).await {
-                super::browser_lifecycle::settle_turns(&self.native_browser_turn, &self.system_browser_turn).await.map_err(AgentSendError::from_app_error)?;
-                super::browser_lifecycle::finish_turns(&self.native_browser_turn, &self.system_browser_turn).await.map_err(AgentSendError::from_app_error)?;
+        if let Some(resource) = &self.browser_resource {
+            if let Err(error) = self.browser_turn.begin(resource).await {
+                self.browser_turn.settle().await.map_err(AgentSendError::from_app_error)?;
+                self.browser_turn.finish().await.map_err(AgentSendError::from_app_error)?;
                 return Err(AgentSendError::from_app_error(error));
             }
         }
@@ -1994,9 +1975,9 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
         };
         let Some((turn_cancel, runtime_turn)) = accepted else {
             #[cfg(feature = "browser-use")]
-            super::browser_lifecycle::settle_turns(&self.native_browser_turn, &self.system_browser_turn).await.map_err(AgentSendError::from_app_error)?;
+            self.browser_turn.settle().await.map_err(AgentSendError::from_app_error)?;
             #[cfg(feature = "browser-use")]
-            super::browser_lifecycle::finish_turns(&self.native_browser_turn, &self.system_browser_turn).await.map_err(AgentSendError::from_app_error)?;
+            self.browser_turn.finish().await.map_err(AgentSendError::from_app_error)?;
             return if self.closing.load(Ordering::Acquire) {
                 Err(AgentSendError::from_app_error(AppError::Conflict(
                     "Agent runtime is shutting down; retry on the replacement runtime".into(),
@@ -2010,9 +1991,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
         let accepted_turn_recovery_required = Arc::new(AtomicBool::new(false));
         let mut term_guard = TurnTerminationGuard {
             #[cfg(feature = "browser-use")]
-            native_browser_turn: self.native_browser_turn.clone(),
-            #[cfg(feature = "browser-use")]
-            system_browser_turn: self.system_browser_turn.clone(),
+            browser_turn: self.browser_turn.clone(),
             runtime: self.runtime.clone(),
             turn: runtime_turn,
             active_turn: Arc::clone(&self.active_turn),
@@ -3032,9 +3011,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
 /// never leak a spurious terminal event past a real one. (Phase 0 F0.2)
 struct TurnTerminationGuard {
     #[cfg(feature = "browser-use")]
-    native_browser_turn: super::browser_lifecycle::NativeBrowserTurnSlot,
-    #[cfg(feature = "browser-use")]
-    system_browser_turn: crate::system_browser::SystemBrowserTurnSlot,
+    browser_turn: super::browser_lifecycle::BrowserTurnSlot,
     runtime: AgentRuntimeState,
     turn: crate::runtime_state::AgentRuntimeTurn,
     active_turn: Arc<std::sync::Mutex<Option<crate::runtime_state::AgentRuntimeTurn>>>,
@@ -3076,7 +3053,7 @@ impl TurnTerminationGuard {
     ) -> Result<bool, AppError> {
         self.settle_hosted().await?;
         #[cfg(feature = "browser-use")]
-        super::browser_lifecycle::settle_turns(&self.native_browser_turn, &self.system_browser_turn).await?;
+        self.browser_turn.settle().await?;
 
         let emitted = terminalize_exact_nomi_turn(
             &self.runtime,
@@ -3088,7 +3065,7 @@ impl TurnTerminationGuard {
         );
         self.armed = false;
         #[cfg(feature = "browser-use")]
-        super::browser_lifecycle::finish_turns(&self.native_browser_turn, &self.system_browser_turn).await?;
+        self.browser_turn.finish().await?;
         Ok(emitted)
     }
 
@@ -3106,10 +3083,10 @@ impl TurnTerminationGuard {
     ) -> Result<bool, AppError> {
         self.settle_hosted().await?;
         #[cfg(feature = "browser-use")]
-        super::browser_lifecycle::settle_turns(&self.native_browser_turn, &self.system_browser_turn).await?;
+        self.browser_turn.settle().await?;
         let result = self.publish_host_text_terminal(turn_cancel, msg_id, response, completed).await?;
         #[cfg(feature = "browser-use")]
-        if !self.armed { super::browser_lifecycle::finish_turns(&self.native_browser_turn, &self.system_browser_turn).await?; }
+        if !self.armed { self.browser_turn.finish().await?; }
         Ok(result)
     }
 
@@ -3161,10 +3138,10 @@ impl TurnTerminationGuard {
     ) -> Result<bool, AppError> {
         self.settle_hosted().await?;
         #[cfg(feature = "browser-use")]
-        super::browser_lifecycle::settle_turns(&self.native_browser_turn, &self.system_browser_turn).await?;
+        self.browser_turn.settle().await?;
         let result = self.fail_adjudicated_terminal(turn_cancel, completed, stream_error).await?;
         #[cfg(feature = "browser-use")]
-        if !self.armed { super::browser_lifecycle::finish_turns(&self.native_browser_turn, &self.system_browser_turn).await?; }
+        if !self.armed { self.browser_turn.finish().await?; }
         Ok(result)
     }
 
@@ -3215,10 +3192,10 @@ impl TurnTerminationGuard {
     ) -> Result<VerifiedTurnCommitOutcome, AppError> {
         self.settle_hosted().await?;
         #[cfg(feature = "browser-use")]
-        super::browser_lifecycle::settle_turns(&self.native_browser_turn, &self.system_browser_turn).await?;
+        self.browser_turn.settle().await?;
         let result = self.commit_verified_terminal(turn_cancel, completed, stop_reason, prepared_distill, engine, completion_context).await?;
         #[cfg(feature = "browser-use")]
-        if !self.armed { super::browser_lifecycle::finish_turns(&self.native_browser_turn, &self.system_browser_turn).await?; }
+        if !self.armed { self.browser_turn.finish().await?; }
         Ok(result)
     }
 
@@ -3315,9 +3292,7 @@ impl Drop for TurnTerminationGuard {
     fn drop(&mut self) {
         if self.armed {
             #[cfg(feature = "browser-use")]
-            self.native_browser_turn.cancel();
-            #[cfg(feature = "browser-use")]
-            self.system_browser_turn.cancel();
+            self.browser_turn.cancel();
             if let Some(scope) = &self.hosted_effects { let _ = scope.close_session(); }
             // This store happens synchronously while the old send still owns
             // `turn_gate`. Therefore a queued successor can never slip between
@@ -3353,9 +3328,7 @@ impl Drop for TurnTerminationGuard {
             let hosted_effects = self.hosted_effects.clone();
             let turn_teardown_fence = Arc::clone(&self.turn_teardown_fence);
             #[cfg(feature = "browser-use")]
-            let native_browser_turn = self.native_browser_turn.clone();
-            #[cfg(feature = "browser-use")]
-            let system_browser_turn = self.system_browser_turn.clone();
+            let browser_turn = self.browser_turn.clone();
             let terminalize = move || {
                 terminalize_exact_nomi_turn(
                     &runtime,
@@ -3415,14 +3388,14 @@ impl Drop for TurnTerminationGuard {
                     }
                 }
                 #[cfg(feature = "browser-use")]
-                if let Err(error) = super::browser_lifecycle::settle_turns(&native_browser_turn, &system_browser_turn).await {
+                if let Err(error) = browser_turn.settle().await {
                     error!(%error, "browser turn did not settle; retaining cleanup authority");
                     exact = false;
                 }
                 if exact {
                     terminalize();
                     #[cfg(feature = "browser-use")]
-                    if let Err(error) = super::browser_lifecycle::finish_turns(&native_browser_turn, &system_browser_turn).await {
+                    if let Err(error) = browser_turn.finish().await {
                         error!(%error, "browser turn did not finish after terminal");
                         return;
                     }
@@ -3962,11 +3935,6 @@ mod tests {
     mod native_browser {
         use super::*;
         include!("browser_lifecycle_tests.rs");
-    }
-    #[cfg(feature = "browser-use")]
-    mod system_browser {
-        use super::*;
-        include!("system_browser_lifecycle_tests.rs");
     }
     use super::*;
     use crate::protocol::events::ToolCallStatus;
@@ -4842,13 +4810,9 @@ mod tests {
         );
         NomiAgentManager {
             #[cfg(feature = "browser-use")]
-            browser_workspace: None,
+            browser_resource: None,
             #[cfg(feature = "browser-use")]
-            system_browser_session: None,
-            #[cfg(feature = "browser-use")]
-            native_browser_turn: Default::default(),
-            #[cfg(feature = "browser-use")]
-            system_browser_turn: Default::default(),
+            browser_turn: Default::default(),
             stop_generation: AtomicU64::new(0),
             runtime,
             backend_output_sink,
@@ -5149,13 +5113,9 @@ mod tests {
         );
         let agent = NomiAgentManager {
             #[cfg(feature = "browser-use")]
-            browser_workspace: None,
+            browser_resource: None,
             #[cfg(feature = "browser-use")]
-            system_browser_session: None,
-            #[cfg(feature = "browser-use")]
-            native_browser_turn: Default::default(),
-            #[cfg(feature = "browser-use")]
-            system_browser_turn: Default::default(),
+            browser_turn: Default::default(),
             stop_generation: AtomicU64::new(0),
             runtime,
             backend_output_sink,
@@ -7412,9 +7372,7 @@ mod tests {
                 active_turn: Arc::clone(&active_turn),
                 lifecycle_gate,
                 #[cfg(feature = "browser-use")]
-                native_browser_turn: Default::default(),
-                #[cfg(feature = "browser-use")]
-                system_browser_turn: Default::default(),
+                browser_turn: Default::default(),
                 steering_inbox: Arc::clone(&steering_inbox),
                 backend_output_sink,
                 process_supervisor: None,
@@ -7459,9 +7417,7 @@ mod tests {
         {
             let _guard = TurnTerminationGuard {
                 #[cfg(feature = "browser-use")]
-                native_browser_turn: Default::default(),
-                #[cfg(feature = "browser-use")]
-                system_browser_turn: Default::default(),
+                browser_turn: Default::default(),
                 runtime: rt.clone(),
                 turn,
                 active_turn: Arc::clone(&active_turn),
@@ -7510,9 +7466,7 @@ mod tests {
         {
             let mut g = TurnTerminationGuard {
                 #[cfg(feature = "browser-use")]
-                native_browser_turn: Default::default(),
-                #[cfg(feature = "browser-use")]
-                system_browser_turn: Default::default(),
+                browser_turn: Default::default(),
                 runtime: rt.clone(),
                 turn,
                 active_turn: Arc::clone(&active_turn),

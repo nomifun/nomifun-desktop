@@ -11,6 +11,7 @@ use nomifun_db::models::{TagSettingPatch, TagSettingRow, WebhookPatch, WebhookRo
 use nomifun_db::{ITagSettingRepository, IWebhookRepository};
 
 use crate::sender::WebhookSender;
+use crate::NotificationBindingState;
 
 /// Map a DB row to the client DTO (dropping the secret; exposing `has_secret`).
 fn row_to_dto(row: &WebhookRow) -> Webhook {
@@ -153,6 +154,48 @@ impl WebhookService {
             )
             .await
             .map_err(|e| AppError::BadGateway(e.to_string()))
+    }
+
+    /// Resolve the notification resource selected by one Automation tag.
+    ///
+    /// This is a platform configuration projection, not an Agent grant. Missing
+    /// rows and dangling resources are distinct so the UI can render a useful
+    /// bound/unbound repair state without trying a delivery first.
+    pub async fn notification_binding_state(
+        &self,
+        tag: &str,
+    ) -> Result<NotificationBindingState, AppError> {
+        if tag.trim().is_empty() {
+            return Err(AppError::BadRequest("tag must not be empty".into()));
+        }
+        let Some(setting) = self.tag_settings.get(tag).await? else {
+            return Ok(NotificationBindingState::Unbound {
+                tag: tag.to_owned(),
+            });
+        };
+        let Some(webhook_id) = setting.webhook_id else {
+            return Ok(NotificationBindingState::Unbound {
+                tag: tag.to_owned(),
+            });
+        };
+        let Some(webhook) = self.webhooks.get_by_webhook_id(&webhook_id).await? else {
+            return Ok(NotificationBindingState::MissingResource {
+                tag: tag.to_owned(),
+                webhook_id,
+            });
+        };
+        Ok(NotificationBindingState::Bound {
+            tag: tag.to_owned(),
+            webhook_id: webhook.webhook_id,
+            platform: WebhookPlatform::from_db(&webhook.platform),
+            enabled: webhook.enabled,
+            notify_events: setting
+                .notify_events
+                .split(',')
+                .filter(|event| !event.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        })
     }
 
     // ── Tag settings ────────────────────────────────────────────────

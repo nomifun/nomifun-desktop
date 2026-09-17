@@ -1,5 +1,5 @@
 //! Real user-command regression; two fresh owned persistent conversation Profiles.
-use nomifun_browser_platform::{runtime::*, workspace::BrowserWorkspaceService};
+use nomifun_browser_platform::{runtime::*, workspace::BrowserResourceService};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tauri::Manager;
@@ -25,12 +25,13 @@ fn persisted_seed(value:&Value) -> bool {
 }
 
 pub(super) async fn verify(app:&tauri::AppHandle,url:&str,data_root:&std::path::Path) -> Result<Value,String> {
-    let service=BrowserWorkspaceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
-    let key=|id:&str|BrowserWorkspaceKey{user_id:"site-data-probe".into(),conversation_id:id.into()};
-    let first_key=key("cleared");let control_key=key("untouched");
+    let service=BrowserResourceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
+    let first_authority=super::browser_resource_fixture::authority("site-data-probe","cleared","native-site-data");
+    let control_authority=super::browser_resource_fixture::authority("site-data-probe","untouched","native-site-data");
+    let first_key=first_authority.key();let control_key=control_authority.key();
     let result=async {
-        let first=service.ensure_user(first_key.clone(),BrowserProfile::for_conversation(data_root,&first_key,false)).await.map_err(|e|e.to_string())?;
-        let control=service.ensure_user(control_key.clone(),BrowserProfile::for_conversation(data_root,&control_key,false)).await.map_err(|e|e.to_string())?;
+        let first=service.ensure(first_authority,BrowserProfile::for_agent_session(data_root,&first_key,false)).await.map_err(|e|e.to_string())?;
+        let control=service.ensure(control_authority,BrowserProfile::for_agent_session(data_root,&control_key,false)).await.map_err(|e|e.to_string())?;
         let clear=||BrowserTabCommand::ClearSiteData{runtime_generation:first.runtime_generation()};
         if first.user_command(clear()).await.is_ok() {return Err("Clear created an absent runtime".into());}
         let mut views=vec![];

@@ -193,7 +193,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       }
     }
 
-    // Browsing first must not start AutoWork/IDMM or send the staged draft.
+    // Browsing first must not start AutoWork or send the staged draft.
     if (entry === 'message') await applyAdvancedConfig?.(conversationId);
     emitter.emit('chat.history.refresh');
 

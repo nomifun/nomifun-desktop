@@ -1,6 +1,8 @@
 use super::*;
 use nomi_agent::context_contributor::TurnContext;
-use nomifun_agent_contracts::{ContextContributionInput, ContextContributionPhase};
+use nomifun_agent_contracts::{
+    ContextContributionInput, ContextContributionPhase, ContextTurnInput,
+};
 
 struct TurnFactory(Arc<Mutex<Vec<ContextContributionInput>>>);
 
@@ -398,7 +400,18 @@ async fn selected_context_receives_fresh_turn_facts_without_initial_or_tool_expo
         assert!(output.contains(&format!("guidance:{text}")));
         assert!(!output.contains("private-host-only"));
     }
-    assert_eq!(seen.lock().unwrap().len(), 2);
+    let observed = seen.lock().unwrap();
+    assert_eq!(observed.len(), 2);
+    assert!(observed.iter().all(|input| matches!(
+        input,
+        ContextContributionInput::BeforeTurn {
+            turn: ContextTurnInput {
+                cs_dialogue_id: None,
+                ..
+            }
+        }
+    )));
+    drop(observed);
     kernel.replace_all(Vec::new()).unwrap();
     assert!(
         contributor

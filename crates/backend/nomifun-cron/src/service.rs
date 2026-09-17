@@ -112,7 +112,7 @@ pub struct CronEmbeddedCommandResult {
 
 #[derive(Clone)]
 pub struct CronEmbeddedMutationWaiter {
-    receiver: watch::Receiver<Option<CronEmbeddedCommandResult>>,
+    receiver: watch::Receiver<Option<Result<CronEmbeddedCommandResult, String>>>,
 }
 
 impl CronEmbeddedMutationWaiter {
@@ -120,15 +120,15 @@ impl CronEmbeddedMutationWaiter {
     ///
     /// Dropping this waiter never cancels the mutation owner. A later replay
     /// with the same operation identity can subscribe to the same receipt.
-    pub async fn wait(mut self) -> CronEmbeddedCommandResult {
+    pub async fn wait(mut self) -> Result<CronEmbeddedCommandResult, CronError> {
         loop {
             if let Some(result) = self.receiver.borrow().clone() {
-                return result;
+                return result.map_err(CronError::OutcomeUnknown);
             }
             if self.receiver.changed().await.is_err() {
-                return embedded_error(
-                    "Cron mutation owner closed before publishing a receipt".to_owned(),
-                );
+                return Err(CronError::OutcomeUnknown(
+                    "mutation owner closed before publishing a terminal receipt".to_owned(),
+                ));
             }
         }
     }
@@ -136,8 +136,68 @@ impl CronEmbeddedMutationWaiter {
 
 struct EmbeddedMutationEntry {
     fingerprint: String,
-    sender: watch::Sender<Option<CronEmbeddedCommandResult>>,
+    sender: watch::Sender<Option<Result<CronEmbeddedCommandResult, String>>>,
     completed: AtomicBool,
+    outcome_unknown: AtomicBool,
+}
+
+const EMBEDDED_MUTATION_OWNER_DROPPED: &str =
+    "mutation owner stopped before publishing a terminal receipt";
+
+impl EmbeddedMutationEntry {
+    fn waiter(&self) -> CronEmbeddedMutationWaiter {
+        CronEmbeddedMutationWaiter {
+            receiver: self.sender.subscribe(),
+        }
+    }
+
+    fn publish_terminal(&self, result: Result<CronEmbeddedCommandResult, String>) {
+        let outcome_unknown = result.is_err();
+        // `send_replace` is synchronous and retains the value even when every
+        // current waiter was dropped. Publish before marking the entry
+        // evictable so a same-operation subscriber can never observe a
+        // completed entry whose receipt has not been installed yet.
+        self.sender.send_replace(Some(result));
+        self.outcome_unknown
+            .store(outcome_unknown, Ordering::Release);
+        self.completed.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn evictable(&self) -> bool {
+        self.completed.load(Ordering::Acquire)
+            && !self.outcome_unknown.load(Ordering::Acquire)
+    }
+}
+
+/// Owns responsibility for publishing exactly one terminal observation for a
+/// detached embedded mutation. Tokio abort drops the task future, and unwinding
+/// a panic drops its captures, so both paths deterministically publish an
+/// unknown outcome instead of leaving the map-owned watch sender open forever.
+struct EmbeddedMutationOwner {
+    state: Arc<EmbeddedMutationEntry>,
+    armed: bool,
+}
+
+impl EmbeddedMutationOwner {
+    fn new(state: Arc<EmbeddedMutationEntry>) -> Self {
+        Self { state, armed: true }
+    }
+
+    fn publish(mut self, result: Result<CronEmbeddedCommandResult, String>) {
+        self.state.publish_terminal(result);
+        self.armed = false;
+    }
+}
+
+impl Drop for EmbeddedMutationOwner {
+    fn drop(&mut self) {
+        if self.armed {
+            self.state
+                .publish_terminal(Err(EMBEDDED_MUTATION_OWNER_DROPPED.to_owned()));
+            self.armed = false;
+        }
+    }
 }
 
 fn validate_cron_job_id(job_id: &str) -> Result<String, CronError> {
@@ -362,7 +422,7 @@ impl CronService {
     ) -> Result<CronEmbeddedMutationWaiter, CronError>
     where
         F: FnOnce(CronService) -> Fut + Send + 'static,
-        Fut: Future<Output = CronEmbeddedCommandResult> + Send + 'static,
+        Fut: Future<Output = Result<CronEmbeddedCommandResult, CronError>> + Send + 'static,
     {
         let user_id = validate_cron_user_id(user_id)?.to_owned();
         let operation_id = validate_embedded_operation_id(operation_id)?;
@@ -371,12 +431,21 @@ impl CronService {
                 "Cron mutation owner requires an active async runtime: {error}"
             ))
         })?;
-        if self.embedded_mutations.len() >= 4_096 {
-            self.embedded_mutations
-                .retain(|_, entry| !entry.completed.load(Ordering::Acquire));
-        }
-
         let operation_key = format!("{user_id}\0{operation_id}");
+        if let Some(entry) = self.embedded_mutations.get(&operation_key) {
+            if entry.fingerprint != fingerprint {
+                return Err(CronError::App(AppError::Conflict(format!(
+                    "Cron embedded operation '{operation_id}' was reused with a different request"
+                ))));
+            }
+            return Ok(entry.waiter());
+        }
+        if self.embedded_mutations.len() >= 4_096 {
+            return Err(CronError::App(AppError::Conflict(
+                "Cron embedded operation receipt capacity is exhausted; wait for process restart before admitting a new operation"
+                    .to_owned(),
+            )));
+        }
         match self.embedded_mutations.entry(operation_key) {
             Entry::Occupied(entry) => {
                 if entry.get().fingerprint != fingerprint {
@@ -384,9 +453,7 @@ impl CronService {
                         "Cron embedded operation '{operation_id}' was reused with a different request"
                     ))));
                 }
-                Ok(CronEmbeddedMutationWaiter {
-                    receiver: entry.get().sender.subscribe(),
-                })
+                Ok(entry.get().waiter())
             }
             Entry::Vacant(entry) => {
                 let (sender, receiver) = watch::channel(None);
@@ -394,13 +461,18 @@ impl CronService {
                     fingerprint,
                     sender,
                     completed: AtomicBool::new(false),
+                    outcome_unknown: AtomicBool::new(false),
                 });
                 entry.insert(Arc::clone(&state));
+                let owner = EmbeddedMutationOwner::new(Arc::clone(&state));
                 let service = self.clone();
                 let task = runtime.spawn(async move {
-                    let result = operation(service).await;
-                    state.sender.send_replace(Some(result));
-                    state.completed.store(true, Ordering::Release);
+                    let result = match operation(service).await {
+                        Ok(result) => Ok(result),
+                        Err(CronError::OutcomeUnknown(message)) => Err(message),
+                        Err(error) => Ok(embedded_error(error.to_string())),
+                    };
+                    owner.publish(result);
                 });
                 self.register_background_task(task);
                 Ok(CronEmbeddedMutationWaiter { receiver })
@@ -631,7 +703,7 @@ impl CronService {
             if let Err(compensation_error) =
                 self.repo.delete(user_id, &job.cron_job_id).await
             {
-                return Err(CronError::Scheduler(format!(
+                return Err(CronError::OutcomeUnknown(format!(
                     "failed to bind existing conversation for cron job {}: {bind_error}; \
                      failed to compensate inserted cron job: {compensation_error}",
                     job.cron_job_id
@@ -839,7 +911,7 @@ impl CronService {
                     self.restore_timer_from_authoritative_row(user_id, &job_id, Some(&job))
                         .await;
                 }
-                return Err(CronError::Scheduler(format!(
+                return Err(CronError::OutcomeUnknown(format!(
                     "failed to bind existing conversation for cron job {job_id}: {bind_error}; \
                      failed to restore the previous cron job state: {compensation_error}"
                 )));
@@ -974,11 +1046,28 @@ impl CronService {
     ) -> Result<Vec<crate::CronScheduledSession>, CronError> {
         let user_id = validate_cron_user_id(user_id)?;
         let job_id = validate_cron_job_id(job_id)?;
-        self.get_job(user_id, &job_id).await?;
-        self.executor
-            .lookup_scheduled_sessions(user_id, &job_id)
+        let job = self.get_job(user_id, &job_id).await?;
+        let Some(agent_session_id) = job.conversation_id.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let mut session = self
+            .executor
+            .get_session_projection(user_id, agent_session_id)
             .await
-            .map_err(CronError::from)
+            .map_err(CronError::from)?;
+        if session.owner_id != user_id
+            || session.agent_session_id.as_ref() != agent_session_id
+        {
+            return Err(CronError::App(AppError::Conflict(format!(
+                "AgentSession {agent_session_id} authority does not match Cron job {job_id}"
+            ))));
+        }
+        // `cron_jobs.conversation_id` is the relation authority for canonical
+        // Store-only sessions. Legacy Conversation projections may carry the
+        // same value as a retained back-reference, but callers never need to
+        // infer the relation from that compatibility field.
+        session.cron_job_id = Some(job_id);
+        Ok(vec![session])
     }
 
     /// Submit an embedded create mutation to a process-owned task.
@@ -1006,7 +1095,7 @@ impl CronService {
             fingerprint,
             move |service| async move {
                 service
-                    .execute_embedded_create(
+                    .apply_embedded_create(
                         &owned_user_id,
                         &owned_session_id,
                         &command,
@@ -1037,7 +1126,7 @@ impl CronService {
             fingerprint,
             move |service| async move {
                 service
-                    .execute_embedded_update(
+                    .apply_embedded_update(
                         &owned_user_id,
                         &owned_session_id,
                         &command,
@@ -1065,7 +1154,7 @@ impl CronService {
             fingerprint,
             move |service| async move {
                 service
-                    .execute_embedded_delete(
+                    .apply_embedded_delete(
                         &owned_user_id,
                         &command.job_id,
                     )
@@ -1074,16 +1163,14 @@ impl CronService {
         )
     }
 
-    /// Compatibility entry point for callers not yet migrated to
-    /// [`Self::submit_embedded_create`].
-    pub async fn execute_embedded_create(
+    async fn apply_embedded_create(
         &self,
         user_id: &str,
         session_id: &str,
         command: &CronEmbeddedCreateCommand,
-    ) -> CronEmbeddedCommandResult {
+    ) -> Result<CronEmbeddedCommandResult, CronError> {
         if ConversationId::try_from(session_id).is_err() {
-            return embedded_error(format!("invalid conversation id '{session_id}'"));
+            return Ok(embedded_error(format!("invalid conversation id '{session_id}'")));
         }
         let session = match self
             .executor
@@ -1091,11 +1178,11 @@ impl CronService {
             .await
         {
             Ok(session) => session,
-            Err(error) => return embedded_error(error.to_string()),
+            Err(error) => return Ok(embedded_error(error.to_string())),
         };
         let agent_config = match build_agent_config_from_session(&session) {
             Ok(config) => config,
-            Err(error) => return embedded_error(error.to_string()),
+            Err(error) => return Ok(embedded_error(error.to_string())),
         };
         let request = CreateCronJobRequest {
             name: command.name.clone(),
@@ -1115,24 +1202,23 @@ impl CronService {
             agent_config: Some(agent_config),
         };
         match self.add_job(user_id, request).await {
-            Ok(job) => CronEmbeddedCommandResult {
+            Ok(job) => Ok(CronEmbeddedCommandResult {
                 success: true,
                 message: format!("Created cron job '{}' ({})", job.name, job.cron_job_id),
-            },
-            Err(error) => embedded_error(error.to_string()),
+            }),
+            Err(error @ CronError::OutcomeUnknown(_)) => Err(error),
+            Err(error) => Ok(embedded_error(error.to_string())),
         }
     }
 
-    /// Compatibility entry point for callers not yet migrated to
-    /// [`Self::submit_embedded_update`].
-    pub async fn execute_embedded_update(
+    async fn apply_embedded_update(
         &self,
         user_id: &str,
         session_id: &str,
         command: &CronEmbeddedUpdateCommand,
-    ) -> CronEmbeddedCommandResult {
+    ) -> Result<CronEmbeddedCommandResult, CronError> {
         if ConversationId::try_from(session_id).is_err() {
-            return embedded_error(format!("invalid conversation id '{session_id}'"));
+            return Ok(embedded_error(format!("invalid conversation id '{session_id}'")));
         }
         let session = match self
             .executor
@@ -1140,24 +1226,27 @@ impl CronService {
             .await
         {
             Ok(session) => session,
-            Err(error) => return embedded_error(error.to_string()),
+            Err(error) => return Ok(embedded_error(error.to_string())),
         };
         let job_id = match validate_cron_job_id(&command.job_id) {
             Ok(job_id) => job_id,
-            Err(error) => return embedded_error(error.to_string()),
+            Err(error) => return Ok(embedded_error(error.to_string())),
         };
         let row = match self.repo.get_by_cron_job_id(user_id, &job_id).await {
             Ok(Some(row)) => row,
-            Ok(None) => return embedded_error(format!("Cron job not found: {job_id}")),
-            Err(error) => return embedded_error(error.to_string()),
+            Ok(None) => return Ok(embedded_error(format!("Cron job not found: {job_id}"))),
+            Err(error) => return Ok(embedded_error(error.to_string())),
         };
         if row.execution_mode != ExecutionMode::Existing.as_str()
             || row.conversation_id.as_deref() != Some(session_id)
-            || session.cron_job_id.as_deref() != Some(job_id.as_str())
+            || session
+                .cron_job_id
+                .as_deref()
+                .is_some_and(|bound| bound != job_id.as_str())
         {
-            return embedded_error(format!(
+            return Ok(embedded_error(format!(
                 "cron job '{job_id}' is not bound to conversation '{session_id}'"
-            ));
+            )));
         }
 
         let request = UpdateCronJobRequest {
@@ -1175,68 +1264,27 @@ impl CronService {
             max_retries: None,
         };
         match self.update_job(user_id, &job_id, request).await {
-            Ok(job) => CronEmbeddedCommandResult {
+            Ok(job) => Ok(CronEmbeddedCommandResult {
                 success: true,
                 message: format!("Updated cron job '{}' ({})", job.name, job.cron_job_id),
-            },
-            Err(error) => embedded_error(error.to_string()),
+            }),
+            Err(error @ CronError::OutcomeUnknown(_)) => Err(error),
+            Err(error) => Ok(embedded_error(error.to_string())),
         }
     }
 
-    pub async fn execute_embedded_list(
-        &self,
-        user_id: &str,
-        session_id: &str,
-    ) -> CronEmbeddedCommandResult {
-        if ConversationId::try_from(session_id).is_err() {
-            return CronEmbeddedCommandResult {
-                success: true,
-                message: format!("No cron jobs found for conversation '{session_id}'."),
-            };
-        }
-        let query = ListCronJobsQuery {
-            conversation_id: Some(session_id.to_owned()),
-        };
-        match self.list_jobs(user_id, &query).await {
-            Ok(jobs) if jobs.is_empty() => CronEmbeddedCommandResult {
-                success: true,
-                message: format!("No cron jobs found for conversation '{session_id}'."),
-            },
-            Ok(jobs) => {
-                let lines = jobs
-                    .iter()
-                    .map(|job| {
-                        let status = if job.enabled { "enabled" } else { "disabled" };
-                        format!("- {} ({}) [{}]", job.name, job.cron_job_id, status)
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                CronEmbeddedCommandResult {
-                    success: true,
-                    message: format!(
-                        "Found {} cron job(s) for conversation '{}':\n{lines}",
-                        jobs.len(),
-                        session_id
-                    ),
-                }
-            }
-            Err(error) => embedded_error(error.to_string()),
-        }
-    }
-
-    /// Compatibility entry point for callers not yet migrated to
-    /// [`Self::submit_embedded_delete`].
-    pub async fn execute_embedded_delete(
+    async fn apply_embedded_delete(
         &self,
         user_id: &str,
         job_id: &str,
-    ) -> CronEmbeddedCommandResult {
+    ) -> Result<CronEmbeddedCommandResult, CronError> {
         match self.remove_job(user_id, job_id).await {
-            Ok(()) => CronEmbeddedCommandResult {
+            Ok(()) => Ok(CronEmbeddedCommandResult {
                 success: true,
                 message: format!("Deleted cron job '{job_id}'"),
-            },
-            Err(error) => embedded_error(error.to_string()),
+            }),
+            Err(error @ CronError::OutcomeUnknown(_)) => Err(error),
+            Err(error) => Ok(embedded_error(error.to_string())),
         }
     }
 
@@ -3112,57 +3160,26 @@ impl CronService {
         }
     }
 
-    /// Compatibility entry point for callers that have not deleted the
-    /// Conversation aggregate yet. The Conversation repository owns the
-    /// production cascade and returns captured IDs for
-    /// [`Self::cleanup_deleted_jobs`].
-    pub async fn delete_jobs_by_conversation(&self, user_id: &str, conversation_id: &str) {
-        let user_id = match validate_cron_user_id(user_id) {
-            Ok(user_id) => user_id,
-            Err(error) => {
-                error!(conversation_id, error = %error, "refusing cron cascade for invalid caller");
-                return;
-            }
-        };
-        let conversation_id = match validate_conversation_id(conversation_id) {
-            Ok(conversation_id) => conversation_id,
-            Err(error) => {
-                error!(conversation_id, error = %error, "refusing cron cascade for invalid conversation id");
-                return;
-            }
-        };
-        let jobs = match self.repo.list_by_conversation(user_id, conversation_id).await {
-            Ok(rows) => rows,
-            Err(e) => {
-                error!(conversation_id, error = %e, "Failed to list cron jobs for cascade delete");
-                return;
-            }
-        };
-
-        match self
-            .repo
-            .delete_by_conversation(user_id, conversation_id)
-            .await
-        {
-            Err(error) => {
-                error!(
-                    conversation_id,
-                    error = %error,
-                    "Failed to cascade-delete cron jobs"
-                );
-            }
-            Ok(_) => {
-                let job_ids = jobs.iter().map(|row| row.cron_job_id.clone()).collect::<Vec<_>>();
-                self.cleanup_deleted_jobs(user_id, &job_ids).await;
-                if !job_ids.is_empty() {
-                    info!(
-                        conversation_id,
-                        count = job_ids.len(),
-                        "Cascade-deleted cron jobs for conversation"
-                    );
-                }
-            }
+    /// Cancel process-local timers, emit lifecycle events, and remove generated
+    /// skill files for Cron rows that have already been deleted durably.
+    pub async fn delete_jobs_by_agent_session(
+        &self,
+        user_id: &str,
+        agent_session_id: &str,
+    ) -> Result<Vec<String>, CronError> {
+        let user_id = validate_cron_user_id(user_id)?;
+        if ConversationId::try_from(agent_session_id).is_err() {
+            return Err(CronError::App(AppError::BadRequest(format!(
+                "invalid AgentSession id '{agent_session_id}'"
+            ))));
         }
+        let job_ids = self
+            .repo
+            .delete_by_conversation(user_id, agent_session_id)
+            .await
+            .map_err(CronError::from)?;
+        self.cleanup_deleted_jobs(user_id, &job_ids).await;
+        Ok(job_ids)
     }
 
     /// Cancel process-local timers, emit lifecycle events, and remove generated
@@ -3827,6 +3844,93 @@ mod tests {
     const USER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
+
+    fn embedded_mutation_entry() -> Arc<EmbeddedMutationEntry> {
+        let (sender, _) = watch::channel(None);
+        Arc::new(EmbeddedMutationEntry {
+            fingerprint: "test-fingerprint".to_owned(),
+            sender,
+            completed: AtomicBool::new(false),
+            outcome_unknown: AtomicBool::new(false),
+        })
+    }
+
+    async fn wait_for_owner_unknown(waiter: CronEmbeddedMutationWaiter) -> String {
+        let error = tokio::time::timeout(std::time::Duration::from_secs(1), waiter.wait())
+            .await
+            .expect("abandoned embedded mutation waiter must be bounded")
+            .expect_err("abandoned embedded mutation must not report deterministic failure");
+        match error {
+            CronError::OutcomeUnknown(message) => message,
+            other => panic!("unexpected embedded mutation error: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn embedded_mutation_owner_drop_publishes_outcome_unknown() {
+        let state = embedded_mutation_entry();
+        let waiter = state.waiter();
+
+        drop(EmbeddedMutationOwner::new(state.clone()));
+
+        assert_eq!(
+            wait_for_owner_unknown(waiter).await,
+            EMBEDDED_MUTATION_OWNER_DROPPED
+        );
+        assert!(state.completed.load(Ordering::Acquire));
+        assert!(!state.evictable(), "unknown owner-drop receipt must remain absorbing");
+    }
+
+    #[tokio::test]
+    async fn embedded_mutation_owner_panic_publishes_outcome_unknown() {
+        let state = embedded_mutation_entry();
+        let waiter = state.waiter();
+        let owner = EmbeddedMutationOwner::new(state.clone());
+
+        let task = tokio::spawn(async move {
+            let _owner = owner;
+            panic!("injected embedded mutation owner panic");
+        });
+        assert!(task.await.expect_err("owner task must panic").is_panic());
+
+        assert_eq!(
+            wait_for_owner_unknown(waiter).await,
+            EMBEDDED_MUTATION_OWNER_DROPPED
+        );
+        assert!(state.completed.load(Ordering::Acquire));
+        assert!(!state.evictable(), "unknown panic receipt must remain absorbing");
+    }
+
+    #[tokio::test]
+    async fn embedded_mutation_owner_abort_settles_same_operation_replays() {
+        let state = embedded_mutation_entry();
+        let original = state.waiter();
+        // An occupied same-operation replay subscribes to this same retained
+        // entry in production; it must receive the identical terminal fact.
+        let replay = state.waiter();
+        let owner = EmbeddedMutationOwner::new(state.clone());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _owner = owner;
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.expect("owner task must start");
+
+        task.abort();
+        assert!(
+            task.await
+                .expect_err("owner task must be aborted")
+                .is_cancelled()
+        );
+
+        let original = wait_for_owner_unknown(original).await;
+        let replay = wait_for_owner_unknown(replay).await;
+        assert_eq!(original, EMBEDDED_MUTATION_OWNER_DROPPED);
+        assert_eq!(replay, original);
+        assert!(state.completed.load(Ordering::Acquire));
+        assert!(!state.evictable(), "unknown abort receipt must remain absorbing");
+    }
 
     // -- validate_skill_body_content -------------------------------------------
 

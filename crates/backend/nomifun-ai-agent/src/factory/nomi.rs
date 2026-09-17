@@ -531,12 +531,6 @@ pub(super) async fn build(
         overrides.vision_input,
         &mut fields.compat_overrides.supports_image,
     )?;
-    #[cfg(feature = "browser-use")]
-    let system_browser_session = crate::system_browser::bind_selected(
-        &overrides.allowed_tools, deps.system_browser.clone(),
-        plugin_tool_session.as_ref().and_then(|session| session.system_browser_binding()).cloned(),
-        &options.user_id, &ctx.conversation_id,
-    ).await?;
     let session_directory = deps.data_dir.join("nomi-sessions");
     let output_ceiling = fields
         .output_limit
@@ -628,30 +622,31 @@ pub(super) async fn build(
     };
 
     #[cfg(feature = "browser-use")]
-    let browser_workspace = if is_instance_owner {
-        let selected = overrides.browser_use.unwrap_or(false);
-        let provider = if selected {
-            plugin_tool_session.as_ref()
-                .map(|session| session.browser_provider())
-                .transpose()
-                .map_err(|error| AppError::UnprocessableEntity(error.to_string()))?
-                .flatten().cloned()
-        } else {
-            None
-        };
-        match &deps.browser_runtime_resolver {
-            Some(resolve) => resolve(crate::factory::BrowserRuntimeRequest {
-                user_id: options.user_id.clone(), conversation_id: ctx.conversation_id.clone(),
-                temporary: ctx.is_temporary_workspace,
-                selected,
-                provider,
-            }).await?,
-            None if selected => return Err(AppError::UnprocessableEntity(
-                "No native browser host is available for this interactive conversation.".into(),
-            )),
-            None => None,
-        }
-    } else { None };
+    #[cfg(feature = "browser-use")]
+    let browser_binding = plugin_tool_session
+        .as_ref()
+        .map(|session| session.browser_binding())
+        .transpose()
+        .map_err(|error| AppError::UnprocessableEntity(error.to_string()))?
+        .flatten();
+    #[cfg(feature = "browser-use")]
+    let browser_resource = match (&deps.browser_runtime_resolver, browser_binding) {
+        (Some(resolve), Some(binding)) => resolve(crate::factory::BrowserRuntimeRequest {
+            principal_id: options.user_id.clone(),
+            agent_session_id: ctx.conversation_id.clone(),
+            action_allowlist: binding.action_allowlist,
+            provider: Some(binding.provider),
+            resource_binding: Some(binding.resource_binding),
+        }).await?,
+        (None, Some(_)) => return Err(AppError::UnprocessableEntity(
+            "The authorized Browser Module has no Browser Provider on this host.".into(),
+        )),
+        (_, None) => None,
+    };
+    #[cfg(feature = "browser-use")]
+    if browser_resource.is_some() && !overrides.allowed_tools.iter().any(|name| name == "Browser") {
+        overrides.allowed_tools.push("Browser".into());
+    }
 
     let computer_use_default = read_bool_pref(
         &deps, PREF_COMPUTER_USE,
@@ -791,9 +786,7 @@ pub(super) async fn build(
     };
     let host_wiring = NomiHostWiring {
         #[cfg(feature = "browser-use")]
-        browser_workspace,
-        #[cfg(feature = "browser-use")]
-        system_browser_session,
+        browser_resource,
         ssh_backend: ssh_session.as_ref().map(|s| Arc::clone(&s.backend)),
         ssh_lease: ssh_session.map(|s| s.lease),
         image_generation_tool,

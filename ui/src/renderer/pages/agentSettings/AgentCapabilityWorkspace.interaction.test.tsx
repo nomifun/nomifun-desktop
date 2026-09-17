@@ -92,8 +92,9 @@ describe('Agent capability transfer workspace', () => {
   test('changing the catalog filter clears hidden batch selections', async () => {
     const screen = mount(documentWith([read]));
     fireEvent.click(screen.getByRole('checkbox', { name: 'Add Read a webpage' }));
-    fireEvent.change(screen.getByRole('searchbox', { name: en.workbench.searchLibrary }), { target: { value: 'knowledge' } });
-    await waitFor(() => expect((screen.getByRole('button', { name: 'Move in' }) as HTMLButtonElement).disabled).toBe(true));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Move in (1)' })).toBeTruthy());
+    fireEvent.input(screen.getByRole('searchbox', { name: en.workbench.searchLibrary }), { target: { value: 'knowledge' } });
+    await waitFor(() => expect((screen.getByRole('button', { name: /^Move in/ }) as HTMLButtonElement).disabled).toBe(true));
     const enabled = within(screen.getByRole('region', { name: en.workbench.enabledCapabilities }));
     expect(enabled.getByRole('button', { name: 'View Read files details' })).toBeTruthy();
     expect(screen.state().enabled_capabilities).toHaveLength(1);
@@ -118,12 +119,12 @@ describe('Agent capability transfer workspace', () => {
     await waitFor(() => expect(screen.state().enabled_capabilities).toEqual([]));
   });
 
-  test('system browser selection does not enable embedded browser or local search capabilities', async () => {
-    const screen = mount(documentWith([]), [item('nomi_system_browser'), item('nomi_local_websearch'), item('browser.navigate')]);
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Add Nomi signed-in Chrome' }));
+  test('browser module is selected once without creating a parallel provider capability', async () => {
+    const screen = mount(documentWith([]), [item('browser'), item('nomi_local_websearch')]);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Add Browser' }));
     fireEvent.click(screen.getByRole('button', { name: 'Move in (1)' }));
-    await waitFor(() => expect(screen.state().enabled_capabilities.map(row => row.capability.id)).toEqual(['nomi_system_browser']));
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Select Nomi signed-in Chrome' }));
+    await waitFor(() => expect(screen.state().enabled_capabilities.map(row => row.capability.id)).toEqual(['browser']));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select Browser' }));
     fireEvent.click(screen.getByRole('button', { name: 'Move out (1)' }));
     await waitFor(() => expect(screen.state().enabled_capabilities).toEqual([]));
   });

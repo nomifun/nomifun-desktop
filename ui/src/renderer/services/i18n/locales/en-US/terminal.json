@@ -23,8 +23,6 @@
     "autoworkDesc": "Let automatic tasks drive this terminal by requirement tag (Claude / Codex, including wrappers like stepcode claude)",
     "autoworkLabel": "AutoWork",
     "autoworkRequiresAgent": "AutoWork requires a Claude / Codex terminal (including wrappers like stepcode claude)",
-    "idmmApplyFailed": "Terminal created, but Smart Decision failed to enable — retry inside the terminal",
-    "idmmApplyNote": "Takes effect as soon as the terminal is created; you can adjust it inside the terminal.",
     "knowledgeConnectNote": "Platform-managed terminals inject this automatically; wrappers, custom commands, and external terminals can register the credential-free command in the workspace.",
     "knowledgeDesc": "Mount knowledge bases into the workspace for this terminal's agent to search.",
     "knowledgeLabel": "Platform Knowledge",

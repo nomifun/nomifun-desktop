@@ -285,26 +285,20 @@ pub enum BackgroundTurnReconciliationDisposition {
     StaleConflict,
 }
 
-/// Stable identity of the exact live turn observed by IDMM.
-///
-/// The durable IDMM action reservation stores this scope and must present it
-/// again when delivering a continuation. A newer turn on the same Conversation
-/// has a different generation and/or root wire identity, so a delayed action
-/// can never be misdelivered to that replacement.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct IdmmTurnScope {
+struct ExactTurnScope {
     pub wire_turn_id: String,
     pub generation: u64,
 }
 
-struct IdmmActiveTurnAuthority {
+struct ExactActiveTurnAuthority {
     _lease: RuntimeBuildLease,
     _preparation_guard: ConversationPreparationGuard,
     row: ConversationRow,
     active_turn: AgentTurnCancellation,
     runtime: AgentRuntimeHandle,
-    scope: IdmmTurnScope,
+    scope: ExactTurnScope,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -959,24 +953,6 @@ impl McpSupportPolicy {
     }
 }
 
-/// One-directional seam letting IDMM (the `nomifun-idmm` crate) arm supervision
-/// for a desktop conversation at turn start — WITHOUT this crate depending on
-/// `nomifun-idmm` (which sits above it). `nomifun-idmm::IdmmManager` implements
-/// it; `nomifun-app` injects the implementation at assembly time via
-/// [`ConversationService::with_supervision_hook`]. Called fire-and-forget once
-/// per turn after the Agent runtime exists; the implementation resolves config
-/// internally and is a cheap no-op when IDMM is disabled or already supervising.
-///
-/// Mirrors AutoWork's `IdmmHandle::ensure_supervising` (which arms per
-/// polling iteration) for the plain, user-driven desktop chat path —
-/// the only path that otherwise never armed IDMM (no AutoWork loop, no
-/// boot-resume), so an enabled 智能决策 silently never observed the turn.
-pub trait ConversationSupervisionHook: Send + Sync {
-    /// Arm IDMM for this exact admitted turn. The scope is captured at
-    /// admission, never reconstructed from a later queued event.
-    fn on_turn_start(&self, conversation_id: &str, admitted_scope: IdmmTurnScope);
-}
-
 /// Host-owned resolver for product entry points that have their own durable
 /// identity (Companion, Robot, Creative Studio canvas, and IM-backed
 /// Companion). The product crate supplies only that identity; the application
@@ -1104,10 +1080,6 @@ pub struct ConversationService {
     // Repos for conversation and agent_metadata access.
     conversation_repo: Arc<dyn IConversationRepository>,
     agent_metadata_repo: Arc<dyn IAgentMetadataRepository>,
-    /// Optional IDMM arm hook (post-construction registration, same slot pattern
-    /// as `cron_service`). Wired by `nomifun-app` so a desktop turn arms 智能决策
-    /// supervision; `None` in contexts that don't run IDMM (tests, webui-only).
-    supervision_hook: Arc<RwLock<Option<Arc<dyn ConversationSupervisionHook>>>>,
     product_agent_snapshot_resolver:
         Arc<RwLock<Option<Arc<dyn ProductAgentSnapshotResolver>>>>,
     companion_desktop_provider: Arc<RwLock<Option<std::sync::Weak<dyn crate::companion_interaction::CompanionDesktopTurnProvider>>>>,
@@ -1119,7 +1091,7 @@ pub struct ConversationService {
     background_task_registrar: Arc<RwLock<Option<Arc<dyn BackgroundTaskRegistrar>>>>,
     /// Phase 3 模型故障转移(plan D5)。挑选器要读 `providers` 表、配置要读
     /// `client_preferences`,而 `ConversationService::new` 不带这两个仓库。沿用
-    /// `cron_service` / `supervision_hook` 的「构造后注册」槽位模式而非改 `new()`
+    /// `cron_service` 的「构造后注册」槽位模式而非改 `new()`
     /// 签名:`nomifun-app` 在装配处对 send-loop 实例调用
     /// [`Self::with_failover_deps`]。未注册(两槽为 `None`)即视为故障转移关闭
     /// —— fail-safe,所以不跑故障转移的上下文(测试、纯 webui)无需任何改动。
@@ -1970,7 +1942,7 @@ impl ConversationService {
 
     fn steer_delivery_request_payload(
         req: &SendMessageRequest,
-        scope: &IdmmTurnScope,
+        scope: &ExactTurnScope,
     ) -> String {
         let mut payload = Self::steer_delivery_request_fields(req);
         payload
@@ -1986,14 +1958,14 @@ impl ConversationService {
     fn existing_steer_receipt_scope(
         request_payload: &str,
         req: &SendMessageRequest,
-    ) -> Option<IdmmTurnScope> {
+    ) -> Option<ExactTurnScope> {
         let Ok(mut stored) = serde_json::from_str::<serde_json::Value>(request_payload) else {
             return None;
         };
         let Some(stored_object) = stored.as_object_mut() else {
             return None;
         };
-        let scope = serde_json::from_value::<IdmmTurnScope>(
+        let scope = serde_json::from_value::<ExactTurnScope>(
             stored_object
                 .remove("turn_scope")
                 .unwrap_or(serde_json::Value::Null),
@@ -2320,7 +2292,6 @@ impl ConversationService {
 
             conversation_repo,
             agent_metadata_repo,
-            supervision_hook: Arc::new(RwLock::new(None)),
             product_agent_snapshot_resolver: Arc::new(RwLock::new(None)),
             companion_desktop_provider: Arc::new(RwLock::new(None)),
             turn_completion_observer: Arc::new(RwLock::new(None)),
@@ -2380,15 +2351,6 @@ impl ConversationService {
             .and_then(|guard| guard.clone())
     }
 
-    /// Register the IDMM supervision hook (post-construction, same pattern as
-    /// `with_cron_service`). Called by `nomifun-app` so each desktop turn arms
-    /// 智能决策 supervision for the conversation.
-    pub fn with_supervision_hook(&self, hook: Arc<dyn ConversationSupervisionHook>) {
-        if let Ok(mut guard) = self.supervision_hook.write() {
-            *guard = Some(hook);
-        }
-    }
-
     pub fn with_companion_desktop_provider(
         &self, provider: Arc<dyn crate::companion_interaction::CompanionDesktopTurnProvider>,
     ) {
@@ -2407,7 +2369,7 @@ impl ConversationService {
     }
 
     /// Register the spec D2 turn-completion observer (post-construction, same
-    /// slot pattern as `with_supervision_hook`). Shared across every clone of
+    /// post-construction slot pattern. Shared across every clone of
     /// this service instance.
     pub fn with_turn_completion_observer(&self, observer: Arc<dyn TurnCompletionObserver>) {
         if let Ok(mut guard) = self.turn_completion_observer.write() {
@@ -9765,22 +9727,6 @@ impl ConversationService {
                 return;
             }
 
-            // Arm IDMM supervision now that the Agent runtime exists (so the
-            // probe's `observe` attaches to THIS turn's event stream). The
-            // user-driven desktop chat path has no AutoWork loop / boot-resume
-            // to arm it, so without this an enabled 智能决策 never observed the
-            // turn that asks "请回复编号". Fire-and-forget; a no-op when IDMM is
-            // disabled or already supervising this conversation.
-            if let Some(hook) = service.current_supervision_hook() {
-                hook.on_turn_start(
-                    &conv_id,
-                    IdmmTurnScope {
-                        wire_turn_id: stable_turn_id.clone(),
-                        generation: turn_handle.turn_id(),
-                    },
-                );
-            }
-
             // If the factory resolved a different workspace (for example, an
             // auto-created temp directory for a row with no stored workspace),
             // persist it back.
@@ -10699,7 +10645,7 @@ impl ConversationService {
         self.ensure_no_ambiguous_edit_resubmit(user_id, conv_id)
             .await?;
         let authority = self
-            .acquire_idmm_active_turn_authority(
+            .acquire_exact_active_turn_authority(
                 user_id,
                 conv_id,
                 None,
@@ -10820,7 +10766,7 @@ impl ConversationService {
     fn exact_active_turn_scope(
         active_turn: &AgentTurnCancellation,
         actor: &str,
-    ) -> Result<IdmmTurnScope, AppError> {
+    ) -> Result<ExactTurnScope, AppError> {
         let wire_turn_id = active_turn
             .wire_turn_id()
             .filter(|wire_turn_id| !wire_turn_id.is_empty())
@@ -10830,7 +10776,7 @@ impl ConversationService {
                 ))
             })?
             .to_owned();
-        Ok(IdmmTurnScope {
+        Ok(ExactTurnScope {
             wire_turn_id,
             generation: active_turn.turn_id(),
         })
@@ -10858,7 +10804,7 @@ impl ConversationService {
         &self,
         user_id: &str,
         conversation_id: &str,
-        expected_scope: &IdmmTurnScope,
+        expected_scope: &ExactTurnScope,
         access: ExactActiveTurnAccess,
         lease: &RuntimeBuildLease,
         runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
@@ -10950,14 +10896,14 @@ impl ConversationService {
         Ok((row, current_turn, runtime))
     }
 
-    async fn acquire_idmm_active_turn_authority(
+    async fn acquire_exact_active_turn_authority(
         &self,
         user_id: &str,
         conversation_id: &str,
-        expected_scope: Option<&IdmmTurnScope>,
+        expected_scope: Option<&ExactTurnScope>,
         access: ExactActiveTurnAccess,
         runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
-    ) -> Result<IdmmActiveTurnAuthority, AppError> {
+    ) -> Result<ExactActiveTurnAuthority, AppError> {
         let conv_id = parse_conv_id(conversation_id)?;
         let lease = self.begin_public_runtime_preparation(conv_id, user_id)?;
         let preparation_token = lease.cancellation_token();
@@ -11003,7 +10949,7 @@ impl ConversationService {
             })?;
         if row.status.as_deref() != Some("running") {
             return Err(AppError::Conflict(
-                "IDMM action requires a durable Running Conversation"
+                "exact-turn action requires a durable Running Conversation"
                     .to_owned(),
             ));
         }
@@ -11013,7 +10959,7 @@ impl ConversationService {
             .active_turn_cancellation(conv_id)
             .ok_or_else(|| {
                 AppError::Conflict(
-                    "IDMM action requires the exact active turn owner"
+                    "exact-turn action requires the active turn owner"
                         .to_owned(),
                 )
             })?;
@@ -11022,36 +10968,36 @@ impl ConversationService {
             || !runtime_registry.has_registered_runtime(conv_id)
         {
             return Err(AppError::Conflict(
-                "IDMM action lost its active runtime authority".to_owned(),
+                "exact-turn action lost its active runtime authority".to_owned(),
             ));
         }
         let runtime = runtime_registry.get_runtime(conv_id).ok_or_else(|| {
             AppError::Conflict(
-                "IDMM action requires a live non-quarantined runtime"
+                "exact-turn action requires a live non-quarantined runtime"
                     .to_owned(),
             )
         })?;
         if runtime.status() != Some(ConversationStatus::Running) {
             return Err(AppError::Conflict(
-                "IDMM action requires a Running runtime".to_owned(),
+                "exact-turn action requires a Running runtime".to_owned(),
             ));
         }
 
-        let scope = Self::exact_active_turn_scope(&active_turn, "IDMM action")?;
+        let scope = Self::exact_active_turn_scope(&active_turn, "exact-turn action")?;
         if expected_scope.is_some_and(|expected| expected != &scope) {
             return Err(AppError::Conflict(
-                "IDMM action reservation belongs to a different turn generation"
+                "exact-turn action belongs to a different turn generation"
                     .to_owned(),
             ));
         }
         lease.ensure_active()?;
         if active_turn.is_cancelled() {
             return Err(AppError::Conflict(
-                "IDMM action lost its active turn before delivery".to_owned(),
+                "exact-turn action lost its active turn before delivery".to_owned(),
             ));
         }
 
-        Ok(IdmmActiveTurnAuthority {
+        Ok(ExactActiveTurnAuthority {
             _lease: lease,
             _preparation_guard: preparation_guard,
             row,
@@ -11059,148 +11005,6 @@ impl ConversationService {
             runtime,
             scope,
         })
-    }
-
-    /// Snapshot the exact currently-running turn for an IDMM reservation.
-    ///
-    /// The returned scope is observation identity only; it grants no build,
-    /// send, failover, or completion authority. Every eventual delivery must
-    /// present it again to an exact-scope method below.
-    #[tracing::instrument(skip_all, fields(user_id = %user_id, conversation_id = %conversation_id))]
-    pub async fn idmm_active_turn_scope(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
-    ) -> Result<IdmmTurnScope, AppError> {
-        Ok(self
-            .acquire_idmm_active_turn_authority(
-                user_id,
-                conversation_id,
-                None,
-                ExactActiveTurnAccess::OrdinaryConversation,
-                runtime_registry,
-            )
-            .await?
-            .scope)
-    }
-
-    /// Continue the exact currently-running turn on behalf of IDMM.
-    ///
-    /// This is intentionally a never-fallback boundary. IDMM does not own the
-    /// [`AgentTurnHandle`] and therefore has no authority to build a runtime,
-    /// mark a Conversation Running, or start a replacement turn. The expected
-    /// scope closes the reservation/delivery TOCTOU window: an action reserved
-    /// for turn A is rejected if turn B has since become active.
-    #[tracing::instrument(skip_all, fields(user_id = %user_id, conversation_id = %conversation_id))]
-    pub async fn idmm_continue_active_turn(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        expected_scope: &IdmmTurnScope,
-        req: SendMessageRequest,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
-    ) -> Result<String, AppError> {
-        Self::validate_steer_input(&req)?;
-        if req.content.trim().is_empty() {
-            return Err(AppError::BadRequest(
-                "IDMM continuation content must not be empty".to_owned(),
-            ));
-        }
-        if !req.files.is_empty() {
-            return Err(AppError::BadRequest(
-                "IDMM continuation cannot attach files to an active turn".to_owned(),
-            ));
-        }
-        if !req.hidden || req.origin.as_deref() != Some("idmm") {
-            return Err(AppError::BadRequest(
-                "IDMM continuation must be hidden and carry origin=idmm".to_owned(),
-            ));
-        }
-
-        let authority = self
-            .acquire_idmm_active_turn_authority(
-                user_id,
-                conversation_id,
-                Some(expected_scope),
-                ExactActiveTurnAccess::OrdinaryConversation,
-                runtime_registry,
-            )
-            .await?;
-        let steer_operation_id = format!("idmm-steer:{}", Self::mint_msg_id());
-        Self::ensure_steer_context_supported(&req, &authority.runtime)?;
-        let claim = self.conversation_repo.claim_delivery_receipt_once(user_id, conversation_id, &steer_operation_id,
-            "steer", &Self::steer_delivery_request_payload(&req, &authority.scope), now_ms()).await?;
-        if !claim.claimed_new { return Err(AppError::Conflict("IDMM steer receipt identity already exists".into())); }
-        let steer_message_id = claim.receipt.message_id;
-        match authority.runtime.steer_with_receipt(nomifun_ai_agent::RuntimeSteerDelivery {
-            receipt_operation_id: steer_operation_id.clone(), wire_turn_id: authority.scope.wire_turn_id.clone(),
-            turn_generation: authority.scope.generation, text: req.content.clone(),
-            files: req.files.clone(), inject_skills: req.inject_skills.clone(),
-        }).await {
-            Ok(true) => {}
-            Ok(false) => {
-                let _ = self.conversation_repo.complete_delivery_receipt(user_id, conversation_id, &steer_operation_id,
-                    false, None, Some("The active turn ended before IDMM continuation delivery"), None, None, now_ms()).await?;
-                return Err(AppError::Conflict(
-                    "The active turn ended before IDMM continuation delivery"
-                        .to_owned(),
-                ));
-            }
-            Err(error) => return Err(error),
-        }
-        // A stop may race steer itself. Keeping the preparation guard means its
-        // durable finalizer cannot pass us; a delivered continuation is recorded
-        // before that finalizer, while a pre-delivery cancellation was rejected.
-        if !authority.active_turn.is_cancelled() {
-            authority._lease.ensure_active()?;
-        }
-
-        let message_id = steer_message_id;
-        let message = MessageRow {
-            id: 0,
-            message_id: message_id.clone(),
-            conversation_id: conversation_id.to_owned(),
-            msg_id: Some(message_id.clone()),
-            r#type: "text".to_owned(),
-            content: serde_json::json!({ "content": &req.content, "files": &req.files,
-                "inject_skills": &req.inject_skills }).to_string(),
-            position: Some("right".to_owned()),
-            status: Some("finish".to_owned()),
-            hidden: true,
-            created_at: now_ms(),
-        };
-        self.conversation_repo.insert_message(&message).await?;
-
-        if !self.conversation_repo.complete_delivery_receipt(user_id, conversation_id, &steer_operation_id,
-            true, None, None, None, None, now_ms()).await? {
-            return Err(AppError::Internal("failed to acknowledge IDMM steer receipt".into()));
-        }
-
-        let (companion, companion_id, extra_channel_platform) =
-            companion_context_from_extra(&authority.row.extra)?;
-        self.user_events.send_to_user(
-            user_id,
-            WebSocketMessage::new(
-                "message.userCreated",
-                serde_json::json!({
-                    "conversation_id": conversation_id,
-                    "msg_id": &message_id,
-                    "content": &req.content,
-                    "position": "right",
-                    "status": "finish",
-                "hidden": true,
-                "files": &req.files,
-                "inject_skills": &req.inject_skills,
-                "origin": "idmm",
-                    "companion": companion,
-                    "companion_id": companion_id,
-                    "channel_platform": req.channel_platform.or(extra_channel_platform),
-                    "created_at": message.created_at,
-                }),
-            ),
-        );
-        Ok(message_id)
     }
 
     /// Public, durable at-most-once steering boundary.
@@ -11283,7 +11087,7 @@ impl ConversationService {
         }
 
         let authority = self
-            .acquire_idmm_active_turn_authority(
+            .acquire_exact_active_turn_authority(
                 user_id,
                 conv_id,
                 None,
@@ -13849,13 +13653,6 @@ impl ConversationService {
 
     fn current_cron_service(&self) -> Option<Arc<dyn ICronService>> {
         match self.cron_service.read() {
-            Ok(guard) => guard.as_ref().map(Arc::clone),
-            Err(_) => None,
-        }
-    }
-
-    fn current_supervision_hook(&self) -> Option<Arc<dyn ConversationSupervisionHook>> {
-        match self.supervision_hook.read() {
             Ok(guard) => guard.as_ref().map(Arc::clone),
             Err(_) => None,
         }

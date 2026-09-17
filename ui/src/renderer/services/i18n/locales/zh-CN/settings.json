@@ -1537,8 +1537,6 @@
     "domainRequirementDesc": "管理需求、任务工作区和需求相关自动化。",
     "domainAutoworkTitle": "AutoWork",
     "domainAutoworkDesc": "开启、关闭和查看需求 AutoWork 状态。",
-    "domainIdmmTitle": "IDMM",
-    "domainIdmmDesc": "模型调度、活动和智能分配相关能力。",
     "domainCronTitle": "计划任务",
     "domainCronDesc": "创建、读取和维护计划任务。",
     "domainMcpTitle": "MCP 服务",

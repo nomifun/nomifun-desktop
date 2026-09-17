@@ -148,8 +148,8 @@ mod tests {
         assert_eq!(result.is_error, Some(true));
         let rendered = serde_json::to_string(&result).unwrap();
         assert!(
-            rendered.contains("selected conversation Browser or system-browser capability"),
-            "must steer the agent to its selected Browser capability: {rendered}"
+            rendered.contains("bound Browser Module actions"),
+            "must steer the agent to its authorized Browser Module: {rendered}"
         );
     }
 

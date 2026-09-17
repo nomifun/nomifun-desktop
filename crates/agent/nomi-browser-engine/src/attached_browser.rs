@@ -2,8 +2,9 @@
 //!
 //! Deliberately separate from process launch: no process handle, Profile
 //! lifetime, browser creation, global auto-attach, target cleanup or reconnect.
-//! No raw protocol handle is exposed to application/model callers. Target
-//! authorization and Agent operations must be added on this independent port.
+//! No raw protocol handle is exposed to application/model callers. The
+//! application owns Browser Module/Resource authority; this engine supplies
+//! only installation-connected tab handles and Agent operations.
 
 use std::{path::Path, sync::Mutex};
 
@@ -18,7 +19,7 @@ use crate::transport::{Connection, ROOT_SESSION};
 
 mod automation;
 mod tabs;
-pub use tabs::{GrantedTab, GrantedTabInfo, UserTabChoice, UserTabInventory};
+pub use tabs::{AttachedProviderTab, GrantedTab, GrantedTabInfo};
 
 const MAX_PORT_FILE_BYTES: u64 = 1024;
 
@@ -36,10 +37,8 @@ pub enum AttachError {
     ConnectionFailed,
     #[error("The connected browser does not meet the Chrome 144+ connection requirement")]
     UnsupportedBrowser,
-    #[error("The browser tab selection is no longer current; refresh the tab list")]
-    StaleSelection,
-    #[error("The browser tab is not authorized on this connection")]
-    TabNotAuthorized,
+    #[error("The attached browser target is no longer current")]
+    StaleTarget,
     #[error("The browser tab list exceeded its bounded capacity")]
     InventoryLimit,
 }
@@ -59,7 +58,6 @@ type Retirement = Shared<BoxFuture<'static, Result<(), AttachError>>>;
 struct AttachedState {
     connection: Option<Connection>,
     retirement: Option<Retirement>,
-    offered_tabs: std::collections::HashMap<String, tabs::OfferedTab>,
     automation: std::collections::BTreeMap<String, automation::TabAutomation>,
     pending: std::collections::BTreeMap<String, automation::Pending>,
     #[cfg(test)]
@@ -135,7 +133,6 @@ impl AttachedBrowser {
                 state: std::sync::Arc::new(Mutex::new(AttachedState {
                     connection: Some(connection),
                     retirement: None,
-                    offered_tabs: Default::default(),
                     automation: Default::default(),
                     pending: Default::default(),
                     #[cfg(test)]
@@ -177,14 +174,13 @@ impl AttachedBrowser {
     /// Synchronous admission/I/O fence. The owner still must await disconnect
     /// to prove physical disposal; this can interrupt a pending inventory read.
     pub fn request_disconnect(&self) {
-        let mut state = self
+        let state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(connection) = &state.connection {
             connection.registry().fail_connection();
         }
-        state.offered_tabs.clear();
     }
 
     /// Stop admission synchronously even if the caller later cancels the close
@@ -203,7 +199,6 @@ impl AttachedBrowser {
                     .take()
                     .expect("connection retires exactly once");
                 connection.registry().fail_connection();
-                state.offered_tabs.clear();
                 let mut cleanup: Vec<_> = state
                     .pending
                     .values()

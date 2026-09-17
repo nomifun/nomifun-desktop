@@ -276,13 +276,10 @@ body[arco-theme='dark'] .sider-soft-popover .arco-popover-arrow {
   border-color: var(--color-border-2) !important;
 }
 
-/* Conversation capability popovers (smart-decision / knowledge): Arco adds its
-   own inner padding, while IdmmControl / KnowledgeControl already own the panel
+/* Conversation capability popovers: Arco adds its own inner padding, while
+   KnowledgeControl already owns the panel
    padding. Zero the shell padding so the content has one consistent left/right
    gutter instead of a doubled left side. */
-.idmm-control-popover .arco-popover-content,
-.idmm-control-popover .arco-popover-inner,
-.idmm-control-popover .arco-popover-inner-content,
 .knowledge-control-popover .arco-popover-content,
 .knowledge-control-popover .arco-popover-inner,
 .knowledge-control-popover .arco-popover-inner-content {

@@ -329,6 +329,79 @@ async fn close_link_publishes_closed_with_a_reaped_teardown() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_close_waiters_share_the_process_owned_receipt_after_cancellation() {
+    const NAME: &str =
+        "concurrent_close_waiters_share_the_process_owned_receipt_after_cancellation";
+    let sshd = sshd_or_skip!(NAME);
+    let harness = support::harness(sshd.known_hosts_path(), support::brisk_tuning()).await;
+    let id = harness.add_fixture_host(&sshd).await;
+    let Some(link) = harness.open_or_skip(NAME, "close-race", &id, "/").await else {
+        return;
+    };
+    let backend = harness.pool.backend_for(&link);
+    let marker = format!("/tmp/nomifun-ssh-close-{}", nomifun_common::generate_id());
+    let command = format!(
+        "printf started > {marker}; sleep 2; printf done >> {marker}",
+        marker = shell_path(&marker),
+    );
+    let execution = {
+        let backend = Arc::clone(&backend);
+        tokio::spawn(async move { backend.run_command(&command, 15_000).await })
+    };
+    let marker_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if backend
+            .read_file(&marker)
+            .await
+            .is_ok_and(|bytes| bytes.starts_with(b"started"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < marker_deadline,
+            "the admitted command never published its marker"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let link_key = key("close-race", &id);
+    let mut cancelled_waiter = {
+        let pool = harness.pool.clone();
+        let key = link_key.clone();
+        tokio::spawn(async move { pool.close_link(&key).await })
+    };
+    let concurrent_waiter = {
+        let pool = harness.pool.clone();
+        let key = link_key.clone();
+        tokio::spawn(async move { pool.close_link(&key).await })
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut cancelled_waiter)
+            .await
+            .is_err(),
+        "teardown must wait for the admitted action"
+    );
+    cancelled_waiter.abort();
+    cancelled_waiter
+        .await
+        .expect_err("cancelling one request waiter must not own teardown");
+
+    execution
+        .await
+        .expect("the command task should not panic")
+        .expect("the admitted command should complete");
+    let teardown = tokio::time::timeout(SETTLE, concurrent_waiter)
+        .await
+        .expect("the concurrent waiter should observe terminal teardown")
+        .expect("the concurrent waiter should not panic");
+    assert!(
+        matches!(teardown, SshTeardown::Reaped { .. }),
+        "all live waiters must receive the process-owned close receipt: {teardown:?}"
+    );
+    assert_eq!(harness.pool.active_link_count(), 0);
+}
+
 /// The seam the agent factory calls, against a real host: one pooled link, tools
 /// that work through it, and a lease that reports rather than closes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -455,6 +528,100 @@ async fn close_conversation_closes_every_host_link() {
         "the other conversation's link must survive"
     );
     harness.pool.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn session_retirement_drains_the_admitted_exec_and_rejects_later_actions_and_links() {
+    const NAME: &str =
+        "session_retirement_drains_the_admitted_exec_and_rejects_later_actions_and_links";
+    let sshd = sshd_or_skip!(NAME);
+    let harness = support::harness(sshd.known_hosts_path(), support::brisk_tuning()).await;
+    let first_host = harness.add_fixture_host(&sshd).await;
+    let second_host = harness.add_fixture_host(&sshd).await;
+    let Some(link) = harness
+        .open_or_skip(NAME, "session-retire", &first_host, "/")
+        .await
+    else {
+        return;
+    };
+    let backend = harness.pool.backend_for(&link);
+    let marker = format!("/tmp/nomifun-ssh-retire-{}", nomifun_common::generate_id());
+    let command = format!(
+        "printf started > {marker}; sleep 2; printf done >> {marker}",
+        marker = shell_path(&marker),
+    );
+    let execution = {
+        let backend = Arc::clone(&backend);
+        tokio::spawn(async move { backend.run_command(&command, 15_000).await })
+    };
+
+    // The SFTP marker proves the command passed action admission and reached the
+    // remote shell. Retirement after this point must wait for that exact winner.
+    let marker_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if backend
+            .read_file(&marker)
+            .await
+            .is_ok_and(|bytes| bytes.starts_with(b"started"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < marker_deadline,
+            "the admitted command never published its marker"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    harness.pool.retire_agent_session("session-retire");
+    let mut cleanup = {
+        let pool = harness.pool.clone();
+        tokio::spawn(async move { pool.close_conversation("session-retire").await })
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut cleanup)
+            .await
+            .is_err(),
+        "cleanup returned before the admitted exec reached a terminal result"
+    );
+
+    let post_retire = backend
+        .write_file(&marker, b"must-not-publish".to_vec())
+        .await
+        .expect_err("post-retire SFTP work must be denied");
+    assert!(post_retire.contains("retired"), "{post_retire}");
+    let acquire = harness
+        .pool
+        .acquire(
+            &harness.user_id,
+            "session-retire",
+            &second_host,
+            "/",
+        )
+        .await
+        .expect_err("a retired Session must not publish another host link");
+    assert!(matches!(acquire, SshDialError::SessionRetired), "{acquire:?}");
+
+    let output = tokio::time::timeout(SETTLE, execution)
+        .await
+        .expect("the admitted exec should reach a terminal result")
+        .expect("the exec task should not panic")
+        .expect("the admitted exec should complete");
+    assert!(output.exit_code == 0 && !output.timed_out, "{output:?}");
+    let teardowns = tokio::time::timeout(SETTLE, cleanup)
+        .await
+        .expect("cleanup should finish after the action drains")
+        .expect("the cleanup task should not panic");
+    assert_eq!(teardowns.len(), 1, "{teardowns:?}");
+    assert!(
+        matches!(&teardowns[0], SshTeardown::Reaped { .. }),
+        "cleanup must retain exact positive teardown evidence: {teardowns:?}"
+    );
+    assert_eq!(harness.pool.active_link_count(), 0);
+}
+
+fn shell_path(path: &str) -> String {
+    format!("'{}'", path.replace('\'', "'\"'\"'"))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

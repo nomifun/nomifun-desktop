@@ -8,7 +8,6 @@ import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 import ChatTitleEditor from '@/renderer/pages/conversation/components/ChatTitleEditor';
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
-import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
 import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
 import WorkspacePanelHeader from './WorkspacePanelHeader';
 import WorkspaceToolRail, {
@@ -45,7 +44,6 @@ import BrowserWorkspacePanel from '../../Browser/BrowserWorkspacePanel';
 import { BrowserLinkContext, type BrowserLinkRequest } from '../../Browser/BrowserLinkContext';
 import type { LocalBrowserLink } from '../../Browser/localBrowserLink';
 import { Earth } from '@icon-park/react';
-import SystemBrowserControl from '../../SystemBrowser/SystemBrowserControl';
 import { StopButtonHostContext } from '@/renderer/components/chat/SendBox/StopButtonPortal';
 
 // headerExtra allows injecting custom actions (e.g., model picker) into the header's right area
@@ -64,7 +62,7 @@ export interface ChatLayoutProps {
   headerControls?: React.ReactNode;
   /**
    * Hide the session-capability controls baked into the header
-   * (AutoWork / IDMM / Knowledge).
+   * (AutoWork / Knowledge).
    * Used by minimal Agents and retained read-only transcripts. Product-owned
    * controls use headerControls instead. Defaults to false.
    */
@@ -72,9 +70,6 @@ export interface ChatLayoutProps {
   /** Whether this Agent's immutable capability ceiling permits target-scoped
    * knowledge binding. Plain Nomi defaults to enabled. */
   knowledgeEnabled?: boolean;
-  /** Independent immutable capability; never inferred from embedded Browser access. */
-  systemBrowserEnabled?: boolean;
-  systemBrowserLocked?: boolean;
   /**
    * Make the header title read-only (no click-to-rename). Used by single-session
    * surfaces like the companion chat, where the title tracks an external source
@@ -346,11 +341,9 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
         {props.headerControls !== undefined ? props.headerControls : !props.hideAdvancedControls && conversation_id != null && (
           <>
             <AutoWorkControl target={{ kind: 'conversation', id: conversation_id }} />
-            <IdmmControl target={{ kind: 'conversation', id: conversation_id }} />
             {(props.knowledgeEnabled ?? true) && (
               <KnowledgeControl target={{ kind: 'conversation', id: conversation_id }} />
             )}
-            {props.systemBrowserEnabled && <SystemBrowserControl key={conversation_id} conversationId={conversation_id} locked={props.systemBrowserLocked ?? true} available={isWindowsRuntime} />}
           </>
         )}
         {props.headerExtra}

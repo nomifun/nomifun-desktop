@@ -47,7 +47,6 @@ const ConversationRow: React.FC<ConversationRowProps> = (props) => {
     onTogglePin,
     getJobStatus,
     autoworkState,
-    idmmState,
   } = props;
   const { t } = useTranslation();
   const { info: presetInfo } = useAgentInfo(conversation);
@@ -56,7 +55,7 @@ const ConversationRow: React.FC<ConversationRowProps> = (props) => {
   const siderTooltipProps = getSiderTooltipProps(tooltipEnabled);
   const ageLabel = formatSessionAgeLabel(t, conversation.created_at);
 
-  const capabilityItems = buildSessionCapabilityItems(t, { cronStatus, autoworkState, idmmState });
+  const capabilityItems = buildSessionCapabilityItems(t, { cronStatus, autoworkState });
 
   const renderLeadingIcon = () => {
     // When the row is pinned, hovering reveals a pushpin marker that overlays

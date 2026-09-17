@@ -14,13 +14,14 @@
 //! to the emitter, so "what the socket is doing", "what the REST snapshot says"
 //! and "what the operator's browser was told" cannot drift apart. Everything else
 //! in this file reads that value; nothing else writes it.
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use dashmap::DashMap;
-use nomifun_ai_agent::SshBackend;
+use nomifun_ai_agent::{RemoteCommandOutput, SshBackend};
 use nomifun_common::SshHostId;
 use tokio::sync::{watch, Notify, RwLock};
 use tokio::task::JoinHandle;
@@ -30,7 +31,9 @@ use tracing::{debug, warn};
 use crate::dto::SshStatusEvent;
 use crate::events::SshEventEmitter;
 use crate::service::SshHostService;
-use crate::sink::{SshConnectionHandle, SshDialError, SshLinkBackend};
+use crate::sink::{
+    SshActionDispatchError, SshConnectionHandle, SshDialError, SshLinkBackend,
+};
 use crate::state::{
     SshLinkState, SshTeardown, SSH_CLOSE_BUDGET, SSH_DIAL_TIMEOUT, SSH_LIVENESS_POLL_INTERVAL,
     SSH_RECONNECT_INITIAL_BACKOFF_MS, SSH_RECONNECT_MAX_ATTEMPTS, SSH_RECONNECT_MAX_BACKOFF_MS,
@@ -114,6 +117,10 @@ impl SshLinkKey {
 /// outage instead of having to be rebuilt (which it cannot be — the runtime that
 /// asked for it may be gone).
 pub struct SshLink {
+    /// Distinguishes successive physical links that reuse the same
+    /// `(AgentSession, ssh_host)` key. A teardown loss belongs to one exact
+    /// incarnation and must survive a later successful reconnect/close.
+    instance_id: u64,
     key: SshLinkKey,
     owner_id: String,
     handle: RwLock<Option<Arc<SshConnectionHandle>>>,
@@ -133,12 +140,21 @@ pub struct SshLink {
     /// Nudges the supervisor when a tool call notices the link died, so the ladder
     /// starts now rather than at the next liveness tick.
     wake: Notify,
+    /// Per-link action admission. Closing a link retires this gate before it
+    /// touches the transport, then waits for every action that linearized first.
+    /// An old backend may keep the `Arc<SshLink>` forever, but it can never use a
+    /// replacement transport after this gate is retired.
+    actions: Arc<ActionAdmission>,
+    /// One process-owned teardown and its immutable terminal receipt. Closing
+    /// callers may be cancelled independently; they never own the close task.
+    close: Arc<LinkCloseCompletion>,
 }
 
 impl SshLink {
-    fn new(key: SshLinkKey, owner_id: &str, remote_cwd: &str) -> Self {
+    fn new(instance_id: u64, key: SshLinkKey, owner_id: &str, remote_cwd: &str) -> Self {
         let (state_tx, _) = watch::channel(SshLinkState::Idle);
         Self {
+            instance_id,
             key,
             owner_id: owner_id.to_string(),
             handle: RwLock::new(None),
@@ -147,6 +163,8 @@ impl SshLink {
             changed_at: AtomicI64::new(nomifun_common::now_ms()),
             transition: tokio::sync::Mutex::new(()),
             wake: Notify::new(),
+            actions: Arc::new(ActionAdmission::default()),
+            close: Arc::new(LinkCloseCompletion::default()),
         }
     }
 
@@ -192,6 +210,208 @@ impl SshLink {
             .as_ref()
             .is_some_and(|h| !h.is_transport_closed())
     }
+}
+
+/// Shared terminal state for an exact physical link close. `started` is claimed
+/// synchronously before the process-owned task is spawned, so dropping any
+/// request future cannot abandon teardown or let a second caller invent a
+/// different result.
+#[derive(Default)]
+struct LinkCloseCompletion {
+    started: AtomicBool,
+    receipt: OnceLock<SshTeardown>,
+    finished: Notify,
+}
+
+impl LinkCloseCompletion {
+    fn try_start(&self) -> bool {
+        self.started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn finish(&self, teardown: SshTeardown) {
+        if self.receipt.set(teardown).is_ok() {
+            self.finished.notify_waiters();
+        }
+    }
+
+    async fn wait(&self) -> SshTeardown {
+        loop {
+            // Tokio's Notified snapshots the notify_waiters generation at
+            // construction, so a finish between this line and the receipt read
+            // is still observed by the subsequent await.
+            let finished = self.finished.notified();
+            if let Some(teardown) = self.receipt.get() {
+                return teardown.clone();
+            }
+            finished.await;
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TeardownReceiptKey {
+    link: SshLinkKey,
+    instance_id: u64,
+}
+
+#[derive(Default)]
+struct TeardownReceipts {
+    entries: DashMap<TeardownReceiptKey, SshTeardown>,
+}
+
+impl TeardownReceipts {
+    fn record(&self, key: TeardownReceiptKey, teardown: SshTeardown) {
+        self.entries.insert(key, teardown);
+    }
+
+    fn latest_for_link(
+        &self,
+        key: &SshLinkKey,
+    ) -> Option<(TeardownReceiptKey, SshTeardown)> {
+        self.entries
+            .iter()
+            .filter(|entry| &entry.key().link == key)
+            .max_by_key(|entry| entry.key().instance_id)
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+    }
+
+    fn for_session(&self, agent_session_id: &str) -> Vec<(TeardownReceiptKey, SshTeardown)> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.key().link.conversation_id == agent_session_id)
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect()
+    }
+
+    fn acknowledge_persisted_for_session(&self, agent_session_id: &str) -> usize {
+        let keys = self
+            .entries
+            .iter()
+            .filter(|entry| entry.key().link.conversation_id == agent_session_id)
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        keys.into_iter()
+            .filter(|key| self.entries.remove(key).is_some())
+            .count()
+    }
+
+    fn discard_proven_for_session(&self, agent_session_id: &str) {
+        let keys = self
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.key().link.conversation_id == agent_session_id
+                    && !matches!(entry.value(), SshTeardown::Lost { .. })
+            })
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.entries.remove(&key);
+        }
+    }
+
+    fn discard_proven(&self, key: &TeardownReceiptKey) {
+        if self
+            .entries
+            .get(key)
+            .is_some_and(|entry| !matches!(entry.value(), SshTeardown::Lost { .. }))
+        {
+            self.entries.remove(key);
+        }
+    }
+}
+
+#[derive(Default)]
+struct ActionAdmissionState {
+    retired: bool,
+    in_flight: usize,
+}
+
+/// A tiny synchronous admission gate. The mutex is held only while changing two
+/// integers; no network or async work occurs under it. `retire` and `admit` use
+/// the same critical section, which is the linearization point needed by Session
+/// deletion: either the action owns a lease and cleanup waits, or retirement won
+/// and the action never reaches a handle.
+#[derive(Default)]
+struct ActionAdmission {
+    state: Mutex<ActionAdmissionState>,
+    drained: Notify,
+}
+
+impl ActionAdmission {
+    fn admit(self: &Arc<Self>) -> Option<ActionAdmissionLease> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.retired {
+            return None;
+        }
+        state.in_flight += 1;
+        Some(ActionAdmissionLease {
+            admission: Arc::clone(self),
+        })
+    }
+
+    fn retire(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.retired = true;
+        if state.in_flight == 0 {
+            self.drained.notify_waiters();
+        }
+    }
+
+    fn is_retired(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retired
+    }
+
+    async fn wait_drained(&self) {
+        loop {
+            // Register before inspecting the count so the final lease cannot
+            // notify between our check and the await.
+            let drained = self.drained.notified();
+            if self
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .in_flight
+                == 0
+            {
+                return;
+            }
+            drained.await;
+        }
+    }
+}
+
+struct ActionAdmissionLease {
+    admission: Arc<ActionAdmission>,
+}
+
+impl Drop for ActionAdmissionLease {
+    fn drop(&mut self) {
+        let mut state = self
+            .admission
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        debug_assert!(state.in_flight > 0, "SSH action admission underflow");
+        state.in_flight = state.in_flight.saturating_sub(1);
+        if state.in_flight == 0 {
+            self.admission.drained.notify_waiters();
+        }
+    }
+}
+
+/// Held from before the first handle lookup until the action has a terminal
+/// result. Both fields matter: the Session lease makes deletion wait across all
+/// host links, while the link lease makes ordinary link/host shutdown wait.
+pub(crate) struct SshActionLease {
+    _global: ActionAdmissionLease,
+    _session: ActionAdmissionLease,
+    _link: ActionAdmissionLease,
 }
 
 impl std::fmt::Debug for SshLink {
@@ -321,6 +541,16 @@ struct PoolInner {
     events: SshEventEmitter,
     tuning: PoolTuning,
     links: DashMap<SshLinkKey, Arc<SshLink>>,
+    next_link_instance: AtomicU64,
+    /// Process-owned terminal evidence for exact link incarnations. Proven
+    /// receipts may be discarded after a successful Session sweep; Lost stays
+    /// until the canonical delete saga confirms its durable Store uncertainty.
+    teardown_receipts: TeardownReceipts,
+    /// Process-wide admission used only to make `shutdown_all` a true fence.
+    global_admission: Arc<ActionAdmission>,
+    /// Permanent per-AgentSession fences. Session UUIDs are never reused, so a
+    /// retired entry intentionally lives for the process lifetime.
+    session_admissions: DashMap<String, Arc<ActionAdmission>>,
     supervisors: DashMap<SshLinkKey, JoinHandle<()>>,
     gates: DashMap<SshHostId, Arc<HostGate>>,
     /// Set by `shutdown_all`. A pool that is closing must not open a socket it
@@ -354,6 +584,10 @@ impl SshConnectionPool {
             events,
             tuning,
             links: DashMap::new(),
+            next_link_instance: AtomicU64::new(1),
+            teardown_receipts: TeardownReceipts::default(),
+            global_admission: Arc::new(ActionAdmission::default()),
+            session_admissions: DashMap::new(),
             supervisors: DashMap::new(),
             gates: DashMap::new(),
             quiescing: AtomicBool::new(false),
@@ -392,16 +626,149 @@ impl SshConnectionPool {
         if self.0.quiescing.load(Ordering::SeqCst) {
             return Err(SshDialError::ShuttingDown);
         }
+        let _global_lease = self
+            .0
+            .global_admission
+            .admit()
+            .ok_or(SshDialError::ShuttingDown)?;
+        let session_admission = self.0.session_admission_for(conversation_id);
+        let _session_lease = session_admission
+            .admit()
+            .ok_or(SshDialError::SessionRetired)?;
         let key = SshLinkKey::new(conversation_id, ssh_host_id.clone());
         let link = self.0.link_for(&key, user_id, remote_cwd);
+        let _link_lease = link
+            .actions
+            .admit()
+            .ok_or(SshDialError::LinkRetired)?;
         self.0.ensure_connected(&link).await?;
         Ok(link)
+    }
+
+    /// Permanently fence an exact AgentSession before its delete cleanup begins.
+    /// This method is synchronous on purpose: a deletion owner can establish the
+    /// no-new-SSH-work boundary before awaiting another resource owner. The later
+    /// [`Self::close_conversation`] call is idempotent and performs the drain.
+    pub fn retire_agent_session(&self, agent_session_id: &str) {
+        self.0
+            .session_admission_for(agent_session_id)
+            .retire();
+    }
+
+    /// Admit one action against the exact Session and link. The returned lease
+    /// must remain alive through the terminal transport result.
+    pub(crate) fn action_lease(
+        &self,
+        link: &Arc<SshLink>,
+    ) -> Result<SshActionLease, String> {
+        if self.0.quiescing.load(Ordering::SeqCst) {
+            return Err("the ssh connection pool is shutting down".to_string());
+        }
+        let global = self
+            .0
+            .global_admission
+            .admit()
+            .ok_or_else(|| "the ssh connection pool is shutting down".to_string())?;
+        let session = self
+            .0
+            .session_admission_for(&link.key.conversation_id)
+            .admit()
+            .ok_or_else(|| {
+                "the AgentSession is retired and cannot admit SSH actions".to_string()
+            })?;
+        let link_lease = link.actions.admit().ok_or_else(|| {
+            "the SSH link is retired and cannot admit actions".to_string()
+        })?;
+        let is_current = self
+            .0
+            .links
+            .get(link.key())
+            .is_some_and(|current| Arc::ptr_eq(current.value(), link));
+        if !is_current {
+            return Err("the SSH link is no longer pooled for this AgentSession".to_string());
+        }
+        Ok(SshActionLease {
+            _global: global,
+            _session: session,
+            _link: link_lease,
+        })
     }
 
     /// The `SshBackend` for a link. Resolves the link's current handle per call,
     /// so handing this to the agent once survives any number of reconnects.
     pub fn backend_for(&self, link: &Arc<SshLink>) -> Arc<dyn SshBackend> {
         Arc::new(SshLinkBackend::new(self.clone(), Arc::clone(link)))
+    }
+
+    /// Execute one explicitly authorized elevated action on an isolated shell.
+    /// The persistent shell used by ordinary `ssh/exec` never receives sudo
+    /// responder rules.
+    pub(crate) async fn run_sudo_action(
+        &self,
+        user_id: &str,
+        link: &Arc<SshLink>,
+        command: &str,
+        timeout_ms: u64,
+    ) -> Result<RemoteCommandOutput, SshActionDispatchError> {
+        let action_lease = self
+            .action_lease(link)
+            .map_err(SshActionDispatchError::Rejected)?;
+        if link.owner_id != user_id {
+            return Err(SshActionDispatchError::Rejected(
+                "ssh_host resource is not owned by this principal".into(),
+            ));
+        }
+        let handle = link.current_handle().await.ok_or_else(|| {
+            SshActionDispatchError::Rejected(format!(
+                "ssh link for this session is not connected ({:?})",
+                link.state().phase()
+            ))
+        })?;
+        let credential = self
+            .0
+            .service
+            .decrypt_credential(user_id, &link.key.ssh_host_id)
+            .await
+            .map_err(|error| SshActionDispatchError::Rejected(error.to_string()))?;
+        let result = handle
+            .run_ephemeral_sudo(
+                &link.last_cwd(),
+                command,
+                timeout_ms,
+                &credential,
+            )
+            .await;
+        drop(action_lease);
+        result
+    }
+
+    /// Execute an ordinary shell Action under the kernel's no-new-privileges
+    /// bit. Hosts without `setpriv`, and root login sessions, fail closed so
+    /// `ssh/exec` cannot bypass the separately granted `ssh/sudo` Action.
+    pub(crate) async fn run_unprivileged_action(
+        &self,
+        user_id: &str,
+        link: &Arc<SshLink>,
+        command: &str,
+        timeout_ms: u64,
+    ) -> Result<RemoteCommandOutput, SshActionDispatchError> {
+        let action_lease = self
+            .action_lease(link)
+            .map_err(SshActionDispatchError::Rejected)?;
+        if link.owner_id != user_id {
+            return Err(SshActionDispatchError::Rejected(
+                "ssh_host resource is not owned by this principal".into(),
+            ));
+        }
+        let handle = link.current_handle().await.ok_or_else(|| {
+            SshActionDispatchError::Rejected(format!(
+                "ssh link for this session is not connected ({:?})",
+                link.state().phase()
+            ))
+        })?;
+        let result = handle.run_unprivileged(command, timeout_ms).await;
+        drop(action_lease);
+        result
     }
 
     /// Watch one link's state. `None` when the pool has no such link.
@@ -432,24 +799,79 @@ impl SshConnectionPool {
         self.0.links.len()
     }
 
+    /// Confirm that every currently retained SSH teardown receipt for this
+    /// exact AgentSession has been durably reduced by the canonical Store.
+    /// Proven receipts are retained too: if the Store write fails after the
+    /// physical close, a same-process retry must observe the same proof rather
+    /// than infer success from an empty pool.
+    pub fn acknowledge_persisted_agent_session_teardowns(
+        &self,
+        agent_session_id: &str,
+    ) -> usize {
+        self.0
+            .acknowledge_persisted_teardowns(agent_session_id)
+    }
+
     /// Close one link and report what could be proven about it.
     pub async fn close_link(&self, key: &SshLinkKey) -> SshTeardown {
-        let Some((_, link)) = self.0.links.remove(key) else {
+        let Some(link) = self.0.links.get(key).map(|entry| Arc::clone(entry.value())) else {
+            if let Some((receipt_key, teardown)) = self.0.latest_teardown_receipt(key) {
+                self.0.teardown_receipts.discard_proven(&receipt_key);
+                return teardown;
+            }
             return SshTeardown::AlreadyDown {
-                detail: "no pooled link for this session".to_string(),
-            };
+                    detail: "no pooled link for this session".to_string(),
+                };
         };
-        self.0.tear_down(&link).await
+        let receipt_key = TeardownReceiptKey {
+            link: link.key.clone(),
+            instance_id: link.instance_id,
+        };
+        let teardown = self.close_exact_link(link).await;
+        self.0.teardown_receipts.discard_proven(&receipt_key);
+        teardown
+    }
+
+    async fn close_exact_link(&self, link: Arc<SshLink>) -> SshTeardown {
+        // Retire while the exact map entry is still published. An action that
+        // acquired its lease first is allowed to finish and cleanup waits; an
+        // action arriving now is rejected before it can read a handle.
+        link.actions.retire();
+        self.0.start_link_teardown(Arc::clone(&link));
+        link.close.wait().await
     }
 
     /// Close every link bound to a conversation (a session may have been rebound
     /// and still hold a link to its previous host).
     pub async fn close_conversation(&self, conversation_id: &str) -> Vec<SshTeardown> {
-        let keys = self.0.keys_where(|key| key.conversation_id == conversation_id);
-        let mut teardowns = Vec::with_capacity(keys.len());
-        for key in keys {
-            teardowns.push(self.close_link(&key).await);
+        let session_admission = self.0.session_admission_for(conversation_id);
+        // This is the permanent AgentSession fence. It must precede both the
+        // drain and the key sweep so an acquire cannot publish a new host link
+        // after the sweep took its snapshot.
+        session_admission.retire();
+        session_admission.wait_drained().await;
+        let links = self
+            .0
+            .links_where(|key| key.conversation_id == conversation_id);
+        let mut closed_instances = HashSet::with_capacity(links.len());
+        let mut teardowns = Vec::with_capacity(links.len());
+        for link in links {
+            closed_instances.insert(link.instance_id);
+            teardowns.push(self.close_exact_link(link).await);
         }
+        // A previous caller may have been cancelled after teardown returned Lost
+        // but before the App durably recorded the uncertainty. An empty active
+        // link sweep must replay that loss, including losses from older physical
+        // incarnations that reused the same `(Session, host)` key.
+        for (receipt_key, teardown) in self.0.teardown_receipts_for_session(conversation_id) {
+            if !closed_instances.contains(&receipt_key.instance_id) {
+                teardowns.push(teardown);
+            }
+        }
+        // This function has no await after this point. Every terminal receipt,
+        // including Reaped/AlreadyDown, survives until the canonical Store
+        // write is acknowledged; otherwise a cancelled/failed Store append
+        // would turn the next retry's empty pool into invented success.
         teardowns
     }
 
@@ -475,6 +897,8 @@ impl SshConnectionPool {
         // Refusing first is what makes the count honest — a link opened while we
         // were closing would be missed by the sweep and leak into shutdown.
         self.0.quiescing.store(true, Ordering::SeqCst);
+        self.0.global_admission.retire();
+        self.0.global_admission.wait_drained().await;
         let mut report = SshShutdownReport::default();
         for key in self.0.keys_where(|_| true) {
             match self.close_link(&key).await {
@@ -505,6 +929,13 @@ impl SshConnectionPool {
                 detail: SshDialError::ShuttingDown.to_string(),
             };
         }
+        let Some(_global_lease) = self.0.global_admission.admit() else {
+            return SshProbeOutcome {
+                ok: false,
+                host_fingerprint: None,
+                detail: SshDialError::ShuttingDown.to_string(),
+            };
+        };
         // The remote `$HOME` — a probe has no session and therefore no cwd to
         // honour.
         let handle = match self
@@ -596,6 +1027,11 @@ impl nomifun_common::OnConversationDelete for SshConnectionPool {
                 );
             }
         }
+        // This legacy Conversation hook has no canonical AgentSession cleanup
+        // saga. Do not retain proven receipts forever; Lost receipts remain for
+        // diagnosis because no durable uncertainty acknowledgement occurred.
+        self.0
+            .discard_proven_teardown_receipts(conversation_id);
     }
 }
 
@@ -673,6 +1109,15 @@ impl nomifun_ai_agent::SshSessionLease for PooledSessionLease {
 }
 
 impl PoolInner {
+    fn session_admission_for(&self, agent_session_id: &str) -> Arc<ActionAdmission> {
+        Arc::clone(
+            self.session_admissions
+                .entry(agent_session_id.to_owned())
+                .or_insert_with(|| Arc::new(ActionAdmission::default()))
+                .value(),
+        )
+    }
+
     fn keys_where(&self, predicate: impl Fn(&SshLinkKey) -> bool) -> Vec<SshLinkKey> {
         // Materialized before any await: holding a DashMap guard across a suspend
         // point is how this kind of map deadlocks.
@@ -683,11 +1128,75 @@ impl PoolInner {
             .collect()
     }
 
+    fn links_where(&self, predicate: impl Fn(&SshLinkKey) -> bool) -> Vec<Arc<SshLink>> {
+        self.links
+            .iter()
+            .filter(|entry| predicate(entry.key()))
+            .map(|entry| Arc::clone(entry.value()))
+            .collect()
+    }
+
+    fn start_link_teardown(self: &Arc<Self>, link: Arc<SshLink>) {
+        if !link.close.try_start() {
+            return;
+        }
+        let pool = Arc::clone(self);
+        tokio::spawn(async move {
+            // This task, rather than any HTTP/action caller, owns the close. A
+            // cancelled waiter merely stops waiting; teardown continues and its
+            // terminal receipt remains available to the next caller.
+            link.actions.wait_drained().await;
+            let teardown = pool.tear_down(&link).await;
+            pool.teardown_receipts.record(
+                TeardownReceiptKey {
+                    link: link.key.clone(),
+                    instance_id: link.instance_id,
+                },
+                teardown.clone(),
+            );
+            link.close.finish(teardown);
+            // No await may occur between publishing the terminal receipt and
+            // removing the map entry. Consequently, map absence never means a
+            // teardown is merely in progress.
+            pool.links
+                .remove_if(&link.key, |_, current| Arc::ptr_eq(current, &link));
+        });
+    }
+
+    fn latest_teardown_receipt(
+        &self,
+        key: &SshLinkKey,
+    ) -> Option<(TeardownReceiptKey, SshTeardown)> {
+        self.teardown_receipts.latest_for_link(key)
+    }
+
+    fn teardown_receipts_for_session(
+        &self,
+        agent_session_id: &str,
+    ) -> Vec<(TeardownReceiptKey, SshTeardown)> {
+        self.teardown_receipts.for_session(agent_session_id)
+    }
+
+    fn acknowledge_persisted_teardowns(&self, agent_session_id: &str) -> usize {
+        self.teardown_receipts
+            .acknowledge_persisted_for_session(agent_session_id)
+    }
+
+    fn discard_proven_teardown_receipts(&self, agent_session_id: &str) {
+        self.teardown_receipts
+            .discard_proven_for_session(agent_session_id);
+    }
+
     fn link_for(&self, key: &SshLinkKey, owner_id: &str, remote_cwd: &str) -> Arc<SshLink> {
         if let Some(existing) = self.links.get(key) {
             return Arc::clone(existing.value());
         }
-        let created = Arc::new(SshLink::new(key.clone(), owner_id, remote_cwd));
+        let created = Arc::new(SshLink::new(
+            self.next_link_instance.fetch_add(1, Ordering::Relaxed),
+            key.clone(),
+            owner_id,
+            remote_cwd,
+        ));
         // `entry`, not `insert`: two turns of the same conversation may race to
         // bind the session, and both must end up with the same link.
         Arc::clone(self.links.entry(key.clone()).or_insert(created).value())
@@ -889,29 +1398,7 @@ impl PoolInner {
         );
 
         let cwd = link.last_cwd();
-        let rules = match self
-            .service
-            .decrypt_credential(&link.owner_id, &link.key.ssh_host_id)
-            .await
-        {
-            Ok(cred) => crate::sink::sudo_rules(&cred),
-            Err(e) => {
-                // A shell without the sudo answer rule would hang at the next
-                // password prompt instead of answering it, which is worse than
-                // being honestly down.
-                *link.handle.write().await = None;
-                self.publish(
-                    link,
-                    SshLinkState::Dropped {
-                        detail: format!("cannot reopen the remote shell: {e}"),
-                        retryable: false,
-                    },
-                );
-                return;
-            }
-        };
-
-        match stale.reopen_channels(&cwd, rules).await {
+        match stale.reopen_channels(&cwd).await {
             Ok(fresh) => {
                 let fingerprint = fresh.fingerprint.clone();
                 *link.handle.write().await = Some(Arc::new(fresh));
@@ -1025,7 +1512,7 @@ impl PoolInner {
         // A link that has left the map is being torn down; giving it a supervisor
         // now would leave a task nobody holds the handle to. (One that slips
         // through anyway exits on its first round, because the state is `Closed`.)
-        if !self.links.contains_key(&link.key) {
+        if !self.links.contains_key(&link.key) || link.actions.is_retired() {
             return;
         }
         // A supervisor that has *finished* — the ladder ran out, or a terminal
@@ -1213,6 +1700,122 @@ async fn supervise(pool: std::sync::Weak<PoolInner>, link: Arc<SshLink>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn close_completion_is_shared_and_outlives_a_cancelled_waiter() {
+        let completion = Arc::new(LinkCloseCompletion::default());
+        assert!(completion.try_start(), "one owner must claim teardown");
+        assert!(!completion.try_start(), "a second close must share the owner");
+
+        let release_owner = Arc::new(Notify::new());
+        let owner = {
+            let completion = Arc::clone(&completion);
+            let release_owner = Arc::clone(&release_owner);
+            tokio::spawn(async move {
+                release_owner.notified().await;
+                completion.finish(SshTeardown::Lost {
+                    detail: "synthetic close proof unavailable".to_owned(),
+                });
+            })
+        };
+        let cancelled_waiter = {
+            let completion = Arc::clone(&completion);
+            tokio::spawn(async move { completion.wait().await })
+        };
+        let concurrent_waiter = {
+            let completion = Arc::clone(&completion);
+            tokio::spawn(async move { completion.wait().await })
+        };
+        tokio::task::yield_now().await;
+        cancelled_waiter.abort();
+        cancelled_waiter
+            .await
+            .expect_err("the first request waiter is intentionally cancelled");
+
+        release_owner.notify_one();
+        owner.await.expect("the process-owned close task must finish");
+        let shared = concurrent_waiter
+            .await
+            .expect("the concurrent waiter must receive the close receipt");
+        assert!(matches!(shared, SshTeardown::Lost { .. }));
+        assert_eq!(completion.wait().await, shared, "late retry gets the same receipt");
+    }
+
+    #[test]
+    fn teardown_receipts_are_retry_stable_per_incarnation_until_durable_ack() {
+        let receipts = TeardownReceipts::default();
+        let host = SshHostId::new();
+        let link = SshLinkKey::new("session-a", host.clone());
+        let first = TeardownReceiptKey {
+            link: link.clone(),
+            instance_id: 1,
+        };
+        let second = TeardownReceiptKey {
+            link: link.clone(),
+            instance_id: 2,
+        };
+        receipts.record(
+            first,
+            SshTeardown::Lost {
+                detail: "first incarnation lost".to_owned(),
+            },
+        );
+        receipts.record(
+            second.clone(),
+            SshTeardown::Lost {
+                detail: "second incarnation lost".to_owned(),
+            },
+        );
+        let proven = TeardownReceiptKey {
+            link: SshLinkKey::new("session-a", SshHostId::new()),
+            instance_id: 3,
+        };
+        receipts.record(
+            proven.clone(),
+            SshTeardown::Reaped {
+                detail: "exit status 0".to_owned(),
+            },
+        );
+
+        let (latest, teardown) = receipts
+            .latest_for_link(&link)
+            .expect("an empty active-link sweep must still find Lost");
+        assert_eq!(latest, second);
+        assert!(matches!(teardown, SshTeardown::Lost { .. }));
+        assert_eq!(receipts.for_session("session-a").len(), 3);
+
+        assert_eq!(receipts.for_session("session-a").len(), 3);
+        assert_eq!(receipts.acknowledge_persisted_for_session("session-a"), 3);
+        assert!(receipts.for_session("session-a").is_empty());
+    }
+
+    #[tokio::test]
+    async fn retirement_rejects_new_work_and_waits_for_the_linearized_winner() {
+        let admission = Arc::new(ActionAdmission::default());
+        let winner = admission.admit().expect("the first action is admitted");
+
+        admission.retire();
+        assert!(
+            admission.admit().is_none(),
+            "work arriving after the retirement fence must be rejected"
+        );
+
+        let waiting = {
+            let admission = Arc::clone(&admission);
+            tokio::spawn(async move { admission.wait_drained().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !waiting.is_finished(),
+            "cleanup must wait for the action that won admission"
+        );
+
+        drop(winner);
+        tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .expect("the drain should wake when the terminal lease drops")
+            .expect("the drain task should not panic");
+    }
 
     #[test]
     fn default_tuning_reproduces_the_pinned_ladder() {

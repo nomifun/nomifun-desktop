@@ -32,11 +32,13 @@ use crate::error::SessionStoreError;
 use crate::projector::{initial_head, payload_value, reduce_head, reduce_agent_messages};
 use crate::registry::EventRegistry;
 use crate::types::{
-    AgentEffectRecord, AgentEffectState, CheckpointAdmission, CreateSessionRequest, DeleteResult,
-    EffectEventRequest, EffectReconcileOutcome, EffectStrategy, EffectTerminalState, ForkRequest,
-    ForkResult, MessageProjection,
-    ChatCausalityFacts, RuntimeAppendContext, RuntimeEventAppendResult, SessionCreateResult,
-    ChatOperationClaimRequest, SessionEventAppendResult, SessionEventPage,
+    AgentDeletionAuditRecord, AgentEffectDeleteBlocker, AgentEffectRecord, AgentEffectState,
+    AgentSessionAutomationConfig, AgentSessionDeleteBlockers, ChatCausalityFacts,
+    ChatOperationClaimRequest, CheckpointAdmission, CommitAgentSessionAutomationConfig,
+    CreateSessionRequest, DeleteResult, EffectEventRequest, EffectReconcileOutcome,
+    EffectStrategy, EffectTerminalState, EnabledAgentSessionAutomationConfig, ForkRequest,
+    ForkResult, MessageProjection, ResourceCleanupUncertainty, RuntimeAppendContext,
+    RuntimeEventAppendResult, SessionCreateResult, SessionEventAppendResult, SessionEventPage,
     SessionHeadProjection, SessionObservation, SessionRehydrationInput, TurnReceipt,
     TurnReceiptStatus,
 };
@@ -46,8 +48,9 @@ pub const MAX_SINGLE_PAYLOAD_BYTES: usize = 1024 * 1024;
 pub const MAX_SESSION_PAYLOAD_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_EVENT_PAGE_SIZE: u32 = 500;
 
-const AGENT_STORE_TABLES: [&str; 8] = [
+const AGENT_STORE_TABLES: [&str; 9] = [
     "agent_sessions",
+    "agent_deletion_audits",
     "agent_turns",
     "agent_effects",
     "agent_session_resources",
@@ -75,6 +78,20 @@ const AGENT_STORE_COLUMNS: &[(&str, &[&str])] = &[
             "next_seq",
             "created_at",
             "deleted_at",
+        ],
+    ),
+    (
+        "agent_deletion_audits",
+        &[
+            "audit_id",
+            "agent_session_id",
+            "owner_ref_json",
+            "target_kind",
+            "target_id",
+            "authority",
+            "risk_acknowledged",
+            "reason_digest",
+            "recorded_at",
         ],
     ),
     (
@@ -194,8 +211,9 @@ const AGENT_STORE_COLUMNS: &[(&str, &[&str])] = &[
     ),
 ];
 
-const AGENT_STORE_INDEXES: [&str; 8] = [
+const AGENT_STORE_INDEXES: [&str; 9] = [
     "idx_agent_sessions_owner_state",
+    "idx_agent_deletion_audits_session_time",
     "idx_agent_turns_session_state",
     "idx_agent_session_resources_session_kind",
     "idx_agent_messages_sequence",
@@ -209,6 +227,13 @@ const AGENT_STORE_INDEXES: [&str; 8] = [
 pub struct AgentSessionStore {
     pool: SqlitePool,
     registry: EventRegistry,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AppendSessionStatePolicy {
+    LiveOnly,
+    EffectSettlement,
+    DeleteCleanupUncertainty,
 }
 
 impl AgentSessionStore {
@@ -1698,7 +1723,18 @@ impl AgentSessionStore {
             EffectTerminalState::Failed => "effect/failed",
             EffectTerminalState::Uncertain => "effect/uncertain",
         };
-        self.append_event(&effect_append(request, kind)?).await
+        let append = effect_append(request, kind)?;
+        let mut tx = self.begin_write_transaction().await?;
+        let result = self
+            .append_event_tx_with_policy(
+                &mut tx,
+                &append,
+                None,
+                AppendSessionStatePolicy::EffectSettlement,
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(result)
     }
 
     pub async fn reconcile_effect(
@@ -1708,8 +1744,898 @@ impl AgentSessionStore {
     ) -> Result<SessionEventAppendResult, SessionStoreError> {
         request.payload =
             SessionEventPayloadRef::InlineJson(StrictJsonValue(serde_json::to_value(outcome)?));
-        self.append_event(&effect_append(request, "effect/reconciled")?)
-            .await
+        let append = effect_append(request, "effect/reconciled")?;
+        let mut tx = self.begin_write_transaction().await?;
+        let result = self
+            .append_event_tx_with_policy(
+                &mut tx,
+                &append,
+                None,
+                AppendSessionStatePolicy::EffectSettlement,
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    pub async fn record_resource_cleanup_started(
+        &self,
+        session_id: &AgentSessionId,
+        owner_domain: &str,
+    ) -> Result<SessionEventAppendResult, SessionStoreError> {
+        validate_resource_cleanup_domain(owner_domain)?;
+        let identity = format!(
+            "resource-cleanup-started:{}:{owner_domain}",
+            session_id.as_ref()
+        );
+        let append = SessionEventAppend {
+            agent_session_id: session_id.clone(),
+            event_id: EventId::from(identity.clone()),
+            producer_id: EventProducerId::from("session_api"),
+            idempotency_key: IdempotencyKey::from(identity),
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                kind: SessionEventKind("resource/cleanup-started".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(session_id.as_ref().to_owned()),
+                causation_event_id: None,
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "owner_domain": owner_domain,
+                    "outcome": "pending",
+                }))),
+            },
+        };
+        let mut tx = self.begin_write_transaction().await?;
+        let result = self
+            .append_event_tx_with_policy(
+                &mut tx,
+                &append,
+                None,
+                AppendSessionStatePolicy::DeleteCleanupUncertainty,
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    pub async fn record_resource_cleanup_succeeded(
+        &self,
+        session_id: &AgentSessionId,
+        owner_domain: &str,
+    ) -> Result<SessionEventAppendResult, SessionStoreError> {
+        validate_resource_cleanup_domain(owner_domain)?;
+        let identity = format!(
+            "resource-cleanup-succeeded:{}:{owner_domain}",
+            session_id.as_ref()
+        );
+        let append = SessionEventAppend {
+            agent_session_id: session_id.clone(),
+            event_id: EventId::from(identity.clone()),
+            producer_id: EventProducerId::from("session_api"),
+            idempotency_key: IdempotencyKey::from(identity),
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                kind: SessionEventKind("resource/cleanup-succeeded".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(session_id.as_ref().to_owned()),
+                causation_event_id: None,
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "owner_domain": owner_domain,
+                    "outcome": "succeeded",
+                }))),
+            },
+        };
+        let mut tx = self.begin_write_transaction().await?;
+        if duplicate_event_tx(&mut tx, &append).await?.is_none() {
+            let blockers = delete_blockers_tx(&mut tx, session_id.as_ref()).await?;
+            if !blockers
+                .resource_cleanup_pending
+                .iter()
+                .any(|domain| domain == owner_domain)
+            {
+                let reconciled: i64 = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM agent_events \
+                     WHERE session_id = ? AND kind = 'resource/cleanup-reconciled' \
+                       AND json_extract(inline_json, '$.owner_domain') = ?)",
+                )
+                .bind(session_id.as_ref())
+                .bind(owner_domain)
+                .fetch_one(&mut *tx)
+                .await?;
+                if reconciled == 0 {
+                    return Err(SessionStoreError::Conflict(format!(
+                        "resource owner {owner_domain} has no pending cleanup"
+                    )));
+                }
+            }
+        }
+        let result = self
+            .append_event_tx_with_policy(
+                &mut tx,
+                &append,
+                None,
+                AppendSessionStatePolicy::DeleteCleanupUncertainty,
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    /// Persist an owner-domain cleanup quarantine after the delete admission
+    /// fence has committed. The payload intentionally excludes transport
+    /// diagnostics and credentials; retries reuse the same immutable fact.
+    pub async fn record_resource_cleanup_uncertain(
+        &self,
+        session_id: &AgentSessionId,
+        owner_domain: &str,
+        recorded_at: i64,
+    ) -> Result<SessionEventAppendResult, SessionStoreError> {
+        validate_resource_cleanup_domain(owner_domain)?;
+        if recorded_at < 0 {
+            return Err(SessionStoreError::InvalidEvent(
+                "resource cleanup uncertainty requires a canonical owner domain and timestamp"
+                    .to_owned(),
+            ));
+        }
+        let identity = format!(
+            "resource-cleanup-uncertain:{}:{owner_domain}",
+            session_id.as_ref()
+        );
+        let append = SessionEventAppend {
+            agent_session_id: session_id.clone(),
+            event_id: EventId::from(identity.clone()),
+            producer_id: EventProducerId::from("session_api"),
+            idempotency_key: IdempotencyKey::from(identity),
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                kind: SessionEventKind("resource/cleanup-uncertain".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(session_id.as_ref().to_owned()),
+                causation_event_id: None,
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "owner_domain": owner_domain,
+                    "outcome": "unknown",
+                    "recorded_at": recorded_at,
+                    "recovery": "external_reconciliation_required",
+                }))),
+            },
+        };
+        let mut tx = self.begin_write_transaction().await?;
+        if duplicate_event_tx(&mut tx, &append).await?.is_none() {
+            let blockers = delete_blockers_tx(&mut tx, session_id.as_ref()).await?;
+            if !blockers
+                .resource_cleanup_pending
+                .iter()
+                .any(|domain| domain == owner_domain)
+            {
+                return Err(SessionStoreError::Conflict(format!(
+                    "resource owner {owner_domain} has no pending cleanup"
+                )));
+            }
+        }
+        let result = self
+            .append_event_tx_with_policy(
+                &mut tx,
+                &append,
+                None,
+                AppendSessionStatePolicy::DeleteCleanupUncertainty,
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    pub async fn reconcile_resource_cleanup_for_delete(
+        &self,
+        owner: &PrincipalRef,
+        session_id: &AgentSessionId,
+        owner_domain: &str,
+        evidence_digest: &DigestHex,
+        recorded_at: i64,
+    ) -> Result<SessionEventAppendResult, SessionStoreError> {
+        validate_cleanup_reconciliation(owner_domain, evidence_digest, recorded_at)?;
+        let mut tx = self.begin_write_transaction().await?;
+        let row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        require_owner(&row, owner)?;
+        if row.state != "deleting" {
+            return Err(SessionStoreError::Conflict(
+                "resource cleanup reconciliation requires a deleting AgentSession".to_owned(),
+            ));
+        }
+        let identity = format!(
+            "resource-cleanup-reconciled:{}:{owner_domain}:{}",
+            session_id.as_ref(),
+            evidence_digest.as_ref()
+        );
+        if let Some(existing) = event_by_event_id_tx(&mut tx, &identity).await? {
+            let record = event_from_row(existing)?;
+            let payload = effect_payload_from_event(&record)?;
+            if record.kind.0 != "resource/cleanup-reconciled"
+                || payload.get("owner_domain").and_then(Value::as_str) != Some(owner_domain)
+                || payload.get("evidence_digest").and_then(Value::as_str)
+                    != Some(evidence_digest.as_ref())
+            {
+                return Err(SessionStoreError::IdempotencyConflict(
+                    "resource cleanup evidence was reused for different input".to_owned(),
+                ));
+            }
+            let ack = event_ack(&record);
+            tx.commit().await?;
+            return Ok(SessionEventAppendResult {
+                record: Some(record),
+                ack: Some(ack.clone()),
+                cursor: ack.cursor,
+                persisted: true,
+                duplicate: true,
+            });
+        }
+        let blockers = delete_blockers_tx(&mut tx, session_id.as_ref()).await?;
+        if !blockers
+            .resource_cleanup_uncertainties
+            .iter()
+            .any(|uncertainty| uncertainty.owner_domain == owner_domain)
+        {
+            return Err(SessionStoreError::Conflict(format!(
+                "resource owner {owner_domain} has no unresolved cleanup uncertainty"
+            )));
+        }
+        let append = SessionEventAppend {
+            agent_session_id: session_id.clone(),
+            event_id: EventId::from(identity.clone()),
+            producer_id: EventProducerId::from("session_api"),
+            idempotency_key: IdempotencyKey::from(identity),
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                kind: SessionEventKind("resource/cleanup-reconciled".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(session_id.as_ref().to_owned()),
+                causation_event_id: None,
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "owner_domain": owner_domain,
+                    "outcome": "confirmed_safe_to_delete",
+                    "evidence_digest": evidence_digest,
+                    "recorded_at": recorded_at,
+                }))),
+            },
+        };
+        let result = self
+            .append_event_tx_with_policy(
+                &mut tx,
+                &append,
+                None,
+                AppendSessionStatePolicy::DeleteCleanupUncertainty,
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    pub async fn reconcile_effect_for_delete(
+        &self,
+        owner: &PrincipalRef,
+        session_id: &AgentSessionId,
+        effect_id: &str,
+        confirmed_succeeded: bool,
+        evidence_digest: &DigestHex,
+        recorded_at: i64,
+    ) -> Result<SessionEventAppendResult, SessionStoreError> {
+        validate_cleanup_reconciliation("effect", evidence_digest, recorded_at)?;
+        if effect_id.is_empty() || effect_id.len() > 512 || effect_id.trim() != effect_id {
+            return Err(SessionStoreError::InvalidEvent(
+                "effect reconciliation requires a canonical effect_id".to_owned(),
+            ));
+        }
+        let mut tx = self.begin_write_transaction().await?;
+        let session_row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        require_owner(&session_row, owner)?;
+        if session_row.state != "deleting" {
+            return Err(SessionStoreError::Conflict(
+                "delete effect reconciliation requires a deleting AgentSession".to_owned(),
+            ));
+        }
+        let reconciliation_event_id = format!(
+            "effect-delete-reconciled:{}:{}:{}",
+            session_id.as_ref(),
+            effect_id,
+            evidence_digest.as_ref()
+        );
+        if let Some(existing) = event_by_event_id_tx(&mut tx, &reconciliation_event_id).await? {
+            let record = event_from_row(existing)?;
+            let payload = effect_payload_from_event(&record)?;
+            let expected_outcome = if confirmed_succeeded {
+                "confirmed_succeeded"
+            } else {
+                "confirmed_failed"
+            };
+            let stored_evidence = if confirmed_succeeded {
+                payload
+                    .get("receipt")
+                    .and_then(|receipt| receipt.get("evidence_digest"))
+                    .and_then(Value::as_str)
+            } else {
+                payload.get("evidence_digest").and_then(Value::as_str)
+            };
+            if record.kind.0 != "effect/reconciled"
+                || record.correlation_id.as_ref() != effect_id
+                || payload.get("outcome").and_then(Value::as_str) != Some(expected_outcome)
+                || stored_evidence != Some(evidence_digest.as_ref())
+            {
+                return Err(SessionStoreError::IdempotencyConflict(
+                    "effect reconciliation evidence was reused for different input".to_owned(),
+                ));
+            }
+            let ack = event_ack(&record);
+            tx.commit().await?;
+            return Ok(SessionEventAppendResult {
+                record: Some(record),
+                ack: Some(ack.clone()),
+                cursor: ack.cursor,
+                persisted: true,
+                duplicate: true,
+            });
+        }
+        let row = sqlx::query_as::<_, StoredEffectRow>(
+            "SELECT effect_id, session_id, turn_id, operation_id, owner_domain, \
+                    capability_module, action_id, resource_binding_id, resource_key, \
+                    input_digest, strategy, state, bounded_observation_json, \
+                    started_event_id, terminal_event_id, created_at, settled_at \
+             FROM agent_effects WHERE session_id = ? AND effect_id = ?",
+        )
+        .bind(session_id.as_ref())
+        .bind(effect_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| SessionStoreError::NotFound(effect_id.to_owned()))?;
+        let effect = effect_from_row(row)?;
+        if effect.state != AgentEffectState::Unknown {
+            return Err(SessionStoreError::Conflict(
+                "only an unknown effect may be externally reconciled for delete".to_owned(),
+            ));
+        }
+        let uncertain_event_id = effect.terminal_event_id.clone().ok_or_else(|| {
+            SessionStoreError::InvalidEvent(
+                "unknown effect has no terminal uncertainty event".to_owned(),
+            )
+        })?;
+        let started_event = event_by_event_id_tx(&mut tx, effect.started_event_id.as_ref())
+            .await?
+            .ok_or_else(|| {
+                SessionStoreError::InvalidEvent(
+                    "unknown effect has no started event".to_owned(),
+                )
+            })?;
+        let outcome = if confirmed_succeeded {
+            json!({
+                "outcome": "confirmed_succeeded",
+                "receipt": {
+                    "evidence_digest": evidence_digest,
+                    "reconciled_for": "delete"
+                }
+            })
+        } else {
+            json!({
+                "outcome": "confirmed_failed",
+                "error": "EXTERNAL_EFFECT_CONFIRMED_FAILED",
+                "evidence_digest": evidence_digest,
+            })
+        };
+        let request = EffectEventRequest {
+            agent_session_id: session_id.clone(),
+            effect_id: effect.effect_id,
+            turn_id: effect.turn_id,
+            operation_id: effect.operation_id,
+            owner_domain: effect.owner_domain,
+            capability_module: effect.capability_module,
+            action_id: effect.action_id,
+            resource_binding_id: effect.resource_binding_id,
+            resource_key: effect.resource_key,
+            input_digest: effect.input_digest,
+            recorded_at,
+            event_id: EventId::from(reconciliation_event_id),
+            producer_id: EventProducerId::from("session_api:delete_reconciliation"),
+            idempotency_key: IdempotencyKey::from(started_event.idempotency_key),
+            correlation_id: CorrelationId::from(effect_id.to_owned()),
+            strategy: effect.strategy,
+            causation_event_id: Some(uncertain_event_id),
+            payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(outcome)),
+        };
+        let append = effect_append(request, "effect/reconciled")?;
+        let result = self
+            .append_event_tx_with_policy(
+                &mut tx,
+                &append,
+                None,
+                AppendSessionStatePolicy::EffectSettlement,
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    pub async fn override_unknown_effect_for_delete(
+        &self,
+        owner: &PrincipalRef,
+        session_id: &AgentSessionId,
+        effect_id: &str,
+        reason_digest: &DigestHex,
+        recorded_at: i64,
+    ) -> Result<SessionEventAppendResult, SessionStoreError> {
+        validate_cleanup_reconciliation("effect", reason_digest, recorded_at)?;
+        if effect_id.is_empty() || effect_id.len() > 512 || effect_id.trim() != effect_id {
+            return Err(SessionStoreError::InvalidEvent(
+                "delete override requires a canonical effect_id".to_owned(),
+            ));
+        }
+        let identity = format!(
+            "deletion-effect-override:{}:{}:{}",
+            session_id.as_ref(),
+            effect_id,
+            reason_digest.as_ref()
+        );
+        let mut append = SessionEventAppend {
+            agent_session_id: session_id.clone(),
+            event_id: EventId::from(identity.clone()),
+            producer_id: EventProducerId::from("session_api:manual_delete_override"),
+            idempotency_key: IdempotencyKey::from(identity.clone()),
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                kind: SessionEventKind("deletion/effect-override".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(session_id.as_ref().to_owned()),
+                causation_event_id: None,
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "effect_id": effect_id,
+                    "authority": "installation_owner_manual_override",
+                    "risk_acknowledged": true,
+                    "reason_digest": reason_digest,
+                    "recorded_at": recorded_at,
+                }))),
+            },
+        };
+        let mut tx = self.begin_write_transaction().await?;
+        let row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        require_owner(&row, owner)?;
+        if row.state != "deleting" {
+            return Err(SessionStoreError::Conflict(
+                "effect delete override requires a deleting AgentSession".to_owned(),
+            ));
+        }
+        let existing_audit = deletion_audit_by_id_tx(&mut tx, &identity).await?;
+        if existing_audit.is_none() {
+            let effect_state: Option<String> = sqlx::query_scalar(
+                "SELECT state FROM agent_effects WHERE session_id = ? AND effect_id = ?",
+            )
+            .bind(session_id.as_ref())
+            .bind(effect_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if effect_state.as_deref() != Some("unknown") {
+                return Err(SessionStoreError::Conflict(
+                    "manual delete override may target only an unknown effect".to_owned(),
+                ));
+            }
+        }
+        let audit = record_deletion_audit_tx(
+            &mut tx,
+            &identity,
+            session_id,
+            owner,
+            "effect",
+            effect_id,
+            reason_digest,
+            recorded_at,
+        )
+        .await?;
+        append.semantic_event.payload = SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+            "effect_id": effect_id,
+            "authority": "installation_owner_manual_override",
+            "risk_acknowledged": true,
+            "reason_digest": reason_digest,
+            "recorded_at": audit.recorded_at,
+        })));
+        let result = self
+            .append_event_tx_with_policy(
+                &mut tx,
+                &append,
+                None,
+                AppendSessionStatePolicy::DeleteCleanupUncertainty,
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    pub async fn override_resource_cleanup_for_delete(
+        &self,
+        owner: &PrincipalRef,
+        session_id: &AgentSessionId,
+        owner_domain: &str,
+        reason_digest: &DigestHex,
+        recorded_at: i64,
+    ) -> Result<SessionEventAppendResult, SessionStoreError> {
+        validate_cleanup_reconciliation(owner_domain, reason_digest, recorded_at)?;
+        let identity = format!(
+            "resource-cleanup-override:{}:{owner_domain}:{}",
+            session_id.as_ref(),
+            reason_digest.as_ref()
+        );
+        let mut append = SessionEventAppend {
+            agent_session_id: session_id.clone(),
+            event_id: EventId::from(identity.clone()),
+            producer_id: EventProducerId::from("session_api:manual_delete_override"),
+            idempotency_key: IdempotencyKey::from(identity.clone()),
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                kind: SessionEventKind("resource/cleanup-override".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(session_id.as_ref().to_owned()),
+                causation_event_id: None,
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "owner_domain": owner_domain,
+                    "authority": "installation_owner_manual_override",
+                    "risk_acknowledged": true,
+                    "reason_digest": reason_digest,
+                    "recorded_at": recorded_at,
+                }))),
+            },
+        };
+        let mut tx = self.begin_write_transaction().await?;
+        let row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        require_owner(&row, owner)?;
+        if row.state != "deleting" {
+            return Err(SessionStoreError::Conflict(
+                "resource cleanup override requires a deleting AgentSession".to_owned(),
+            ));
+        }
+        let existing_audit = deletion_audit_by_id_tx(&mut tx, &identity).await?;
+        if existing_audit.is_none() {
+            let blockers = delete_blockers_tx(&mut tx, session_id.as_ref()).await?;
+            if !blockers
+                .resource_cleanup_uncertainties
+                .iter()
+                .any(|uncertainty| uncertainty.owner_domain == owner_domain)
+            {
+                return Err(SessionStoreError::Conflict(format!(
+                    "resource owner {owner_domain} has no unknown cleanup to override"
+                )));
+            }
+        }
+        let audit = record_deletion_audit_tx(
+            &mut tx,
+            &identity,
+            session_id,
+            owner,
+            "resource_cleanup",
+            owner_domain,
+            reason_digest,
+            recorded_at,
+        )
+        .await?;
+        append.semantic_event.payload = SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+            "owner_domain": owner_domain,
+            "authority": "installation_owner_manual_override",
+            "risk_acknowledged": true,
+            "reason_digest": reason_digest,
+            "recorded_at": audit.recorded_at,
+        })));
+        let result = self
+            .append_event_tx_with_policy(
+                &mut tx,
+                &append,
+                None,
+                AppendSessionStatePolicy::DeleteCleanupUncertainty,
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    pub async fn deletion_audits(
+        &self,
+        owner: &PrincipalRef,
+        session_id: &AgentSessionId,
+    ) -> Result<Vec<AgentDeletionAuditRecord>, SessionStoreError> {
+        validate_principal(owner)?;
+        let mut tx = self.pool.begin().await?;
+        let row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        require_owner(&row, owner)?;
+        let rows = sqlx::query_as::<_, StoredDeletionAuditRow>(
+            "SELECT audit_id, agent_session_id, owner_ref_json, target_kind, target_id, \
+                    authority, risk_acknowledged, reason_digest, recorded_at \
+             FROM agent_deletion_audits WHERE agent_session_id = ? \
+             ORDER BY recorded_at, audit_id",
+        )
+        .bind(session_id.as_ref())
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        rows.into_iter().map(deletion_audit_from_row).collect()
+    }
+
+    /// Return the exact durable facts that currently prevent physical purge.
+    /// This read is valid only after the Session has entered `deleting`.
+    pub async fn delete_blockers(
+        &self,
+        session_id: &AgentSessionId,
+    ) -> Result<AgentSessionDeleteBlockers, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        let row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        if row.state != "deleting" {
+            return Err(SessionStoreError::Conflict(
+                "delete blockers may only be inspected after the admission fence".to_owned(),
+            ));
+        }
+        let blockers = delete_blockers_tx(&mut tx, session_id.as_ref()).await?;
+        tx.commit().await?;
+        Ok(blockers)
+    }
+
+    /// A restarted process cannot recover the execution owner behind a
+    /// persisted `effect/started`. Convert those pending effects to durable
+    /// unknown outcomes before startup deletion recovery proceeds. No effect
+    /// is reported failed or replay-safe merely because its process vanished.
+    pub async fn quarantine_pending_effects_for_delete(
+        &self,
+        owner: &PrincipalRef,
+        session_id: &AgentSessionId,
+        recorded_at: i64,
+    ) -> Result<u64, SessionStoreError> {
+        if recorded_at < 0 {
+            return Err(SessionStoreError::InvalidEvent(
+                "effect recovery timestamp must not be negative".to_owned(),
+            ));
+        }
+        let mut tx = self.begin_write_transaction().await?;
+        let session_row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        require_owner(&session_row, owner)?;
+        if session_row.state != "deleting" {
+            return Err(SessionStoreError::Conflict(
+                "pending effect quarantine requires a deleting AgentSession".to_owned(),
+            ));
+        }
+        let rows = sqlx::query_as::<_, StoredEffectRow>(
+            "SELECT effect_id, session_id, turn_id, operation_id, owner_domain, \
+                    capability_module, action_id, resource_binding_id, resource_key, \
+                    input_digest, strategy, state, bounded_observation_json, \
+                    started_event_id, terminal_event_id, created_at, settled_at \
+             FROM agent_effects WHERE session_id = ? AND state = 'pending' \
+             ORDER BY effect_id",
+        )
+        .bind(session_id.as_ref())
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut quarantined = 0_u64;
+        for row in rows {
+            let effect = effect_from_row(row)?;
+            let started_event = event_by_event_id_tx(&mut tx, effect.started_event_id.as_ref())
+                .await?
+                .ok_or_else(|| {
+                    SessionStoreError::InvalidEvent(
+                        "pending effect has no started event".to_owned(),
+                    )
+                })?;
+            let request = EffectEventRequest {
+                agent_session_id: session_id.clone(),
+                effect_id: effect.effect_id.clone(),
+                turn_id: effect.turn_id,
+                operation_id: effect.operation_id,
+                owner_domain: effect.owner_domain,
+                capability_module: effect.capability_module,
+                action_id: effect.action_id,
+                resource_binding_id: effect.resource_binding_id,
+                resource_key: effect.resource_key,
+                input_digest: effect.input_digest,
+                recorded_at,
+                event_id: EventId::from(format!(
+                    "effect-delete-recovery:{}:{}",
+                    session_id.as_ref(),
+                    effect.effect_id
+                )),
+                producer_id: EventProducerId::from("runtime_supervisor"),
+                idempotency_key: IdempotencyKey::from(started_event.idempotency_key),
+                correlation_id: CorrelationId::from(effect.effect_id),
+                strategy: effect.strategy,
+                causation_event_id: Some(effect.started_event_id),
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "outcome": "unknown",
+                    "recovery": "process_restart_external_reconciliation_required",
+                }))),
+            };
+            let append = effect_append(request, "effect/uncertain")?;
+            self.append_event_tx_with_policy(
+                &mut tx,
+                &append,
+                None,
+                AppendSessionStatePolicy::EffectSettlement,
+            )
+            .await?;
+            quarantined = quarantined.saturating_add(1);
+        }
+        tx.commit().await?;
+        Ok(quarantined)
+    }
+
+    pub async fn quarantine_pending_resource_cleanups_for_delete(
+        &self,
+        owner: &PrincipalRef,
+        session_id: &AgentSessionId,
+        recorded_at: i64,
+    ) -> Result<u64, SessionStoreError> {
+        if recorded_at < 0 {
+            return Err(SessionStoreError::InvalidEvent(
+                "resource cleanup recovery timestamp must not be negative".to_owned(),
+            ));
+        }
+        let pending = {
+            let mut tx = self.pool.begin().await?;
+            let row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
+            require_owner(&row, owner)?;
+            if row.state != "deleting" {
+                return Err(SessionStoreError::Conflict(
+                    "resource cleanup recovery requires a deleting AgentSession".to_owned(),
+                ));
+            }
+            let pending = delete_blockers_tx(&mut tx, session_id.as_ref())
+                .await?
+                .resource_cleanup_pending;
+            tx.commit().await?;
+            pending
+        };
+        let mut quarantined = 0_u64;
+        for owner_domain in pending {
+            self.record_resource_cleanup_uncertain(
+                session_id,
+                &owner_domain,
+                recorded_at,
+            )
+            .await?;
+            quarantined = quarantined.saturating_add(1);
+        }
+        Ok(quarantined)
+    }
+
+    pub async fn automation_config(
+        &self,
+        session_id: &AgentSessionId,
+    ) -> Result<AgentSessionAutomationConfig, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        require_live_session_tx(&mut tx, session_id.as_ref()).await?;
+        let config = automation_config_tx(&mut tx, session_id.as_ref()).await?;
+        tx.commit().await?;
+        Ok(config)
+    }
+
+    pub async fn commit_automation_config(
+        &self,
+        request: CommitAgentSessionAutomationConfig,
+    ) -> Result<AgentSessionAutomationConfig, SessionStoreError> {
+        validate_automation_config_request(&request)?;
+        let mut tx = self.begin_write_transaction().await?;
+        let row = session_row_by_id_tx(&mut tx, request.agent_session_id.as_ref()).await?;
+        require_owner(&row, &request.owner_ref)?;
+        require_live_row(row)?;
+        if let Some(operation_id) = request.operation_id.as_deref() {
+            let identity = format!(
+                "automation-config:{}:{operation_id}",
+                request.agent_session_id.as_ref()
+            );
+            if let Some(existing) = event_by_event_id_tx(&mut tx, &identity).await? {
+                let event = event_from_row(existing)?;
+                let SessionEventPayloadRef::InlineJson(payload) = event.payload else {
+                    return Err(SessionStoreError::InvalidEvent(
+                        "AutoWork config event lost its inline receipt".to_owned(),
+                    ));
+                };
+                let (expected_revision, committed) =
+                    automation_config_event_from_value(payload.0)?;
+                if event.kind.0 != "automation/config-committed"
+                    || expected_revision != request.expected_revision
+                    || committed.enabled != request.enabled
+                    || committed.tag != request.tag
+                    || committed.max_requirements != request.max_requirements
+                    || committed.operation_id.as_deref() != Some(operation_id)
+                {
+                    return Err(SessionStoreError::IdempotencyConflict(
+                        "AutoWork config operation was replayed with different input".to_owned(),
+                    ));
+                }
+                tx.commit().await?;
+                return Ok(committed);
+            }
+        }
+        let current = automation_config_tx(&mut tx, request.agent_session_id.as_ref()).await?;
+        if current.revision != request.expected_revision {
+            return Err(SessionStoreError::Conflict(
+                "AutoWork config revision changed concurrently".to_owned(),
+            ));
+        }
+        let unchanged = current.enabled == request.enabled
+            && current.tag == request.tag
+            && current.max_requirements == request.max_requirements;
+        if unchanged && request.operation_id.is_none() {
+            tx.commit().await?;
+            return Ok(current);
+        }
+        let revision = if unchanged {
+            current.revision
+        } else {
+            current.revision.checked_add(1).ok_or_else(|| {
+                SessionStoreError::Conflict("AutoWork config revision overflow".to_owned())
+            })?
+        };
+        let committed = AgentSessionAutomationConfig {
+            enabled: request.enabled,
+            tag: request.tag,
+            max_requirements: request.max_requirements,
+            revision,
+            operation_id: request.operation_id.clone(),
+        };
+        let nonce = request
+            .operation_id
+            .as_deref()
+            .map(str::to_owned)
+            .unwrap_or_else(|| Uuid::now_v7().to_string());
+        let identity = format!(
+            "automation-config:{}:{nonce}",
+            request.agent_session_id.as_ref()
+        );
+        let session_correlation = request.agent_session_id.as_ref().to_owned();
+        let append = SessionEventAppend {
+            agent_session_id: request.agent_session_id,
+            event_id: EventId::from(identity.clone()),
+            producer_id: EventProducerId::from("session_api"),
+            idempotency_key: IdempotencyKey::from(identity),
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                kind: SessionEventKind("automation/config-committed".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(session_correlation),
+                causation_event_id: None,
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "expected_revision": request.expected_revision,
+                    "committed": committed,
+                }))),
+            },
+        };
+        self.append_event_tx(&mut tx, &append, None).await?;
+        tx.commit().await?;
+        Ok(committed)
+    }
+
+    pub async fn list_enabled_automation_configs(
+        &self,
+        owner: &PrincipalRef,
+    ) -> Result<Vec<EnabledAgentSessionAutomationConfig>, SessionStoreError> {
+        validate_principal(owner)?;
+        let owner_json = serde_json::to_string(owner)?;
+        let mut tx = self.pool.begin().await?;
+        let rows = sqlx::query_as::<_, StoredSessionRow>(
+            "SELECT agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                    agent_binding_json, remote_binding_id, remote_binding_version, \
+                    parent_agent_session_id, fork_base_payload_id, next_seq, created_at, deleted_at \
+             FROM agent_sessions WHERE owner_ref_json = ? AND state = 'live' \
+             ORDER BY agent_session_id",
+        )
+        .bind(owner_json)
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut enabled = Vec::new();
+        for row in rows {
+            let session = live_from_row(row)?;
+            let config = automation_config_tx(&mut tx, session.agent_session_id.as_ref()).await?;
+            if config.enabled {
+                enabled.push(EnabledAgentSessionAutomationConfig { session, config });
+            }
+        }
+        tx.commit().await?;
+        Ok(enabled)
     }
 
     pub async fn admit_checkpoint(
@@ -1977,10 +2903,19 @@ impl AgentSessionStore {
         let row = session_row_by_id_tx(&mut tx, command.agent_session_id.as_ref()).await?;
         require_owner(&row, &command.owner_ref)?;
         match row.state.as_str() {
-            "deleted" | "deleting" => {
+            "deleted" => {
                 return Err(SessionStoreError::Deleted(
                     command.agent_session_id.0.clone(),
                 ));
+            }
+            "deleting" => {
+                let live = live_from_row(row)?;
+                tx.commit().await?;
+                return Ok(AgentSessionDeletingRecord {
+                    live,
+                    delete_operation_id: command.operation_id.clone(),
+                    admission_fenced_at: command.requested_at,
+                });
             }
             "live" => {}
             other => {
@@ -2043,6 +2978,16 @@ impl AgentSessionStore {
             }
         }
 
+        let blockers = delete_blockers_tx(&mut tx, command.agent_session_id.as_ref()).await?;
+        if !blockers.is_empty() {
+            return Err(SessionStoreError::Conflict(format!(
+                "AgentSession delete remains fenced: {} unsettled effect(s), {} pending resource cleanup(s), {} resource cleanup uncertainty fact(s)",
+                blockers.effects.len(),
+                blockers.resource_cleanup_pending.len(),
+                blockers.resource_cleanup_uncertainties.len(),
+            )));
+        }
+
         purge_private_content_tx(&mut tx, command.agent_session_id.as_ref()).await?;
         sqlx::query(
             "UPDATE agent_sessions SET \
@@ -2071,16 +3016,29 @@ impl AgentSessionStore {
         })
     }
 
-    pub async fn delete_session(
+    /// Read one exact deleting Session so a resource owner can resume its
+    /// cleanup saga after restart without scanning or completing other rows.
+    pub async fn get_deleting_session(
         &self,
-        command: &DeleteAgentSessionCommand,
-        deleted_at: i64,
-    ) -> Result<DeleteResult, SessionStoreError> {
-        self.fence_delete(command).await?;
-        self.complete_delete(command, deleted_at).await
+        session_id: &AgentSessionId,
+    ) -> Result<AgentSessionLiveRecord, SessionStoreError> {
+        let row = sqlx::query_as::<_, StoredSessionRow>(
+            "SELECT agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                    agent_binding_json, remote_binding_id, remote_binding_version, \
+                    parent_agent_session_id, fork_base_payload_id, next_seq, \
+                    created_at, deleted_at \
+             FROM agent_sessions WHERE agent_session_id = ? AND state = 'deleting'",
+        )
+        .bind(session_id.as_ref())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| SessionStoreError::NotFound(session_id.as_ref().to_owned()))?;
+        live_from_row(row)
     }
 
-    pub async fn deleting_sessions(
+    /// Enumerate fenced Sessions for the application-owned startup cleanup
+    /// saga. This method never purges or completes a row on its own.
+    pub async fn list_deleting_sessions(
         &self,
     ) -> Result<Vec<AgentSessionLiveRecord>, SessionStoreError> {
         let rows = sqlx::query_as::<_, StoredSessionRow>(
@@ -2095,37 +3053,27 @@ impl AgentSessionStore {
         rows.into_iter().map(live_from_row).collect()
     }
 
-    /// Finish Session-owned cleanup left behind by an interrupted delete.
-    pub async fn recover_deleting_sessions(
-        &self,
-        deleted_at: i64,
-    ) -> Result<Vec<DeleteResult>, SessionStoreError> {
-        if deleted_at < 0 {
-            return Err(SessionStoreError::InvalidSession(
-                "delete recovery timestamp must not be negative".to_owned(),
-            ));
-        }
-        let mut recovered = Vec::new();
-        for session in self.deleting_sessions().await? {
-            let command = DeleteAgentSessionCommand {
-                operation_id: OperationId::from(format!(
-                    "delete-recovery:{}",
-                    session.agent_session_id.as_ref()
-                )),
-                agent_session_id: session.agent_session_id,
-                owner_ref: session.owner_ref,
-                requested_at: 0,
-            };
-            recovered.push(self.complete_delete(&command, deleted_at).await?);
-        }
-        Ok(recovered)
-    }
-
     async fn append_event_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
         append: &SessionEventAppend,
         payload: Option<&SessionPayloadRecord>,
+    ) -> Result<SessionEventAppendResult, SessionStoreError> {
+        self.append_event_tx_with_policy(
+            tx,
+            append,
+            payload,
+            AppendSessionStatePolicy::LiveOnly,
+        )
+        .await
+    }
+
+    async fn append_event_tx_with_policy(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        append: &SessionEventAppend,
+        payload: Option<&SessionPayloadRecord>,
+        state_policy: AppendSessionStatePolicy,
     ) -> Result<SessionEventAppendResult, SessionStoreError> {
         validate_event_append(append)?;
         let registry_entry = self
@@ -2135,7 +3083,77 @@ impl AgentSessionStore {
                 append.semantic_event.kind_version,
             )?
             .clone();
-        require_live_session_tx(tx, append.agent_session_id.as_ref()).await?;
+        let session_row = session_row_by_id_tx(tx, append.agent_session_id.as_ref()).await?;
+        let permitted_states: &[&str] = match state_policy {
+            AppendSessionStatePolicy::LiveOnly => {
+                require_live_row(session_row)?;
+                &["live"]
+            }
+            AppendSessionStatePolicy::EffectSettlement => {
+                if !matches!(
+                    append.semantic_event.kind.0.as_str(),
+                    "effect/succeeded"
+                        | "effect/failed"
+                        | "effect/uncertain"
+                        | "effect/reconciled"
+                ) {
+                    return Err(SessionStoreError::InvalidEvent(
+                        "deleting Session append authority is limited to effect settlement"
+                            .to_owned(),
+                    ));
+                }
+                match session_row.state.as_str() {
+                    "live" | "deleting" => {}
+                    "deleted" => {
+                        return Err(SessionStoreError::Deleted(
+                            append.agent_session_id.0.clone(),
+                        ));
+                    }
+                    other => {
+                        return Err(SessionStoreError::InvalidSession(format!(
+                            "unknown AgentSession state {other}"
+                        )));
+                    }
+                }
+                &["live", "deleting"]
+            }
+            AppendSessionStatePolicy::DeleteCleanupUncertainty => {
+                if !matches!(
+                    append.semantic_event.kind.0.as_str(),
+                    "resource/cleanup-started"
+                        | "resource/cleanup-succeeded"
+                        | "resource/cleanup-uncertain"
+                        | "resource/cleanup-reconciled"
+                        | "resource/cleanup-override"
+                        | "deletion/effect-override"
+                ) {
+                    return Err(SessionStoreError::InvalidEvent(
+                        "delete cleanup append authority is limited to cleanup reconciliation"
+                            .to_owned(),
+                    ));
+                }
+                match session_row.state.as_str() {
+                    "deleting" => {}
+                    "live" => {
+                        return Err(SessionStoreError::Conflict(
+                            "resource cleanup uncertainty requires a committed delete fence"
+                                .to_owned(),
+                        ));
+                    }
+                    "deleted" => {
+                        return Err(SessionStoreError::Deleted(
+                            append.agent_session_id.0.clone(),
+                        ));
+                    }
+                    other => {
+                        return Err(SessionStoreError::InvalidSession(format!(
+                            "unknown AgentSession state {other}"
+                        )));
+                    }
+                }
+                &["deleting"]
+            }
+        };
 
         if self.registry.is_transient(
             &append.semantic_event.kind,
@@ -2191,15 +3209,22 @@ impl AgentSessionStore {
 
         let stored_payload_value = validate_payload_reference_tx(tx, append).await?;
 
-        let seq: i64 = sqlx::query_scalar(
+        let state_placeholders = std::iter::repeat_n("?", permitted_states.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
             "UPDATE agent_sessions SET next_seq = next_seq + 1 \
-             WHERE agent_session_id = ? AND state = 'live' \
-             RETURNING next_seq - 1",
-        )
-        .bind(append.agent_session_id.as_ref())
-        .fetch_optional(&mut **tx)
-        .await?
-        .ok_or_else(|| SessionStoreError::Deleted(append.agent_session_id.0.clone()))?;
+             WHERE agent_session_id = ? AND state IN ({state_placeholders}) \
+             RETURNING next_seq - 1"
+        );
+        let mut query = sqlx::query_scalar::<_, i64>(&sql).bind(append.agent_session_id.as_ref());
+        for state in permitted_states {
+            query = query.bind(state);
+        }
+        let seq = query
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or_else(|| SessionStoreError::Deleted(append.agent_session_id.0.clone()))?;
         let record = record_from_append(append, as_u64(seq, "seq")?);
         insert_event_tx(tx, &record).await?;
 
@@ -2499,6 +3524,19 @@ struct StoredEffectRow {
 }
 
 #[derive(Debug, sqlx::FromRow)]
+struct StoredDeletionAuditRow {
+    audit_id: String,
+    agent_session_id: String,
+    owner_ref_json: String,
+    target_kind: String,
+    target_id: String,
+    authority: String,
+    risk_acknowledged: i64,
+    reason_digest: String,
+    recorded_at: i64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
 struct StoredResourceRow {
     binding_id: String,
     resource_kind: String,
@@ -2607,7 +3645,8 @@ async fn validate_agent_store_schema(pool: &SqlitePool) -> Result<(), SessionSto
         "SELECT name FROM sqlite_schema \
          WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%' \
            AND tbl_name IN (\
-               'agent_sessions', 'agent_turns', 'agent_events', 'agent_payloads', \
+               'agent_sessions', 'agent_deletion_audits', 'agent_turns', \
+               'agent_events', 'agent_payloads', \
                'agent_effects', 'agent_session_resources', \
                'agent_session_heads', 'agent_messages'\
            )",
@@ -3509,9 +4548,17 @@ async fn validate_effect_transition_tx(
             if terminal_kind == "effect/uncertain"
                 && strategy != crate::types::EffectStrategy::ExternalUncertainEffect
             {
-                return Err(SessionStoreError::InvalidEvent(
-                    "only external_uncertain_effect may end as uncertain".to_owned(),
-                ));
+                let recovery = effect_payload_from_append(append)?
+                    .get("recovery")
+                    .and_then(Value::as_str);
+                if append.producer_id.as_ref() != "runtime_supervisor"
+                    || recovery != Some("process_restart_external_reconciliation_required")
+                {
+                    return Err(SessionStoreError::InvalidEvent(
+                        "managed effects require process-restart proof before becoming uncertain"
+                            .to_owned(),
+                    ));
+                }
             }
             Ok(())
         }
@@ -3527,9 +4574,17 @@ async fn validate_effect_transition_tx(
                 ));
             }
             if started_strategy != Some(crate::types::EffectStrategy::ExternalUncertainEffect) {
-                return Err(SessionStoreError::InvalidEvent(
-                    "only external_uncertain_effect may be reconciled".to_owned(),
-                ));
+                let terminal_payload = effect_payload_from_event(
+                    terminal.expect("reconciled effect has uncertain terminal"),
+                )?;
+                if terminal_payload.get("recovery").and_then(Value::as_str)
+                    != Some("process_restart_external_reconciliation_required")
+                {
+                    return Err(SessionStoreError::InvalidEvent(
+                        "managed effect reconciliation requires a process-restart uncertainty"
+                            .to_owned(),
+                    ));
+                }
             }
             if reconciled.is_some() {
                 return Err(SessionStoreError::InvalidEvent(
@@ -4372,6 +5427,104 @@ fn effect_from_row(row: StoredEffectRow) -> Result<AgentEffectRecord, SessionSto
     })
 }
 
+fn deletion_audit_from_row(
+    row: StoredDeletionAuditRow,
+) -> Result<AgentDeletionAuditRecord, SessionStoreError> {
+    if row.risk_acknowledged != 1
+        || row.authority != "installation_owner_manual_override"
+        || !matches!(row.target_kind.as_str(), "effect" | "resource_cleanup")
+        || row.recorded_at < 0
+    {
+        return Err(SessionStoreError::InvalidSession(
+            "Agent deletion audit row violates its immutable contract".to_owned(),
+        ));
+    }
+    Ok(AgentDeletionAuditRecord {
+        audit_id: row.audit_id,
+        agent_session_id: AgentSessionId::from(row.agent_session_id),
+        owner_ref: serde_json::from_str(&row.owner_ref_json)?,
+        target_kind: row.target_kind,
+        target_id: row.target_id,
+        authority: row.authority,
+        risk_acknowledged: true,
+        reason_digest: DigestHex::from(row.reason_digest),
+        recorded_at: row.recorded_at,
+    })
+}
+
+async fn deletion_audit_by_id_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    audit_id: &str,
+) -> Result<Option<AgentDeletionAuditRecord>, SessionStoreError> {
+    sqlx::query_as::<_, StoredDeletionAuditRow>(
+        "SELECT audit_id, agent_session_id, owner_ref_json, target_kind, target_id, \
+                authority, risk_acknowledged, reason_digest, recorded_at \
+         FROM agent_deletion_audits WHERE audit_id = ?",
+    )
+    .bind(audit_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .map(deletion_audit_from_row)
+    .transpose()
+}
+
+async fn record_deletion_audit_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    audit_id: &str,
+    session_id: &AgentSessionId,
+    owner: &PrincipalRef,
+    target_kind: &str,
+    target_id: &str,
+    reason_digest: &DigestHex,
+    recorded_at: i64,
+) -> Result<AgentDeletionAuditRecord, SessionStoreError> {
+    if !matches!(target_kind, "effect" | "resource_cleanup")
+        || target_id.is_empty()
+        || target_id.len() > 512
+        || target_id.trim() != target_id
+    {
+        return Err(SessionStoreError::InvalidEvent(
+            "delete override audit target is invalid".to_owned(),
+        ));
+    }
+    let owner_json = serde_json::to_string(owner)?;
+    sqlx::query(
+        "INSERT INTO agent_deletion_audits (audit_id, agent_session_id, owner_ref_json, \
+                target_kind, target_id, authority, risk_acknowledged, reason_digest, recorded_at) \
+         VALUES (?, ?, ?, ?, ?, 'installation_owner_manual_override', 1, ?, ?) \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(audit_id)
+    .bind(session_id.as_ref())
+    .bind(&owner_json)
+    .bind(target_kind)
+    .bind(target_id)
+    .bind(reason_digest.as_ref())
+    .bind(recorded_at)
+    .execute(&mut **tx)
+    .await?;
+    let audit = deletion_audit_by_id_tx(tx, audit_id)
+        .await?
+        .ok_or_else(|| {
+            SessionStoreError::IdempotencyConflict(
+                "delete override audit identity conflicts with another record".to_owned(),
+            )
+        })?;
+    if audit.agent_session_id != *session_id
+        || audit.owner_ref != *owner
+        || audit.target_kind != target_kind
+        || audit.target_id != target_id
+        || audit.reason_digest != *reason_digest
+        || !audit.risk_acknowledged
+        || audit.authority != "installation_owner_manual_override"
+    {
+        return Err(SessionStoreError::IdempotencyConflict(
+            "delete override audit identity was reused for different input".to_owned(),
+        ));
+    }
+    Ok(audit)
+}
+
 fn resource_from_row(row: StoredResourceRow) -> Result<TypedResourceBinding, SessionStoreError> {
     Ok(TypedResourceBinding {
         binding_id: ResourceBindingId::from(row.binding_id),
@@ -4631,6 +5784,305 @@ fn projection_from_row(row: StoredProjectionRow) -> Result<MessageProjection, Se
         message_status: None,
         projection: serde_json::from_str(&row.projection_json)?,
         semantic_digest: row.semantic_digest,
+    })
+}
+
+fn validate_automation_config_request(
+    request: &CommitAgentSessionAutomationConfig,
+) -> Result<(), SessionStoreError> {
+    validate_uuidv7(request.agent_session_id.as_ref(), "agent_session_id")?;
+    validate_principal(&request.owner_ref)?;
+    if request.recorded_at < 0 {
+        return Err(SessionStoreError::InvalidSession(
+            "AutoWork config timestamp must not be negative".to_owned(),
+        ));
+    }
+    validate_automation_config_fields(
+        request.enabled,
+        request.tag.as_deref(),
+        request.operation_id.as_deref(),
+    )
+}
+
+fn validate_cleanup_reconciliation(
+    owner_domain: &str,
+    evidence_digest: &DigestHex,
+    recorded_at: i64,
+) -> Result<(), SessionStoreError> {
+    validate_resource_cleanup_domain(owner_domain)?;
+    if evidence_digest.as_ref().len() != 64
+        || !evidence_digest
+            .as_ref()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || recorded_at < 0
+    {
+        return Err(SessionStoreError::InvalidEvent(
+            "delete reconciliation requires a canonical owner, evidence digest and timestamp"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_resource_cleanup_domain(owner_domain: &str) -> Result<(), SessionStoreError> {
+    if owner_domain.is_empty()
+        || owner_domain.len() > 64
+        || owner_domain.trim() != owner_domain
+        || !owner_domain
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(SessionStoreError::InvalidEvent(
+            "resource cleanup requires a canonical owner domain".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_automation_config_fields(
+    enabled: bool,
+    tag: Option<&str>,
+    operation_id: Option<&str>,
+) -> Result<(), SessionStoreError> {
+    if enabled && tag.is_none() {
+        return Err(SessionStoreError::InvalidSession(
+            "enabled AutoWork config requires a tag".to_owned(),
+        ));
+    }
+    if tag.is_some_and(|tag| {
+        tag.is_empty()
+            || tag.len() > 256
+            || tag.trim() != tag
+            || tag.chars().any(char::is_control)
+    }) {
+        return Err(SessionStoreError::InvalidSession(
+            "AutoWork tag must be canonical and bounded".to_owned(),
+        ));
+    }
+    if operation_id.is_some_and(|operation_id| {
+        operation_id.is_empty()
+            || operation_id.len() > 128
+            || !operation_id.bytes().all(|byte| byte.is_ascii_graphic())
+    }) {
+        return Err(SessionStoreError::InvalidSession(
+            "AutoWork config operation must contain 1-128 visible ASCII bytes".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+async fn automation_config_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session_id: &str,
+) -> Result<AgentSessionAutomationConfig, SessionStoreError> {
+    let payload = sqlx::query_scalar::<_, String>(
+        "SELECT inline_json FROM agent_events \
+         WHERE session_id = ? AND kind = 'automation/config-committed' \
+         ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(session_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(payload) = payload else {
+        return Ok(AgentSessionAutomationConfig::default());
+    };
+    let (_, config) = automation_config_event_from_value(serde_json::from_str(&payload)?)?;
+    Ok(config)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredAutomationConfigEventPayload {
+    expected_revision: u64,
+    committed: AgentSessionAutomationConfig,
+}
+
+fn automation_config_event_from_value(
+    value: Value,
+) -> Result<(u64, AgentSessionAutomationConfig), SessionStoreError> {
+    let payload: StoredAutomationConfigEventPayload = serde_json::from_value(value)?;
+    let config = payload.committed;
+    validate_automation_config_fields(
+        config.enabled,
+        config.tag.as_deref(),
+        config.operation_id.as_deref(),
+    )?;
+    let next_revision = payload.expected_revision.checked_add(1);
+    if config.revision != payload.expected_revision
+        && next_revision != Some(config.revision)
+    {
+        return Err(SessionStoreError::InvalidEvent(
+            "AutoWork config receipt has an invalid revision transition".to_owned(),
+        ));
+    }
+    Ok((payload.expected_revision, config))
+}
+
+async fn delete_blockers_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session_id: &str,
+) -> Result<AgentSessionDeleteBlockers, SessionStoreError> {
+    let effect_rows = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT effect.effect_id, effect.owner_domain, effect.state FROM agent_effects effect \
+         WHERE effect.session_id = ? AND effect.state IN ('pending', 'unknown', 'cancelled') \
+           AND NOT EXISTS (SELECT 1 FROM agent_events override \
+               WHERE override.session_id = effect.session_id \
+                 AND override.kind = 'deletion/effect-override' \
+                 AND json_extract(override.inline_json, '$.effect_id') = effect.effect_id) \
+         ORDER BY owner_domain, effect_id",
+    )
+    .bind(session_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let effects = effect_rows
+        .into_iter()
+        .map(|(effect_id, owner_domain, state)| {
+            let state = match state.as_str() {
+                "pending" => AgentEffectState::Pending,
+                "unknown" => AgentEffectState::Unknown,
+                "cancelled" => AgentEffectState::Cancelled,
+                other => {
+                    return Err(SessionStoreError::InvalidEvent(format!(
+                        "delete blocker has unsupported effect state {other}"
+                    )));
+                }
+            };
+            Ok(AgentEffectDeleteBlocker {
+                effect_id,
+                owner_domain,
+                state,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let cleanup_events = sqlx::query_as::<_, (String, String)>(
+        "SELECT kind, inline_json FROM agent_events \
+         WHERE session_id = ? \
+           AND kind IN ('resource/cleanup-started', 'resource/cleanup-succeeded', \
+                        'resource/cleanup-uncertain', 'resource/cleanup-reconciled', \
+                        'resource/cleanup-override') \
+         ORDER BY seq",
+    )
+    .bind(session_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut cleanup_pending = BTreeSet::new();
+    let mut cleanup_uncertainties = BTreeMap::new();
+    let mut cleanup_reconciled = BTreeSet::new();
+    for (kind, payload) in cleanup_events {
+        let payload: Value = serde_json::from_str(&payload)?;
+        let owner_domain = payload
+            .get("owner_domain")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                SessionStoreError::InvalidEvent(
+                    "resource cleanup event lost owner_domain".to_owned(),
+                )
+            })?;
+        match kind.as_str() {
+            "resource/cleanup-started" => {
+                if payload.get("outcome").and_then(Value::as_str) != Some("pending") {
+                    return Err(SessionStoreError::InvalidEvent(
+                        "resource cleanup start has invalid semantics".to_owned(),
+                    ));
+                }
+                cleanup_pending.insert(owner_domain.to_owned());
+            }
+            "resource/cleanup-succeeded" => {
+                if payload.get("outcome").and_then(Value::as_str) != Some("succeeded")
+                    || (!cleanup_pending.remove(owner_domain)
+                        && !cleanup_reconciled.contains(owner_domain))
+                {
+                    return Err(SessionStoreError::InvalidEvent(
+                        "resource cleanup success has no exact pending predecessor".to_owned(),
+                    ));
+                }
+            }
+            "resource/cleanup-uncertain" => {
+                let recorded_at = payload
+                    .get("recorded_at")
+                    .and_then(Value::as_i64)
+                    .filter(|value| *value >= 0)
+                    .ok_or_else(|| {
+                        SessionStoreError::InvalidEvent(
+                            "resource cleanup uncertainty lost recorded_at".to_owned(),
+                        )
+                    })?;
+                if payload.get("outcome").and_then(Value::as_str) != Some("unknown")
+                    || payload.get("recovery").and_then(Value::as_str)
+                        != Some("external_reconciliation_required")
+                {
+                    return Err(SessionStoreError::InvalidEvent(
+                        "resource cleanup uncertainty has invalid recovery semantics".to_owned(),
+                    ));
+                }
+                if !cleanup_pending.remove(owner_domain) {
+                    return Err(SessionStoreError::InvalidEvent(
+                        "resource cleanup uncertainty has no exact pending predecessor"
+                            .to_owned(),
+                    ));
+                }
+                cleanup_uncertainties.insert(
+                    owner_domain.to_owned(),
+                    ResourceCleanupUncertainty {
+                        owner_domain: owner_domain.to_owned(),
+                        recorded_at,
+                    },
+                );
+            }
+            "resource/cleanup-reconciled" => {
+                if payload.get("outcome").and_then(Value::as_str)
+                    != Some("confirmed_safe_to_delete")
+                    || payload
+                        .get("evidence_digest")
+                        .and_then(Value::as_str)
+                        .is_none_or(|digest| {
+                            digest.len() != 64
+                                || !digest.bytes().all(|byte| {
+                                    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+                                })
+                        })
+                    || cleanup_uncertainties.remove(owner_domain).is_none()
+                {
+                    return Err(SessionStoreError::InvalidEvent(
+                        "resource cleanup reconciliation has no exact uncertainty predecessor"
+                            .to_owned(),
+                    ));
+                }
+                cleanup_reconciled.insert(owner_domain.to_owned());
+            }
+            "resource/cleanup-override" => {
+                let reason_digest = payload.get("reason_digest").and_then(Value::as_str);
+                if payload.get("authority").and_then(Value::as_str)
+                    != Some("installation_owner_manual_override")
+                    || payload.get("risk_acknowledged").and_then(Value::as_bool) != Some(true)
+                    || reason_digest.is_none_or(|digest| {
+                        digest.len() != 64
+                            || !digest.bytes().all(|byte| {
+                                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+                            })
+                    })
+                    || cleanup_uncertainties.remove(owner_domain).is_none()
+                {
+                    return Err(SessionStoreError::InvalidEvent(
+                        "resource cleanup override has no exact uncertainty predecessor"
+                            .to_owned(),
+                    ));
+                }
+                cleanup_reconciled.insert(owner_domain.to_owned());
+            }
+            _ => unreachable!(),
+        }
+    }
+    let resource_cleanup_pending = cleanup_pending.into_iter().collect();
+    let resource_cleanup_uncertainties = cleanup_uncertainties.into_values().collect();
+
+    Ok(AgentSessionDeleteBlockers {
+        effects,
+        resource_cleanup_pending,
+        resource_cleanup_uncertainties,
     })
 }
 

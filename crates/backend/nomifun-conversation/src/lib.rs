@@ -30,6 +30,7 @@ pub use failover_seam::FailoverSwitch;
 pub use agent_execution_port::AgentExecutionConversationPort;
 pub use canonical_session_owner::{
     AgentMutationReceipt, AgentTurnReceipt, CanonicalAgentSessionOwner, OpenAgentSession,
+    PreparedAgentSessionDelete,
 };
 pub use execution_conversation_boundary::{
     ConversationExecutionProjection, ExecutionConversationBoundary, NoExecutionConversationBoundary,
@@ -38,8 +39,8 @@ pub use execution_conversation_boundary::{
 pub use routes::{conversation_routes, creative_studio_agent_session_routes};
 pub use routes_aux::conversation_ops_routes;
 pub use service::{
-    ConversationService, ConversationSupervisionHook, DELIVERY_NOTIFY_ORIGIN,
-    DeliveryNotifyRegistration, IdempotentMessageDelivery, IdmmTurnScope,
+    ConversationService, DELIVERY_NOTIFY_ORIGIN, DeliveryNotifyRegistration,
+    IdempotentMessageDelivery,
     BackgroundTaskRegistrar, PublicTurnDeliveryState, TurnCompletionObserver,
     ProductAgentResolution, ProductAgentSnapshotResolver, ProductAgentTarget,
 };

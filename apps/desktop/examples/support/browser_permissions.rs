@@ -2,7 +2,7 @@
 //! It never reads the user's actual location, camera, microphone or clipboard.
 use nomifun_browser_platform::{
     runtime::*,
-    workspace::{BrowserWorkspace, BrowserWorkspaceService},
+    workspace::{BrowserResource, BrowserResourceService},
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -34,7 +34,7 @@ async fn visibility(view: &tauri::Webview) -> Result<(bool, bool), String> {
     rx.await.map_err(message)?
 }
 
-async fn tab(workspace: &Arc<BrowserWorkspace>, id: &str) -> Result<BrowserTabSnapshot, String> {
+async fn tab(workspace: &Arc<BrowserResource>, id: &str) -> Result<BrowserTabSnapshot, String> {
     workspace
         .snapshot()
         .await
@@ -46,7 +46,7 @@ async fn tab(workspace: &Arc<BrowserWorkspace>, id: &str) -> Result<BrowserTabSn
         .find(|tab| tab.target.tab_id == id)
         .ok_or("Missing permission tab".into())
 }
-async fn refresh(workspace: &Arc<BrowserWorkspace>, view: &tauri::Webview) -> Result<(), String> {
+async fn refresh(workspace: &Arc<BrowserResource>, view: &tauri::Webview) -> Result<(), String> {
     let target = tab(workspace, view.label()).await?.target;
     let generation = target.document_generation;
     workspace
@@ -68,7 +68,7 @@ async fn refresh(workspace: &Arc<BrowserWorkspace>, view: &tauri::Webview) -> Re
     }
 }
 async fn request(
-    workspace: &Arc<BrowserWorkspace>,
+    workspace: &Arc<BrowserResource>,
     view: &tauri::Webview,
 ) -> Result<(BrowserTabTarget, String), String> {
     super::evaluate(view, "window.geoResult=undefined;true").await?;
@@ -120,13 +120,15 @@ pub(super) async fn verify(
     timeout_only: bool,
 ) -> Result<Value, String> {
     let service =
-        BrowserWorkspaceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
-    let key = BrowserWorkspaceKey {
-        user_id: "permission-fixture".into(),
-        conversation_id: "permission-fixture".into(),
-    };
+        BrowserResourceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
+    let authority = super::browser_resource_fixture::authority(
+        "permission-fixture",
+        "permission-fixture",
+        "native-permission-fixture",
+    );
+    let key = authority.key();
     let workspace = service
-        .ensure_user(key.clone(), BrowserProfile::Ephemeral)
+        .ensure(authority, BrowserProfile::Ephemeral)
         .await
         .map_err(message)?;
     let evidence=async {

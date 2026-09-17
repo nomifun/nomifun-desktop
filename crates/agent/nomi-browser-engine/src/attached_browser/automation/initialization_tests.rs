@@ -111,7 +111,6 @@ async fn initialization_failure_retains_group(failure: EvaluateFailure) {
         state: Arc::new(Mutex::new(crate::attached_browser::AttachedState {
             connection: Some(connection.clone()),
             retirement: None,
-            offered_tabs: Default::default(),
             automation: Default::default(),
             pending: Default::default(),
             retirement_pause: None,
@@ -121,8 +120,14 @@ async fn initialization_failure_retains_group(failure: EvaluateFailure) {
         browser_identity: [0; 32],
         chromium_major: 144,
     };
-    let choices = browser.tabs_for_user().await.unwrap();
-    let grant = browser.grant_tab(&choices.tabs[0].choice_id).await.unwrap();
+    let grant = browser
+        .tabs_for_provider()
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .grant;
     let cancel = CancellationToken::new();
     let mut groups = Vec::new();
     for _ in 0..2 {

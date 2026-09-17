@@ -38,25 +38,19 @@ use nomifun_auth::extract_token_from_ws_headers;
 use nomifun_channel::ChannelRouterState;
 use nomifun_common::{AppError, OnConversationDelete, OnTerminalDelete};
 use nomifun_conversation::service::QuiescentOrphanReconciliation;
-use nomifun_conversation::{
-    ConversationRouterState, ConversationService, ConversationSupervisionHook, IdmmTurnScope,
-};
+use nomifun_conversation::{ConversationRouterState, ConversationService};
 use nomifun_cron::{CronEventEmitter, CronRouterState};
 use nomifun_db::{
     IAgentExecutionRepository, IAgentExecutionTemplateRepository,
     IAgentMetadataRepository,
-    IIdmmInterventionRepository,
     IProviderRepository, IRemoteBindingRepository, SqliteAgentExecutionRepository,
     SqliteAgentExecutionTemplateRepository,
     SqliteAgentMetadataRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
-    SqliteIdmmInterventionRepository, SqliteProviderRepository, SqliteRemoteBindingRepository,
+    SqliteProviderRepository, SqliteRemoteBindingRepository,
     SqliteSettingsRepository,
     MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE,
 };
 use nomifun_file::{FileRouterState, FileService, FileWatchService, SnapshotService};
-use nomifun_idmm::{
-    IdmmManager, IdmmRouterState, SessionSupervisionPort, SupervisionTurnScope,
-};
 use nomifun_knowledge::KnowledgeRouterState;
 use nomifun_mcp::{
     ClaudeAdapter, CodeBuddyAdapter, CodexAdapter, GeminiAdapter, McpAgentAdapter, McpConfigService,
@@ -108,7 +102,6 @@ pub struct ModuleStates {
     pub channel: ChannelRouterState,
     pub cron: CronRouterState,
     pub requirement: RequirementRouterState,
-    pub idmm: IdmmRouterState,
     pub knowledge: KnowledgeRouterState,
     pub companion: CompanionRouterState,
     /// 客服独立域 (customer-service domain).
@@ -565,6 +558,13 @@ pub(crate) async fn try_build_module_states(
         )
         .await
         .map_err(|error| anyhow::anyhow!("Nomi-core Agent/Plugin platform composition failed: {error:#}"))?;
+    #[cfg(feature = "browser-use")]
+    if let Some(attached_chrome) = services.attached_chrome.as_ref() {
+        crate::browser_workspace_provider::install_attached_session_verifier(
+            attached_chrome,
+            nomi_core_agent_api.session_owner.canonical().clone(),
+        )?;
+    }
     let javascript_runtime =
         super::javascript_runtime::build_javascript_runtime_state(
             javascript_runtime_foundation,
@@ -648,6 +648,9 @@ pub(crate) async fn try_build_module_states(
         }
     }));
     let cron = build_cron_state(services, conversation_owner.clone());
+    nomi_core_agent_api
+        .install_cron_cleanup_owner(cron.cron_service.clone())
+        .map_err(|error| anyhow::anyhow!("Nomi-core Cron cleanup owner installation failed: {error}"))?;
     cron.cron_service.with_agent_preset_resolver(Arc::new(
         NomiCoreCronAgentPresetResolver {
             control_plane: nomi_core_agent_api.control_plane.clone(),
@@ -670,15 +673,6 @@ pub(crate) async fn try_build_module_states(
         &conversation.service,
     )
     .await;
-
-    cron.cron_service.init().await;
-    // Register the process CronService so the agent's native cron tools (wired
-    // via AgentFactoryDeps.cron_sink_factory) can reach it. (Phase 4)
-    nomifun_cron::sink::set_process_cron_service(cron.cron_service.clone());
-    tracing::info!(
-        elapsed_ms = boot.elapsed().as_millis(),
-        "startup: cron state initialized"
-    );
 
     // The agent catalog already hydrated at startup (see `lib.rs`).
     // Extension-contributed rows will land in `agent_metadata` in a
@@ -710,26 +704,52 @@ pub(crate) async fn try_build_module_states(
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: module states bundle started"
     );
-    let (requirement_state, idmm_state) =
-        build_requirement_state(services, conversation_owner.clone());
+    // AgentExecution owns Attempt, retry, recovery and canonical turn receipt
+    // before AutoWork is allowed to resume any persisted queue binding.
+    let agent_execution = build_agent_execution_engine(
+        services,
+        conversation_owner.clone(),
+    );
+    nomi_core_agent_api
+        .wave5_owner
+        .install_runtime_owners(
+            agent_execution.clone(),
+            cron.cron_service.clone(),
+        )
+        .map_err(|error| anyhow::anyhow!("Wave 5 owner installation failed: {error}"))?;
+    let requirement_state = build_requirement_state(
+        services,
+        conversation_owner.clone(),
+        agent_execution.clone(),
+    );
+    nomi_core_agent_api
+        .install_requirement_cleanup_owner(
+            requirement_state.requirement_service.clone(),
+            requirement_state.auto_work_runner.clone(),
+        )
+        .map_err(|error| {
+            anyhow::anyhow!("Nomi-core Requirement cleanup owner installation failed: {error}")
+        })?;
+    nomi_core_agent_api
+        .recover_deleting_agent_sessions()
+        .await
+        .map_err(|error| anyhow::anyhow!(
+            "canonical AgentSession delete recovery failed: {error}"
+        ))?;
+    cron.cron_service.init().await;
+    tracing::info!(
+        elapsed_ms = boot.elapsed().as_millis(),
+        "startup: canonical delete recovery and cron initialization completed"
+    );
+    agent_execution.spawn_recovery();
+    requirement_state.auto_work_runner.start_sweeper();
+    requirement_state.auto_work_runner.resume_persisted_bindings();
     let companion_state = build_companion_state(
         services,
         channel_components.manager.clone(),
         conversation_owner.clone(),
     )
         .with_knowledge_service(services.knowledge_service.clone());
-    // Arm the shared service before execution recovery can start. Every clone
-    // shares this hook slot, so normal chat and Agent attempts observe the same
-    // IDMM supervisor without a boot-time race.
-    let idmm_manager = idmm_state.service.manager().clone();
-    conversation
-        .service
-        .with_supervision_hook(Arc::new(NomiCoreConversationSupervisionHook::new(
-            idmm_manager.clone(),
-        )));
-    services
-        .terminal_service
-        .with_terminal_supervision_hook(Arc::new(idmm_manager));
     let states = ModuleStates {
         system: build_system_state(services),
         conversation,
@@ -749,7 +769,6 @@ pub(crate) async fn try_build_module_states(
         channel: channel_state,
         cron,
         requirement: requirement_state,
-        idmm: idmm_state,
         knowledge: KnowledgeRouterState::new(services.knowledge_service.clone()),
         companion: companion_state,
         customer_service: nomifun_customer_service::CustomerServiceRouterState {
@@ -764,12 +783,9 @@ pub(crate) async fn try_build_module_states(
         javascript_runtime,
         creation: build_creation_state(services),
         webhook: build_webhook_state(services),
-        // REST routes, model tools and attempt conversations share this one engine
-        // and the same ConversationService/runtime registry as ordinary Nomi chat.
-        agent_execution: build_agent_execution_engine(
-            services,
-            conversation_owner.clone(),
-        ),
+        // REST routes, model tools and AutoWork share this one engine and its
+        // canonical Attempt/receipt/recovery state machine.
+        agent_execution,
         terminal: build_terminal_state(services),
         office: build_office_state(services),
         shell: build_shell_state(services),
@@ -810,6 +826,7 @@ async fn build_nomi_core_agent_api_state(
     )
     .await?;
     let wave4_owners = Arc::clone(&builtin_plan.wave4_owners);
+    let wave5_owner = Arc::clone(&builtin_plan.wave5_owner);
     let robot_owner = builtin_plan.robot_owner.clone();
     wave4_owners
         .reclaim_orphaned_receipts()
@@ -934,9 +951,9 @@ async fn build_nomi_core_agent_api_state(
     .await?;
     let plugin_state = plugin.router.clone();
     #[cfg(feature="browser-use")]
-    if services.headless_render.is_some() {
+    if let Some(runtime) = services.headless_render.as_ref() {
         services.knowledge_service.set_browser_render_content_port(
-            super::knowledge_browser::KnowledgeBrowserPort::bind(kernel.clone(),services.authoritative_user_id.as_ref())?);
+            super::knowledge_browser::KnowledgeHeadlessRenderPort::bind(runtime.clone()));
     }
     let mcp_catalog_publisher = plugin.mcp_catalog_publisher(
         Arc::new(nomifun_db::SqliteMcpServerRepository::new(services.database.pool().clone())),
@@ -949,7 +966,7 @@ async fn build_nomi_core_agent_api_state(
     let seed = official_preset_seed_manifest_payload();
     #[cfg(feature = "browser-use")]
     let installation_role_bindings = crate::browser_workspace_provider::installation_binding(
-        &materialized, services.browser_workspaces.is_some(),
+        &materialized, services.browser_resources.is_some(),
     )?;
     #[cfg(not(feature = "browser-use"))]
     let installation_role_bindings = Default::default();
@@ -1059,6 +1076,7 @@ async fn build_nomi_core_agent_api_state(
     services.spawn_knowledge_resume_task();
     Ok((
         NomiCoreAgentApiState::new(
+            services.authoritative_user_id.clone(),
             conversation_owner,
             control_plane,
             remote_repository,
@@ -1066,8 +1084,14 @@ async fn build_nomi_core_agent_api_state(
             resource_bindings,
             mcp_server_repository,
             Arc::clone(&wave4_owners),
+            wave5_owner,
             product_agent_resolver,
             plugin_tool_sessions,
+            services.ssh_pool.clone(),
+            #[cfg(feature = "browser-use")]
+            services.browser_resources.clone(),
+            #[cfg(feature = "browser-use")]
+            services.attached_chrome.clone(),
         ),
         plugin_state,
         plugin_runtime_participant,
@@ -1272,9 +1296,6 @@ fn build_nomi_core_conversation_owner(services: &AppServices) -> ConversationSer
     conversation_service.with_delete_hook(
         Arc::new(services.ssh_pool.clone()) as Arc<dyn OnConversationDelete>,
     );
-    conversation_service.with_delete_hook(Arc::new(IdmmRecordCascade {
-        records: Arc::new(SqliteIdmmInterventionRepository::new(pool.clone())),
-    }) as Arc<dyn OnConversationDelete>);
     conversation_service.with_delete_hook(Arc::new(
         nomifun_ai_agent::runtime_registry::NomiSessionFilesCascade {
             data_dir: services.data_dir.clone(),
@@ -1285,12 +1306,12 @@ fn build_nomi_core_conversation_owner(services: &AppServices) -> ConversationSer
         conversation_service.with_delete_hook(hook);
     }
     #[cfg(feature = "browser-use")]
-    if let Some(workspaces) = services.browser_workspaces.clone() {
-        conversation_service.with_before_delete_hook(Arc::new(BrowserWorkspaceConversationCascade { workspaces }));
+    if let Some(resources) = services.browser_resources.clone() {
+        conversation_service.with_before_delete_hook(Arc::new(BrowserResourceAgentSessionCascade { resources }));
     }
     #[cfg(feature = "browser-use")]
-    if let Some(service) = services.system_browser.clone() {
-        conversation_service.with_before_delete_hook(Arc::new(SystemBrowserConversationCascade { service }));
+    if let Some(service) = services.attached_chrome.clone() {
+        conversation_service.with_before_delete_hook(Arc::new(AttachedBrowserAgentSessionCascade { service }));
     }
 
     conversation_service
@@ -1301,96 +1322,8 @@ fn attach_cron_service(
     cron_service: Arc<nomifun_cron::service::CronService>,
 ) {
     conversation_service.with_delete_hook(Arc::new(CronConversationDeleteAdapter {
-        service: cron_service.clone(),
-    }));
-    conversation_service.with_cron_service(Some(Arc::new(CronConversationCommandAdapter {
         service: cron_service,
-    })));
-}
-
-struct CronConversationCommandAdapter {
-    service: Arc<nomifun_cron::service::CronService>,
-}
-
-#[async_trait::async_trait]
-impl nomifun_conversation::response_middleware::ICronService
-    for CronConversationCommandAdapter
-{
-    async fn create_job(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        params: &nomifun_conversation::response_middleware::CronCreateParams,
-    ) -> nomifun_conversation::response_middleware::CronCommandResult {
-        cron_conversation_command_result(
-            self.service
-                .execute_embedded_create(
-                    user_id,
-                    conversation_id,
-                    &nomifun_cron::CronEmbeddedCreateCommand {
-                        name: params.name.clone(),
-                        schedule: params.schedule.clone(),
-                        schedule_description: params.schedule_description.clone(),
-                        message: params.message.clone(),
-                    },
-                )
-                .await,
-        )
-    }
-
-    async fn update_job(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        params: &nomifun_conversation::response_middleware::CronUpdateParams,
-    ) -> nomifun_conversation::response_middleware::CronCommandResult {
-        cron_conversation_command_result(
-            self.service
-                .execute_embedded_update(
-                    user_id,
-                    conversation_id,
-                    &nomifun_cron::CronEmbeddedUpdateCommand {
-                        job_id: params.job_id.clone(),
-                        name: params.name.clone(),
-                        schedule: params.schedule.clone(),
-                        schedule_description: params.schedule_description.clone(),
-                        message: params.message.clone(),
-                    },
-                )
-                .await,
-        )
-    }
-
-    async fn list_jobs(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-    ) -> nomifun_conversation::response_middleware::CronCommandResult {
-        cron_conversation_command_result(
-            self.service
-                .execute_embedded_list(user_id, conversation_id)
-                .await,
-        )
-    }
-
-    async fn delete_job(
-        &self,
-        user_id: &str,
-        job_id: &str,
-    ) -> nomifun_conversation::response_middleware::CronCommandResult {
-        cron_conversation_command_result(
-            self.service.execute_embedded_delete(user_id, job_id).await,
-        )
-    }
-}
-
-fn cron_conversation_command_result(
-    result: nomifun_cron::CronEmbeddedCommandResult,
-) -> nomifun_conversation::response_middleware::CronCommandResult {
-    nomifun_conversation::response_middleware::CronCommandResult {
-        success: result.success,
-        message: result.message,
-    }
+    }));
 }
 
 struct CronConversationDeleteAdapter {
@@ -1399,14 +1332,10 @@ struct CronConversationDeleteAdapter {
 
 #[async_trait::async_trait]
 impl OnConversationDelete for CronConversationDeleteAdapter {
-    async fn on_conversation_deleted(&self, user_id: &str, conversation_id: &str) {
-        if let Some(job_ids) = nomifun_conversation::service::current_deleted_cron_job_ids() {
-            self.service.cleanup_deleted_jobs(user_id, &job_ids).await;
-        } else {
-            self.service
-                .delete_jobs_by_conversation(user_id, conversation_id)
-                .await;
-        }
+    async fn on_conversation_deleted(&self, user_id: &str, _conversation_id: &str) {
+        let job_ids = nomifun_conversation::service::current_deleted_cron_job_ids()
+            .expect("Conversation deletion must publish the exact Cron row set");
+        self.service.cleanup_deleted_jobs(user_id, &job_ids).await;
     }
 }
 
@@ -1814,14 +1743,6 @@ pub fn build_terminal_state(services: &AppServices) -> TerminalRouterState {
     services
         .terminal_service
         .with_delete_hook(services.requirement_service.clone() as Arc<dyn OnTerminalDelete>);
-    // Drop this terminal's IDMM decision records (disposable audit trail,
-    // polymorphic target_id with no FK —app-level cascade, mirror of the
-    // conversation delete hook).
-    services
-        .terminal_service
-        .with_delete_hook(Arc::new(IdmmRecordCascade {
-            records: Arc::new(SqliteIdmmInterventionRepository::new(services.database.pool().clone())),
-        }) as Arc<dyn OnTerminalDelete>);
     let lifecycle_notice = Arc::new(AgentTerminalLifecycleNotice {
         runtimes: services.agent_runtime_registry.clone(),
     });
@@ -1840,89 +1761,42 @@ pub fn build_terminal_state(services: &AppServices) -> TerminalRouterState {
         .with_conversation_notice_sink(lifecycle_notice)
 }
 
-/// Build the `RequirementRouterState` + `IdmmRouterState` from application
-/// services.
-///
-/// Reuses the singleton `requirement_service` (which shares its repo + WS emitter
-/// with the nomi native-tool sink), attaches a `ConversationService` + repo to a
-/// clone for AutoWork config persistence, builds the AutoWork runner, and
-/// constructs the IDMM supervisor sharing the same live-session collaborators
-/// (threaded back into the runner as its `IdmmHandle`).
+/// Build the Requirements queue controller over the single AgentExecution
+/// state machine. AutoWork retains only binding, claim and queue policy; it
+/// cannot acquire a Runtime lease or deliver a Conversation turn directly.
 pub fn build_requirement_state(
     services: &AppServices,
     conversation_owner: Arc<NomiCoreSessionOwner>,
-) -> (RequirementRouterState, IdmmRouterState) {
-    let pool = services.database.pool().clone();
-
+    agent_execution: Arc<AgentExecutionEngine>,
+) -> RequirementRouterState {
     let conversation_service = conversation_owner.service().clone();
     let conv_repo = conversation_service.conversation_repo().clone();
-
-    // Router-state service: the singleton plus conversation service + repo for
-    // AutoWork config, plus the terminal driver for terminal-target AutoWork. The
-    // sink (built in AppServices) keeps using the plain singleton —it never needs
-    // the autowork-config methods.
-    let terminal_driver: Arc<dyn nomifun_terminal::TerminalDriver> = services.terminal_service.clone();
-    let terminal_repo: Arc<dyn nomifun_db::ITerminalRepository> =
-        Arc::new(nomifun_db::SqliteTerminalRepository::new(pool.clone()));
-    // Shared AutoWork waker: the service fires it when a requirement becomes
-    // claimable so idle AutoWork loops pick up new work without polling delay.
     let autowork_waker = Arc::new(tokio::sync::Notify::new());
-    let autowork_conversation: Arc<dyn nomifun_requirement::AutoWorkConversationPort> =
+    let session_config: Arc<dyn nomifun_requirement::AutoWorkSessionConfigPort> =
         conversation_owner.clone();
     let requirement_service = Arc::new(
         (*services.requirement_service)
             .clone()
-            .with_conversation_port(autowork_conversation.clone(), conv_repo.clone())
+            .with_session_config_port(session_config, conv_repo)
             .with_scheduled_session_lookup(conversation_owner.clone())
-            .with_terminal_driver(terminal_driver.clone())
-            .with_terminal_repo(terminal_repo)
             .with_autowork_waker(autowork_waker.clone()),
     );
-
-    // IDMM observes the same Nomi-core owner as the route, Channel, Cron,
-    // AutoWork, Companion, and AgentExecution consumers.
-    let idmm_state = build_idmm_state(
-        services,
-        conversation_owner.clone(),
-        conv_repo.clone(),
-        terminal_driver.clone(),
-    );
-    let idmm_handle: Arc<dyn nomifun_requirement::IdmmHandle> = Arc::new(idmm_state.service.manager().clone());
-
-    // NOTE: the ConversationSupervisionHook for user-driven chat turns is
-    // registered in `build_module_states` on the ROUTE ConversationService
-    // (`build_conversation_state`'s instance), not here —this `conv_service` is
-    // moved into `AutoWorkRunnerDeps` below and only drives AutoWork, which arms
-    // IDMM per loop iteration via `AutoWorkRunnerDeps.idmm` (so a hook here was
-    // dead code that fooled debugging into thinking arming was wired).
-
+    let execution: Arc<dyn nomifun_requirement::AutoWorkExecutionPort> = agent_execution;
+    let workspace: Arc<dyn nomifun_requirement::AutoWorkWorkspacePort> =
+        conversation_owner.clone();
     let deps = Arc::new(nomifun_requirement::AutoWorkRunnerDeps {
         authoritative_user_id: services.authoritative_user_id.clone(),
         service: requirement_service.clone(),
-        conversation: autowork_conversation,
-        agent_registry: services.agent_registry.clone(),
-        terminal_driver: Some(terminal_driver),
-        idmm: Some(idmm_handle),
+        execution,
+        workspace,
         wake: autowork_waker,
-        // ACP sessions expose the requirement declaration tools only when the
-        // requirement MCP server started + was plumbed into the agent factory.
-        requirement_mcp_enabled: services.requirement_mcp_config.is_some(),
     });
     let auto_work_runner = Arc::new(nomifun_requirement::AutoWorkRunner::new(deps));
     services.set_auto_work_runner(auto_work_runner.clone());
-    // Start the periodic lease sweeper (re-pends stale claims from dead sessions).
-    auto_work_runner.start_sweeper();
-    // Resume every persisted-enabled binding so bound sessions work in the
-    // background from boot —no foreground/session-page visit required.
-    auto_work_runner.resume_persisted_bindings();
-
-    (
-        RequirementRouterState {
-            requirement_service,
-            auto_work_runner,
-        },
-        idmm_state,
-    )
+    RequirementRouterState {
+        requirement_service,
+        auto_work_runner,
+    }
 }
 
 /// Build the `WebhookRouterState` (webhook CRUD + per-tag settings). Constructs
@@ -2012,125 +1886,7 @@ pub fn build_agent_execution_engine(
         workspace_root: services.work_dir.clone(),
         lifecycle: services.agent_execution_lifecycle.clone(),
     }));
-    engine.spawn_recovery();
     engine
-}
-
-/// Build the `IdmmRouterState` (the IDMM supervisor manager + service). Shares
-/// the caller's `ConversationService` / conversation repo / terminal driver so
-/// IDMM supervises the same live sessions AutoWork + the UI drive. Constructs a
-/// the process-wide model invoke resolver from [`AppServices`].
-pub fn build_idmm_state(
-    services: &AppServices,
-    conversation_owner: Arc<NomiCoreSessionOwner>,
-    conv_repo: Arc<dyn nomifun_db::IConversationRepository>,
-    terminal_driver: Arc<dyn nomifun_terminal::TerminalDriver>,
-) -> IdmmRouterState {
-    let pool = services.database.pool().clone();
-    let records: Arc<dyn IIdmmInterventionRepository> = Arc::new(SqliteIdmmInterventionRepository::new(pool));
-
-    // The sidecar's one-shot completions run against a backup provider; use the
-    // data dir as the (unused-for-supervision) workspace root.
-    let completer: Arc<dyn nomifun_idmm::Completer> = Arc::new(nomifun_idmm::LiveCompleter {
-        model_invoke: services.model_invoke_service.clone(),
-        workspace: services.data_dir.clone(),
-    });
-    let sidecar = Arc::new(nomifun_idmm::SidecarClient::new(completer));
-
-    let probe_deps = Arc::new(nomifun_idmm::ProbeDeps {
-        conversation_session: conversation_owner,
-        conversation_repo: conv_repo,
-        terminal_driver,
-    });
-
-    let loop_deps = Arc::new(nomifun_idmm::LoopDeps {
-        sidecar: sidecar.clone(),
-        emitter: nomifun_idmm::IdmmEventEmitter::new(services.event_bus.clone()),
-        records: records.clone(),
-    });
-    let manager = IdmmManager::new(loop_deps, probe_deps.clone(), probe_deps.clone());
-    let service = Arc::new(nomifun_idmm::IdmmService::new(
-        probe_deps,
-        sidecar,
-        manager,
-        records.clone(),
-    ));
-
-    // TTL janitor: IDMM records are deliberately disposable (per-target cap is
-    // enforced on insert; this enforces the shared TTL + per-owner backstop). Sweep
-    // once at boot, then hourly. Best-effort —a failed sweep only warns and the
-    // next tick retries.
-    let janitor = spawn_idmm_record_janitor(
-        records,
-        services.background_shutdown.clone(),
-    );
-    services.register_background_task(janitor);
-
-    IdmmRouterState::new(service)
-}
-
-/// App-owned composition adapter for the two crates' supervision contracts.
-///
-/// `nomifun-conversation` deliberately does not depend on IDMM, while IDMM
-/// deliberately does not depend on the Conversation implementation. The app
-/// is the only layer that can translate the host admission token into the
-/// IDMM-owned supervision scope and wire the shared manager into the live
-/// Conversation service.
-#[derive(Clone)]
-struct NomiCoreConversationSupervisionHook {
-    manager: IdmmManager,
-}
-
-impl NomiCoreConversationSupervisionHook {
-    fn new(manager: IdmmManager) -> Self {
-        Self { manager }
-    }
-}
-
-impl ConversationSupervisionHook for NomiCoreConversationSupervisionHook {
-    fn on_turn_start(&self, conversation_id: &str, admitted_scope: IdmmTurnScope) {
-        SessionSupervisionPort::admit_conversation_turn(
-            &self.manager,
-            conversation_id,
-            SupervisionTurnScope::new(admitted_scope.wire_turn_id, admitted_scope.generation),
-        );
-    }
-}
-
-/// Spawn the IDMM record TTL janitor: sweeps rows older than `TTL_MS` and
-/// enforces the per-owner hard cap `PER_USER_ACTIVITY_CAP`. Runs once immediately (boot
-/// sweep) then on a ~1h interval. Best-effort —a sweep error only warns and
-/// the next tick retries; the sweep is a backstop on top of the per-target cap
-/// already enforced at insert time.
-fn spawn_idmm_record_janitor(
-    records: Arc<dyn IIdmmInterventionRepository>,
-    shutdown: tokio_util::sync::CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        // First missed tick fires immediately → boot sweep on the first
-        // iteration, then hourly.
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
-        loop {
-            tokio::select! {
-                _ = shutdown.cancelled() => break,
-                _ = ticker.tick() => {}
-            }
-            if shutdown.is_cancelled() {
-                break;
-            }
-            let cutoff = nomifun_common::now_ms() - nomifun_db::TTL_MS;
-            match records
-                .sweep_all_owners(cutoff, nomifun_db::PER_USER_ACTIVITY_CAP)
-                .await
-            {
-                Ok(removed) if removed > 0 => {
-                    tracing::debug!(removed, "IDMM record janitor swept expired/overflow rows");
-                }
-                Ok(_) => {}
-                Err(e) => tracing::warn!(error = %e, "IDMM record janitor sweep failed (will retry)"),
-            }
-        }
-    })
 }
 
 /// Build the `CompanionRouterState` (the "nomi" desktop companion: opt-in event
@@ -2203,33 +1959,29 @@ struct ConversationTerminalCascade {
 }
 
 #[cfg(feature = "browser-use")]
-struct BrowserWorkspaceConversationCascade {
-    workspaces: Arc<nomifun_browser_platform::workspace::BrowserWorkspaceService>,
+struct BrowserResourceAgentSessionCascade {
+    resources: Arc<nomifun_browser_platform::workspace::BrowserResourceService>,
 }
 
 #[cfg(feature = "browser-use")]
-struct SystemBrowserConversationCascade {
-    service: Arc<crate::system_browser::SystemBrowserService>,
+struct AttachedBrowserAgentSessionCascade {
+    service: Arc<crate::AttachedChromeProviderService>,
 }
 #[cfg(feature = "browser-use")]
 #[async_trait::async_trait]
-impl nomifun_common::BeforeConversationDelete for SystemBrowserConversationCascade {
+impl nomifun_common::BeforeConversationDelete for AttachedBrowserAgentSessionCascade {
     async fn before_conversation_delete(&self, user_id: &str, conversation_id: &str) -> Result<(), AppError> {
-        if let Some(snapshot) = self.service.snapshot(user_id, conversation_id) {
-            self.service.disconnect(user_id, conversation_id, &snapshot.incarnation).await
-                .map_err(|_| AppError::Internal("System browser disconnect must complete before deleting the conversation".into()))?;
-        }
-        Ok(())
+        self.service.close_agent_session(user_id, conversation_id).await
+            .map_err(|error| AppError::Internal(format!("attached Browser AgentSession cleanup failed: {error}")))
     }
 }
 
 #[cfg(feature = "browser-use")]
 #[async_trait::async_trait]
-impl nomifun_common::BeforeConversationDelete for BrowserWorkspaceConversationCascade {
+impl nomifun_common::BeforeConversationDelete for BrowserResourceAgentSessionCascade {
     async fn before_conversation_delete(&self, user_id: &str, conversation_id: &str) -> Result<(), AppError> {
-        self.workspaces.close(&nomifun_browser_platform::runtime::BrowserWorkspaceKey {
-            user_id: user_id.into(), conversation_id: conversation_id.into(),
-        }).await.map_err(|error| AppError::Internal(format!("Conversation browser cleanup failed: {error}")))
+        self.resources.close_agent_session(user_id, conversation_id).await
+            .map_err(|error| AppError::Internal(format!("Browser Resource cleanup failed: {error}")))
     }
 }
 
@@ -2443,43 +2195,6 @@ impl nomifun_terminal::TerminalConversationNoticeSink for AgentTerminalLifecycle
             terminal_id,
             format!("received lifecycle event `{event}`"),
         );
-    }
-}
-
-/// Session-delete cascade for IDMM decision records: `idmm_interventions` has a
-/// polymorphic `target_id` (no FK to cascade), so when a conversation or terminal
-/// is deleted the app layer clears its disposable audit trail here. Best-effort:
-/// failures are logged, never propagated (hook contract —the session is already
-/// gone). Lives in `nomifun-app` so `nomifun-conversation` / `nomifun-terminal`
-/// stay unaware of the IDMM record repo. The `target_id` string matches the
-/// supervisor's probe target (`conversation_id` / `terminal_id` as decimal).
-struct IdmmRecordCascade {
-    records: Arc<dyn IIdmmInterventionRepository>,
-}
-
-#[async_trait::async_trait]
-impl OnConversationDelete for IdmmRecordCascade {
-    async fn on_conversation_deleted(&self, user_id: &str, conversation_id: &str) {
-        if let Err(e) = self
-            .records
-            .delete_for_target(user_id, "conversation", &conversation_id.to_string())
-            .await
-        {
-            tracing::warn!(conversation_id, error = %e, "failed to clear IDMM records on conversation delete");
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl OnTerminalDelete for IdmmRecordCascade {
-    async fn on_terminal_deleted(&self, user_id: &str, terminal_id: &str) {
-        if let Err(e) = self
-            .records
-            .delete_for_target(user_id, "terminal", terminal_id)
-            .await
-        {
-            tracing::warn!(terminal_id, error = %e, "failed to clear IDMM records on terminal delete");
-        }
     }
 }
 
@@ -2828,8 +2543,9 @@ mod tests {
             "Channel must receive the shared Conversation owner"
         );
         assert!(
-            production_source.contains("build_requirement_state(services, conversation_owner.clone())"),
-            "AutoWork/IDMM must receive the shared Conversation owner"
+            production_source.contains("let requirement_state = build_requirement_state(")
+                && production_source.contains("agent_execution.clone(),"),
+            "AutoWork must receive the shared Session config owner and AgentExecution port"
         );
         assert!(
             production_source.contains("conversation_owner.clone(),\n    )"),

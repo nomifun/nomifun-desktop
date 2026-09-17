@@ -59,8 +59,8 @@ pub fn validate_agent_web_target(target: &str) -> Result<(), String> {
         if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
             return Err(format!(
                 "opening web URLs through the operating-system browser is not available to \
-                 Agent tools ({target:?}). Use the selected conversation Browser or system-browser \
-                 capability to read or interact with web pages."
+                 Agent tools ({target:?}). Use the bound Browser Module actions to read or \
+                 interact with web pages."
             ));
         }
         // Descend into the wrapped target (`microsoft-edge:https://…`),
@@ -445,9 +445,8 @@ mod tests {
         assert!(validate_agent_web_target("microsoft-edge:https:example.com").is_err());
         let error = validate_agent_web_target("https://example.com").unwrap_err();
         assert!(
-            error.contains("selected conversation Browser")
-                && error.contains("system-browser capability"),
-            "must steer to an explicit Browser capability: {error}"
+            error.contains("bound Browser Module actions"),
+            "must steer to the authorized Browser Module: {error}"
         );
         // Apps, files, folders and non-web protocols remain launchable.
         assert!(validate_agent_web_target("C:\\Windows\\notepad.exe").is_ok());

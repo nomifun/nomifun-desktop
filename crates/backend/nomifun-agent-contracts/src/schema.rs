@@ -100,6 +100,7 @@ const TABLES: &[(&str, &str, &str, SchemaResetScope)] = &[
     ("system_settings", "platform.host-configuration", "configuration", SchemaResetScope::Preserve),
     ("agent_runtime_snapshots", "platform.agent-preset-compiler", "fact", SchemaResetScope::AgentData),
     ("agent_sessions", "platform.agent-session", "fact", SchemaResetScope::AgentData),
+    ("agent_deletion_audits", "platform.agent-session", "audit", SchemaResetScope::AgentData),
     ("agent_turns", "platform.agent-session", "fact", SchemaResetScope::AgentData),
     ("agent_events", "platform.agent-session", "fact", SchemaResetScope::AgentData),
     ("agent_payloads", "platform.agent-session", "fact", SchemaResetScope::AgentData),

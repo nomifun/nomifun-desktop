@@ -12,8 +12,6 @@ const TEMP_WORKSPACE_ID_EXTRA_KEY: &str = "temp_workspace_id";
 pub(super) struct FactoryContext {
     pub conversation_id: String,
     pub workspace: String,
-    #[cfg(feature = "browser-use")]
-    pub is_temporary_workspace: bool,
 }
 
 impl FactoryContext {
@@ -47,8 +45,6 @@ impl FactoryContext {
         Ok(Self {
             conversation_id,
             workspace,
-            #[cfg(feature = "browser-use")]
-            is_temporary_workspace,
         })
     }
 }

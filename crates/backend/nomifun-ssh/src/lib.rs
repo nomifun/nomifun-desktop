@@ -7,6 +7,7 @@
 //! `nomi-ssh` crate; this crate is the only place that joins transport +
 //! credentials + persistence + realtime.
 
+pub mod agent;
 pub mod dto;
 pub mod events;
 pub mod pool;
@@ -19,6 +20,17 @@ pub mod state;
 pub use dto::{
     CreateSshHostRequest, ImportSshHostsRequest, ImportedSshHost, SshHostResponse, SshImportResult,
     SshImportSkipReason, SshStatusEvent, UpdateSshHostRequest,
+};
+pub use agent::{
+    AgentSshAuthority, AgentSshHostResource, DEFAULT_SSH_ACTION_TIMEOUT_MS,
+    MAX_SSH_ACTION_READ_BYTES, MAX_SSH_ACTION_TIMEOUT_MS, MAX_SSH_ACTION_WRITE_BYTES,
+    SSH_ACTION_IDS, SSH_EXEC_ACTION_ID, SSH_FS_READ_ACTION_ID, SSH_FS_WRITE_ACTION_ID,
+    SSH_HOST_EXECUTE_OPERATION, SSH_HOST_READ_OPERATION, SSH_HOST_RESOURCE_KIND,
+    SSH_HOST_RESOURCE_OPERATIONS, SSH_HOST_SUDO_OPERATION, SSH_HOST_WRITE_OPERATION,
+    SSH_MODULE_ID, SSH_SUDO_ACTION_ID, SshAction, SshActionContext, SshActionError,
+    SshActionOwner, SshCommandOutput, SshConnectionStatus, SshExecInput,
+    SshExternalActionStatus, SshFsReadInput, SshFsReadOutput, SshFsWriteInput,
+    SshFsWriteOutput, SshResourceOperation, SshResourceSelection, SshSudoInput,
 };
 pub use events::SshEventEmitter;
 pub use pool::{

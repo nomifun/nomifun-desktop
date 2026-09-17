@@ -2,7 +2,7 @@
   "digest_algorithm": "sorted-json-sha256-v1",
   "payload": {
     "manifest_version": "1.0.0",
-    "target_first_party_contribution_digest": "aeb36fb2687946ecf7cf67c2d75c2f9cd0a303f7c2cce3aa7813775ffb520649",
+    "target_first_party_contribution_digest": "dbcf73265a89a1133c2683124cf387202eec0888baf31ac4c922d3e94baea33d",
     "target_runtime_feature_inventory_digest": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
     "templates": {
       "chat.minimal": {
@@ -40,15 +40,7 @@
       "coding.codex": {
         "enabled_capabilities": [
           {
-            "id": "agent.execution.plan",
-            "version": "1.0.0"
-          },
-          {
-            "id": "agent.execution.steer",
-            "version": "1.0.0"
-          },
-          {
-            "id": "agent.execution.observe",
+            "id": "agent.collaboration",
             "version": "1.0.0"
           },
           {
@@ -65,14 +57,6 @@
           },
           {
             "id": "workspace.artifacts",
-            "version": "1.0.0"
-          },
-          {
-            "id": "agent.delegate",
-            "version": "1.0.0"
-          },
-          {
-            "id": "agent.fork",
             "version": "1.0.0"
           },
           {
@@ -235,11 +219,7 @@
           "workspace_repository"
         ],
         "required_capability_ids": [
-          "agent.delegate",
-          "agent.execution.observe",
-          "agent.execution.plan",
-          "agent.execution.steer",
-          "agent.fork",
+          "agent.collaboration",
           "web.research",
           "workspace.artifacts",
           "workspace.files",
@@ -344,5 +324,5 @@
       "research.web"
     ]
   },
-  "payload_digest": "d461c0c9aa31132ef628b2d66be8536fdf05b9e60ce356df7b918118a20e5350"
+  "payload_digest": "3e6e6db4b20c13bdfee5031602947d8a651195d4e675b72bd53e56a88c6dfbf3"
 }

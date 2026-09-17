@@ -805,11 +805,11 @@ pub struct AppServices {
     /// the `/api/knowledge/*` routes and the `ConversationService`, which
     /// mounts bound bases into session workspaces at task start.
     pub knowledge_service: Arc<nomifun_knowledge::KnowledgeService>,
-    /// Conversation-owned native browsers supplied by the desktop composition.
+    /// AgentSession-owned managed Browser Resources supplied by the desktop composition.
     #[cfg(feature = "browser-use")]
-    pub browser_workspaces: Option<Arc<nomifun_browser_platform::workspace::BrowserWorkspaceService>>,
+    pub browser_resources: Option<Arc<nomifun_browser_platform::workspace::BrowserResourceService>>,
     #[cfg(feature = "browser-use")]
-    pub system_browser: Option<Arc<crate::system_browser::SystemBrowserService>>,
+    pub attached_chrome: Option<Arc<crate::AttachedChromeProviderService>>,
     #[cfg(feature = "browser-use")]
     pub local_web_search: Option<Arc<nomifun_ai_agent::local_web_search::BrowserSearchProvider>>,
     #[cfg(feature="browser-use")]
@@ -1244,7 +1244,7 @@ impl AppServices {
     /// `Drop` is insufficient even when `browser-use` is disabled.
     pub async fn shutdown_browser_platform(&self) -> anyhow::Result<()> {
         #[cfg(feature = "browser-use")]
-        let system_browser = match &self.system_browser {
+        let attached_chrome = match &self.attached_chrome {
             Some(service) => service.shutdown().await,
             None => Ok(()),
         };
@@ -1252,15 +1252,15 @@ impl AppServices {
         let render=match &self.headless_render {Some(runtime)=>runtime.shutdown().await,None=>Ok(())};
         let platform = self.browser_platform_shutdown.shutdown().await;
         #[cfg(feature = "browser-use")]
-        if let Some(workspaces) = &self.browser_workspaces {
-            if let Err(error) = workspaces.shutdown().await {
-                return Err(anyhow::anyhow!("native browser workspace shutdown failed: {error}; browser platform: {platform:?}"));
+        if let Some(resources) = &self.browser_resources {
+            if let Err(error) = resources.shutdown().await {
+                return Err(anyhow::anyhow!("managed Browser Resource shutdown failed: {error}; browser platform: {platform:?}"));
             }
         }
         #[cfg(feature="browser-use")]
         render.map_err(|error|anyhow::anyhow!("headless render shutdown failed: {error}"))?;
         #[cfg(feature = "browser-use")]
-        system_browser.map_err(|error|anyhow::anyhow!("system browser disconnect failed: {error}"))?;
+        attached_chrome.map_err(|error|anyhow::anyhow!("attached Chrome Provider disconnect failed: {error}"))?;
         platform
     }
 
@@ -1294,7 +1294,7 @@ impl AppServices {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(runner);
     }
 
-    pub(crate) async fn shutdown_auto_work_runner(&self) -> anyhow::Result<()> {
+    pub(crate) async fn quiesce_auto_work_runner(&self) -> anyhow::Result<()> {
         let runner = self
             .auto_work_runner
             .lock()
@@ -1302,7 +1302,7 @@ impl AppServices {
             .take();
         if let Some(runner) = runner {
             runner
-                .shutdown()
+                .quiesce()
                 .await
                 .map_err(|error| anyhow::anyhow!(error))?;
         }
@@ -1352,8 +1352,8 @@ impl AppServices {
         {
             errors.push(format!("Plugin Service cleanup failed: {error}"));
         }
-        if let Err(error) = self.shutdown_auto_work_runner().await {
-            errors.push(format!("AutoWork cleanup failed: {error:#}"));
+        if let Err(error) = self.quiesce_auto_work_runner().await {
+            errors.push(format!("AutoWork quiesce failed: {error:#}"));
         }
         if !self.nomi_core_remote_runtime.shutdown().await {
             errors.push(
@@ -1477,7 +1477,7 @@ impl AppServices {
                 "Plugin Service cleanup failed during startup failure cleanup"
             );
         }
-        if let Err(cleanup_error) = self.shutdown_auto_work_runner().await {
+        if let Err(cleanup_error) = self.quiesce_auto_work_runner().await {
             tracing::error!(
                 %cleanup_error,
                 "AutoWork runner did not shut down during startup cleanup"
@@ -2234,14 +2234,6 @@ impl AppServices {
                     })
                 })
             });
-        #[cfg(feature = "browser-use")]
-        if let Some(browser) = &host_services.system_browser {
-            browser.install_owner_verifier(Arc::new(crate::system_browser_owner::SystemBrowserOwnerVerifier {
-                owner: authoritative_user_id.clone(),
-                conversations: Arc::new(nomifun_db::SqliteConversationRepository::new(database.pool().clone())),
-                execution: execution_conversation_boundary.clone(),
-            }))?;
-        }
         let factory = build_agent_factory(AgentFactoryDeps {
             authoritative_user_id: authoritative_user_id.clone(),
             model_invoke: model_invoke_service.clone(),
@@ -2253,11 +2245,9 @@ impl AppServices {
             gateway_mcp_config: gateway_mcp_config.clone(),
             #[cfg(feature = "browser-use")]
             browser_runtime_resolver: Some(crate::browser_workspace_provider::resolver(
-                    host_services.browser_workspaces.clone(), database.pool().clone(), execution_conversation_boundary.clone(),
+                    host_services.browser_resources.clone(), host_services.attached_chrome.clone(),
                     data_dir.clone(), authoritative_user_id.clone(),
                 )),
-            #[cfg(feature = "browser-use")]
-            system_browser: host_services.system_browser.clone().map(|host| host as Arc<dyn nomifun_browser_platform::system_browser::SystemBrowserHost>),
             client_prefs: Some(Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
                 database.pool().clone(),
             ))
@@ -2269,17 +2259,10 @@ impl AppServices {
                 database.pool().clone(),
             )) as Arc<dyn nomifun_db::ISettingsRepository>),
             requirement_sink: Some(requirement_sink),
-            // Native cron tools: agent schedules/lists/deletes its own recurring
-            // prompts. The closure resolves the process CronService lazily (it is
-            // registered at startup in router/state.rs, after this factory is
-            // built), so by the time a conversation runs the agent the service is
-            // present. (Phase 4 platform synergy)
-            cron_sink_factory: Some(Arc::new(|user_id: &str, conversation_id: &str| {
-                nomifun_cron::sink::cron_sink_for(
-                    user_id.to_string(),
-                    conversation_id.to_string(),
-                )
-            })),
+            // Schedule actions are materialized from the frozen
+            // `automation.schedule` Module. The legacy native Cron tool family
+            // must stay unreachable during the Store cutover.
+            cron_sink_factory: None,
             companion_sink: Some(companion_service.memory_sink()),
             // Companion self-evolved skill auto-use (`companion_skill` tool + per-turn
             // when_to_use injection). Only registered for companion sessions (factory gates).
@@ -2397,9 +2380,9 @@ impl AppServices {
             model_invoke_service,
             knowledge_service,
             #[cfg(feature = "browser-use")]
-            browser_workspaces: host_services.browser_workspaces,
+            browser_resources: host_services.browser_resources,
             #[cfg(feature = "browser-use")]
-            system_browser: host_services.system_browser,
+            attached_chrome: host_services.attached_chrome,
             #[cfg(feature = "browser-use")]
             local_web_search: host_services.local_web_search,
             #[cfg(feature="browser-use")]

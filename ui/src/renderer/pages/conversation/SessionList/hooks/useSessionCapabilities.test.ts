@@ -5,46 +5,55 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 
-import type { IIdmmState } from '@/common/adapter/ipcBridge';
+import type { IAutoWorkState } from '@/common/adapter/ipcBridge';
 import { parseConversationId } from '@/common/types/ids';
 
 import {
-  applyIdmmStateToSessionCapabilities,
+  applyAutoWorkStateToSessionCapabilities,
   capabilityKey,
   getSessionCapabilitySnapshot,
   resetSessionCapabilitiesForTest,
 } from './useSessionCapabilities';
 
-const idmmState = (overrides: Partial<IIdmmState> = {}): IIdmmState => ({
+const autoWorkState = (overrides: Partial<IAutoWorkState> = {}): IAutoWorkState => ({
   kind: 'conversation',
   target_id: parseConversationId('0190f5fe-7c00-7a00-8000-000000000007'),
   enabled: true,
-  run_state: 'armed',
-  interventions_count: 0,
-  sidecar_provider_resolved: true,
+  running: false,
+  run_state: 'idle',
+  completed_count: 0,
   ...overrides,
 });
 
 describe('SessionList capability snapshot', () => {
   const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000007');
 
-  test('applies an enabled IDMM state returned from the control save flow', () => {
+  test('applies an enabled AutoWork state returned from the control save flow', () => {
     resetSessionCapabilitiesForTest();
 
-    applyIdmmStateToSessionCapabilities(idmmState());
+    applyAutoWorkStateToSessionCapabilities(autoWorkState());
 
     const snapshot = getSessionCapabilitySnapshot();
-    expect(snapshot.idmm.get(capabilityKey('conversation', conversationId))).toBe('armed');
+    expect(snapshot.autowork.get(capabilityKey('conversation', conversationId))).toBe('idle');
   });
 
-  test('removes IDMM state when the control save flow disables it', () => {
+  test('removes AutoWork state when the control save flow disables it', () => {
     resetSessionCapabilitiesForTest();
-    applyIdmmStateToSessionCapabilities(idmmState());
+    applyAutoWorkStateToSessionCapabilities(autoWorkState());
 
-    applyIdmmStateToSessionCapabilities(idmmState({ enabled: false, run_state: 'off' }));
+    applyAutoWorkStateToSessionCapabilities(autoWorkState({ enabled: false, run_state: 'off' }));
 
     const snapshot = getSessionCapabilitySnapshot();
-    expect(snapshot.idmm.has(capabilityKey('conversation', conversationId))).toBe(false);
+    expect(snapshot.autowork.has(capabilityKey('conversation', conversationId))).toBe(false);
+  });
+
+  test('does not subscribe to the retired independent decision layer', () => {
+    const hook = readFileSync(new URL('./useSessionCapabilities.ts', import.meta.url), 'utf8');
+    const projection = readFileSync(new URL('../utils/sessionCapabilityItems.tsx', import.meta.url), 'utf8');
+
+    expect(hook.includes('ipcBridge.idmm')).toBe(false);
+    expect(projection.includes('idmmState')).toBe(false);
   });
 });

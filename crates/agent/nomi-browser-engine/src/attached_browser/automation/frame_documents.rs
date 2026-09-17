@@ -273,7 +273,7 @@ impl Documents {
                 continue;
             }
             let mut params = CreateIsolatedWorldParams::new(plan.frame.clone());
-            params.world_name = Some("nomifun-system-browser-semantic".into());
+            params.world_name = Some("nomifun-attached-browser-semantic".into());
             params.grant_univeral_access = Some(false);
             let context = conn
                 .send(&plan.session, &params)
@@ -288,10 +288,10 @@ impl Documents {
                 loader: plan.loader,
                 object: String::new(),
                 context,
-                group: format!("nomi-system-frame-{}", nomifun_common::generate_id()),
+                group: format!("nomi-attached-frame-{}", nomifun_common::generate_id()),
                 parent: Some(parent),
                 owner: None,
-                owner_group: format!("nomi-system-frame-owner-{}", nomifun_common::generate_id()),
+                owner_group: format!("nomi-attached-frame-owner-{}", nomifun_common::generate_id()),
             });
             let world = &mut self.worlds[index];
             let mut params = EvaluateParams::new(format!(

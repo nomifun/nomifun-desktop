@@ -3,8 +3,8 @@
 //! Provider mechanics, citation rendering, Knowledge retrieval internals,
 //! attachment ingestion, memory maintenance, and resource discovery are host
 //! services. Agent authoring receives only the four product Modules and their
-//! exact Actions. The temporary system-browser contribution remains isolated
-//! here until UARC-040 moves Browser into its dedicated Module.
+//! exact Actions. Browser is owned independently by the Wave 2 `browser`
+//! Module and never appears as a parallel Wave 1 capability.
 
 #![forbid(unsafe_code)]
 
@@ -44,19 +44,16 @@ pub const WEB_RESEARCH_PACKAGE_ID: &str = "nomifun.web-research";
 pub const KNOWLEDGE_PACKAGE_ID: &str = "nomifun.knowledge";
 pub const PROJECT_MEMORY_PACKAGE_ID: &str = "nomifun.project-memory";
 pub const COMPANION_MEMORY_PACKAGE_ID: &str = "nomifun.companion-memory";
-pub const SYSTEM_BROWSER_PACKAGE_ID: &str = "nomifun.system-browser";
 
 pub const WEB_RESEARCH_MOUNT_ID: &str = "domain-web-research";
 pub const KNOWLEDGE_MOUNT_ID: &str = "domain-knowledge";
 pub const PROJECT_MEMORY_MOUNT_ID: &str = "domain-project-memory";
 pub const COMPANION_MEMORY_MOUNT_ID: &str = "domain-companion-memory";
-pub const SYSTEM_BROWSER_MOUNT_ID: &str = "domain-system-browser";
 
 pub const WEB_RESEARCH_MODULE_ID: &str = "web.research";
 pub const KNOWLEDGE_MODULE_ID: &str = "knowledge";
 pub const PROJECT_MEMORY_MODULE_ID: &str = "project.memory";
 pub const COMPANION_MEMORY_MODULE_ID: &str = "companion.memory";
-pub const NOMI_SYSTEM_BROWSER: &str = nomifun_browser_platform::system_browser::TOOL_NAME;
 
 pub const WEB_RESEARCH_SEARCH_ACTION_ID: &str = "web.research/search";
 pub const WEB_RESEARCH_FETCH_ACTION_ID: &str = "web.research/fetch";
@@ -68,7 +65,6 @@ pub const PROJECT_MEMORY_READ_ACTION_ID: &str = "project.memory/read";
 pub const PROJECT_MEMORY_WRITE_ACTION_ID: &str = "project.memory/write";
 pub const COMPANION_MEMORY_RECALL_ACTION_ID: &str = "companion.memory/recall";
 pub const COMPANION_MEMORY_WRITE_ACTION_ID: &str = "companion.memory/write";
-pub const NOMI_SYSTEM_BROWSER_ACTION_ID: &str = "nomi_system_browser.invoke";
 
 pub const WEB_RESEARCH_ACTION_IDS: &[&str] = &[
     WEB_RESEARCH_SEARCH_ACTION_ID,
@@ -89,24 +85,22 @@ pub const COMPANION_MEMORY_ACTION_IDS: &[&str] = &[
     COMPANION_MEMORY_WRITE_ACTION_ID,
 ];
 
-pub const PACKAGE_IDS: [&str; 5] = [
+pub const PACKAGE_IDS: [&str; 4] = [
     WEB_RESEARCH_PACKAGE_ID,
     KNOWLEDGE_PACKAGE_ID,
     PROJECT_MEMORY_PACKAGE_ID,
     COMPANION_MEMORY_PACKAGE_ID,
-    SYSTEM_BROWSER_PACKAGE_ID,
 ];
-pub const TARGET_PACKAGE_IDS: [&str; 5] = PACKAGE_IDS;
-pub const CAPABILITY_IDS: [&str; 5] = [
+pub const TARGET_PACKAGE_IDS: [&str; 4] = PACKAGE_IDS;
+pub const CAPABILITY_IDS: [&str; 4] = [
     WEB_RESEARCH_MODULE_ID,
     KNOWLEDGE_MODULE_ID,
     PROJECT_MEMORY_MODULE_ID,
     COMPANION_MEMORY_MODULE_ID,
-    NOMI_SYSTEM_BROWSER,
 ];
-pub const TARGET_CAPABILITY_IDS: [&str; 5] = CAPABILITY_IDS;
-pub const ALL_CAPABILITY_IDS: [&str; 5] = CAPABILITY_IDS;
-pub const TARGET_ACTION_IDS: [&str; 11] = [
+pub const TARGET_CAPABILITY_IDS: [&str; 4] = CAPABILITY_IDS;
+pub const ALL_CAPABILITY_IDS: [&str; 4] = CAPABILITY_IDS;
+pub const TARGET_ACTION_IDS: [&str; 10] = [
     WEB_RESEARCH_SEARCH_ACTION_ID,
     WEB_RESEARCH_FETCH_ACTION_ID,
     KNOWLEDGE_SEARCH_ACTION_ID,
@@ -117,7 +111,6 @@ pub const TARGET_ACTION_IDS: [&str; 11] = [
     PROJECT_MEMORY_WRITE_ACTION_ID,
     COMPANION_MEMORY_RECALL_ACTION_ID,
     COMPANION_MEMORY_WRITE_ACTION_ID,
-    NOMI_SYSTEM_BROWSER_ACTION_ID,
 ];
 
 pub const AGENT_SURFACES: &[&str] = &["desktop", "headless"];
@@ -255,14 +248,7 @@ const COMPANION_MEMORY_ACTIONS: [ActionSpec; 2] = [
     },
 ];
 
-const SYSTEM_BROWSER_ACTIONS: [ActionSpec; 1] = [ActionSpec {
-    id: NOMI_SYSTEM_BROWSER_ACTION_ID,
-    effect_class: EffectClass::ExternalTransmit,
-    resource_kinds: &[],
-    requirements: &[],
-}];
-
-const PACKAGES: [PackageSpec; 5] = [
+const PACKAGES: [PackageSpec; 4] = [
     PackageSpec {
         id: WEB_RESEARCH_PACKAGE_ID,
         mount_id: WEB_RESEARCH_MOUNT_ID,
@@ -294,14 +280,6 @@ const PACKAGES: [PackageSpec; 5] = [
         display_name: "Companion Memory",
         description: "Recall and write memory for the selected Companion.",
         actions: &COMPANION_MEMORY_ACTIONS,
-    },
-    PackageSpec {
-        id: SYSTEM_BROWSER_PACKAGE_ID,
-        mount_id: SYSTEM_BROWSER_MOUNT_ID,
-        module_id: NOMI_SYSTEM_BROWSER,
-        display_name: "Nomi System Browser",
-        description: "Temporary Browser contribution retained only until UARC-040.",
-        actions: &SYSTEM_BROWSER_ACTIONS,
     },
 ];
 
@@ -696,16 +674,7 @@ fn capability_manifest(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let supported_platforms = if spec.module_id == NOMI_SYSTEM_BROWSER {
-        vec![PlatformConstraint::Targets {
-            host_targets: BTreeSet::from([nomifun_agent_contracts::RuntimeTarget::from(
-                "x86_64-pc-windows-msvc",
-            )]),
-            host_surfaces: BTreeSet::from(["desktop".to_owned()]),
-        }]
-    } else {
-        vec![PlatformConstraint::Any]
-    };
+    let supported_platforms = vec![PlatformConstraint::Any];
     Ok(CapabilityManifest {
         id: CapabilityId::from(spec.module_id),
         contribution_id: nomifun_agent_contracts::ContributionId::from(format!(
@@ -814,12 +783,6 @@ pub fn operation_from_action(
     action: &ActionId,
     input: StrictJsonValue,
 ) -> Result<Wave1CapabilityOperation, KernelError> {
-    if action.as_ref() == NOMI_SYSTEM_BROWSER_ACTION_ID {
-        return Err(KernelError::capability_execution_failed(
-            CAPABILITY_UNAVAILABLE_CODE,
-            "System Browser actions require the owning Session Browser turn",
-        ));
-    }
     validate_action_input(action.as_ref(), &input.0)?;
     let required = |field: &str| {
         input
@@ -1138,21 +1101,12 @@ where
 
 pub fn check_platform_availability(
     capability_id: &CapabilityId,
-    host_target: &nomifun_agent_contracts::RuntimeTarget,
+    _host_target: &nomifun_agent_contracts::RuntimeTarget,
     host_surface: &str,
 ) -> Result<(), KernelError> {
     if find_module(capability_id.as_ref()).is_none() {
         return Err(KernelError::CapabilityExecution {
             reason: format!("unknown Wave 1 Module {}", capability_id.as_ref()),
-        });
-    }
-    if capability_id.as_ref() == NOMI_SYSTEM_BROWSER
-        && host_target.as_ref() != "x86_64-pc-windows-msvc"
-    {
-        return Err(KernelError::CapabilityUnavailableOnPlatform {
-            capability_id: capability_id.clone(),
-            target: host_target.as_ref().to_owned(),
-            surface: host_surface.to_owned(),
         });
     }
     if capability_surfaces(capability_id.as_ref()).contains(&host_surface) {
@@ -1173,9 +1127,8 @@ pub fn is_available_on_platform(
     if find_module(capability_id).is_none() {
         return Err(format!("unknown Wave 1 Module {capability_id}"));
     }
-    Ok(capability_surfaces(capability_id).contains(&host_surface)
-        && (capability_id != NOMI_SYSTEM_BROWSER
-            || host_target == "x86_64-pc-windows-msvc"))
+    let _ = host_target;
+    Ok(capability_surfaces(capability_id).contains(&host_surface))
 }
 
 pub fn unavailable_on_platform_code() -> CanonicalErrorCode {
@@ -1303,7 +1256,6 @@ fn validate_resource_bindings<'a>(
 
 pub fn action_input_schema(action_id: &str) -> Result<Value, String> {
     let schema = match action_id {
-        NOMI_SYSTEM_BROWSER_ACTION_ID => nomifun_browser_platform::system_browser::input_schema(),
         WEB_RESEARCH_SEARCH_ACTION_ID | KNOWLEDGE_SEARCH_ACTION_ID => json!({
             "type": "object", "additionalProperties": false,
             "properties": {
@@ -1538,11 +1490,8 @@ fn validate_optional_integer(
 }
 
 fn capability_surfaces(capability_id: &str) -> &'static [&'static str] {
-    if capability_id == NOMI_SYSTEM_BROWSER {
-        &["desktop"]
-    } else {
-        AGENT_SURFACES
-    }
+    let _ = capability_id;
+    AGENT_SURFACES
 }
 
 pub fn supported_consumers(capability_id: &str) -> BTreeSet<CapabilityConsumer> {
@@ -1615,8 +1564,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn target_inventory_contains_only_modules_and_browser_handoff() {
-        assert_eq!(capability_ids().len(), 5);
+    fn target_inventory_contains_only_wave1_modules() {
+        assert_eq!(capability_ids().len(), 4);
         for retired in [
             "web.search",
             "web.fetch",

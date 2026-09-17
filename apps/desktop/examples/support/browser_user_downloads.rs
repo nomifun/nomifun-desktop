@@ -1,5 +1,5 @@
 //! Same-WebView native attachment response, Save dialog and terminal cleanup.
-use nomifun_browser_platform::{runtime::*, workspace::BrowserWorkspaceService};
+use nomifun_browser_platform::{runtime::*, workspace::BrowserResourceService};
 use std::sync::Arc;
 use tauri::Manager;
 
@@ -12,15 +12,16 @@ pub(super) async fn verify(
     check: Check,
 ) -> Result<serde_json::Value, String> {
     let service =
-        BrowserWorkspaceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
-    let key = BrowserWorkspaceKey {
-        user_id: "download-fixture".into(),
-        conversation_id: "download-fixture".into(),
-    };
+        BrowserResourceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
+    let authority = super::browser_resource_fixture::authority(
+        "download-fixture",
+        "download-fixture",
+        "native-download-fixture",
+    );
+    let key = authority.key();
     let workspace = service
         .ensure(
-            key.clone(),
-            "native-download-fixture".into(),
+            authority,
             BrowserProfile::Ephemeral,
         )
         .await
