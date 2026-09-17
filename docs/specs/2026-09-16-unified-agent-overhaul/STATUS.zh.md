@@ -562,3 +562,31 @@
 - Not run: Wave 5 gates wait for the three bounded deliveries and Integration merge.
 - Remaining/blocker: none for the Windows/shared lanes. External Mac hardware remains a later platform prerequisite.
 - Next ready tasks: none until `UARC-041/042/050` integrate; then `UARC-051` is the next serial integration task.
+
+### 2026-09-18 UARC-050 exact Module/Action catalog transport granted
+
+- Barrier/source: Wave 5 start `90ba8f95f`; task dependencies and lane topology are unchanged.
+- Owner/write set: Integration adds only `nomifun-api-types/src/agent_platform.rs` and the matching renderer contract
+  type to `UARC-050`; the Feature worker still owns its original UI/catalog files and may not edit other shared inputs.
+- Changed: the already-defined strict `CapabilityModuleCatalogItemDto` will be carried as `AgentCatalogResponse.modules`
+  from canonical manifests instead of duplicating first-party Action IDs in the renderer.
+- Deleted: the proposed renderer-local Module/Action registry is rejected before implementation.
+- Retained + reason: server preview/save remains the sole compile authority; plugin/unknown exact grants remain opaque
+  and cannot be widened by the UI.
+- Tests: pending API serialization, Control Plane catalog and focused Workbench fixtures in the Wave 5 gate.
+- Windows/macOS: shared transport only; no native verification claim changes.
+- Remaining/blocker: transport gap resolved by this bounded grant; no product decision or external input is required.
+
+### 2026-09-18 UARC-042 Robot composition/test cutover granted
+
+- Barrier/source: Wave 5 start `90ba8f95f`; task dependencies and lane topology are unchanged.
+- Owner/write set: Integration adds only `nomifun-app/src/robot_wiring.rs` and its test module to `UARC-042`; final
+  App composition cleanup remains Integration-owned after the Feature worker delivers the Robot/Computer owners.
+- Changed: the 10 preassigned App failures are now explicitly writable so their legacy Conversation + generic
+  device-MCP harness can be physically replaced by canonical Session + exact Robot Action acceptance.
+- Deleted: no `mcp_connect`/`mcp_tool_proxy` or capability-string compatibility path may be retained to satisfy tests.
+- Retained + reason: real Robot registry/link/physical protocol doubles remain valid evidence behind exact Actions.
+- Tests: pending focused Robot owner tests and the 10-case App transition suite in the unified Wave gate.
+- Windows: implementation scope expanded only to the already-owned App Robot composition seam.
+- macOS: no native claim; `UARC-062` remains the Mac TCC/lifecycle owner.
+- Remaining/blocker: write-set gap resolved; no user decision is required.
