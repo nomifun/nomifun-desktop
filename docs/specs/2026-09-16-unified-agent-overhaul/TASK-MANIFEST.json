@@ -355,7 +355,7 @@
       "status": "active",
       "depends_on": ["UARC-014"],
       "lane": "feature-devices-windows",
-      "write_set": ["crates/agent/nomi-computer/**", "crates/backend/nomifun-robot/**", "crates/backend/nomifun-app/src/router/*robot*", "crates/backend/nomifun-app/src/robot_wiring.rs", "crates/backend/nomifun-app/src/robot_wiring/**"],
+      "write_set": ["crates/agent/nomi-computer/**", "crates/backend/nomifun-robot/**", "crates/backend/nomifun-agent-domain-wave2/**", "crates/backend/nomifun-agent-domain-wave4/**", "crates/backend/nomifun-app/src/router/*robot*", "crates/backend/nomifun-app/src/robot_wiring.rs", "crates/backend/nomifun-app/src/robot_wiring/**", "crates/backend/nomifun-app/src/router/agent_role_host.rs", "crates/backend/nomifun-app/src/router/engine_kernel_session.rs", "crates/backend/nomifun-app/src/router/nomi_core_builtins.rs", "crates/backend/nomifun-app/src/router/nomi_core_resource_bindings.rs", "crates/backend/nomifun-app/src/router/nomi_core_session.rs", "crates/backend/nomifun-app/src/router/nomi_core_wave2.rs", "crates/backend/nomifun-app/src/router/nomi_core_wave4.rs"],
       "delete_set": ["observe/input/launch fragmented capability identities", "robot link/audio authoring capabilities"],
       "retained_set": ["Computer/Robot native engines and physical-action owners"],
       "ui_surface": ["Agent capability configuration for Computer/Robot"],

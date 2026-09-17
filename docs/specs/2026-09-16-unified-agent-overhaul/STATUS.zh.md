@@ -590,3 +590,21 @@
 - Windows: implementation scope expanded only to the already-owned App Robot composition seam.
 - macOS: no native claim; `UARC-062` remains the Mac TCC/lifecycle owner.
 - Remaining/blocker: write-set gap resolved; no user decision is required.
+
+### 2026-09-18 UARC-042 canonical owner integration seams granted
+
+- Barrier/source: Wave 5 start `90ba8f95f`; the bounded Robot/Computer owner implementation exposed the exact
+  remaining production call graph before Integration began edits.
+- Owner/write set: Integration adds Domain Wave2/Wave4 manifests and seven exact App Kernel/resource/composition files
+  to `UARC-042`; Feature ownership remains confined to Computer, Robot and `*robot*` route sources.
+- Changed: the unified Runtime can now be wired to one `computer` Module and one `robot` Module with slash Action
+  policies instead of compiling old dotted Capability fragments around the new owners.
+- Deleted: old Robot lifecycle grants (`robot.link`, `robot.audio`) and Computer/Robot fragment dispatch must be removed
+  at these call sites, not hidden behind aliases.
+- Retained + reason: source-integrated Engine plans, hosted-effect receipts, typed resource bindings and the physical
+  Robot/Computer owners remain the single runtime path.
+- Tests: pending Domain Wave2/Wave4 contracts, App Kernel/session boundary and Robot transition gates.
+- Windows: integration implementation authorized; native input/permission evidence remains part of the unified gate.
+- macOS: no native claim; shared manifest changes become `UARC-062` inputs.
+- Remaining/blocker: call-graph write-set gap resolved; `coding_runtime_host.rs` stays untouched because its old
+  Runtime path is physically owned by `UARC-052`, not a compatibility target for this task.
