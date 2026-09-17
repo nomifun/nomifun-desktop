@@ -2,7 +2,7 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-17
-> 当前阶段：Wave 2 / UARC-020 + UARC-021 + UARC-022 active
+> 当前阶段：Wave 2 gate complete / Wave 3 ready
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
@@ -12,8 +12,9 @@
 > UARC-013 实现提交：`5f317024d63c6845d896d379c201254101410d1b`
 > UARC-014 实现提交：`3983deff110f7e22b4eb85b6cc8ce00e9e8c4009`
 > Wave 1 gate 修复提交：`8afc40c7a`
+> Wave 2 实现提交：`efe80298f`
 > 当前主机：Windows
-> Initiative 状态：`active / Wave 2 feature implementation`
+> Initiative 状态：`active / Wave 3 ready`
 
 ## 1. 当前事实
 
@@ -33,7 +34,11 @@
   Domain/UI migration input 分别归 `UARC-020..053`，没有兼容翻译器。
 - canonical `/api/agent-sessions` 已切换 generation 5 Store；旧领域入口等待后续 wave/cutover 删除。
 - Wave 1 的 UARC-010/011/012/013/014 已集成；Windows 静态、UI、Desktop 与 debug native build
-  milestone 已通过，Core workspace 的唯二首失败是 `UARC-022` 的 `skill.hooks` Context factory 迁移。
+  milestone 已通过；当时的 `skill.hooks` Context factory transition 已由 `UARC-022` 闭合。
+- Wave 2 的 UARC-020/021/022 已统一集成：一个自适应 Runtime loop、四个 Workspace Module、exact
+  per-tool MCP/Plugin/Skill contribution、Store effect causation 与 Windows owner/path/process 证据均已闭合。
+- App 的 Wave 2 gate 为 499/499；过滤的 10 个 Robot unified fixture 明确归 `UARC-042`，另 1 个
+  Bootstrap SQLite WAL 字节比较不稳定项保留到 Windows 回归闭合，不构成 UARC authority fallback。
 - 当前没有本轮源码重构的 macOS 编译、原生或打包证据。
 
 ## 2. 已确认产品决定
@@ -65,9 +70,10 @@
 | `UARC-012` | integrated | Integration | verified | n/a | 单一 AgentSession owner、完整生命周期 API 与 exact receipt 已闭合 |
 | `UARC-013` | integrated | Integration | verified | n/a | 单一官方 provider/factory、Driver lifecycle 与 typed host ports 已闭合 |
 | `UARC-014` | integrated | Integration | verified | n/a | Runtime selector 删除、通用 Compiler/projection、136-ID retirement 已闭合 |
-| `UARC-020` | active | Feature Runtime | pending | pending | `codex/uarc-020-runtime`；自适应单 Runtime 与长程 Coding |
-| `UARC-021` | active | Feature Workspace | pending | pending | `codex/uarc-021-workspace`；Workspace/VCS/Process/Artifact modules |
-| `UARC-022` | active | Feature Extensions | pending | pending | `codex/uarc-022-extensions`；Skill/MCP/Plugin/Connector modules |
+| `UARC-020` | integrated | Integration | verified | pending | 自适应单 Runtime、长程 Coding、exact restart proof |
+| `UARC-021` | integrated | Integration | verified | pending | 四个 Workspace Module、owner effects、Artifact/VCS hardening |
+| `UARC-022` | integrated | Integration | verified | pending | Skill locks、per-tool MCP、Plugin contributions；无 broad Runtime/proxy |
+| `UARC-030/031/032` | ready | unassigned | pending | pending | Wave 3 三条互斥 Feature lane 已释放 |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -117,6 +123,12 @@
 | UARC-013 AI Agent/Engine Core | 552 + 14 passed | one-active-turn、cancel/cleanup、quarantine 与 typed ports |
 | UARC-013 App composition | 2 + 6 passed | one provider/factory、foreign-family rejection 与 state wiring |
 | UARC-013 App compile/boundary | lib/bin/tests passed，3,033 files | no registration API; compatibility 28→26 |
+| UARC-020 Coding/Engine/AI Runtime | 40 + 15 + 548 passed；新增 focused 1 | simple-turn、multi-compaction、restart、cancel/steer |
+| UARC-021 Domain/Session/File/App host | 17 + 28 + 378 + 29 passed | exact Action resources、effect causation、path/VCS/process owners |
+| UARC-022 Nomi/Plugin consumers/Kernel/Control Plane/Wave4 | 638 + 41 + 61 + 49 + 20 passed | frozen Skill、per-tool MCP、Plugin hooks、no authority expansion |
+| Wave 2 App gate | 499 passed / 0 failed / 11 filtered | 10 UARC-042 Robot fixtures + 1 Bootstrap WAL byte-test anomaly |
+| Wave 2 App feature compile | default + `browser-use,computer-use` passed | Windows desktop feature composition compiles |
+| Wave 2 contract/boundary | generator check + 108 contracts + scanner self-test passed | 3,035 files；baseline anomaly 1；Mac gaps 3 |
 | Windows UARC full gate | not run | 否 |
 | macOS UARC shared compile | not run | 否 |
 | macOS native Browser/Computer/Process | not run | 否 |
@@ -136,21 +148,22 @@
 
 - UARC 实施无产品决定 blocker。
 - macOS 任务需要可用 Mac 主机；在主机可用前状态保持 `pending`，不能标完成。
-- Wave 1 barrier 已收口；`UARC-020/021/022` 写集互斥并已释放，Integration 仍独占共享合同、生成物、
-  状态台账与合并。
-- `nomi-process-runtime --lib` 默认并行样本存在 ConPTY serial-group 挂起；已归 `UARC-021`，不阻塞
-  Wave 1，但最终 gate 前必须闭合。
-- UARC-014 后 App 全量 transition probe 为 444/497：27 项旧 Workspace/Process/Git payload 归
-  `UARC-021`，26 项 Skill/MCP/Plugin/Robot fixture 归 `UARC-022`；不恢复 selector、kind authority 或
-  broad proxy 来伪造全绿。
+- Wave 2 barrier 已收口；`UARC-030/031/032` 可以从同一 barrier 启动，Integration 继续独占共享合同、
+  根配置、生成物、状态台账和最终合并。
+- App 当前只保留 10 个 `UARC-042` Robot device-MCP transition fixture；旧 proxy 已物理删除，后续必须
+  通过 materialized Robot Actions 修复。
+- Bootstrap 的 `v3_validation_failures_preserve_data_with_or_without_prior_retirement` 在 Windows 对 SQLite
+  WAL checkpoint 后的主文件做字节级比较，单测可通过也可复现失败；不涉及 UARC 数据丢失，须在
+  `UARC-060/064` Windows gate 前改为稳定的持久状态证据并全量复跑。
 - canonical `/api/agent-sessions` 已只写 generation 5；Cron/Channel/AutoWork/Companion/IDMM/
   AgentExecution/Remote 的旧 Conversation writers/readers 仍由 `UARC-033/034/051/054` 迁移删除。
   Fresh-v4 root coordinator aliases 仅为 `UARC-054` 保留。
 
 ## 8. Next ready tasks
 
-1. `UARC-020/021/022` 已从同一 Wave 1 barrier 并行执行；Integration 等待有界交付。
-2. Wave 2 合并前没有其他 ready task；共享合同变更只由 Integration 处理。
+1. `UARC-030`：Web、Knowledge 与 Memory Module。
+2. `UARC-031`：Channel、Companion 与 Customer Service Module。
+3. `UARC-032`：Creation、Workshop、Office、Attachments 与 Model Role Module。
 
 ## 9. 状态更新模板
 
@@ -393,3 +406,30 @@
 - Not run: Wave 2 gates wait for each bounded delivery and Integration merge.
 - Remaining/blocker: no product blocker. External Mac host remains a later platform prerequisite.
 - Next ready tasks: none until the three active lanes are integrated and the Wave 2 gate completes.
+
+### 2026-09-17 UARC-020/021/022 integrated and Wave 2 gate complete
+
+- Barrier/source: Wave 1 closeout `4b65cf019`; unified implementation `efe80298f`.
+- Owner/write set: Integration merged the three bounded Feature lanes, then alone updated shared contracts,
+  generated artifacts, Cargo lock and this ledger. Final dirty-path audit covered all 86 implementation paths.
+- Changed: one adaptive Runtime loop and exact restart proof; four Workspace Modules with 19 Actions; frozen
+  Action-derived resources; exact Store effect causation; hardened Artifact/Git owners; frozen Skill/Plugin consumers;
+  per-tool MCP materialization; contribution-driven Context/Event/middleware; host-owned Turn propagation.
+- Deleted: Coding process wrapper, `CapabilitiesActivated` restore path, generic MCP proxy/connect/resource tools,
+  `mcp_capability_tools.rs`, unactivated `lazy_mcp.rs`, AI-factory MCP repository/OAuth injection and legacy device
+  MCP Runtime entry. Retired Workspace IDs no longer derive canonical resource authority.
+- Retained + reason: compaction/requirements/completion/history/continuation; physical Domain owners; frozen Skill
+  locks; exact MCP resources/per-tool locks; fixed process-owned Gateway `nomi_delegate`; these are active target owners,
+  not compatibility translators.
+- Tests: Coding 40; Engine Core 15; Domain Wave2 17; Session 28; File all targets 378; JS Adapter 25;
+  Nomi Agent all targets (lib 638); AI Agent lib 548 plus new focused 1; Plugin consumers 41; Factory integration 5;
+  Kernel 61; Control Plane 49; Domain Wave4 20; App Wave2 host 29; App resource bindings 10; App unified gate
+  499/499. Default and Browser/Computer feature checks, contract generator, Contracts 108, UARC boundary self-test
+  and staged whitespace validation passed.
+- Windows: verified for Wave 2 implementation and scoped gate.
+- macOS: pending; no Mac compile/native/CEF/TCC/package evidence is claimed.
+- Not run: Windows installer/native release package and UI visual gate because Wave 2 changed no renderer or packaging
+  surface. Ten Robot transition tests remain assigned to `UARC-042`; the unrelated Bootstrap WAL byte-test anomaly is
+  assigned to final Windows regression.
+- Remaining/blocker: none for Wave 2. External Mac host remains required later.
+- Next ready tasks: `UARC-030`, `UARC-031`, `UARC-032`, at most three Feature workers from the Wave 2 barrier.
