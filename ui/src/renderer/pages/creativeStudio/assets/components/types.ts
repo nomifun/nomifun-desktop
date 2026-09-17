@@ -72,7 +72,6 @@ export interface CreativeAssetLibraryLabels {
   listView: string;
   upload: string;
   createText: string;
-  renameCollection: string;
   search: string;
   pagination: string;
   previousPage: string;
@@ -150,7 +149,6 @@ export const createCreativeAssetLibraryLabels = (t: TFunction): CreativeAssetLib
   listView: t('creativeStudio.assets.view.list', { defaultValue: '列表视图' }),
   upload: t('creativeStudio.assets.library.upload', { defaultValue: '上传素材' }),
   createText: t('creativeStudio.assets.library.createText', { defaultValue: '新建文本' }),
-  renameCollection: t('creativeStudio.assets.library.renameCollection', { defaultValue: '重命名合集' }),
   search: t('creativeStudio.assets.library.search', { defaultValue: '搜索' }),
   pagination: t('creativeStudio.assets.library.pagination', { defaultValue: '素材分页' }),
   previousPage: t('creativeStudio.assets.library.previousPage', { defaultValue: '上一页' }),
