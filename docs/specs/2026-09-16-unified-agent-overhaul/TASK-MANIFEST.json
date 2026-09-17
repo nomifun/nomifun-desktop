@@ -237,10 +237,10 @@
       "completion_gate": "Installed extensions publish modules/actions and never register Runtime or broad proxy authority"
     },
     {
-      "id": "UARC-030",
-      "title": "Web, knowledge and memory modules",
-      "wave": "W3",
-      "status": "ready",
+    "id": "UARC-030",
+    "title": "Web, knowledge and memory modules",
+    "wave": "W3",
+    "status": "active",
       "depends_on": ["UARC-014"],
       "lane": "feature-context-data",
       "write_set": ["crates/backend/nomifun-knowledge/**", "crates/backend/nomifun-ai-agent/src/web_*.rs", "crates/backend/nomifun-ai-agent/src/knowledge_*.rs", "crates/backend/nomifun-app/src/router/*knowledge*", "crates/backend/nomifun-app/src/router/*memory*"],
@@ -253,10 +253,10 @@
       "completion_gate": "Product modules hide provider mechanics while preserving sensitive-data authorization"
     },
     {
-      "id": "UARC-031",
-      "title": "Channel, companion and customer-service modules",
-      "wave": "W3",
-      "status": "ready",
+    "id": "UARC-031",
+    "title": "Channel, companion and customer-service modules",
+    "wave": "W3",
+    "status": "active",
       "depends_on": ["UARC-014"],
       "lane": "feature-conversation-domains",
       "write_set": ["crates/backend/nomifun-channel/**", "crates/backend/nomifun-companion/**", "crates/backend/nomifun-customer-service/**", "crates/backend/nomifun-app/src/router/agent_wave4_host.rs"],
@@ -269,10 +269,10 @@
       "completion_gate": "Scene bindings derive context/middleware; Agent grants only real actions"
     },
     {
-      "id": "UARC-032",
-      "title": "Creation, workshop, office, attachments and model-role modules",
-      "wave": "W3",
-      "status": "ready",
+    "id": "UARC-032",
+    "title": "Creation, workshop, office, attachments and model-role modules",
+    "wave": "W3",
+    "status": "active",
       "depends_on": ["UARC-014"],
       "lane": "feature-creation",
       "write_set": ["crates/backend/nomifun-creation/**", "crates/backend/nomifun-agent-domain-wave3/**", "crates/backend/nomifun-office/**", "crates/backend/nomifun-app/src/router/agent_wave3_*.rs", "ui/src/renderer/pages/creativeStudio/**"],
