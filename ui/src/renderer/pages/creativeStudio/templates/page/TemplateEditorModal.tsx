@@ -447,9 +447,7 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
       autoFocus={false}
       unmountOnExit
       confirmLoading={saving}
-      getPopupContainer={() =>
-        document.getElementById('resource-page-portal-root') ?? document.body
-      }
+      getPopupContainer={() => document.body}
       onCancel={onCancel}
       onOk={onSave}
     >

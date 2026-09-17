@@ -34,7 +34,7 @@ export default function ImageLightbox({ src, title, onClose, onDownload }: {
     catch (error) { Message.error(error instanceof Error ? error.message : String(error)); }
     finally { setDownloading(false); }
   };
-  return <Modal visible title='查看图片' className={styles.modal} wrapClassName={styles.wrap} maskStyle={{ background: 'rgba(0, 0, 0, .88)' }} footer={null} closable={false} focusLock unmountOnExit onCancel={onClose}>
+  return <Modal visible title='查看图片' className={`nomifun-modal-fullscreen ${styles.modal}`} wrapClassName={styles.wrap} maskStyle={{ background: 'rgba(0, 0, 0, .88)' }} footer={null} closable={false} focusLock unmountOnExit onCancel={onClose}>
     <div className={styles.viewport} ref={setViewport} onClick={event => { if (event.target === event.currentTarget) onClose(); }}>
       {!failed && <img className={styles.image} src={src} alt={title} draggable={false} style={{ width: loaded ? natural.width * zoom : undefined, height: loaded ? natural.height * zoom : undefined, visibility: loaded ? 'visible' : 'hidden' }} onLoad={event => {
         const image = event.currentTarget;
