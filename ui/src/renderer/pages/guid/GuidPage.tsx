@@ -8,7 +8,7 @@ import { ipcBridge } from '@/common';
 import Composer, { ComposerSendButton } from '@/renderer/components/chat/Composer';
 import ComposerAttachments from '@/renderer/components/chat/ComposerAttachments';
 import FileAttachButton from '@/renderer/components/media/FileAttachButton';
-import { ComposerSceneHeader, SceneDiscoveryHint } from '@/renderer/creation/ComposerSceneSelector';
+import { ComposerSceneHeader } from '@/renderer/creation/ComposerSceneSelector';
 import GuidWorkspaceFootnote from './components/GuidWorkspaceFootnote';
 import { Earth, Robot } from '@icon-park/react';
 import { isDesktopShell } from '@/renderer/utils/platform';
@@ -591,98 +591,97 @@ const GuidPage: React.FC = () => {
               />
             )}
 
-            <Composer
-              sideTools={
-                !isCompanionAgent && <SessionCapabilityPicker
-                  catalog={displayedCapabilityCatalog}
-                  draft={effectiveCapabilityDraft}
-                  onChange={handleCapabilityDraftChange}
-                  loading={capabilityCatalog.loading}
-                  loadFailed={Boolean(capabilityCatalog.error)}
-                  onRetry={capabilityCatalog.retry}
-                  applyMode='create'
-                  disabled={guidInput.loading}
-                  lockedMcpServerIds={lockedMcpServerIds}
-                >
-                  <CollaborationComposerControl
-                    value={collaboration.activeCollaborators}
-                    onChange={collaboration.setCollaborators}
-                    mainModel={collaboration.mainModel}
-                    selectedTemplate={collaboration.selectedTemplate}
-                    workDir={guidInput.dir}
-                    onTemplateApply={collaboration.setTemplate}
-                    onTemplateClear={() => collaboration.setTemplate(null)}
-                    policy={collaboration.policy}
-                    onPolicyChange={collaboration.setPolicy}
+            <div className={styles.guidComposerGroup}>
+              {workspaceEnabled && <GuidWorkspaceFootnote workspaceDir={guidInput.dir} onSelectWorkspace={guidInput.setDir} onClearWorkspace={() => guidInput.setDir('')} />}
+              <Composer
+                sideTools={
+                  !isCompanionAgent && <SessionCapabilityPicker
+                    catalog={displayedCapabilityCatalog}
+                    draft={effectiveCapabilityDraft}
+                    onChange={handleCapabilityDraftChange}
+                    loading={capabilityCatalog.loading}
+                    loadFailed={Boolean(capabilityCatalog.error)}
+                    onRetry={capabilityCatalog.retry}
+                    applyMode='create'
+                    disabled={guidInput.loading}
+                    lockedMcpServerIds={lockedMcpServerIds}
+                  >
+                    <CollaborationComposerControl
+                      value={collaboration.activeCollaborators}
+                      onChange={collaboration.setCollaborators}
+                      mainModel={collaboration.mainModel}
+                      selectedTemplate={collaboration.selectedTemplate}
+                      workDir={guidInput.dir}
+                      onTemplateApply={collaboration.setTemplate}
+                      onTemplateClear={() => collaboration.setTemplate(null)}
+                      policy={collaboration.policy}
+                      onPolicyChange={collaboration.setPolicy}
+                    />
+                  </SessionCapabilityPicker>
+                }
+                isFileDragging={guidInput.isFileDragging}
+                dragHandlers={guidInput.dragHandlers}
+                overlayOpen={mention.mentionOpen}
+                header={<ComposerSceneHeader agent={
+                  <GuidAgentSelector
+                    presets={agentSelection.presets}
+                    draftPresets={agentSelection.draftPresets}
+                    officialTemplates={agentSelection.officialTemplates}
+                    selection={agentSelection.selection}
+                    isLoading={agentSelection.isLoading}
+                    loadError={agentSelection.loadError}
+                    onRetry={agentSelection.refreshPresets}
+                    onSelectPreset={(presetId) =>
+                      handleSelectAgent({ kind: 'preset', presetId })
+                    }
+                    onSelectTemplate={(templateKey) =>
+                      handleSelectAgent({ kind: 'template', templateKey })
+                    }
                   />
-                </SessionCapabilityPicker>
-              }
-              isFileDragging={guidInput.isFileDragging}
-              dragHandlers={guidInput.dragHandlers}
-              overlayOpen={mention.mentionOpen}
-              header={<ComposerSceneHeader agent={
-                <GuidAgentSelector
-                  presets={agentSelection.presets}
-                  draftPresets={agentSelection.draftPresets}
-                  officialTemplates={agentSelection.officialTemplates}
-                  selection={agentSelection.selection}
-                  isLoading={agentSelection.isLoading}
-                  loadError={agentSelection.loadError}
-                  onRetry={agentSelection.refreshPresets}
-                  onSelectPreset={(presetId) =>
-                    handleSelectAgent({ kind: 'preset', presetId })
-                  }
-                  onSelectTemplate={(templateKey) =>
-                    handleSelectAgent({ kind: 'template', templateKey })
-                  }
-                />
-              } />}
-              beforeInput={<MentionSelectorBadge
-                visible={mention.mentionSelectorVisible}
-                open={mention.mentionSelectorOpen}
-                onOpenChange={mention.setMentionSelectorOpen}
-                agentLabel={mention.selectedAgentLabel}
-                mentionMenu={mentionDropdownNode}
-                onResetQuery={() => mention.setMentionQuery(null)}
-              />}
-              overlays={mention.mentionOpen && <div className='absolute left-12px right-12px bottom-[calc(100%+8px)] z-70'>{mentionDropdownNode}</div>}
-              inputProps={{
-                value: guidInput.input,
-                onChange: handleInputChange,
-                onKeyDown: handleInputKeyDown,
-                onPaste: guidInput.onPaste,
-                onFocus: guidInput.handleTextareaFocus,
-                placeholder: creation.draft.mode ? '描述你想创作的内容，可添加参考素材…' : normalPlaceholder,
-                'data-testid': 'guid-input',
-              }}
-              attachments={<ComposerAttachments files={guidInput.files} onRemoveFile={guidInput.handleRemoveFile} />}
-              tools={<div className='inline-flex items-center gap-6px'>
-                {isDesktopShell() && !creation.draft.mode && <Button type='text' size='small'
-                  disabled={guidInput.loading || creation.loading || send.isBrowserButtonDisabled}
-                  onClick={send.openBrowserHandler} icon={<Earth size={16} />} aria-label={t('browserWorkspace.title')}>
-                  {t('browserWorkspace.title')}
-                </Button>}
-                <FileAttachButton openFileSelector={openFileSelector} onLocalFilesAdded={guidInput.handleFilesPasted} showLoadedCapabilities={false} />
-              </div>}
-              creationTools={<CreationControls prompt={guidInput.input} onPromptChange={guidInput.setInput} files={guidInput.files} />}
-              rightTools={<div className='sendbox-responsive-config-group flex flex-1 items-center justify-end gap-2 min-w-0' data-composer-group>{modelSelectorNode}</div>}
-              actions={<>
-                <SpeechInputButton disabled={guidInput.loading} locale={i18n.language}
-                  onTranscript={transcript => guidInput.setInput(current => appendSpeechTranscript(current, transcript))} />
-                <ComposerSendButton
-                  loading={guidInput.loading || creation.loading}
-                  disabled={creation.draft.mode ? creation.loading || !creation.ready || !guidInput.input.trim() : isAutoWorkMode ? autoWorkButtonDisabled : send.isButtonDisabled}
-                  icon={!creation.draft.mode && isAutoWorkMode ? <Robot theme='filled' size='14' fill='currentColor' strokeWidth={5} /> : undefined}
-                  title={!creation.draft.mode && isAutoWorkMode ? t('requirements.autowork.startSession') : undefined}
-                  onClick={() => void submitInput()}
-                  testId='guid-send-btn'
-                />
-              </>}
-              footer={<>
-                <SceneDiscoveryHint />
-                {workspaceEnabled && <GuidWorkspaceFootnote workspaceDir={guidInput.dir} onSelectWorkspace={guidInput.setDir} onClearWorkspace={() => guidInput.setDir('')} />}
-              </>}
-            />
+                } />}
+                beforeInput={<MentionSelectorBadge
+                  visible={mention.mentionSelectorVisible}
+                  open={mention.mentionSelectorOpen}
+                  onOpenChange={mention.setMentionSelectorOpen}
+                  agentLabel={mention.selectedAgentLabel}
+                  mentionMenu={mentionDropdownNode}
+                  onResetQuery={() => mention.setMentionQuery(null)}
+                />}
+                overlays={mention.mentionOpen && <div className='absolute left-12px right-12px bottom-[calc(100%+8px)] z-70'>{mentionDropdownNode}</div>}
+                inputProps={{
+                  value: guidInput.input,
+                  onChange: handleInputChange,
+                  onKeyDown: handleInputKeyDown,
+                  onPaste: guidInput.onPaste,
+                  onFocus: guidInput.handleTextareaFocus,
+                  placeholder: creation.draft.mode ? '描述你想创作的内容，可添加参考素材…' : normalPlaceholder,
+                  'data-testid': 'guid-input',
+                }}
+                attachments={<ComposerAttachments files={guidInput.files} onRemoveFile={guidInput.handleRemoveFile} />}
+                tools={<div className='inline-flex items-center gap-6px'>
+                  {isDesktopShell() && !creation.draft.mode && <Button type='text' size='small'
+                    disabled={guidInput.loading || creation.loading || send.isBrowserButtonDisabled}
+                    onClick={send.openBrowserHandler} icon={<Earth size={16} />} aria-label={t('browserWorkspace.title')}>
+                    {t('browserWorkspace.title')}
+                  </Button>}
+                  <FileAttachButton openFileSelector={openFileSelector} onLocalFilesAdded={guidInput.handleFilesPasted} showLoadedCapabilities={false} />
+                </div>}
+                creationTools={<CreationControls prompt={guidInput.input} onPromptChange={guidInput.setInput} files={guidInput.files} />}
+                rightTools={<div className='sendbox-responsive-config-group flex flex-1 items-center justify-end gap-2 min-w-0' data-composer-group>{modelSelectorNode}</div>}
+                actions={<>
+                  <SpeechInputButton disabled={guidInput.loading} locale={i18n.language}
+                    onTranscript={transcript => guidInput.setInput(current => appendSpeechTranscript(current, transcript))} />
+                  <ComposerSendButton
+                    loading={guidInput.loading || creation.loading}
+                    disabled={creation.draft.mode ? creation.loading || !creation.ready || !guidInput.input.trim() : isAutoWorkMode ? autoWorkButtonDisabled : send.isButtonDisabled}
+                    icon={!creation.draft.mode && isAutoWorkMode ? <Robot theme='filled' size='14' fill='currentColor' strokeWidth={5} /> : undefined}
+                    title={!creation.draft.mode && isAutoWorkMode ? t('requirements.autowork.startSession') : undefined}
+                    onClick={() => void submitInput()}
+                    testId='guid-send-btn'
+                  />
+                </>}
+              />
+            </div>
 
             {!creation.draft.mode && <AgentResourcePicker
               requiredKinds={isCompanionAgent ? ['companion'] : resourcePickerKinds}

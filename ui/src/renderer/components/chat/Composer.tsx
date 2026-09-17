@@ -65,12 +65,12 @@ export default function Composer({ inputProps, surfaceRef, singleLine = false, i
         <div className={singleLine ? 'flex items-center gap-2 w-full min-w-0 overflow-hidden' : 'w-full overflow-hidden'}>
           {singleLine && <div className='flex-shrink-0 sendbox-tools'>{tools}</div>}
           <div className={`sendbox-highlight-container ${singleLine ? 'sendbox-highlight-container--single' : ''}`}
-            style={{ width: singleLine ? 'auto' : '100%', flex: singleLine ? 1 : 'none', minWidth: 0, maxWidth: '100%', marginBottom: singleLine ? 0 : sideTools ? 6 : 8, minHeight: singleLine ? 20 : 40 }}>
+            style={{ width: singleLine ? 'auto' : '100%', flex: singleLine ? 1 : 'none', minWidth: 0, maxWidth: '100%', marginBottom: singleLine ? 0 : 2, minHeight: singleLine ? 20 : 40 }}>
             {inputOverlay}
             <Input.TextArea {...inputProps}
               spellCheck={false}
               className={`${highlightInput ? 'sendbox-highlight-textarea ' : ''}pl-0 pr-0 !b-none focus:shadow-none m-0 !bg-transparent !focus:bg-transparent !hover:bg-transparent lh-[20px] !resize-none text-14px`}
-              style={{ width: '100%', flex: singleLine ? 1 : 'none', minWidth: 0, maxWidth: '100%', margin: 0, height: singleLine ? 20 : 'auto', minHeight: singleLine ? 20 : 40, overflowY: singleLine ? 'hidden' : 'auto', overflowX: 'hidden', whiteSpace: singleLine ? 'nowrap' : 'pre-wrap', textOverflow: singleLine ? 'ellipsis' : 'clip', wordBreak: singleLine ? 'normal' : 'break-word', overflowWrap: 'break-word' }}
+              style={{ width: '100%', flex: singleLine ? 1 : 'none', minWidth: 0, maxWidth: '100%', margin: 0, paddingBlock: singleLine ? 0 : 1, height: singleLine ? 20 : 'auto', minHeight: singleLine ? 20 : 40, overflowY: singleLine ? 'hidden' : 'auto', overflowX: 'hidden', whiteSpace: singleLine ? 'nowrap' : 'pre-wrap', textOverflow: singleLine ? 'ellipsis' : 'clip', wordBreak: singleLine ? 'normal' : 'break-word', overflowWrap: 'break-word' }}
               autoSize={singleLine ? false : { minRows: 2, maxRows: 10 }}
               onFocus={event => { setFocused(true); inputProps.onFocus?.(event); }}
               onBlur={event => { setFocused(false); inputProps.onBlur?.(event); }}
