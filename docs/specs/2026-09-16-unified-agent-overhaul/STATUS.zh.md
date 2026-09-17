@@ -608,3 +608,19 @@
 - macOS: no native claim; shared manifest changes become `UARC-062` inputs.
 - Remaining/blocker: call-graph write-set gap resolved; `coding_runtime_host.rs` stays untouched because its old
   Runtime path is physically owned by `UARC-052`, not a compatibility target for this task.
+
+### 2026-09-18 UARC-041 Browser copy/navigation assertions granted
+
+- Barrier/source: Wave 5 start `90ba8f95f`; Browser implementation completed its in-scope focused suite before the
+  final integration-owned copy/navigation seams were identified.
+- Owner/write set: Integration adds the exact Sider structure test and `browserWorkspace.json` locale pair to
+  `UARC-041`; generated i18n keys remain integration-only as already declared globally.
+- Changed: product copy and structural assertions can now name the generic current-Session Browser capability and its
+  managed/attached providers instead of the deleted Conversation Browser entry.
+- Deleted: stale `chat-browser-toggle`/`BrowserWorkspacePanel` assertions and “Conversation browser” copy.
+- Retained + reason: the tool-rail Browser button, accessible in-panel menu and native WebView2 surface are the new
+  interaction contract.
+- Tests: Feature-focused 114/114 passed; Integration will rerun i18n generation, Sider structure and full UI boundary.
+- Windows: renderer implementation complete pending integrated native/visual gate.
+- macOS: shared copy only; CEF native evidence remains `UARC-061`.
+- Remaining/blocker: write-set gap resolved; no user decision is required.
