@@ -1,8 +1,4 @@
-.page,
-.editorModal,
-.runModal,
-.reviewModal,
-.confirmModal {
+.page {
   --color-bg-1: #f4f2ed;
   --color-bg-2: #fbfaf7;
   --color-bg-3: #eeeae4;
@@ -104,16 +100,8 @@
   color: var(--color-text-1);
 }
 
-.editorModal :global(.arco-modal-content),
-.editorModal :global(.arco-modal-header),
-.runModal :global(.arco-modal-content),
-.runModal :global(.arco-modal-header),
-.reviewModal :global(.arco-modal-content),
-.reviewModal :global(.arco-modal-header),
-.confirmModal :global(.arco-modal-content),
-.confirmModal :global(.arco-modal-header) {
-  background: var(--color-bg-1) !important;
-  color: var(--color-text-1) !important;
+.confirmModal {
+  width: 460px;
 }
 
 .inner {
@@ -412,26 +400,20 @@
 }
 
 .editorModal {
-  left: calc(var(--app-sider-width, 0px) * 0.5);
-  width: min(
-    1080px,
-    calc(100vw - var(--app-sider-width, 0px) - 32px)
-  ) !important;
-  max-height: calc(100vh - 24px);
+  width: 1000px !important;
 }
 
 .editorModal :global(.arco-modal-content) {
   min-height: 0;
-  max-height: calc(100vh - 144px);
-  padding: 16px 20px 20px;
-  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .editorGrid {
   display: grid;
-  height: min(710px, calc(100vh - 190px));
-  max-height: calc(100vh - 190px);
-  grid-template-columns: minmax(0, 1fr) 360px;
+  height: 620px;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(250px, .85fr);
   gap: 16px;
   overflow: hidden;
 }
@@ -443,6 +425,7 @@
 }
 
 .editorMain {
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -505,6 +488,17 @@
   grid-template-columns: minmax(100px, 1fr) minmax(100px, 1fr) 120px auto 30px;
   align-items: center;
   gap: 8px;
+}
+
+@container (max-width: 560px) {
+  .variableRow {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 30px;
+  }
+  .variableRow > :nth-child(1) { grid-column: 1; grid-row: 1; }
+  .variableRow > :nth-child(2) { grid-column: 2; grid-row: 1; }
+  .variableRow > :nth-child(3) { grid-column: 1; grid-row: 2; }
+  .variableRow > :nth-child(4) { grid-column: 2; grid-row: 2; }
+  .variableRow > :nth-child(5) { grid-column: 3; grid-row: 1; }
 }
 
 .toggleRow {

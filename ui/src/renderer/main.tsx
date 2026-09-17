@@ -22,6 +22,7 @@ import { ThemeProvider } from './hooks/context/ThemeContext';
 
 // Arco Design
 import { ConfigProvider } from '@arco-design/web-react';
+import { modalDefaults } from './components/base/modalDefaults';
 // Configure Arco Design to use React 18's createRoot, fixing Message component's CopyReactDOM.render error
 import '@arco-design/web-react/es/_util/react-19-adapter';
 import '@arco-design/web-react/dist/css/arco.css';
@@ -83,7 +84,11 @@ const Config: React.FC<PropsWithChildren> = ({ children }) => {
   } = useTranslation();
   const arcoLocale = arcoLocales[language] ?? enUS;
 
-  return React.createElement(ConfigProvider, { theme: { primaryColor: '#4E5969' }, locale: arcoLocale }, children);
+  return React.createElement(ConfigProvider, {
+    theme: { primaryColor: '#4E5969' },
+    locale: arcoLocale,
+    componentConfig: { Modal: modalDefaults },
+  }, children);
 };
 
 const Main = () => {

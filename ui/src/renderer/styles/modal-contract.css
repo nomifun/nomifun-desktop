@@ -11,6 +11,77 @@
   --nomi-modal-disabled-border: var(--color-border-3);
   --nomi-modal-error-border: var(--danger, #f53f3f);
   --nomi-modal-warning-border: var(--warning, #ff7d00);
+  --nomi-modal-block-gap: clamp(24px, 4vh, 48px);
+  --nomi-modal-inline-gap: clamp(24px, 4vw, 64px);
+  --nomi-modal-max-height: min(800px, calc(100vh - 2 * var(--nomi-modal-block-gap)));
+}
+
+/* Bound the whole dialog, not just an editor inside it. Keep Arco's inline
+ * centering and visibility lifecycle; the focus-lock wrapper is a flex column
+ * so only the body shrinks/scrolls, while the header and actions stay visible. */
+.arco-modal-wrapper:not(:has(.nomifun-modal-fullscreen)) {
+  box-sizing: border-box;
+  padding: var(--nomi-modal-block-gap) var(--nomi-modal-inline-gap);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.arco-modal-wrapper:not(:has(.nomifun-modal-fullscreen))::after {
+  content: '';
+  display: inline-block;
+  width: 0;
+  height: 100%;
+  vertical-align: middle;
+}
+
+.arco-modal-wrapper .arco-modal:not(.nomifun-modal-fullscreen) {
+  display: inline-flex;
+  flex-direction: column;
+  vertical-align: middle;
+  top: 0 !important;
+  left: 0 !important;
+  min-width: 0;
+  min-height: 0;
+  max-width: min(1080px, calc(100vw - 2 * var(--nomi-modal-inline-gap))) !important;
+  max-height: var(--nomi-modal-max-height) !important;
+}
+
+.arco-modal:not(.nomifun-modal-fullscreen) > [data-focus-lock-disabled] {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  max-height: inherit;
+}
+
+.arco-modal:not(.nomifun-modal-fullscreen) .arco-modal-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.arco-modal .arco-modal-header,
+.arco-modal .arco-modal-footer {
+  flex: 0 0 auto;
+}
+
+.nomifun-modal .arco-modal-content,
+.nomifun-modal .nomifun-modal-wrapper {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.nomifun-modal .nomifun-modal-wrapper {
+  gap: 8px;
+}
+
+.nomifun-modal .nomifun-modal-body-content {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .arco-modal {

@@ -264,9 +264,7 @@ const TemplateAgentDraftModal: React.FC<TemplateAgentDraftModalProps> = ({
       unmountOnExit
       maskClosable={!generating}
       closable={!generating}
-      getPopupContainer={() =>
-        document.getElementById('resource-page-portal-root') ?? document.body
-      }
+      getPopupContainer={() => document.body}
       onCancel={() => !generating && onClose()}
     >
       <div
