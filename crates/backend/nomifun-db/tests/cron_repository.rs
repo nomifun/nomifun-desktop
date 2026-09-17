@@ -361,11 +361,11 @@ async fn repository_hides_crud_and_run_history_from_foreign_owners() {
         r.delete(FOREIGN_OWNER, &job_id).await,
         Err(DbError::NotFound(_))
     ));
-    assert_eq!(
+    assert!(
         r.delete_by_conversation(FOREIGN_OWNER, CONV_1)
             .await
-            .unwrap(),
-        0
+            .unwrap()
+            .is_empty()
     );
     assert!(
         r.get_by_cron_job_id(INSTALLATION_OWNER, &job_id)
@@ -857,7 +857,8 @@ async fn cd1_delete_by_conversation_removes_all() {
     r.insert(&make_job()).await.unwrap();
 
     let deleted = r.delete_by_conversation(INSTALLATION_OWNER, CONV_1).await.unwrap();
-    assert_eq!(deleted, 2);
+    assert_eq!(deleted.len(), 2);
+    assert!(deleted.windows(2).all(|pair| pair[0] < pair[1]));
 
     let remaining = r.list_all(INSTALLATION_OWNER).await.unwrap();
     assert!(remaining.is_empty());
@@ -870,7 +871,7 @@ async fn delete_by_conversation_no_match_returns_zero() {
         .delete_by_conversation(INSTALLATION_OWNER, "0190f5fe-7c00-7a00-8abc-012345679999")
         .await
         .unwrap();
-    assert_eq!(deleted, 0);
+    assert!(deleted.is_empty());
 }
 
 // ── Execution state tracking ────────────────────────────────────────

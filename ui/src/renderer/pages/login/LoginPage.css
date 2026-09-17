@@ -339,3 +339,70 @@ body.login-page-active {
 .login-page__footer-divider {
   color: #ddd;
 }
+
+/* The desktop contract includes 880×600. Compact vertical rhythm only when
+   height is constrained; width, interaction order, and the desktop layout stay
+   unchanged. The max-height remains a safety net for localized/error content. */
+@media (max-height: 680px) and (min-width: 880px) {
+  .login-page__card {
+    box-sizing: border-box;
+    max-width: 416px;
+    max-height: calc(100vh - 24px);
+    padding: 20px 28px 16px;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+  }
+
+  .login-page__lang-select-wrapper {
+    top: 12px;
+  }
+
+  .login-page__header {
+    margin-bottom: 14px;
+  }
+
+  .login-page__logo {
+    margin-bottom: 8px;
+  }
+
+  .login-page__logo svg,
+  .login-page__logo img {
+    width: 52px;
+    height: 52px;
+  }
+
+  .login-page__title {
+    margin-bottom: 4px;
+    font-size: 24px;
+  }
+
+  .login-page__form {
+    margin-bottom: 12px;
+  }
+
+  .login-page__form-item {
+    margin-bottom: 12px;
+  }
+
+  .login-page__label {
+    margin-bottom: 6px;
+  }
+
+  .login-page__input {
+    height: 40px;
+  }
+
+  .login-page__checkbox {
+    margin-top: -4px;
+    margin-bottom: 12px;
+  }
+
+  .login-page__submit {
+    height: 42px;
+    margin-top: 2px;
+  }
+
+  .login-page__footer {
+    padding-top: 12px;
+  }
+}

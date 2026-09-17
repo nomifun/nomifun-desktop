@@ -52,19 +52,19 @@ pub(crate) struct Wave2ApplicationHost {
 }
 
 #[derive(Clone, Debug)]
-struct Wave2EffectReservation {
+pub(crate) struct Wave2EffectReservation {
     store: nomifun_agent_session::AgentSessionStore,
     request: nomifun_agent_session::EffectEventRequest,
 }
 
 #[derive(Debug)]
-enum Wave2EffectAdmission {
+pub(crate) enum Wave2EffectAdmission {
     Replay(StrictJsonValue),
     Reserved(Wave2EffectReservation),
 }
 
 #[derive(Clone, Copy)]
-enum Wave2EffectCompletion<'a> {
+pub(crate) enum Wave2EffectCompletion<'a> {
     Succeeded(&'a StrictJsonValue),
     Failed(&'a Wave2HostPortError),
     Uncertain(&'a Wave2HostPortError),
@@ -294,7 +294,7 @@ fn wave2_effect_id(context: &Wave2HostContext) -> Result<String, Wave2HostPortEr
             format!("Wave 2 effect identity could not be canonicalized: {error}"),
         )
     })?;
-    Ok(format!("workspace:{}", digest.as_ref()))
+    Ok(format!("wave2:{}", digest.as_ref()))
 }
 
 fn wave2_effect_resource_key(
@@ -303,41 +303,85 @@ fn wave2_effect_resource_key(
 ) -> Result<String, Wave2HostPortError> {
     if binding.resource_id.as_ref().trim().is_empty() {
         return Err(Wave2HostPortError::invalid_payload(
-            "workspace effect requires a non-empty resource identity",
+            "Wave 2 effect requires a non-empty resource identity",
         ));
     }
     if binding.owner_id != context.principal.principal_id
         || context.principal.principal_kind.trim().is_empty()
     {
         return Err(Wave2HostPortError::invalid_payload(
-            "workspace effect resource owner differs from authenticated authority",
+            "Wave 2 effect resource owner differs from authenticated authority",
         ));
     }
-    let identity = json!({
-        "principal_kind": context.principal.principal_kind.as_str(),
-        "owner_id": binding.owner_id.as_str(),
-        "resource_kind": binding.resource_kind.as_ref(),
-        "resource_id": binding.resource_id.as_ref(),
-    });
+    let owner_domain = wave2_effect_owner_domain(context)?;
+    let identity = if owner_domain == "workspace" {
+        if !matches!(binding.resource_kind.as_ref(), "workspace" | "process_session") {
+            return Err(Wave2HostPortError::invalid_payload(
+                "workspace effect requires a workspace-backed resource",
+            ));
+        }
+        let root = binding
+            .typed_parameters
+            .get(WORKSPACE_ROOT_PARAMETER)
+            .filter(|root| !root.is_empty() && root.trim() == root.as_str())
+            .ok_or_else(|| {
+                Wave2HostPortError::invalid_payload(
+                    "workspace effect resource has no canonical workspace_root",
+                )
+            })?;
+        let canonical_root = std::fs::canonicalize(root).map_err(|error| {
+            Wave2HostPortError::invalid_payload(format!(
+                "workspace effect root could not be resolved: {error}"
+            ))
+        })?;
+        json!({
+            "principal_kind": context.principal.principal_kind.as_str(),
+            "owner_id": binding.owner_id.as_str(),
+            "workspace_root": canonical_root.to_string_lossy(),
+        })
+    } else {
+        json!({
+            "principal_kind": context.principal.principal_kind.as_str(),
+            "owner_id": binding.owner_id.as_str(),
+            "resource_kind": binding.resource_kind.as_ref(),
+            "resource_id": binding.resource_id.as_ref(),
+        })
+    };
     let digest = digest_payload(&identity).map_err(|error| {
         Wave2HostPortError::invalid_payload(format!(
-            "workspace effect resource identity could not be canonicalized: {error}"
+            "Wave 2 effect resource identity could not be canonicalized: {error}"
         ))
     })?;
-    Ok(format!("workspace:{}", digest.as_ref()))
+    Ok(format!("{owner_domain}:{}", digest.as_ref()))
+}
+
+fn wave2_effect_owner_domain(
+    context: &Wave2HostContext,
+) -> Result<&'static str, Wave2HostPortError> {
+    match context.capability_id.as_ref() {
+        nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID
+        | nomifun_agent_domain_wave2::WORKSPACE_VCS_MODULE_ID
+        | nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID
+        | nomifun_agent_domain_wave2::WORKSPACE_ARTIFACTS_MODULE_ID => Ok("workspace"),
+        nomifun_agent_domain_wave2::SSH_MODULE_ID => Ok("ssh"),
+        other => Err(Wave2HostPortError::invalid_payload(format!(
+            "Wave 2 effect owner domain is undefined for Module {other}"
+        ))),
+    }
 }
 
 fn effect_record_matches(
     record: &nomifun_agent_session::AgentEffectRecord,
     context: &Wave2HostContext,
     binding: &TypedResourceBinding,
+    owner_domain: &str,
     input_digest: &DigestHex,
     strategy: nomifun_agent_session::EffectStrategy,
     resource_key: &str,
 ) -> bool {
     record.agent_session_id == context.agent_session_id
         && record.turn_id == context.turn_id
-        && record.owner_domain == "workspace"
+        && record.owner_domain == owner_domain
         && record.capability_module == context.capability_id
         && record.action_id == context.action_id
         && record.resource_binding_id.as_ref() == Some(&binding.binding_id)
@@ -350,6 +394,7 @@ fn observe_wave2_effect(
     record: nomifun_agent_session::AgentEffectRecord,
     context: &Wave2HostContext,
     binding: &TypedResourceBinding,
+    owner_domain: &str,
     input_digest: &DigestHex,
     strategy: nomifun_agent_session::EffectStrategy,
     resource_key: &str,
@@ -358,6 +403,7 @@ fn observe_wave2_effect(
         &record,
         context,
         binding,
+        owner_domain,
         input_digest,
         strategy,
         resource_key,
@@ -421,6 +467,7 @@ fn new_wave2_effect_request(
     effect_id: &str,
     context: &Wave2HostContext,
     binding: &TypedResourceBinding,
+    owner_domain: &str,
     input_digest: DigestHex,
     resource_key: String,
     strategy: nomifun_agent_session::EffectStrategy,
@@ -431,7 +478,7 @@ fn new_wave2_effect_request(
         effect_id: effect_id.to_owned(),
         turn_id: context.turn_id.clone(),
         operation_id: context.operation_id.clone(),
-        owner_domain: "workspace".to_owned(),
+        owner_domain: owner_domain.to_owned(),
         capability_module: context.capability_id.clone(),
         action_id: context.action_id.clone(),
         resource_binding_id: Some(binding.binding_id.clone()),
@@ -474,7 +521,7 @@ async fn begin_wave2_effect(
     .await
 }
 
-async fn begin_wave2_exclusive_effect(
+pub(crate) async fn begin_wave2_exclusive_effect(
     store: &nomifun_agent_session::AgentSessionStore,
     context: &Wave2HostContext,
     binding: &TypedResourceBinding,
@@ -496,6 +543,7 @@ async fn begin_wave2_effect_with_strategy(
     strategy: nomifun_agent_session::EffectStrategy,
 ) -> Result<Wave2EffectAdmission, Wave2HostPortError> {
     let effect_id = wave2_effect_id(context)?;
+    let owner_domain = wave2_effect_owner_domain(context)?;
     let input_digest = wave2_effect_request_digest(context, binding, input)?;
     let resource_key = wave2_effect_resource_key(context, binding)?;
     let read = || async {
@@ -513,6 +561,7 @@ async fn begin_wave2_effect_with_strategy(
             record,
             context,
             binding,
+            owner_domain,
             &input_digest,
             strategy,
             &resource_key,
@@ -530,13 +579,14 @@ async fn begin_wave2_effect_with_strategy(
         .await
         .map_err(|error| {
             Wave2HostPortError::unavailable(format!(
-                "canonical Tool causation could not be proven for the workspace effect: {error}"
+                "canonical Tool causation could not be proven for the Wave 2 effect: {error}"
             ))
         })?;
     let request = new_wave2_effect_request(
         &effect_id,
         context,
         binding,
+        owner_domain,
         input_digest.clone(),
         resource_key.clone(),
         strategy,
@@ -557,13 +607,14 @@ async fn begin_wave2_effect_with_strategy(
                     record,
                     context,
                     binding,
+                    owner_domain,
                     &input_digest,
                     strategy,
                     &resource_key,
                 );
             }
             Err(Wave2HostPortError::unavailable(format!(
-                "canonical Agent Effect admission failed or another workspace effect is unsettled: {error}"
+                "canonical Agent Effect admission failed or another Wave 2 effect is unsettled: {error}"
             )))
         }
     }
@@ -603,7 +654,7 @@ fn bounded_terminal_payload(completion: Wave2EffectCompletion<'_>) -> StrictJson
     StrictJsonValue(value)
 }
 
-async fn finish_wave2_effect(
+pub(crate) async fn finish_wave2_effect(
     reservation: &Wave2EffectReservation,
     completion: Wave2EffectCompletion<'_>,
 ) -> Result<(), Wave2HostPortError> {
@@ -3055,7 +3106,7 @@ mod tests {
             agent_session_id: context.agent_session_id.clone(),
             turn_id: context.turn_id.clone(),
             operation_id: context.operation_id.clone(),
-            owner_domain: "workspace".to_owned(),
+            owner_domain: wave2_effect_owner_domain(&context).unwrap().to_owned(),
             capability_module: context.capability_id.clone(),
             action_id: context.action_id.clone(),
             resource_binding_id: Some(binding.binding_id.clone()),
@@ -3073,6 +3124,7 @@ mod tests {
             record,
             &context,
             &binding,
+            wave2_effect_owner_domain(&context).unwrap(),
             &input_digest,
             nomifun_agent_session::EffectStrategy::ManagedEffect,
             &resource_key,
@@ -3080,6 +3132,25 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, "CAPABILITY_UNAVAILABLE");
         assert!(error.message.contains("cannot reproduce the exact result"));
+    }
+
+    #[test]
+    fn durable_effect_owner_domain_tracks_the_physical_resource_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut context = context(directory.path());
+        for capability_id in [
+            "workspace.files",
+            "workspace.vcs",
+            "workspace.process",
+            "workspace.artifacts",
+        ] {
+            context.capability_id = CapabilityId::from(capability_id);
+            assert_eq!(wave2_effect_owner_domain(&context).unwrap(), "workspace");
+        }
+        context.capability_id = CapabilityId::from("ssh");
+        assert_eq!(wave2_effect_owner_domain(&context).unwrap(), "ssh");
+        context.capability_id = CapabilityId::from("unknown");
+        assert!(wave2_effect_owner_domain(&context).is_err());
     }
 
     #[tokio::test]
@@ -3103,6 +3174,48 @@ mod tests {
                 .unwrap(),
             Wave2EffectAdmission::Reserved(_)
         ));
+
+        let mut same_workspace_other_module = first.clone();
+        same_workspace_other_module.capability_id = CapabilityId::from("workspace.vcs");
+        same_workspace_other_module.action_id = ActionId::from("workspace.vcs/stage");
+        same_workspace_other_module.operation_id = OperationId::from("operation-cross-module");
+        same_workspace_other_module.idempotency_key =
+            IdempotencyKey::from("same-workspace-cross-module");
+        ensure_test_effect_context(&store, &same_workspace_other_module).await;
+        let blocked = begin_wave2_effect(
+            host.effect_store().unwrap(),
+            &same_workspace_other_module,
+            workspace_typed_binding(&same_workspace_other_module).unwrap(),
+            &StrictJsonValue(json!({"path": "owned.txt"})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(blocked.code, "CAPABILITY_UNAVAILABLE");
+        assert!(blocked.message.contains("unsettled"));
+
+        let mut same_workspace_process = first.clone();
+        same_workspace_process.capability_id = CapabilityId::from("workspace.process");
+        same_workspace_process.action_id = ActionId::from("workspace.process/exec");
+        same_workspace_process.operation_id = OperationId::from("operation-process-cross-module");
+        same_workspace_process.idempotency_key =
+            IdempotencyKey::from("same-workspace-process-cross-module");
+        same_workspace_process.resource_bindings[0].binding_id =
+            ResourceBindingId::from("process-binding");
+        same_workspace_process.resource_bindings[0].resource_kind =
+            ResourceKind::from("process_session");
+        same_workspace_process.resource_bindings[0].resource_id =
+            ResourceId::from("managed-process-session");
+        ensure_test_effect_context(&store, &same_workspace_process).await;
+        let blocked = begin_wave2_effect(
+            host.effect_store().unwrap(),
+            &same_workspace_process,
+            &same_workspace_process.resource_bindings[0],
+            &StrictJsonValue(json!({"command": "echo blocked"})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(blocked.code, "CAPABILITY_UNAVAILABLE");
+        assert!(blocked.message.contains("unsettled"));
 
         let mut second_owner = context(directory.path());
         second_owner.principal.principal_id = "owner-2".to_owned();

@@ -10,7 +10,7 @@ use nomifun_api_types::{
     ResumeTagRequest, TagBindings, TagSummary, UpdateRequirementRequest, UpdateStatusRequest,
 };
 use nomifun_auth::CurrentUser;
-use nomifun_common::{AppError, ConversationId, PaginatedResult, RequirementId, TerminalId};
+use nomifun_common::{AppError, ConversationId, PaginatedResult, RequirementId};
 use serde::Deserialize;
 
 use crate::state::RequirementRouterState;
@@ -236,27 +236,12 @@ async fn set_autowork(
             "session is actively executing a requirement; stop it from the session page first".into(),
         ));
     }
-    // Ownership + (terminal) eligibility, per target kind.
+    // Target kind is fixed to canonical AgentSession. The runner's config port
+    // performs the owner-scoped Store compare-and-set; no legacy Conversation
+    // row participates in admission.
     match req.kind {
-        AutoWorkTargetKind::Conversation => {
-            // Validate ownership in the conversation ID domain.
-            state
-                .requirement_service
-                .verify_conversation_owner(&req.target_id, &user.id)
-                .await?;
-        }
-        AutoWorkTargetKind::Terminal => {
-            state
-                .requirement_service
-                .verify_terminal_owner(&req.target_id, &user.id)
-                .await?;
-            if req.enabled {
-                state
-                    .requirement_service
-                    .ensure_terminal_autowork_eligible(&req.target_id)
-                    .await?;
-            }
-        }
+        AutoWorkTargetKind::Conversation => {}
+        AutoWorkTargetKind::Terminal => unreachable!("validated above"),
     }
     // Persist config and reconcile the live loop under one per-target
     // transition lock. Identical enables are a no-op for the running
@@ -286,28 +271,20 @@ async fn get_autowork(
         .ok_or_else(|| AppError::BadRequest(format!("unknown autowork target kind: {kind}")))?;
     validate_target_id(kind, &target_id)?;
     match kind {
-        AutoWorkTargetKind::Conversation => {
-            state
-                .requirement_service
-                .verify_conversation_owner(&target_id, &user.id)
-                .await?;
-        }
-        AutoWorkTargetKind::Terminal => {
-            state
-                .requirement_service
-                .verify_terminal_owner(&target_id, &user.id)
-                .await?;
-        }
+        AutoWorkTargetKind::Conversation => {}
+        AutoWorkTargetKind::Terminal => unreachable!("validated above"),
     }
     let st = build_autowork_state(&state, &user.id, kind, &target_id).await?;
     Ok(Json(ApiResponse::ok(st)))
 }
 
 fn validate_target_id(kind: AutoWorkTargetKind, target_id: &str) -> Result<(), AppError> {
-    let valid = match kind {
-        AutoWorkTargetKind::Conversation => ConversationId::try_from(target_id).is_ok(),
-        AutoWorkTargetKind::Terminal => TerminalId::try_from(target_id).is_ok(),
-    };
+    if kind == AutoWorkTargetKind::Terminal {
+        return Err(AppError::BadRequest(
+            "Terminal AutoWork was retired; bind an AgentPreset Session instead".to_owned(),
+        ));
+    }
+    let valid = ConversationId::try_from(target_id).is_ok();
     if valid {
         Ok(())
     } else {

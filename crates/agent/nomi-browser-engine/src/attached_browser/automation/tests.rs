@@ -114,13 +114,12 @@ async fn real_attached_tab_uses_trusted_input_and_disconnect_preserves_the_brows
         let browser = AttachedBrowser::connect_port_file(&profile.join("DevToolsActivePort"))
             .await
             .unwrap();
-        let choices = browser.tabs_for_user().await.unwrap();
-        let choice = choices
-            .tabs
-            .iter()
-            .find(|tab| tab.url == url)
+        let tabs = browser.tabs_for_provider().await.unwrap();
+        let tab = tabs
+            .into_iter()
+            .find(|tab| tab.info.url == url)
             .expect("owned fixture tab");
-        let grant = browser.grant_tab(&choice.choice_id).await.unwrap();
+        let grant = tab.grant;
         let cancel = CancellationToken::new();
         let mut observation = Value::Null;
         for _ in 0..30 {
@@ -334,15 +333,13 @@ async fn real_attached_tab_uses_trusted_input_and_disconnect_preserves_the_brows
         let other_browser = AttachedBrowser::connect_port_file(&profile.join("DevToolsActivePort"))
             .await
             .unwrap();
-        let other_choices = other_browser.tabs_for_user().await.unwrap();
-        let other_choice = other_choices
-            .tabs
-            .iter()
-            .find(|tab| tab.url == url)
-            .unwrap();
         let other_grant = other_browser
-            .grant_tab(&other_choice.choice_id)
+            .tabs_for_provider()
             .await
+            .unwrap()
+            .into_iter()
+            .find(|tab| tab.info.url == url)
+            .map(|tab| tab.grant)
             .unwrap();
         assert_eq!(
             grant.target_key(),

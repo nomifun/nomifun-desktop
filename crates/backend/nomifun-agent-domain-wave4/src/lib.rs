@@ -97,8 +97,6 @@ pub const CHANNEL_GROUP_POLICY: &str = "channel.group_policy";
 pub const COMPANION_PERSONA: &str = "companion.persona";
 pub const COMPANION_ROSTER: &str = "companion.roster";
 pub const CUSTOMER_SERVICE_DIALOGUE: &str = "customer_service.dialogue";
-pub const NOTIFICATION_WEBHOOK: &str = "notification.webhook";
-pub const NOTIFICATION_DESKTOP: &str = "notification.desktop";
 pub const ROBOT_LINK: &str = "robot.link";
 pub const ROBOT_AUDIO: &str = "robot.audio";
 pub const ROBOT_DEVICE_TOOLS: &str = "robot.device_tools";
@@ -124,11 +122,10 @@ pub const TARGET_PACKAGE_IDS: [&str; 5] = PACKAGE_IDS;
 /// The frozen first-party catalog spells the two multiword IDs with
 /// underscores.  [`canonical_capability_id`] makes that normalization
 /// explicit instead of creating duplicate aliases.
-pub const TARGET_CAPABILITY_FAMILIES: [&str; 10] = [
+pub const TARGET_CAPABILITY_FAMILIES: [&str; 9] = [
     CHANNEL_MESSAGING_MODULE_ID,
     COMPANION_MODULE_ID,
     CUSTOMER_SERVICE_MODULE_ID,
-    "notification.webhook",
     "robot.audio",
     "robot.device-tools",
     "robot.display",
@@ -141,7 +138,7 @@ pub const TARGET_CAPABILITY_FAMILIES: [&str; 10] = [
 ///
 /// This is intentionally the full checked-in target-package inventory, not
 /// only the deletion-contract family subset.
-pub const TARGET_CAPABILITY_IDS: [&str; 11] = [
+pub const TARGET_CAPABILITY_IDS: [&str; 9] = [
     CHANNEL_MESSAGING_MODULE_ID,
     COMPANION_MODULE_ID,
     CUSTOMER_SERVICE_MODULE_ID,
@@ -151,11 +148,9 @@ pub const TARGET_CAPABILITY_IDS: [&str; 11] = [
     ROBOT_DISPLAY,
     ROBOT_MOTION,
     ROBOT_DEVICE_TOOLS,
-    NOTIFICATION_WEBHOOK,
-    NOTIFICATION_DESKTOP,
 ];
-pub const CAPABILITY_IDS: [&str; 11] = TARGET_CAPABILITY_IDS;
-pub const ALL_CAPABILITY_IDS: [&str; 11] = TARGET_CAPABILITY_IDS;
+pub const CAPABILITY_IDS: [&str; 9] = TARGET_CAPABILITY_IDS;
+pub const ALL_CAPABILITY_IDS: [&str; 9] = TARGET_CAPABILITY_IDS;
 
 const AGENT_SURFACES: &[&str] = &["desktop", "headless", "remote", "web"];
 const CHANNEL_RESOURCE: &[&str] = &[CHANNEL_RESOURCE_KIND];
@@ -1111,27 +1106,6 @@ const ROBOT_CAPABILITIES: [CapabilitySpec; 6] = [
     },
 ];
 
-const NOTIFICATION_CAPABILITIES: [CapabilitySpec; 2] = [
-    CapabilitySpec {
-        id: NOTIFICATION_WEBHOOK,
-        kind: CapabilityKind::EventConsumer,
-        display_name: "Webhook notification",
-        description: "Consume an owning-domain event for webhook delivery.",
-        resource_kinds: &[],
-        requirements: &[],
-        effect_class: None,
-    },
-    CapabilitySpec {
-        id: NOTIFICATION_DESKTOP,
-        kind: CapabilityKind::EventConsumer,
-        display_name: "Desktop notification",
-        description: "Consume an owning-domain event for desktop notification projection.",
-        resource_kinds: &[],
-        requirements: &[],
-        effect_class: None,
-    },
-];
-
 const CHANNEL_PORTS: PortSpec = PortSpec {
     command_ports: &["channel.agent-session-command", "channel.inbound-receipt"],
     outbox_ports: &[],
@@ -1194,7 +1168,7 @@ const PACKAGE_SPECS: [PackageSpec; 5] = [
         mount_id: "domain-notification",
         display_name: "Notification",
         description: "Bundled webhook event consumption.",
-        capabilities: &NOTIFICATION_CAPABILITIES,
+        capabilities: &[],
         ports: NOTIFICATION_PORTS,
     },
 ];

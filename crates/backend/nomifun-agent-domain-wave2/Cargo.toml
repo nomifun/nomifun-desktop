@@ -18,3 +18,4 @@ jsonschema = { workspace = true }
 nomifun-agent-domain-wave1 = { path = "../nomifun-agent-domain-wave1" }
 nomifun-agent-domain-wave3 = { path = "../nomifun-agent-domain-wave3" }
 nomifun-agent-domain-wave4 = { path = "../nomifun-agent-domain-wave4" }
+nomifun-agent-domain-wave5 = { path = "../nomifun-agent-domain-wave5" }

@@ -31,7 +31,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     for registration in nomifun_agent_domain_wave1::registrations()?.into_iter()
         .chain(nomifun_agent_domain_wave2::registrations()?)
         .chain(nomifun_agent_domain_wave3::registrations()?)
-        .chain(nomifun_agent_domain_wave4::registrations()?) {
+        .chain(nomifun_agent_domain_wave4::registrations()?)
+        .chain(nomifun_agent_domain_wave5::registrations()?) {
         let manifest = registration.metadata.manifest.payload;
         let target = updated
             .packages

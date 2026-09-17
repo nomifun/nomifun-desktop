@@ -897,141 +897,6 @@
   },
   {
     "capability": {
-      "id": "ssh.connect",
-      "version": "1.0.0"
-    },
-    "kind": "resource_provider",
-    "display_name": "ssh.connect",
-    "description": "ssh.connect",
-    "source_package": {
-      "id": "nomifun.ssh",
-      "version": "1.0.0"
-    },
-    "source_kind": "bundled",
-    "materialization_state": "unavailable",
-    "unavailable_code": "CAPABILITY_UNAVAILABLE",
-    "supported_surfaces": [
-      "desktop"
-    ],
-    "required_runtime_features": [],
-    "required_resource_kinds": [
-      "ssh_host"
-    ],
-    "required_capabilities": [],
-    "conflicting_capabilities": [],
-    "action_count": 0,
-    "context_contributor_count": 0
-  },
-  {
-    "capability": {
-      "id": "ssh.fs.read",
-      "version": "1.0.0"
-    },
-    "kind": "tool",
-    "display_name": "ssh.fs.read",
-    "description": "ssh.fs.read",
-    "source_package": {
-      "id": "nomifun.ssh",
-      "version": "1.0.0"
-    },
-    "source_kind": "bundled",
-    "materialization_state": "unavailable",
-    "unavailable_code": "CAPABILITY_UNAVAILABLE",
-    "supported_surfaces": [
-      "desktop"
-    ],
-    "required_runtime_features": [],
-    "required_resource_kinds": [
-      "ssh_host"
-    ],
-    "required_capabilities": [],
-    "conflicting_capabilities": [],
-    "action_count": 1,
-    "context_contributor_count": 0
-  },
-  {
-    "capability": {
-      "id": "ssh.fs.write",
-      "version": "1.0.0"
-    },
-    "kind": "tool",
-    "display_name": "ssh.fs.write",
-    "description": "ssh.fs.write",
-    "source_package": {
-      "id": "nomifun.ssh",
-      "version": "1.0.0"
-    },
-    "source_kind": "bundled",
-    "materialization_state": "unavailable",
-    "unavailable_code": "CAPABILITY_UNAVAILABLE",
-    "supported_surfaces": [
-      "desktop"
-    ],
-    "required_runtime_features": [],
-    "required_resource_kinds": [
-      "ssh_host"
-    ],
-    "required_capabilities": [],
-    "conflicting_capabilities": [],
-    "action_count": 1,
-    "context_contributor_count": 0
-  },
-  {
-    "capability": {
-      "id": "ssh.exec",
-      "version": "1.0.0"
-    },
-    "kind": "tool",
-    "display_name": "ssh.exec",
-    "description": "ssh.exec",
-    "source_package": {
-      "id": "nomifun.ssh",
-      "version": "1.0.0"
-    },
-    "source_kind": "bundled",
-    "materialization_state": "unavailable",
-    "unavailable_code": "CAPABILITY_UNAVAILABLE",
-    "supported_surfaces": [
-      "desktop"
-    ],
-    "required_runtime_features": [],
-    "required_resource_kinds": [
-      "ssh_host"
-    ],
-    "required_capabilities": [],
-    "conflicting_capabilities": [],
-    "action_count": 1,
-    "context_contributor_count": 0
-  },
-  {
-    "capability": {
-      "id": "ssh.sudo",
-      "version": "1.0.0"
-    },
-    "kind": "tool",
-    "display_name": "ssh.sudo",
-    "description": "ssh.sudo",
-    "source_package": {
-      "id": "nomifun.ssh",
-      "version": "1.0.0"
-    },
-    "source_kind": "bundled",
-    "materialization_state": "unavailable",
-    "unavailable_code": "CAPABILITY_UNAVAILABLE",
-    "supported_surfaces": [
-      "desktop"
-    ],
-    "required_runtime_features": [],
-    "required_resource_kinds": [
-      "ssh_host"
-    ],
-    "required_capabilities": [],
-    "conflicting_capabilities": [],
-    "action_count": 1,
-    "context_contributor_count": 0
-  },
-  {
-    "capability": {
       "id": "knowledge.search",
       "version": "1.0.0"
     },
@@ -1729,30 +1594,6 @@
   },
   {
     "capability": {
-      "id": "nomi_system_browser",
-      "version": "1.0.0"
-    },
-    "kind": "tool",
-    "display_name": "nomi_system_browser",
-    "description": "nomi_system_browser",
-    "source_package": {
-      "id": "nomifun.system-browser",
-      "version": "1.0.0"
-    },
-    "source_kind": "bundled",
-    "materialization_state": "materialized",
-    "supported_surfaces": [
-      "desktop"
-    ],
-    "required_runtime_features": [],
-    "required_resource_kinds": [],
-    "required_capabilities": [],
-    "conflicting_capabilities": [],
-    "action_count": 1,
-    "context_contributor_count": 0
-  },
-  {
-    "capability": {
       "id": "nomi_local_websearch",
       "version": "1.0.0"
     },
@@ -1770,184 +1611,6 @@
     ],
     "required_runtime_features": [],
     "required_resource_kinds": [],
-    "required_capabilities": [],
-    "conflicting_capabilities": [],
-    "action_count": 1,
-    "context_contributor_count": 0
-  },
-  {
-    "capability": {
-      "id": "browser.observe",
-      "version": "1.0.0"
-    },
-    "kind": "context_contributor",
-    "display_name": "browser.observe",
-    "description": "browser.observe",
-    "source_package": {
-      "id": "nomifun.browser",
-      "version": "1.0.0"
-    },
-    "source_kind": "bundled",
-    "materialization_state": "materialized",
-    "supported_surfaces": [
-      "desktop"
-    ],
-    "required_runtime_features": [],
-    "required_resource_kinds": [],
-    "required_capabilities": [],
-    "conflicting_capabilities": [],
-    "action_count": 0,
-    "context_contributor_count": 1
-  },
-  {
-    "capability": {
-      "id": "browser.navigate",
-      "version": "1.0.0"
-    },
-    "kind": "tool",
-    "display_name": "browser.navigate",
-    "description": "browser.navigate",
-    "source_package": {
-      "id": "nomifun.browser",
-      "version": "1.0.0"
-    },
-    "source_kind": "bundled",
-    "materialization_state": "materialized",
-    "supported_surfaces": [
-      "desktop"
-    ],
-    "required_runtime_features": [],
-    "required_resource_kinds": [
-      "browser"
-    ],
-    "required_capabilities": [],
-    "conflicting_capabilities": [],
-    "action_count": 1,
-    "context_contributor_count": 0
-  },
-  {
-    "capability": {
-      "id": "browser.act",
-      "version": "1.0.0"
-    },
-    "kind": "tool",
-    "display_name": "browser.act",
-    "description": "browser.act",
-    "source_package": {
-      "id": "nomifun.browser",
-      "version": "1.0.0"
-    },
-    "source_kind": "bundled",
-    "materialization_state": "materialized",
-    "supported_surfaces": [
-      "desktop"
-    ],
-    "required_runtime_features": [],
-    "required_resource_kinds": [
-      "browser"
-    ],
-    "required_capabilities": [],
-    "conflicting_capabilities": [],
-    "action_count": 1,
-    "context_contributor_count": 0
-  },
-  {
-    "capability": {
-      "id": "browser.render_content",
-      "version": "1.0.0"
-    },
-    "kind": "tool",
-    "display_name": "browser.render_content",
-    "description": "browser.render_content",
-    "source_package": {
-      "id": "nomifun.browser",
-      "version": "1.0.0"
-    },
-    "source_kind": "bundled",
-    "materialization_state": "materialized",
-    "supported_surfaces": [
-      "desktop"
-    ],
-    "required_runtime_features": [],
-    "required_resource_kinds": [],
-    "required_capabilities": [],
-    "conflicting_capabilities": [],
-    "action_count": 1,
-    "context_contributor_count": 0
-  },
-  {
-    "capability": {
-      "id": "browser.download",
-      "version": "1.0.0"
-    },
-    "kind": "tool",
-    "display_name": "browser.download",
-    "description": "browser.download",
-    "source_package": {
-      "id": "nomifun.browser",
-      "version": "1.0.0"
-    },
-    "source_kind": "bundled",
-    "materialization_state": "materialized",
-    "supported_surfaces": [
-      "desktop"
-    ],
-    "required_runtime_features": [],
-    "required_resource_kinds": [
-      "browser"
-    ],
-    "required_capabilities": [],
-    "conflicting_capabilities": [],
-    "action_count": 1,
-    "context_contributor_count": 0
-  },
-  {
-    "capability": {
-      "id": "browser.upload",
-      "version": "1.0.0"
-    },
-    "kind": "tool",
-    "display_name": "browser.upload",
-    "description": "browser.upload",
-    "source_package": {
-      "id": "nomifun.browser",
-      "version": "1.0.0"
-    },
-    "source_kind": "bundled",
-    "materialization_state": "materialized",
-    "supported_surfaces": [
-      "desktop"
-    ],
-    "required_runtime_features": [],
-    "required_resource_kinds": [
-      "browser"
-    ],
-    "required_capabilities": [],
-    "conflicting_capabilities": [],
-    "action_count": 1,
-    "context_contributor_count": 0
-  },
-  {
-    "capability": {
-      "id": "browser.evaluate",
-      "version": "1.0.0"
-    },
-    "kind": "tool",
-    "display_name": "browser.evaluate",
-    "description": "browser.evaluate",
-    "source_package": {
-      "id": "nomifun.browser",
-      "version": "1.0.0"
-    },
-    "source_kind": "bundled",
-    "materialization_state": "materialized",
-    "supported_surfaces": [
-      "desktop"
-    ],
-    "required_runtime_features": [],
-    "required_resource_kinds": [
-      "browser"
-    ],
     "required_capabilities": [],
     "conflicting_capabilities": [],
     "action_count": 1,
@@ -2237,81 +1900,6 @@
     "description": "schedule.agent_trigger",
     "source_package": {
       "id": "nomifun.autowork-scheduler",
-      "version": "1.0.0"
-    },
-    "source_kind": "bundled",
-    "materialization_state": "unavailable",
-    "unavailable_code": "CAPABILITY_UNAVAILABLE",
-    "supported_surfaces": [
-      "desktop"
-    ],
-    "required_runtime_features": [],
-    "required_resource_kinds": [],
-    "required_capabilities": [],
-    "conflicting_capabilities": [],
-    "action_count": 0,
-    "context_contributor_count": 0
-  },
-  {
-    "capability": {
-      "id": "idmm.observe",
-      "version": "1.0.0"
-    },
-    "kind": "turn_middleware",
-    "display_name": "idmm.observe",
-    "description": "idmm.observe",
-    "source_package": {
-      "id": "nomifun.idmm",
-      "version": "1.0.0"
-    },
-    "source_kind": "bundled",
-    "materialization_state": "unavailable",
-    "unavailable_code": "CAPABILITY_UNAVAILABLE",
-    "supported_surfaces": [
-      "desktop"
-    ],
-    "required_runtime_features": [],
-    "required_resource_kinds": [],
-    "required_capabilities": [],
-    "conflicting_capabilities": [],
-    "action_count": 0,
-    "context_contributor_count": 0
-  },
-  {
-    "capability": {
-      "id": "idmm.intervene",
-      "version": "1.0.0"
-    },
-    "kind": "turn_middleware",
-    "display_name": "idmm.intervene",
-    "description": "idmm.intervene",
-    "source_package": {
-      "id": "nomifun.idmm",
-      "version": "1.0.0"
-    },
-    "source_kind": "bundled",
-    "materialization_state": "unavailable",
-    "unavailable_code": "CAPABILITY_UNAVAILABLE",
-    "supported_surfaces": [
-      "desktop"
-    ],
-    "required_runtime_features": [],
-    "required_resource_kinds": [],
-    "required_capabilities": [],
-    "conflicting_capabilities": [],
-    "action_count": 0,
-    "context_contributor_count": 0
-  },
-  {
-    "capability": {
-      "id": "idmm.fallback_policy",
-      "version": "1.0.0"
-    },
-    "kind": "turn_middleware",
-    "display_name": "idmm.fallback_policy",
-    "description": "idmm.fallback_policy",
-    "source_package": {
-      "id": "nomifun.idmm",
       "version": "1.0.0"
     },
     "source_kind": "bundled",
@@ -3483,6 +3071,60 @@
     "required_capabilities": [],
     "conflicting_capabilities": [],
     "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "ssh",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "ssh",
+    "description": "ssh",
+    "source_package": {
+      "id": "nomifun.ssh",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "unavailable_code": null,
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "ssh_host"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 4,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "browser",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "browser",
+    "description": "browser",
+    "source_package": {
+      "id": "nomifun.browser",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "unavailable_code": null,
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "browser"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 7,
     "context_contributor_count": 0
   }
 ]

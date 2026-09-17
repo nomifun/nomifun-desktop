@@ -3,7 +3,7 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 
 use crate::error::DbError;
 use crate::models::{NewRequirementRow, RequirementRow, RequirementRowUpdate, RequirementTagRow};
-use crate::repository::bind::{BindValue, bind_value, bind_value_as, bind_value_scalar};
+use crate::repository::bind::{BindValue, bind_value_as, bind_value_scalar};
 use crate::repository::requirement::{
     IRequirementRepository, ListRequirementsParams, RequirementClaim,
     RequirementClaimResolution,
@@ -75,17 +75,41 @@ async fn lock_requirement_owners(
                 "requirement conversation owner '{owner}' is not a canonical UUIDv7: {error}"
             ))
         })?;
-        let parent = sqlx::query(
-            "UPDATE conversations SET updated_at = updated_at WHERE conversation_id = ?",
+        // Canonical AgentSessions and the delete admission fence share this
+        // exact SQLite writer boundary. If delete wins first, `deleting` must
+        // never fall back to a same-ID legacy Conversation row.
+        let canonical = sqlx::query(
+            "UPDATE agent_sessions SET state = state \
+             WHERE agent_session_id = ? AND state = 'live'",
         )
         .bind(owner.as_str())
         .execute(&mut **tx)
         .await?;
-        if parent.rows_affected() == 0 {
-            return Err(DbError::Conflict(format!(
-                "requirement conversation owner '{}' does not exist",
-                owner
-            )));
+        if canonical.rows_affected() == 0 {
+            let canonical_state: Option<String> = sqlx::query_scalar(
+                "SELECT state FROM agent_sessions WHERE agent_session_id = ?",
+            )
+            .bind(owner.as_str())
+            .fetch_optional(&mut **tx)
+            .await?;
+            if let Some(state) = canonical_state {
+                return Err(DbError::Conflict(format!(
+                    "requirement AgentSession owner '{}' is {state}",
+                    owner
+                )));
+            }
+            let legacy = sqlx::query(
+                "UPDATE conversations SET updated_at = updated_at WHERE conversation_id = ?",
+            )
+            .bind(owner.as_str())
+            .execute(&mut **tx)
+            .await?;
+            if legacy.rows_affected() == 0 {
+                return Err(DbError::Conflict(format!(
+                    "requirement AgentSession owner '{}' does not exist",
+                    owner
+                )));
+            }
         }
     }
     if let Some(owner) = owner_terminal_id {
@@ -282,7 +306,7 @@ impl IRequirementRepository for SqliteRequirementRepository {
         &self,
         requirement_id: &str,
         params: &RequirementRowUpdate,
-    ) -> Result<(), DbError> {
+    ) -> Result<RequirementRow, DbError> {
         let requirement_id = parse_requirement_id(requirement_id)?;
         if params.status.is_some()
             || params.owner_conversation_id.is_some()
@@ -298,8 +322,6 @@ impl IRequirementRepository for SqliteRequirementRepository {
                     .into(),
             ));
         }
-        let mut transaction = self.pool.begin().await?;
-
         let mut set_parts: Vec<String> = Vec::new();
         let mut binds: Vec<BindValue> = Vec::new();
 
@@ -354,28 +376,32 @@ impl IRequirementRepository for SqliteRequirementRepository {
         push_str!(extra);
 
         if set_parts.is_empty() {
-            return Ok(());
+            return self
+                .get_by_requirement_id(requirement_id.as_str())
+                .await?
+                .ok_or_else(|| DbError::NotFound(format!("requirement '{requirement_id}'")));
         }
 
         set_parts.push("updated_at = ?".to_string());
         binds.push(BindValue::I64(now_ms()));
 
         let sql = format!(
-            "UPDATE requirements SET {} WHERE requirement_id = ?",
+            "UPDATE requirements SET {} WHERE requirement_id = ? RETURNING *",
             set_parts.join(", ")
         );
-        let mut query = sqlx::query(&sql);
+        let mut query = sqlx::query_as::<_, RequirementRow>(&sql);
         for bind in &binds {
-            query = bind_value(query, bind);
+            query = bind_value_as(query, bind);
         }
         query = query.bind(requirement_id.as_str());
 
-        let result = query.execute(&mut *transaction).await?;
-        if result.rows_affected() == 0 {
-            return Err(DbError::NotFound(format!("requirement '{requirement_id}'")));
-        }
+        let mut transaction = self.pool.begin().await?;
+        let updated = query
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or_else(|| DbError::NotFound(format!("requirement '{requirement_id}'")))?;
         transaction.commit().await?;
-        Ok(())
+        Ok(updated)
     }
 
     async fn touch_updated_at(

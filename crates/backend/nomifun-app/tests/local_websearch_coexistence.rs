@@ -119,7 +119,7 @@ fn reply(state: &Coexistence, body: &Value) -> Result<Response, String> {
     }
     if names
         .iter()
-        .any(|name| matches!(*name, "Browser" | "nomi_system_browser"))
+        .any(|name| *name == "Browser")
     {
         return Err("Searches implicitly enabled browser interaction".into());
     }

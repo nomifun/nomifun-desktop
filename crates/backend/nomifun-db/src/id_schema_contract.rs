@@ -50,6 +50,7 @@ pub(crate) const CANONICAL_AGENT_STORE_TABLES: &[&str] = &[
     "agent_bindings",
     "agent_runtime_snapshots",
     "agent_sessions",
+    "agent_deletion_audits",
     "agent_turns",
     "agent_session_resources",
     "agent_payloads",

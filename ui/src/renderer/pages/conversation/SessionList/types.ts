@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { AutoWorkRunState, IdmmRunState } from '@/common/adapter/ipcBridge';
+import type { AutoWorkRunState } from '@/common/adapter/ipcBridge';
 import type { TChatConversation } from '@/common/config/storage';
 import type { ConversationId } from '@/common/types/ids';
 
@@ -40,8 +40,6 @@ export type ConversationRowProps = {
   getJobStatus: (conversation_id: ConversationId) => 'none' | 'active' | 'paused' | 'error' | 'unread';
   /** AutoWork run state when enabled for this conversation (undefined = not enabled / unknown). */
   autoworkState?: AutoWorkRunState;
-  /** IDMM run state when enabled for this conversation (undefined = not enabled / unknown). */
-  idmmState?: IdmmRunState;
   /** When true, the agent icon is dimmed by default and only shows full color on hover. Used inside project folders to reduce visual weight. */
   dimIcon?: boolean;
   /** Sidebar display preference: show/hide the compact age marker on the right. */

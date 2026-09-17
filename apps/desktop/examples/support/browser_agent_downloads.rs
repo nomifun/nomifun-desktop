@@ -1,8 +1,13 @@
 //! Production tool -> exact run -> observed native click -> HTTP download ->
 //! validated workspace publication. No OS Save dialog or fake downloaded bytes.
 use nomi_tools::Tool;
-use nomifun_agent_kernel::ActiveCapabilitySetSnapshot;
-use nomifun_browser_platform::{downloads::BrowserDownloadScope, runtime::*, workspace::BrowserWorkspaceService};
+use nomifun_browser_platform::{
+    bound_resource::BoundBrowserProviderResource,
+    downloads::BrowserDownloadScope,
+    product::BrowserProviderKind,
+    runtime::*,
+    workspace::BrowserResourceService,
+};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use sha2::{Digest, Sha256};
@@ -17,20 +22,26 @@ async fn element(tool: &dyn Tool, label: &str) -> Result<Value, String> {
 }
 pub(super) async fn verify(app: &tauri::AppHandle, url: &str) -> Result<Value, String> {
     let root = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let service = BrowserWorkspaceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
-    let key = BrowserWorkspaceKey { user_id: "agent-download-fixture".into(), conversation_id: "agent-download-fixture".into() };
-    let workspace = service.ensure(key.clone(), "fixture".into(), BrowserProfile::Ephemeral).await.map_err(|e| e.to_string())?;
-    let slot = super::browser_lifecycle::NativeBrowserTurnSlot::default();
+    let service = BrowserResourceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
+    let authority = super::browser_resource_fixture::authority("agent-download-fixture", "agent-download-fixture", "fixture");
+    let key = authority.key();
+    let workspace = service.ensure(authority, BrowserProfile::Ephemeral).await.map_err(|e| e.to_string())?;
+    let bound = BoundBrowserProviderResource::Managed(workspace.clone());
+    let slot = super::browser_lifecycle::BrowserTurnSlot::default();
     let result = async {
         workspace.user_command(BrowserTabCommand::Create { url: url.into() }).await.map_err(|e| e.to_string())?;
         let target = super::wait_workspace_page(&workspace, url).await?;
         let view = app.get_webview(&target.tab_id).ok_or("Missing native download tab")?;
         workspace.set_surface(BrowserSurfaceBounds { x: 20., y: 60., width: 1000., height: 600. }, true, Default::default()).await.map_err(|e| e.to_string())?;
-        slot.begin(workspace.clone()).await.map_err(|e| e.to_string())?;
-        let tool = Arc::new(super::browser_tool::ConversationBrowserTool::new(slot.clone(), ActiveCapabilitySetSnapshot {
-            resolved_snapshot_ref: nomifun_agent_contracts::ResolvedSnapshotRef { snapshot_id: "download-fixture".into(), snapshot_digest: "download-fixture".into() },
-            generation: 1, active: ["browser.observe", "browser.act", "browser.download"].into_iter().map(Into::into).collect(),
-        }).with_download_scope(Arc::new(BrowserDownloadScope::open(root.path()).map_err(|e| e.to_string())?)));
+        slot.begin(&bound).await.map_err(|e| e.to_string())?;
+        let tool = Arc::new(super::browser_tool::ConversationBrowserTool::new(
+            slot.clone(),
+            ["browser/observe", "browser/act", "browser/download"]
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            BrowserProviderKind::Managed,
+        ).with_download_scope(Arc::new(BrowserDownloadScope::open(root.path()).map_err(|e| e.to_string())?)));
         let mut published = vec![];
         for index in 0..5 {
             let reference = element(tool.as_ref(), "Download local fixture").await?;

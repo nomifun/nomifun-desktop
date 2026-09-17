@@ -5,13 +5,12 @@
  */
 
 import { ipcBridge } from '@/common';
-import type { IIdmmConfig, IKnowledgeBinding } from '@/common/adapter/ipcBridge';
+import type { IKnowledgeBinding } from '@/common/adapter/ipcBridge';
 import type { ConversationId } from '@/common/types/ids';
 import { Message } from '@arco-design/web-react';
 import { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { AutoWorkDraftValue } from '@/renderer/pages/conversation/components/AutoWorkControl';
-import { defaultIdmmConfig } from '@/renderer/pages/conversation/components/IdmmControl';
 import { defaultKnowledgeBinding } from '@/renderer/pages/conversation/components/KnowledgeControl';
 
 export type GuidAdvancedConfig = {
@@ -19,8 +18,6 @@ export type GuidAdvancedConfig = {
   setKnowledge: (next: IKnowledgeBinding) => void;
   autoWork: AutoWorkDraftValue;
   setAutoWork: (next: AutoWorkDraftValue) => void;
-  idmm: IIdmmConfig;
-  setIdmm: (next: IIdmmConfig) => void;
   applyToConversation: (
     conversationId: ConversationId,
     options?: { allowKnowledgeBinding?: boolean; allowAutomation?: boolean }
@@ -40,17 +37,16 @@ export const useGuidAdvancedConfig = (): GuidAdvancedConfig => {
   const [autoWork, setAutoWork] = useState<AutoWorkDraftValue>({
     enabled: false,
   });
-  const [idmm, setIdmm] = useState<IIdmmConfig>(defaultIdmmConfig);
 
-  const draftsRef = useRef({ knowledge, autoWork, idmm });
-  draftsRef.current = { knowledge, autoWork, idmm };
+  const draftsRef = useRef({ knowledge, autoWork });
+  draftsRef.current = { knowledge, autoWork };
 
   const applyToConversation = useCallback(
     async (
       conversationId: ConversationId,
       options?: { allowKnowledgeBinding?: boolean; allowAutomation?: boolean }
     ) => {
-      const { knowledge: kb, autoWork: aw, idmm: idm } = draftsRef.current;
+      const { knowledge: kb, autoWork: aw } = draftsRef.current;
       const tasks: Array<{ label: string; run: () => Promise<unknown> }> = [];
 
       if (
@@ -70,18 +66,6 @@ export const useGuidAdvancedConfig = (): GuidAdvancedConfig => {
             }),
         });
       }
-      if (options?.allowAutomation !== false && (idm.fault_watch.enabled || idm.decision_watch.enabled)) {
-        tasks.push({
-          label: t('idmm.label'),
-          run: () =>
-            ipcBridge.idmm.set.invoke({
-              kind: 'conversation',
-              target_id: conversationId,
-              ...idm,
-            }),
-        });
-      }
-
       const report = (
         pendingTasks: Array<{ label: string }>,
         results: PromiseSettledResult<unknown>[]
@@ -127,7 +111,6 @@ export const useGuidAdvancedConfig = (): GuidAdvancedConfig => {
   const reset = useCallback(() => {
     setKnowledge(defaultKnowledgeBinding());
     setAutoWork({ enabled: false });
-    setIdmm(defaultIdmmConfig());
   }, []);
 
   return {
@@ -135,8 +118,6 @@ export const useGuidAdvancedConfig = (): GuidAdvancedConfig => {
     setKnowledge,
     autoWork,
     setAutoWork,
-    idmm,
-    setIdmm,
     applyToConversation,
     reset,
   };

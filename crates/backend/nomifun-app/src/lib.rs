@@ -10,11 +10,9 @@ pub mod delivery_notify;
 #[cfg(feature = "browser-use")]
 mod browser_workspace_provider;
 #[cfg(feature = "browser-use")]
+pub use browser_workspace_provider::attached_provider::AttachedChromeProviderService;
+#[cfg(feature = "browser-use")]
 pub mod headless_render;
-#[cfg(feature = "browser-use")]
-pub mod system_browser;
-#[cfg(feature = "browser-use")]
-mod system_browser_owner;
 mod provider_deletion;
 mod robot_wiring;
 mod router;

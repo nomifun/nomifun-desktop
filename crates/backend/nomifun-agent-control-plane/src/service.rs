@@ -2137,7 +2137,7 @@ mod tests {
             [CapabilityConsumer::Agent, CapabilityConsumer::Gateway],
         );
         let (knowledge_only, knowledge_only_entry) = catalog_capability(
-            "browser.render_content",
+            "knowledge.render.internal",
             [CapabilityConsumer::Knowledge],
         );
         let snapshot = CatalogSnapshot {
@@ -2164,7 +2164,7 @@ mod tests {
             version: VersionString::from("1.0.0"),
         };
         let knowledge_only_ref = CapabilityRef {
-            id: CapabilityId::from("browser.render_content"),
+            id: CapabilityId::from("knowledge.render.internal"),
             version: VersionString::from("1.0.0"),
         };
 

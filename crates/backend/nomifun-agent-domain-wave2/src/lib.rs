@@ -45,8 +45,7 @@ use nomifun_agent_kernel::{
     CapabilityHandler, CapabilityInvocationContext, CapabilityResourceProviderFactory,
     CapabilityResourceProviderRequest, ContextContributionFactory, ContextContributionRequest,
     ContextContributionResult, HostPluginStateApi, KernelError, PluginRegistration,
-    PluginStateError, PluginStateHandle, ResourceProviderResult, ResolvedRoleMemberContext, RoleToolHandler,
-    RoleToolInvocationContext,
+    PluginStateError, PluginStateHandle, ResourceProviderResult, ResolvedRoleMemberContext,
 };
 
 pub const CONTRACT_VERSION: &str = "1.0.0";
@@ -78,6 +77,8 @@ pub const WORKSPACE_FILES_MODULE_ID: &str = "workspace.files";
 pub const WORKSPACE_VCS_MODULE_ID: &str = "workspace.vcs";
 pub const WORKSPACE_PROCESS_MODULE_ID: &str = "workspace.process";
 pub const WORKSPACE_ARTIFACTS_MODULE_ID: &str = "workspace.artifacts";
+pub const SSH_MODULE_ID: &str = "ssh";
+pub const BROWSER_MODULE_ID: &str = "browser";
 pub const WORKSPACE_FILES_CHANGED_EVENT_SCHEMA_ID: &str = "workspace.files/changed";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,23 +170,24 @@ pub const WORKSPACE_EXECUTION_CAPABILITY_IDS: &[&str] = &[
     WORKSPACE_ARTIFACTS_MODULE_ID,
 ];
 
-pub const SSH_CAPABILITY_IDS: &[&str] = &[
-    "ssh.connect",
-    "ssh.fs.read",
-    "ssh.fs.write",
-    "ssh.exec",
-    "ssh.sudo",
+pub const SSH_ACTION_IDS: &[&str] = &[
+    "ssh/fs.read",
+    "ssh/fs.write",
+    "ssh/exec",
+    "ssh/sudo",
 ];
+pub const SSH_CAPABILITY_IDS: &[&str] = &[SSH_MODULE_ID];
 
-pub const BROWSER_CAPABILITY_IDS: &[&str] = &[
-    "browser.observe",
-    "browser.navigate",
-    "browser.act",
-    "browser.render_content",
-    "browser.download",
-    "browser.upload",
-    "browser.evaluate",
+pub const BROWSER_ACTION_IDS: &[&str] = &[
+    "browser/observe",
+    "browser/navigate",
+    "browser/act",
+    "browser/render_content",
+    "browser/download",
+    "browser/upload",
+    "browser/evaluate",
 ];
+pub const BROWSER_CAPABILITY_IDS: &[&str] = &[BROWSER_MODULE_ID];
 
 pub const COMPUTER_A11Y_CAPABILITY_IDS: &[&str] = &[
     "computer.observe",
@@ -194,29 +196,19 @@ pub const COMPUTER_A11Y_CAPABILITY_IDS: &[&str] = &[
     "a11y.observe",
 ];
 
-pub const ALL_CAPABILITY_IDS: [&str; 20] = [
+pub const ALL_CAPABILITY_IDS: [&str; 10] = [
     WORKSPACE_FILES_MODULE_ID,
     WORKSPACE_VCS_MODULE_ID,
     WORKSPACE_PROCESS_MODULE_ID,
     WORKSPACE_ARTIFACTS_MODULE_ID,
-    "ssh.connect",
-    "ssh.fs.read",
-    "ssh.fs.write",
-    "ssh.exec",
-    "ssh.sudo",
-    "browser.observe",
-    "browser.navigate",
-    "browser.act",
-    "browser.render_content",
-    "browser.download",
-    "browser.upload",
-    "browser.evaluate",
+    SSH_MODULE_ID,
+    BROWSER_MODULE_ID,
     "computer.observe",
     "computer.input",
     "computer.launch",
     "a11y.observe",
 ];
-pub const TARGET_CAPABILITY_IDS: [&str; 20] = ALL_CAPABILITY_IDS;
+pub const TARGET_CAPABILITY_IDS: [&str; 10] = ALL_CAPABILITY_IDS;
 
 pub const TARGET_CAPABILITY_FAMILIES: [&str; 10] = [
     "browser",
@@ -256,6 +248,7 @@ pub const BROWSER_COMPUTER_SURFACES: &[&str] = &["desktop"];
 const WORKSPACE_RESOURCE: &[&str] = &["workspace"];
 const PROCESS_RESOURCE: &[&str] = &["process_session"];
 const SSH_RESOURCE: &[&str] = &["ssh_host"];
+const BROWSER_RESOURCE: &[&str] = &["browser"];
 const COMPUTER_RESOURCE: &[&str] = &["computer"];
 
 const PLUGIN_CANCEL_PORT: &str = "host.plugin.cancel";
@@ -414,6 +407,7 @@ pub enum Wave2TypedCapabilityOperation {
     SshFsWrite { input: StrictJsonValue },
     SshExec { input: StrictJsonValue },
     SshSudo { input: StrictJsonValue },
+    BrowserObserve { input: StrictJsonValue },
     BrowserNavigate { input: StrictJsonValue },
     BrowserAct { input: StrictJsonValue },
     BrowserRenderContent { input: StrictJsonValue },
@@ -446,16 +440,17 @@ impl Wave2TypedCapabilityOperation {
             | Self::WorkspaceProcessCancel { .. } => WORKSPACE_PROCESS_MODULE_ID,
             Self::WorkspaceArtifactRead { .. }
             | Self::WorkspaceArtifactPublish { .. } => WORKSPACE_ARTIFACTS_MODULE_ID,
-            Self::SshFsRead { .. } => "ssh.fs.read",
-            Self::SshFsWrite { .. } => "ssh.fs.write",
-            Self::SshExec { .. } => "ssh.exec",
-            Self::SshSudo { .. } => "ssh.sudo",
-            Self::BrowserNavigate { .. } => "browser.navigate",
-            Self::BrowserAct { .. } => "browser.act",
-            Self::BrowserRenderContent { .. } => "browser.render_content",
-            Self::BrowserDownload { .. } => "browser.download",
-            Self::BrowserUpload { .. } => "browser.upload",
-            Self::BrowserEvaluate { .. } => "browser.evaluate",
+            Self::SshFsRead { .. }
+            | Self::SshFsWrite { .. }
+            | Self::SshExec { .. }
+            | Self::SshSudo { .. } => SSH_MODULE_ID,
+            Self::BrowserObserve { .. }
+            | Self::BrowserNavigate { .. }
+            | Self::BrowserAct { .. }
+            | Self::BrowserRenderContent { .. }
+            | Self::BrowserDownload { .. }
+            | Self::BrowserUpload { .. }
+            | Self::BrowserEvaluate { .. } => BROWSER_MODULE_ID,
             Self::ComputerInput { .. } => "computer.input",
             Self::ComputerLaunch { .. } => "computer.launch",
         }
@@ -482,16 +477,17 @@ impl Wave2TypedCapabilityOperation {
             Self::WorkspaceProcessCancel { .. } => "workspace.process/cancel",
             Self::WorkspaceArtifactRead { .. } => "workspace.artifacts/read",
             Self::WorkspaceArtifactPublish { .. } => "workspace.artifacts/publish",
-            Self::SshFsRead { .. } => "ssh.fs.read.invoke",
-            Self::SshFsWrite { .. } => "ssh.fs.write.invoke",
-            Self::SshExec { .. } => "ssh.exec.invoke",
-            Self::SshSudo { .. } => "ssh.sudo.invoke",
-            Self::BrowserNavigate { .. } => "browser.navigate.invoke",
-            Self::BrowserAct { .. } => "browser.act.invoke",
-            Self::BrowserRenderContent { .. } => "browser.render_content.invoke",
-            Self::BrowserDownload { .. } => "browser.download.invoke",
-            Self::BrowserUpload { .. } => "browser.upload.invoke",
-            Self::BrowserEvaluate { .. } => "browser.evaluate.invoke",
+            Self::SshFsRead { .. } => "ssh/fs.read",
+            Self::SshFsWrite { .. } => "ssh/fs.write",
+            Self::SshExec { .. } => "ssh/exec",
+            Self::SshSudo { .. } => "ssh/sudo",
+            Self::BrowserObserve { .. } => "browser/observe",
+            Self::BrowserNavigate { .. } => "browser/navigate",
+            Self::BrowserAct { .. } => "browser/act",
+            Self::BrowserRenderContent { .. } => "browser/render_content",
+            Self::BrowserDownload { .. } => "browser/download",
+            Self::BrowserUpload { .. } => "browser/upload",
+            Self::BrowserEvaluate { .. } => "browser/evaluate",
             Self::ComputerInput { .. } => "computer.input.invoke",
             Self::ComputerLaunch { .. } => "computer.launch.invoke",
         }
@@ -524,7 +520,8 @@ impl Wave2TypedCapabilityOperation {
             | Self::SshFsWrite { input }
             | Self::SshExec { input }
             | Self::SshSudo { input } => Wave2CapabilityOperation::Ssh { input: input.clone() },
-            Self::BrowserNavigate { input }
+            Self::BrowserObserve { input }
+            | Self::BrowserNavigate { input }
             | Self::BrowserAct { input }
             | Self::BrowserRenderContent { input }
             | Self::BrowserDownload { input }
@@ -672,7 +669,6 @@ pub struct Wave2RoleMemberContext {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Wave2ContextCapabilityOperation {
-    BrowserObserve,
     ComputerObserve,
     A11yObserve,
 }
@@ -680,7 +676,6 @@ pub enum Wave2ContextCapabilityOperation {
 impl Wave2ContextCapabilityOperation {
     pub fn capability_id(&self) -> &'static str {
         match self {
-            Self::BrowserObserve => "browser.observe",
             Self::ComputerObserve => "computer.observe",
             Self::A11yObserve => "a11y.observe",
         }
@@ -709,24 +704,6 @@ pub trait Wave2ContextHostPort: Send + Sync {
     >;
 }
 
-
-/// Host boundary for a Tool invoked by a non-Agent operation.
-///
-/// The resolved Kernel context carries an exact Provider lock and typed
-/// resources, but intentionally has no fabricated AgentSession or Snapshot.
-pub struct Wave2OperationToolHostRequest {
-    pub context: ResolvedRoleMemberContext,
-    pub operation: Wave2TypedCapabilityOperation,
-    pub action_id: ActionId,
-    pub idempotency_key: IdempotencyKey,
-}
-
-pub trait Wave2OperationToolHostPort: Send + Sync {
-    fn invoke<'a>(
-        &'a self,
-        request: Wave2OperationToolHostRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave2HostPortError>> + Send + 'a>>;
-}
 
 /// An exact-operation adapter used by [`Wave2HostPortDispatcher`].
 pub trait Wave2TypedOperationAdapter: Send + Sync {
@@ -885,35 +862,12 @@ pub fn unconfigured_context_host_port() -> Arc<dyn Wave2ContextHostPort> {
 }
 
 
-struct UnconfiguredWave2OperationToolHostPort;
-
-impl Wave2OperationToolHostPort for UnconfiguredWave2OperationToolHostPort {
-    fn invoke<'a>(
-        &'a self,
-        request: Wave2OperationToolHostRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave2HostPortError>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            Err(Wave2HostPortError::unavailable(format!(
-                "no non-Agent operation owner is bound for {}",
-                request.context.member_id.as_ref()
-            )))
-        })
-    }
-}
-
-pub fn unconfigured_operation_tool_host_port() -> Arc<dyn Wave2OperationToolHostPort> {
-    Arc::new(UnconfiguredWave2OperationToolHostPort)
-}
-
 #[derive(Clone)]
 pub struct Wave2RoleHostPorts {
     pub actions: Arc<dyn Wave2HostPort>,
     pub browser_actions: Arc<dyn Wave2HostPort>,
     pub computer_actions: Arc<dyn Wave2HostPort>,
-    pub browser_contexts: Arc<dyn Wave2ContextHostPort>,
     pub computer_contexts: Arc<dyn Wave2ContextHostPort>,
-    pub browser_operation_tools: Arc<dyn Wave2OperationToolHostPort>,
 }
 
 impl Wave2RoleHostPorts {
@@ -922,9 +876,7 @@ impl Wave2RoleHostPorts {
             browser_actions: Arc::clone(&actions),
             computer_actions: Arc::clone(&actions),
             actions,
-            browser_contexts: unconfigured_context_host_port(),
             computer_contexts: unconfigured_context_host_port(),
-            browser_operation_tools: unconfigured_operation_tool_host_port(),
         }
     }
 
@@ -941,22 +893,11 @@ impl Wave2RoleHostPorts {
         role_id: &ExecutionRoleId,
     ) -> Arc<dyn Wave2ContextHostPort> {
         match role_id.as_ref() {
-            BROWSER_EXECUTION_ROLE_ID => Arc::clone(&self.browser_contexts),
             COMPUTER_EXECUTION_ROLE_ID => Arc::clone(&self.computer_contexts),
             _ => unconfigured_context_host_port(),
         }
     }
 
-
-    fn operation_tool_port(
-        &self,
-        role_id: &ExecutionRoleId,
-    ) -> Arc<dyn Wave2OperationToolHostPort> {
-        match role_id.as_ref() {
-            BROWSER_EXECUTION_ROLE_ID => Arc::clone(&self.browser_operation_tools),
-            _ => unconfigured_operation_tool_host_port(),
-        }
-    }
 }
 
 struct Wave2ContextFactory {
@@ -1018,7 +959,6 @@ impl ContextContributionFactory for Wave2ContextFactory {
             });
         }
         let operation = match self.capability_id.as_ref() {
-            "browser.observe" => Wave2ContextCapabilityOperation::BrowserObserve,
             "computer.observe" => Wave2ContextCapabilityOperation::ComputerObserve,
             "a11y.observe" => Wave2ContextCapabilityOperation::A11yObserve,
             _ => {
@@ -1033,51 +973,6 @@ impl ContextContributionFactory for Wave2ContextFactory {
                 context: role_member_context(request.context)?,
                 operation,
                 schema_ref: request.schema_ref,
-            })
-            .await
-            .map_err(wave2_host_error_to_kernel)
-    }
-}
-
-
-struct Wave2OperationToolFactory {
-    role_id: ExecutionRoleId,
-    capability_id: CapabilityId,
-    host_port: Arc<dyn Wave2OperationToolHostPort>,
-}
-
-#[async_trait::async_trait]
-impl RoleToolHandler for Wave2OperationToolFactory {
-    async fn invoke(
-        &self,
-        request: RoleToolInvocationContext,
-        input: StrictJsonValue,
-    ) -> Result<StrictJsonValue, KernelError> {
-        if request.context.provider_lock.provider.role.key.role_id != self.role_id
-            || request.context.member_id != self.capability_id
-        {
-            return Err(KernelError::RoleProviderMemberUnavailable {
-                role_id: self.role_id.clone(),
-                capability_id: self.capability_id.clone(),
-            });
-        }
-        if !input.0.is_object() {
-            return Err(KernelError::capability_execution_failed(
-                INVALID_PAYLOAD,
-                format!(
-                    "{} input must be a JSON object",
-                    self.capability_id.as_ref()
-                ),
-            ));
-        }
-        let operation = typed_operation_for(&self.capability_id, &request.action_id, input)
-            .map_err(wave2_input_error_to_kernel)?;
-        self.host_port
-            .invoke(Wave2OperationToolHostRequest {
-                context: request.context,
-                operation,
-                action_id: request.action_id,
-                idempotency_key: request.idempotency_key,
             })
             .await
             .map_err(wave2_host_error_to_kernel)
@@ -1151,27 +1046,21 @@ struct CapabilityDefinition {
 }
 
 impl CapabilityDefinition {
-    const fn tool(
-        id: &'static str,
-        effect_class: EffectClass,
-        resource_kinds: &'static [&'static str],
-    ) -> Self {
-        Self {
-            id,
-            kind: CapabilityKind::Tool,
-            effect_class: Some(effect_class),
-            module_actions: NO_ACTIONS,
-            publishes_event: false,
-            resource_kinds,
-            platform_scope: PlatformScope::Any,
-        }
-    }
-
     const fn module(
         id: &'static str,
         actions: &'static [ActionDefinition],
         publishes_event: bool,
         resource_kinds: &'static [&'static str],
+    ) -> Self {
+        Self::module_on(id, actions, publishes_event, resource_kinds, PlatformScope::Any)
+    }
+
+    const fn module_on(
+        id: &'static str,
+        actions: &'static [ActionDefinition],
+        publishes_event: bool,
+        resource_kinds: &'static [&'static str],
+        platform_scope: PlatformScope,
     ) -> Self {
         Self {
             id,
@@ -1180,7 +1069,7 @@ impl CapabilityDefinition {
             module_actions: actions,
             publishes_event,
             resource_kinds,
-            platform_scope: PlatformScope::Any,
+            platform_scope,
         }
     }
 
@@ -1192,22 +1081,6 @@ impl CapabilityDefinition {
         Self {
             id,
             kind: CapabilityKind::ContextContributor,
-            effect_class: None,
-            module_actions: NO_ACTIONS,
-            publishes_event: false,
-            resource_kinds,
-            platform_scope,
-        }
-    }
-
-    const fn resource_provider(
-        id: &'static str,
-        resource_kinds: &'static [&'static str],
-        platform_scope: PlatformScope,
-    ) -> Self {
-        Self {
-            id,
-            kind: CapabilityKind::ResourceProvider,
             effect_class: None,
             module_actions: NO_ACTIONS,
             publishes_event: false,
@@ -1288,30 +1161,37 @@ const WORKSPACE_EXECUTION_CAPABILITIES: &[CapabilityDefinition] = &[
     ),
 ];
 
-const SSH_CAPABILITIES: &[CapabilityDefinition] = &[
-    CapabilityDefinition::resource_provider("ssh.connect", SSH_RESOURCE, PlatformScope::Any),
-    CapabilityDefinition::tool("ssh.fs.read", EffectClass::ReadSensitive, SSH_RESOURCE),
-    CapabilityDefinition::tool("ssh.fs.write", EffectClass::WriteDurable, SSH_RESOURCE),
-    CapabilityDefinition::tool("ssh.exec", EffectClass::ExecuteLocal, SSH_RESOURCE),
-    CapabilityDefinition::tool("ssh.sudo", EffectClass::ExecuteLocal, SSH_RESOURCE),
+const SSH_ACTIONS: &[ActionDefinition] = &[
+    ActionDefinition::function("ssh/fs.read", EffectClass::ReadSensitive),
+    ActionDefinition::function("ssh/fs.write", EffectClass::WriteDurable),
+    ActionDefinition::function("ssh/exec", EffectClass::ExecuteLocal),
+    ActionDefinition::function("ssh/sudo", EffectClass::ExecuteLocal),
 ];
 
-const BROWSER_CAPABILITIES: &[CapabilityDefinition] = &[
-    CapabilityDefinition::context(
-        "browser.observe",
-        &[],
-        PlatformScope::BrowserDesktop,
-    ),
-    CapabilityDefinition::browser_tool("browser.navigate", EffectClass::ExternalTransmit),
-    CapabilityDefinition::browser_tool("browser.act", EffectClass::WriteReversible),
-    CapabilityDefinition::browser_tool(
-        "browser.render_content",
-        EffectClass::ExternalTransmit,
-    ),
-    CapabilityDefinition::browser_tool("browser.download", EffectClass::WriteDurable),
-    CapabilityDefinition::browser_tool("browser.upload", EffectClass::ExternalTransmit),
-    CapabilityDefinition::browser_tool("browser.evaluate", EffectClass::ExecuteLocal),
+const SSH_CAPABILITIES: &[CapabilityDefinition] = &[CapabilityDefinition::module(
+    SSH_MODULE_ID,
+    SSH_ACTIONS,
+    false,
+    SSH_RESOURCE,
+)];
+
+const BROWSER_ACTIONS: &[ActionDefinition] = &[
+    ActionDefinition::function("browser/observe", EffectClass::ReadSensitive),
+    ActionDefinition::function("browser/navigate", EffectClass::ExternalTransmit),
+    ActionDefinition::function("browser/act", EffectClass::WriteReversible),
+    ActionDefinition::function("browser/render_content", EffectClass::ReadSensitive),
+    ActionDefinition::function("browser/download", EffectClass::WriteDurable),
+    ActionDefinition::function("browser/upload", EffectClass::ExternalTransmit),
+    ActionDefinition::function("browser/evaluate", EffectClass::ExecuteLocal),
 ];
+
+const BROWSER_CAPABILITIES: &[CapabilityDefinition] = &[CapabilityDefinition::module_on(
+    BROWSER_MODULE_ID,
+    BROWSER_ACTIONS,
+    false,
+    BROWSER_RESOURCE,
+    PlatformScope::BrowserDesktop,
+)];
 
 const COMPUTER_A11Y_CAPABILITIES: &[CapabilityDefinition] = &[
     CapabilityDefinition::context(
@@ -1329,20 +1209,6 @@ const COMPUTER_A11Y_CAPABILITIES: &[CapabilityDefinition] = &[
 ];
 
 impl CapabilityDefinition {
-    const fn browser_tool(id: &'static str, effect_class: EffectClass) -> Self {
-        Self {
-            id,
-            kind: CapabilityKind::Tool,
-            effect_class: Some(effect_class),
-            module_actions: NO_ACTIONS,
-            publishes_event: false,
-            // The selected Provider resolves the runtime from the trusted invocation
-            // (Conversation/run or headless job). Users do not bind a Browser resource.
-            resource_kinds: &[],
-            platform_scope: PlatformScope::BrowserDesktop,
-        }
-    }
-
     const fn computer_tool(id: &'static str, effect_class: EffectClass) -> Self {
         Self {
             id,
@@ -1652,26 +1518,6 @@ fn build_registration(
         let Some(role_id) = role_id_for_capability(definition.id) else {
             continue;
         };
-        if definition.id != "browser.render_content" {
-            continue;
-        }
-        let capability_id = CapabilityId::from(definition.id);
-        registration
-            .add_role_tool_handler(
-                role_id.clone(),
-                capability_id.clone(),
-                Arc::new(Wave2OperationToolFactory {
-                    role_id: role_id.clone(),
-                    capability_id,
-                    host_port: role_host_ports.operation_tool_port(&role_id),
-                }),
-            )
-            .map_err(|error| format!("register {} operation tool: {error}", package.id))?;
-    }
-    for definition in package.capabilities {
-        let Some(role_id) = role_id_for_capability(definition.id) else {
-            continue;
-        };
         let capability_id = CapabilityId::from(definition.id);
         match definition.kind {
             CapabilityKind::ContextContributor => {
@@ -1719,11 +1565,7 @@ fn build_capability(
             input_schema: schema_ref(definition.id, "input")?,
             output_schema: schema_ref(definition.id, "output")?,
             effect_class,
-            presentation: if definition.id == "browser.render_content" {
-                ToolPresentationKind::Hidden
-            } else {
-                ToolPresentationKind::FunctionTool
-            },
+            presentation: ToolPresentationKind::FunctionTool,
         }]
     } else {
         Vec::new()
@@ -1742,7 +1584,7 @@ fn build_capability(
 
     let supported_surfaces = match role_id_for_capability(definition.id).as_ref().map(AsRef::as_ref)
     {
-        Some(BROWSER_EXECUTION_ROLE_ID) => AGENT_SURFACES,
+        Some(BROWSER_EXECUTION_ROLE_ID) => BROWSER_COMPUTER_SURFACES,
         Some(COMPUTER_EXECUTION_ROLE_ID) => BROWSER_COMPUTER_SURFACES,
         _ => match definition.platform_scope {
             PlatformScope::Any => AGENT_SURFACES,
@@ -1819,16 +1661,108 @@ fn action_input_schema(action_id: &str) -> StrictJsonValue {
         return schema;
     }
     match action_id {
-        "browser.render_content" => strict_object_schema(
+        "ssh/fs.read" => StrictJsonValue(serde_json::json!({
+            "oneOf": [
+                {
+                    "type":"object",
+                    "additionalProperties":false,
+                    "properties":{
+                        "operation":{"const":"read"},
+                        "path":{"type":"string","minLength":1,"maxLength":4096}
+                    },
+                    "required":["operation","path"]
+                },
+                {
+                    "type":"object",
+                    "additionalProperties":false,
+                    "properties":{
+                        "operation":{"const":"grep"},
+                        "pattern":{"type":"string","minLength":1,"maxLength":16384},
+                        "path":{"type":"string","minLength":1,"maxLength":4096}
+                    },
+                    "required":["operation","pattern","path"]
+                },
+                {
+                    "type":"object",
+                    "additionalProperties":false,
+                    "properties":{
+                        "operation":{"const":"list"},
+                        "glob":{"type":"string","minLength":1,"maxLength":4096}
+                    },
+                    "required":["operation","glob"]
+                },
+                {
+                    "type":"object",
+                    "additionalProperties":false,
+                    "properties":{
+                        "operation":{"const":"stat"},
+                        "path":{"type":"string","minLength":1,"maxLength":4096}
+                    },
+                    "required":["operation","path"]
+                }
+            ]
+        })),
+        "ssh/fs.write" => strict_object_schema(
+            serde_json::json!({
+                "path":{"type":"string","minLength":1,"maxLength":4096},
+                "content":{"type":"string","maxLength":1048576}
+            }),
+            &["path", "content"],
+        ),
+        "ssh/exec" | "ssh/sudo" => strict_object_schema(
+            serde_json::json!({
+                "command":{"type":"string","minLength":1,"maxLength":65536},
+                "timeout_ms":{"type":"integer","minimum":1,"maximum":600000}
+            }),
+            &["command"],
+        ),
+        "browser/observe" => strict_object_schema(
+            serde_json::json!({"tab_id":{"type":"string","minLength":1,"maxLength":512}}),
+            &[],
+        ),
+        "browser/navigate" => strict_object_schema(
+            serde_json::json!({
+                "url":{"type":"string","minLength":1,"maxLength":8192},
+                "new_tab":{"type":"boolean"}
+            }),
+            &["url"],
+        ),
+        "browser/act" => strict_object_schema(
+            serde_json::json!({
+                "action":{"type":"object","minProperties":1}
+            }),
+            &["action"],
+        ),
+        "browser/render_content" => strict_object_schema(
             serde_json::json!({"url":{"type":"string","minLength":1,"maxLength":8192,"pattern":"^https?://"}}),
             &["url"],
+        ),
+        "browser/download" => strict_object_schema(
+            serde_json::json!({"element":{"type":"object","minProperties":1}}),
+            &["element"],
+        ),
+        "browser/upload" => strict_object_schema(
+            serde_json::json!({
+                "element":{"type":"object","minProperties":1},
+                "files":{
+                    "type":"array",
+                    "items":{"type":"string","minLength":1,"maxLength":4096},
+                    "minItems":1,
+                    "maxItems":16
+                }
+            }),
+            &["element", "files"],
+        ),
+        "browser/evaluate" => strict_object_schema(
+            serde_json::json!({"request":{"type":"object","minProperties":1}}),
+            &["request"],
         ),
         _ => open_object_schema(),
     }
 }
 
 fn canonical_schema(schema_owner: &str, role: &str) -> StrictJsonValue {
-    if schema_owner == "browser.render_content" && role == "output" {
+    if schema_owner == "browser/render_content" && role == "output" {
         return strict_object_schema(serde_json::json!({
             "final_url":{"type":"string","maxLength":8192},
             "html":{"type":"string","maxLength":262144},
@@ -1962,12 +1896,8 @@ fn strict_object_schema(
 }
 
 pub fn supported_consumers(capability_id: &str) -> BTreeSet<CapabilityConsumer> {
-    match capability_id {
-        "browser.render_content" => {
-            BTreeSet::from([CapabilityConsumer::Knowledge])
-        }
-        _ => BTreeSet::from([CapabilityConsumer::Agent]),
-    }
+    let _ = capability_id;
+    BTreeSet::from([CapabilityConsumer::Agent])
 }
 
 struct Wave2CapabilityHandler {
@@ -2148,18 +2078,19 @@ pub fn typed_operation_for(
         (WORKSPACE_ARTIFACTS_MODULE_ID, "workspace.artifacts/publish") => {
             Wave2TypedCapabilityOperation::WorkspaceArtifactPublish { input }
         }
-        ("ssh.fs.read", "ssh.fs.read.invoke") => Wave2TypedCapabilityOperation::SshFsRead { input },
-        ("ssh.fs.write", "ssh.fs.write.invoke") => Wave2TypedCapabilityOperation::SshFsWrite { input },
-        ("ssh.exec", "ssh.exec.invoke") => Wave2TypedCapabilityOperation::SshExec { input },
-        ("ssh.sudo", "ssh.sudo.invoke") => Wave2TypedCapabilityOperation::SshSudo { input },
-        ("browser.navigate", "browser.navigate.invoke") => Wave2TypedCapabilityOperation::BrowserNavigate { input },
-        ("browser.act", "browser.act.invoke") => Wave2TypedCapabilityOperation::BrowserAct { input },
-        ("browser.render_content", "browser.render_content.invoke") => {
+        (SSH_MODULE_ID, "ssh/fs.read") => Wave2TypedCapabilityOperation::SshFsRead { input },
+        (SSH_MODULE_ID, "ssh/fs.write") => Wave2TypedCapabilityOperation::SshFsWrite { input },
+        (SSH_MODULE_ID, "ssh/exec") => Wave2TypedCapabilityOperation::SshExec { input },
+        (SSH_MODULE_ID, "ssh/sudo") => Wave2TypedCapabilityOperation::SshSudo { input },
+        (BROWSER_MODULE_ID, "browser/observe") => Wave2TypedCapabilityOperation::BrowserObserve { input },
+        (BROWSER_MODULE_ID, "browser/navigate") => Wave2TypedCapabilityOperation::BrowserNavigate { input },
+        (BROWSER_MODULE_ID, "browser/act") => Wave2TypedCapabilityOperation::BrowserAct { input },
+        (BROWSER_MODULE_ID, "browser/render_content") => {
             Wave2TypedCapabilityOperation::BrowserRenderContent { input }
         }
-        ("browser.download", "browser.download.invoke") => Wave2TypedCapabilityOperation::BrowserDownload { input },
-        ("browser.upload", "browser.upload.invoke") => Wave2TypedCapabilityOperation::BrowserUpload { input },
-        ("browser.evaluate", "browser.evaluate.invoke") => Wave2TypedCapabilityOperation::BrowserEvaluate { input },
+        (BROWSER_MODULE_ID, "browser/download") => Wave2TypedCapabilityOperation::BrowserDownload { input },
+        (BROWSER_MODULE_ID, "browser/upload") => Wave2TypedCapabilityOperation::BrowserUpload { input },
+        (BROWSER_MODULE_ID, "browser/evaluate") => Wave2TypedCapabilityOperation::BrowserEvaluate { input },
         ("computer.input", "computer.input.invoke") => Wave2TypedCapabilityOperation::ComputerInput { input },
         ("computer.launch", "computer.launch.invoke") => Wave2TypedCapabilityOperation::ComputerLaunch { input },
         _ => {
@@ -2226,11 +2157,17 @@ pub fn required_action_resource_operation(
         (WORKSPACE_FILES_MODULE_ID, "workspace.files/write" | "workspace.files/patch" | "workspace.files/delete")
         | (WORKSPACE_VCS_MODULE_ID, "workspace.vcs/stage" | "workspace.vcs/commit" | "workspace.vcs/push")
         | (WORKSPACE_ARTIFACTS_MODULE_ID, "workspace.artifacts/publish")
-        | ("ssh.fs.write", "ssh.fs.write.invoke") => Some("write"),
-        (WORKSPACE_PROCESS_MODULE_ID, _)
-        | ("ssh.exec", "ssh.exec.invoke")
-        | ("ssh.sudo", "ssh.sudo.invoke") => Some("execute"),
-        ("ssh.fs.read", "ssh.fs.read.invoke") => Some("read"),
+        | (SSH_MODULE_ID, "ssh/fs.write") => Some("write"),
+        (WORKSPACE_PROCESS_MODULE_ID, _) | (SSH_MODULE_ID, "ssh/exec") => Some("execute"),
+        (SSH_MODULE_ID, "ssh/sudo") => Some("sudo"),
+        (SSH_MODULE_ID, "ssh/fs.read") => Some("read"),
+        (BROWSER_MODULE_ID, "browser/observe") => Some("observe"),
+        (BROWSER_MODULE_ID, "browser/navigate") => Some("navigate"),
+        (BROWSER_MODULE_ID, "browser/act") => Some("act"),
+        (BROWSER_MODULE_ID, "browser/render_content") => Some("render_content"),
+        (BROWSER_MODULE_ID, "browser/download") => Some("download"),
+        (BROWSER_MODULE_ID, "browser/upload") => Some("upload"),
+        (BROWSER_MODULE_ID, "browser/evaluate") => Some("evaluate"),
         ("computer.input", "computer.input.invoke") => Some("input"),
         ("computer.launch", "computer.launch.invoke") => Some("launch"),
         _ => None,
@@ -2462,7 +2399,7 @@ pub fn computer_a11y_registration() -> Result<PluginRegistration, String> {
 }
 
 fn role_id_for_capability(capability_id: &str) -> Option<ExecutionRoleId> {
-    if capability_id.starts_with("browser.") {
+    if capability_id == BROWSER_MODULE_ID {
         Some(ExecutionRoleId::from(BROWSER_EXECUTION_ROLE_ID))
     } else if capability_id.starts_with("computer.") || capability_id == "a11y.observe" {
         Some(ExecutionRoleId::from(COMPUTER_EXECUTION_ROLE_ID))
@@ -2481,16 +2418,9 @@ fn role_contracts_for_package(
         _ => return Ok(Vec::new()),
     };
     let member_ids = match role_id {
-        BROWSER_EXECUTION_ROLE_ID => [
-            ("browser.observe", RoleMemberRequirement::Required),
-            ("browser.navigate", RoleMemberRequirement::Required),
-            ("browser.act", RoleMemberRequirement::Required),
-            ("browser.render_content", RoleMemberRequirement::Optional),
-            ("browser.download", RoleMemberRequirement::Optional),
-            ("browser.upload", RoleMemberRequirement::Optional),
-            ("browser.evaluate", RoleMemberRequirement::Optional),
-        ]
-        .as_slice(),
+        BROWSER_EXECUTION_ROLE_ID => {
+            [(BROWSER_MODULE_ID, RoleMemberRequirement::Required)].as_slice()
+        }
         COMPUTER_EXECUTION_ROLE_ID => [
             ("computer.observe", RoleMemberRequirement::Required),
             ("computer.input", RoleMemberRequirement::Required),
@@ -2532,8 +2462,11 @@ fn role_contracts_for_package(
             }),
         },
         members,
-        serialized_target_resource_kind: (role_id == COMPUTER_EXECUTION_ROLE_ID)
-            .then(|| ResourceKind::from("computer")),
+        serialized_target_resource_kind: match role_id {
+            BROWSER_EXECUTION_ROLE_ID => Some(ResourceKind::from(BROWSER_RESOURCE[0])),
+            COMPUTER_EXECUTION_ROLE_ID => Some(ResourceKind::from("computer")),
+            _ => None,
+        },
     }])
 }
 
@@ -2734,11 +2667,11 @@ mod tests {
     #[test]
     fn rendered_content_contract_has_only_url_input_and_bounded_html_output() {
         let valid=super::StrictJsonValue(serde_json::json!({"url":"https://example.com/"}));
-        assert!(super::validate_action_input("browser.render_content",&valid).is_ok());
+        assert!(super::validate_module_action_input(super::BROWSER_MODULE_ID,"browser/render_content",&valid).is_ok());
         for value in [serde_json::json!({}),serde_json::json!({"url":"file:///private"}),serde_json::json!({"url":"https://example.com/","chrome_path":"other.exe"})] {
-            assert!(super::validate_action_input("browser.render_content",&super::StrictJsonValue(value)).is_err());
+            assert!(super::validate_module_action_input(super::BROWSER_MODULE_ID,"browser/render_content",&super::StrictJsonValue(value)).is_err());
         }
-        let output=super::canonical_schema("browser.render_content","output");
+        let output=super::canonical_schema("browser/render_content","output");
         let validator=jsonschema::options().build(&output.0).unwrap();
         assert!(validator.validate(&serde_json::json!({"final_url":"https://example.com/","html":"<p>content</p>","html_truncated":false})).is_ok());
         assert!(validator.validate(&serde_json::json!({"html":"content"})).is_err());
@@ -2751,9 +2684,7 @@ mod tests {
     use serde_json::json;
     use nomifun_agent_kernel::{
         AgentPresetCompiler, CapabilityInvocationRequest, CompileRequest, CompilerEnvironment,
-        ContextContributionFactory, ContextContributionRequest, ContextContributionResult,
         InMemoryPluginStatePersistence, KernelRegistry, MaterializationPolicy, Materializer,
-        RoleMemberAdmission, RoleMemberInvocationRequest,
         SessionCapabilityState,
     };
     use nomifun_agent_contracts::{
@@ -2769,24 +2700,6 @@ mod tests {
     struct AlternateBrowserHandler {
         captured_mount: Arc<Mutex<Option<String>>>,
     }
-
-    struct AlternateBrowserContextFactory;
-
-    #[async_trait::async_trait]
-    impl ContextContributionFactory for AlternateBrowserContextFactory {
-        async fn contribute(
-            &self,
-            request: ContextContributionRequest,
-        ) -> Result<ContextContributionResult, KernelError> {
-            Ok(ContextContributionResult {
-                value: Some(StrictJsonValue(json!({
-                    "provider_mount": request.context.mount.identity.mount_id,
-                    "capability": request.context.member_id,
-                }))),
-            })
-        }
-    }
-
 
     impl CapabilityHandler for AlternateBrowserHandler {
         fn invoke<'life0, 'async_trait>(
@@ -2959,15 +2872,6 @@ mod tests {
                             }),
                         )
                         .expect("alternate Browser role handler");
-                }
-                CapabilityKind::ContextContributor => {
-                    registration
-                        .add_role_context_factory(
-                            provider.role.key.role_id.clone(),
-                            capability_id.clone(),
-                            Arc::new(AlternateBrowserContextFactory),
-                        )
-                        .expect("alternate Browser context factory");
                 }
                 _ => {}
             }
@@ -3501,18 +3405,18 @@ mod tests {
         )
         .expect("Wave 2 metadata materializes");
         assert_eq!(materialized.packages.len(), 4);
-        assert_eq!(materialized.capabilities.len(), 20);
+        assert_eq!(materialized.capabilities.len(), 10);
         assert_eq!(materialized.role_contracts.len(), 2);
         assert_eq!(materialized.role_providers.len(), 2);
         let browser_role = materialized.role_contract(&ExecutionRoleId::from(BROWSER_EXECUTION_ROLE_ID))
             .expect("Browser Role v2");
         assert_eq!(browser_role.manifest.key.contract_version.as_ref(), BROWSER_ROLE_CONTRACT_VERSION);
-        assert_eq!(browser_role.manifest.members.iter().map(|member| member.capability.id.as_ref()).collect::<BTreeSet<_>>(), BTreeSet::from([
-            "browser.observe", "browser.navigate", "browser.act", "browser.download",
-            "browser.upload", "browser.render_content", "browser.evaluate",
-        ]));
+        assert_eq!(browser_role.manifest.members.iter().map(|member| member.capability.id.as_ref()).collect::<BTreeSet<_>>(), BTreeSet::from([BROWSER_MODULE_ID]));
         for member in &browser_role.manifest.members {
-            assert!(required_resource_kinds(member.capability.id.as_ref()).unwrap().is_empty());
+            assert_eq!(
+                required_resource_kinds(member.capability.id.as_ref()),
+                Some(BTreeSet::from([ResourceKind::from("browser")]))
+            );
         }
         assert_eq!(
             required_resource_kinds(WORKSPACE_PROCESS_MODULE_ID),
@@ -3563,24 +3467,16 @@ mod tests {
                 schema_version: VersionString::from(CONTRACT_VERSION),
                 model_route_refs: BTreeMap::new(),
                 chat_route_records: BTreeMap::new(),
-                enabled_capabilities: vec![
-                    CapabilitySelection {
-                        capability: CapabilityRef {
-                            id: CapabilityId::from("browser.navigate"),
-                            version: VersionString::from(CONTRACT_VERSION),
-                        },
-                        action_allowlist: BTreeSet::from([ActionId::from(
-                            "browser.navigate.invoke",
-                        )]),
+                enabled_capabilities: vec![CapabilitySelection {
+                    capability: CapabilityRef {
+                        id: CapabilityId::from(BROWSER_MODULE_ID),
+                        version: VersionString::from(CONTRACT_VERSION),
                     },
-                    CapabilitySelection {
-                        capability: CapabilityRef {
-                            id: CapabilityId::from("browser.observe"),
-                            version: VersionString::from(CONTRACT_VERSION),
-                        },
-                        action_allowlist: BTreeSet::new(),
-                    },
-                ],
+                    action_allowlist: BTreeSet::from([
+                        ActionId::from("browser/observe"),
+                        ActionId::from("browser/navigate"),
+                    ]),
+                }],
 
                 skill_bindings: Vec::new(),
                 system_role_provider_overrides: overrides,
@@ -3653,6 +3549,15 @@ mod tests {
             },
             provider_mount_id: PluginMountId::from("fixture-browser-provider"),
         };
+        let browser_binding = TypedResourceBinding {
+            binding_id: ResourceBindingId::from("browser-binding"),
+            resource_kind: ResourceKind::from("browser"),
+            resource_id: "browser-resource".into(),
+            owner_id: principal.principal_id.clone(),
+            operations: BTreeSet::from(["observe".to_owned(), "navigate".to_owned()]),
+            connection_config_ref: None,
+            typed_parameters: BTreeMap::new(),
+        };
         let compiled = AgentPresetCompiler::compile(
             &materialized,
             &environment,
@@ -3668,7 +3573,7 @@ mod tests {
             },
         )
         .expect("compile selected alternate Browser provider")
-        .with_target_resource_bindings(&principal, Vec::new())
+        .with_target_resource_bindings(&principal, vec![browser_binding.clone()])
         .expect("bind alternate Browser target resource");
         assert_eq!(
             compiled
@@ -3695,11 +3600,11 @@ mod tests {
                 correlation_id: CorrelationId::from("browser-provider-invoke"),
                 resolved_snapshot_ref: compiled.snapshot_ref().clone(),
                 active_set_generation: active.generation,
-                capability_id: CapabilityId::from("browser.navigate"),
-                action_id: ActionId::from("browser.navigate.invoke"),
-                resource_binding_ids: BTreeSet::new(),
+                capability_id: CapabilityId::from(BROWSER_MODULE_ID),
+                action_id: ActionId::from("browser/navigate"),
+                resource_binding_ids: BTreeSet::from([browser_binding.binding_id]),
                 state_scope_key: ScopeKey::from("session:browser-provider"),
-                input: empty_object(),
+                input: StrictJsonValue(json!({"url":"https://example.test/"})),
             },
         ))
         .expect("alternate Browser invocation");
@@ -3710,33 +3615,10 @@ mod tests {
                 .as_deref(),
             Some("fixture-browser-provider")
         );
-        let role_member_request = |capability_id: &str| RoleMemberInvocationRequest {
-            principal: principal.clone(),
-            session_owner: principal.clone(),
-            turn_id: Some(OperationId::from("browser-provider-turn")),
-            operation_id: OperationId::from(format!("{capability_id}:operation")),
-            correlation_id: CorrelationId::from(format!("{capability_id}:correlation")),
-            capability_id: CapabilityId::from(capability_id),
-            resource_binding_ids: BTreeSet::new(),
-            state_scope_key: ScopeKey::from("session:browser-provider"),
-            admission: RoleMemberAdmission::Agent {
-                agent_session_id: AgentSessionId::from("browser-provider-session"),
-                resolved_snapshot_ref: compiled.snapshot_ref().clone(),
-                active_set_generation: active.generation,
-            },
-        };
-        let context = poll_ready(registry.contribute_role_context(
-            &compiled,
-            &active,
-            role_member_request("browser.observe"),
-        ))
-        .expect("alternate Browser context");
         assert_eq!(
-            context.value.expect("context value").0["provider_mount"],
-            "fixture-browser-provider"
+            compiled.content().required_resource_kinds,
+            BTreeSet::from([ResourceKind::from("browser")])
         );
-
-        assert!(compiled.content().required_resource_kinds.is_empty(), "Browser runtime is resolved by the host, not a saved resource binding");
     }
 
     #[test]
@@ -3794,8 +3676,8 @@ mod tests {
     #[test]
     fn non_action_capabilities_cannot_enter_the_host_dispatch_contract() {
         let error = typed_operation_for(
-            &CapabilityId::from("ssh.connect"),
-            &ActionId::from("ssh.connect.invoke"),
+            &CapabilityId::from("unknown.resource"),
+            &ActionId::from("unknown.resource.invoke"),
             empty_object(),
         )
             .expect_err("resource providers must not become action operations");
@@ -4112,19 +3994,11 @@ mod tests {
             );
             assert_eq!(
                 capability.manifest.supported_surfaces,
-                if *capability_id == "browser.render_content" {
-                    BTreeSet::from([
-                        "consumer:knowledge".to_owned(),
-                        "desktop".to_owned(),
-                        "headless".to_owned(),
-                    ])
-                } else {
-                    BTreeSet::from([
-                        "consumer:agent".to_owned(),
-                        "desktop".to_owned(),
-                        "headless".to_owned(),
-                    ])
-                }
+                BTreeSet::from([
+                    "authoring:direct".to_owned(),
+                    "consumer:agent".to_owned(),
+                    "desktop".to_owned(),
+                ])
             );
             assert!(check_platform_availability(
                 &CapabilityId::from(*capability_id),

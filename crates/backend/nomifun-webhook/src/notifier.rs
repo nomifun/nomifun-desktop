@@ -14,6 +14,7 @@ use nomifun_db::{ITagSettingRepository, IWebhookRepository};
 use nomifun_requirement::CompletionNotifier;
 
 use crate::sender::WebhookSender;
+use crate::NotificationDeliveryStatus;
 
 /// Truncate a content snippet for the notification card (keeps cards compact).
 const MAX_CONTENT_CHARS: usize = 500;
@@ -64,58 +65,61 @@ impl CompletionNotifierImpl {
         Arc::new(self)
     }
 
-    /// Resolve the bound + enabled webhook for `tag` plus its allowed event set,
-    /// if any binding exists.
-    async fn resolve_webhook(&self, tag: &str) -> Option<(nomifun_db::models::WebhookRow, Vec<String>)> {
-        let setting = self.tag_settings.get(tag).await.ok().flatten()?;
-        let events: Vec<String> = setting
+    /// Deliver one completion notification and return a stable external-action
+    /// status for observability. Requirement completion still treats delivery
+    /// as best effort; the trait adapter below logs failures and never mutates
+    /// the completed Requirement fact.
+    pub async fn notify_completion_with_status(
+        &self,
+        requirement: &RequirementRow,
+    ) -> NotificationDeliveryStatus {
+        let setting = match self.tag_settings.get(&requirement.tag).await {
+            Ok(Some(setting)) => setting,
+            Ok(None) => return NotificationDeliveryStatus::SkippedUnbound,
+            Err(_) => {
+                return NotificationDeliveryStatus::Failed {
+                    webhook_id: None,
+                    code: "NOTIFICATION_CONFIGURATION_UNAVAILABLE",
+                };
+            }
+        };
+        let events = setting
             .notify_events
             .split(',')
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect();
-        let webhook_id = setting.webhook_id?;
-        let webhook = self
-            .webhooks
-            .get_by_webhook_id(&webhook_id)
-            .await
-            .ok()
-            .flatten()?;
-        webhook.enabled.then_some((webhook, events))
-    }
-}
-
-#[async_trait]
-impl CompletionNotifier for CompletionNotifierImpl {
-    async fn notify_completion(&self, requirement: &RequirementRow) {
-        let Some((webhook, events)) = self.resolve_webhook(&requirement.tag).await else {
-            return; // no binding / disabled / missing → silent skip
+            .filter(|event| !event.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let Some(webhook_id) = setting.webhook_id else {
+            return NotificationDeliveryStatus::SkippedUnbound;
         };
+        let webhook = match self.webhooks.get_by_webhook_id(&webhook_id).await {
+            Ok(Some(webhook)) => webhook,
+            Ok(None) | Err(_) => {
+                return NotificationDeliveryStatus::Failed {
+                    webhook_id: Some(webhook_id),
+                    code: "NOTIFICATION_RESOURCE_UNAVAILABLE",
+                };
+            }
+        };
+        if !webhook.enabled {
+            return NotificationDeliveryStatus::SkippedDisabled {
+                webhook_id: webhook.webhook_id,
+            };
+        }
         if !event_allowed(&requirement.status, &events) {
-            return; // this event isn't in the tag's allowed set → silent skip
+            return NotificationDeliveryStatus::SkippedFiltered {
+                webhook_id: webhook.webhook_id,
+                event: requirement.status.clone(),
+            };
         }
 
-        // Template: 【需求id】【需求名】【需求内容】【完成状态】【完成记录(报告)】
-        let fields = vec![
-            ("需求id".to_string(), requirement.requirement_id.clone()),
-            ("需求名".to_string(), requirement.title.clone()),
-            (
-                "需求内容".to_string(),
-                truncate(&requirement.content, MAX_CONTENT_CHARS),
-            ),
-            ("完成状态".to_string(), status_label(&requirement.status).to_string()),
-            (
-                "完成记录(报告)".to_string(),
-                requirement
-                    .completion_note
-                    .as_deref()
-                    .map(|n| truncate(n, MAX_CONTENT_CHARS))
-                    .unwrap_or_else(|| "-".to_string()),
-            ),
-        ];
-
-        let title = format!("需求{}: {}", status_label(&requirement.status), requirement.title);
-        if let Err(e) = self
+        let fields = completion_fields(requirement);
+        let title = format!(
+            "需求{}: {}",
+            status_label(&requirement.status),
+            requirement.title
+        );
+        match self
             .sender
             .send_card(
                 WebhookPlatform::from_db(&webhook.platform),
@@ -126,16 +130,77 @@ impl CompletionNotifier for CompletionNotifierImpl {
             )
             .await
         {
-            // Best-effort: log + swallow. A failing webhook must never affect
-            // requirement state (and this runs on a detached task anyway).
-            tracing::warn!(
-                webhook_id = %webhook.webhook_id,
-                requirement_id = %requirement.requirement_id,
-                error = %e,
-                "completion webhook delivery failed"
-            );
+            Ok(()) => NotificationDeliveryStatus::Delivered {
+                webhook_id: webhook.webhook_id,
+            },
+            Err(error) if error.outcome_unknown() => {
+                NotificationDeliveryStatus::OutcomeUnknown {
+                    webhook_id: webhook.webhook_id,
+                    code: "NOTIFICATION_DELIVERY_OUTCOME_UNKNOWN",
+                    recovery: "inspect the destination before retrying; never retry automatically",
+                }
+            }
+            Err(_) => NotificationDeliveryStatus::Failed {
+                webhook_id: Some(webhook.webhook_id),
+                code: "NOTIFICATION_DELIVERY_FAILED",
+            },
         }
     }
+}
+
+#[async_trait]
+impl CompletionNotifier for CompletionNotifierImpl {
+    async fn notify_completion(&self, requirement: &RequirementRow) {
+        let status = self.notify_completion_with_status(requirement).await;
+        match status {
+            NotificationDeliveryStatus::Failed { webhook_id, code } => {
+                tracing::warn!(
+                    webhook_id = webhook_id.as_deref().unwrap_or("unresolved"),
+                    requirement_id = %requirement.requirement_id,
+                    code,
+                    "completion webhook delivery failed"
+                );
+            }
+            NotificationDeliveryStatus::OutcomeUnknown {
+                webhook_id,
+                code,
+                recovery,
+            } => {
+                tracing::warn!(
+                    webhook_id,
+                    requirement_id = %requirement.requirement_id,
+                    code,
+                    recovery,
+                    "completion webhook delivery outcome is unknown"
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn completion_fields(requirement: &RequirementRow) -> Vec<(String, String)> {
+    // Template: 【需求id】【需求名】【需求内容】【完成状态】【完成记录(报告)】
+    vec![
+        ("需求id".to_string(), requirement.requirement_id.clone()),
+        ("需求名".to_string(), requirement.title.clone()),
+        (
+            "需求内容".to_string(),
+            truncate(&requirement.content, MAX_CONTENT_CHARS),
+        ),
+        (
+            "完成状态".to_string(),
+            status_label(&requirement.status).to_string(),
+        ),
+        (
+            "完成记录(报告)".to_string(),
+            requirement
+                .completion_note
+                .as_deref()
+                .map(|note| truncate(note, MAX_CONTENT_CHARS))
+                .unwrap_or_else(|| "-".to_string()),
+        ),
+    ]
 }
 
 #[cfg(test)]

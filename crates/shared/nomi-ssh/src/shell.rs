@@ -295,6 +295,18 @@ impl RemoteShell {
     /// DRAIN_TIMEOUT for interruption/resync and returns exit_code 124. Partial
     /// submission timeout is an error with unknown outcome, never retried.
     pub async fn run(&self, submission: &str, timeout: Duration) -> Result<ShellOutcome, SshError> {
+        self.run_with_rules(submission, timeout, &self.answer_rules).await
+    }
+
+    /// Run one command with invocation-scoped responder rules. The rules are
+    /// borrowed only for this command and cannot survive into a later
+    /// untrusted command on the same PTY.
+    pub async fn run_with_rules(
+        &self,
+        submission: &str,
+        timeout: Duration,
+        answer_rules: &[AnswerRule],
+    ) -> Result<ShellOutcome, SshError> {
         validate_command(submission).map_err(limit_error)?;
         let deadline = Instant::now() + timeout;
         let _operation = timeout_at(deadline, self.operation.lock()).await
@@ -336,7 +348,7 @@ impl RemoteShell {
             &prefix,
             deadline,
             &mut buf,
-            &self.answer_rules,
+            answer_rules,
         )
         .await
         {

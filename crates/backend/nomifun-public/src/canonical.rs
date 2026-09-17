@@ -268,7 +268,7 @@ impl ServerHandler for CanonicalRemoteMcpHandler {
 
 async fn decode_and_run<T, F, Fut>(value: Value, run: F) -> Result<Value, CanonicalRemoteError>
 where
-    T: DeserializeOwned,
+    T: DeserializeOwned + ValidatedRemoteIngressRequest,
     F: FnOnce(T) -> Fut,
     Fut: Future<Output = Result<Value, CanonicalRemoteError>>,
 {
@@ -278,7 +278,89 @@ where
             format!("canonical Remote operation arguments are invalid: {error}"),
         )
     })?;
+    request.validate_remote_ingress()?;
     run(request).await
+}
+
+trait ValidatedRemoteIngressRequest {
+    fn validate_remote_ingress(&self) -> Result<(), CanonicalRemoteError>;
+}
+
+impl ValidatedRemoteIngressRequest for RemoteOpenRequestDto {
+    fn validate_remote_ingress(&self) -> Result<(), CanonicalRemoteError> {
+        validate_remote_identifier("binding_id", &self.binding_id)?;
+        validate_remote_idempotency_key(&self.idempotency_key)
+    }
+}
+
+impl ValidatedRemoteIngressRequest for RemoteTurnRequestDto {
+    fn validate_remote_ingress(&self) -> Result<(), CanonicalRemoteError> {
+        validate_remote_agent_session_id(&self.agent_session_id)?;
+        validate_remote_idempotency_key(&self.idempotency_key)
+    }
+}
+
+impl ValidatedRemoteIngressRequest for RemoteObserveRequestDto {
+    fn validate_remote_ingress(&self) -> Result<(), CanonicalRemoteError> {
+        validate_remote_agent_session_id(&self.agent_session_id)?;
+        validate_remote_agent_session_id(&self.after_cursor.agent_session_id)?;
+        if self.after_cursor.agent_session_id != self.agent_session_id {
+            return Err(CanonicalRemoteError::new(
+                "REMOTE_INVALID_REQUEST",
+                "after_cursor must reference the requested AgentSession",
+            ));
+        }
+        if self.limit == 0 {
+            return Err(CanonicalRemoteError::new(
+                "REMOTE_INVALID_REQUEST",
+                "observe limit must be greater than zero",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ValidatedRemoteIngressRequest for RemoteCancelRequestDto {
+    fn validate_remote_ingress(&self) -> Result<(), CanonicalRemoteError> {
+        validate_remote_agent_session_id(&self.agent_session_id)?;
+        validate_remote_idempotency_key(&self.idempotency_key)
+    }
+}
+
+fn validate_remote_agent_session_id(value: &str) -> Result<(), CanonicalRemoteError> {
+    nomifun_common::ConversationId::try_from(value).map_err(|error| {
+        CanonicalRemoteError::new(
+            "REMOTE_INVALID_REQUEST",
+            format!("agent_session_id is invalid: {error}"),
+        )
+    })?;
+    Ok(())
+}
+
+fn validate_remote_identifier(label: &str, value: &str) -> Result<(), CanonicalRemoteError> {
+    if value.trim().is_empty() || value.trim() != value || value.len() > 256 {
+        return Err(CanonicalRemoteError::new(
+            "REMOTE_INVALID_REQUEST",
+            format!("{label} must contain 1 to 256 non-padding characters"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_remote_idempotency_key(value: &str) -> Result<(), CanonicalRemoteError> {
+    if value.is_empty()
+        || value.len() > nomifun_common::MAX_IDEMPOTENCY_KEY_LEN
+        || !value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+    {
+        return Err(CanonicalRemoteError::new(
+            "REMOTE_INVALID_REQUEST",
+            format!(
+                "idempotency_key must contain 1 to {} visible ASCII bytes",
+                nomifun_common::MAX_IDEMPOTENCY_KEY_LEN
+            ),
+        ));
+    }
+    Ok(())
 }
 
 type CanonicalRemoteError = CanonicalRemoteOperationError;
@@ -298,8 +380,13 @@ fn canonical_tools() -> Vec<Tool> {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                    "binding_id": {"type": "string"},
-                    "idempotency_key": {"type": "string"},
+                    "binding_id": {"type": "string", "minLength": 1, "maxLength": 256},
+                    "idempotency_key": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": nomifun_common::MAX_IDEMPOTENCY_KEY_LEN,
+                        "pattern": "^[!-~]+$"
+                    },
                     "initial_input": {}
                 },
                 "required": ["binding_id", "idempotency_key"]
@@ -312,9 +399,17 @@ fn canonical_tools() -> Vec<Tool> {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                    "agent_session_id": {"type": "string"},
+                    "agent_session_id": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    },
                     "input": {},
-                    "idempotency_key": {"type": "string"}
+                    "idempotency_key": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": nomifun_common::MAX_IDEMPOTENCY_KEY_LEN,
+                        "pattern": "^[!-~]+$"
+                    }
                 },
                 "required": ["agent_session_id", "input", "idempotency_key"]
             })),
@@ -326,12 +421,18 @@ fn canonical_tools() -> Vec<Tool> {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                    "agent_session_id": {"type": "string"},
+                    "agent_session_id": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    },
                     "after_cursor": {
                         "type": "object",
                         "additionalProperties": false,
                         "properties": {
-                            "agent_session_id": {"type": "string"},
+                            "agent_session_id": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                            },
                             "seq": {"type": "integer", "minimum": 0}
                         },
                         "required": ["agent_session_id", "seq"]
@@ -348,8 +449,16 @@ fn canonical_tools() -> Vec<Tool> {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                    "agent_session_id": {"type": "string"},
-                    "idempotency_key": {"type": "string"}
+                    "agent_session_id": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    },
+                    "idempotency_key": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": nomifun_common::MAX_IDEMPOTENCY_KEY_LEN,
+                        "pattern": "^[!-~]+$"
+                    }
                 },
                 "required": ["agent_session_id", "idempotency_key"]
             })),
@@ -413,6 +522,7 @@ mod tests {
     use super::*;
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request, StatusCode};
+    use nomifun_api_types::SessionCursorDto;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;
 
@@ -560,6 +670,70 @@ mod tests {
         assert_eq!(detailed.code, "TEST_DETAILED");
         assert_eq!(detailed.message, "detailed message");
         assert_eq!(detailed.details, Some(json!({"retryable": true})));
+    }
+
+    #[test]
+    fn typed_ingress_requests_reject_implicit_or_mismatched_session_authority() {
+        assert!(
+            RemoteTurnRequestDto {
+                agent_session_id: "not-a-session".into(),
+                input: json!({}),
+                idempotency_key: "turn-a".into(),
+            }
+            .validate_remote_ingress()
+            .is_err()
+        );
+
+        let session = UserId::new().into_string();
+        assert!(
+            RemoteObserveRequestDto {
+                agent_session_id: session,
+                after_cursor: SessionCursorDto {
+                    agent_session_id: UserId::new().into_string(),
+                    seq: 0,
+                },
+                limit: 100,
+            }
+            .validate_remote_ingress()
+            .is_err()
+        );
+        assert!(
+            RemoteCancelRequestDto {
+                agent_session_id: UserId::new().into_string(),
+                idempotency_key: " padded ".into(),
+            }
+            .validate_remote_ingress()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn remote_idempotency_limit_matches_the_canonical_app_owner() {
+        let maximum = "x".repeat(nomifun_common::MAX_IDEMPOTENCY_KEY_LEN);
+        assert!(validate_remote_idempotency_key(&maximum).is_ok());
+        let over_limit = format!("{maximum}x");
+        assert!(validate_remote_idempotency_key(&over_limit).is_err());
+
+        for tool in canonical_tools() {
+            let Some(schema_limit) = tool
+                .input_schema
+                .get("properties")
+                .and_then(|value| value.get("idempotency_key"))
+                .and_then(|value| value.get("maxLength"))
+                .and_then(Value::as_u64)
+            else {
+                if tool.name == CANONICAL_REMOTE_OBSERVE_TOOL {
+                    continue;
+                }
+                panic!("{} lost its idempotency schema", tool.name);
+            };
+            assert_eq!(
+                schema_limit,
+                nomifun_common::MAX_IDEMPOTENCY_KEY_LEN as u64,
+                "{} advertises a different limit from the App owner",
+                tool.name,
+            );
+        }
     }
 
     #[tokio::test]

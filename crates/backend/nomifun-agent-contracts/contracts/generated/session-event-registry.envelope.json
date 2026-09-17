@@ -607,6 +607,161 @@
         "replay_rule": "no_effect"
       },
       {
+        "kind": "automation/config-committed",
+        "version": 1,
+        "persistence": "persistent",
+        "payload_schema": "events/automation-config-committed/v1",
+        "producer": {
+          "allowed": [
+            "session_api"
+          ]
+        },
+        "predecessor": {
+          "mode": "any_committed"
+        },
+        "correlation": "session",
+        "idempotency": "operation_scoped_required",
+        "projector": {
+          "required": false
+        },
+        "replay_rule": "no_effect"
+      },
+      {
+        "kind": "resource/cleanup-started",
+        "version": 1,
+        "persistence": "persistent",
+        "payload_schema": "events/resource-cleanup-started/v1",
+        "producer": {
+          "allowed": [
+            "session_api"
+          ]
+        },
+        "predecessor": {
+          "mode": "any_committed"
+        },
+        "correlation": "session",
+        "idempotency": "operation_scoped_required",
+        "projector": {
+          "required": false
+        },
+        "replay_rule": "no_effect"
+      },
+      {
+        "kind": "resource/cleanup-uncertain",
+        "version": 1,
+        "persistence": "persistent",
+        "payload_schema": "events/resource-cleanup-uncertain/v1",
+        "producer": {
+          "allowed": [
+            "session_api"
+          ]
+        },
+        "predecessor": {
+          "mode": "any_of",
+          "kinds": [
+            "resource/cleanup-started"
+          ]
+        },
+        "correlation": "session",
+        "idempotency": "operation_scoped_required",
+        "projector": {
+          "required": false
+        },
+        "replay_rule": "no_effect"
+      },
+      {
+        "kind": "resource/cleanup-succeeded",
+        "version": 1,
+        "persistence": "persistent",
+        "payload_schema": "events/resource-cleanup-succeeded/v1",
+        "producer": {
+          "allowed": [
+            "session_api"
+          ]
+        },
+        "predecessor": {
+          "mode": "any_of",
+          "kinds": [
+            "resource/cleanup-started"
+          ]
+        },
+        "correlation": "session",
+        "idempotency": "operation_scoped_required",
+        "projector": {
+          "required": false
+        },
+        "replay_rule": "no_effect"
+      },
+      {
+        "kind": "resource/cleanup-reconciled",
+        "version": 1,
+        "persistence": "persistent",
+        "payload_schema": "events/resource-cleanup-reconciled/v1",
+        "producer": {
+          "allowed": [
+            "session_api"
+          ]
+        },
+        "predecessor": {
+          "mode": "any_of",
+          "kinds": [
+            "resource/cleanup-uncertain"
+          ]
+        },
+        "correlation": "session",
+        "idempotency": "operation_scoped_required",
+        "projector": {
+          "required": false
+        },
+        "replay_rule": "no_effect"
+      },
+      {
+        "kind": "resource/cleanup-override",
+        "version": 1,
+        "persistence": "persistent",
+        "payload_schema": "events/resource-cleanup-override/v1",
+        "producer": {
+          "allowed": [
+            "session_api"
+          ]
+        },
+        "predecessor": {
+          "mode": "any_of",
+          "kinds": [
+            "resource/cleanup-uncertain"
+          ]
+        },
+        "correlation": "session",
+        "idempotency": "operation_scoped_required",
+        "projector": {
+          "required": false
+        },
+        "replay_rule": "no_effect"
+      },
+      {
+        "kind": "deletion/effect-override",
+        "version": 1,
+        "persistence": "persistent",
+        "payload_schema": "events/deletion-effect-override/v1",
+        "producer": {
+          "allowed": [
+            "session_api"
+          ]
+        },
+        "predecessor": {
+          "mode": "any_of",
+          "kinds": [
+            "effect/uncertain"
+          ]
+        },
+        "correlation": "session",
+        "idempotency": "operation_scoped_required",
+        "projector": {
+          "required": false
+        },
+        "replay_rule": "no_effect"
+      },
+      {
         "kind": "runtime/bound",
         "version": 1,
         "persistence": "persistent",
@@ -741,5 +896,5 @@
       }
     ]
   },
-  "payload_digest": "e2cec429a2166b519e364483f94e47edfe4bc8c208ddc6bbdb82d70c5e69c74c"
+  "payload_digest": "caf550c832c778858c651d51af00eb857eda83ebfd1bc132f54f1419b2ca7d5c"
 }

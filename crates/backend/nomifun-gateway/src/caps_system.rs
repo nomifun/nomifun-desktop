@@ -40,12 +40,6 @@ struct UpdateSettingsParams {
     /// System language code. Allowed: "en-US" or "zh-CN".
     #[serde(default)]
     language: Option<String>,
-    /// Enable/disable desktop notifications globally.
-    #[serde(default)]
-    notification_enabled: Option<bool>,
-    /// Enable/disable notifications specifically for cron-job results.
-    #[serde(default)]
-    cron_notification_enabled: Option<bool>,
     /// Enable/disable the command queue (batch-queued execution of LLM requests).
     #[serde(default)]
     command_queue_enabled: Option<bool>,
@@ -249,8 +243,10 @@ async fn get_settings(deps: Arc<SystemCapabilityDeps>, _p: GetSettingsParams) ->
 async fn update_settings(deps: Arc<SystemCapabilityDeps>, p: UpdateSettingsParams) -> Value {
     let req = UpdateSettingsRequest {
         language: p.language,
-        notification_enabled: p.notification_enabled,
-        cron_notification_enabled: p.cron_notification_enabled,
+        // Notification delivery is platform/Automation configuration, not an
+        // Agent grant. Its existing settings UI remains the owner.
+        notification_enabled: None,
+        cron_notification_enabled: None,
         command_queue_enabled: p.command_queue_enabled,
         save_upload_to_workspace: p.save_upload_to_workspace,
     };
@@ -415,7 +411,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_system_update_settings",
             "system",
-            "Partially update system settings (language, notification toggles, command queue, workspace upload). Only provided fields are changed.",
+            "Partially update Agent-safe system settings (language, command queue, workspace upload). Notification delivery remains platform-owned.",
             EffectClass::Write,
         ),
         adapt(update_settings),
@@ -565,5 +561,21 @@ mod tests {
             "api_key": "sk-next"
         }));
         assert!(legacy.is_err(), "the removed flat api_key contract must stay rejected");
+    }
+
+    #[test]
+    fn notification_configuration_is_not_an_agent_settings_grant() {
+        for field in ["notification_enabled", "cron_notification_enabled"] {
+            let mut input = serde_json::Map::new();
+            input.insert(field.to_owned(), json!(true));
+            assert!(
+                serde_json::from_value::<UpdateSettingsParams>(Value::Object(input)).is_err(),
+                "{field} must stay owned by platform notification configuration"
+            );
+        }
+        assert!(serde_json::from_value::<UpdateSettingsParams>(json!({
+            "language": "zh-CN"
+        }))
+        .is_ok());
     }
 }

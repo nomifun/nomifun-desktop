@@ -38,6 +38,12 @@ pub struct AgentMutationReceipt {
     pub duplicate: bool,
 }
 
+#[derive(Clone, Debug)]
+pub enum PreparedAgentSessionDelete {
+    AlreadyDeleted(DeleteResult),
+    Fenced(DeleteAgentSessionCommand),
+}
+
 impl CanonicalAgentSessionOwner {
     pub async fn from_pool(pool: nomifun_db::SqlitePool) -> Result<Self, AppError> {
         Ok(Self {
@@ -310,42 +316,16 @@ impl CanonicalAgentSessionOwner {
             .map_err(store_error)
     }
 
-    pub async fn delete(
+    /// Commit the canonical admission fence before any resource owner begins
+    /// cleanup. Re-entering an interrupted `deleting` row is intentional: the
+    /// caller must rerun idempotent owner cleanup before completing the purge.
+    pub async fn fence_delete(
         &self,
         owner: &PrincipalRef,
         session_id: &AgentSessionId,
         idempotency_key: &str,
         deleted_at: i64,
-    ) -> Result<DeleteResult, AppError> {
-        match self.store.get_live_session(session_id).await {
-            Ok(session) if &session.owner_ref == owner => {}
-            Ok(_) => {
-                return Err(AppError::Forbidden(
-                    "AgentSession belongs to another owner".to_owned(),
-                ));
-            }
-            Err(SessionStoreError::Deleted(_)) => {
-                let tombstone = self
-                    .store
-                    .inspect_tombstone(session_id)
-                    .await
-                    .map_err(store_error)?
-                    .ok_or_else(|| AppError::NotFound(session_id.as_ref().to_owned()))?;
-                if &tombstone.owner_ref != owner {
-                    return Err(AppError::Forbidden(
-                        "AgentSession belongs to another owner".to_owned(),
-                    ));
-                }
-                return Ok(DeleteResult {
-                    tombstone,
-                    operation_id: OperationId::from(format!(
-                        "delete:{}",
-                        scoped_key(owner, idempotency_key, session_id.as_ref())?
-                    )),
-                });
-            }
-            Err(error) => return Err(store_error(error)),
-        }
+    ) -> Result<PreparedAgentSessionDelete, AppError> {
         let command = DeleteAgentSessionCommand {
             operation_id: OperationId::from(format!(
                 "delete:{}",
@@ -355,8 +335,75 @@ impl CanonicalAgentSessionOwner {
             owner_ref: owner.clone(),
             requested_at: deleted_at,
         };
+        match self.store.get_live_session(session_id).await {
+            Ok(session) if &session.owner_ref == owner => {}
+            Ok(_) => {
+                return Err(AppError::Forbidden(
+                    "AgentSession belongs to another owner".to_owned(),
+                ));
+            }
+            Err(SessionStoreError::Deleted(_)) => {
+                if let Some(tombstone) = self
+                    .store
+                    .inspect_tombstone(session_id)
+                    .await
+                    .map_err(store_error)?
+                {
+                    if &tombstone.owner_ref != owner {
+                        return Err(AppError::Forbidden(
+                            "AgentSession belongs to another owner".to_owned(),
+                        ));
+                    }
+                    return Ok(PreparedAgentSessionDelete::AlreadyDeleted(DeleteResult {
+                        tombstone,
+                        operation_id: command.operation_id,
+                    }));
+                }
+                let deleting = self
+                    .store
+                    .get_deleting_session(session_id)
+                    .await
+                    .map_err(store_error)?;
+                if &deleting.owner_ref != owner {
+                    return Err(AppError::Forbidden(
+                        "AgentSession belongs to another owner".to_owned(),
+                    ));
+                }
+            }
+            Err(error) => return Err(store_error(error)),
+        }
+        match self.store.fence_delete(&command).await {
+            Ok(_) => Ok(PreparedAgentSessionDelete::Fenced(command)),
+            Err(SessionStoreError::Deleted(_)) => {
+                let tombstone = self
+                    .store
+                    .inspect_tombstone(session_id)
+                    .await
+                    .map_err(store_error)?
+                    .ok_or_else(|| AppError::Conflict(
+                        "AgentSession delete state changed without a durable tombstone".to_owned(),
+                    ))?;
+                if &tombstone.owner_ref != owner {
+                    return Err(AppError::Forbidden(
+                        "AgentSession belongs to another owner".to_owned(),
+                    ));
+                }
+                Ok(PreparedAgentSessionDelete::AlreadyDeleted(DeleteResult {
+                    tombstone,
+                    operation_id: command.operation_id,
+                }))
+            }
+            Err(error) => Err(store_error(error)),
+        }
+    }
+
+    pub async fn complete_fenced_delete(
+        &self,
+        command: &DeleteAgentSessionCommand,
+        deleted_at: i64,
+    ) -> Result<DeleteResult, AppError> {
         self.store
-            .delete_session(&command, deleted_at)
+            .complete_delete(command, deleted_at)
             .await
             .map_err(store_error)
     }
@@ -715,25 +762,41 @@ mod tests {
                 .iter()
                 .any(|message| message.projection["content"] == "hello")
         );
-        let deleted = owner_service
-            .delete(
+        let command = match owner_service
+            .fence_delete(
                 &owner(),
                 &forked.child_session.agent_session_id,
                 "delete-1",
                 3,
             )
+            .await
+            .unwrap()
+        {
+            PreparedAgentSessionDelete::Fenced(command) => command,
+            PreparedAgentSessionDelete::AlreadyDeleted(_) => {
+                panic!("first delete unexpectedly replayed a tombstone")
+            }
+        };
+        let deleted = owner_service
+            .complete_fenced_delete(&command, 3)
             .await
             .unwrap();
         assert_eq!(deleted.tombstone.state, nomifun_agent_contracts::AgentSessionDeletedState::Deleted);
-        let replayed_delete = owner_service
-            .delete(
+        let replayed_delete = match owner_service
+            .fence_delete(
                 &owner(),
                 &forked.child_session.agent_session_id,
                 "delete-1",
                 3,
             )
             .await
-            .unwrap();
+            .unwrap()
+        {
+            PreparedAgentSessionDelete::AlreadyDeleted(deleted) => deleted,
+            PreparedAgentSessionDelete::Fenced(_) => {
+                panic!("deleted Session unexpectedly re-entered cleanup")
+            }
+        };
         assert_eq!(replayed_delete.tombstone, deleted.tombstone);
         assert_eq!(replayed_delete.tombstone.deleted_at, 3);
         assert!(owner_service

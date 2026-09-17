@@ -41,15 +41,18 @@ use nomifun_cron::events::CronEventEmitter;
 use nomifun_cron::executor::JobExecutor;
 use nomifun_cron::scheduler::CronScheduler;
 use nomifun_cron::service::{
-    CronEmbeddedCreateCommand, CronEmbeddedUpdateCommand, CronService,
+    CronEmbeddedCommandResult, CronEmbeddedCreateCommand, CronEmbeddedDeleteCommand,
+    CronEmbeddedMutationRequest, CronEmbeddedUpdateCommand, CronService,
 };
 use nomifun_cron::{
-    CronPreparedTurnDelivery, CronRuntimePreparationRequest, CronScheduledSession,
-    CronScheduledSessionLookup, CronSessionCronBindingRequest, CronSessionLookup,
+    CronPreparedTurnDelivery, CronRuntimePreparationRequest, CronScheduledSessionLookup,
+    CronSessionCronBindingRequest, CronSessionLookup,
     CronSessionPort, CronSessionProjection, CronTurnDelivery, CronTurnDeliveryQuery,
     CronTurnMessage, CronTurnReceiptQuery, CronTurnReceiptState, CronTurnReconciliation,
     CronTurnReconciliationRequest, CronTurnRequest, CronTurnRuntimeOverlay,
-    CronTurnRuntimePreparation,
+    CronTurnRuntimePreparation, ScheduleActionContext, ScheduleActionOwner, ScheduleAuthority,
+    ScheduleCreateInput, ScheduleDeleteInput, ScheduleExternalActionStatus, ScheduleListInput,
+    ScheduleResourceBinding, ScheduleResourceOperation, ScheduleUpdateInput,
 };
 use nomifun_cron::skill_file::{CRON_SKILLS_REL_DIR, SKILL_FILE_NAME, write_raw_skill_file};
 use nomifun_cron::types::JobStatus;
@@ -70,6 +73,7 @@ const CONV_CODEX: &str = "0190f5fe-7c00-7a00-8abc-012345678912";
 const CONV_CLAUDE: &str = "0190f5fe-7c00-7a00-8abc-012345678913";
 const CONV_NOMI: &str = "0190f5fe-7c00-7a00-8abc-012345678914";
 const ARTIFACT_1: &str = "0190f5fe-7c00-7a00-8abc-012345678915";
+const CANONICAL_ONLY_SESSION: &str = "0190f5fe-7c00-7a00-8abc-012345678916";
 const MISSING_JOB_ID: &str = "0190f5fe-7c00-7a00-8abc-ffffffffffff";
 const SECONDARY_USER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000002";
 const SAFE_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000002";
@@ -416,6 +420,7 @@ const fn test_turn_reconciliation_from_conversation(
 struct TestCronSessionPort {
     service: Arc<ConversationService>,
     runtime_registry: Arc<dyn nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry>,
+    canonical_sessions: Arc<Mutex<HashMap<String, CronSessionProjection>>>,
 }
 
 #[async_trait::async_trait]
@@ -424,6 +429,20 @@ impl CronSessionPort for TestCronSessionPort {
         &self,
         query: &CronSessionLookup,
     ) -> Result<CronSessionProjection, nomifun_common::AppError> {
+        if let Some(session) = self
+            .canonical_sessions
+            .lock()
+            .unwrap()
+            .get(query.agent_session_id.as_ref())
+            .cloned()
+        {
+            if session.owner_id != query.owner_id {
+                return Err(nomifun_common::AppError::Forbidden(
+                    "canonical AgentSession belongs to another owner".into(),
+                ));
+            }
+            return Ok(session);
+        }
         let row = self
             .service
             .conversation_repo()
@@ -443,24 +462,6 @@ impl CronSessionPort for TestCronSessionPort {
         test_session_projection_from_response(&query.owner_id, response, row.cron_job_id)
     }
 
-    async fn lookup_scheduled_sessions(
-        &self,
-        query: &CronScheduledSessionLookup,
-    ) -> Result<Vec<CronScheduledSession>, nomifun_common::AppError> {
-        self.service
-            .list_by_cron_job(&query.owner_id, &query.cron_job_id)
-            .await?
-            .into_iter()
-            .map(|response| {
-                test_session_projection_from_response(
-                    &query.owner_id,
-                    response,
-                    Some(query.cron_job_id.clone()),
-                )
-            })
-            .collect()
-    }
-
     async fn list_conversation_responses_for_cron(
         &self,
         query: &CronScheduledSessionLookup,
@@ -474,6 +475,20 @@ impl CronSessionPort for TestCronSessionPort {
         &self,
         request: &CronSessionCronBindingRequest,
     ) -> Result<(), nomifun_common::AppError> {
+        if let Some(session) = self
+            .canonical_sessions
+            .lock()
+            .unwrap()
+            .get(request.agent_session_id.as_ref())
+            .cloned()
+        {
+            if session.owner_id != request.owner_id {
+                return Err(nomifun_common::AppError::Forbidden(
+                    "canonical AgentSession belongs to another owner".into(),
+                ));
+            }
+            return Ok(());
+        }
         let row = self
             .service
             .conversation_repo()
@@ -1367,9 +1382,49 @@ async fn setup_with_conv_repo() -> (
     sqlx::SqlitePool,
     std::path::PathBuf,
 ) {
+    setup_with_canonical_sessions(Arc::new(Mutex::new(HashMap::new()))).await
+}
+
+async fn setup_with_canonical_sessions(
+    canonical_sessions: Arc<Mutex<HashMap<String, CronSessionProjection>>>,
+) -> (
+    CronService,
+    Arc<dyn ICronRepository>,
+    Arc<MockBroadcaster>,
+    Arc<StubConvRepo>,
+    sqlx::SqlitePool,
+    std::path::PathBuf,
+) {
     let db = init_database_memory().await.unwrap();
     let pool = db.pool().clone();
     let cron_repo: Arc<dyn ICronRepository> = Arc::new(SqliteCronRepository::new(pool.clone()));
+
+    let canonical_fixtures = canonical_sessions
+        .lock()
+        .unwrap()
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    for session in canonical_fixtures {
+        sqlx::query(
+            "INSERT INTO agent_sessions (\
+                agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                agent_binding_json, next_seq, created_at\
+             ) VALUES (?, ?, 'live', ?, 0, 0, '{}', 1, 1)",
+        )
+        .bind(session.agent_session_id.as_ref())
+        .bind(
+            serde_json::json!({
+                "principal_kind": "user",
+                "principal_id": session.owner_id,
+            })
+            .to_string(),
+        )
+        .bind(&session.name)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
 
     sqlx::query("UPDATE users SET password_hash='hash' WHERE user_id = ?")
         .bind(TEST_USER_ID)
@@ -1513,6 +1568,7 @@ async fn setup_with_conv_repo() -> (
     let sessions: Arc<dyn CronSessionPort> = Arc::new(TestCronSessionPort {
         service: conv_service,
         runtime_registry,
+        canonical_sessions,
     });
     let executor = Arc::new(JobExecutor::new(
         Arc::<str>::from(TEST_USER_ID),
@@ -1568,6 +1624,30 @@ fn make_create_req(name: &str, schedule: CronScheduleDto) -> CreateCronJobReques
             workspace: None,
             clear_context_each_run: false,
         }),
+    }
+}
+
+fn canonical_only_session_projection() -> CronSessionProjection {
+    CronSessionProjection {
+        agent_session_id: AgentSessionId::from(CANONICAL_ONLY_SESSION),
+        owner_id: TEST_USER_ID.to_owned(),
+        name: "Store-only Agent".to_owned(),
+        agent_type: nomifun_common::AgentType::Nomi,
+        model: Some(nomifun_common::ProviderWithModel {
+            provider_id: GEMINI_PROVIDER_ID.to_owned(),
+            model: "gemini-2.5-pro".to_owned(),
+            use_model: None,
+        }),
+        workspace: std::env::temp_dir().to_string_lossy().into_owned(),
+        cron_job_id: None,
+        temp_workspace_id: None,
+        skills: vec!["frozen-skill".to_owned()],
+        agent_name: Some("Store-only Agent".to_owned()),
+        cli_path: None,
+        custom_agent_id: None,
+        preset_id: None,
+        preset_revision: None,
+        agent_snapshot: None,
     }
 }
 
@@ -1852,6 +1932,53 @@ async fn existing_conversation_binding_failure_compensates_inserted_cron_job() {
 }
 
 #[tokio::test]
+async fn embedded_create_reports_outcome_unknown_when_insert_compensation_fails() {
+    let (svc, _repo, _events, conversations, pool, _data_dir) =
+        setup_with_conv_repo().await;
+    conversations.set_fail_cron_binding(true);
+    sqlx::query(
+        "CREATE TRIGGER fail_cron_compensation_delete \
+         BEFORE DELETE ON cron_jobs \
+         WHEN OLD.name = 'binding outcome unknown' \
+         BEGIN SELECT RAISE(ABORT, 'fixture delete compensation failure'); END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let error = svc
+        .submit_embedded_create(
+            TEST_USER_ID,
+            CONV_1,
+            CronEmbeddedMutationRequest {
+                operation_id: "binding-outcome-unknown-create".into(),
+                command: CronEmbeddedCreateCommand {
+                    name: "binding outcome unknown".into(),
+                    schedule: "0 */10 * * * *".into(),
+                    schedule_description: "every 10 min".into(),
+                    message: "test uncertain create".into(),
+                },
+            },
+        )
+        .unwrap()
+        .wait()
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        nomifun_cron::error::CronError::OutcomeUnknown(_)
+    ));
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cron_jobs WHERE user_id = ? AND name = 'binding outcome unknown'",
+    )
+    .bind(TEST_USER_ID)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1, "failed compensation leaves the commit ambiguous");
+}
+
+#[tokio::test]
 async fn existing_conversation_binding_failure_compensates_updated_cron_job() {
     let (svc, _repo, _events, conversations, pool, _data_dir) =
         setup_with_conv_repo().await;
@@ -1898,6 +2025,64 @@ async fn existing_conversation_binding_failure_compensates_updated_cron_job() {
     .unwrap();
     assert_eq!(row.0, "before binding failure");
     assert_eq!(row.1.as_deref(), Some(CONV_1));
+}
+
+#[tokio::test]
+async fn update_reports_outcome_unknown_when_restore_compensation_fails() {
+    let (svc, _repo, _events, conversations, pool, _data_dir) =
+        setup_with_conv_repo().await;
+    let mut request = make_create_req("before outcome unknown", every_60s());
+    request.conversation_id = Some(CONV_1.to_owned());
+    let job = svc.add_job(TEST_USER_ID, request).await.unwrap();
+    conversations
+        .update(
+            CONV_1,
+            &ConversationRowUpdate {
+                cron_job_id: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_cron_compensation_restore \
+         BEFORE UPDATE ON cron_jobs \
+         WHEN OLD.name = 'after outcome unknown' AND NEW.name = 'before outcome unknown' \
+         BEGIN SELECT RAISE(ABORT, 'fixture restore compensation failure'); END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    conversations.set_fail_cron_binding(true);
+
+    let error = svc
+        .update_job(
+            TEST_USER_ID,
+            &job.cron_job_id,
+            UpdateCronJobRequest {
+                name: Some("after outcome unknown".into()),
+                description: None,
+                enabled: None,
+                schedule: None,
+                message: None,
+                agent_config: None,
+                conversation_title: None,
+                max_retries: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        nomifun_cron::error::CronError::OutcomeUnknown(_)
+    ));
+    let persisted_name: String =
+        sqlx::query_scalar("SELECT name FROM cron_jobs WHERE cron_job_id = ?")
+            .bind(&job.cron_job_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(persisted_name, "after outcome unknown");
 }
 
 #[tokio::test]
@@ -3279,6 +3464,389 @@ async fn delete_skill_clears_content() {
 
 // ── Embedded commands: create ──────────────────────────────────────
 
+async fn submit_create(
+    service: &CronService,
+    session_id: &str,
+    operation_id: impl Into<String>,
+    command: CronEmbeddedCreateCommand,
+) -> CronEmbeddedCommandResult {
+    service
+        .submit_embedded_create(
+            TEST_USER_ID,
+            session_id,
+            CronEmbeddedMutationRequest {
+                operation_id: operation_id.into(),
+                command,
+            },
+        )
+        .unwrap()
+        .wait()
+        .await
+        .unwrap()
+}
+
+async fn submit_update(
+    service: &CronService,
+    session_id: &str,
+    operation_id: impl Into<String>,
+    command: CronEmbeddedUpdateCommand,
+) -> CronEmbeddedCommandResult {
+    service
+        .submit_embedded_update(
+            TEST_USER_ID,
+            session_id,
+            CronEmbeddedMutationRequest {
+                operation_id: operation_id.into(),
+                command,
+            },
+        )
+        .unwrap()
+        .wait()
+        .await
+        .unwrap()
+}
+
+async fn submit_delete(
+    service: &CronService,
+    operation_id: impl Into<String>,
+    job_id: impl Into<String>,
+) -> CronEmbeddedCommandResult {
+    service
+        .submit_embedded_delete(
+            TEST_USER_ID,
+            CronEmbeddedMutationRequest {
+                operation_id: operation_id.into(),
+                command: CronEmbeddedDeleteCommand {
+                    job_id: job_id.into(),
+                },
+            },
+        )
+        .unwrap()
+        .wait()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn automation_schedule_owner_enforces_resource_binding_and_executes_exact_actions() {
+    let (service, _, _, _, _, _) = setup_with_conv_repo().await;
+    let owner = ScheduleActionOwner::new(Arc::new(service));
+    let authority = ScheduleAuthority::bound(
+        TEST_USER_ID,
+        ScheduleResourceBinding::new(
+            "scheduler-binding",
+            "installation-scheduler",
+            TEST_USER_ID,
+            [
+                ScheduleResourceOperation::Read,
+                ScheduleResourceOperation::Write,
+                ScheduleResourceOperation::Delete,
+            ],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let context = |operation_id: &str| ScheduleActionContext {
+        principal_id: TEST_USER_ID.into(),
+        agent_session_id: CONV_1.into(),
+        operation_id: operation_id.into(),
+    };
+
+    let created = owner
+        .create(
+            &authority,
+            &context("schedule-owner-create"),
+            ScheduleCreateInput {
+                name: "Owner schedule".into(),
+                schedule: "0 */10 * * * *".into(),
+                schedule_description: Some("every ten minutes".into()),
+                message: "continue the bound session".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status, ScheduleExternalActionStatus::Succeeded);
+
+    let listed = owner
+        .list(
+            &authority,
+            &context("schedule-owner-list"),
+            ScheduleListInput::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed.jobs.len(), 1);
+    let cron_job_id = nomifun_common::CronJobId::parse(listed.jobs[0].cron_job_id.clone()).unwrap();
+
+    let updated = owner
+        .update(
+            &authority,
+            &context("schedule-owner-update"),
+            ScheduleUpdateInput {
+                cron_job_id: cron_job_id.clone(),
+                name: "Updated owner schedule".into(),
+                schedule: "0 */15 * * * *".into(),
+                schedule_description: Some("every fifteen minutes".into()),
+                message: "continue with the new cadence".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.status, ScheduleExternalActionStatus::Succeeded);
+
+    let deleted = owner
+        .delete(
+            &authority,
+            &context("schedule-owner-delete"),
+            ScheduleDeleteInput { cron_job_id },
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.status, ScheduleExternalActionStatus::Succeeded);
+    assert!(
+        owner
+            .list(
+                &authority,
+                &context("schedule-owner-list-after-delete"),
+                ScheduleListInput::default(),
+            )
+            .await
+            .unwrap()
+            .jobs
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn automation_schedule_crud_accepts_store_only_canonical_session() {
+    let canonical_sessions = Arc::new(Mutex::new(HashMap::from([(
+        CANONICAL_ONLY_SESSION.to_owned(),
+        canonical_only_session_projection(),
+    )])));
+    let (service, _, _, _, pool, _) =
+        setup_with_canonical_sessions(canonical_sessions).await;
+    let owner = ScheduleActionOwner::new(Arc::new(service));
+    let authority = ScheduleAuthority::bound(
+        TEST_USER_ID,
+        ScheduleResourceBinding::new(
+            "canonical-scheduler-binding",
+            "installation-scheduler",
+            TEST_USER_ID,
+            [
+                ScheduleResourceOperation::Read,
+                ScheduleResourceOperation::Write,
+                ScheduleResourceOperation::Delete,
+            ],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let context = |operation_id: &str| ScheduleActionContext {
+        principal_id: TEST_USER_ID.into(),
+        agent_session_id: CANONICAL_ONLY_SESSION.into(),
+        operation_id: operation_id.into(),
+    };
+
+    let created = owner
+        .create(
+            &authority,
+            &context("canonical-schedule-create"),
+            ScheduleCreateInput {
+                name: "Canonical schedule".into(),
+                schedule: "0 */10 * * * *".into(),
+                schedule_description: Some("every ten minutes".into()),
+                message: "continue the Store-only session".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status, ScheduleExternalActionStatus::Succeeded);
+    let legacy_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE conversation_id = ?")
+            .bind(CANONICAL_ONLY_SESSION)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(legacy_rows, 0, "schedule create must not mint a Conversation");
+
+    let listed = owner
+        .list(
+            &authority,
+            &context("canonical-schedule-list"),
+            ScheduleListInput::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed.jobs.len(), 1);
+    let cron_job_id =
+        nomifun_common::CronJobId::parse(listed.jobs[0].cron_job_id.clone()).unwrap();
+    assert_eq!(
+        owner
+            .update(
+                &authority,
+                &context("canonical-schedule-update"),
+                ScheduleUpdateInput {
+                    cron_job_id: cron_job_id.clone(),
+                    name: "Updated canonical schedule".into(),
+                    schedule: "0 */15 * * * *".into(),
+                    schedule_description: Some("every fifteen minutes".into()),
+                    message: "continue with the new cadence".into(),
+                },
+            )
+            .await
+            .unwrap()
+            .status,
+        ScheduleExternalActionStatus::Succeeded
+    );
+    assert_eq!(
+        owner
+            .delete(
+                &authority,
+                &context("canonical-schedule-delete"),
+                ScheduleDeleteInput { cron_job_id },
+            )
+            .await
+            .unwrap()
+            .status,
+        ScheduleExternalActionStatus::Succeeded
+    );
+    assert!(
+        owner
+            .list(
+                &authority,
+                &context("canonical-schedule-list-after-delete"),
+                ScheduleListInput::default(),
+            )
+            .await
+            .unwrap()
+            .jobs
+            .is_empty()
+    );
+
+    let foreign_authority = ScheduleAuthority::bound(
+        FOREIGN_USER_ID,
+        ScheduleResourceBinding::new(
+            "foreign-scheduler-binding",
+            "installation-scheduler",
+            FOREIGN_USER_ID,
+            [ScheduleResourceOperation::Write],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let foreign_context = ScheduleActionContext {
+        principal_id: FOREIGN_USER_ID.into(),
+        agent_session_id: CANONICAL_ONLY_SESSION.into(),
+        operation_id: "canonical-schedule-foreign".into(),
+    };
+    let rejected = owner
+        .create(
+            &foreign_authority,
+            &foreign_context,
+            ScheduleCreateInput {
+                name: "Foreign schedule".into(),
+                schedule: "0 */10 * * * *".into(),
+                schedule_description: None,
+                message: "must fail".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status, ScheduleExternalActionStatus::Failed);
+    assert!(rejected.message.contains("another owner"));
+}
+
+#[tokio::test]
+async fn canonical_session_delete_removes_schedule_row_and_process_owner_state() {
+    let canonical_sessions = Arc::new(Mutex::new(HashMap::from([(
+        CANONICAL_ONLY_SESSION.to_owned(),
+        canonical_only_session_projection(),
+    )])));
+    let (service, repo, broadcaster, _, pool, _) =
+        setup_with_canonical_sessions(canonical_sessions).await;
+    let service = Arc::new(service);
+    let owner = ScheduleActionOwner::new(service.clone());
+    let authority = ScheduleAuthority::bound(
+        TEST_USER_ID,
+        ScheduleResourceBinding::new(
+            "canonical-delete-scheduler-binding",
+            "installation-scheduler",
+            TEST_USER_ID,
+            [ScheduleResourceOperation::Write],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let context = ScheduleActionContext {
+        principal_id: TEST_USER_ID.into(),
+        agent_session_id: CANONICAL_ONLY_SESSION.into(),
+        operation_id: "canonical-delete-schedule-create".into(),
+    };
+    assert_eq!(
+        owner
+            .create(
+                &authority,
+                &context,
+                ScheduleCreateInput {
+                    name: "Delete with Session".into(),
+                    schedule: "0 */10 * * * *".into(),
+                    schedule_description: Some("every ten minutes".into()),
+                    message: "must be cancelled with its Session".into(),
+                },
+            )
+            .await
+            .unwrap()
+            .status,
+        ScheduleExternalActionStatus::Succeeded
+    );
+    let jobs = repo
+        .list_by_conversation(TEST_USER_ID, CANONICAL_ONLY_SESSION)
+        .await
+        .unwrap();
+    assert_eq!(jobs.len(), 1);
+    let job_id = jobs[0].cron_job_id.clone();
+    broadcaster.take_events();
+
+    assert_eq!(
+        service
+            .delete_jobs_by_agent_session(TEST_USER_ID, CANONICAL_ONLY_SESSION)
+            .await
+            .unwrap(),
+        vec![job_id.clone()]
+    );
+    assert!(
+        repo.list_by_conversation(TEST_USER_ID, CANONICAL_ONLY_SESSION)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM conversations WHERE conversation_id = ?",
+        )
+        .bind(CANONICAL_ONLY_SESSION)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0,
+        "canonical schedule cleanup must not depend on a legacy Conversation row"
+    );
+    assert!(
+        broadcaster
+            .take_events()
+            .iter()
+            .any(|event| event.name == "cron.job-removed" && event.data["cron_job_id"] == job_id)
+    );
+    assert!(
+        service
+            .delete_jobs_by_agent_session(TEST_USER_ID, CANONICAL_ONLY_SESSION)
+            .await
+            .unwrap()
+            .is_empty(),
+        "Session cleanup replay must be idempotent"
+    );
+}
+
 #[tokio::test]
 async fn icron_service_create_job() {
     let (svc, _, _, conv_repo, _, _) = setup_with_conv_repo().await;
@@ -3290,7 +3858,7 @@ async fn icron_service_create_job() {
         message: "do agent work".into(),
     };
 
-    let result = svc.execute_embedded_create(TEST_USER_ID, CONV_1, &params).await;
+    let result = submit_create(&svc, CONV_1, "test-create", params).await;
     assert!(result.success);
     assert!(result.message.contains("Agent Job"));
 
@@ -3310,8 +3878,18 @@ async fn icron_service_create_job_inherits_conversation_provider_model_and_works
     };
 
     let result = svc
-        .execute_embedded_create(TEST_USER_ID, CONV_GEMINI, &params)
-        .await;
+        .submit_embedded_create(
+            TEST_USER_ID,
+            CONV_GEMINI,
+            CronEmbeddedMutationRequest {
+                operation_id: "test-inherit-model".into(),
+                command: params,
+            },
+        )
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
     assert!(result.success);
 
     let jobs = svc
@@ -3380,8 +3958,18 @@ async fn icron_service_create_job_preserves_provider_model_and_workspace_for_gen
         ),
     ] {
         let created = svc
-            .execute_embedded_create(TEST_USER_ID, conversation_id, &params)
-            .await;
+            .submit_embedded_create(
+                TEST_USER_ID,
+                conversation_id,
+                CronEmbeddedMutationRequest {
+                    operation_id: format!("test-generated-{conversation_id}"),
+                    command: params.clone(),
+                },
+            )
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
         assert!(created.success, "cron creation for {conversation_id}");
 
         let jobs = svc
@@ -3408,26 +3996,32 @@ async fn icron_service_create_job_preserves_provider_model_and_workspace_for_gen
 async fn icron_service_list_jobs() {
     let (svc, _, _) = setup().await;
 
-    let result = svc.execute_embedded_list(TEST_USER_ID, CONV_1).await;
-    assert!(result.success);
-    assert!(
-        result
-            .message
-            .contains(&format!("No cron jobs found for conversation '{}'", CONV_1))
-    );
+    let jobs = svc
+        .list_jobs(
+            TEST_USER_ID,
+            &ListCronJobsQuery {
+                conversation_id: Some(CONV_1.to_owned()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(jobs.is_empty());
 
     let mut req = make_create_req("Listed Job", every_60s());
     req.conversation_id = Some(CONV_1.to_owned());
     svc.add_job(TEST_USER_ID, req).await.unwrap();
 
-    let result = svc.execute_embedded_list(TEST_USER_ID, CONV_1).await;
-    assert!(result.success);
-    assert!(
-        result
-            .message
-            .contains(&format!("Found 1 cron job(s) for conversation '{}'", CONV_1))
-    );
-    assert!(result.message.contains("Listed Job"));
+    let jobs = svc
+        .list_jobs(
+            TEST_USER_ID,
+            &ListCronJobsQuery {
+                conversation_id: Some(CONV_1.to_owned()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].name, "Listed Job");
 }
 
 // ── Embedded commands: update ──────────────────────────────────────
@@ -3448,7 +4042,7 @@ async fn icron_service_update_job() {
         message: "do updated work".into(),
     };
 
-    let result = svc.execute_embedded_update(TEST_USER_ID, CONV_1, &params).await;
+    let result = submit_update(&svc, CONV_1, "test-update", params).await;
     assert!(result.success);
     assert!(result.message.contains("Updated Via Trait"));
 
@@ -3479,7 +4073,7 @@ async fn icron_service_update_job_rejects_cross_conversation_scope() {
         message: "must not change".into(),
     };
 
-    let result = svc.execute_embedded_update(TEST_USER_ID, CONV_2, &params).await;
+    let result = submit_update(&svc, CONV_2, "test-cross-update", params).await;
     assert!(!result.success);
     assert!(result.message.contains("is not bound to conversation"));
 
@@ -3525,14 +4119,10 @@ async fn icron_service_delete_job() {
         .await
         .unwrap();
 
-    let result = svc
-        .execute_embedded_delete(TEST_USER_ID, &job.cron_job_id)
-        .await;
+    let result = submit_delete(&svc, "test-delete", job.cron_job_id.clone()).await;
     assert!(result.success);
 
-    let result = svc
-        .execute_embedded_delete(TEST_USER_ID, MISSING_JOB_ID)
-        .await;
+    let result = submit_delete(&svc, "test-delete-missing", MISSING_JOB_ID).await;
     assert!(!result.success);
 }
 
@@ -3834,87 +4424,6 @@ async fn stale_dispatched_occurrence_cannot_reach_executor_after_durable_resched
     assert!(persisted.last_run_at.is_none());
 }
 
-// ── CD-1: Cascade delete cron jobs when conversation is deleted ──
-
-#[tokio::test]
-async fn cd1_cascade_delete_by_conversation() {
-    let (svc, _repo, bc) = setup().await;
-
-    let mut req_a = make_create_req("Cascade A", every_60s());
-    req_a.conversation_id = Some(CONV_5.to_owned());
-    let job_a = svc.add_job(TEST_USER_ID, req_a).await.unwrap();
-
-    let mut req_b = make_create_req("Cascade B", every_60s());
-    req_b.conversation_id = Some(CONV_6.to_owned());
-    let job_b = svc.add_job(TEST_USER_ID, req_b).await.unwrap();
-
-    let mut req_c = make_create_req("Unrelated", every_60s());
-    req_c.conversation_id = Some(CONV_3.to_owned());
-    let _job_c = svc.add_job(TEST_USER_ID, req_c).await.unwrap();
-
-    bc.take_events();
-
-    svc.delete_jobs_by_conversation(TEST_USER_ID, CONV_5)
-        .await;
-
-    assert!(svc.get_job(TEST_USER_ID, &job_a.cron_job_id).await.is_err());
-    assert!(svc.get_job(TEST_USER_ID, &job_b.cron_job_id).await.is_ok());
-
-    let remaining = svc.list_jobs(TEST_USER_ID, &ListCronJobsQuery::default()).await.unwrap();
-    assert_eq!(remaining.len(), 2, "unrelated jobs should remain");
-
-    let events = bc.take_events();
-    let removed_events: Vec<_> = events
-        .iter()
-        .filter(|e| e.name == "cron.job-removed")
-        .collect();
-    assert_eq!(removed_events.len(), 1, "should emit 1 removed event");
-}
-
-// ── CD-2: Cascade delete on empty conversation (no-op) ──────────
-
-#[tokio::test]
-async fn cd2_cascade_delete_no_matching_jobs() {
-    let (svc, _repo, bc) = setup().await;
-
-    svc.add_job(TEST_USER_ID, make_create_req("Existing", every_60s()))
-        .await
-        .unwrap();
-    bc.take_events();
-
-    svc.delete_jobs_by_conversation(TEST_USER_ID, "0190f5fe-7c00-7a00-8abc-012345679999")
-        .await;
-
-    let events = bc.take_events();
-    assert!(
-        events.is_empty(),
-        "no events should be emitted when no jobs match"
-    );
-
-    let all = svc.list_jobs(TEST_USER_ID, &ListCronJobsQuery::default()).await.unwrap();
-    assert_eq!(all.len(), 1, "existing job should remain untouched");
-}
-
-// ── CD-3: OnConversationDelete trait dispatches cascade ──────────
-
-#[tokio::test]
-async fn cd3_on_conversation_delete_trait() {
-    let (svc, _repo, bc) = setup().await;
-
-    let mut req = make_create_req("Trait Cascade", every_60s());
-    req.conversation_id = Some(CONV_6.to_owned());
-    let job = svc.add_job(TEST_USER_ID, req).await.unwrap();
-    bc.take_events();
-
-    svc.delete_jobs_by_conversation(TEST_USER_ID, CONV_6).await;
-
-    assert!(svc.get_job(TEST_USER_ID, &job.cron_job_id).await.is_err());
-
-    let events = bc.take_events();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].name, "cron.job-removed");
-}
-
 #[tokio::test]
 async fn cd4_conversation_transaction_hands_captured_job_ids_to_post_commit_cleanup() {
     let (cron_service, _repo, bc, _stub_conversations, pool, data_dir) =
@@ -3985,16 +4494,10 @@ async fn cd4_conversation_transaction_hands_captured_job_ids_to_post_commit_clea
 
     #[async_trait::async_trait]
     impl nomifun_common::OnConversationDelete for TestCronDeleteHook {
-        async fn on_conversation_deleted(&self, user_id: &str, conversation_id: &str) {
-            if let Some(job_ids) =
-                nomifun_conversation::service::current_deleted_cron_job_ids()
-            {
-                self.service.cleanup_deleted_jobs(user_id, &job_ids).await;
-            } else {
-                self.service
-                    .delete_jobs_by_conversation(user_id, conversation_id)
-                    .await;
-            }
+        async fn on_conversation_deleted(&self, user_id: &str, _conversation_id: &str) {
+            let job_ids = nomifun_conversation::service::current_deleted_cron_job_ids()
+                .expect("Conversation deletion must publish captured Cron job identities");
+            self.service.cleanup_deleted_jobs(user_id, &job_ids).await;
         }
     }
 

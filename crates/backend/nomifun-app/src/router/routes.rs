@@ -32,7 +32,6 @@ use nomifun_conversation::{
 };
 use nomifun_cron::cron_routes;
 use nomifun_file::file_routes;
-use nomifun_idmm::idmm_routes;
 use nomifun_knowledge::knowledge_routes;
 use nomifun_mcp::mcp_routes;
 use nomifun_office::{office_proxy_routes, office_routes};
@@ -313,11 +312,9 @@ pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router>
     // The gateway server itself started inside `AppServices::from_config`
     // (before the agent factory, which carries its connection config).
     //
-    // requirement_service / auto_work_runner / idmm_service come from the
-    // ROUTER STATES (not the bare singletons): those instances carry the
-    // conversation-service / terminal-driver attachments the gateway's
-    // autowork + idmm tools need, and share the live loop maps with the REST
-    // routes so a gateway toggle and a UI toggle act on the same state.
+    // Only retained product-management domains are injected. Requirements,
+    // AutoWork, Schedule and IDMM are no longer broad Gateway Agent tools;
+    // their exact Module/Action or platform owners live outside this host.
     let gateway_deps = Arc::new(nomifun_gateway::CompatibilityCapabilityHost {
         authoritative_user_id: services.authoritative_user_id.clone(),
         capability_admission: Arc::new(GatewayCatalogAdmission {
@@ -327,8 +324,6 @@ pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router>
             states.conversation.service.clone(),
             services.agent_runtime_registry.clone(),
         )),
-        cron_service: states.cron.cron_service.clone(),
-        requirement_service: states.requirement.requirement_service.clone(),
         companion_service: services.companion_service.clone(),
         terminal_service: services.terminal_service.clone(),
         provider_repo: Arc::new(nomifun_db::SqliteProviderRepository::new(
@@ -342,14 +337,12 @@ pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router>
                 services.database.pool().clone(),
             ),
         ),
-        idmm_service: states.idmm.service.clone(),
         knowledge_service: services.knowledge_service.clone(),
         // Creative Studio project/asset + generation services: the SAME
         // singletons used by `/api/creative-studio/*`, so Gateway operations and
         // product requests observe one project store and one live task queue.
         workshop_service: services.workshop_service.clone(),
         creation_service: services.creation_service.clone(),
-        auto_work_runner: states.requirement.auto_work_runner.clone(),
         // System domain: reuse the SAME service instances the system routes use
         // (states.system is still owned here; it is moved into `system_routes`
         // later in `create_router_with_states`). A gateway theme/toggle/provider
@@ -811,10 +804,12 @@ fn create_nomi_core_router_with_all_state(
 
     // Conversation routes protected by auth middleware
     #[cfg(feature = "browser-use")]
-    let browser_workspace_authenticated = protect_instance_owner(
-        crate::router::browser_workspace::routes(crate::router::browser_workspace::BrowserWorkspaceApiState {
-            workspaces: services.browser_workspaces.clone(),
-            conversations: states.conversation.service.clone(),
+    let browser_resource_authenticated = protect_instance_owner(
+        crate::router::browser_workspace::routes(crate::router::browser_workspace::BrowserResourceApiState {
+            resources: services.browser_resources.clone(),
+            attached_chrome: services.attached_chrome.clone(),
+            sessions: states.nomi_core_agent_api.session_owner.canonical().clone(),
+            control_plane: states.nomi_core_agent_api.control_plane.clone(),
             data_dir: services.data_dir.clone(),
         }).route_layer(middleware::from_fn(require_local_trust_middleware)),
         &auth_mw_state,
@@ -822,15 +817,6 @@ fn create_nomi_core_router_with_all_state(
     );
     let conversation_authenticated = conversation_routes(states.conversation.clone())
         .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
-    #[cfg(feature = "browser-use")]
-    let system_browser_authenticated = protect_instance_owner(
-        crate::router::system_browser::routes(crate::router::system_browser::SystemBrowserApiState {
-            service: services.system_browser.clone(),
-            conversations: states.conversation.service.clone(),
-        }).route_layer(middleware::from_fn(require_local_trust_middleware)),
-        &auth_mw_state, &instance_owner_state,
-    );
-
     let creative_studio_agent_session_authenticated = protect_instance_owner(
         creative_studio_agent_session_routes(states.conversation.clone()),
         &auth_mw_state,
@@ -960,13 +946,6 @@ fn create_nomi_core_router_with_all_state(
     // Requirements Platform routes protected by auth middleware
     let requirement_authenticated = protect_instance_owner(
         requirement_routes(states.requirement),
-        &auth_mw_state,
-        &instance_owner_state,
-    );
-
-    // IDMM (Intelligent Decision-Making Mode) routes protected by auth middleware
-    let idmm_authenticated = protect_instance_owner(
-        idmm_routes(states.idmm),
         &auth_mw_state,
         &instance_owner_state,
     );
@@ -1171,7 +1150,6 @@ fn create_nomi_core_router_with_all_state(
         .merge(channel_authenticated)
         .merge(cron_authenticated)
         .merge(requirement_authenticated)
-        .merge(idmm_authenticated)
         .merge(companion_authenticated)
         .merge(customer_service_authenticated)
         .merge(workshop_authenticated)
@@ -1194,10 +1172,8 @@ fn create_nomi_core_router_with_all_state(
         None => router,
     };
 
-    // Native browser and personal-browser connection management are separate,
-    // locally trusted APIs. Neither grants the other capability's authority.
     #[cfg(feature = "browser-use")]
-    let router = router.merge(browser_workspace_authenticated).merge(system_browser_authenticated);
+    let router = router.merge(browser_resource_authenticated);
 
     // CSRF (Double Submit Cookie) protects cookie-authenticated (remote
     // browser) requests. It is skipped entirely under NoAuth, and skips

@@ -3,13 +3,13 @@ import { asCapabilityId, asPackageId, type CapabilityCatalogItem } from '@/commo
 import { capabilityCategory } from './capabilityGroups';
 import { capabilityProductCopy } from './model';
 
-test('system browser is an independent web capability with explicit sign-in scope', () => {
-  const capability = { id: asCapabilityId('nomi_system_browser'), version: '1.0.0' };
+test('browser is one provider-neutral web module', () => {
+  const capability = { id: asCapabilityId('browser'), version: '1.0.0' };
   expect(capabilityCategory(capability)).toBe('web');
-  const item = { capability, display_name: 'nomi_system_browser', description: 'nomi_system_browser', source_package: { id: asPackageId('nomifun.system-browser'), version: '1.0.0' }, source_kind: 'bundled' } as CapabilityCatalogItem;
-  expect(capabilityProductCopy(item, 'zh-CN').name).toBe('Nomi 已登录 Chrome');
-  expect(capabilityProductCopy(item, 'zh-CN').description).toContain('现有登录态');
-  expect(capabilityProductCopy(item, 'en-US').name).toBe('Nomi signed-in Chrome');
+  const item = { capability, display_name: 'browser', description: 'browser', source_package: { id: asPackageId('nomifun.browser'), version: '1.0.0' }, source_kind: 'bundled' } as CapabilityCatalogItem;
+  expect(capabilityProductCopy(item, 'zh-CN').name).toBe('浏览器');
+  expect(capabilityProductCopy(item, 'zh-CN').description).toContain('不会扩大');
+  expect(capabilityProductCopy(item, 'en-US').name).toBe('Browser');
 });
 
 test('local browser search has its own web-category identity and product copy', () => {

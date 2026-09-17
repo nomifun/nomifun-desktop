@@ -28,14 +28,14 @@ use windows as native;
 #[cfg(windows)]
 #[path = "support/browser_presentation.rs"]
 mod presentation;
+#[cfg(windows)]
+#[path = "support/browser_resource_fixture.rs"]
+mod browser_resource_fixture;
 // Compile the production tool and turn owner against the real native host.
 // These are test-only modules, not a public runtime-construction API.
 #[cfg(windows)]
 #[path = "../../../crates/backend/nomifun-ai-agent/src/manager/nomi/browser_lifecycle.rs"]
 mod browser_lifecycle;
-#[cfg(windows)]
-#[path = "../../../crates/backend/nomifun-ai-agent/src/system_browser.rs"]
-mod system_browser;
 #[cfg(all(windows, test))]
 use nomifun_ai_agent::AgentRuntimeState;
 #[cfg(windows)]
@@ -1633,22 +1633,23 @@ async fn verify_workspace(app: &tauri::AppHandle, url: &str) -> Result<serde_jso
     use nomifun_browser_platform::{
         run_guard::{BrowserInputState, RunAdmissionError},
         runtime::{
-            BrowserProfile, BrowserTabCommand, BrowserTabLifecycle, BrowserWorkspaceKey,
+            BrowserProfile, BrowserTabCommand, BrowserTabLifecycle,
             WorkspaceError,
         },
-        workspace::BrowserWorkspaceService,
+        workspace::BrowserResourceService,
     };
     use std::sync::Arc;
     let service =
-        Arc::new(BrowserWorkspaceService::new(Arc::new(host::DesktopBrowserHost::new(app.clone()))));
-    let key = BrowserWorkspaceKey {
-        user_id: "smoke-user".into(),
-        conversation_id: "smoke-conversation".into(),
-    };
+        Arc::new(BrowserResourceService::new(Arc::new(host::DesktopBrowserHost::new(app.clone()))));
+    let authority = browser_resource_fixture::authority(
+        "smoke-user",
+        "smoke-conversation",
+        "native-webview2-v2",
+    );
+    let key = authority.key();
     let workspace = service
         .ensure(
-            key.clone(),
-            "native-webview2-v2".into(),
+            authority,
             BrowserProfile::Ephemeral,
         )
         .await
@@ -2047,7 +2048,7 @@ async fn verify_workspace(app: &tauri::AppHandle, url: &str) -> Result<serde_jso
     if !matches!(workspace.begin_run().await,Err(WorkspaceError::WorkspaceClosed)) {
         return Err("Retired native workspace accepted another Agent run".into());
     }
-    let replacement=service.ensure(key.clone(),"replacement-native-provider".into(),BrowserProfile::Ephemeral).await.map_err(|error|error.to_string())?;
+    let replacement=service.ensure(browser_resource_fixture::authority("smoke-user","smoke-conversation","replacement-native-provider"),BrowserProfile::Ephemeral).await.map_err(|error|error.to_string())?;
     if replacement.runtime_generation()<=workspace.runtime_generation() {return Err("Browser rebuild reused the native runtime generation".into());}
     replacement.user_command(BrowserTabCommand::Create {url:url.into()}).await.map_err(|error|format!("Replacement native tab creation: {error}"))?;
     let rebuilt=wait_workspace_page(&replacement,url).await?;
@@ -2075,10 +2076,7 @@ async fn verify_runtime_locks(
     use tauri::Manager;
     let runtime = host::DesktopBrowserHost::for_transport_conformance(app.clone())
         .create(CreateBrowserRuntime {
-            key: BrowserWorkspaceKey {
-                user_id: "native-lock-smoke".into(),
-                conversation_id: "native-lock-smoke".into(),
-            },
+            key: browser_resource_fixture::key("native-lock-smoke", "native-lock-smoke"),
             runtime_generation: 1,
             profile: BrowserProfile::Ephemeral,
             user_input_enabled: false,
@@ -2421,19 +2419,20 @@ async fn verify_managed_popup(
     app: &tauri::AppHandle,
     url: &str,
 ) -> Result<serde_json::Value, String> {
-    use nomifun_browser_platform::{runtime::*, workspace::BrowserWorkspaceService};
+    use nomifun_browser_platform::{runtime::*, workspace::BrowserResourceService};
     use std::sync::Arc;
     use tauri::Manager;
     let service =
-        BrowserWorkspaceService::new(Arc::new(host::DesktopBrowserHost::new(app.clone())));
-    let key = BrowserWorkspaceKey {
-        user_id: "managed-popup".into(),
-        conversation_id: "managed-popup".into(),
-    };
+        BrowserResourceService::new(Arc::new(host::DesktopBrowserHost::new(app.clone())));
+    let authority = browser_resource_fixture::authority(
+        "managed-popup",
+        "managed-popup",
+        "native-popup-provider",
+    );
+    let key = authority.key();
     let workspace = service
         .ensure(
-            key.clone(),
-            "native-popup-provider".into(),
+            authority,
             BrowserProfile::Ephemeral,
         )
         .await
@@ -2637,7 +2636,7 @@ async fn verify_managed_popup(
 
 #[cfg(windows)]
 async fn wait_navigation_metadata(
-    workspace: &std::sync::Arc<nomifun_browser_platform::workspace::BrowserWorkspace>,
+    workspace: &std::sync::Arc<nomifun_browser_platform::workspace::BrowserResource>,
     id: &str,
     url: &str,
     back: bool,
@@ -2708,7 +2707,7 @@ async fn native_visible(view: &tauri::Webview) -> Result<bool, String> {
 
 #[cfg(windows)]
 async fn verify_selections(
-    workspace: &std::sync::Arc<nomifun_browser_platform::workspace::BrowserWorkspace>,
+    workspace: &std::sync::Arc<nomifun_browser_platform::workspace::BrowserResource>,
     run: &nomifun_browser_platform::run_guard::BrowserRunGuard,
     tab_id: &str,
     view: &tauri::Webview,
@@ -2918,7 +2917,7 @@ async fn verify_selections(
 
 #[cfg(windows)]
 async fn wait_workspace_page(
-    workspace: &nomifun_browser_platform::workspace::BrowserWorkspace,
+    workspace: &nomifun_browser_platform::workspace::BrowserResource,
     url: &str,
 ) -> Result<nomifun_browser_platform::runtime::BrowserTabTarget, String> {
     loop {

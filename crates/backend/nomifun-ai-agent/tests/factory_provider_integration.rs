@@ -115,10 +115,6 @@ fn make_factory(
         gateway_mcp_config: None,
         #[cfg(feature = "browser-use")]
         browser_runtime_resolver: None,
-        #[cfg(feature = "browser-use")]
-        local_web_search: None,
-        #[cfg(feature = "browser-use")]
-        system_browser: None,
         client_prefs: None,
         settings_repo: None,
         companion_prompt: None,
@@ -262,6 +258,7 @@ async fn selected_browser_requires_native_host_instead_of_creating_private_chrom
         conversation_id: ConversationId::new().into_string(),
         delegation_policy: Default::default(),
         conversation_created_at: Some(1),
+        device_mcp_servers: Vec::new(),
         workspace_binding_lease: None,
         extra: serde_json::json!({"browser_use":true}),
     }).await;

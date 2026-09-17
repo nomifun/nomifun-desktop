@@ -224,7 +224,7 @@ async fn failed_cleanup_stays_locked_until_same_run_successfully_finishes() {
 }
 
 #[tokio::test]
-async fn guards_cannot_cross_conversations_and_failed_starts_can_be_cleaned_up() {
+async fn guards_cannot_cross_resources_and_failed_starts_can_be_cleaned_up() {
     let gate = Arc::new(Gate::default());
     let coordinator = BrowserRunCoordinator::new(gate.clone());
     gate.fail_release.store(true, Ordering::SeqCst);

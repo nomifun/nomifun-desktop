@@ -13,8 +13,6 @@ import { ipcBridge } from '@/common';
 import type { ITerminalSession } from '@/common/adapter/ipcBridge';
 import { parseTerminalId, terminalTarget, type TerminalId } from '@/common/types/ids';
 import { browserStorageKey } from '@/common/utils/browserStorageKey';
-import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
-import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
 import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 import { PreviewPanel, PreviewProvider, usePreviewContext } from '@/renderer/pages/conversation/Preview';
@@ -35,7 +33,7 @@ import RegisterKnowledgeButton from './RegisterKnowledgeButton';
 import TerminalWorkspaceRail from './TerminalWorkspaceRail';
 import XtermView, { type XtermViewHandle } from './XtermView';
 import TerminalSendBox from './TerminalSendBox';
-import { isTerminalAutoworkCapable } from './detectFamily';
+import { detectFamily } from './detectFamily';
 import styles from './XtermView.module.css';
 
 /** Workspace rail width bounds (px), mirroring the conversation workspace panel. */
@@ -449,16 +447,10 @@ const TerminalSessionContent: React.FC<{ sessionId: TerminalId }> = ({ sessionId
 
   const isExited = session.last_status !== 'running';
 
-  // AutoWork is only meaningful for agent-CLI terminals running in the foreground.
-  // Capability is resolved from the launch command/args/backend the SAME way the
-  // backend gate does (wrappers like `stepcode claude` count; a plain shell or
-  // gemini does not).
-  const isAgentCli = isTerminalAutoworkCapable(session.command, session.args, session.backend);
-  const autoWorkDisabledReason = !isAgentCli
-    ? t('terminal.autowork.requiresAgentCli')
-    : isExited
-      ? t('terminal.autowork.terminalExited')
-      : undefined;
+  const agentFamily = detectFamily(
+    [session.backend, session.command, ...session.args].filter(Boolean).join(' ')
+  );
+  const isAgentCli = agentFamily === 'claude' || agentFamily === 'codex';
   return (
     // The WHOLE page (both columns) is wrapped in the terminal-scoped
     // PreviewProvider — not just the right region. TerminalSendBox (left column)
@@ -538,11 +530,6 @@ const TerminalSessionContent: React.FC<{ sessionId: TerminalId }> = ({ sessionId
                 ) : undefined
               }
             />
-            <AutoWorkControl
-              target={{ kind: 'terminal', id: sessionId }}
-              disabledReason={autoWorkDisabledReason}
-            />
-            <IdmmControl target={{ kind: 'terminal', id: sessionId }} />
             {/* Escape hatch for a wedged/garbled claude/codex TUI: always
                 available (NOT gated on isExited) for agent sessions. After a
                 fallback the session is a plain shell, so isAgentCli flips false

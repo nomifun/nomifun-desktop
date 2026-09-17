@@ -230,7 +230,6 @@ import {
   parseExecutionTemplateId,
   parseExecutionTemplateParticipantId,
   parseFigureId,
-  parseIdmmInterventionId,
   parseKnowledgeBaseId,
   parseKnowledgeEntryId,
   parseKnowledgeSourceId,
@@ -263,7 +262,6 @@ import {
   type CompanionSessionWindowId,
   type CompanionSkillId,
   type FigureId,
-  type IdmmInterventionId,
   type ExecutionAttemptId,
   type ExecutionId,
   type ExecutionStepId,
@@ -3576,8 +3574,8 @@ export interface IResponseMessage {
   /** IM platform ("telegram" | "lark" | ...) when the conversation is a
    *  channel-originated turn; null/absent for local conversations. */
   channel_platform?: string | null;
-  /** Originating subsystem of the turn's user message (companion/cron/autowork/
-   *  idmm); null/absent = typed by a real person. */
+  /** Originating subsystem of the turn's user message (companion/cron/autowork);
+   * null/absent = typed by a real person. */
   origin?: string | null;
 }
 
@@ -4133,9 +4131,9 @@ export interface ITagPausedPayload {
   requirement_id?: RequirementId;
 }
 
-export type AutoWorkTargetKind = 'conversation' | 'terminal';
+export type AutoWorkTargetKind = 'conversation';
 export type AutoWorkRunState = 'off' | 'idle' | 'active';
-export type SessionCapabilityTargetId = ConversationId | TerminalId;
+export type SessionCapabilityTargetId = ConversationId;
 
 export interface IAutoWorkConfigParams {
   kind: AutoWorkTargetKind;
@@ -4193,9 +4191,7 @@ const fromApiRequirement = (requirement: RequirementResponse): IRequirement => {
 
 const fromApiAutoWorkState = (state: IAutoWorkState): IAutoWorkState => ({
   ...state,
-  target_id: state.kind === 'conversation'
-    ? parseConversationId(state.target_id)
-    : parseTerminalId(state.target_id),
+  target_id: parseConversationId(state.target_id),
   ...(state.current_requirement_id != null
     ? { current_requirement_id: parseRequirementId(state.current_requirement_id) }
     : {}),
@@ -4260,214 +4256,10 @@ export const requirements = {
       ...group,
       bindings: group.bindings.map((binding) => ({
         ...binding,
-        target_id: binding.kind === 'conversation'
-          ? parseConversationId(binding.target_id)
-          : parseTerminalId(binding.target_id),
+        target_id: parseConversationId(binding.target_id),
       })),
     }))
   ),
-};
-
-// ─────────────────────────── IDMM (Intelligent Decision-Making Mode) ───────────────────────────
-
-export type IdmmTargetKind = 'conversation' | 'terminal';
-export type IdmmRunState = 'off' | 'armed' | 'intervening';
-
-// ── Phase-2 dual-watch config (mirrors `nomifun-api-types/src/idmm.rs` D1/D2). ──
-// IDMM is reorganized into two independently-toggleable, default-off watches that
-// share one engine: 故障值守 (fault watch) and 决策值守 (decision watch). The
-// backend flattens `WatchBase` into each watch (serde `#[flatten]`), so the base
-// knobs live at the top level of each watch object on the wire.
-
-/** Rule-only (no model) vs rule + backup model. */
-export type IdmmWatchTier = 'rule_only' | 'rule_plus_model';
-
-/** How much context the watch scans / feeds the backup model. */
-export type IdmmScanScope = 'last_turn' | 'last_messages' | 'full_session';
-
-/** Backup ("bypass") model the watch escalates to (empty → global default → session model). */
-export interface IIdmmBypassModelRef {
-  provider_id?: ProviderId | null;
-  model?: string | null;
-}
-
-/** Rate limits to keep a watch from thrashing a session. */
-export interface IIdmmBudgetConfig {
-  max_interventions_per_hour: number;
-  min_interval_secs: number;
-}
-
-/** Shared base knobs flattened into each watch config. */
-export interface IIdmmWatchBase {
-  enabled: boolean;
-  tier: IdmmWatchTier;
-  /** 监测间隔 (was idle_threshold_secs). */
-  scan_interval_secs: number;
-  /** 最大重试. */
-  max_retries: number;
-  /** 扫描范围. */
-  scan_scope: IdmmScanScope;
-  /** Context-char ceiling fed to the bypass model (carried over default 8000). */
-  max_context_chars: number;
-  /** 旁路模型. */
-  bypass_model: IIdmmBypassModelRef;
-  budget: IIdmmBudgetConfig;
-}
-
-/** P3 fault failover strategy; P2 only Retry is live. */
-export type IdmmWakeStrategy = 'retry' | 'failover' | 'failover_then_retry';
-
-/** 故障值守 — base flattened to top level + fault-specific fields. */
-export interface IIdmmFaultWatchConfig extends IIdmmWatchBase {
-  wake_action: IdmmWakeStrategy;
-  use_failover_queue: boolean;
-}
-
-// ── Decision strategy (D2) ──
-
-export type IdmmTendency = 'conservative' | 'balanced' | 'aggressive';
-export type IdmmBlockedBehavior = 'prefer_continue' | 'prefer_pause' | 'must_ask';
-export type IdmmCategoryMode = 'auto' | 'ask_first' | 'off';
-
-export interface IIdmmOptionRule {
-  mode: IdmmCategoryMode;
-  prefer_recommended: boolean;
-  allow_unmarked_pick: boolean;
-  never_destructive: boolean;
-}
-export interface IIdmmOpenQuestionRule {
-  mode: IdmmCategoryMode;
-  max_answer_chars: number;
-}
-export interface IIdmmCategoryRules {
-  option_decision: IIdmmOptionRule;
-  open_question: IIdmmOpenQuestionRule;
-}
-export interface IIdmmDecisionStrategy {
-  tendency: IdmmTendency;
-  on_blocked: IdmmBlockedBehavior;
-  categories: IIdmmCategoryRules;
-  /** 自由文本策略 — appended to the bypass-model prompt (model tier only). */
-  freeform_policy?: string | null;
-}
-
-/** 决策值守 — base flattened to top level + decision-specific fields. */
-export interface IIdmmDecisionWatchConfig extends IIdmmWatchBase {
-  strategy: IIdmmDecisionStrategy;
-  /** 纯问答开关 — answer open-ended questions (only effective at rule_plus_model). */
-  answer_open_questions: boolean;
-}
-
-export interface IIdmmConfig {
-  fault_watch: IIdmmFaultWatchConfig;
-  decision_watch: IIdmmDecisionWatchConfig;
-}
-
-/** POST /api/idmm body: kind + target_id + a (flattened) IdmmConfig. */
-export interface IIdmmSetParams extends IIdmmConfig {
-  kind: IdmmTargetKind;
-  target_id: SessionCapabilityTargetId;
-}
-
-export interface IIdmmState {
-  kind: IdmmTargetKind;
-  target_id: SessionCapabilityTargetId;
-  /** True when either watch is enabled. */
-  enabled: boolean;
-  run_state: IdmmRunState;
-  interventions_count: number;
-  last_signal?: string;
-  last_intervention_at?: number;
-  /** Whether a backup provider is resolvable (per-session or global default). */
-  sidecar_provider_resolved: boolean;
-  /**
-   * Persisted per-session IdmmConfig — the form's source of truth on remount.
-   * Absent for targets that have never been saved. Without this round-trip,
-   * user edits would silently disappear after navigation.
-   */
-  config?: IIdmmConfig;
-}
-
-/** One persisted IDMM decision (the "思路"/audit trail row). Field names mirror
- * the backend `InterventionRecord` JSON exactly. `target_id` is polymorphic on
- * the wire (conversation/terminal id serialized as a string). */
-export interface IIdmmIntervention {
-  intervention_id: IdmmInterventionId;
-  target_kind: IdmmTargetKind;
-  target_id: SessionCapabilityTargetId;
-  /** Which watch fired: 'fault' | 'decision'. */
-  watch: string;
-  at: number;
-  stall_class: string;
-  tier_used: string;
-  /** option / open_question / fault. */
-  category?: string;
-  action: string;
-  /** What was picked/answered (truncated server-side). */
-  detail?: string;
-  outcome: string;
-  /** The reasoning ("思路") — model reason or a rule explanation. */
-  reason?: string;
-  /** Model confidence (null for the rule tier). */
-  confidence?: number;
-  /** provider/model used (null for the rule tier). */
-  bypass_model?: string;
-}
-
-const parseIdmmTargetId = (kind: IdmmTargetKind, value: unknown): SessionCapabilityTargetId =>
-  kind === 'conversation' ? parseConversationId(value) : parseTerminalId(value);
-
-const fromApiIdmmConfig = (config: IIdmmConfig): IIdmmConfig => ({
-  ...config,
-  fault_watch: {
-    ...config.fault_watch,
-    bypass_model: {
-      ...config.fault_watch.bypass_model,
-      provider_id: config.fault_watch.bypass_model.provider_id == null
-        ? config.fault_watch.bypass_model.provider_id
-        : parseProviderId(config.fault_watch.bypass_model.provider_id),
-    },
-  },
-  decision_watch: {
-    ...config.decision_watch,
-    bypass_model: {
-      ...config.decision_watch.bypass_model,
-      provider_id: config.decision_watch.bypass_model.provider_id == null
-        ? config.decision_watch.bypass_model.provider_id
-        : parseProviderId(config.decision_watch.bypass_model.provider_id),
-    },
-  },
-});
-
-const fromApiIdmmState = (state: IIdmmState): IIdmmState => ({
-  ...state,
-  target_id: parseIdmmTargetId(state.kind, state.target_id),
-  ...(state.config ? { config: fromApiIdmmConfig(state.config) } : {}),
-});
-
-const fromApiIdmmIntervention = (record: IIdmmIntervention): IIdmmIntervention => ({
-  ...record,
-  intervention_id: parseIdmmInterventionId(record.intervention_id),
-  target_id: parseIdmmTargetId(record.target_kind, record.target_id),
-});
-
-export const idmm = {
-  set: withResponseMap(httpPost<IIdmmState, IIdmmSetParams>('/api/idmm'), fromApiIdmmState),
-  getStatus: withResponseMap(httpGet<IIdmmState, { kind: IdmmTargetKind; target_id: SessionCapabilityTargetId }>(
-    (p) => `/api/idmm/${p.kind}/${p.target_id}`
-  ), fromApiIdmmState),
-  intervene: withResponseMap(httpPost<IIdmmState, { kind: IdmmTargetKind; target_id: SessionCapabilityTargetId }>(
-    (p) => `/api/idmm/${p.kind}/${p.target_id}/intervene`,
-    () => ({})
-  ), fromApiIdmmState),
-  getLog: withResponseMap(httpGet<IIdmmIntervention[], { kind: IdmmTargetKind; target_id: SessionCapabilityTargetId; limit?: number }>(
-    (p) => `/api/idmm/${p.kind}/${p.target_id}/log${p.limit ? `?limit=${p.limit}` : ''}`
-  ), (records) => records.map(fromApiIdmmIntervention)),
-  clearLog: httpDelete<void, { kind: IdmmTargetKind; target_id: SessionCapabilityTargetId }>(
-    (p) => `/api/idmm/${p.kind}/${p.target_id}/log`
-  ),
-  onStatus: wsMappedEmitter<IIdmmState>('idmm.statusChanged', fromApiIdmmState),
-  onIntervention: wsMappedEmitter<IIdmmIntervention>('idmm.intervention', fromApiIdmmIntervention),
 };
 
 // ── Phase-3 model failover queue (mirrors `ModelFailoverConfig`, plan D1/D8). ──

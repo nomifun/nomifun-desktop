@@ -456,7 +456,7 @@ export function redactSensitiveText(input: string): string {
     .replace(/((?:^|[;{,]\s*|")(?:set-)?cookie["']?\s*[:=])\s*[^\r\n]+/gim, '$1[REDACTED]')
     .replace(/[A-Za-z]:\\[^\r\n"'<>]*(?:User Data|Profiles?)[^\r\n"'<>]*/gi, '[REDACTED_PROFILE_PATH]')
     // POSIX equivalent of the drive-letter rule: managed platform profile
-    // roots and system-browser profile directories on macOS/Linux.
+    // roots and Browser Provider profile directories on macOS/Linux.
     .replace(
       /\/(?:Users|home|root|private|var|tmp|opt)\/[^\r\n"'<>]*?(?:platform-profiles|browser-data|User Data|(?:Application Support|\.config)\/(?:Google\/Chrome|google-chrome|Chromium|chromium|Microsoft Edge|microsoft-edge|BraveSoftware|vivaldi|Vivaldi))[^\s"'<>]*/g,
       '[REDACTED_PROFILE_PATH]'

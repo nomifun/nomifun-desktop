@@ -1,19 +1,18 @@
-//! Tests for `RequirementService::tag_bindings`: enumerates conversation +
-//! terminal AutoWork bindings, grouped by tag, only for enabled ones.
+//! Tests for AgentSession-backed AutoWork bindings grouped by tag.
 
 use std::sync::Arc;
 
 use nomifun_db::models::ConversationRow;
 use nomifun_db::{
-    CreateTerminalParams, IConversationRepository, IRequirementRepository, ITerminalRepository,
-    SqliteConversationRepository, SqliteRequirementRepository, SqliteTerminalRepository, init_database_memory,
+    IConversationRepository, IRequirementRepository, SqliteConversationRepository,
+    SqliteRequirementRepository, init_database_memory,
 };
 use nomifun_realtime::UserEventSink;
 use nomifun_requirement::{
     AutoWorkScheduledSessionLookup, RequirementEventEmitter, RequirementService,
     ScheduledAutoWorkSession, ScheduledAutoWorkSessionScan,
 };
-use nomifun_common::{AppError, ConversationId, TerminalId, UserId};
+use nomifun_common::{AppError, ConversationId};
 
 #[derive(Default)]
 struct NoopBroadcaster;
@@ -69,13 +68,11 @@ fn conv(name: &str, autowork_json: &str) -> ConversationRow {
 }
 
 #[tokio::test]
-async fn groups_enabled_conversation_and_terminal_bindings_by_tag() {
+async fn groups_enabled_agent_session_bindings_by_tag() {
     let db = init_database_memory().await.unwrap();
     let pool = db.pool().clone();
     let installation_owner = nomifun_db::installation_owner_id(&pool).await.unwrap();
-    let typed_installation_owner = UserId::parse(&installation_owner).unwrap();
     let conv_repo: Arc<dyn IConversationRepository> = Arc::new(SqliteConversationRepository::new(pool.clone()));
-    let term_repo: Arc<dyn ITerminalRepository> = Arc::new(SqliteTerminalRepository::new(pool.clone()));
     let req_repo: Arc<dyn IRequirementRepository> = Arc::new(SqliteRequirementRepository::new(pool.clone()));
 
     // Two conversations enabled on tag "x", one disabled, one with no autowork.
@@ -101,29 +98,6 @@ async fn groups_enabled_conversation_and_terminal_bindings_by_tag() {
     c.user_id = installation_owner.clone();
     conv_repo.create(&c).await.unwrap();
 
-    // One terminal enabled on tag "y"; its business UUIDv7 is returned.
-    let term = term_repo
-        .create(&CreateTerminalParams {
-            id: TerminalId::new(),
-            name: "Term One".into(),
-            cwd: "/tmp".into(),
-            command: "claude".into(),
-            args: "[]".into(),
-            env: None,
-            backend: Some("claude".into()),
-            mode: None,
-            cols: 80,
-            rows: 24,
-            user_id: typed_installation_owner,
-        })
-        .await
-        .unwrap();
-    let term_id = term.terminal_id;
-    term_repo
-        .update_autowork(term_id.as_str(), Some(r#"{"enabled":true,"tag":"y"}"#))
-        .await
-        .unwrap();
-
     let svc = RequirementService::new(
         req_repo,
         RequirementEventEmitter::new(Arc::new(NoopBroadcaster), Arc::from(installation_owner.clone())),
@@ -144,22 +118,18 @@ async fn groups_enabled_conversation_and_terminal_bindings_by_tag() {
                 max_requirements: None,
                 config_revision: "conversation:alpha-b".into(),
             },
-        ])))
-        .with_terminal_repo(term_repo);
+        ])));
 
     let groups = svc.tag_bindings(&installation_owner).await.unwrap();
 
-    // tag "x" has the two enabled conversations; "y" has the terminal. Disabled +
-    // no-autowork conversations are excluded.
+    // Disabled and unscheduled Sessions are excluded.
     let x = groups.iter().find(|g| g.tag == "x").expect("tag x present");
     assert_eq!(x.bindings.len(), 2);
     let mut names: Vec<&str> = x.bindings.iter().map(|b| b.name.as_str()).collect();
     names.sort();
     assert_eq!(names, vec!["Alpha A", "Alpha B"]);
 
-    let y = groups.iter().find(|g| g.tag == "y").expect("tag y present");
-    assert_eq!(y.bindings.len(), 1);
-    assert_eq!(y.bindings[0].target_id, term_id.to_string());
+    assert!(groups.iter().all(|group| group.tag != "y"));
 
     // No "active" run_state without a live AutoWork runner (route enriches that).
     assert!(

@@ -110,7 +110,6 @@ fn browser(conn: Connection) -> Arc<AttachedBrowser> {
         state: Arc::new(Mutex::new(crate::attached_browser::AttachedState {
             connection: Some(conn),
             retirement: None,
-            offered_tabs: Default::default(),
             automation: Default::default(),
             pending: Default::default(),
             retirement_pause: None,

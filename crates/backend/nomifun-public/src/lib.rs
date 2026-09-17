@@ -5,6 +5,7 @@
 //! lifecycle and admission; it is never a second product identity.
 
 mod canonical;
+mod platform;
 mod result;
 mod router;
 mod session;
@@ -16,5 +17,10 @@ pub use canonical::{
     canonical_remote_mcp_router_with_operations,
 };
 pub use result::build_tool_result;
+pub use platform::{
+    REMOTE_INGRESS_AGENT_ACTION_IDS, REMOTE_INGRESS_OPERATION_IDS,
+    REMOTE_INGRESS_PLATFORM_SERVICE_ID, RemoteIngressBindingSelection,
+    RemoteIngressTransport,
+};
 pub use router::{PublicMcpState, RemoteInstanceOwner, instance_token_middleware};
 pub use session::RemoteMcpSessionAdmissionAuthority;

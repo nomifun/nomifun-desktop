@@ -3,22 +3,22 @@ use super::windows::script_dialogs as dialogs;
 use nomifun_browser_platform::{
     run_guard::{BrowserInputState, RunAdmissionError},
     runtime::*,
-    workspace::BrowserWorkspaceService,
+    workspace::BrowserResourceService,
 };
 use std::sync::Arc;
 use tauri::Manager;
 
 pub(super) async fn verify(app: &tauri::AppHandle, url: &str) -> Result<serde_json::Value, String> {
-    let service = Arc::new(BrowserWorkspaceService::new(Arc::new(
+    let service = Arc::new(BrowserResourceService::new(Arc::new(
         super::host::DesktopBrowserHost::new(app.clone()),
     )));
     let workspace = service
         .ensure(
-            BrowserWorkspaceKey {
-                user_id: "dialog-user".into(),
-                conversation_id: "dialog-conversation".into(),
-            },
-            "native-webview2-v2".into(),
+            super::browser_resource_fixture::authority(
+                "dialog-user",
+                "dialog-conversation",
+                "native-webview2-v2",
+            ),
             BrowserProfile::Ephemeral,
         )
         .await

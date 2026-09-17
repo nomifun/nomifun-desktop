@@ -8,6 +8,7 @@ use nomi_ssh::responder::AnswerRule;
 use zeroize::Zeroizing;
 
 const T: Duration = Duration::from_secs(8);
+const PROMPT: &str = "__NOMIFUN_SUDO_TEST_PROMPT__:";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn answer_rule_injects_password_and_it_never_appears_in_output() {
@@ -16,7 +17,11 @@ async fn answer_rule_injects_password_and_it_never_appears_in_output() {
         return;
     };
     let conn = support::connect(&sshd).await;
-    let rules = vec![AnswerRule::sudo(Zeroizing::new("test_sudo_pw".to_string()))];
+    let rules = vec![AnswerRule::exact_once(
+        PROMPT,
+        Zeroizing::new("test_sudo_pw".to_string()),
+    )
+    .unwrap()];
     let sh = conn
         .open_shell_with_rules("/tmp", rules)
         .await
@@ -24,8 +29,11 @@ async fn answer_rule_injects_password_and_it_never_appears_in_output() {
 
     // A pure-sh stand-in for sudo: print the exact sudo prompt, read a line from
     // the tty (which the responder must supply), and echo OK iff it matches.
-    let script = r#"printf '[sudo] password for tester: '; read -r pw; if [ "$pw" = "test_sudo_pw" ]; then echo INJECT_OK; else echo INJECT_BAD; fi"#;
-    let out = sh.run(script, T).await.expect("run");
+    let script = format!(
+        "printf '{}'; read -r pw; if [ \"$pw\" = \"test_sudo_pw\" ]; then echo INJECT_OK; else echo INJECT_BAD; fi",
+        PROMPT
+    );
+    let out = sh.run(&script, T).await.expect("run");
 
     assert_eq!(out.exit_code, 0, "got: {:?}", out);
     assert!(

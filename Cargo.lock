@@ -6052,7 +6052,6 @@ dependencies = [
  "jsonschema",
  "nomifun-agent-contracts",
  "nomifun-agent-kernel",
- "nomifun-browser-platform",
  "serde_json",
  "tokio",
 ]
@@ -6067,6 +6066,7 @@ dependencies = [
  "nomifun-agent-domain-wave1",
  "nomifun-agent-domain-wave3",
  "nomifun-agent-domain-wave4",
+ "nomifun-agent-domain-wave5",
  "nomifun-agent-kernel",
  "serde",
  "serde_json",
@@ -6094,7 +6094,7 @@ dependencies = [
 
 [[package]]
 name = "nomifun-agent-domain-wave5"
-version = "0.7.4"
+version = "0.7.6"
 dependencies = [
  "nomifun-agent-contracts",
  "nomifun-agent-kernel",
@@ -6303,7 +6303,6 @@ dependencies = [
  "nomifun-engine-core",
  "nomifun-file",
  "nomifun-gateway",
- "nomifun-idmm",
  "nomifun-js-authoring",
  "nomifun-js-host",
  "nomifun-js-kernel-adapter",
@@ -6835,13 +6834,10 @@ dependencies = [
  "nomifun-companion",
  "nomifun-conversation",
  "nomifun-creation",
- "nomifun-cron",
  "nomifun-db",
  "nomifun-file",
- "nomifun-idmm",
  "nomifun-knowledge",
  "nomifun-mcp",
- "nomifun-requirement",
  "nomifun-shell",
  "nomifun-skill-library",
  "nomifun-system",
@@ -6855,30 +6851,6 @@ dependencies = [
  "tokio",
  "tower",
  "tower-http",
- "tracing",
-]
-
-[[package]]
-name = "nomifun-idmm"
-version = "0.7.6"
-dependencies = [
- "async-trait",
- "axum",
- "dashmap",
- "nomifun-ai-agent",
- "nomifun-api-types",
- "nomifun-auth",
- "nomifun-common",
- "nomifun-db",
- "nomifun-model-invoke",
- "nomifun-realtime",
- "nomifun-requirement",
- "nomifun-terminal",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sqlx",
- "tokio",
  "tracing",
 ]
 
@@ -7182,15 +7154,14 @@ dependencies = [
  "async-trait",
  "axum",
  "dashmap",
+ "nomifun-agent-execution",
  "nomifun-ai-agent",
  "nomifun-api-types",
  "nomifun-auth",
  "nomifun-common",
- "nomifun-conversation",
  "nomifun-db",
  "nomifun-file",
  "nomifun-realtime",
- "nomifun-terminal",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -7447,6 +7418,7 @@ dependencies = [
  "nomifun-net",
  "nomifun-requirement",
  "reqwest 0.12.28",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.19",

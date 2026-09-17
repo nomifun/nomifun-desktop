@@ -1,62 +1,176 @@
-//! The Nomi turn owner coordinates native input with its authoritative terminal.
+//! Provider-neutral Browser Resource lifecycle for one Nomi turn.
 
-use nomifun_browser_platform::{run_guard::BrowserRunGuard, workspace::BrowserWorkspace};
+use nomifun_browser_platform::{
+    attached_browser::AuthorizedAttachedBrowserTurn,
+    bound_resource::BoundBrowserProviderResource,
+    run_guard::BrowserRunGuard,
+    workspace::BrowserResource,
+};
 use nomifun_common::AppError;
 use std::sync::{Arc, Mutex};
 
-pub(super) struct NativeBrowserTurn {
-    workspace: Arc<BrowserWorkspace>,
+pub(super) struct ManagedBrowserTurn {
+    resource: Arc<BrowserResource>,
     guard: BrowserRunGuard,
 }
 
+#[derive(Clone)]
+pub(super) enum BrowserTurn {
+    Managed(Arc<ManagedBrowserTurn>),
+    AttachedChrome(Arc<AuthorizedAttachedBrowserTurn>),
+}
+
 #[derive(Clone, Default)]
-pub(super) struct NativeBrowserTurnSlot(Arc<Mutex<Option<Arc<NativeBrowserTurn>>>>);
+pub(super) struct BrowserTurnSlot(Arc<Mutex<Option<BrowserTurn>>>);
 
 fn error(value: impl std::fmt::Display) -> AppError {
-    AppError::Internal(format!("Native browser lifecycle failed: {value}"))
+    AppError::Internal(format!("Browser Resource lifecycle failed: {value}"))
 }
 
-pub(super) async fn settle_turns(native: &NativeBrowserTurnSlot, system: &crate::system_browser::SystemBrowserTurnSlot) -> Result<(), AppError> {
-    let native = native.settle().await;
-    let system = system.settle().await;
-    native.and(system)
-}
-
-pub(super) async fn finish_turns(native: &NativeBrowserTurnSlot, system: &crate::system_browser::SystemBrowserTurnSlot) -> Result<(), AppError> {
-    let native = native.finish().await;
-    let system = system.finish().await;
-    native.and(system)
-}
-
-impl NativeBrowserTurnSlot {
-    pub(super) fn current(
-        &self,
-    ) -> Result<Arc<NativeBrowserTurn>, nomifun_browser_platform::runtime::WorkspaceError> {
+impl BrowserTurnSlot {
+    pub(super) fn current(&self) -> Result<BrowserTurn, AppError> {
         self.0
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
-            .ok_or(nomifun_browser_platform::run_guard::RunAdmissionError::StaleRun.into())
+            .ok_or_else(|| AppError::Conflict("The Browser turn is no longer active.".into()))
+    }
+
+    pub async fn begin(&self, resource: &BoundBrowserProviderResource) -> Result<(), AppError> {
+        if self.0.lock().unwrap_or_else(|error| error.into_inner()).is_some() {
+            return Err(AppError::Conflict(
+                "A prior Browser run has not finished cleanup.".into(),
+            ));
+        }
+        let turn = match resource {
+            BoundBrowserProviderResource::Managed(resource) => {
+                let guard = resource.begin_run().await.map_err(error)?;
+                guard.require_explicit_finish();
+                BrowserTurn::Managed(Arc::new(ManagedBrowserTurn {
+                    resource: Arc::clone(resource),
+                    guard,
+                }))
+            }
+            BoundBrowserProviderResource::AttachedChrome(resource) => {
+                BrowserTurn::AttachedChrome(resource.begin_run().await.map_err(error)?)
+            }
+        };
+        *self.0.lock().unwrap_or_else(|error| error.into_inner()) = Some(turn);
+        Ok(())
+    }
+
+    pub fn cancel(&self) {
+        if let Some(turn) = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+        {
+            match turn {
+                BrowserTurn::Managed(turn) => turn.guard.cancel(),
+                BrowserTurn::AttachedChrome(turn) => turn.cancel(),
+            }
+        }
+    }
+
+    pub async fn settle(&self) -> Result<(), AppError> {
+        let turn = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        match turn {
+            Some(BrowserTurn::Managed(turn)) => {
+                turn.resource.settle_run(&turn.guard).await.map_err(error)
+            }
+            Some(BrowserTurn::AttachedChrome(turn)) => turn.settle().await.map_err(error),
+            None => Ok(()),
+        }
+    }
+
+    pub async fn finish(&self) -> Result<(), AppError> {
+        let turn = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let Some(turn) = turn else { return Ok(()); };
+        match &turn {
+            BrowserTurn::Managed(turn) => {
+                turn.resource.finish_run(&turn.guard).await.map_err(error)?;
+            }
+            BrowserTurn::AttachedChrome(turn) => turn.finish().await.map_err(error)?,
+        }
+        let mut slot = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        let same = match (slot.as_ref(), &turn) {
+            (Some(BrowserTurn::Managed(active)), BrowserTurn::Managed(completed)) => {
+                Arc::ptr_eq(active, completed)
+            }
+            (
+                Some(BrowserTurn::AttachedChrome(active)),
+                BrowserTurn::AttachedChrome(completed),
+            ) => Arc::ptr_eq(active, completed),
+            _ => false,
+        };
+        if same {
+            slot.take();
+        }
+        Ok(())
     }
 }
 
-impl NativeBrowserTurn {
-    pub async fn evaluate(&self, request: nomifun_browser_platform::runtime::BrowserEvaluation)
-        -> Result<nomifun_browser_platform::runtime::BrowserEvaluationResult, nomifun_browser_platform::runtime::WorkspaceError> {
-        self.workspace.evaluate(&self.guard, request).await
+impl ManagedBrowserTurn {
+    pub async fn evaluate(
+        &self,
+        request: nomifun_browser_platform::runtime::BrowserEvaluation,
+    ) -> Result<
+        nomifun_browser_platform::runtime::BrowserEvaluationResult,
+        nomifun_browser_platform::runtime::WorkspaceError,
+    > {
+        self.resource.evaluate(&self.guard, request).await
     }
-    pub async fn download(&self, element: nomifun_browser_platform::runtime::BrowserElementRef, scope: Arc<nomifun_browser_platform::downloads::BrowserDownloadScope>) -> Result<nomifun_browser_platform::runtime::BrowserActionResult, nomifun_browser_platform::runtime::WorkspaceError> {
-        self.workspace.download(&self.guard, element, scope).await
+
+    pub async fn download(
+        &self,
+        element: nomifun_browser_platform::runtime::BrowserElementRef,
+        scope: Arc<nomifun_browser_platform::downloads::BrowserDownloadScope>,
+    ) -> Result<
+        nomifun_browser_platform::runtime::BrowserActionResult,
+        nomifun_browser_platform::runtime::WorkspaceError,
+    > {
+        self.resource.download(&self.guard, element, scope).await
     }
-    pub async fn respond_dialog(&self, reply: nomifun_browser_platform::runtime::BrowserDialogReply)
-        -> Result<nomifun_browser_platform::runtime::BrowserActionResult, nomifun_browser_platform::runtime::WorkspaceError> {
-        self.workspace.respond_dialog(&self.guard, reply).await
+
+    pub async fn respond_dialog(
+        &self,
+        reply: nomifun_browser_platform::runtime::BrowserDialogReply,
+    ) -> Result<
+        nomifun_browser_platform::runtime::BrowserActionResult,
+        nomifun_browser_platform::runtime::WorkspaceError,
+    > {
+        self.resource.respond_dialog(&self.guard, reply).await
     }
-    pub async fn upload(&self,element:nomifun_browser_platform::runtime::BrowserElementRef,scope:Arc<nomifun_browser_platform::uploads::BrowserUploadScope>,paths:Vec<String>) -> Result<nomifun_browser_platform::runtime::BrowserActionResult,nomifun_browser_platform::runtime::WorkspaceError> {
-        self.workspace.upload(&self.guard,element,scope,paths).await
+
+    pub async fn upload(
+        &self,
+        element: nomifun_browser_platform::runtime::BrowserElementRef,
+        scope: Arc<nomifun_browser_platform::uploads::BrowserUploadScope>,
+        paths: Vec<String>,
+    ) -> Result<
+        nomifun_browser_platform::runtime::BrowserActionResult,
+        nomifun_browser_platform::runtime::WorkspaceError,
+    > {
+        self.resource.upload(&self.guard, element, scope, paths).await
     }
-    pub async fn screenshot(&self, tab_id: Option<String>) -> Result<nomifun_browser_platform::runtime::BrowserScreenshot, nomifun_browser_platform::runtime::WorkspaceError> {
-        self.workspace.screenshot(&self.guard, tab_id).await
+
+    pub async fn screenshot(
+        &self,
+        tab_id: Option<String>,
+    ) -> Result<
+        nomifun_browser_platform::runtime::BrowserScreenshot,
+        nomifun_browser_platform::runtime::WorkspaceError,
+    > {
+        self.resource.screenshot(&self.guard, tab_id).await
     }
 
     pub async fn observe(
@@ -66,7 +180,7 @@ impl NativeBrowserTurn {
         nomifun_browser_platform::runtime::BrowserObservation,
         nomifun_browser_platform::runtime::WorkspaceError,
     > {
-        self.workspace.observe(&self.guard, tab_id).await
+        self.resource.observe(&self.guard, tab_id).await
     }
 
     pub async fn act(
@@ -76,7 +190,7 @@ impl NativeBrowserTurn {
         nomifun_browser_platform::runtime::BrowserActionResult,
         nomifun_browser_platform::runtime::WorkspaceError,
     > {
-        self.workspace.act(&self.guard, action).await
+        self.resource.act(&self.guard, action).await
     }
 
     pub async fn command(
@@ -86,7 +200,7 @@ impl NativeBrowserTurn {
         nomifun_browser_platform::runtime::BrowserRuntimeSnapshot,
         nomifun_browser_platform::runtime::WorkspaceError,
     > {
-        self.workspace.agent_command(&self.guard, command).await
+        self.resource.agent_command(&self.guard, command).await
     }
 
     pub async fn tabs(
@@ -95,56 +209,6 @@ impl NativeBrowserTurn {
         Option<nomifun_browser_platform::runtime::BrowserRuntimeSnapshot>,
         nomifun_browser_platform::runtime::WorkspaceError,
     > {
-        Ok(self.workspace.agent_snapshot(&self.guard).await?.runtime)
-    }
-}
-
-impl NativeBrowserTurnSlot {
-    pub async fn begin(&self, workspace: Arc<BrowserWorkspace>) -> Result<(), AppError> {
-        if self.0.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
-            return Err(AppError::Conflict(
-                "A prior browser run has not finished cleanup.".into(),
-            ));
-        }
-        let guard = workspace.begin_run().await.map_err(error)?;
-        guard.require_explicit_finish();
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(Arc::new(NativeBrowserTurn { workspace, guard }));
-        Ok(())
-    }
-
-    pub fn cancel(&self) {
-        if let Some(turn) = self.0.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-            turn.guard.cancel();
-        }
-    }
-
-    pub async fn settle(&self) -> Result<(), AppError> {
-        let turn = self.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(turn) = turn {
-            turn.workspace
-                .settle_run(&turn.guard)
-                .await
-                .map_err(error)?;
-        }
-        Ok(())
-    }
-
-    pub async fn finish(&self) -> Result<(), AppError> {
-        let turn = self.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(turn) = turn {
-            turn.workspace
-                .finish_run(&turn.guard)
-                .await
-                .map_err(error)?;
-            let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
-            if slot
-                .as_ref()
-                .is_some_and(|active| Arc::ptr_eq(active, &turn))
-            {
-                slot.take();
-            }
-        }
-        Ok(())
+        Ok(self.resource.agent_snapshot(&self.guard).await?.runtime)
     }
 }

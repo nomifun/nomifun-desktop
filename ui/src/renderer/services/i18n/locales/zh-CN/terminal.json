@@ -23,8 +23,6 @@
     "autoworkDesc": "让自动任务按需求标签驱动该终端并确认完成（Claude / Codex，含 stepcode claude 等代理形式）",
     "autoworkLabel": "自动工作",
     "autoworkRequiresAgent": "自动工作需要 Claude / Codex 终端（含 stepcode claude 等代理形式）",
-    "idmmApplyFailed": "终端已创建，但智能决策启用失败，可在终端内重试",
-    "idmmApplyNote": "创建终端后立即生效，可在终端内继续调整。",
     "knowledgeConnectNote": "平台终端会自动注入；包装命令、自定义或外置终端可把无密钥命令注册到工作路径。",
     "knowledgeDesc": "挂载知识库到工作路径，供该终端的 Agent 检索。",
     "knowledgeLabel": "平台知识库",

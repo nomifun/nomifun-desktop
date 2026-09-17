@@ -331,7 +331,7 @@ async fn verify_storage(engine: &std::sync::Arc<nomifun_browser_macos::engine::E
 async fn verify_runtime(engine: &std::sync::Arc<nomifun_browser_macos::engine::Engine>, app: &tauri::AppHandle, url: &str, checks: &mut serde_json::Value) -> Result<(), String> {
     use nomifun_browser_platform::{runtime::*, run_guard::{BrowserRunCoordinator, BrowserInputState}};
     let host = macos::host::DesktopBrowserHost::new(app.clone(), engine.clone());
-    let runtime = host.create(CreateBrowserRuntime { key: BrowserWorkspaceKey { user_id:"fixture".into(), conversation_id:"native-cef".into() }, runtime_generation: 7, profile: BrowserProfile::Ephemeral, user_input_enabled:true }).await.map_err(|e|e.to_string())?;
+    let runtime = host.create(CreateBrowserRuntime { key: BrowserResourceKey { principal_id:"fixture".into(), agent_session_id:"native-cef".into(), resource_binding_id:"browser-fixture:native-cef".into() }, runtime_generation: 7, profile: BrowserProfile::Ephemeral, user_input_enabled:true }).await.map_err(|e|e.to_string())?;
     runtime.surface().unwrap().set_surface(BrowserSurfaceBounds { x:20., y:60., width:1060., height:620. }, true, Default::default()).await.map_err(|e|e.to_string())?;
     runtime.execute(BrowserTabCommand::Create { url:url.into() }, Default::default()).await.map_err(|e|e.to_string())?;
     let mut changes = runtime.changes().unwrap();

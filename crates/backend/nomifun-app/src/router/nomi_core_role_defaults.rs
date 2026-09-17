@@ -64,7 +64,7 @@ impl InstallationRoleBindingStore for NomiCoreRoleBindingStore {
             .await
             .map_err(db_error)?;
         // A stored choice cannot invent native ownership on a host without a
-        // BrowserWorkspaceService, nor override the current native contract.
+        // BrowserResourceService, nor override the current native contract.
         bindings.remove(&nomifun_agent_domain_wave2::BROWSER_EXECUTION_ROLE_ID.into());
         bindings.extend(self.host_bindings.clone());
         Ok(bindings)

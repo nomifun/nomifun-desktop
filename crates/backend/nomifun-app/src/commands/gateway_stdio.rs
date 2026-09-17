@@ -488,8 +488,8 @@ mod tests {
             .iter()
             .map(|spec| spec.name)
             .collect();
-        assert!(names.contains(&"nomi_cron_create"));
-        assert!(names.contains(&"nomi_requirement_create"));
+        assert!(!names.contains(&"nomi_cron_create"));
+        assert!(!names.contains(&"nomi_requirement_create"));
         assert!(names.contains(&"nomi_knowledge_list_bases"));
         // The desktop default (work) profile exposes the unified collaboration
         // surface so the lead Agent can delegate or create persistent executions.
@@ -577,7 +577,7 @@ mod tests {
         let mut claims = test_claims();
         claims.scope.profile = GatewayMcpConfig::PROFILE_WORK.into();
 
-        assert!(GatewayStdioServer::blocked_tool_message(&claims, "nomi_cron_create").is_none());
+        assert!(GatewayStdioServer::blocked_tool_message(&claims, "nomi_cron_create").is_some());
         let blocked = GatewayStdioServer::blocked_tool_message(
             &claims,
             "nomi_system_update_settings",
@@ -650,7 +650,7 @@ mod tests {
             .iter()
             .map(|spec| spec.name)
             .collect();
-        assert!(names.contains(&"nomi_cron_create"));
+        assert!(!names.contains(&"nomi_cron_create"));
         assert!(!names.contains(&"nomi_delegate"));
         assert!(!names.contains(&"nomi_execution_get"));
         assert!(!names.contains(&"nomi_execution_update"));

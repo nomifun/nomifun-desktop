@@ -13,7 +13,7 @@ import React from 'react';
  * (`--gray-4` / `--warning-6` / …) are RGB triplets and must be wrapped in
  * `rgb(var(...))`; `--brand` is a plain hex value used as-is.
  *
- * AutoWorkControl / IdmmControl status dots and every session-list capability
+ * header status dots and every session-list capability
  * icon read from this single map — do not re-inline these values.
  */
 export const CAPABILITY_COLORS = {
@@ -40,7 +40,7 @@ export interface CapabilityIconProps {
 
 /**
  * Single capability marker: coloured icon + optional red badge dot + tooltip.
- * Capability = a per-session / per-workpath feature (cron, AutoWork, IDMM,
+ * Capability = a per-session / per-workpath feature (cron, AutoWork,
  * knowledge base, …) whose presence and run state are surfaced as a tinted icon.
  */
 const CapabilityIcon: React.FC<CapabilityIconProps> = ({ icon, color, dot, title, size = 14 }) => (

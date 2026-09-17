@@ -22,7 +22,6 @@ import {
   parseCronJobId,
   parseCronJobRunId,
   parseFigureId,
-  parseIdmmInterventionId,
   parseMcpServerId,
   parseMessageId,
   parseOptionalEntityId,
@@ -237,14 +236,6 @@ describe('entity ids', () => {
     expect(parseConversationArtifactId(artifactId)).toBe(artifactId);
     for (const value of invalidBusinessIdValues(artifactId, 'artifact')) {
       expectInvalidEntityId(() => parseConversationArtifactId(value));
-    }
-  });
-
-  test('intervention_id accepts only a bare canonical lowercase UUIDv7', () => {
-    const interventionId = '0190f5fe-7c00-7a00-8000-000000000015';
-    expect(parseIdmmInterventionId(interventionId)).toBe(interventionId);
-    for (const value of invalidBusinessIdValues(interventionId, 'intervention')) {
-      expectInvalidEntityId(() => parseIdmmInterventionId(value));
     }
   });
 

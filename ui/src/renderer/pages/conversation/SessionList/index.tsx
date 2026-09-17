@@ -79,7 +79,7 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
     markAsRead,
     setActiveConversation: setCronActiveConversation,
   } = useCronJobsMap();
-  // AutoWork / IDMM enabled-state snapshot (bulk fetch + WS events, no per-row requests).
+  // Conversation AutoWork snapshot (bulk fetch + WS events, no per-row requests).
   const capabilities = useSessionCapabilities();
 
   const {
@@ -435,7 +435,6 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
       onTogglePin: handleTogglePin,
       getJobStatus,
       autoworkState: capabilities.autowork.get(capabilityKey('conversation', conversation.id)),
-      idmmState: capabilities.idmm.get(capabilityKey('conversation', conversation.id)),
       showSessionAge: displayPreferences.sessionMetaMode === 'age',
     }),
     [
@@ -505,8 +504,6 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
             selected={selectedTerminalIds.has(entry.id)}
             onToggleSelect={() => toggleSelectedTerminal(entry.id)}
             indent
-            autoworkState={capabilities.autowork.get(capabilityKey('terminal', entry.id))}
-            idmmState={capabilities.idmm.get(capabilityKey('terminal', entry.id))}
             showSessionAge={displayPreferences.sessionMetaMode === 'age'}
           />
         );
@@ -520,7 +517,6 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
       batchMode,
       selectedTerminalIds,
       toggleSelectedTerminal,
-      capabilities,
       displayPreferences.sessionMetaMode,
     ]
   );

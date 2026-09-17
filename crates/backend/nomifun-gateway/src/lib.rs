@@ -1,6 +1,6 @@
 //! `nomifun-gateway` — the Platform Gateway MCP: an in-process HTTP tool server
 //! that exposes the whole Nomi Desktop capability surface (conversations,
-//! terminals, cron jobs, global companion memory, requirements, AutoWork, IDMM,
+//! terminals, cron jobs, global companion memory, requirements, and AutoWork,
 //! knowledge bases, model providers) to agent sessions that carry the
 //! process-issued, scoped session claims.
 //!
@@ -39,21 +39,16 @@ mod terminal_support;
 // The `all_caps_modules_are_mod_declared_and_registered` test fails CI if a
 // file here is missing its register() call (and vice-versa).
 mod caps_agent;
-mod caps_autowork;
 mod caps_channel;
 mod caps_companion;
 mod caps_conversation;
-mod caps_cron;
 mod caps_files;
-mod caps_idmm;
 mod caps_knowledge;
 mod caps_knowledge_ext;
 mod caps_mcp;
 mod caps_memory;
 mod caps_agent_execution;
 mod caps_provider;
-mod caps_requirement;
-mod caps_scheduling_ext;
 mod caps_system;
 mod caps_terminal;
 mod caps_terminal_ext;

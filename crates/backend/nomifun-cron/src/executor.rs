@@ -35,7 +35,7 @@ use crate::prompt::{
     build_new_conversation_prompt_with_skill_suggest, build_new_conversation_with_skill_prompt,
 };
 use crate::session_port::{
-    CronRuntimePreparationRequest, CronScheduledSession, CronScheduledSessionLookup,
+    CronRuntimePreparationRequest, CronScheduledSessionLookup,
     CronSessionCronBindingRequest, CronSessionHandle, CronSessionLookup, CronSessionPort,
     CronSessionProjection, CronTurnDelivery, CronTurnDeliveryQuery, CronTurnMessage,
     CronTurnReceiptQuery, CronTurnReceiptState, CronTurnReconciliation,
@@ -159,19 +159,6 @@ impl JobExecutor {
     ) -> Result<Vec<nomifun_api_types::ConversationResponse>, AppError> {
         self.sessions
             .list_conversation_responses_for_cron(&CronScheduledSessionLookup {
-                owner_id: user_id.to_owned(),
-                cron_job_id: cron_job_id.to_owned(),
-            })
-            .await
-    }
-
-    pub(crate) async fn lookup_scheduled_sessions(
-        &self,
-        user_id: &str,
-        cron_job_id: &str,
-    ) -> Result<Vec<CronScheduledSession>, AppError> {
-        self.sessions
-            .lookup_scheduled_sessions(&CronScheduledSessionLookup {
                 owner_id: user_id.to_owned(),
                 cron_job_id: cron_job_id.to_owned(),
             })

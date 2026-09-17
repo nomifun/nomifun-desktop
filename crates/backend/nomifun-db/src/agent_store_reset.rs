@@ -13,6 +13,7 @@ const RESET_ORDER: &[&str] = &[
     "agent_session_heads",
     "agent_events",
     "agent_payloads",
+    "agent_deletion_audits",
     "agent_sessions",
     "agent_bindings",
     "agent_runtime_snapshots",

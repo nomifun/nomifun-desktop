@@ -84,6 +84,30 @@ const RETIRED_COLLABORATION_TOOL_NAMES: &[&str] = &[
     "nomi_agent_result",
 ];
 
+/// Platform lifecycle/supervision operations that were historically projected
+/// as extra Agent tools. Schedule authoring now has exactly
+/// list/create/update/delete, and Agent-path IDMM has been removed.
+const RETIRED_PLATFORM_SERVICE_TOOL_NAMES: &[&str] = &[
+    "nomi_cron_get_job",
+    "nomi_cron_run_now",
+    "nomi_set_idmm",
+    "nomi_get_idmm",
+    "nomi_idmm_get_log",
+    "nomi_idmm_get_activity",
+    "nomi_idmm_intervene",
+    "nomi_idmm_clear_log",
+    "nomi_requirement_list",
+    "nomi_requirement_create",
+    "nomi_requirement_update",
+    "nomi_requirement_delete",
+    "nomi_requirement_get",
+    "nomi_requirement_list_tags",
+    "nomi_requirement_get_board",
+    "nomi_requirement_resume_tag",
+    "nomi_set_autowork",
+    "nomi_get_autowork",
+];
+
 fn retired_collaboration_name_rule(name: &str) -> Option<&'static str> {
     if RETIRED_COLLABORATION_TOOL_NAMES.contains(&name) {
         return Some("exact retired name");
@@ -102,6 +126,11 @@ fn validate_registered_tool_names<'a>(
 ) -> Result<(), String> {
     let mut seen = BTreeSet::new();
     for name in names {
+        if RETIRED_PLATFORM_SERVICE_TOOL_NAMES.contains(&name) {
+            return Err(format!(
+                "retired platform-service capability name '{name}' matched exact retired name"
+            ));
+        }
         if let Some(rule) = retired_collaboration_name_rule(name) {
             return Err(format!(
                 "retired collaboration capability name '{name}' matched {rule}"
@@ -154,17 +183,12 @@ impl Registry {
         register_instance_owner_domain(&mut caps, crate::caps_agent_execution::register);
         crate::caps_conversation::register(&mut caps);
         register_instance_owner_domain(&mut caps, crate::caps_provider::register);
-        crate::caps_cron::register(&mut caps);
-        register_instance_owner_domain(&mut caps, crate::caps_requirement::register);
-        register_instance_owner_domain(&mut caps, crate::caps_autowork::register);
-        register_instance_owner_domain(&mut caps, crate::caps_idmm::register);
         register_instance_owner_domain(&mut caps, crate::caps_terminal::register);
         register_instance_owner_domain(&mut caps, crate::caps_knowledge::register);
         register_instance_owner_domain(&mut caps, crate::caps_knowledge_ext::register);
         register_instance_owner_domain(&mut caps, crate::caps_system::register);
         register_instance_owner_domain(&mut caps, crate::caps_companion::register);
         register_instance_owner_domain(&mut caps, crate::caps_channel::register);
-        crate::caps_scheduling_ext::register(&mut caps);
         register_instance_owner_domain(&mut caps, crate::caps_terminal_ext::register);
         register_instance_owner_domain(&mut caps, crate::caps_files::register);
         register_instance_owner_domain(&mut caps, crate::caps_mcp::register);
@@ -397,8 +421,8 @@ mod tests {
     fn registry_capability_count_floor() {
         let n = Registry::global().len();
         assert!(
-            n >= 123,
-            "capability count fell to {n} (floor 123) — a caps_* module may have lost its \
+            n >= 101,
+            "capability count fell to {n} (floor 101) — a caps_* module may have lost its \
              register() call in Registry::build(), or a domain was removed. If intentional, lower the floor."
         );
     }
@@ -464,11 +488,20 @@ mod tests {
             "nomi_process_spawn",
             "nomi_spawn_process",
             "nomi_cron_run",
-            "nomi_requirement_list",
             "nomi_teamwork_summarize",
             "nomi_clustered_search",
         ])
         .expect("precise retired-name rules must not reject unrelated capabilities");
+    }
+
+    #[test]
+    fn retired_platform_services_cannot_reenter_the_agent_gateway() {
+        for name in RETIRED_PLATFORM_SERVICE_TOOL_NAMES {
+            let error = validate_registered_tool_names([*name])
+                .expect_err("retired platform service must fail closed");
+            assert!(error.contains(name), "{error}");
+            assert!(!Registry::global().contains(name));
+        }
     }
 
     #[test]
@@ -494,16 +527,11 @@ mod tests {
 
         // User-owned aggregates keep their own repository/service owner checks.
         assert_eq!(scope("nomi_list_conversations"), OwnershipScope::User);
-        assert_eq!(scope("nomi_cron_list"), OwnershipScope::User);
 
         // Installation-wide control planes are rejected centrally before their
         // handlers can observe or mutate shared state.
         assert_eq!(
             scope("nomi_system_get_settings"),
-            OwnershipScope::InstanceOwner
-        );
-        assert_eq!(
-            scope("nomi_requirement_list"),
             OwnershipScope::InstanceOwner
         );
         assert_eq!(
@@ -521,10 +549,6 @@ mod tests {
         assert_eq!(scope("nomi_delegate"), OwnershipScope::InstanceOwner);
         assert_eq!(scope("nomi_execution_get"), OwnershipScope::InstanceOwner);
         assert_eq!(scope("nomi_execution_update"), OwnershipScope::InstanceOwner);
-        // Every IDMM capability is target-scoped and user-owned, and every
-        // handler verifies the target owner (there are no global IDMM settings
-        // for an installation owner to hold).
-        assert_eq!(scope("nomi_idmm_get_log"), OwnershipScope::User);
         assert_eq!(scope("nomi_create_terminal"), OwnershipScope::InstanceOwner);
         assert_eq!(scope("nomi_terminal_get"), OwnershipScope::InstanceOwner);
         assert_eq!(scope("nomi_fs_read_file"), OwnershipScope::InstanceOwner);
@@ -547,10 +571,8 @@ mod tests {
             .map(|spec| spec.name)
             .collect();
         assert!(names.contains(&"nomi_list_conversations"));
-        assert!(names.contains(&"nomi_cron_list"));
         assert!(!names.contains(&"nomi_delegate"));
         assert!(!names.contains(&"nomi_system_get_settings"));
-        assert!(!names.contains(&"nomi_requirement_list"));
         assert!(!names.contains(&"nomi_knowledge_list_bases"));
         assert!(!names.contains(&"nomi_creative_studio_list_canvases"));
         assert!(!names.contains(&"nomi_creative_studio_get_canvas"));

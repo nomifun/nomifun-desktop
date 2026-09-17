@@ -45,7 +45,7 @@ pub struct FetchedPage {
     pub truncated: bool,
 }
 
-/// Typed request for the canonical hidden `browser.render_content` member.
+/// Typed request for the Knowledge-owned headless rendering service.
 ///
 /// The request intentionally contains only the source URL. Provider
 /// selection, operation admission, resource binding, and browser lifecycle
@@ -62,8 +62,8 @@ impl BrowserRenderContentRequest {
     }
 }
 
-/// Typed result returned by the canonical hidden `browser.render_content`
-/// member. The provider returns raw rendered HTML; Knowledge owns the
+/// Typed result returned by the Knowledge-owned headless renderer. The
+/// service returns raw rendered HTML; Knowledge owns the
 /// HTML-to-Markdown projection used by snapshots.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserRenderContent {
@@ -72,8 +72,7 @@ pub struct BrowserRenderContent {
     pub html_truncated: bool,
 }
 
-/// Consumer-owned port for the canonical hidden `browser.render_content`
-/// operation.
+/// Consumer-owned port for the Knowledge headless rendering service.
 ///
 /// Implementations are expected to dispatch through the resolved Provider
 /// selected for the non-Agent operation. This crate deliberately knows
@@ -99,7 +98,7 @@ impl BrowserRenderContentPort for UnavailableBrowserRenderContentPort {
         _request: BrowserRenderContentRequest,
     ) -> Result<BrowserRenderContent, AppError> {
         Err(AppError::Conflict(
-            "canonical browser.render_content is unavailable; configure a Browser Provider operation port"
+            "Knowledge headless rendering is unavailable; configure its service port"
                 .into(),
         ))
     }
@@ -540,7 +539,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&error, AppError::Conflict(message) if message.contains("browser.render_content")),
+            matches!(&error, AppError::Conflict(message) if message.contains("headless rendering")),
             "{error}"
         );
     }

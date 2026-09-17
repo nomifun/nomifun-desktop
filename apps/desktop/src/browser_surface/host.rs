@@ -561,7 +561,7 @@ impl DesktopBrowserRuntime {
             }
             windows::user_file_chooser::install(&view,tab.automation.clone(),self.input_locked.clone(),self.app.path().home_dir().map_err(native_error)?)
                 .await.map_err(native_error)?;
-            windows::shortcuts::install(&view, self.request.key.conversation_id.clone(), tab.metadata.clone(), self.input_locked.clone()).await.map_err(native_error)?;
+            windows::shortcuts::install(&view, self.request.key.agent_session_id.clone(), tab.metadata.clone(), self.input_locked.clone()).await.map_err(native_error)?;
             windows::user_downloads::install(&view, tab.metadata.clone(), self.input_locked.clone(), self.app.path().download_dir().map_err(native_error)?, self.downloads.clone())
                 .await.map_err(native_error)?;
             automation.configure_file_choosers(&view, self.input_locked.load(Ordering::Acquire)).await?;
@@ -623,7 +623,7 @@ impl DesktopBrowserRuntime {
             match self.app.emit_to(
                 "main",
                 "browser-workspace-open",
-                &self.request.key.conversation_id,
+                &self.request.key.agent_session_id,
             ) {
                 Ok(()) => state.presentation_requested = true,
                 Err(error) => tracing::warn!(%error,"could not announce native browser workspace"),
@@ -803,7 +803,7 @@ impl DesktopBrowserRuntime {
             windows::script_dialogs::install(&view, tab.metadata.clone(), self.revision.clone()).await?;
             windows::user_file_chooser::install(&view,tab.automation.clone(),self.input_locked.clone(),self.app.path().home_dir().map_err(native_error)?)
                 .await.map_err(native_error)?;
-            windows::shortcuts::install(&view, self.request.key.conversation_id.clone(), tab.metadata.clone(), self.input_locked.clone()).await.map_err(native_error)?;
+            windows::shortcuts::install(&view, self.request.key.agent_session_id.clone(), tab.metadata.clone(), self.input_locked.clone()).await.map_err(native_error)?;
             windows::user_downloads::install(&view, tab.metadata.clone(), self.input_locked.clone(), self.app.path().download_dir().map_err(native_error)?, self.downloads.clone())
                 .await.map_err(native_error)?;
             windows::protocol_call(&view, "Page.enable", serde_json::json!({}))

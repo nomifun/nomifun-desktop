@@ -31,7 +31,9 @@ use nomifun_db::{
 use serde_json::json;
 use tokio::sync::{Notify, watch};
 
-use crate::attempt_runner::{AttemptOutcome, AttemptRunner};
+use crate::attempt_runner::{
+    AttemptOutcome, AttemptRunner, MISSING_DELIVERY_RECEIPT_CODE,
+};
 use crate::artifact_contract::{requires_artifact_delivery, validate_required_artifacts};
 use crate::control_steps::{self, ControlResolution};
 use crate::conversation_effect::{AttemptConversationEffects, PendingConversationEffect};
@@ -379,6 +381,23 @@ impl ExecutionScheduler {
     pub async fn reconcile_conversation_cleanup(&self, execution_id: Option<&str>) {
         if !self.reconcile_conversation_cleanup_once(execution_id).await {
             self.schedule_cleanup_reconciliation();
+        }
+    }
+
+    pub(crate) async fn reconcile_conversation_cleanup_strict(
+        &self,
+        execution_id: &str,
+    ) -> Result<(), AppError> {
+        if self
+            .reconcile_conversation_cleanup_once(Some(execution_id))
+            .await
+        {
+            Ok(())
+        } else {
+            self.schedule_cleanup_reconciliation();
+            Err(AppError::Conflict(format!(
+                "AgentExecution {execution_id} still has unacknowledged runtime cleanup"
+            )))
         }
     }
 
@@ -1860,7 +1879,7 @@ impl ExecutionScheduler {
                     .ok
                     .then(|| validate_required_artifacts(&step.spec, &outcome.output_files).err())
                     .flatten();
-                let (retryable, has_marker, reason) = if let Some(error) =
+                let (retryable, has_marker, mut reason) = if let Some(error) =
                     artifact_contract_error
                 {
                     // The turn itself finished, but its verified delivery did
@@ -1919,6 +1938,7 @@ impl ExecutionScheduler {
                         reason,
                     )
                 };
+                reason = durable_attempt_failure_reason(&outcome, reason);
                 tracing::warn!(
                     %execution_id,
                     %step_id,
@@ -2517,6 +2537,18 @@ fn attempt_outcome_retry_class(
             AttemptRetryClass::Provider
         }
         _ => AttemptRetryClass::Deterministic,
+    }
+}
+
+fn durable_attempt_failure_reason(outcome: &AttemptOutcome, reason: String) -> String {
+    if outcome.error_code.as_deref() == Some(MISSING_DELIVERY_RECEIPT_CODE) {
+        // Preserve this uncertainty as a durable, machine-readable terminal
+        // marker. The automation receipt mapper consumes it after a restart
+        // and queue policy parks the exact claim instead of treating it as a
+        // retryable or ordinary failure.
+        format!("{MISSING_DELIVERY_RECEIPT_CODE}: {reason}")
+    } else {
+        reason
     }
 }
 
@@ -3305,6 +3337,29 @@ mod tests {
         assert_eq!(
             attempt_outcome_retry_class(&timeout_without_marker, false, true),
             AttemptRetryClass::Timeout
+        );
+    }
+
+    #[test]
+    fn missing_canonical_receipt_is_persisted_as_outcome_unknown() {
+        let outcome = AttemptOutcome {
+            conversation_id: "0190f5fe-7c00-7a00-8000-000000000203".to_owned(),
+            text: None,
+            output_files: Vec::new(),
+            ok: false,
+            tokens: None,
+            error: Some("canonical receipt was not observed".to_owned()),
+            error_code: Some(MISSING_DELIVERY_RECEIPT_CODE.to_owned()),
+            error_retryable: Some(false),
+        };
+        assert_eq!(
+            durable_attempt_failure_reason(&outcome, "canonical receipt was not observed".into()),
+            "agent_delivery_receipt_missing: canonical receipt was not observed"
+        );
+        assert_eq!(
+            attempt_outcome_retry_class(&outcome, true, false),
+            AttemptRetryClass::Deterministic,
+            "outcome-unknown must never enter an automatic retry lane"
         );
     }
 

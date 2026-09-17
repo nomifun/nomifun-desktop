@@ -340,12 +340,9 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
         );
     }
     for capability_id in [
-        "web.fetch",
-        "agent.delegate",
-        "agent.execution.observe",
-        "agent.execution.steer",
-        "agent.fork",
-        "schedule.store",
+        "web.research",
+        "agent.collaboration",
+        "automation.schedule",
     ] {
         let capability = capabilities.iter()
             .find(|item| item["capability"]["id"] == capability_id)
@@ -356,7 +353,7 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
     }
     let browser = capabilities
         .iter()
-        .find(|item| item["capability"]["id"] == "browser.navigate")
+        .find(|item| item["capability"]["id"] == "browser")
         .expect("browser capability remains visible in the shared catalog");
     let expected_browser_state = if cfg!(feature = "browser-use") {
         "materialized"
@@ -1687,6 +1684,46 @@ async fn nomi_core_agent_session_projects_saved_chat_binding_without_internal_in
             .is_some_and(|value| !value.is_empty())
     );
 
+    let delete_child = || {
+        Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/agent-sessions/{child_session_id}"))
+            .header("x-nomi-local-trust", "agent-session-local-trust")
+            .header("idempotency-key", "agent-session-child-delete-smoke")
+            .body(Body::empty())
+            .expect("build child Session delete request")
+    };
+    let deleted_child = router
+        .clone()
+        .oneshot(delete_child())
+        .await
+        .expect("delete child Session");
+    assert_eq!(deleted_child.status(), StatusCode::OK);
+    let deleted_child: Value = serde_json::from_slice(
+        &axum::body::to_bytes(deleted_child.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("read child Session delete response"),
+    )
+    .expect("child Session delete JSON");
+    assert_eq!(deleted_child["data"]["state"], "deleted");
+    let replayed_child = router
+        .clone()
+        .oneshot(delete_child())
+        .await
+        .expect("replay child Session delete");
+    assert_eq!(replayed_child.status(), StatusCode::OK);
+    let replayed_child: Value = serde_json::from_slice(
+        &axum::body::to_bytes(replayed_child.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("read replayed child Session delete response"),
+    )
+    .expect("replayed child Session delete JSON");
+    assert_eq!(
+        replayed_child["data"]["deleted_at"],
+        deleted_child["data"]["deleted_at"],
+        "delete replay must return the original tombstone"
+    );
+
     let retired = router
         .clone()
         .oneshot(
@@ -2058,7 +2095,16 @@ async fn nomi_core_remote_replays_frozen_binding_and_persists_event_cursor() {
         )
         .await
         .expect("delete Remote Session");
-    assert_eq!(delete_session.status(), StatusCode::OK);
+    let delete_status = delete_session.status();
+    let delete_body = axum::body::to_bytes(delete_session.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("read Remote Session delete response");
+    assert_eq!(
+        delete_status,
+        StatusCode::OK,
+        "Remote Session delete failed: {}",
+        String::from_utf8_lossy(&delete_body)
+    );
 
     let post_delete_requests = [
         Request::builder()

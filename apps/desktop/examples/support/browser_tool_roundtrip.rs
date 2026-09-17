@@ -1,6 +1,12 @@
 use nomi_tools::{Tool, registry::ToolRegistry};
-use nomifun_agent_kernel::ActiveCapabilitySetSnapshot;
-use nomifun_browser_platform::{run_guard::BrowserInputState, runtime::*, workspace::BrowserWorkspaceService};
+use nomifun_agent_contracts::ActionId;
+use nomifun_browser_platform::{
+    bound_resource::BoundBrowserProviderResource,
+    product::BrowserProviderKind,
+    run_guard::BrowserInputState,
+    runtime::*,
+    workspace::BrowserResourceService,
+};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tauri::Manager;
@@ -37,15 +43,11 @@ async fn zoom_factor(view: &tauri::Webview, value: Option<f64>) -> Result<f64,St
     }).map_err(message)?;
     rx.await.map_err(message)?
 }
-fn capabilities(ids: &[&str]) -> ActiveCapabilitySetSnapshot {
-    ActiveCapabilitySetSnapshot {
-        resolved_snapshot_ref: nomifun_agent_contracts::ResolvedSnapshotRef { snapshot_id: "native-tool-fixture".into(), snapshot_digest: "native-tool-fixture-digest".into() },
-        generation: 1,
-        active: ids.iter().map(|id| (*id).into()).collect(),
-    }
+fn capabilities(ids: &[&str]) -> std::collections::BTreeSet<ActionId> {
+    ids.iter().map(|id| (*id).into()).collect()
 }
 
-async fn scaled_captures(view: &tauri::Webview, turn: &super::browser_lifecycle::NativeBrowserTurn) -> Result<(),String> {
+async fn scaled_captures(view: &tauri::Webview, turn: &super::browser_lifecycle::ManagedBrowserTurn) -> Result<(),String> {
     use base64::Engine;
     let result=async {
         for density in [1.0,2.0,3.0] {
@@ -130,20 +132,22 @@ fn element(observation: &Value, name: &str, role: &str) -> Result<Value, String>
 }
 
 pub(super) async fn verify(app: &tauri::AppHandle, url: &str) -> Result<Value, String> {
-    let service = BrowserWorkspaceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
-    let key = BrowserWorkspaceKey { user_id: "tool-fixture".into(), conversation_id: "tool-fixture".into() };
-    let workspace = service.ensure(key.clone(), "native-tool-fixture-provider".into(), BrowserProfile::Ephemeral).await.map_err(message)?;
-    let slot = super::browser_lifecycle::NativeBrowserTurnSlot::default();
-    let tool = super::browser_tool::ConversationBrowserTool::new(slot.clone(), capabilities(&["browser.observe","browser.act","browser.navigate"]));
-    let reader = super::browser_tool::ConversationBrowserTool::new(slot.clone(), capabilities(&["browser.observe"]));
+    let service = BrowserResourceService::new(Arc::new(super::host::DesktopBrowserHost::new(app.clone())));
+    let authority = super::browser_resource_fixture::authority("tool-fixture", "tool-fixture", "native-tool-fixture-provider");
+    let key = authority.key();
+    let workspace = service.ensure(authority, BrowserProfile::Ephemeral).await.map_err(message)?;
+    let bound = BoundBrowserProviderResource::Managed(workspace.clone());
+    let slot = super::browser_lifecycle::BrowserTurnSlot::default();
+    let tool = super::browser_tool::ConversationBrowserTool::new(slot.clone(), capabilities(&["browser/observe","browser/act","browser/navigate"]), BrowserProviderKind::Managed);
+    let reader = super::browser_tool::ConversationBrowserTool::new(slot.clone(), capabilities(&["browser/observe"]), BrowserProviderKind::Managed);
     let mut registry = ToolRegistry::new();
-    if !registry.register(Box::new(super::browser_tool::ConversationBrowserTool::new(slot.clone(), capabilities(&["browser.observe","browser.act","browser.navigate"])))) {
+    if !registry.register(Box::new(super::browser_tool::ConversationBrowserTool::new(slot.clone(), capabilities(&["browser/observe","browser/act","browser/navigate"]), BrowserProviderKind::Managed))) {
         return Err("Native Browser registry registration failed".into());
     }
     let result = async {
         reject(&tool,json!({"operation":"tabs"}),"BROWSER_STALE_RUN").await?;
-        slot.begin(workspace.clone()).await.map_err(message)?;
-        let old_turn = slot.current().map_err(message)?;
+        slot.begin(&bound).await.map_err(message)?;
+        let super::browser_lifecycle::BrowserTurn::Managed(old_turn) = slot.current().map_err(message)? else { return Err("Expected managed Browser turn".into()); };
         let navigated = invoke(&registry,json!({"operation":"navigate","url":url})).await?;
         let target = super::wait_workspace_page(&workspace,url).await?;
         if navigated["active_tab_id"] != target.tab_id { return Err("Tool navigation used another native tab".into()); }
@@ -180,7 +184,7 @@ pub(super) async fn verify(app: &tauri::AppHandle, url: &str) -> Result<Value, S
         let (busy,captured,hidden)=tokio::join!(busy,capture,hide);
         busy?; captured.map_err(message)?; hidden?;
         if native_visibility(&view).await?!=(false,false) { return Err("Capture cleanup did not preserve the latest hide".into()); }
-        let no_observe = super::browser_tool::ConversationBrowserTool::new(slot.clone(), capabilities(&["browser.act"]));
+        let no_observe = super::browser_tool::ConversationBrowserTool::new(slot.clone(), capabilities(&["browser/act"]), BrowserProviderKind::Managed);
         reject(&no_observe,json!({"operation":"screenshot"}),"CAPABILITY_NOT_SELECTED").await?;
         if workspace.snapshot().await.map_err(message)?.run.input_state != BrowserInputState::AgentRunning {
             return Err("Tool page was not locked during the Agent run".into());
@@ -224,7 +228,7 @@ pub(super) async fn verify(app: &tauri::AppHandle, url: &str) -> Result<Value, S
         slot.finish().await.map_err(message)?;
         reject(&tool,json!({"operation":"tabs"}),"BROWSER_STALE_RUN").await?;
         if workspace.snapshot().await.map_err(message)?.run.input_state!=BrowserInputState::UserReady { return Err("Terminal finish did not restore user input".into()); }
-        slot.begin(workspace.clone()).await.map_err(message)?;
+        slot.begin(&bound).await.map_err(message)?;
         if old_turn.tabs().await.is_ok() { return Err("Old tool invocation adopted the next run".into()); }
         let observed = invoke(&registry,json!({"operation":"observe"})).await?;
         if observed["target"]["tab_id"]!=target.tab_id || super::evaluate(&view,"popupNonce").await?!=nonce { return Err("The next tool run replaced the native page".into()); }

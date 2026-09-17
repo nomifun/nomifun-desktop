@@ -24,7 +24,6 @@ import SessionCapabilityPicker, {
 } from '@/renderer/components/chat/SessionCapabilityPicker';
 import FeedbackReportModal from '@/renderer/components/settings/SettingsModal/contents/FeedbackReportModal';
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
-import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
 import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
 import { usePendingConversation } from '@/renderer/pages/conversation/components/ConversationShell/PendingConversationContext';
 import AgentResourcePicker from '@/renderer/components/agent/AgentResourcePicker';
@@ -528,14 +527,6 @@ const GuidPage: React.FC = () => {
             draft={{
               value: advancedConfig.autoWork,
               onChange: advancedConfig.setAutoWork,
-            }}
-            applyNote={t('guid.advanced.applyNote')}
-          />
-          <IdmmControl
-            key={`idmm-${location.key}`}
-            draft={{
-              value: advancedConfig.idmm,
-              onChange: advancedConfig.setIdmm,
             }}
             applyNote={t('guid.advanced.applyNote')}
           />

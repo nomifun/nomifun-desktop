@@ -9,11 +9,9 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { Button, Input, Message, Select } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
-import type { IIdmmConfig, IKnowledgeBase } from '@/common/adapter/ipcBridge';
+import type { IKnowledgeBase } from '@/common/adapter/ipcBridge';
 import { emitter } from '@/renderer/utils/emitter';
 import { WorkspaceFolderSelect } from '@/renderer/components/workspace';
-import { defaultIdmmConfig } from '@/renderer/pages/conversation/components/IdmmControl';
-import type { AutoWorkDraftValue } from '@/renderer/pages/conversation/components/AutoWorkControl';
 import {
   buildLaunchCommand,
   formatCommandPreview,
@@ -24,7 +22,6 @@ import {
 } from './launchPresets';
 import ExtendedCapabilitiesPanel from './ExtendedCapabilitiesPanel';
 import LabelWithTip from './LabelWithTip';
-import { isTerminalAutoworkCapable } from './detectFamily';
 import { addRecentLaunchCommand, getRecentLaunchCommands } from './recentLaunchCommands';
 
 const TerminalCreatePage: React.FC = () => {
@@ -33,7 +30,10 @@ const TerminalCreatePage: React.FC = () => {
   const { t } = useTranslation();
   const [presetId, setPresetId] = useState<TerminalPresetId>('shell');
   const [cwd, setCwd] = useState('');
-  const [commandPreview, setCommandPreview] = useState('');
+  const [commandPreview, setCommandPreview] = useState(() =>
+    formatCommandPreview(buildLaunchCommand('shell'))
+  );
+  const commandPreset = useRef<TerminalPresetId>('shell');
   const [creating, setCreating] = useState(false);
   const launchOwner = useRef<{ busy: boolean } | null>(null);
   // Recent custom launch commands (read once on mount; the page unmounts on launch).
@@ -41,10 +41,6 @@ const TerminalCreatePage: React.FC = () => {
   // Optional knowledge bases bound at creation (mounted into {cwd}/.nomi/knowledge/).
   const [knowledgeBases, setKnowledgeBases] = useState<IKnowledgeBase[]>([]);
   const [kbIds, setKbIds] = useState<string[]>([]);
-  // Draft IDMM config — applied after session creation and before AutoWork.
-  const [idmm, setIdmm] = useState<IIdmmConfig>(defaultIdmmConfig);
-  // Draft AutoWork config — applied after session creation (best-effort).
-  const [autowork, setAutowork] = useState<AutoWorkDraftValue>({ enabled: false });
 
   // Preset working directory passed via navigation state (sidebar workpath
   // drawer → "new terminal session"). Each navigation owns its launch, even
@@ -76,6 +72,8 @@ const TerminalCreatePage: React.FC = () => {
 
   // Keep the editable command preview in sync with the selected preset.
   useEffect(() => {
+    if (commandPreset.current === presetId) return;
+    commandPreset.current = presetId;
     setCommandPreview(formatCommandPreview(buildLaunchCommand(presetId)));
   }, [presetId]);
 
@@ -106,45 +104,6 @@ const TerminalCreatePage: React.FC = () => {
       if (!isCurrent()) return;
       // Remember the launched command for quick reuse — only for the custom preset.
       if (presetId === 'shell') addRecentLaunchCommand(commandPreview);
-      // Apply smart-decision before AutoWork starts driving requirements.
-      if (idmm.fault_watch.enabled || idmm.decision_watch.enabled) {
-        try {
-          await ipcBridge.idmm.set.invoke({
-            kind: 'terminal',
-            target_id: session.terminal_id,
-            ...idmm,
-          });
-        } catch {
-          if (!isCurrent()) return;
-          Message.warning(
-            t('terminal.extended.idmmApplyFailed', {
-              defaultValue: '终端已创建，但智能决策启用失败，可在终端内重试',
-            }),
-          );
-        }
-      }
-      if (!isCurrent()) return;
-      // Best-effort: apply AutoWork draft. Capability is resolved from the
-      // command/args/backend the same way the backend gate does — so a wrapper
-      // (`stepcode claude`) or a bare custom command also qualifies.
-      if (autowork.enabled && autowork.tag && isTerminalAutoworkCapable(command, args, preset.backend)) {
-        try {
-          await ipcBridge.requirements.setAutoWork.invoke({
-            kind: 'terminal',
-            target_id: session.terminal_id,
-            enabled: true,
-            tag: autowork.tag,
-          });
-        } catch {
-          if (!isCurrent()) return;
-          Message.warning(
-            t('terminal.extended.autoworkApplyFailed', {
-              defaultValue: '终端已创建，但自动工作启用失败，可在终端内重试',
-            }),
-          );
-        }
-      }
-      if (!isCurrent()) return;
       emitter.emit('terminal.list.refresh');
       navigate(`/terminal/${session.terminal_id}`);
     } catch (err) {
@@ -188,7 +147,7 @@ const TerminalCreatePage: React.FC = () => {
 
         {/* Editable launch command preview */}
         <LabelWithTip label={t('terminal.create.command')} tip={t('terminal.create.commandHint')} />
-        <Input className={`font-mono ${presetId === 'shell' && recentCommands.length > 0 ? 'mb-8px' : 'mb-20px'}`} value={commandPreview} onChange={setCommandPreview} placeholder='$SHELL' />
+        <Input className={`font-mono ${presetId === 'shell' && recentCommands.length > 0 ? 'mb-8px' : 'mb-20px'}`} value={commandPreview} onChange={setCommandPreview} onInput={event => setCommandPreview((event.target as HTMLInputElement).value)} placeholder='$SHELL' />
 
         {/* Recent launch commands — custom preset only; click to fill the command field */}
         {presetId === 'shell' && recentCommands.length > 0 && (
@@ -217,19 +176,13 @@ const TerminalCreatePage: React.FC = () => {
           </Button>
         </div>
 
-        {/* Extended capabilities (knowledge mount / AutoWork / smart decision) —
-            an optional drawer below the primary action; collapsed by default. */}
+        {/* Optional Knowledge mount and external CLI registration. */}
         <ExtendedCapabilitiesPanel
           cwd={cwd}
           command={commandPreview}
-          backend={preset.backend}
           knowledgeBases={knowledgeBases}
           kbIds={kbIds}
           onKbIdsChange={setKbIds}
-          idmm={idmm}
-          onIdmmChange={setIdmm}
-          autowork={autowork}
-          onAutoworkChange={setAutowork}
         />
       </div>
     </div>

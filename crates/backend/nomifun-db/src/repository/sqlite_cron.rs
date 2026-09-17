@@ -17,6 +17,12 @@ pub struct SqliteCronRepository {
     pool: SqlitePool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionRelationStorage {
+    LegacyConversation,
+    CanonicalAgentSession,
+}
+
 impl SqliteCronRepository {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
@@ -50,7 +56,7 @@ impl SqliteCronRepository {
             "Cron job",
         )
         .await?;
-        validate_cron_authority(
+        let session_relation = validate_cron_authority(
             &mut tx,
             &row.user_id,
             row.enabled,
@@ -64,6 +70,17 @@ impl SqliteCronRepository {
             row.skill_content.as_deref(),
         )
         .await?;
+        if bind_session_relation {
+            ensure_session_relation_available(
+                &mut tx,
+                &row.user_id,
+                row.conversation_id
+                    .as_deref()
+                    .expect("atomic relation insertion validated conversation_id"),
+                None,
+            )
+            .await?;
+        }
         sqlx::query(
             "INSERT INTO cron_jobs (\
                 cron_job_id, user_id, name, enabled, schedule_revision, schedule_kind, schedule_value, schedule_tz, \
@@ -109,7 +126,9 @@ impl SqliteCronRepository {
         .execute(&mut *tx)
         .await?;
 
-        if bind_session_relation {
+        if bind_session_relation
+            && session_relation == Some(SessionRelationStorage::LegacyConversation)
+        {
             let conversation_id = row
                 .conversation_id
                 .as_deref()
@@ -244,22 +263,13 @@ async fn validate_cron_authority(
     preset_revision: Option<i64>,
     agent_snapshot: Option<&str>,
     skill_content: Option<&str>,
-) -> Result<(), DbError> {
-    if let Some(conversation_id) = conversation_id {
-        let owned = sqlx::query(
-            "UPDATE conversations SET updated_at = updated_at \
-             WHERE conversation_id = ? AND user_id = ?",
-        )
-        .bind(conversation_id)
-        .bind(user_id)
-        .execute(&mut **tx)
-        .await?;
-        if owned.rows_affected() == 0 {
-            return Err(DbError::Conflict(
-                "cron job conversation owner mismatch".into(),
-            ));
-        }
-    }
+) -> Result<Option<SessionRelationStorage>, DbError> {
+    let session_relation = match conversation_id {
+        Some(agent_session_id) => Some(
+            lock_owned_session_relation(tx, user_id, agent_session_id).await?,
+        ),
+        None => None,
+    };
 
     let owner: String = sqlx::query_scalar(
         "SELECT owner_user_id FROM installation_identity \
@@ -268,7 +278,7 @@ async fn validate_cron_authority(
     .fetch_one(&mut **tx)
     .await?;
     if user_id == owner {
-        return Ok(());
+        return Ok(session_relation);
     }
 
     let model_only_error = || {
@@ -310,7 +320,7 @@ async fn validate_cron_authority(
                 return Err(model_only_error());
             }
         }
-        return Ok(());
+        return Ok(session_relation);
     };
 
     let config: Value = serde_json::from_str(agent_config)
@@ -339,6 +349,78 @@ async fn validate_cron_authority(
             .is_some_and(|value| !value.is_boolean())
     {
         return Err(model_only_error());
+    }
+    Ok(session_relation)
+}
+
+/// Lock and authenticate the exact Session relation target inside the caller's
+/// write transaction. During the UARC cutover a target is represented by
+/// either the legacy Conversation aggregate or the canonical Agent Store, but
+/// never by an inferred cross-owner fallback. A tombstone/deleting canonical
+/// row is deliberately not a valid scheduling target.
+async fn lock_owned_session_relation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    user_id: &str,
+    agent_session_id: &str,
+) -> Result<SessionRelationStorage, DbError> {
+    let legacy = sqlx::query(
+        "UPDATE conversations SET updated_at = updated_at \
+         WHERE conversation_id = ? AND user_id = ?",
+    )
+    .bind(agent_session_id)
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    if legacy == 1 {
+        return Ok(SessionRelationStorage::LegacyConversation);
+    }
+
+    let canonical = sqlx::query(
+        "UPDATE agent_sessions SET next_seq = next_seq \
+         WHERE agent_session_id = ? AND state = 'live' \
+           AND json_extract(owner_ref_json, '$.principal_kind') = 'user' \
+           AND json_extract(owner_ref_json, '$.principal_id') = ?",
+    )
+    .bind(agent_session_id)
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    if canonical == 1 {
+        return Ok(SessionRelationStorage::CanonicalAgentSession);
+    }
+
+    Err(DbError::Conflict(
+        "cron job AgentSession owner mismatch or Session is not live".into(),
+    ))
+}
+
+/// Prove that this owner-scoped Session has no different Cron relation while
+/// the same SQLite writer lock acquired by [`lock_owned_session_relation`] is
+/// still held. This supplies the one-Session/one-Cron CAS for canonical Store
+/// sessions, which intentionally have no mutable `cron_job_id` back-reference.
+async fn ensure_session_relation_available(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    user_id: &str,
+    agent_session_id: &str,
+    allowed_cron_job_id: Option<&str>,
+) -> Result<(), DbError> {
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT cron_job_id FROM cron_jobs \
+         WHERE user_id = ? AND conversation_id = ? \
+         ORDER BY id LIMIT 1",
+    )
+    .bind(user_id)
+    .bind(agent_session_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(existing) = existing
+        && Some(existing.as_str()) != allowed_cron_job_id
+    {
+        return Err(DbError::Conflict(format!(
+            "AgentSession '{agent_session_id}' is already bound to Cron job {existing}"
+        )));
     }
     Ok(())
 }
@@ -723,7 +805,7 @@ impl ICronRepository for SqliteCronRepository {
         &self,
         user_id: &str,
         conversation_id: &str,
-    ) -> Result<u64, DbError> {
+    ) -> Result<Vec<String>, DbError> {
         let mut tx = self.pool.begin().await?;
         let locked = sqlx::query(
             "UPDATE cron_jobs \
@@ -736,8 +818,17 @@ impl ICronRepository for SqliteCronRepository {
         .await?;
         if locked.rows_affected() == 0 {
             tx.commit().await?;
-            return Ok(0);
+            return Ok(Vec::new());
         }
+
+        let job_ids = sqlx::query_scalar::<_, String>(
+            "SELECT cron_job_id FROM cron_jobs \
+             WHERE user_id = ? AND conversation_id = ? ORDER BY cron_job_id",
+        )
+        .bind(user_id)
+        .bind(conversation_id)
+        .fetch_all(&mut *tx)
+        .await?;
 
         let reserved_run: Option<(String, String)> = sqlx::query_as(
             "SELECT reservation.cron_job_run_id, reservation.cron_job_id \
@@ -812,8 +903,13 @@ impl ICronRepository for SqliteCronRepository {
             .bind(conversation_id)
             .execute(&mut *tx)
             .await?;
+        if result.rows_affected() != job_ids.len() as u64 {
+            return Err(DbError::Conflict(
+                "cron Session cleanup changed while the deletion fence was held".to_owned(),
+            ));
+        }
         tx.commit().await?;
-        Ok(result.rows_affected())
+        Ok(job_ids)
     }
 
     async fn insert_run_pruned(
@@ -1481,6 +1577,8 @@ mod tests {
     const MISSING_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678903";
     const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678904";
     const MISSING_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678905";
+    const CANONICAL_SESSION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678906";
+    const DELETED_CANONICAL_SESSION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678907";
     const MISSING_CRON_JOB_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678999";
 
     async fn setup() -> (SqliteCronRepository, crate::Database, String) {
@@ -1550,6 +1648,131 @@ mod tests {
             status: if index % 2 == 0 { "ok" } else { "error" }.to_owned(),
             created_at_ms: 2_000 + index,
         }
+    }
+
+    async fn insert_canonical_session(
+        db: &crate::Database,
+        agent_session_id: &str,
+        owner_id: &str,
+        state: &str,
+    ) {
+        let owner_ref = serde_json::json!({
+            "principal_kind": "user",
+            "principal_id": owner_id,
+        })
+        .to_string();
+        match state {
+            "live" => {
+                sqlx::query(
+                    "INSERT INTO agent_sessions (\
+                        agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                        agent_binding_json, next_seq, created_at\
+                     ) VALUES (?, ?, 'live', 'Canonical', 0, 0, '{}', 1, 1)",
+                )
+                .bind(agent_session_id)
+                .bind(owner_ref)
+                .execute(db.pool())
+                .await
+                .unwrap();
+            }
+            "deleted" => {
+                sqlx::query(
+                    "INSERT INTO agent_sessions (\
+                        agent_session_id, owner_ref_json, state, deleted_at\
+                     ) VALUES (?, ?, 'deleted', 1)",
+                )
+                .bind(agent_session_id)
+                .bind(owner_ref)
+                .execute(db.pool())
+                .await
+                .unwrap();
+            }
+            other => panic!("unsupported canonical Session fixture state {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn atomic_relation_supports_store_only_session_and_rejects_second_job() {
+        let (repo, db, owner) = setup().await;
+        insert_canonical_session(&db, CANONICAL_SESSION_ID, &owner, "live").await;
+
+        let mut first = make_row(&owner);
+        first.conversation_id = Some(CANONICAL_SESSION_ID.into());
+        first.conversation_title = Some("Canonical".into());
+        let first_job_id = first.cron_job_id.clone();
+        repo.insert_with_session_relation(&first).await.unwrap();
+
+        let legacy_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM conversations WHERE conversation_id = ?",
+        )
+        .bind(CANONICAL_SESSION_ID)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(legacy_count, 0, "canonical relation must not mint a Conversation");
+        assert_eq!(
+            repo.list_by_conversation(&owner, CANONICAL_SESSION_ID)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|row| row.cron_job_id)
+                .collect::<Vec<_>>(),
+            vec![first_job_id]
+        );
+
+        let mut second = make_row(&owner);
+        second.conversation_id = Some(CANONICAL_SESSION_ID.into());
+        let error = repo
+            .insert_with_session_relation(&second)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, DbError::Conflict(ref message) if message.contains("already bound")),
+            "unexpected duplicate relation error: {error:?}"
+        );
+        assert_eq!(repo.list_all(&owner).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn atomic_relation_preserves_legacy_backref_and_fails_closed_for_canonical_owner_state() {
+        let (repo, db, owner) = setup().await;
+        let legacy = make_row(&owner);
+        let legacy_job_id = legacy.cron_job_id.clone();
+        repo.insert_with_session_relation(&legacy).await.unwrap();
+        let legacy_backref: Option<String> = sqlx::query_scalar(
+            "SELECT cron_job_id FROM conversations WHERE conversation_id = ? AND user_id = ?",
+        )
+        .bind(CONVERSATION_ID)
+        .bind(&owner)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(legacy_backref.as_deref(), Some(legacy_job_id.as_str()));
+
+        insert_canonical_session(&db, CANONICAL_SESSION_ID, &owner, "live").await;
+        let mut wrong_owner = make_row(&owner);
+        wrong_owner.user_id = "0190f5fe-7c00-7a00-8000-000000000099".into();
+        wrong_owner.conversation_id = Some(CANONICAL_SESSION_ID.into());
+        let error = repo
+            .insert_with_session_relation(&wrong_owner)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("owner mismatch"));
+
+        insert_canonical_session(
+            &db,
+            DELETED_CANONICAL_SESSION_ID,
+            &owner,
+            "deleted",
+        )
+        .await;
+        let mut deleted = make_row(&owner);
+        deleted.conversation_id = Some(DELETED_CANONICAL_SESSION_ID.into());
+        let error = repo
+            .insert_with_session_relation(&deleted)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("not live"));
     }
 
     async fn insert_provider(db: &crate::Database, provider_id: &str) {
@@ -1995,7 +2218,8 @@ mod tests {
             .delete_by_conversation(&owner, CONVERSATION_ID)
             .await
             .unwrap();
-        assert_eq!(deleted, 2);
+        assert_eq!(deleted.len(), 2);
+        assert!(deleted.windows(2).all(|pair| pair[0] < pair[1]));
 
         let remaining = repo.list_all(&owner).await.unwrap();
         assert!(remaining.is_empty());
@@ -2008,7 +2232,7 @@ mod tests {
             .delete_by_conversation(&owner, MISSING_CONVERSATION_ID)
             .await
             .unwrap();
-        assert_eq!(deleted, 0);
+        assert!(deleted.is_empty());
     }
 
     #[tokio::test]

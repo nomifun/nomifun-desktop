@@ -415,9 +415,9 @@ impl CronScheduler {
         current.then(commit)
     }
 
-    /// Resolve the current installation token for compatibility callers that
-    /// already hold the authoritative persisted occurrence.
-    pub fn current_generation_for(
+    /// Resolve the current installation token for the Cron owner after it has
+    /// loaded the authoritative persisted occurrence.
+    pub(crate) fn current_generation_for(
         &self,
         job_id: &str,
         user_id: &str,

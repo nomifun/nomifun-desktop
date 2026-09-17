@@ -58,6 +58,48 @@ fn is_terminal_execution_status(status: &str) -> bool {
     )
 }
 
+/// Acquire the transaction writer lock while proving that a lead Session is
+/// owned by the caller. Canonical Store-only Sessions and retained legacy
+/// Conversations are both valid lead identities during cutover. Only a live
+/// canonical row is eligible; deleting/tombstoned and foreign rows fail
+/// closed. Attempt Conversations continue to be validated by their dedicated
+/// legacy runtime paths.
+async fn lock_owned_lead_session_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    user_id: &str,
+    agent_session_id: &str,
+) -> Result<(), DbError> {
+    let legacy = sqlx::query(
+        "UPDATE conversations SET updated_at = updated_at \
+         WHERE conversation_id = ? AND user_id = ?",
+    )
+    .bind(agent_session_id)
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    if legacy == 1 {
+        return Ok(());
+    }
+
+    let canonical = sqlx::query(
+        "UPDATE agent_sessions SET next_seq = next_seq \
+         WHERE agent_session_id = ? AND state = 'live' \
+           AND json_extract(owner_ref_json, '$.principal_kind') = 'user' \
+           AND json_extract(owner_ref_json, '$.principal_id') = ?",
+    )
+    .bind(agent_session_id)
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    if canonical == 1 {
+        return Ok(());
+    }
+
+    Err(conflict("lead AgentSession"))
+}
+
 /// Atomically make `execution_id` the current lead owner of
 /// `conversation_id`. Lead rows are audit identity and therefore never become
 /// active again: switching deactivates the previous current rows and appends a
@@ -80,17 +122,7 @@ async fn switch_current_lead_tx(
     if execution.rows_affected() == 0 {
         return Err(conflict("lead execution"));
     }
-    let conversation = sqlx::query(
-        "UPDATE conversations SET updated_at = updated_at \
-         WHERE conversation_id = ? AND user_id = ?",
-    )
-    .bind(conversation_id)
-    .bind(user_id)
-    .execute(&mut **tx)
-    .await?;
-    if conversation.rows_affected() == 0 {
-        return Err(conflict("lead conversation"));
-    }
+    lock_owned_lead_session_tx(tx, user_id, conversation_id).await?;
 
     let is_attempt_conversation: i64 = sqlx::query_scalar(
         "SELECT EXISTS( \
@@ -819,20 +851,6 @@ async fn append_event_tx(
                         ));
                     }
                 };
-                let actor_conversation = sqlx::query(
-                    "UPDATE conversations SET updated_at = updated_at \
-                     WHERE conversation_id = ? AND user_id = ?",
-                )
-                .bind(conversation_id)
-                .bind(&on_behalf_of_user_id)
-                .execute(&mut **tx)
-                .await?;
-                if actor_conversation.rows_affected() == 0 {
-                    return Err(DbError::Conflict(
-                        "Agent caller Conversation does not exist or belongs to another user"
-                            .to_owned(),
-                    ));
-                }
                 let links = sqlx::query_as::<_, (String, Option<String>)>(
                     "SELECT link.relation, link.attempt_id \
                      FROM conversation_execution_links link \
@@ -853,6 +871,33 @@ async fn append_event_tx(
                     ));
                 }
                 let (relation, linked_attempt_id) = &links[0];
+                if relation == "lead" {
+                    lock_owned_lead_session_tx(
+                        tx,
+                        &on_behalf_of_user_id,
+                        conversation_id,
+                    )
+                    .await?;
+                } else {
+                    // Attempt runtime identity is intentionally still backed
+                    // by the legacy Conversation aggregate until its later
+                    // runtime cutover. A canonical Store row must never be
+                    // accepted as an Attempt Conversation by this fallback.
+                    let actor_conversation = sqlx::query(
+                        "UPDATE conversations SET updated_at = updated_at \
+                         WHERE conversation_id = ? AND user_id = ?",
+                    )
+                    .bind(conversation_id)
+                    .bind(&on_behalf_of_user_id)
+                    .execute(&mut **tx)
+                    .await?;
+                    if actor_conversation.rows_affected() == 0 {
+                        return Err(DbError::Conflict(
+                            "Agent caller Conversation does not exist or belongs to another user"
+                                .to_owned(),
+                        ));
+                    }
+                }
                 if relation == "attempt" && linked_attempt_id != &actor_attempt_id {
                     return Err(DbError::Conflict(
                         "Agent caller attempt does not match its active execution link".to_owned(),

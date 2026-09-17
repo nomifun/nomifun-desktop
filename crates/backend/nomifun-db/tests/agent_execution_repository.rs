@@ -17,6 +17,9 @@ use nomifun_db::{
 const OWNER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
 const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000002";
 const SOURCE_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000114";
+const CANONICAL_LEAD_ID: &str = "0190f5fe-7c00-7a00-8000-000000000115";
+const FOREIGN_CANONICAL_LEAD_ID: &str = "0190f5fe-7c00-7a00-8000-000000000116";
+const DELETED_CANONICAL_LEAD_ID: &str = "0190f5fe-7c00-7a00-8000-000000000117";
 
 async fn database() -> nomifun_db::Database {
     let database = nomifun_db::init_database_memory_with_owner(
@@ -136,6 +139,47 @@ fn conversation_row() -> ConversationRow {
         agent_snapshot: None,
         created_at: now,
         updated_at: now,
+    }
+}
+
+async fn insert_canonical_session(
+    database: &nomifun_db::Database,
+    agent_session_id: &str,
+    owner_id: &str,
+    state: &str,
+) {
+    let owner_ref = serde_json::json!({
+        "principal_kind": "user",
+        "principal_id": owner_id,
+    })
+    .to_string();
+    match state {
+        "live" => {
+            nomifun_db::sqlx::query(
+                "INSERT INTO agent_sessions (\
+                    agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                    agent_binding_json, next_seq, created_at\
+                 ) VALUES (?, ?, 'live', 'Canonical lead', 0, 0, '{}', 1, 1)",
+            )
+            .bind(agent_session_id)
+            .bind(owner_ref)
+            .execute(database.pool())
+            .await
+            .unwrap();
+        }
+        "deleted" => {
+            nomifun_db::sqlx::query(
+                "INSERT INTO agent_sessions (\
+                    agent_session_id, owner_ref_json, state, deleted_at\
+                 ) VALUES (?, ?, 'deleted', 1)",
+            )
+            .bind(agent_session_id)
+            .bind(owner_ref)
+            .execute(database.pool())
+            .await
+            .unwrap();
+        }
+        other => panic!("unsupported canonical Session fixture state {other}"),
     }
 }
 
@@ -348,6 +392,108 @@ async fn agent_execution_rows_expose_business_uuidv7_identity() {
     assert_eq!(fetched.goal, created.goal);
     assert_eq!(fetched.status, created.status);
     assert_eq!(fetched.version, created.version);
+}
+
+#[tokio::test]
+async fn store_only_canonical_session_can_be_persisted_as_execution_lead() {
+    let db = database().await;
+    insert_canonical_session(&db, CANONICAL_LEAD_ID, OWNER_ID, "live").await;
+    let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
+    let mut params = execution_params();
+    params.lead_conversation_id = Some(CANONICAL_LEAD_ID.to_owned());
+    let created_event = NewAgentExecutionEvent {
+        event_type: AgentExecutionEventKind::Created,
+        step_id: None,
+        attempt_id: None,
+        actor: nomifun_common::AgentExecutionActor::agent(CANONICAL_LEAD_ID, None),
+        payload: "{}".to_owned(),
+    };
+
+    let execution = repository
+        .create_execution_with_participants(
+            OWNER_ID,
+            &params,
+            &[participant(nomifun_common::generate_id())],
+            &created_event,
+        )
+        .await
+        .unwrap();
+
+    let lead: (String, String, bool) = nomifun_db::sqlx::query_as(
+        "SELECT conversation_id, relation, active \
+         FROM conversation_execution_links WHERE execution_id = ?",
+    )
+    .bind(&execution.execution_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(lead, (CANONICAL_LEAD_ID.to_owned(), "lead".to_owned(), true));
+    let actor: (String, Option<String>) = nomifun_db::sqlx::query_as(
+        "SELECT actor_type, actor_conversation_id FROM agent_execution_events \
+         WHERE execution_id = ? AND sequence = 1",
+    )
+    .bind(&execution.execution_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        actor,
+        ("agent".to_owned(), Some(CANONICAL_LEAD_ID.to_owned()))
+    );
+    let legacy_rows: i64 = nomifun_db::sqlx::query_scalar(
+        "SELECT COUNT(*) FROM conversations WHERE conversation_id = ?",
+    )
+    .bind(CANONICAL_LEAD_ID)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(legacy_rows, 0, "collaboration must not mint a Conversation");
+    let persisted = repository
+        .get_execution_detail(OWNER_ID, &execution.execution_id)
+        .await
+        .unwrap()
+        .expect("canonical lead execution persists");
+    assert_eq!(persisted.execution.execution_id, execution.execution_id);
+}
+
+#[tokio::test]
+async fn canonical_execution_lead_rejects_foreign_and_deleted_sessions_atomically() {
+    let db = database().await;
+    insert_canonical_session(
+        &db,
+        FOREIGN_CANONICAL_LEAD_ID,
+        "0190f5fe-7c00-7a00-8000-000000000099",
+        "live",
+    )
+    .await;
+    insert_canonical_session(&db, DELETED_CANONICAL_LEAD_ID, OWNER_ID, "deleted").await;
+    let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
+
+    for lead in [FOREIGN_CANONICAL_LEAD_ID, DELETED_CANONICAL_LEAD_ID] {
+        let mut params = execution_params();
+        params.lead_conversation_id = Some(lead.to_owned());
+        let error = repository
+            .create_execution_with_participants(
+                OWNER_ID,
+                &params,
+                &[participant(nomifun_common::generate_id())],
+                &event(AgentExecutionEventKind::Created),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, nomifun_db::DbError::Conflict(ref message) if message.contains("lead AgentSession")),
+            "unexpected canonical lead rejection: {error:?}"
+        );
+    }
+
+    let persisted: i64 = nomifun_db::sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_executions",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(persisted, 0, "failed lead admission must roll back execution rows");
 }
 
 #[tokio::test]

@@ -270,14 +270,9 @@ pub trait CronSessionPort: Send + Sync {
         query: &CronSessionLookup,
     ) -> Result<CronSessionProjection, AppError>;
 
-    async fn lookup_scheduled_sessions(
-        &self,
-        query: &CronScheduledSessionLookup,
-    ) -> Result<Vec<CronScheduledSession>, AppError>;
-
     /// Legacy HTTP projection retained for the existing Cron conversations
-    /// endpoint. Core scheduling and execution must use
-    /// `lookup_scheduled_sessions`/`get_session`.
+    /// endpoint. Core scheduling and execution use `get_session` with the
+    /// relation selected from the authoritative Cron row.
     async fn list_conversation_responses_for_cron(
         &self,
         query: &CronScheduledSessionLookup,
@@ -347,24 +342,6 @@ impl CronSessionPort for TestCronSessionPort {
             .get(&query.owner_id, query.agent_session_id.as_ref())
             .await?;
         session_projection_from_response(&query.owner_id, response, row.cron_job_id)
-    }
-
-    async fn lookup_scheduled_sessions(
-        &self,
-        query: &CronScheduledSessionLookup,
-    ) -> Result<Vec<CronScheduledSession>, AppError> {
-        self.service
-            .list_by_cron_job(&query.owner_id, &query.cron_job_id)
-            .await?
-            .into_iter()
-            .map(|response| {
-                session_projection_from_response(
-                    &query.owner_id,
-                    response,
-                    Some(query.cron_job_id.clone()),
-                )
-            })
-            .collect()
     }
 
     async fn list_conversation_responses_for_cron(

@@ -22,7 +22,7 @@ const PLATFORM_ADAPTER = 'crates/agent/nomi-browser/src/platform_adapter.rs';
 const GATEWAY_REGISTRY = 'crates/backend/nomifun-gateway/src/browser_registry.rs';
 const HUB_COMPOSITION = 'crates/backend/nomifun-app/src/services.rs';
 const KNOWLEDGE_BROWSER_COMPOSITION =
-  'crates/backend/nomifun-app/src/services.rs';
+  'crates/backend/nomifun-app/src/router/state.rs';
 const FRESH_V4_COMPOSITION =
   'crates/backend/nomifun-app/src/router/agent_platform_host.rs';
 
@@ -865,8 +865,8 @@ function scanEntries(entries) {
     }
     if (path.startsWith('crates/backend/nomifun-app/src/')) {
       for (const match of findMatches(masked, /\.set_browser_render_content_port\s*\(/g)) {
-        if (!/^\.set_browser_render_content_port\s*\(\s*super::knowledge_browser::KnowledgeBrowserPort::bind\s*\(/.test(masked.slice(match.index))) {
-          report(path, entry.source, masked, match.index, 'knowledge-render-kernel-port', 'Knowledge rendering must use the exact non-Agent Kernel Provider port');
+        if (!/^\.set_browser_render_content_port\s*\(\s*super::knowledge_browser::KnowledgeHeadlessRenderPort::bind\s*\(/.test(masked.slice(match.index))) {
+          report(path, entry.source, masked, match.index, 'knowledge-render-service-port', 'Knowledge rendering must use its exact non-Agent headless service port');
         }
       }
       for (const match of findMatches(masked, /\b(?:BrowserRoleRuntime|BoundBrowserRoleInvoker|build_browser_session_hub|with_browser_hub)\b/g)) {
@@ -987,7 +987,7 @@ function scanEntries(entries) {
           masked,
           match.index,
           'knowledge-browser-provider-bypass',
-          'Knowledge rendered sources must use canonical browser.render_content rather than a Hub-backed BrowserFetcher',
+          'Knowledge rendered sources must use the dedicated headless service port rather than an Agent Browser resource',
         );
       }
     }
@@ -1122,6 +1122,10 @@ function selfTest() {
     {
       path: HUB_COMPOSITION,
       source: 'fn service() { /* retired Hub has no production composition */ }',
+    },
+    {
+      path: KNOWLEDGE_BROWSER_COMPOSITION,
+      source: 'fn knowledge() { /* renderer uses only the typed headless service port */ }',
     },
     {
       path: FRESH_V4_COMPOSITION,
@@ -1317,7 +1321,7 @@ function selfTest() {
   assertViolation(baseline.concat({path:'apps/desktop/src/browser_surface/network_policy.rs',source:'struct NetworkPolicy;'}),
     'embedded-browser-native-network','failed to reject restoration of the interactive Browser network-policy module');
   assertViolation(baseline.concat({path:'crates/backend/nomifun-app/src/services.rs',source:'fn boot() { knowledge.set_browser_render_content_port(Arc::new(DirectEngine)); }'}),
-    'knowledge-render-kernel-port','failed to reject direct Knowledge renderer injection');
+    'knowledge-render-service-port','failed to reject direct Knowledge renderer injection');
   assertViolation(baseline.concat({path:HUB_COMPOSITION,source:'fn boot() { BrowserSessionHub::new(); }'}),
     'hub-composition-contract','failed to reject restoring the old primary Hub composition');
   assertViolation(baseline.concat({path:'crates/backend/nomifun-app/src/browser_lane_provider.rs',source:'// old issuer'}),

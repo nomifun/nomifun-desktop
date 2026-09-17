@@ -1,9 +1,5 @@
 use nomifun_common::AppError;
 use serde::Serialize;
-use serde_json::{Map, Value};
-
-const TERMINAL_REVISION_FIELD: &str = "_revision";
-const OPERATION_ID_FIELD: &str = "_operation_id";
 
 /// Canonical AutoWork configuration shared by REST, Gateway, boot recovery,
 /// and the live runner.
@@ -59,11 +55,6 @@ impl AutoWorkConfig {
         })
     }
 
-    fn semantic_fingerprint(&self) -> String {
-        // serde_json gives a deterministic representation for this struct and
-        // safely length-delimits arbitrary tag text.
-        serde_json::to_string(self).expect("AutoWorkConfig serialization cannot fail")
-    }
 }
 
 /// Owner-scoped persisted AutoWork configuration plus its optimistic
@@ -117,138 +108,6 @@ pub struct AutoWorkSessionConfigCommand {
     pub operation_id: Option<String>,
 }
 
-#[derive(Debug)]
-pub(crate) struct DecodedTerminalAutoWorkConfig {
-    pub snapshot: AutoWorkConfigSnapshot,
-    pub sequence: u64,
-}
-
-pub(crate) fn decode_terminal_autowork_config(
-    raw: Option<&Value>,
-    target_id: &str,
-) -> Result<DecodedTerminalAutoWorkConfig, AppError> {
-    let Some(raw) = raw else {
-        return Ok(DecodedTerminalAutoWorkConfig {
-            snapshot: AutoWorkConfigSnapshot {
-                config: AutoWorkConfig::default(),
-                revision: "terminal:0".to_owned(),
-                operation_id: None,
-            },
-            sequence: 0,
-        });
-    };
-    let object = raw.as_object().ok_or_else(|| {
-        AppError::Internal(format!(
-            "AutoWork config for terminal {target_id} must be a JSON object"
-        ))
-    })?;
-    let enabled = optional_bool(object, "enabled", target_id)?.unwrap_or(false);
-    let tag = optional_string(object, "tag", target_id)?;
-    let max_requirements = optional_u32(object, "max_requirements", target_id)?;
-    let config = AutoWorkConfig::normalize(enabled, tag.as_deref(), max_requirements).map_err(
-        |error| {
-            AppError::Internal(format!(
-                "terminal {target_id} has an invalid persisted AutoWork config: {error}"
-            ))
-        },
-    )?;
-    let sequence = optional_u64(object, TERMINAL_REVISION_FIELD, target_id)?.unwrap_or(0);
-    let operation_id = optional_string(object, OPERATION_ID_FIELD, target_id)?;
-    let revision = if sequence == 0 && !object.contains_key(TERMINAL_REVISION_FIELD) {
-        format!("terminal:legacy:{}", config.semantic_fingerprint())
-    } else {
-        format!("terminal:{sequence}")
-    };
-    Ok(DecodedTerminalAutoWorkConfig {
-        snapshot: AutoWorkConfigSnapshot {
-            config,
-            revision,
-            operation_id,
-        },
-        sequence,
-    })
-}
-
-pub(crate) fn encode_terminal_autowork_config(
-    config: &AutoWorkConfig,
-    sequence: u64,
-    operation_id: Option<&str>,
-) -> Value {
-    serde_json::json!({
-        "enabled": config.enabled,
-        "tag": config.tag,
-        "max_requirements": config.max_requirements,
-        (TERMINAL_REVISION_FIELD): sequence,
-        (OPERATION_ID_FIELD): operation_id,
-    })
-}
-
-fn optional_bool(
-    object: &Map<String, Value>,
-    field: &str,
-    target_id: &str,
-) -> Result<Option<bool>, AppError> {
-    match object.get(field) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Bool(value)) => Ok(Some(*value)),
-        Some(_) => Err(invalid_field(target_id, field, "a boolean")),
-    }
-}
-
-fn optional_string(
-    object: &Map<String, Value>,
-    field: &str,
-    target_id: &str,
-) -> Result<Option<String>, AppError> {
-    match object.get(field) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) => {
-            // Operation identities are opaque; only tags are normalized later.
-            if value.trim().is_empty() {
-                Err(invalid_field(target_id, field, "a non-empty string"))
-            } else {
-                Ok(Some(value.to_owned()))
-            }
-        }
-        Some(_) => Err(invalid_field(target_id, field, "a string")),
-    }
-}
-
-fn optional_u32(
-    object: &Map<String, Value>,
-    field: &str,
-    target_id: &str,
-) -> Result<Option<u32>, AppError> {
-    optional_u64(object, field, target_id)?
-        .map(|value| {
-            u32::try_from(value).map_err(|_| {
-                invalid_field(target_id, field, "an unsigned 32-bit integer")
-            })
-        })
-        .transpose()
-}
-
-fn optional_u64(
-    object: &Map<String, Value>,
-    field: &str,
-    target_id: &str,
-) -> Result<Option<u64>, AppError> {
-    match object.get(field) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(value)) => value
-            .as_u64()
-            .map(Some)
-            .ok_or_else(|| invalid_field(target_id, field, "an unsigned integer")),
-        Some(_) => Err(invalid_field(target_id, field, "an unsigned integer")),
-    }
-}
-
-fn invalid_field(target_id: &str, field: &str, expected: &str) -> AppError {
-    AppError::Internal(format!(
-        "AutoWork config for terminal {target_id} field '{field}' must be {expected}"
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,54 +128,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_terminal_config_gets_a_stable_semantic_revision() {
-        let raw = serde_json::json!({
-            "enabled": true,
-            "tag": " release ",
-            "max_requirements": 2,
-        });
-        let first = decode_terminal_autowork_config(Some(&raw), "terminal").unwrap();
-        let second = decode_terminal_autowork_config(Some(&raw), "terminal").unwrap();
-        assert_eq!(first.snapshot, second.snapshot);
-        assert_eq!(first.snapshot.config.tag.as_deref(), Some("release"));
-        assert_eq!(first.snapshot.operation_id, None);
-        assert!(first.snapshot.revision.starts_with("terminal:legacy:"));
-    }
-
-    #[test]
-    fn terminal_envelope_roundtrips_revision_and_operation_identity() {
-        let config = AutoWorkConfig::normalize(true, Some("alpha"), Some(5)).unwrap();
-        for operation_id in [
-            None,
-            Some("gateway:op"),
-            Some(" gateway:op "),
-            Some("\t gateway:op\n"),
-            Some("\u{3000}gateway:op\u{3000}"),
-        ] {
-            let raw = encode_terminal_autowork_config(&config, 9, operation_id);
-            let decoded = decode_terminal_autowork_config(Some(&raw), "terminal").unwrap();
-            assert_eq!(decoded.sequence, 9);
-            assert_eq!(decoded.snapshot.config, config);
-            assert_eq!(decoded.snapshot.revision, "terminal:9");
-            assert_eq!(decoded.snapshot.operation_id.as_deref(), operation_id);
-        }
-    }
-
-    #[test]
-    fn terminal_operation_identity_rejects_blank_and_non_string_values() {
-        for (operation_id, expected) in [
-            (serde_json::json!(""), "a non-empty string"),
-            (serde_json::json!(" \t\n\u{3000}"), "a non-empty string"),
-            (serde_json::json!(42), "a string"),
-            (serde_json::json!(false), "a string"),
-            (serde_json::json!([]), "a string"),
-            (serde_json::json!({}), "a string"),
-        ] {
-            let raw = serde_json::json!({ (OPERATION_ID_FIELD): operation_id });
-            let error = decode_terminal_autowork_config(Some(&raw), "terminal").unwrap_err();
-            assert!(matches!(error, AppError::Internal(message) if message == format!(
-                "AutoWork config for terminal terminal field '_operation_id' must be {expected}"
-            )));
-        }
+    fn snapshot_rejects_blank_revision_and_operation_identity() {
+        let config = AutoWorkConfig::default();
+        assert!(AutoWorkConfigSnapshot::new(config.clone(), "", None).is_err());
+        assert!(
+            AutoWorkConfigSnapshot::new(config, "session:1", Some("  ".to_owned())).is_err()
+        );
     }
 }

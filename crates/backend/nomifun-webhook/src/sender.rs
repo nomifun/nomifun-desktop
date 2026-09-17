@@ -21,14 +21,24 @@ const MAX_LARK_RESPONSE_BYTES: usize = 64 * 1024;
 
 // Endpoint URLs can carry bot credentials in their path/query, and remote
 // responses can echo the signed request. Keep diagnostics metadata-only.
-fn http_error(error: reqwest::Error) -> WebhookError {
-    WebhookError::Http(if error.is_timeout() {
-        "webhook request timed out".into()
-    } else if error.is_builder() {
-        "invalid webhook request".into()
+fn send_error(error: reqwest::Error) -> WebhookError {
+    if error.is_builder() {
+        WebhookError::Http("invalid webhook request".into())
+    } else if error.is_connect() {
+        WebhookError::Http("webhook connection failed before dispatch".into())
     } else {
-        "webhook transport failed".into()
-    })
+        // Once request dispatch may have started, a timeout/reset cannot prove
+        // whether the remote endpoint accepted the notification.
+        WebhookError::OutcomeUnknown(if error.is_timeout() {
+            "request timed out after dispatch may have started".into()
+        } else {
+            "transport ended after dispatch may have started".into()
+        })
+    }
+}
+
+fn response_error(_error: reqwest::Error) -> WebhookError {
+    WebhookError::OutcomeUnknown("response ended before acceptance could be verified".into())
 }
 
 /// Abstraction over a webhook platform's "send a notification card" operation.
@@ -175,7 +185,7 @@ impl WebhookSender for DefaultWebhookSender {
             .json(&body)
             .send()
             .await
-            .map_err(http_error)?;
+            .map_err(send_error)?;
         let status = resp.status();
         if !status.is_success() {
             return Err(WebhookError::Remote(format!("HTTP {status}")));
@@ -184,22 +194,30 @@ impl WebhookSender for DefaultWebhookSender {
         // Slack/HTTP treat any 2xx as success (response body is free-form).
         if matches!(platform, WebhookPlatform::Lark) {
             if resp.content_length().is_some_and(|len| len > MAX_LARK_RESPONSE_BYTES as u64) {
-                return Err(WebhookError::Remote("lark response is too large".into()));
+                return Err(WebhookError::OutcomeUnknown(
+                    "lark response exceeded the verification limit".into(),
+                ));
             }
             let mut bytes = Vec::new();
-            while let Some(chunk) = resp.chunk().await.map_err(http_error)? {
+            while let Some(chunk) = resp.chunk().await.map_err(response_error)? {
                 if chunk.len() > MAX_LARK_RESPONSE_BYTES - bytes.len() {
-                    return Err(WebhookError::Remote("lark response is too large".into()));
+                    return Err(WebhookError::OutcomeUnknown(
+                        "lark response exceeded the verification limit".into(),
+                    ));
                 }
                 bytes.extend_from_slice(&chunk);
             }
             let parsed: Value = serde_json::from_slice(&bytes)
-                .map_err(|_| WebhookError::Remote("invalid lark response JSON".into()))?;
+                .map_err(|_| WebhookError::OutcomeUnknown("invalid lark response JSON".into()))?;
             let code = parsed
                 .get("code")
                 .or_else(|| parsed.get("StatusCode"))
                 .and_then(Value::as_i64)
-                .ok_or_else(|| WebhookError::Remote("missing or invalid lark response code".into()))?;
+                .ok_or_else(|| {
+                    WebhookError::OutcomeUnknown(
+                        "missing or invalid lark response code".into(),
+                    )
+                })?;
             if code != 0 {
                 return Err(WebhookError::Remote(format!("lark code {code}")));
             }
@@ -253,7 +271,7 @@ mod tests {
         }
         for body in ["", "<html>ok</html>", "{}", "null", r#"{"code":"0"}"#, r#"{"code":null,"StatusCode":0}"#] {
             let error = deliver_response(WebhookPlatform::Lark, response("200 OK", body)).await.unwrap_err();
-            assert!(matches!(error, WebhookError::Remote(_)), "{body}: {error}");
+            assert!(matches!(error, WebhookError::OutcomeUnknown(_)), "{body}: {error}");
         }
     }
 
@@ -268,14 +286,18 @@ mod tests {
             assert_eq!(error.to_string(), expected);
         }
         let error = deliver_response(WebhookPlatform::Lark, "not an HTTP response\r\n\r\n".into()).await.unwrap_err();
-        assert_eq!(error.to_string(), "request failed: webhook transport failed");
+        assert!(
+            matches!(error, WebhookError::Http(_) | WebhookError::OutcomeUnknown(_)),
+            "{error}"
+        );
+        assert!(!error.to_string().contains("synthetic-hook-token"));
     }
 
     #[tokio::test]
     async fn lark_rejects_incomplete_and_oversized_response_bodies() {
         let incomplete = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"code\":0}";
         let error = deliver_response(WebhookPlatform::Lark, incomplete.into()).await.unwrap_err();
-        assert!(matches!(error, WebhookError::Http(_)));
+        assert!(matches!(error, WebhookError::OutcomeUnknown(_)));
 
         let mut body = r#"{"code":0}"#.to_string();
         body.push_str(&" ".repeat(MAX_LARK_RESPONSE_BYTES - body.len()));
@@ -287,7 +309,7 @@ mod tests {
             format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{body}\r\n0\r\n\r\n", body.len()),
         ] {
             let error = deliver_response(WebhookPlatform::Lark, raw).await.unwrap_err();
-            assert_eq!(error.to_string(), "remote rejected the webhook: lark response is too large");
+            assert!(matches!(error, WebhookError::OutcomeUnknown(_)));
         }
     }
 

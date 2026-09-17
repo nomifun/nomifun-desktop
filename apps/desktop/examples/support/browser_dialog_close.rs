@@ -2,11 +2,11 @@
 use nomifun_browser_platform::{
     run_guard::BrowserInputState,
     runtime::*,
-    workspace::{BrowserWorkspace, BrowserWorkspaceService},
+    workspace::{BrowserResource, BrowserResourceService},
 };
 use std::{sync::Arc, time::Duration};
 use tauri::Manager;
-async fn find_dialog(workspace: &BrowserWorkspace, message: &str) -> Result<BrowserDialog, String> {
+async fn find_dialog(workspace: &BrowserResource, message: &str) -> Result<BrowserDialog, String> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let snapshot = workspace
@@ -32,7 +32,7 @@ async fn find_dialog(workspace: &BrowserWorkspace, message: &str) -> Result<Brow
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
-async fn create(workspace: &Arc<BrowserWorkspace>, url: &str) -> Result<BrowserTabTarget, String> {
+async fn create(workspace: &Arc<BrowserResource>, url: &str) -> Result<BrowserTabTarget, String> {
     let snapshot = workspace
         .user_command(BrowserTabCommand::Create { url: url.into() })
         .await
@@ -63,16 +63,16 @@ pub(super) async fn verify(
     app: &tauri::AppHandle,
     base: &str,
 ) -> Result<serde_json::Value, String> {
-    let service = Arc::new(BrowserWorkspaceService::new(Arc::new(
+    let service = Arc::new(BrowserResourceService::new(Arc::new(
         super::host::DesktopBrowserHost::new(app.clone()),
     )));
     let workspace = service
         .ensure(
-            BrowserWorkspaceKey {
-                user_id: "tab-close-user".into(),
-                conversation_id: "tab-close-conversation".into(),
-            },
-            "native-webview2-v2".into(),
+            super::browser_resource_fixture::authority(
+                "tab-close-user",
+                "tab-close-conversation",
+                "native-webview2-v2",
+            ),
             BrowserProfile::Ephemeral,
         )
         .await
@@ -135,10 +135,7 @@ pub(super) async fn verify(
 async fn verify_parallel_close(app: &tauri::AppHandle, base: &str) -> Result<(), String> {
     let runtime = super::host::DesktopBrowserHost::new(app.clone())
         .create(CreateBrowserRuntime {
-            key: BrowserWorkspaceKey {
-                user_id: "parallel-close".into(),
-                conversation_id: "parallel-close".into(),
-            },
+            key: super::browser_resource_fixture::key("parallel-close", "parallel-close"),
             runtime_generation: 1,
             profile: BrowserProfile::Ephemeral,
             user_input_enabled: true,

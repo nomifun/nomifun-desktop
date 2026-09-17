@@ -33,8 +33,8 @@ use nomifun_ai_agent::{
 };
 use nomifun_agent_contracts::{
     AgentBindingValue, AgentSessionId, ArtifactId, ContributionSourceKind,
-    PrincipalRef, RemoteBindingProvenance, ResolvedCapability, ScopeKey,
-    StrictJsonValue, UserId,
+    DeleteAgentSessionCommand, OperationId, PrincipalRef, RemoteBindingProvenance,
+    ResolvedCapability, ScopeKey, StrictJsonValue, UserId,
 };
 use nomifun_agent_control_plane::{
     AgentControlPlane, AuthenticatedOwner, ControlPlaneError,
@@ -49,7 +49,6 @@ use nomifun_api_types::{
     CancelAgentSessionTurnRequestDto, SteerAgentSessionTurnRequestDto,
     ErrorResponse, ForkAgentSessionRequestDto,
     ForkAgentSessionResponseDto, ListMessagesQuery, MessageListResponse, MessageResponse,
-    ListConversationsQuery,
     RemoteCancelRequestDto, RemoteMutationResponseDto, RemoteObserveRequestDto,
     RemoteObserveResponseDto, RemoteOpenRequestDto, RemoteOpenResponseDto,
     RemoteOpenStateViewDto, RemoteTurnRequestDto,
@@ -61,16 +60,16 @@ use nomifun_api_types::{
     UpdateAgentSessionCapabilitySelectionResponseDto,
     CreateAgentPresetFromTemplateRequest, PutAgentBindingRequest,
 };
-use nomifun_common::{AppError, MessagePosition, MessageType};
-use nomifun_conversation::runtime_state::RuntimeBuildLease;
+use nomifun_common::{AppError, ConversationStatus, MessagePosition, MessageType};
 use nomifun_conversation::service::{
-    BackgroundTurnPreSendHook, BackgroundTurnReconciliationDisposition,
+    BackgroundTurnReconciliationDisposition,
     BackgroundTurnRuntimePreparation, IdempotentMessageDelivery,
     PublicTurnDeliveryState,
 };
 use nomifun_conversation::{
-    AgentExecutionConversationPort, CanonicalAgentSessionOwner, ConversationService, IdmmTurnScope,
-    ProductAgentResolution, ProductAgentSnapshotResolver, ProductAgentTarget,
+    AgentExecutionConversationPort, CanonicalAgentSessionOwner, ConversationService,
+    PreparedAgentSessionDelete, ProductAgentResolution, ProductAgentSnapshotResolver,
+    ProductAgentTarget,
 };
 use nomifun_db::{
     AgentExecutionTurnAuthority, AppendNomiRemoteEventParams, GetOrCreateRemoteSessionParams,
@@ -104,8 +103,8 @@ pub(crate) struct NomiCoreSessionOwner {
     canonical: CanonicalAgentSessionOwner,
     runtime_registry: Arc<dyn AgentRuntimeRegistry>,
     execution: AgentExecutionConversationPort,
-    autowork_runtime_lease_issuer: nomifun_requirement::AutoWorkRuntimeLeaseIssuer,
-    autowork_config_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    session_operation_locks:
+        Arc<DashMap<String, Arc<tokio::sync::RwLock<()>>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -423,9 +422,7 @@ impl NomiCoreSessionOwner {
             runtime_control_plane: std::sync::OnceLock::new(),
             runtime_registry,
             execution,
-            autowork_runtime_lease_issuer:
-                nomifun_requirement::AutoWorkRuntimeLeaseIssuer::new(),
-            autowork_config_locks: Arc::new(DashMap::new()),
+            session_operation_locks: Arc::new(DashMap::new()),
         }
     }
 
@@ -435,6 +432,16 @@ impl NomiCoreSessionOwner {
 
     pub(crate) fn canonical(&self) -> &CanonicalAgentSessionOwner {
         &self.canonical
+    }
+
+    fn session_operation_lock(
+        &self,
+        session_id: &str,
+    ) -> Arc<tokio::sync::RwLock<()>> {
+        self.session_operation_locks
+            .entry(session_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::RwLock::new(())))
+            .clone()
     }
 
     pub(crate) fn install_runtime_engines(&self, host: Arc<super::runtime_engines::RuntimeEngineHost>, control_plane: std::sync::Weak<AgentControlPlane>) -> Result<(), AppError> {
@@ -589,6 +596,76 @@ impl NomiCoreSessionOwner {
         self.service.get(owner_id, session_id).await
     }
 
+    /// Materialize the retiring Conversation-shaped consumer projection from
+    /// a Store-only canonical AgentSession. `None` means there is no canonical
+    /// row and permits an explicit legacy fallback; every other canonical
+    /// state (foreign owner, deleting/tombstoned row, invalid saved artifacts)
+    /// fails closed.
+    async fn canonical_conversation_projection(
+        &self,
+        owner_id: &str,
+        session_id: &AgentSessionId,
+    ) -> Result<Option<ConversationResponse>, AppError> {
+        let principal = PrincipalRef {
+            principal_kind: "user".to_owned(),
+            principal_id: owner_id.to_owned(),
+        };
+        let observed = match self.canonical.get(&principal, session_id).await {
+            Ok(observed) => observed,
+            Err(AppError::NotFound(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let control_plane = self
+            .runtime_control_plane
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| {
+                AppError::Conflict(
+                    "canonical AgentSession projection requires the assembled control plane"
+                        .to_owned(),
+                )
+            })?;
+        let binding_dto: AgentBindingValueDto =
+            serde_json::to_value(&observed.session.agent_binding)
+                .and_then(serde_json::from_value)
+                .map_err(|error| {
+                    AppError::Conflict(format!(
+                        "canonical AgentSession has an invalid frozen binding: {error}"
+                    ))
+                })?;
+        let owner = UserId::from(owner_id.to_owned());
+        let (binding, revision, snapshot) = control_plane
+            .saved_binding_artifacts(&owner, &binding_dto)
+            .await
+            .map_err(control_plane_error_to_app)?;
+        if binding != observed.session.agent_binding {
+            return Err(AppError::Conflict(
+                "canonical AgentSession binding differs from its exact saved artifacts"
+                    .to_owned(),
+            ));
+        }
+        let common_owner = nomifun_common::UserId::parse(owner_id.to_owned()).map_err(|error| {
+            AppError::Forbidden(format!("invalid canonical AgentSession owner: {error}"))
+        })?;
+        let projected = super::nomi_core_agent_projection::project_saved_artifacts(
+            &common_owner,
+            binding,
+            revision,
+            snapshot,
+            observed.session.metadata.title.as_deref(),
+        )?;
+        let workspace = frozen_workspace_root(
+            owner_id,
+            session_id,
+            &projected.binding,
+        )?;
+        Ok(Some(canonical_conversation_response(
+            observed,
+            projected,
+            workspace,
+        )?))
+    }
+
     /// Deliver an owner-visible turn through the one public at-most-once Nomi
     /// boundary and the registry already owned by this facade.
     pub(crate) async fn send_session_message_idempotent(
@@ -632,42 +709,6 @@ impl NomiCoreSessionOwner {
             .await
     }
 
-    fn autowork_config_lock(
-        &self,
-        owner_id: &str,
-        session_id: &str,
-    ) -> Arc<tokio::sync::Mutex<()>> {
-        let key = format!("{owner_id}\n{session_id}");
-        self.autowork_config_locks
-            .entry(key)
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
-    }
-
-    async fn raw_owned_session_extra(
-        &self,
-        owner_id: &str,
-        session_id: &str,
-    ) -> Result<(String, Value), AppError> {
-        let row = self
-            .service
-            .conversation_repo()
-            .get(session_id)
-            .await?
-            .filter(|row| row.user_id == owner_id)
-            .ok_or_else(|| AppError::NotFound(format!("AgentSession {session_id} not found")))?;
-        let extra: Value = serde_json::from_str(&row.extra).map_err(|error| {
-            AppError::Internal(format!(
-                "AgentSession {session_id} has invalid extra JSON: {error}"
-            ))
-        })?;
-        if !extra.is_object() {
-            return Err(AppError::Internal(format!(
-                "AgentSession {session_id} extra must be a JSON object"
-            )));
-        }
-        Ok((row.extra, extra))
-    }
 }
 
 /// App-owned bridge from a Conversation-backed Nomi session to one exact
@@ -1493,6 +1534,12 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
         &self,
         query: &nomifun_cron::CronSessionLookup,
     ) -> Result<nomifun_cron::CronSessionProjection, AppError> {
+        if let Some(response) = self
+            .canonical_conversation_projection(&query.owner_id, &query.agent_session_id)
+            .await?
+        {
+            return cron_session_projection_from_response(&query.owner_id, response, None);
+        }
         let response = self
             .service
             .get(&query.owner_id, query.agent_session_id.as_ref())
@@ -1512,24 +1559,6 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
         cron_session_projection_from_response(&query.owner_id, response, row.cron_job_id)
     }
 
-    async fn lookup_scheduled_sessions(
-        &self,
-        query: &nomifun_cron::CronScheduledSessionLookup,
-    ) -> Result<Vec<nomifun_cron::CronScheduledSession>, AppError> {
-        self.service
-            .list_by_cron_job(&query.owner_id, &query.cron_job_id)
-            .await?
-            .into_iter()
-            .map(|response| {
-                cron_session_projection_from_response(
-                    &query.owner_id,
-                    response,
-                    Some(query.cron_job_id.clone()),
-                )
-            })
-            .collect()
-    }
-
     async fn list_conversation_responses_for_cron(
         &self,
         query: &nomifun_cron::CronScheduledSessionLookup,
@@ -1543,6 +1572,18 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
         &self,
         request: &nomifun_cron::CronSessionCronBindingRequest,
     ) -> Result<(), AppError> {
+        if self
+            .canonical_conversation_projection(&request.owner_id, &request.agent_session_id)
+            .await?
+            .is_some()
+        {
+            // The Cron repository already committed and CAS-checked the
+            // canonical relation in `cron_jobs.conversation_id`. Canonical
+            // AgentSession records intentionally carry no mutable Cron
+            // back-reference; this port only revalidates exact ownership and
+            // saved artifacts after the durable write.
+            return Ok(());
+        }
         self.service
             .conversation_repo()
             .bind_cron_relation(
@@ -1773,144 +1814,139 @@ impl nomifun_requirement::AutoWorkScheduledSessionLookup for NomiCoreSessionOwne
         &self,
         owner_id: &str,
     ) -> Result<nomifun_requirement::ScheduledAutoWorkSessionScan, AppError> {
-        const PAGE_SIZE: u32 = 200;
-        let mut cursor = None;
-        let mut sessions = Vec::new();
-        let mut quarantined = Vec::new();
-        loop {
-            let page = self
-                .service
-                .list(
-                    owner_id,
-                    ListConversationsQuery {
-                        cursor: cursor.clone(),
-                        limit: Some(PAGE_SIZE),
-                        source: None,
-                        cron_job_id: None,
-                        pinned: None,
-                    },
-                    false,
-                )
-                .await?;
-            let next_cursor = page.items.last().map(|session| session.conversation_id.clone());
-            for session in page.items {
-                let Some(raw) = session.extra.get("autowork") else {
-                    continue;
-                };
-                match conversation_autowork_config_snapshot(
-                    &session.conversation_id,
-                    Some(raw),
-                ) {
-                    Ok(snapshot) if snapshot.config.enabled => {
-                        match snapshot.config.enabled_tag() {
-                            Ok(tag) => {
-                                sessions.push(nomifun_requirement::ScheduledAutoWorkSession {
-                                    session_id: session.conversation_id,
-                                    display_name: session.name,
-                                    tag: tag.to_owned(),
-                                    max_requirements: snapshot.config.max_requirements,
-                                    config_revision: snapshot.revision,
-                                });
-                            }
-                            Err(error) => quarantined.push(
-                                nomifun_requirement::AutoWorkBindingIssue {
-                                    target_id: Some(session.conversation_id),
-                                    code: "missing_tag",
-                                    detail: error.to_string(),
-                                },
-                            ),
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(error) => quarantined.push(
-                        nomifun_requirement::AutoWorkBindingIssue {
-                            target_id: Some(session.conversation_id),
-                            code: "invalid_config",
-                            detail: error.to_string(),
-                        },
-                    ),
-                }
-            }
-            if !page.has_more {
-                break;
-            }
-            let next_cursor = next_cursor.ok_or_else(|| {
-                AppError::Internal(
-                    "AgentSession AutoWork lookup returned an empty non-terminal page".to_owned(),
-                )
-            })?;
-            if cursor.as_deref() == Some(next_cursor.as_str()) {
-                return Err(AppError::Internal(
-                    "AgentSession AutoWork lookup cursor did not advance".to_owned(),
-                ));
-            }
-            cursor = Some(next_cursor);
-        }
+        let principal = PrincipalRef {
+            principal_kind: "user".to_owned(),
+            principal_id: owner_id.to_owned(),
+        };
+        let configs = self
+            .canonical
+            .store()
+            .list_enabled_automation_configs(&principal)
+            .await
+            .map_err(|error| AppError::Internal(format!(
+                "list canonical AgentSession AutoWork configs: {error}"
+            )))?;
+        let sessions = configs
+            .into_iter()
+            .map(|entry| {
+                let tag = entry.config.tag.ok_or_else(|| {
+                    AppError::Conflict(format!(
+                        "enabled AgentSession {} AutoWork config has no tag",
+                        entry.session.agent_session_id.as_ref()
+                    ))
+                })?;
+                Ok(nomifun_requirement::ScheduledAutoWorkSession {
+                    session_id: entry.session.agent_session_id.as_ref().to_owned(),
+                    display_name: entry
+                        .session
+                        .metadata
+                        .title
+                        .unwrap_or_else(|| "Agent Session".to_owned()),
+                    tag,
+                    max_requirements: entry.config.max_requirements,
+                    config_revision: format!("agent-session:{}", entry.config.revision),
+                })
+            })
+            .collect::<Result<Vec<_>, AppError>>()?;
         Ok(nomifun_requirement::ScheduledAutoWorkSessionScan {
             sessions,
-            quarantined,
+            quarantined: Vec::new(),
         })
     }
 }
 
 #[async_trait]
-impl nomifun_requirement::AutoWorkSessionPort for NomiCoreSessionOwner {
-    async fn prepare_autowork_turn(
+impl nomifun_requirement::AutoWorkWorkspacePort for NomiCoreSessionOwner {
+    async fn resolve_frozen_workspace(
         &self,
         owner_id: &str,
-        session_id: &str,
-        build_lease: &nomifun_requirement::AutoWorkRuntimeBuildLease,
-    ) -> Result<nomifun_requirement::AutoWorkSessionPreparation, AppError> {
-        build_lease.ensure_scope(owner_id, session_id)?;
-        build_lease.ensure_active()?;
-        let session = self.service.get(owner_id, session_id).await?;
-        build_lease.ensure_active()?;
-        let workspace = session_workspace(&session)?;
-        let revision = session_projection_revision(&session)?;
-        let snapshot = self
-            .autowork_runtime_lease_issuer
-            .issue_snapshot(owner_id, session_id, revision)?;
-        Ok(nomifun_requirement::AutoWorkSessionPreparation {
-            agent_type: session.r#type,
-            workspace,
-            snapshot,
-        })
-    }
-
-    fn begin_runtime_preparation(
-        &self,
-        conversation_id: &str,
-        requester_user_id: &str,
-    ) -> Result<nomifun_requirement::AutoWorkRuntimeBuildLease, AppError> {
-        let lease = self
-            .service
-            .begin_public_runtime_preparation(conversation_id, requester_user_id)?;
-        self.autowork_runtime_lease_issuer.issue(
-            requester_user_id,
-            conversation_id,
-            lease,
-            RuntimeBuildLease::ensure_active,
+        agent_session_id: &str,
+    ) -> Result<nomifun_requirement::AutoWorkWorkspaceResolution, AppError> {
+        nomifun_common::UserId::parse(owner_id.to_owned()).map_err(|error| {
+            AppError::Forbidden(format!(
+                "AutoWork owner is not a canonical installation UserId: {error}"
+            ))
+        })?;
+        nomifun_common::validate_uuidv7(agent_session_id).map_err(|error| {
+            AppError::NotFound(format!(
+                "AutoWork AgentSession identity is not canonical UUIDv7: {error}"
+            ))
+        })?;
+        let session_id = AgentSessionId::from(agent_session_id.to_owned());
+        let operation_guard = self
+            .session_operation_lock(agent_session_id)
+            .read_owned()
+            .await;
+        let principal = PrincipalRef {
+            principal_kind: "user".to_owned(),
+            principal_id: owner_id.to_owned(),
+        };
+        let observed = self.canonical.get(&principal, &session_id).await?;
+        let binding_dto: AgentBindingValueDto = serde_json::to_value(
+            &observed.session.agent_binding,
         )
-    }
-
-    fn user_cancelled_since(&self, conversation_id: &str, since_ms: i64) -> bool {
-        self.service.user_cancelled_since(conversation_id, since_ms)
-    }
-
-    async fn cancel_active_turn(&self, conversation_id: &str) -> Result<(), AppError> {
-        if let Some(runtime) = self.runtime_registry.get_runtime(conversation_id) {
-            runtime.cancel().await?;
+        .and_then(serde_json::from_value)
+        .map_err(|error| {
+            AppError::Conflict(format!(
+                "AutoWork AgentSession has an invalid frozen binding: {error}"
+            ))
+        })?;
+        let control_plane = self
+            .runtime_control_plane
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| {
+                AppError::Conflict(
+                    "AutoWork workspace resolution requires the assembled control plane"
+                        .to_owned(),
+                )
+            })?;
+        let (saved_binding, _, _) = control_plane
+            .saved_binding_artifacts(&UserId::from(owner_id.to_owned()), &binding_dto)
+            .await
+            .map_err(control_plane_error_to_app)?;
+        if saved_binding != observed.session.agent_binding {
+            return Err(AppError::Conflict(
+                "AutoWork AgentSession binding differs from its exact saved artifacts"
+                    .to_owned(),
+            ));
         }
-        Ok(())
+        let workspace = frozen_workspace_root(
+            owner_id,
+            &session_id,
+            &observed.session.agent_binding,
+        )?
+            .map(nomifun_requirement::FrozenAutoWorkWorkspace::new)
+            .transpose()?;
+        let lease: Arc<dyn Send + Sync> =
+            Arc::new(std::sync::Mutex::new(Some(operation_guard)));
+        Ok(nomifun_requirement::AutoWorkWorkspaceResolution::with_operation_lease(
+            workspace,
+            lease,
+        ))
     }
+}
 
+#[async_trait]
+impl nomifun_requirement::AutoWorkSessionConfigPort for NomiCoreSessionOwner {
     async fn read_config(
         &self,
         owner_id: &str,
         session_id: &str,
     ) -> Result<nomifun_requirement::AutoWorkConfigSnapshot, AppError> {
-        let (_, extra) = self.raw_owned_session_extra(owner_id, session_id).await?;
-        conversation_autowork_config_snapshot(session_id, extra.get("autowork"))
+        let owner = PrincipalRef {
+            principal_kind: "user".to_owned(),
+            principal_id: owner_id.to_owned(),
+        };
+        let session_id = AgentSessionId::from(session_id.to_owned());
+        self.canonical.get(&owner, &session_id).await?;
+        let config = self
+            .canonical
+            .store()
+            .automation_config(&session_id)
+            .await
+            .map_err(agent_session_store_error)?;
+        canonical_autowork_config_snapshot(config)
     }
 
     async fn save_config(
@@ -1927,246 +1963,29 @@ impl nomifun_requirement::AutoWorkSessionPort for NomiCoreSessionOwner {
                 "AutoWork config must use its canonical normalized tag".to_owned(),
             ));
         }
-        if command.expected_revision.trim().is_empty() {
-            return Err(AppError::Conflict(
-                "AutoWork config write requires an expected revision".to_owned(),
-            ));
-        }
-        if command
-            .operation_id
-            .as_deref()
-            .is_some_and(|operation_id| operation_id.trim().is_empty())
-        {
-            return Err(AppError::BadRequest(
-                "AutoWork config operation identity must not be empty".to_owned(),
-            ));
-        }
-        let lock = self.autowork_config_lock(&command.owner_id, &command.session_id);
-        let _guard = lock.lock().await;
-        let (expected_extra, stored_extra) = self
-            .raw_owned_session_extra(&command.owner_id, &command.session_id)
-            .await?;
-        let current = conversation_autowork_config_snapshot(
-            &command.session_id,
-            stored_extra.get("autowork"),
-        )?;
-        if command.operation_id.is_some()
-            && current.operation_id == command.operation_id
-        {
-            if current.config == command.config {
-                return Ok(current);
-            }
-            return Err(AppError::Conflict(
-                "AutoWork operation identity was replayed with a different config".to_owned(),
-            ));
-        }
-        if current.revision != command.expected_revision {
-            return Err(AppError::Conflict(format!(
-                "AutoWork config for conversation {} changed concurrently",
-                command.session_id
-            )));
-        }
-        if current.config == command.config && command.operation_id.is_none() {
-            return Ok(current);
-        }
-
-        let current_sequence = conversation_autowork_sequence(&current.revision);
-        let next_sequence = if current.config == command.config
-            && !current.revision.starts_with("conversation:legacy:")
-        {
-            current_sequence
-        } else {
-            current_sequence.checked_add(1).ok_or_else(|| {
-                AppError::Conflict(format!(
-                    "AutoWork config revision overflow for conversation {}",
-                    command.session_id
-                ))
-            })?
-        };
-        let mut autowork = stored_extra
-            .get("autowork")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
-        let object = autowork.as_object_mut().ok_or_else(|| {
-            AppError::Conflict(format!(
-                "AgentSession {} has an invalid AutoWork config",
-                command.session_id
-            ))
-        })?;
-        object.insert("enabled".to_owned(), Value::Bool(command.config.enabled));
-        object.insert(
-            "tag".to_owned(),
-            command
-                .config
-                .tag
-                .clone()
-                .map(Value::String)
-                .unwrap_or(Value::Null),
-        );
-        object.insert(
-            "max_requirements".to_owned(),
-            command
-                .config
-                .max_requirements
-                .map(|value| Value::Number(value.into()))
-                .unwrap_or(Value::Null),
-        );
-        object.insert(
-            "_revision".to_owned(),
-            Value::Number(next_sequence.into()),
-        );
-        object.insert(
-            "_operation_id".to_owned(),
-            command
-                .operation_id
-                .clone()
-                .map(Value::String)
-                .unwrap_or(Value::Null),
-        );
-        let mut replacement_extra = stored_extra;
-        replacement_extra["autowork"] = Value::Object(object.clone());
-        let replacement_extra = serde_json::to_string(&replacement_extra).map_err(|error| {
-            AppError::Internal(format!(
-                "failed to serialize AutoWork Session extra {}: {error}",
-                command.session_id
-            ))
-        })?;
-        let swapped = self
-            .service
-            .conversation_repo()
-            .compare_and_swap_extra(
-                &command.owner_id,
-                &command.session_id,
-                &expected_extra,
-                &replacement_extra,
-                nomifun_common::now_ms(),
-            )
-            .await?;
-        if !swapped {
-            return Err(AppError::Conflict(format!(
-                "AutoWork config for conversation {} changed concurrently",
-                command.session_id
-            )));
-        }
-        let (_, updated_extra) = self
-            .raw_owned_session_extra(&command.owner_id, &command.session_id)
-            .await?;
-        let snapshot =
-            conversation_autowork_config_snapshot(&command.session_id, updated_extra.get("autowork"))?;
-        if snapshot.config != command.config
-            || snapshot.revision != format!("conversation:{next_sequence}")
-            || snapshot.operation_id != command.operation_id
-        {
-            return Err(AppError::Conflict(
-                "Session host returned a different AutoWork config after save".to_owned(),
-            ));
-        }
-        Ok(snapshot)
-    }
-
-    async fn send_turn(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        operation_id: &str,
-        request: nomifun_requirement::AutoWorkTurnRequest,
-        build_lease: nomifun_requirement::AutoWorkRuntimeBuildLease,
-        authority: nomifun_db::RequirementConversationTurnAuthority,
-    ) -> Result<nomifun_requirement::AutoWorkMessageDelivery, AppError> {
-        let nomifun_requirement::AutoWorkTurnRequest {
-            message,
-            runtime_overlay,
-            session_snapshot,
-        } = request;
-        build_lease.ensure_snapshot(&session_snapshot)?;
-        let build_lease = self.autowork_runtime_lease_issuer.consume::<RuntimeBuildLease>(
-            build_lease,
-            user_id,
-            conversation_id,
-        )?;
-        let session = self.service.get(user_id, conversation_id).await?;
-        build_lease.ensure_active()?;
-        let revision = session_projection_revision(&session)?;
-        self.autowork_runtime_lease_issuer.validate_snapshot(
-            &session_snapshot,
-            user_id,
-            conversation_id,
-            &revision,
-        )?;
-        build_lease.ensure_active()?;
-        let (runtime_options, _) = runtime_options_from_session(user_id, session, None)?;
-        let observed = self
-            .service
-            .send_observed_autowork_message_with_idempotency_key(
-                user_id,
-                conversation_id,
-                operation_id,
-                autowork_message_to_request(message),
-                &self.runtime_registry,
-                build_lease,
-                BackgroundTurnRuntimePreparation {
-                    companion_device_turn: None,
-                    runtime_options,
-                    clear_context: runtime_overlay.clear_context,
-                    pre_send_hook: runtime_overlay.pre_send_hook.map(|hook| {
-                        Arc::new(NomiCoreAutoWorkPreSendHook { inner: hook })
-                            as Arc<dyn BackgroundTurnPreSendHook>
-                    }),
+        let expected_revision = parse_canonical_autowork_revision(&command.expected_revision)?;
+        let session_id = AgentSessionId::from(command.session_id);
+        let config = self
+            .canonical
+            .store()
+            .commit_automation_config(
+                nomifun_agent_session::CommitAgentSessionAutomationConfig {
+                    agent_session_id: session_id,
+                    owner_ref: PrincipalRef {
+                        principal_kind: "user".to_owned(),
+                        principal_id: command.owner_id,
+                    },
+                    expected_revision,
+                    enabled: command.config.enabled,
+                    tag: command.config.tag,
+                    max_requirements: command.config.max_requirements,
+                    operation_id: command.operation_id,
+                    recorded_at: now_ms(),
                 },
-                authority,
-            )
-            .await?;
-        Ok(autowork_delivery_from_conversation(observed.delivery))
-    }
-
-    async fn delivery_result(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        operation_id: &str,
-        request: &nomifun_requirement::AutoWorkMessage,
-        authority: &nomifun_db::RequirementConversationTurnAuthority,
-    ) -> Result<Option<nomifun_requirement::AutoWorkMessageDelivery>, AppError> {
-        let request = autowork_message_to_request(request.clone());
-        self.service
-            .autowork_delivery_result_with_idempotency_key(
-                user_id,
-                conversation_id,
-                operation_id,
-                &request,
-                authority,
             )
             .await
-            .map(|delivery| delivery.map(autowork_delivery_from_conversation))
-    }
-
-    async fn public_turn_delivery_state(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        operation_id: &str,
-    ) -> Result<nomifun_requirement::AutoWorkTurnDeliveryState, AppError> {
-        self.service
-            .public_turn_delivery_state(user_id, conversation_id, operation_id)
-            .await
-            .map(autowork_turn_state_from_conversation)
-    }
-
-    async fn reconcile_quiescent_running_turn(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        operation_id: &str,
-    ) -> Result<nomifun_requirement::AutoWorkReconciliationDisposition, AppError> {
-        self.service
-            .reconcile_quiescent_running_turn_for_background(
-                user_id,
-                conversation_id,
-                operation_id,
-                &self.runtime_registry,
-            )
-            .await
-            .map(autowork_reconciliation_from_conversation)
+            .map_err(agent_session_store_error)?;
+        canonical_autowork_config_snapshot(config)
     }
 }
 
@@ -2297,78 +2116,6 @@ fn companion_archive_message(
 }
 
 #[async_trait]
-impl nomifun_idmm::ConversationSessionPort for NomiCoreSessionOwner {
-    fn subscribe(
-        &self,
-        conversation_id: &str,
-    ) -> Option<broadcast::Receiver<AgentStreamEvent>> {
-        self.runtime_registry
-            .get_runtime(conversation_id)
-            .map(|runtime| runtime.subscribe())
-    }
-
-    async fn runtime_summary(
-        &self,
-        conversation_id: &str,
-    ) -> nomifun_api_types::ConversationRuntimeSummary {
-        self.service.runtime_summary_for(conversation_id).await
-    }
-
-    fn user_cancelled_since(&self, conversation_id: &str, since_ms: i64) -> bool {
-        self.service.user_cancelled_since(conversation_id, since_ms)
-    }
-
-    fn is_alive(&self, conversation_id: &str) -> bool {
-        self.runtime_registry.get_runtime(conversation_id).is_some()
-    }
-
-    async fn active_turn_scope(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-    ) -> Result<nomifun_idmm::SupervisionTurnScope, AppError> {
-        self.service
-            .idmm_active_turn_scope(owner_id, conversation_id, &self.runtime_registry)
-            .await
-            .map(|scope| {
-                nomifun_idmm::SupervisionTurnScope::new(scope.wire_turn_id, scope.generation)
-            })
-    }
-
-    async fn continue_active_turn(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-        expected_scope: &nomifun_idmm::SupervisionTurnScope,
-        request: SendMessageRequest,
-    ) -> Result<String, AppError> {
-        let conversation_scope = IdmmTurnScope {
-            wire_turn_id: expected_scope.wire_turn_id().to_owned(),
-            generation: expected_scope.generation(),
-        };
-        self.service
-            .idmm_continue_active_turn(
-                owner_id,
-                conversation_id,
-                &conversation_scope,
-                request,
-                &self.runtime_registry,
-            )
-            .await
-    }
-
-    async fn failover(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-    ) -> Result<bool, AppError> {
-        self.service
-            .idmm_failover_conversation(owner_id, conversation_id, &self.runtime_registry)
-            .await
-    }
-}
-
-#[async_trait]
 impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner {
     async fn create_idempotent(
         &self,
@@ -2447,6 +2194,18 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         owner_id: &str,
         conversation_id: &str,
     ) -> Result<ConversationResponse, AppError> {
+        let agent_session_id = AgentSessionId::from(conversation_id.to_owned());
+        nomifun_common::validate_uuidv7(agent_session_id.as_ref()).map_err(|error| {
+            AppError::NotFound(format!(
+                "AgentSession identity is not canonical UUIDv7: {error}"
+            ))
+        })?;
+        if let Some(response) = self
+            .canonical_conversation_projection(owner_id, &agent_session_id)
+            .await?
+        {
+            return Ok(response);
+        }
         self.service.get(owner_id, conversation_id).await
     }
 
@@ -2630,6 +2389,186 @@ fn cron_session_handle_from_response(
     })
 }
 
+fn frozen_workspace_root(
+    owner_id: &str,
+    _session_id: &AgentSessionId,
+    binding: &AgentBindingValue,
+) -> Result<Option<String>, AppError> {
+    let binding: AgentBindingValueDto = serde_json::to_value(binding)
+        .and_then(serde_json::from_value)
+        .map_err(|error| {
+            AppError::Conflict(format!(
+                "canonical AgentSession has an invalid frozen binding: {error}"
+            ))
+        })?;
+    nomifun_agent_execution::resolve_frozen_automation_workspace(owner_id, &binding)
+}
+
+#[cfg(feature = "browser-use")]
+fn managed_browser_profile_bindings(
+    owner_id: &str,
+    binding: &AgentBindingValue,
+) -> Result<Vec<nomifun_browser_platform::runtime::BrowserProfileBinding>, AppError> {
+    let mut profiles = Vec::new();
+    for resource in binding
+        .typed_resource_bindings
+        .iter()
+        .filter(|resource| {
+            resource.resource_kind.as_ref()
+                == nomifun_browser_platform::product::BROWSER_RESOURCE_KIND
+        })
+    {
+        if resource.owner_id != owner_id {
+            return Err(AppError::Forbidden(
+                "Browser Resource belongs to another owner".to_owned(),
+            ));
+        }
+        match resource
+            .typed_parameters
+            .get("provider_kind")
+            .map(String::as_str)
+        {
+            Some("managed") => {
+                let profile = match resource
+                    .typed_parameters
+                    .get("persistence")
+                    .map(String::as_str)
+                {
+                    None | Some("persistent") => {
+                        nomifun_browser_platform::runtime::BrowserProfileBinding::persistent(
+                            resource.binding_id.as_ref(),
+                        )
+                    }
+                    Some("ephemeral") => {
+                        nomifun_browser_platform::runtime::BrowserProfileBinding::ephemeral(
+                            resource.binding_id.as_ref(),
+                        )
+                    }
+                    Some(_) => {
+                        return Err(AppError::Conflict(
+                            "managed Browser Resource has an invalid persistence policy"
+                                .to_owned(),
+                        ));
+                    }
+                }
+                .map_err(|error| AppError::Conflict(error.to_string()))?;
+                profiles.push(profile);
+            }
+            Some("attached_chrome") => {}
+            _ => {
+                return Err(AppError::Conflict(
+                    "Browser Resource has no canonical provider kind".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(profiles)
+}
+
+#[cfg(feature = "browser-use")]
+fn has_attached_browser_binding(
+    owner_id: &str,
+    binding: &AgentBindingValue,
+) -> Result<bool, AppError> {
+    let mut attached = false;
+    for resource in binding
+        .typed_resource_bindings
+        .iter()
+        .filter(|resource| {
+            resource.resource_kind.as_ref()
+                == nomifun_browser_platform::product::BROWSER_RESOURCE_KIND
+        })
+    {
+        if resource.owner_id != owner_id {
+            return Err(AppError::Forbidden(
+                "Browser Resource belongs to another owner".to_owned(),
+            ));
+        }
+        match resource
+            .typed_parameters
+            .get("provider_kind")
+            .map(String::as_str)
+        {
+            Some("managed") => {}
+            Some("attached_chrome") => attached = true,
+            _ => {
+                return Err(AppError::Conflict(
+                    "Browser Resource has no canonical provider kind".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(attached)
+}
+
+fn canonical_conversation_response(
+    observed: SessionObservation,
+    projected: super::nomi_core_agent_projection::NomiCoreSavedBindingProjection,
+    workspace: Option<String>,
+) -> Result<ConversationResponse, AppError> {
+    let SessionObservation { session, head, .. } = observed;
+    let super::nomi_core_agent_projection::NomiCoreSavedBindingProjection {
+        binding,
+        projection,
+        ..
+    } = projected;
+    let snapshot = projection.snapshot;
+    let mut request = projection.request;
+    let extra = request.extra.as_object_mut().ok_or_else(|| {
+        AppError::Conflict(
+            "canonical Agent projection extra must be a JSON object".to_owned(),
+        )
+    })?;
+    if let Some(workspace) = workspace {
+        extra.insert("workspace".to_owned(), Value::String(workspace));
+    }
+    attach_session_metadata_with_fork(
+        &mut request.extra,
+        &binding,
+        session.remote_binding_provenance,
+        session.parent_session_id,
+        session.fork_base_payload_id,
+    )
+    .map_err(|error| AppError::Conflict(error.message))?;
+    let status = match head.status.as_str() {
+        "running" => ConversationStatus::Running,
+        "failed" | "open_failed" => ConversationStatus::Finished,
+        _ => ConversationStatus::Pending,
+    };
+    let name = request
+        .name
+        .unwrap_or_else(|| snapshot.preset_name.clone());
+    Ok(ConversationResponse {
+        conversation_id: session.agent_session_id.as_ref().to_owned(),
+        name,
+        r#type: request.r#type,
+        model: request.model,
+        status,
+        runtime: None,
+        source: request.source,
+        pinned: session.metadata.pinned,
+        pinned_at: None,
+        channel_chat_id: request.channel_chat_id,
+        preset_id: Some(snapshot.preset_id.clone()),
+        preset_revision: Some(snapshot.preset_revision),
+        agent_snapshot: Some(snapshot),
+        delegation_policy: request.delegation_policy,
+        execution_model_pool: request.execution_model_pool,
+        decision_policy: request.decision_policy,
+        execution_template_id: request.execution_template_id,
+        linked_execution_id: None,
+        execution_step_id: None,
+        execution_attempt_id: None,
+        // Canonical Session metadata currently has no public timestamp field.
+        // Keep the retiring DTO deterministic rather than manufacturing wall
+        // clock facts; no canonical consumer treats this projection as time
+        // authority.
+        created_at: 0,
+        modified_at: 0,
+        extra: request.extra,
+    })
+}
+
 fn cron_session_projection_from_response(
     owner_id: &str,
     response: ConversationResponse,
@@ -2651,8 +2590,8 @@ fn cron_session_projection_from_response(
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
     };
-    let skills = match response.extra.get("skills") {
-        None | Some(Value::Null) => Vec::new(),
+    let legacy_skills = || match response.extra.get("skills") {
+        None | Some(Value::Null) => Ok(Vec::new()),
         Some(Value::Array(values)) => values
             .iter()
             .map(|value| {
@@ -2668,16 +2607,13 @@ fn cron_session_projection_from_response(
                         ))
                     })
             })
-            .collect::<Result<Vec<_>, _>>()?,
-        Some(_) => {
-            return Err(AppError::Conflict(format!(
-                "AgentSession {} has an invalid skills projection",
-                response.conversation_id
-            )));
-        }
+            .collect::<Result<Vec<_>, _>>(),
+        Some(_) => Err(AppError::Conflict(format!(
+            "AgentSession {} has an invalid skills projection",
+            response.conversation_id
+        ))),
     };
     let temp_workspace_id = optional_string("temp_workspace_id");
-    let agent_name = optional_string("agent_name");
     let cli_path = optional_string("cli_path").or_else(|| {
         response
             .extra
@@ -2688,7 +2624,54 @@ fn cron_session_projection_from_response(
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
     });
-    let custom_agent_id = optional_string("custom_agent_id");
+    let (skills, agent_name, custom_agent_id, preset_id, preset_revision) =
+        match response.agent_snapshot.as_ref() {
+            Some(snapshot) => {
+                if response
+                    .preset_id
+                    .as_deref()
+                    .is_some_and(|value| value != snapshot.preset_id)
+                    || response
+                        .preset_revision
+                        .is_some_and(|value| value != snapshot.preset_revision)
+                {
+                    return Err(AppError::Conflict(format!(
+                        "AgentSession {} preset lineage differs from its frozen Snapshot",
+                        response.conversation_id
+                    )));
+                }
+                if snapshot
+                    .resolved_agent_type
+                    .as_deref()
+                    .is_some_and(|value| value != response.r#type.serde_name())
+                    || snapshot.resolved_model.as_ref().is_some_and(|model| {
+                        response.model.as_ref().is_none_or(|selected| {
+                            selected.provider_id != model.provider_id
+                                || selected.model != model.model
+                        })
+                    })
+                {
+                    return Err(AppError::Conflict(format!(
+                        "AgentSession {} runtime metadata differs from its frozen Snapshot",
+                        response.conversation_id
+                    )));
+                }
+                (
+                    snapshot.included_skills.clone(),
+                    Some(snapshot.preset_name.clone()),
+                    snapshot.resolved_agent_id.clone(),
+                    Some(snapshot.preset_id.clone()),
+                    Some(snapshot.preset_revision),
+                )
+            }
+            None => (
+                legacy_skills()?,
+                optional_string("agent_name"),
+                optional_string("custom_agent_id"),
+                response.preset_id.clone(),
+                response.preset_revision,
+            ),
+        };
     Ok(nomifun_cron::CronSessionProjection {
         agent_session_id,
         owner_id: owner_id.to_owned(),
@@ -2702,87 +2685,10 @@ fn cron_session_projection_from_response(
         agent_name,
         cli_path,
         custom_agent_id,
-        preset_id: response.preset_id,
-        preset_revision: response.preset_revision,
+        preset_id,
+        preset_revision,
         agent_snapshot: response.agent_snapshot,
     })
-}
-
-struct NomiCoreAutoWorkPreSendHook {
-    inner: Arc<dyn nomifun_requirement::AutoWorkPreSendHook>,
-}
-
-#[async_trait]
-impl BackgroundTurnPreSendHook for NomiCoreAutoWorkPreSendHook {
-    async fn prepare(&self) -> Result<(), AppError> {
-        self.inner.prepare().await
-    }
-}
-
-fn autowork_message_to_request(
-    message: nomifun_requirement::AutoWorkMessage,
-) -> SendMessageRequest {
-    SendMessageRequest {
-        preset_id: None,
-        content: message.content,
-        files: message.files,
-        inject_skills: message.inject_skills,
-        hidden: message.hidden,
-        origin: message.origin,
-        channel_platform: message.channel_platform,
-    }
-}
-
-fn autowork_delivery_from_conversation(
-    delivery: IdempotentMessageDelivery,
-) -> nomifun_requirement::AutoWorkMessageDelivery {
-    nomifun_requirement::AutoWorkMessageDelivery {
-        message_id: delivery.message_id,
-        replayed: delivery.replayed,
-        completed: delivery.completed,
-        result_ok: delivery.result_ok,
-        result_text: delivery.result_text,
-        result_error: delivery.result_error,
-        result_error_code: delivery.result_error_code,
-        result_error_retryable: delivery.result_error_retryable,
-    }
-}
-
-fn autowork_turn_state_from_conversation(
-    state: PublicTurnDeliveryState,
-) -> nomifun_requirement::AutoWorkTurnDeliveryState {
-    match state {
-        PublicTurnDeliveryState::Missing => {
-            nomifun_requirement::AutoWorkTurnDeliveryState::Missing
-        }
-        PublicTurnDeliveryState::Accepted { message_id } => {
-            nomifun_requirement::AutoWorkTurnDeliveryState::Accepted { message_id }
-        }
-        PublicTurnDeliveryState::Completed(delivery) => {
-            nomifun_requirement::AutoWorkTurnDeliveryState::Completed(
-                autowork_delivery_from_conversation(delivery),
-            )
-        }
-    }
-}
-
-fn autowork_reconciliation_from_conversation(
-    disposition: BackgroundTurnReconciliationDisposition,
-) -> nomifun_requirement::AutoWorkReconciliationDisposition {
-    match disposition {
-        BackgroundTurnReconciliationDisposition::LiveExactOwnerWait => {
-            nomifun_requirement::AutoWorkReconciliationDisposition::LiveExactOwnerWait
-        }
-        BackgroundTurnReconciliationDisposition::ReconciledOrTerminalReRead => {
-            nomifun_requirement::AutoWorkReconciliationDisposition::ReconciledOrTerminalReRead
-        }
-        BackgroundTurnReconciliationDisposition::ExternalProofRequiredFailClosed => {
-            nomifun_requirement::AutoWorkReconciliationDisposition::ExternalProofRequiredFailClosed
-        }
-        BackgroundTurnReconciliationDisposition::StaleConflict => {
-            nomifun_requirement::AutoWorkReconciliationDisposition::StaleConflict
-        }
-    }
 }
 
 fn session_workspace(session: &ConversationResponse) -> Result<String, AppError> {
@@ -2860,120 +2766,51 @@ fn runtime_options_from_session(
     ))
 }
 
-fn conversation_autowork_config_snapshot(
-    session_id: &str,
-    raw: Option<&Value>,
+fn canonical_autowork_config_snapshot(
+    stored: nomifun_agent_session::AgentSessionAutomationConfig,
 ) -> Result<nomifun_requirement::AutoWorkConfigSnapshot, AppError> {
-    let Some(raw) = raw else {
-        return Ok(nomifun_requirement::AutoWorkConfigSnapshot {
-            config: nomifun_requirement::AutoWorkConfig::default(),
-            revision: "conversation:0".to_owned(),
-            operation_id: None,
-        });
-    };
-    let object = raw.as_object().ok_or_else(|| {
-        AppError::Conflict(format!(
-            "AgentSession {session_id} has an invalid AutoWork config"
-        ))
-    })?;
-    let enabled = match object.get("enabled") {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(value)) => *value,
-        Some(_) => {
-            return Err(AppError::Conflict(format!(
-                "AgentSession {session_id} AutoWork enabled must be a boolean"
-            )));
-        }
-    };
-    let tag = match object.get("tag") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(value)) => Some(value.as_str()),
-        Some(_) => {
-            return Err(AppError::Conflict(format!(
-                "AgentSession {session_id} AutoWork tag must be a string"
-            )));
-        }
-    };
-    let max_requirements = match object.get("max_requirements") {
-        None | Some(Value::Null) => None,
-        Some(Value::Number(value)) => {
-            let value = value.as_u64().ok_or_else(|| {
-                AppError::Conflict(format!(
-                    "AgentSession {session_id} AutoWork max_requirements must be an unsigned integer"
-                ))
-            })?;
-            Some(u32::try_from(value).map_err(|_| {
-                AppError::Conflict(format!(
-                    "AgentSession {session_id} AutoWork max_requirements exceeds u32"
-                ))
-            })?)
-        }
-        Some(_) => {
-            return Err(AppError::Conflict(format!(
-                "AgentSession {session_id} AutoWork max_requirements must be an unsigned integer"
-            )));
-        }
-    };
-    let config = nomifun_requirement::AutoWorkConfig::normalize(
-        enabled,
-        tag,
-        max_requirements,
-    )
-    .map_err(|error| {
-        AppError::Conflict(format!(
-            "AgentSession {session_id} has an invalid persisted AutoWork config: {error}"
-        ))
-    })?;
-    let sequence = match object.get("_revision") {
-        None | Some(Value::Null) => None,
-        Some(Value::Number(value)) => Some(value.as_u64().ok_or_else(|| {
-            AppError::Conflict(format!(
-                "AgentSession {session_id} AutoWork revision must be an unsigned integer"
-            ))
-        })?),
-        Some(_) => {
-            return Err(AppError::Conflict(format!(
-                "AgentSession {session_id} AutoWork revision must be an unsigned integer"
-            )));
-        }
-    };
-    let operation_id = match object.get("_operation_id") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(value)) if !value.trim().is_empty() => Some(value.clone()),
-        Some(_) => {
-            return Err(AppError::Conflict(format!(
-                "AgentSession {session_id} AutoWork operation identity must be a non-empty string"
-            )));
-        }
-    };
-    let revision = match sequence {
-        Some(sequence) => format!("conversation:{sequence}"),
-        None => {
-            let fingerprint = serde_json::to_string(&config).map_err(|error| {
-                AppError::Internal(format!(
-                    "failed to fingerprint AutoWork config for {session_id}: {error}"
-                ))
-            })?;
-            format!(
-                "conversation:legacy:{:x}",
-                Sha256::digest(fingerprint.as_bytes())
-            )
-        }
-    };
     Ok(nomifun_requirement::AutoWorkConfigSnapshot {
-        config,
-        revision,
-        operation_id,
+        config: nomifun_requirement::AutoWorkConfig {
+            enabled: stored.enabled,
+            tag: stored.tag,
+            max_requirements: stored.max_requirements,
+        },
+        revision: format!("agent-session:{}", stored.revision),
+        operation_id: stored.operation_id,
     })
 }
 
-fn conversation_autowork_sequence(revision: &str) -> u64 {
+fn parse_canonical_autowork_revision(revision: &str) -> Result<u64, AppError> {
     revision
-        .strip_prefix("conversation:")
+        .strip_prefix("agent-session:")
         .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(0)
+        .ok_or_else(|| {
+            AppError::Conflict(
+                "AutoWork config expected_revision is not a canonical AgentSession revision"
+                    .to_owned(),
+            )
+        })
 }
 
+fn agent_session_store_error(error: nomifun_agent_session::SessionStoreError) -> AppError {
+    match error {
+        nomifun_agent_session::SessionStoreError::NotFound(message) => AppError::NotFound(message),
+        nomifun_agent_session::SessionStoreError::Deleted(message)
+        | nomifun_agent_session::SessionStoreError::Conflict(message)
+        | nomifun_agent_session::SessionStoreError::IdempotencyConflict(message) => {
+            AppError::Conflict(message)
+        }
+        nomifun_agent_session::SessionStoreError::InvalidEvent(message)
+        | nomifun_agent_session::SessionStoreError::InvalidPayload(message)
+        | nomifun_agent_session::SessionStoreError::InvalidSession(message)
+        | nomifun_agent_session::SessionStoreError::Registry(message) => {
+            AppError::BadRequest(message)
+        }
+        other => AppError::Internal(other.to_string()),
+    }
+}
+
+#[cfg(test)]
 fn session_projection_revision(session: &ConversationResponse) -> Result<String, AppError> {
     let projection = json!({
         "conversation_id": session.conversation_id,
@@ -3006,17 +2843,82 @@ fn session_projection_revision(session: &ConversationResponse) -> Result<String,
 #[cfg(test)]
 mod session_boundary_tests {
     use super::{
-        companion_archive_message, conversation_autowork_config_snapshot,
-        conversation_autowork_sequence, session_projection_revision,
+        canonical_autowork_config_snapshot, companion_archive_message,
+        cron_session_projection_from_response, delete_cleanup_requires_reconciliation,
+        frozen_workspace_root,
+        parse_canonical_autowork_revision, session_projection_revision, ssh_teardown_loss,
     };
-    use nomifun_api_types::MessageResponse;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use nomifun_agent_contracts::{
+        AgentBindingValue, AgentPresetId, AgentSessionId, DigestHex,
+        PresetRevisionRef, ResolvedSnapshotId, ResolvedSnapshotRef,
+        ResourceBindingId, ResourceId, ResourceKind, TypedResourceBinding,
+    };
+    use nomifun_api_types::{AgentKnowledgePolicy, AgentResolvedSnapshot, ExecutionModelRef, MessageResponse};
     use nomifun_common::{
         AgentType, ConversationSource, ConversationStatus, DecisionPolicy, DelegationPolicy,
-        MessagePosition, MessageType,
+        MessagePosition, MessageType, ProviderWithModel,
     };
     use serde_json::json;
 
     const SESSION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
+    const OWNER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
+
+    fn frozen_binding(workspace_root: &str, owner_id: &str) -> AgentBindingValue {
+        AgentBindingValue {
+            preset_revision_ref: PresetRevisionRef {
+                preset_id: AgentPresetId::from("0190f5fe-7c00-7a00-8abc-012345678902"),
+                revision: 1,
+                revision_digest: DigestHex::from("b".repeat(64)),
+            },
+            resolved_snapshot_ref: ResolvedSnapshotRef {
+                snapshot_id: ResolvedSnapshotId::from("snapshot-test"),
+                snapshot_digest: DigestHex::from("a".repeat(64)),
+            },
+            typed_resource_bindings: vec![TypedResourceBinding {
+                binding_id: ResourceBindingId::from("workspace-binding"),
+                resource_kind: ResourceKind::from("workspace"),
+                resource_id: ResourceId::from("default-workspace"),
+                owner_id: owner_id.to_owned(),
+                operations: BTreeSet::from(["read".to_owned(), "write".to_owned()]),
+                connection_config_ref: None,
+                typed_parameters: BTreeMap::from([(
+                    "workspace_root".to_owned(),
+                    workspace_root.to_owned(),
+                )]),
+            }],
+            binding_version: 1,
+        }
+    }
+
+    #[test]
+    fn canonical_delete_accepts_proven_ssh_teardown_and_defers_unknown_outcome() {
+        use nomifun_ssh::SshTeardown;
+
+        assert_eq!(
+            ssh_teardown_loss(&[
+                SshTeardown::Reaped {
+                    detail: "exit status 0".into(),
+                },
+                SshTeardown::AlreadyDown {
+                    detail: "already closed".into(),
+                },
+            ]),
+            None
+        );
+        assert_eq!(
+            ssh_teardown_loss(&[
+                SshTeardown::Reaped {
+                    detail: "exit status 0".into(),
+                },
+                SshTeardown::Lost {
+                    detail: "no exit evidence".into(),
+                },
+            ]),
+            Some("no exit evidence".into())
+        );
+    }
 
     #[test]
     fn canonical_agent_session_routes_cover_the_full_lifecycle() {
@@ -3073,49 +2975,259 @@ mod session_boundary_tests {
     }
 
     #[test]
-    fn conversation_autowork_config_has_stable_legacy_and_explicit_revisions() {
-        let legacy = json!({
-            "enabled": true,
-            "tag": "  release  ",
-            "max_requirements": 3,
-        });
-        let first =
-            conversation_autowork_config_snapshot(SESSION_ID, Some(&legacy)).unwrap();
-        let second =
-            conversation_autowork_config_snapshot(SESSION_ID, Some(&legacy)).unwrap();
-        assert_eq!(first, second);
-        assert_eq!(first.config.tag.as_deref(), Some("release"));
-        assert!(first.revision.starts_with("conversation:legacy:"));
+    fn domain_session_ports_try_the_canonical_store_before_legacy_fallback() {
+        let source = include_str!("nomi_core_session.rs");
+        let cron = source
+            .split_once("impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner")
+            .unwrap()
+            .1
+            .split_once("impl nomifun_channel::ChannelSessionPort")
+            .unwrap()
+            .0;
+        let cron_get = cron
+            .split_once("async fn get_session(")
+            .unwrap()
+            .1
+            .split_once("async fn list_conversation_responses_for_cron(")
+            .unwrap()
+            .0;
+        assert!(
+            cron_get.find("canonical_conversation_projection").unwrap()
+                < cron_get.find(".service").unwrap()
+        );
 
-        let versioned = json!({
-            "enabled": true,
-            "tag": "release",
-            "max_requirements": 3,
-            "_revision": 7,
-            "_operation_id": "gateway:request-7",
-        });
-        let snapshot =
-            conversation_autowork_config_snapshot(SESSION_ID, Some(&versioned)).unwrap();
-        assert_eq!(snapshot.revision, "conversation:7");
+        let execution = source
+            .split_once(
+                "impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner",
+            )
+            .unwrap()
+            .1
+            .split_once("fn agent_execution_delivery_from_conversation")
+            .unwrap()
+            .0;
+        let get = execution
+            .split_once("async fn get(")
+            .unwrap()
+            .1
+            .split_once("fn take_turn_tokens")
+            .unwrap()
+            .0;
+        assert!(get.contains("canonical_conversation_projection"));
+        assert!(get.contains("self.service.get"));
+    }
+
+    #[test]
+    fn frozen_workspace_projection_is_exact_and_owner_scoped() {
+        let workspace = std::env::temp_dir().join("uarc-canonical-workspace");
+        let workspace = workspace.to_string_lossy().into_owned();
+        let session_id = AgentSessionId::from(SESSION_ID);
+        assert_eq!(
+            frozen_workspace_root(
+                OWNER_ID,
+                &session_id,
+                &frozen_binding(&workspace, OWNER_ID),
+            )
+            .unwrap(),
+            Some(workspace)
+        );
+        let error = frozen_workspace_root(
+            OWNER_ID,
+            &session_id,
+            &frozen_binding(
+                &std::env::temp_dir().to_string_lossy(),
+                "0190f5fe-7c00-7a00-8000-000000000099",
+            ),
+        )
+        .unwrap_err();
+        assert!(matches!(error, nomifun_common::AppError::Forbidden(_)));
+
+        let mut no_workspace = frozen_binding(
+            &std::env::temp_dir().to_string_lossy(),
+            OWNER_ID,
+        );
+        no_workspace.typed_resource_bindings.clear();
+        assert_eq!(
+            frozen_workspace_root(OWNER_ID, &session_id, &no_workspace).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn cron_projection_uses_frozen_snapshot_metadata_not_legacy_extra() {
+        let snapshot = AgentResolvedSnapshot {
+            canonical_binding: None,
+            preset_id: "0190f5fe-7c00-7a00-8abc-012345678902".to_owned(),
+            preset_revision: 7,
+            preset_name: "Frozen Agent".to_owned(),
+            routing_description: None,
+            instructions: "frozen".to_owned(),
+            resolved_agent_id: Some("0190f5fe-7c00-7a00-8abc-012345678903".to_owned()),
+            resolved_agent_type: Some("nomi".to_owned()),
+            resolved_agent_backend: Some("nomi".to_owned()),
+            resolved_model: Some(ExecutionModelRef {
+                provider_id: "0190f5fe-7c00-7a00-8000-000000000002".to_owned(),
+                model: "step-3.7-flash".to_owned(),
+            }),
+            included_skills: vec!["frozen-skill".to_owned()],
+            excluded_auto_skills: Vec::new(),
+            enabled_capabilities: Vec::new(),
+            enabled_capability_actions: BTreeMap::new(),
+            required_resource_kinds: BTreeSet::new(),
+            knowledge_policy: AgentKnowledgePolicy::default(),
+            warnings: Vec::new(),
+        };
+        let response = super::ConversationResponse {
+            conversation_id: SESSION_ID.to_owned(),
+            name: "Session".to_owned(),
+            r#type: AgentType::Nomi,
+            model: Some(ProviderWithModel {
+                provider_id: "0190f5fe-7c00-7a00-8000-000000000002".to_owned(),
+                model: "step-3.7-flash".to_owned(),
+                use_model: None,
+            }),
+            status: ConversationStatus::Pending,
+            runtime: None,
+            source: None,
+            pinned: false,
+            pinned_at: None,
+            channel_chat_id: None,
+            preset_id: None,
+            preset_revision: None,
+            agent_snapshot: Some(snapshot),
+            delegation_policy: DelegationPolicy::Automatic,
+            execution_model_pool: None,
+            decision_policy: DecisionPolicy::Automatic,
+            execution_template_id: None,
+            linked_execution_id: None,
+            execution_step_id: None,
+            execution_attempt_id: None,
+            created_at: 0,
+            modified_at: 0,
+            extra: json!({
+                "workspace": std::env::temp_dir().to_string_lossy(),
+                "skills": ["forged-skill"],
+                "agent_name": "Forged Agent",
+                "custom_agent_id": "0190f5fe-7c00-7a00-8abc-012345678999",
+            }),
+        };
+        let projection =
+            cron_session_projection_from_response(OWNER_ID, response, None).unwrap();
+        assert_eq!(projection.skills, vec!["frozen-skill"]);
+        assert_eq!(projection.agent_name.as_deref(), Some("Frozen Agent"));
+        assert_eq!(
+            projection.custom_agent_id.as_deref(),
+            Some("0190f5fe-7c00-7a00-8abc-012345678903")
+        );
+        assert_eq!(
+            projection.model.as_ref().map(|model| model.model.as_str()),
+            Some("step-3.7-flash")
+        );
+        assert_eq!(projection.preset_revision, Some(7));
+    }
+
+    #[test]
+    fn canonical_delete_fences_admission_then_closes_exact_resources_before_tombstone() {
+        let source = include_str!("nomi_core_session.rs");
+        let handler = source
+            .rsplit_once("async fn delete_nomi_core_agent_session(")
+            .unwrap()
+            .1
+            .split_once("async fn open_nomi_core_remote(")
+            .unwrap()
+            .0;
+        let fence = handler
+            .find(".fence_delete(")
+            .expect("canonical delete must fence Store admission first");
+        let cleanup = handler
+            .find("cleanup_agent_session_resources_before_delete")
+            .expect("canonical delete must run exact resource cleanup");
+        let blockers = handler
+            .match_indices(".delete_blockers(")
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let tombstone = handler
+            .find(".complete_fenced_delete(")
+            .expect("canonical delete must write the Store tombstone");
+        assert!(handler.contains("tokio::spawn(async move"));
+        assert!(handler.contains("quiesce_agent_session_execution_before_delete"));
+        assert!(blockers.len() >= 2, "delete must check blockers before and after cleanup");
+        assert!(blockers.iter().any(|index| fence < *index && *index < cleanup));
+        assert!(
+            blockers
+                .iter()
+                .any(|index| cleanup < *index && *index < tombstone),
+            "resource cleanup must be followed by a final blocker check"
+        );
+        assert!(cleanup < tombstone, "cleanup must precede the tombstone");
+
+        let cleanup_owner = source
+            .rsplit_once("async fn cleanup_agent_session_resources_before_delete(")
+            .unwrap()
+            .1
+            .split_once("fn ssh_teardown_loss(")
+            .unwrap()
+            .0;
+        for exact_cleanup in [
+            ".retire_agent_session(agent_session_id)",
+            ".delete_agent_session(owner_id, agent_session_id, &bindings)",
+            ".close_agent_session(owner_id, agent_session_id)",
+            ".delete_jobs_by_agent_session(owner_id, agent_session_id)",
+            ".clear_owner_for_session(",
+            ".record_resource_cleanup_started(&session_id, \"ssh\")",
+            ".close_conversation(agent_session_id)",
+            ".record_resource_cleanup_succeeded(&session_id, \"ssh\")",
+        ] {
+            assert!(
+                cleanup_owner.contains(exact_cleanup),
+                "missing exact AgentSession cleanup {exact_cleanup}"
+            );
+        }
+        assert!(cleanup_owner.contains("record_resource_cleanup_uncertain"));
+        assert!(cleanup_owner.contains("acknowledge_persisted_agent_session_teardowns"));
+    }
+
+    #[test]
+    fn pending_cleanup_reenters_owner_but_terminal_gate_stays_closed() {
+        let pending = nomifun_agent_session::AgentSessionDeleteBlockers {
+            effects: Vec::new(),
+            resource_cleanup_pending: vec!["ssh".to_owned()],
+            resource_cleanup_uncertainties: Vec::new(),
+        };
+        assert!(!delete_cleanup_requires_reconciliation(&pending));
+        assert!(!pending.is_empty(), "pending cleanup must still block tombstone");
+
+        let uncertain = nomifun_agent_session::AgentSessionDeleteBlockers {
+            effects: Vec::new(),
+            resource_cleanup_pending: Vec::new(),
+            resource_cleanup_uncertainties: vec![
+                nomifun_agent_session::ResourceCleanupUncertainty {
+                    owner_domain: "ssh".to_owned(),
+                    recorded_at: 1,
+                },
+            ],
+        };
+        assert!(delete_cleanup_requires_reconciliation(&uncertain));
+    }
+
+    #[test]
+    fn canonical_autowork_config_uses_store_revision_and_operation_identity() {
+        let snapshot = canonical_autowork_config_snapshot(
+            nomifun_agent_session::AgentSessionAutomationConfig {
+                enabled: true,
+                tag: Some("release".to_owned()),
+                max_requirements: Some(3),
+                revision: 7,
+                operation_id: Some("gateway:request-7".to_owned()),
+            },
+        )
+        .unwrap();
+        assert_eq!(snapshot.revision, "agent-session:7");
         assert_eq!(
             snapshot.operation_id.as_deref(),
             Some("gateway:request-7")
         );
-        assert_eq!(conversation_autowork_sequence(&snapshot.revision), 7);
-    }
-
-    #[test]
-    fn conversation_autowork_config_rejects_malformed_persisted_values() {
-        for raw in [
-            json!({"enabled": "yes", "tag": "release"}),
-            json!({"enabled": true, "tag": " \t "}),
-            json!({"enabled": true, "tag": "release", "_revision": -1}),
-            json!({"enabled": true, "tag": "release", "_operation_id": ""}),
-        ] {
-            assert!(
-                conversation_autowork_config_snapshot(SESSION_ID, Some(&raw)).is_err()
-            );
-        }
+        assert_eq!(parse_canonical_autowork_revision(&snapshot.revision).unwrap(), 7);
+        assert!(parse_canonical_autowork_revision("conversation:7").is_err());
     }
 
     #[test]
@@ -3253,10 +3365,11 @@ const NOMI_CORE_REMOTE_CANCEL_COMMAND_TIMEOUT: Duration = Duration::from_secs(30
 /// route builders.
 ///
 /// `session_owner` is the same object that the normal Conversation, Channel,
-/// Cron, AutoWork, Companion, IDMM, and AgentExecution wiring receives.  The
+/// Cron, AutoWork, Companion, and AgentExecution wiring receives.  The
 /// adapter never constructs an AgentRuntimeRegistry or a ConversationService.
 #[derive(Clone)]
 pub(crate) struct NomiCoreAgentApiState {
+    authoritative_user_id: Arc<str>,
     product_agent_resolver: Arc<NomiCoreProductAgentResolver>,
     skill_discovery: Arc<NomiCorePluginToolSessionProvider>,
     pub(crate) session_owner: Arc<NomiCoreSessionOwner>,
@@ -3267,10 +3380,26 @@ pub(crate) struct NomiCoreAgentApiState {
         super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry,
     pub(crate) mcp_server_repository: Arc<dyn nomifun_db::IMcpServerRepository>,
     pub(crate) wave4_owners: Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
+    pub(crate) wave5_owner: Arc<super::agent_wave5_host::NomiCoreWave5Host>,
+    ssh_pool: nomifun_ssh::SshConnectionPool,
+    cron_cleanup_owner:
+        Arc<std::sync::OnceLock<Arc<nomifun_cron::service::CronService>>>,
+    requirement_cleanup_owner:
+        Arc<std::sync::OnceLock<Arc<nomifun_requirement::RequirementService>>>,
+    autowork_cleanup_owner:
+        Arc<std::sync::OnceLock<Arc<nomifun_requirement::AutoWorkRunner>>>,
+    #[cfg(feature = "browser-use")]
+    browser_resources:
+        Option<Arc<nomifun_browser_platform::workspace::BrowserResourceService>>,
+    #[cfg(feature = "browser-use")]
+    attached_chrome: Option<Arc<crate::AttachedChromeProviderService>>,
+    delete_cleanup_locks:
+        Arc<DashMap<(String, String), Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl NomiCoreAgentApiState {
     pub(crate) fn new(
+        authoritative_user_id: Arc<str>,
         session_owner: Arc<NomiCoreSessionOwner>,
         control_plane: Arc<AgentControlPlane>,
         remote_repository: Arc<dyn IRemoteBindingRepository>,
@@ -3278,10 +3407,19 @@ impl NomiCoreAgentApiState {
         resource_bindings: super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry,
         mcp_server_repository: Arc<dyn nomifun_db::IMcpServerRepository>,
         wave4_owners: Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
+        wave5_owner: Arc<super::agent_wave5_host::NomiCoreWave5Host>,
         product_agent_resolver: Arc<NomiCoreProductAgentResolver>,
         skill_discovery: Arc<NomiCorePluginToolSessionProvider>,
+        ssh_pool: nomifun_ssh::SshConnectionPool,
+        #[cfg(feature = "browser-use")]
+        browser_resources: Option<
+            Arc<nomifun_browser_platform::workspace::BrowserResourceService>,
+        >,
+        #[cfg(feature = "browser-use")]
+        attached_chrome: Option<Arc<crate::AttachedChromeProviderService>>,
     ) -> Self {
         Self {
+            authoritative_user_id,
             product_agent_resolver,
             skill_discovery,
             session_owner,
@@ -3291,9 +3429,488 @@ impl NomiCoreAgentApiState {
             resource_bindings,
             mcp_server_repository,
             wave4_owners,
+            wave5_owner,
+            ssh_pool,
+            cron_cleanup_owner: Arc::new(std::sync::OnceLock::new()),
+            requirement_cleanup_owner: Arc::new(std::sync::OnceLock::new()),
+            autowork_cleanup_owner: Arc::new(std::sync::OnceLock::new()),
+            #[cfg(feature = "browser-use")]
+            browser_resources,
+            #[cfg(feature = "browser-use")]
+            attached_chrome,
+            delete_cleanup_locks: Arc::new(DashMap::new()),
         }
     }
 
+    pub(crate) fn install_cron_cleanup_owner(
+        &self,
+        service: Arc<nomifun_cron::service::CronService>,
+    ) -> Result<(), &'static str> {
+        self.cron_cleanup_owner
+            .set(service)
+            .map_err(|_| "Cron cleanup owner is already installed")
+    }
+
+    pub(crate) fn install_requirement_cleanup_owner(
+        &self,
+        service: Arc<nomifun_requirement::RequirementService>,
+        runner: Arc<nomifun_requirement::AutoWorkRunner>,
+    ) -> Result<(), &'static str> {
+        self.requirement_cleanup_owner
+            .set(service)
+            .map_err(|_| "Requirement cleanup owner is already installed")?;
+        self.autowork_cleanup_owner
+            .set(runner)
+            .map_err(|_| "AutoWork cleanup owner is already installed")
+    }
+
+    async fn quiesce_agent_session_execution_before_delete(
+        &self,
+        agent_session_id: &str,
+    ) -> Result<(), NomiCoreApiError> {
+        let runner = self.autowork_cleanup_owner.get().ok_or_else(|| {
+            NomiCoreApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "AGENT_SESSION_AUTOWORK_CLEANUP_UNAVAILABLE",
+                "AutoWork cleanup owner is not installed",
+            )
+        })?;
+        runner
+            .stop_for_session_delete(agent_session_id)
+            .await
+            .map_err(|error| {
+                NomiCoreApiError::new(
+                    StatusCode::CONFLICT,
+                    "AGENT_SESSION_AUTOWORK_CLEANUP_FAILED",
+                    format!(
+                        "AutoWork/AgentExecution cleanup failed after AgentSession deletion was fenced: {error}"
+                    ),
+                )
+            })
+    }
+
+    fn delete_cleanup_lock(
+        &self,
+        owner_id: &str,
+        agent_session_id: &str,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        self.delete_cleanup_locks
+            .entry((owner_id.to_owned(), agent_session_id.to_owned()))
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    async fn cleanup_agent_session_resources_before_delete(
+        &self,
+        owner_id: &str,
+        agent_session_id: &str,
+    ) -> Result<(), NomiCoreApiError> {
+        // This synchronous pool fence must be the first operation after the
+        // durable Store fence. A cancelled HTTP future cannot leave direct
+        // SshBackend holders able to admit new work against a deleting Session.
+        self.ssh_pool.retire_agent_session(agent_session_id);
+        let session_id = AgentSessionId::from(agent_session_id.to_owned());
+        let deleting_session = self
+            .session_owner
+            .canonical()
+            .store()
+            .get_deleting_session(&session_id)
+            .await
+            .map_err(agent_session_store_error)?;
+        if deleting_session.owner_ref.principal_id != owner_id {
+            return Err(AppError::Forbidden(
+                "deleting AgentSession belongs to another owner".to_owned(),
+            )
+            .into());
+        }
+        let existing_blockers = self
+            .session_owner
+            .canonical()
+            .store()
+            .delete_blockers(&session_id)
+            .await
+            .map_err(|error| AppError::Internal(format!(
+                "inspect AgentSession delete blockers: {error}"
+            )))?;
+        let ssh_cleanup_overridden = self
+            .session_owner
+            .canonical()
+            .store()
+            .deletion_audits(&deleting_session.owner_ref, &session_id)
+            .await
+            .map_err(agent_session_store_error)?
+            .iter()
+            .any(|audit| {
+                audit.target_kind == "resource_cleanup" && audit.target_id == "ssh"
+            });
+        if existing_blockers
+            .resource_cleanup_uncertainties
+            .iter()
+            .any(|uncertainty| uncertainty.owner_domain == "ssh")
+        {
+            self.ssh_pool
+                .acknowledge_persisted_agent_session_teardowns(agent_session_id);
+            return Err(agent_session_cleanup_uncertain(agent_session_id));
+        }
+
+        #[cfg(feature = "browser-use")]
+        {
+            let bindings = managed_browser_profile_bindings(
+                owner_id,
+                &deleting_session.agent_binding,
+            )?;
+            if let Some(resources) = &self.browser_resources {
+                resources
+                    .delete_agent_session(owner_id, agent_session_id, &bindings)
+                    .await
+                    .map_err(|error| {
+                        NomiCoreApiError::new(
+                            StatusCode::CONFLICT,
+                            "AGENT_SESSION_BROWSER_CLEANUP_FAILED",
+                            format!(
+                                "Browser Resource cleanup failed before AgentSession deletion: {error}"
+                            ),
+                        )
+                    })?;
+            } else if !bindings.is_empty() {
+                return Err(NomiCoreApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "AGENT_SESSION_BROWSER_CLEANUP_UNAVAILABLE",
+                    "Managed Browser profile cleanup owner is unavailable",
+                ));
+            }
+        }
+        #[cfg(not(feature = "browser-use"))]
+        if deleting_session
+            .agent_binding
+            .typed_resource_bindings
+            .iter()
+            .any(|resource| resource.resource_kind.as_ref() == "browser")
+        {
+            return Err(NomiCoreApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "AGENT_SESSION_BROWSER_CLEANUP_UNAVAILABLE",
+                "Browser cleanup is unavailable in this host build",
+            ));
+        }
+        #[cfg(feature = "browser-use")]
+        {
+            let has_attached = has_attached_browser_binding(
+                owner_id,
+                &deleting_session.agent_binding,
+            )?;
+            if let Some(attached) = &self.attached_chrome {
+                attached
+                    .close_agent_session(owner_id, agent_session_id)
+                    .await
+                    .map_err(|error| {
+                        NomiCoreApiError::new(
+                            StatusCode::CONFLICT,
+                            "AGENT_SESSION_ATTACHED_BROWSER_CLEANUP_FAILED",
+                            format!(
+                                "Attached Browser cleanup failed before AgentSession deletion: {error}"
+                            ),
+                        )
+                    })?;
+            } else if has_attached {
+                return Err(NomiCoreApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "AGENT_SESSION_ATTACHED_BROWSER_CLEANUP_UNAVAILABLE",
+                    "Attached Browser cleanup owner is unavailable",
+                ));
+            }
+        }
+
+
+        let cron = self.cron_cleanup_owner.get().ok_or_else(|| {
+            NomiCoreApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "AGENT_SESSION_SCHEDULE_CLEANUP_UNAVAILABLE",
+                "Schedule cleanup owner is not installed",
+            )
+        })?;
+        cron.delete_jobs_by_agent_session(owner_id, agent_session_id)
+            .await
+            .map_err(|error| {
+                NomiCoreApiError::new(
+                    StatusCode::CONFLICT,
+                    "AGENT_SESSION_SCHEDULE_CLEANUP_FAILED",
+                    format!(
+                        "Schedule cleanup failed after AgentSession deletion was fenced: {error}"
+                    ),
+                )
+            })?;
+
+        let requirements = self.requirement_cleanup_owner.get().ok_or_else(|| {
+            NomiCoreApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "AGENT_SESSION_REQUIREMENT_CLEANUP_UNAVAILABLE",
+                "Requirement cleanup owner is not installed",
+            )
+        })?;
+        requirements
+            .clear_owner_for_session(
+                agent_session_id,
+                nomifun_api_types::AutoWorkTargetKind::Conversation,
+            )
+            .await
+            .map_err(|error| {
+                NomiCoreApiError::new(
+                    StatusCode::CONFLICT,
+                    "AGENT_SESSION_REQUIREMENT_CLEANUP_FAILED",
+                    format!(
+                        "Requirement owner cleanup failed after AgentSession deletion was fenced: {error}"
+                    ),
+                )
+            })?;
+
+        if ssh_cleanup_overridden {
+            // Manual risk acceptance is not physical cleanup proof. Do not
+            // rewrite the retained unknown outcome as `succeeded`; the durable
+            // non-private audit fact is the sole authority allowing deletion.
+            self.ssh_pool
+                .acknowledge_persisted_agent_session_teardowns(agent_session_id);
+            return Ok(());
+        }
+
+        self.session_owner
+            .canonical()
+            .store()
+            .record_resource_cleanup_started(&session_id, "ssh")
+            .await
+            .map_err(|error| AppError::Internal(format!(
+                "persist SSH cleanup start: {error}"
+            )))?;
+        let teardowns = self.ssh_pool.close_conversation(agent_session_id).await;
+        if ssh_teardown_loss(&teardowns).is_some() {
+            self.session_owner
+                .canonical()
+                .store()
+                .record_resource_cleanup_uncertain(&session_id, "ssh", now_ms())
+                .await
+                .map_err(|error| AppError::Internal(format!(
+                    "persist SSH cleanup uncertainty: {error}"
+                )))?;
+            self.ssh_pool
+                .acknowledge_persisted_agent_session_teardowns(agent_session_id);
+            return Err(agent_session_cleanup_uncertain(agent_session_id));
+        }
+        self.session_owner
+            .canonical()
+            .store()
+            .record_resource_cleanup_succeeded(&session_id, "ssh")
+            .await
+            .map_err(|error| AppError::Internal(format!(
+                "persist SSH cleanup success: {error}"
+            )))?;
+        self.ssh_pool
+            .acknowledge_persisted_agent_session_teardowns(agent_session_id);
+        Ok(())
+    }
+
+    pub(crate) async fn recover_deleting_agent_sessions(&self) -> Result<(), AppError> {
+        let sessions = self
+            .session_owner
+            .canonical()
+            .store()
+            .list_deleting_sessions()
+            .await
+            .map_err(agent_session_store_error)?;
+        for session in sessions {
+            let session_id = session.agent_session_id;
+            let owner = session.owner_ref;
+            let cleanup_lock =
+                self.delete_cleanup_lock(&owner.principal_id, session_id.as_ref());
+            let _cleanup = cleanup_lock.lock().await;
+            let _operation_fence = self
+                .session_owner
+                .session_operation_lock(session_id.as_ref())
+                .write_owned()
+                .await;
+
+            // No request future owns startup recovery. Retire direct SSH
+            // holders before the first awaited Store classification.
+            self.ssh_pool.retire_agent_session(session_id.as_ref());
+            if let Err(error) = self
+                .quiesce_agent_session_execution_before_delete(
+                    session_id.as_ref(),
+                )
+                .await
+            {
+                tracing::warn!(
+                    agent_session_id = session_id.as_ref(),
+                    code = %error.code,
+                    message = %error.message,
+                    "canonical AgentSession execution cleanup remains fenced"
+                );
+                continue;
+            }
+            self.session_owner
+                .canonical()
+                .store()
+                .quarantine_pending_effects_for_delete(&owner, &session_id, now_ms())
+                .await
+                .map_err(agent_session_store_error)?;
+            self.session_owner
+                .canonical()
+                .store()
+                .quarantine_pending_resource_cleanups_for_delete(
+                    &owner,
+                    &session_id,
+                    now_ms(),
+                )
+                .await
+                .map_err(agent_session_store_error)?;
+
+            let blockers = self
+                .session_owner
+                .canonical()
+                .store()
+                .delete_blockers(&session_id)
+                .await
+                .map_err(agent_session_store_error)?;
+            if !blockers.is_empty() {
+                tracing::warn!(
+                    agent_session_id = session_id.as_ref(),
+                    effect_blockers = blockers.effects.len(),
+                    pending_resource_cleanups = blockers.resource_cleanup_pending.len(),
+                    unknown_resource_cleanups = blockers.resource_cleanup_uncertainties.len(),
+                    "canonical AgentSession delete recovery awaits reconciliation"
+                );
+                continue;
+            }
+
+            if let Err(error) = self
+                .cleanup_agent_session_resources_before_delete(
+                    &owner.principal_id,
+                    session_id.as_ref(),
+                )
+                .await
+            {
+                tracing::warn!(
+                    agent_session_id = session_id.as_ref(),
+                    code = %error.code,
+                    message = %error.message,
+                    "canonical AgentSession delete recovery remains fenced"
+                );
+                continue;
+            }
+            let blockers = self
+                .session_owner
+                .canonical()
+                .store()
+                .delete_blockers(&session_id)
+                .await
+                .map_err(agent_session_store_error)?;
+            if !blockers.is_empty() {
+                tracing::warn!(
+                    agent_session_id = session_id.as_ref(),
+                    effect_blockers = blockers.effects.len(),
+                    pending_resource_cleanups = blockers.resource_cleanup_pending.len(),
+                    unknown_resource_cleanups = blockers.resource_cleanup_uncertainties.len(),
+                    "canonical AgentSession delete recovery awaits reconciliation"
+                );
+                continue;
+            }
+            let command = DeleteAgentSessionCommand {
+                operation_id: OperationId::from(format!(
+                    "delete-recovery:{}",
+                    session_id.as_ref()
+                )),
+                agent_session_id: session_id.clone(),
+                owner_ref: owner.clone(),
+                requested_at: 0,
+            };
+            self.session_owner
+                .canonical()
+                .complete_fenced_delete(&command, now_ms())
+                .await?;
+            if let Err(error) = self
+                .wave4_owners
+                .release_session(&owner.principal_id, session_id.as_ref())
+                .await
+            {
+                tracing::warn!(
+                    agent_session_id = session_id.as_ref(),
+                    code = error.code,
+                    "Wave 4 recovery cleanup deferred to orphan reconciliation"
+                );
+            }
+        }
+        Ok(())
+    }
+
+}
+
+fn ssh_teardown_loss(teardowns: &[nomifun_ssh::SshTeardown]) -> Option<String> {
+    let losses = teardowns
+        .iter()
+        .filter_map(|teardown| match teardown {
+            nomifun_ssh::SshTeardown::Lost { detail } => Some(detail.as_str()),
+            nomifun_ssh::SshTeardown::Reaped { .. }
+            | nomifun_ssh::SshTeardown::AlreadyDown { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    (!losses.is_empty()).then(|| losses.join("; "))
+}
+
+fn delete_cleanup_requires_reconciliation(
+    blockers: &nomifun_agent_session::AgentSessionDeleteBlockers,
+) -> bool {
+    !blockers.effects.is_empty() || !blockers.resource_cleanup_uncertainties.is_empty()
+}
+
+fn agent_session_cleanup_uncertain(
+    agent_session_id: &str,
+) -> NomiCoreApiError {
+    NomiCoreApiError::with_details(
+        StatusCode::CONFLICT,
+        "AGENT_SESSION_SSH_CLEANUP_UNCERTAIN",
+        "AgentSession deletion was deferred because SSH teardown could not be proven.",
+        json!({
+            "agent_session_id": agent_session_id,
+            "owner_domain": "ssh",
+            "outcome": "unknown",
+            "recovery": "domain_owner_reconciliation_or_explicit_manual_delete_override_required",
+            "manual_override_confirmation": DELETE_OVERRIDE_CONFIRMATION,
+        }),
+    )
+}
+
+fn agent_session_delete_blocked(
+    agent_session_id: &str,
+    blockers: &nomifun_agent_session::AgentSessionDeleteBlockers,
+) -> NomiCoreApiError {
+    let effects = blockers
+        .effects
+        .iter()
+        .map(|effect| {
+            json!({
+                "effect_id": effect.effect_id,
+                "owner_domain": effect.owner_domain,
+                "state": match effect.state {
+                    nomifun_agent_session::AgentEffectState::Pending => "pending",
+                    nomifun_agent_session::AgentEffectState::Unknown => "unknown",
+                    nomifun_agent_session::AgentEffectState::Cancelled => "cancelled",
+                    nomifun_agent_session::AgentEffectState::Returned => "returned",
+                    nomifun_agent_session::AgentEffectState::Rejected => "rejected",
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    NomiCoreApiError::with_details(
+        StatusCode::CONFLICT,
+        "AGENT_SESSION_DELETE_BLOCKED",
+        "AgentSession deletion remains fenced until every admitted effect is terminal and every unknown outcome is explicitly reconciled.",
+        json!({
+            "agent_session_id": agent_session_id,
+            "effects": effects,
+            "resource_cleanup_pending": blockers.resource_cleanup_pending,
+            "resource_cleanup_uncertainties": blockers.resource_cleanup_uncertainties,
+            "recovery": "domain_owner_reconciliation_or_explicit_manual_delete_override_required",
+            "manual_override_confirmation": DELETE_OVERRIDE_CONFIRMATION,
+        }),
+    )
 }
 
 /// Native Nomi tool owner bound to one exact authenticated AgentSession.
@@ -3486,6 +4103,10 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
         .route(
             "/api/agent-sessions/{agent_session_id}",
             get(get_nomi_core_agent_session).delete(delete_nomi_core_agent_session),
+        )
+        .route(
+            "/api/agent-sessions/{agent_session_id}/delete-override",
+            post(override_nomi_core_agent_session_delete),
         )
         .route(
             "/api/agent-sessions/{agent_session_id}/capabilities",
@@ -4070,6 +4691,27 @@ struct NomiCoreAgentSessionDeleteResponse {
     agent_session_id: String,
     state: &'static str,
     deleted_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "target", rename_all = "snake_case", deny_unknown_fields)]
+enum NomiCoreDeleteOverrideRequest {
+    Effect {
+        effect_id: String,
+        confirmation: String,
+        reason: String,
+    },
+    ResourceCleanup {
+        owner_domain: String,
+        confirmation: String,
+        reason: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct NomiCoreDeleteOverrideResponse {
+    agent_session_id: String,
+    remaining_blockers: nomifun_agent_session::AgentSessionDeleteBlockers,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5908,18 +6550,111 @@ async fn delete_nomi_core_agent_session(
     headers: HeaderMap,
 ) -> Result<Json<ApiResponse<NomiCoreAgentSessionDeleteResponse>>, NomiCoreApiError> {
     let session_id = parse_agent_session_id(&agent_session_id)?;
-    let deleted_at = now_ms();
     let key = request_idempotency_key(&headers, "nomi-core-agent-session-delete")?;
-    let deleted = state
+    let task_state = state.clone();
+    let task_owner = owner.clone();
+    let task_session_id = session_id.clone();
+    let deleted = tokio::spawn(async move {
+        execute_nomi_core_agent_session_delete(
+            task_state,
+            task_owner,
+            task_session_id,
+            key,
+        )
+        .await
+    })
+    .await
+    .map_err(|error| {
+        NomiCoreApiError::with_details(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "AGENT_SESSION_DELETE_OUTCOME_UNKNOWN",
+            "AgentSession delete owner stopped before publishing its terminal result.",
+            json!({
+                "agent_session_id": session_id,
+                "outcome": "unknown",
+                "recovery": "retry_same_delete_request",
+                "detail": error.to_string(),
+            }),
+        )
+    })??;
+    Ok(Json(ApiResponse::ok(NomiCoreAgentSessionDeleteResponse {
+        agent_session_id: session_id.as_ref().to_owned(),
+        state: "deleted",
+        deleted_at: deleted.tombstone.deleted_at,
+    })))
+}
+
+async fn execute_nomi_core_agent_session_delete(
+    state: NomiCoreAgentApiState,
+    owner: AuthenticatedOwner,
+    session_id: AgentSessionId,
+    key: String,
+) -> Result<nomifun_agent_session::DeleteResult, NomiCoreApiError> {
+    let cleanup_lock = state.delete_cleanup_lock(owner.as_ref(), session_id.as_ref());
+    let _cleanup = cleanup_lock.lock().await;
+    let _operation_fence = state
+        .session_owner
+        .session_operation_lock(session_id.as_ref())
+        .write_owned()
+        .await;
+    let deleted_at = now_ms();
+    let principal = authenticated_principal(&owner);
+    let prepared = state
         .session_owner
         .canonical()
-        .delete(
-            &authenticated_principal(&owner),
-            &session_id,
-            &key,
-            deleted_at,
-        )
+        .fence_delete(&principal, &session_id, &key, deleted_at)
         .await?;
+    let deleted = match prepared {
+        PreparedAgentSessionDelete::AlreadyDeleted(deleted) => deleted,
+        PreparedAgentSessionDelete::Fenced(command) => {
+            // From this point the process-owned task, not the request future,
+            // owns cleanup. Direct SSH holders are synchronously retired before
+            // any further await.
+            state.ssh_pool.retire_agent_session(session_id.as_ref());
+            state
+                .quiesce_agent_session_execution_before_delete(
+                    session_id.as_ref(),
+                )
+                .await?;
+            let blockers = state
+                .session_owner
+                .canonical()
+                .store()
+                .delete_blockers(&session_id)
+                .await
+                .map_err(agent_session_store_error)?;
+            if delete_cleanup_requires_reconciliation(&blockers) {
+                return Err(agent_session_delete_blocked(
+                    session_id.as_ref(),
+                    &blockers,
+                ));
+            }
+            state
+                .cleanup_agent_session_resources_before_delete(
+                    owner.as_ref(),
+                    session_id.as_ref(),
+                )
+                .await?;
+            let blockers = state
+                .session_owner
+                .canonical()
+                .store()
+                .delete_blockers(&session_id)
+                .await
+                .map_err(agent_session_store_error)?;
+            if !blockers.is_empty() {
+                return Err(agent_session_delete_blocked(
+                    session_id.as_ref(),
+                    &blockers,
+                ));
+            }
+            state
+                .session_owner
+                .canonical()
+                .complete_fenced_delete(&command, now_ms())
+                .await?
+        }
+    };
     if let Err(error) = state
         .wave4_owners
         .release_session(owner.as_ref(), session_id.as_ref())
@@ -5931,11 +6666,132 @@ async fn delete_nomi_core_agent_session(
             "Wave 4 resource and receipt cleanup deferred to orphan reconciliation"
         );
     }
-    Ok(Json(ApiResponse::ok(NomiCoreAgentSessionDeleteResponse {
-        agent_session_id: session_id.as_ref().to_owned(),
-        state: "deleted",
-        deleted_at: deleted.tombstone.deleted_at,
-    })))
+    Ok(deleted)
+}
+
+const DELETE_OVERRIDE_CONFIRMATION: &str =
+    "DELETE DESPITE UNRESOLVED EXTERNAL EFFECTS";
+
+async fn override_nomi_core_agent_session_delete(
+    State(state): State<NomiCoreAgentApiState>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path(agent_session_id): Path<String>,
+    Json(request): Json<NomiCoreDeleteOverrideRequest>,
+) -> Result<Json<ApiResponse<NomiCoreDeleteOverrideResponse>>, NomiCoreApiError> {
+    let session_id = parse_agent_session_id(&agent_session_id)?;
+    if owner.as_ref() != state.authoritative_user_id.as_ref() {
+        return Err(AppError::Forbidden(
+            "manual delete override requires the installation owner".to_owned(),
+        )
+        .into());
+    }
+    let (confirmation, reason) = match &request {
+        NomiCoreDeleteOverrideRequest::Effect {
+            confirmation,
+            reason,
+            ..
+        }
+        | NomiCoreDeleteOverrideRequest::ResourceCleanup {
+            confirmation,
+            reason,
+            ..
+        } => (confirmation, reason),
+    };
+    if confirmation != DELETE_OVERRIDE_CONFIRMATION
+        || reason.len() < 20
+        || reason.trim() != reason
+        || reason.len() > 4096
+        || reason.chars().any(char::is_control)
+    {
+        return Err(NomiCoreApiError::new(
+            StatusCode::BAD_REQUEST,
+            "AGENT_SESSION_DELETE_OVERRIDE_CONFIRMATION_INVALID",
+            "manual delete override requires the exact risk confirmation and a 20-4096 character audit reason",
+        ));
+    }
+    let reason_digest = nomifun_agent_contracts::DigestHex::from(format!(
+        "{:x}",
+        Sha256::digest(reason.as_bytes())
+    ));
+    let cleanup_lock = state.delete_cleanup_lock(owner.as_ref(), session_id.as_ref());
+    let _cleanup = cleanup_lock.lock().await;
+    let _operation_fence = state
+        .session_owner
+        .session_operation_lock(session_id.as_ref())
+        .write_owned()
+        .await;
+    let deleting = state
+        .session_owner
+        .canonical()
+        .store()
+        .get_deleting_session(&session_id)
+        .await
+        .map_err(agent_session_store_error)?;
+    let principal = authenticated_principal(&owner);
+    if deleting.owner_ref != principal {
+        return Err(AppError::Forbidden(
+            "AgentSession belongs to another owner".to_owned(),
+        )
+        .into());
+    }
+    match request {
+        NomiCoreDeleteOverrideRequest::Effect {
+            effect_id,
+            ..
+        } => {
+            state
+                .session_owner
+                .canonical()
+                .store()
+                .override_unknown_effect_for_delete(
+                    &principal,
+                    &session_id,
+                    &effect_id,
+                    &reason_digest,
+                    now_ms(),
+                )
+                .await
+                .map_err(agent_session_store_error)?;
+        }
+        NomiCoreDeleteOverrideRequest::ResourceCleanup {
+            owner_domain,
+            ..
+        } => {
+            state
+                .session_owner
+                .canonical()
+                .store()
+                .override_resource_cleanup_for_delete(
+                    &principal,
+                    &session_id,
+                    &owner_domain,
+                    &reason_digest,
+                    now_ms(),
+                )
+                .await
+                .map_err(agent_session_store_error)?;
+            if owner_domain == "ssh" {
+                state
+                    .ssh_pool
+                    .acknowledge_persisted_agent_session_teardowns(
+                        session_id.as_ref(),
+                    );
+            }
+        }
+    }
+    let remaining_blockers = state
+        .session_owner
+        .canonical()
+        .store()
+        .delete_blockers(&session_id)
+        .await
+        .map_err(agent_session_store_error)?;
+    Ok(Json(ApiResponse::ok(
+        NomiCoreDeleteOverrideResponse {
+            agent_session_id,
+            remaining_blockers,
+        },
+    )))
 }
 
 async fn open_nomi_core_remote(

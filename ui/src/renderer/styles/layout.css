@@ -254,7 +254,7 @@
 }
 
 /* Arco's default top (40px) lands on the app titlebar (42-48px) + chat header
-   row, covering the header controls (AutoWork / IDMM / Knowledge menus) since
+   row, covering the header capability menus since
    each message keeps pointer-events: auto. Drop toasts below that band. */
 .arco-message-wrapper-top {
   top: 96px !important;
