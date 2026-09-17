@@ -2,7 +2,7 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-17
-> 当前阶段：Wave 3 / UARC-030 + UARC-031 + UARC-032 active
+> 当前阶段：Wave 3 gate complete / Wave 4 ready
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
@@ -13,8 +13,9 @@
 > UARC-014 实现提交：`3983deff110f7e22b4eb85b6cc8ce00e9e8c4009`
 > Wave 1 gate 修复提交：`8afc40c7a`
 > Wave 2 实现提交：`efe80298f`
+> Wave 3 实现提交：`8454133b124a3d38636f882b098de80ce17028c0`
 > 当前主机：Windows
-> Initiative 状态：`active / Wave 3 feature implementation`
+> Initiative 状态：`active / Wave 4 ready`
 
 ## 1. 当前事实
 
@@ -37,6 +38,9 @@
   milestone 已通过；当时的 `skill.hooks` Context factory transition 已由 `UARC-022` 闭合。
 - Wave 2 的 UARC-020/021/022 已统一集成：一个自适应 Runtime loop、四个 Workspace Module、exact
   per-tool MCP/Plugin/Skill contribution、Store effect causation 与 Windows owner/path/process 证据均已闭合。
+- Wave 3 的 UARC-030/031/032 已统一集成：Web/Knowledge/Memory、Channel/Companion/Customer Service、
+  Creation/Workshop/Office/Plugin Development 均只暴露产品 Module 与 exact Actions；scene Context 从 binding
+  派生，provider/model transport 细节不再成为 Agent grant。
 - App 的 Wave 2 gate 为 499/499；过滤的 10 个 Robot unified fixture 明确归 `UARC-042`，另 1 个
   Bootstrap SQLite WAL 字节比较不稳定项保留到 Windows 回归闭合，不构成 UARC authority fallback。
 - 当前没有本轮源码重构的 macOS 编译、原生或打包证据。
@@ -73,9 +77,9 @@
 | `UARC-020` | integrated | Integration | verified | pending | 自适应单 Runtime、长程 Coding、exact restart proof |
 | `UARC-021` | integrated | Integration | verified | pending | 四个 Workspace Module、owner effects、Artifact/VCS hardening |
 | `UARC-022` | integrated | Integration | verified | pending | Skill locks、per-tool MCP、Plugin contributions；无 broad Runtime/proxy |
-| `UARC-030` | active | Feature Context/Data | pending | pending | Web、Knowledge 与 Memory Module |
-| `UARC-031` | active | Feature Conversation Domains | pending | pending | Channel、Companion 与 Customer Service Module |
-| `UARC-032` | active | Feature Creation | pending | pending | Creation、Workshop、Office、Attachments、Model Role |
+| `UARC-030` | integrated | Integration | verified | pending | Web、Knowledge、Memory Module 与 sensitive Action authority |
+| `UARC-031` | integrated | Integration | verified | pending | scene-derived Context；Channel/Companion/Customer Actions |
+| `UARC-032` | integrated | Integration | verified | pending | Creation/Workshop/Office/Plugin Modules 与 Creative UI |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -131,6 +135,12 @@
 | Wave 2 App gate | 499 passed / 0 failed / 11 filtered | 10 UARC-042 Robot fixtures + 1 Bootstrap WAL byte-test anomaly |
 | Wave 2 App feature compile | default + `browser-use,computer-use` passed | Windows desktop feature composition compiles |
 | Wave 2 contract/boundary | generator check + 108 contracts + scanner self-test passed | 3,035 files；baseline anomaly 1；Mac gaps 3 |
+| UARC-030 Domain/AI/App | Wave1 4 + Knowledge 329 + AI 542 + App 73 passed | Product modules、sensitive read/write、citation provenance |
+| UARC-031 Domain/App | Channel 353 + Companion 275 + Customer 31 + Wave4 target 6 + App 10 passed | scene binding、receipts、persona、notes/handoff |
+| UARC-032 Domain/App/UI | Wave3 13 + Office 89 + App slash 2 + UI 23 passed | product actions、Office owner、two-authority slash discovery |
+| Wave 3 compile/contract/UI boundary | Browser feature + live smoke no-run + generator/inventory/typecheck passed | 1,931 renderer sources；880×600 boundary |
+| Wave 3 full App transition probe | 491 passed / 11 known future-owned failures | 10 UARC-042 Robot + 1 final Windows WAL anomaly |
+| Commercial selected-model probe | StepFun Coding Plan `step-3.7-flash` direct HTTP 200 | canonical turn dispatch pending UARC-051/052；未记作 integrated smoke pass |
 | Windows UARC full gate | not run | 否 |
 | macOS UARC shared compile | not run | 否 |
 | macOS native Browser/Computer/Process | not run | 否 |
@@ -150,7 +160,7 @@
 
 - UARC 实施无产品决定 blocker。
 - macOS 任务需要可用 Mac 主机；在主机可用前状态保持 `pending`，不能标完成。
-- Wave 2 barrier 已收口；`UARC-030/031/032` 可以从同一 barrier 启动，Integration 继续独占共享合同、
+- Wave 3 barrier 已收口；`UARC-033/034/040` 可从同一 barrier 启动，Integration 继续独占共享合同、
   根配置、生成物、状态台账和最终合并。
 - App 当前只保留 10 个 `UARC-042` Robot device-MCP transition fixture；旧 proxy 已物理删除，后续必须
   通过 materialized Robot Actions 修复。
@@ -163,8 +173,9 @@
 
 ## 8. Next ready tasks
 
-1. `UARC-030/031/032` 已从同一 Wave 2 barrier 并行执行；Integration 等待有界交付。
-2. Wave 3 合并前没有其他 ready task；共享合同、生成物、根配置和状态台账仍由 Integration 独占。
+1. `UARC-033`：Requirements、AutoWork、AgentExecution 与 IDMM 收敛。
+2. `UARC-034`：Schedule、Notification、Remote 与 SSH Module。
+3. `UARC-040`：Browser 产品模型与共享 Resource/Provider contract。
 
 ## 9. 状态更新模板
 
@@ -451,3 +462,29 @@
 - Not run: Wave 3 gates wait for all three bounded deliveries and Integration merge.
 - Remaining/blocker: none. External Mac host remains a later platform prerequisite.
 - Next ready tasks: none until Wave 3 is integrated.
+
+### 2026-09-17 UARC-030/031/032 integrated and Wave 3 gate complete
+
+- Barrier/source: Wave 2 closeout `67417aa08`; unified implementation
+  `8454133b124a3d38636f882b098de80ce17028c0`.
+- Owner/write set: Integration merged the three bounded Feature lanes, alone updated contracts/generated artifacts,
+  resolved App composition seams, ran the single Cargo/UI gates and performed final review.
+- Changed: four Context/Data Modules with 10 exact Actions; three conversation-domain Modules with seven Actions and
+  binding-derived `BeforeTurn` scenes; four Creation/Office/Plugin Modules with 19 Actions; exact resource operations,
+  real Domain owners, immutable slash discovery and finished Creative Studio states.
+- Deleted: direct Web fetch Tool, local-Web binding projection test, old Wave4 App wrapper, provider/media and persistent
+  attachment grants, 19 Creation fragments, and channel/persona/dialogue authoring Capability paths.
+- Retained + reason: provider implementations, sensitive Knowledge/Memory operations, Channel/Companion/Customer
+  business owners, Creation task routes, Canvas/asset owners and Session-scoped current-turn attachments remain target
+  implementation facts, not compatibility translators.
+- Tests: Wave1 4; Wave3 13; Wave4 target 6; Knowledge 329; Channel 353; Companion 275; Customer 31; Office 89;
+  AI Agent 542; App focused 73 + Wave4 10 + slash HTTP 2; final UI 23. Browser feature App check, live-provider
+  no-run compile, typecheck, 1,931-source desktop boundary, target inventory, contract generator, runner self-test,
+  UARC scanner and whitespace checks passed. Full App probe remains 491/502 only on the 11 already assigned cases.
+- Windows: verified for Wave 3 implementation, scoped runtime/domain/UI gates and 880×600 product boundary.
+- macOS: pending; no Mac compile/native/CEF/TCC/package evidence is claimed.
+- Not run: Windows installer/signing and macOS native/package gates, which are outside these three task surfaces.
+  Commercial selected-model evidence used only StepFun Coding Plan `step-3.7-flash`: direct provider probe passed;
+  canonical integrated reply remains pending the UARC-051/052 runtime-dispatch cutover and was not reported as pass.
+- Remaining/blocker: none for Wave 3. External Mac host remains required later; no credential was persisted.
+- Next ready tasks: `UARC-033`, `UARC-034`, `UARC-040`, at most three Feature workers from the Wave 3 barrier.
