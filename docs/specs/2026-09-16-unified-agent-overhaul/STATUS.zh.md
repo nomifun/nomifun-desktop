@@ -2,7 +2,7 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-17
-> 当前阶段：Wave 2 gate complete / Wave 3 ready
+> 当前阶段：Wave 3 / UARC-030 + UARC-031 + UARC-032 active
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
@@ -14,7 +14,7 @@
 > Wave 1 gate 修复提交：`8afc40c7a`
 > Wave 2 实现提交：`efe80298f`
 > 当前主机：Windows
-> Initiative 状态：`active / Wave 3 ready`
+> Initiative 状态：`active / Wave 3 feature implementation`
 
 ## 1. 当前事实
 
@@ -73,7 +73,9 @@
 | `UARC-020` | integrated | Integration | verified | pending | 自适应单 Runtime、长程 Coding、exact restart proof |
 | `UARC-021` | integrated | Integration | verified | pending | 四个 Workspace Module、owner effects、Artifact/VCS hardening |
 | `UARC-022` | integrated | Integration | verified | pending | Skill locks、per-tool MCP、Plugin contributions；无 broad Runtime/proxy |
-| `UARC-030/031/032` | ready | unassigned | pending | pending | Wave 3 三条互斥 Feature lane 已释放 |
+| `UARC-030` | active | Feature Context/Data | pending | pending | Web、Knowledge 与 Memory Module |
+| `UARC-031` | active | Feature Conversation Domains | pending | pending | Channel、Companion 与 Customer Service Module |
+| `UARC-032` | active | Feature Creation | pending | pending | Creation、Workshop、Office、Attachments、Model Role |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -161,9 +163,8 @@
 
 ## 8. Next ready tasks
 
-1. `UARC-030`：Web、Knowledge 与 Memory Module。
-2. `UARC-031`：Channel、Companion 与 Customer Service Module。
-3. `UARC-032`：Creation、Workshop、Office、Attachments 与 Model Role Module。
+1. `UARC-030/031/032` 已从同一 Wave 2 barrier 并行执行；Integration 等待有界交付。
+2. Wave 3 合并前没有其他 ready task；共享合同、生成物、根配置和状态台账仍由 Integration 独占。
 
 ## 9. 状态更新模板
 
@@ -433,3 +434,20 @@
   assigned to final Windows regression.
 - Remaining/blocker: none for Wave 2. External Mac host remains required later.
 - Next ready tasks: `UARC-030`, `UARC-031`, `UARC-032`, at most three Feature workers from the Wave 2 barrier.
+
+### 2026-09-17 Wave 3 feature lanes started
+
+- Barrier/source: Wave 2 closeout `67417aa08` for all three Feature lanes.
+- Owner/write set: Feature Context/Data → `UARC-030`; Feature Conversation Domains → `UARC-031`; Feature
+  Creation → `UARC-032`. Their manifest write sets are pairwise disjoint; Integration retains every shared contract,
+  root config, generated artifact, status and merge path.
+- Changed: three tasks claimed from one clean barrier; no implementation change in this status commit.
+- Deleted: pending each task's delete set.
+- Retained + reason: existing Domain owners and product services remain execution owners while their authoring IDs are
+  replaced by product Modules/Actions.
+- Tests: workers start without Cargo; Integration will serialize focused validation after delivery.
+- Windows: implementation active.
+- macOS: source implementation active where shared; no Mac evidence claimed.
+- Not run: Wave 3 gates wait for all three bounded deliveries and Integration merge.
+- Remaining/blocker: none. External Mac host remains a later platform prerequisite.
+- Next ready tasks: none until Wave 3 is integrated.
