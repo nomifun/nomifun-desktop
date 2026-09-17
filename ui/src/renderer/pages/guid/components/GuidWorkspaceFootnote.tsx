@@ -6,7 +6,6 @@
 
 import { ipcBridge } from '@/common';
 import CopyIconButton from '@/renderer/components/base/CopyIconButton';
-import PathText from '@/renderer/components/base/PathText';
 import { addRecentWorkspace, getRecentWorkspaces } from '@/renderer/components/workspace';
 import { Tooltip } from '@arco-design/web-react';
 import { Close, Down } from '@icon-park/react';
@@ -55,6 +54,7 @@ const GuidWorkspaceFootnote: React.FC<GuidWorkspaceFootnoteProps> = ({
   onClearWorkspace,
 }) => {
   const { t } = useTranslation();
+  const workspaceName = workspaceDir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || workspaceDir;
   const recentWorkspaces = getRecentWorkspaces();
   const [open, setOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -92,12 +92,17 @@ const GuidWorkspaceFootnote: React.FC<GuidWorkspaceFootnoteProps> = ({
     const el = triggerRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    // position above the trigger, aligned to left edge
+    // The selector sits above the composer; open below when there is room.
+    const spaceBelow = window.innerHeight - rect.bottom - 14;
+    const spaceAbove = rect.top - 14;
+    const openBelow = spaceBelow >= Math.min(360, spaceAbove);
     setDropdownStyle({
       position: 'fixed',
-      left: rect.left,
-      bottom: window.innerHeight - rect.top + 6,
-      minWidth: 230,
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - 328)),
+      ...(openBelow ? { top: rect.bottom + 6 } : { bottom: window.innerHeight - rect.top + 6 }),
+      width: 320,
+      maxWidth: 'calc(100vw - 16px)',
+      maxHeight: Math.min(360, Math.max(0, openBelow ? spaceBelow : spaceAbove)),
       zIndex: 9999,
     });
     setOpen(true);
@@ -246,7 +251,7 @@ const GuidWorkspaceFootnote: React.FC<GuidWorkspaceFootnoteProps> = ({
                 onClick={toggleOpen}
               >
                 <FolderIcon size={14} />
-                <PathText path={workspaceDir} className={styles.workspacePillName} />
+                <span className={styles.workspacePillName}>{workspaceName}</span>
                 <Down
                   theme='outline'
                   size='12'
@@ -283,7 +288,7 @@ const GuidWorkspaceFootnote: React.FC<GuidWorkspaceFootnoteProps> = ({
             onClick={recentWorkspaces.length > 0 ? toggleOpen : handleBrowseWorkspace}
           >
             <FolderIcon size={14} />
-            <span>{t('guid.workspace.workInProject')}</span>
+            <span>{t('conversation.welcome.specifyWorkspace')}</span>
             {recentWorkspaces.length > 0 && (
               <Down
                 theme='outline'

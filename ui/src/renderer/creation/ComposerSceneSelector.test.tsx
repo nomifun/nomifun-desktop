@@ -6,7 +6,7 @@ import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import messages from '@/renderer/services/i18n/locales/zh-CN/creation.json';
 import { CreationComposerContext } from './CreationComposerContext';
-import { ComposerSceneHeader, SceneDiscoveryHint } from './ComposerSceneSelector';
+import { ComposerSceneHeader } from './ComposerSceneSelector';
 import { useCreationDraft } from './useCreationDraft';
 
 const i18n = createInstance();
@@ -26,7 +26,6 @@ function mount({ preparing = false } = {}) {
     }}>
       <ComposerSceneHeader agent={<button type='button'>最简问答</button>} />
       <textarea aria-label='描述' value={prompt} onChange={event => setPrompt(event.target.value)} />
-      <SceneDiscoveryHint />
     </CreationComposerContext.Provider>;
   }
   return { page: render(<I18nextProvider i18n={i18n}><Harness /></I18nextProvider>), getDraft: () => current, switches: () => switches };
@@ -77,15 +76,6 @@ test('hover does not open a popup, take input focus, or switch the Agent', () =>
   expect(page.queryByRole('menu')).toBeNull();
   expect(document.activeElement).toBe(input);
   expect(switches()).toBe(0);
-});
-
-test('the discovery hint can be dismissed and stays dismissed after remount', () => {
-  const { page } = mount();
-  expect(page.getByText('也可以创作图像、视频和音乐')).toBeTruthy();
-  fireEvent.click(page.getByRole('button', { name: '不再显示场景提示' }));
-  expect(page.queryByText('也可以创作图像、视频和音乐')).toBeNull();
-  page.unmount();
-  expect(mount().page.queryByText('也可以创作图像、视频和音乐')).toBeNull();
 });
 
 test('preparing an Agent disables scene changes', () => {
