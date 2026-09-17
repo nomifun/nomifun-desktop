@@ -591,6 +591,23 @@
 - macOS: no native claim; `UARC-062` remains the Mac TCC/lifecycle owner.
 - Remaining/blocker: write-set gap resolved; no user decision is required.
 
+### 2026-09-18 UARC-041 exact Browser UI authority seams granted
+
+- Barrier/source: Wave 5 start `90ba8f95f`; Integration review found three pre-gate correctness gaps in the completed
+  renderer lane.
+- Owner/write set: Integration adds the exact Browser snapshot builders and focused Rust/App tests to `UARC-041`;
+  renderer/ChatLayout files were already in the task write set.
+- Changed: Browser snapshots must expose the Session's exact Action allowlist so human controls can be disabled before
+  dispatch; attached Chrome is informational until an existing target is explicitly projected; entering the 880×600
+  focus layout must move focus out of the hidden chat surface.
+- Deleted: optimistic all-controls authority, attached-provider `userReady` claims and hidden-element focus retention.
+- Retained + reason: backend Action admission remains authoritative and still rejects forged/stale commands; the UI
+  projection only prevents guaranteed failures and explains unavailable controls.
+- Tests: pending subset-grant control matrix, attached zero-command case and ChatLayout open/resize focus handoff.
+- Windows: fixes are required before WebView2 native/visual acceptance.
+- macOS: snapshot contract is shared; CEF native behavior remains `UARC-061`.
+- Remaining/blocker: review findings are fully specified and require no product decision.
+
 ### 2026-09-18 UARC-042 hosted-effect rejection seam granted
 
 - Barrier/source: Wave 5 start `90ba8f95f`; the completed owner exposed one final receipt-classification call site.

@@ -339,7 +339,7 @@
       "status": "active",
       "depends_on": ["UARC-040"],
       "lane": "feature-browser-windows-ui",
-      "write_set": ["apps/desktop/src/browser_surface/**", "ui/src/renderer/pages/conversation/Browser/**", "ui/src/renderer/pages/guid/**", "ui/src/renderer/pages/conversation/components/ChatLayout/**", "ui/src/renderer/components/layout/Sider/capabilityHubNav.test.ts", "ui/src/renderer/services/i18n/locales/*/browserWorkspace.json"],
+      "write_set": ["apps/desktop/src/browser_surface/**", "crates/backend/nomifun-browser-platform/src/workspace.rs", "crates/backend/nomifun-browser-platform/src/workspace/tests.rs", "crates/backend/nomifun-browser-platform/src/bound_resource.rs", "crates/backend/nomifun-app/src/router/browser_workspace.rs", "crates/backend/nomifun-app/tests/browser_workspace.rs", "ui/src/renderer/pages/conversation/Browser/**", "ui/src/renderer/pages/guid/**", "ui/src/renderer/pages/conversation/components/ChatLayout/**", "ui/src/renderer/components/layout/Sider/capabilityHubNav.test.ts", "ui/src/renderer/services/i18n/locales/*/browserWorkspace.json"],
       "delete_set": ["Guid session-browser button", "launch('browser')", "initial-browser-open", "Browser-only empty Session", "Conversation-main-Agent-only controls"],
       "retained_set": ["Browser panel as a generic current-session capability surface", "native WebView2 implementation"],
       "ui_surface": ["Guid composer", "Conversation tool rail", "Browser panel", "Browser provider status"],
