@@ -291,7 +291,7 @@
       "status": "active",
       "depends_on": ["UARC-012", "UARC-014"],
       "lane": "feature-automation-core",
-      "write_set": ["crates/backend/nomifun-requirement/**", "crates/backend/nomifun-agent-execution/**", "crates/backend/nomifun-idmm/**", "crates/backend/nomifun-agent-domain-wave5/**"],
+      "write_set": ["crates/backend/nomifun-requirement/**", "crates/backend/nomifun-agent-execution/**", "crates/backend/nomifun-idmm/**", "crates/backend/nomifun-agent-domain-wave5/**", "crates/backend/nomifun-app/Cargo.toml", "crates/backend/nomifun-app/src/router/state.rs", "crates/backend/nomifun-app/src/router/routes.rs", "crates/backend/nomifun-app/src/router/nomi_core_session.rs", "crates/backend/nomifun-app/tests/idmm_e2e.rs", "ui/src/common/adapter/ipcBridge.ts", "ui/src/common/adapter/ipcBridge.idmm-intervention-wire.test.ts", "ui/src/renderer/components/capability/*idmm*", "ui/src/renderer/pages/guid/**", "ui/src/renderer/pages/conversation/components/ChatLayout/**", "ui/src/renderer/pages/conversation/components/Idmm*", "ui/src/renderer/pages/conversation/SessionList/**", "ui/src/renderer/pages/terminal/**", "ui/src/renderer/services/i18n/locales/*/idmm.json", "ui/src/renderer/services/i18n/locales/*/index.ts", "ui/src/common/config/i18n-config.json"],
       "delete_set": ["Agent-path IDMM supervisor/UI contracts", "AutoWork parallel attempt/receipt state machine", "requirements one-capability-per-action registrations"],
       "retained_set": ["Requirements business facts", "AutoWork queue policy", "AgentExecution DAG/Attempt", "Terminal-specific supervisor if required"],
       "ui_surface": ["Requirements/AutoWork controls; removal of Agent IDMM controls"],
