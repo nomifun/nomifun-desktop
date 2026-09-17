@@ -543,3 +543,22 @@
   external Mac hardware is a later platform prerequisite, not a Windows Wave 4 blocker.
 - Next ready tasks: `UARC-041`, `UARC-042`, `UARC-050` as pairwise-disjoint Windows/shared Feature lanes; `UARC-061`
   remains pending a Mac host and must not be claimed from Windows.
+
+### 2026-09-18 Wave 5 Windows/shared feature lanes started
+
+- Barrier/source: Wave 4 closeout `c5d64b943a7862bb9837686214e413899a47efc2` for all three Feature lanes.
+- Owner/write set: Feature Browser Windows UI → `UARC-041`; Feature Devices → `UARC-042`; Feature Agent UI →
+  `UARC-050`. Manifest write sets are pairwise disjoint; Integration alone owns shared contracts, generated artifacts,
+  root configuration, status, final merge and all broad/native/UI gates.
+- Changed: three bounded tasks claimed from the clean Wave 4 barrier; no feature implementation is recorded in this
+  status commit.
+- Deleted: pending each task's declared delete set; no macOS CEF source or WKWebView substitute is authorized here.
+- Retained + reason: Windows WebView2, Computer/Robot physical owners and exact Agent compile preview remain the target
+  production foundations while their fragmented entry points and implementation vocabulary are replaced.
+- Tests: workers begin without a Cargo/full-UI/native-build lease. Integration will serialize focused checks, 880×600
+  visual acceptance, full typecheck/UI boundary and the Wave gate after all deliveries.
+- Windows: implementation active.
+- macOS: shared UI/source changes may be prepared, but no Mac verification is claimed; `UARC-061/062` remain unclaimed.
+- Not run: Wave 5 gates wait for the three bounded deliveries and Integration merge.
+- Remaining/blocker: none for the Windows/shared lanes. External Mac hardware remains a later platform prerequisite.
+- Next ready tasks: none until `UARC-041/042/050` integrate; then `UARC-051` is the next serial integration task.
