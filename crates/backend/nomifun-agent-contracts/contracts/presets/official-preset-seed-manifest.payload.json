@@ -1,6 +1,6 @@
 {
   "manifest_version": "1.0.0",
-  "target_first_party_contribution_digest": "be13bb95cf0bf1fca71ebe13d4d5f8f956f00ee0134614946b8f6009a4293bb3",
+  "target_first_party_contribution_digest": "793c2932cbcef6e66ee9066d857ea2682bd3b8ce972e7d070e2ba566e49b5fbc",
   "target_runtime_feature_inventory_digest": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
   "templates": {
     "chat.minimal": {
@@ -37,10 +37,6 @@
         },
         {
           "id": "citation.render",
-          "version": "1.0.0"
-        },
-        {
-          "id": "fs.read",
           "version": "1.0.0"
         },
         {
@@ -103,63 +99,19 @@
           "version": "1.0.0"
         },
         {
-          "id": "fs.read",
+          "id": "workspace.files",
           "version": "1.0.0"
         },
         {
-          "id": "fs.search",
+          "id": "workspace.vcs",
           "version": "1.0.0"
         },
         {
-          "id": "fs.write",
-          "version": "1.0.0"
-        },
-        {
-          "id": "fs.patch",
-          "version": "1.0.0"
-        },
-        {
-          "id": "workspace.bind",
+          "id": "workspace.process",
           "version": "1.0.0"
         },
         {
           "id": "workspace.artifacts",
-          "version": "1.0.0"
-        },
-        {
-          "id": "vcs.status",
-          "version": "1.0.0"
-        },
-        {
-          "id": "vcs.diff",
-          "version": "1.0.0"
-        },
-        {
-          "id": "process.exec",
-          "version": "1.0.0"
-        },
-        {
-          "id": "process.session",
-          "version": "1.0.0"
-        },
-        {
-          "id": "terminal.pty",
-          "version": "1.0.0"
-        },
-        {
-          "id": "skill.catalog",
-          "version": "1.0.0"
-        },
-        {
-          "id": "skill.describe",
-          "version": "1.0.0"
-        },
-        {
-          "id": "skill.invoke",
-          "version": "1.0.0"
-        },
-        {
-          "id": "skill.hooks",
           "version": "1.0.0"
         },
         {
@@ -168,46 +120,6 @@
         },
         {
           "id": "agent.fork",
-          "version": "1.0.0"
-        },
-        {
-          "id": "fs.delete",
-          "version": "1.0.0"
-        },
-        {
-          "id": "fs.watch",
-          "version": "1.0.0"
-        },
-        {
-          "id": "fs.snapshot",
-          "version": "1.0.0"
-        },
-        {
-          "id": "vcs.stage",
-          "version": "1.0.0"
-        },
-        {
-          "id": "vcs.commit",
-          "version": "1.0.0"
-        },
-        {
-          "id": "vcs.push",
-          "version": "1.0.0"
-        },
-        {
-          "id": "mcp.connect",
-          "version": "1.0.0"
-        },
-        {
-          "id": "mcp.tool_proxy",
-          "version": "1.0.0"
-        },
-        {
-          "id": "mcp.resource",
-          "version": "1.0.0"
-        },
-        {
-          "id": "mcp.oauth",
           "version": "1.0.0"
         },
         {
@@ -231,7 +143,6 @@
       "required_resource_kinds": [
         "mcp_server",
         "process_session",
-        "terminal",
         "workspace"
       ],
       "required_runtime_features": [
@@ -343,14 +254,6 @@
         },
         {
           "id": "robot.device_tools",
-          "version": "1.0.0"
-        },
-        {
-          "id": "mcp.connect",
-          "version": "1.0.0"
-        },
-        {
-          "id": "mcp.tool_proxy",
           "version": "1.0.0"
         }
       ],
@@ -476,7 +379,6 @@
         "creation.image_edit",
         "creation.music",
         "creation.video",
-        "fs.read",
         "knowledge.read",
         "knowledge.search",
         "memory.project.citation",
@@ -513,35 +415,14 @@
         "agent.execution.steer",
         "agent.fork",
         "citation.render",
-        "fs.delete",
-        "fs.patch",
-        "fs.read",
-        "fs.search",
-        "fs.snapshot",
-        "fs.watch",
-        "fs.write",
         "llm.vision",
-        "mcp.connect",
-        "mcp.oauth",
-        "mcp.resource",
-        "mcp.tool_proxy",
-        "process.exec",
-        "process.session",
         "session.attachments.read",
-        "skill.catalog",
-        "skill.describe",
-        "skill.hooks",
-        "skill.invoke",
-        "terminal.pty",
-        "vcs.commit",
-        "vcs.diff",
-        "vcs.push",
-        "vcs.stage",
-        "vcs.status",
         "web.fetch",
         "web.search",
         "workspace.artifacts",
-        "workspace.bind"
+        "workspace.files",
+        "workspace.process",
+        "workspace.vcs"
       ],
       "required_runtime_features": [
         "code_mode",
@@ -570,7 +451,6 @@
       "required_resource_kinds": [
         "mcp_server",
         "process_session",
-        "terminal",
         "workspace"
       ]
     },
@@ -595,8 +475,6 @@
         "companion.roster",
         "knowledge.read",
         "knowledge.search",
-        "mcp.connect",
-        "mcp.tool_proxy",
         "memory.companion.evolve",
         "memory.companion.merge",
         "memory.companion.recall",

@@ -104,7 +104,7 @@
       "completion_requirement": "zero_production_references",
       "matcher": {
         "kind": "catalog_ids",
-        "catalog_path": "crates/backend/nomifun-agent-contracts/contracts/target-packages/target-first-party-contributions.v1.json"
+        "catalog_path": "crates/backend/nomifun-agent-contracts/contracts/closure/legacy-first-party-contributions.v1.json"
       },
       "baseline": { "match_count": 2595, "file_count": 166, "files_digest": "a9a32f16e11be780fb04c086a2f3a0a88ba7c8ac33602b985c4892eb33cd4d78", "catalog_item_count": 136 }
     },
