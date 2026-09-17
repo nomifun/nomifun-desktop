@@ -507,3 +507,39 @@
 - Not run: Wave 4 gates wait for all three bounded deliveries and Integration merge.
 - Remaining/blocker: none. External Mac host remains a later platform prerequisite.
 - Next ready tasks: none until Wave 4 is integrated.
+
+### 2026-09-18 UARC-033/034/040 integrated and Wave 4 gate complete
+
+- Barrier/source: Wave 3 closeout `5bec65d182d5798d5fa99398a39ae59a218bbba1`; unified implementation
+  `26e50f4f1f962c3cf9996fb87f51aa9955a920f9`.
+- Owner/write set: Integration merged the three bounded Feature lanes, alone reconciled App composition, shared
+  contracts/generated artifacts, Agent Store schema/migration, root Cargo files, status and the final gate.
+- Changed: AutoWork now delegates every execution to AgentExecution and persists one canonical owner-scoped config;
+  deletion is a fenced process-owned saga with durable non-private manual-override audit; Schedule/SSH expose exact
+  Actions with retained teardown evidence; Browser uses one provider-neutral Module/Resource model for managed and
+  attached providers; Windows Desktop injects the canonical persistent profile owner.
+- Deleted: Agent-path IDMM crate/routes/UI/i18n, AutoWork Conversation/Terminal dispatch and receipt state machine,
+  fragmented Schedule/Requirement/SSH Gateway capabilities, old SystemBrowser/BrowserWorkspace implementation and
+  controls, and Conversation supervision/turn-scope/failover paths with no remaining owner.
+- Retained + reason: Requirements business facts and queue policy, AgentExecution DAG/Attempt, typed remote ingress,
+  native transport/resource owners, Browser engine/WebView2 and independent macOS CEF child NSView. The latter is a
+  platform implementation input for `UARC-061`, not a WKWebView or compatibility path.
+- Tests: Agent Session 34; Requirement 60; AgentExecution 103; Cron 197 + integration 64; DB Cron 43, Agent reset 3,
+  ID schema 20 and published migration 5; Public 27; SSH 40; Browser Platform 55; Browser Engine 293 with 9 explicit
+  real-Chrome ignores; App Browser 15, Wave2 host 30, Session boundary 11 and Requirements e2e 10; Gateway 107;
+  Contracts 108. Contract generator write/check, target inventory, UARC scanner, `bun run check`, Desktop all-targets
+  check and debug build passed. Full App probe is 520/530: the exact 10 failures are Robot transition inputs owned by
+  `UARC-042`, with no Wave 4 regression.
+- Windows: verified for shared contracts, Store/migrations, service composition, Browser WebView2 resource/profile
+  lifecycle, 880×600 UI boundary and debug Desktop build.
+- macOS: pending; shared source and the existing independent CEF child NSView are not Mac compile/native/package
+  evidence. CEF integration, TCC, lifecycle, arm64 app/DMG and signing structure remain mandatory on a Mac host.
+- Not run: 18 real-sshd `pool_lifecycle` cases self-skipped because this Windows host has no sshd/ssh-keygen; only the
+  non-sshd harness case executed. No native macOS, DMG or signing claim was made.
+- Commercial-model evidence: only StepFun Coding Plan `step-3.7-flash` was selected; the direct provider probe returned
+  HTTP 200. Canonical integrated dispatch remains pending `UARC-051/052`, so its timeout is not reported as success.
+  No API credential was persisted, logged into repository artifacts or committed.
+- Remaining/blocker: none for Wave 4. Cron's bounded 4096 in-process receipt ledger remains fail-closed at capacity;
+  external Mac hardware is a later platform prerequisite, not a Windows Wave 4 blocker.
+- Next ready tasks: `UARC-041`, `UARC-042`, `UARC-050` as pairwise-disjoint Windows/shared Feature lanes; `UARC-061`
+  remains pending a Mac host and must not be claimed from Windows.
