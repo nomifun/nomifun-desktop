@@ -38,9 +38,8 @@ import {
   normalizeCreativeAssetEditDraft,
   normalizeCreativeTextAssetForm,
   validateCreativeAssetManualUpload,
-  validateCreativeCollectionRename,
 } from './model';
-import type { CreativeAssetEditDraft, CreativeCollectionRenameDraft } from './model';
+import type { CreativeAssetEditDraft } from './model';
 import { useCreativeAssetUploadQueue } from './useCreativeAssetUploadQueue';
 
 const EMPTY_SELECTION = new Set<string>();
@@ -50,7 +49,6 @@ const DEFAULT_EDIT_DRAFT: CreativeAssetEditDraft = {
   collection: '',
   tags: [],
 };
-const DEFAULT_RENAME_DRAFT: CreativeCollectionRenameDraft = { from: '', to: '' };
 
 const popupContainer = (): HTMLElement =>
   document.getElementById('resource-page-portal-root') ?? document.body;
@@ -301,11 +299,6 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const deleteSubmittingRef = useRef(false);
 
-  const [renameOpen, setRenameOpen] = useState(false);
-  const [renameDraft, setRenameDraft] = useState<CreativeCollectionRenameDraft>(DEFAULT_RENAME_DRAFT);
-  const [renameSubmitting, setRenameSubmitting] = useState(false);
-  const [renameError, setRenameError] = useState<string | null>(null);
-
   const handleUploadFiles = (files: readonly File[]): void => {
     const accepted: File[] = [];
     const rejections = new Set<string>();
@@ -403,44 +396,6 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
     }
   };
 
-  const handleRenameCollection = async (): Promise<void> => {
-    const validation = validateCreativeCollectionRename(renameDraft, t);
-    if (validation) {
-      setRenameError(validation);
-      return;
-    }
-    setRenameSubmitting(true);
-    setRenameError(null);
-    try {
-      const updated = await library.renameCollection(renameDraft.from.trim(), renameDraft.to.trim());
-      setRenameOpen(false);
-      setRenameDraft(DEFAULT_RENAME_DRAFT);
-      if (updated > 0) {
-        Message.success(
-          t('creativeStudio.assets.messages.collectionUpdated', {
-            defaultValue: '已更新 {{assetCount}} 个素材。',
-            assetCount: updated,
-          })
-        );
-      } else {
-        Message.info(
-          t('creativeStudio.assets.messages.collectionUnused', {
-            defaultValue: '没有找到使用该合集的素材。',
-          })
-        );
-      }
-    } catch (reason) {
-      setRenameError(errorText(reason));
-    } finally {
-      setRenameSubmitting(false);
-    }
-  };
-
-  const openRenameCollection = (): void => {
-    setRenameError(null);
-    setRenameOpen(true);
-  };
-
   const handlePageChange = (nextPage: number): void => {
     if (nextPage < 1 || nextPage > totalPages) return;
     setPage(nextPage);
@@ -508,7 +463,6 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
           setTextDraft(EMPTY_CREATIVE_TEXT_ASSET_FORM);
           setTextModalOpen(true);
         }}
-        onRenameCollection={openRenameCollection}
         onOpenAsset={setPreviewAsset}
         onEditAsset={openEdit}
         onDownloadAsset={downloadAsset}
@@ -575,77 +529,6 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
           </p>
           {deleteError ? <p className={styles.modalError} role='alert'>{deleteError}</p> : null}
         </div>
-      </Modal>
-
-      <Modal
-        visible={renameOpen}
-        title={t('creativeStudio.assets.collection.renameTitle', {
-          defaultValue: '重命名合集',
-        })}
-        footer={null}
-        autoFocus={false}
-        focusLock
-        unmountOnExit
-        maskClosable={!renameSubmitting}
-        closable={!renameSubmitting}
-        getPopupContainer={popupContainer}
-        onCancel={() => {
-          if (!renameSubmitting) setRenameOpen(false);
-        }}
-      >
-        <form
-          className={styles.modalForm}
-          data-rename-creative-asset-collection-form
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (!renameSubmitting) void handleRenameCollection();
-          }}
-        >
-          <p className={styles.modalDescription}>
-            {t('creativeStudio.assets.collection.renameDescription', {
-              defaultValue:
-                '这会更新所有使用当前合集名称的素材。新名称留空会将这些素材设为未分组。',
-            })}
-          </p>
-          <label className={styles.field}>
-            <span>
-              {t('creativeStudio.assets.collection.currentNameLabel', {
-                defaultValue: '当前合集名称',
-              })}
-            </span>
-            <Input
-              value={renameDraft.from}
-              maxLength={240}
-              disabled={renameSubmitting}
-              onChange={(from) => setRenameDraft((draft) => ({ ...draft, from }))}
-            />
-          </label>
-          <label className={styles.field}>
-            <span>
-              {t('creativeStudio.assets.collection.newNameLabel', {
-                defaultValue: '新合集名称',
-              })}
-            </span>
-            <Input
-              value={renameDraft.to}
-              maxLength={240}
-              placeholder={t('creativeStudio.assets.collection.newNamePlaceholder', {
-                defaultValue: '留空表示取消分组',
-              })}
-              disabled={renameSubmitting}
-              onChange={(to) => setRenameDraft((draft) => ({ ...draft, to }))}
-            />
-          </label>
-          {renameError ? <p className={styles.modalError} role='alert'>{renameError}</p> : null}
-          <footer className={styles.modalFooter}>
-            <Button disabled={renameSubmitting} onClick={() => setRenameOpen(false)}>
-              {t('creativeStudio.assets.collection.cancel', { defaultValue: '取消' })}
-            </Button>
-            <Button type='primary' htmlType='submit' loading={renameSubmitting}>
-              {t('creativeStudio.assets.collection.confirm', { defaultValue: '确认更新' })}
-            </Button>
-          </footer>
-        </form>
       </Modal>
     </main>
   );
