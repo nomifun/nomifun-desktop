@@ -2,7 +2,7 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-17
-> 当前阶段：Wave 3 gate complete / Wave 4 ready
+> 当前阶段：Wave 4 / UARC-033 + UARC-034 + UARC-040 active
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
@@ -15,7 +15,7 @@
 > Wave 2 实现提交：`efe80298f`
 > Wave 3 实现提交：`8454133b124a3d38636f882b098de80ce17028c0`
 > 当前主机：Windows
-> Initiative 状态：`active / Wave 4 ready`
+> Initiative 状态：`active / Wave 4 feature implementation`
 
 ## 1. 当前事实
 
@@ -80,6 +80,9 @@
 | `UARC-030` | integrated | Integration | verified | pending | Web、Knowledge、Memory Module 与 sensitive Action authority |
 | `UARC-031` | integrated | Integration | verified | pending | scene-derived Context；Channel/Companion/Customer Actions |
 | `UARC-032` | integrated | Integration | verified | pending | Creation/Workshop/Office/Plugin Modules 与 Creative UI |
+| `UARC-033` | active | Feature Automation Core | pending | pending | Requirements/AutoWork/AgentExecution/IDMM 收敛 |
+| `UARC-034` | active | Feature Platform Services | pending | pending | Schedule/Notification/Remote/SSH Modules |
+| `UARC-040` | active | Feature Browser Shared | pending | pending | Browser product model、Resource 与 Provider contract |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -160,7 +163,7 @@
 
 - UARC 实施无产品决定 blocker。
 - macOS 任务需要可用 Mac 主机；在主机可用前状态保持 `pending`，不能标完成。
-- Wave 3 barrier 已收口；`UARC-033/034/040` 可从同一 barrier 启动，Integration 继续独占共享合同、
+- Wave 3 barrier 已收口；`UARC-033/034/040` 已从同一 barrier 启动，Integration 继续独占共享合同、
   根配置、生成物、状态台账和最终合并。
 - App 当前只保留 10 个 `UARC-042` Robot device-MCP transition fixture；旧 proxy 已物理删除，后续必须
   通过 materialized Robot Actions 修复。
@@ -173,9 +176,8 @@
 
 ## 8. Next ready tasks
 
-1. `UARC-033`：Requirements、AutoWork、AgentExecution 与 IDMM 收敛。
-2. `UARC-034`：Schedule、Notification、Remote 与 SSH Module。
-3. `UARC-040`：Browser 产品模型与共享 Resource/Provider contract。
+1. `UARC-033/034/040` 已从同一 Wave 3 barrier 并行执行；Integration 等待有界交付。
+2. Wave 4 合并前没有其他 ready task；共享合同、生成物、根配置和状态台账仍由 Integration 独占。
 
 ## 9. 状态更新模板
 
@@ -488,3 +490,20 @@
   canonical integrated reply remains pending the UARC-051/052 runtime-dispatch cutover and was not reported as pass.
 - Remaining/blocker: none for Wave 3. External Mac host remains required later; no credential was persisted.
 - Next ready tasks: `UARC-033`, `UARC-034`, `UARC-040`, at most three Feature workers from the Wave 3 barrier.
+
+### 2026-09-17 Wave 4 feature lanes started
+
+- Barrier/source: Wave 3 closeout `5bec65d182d5798d5fa99398a39ae59a218bbba1` for all three Feature lanes.
+- Owner/write set: Feature Automation Core → `UARC-033`; Feature Platform Services → `UARC-034`; Feature Browser
+  Shared → `UARC-040`. Manifest write sets are pairwise disjoint; Integration retains shared contracts, App composition,
+  UI paths outside declared sets, generated artifacts, root config, status and final merge.
+- Changed: three tasks claimed from one clean barrier; no implementation change in this status commit.
+- Deleted: pending each task's declared delete set.
+- Retained + reason: business queues/effects, transport owners and Browser engine/providers remain target implementation
+  owners while Agent-facing fragments and Conversation-only identity are replaced.
+- Tests: workers start without a Cargo or full-UI lease; Integration will serialize all focused and wave gates.
+- Windows: implementation active.
+- macOS: shared source implementation active where applicable; no Mac host verification claimed.
+- Not run: Wave 4 gates wait for all three bounded deliveries and Integration merge.
+- Remaining/blocker: none. External Mac host remains a later platform prerequisite.
+- Next ready tasks: none until Wave 4 is integrated.
