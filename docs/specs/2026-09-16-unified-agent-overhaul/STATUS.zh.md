@@ -591,6 +591,18 @@
 - macOS: no native claim; `UARC-062` remains the Mac TCC/lifecycle owner.
 - Remaining/blocker: write-set gap resolved; no user decision is required.
 
+### 2026-09-18 UARC-042 hosted-effect rejection seam granted
+
+- Barrier/source: Wave 5 start `90ba8f95f`; the completed owner exposed one final receipt-classification call site.
+- Owner/write set: Integration adds only `router/hosted_effect_receipts.rs` to `UARC-042`.
+- Changed: pre-dispatch permission, missing Action and revoked-Session rejections can settle as rejected facts rather
+  than being quarantined as an unknown physical outcome.
+- Deleted: no compatibility or retry inference; only the exact canonical rejection codes are admitted.
+- Retained + reason: dispatch-started physical effects still require returned/failed/unknown terminal proof.
+- Tests: pending hosted-effect receipt and Robot canonical Session gates.
+- Windows/macOS: shared receipt semantics only; native verification status is unchanged.
+- Remaining/blocker: final call-site grant resolved.
+
 ### 2026-09-18 UARC-042 canonical owner integration seams granted
 
 - Barrier/source: Wave 5 start `90ba8f95f`; the bounded Robot/Computer owner implementation exposed the exact
