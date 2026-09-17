@@ -9,7 +9,7 @@ use crate::{CapabilityId, DigestHex, TargetPackageInventoryPayload, VersionStrin
 const RETIREMENT_JSON: &str =
     include_str!("../contracts/closure/capability-retirement.v1.json");
 const SOURCE_INVENTORY_JSON: &str =
-    include_str!("../contracts/target-packages/target-first-party-contributions.v1.json");
+    include_str!("../contracts/closure/legacy-first-party-contributions.v1.json");
 
 /// Extension-era authoring roots retired by UARC-022. These identities are
 /// globally reserved: a different package or Plugin must not republish them

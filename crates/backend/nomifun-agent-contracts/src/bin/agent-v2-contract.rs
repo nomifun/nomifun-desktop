@@ -57,6 +57,8 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let closure_path = contracts.join("closure/contract-closure.v1.json");
     let retirement_path = contracts.join("closure/capability-retirement.v1.json");
+    let legacy_inventory_path =
+        contracts.join("closure/legacy-first-party-contributions.v1.json");
     let inventory_path =
         contracts.join("target-packages/target-first-party-contributions.v1.json");
     let feature_path =
@@ -104,8 +106,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     let inventory: TargetPackageInventoryPayload = read_json(&inventory_path)?;
     validate_target_inventory(&inventory)?;
     let inventory_digest = digest_payload(&inventory)?;
+    let legacy_inventory: TargetPackageInventoryPayload = read_json(&legacy_inventory_path)?;
+    validate_target_inventory(&legacy_inventory)?;
     let retirement: CapabilityRetirementManifest = read_json(&retirement_path)?;
-    retirement.validate(&inventory)?;
+    retirement.validate(&legacy_inventory)?;
     let retirement_digest = digest_payload(&retirement)?;
 
     let feature_inventory: PlatformFeatureInventoryPayload = read_json(&feature_path)?;
