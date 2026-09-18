@@ -695,27 +695,11 @@ async fn run_with_provider(
         "/id",
         "BEFORE_TOOL_CAPABILITY_ID_MISSING",
     )?;
-    let catalog = successful_json(
-        router,
-        "before_tool.select",
-        Method::GET,
-        "/api/runtime-engines",
-        None,
-        LOCAL_API_DEADLINE,
-        &[StatusCode::OK],
-    )
-    .await?;
-    let selection = engine_selection(
-        &envelope_data("before_tool.select", catalog)?,
-        "nomifun.nomi",
-        "default",
-    )?;
     let (preset, _) =
         create_agent_preset(
             router,
             &provider,
             model,
-            Some(&selection),
             &[(
                 "workspace.files",
                 &["workspace.files/write"],
@@ -729,7 +713,6 @@ async fn run_with_provider(
         &preset,
         &provider,
         model,
-        Some(&selection),
         json!([{"resource_kind":"workspace","resource_id":"default-workspace"}]),
     )
     .await?;
@@ -747,7 +730,7 @@ async fn run_with_provider(
         )
     })?;
     bind_session_workspace(router, &session, &workspace).await?;
-    assert_session_engine(router, &session, &selection, &provider, model).await?;
+    assert_session_runtime(router, &session).await?;
     stages.push("before_tool.publish_select");
     let mut receipt_cursor = 0;
     for denied in [false, true] {
@@ -790,7 +773,7 @@ async fn run_with_provider(
         {
             return Err(fail(phase, "BEFORE_TOOL_ALLOWED_WRITE_MISSING"));
         }
-        assert_session_engine(router, &session, &selection, &provider, model).await?;
+        assert_session_runtime(router, &session).await?;
         stages.push(phase);
         if denied {
             stages.push("before_tool.continuation");

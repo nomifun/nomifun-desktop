@@ -1,5 +1,5 @@
 //! Exact Nomi `mcp_server` binding admission into the shared platform MCP owner.
-//! Nomi's execution context differs from Coding's Broker context; neither is
+//! Nomi's execution context differs from the Runtime's Broker context; neither is
 //! fabricated here. The retained Nomi effect scope owns calls and turn closure.
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
@@ -144,7 +144,7 @@ impl NomiMcpResourceInvoker for ResourceOwner {
         validate_resource_owner_result(&value, &read)?;
         self.admit_image(Some(generation))?;
         // Nomi's EngineEffectScope retains this complete future through remote
-        // cleanup, receipts AND decoding. Never fabricate a Coding/Broker turn.
+        // cleanup, receipts AND decoding. Never fabricate a Runtime/Broker turn.
         let result = super::engine_mcp_media::image(value, request, operation_id).await?;
         self.admit_image(Some(generation))?;
         Ok(result)

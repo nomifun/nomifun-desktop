@@ -4,7 +4,7 @@
 mod browser_provider;
 
 use async_trait::async_trait;
-use nomifun_agent_contracts::{ActionId, ResourceBindingId, ResourceId, ResourceKind, TypedResourceBinding};
+use nomifun_agent_contracts::{ResourceBindingId, ResourceId, ResourceKind, TypedResourceBinding};
 use nomifun_browser_platform::{
     attached_browser::AttachedBrowserRuntimeError,
     bound_resource::BoundBrowserProviderResource,
@@ -150,104 +150,6 @@ impl browser_provider::attached_provider::AttachedBrowserSessionVerifier for Ses
             Err(AttachedBrowserRuntimeError::ActionDenied)
         }
     }
-}
-
-fn request(owner: &str, session: &str) -> nomifun_ai_agent::factory::BrowserRuntimeRequest {
-    nomifun_ai_agent::factory::BrowserRuntimeRequest {
-        principal_id: owner.to_owned(),
-        agent_session_id: session.to_owned(),
-        action_allowlist: BTreeSet::from([
-            ActionId::from("browser/observe"),
-            ActionId::from("browser/navigate"),
-        ]),
-        provider: Some(provider()),
-        resource_binding: Some(binding(owner)),
-    }
-}
-
-#[tokio::test]
-async fn managed_browser_resource_isolated_by_any_authorized_agent_session() {
-    let owner = "0190f5fe-7c00-7a00-8000-000000000001";
-    let regular = "0190f5fe-7c00-7a00-8000-000000000081";
-    let delegated = "0190f5fe-7c00-7a00-8000-000000000082";
-    let root = tempfile::tempdir().unwrap();
-    let factory = Arc::new(Factory::default());
-    let resources = Arc::new(BrowserResourceService::new(factory.clone()));
-    let resolve = browser_provider::resolver(
-        Some(resources.clone()),
-        None,
-        root.path().to_path_buf(),
-        Arc::from(owner),
-    );
-
-    let regular_resource = resolve(request(owner, regular))
-        .await
-        .unwrap()
-        .expect("regular AgentSession Browser Resource");
-    let delegated_resource = resolve(request(owner, delegated))
-        .await
-        .unwrap()
-        .expect("delegated AgentSession Browser Resource");
-    let (
-        BoundBrowserProviderResource::Managed(regular_resource),
-        BoundBrowserProviderResource::Managed(delegated_resource),
-    ) = (regular_resource, delegated_resource)
-    else {
-        panic!("managed provider expected")
-    };
-    assert_eq!(regular_resource.authority().agent_session_id(), regular);
-    assert_eq!(delegated_resource.authority().agent_session_id(), delegated);
-    assert_ne!(regular_resource.authority().key(), delegated_resource.authority().key());
-    assert!(!Arc::ptr_eq(&regular_resource, &delegated_resource));
-
-    let first_run = regular_resource.begin_run().await.unwrap();
-    regular_resource
-        .agent_command(
-            &first_run,
-            BrowserTabCommand::Create { url: "https://example.com/".into() },
-        )
-        .await
-        .unwrap();
-    regular_resource.finish_run(&first_run).await.unwrap();
-    assert_eq!(factory.created.lock().unwrap().len(), 1);
-    resources.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn provider_and_resource_never_create_browser_action_authority() {
-    let owner = "0190f5fe-7c00-7a00-8000-000000000001";
-    let session = "0190f5fe-7c00-7a00-8000-000000000083";
-    let root = tempfile::tempdir().unwrap();
-    let resources = Arc::new(BrowserResourceService::new(Arc::new(Factory::default())));
-    let resolve = browser_provider::resolver(
-        Some(resources.clone()),
-        None,
-        root.path().to_path_buf(),
-        Arc::from(owner),
-    );
-
-    let mut no_actions = request(owner, session);
-    no_actions.action_allowlist.clear();
-    assert!(resolve(no_actions).await.unwrap().is_none());
-
-    let mut wrong_owner = request(owner, session);
-    wrong_owner.principal_id = "0190f5fe-7c00-7a00-8000-000000000002".into();
-    assert!(resolve(wrong_owner).await.is_err());
-
-    let mut missing_provider = request(owner, session);
-    missing_provider.provider = None;
-    assert!(resolve(missing_provider).await.is_err());
-
-    let mut missing_binding = request(owner, session);
-    missing_binding.resource_binding = None;
-    assert!(resolve(missing_binding).await.is_err());
-
-    assert!(resources
-        .get_for_agent_session(owner, session)
-        .await
-        .unwrap()
-        .is_none());
-    resources.shutdown().await.unwrap();
 }
 
 #[tokio::test]

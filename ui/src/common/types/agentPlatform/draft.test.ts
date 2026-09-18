@@ -27,7 +27,7 @@ describe('AgentPreset draft model', () => {
     draft.document.persona = 'Careful collaborator';
     expect(isDraftDirty(saved, draft)).toBe(true);
     expect(cloneDraft(draft).document.persona).toBe('Careful collaborator');
-    expect('runtime_engine' in draft.document).toBe(false);
+    expect('runtime_build' in draft.document).toBe(false);
     draft.document.persona = '';
     expect(isDraftDirty(saved, draft)).toBe(false);
   });

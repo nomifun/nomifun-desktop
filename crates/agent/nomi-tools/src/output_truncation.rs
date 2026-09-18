@@ -4,7 +4,7 @@
 //! and inserting a marker that records how much was removed. Ported (and
 //! de-dependency-ed) from codex `utils/string/src/truncate.rs`.
 //!
-//! Unlike the engine-level fallback in `nomi-agent::tool_execution` (private,
+//! Unlike the engine-level fallback in the retired loop (private,
 //! char-counted, multi-pass), this is a reusable, single-pass, tested pure
 //! function (used by Read today) so any tool can bound its output.
 

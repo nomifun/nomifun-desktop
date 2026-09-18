@@ -1,14 +1,8 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use nomi_agent::bootstrap::AgentBootstrap;
-use nomi_agent::engine::{AgentEngine, AgentResult};
-use nomi_agent::output::OutputSink;
-use nomi_agent::output::null_sink::NullSink;
-use nomi_config::config::{CliArgs, Config};
-use nomi_types::message::StopReason;
+use nomi_config::config::Config;
 use nomifun_api_types::{
     CapabilityHealth, HealthStatus, ModelTask, ProviderHealthCheckErrorKind,
     ProviderHealthCheckRequest, ProviderHealthCheckResponse,
@@ -18,12 +12,12 @@ use nomifun_model_invoke::{ModelInvokeService, ModelRef};
 use regex::Regex;
 use tracing::{info, warn};
 
-use crate::factory::provider_config::resolve_provider_fields;
-use crate::types::NomiResolvedConfig;
+use crate::factory::provider_config::{
+    one_shot_completion_bounded, resolve_provider_config, user_message,
+};
 
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const HEALTH_CHECK_PROMPT: &str = "Reply with exactly OK.";
-const HEALTH_CHECK_MSG_ID: &str = "provider-health-check";
 
 /// Output budget for the chat probe.
 ///
@@ -163,37 +157,14 @@ impl ProviderHealthCheckService {
         &self,
         provider_id: &str,
         model_id: &str,
-    ) -> Result<NomiResolvedConfig, AppError> {
-        let fields = resolve_provider_fields(self.invoke.as_ref(), provider_id, model_id).await?;
-
-        Ok(NomiResolvedConfig {
-            provider: fields.provider,
-            api_key: fields.api_key,
-            model: fields.model,
-            base_url: fields.base_url,
-            system_prompt: Some(
-                "You are a provider health probe. Reply with exactly OK and do not use tools."
-                    .into(),
-            ),
-            output_ceiling: Some(PROBE_OUTPUT_CEILING),
-            max_turns: Some(1),
-            context_limit: fields.context_limit.map(|value| value as u64),
-            compat_overrides: fields.compat_overrides,
-            session_directory: self.data_dir.join("nomi-health-check-sessions"),
-            extra_mcp_servers: HashMap::new(),
-            loopback_capability_leases: Default::default(),
-            bedrock_config: fields.bedrock_config,
-            computer_use: false,
-            goal: None,
-            owner_token: None,
-            install_embedded_agent_execution: false,
-            allowed_tools: Vec::new(),
-            enforce_tool_allowlist: false,
-            companion_memory_enabled: true,
-            companion_skills_enabled: true,
-            deferred_tools: Vec::new(),
-            write_root: None,
-        })
+    ) -> Result<Config, AppError> {
+        resolve_provider_config(
+            self.invoke.as_ref(),
+            provider_id,
+            model_id,
+            &self.data_dir,
+        )
+        .await
     }
 }
 /// Persist one probe outcome onto the model's authoritative catalog row.
@@ -264,7 +235,7 @@ async fn run_probe(
     platform: String,
     model: String,
     task: ModelTask,
-    config_extra: NomiResolvedConfig,
+    config: Config,
 ) -> Result<ProviderHealthCheckResponse, AppError> {
     let started = Instant::now();
 
@@ -275,31 +246,19 @@ async fn run_probe(
         "Provider health check started"
     );
 
-    let mut engine = match build_probe_engine(config_extra).await {
-        Ok(engine) => engine,
-        Err(error) => {
-            let message = format!("Nomi probe bootstrap failed: {error}");
-            let response = unhealthy_response(
-                provider_id,
-                platform,
-                model,
-                task,
-                started.elapsed(),
-                message,
-                None,
-            );
-            log_health_check_result(&response);
-            return Ok(response);
-        }
-    };
-
     match tokio::time::timeout(
         HEALTH_CHECK_TIMEOUT,
-        engine.execute_turn(HEALTH_CHECK_PROMPT, HEALTH_CHECK_MSG_ID),
+        one_shot_completion_bounded(
+            &config,
+            "You are a provider health probe. Reply with exactly OK and do not use tools.",
+            vec![user_message(HEALTH_CHECK_PROMPT)],
+            PROBE_OUTPUT_CEILING,
+            32 * 1024,
+        ),
     )
     .await
     {
-        Ok(Ok(result)) if probe_terminal_failure(&result).is_none() => {
+        Ok(Ok(_)) => {
             let response = ProviderHealthCheckResponse {
                 provider_id,
                 platform,
@@ -313,21 +272,6 @@ async fn run_probe(
                 timeout_stage: None,
                 attempted_url: None,
             };
-            log_health_check_result(&response);
-            Ok(response)
-        }
-        Ok(Ok(result)) => {
-            let message = probe_terminal_failure(&result)
-                .expect("the healthy terminal arm already handled clean EndTurn");
-            let response = unhealthy_response(
-                provider_id,
-                platform,
-                model,
-                task,
-                started.elapsed(),
-                message,
-                None,
-            );
             log_health_check_result(&response);
             Ok(response)
         }
@@ -353,51 +297,11 @@ async fn run_probe(
                 task,
                 started.elapsed(),
                 format!("Health check timeout ({}s)", HEALTH_CHECK_TIMEOUT.as_secs()),
-                Some("engine_run".into()),
+                Some("chat_probe".into()),
             );
             log_health_check_result(&response);
             Ok(response)
         }
-    }
-}
-
-fn probe_terminal_failure(result: &AgentResult) -> Option<String> {
-    if let Some(adjudication) = &result.completion_adjudication {
-        return Some(format!(
-            "ProviderError: provider health probe failed completion adjudication ({}): {}",
-            adjudication.kind(),
-            adjudication.detail()
-        ));
-    }
-
-    if result.stop_reason == StopReason::EndTurn && result.text.trim().is_empty() {
-        return Some(
-            "ProviderError: provider health probe returned no final text (empty_final_text)"
-                .to_owned(),
-        );
-    }
-
-    match result.stop_reason {
-        StopReason::EndTurn => None,
-        // Reaching our own ceiling is not a provider fault. A reasoning model
-        // spends its first output tokens on a thinking preamble and emits
-        // `content` only afterwards, so any ceiling we pick is a budget we
-        // imposed, not a health signal — and the truncated round already proved
-        // that auth, routing, protocol and streaming all work. Treating this as
-        // a failure made every reasoning model report "connection failed" while
-        // curl against the same key and model returned 200.
-        StopReason::MaxTokens => None,
-        StopReason::MaxTurns => Some(
-            "ProviderError: provider health probe exhausted its request budget (turn_requests_exhausted)"
-                .to_owned(),
-        ),
-        StopReason::Refusal => {
-            Some("ContentPolicy: provider health probe was refused (model_refused)".to_owned())
-        }
-        StopReason::ToolUse => Some(
-            "ProviderError: provider health probe ended with unresolved tool use (protocol_error)"
-                .to_owned(),
-        ),
     }
 }
 
@@ -448,54 +352,6 @@ fn log_health_check_result(response: &ProviderHealthCheckResponse) {
             "Provider health check failed"
         ),
     }
-}
-
-async fn build_probe_engine(config_extra: NomiResolvedConfig) -> Result<AgentEngine, AppError> {
-    let workspace = config_extra
-        .session_directory
-        .parent()
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let sink: Arc<dyn OutputSink> = Arc::new(NullSink);
-    let cli_args = CliArgs {
-        provider: Some(config_extra.provider),
-        api_key: Some(config_extra.api_key),
-        base_url: config_extra.base_url,
-        model: Some(config_extra.model),
-        max_tokens: config_extra.output_ceiling,
-        max_turns: config_extra.max_turns,
-        system_prompt: config_extra.system_prompt,
-        profile: None,
-        project_dir: Some(PathBuf::from(&workspace)),
-    };
-    let mut config = Config::resolve(&cli_args)
-        .map_err(|error| AppError::Internal(format!("Config resolve failed: {error}")))?;
-
-    config.bedrock = config_extra.bedrock_config;
-    config.session.enabled = false;
-    config.mcp.servers.clear();
-    config.file_cache.enabled = false;
-    if let Some(field) = config_extra.compat_overrides.max_tokens_field {
-        config.compat.max_tokens_field = Some(field);
-    }
-    if let Some(path) = config_extra.compat_overrides.api_path {
-        config.compat.api_path = Some(path);
-    }
-    if let Some(required) = config_extra.compat_overrides.require_reasoning_content {
-        config.compat.require_reasoning_content = Some(required);
-    }
-    // Health probes never consume a provider round id. Intentionally do not
-    // copy `chain_rounds`: Responses must send `store:false` for this one-shot
-    // diagnostic even when the selected Chat capability opted into chaining.
-    config.compat.extra_body = config_extra.compat_overrides.extra_body;
-
-    let mut result = AgentBootstrap::new(config, workspace, sink)
-        .install_embedded_agent_execution(config_extra.install_embedded_agent_execution)
-        .build()
-        .await
-        .map_err(|error| AppError::Internal(error.to_string()))?;
-    result.engine.registry_mut().clear();
-    Ok(result.engine)
 }
 
 fn unhealthy_response(
@@ -682,8 +538,6 @@ pub(crate) fn extract_http_status(message: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomi_agent::engine::CompletionAdjudication;
-    use nomi_types::message::TokenUsage;
     use nomifun_common::encrypt_string;
     use nomifun_db::{
         CreateProviderParams, IProviderModelCapabilityRepository, IProviderRepository,
@@ -695,72 +549,12 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn probe_result(stop_reason: StopReason) -> AgentResult {
-        AgentResult {
-            text: "OK".to_owned(),
-            stop_reason,
-            usage: TokenUsage::default(),
-            turns: 1,
-            rounds: 1,
-            effects_ok: 0,
-            durable_effect_targets: Vec::new(),
-            cutoff_state_changing: 0,
-            state_changing_tools_advertised: false,
-            completion_adjudication: None,
-        }
-    }
-
     #[test]
-    fn a_reasoning_model_that_spends_the_ceiling_on_thinking_is_still_healthy() {
-        // Regression: StepFun step-3.7-flash (and every other reasoning model)
-        // returns `content: ""` with `finish_reason: "length"` when the output
-        // ceiling only covers the thinking preamble. That round still proved the
-        // key, URL, protocol and stream are all good, so it must not be reported
-        // as a connectivity failure.
-        let mut truncated = probe_result(StopReason::MaxTokens);
-        truncated.text.clear();
-        assert!(
-            probe_terminal_failure(&truncated).is_none(),
-            "hitting our own output ceiling is a budget we chose, not a provider fault"
-        );
-
-        // A ceiling large enough for a normal reasoning preamble, so the probe
-        // usually observes real text rather than relying on the rule above.
+    fn reasoning_probe_has_a_real_output_budget() {
         assert!(
             PROBE_OUTPUT_CEILING >= 512,
             "a 16-token ceiling is what broke every reasoning model"
         );
-    }
-
-    #[test]
-    fn chat_probe_is_healthy_only_for_clean_end_turn() {
-        assert!(probe_terminal_failure(&probe_result(StopReason::EndTurn)).is_none());
-
-        let mut empty = probe_result(StopReason::EndTurn);
-        empty.text.clear();
-        let failure = probe_terminal_failure(&empty)
-            .expect("an empty EndTurn must not be reported healthy");
-        assert!(failure.contains("empty_final_text"));
-
-        for (stop_reason, code) in [
-            (StopReason::MaxTurns, "turn_requests_exhausted"),
-            (StopReason::Refusal, "model_refused"),
-            (StopReason::ToolUse, "protocol_error"),
-        ] {
-            let failure = probe_terminal_failure(&probe_result(stop_reason))
-                .expect("every non-EndTurn terminal must fail the probe");
-            assert!(failure.contains(code), "failure={failure}");
-        }
-
-        let mut adjudicated = probe_result(StopReason::EndTurn);
-        adjudicated.completion_adjudication = Some(
-            CompletionAdjudication::UnbackedStateChangeClaim {
-                target: "plugin.html".to_owned(),
-            },
-        );
-        let failure = probe_terminal_failure(&adjudicated)
-            .expect("adjudicated EndTurn must not be reported healthy");
-        assert!(failure.contains("unbacked_state_change_claim"));
     }
 
     #[test]

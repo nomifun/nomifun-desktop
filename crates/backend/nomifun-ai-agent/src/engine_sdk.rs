@@ -35,8 +35,8 @@ use crate::protocol::send_error::AgentSendError;
 use crate::runtime_state::{AgentRuntimeState, AgentRuntimeTurn};
 use crate::types::{AgentRuntimeBuildOptions, SendMessageData};
 use crate::{
-    AgentCapabilityActivationSnapshot, AgentRuntimeControl, RegisteredAgentRuntime,
-    RuntimeEngineBinding, RuntimeEngineFactory, RuntimeSteerDelivery, RuntimeTeardown,
+    AgentCapabilityActivationSnapshot, AgentRuntimeControl, OfficialAgentRuntime,
+    RuntimeBuildBinding, OfficialRuntimeFactory, RuntimeSteerDelivery, RuntimeTeardown,
 };
 
 /// Only nonterminal UI events are available to drivers. Persistence belongs to
@@ -126,7 +126,7 @@ impl EngineTurnOutcome {
 /// One exact, host-admitted Session. Implementations choose their own request
 /// loop, planning and context strategy. They must use the platform's ports for
 /// models, effects, history and durable turn admission; options/model JSON do
-/// not confer authority. This is a trusted source extension, not a sandbox.
+/// not confer authority. This is the trusted internal Driver seam, not a sandbox.
 #[async_trait]
 pub trait EngineSessionDriver: Send + Sync {
     /// Includes preparation. The outer runtime may drop this future on cancel;
@@ -404,7 +404,7 @@ fn break_transport(shared: &SharedRuntime, turn: AgentRuntimeTurn, message: Stri
 }
 
 #[async_trait]
-impl RegisteredAgentRuntime for HostedAgentRuntime {
+impl OfficialAgentRuntime for HostedAgentRuntime {
     fn supports_steering_context(&self) -> bool {
         self.shared.driver.supports_steering_context()
     }
@@ -484,7 +484,7 @@ impl RegisteredAgentRuntime for HostedAgentRuntime {
 pub type EngineDriverFactory = Arc<
     dyn Fn(
             AgentRuntimeBuildOptions,
-            RuntimeEngineBinding,
+            RuntimeBuildBinding,
         ) -> BoxFuture<'static, Result<Arc<dyn EngineSessionDriver>, AppError>>
         + Send
         + Sync,
@@ -492,14 +492,14 @@ pub type EngineDriverFactory = Arc<
 
 /// Register this factory with the existing catalog and an explicit admission
 /// policy during application assembly. No packaged upload/install API exists.
-pub fn hosted_engine_factory(factory: EngineDriverFactory) -> RuntimeEngineFactory {
+pub fn hosted_engine_factory(factory: EngineDriverFactory) -> OfficialRuntimeFactory {
     Arc::new(move |options, binding| {
         let factory = factory.clone();
         Box::pin(async move {
             let runtime_options = options.clone();
             let driver = factory(options, binding).await?;
             Ok(Arc::new(HostedAgentRuntime::new(&runtime_options, driver)?)
-                as Arc<dyn RegisteredAgentRuntime>)
+                as Arc<dyn OfficialAgentRuntime>)
         })
     })
 }

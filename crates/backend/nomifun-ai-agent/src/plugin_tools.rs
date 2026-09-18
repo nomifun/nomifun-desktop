@@ -6,14 +6,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::future::Future;
 use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use nomi_protocol::events::ToolCategory;
-use nomi_agent::context_contributor::{ContextContributor, TurnContext};
+use crate::context_contributor::{ContextContributor, TurnContext};
 use nomi_tools::{
     Tool, ToolExecutionContext,
     registry::{DeferredToolState, ToolRegistry},
@@ -266,10 +265,6 @@ mod kind_invariance_tests {
             );
         }
     }
-}
-
-tokio::task_local! {
-    static CURRENT_NOMI_PLUGIN_TOOL_SESSION: Option<NomiPluginToolSession>;
 }
 
 #[derive(Debug, Error)]
@@ -873,26 +868,6 @@ pub trait NomiPluginToolSessionProvider: Send + Sync {
     ) -> Result<Option<NomiPluginToolSession>, AppError>;
 }
 
-pub(crate) async fn with_nomi_plugin_tool_session<F>(
-    session: Option<NomiPluginToolSession>,
-    future: F,
-) -> F::Output
-where
-    F: Future,
-{
-    CURRENT_NOMI_PLUGIN_TOOL_SESSION
-        .scope(session, future)
-        .await
-}
-
-pub(crate) fn current_nomi_plugin_tool_session(
-) -> Option<NomiPluginToolSession> {
-    CURRENT_NOMI_PLUGIN_TOOL_SESSION
-        .try_with(Clone::clone)
-        .ok()
-        .flatten()
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize)]
 struct NomiPluginToolActionIdentity {
     resolved_snapshot_ref: ResolvedSnapshotRef,
@@ -1301,7 +1276,7 @@ pub struct NomiPluginToolSession {
     host_dynamic_actions: Arc<[NomiHostDynamicToolAction]>,
     host_dynamic_invoker: Option<Arc<dyn NomiHostDynamicToolInvoker>>,
     capability_state: Option<Arc<SessionCapabilityState>>,
-    pub(crate) host_skills: Arc<[Arc<nomi_agent::host_skills::HostSkill>]>,
+    pub(crate) host_skills: Arc<[Arc<crate::host_skills::HostSkill>]>,
     /// Host-owned, Session-scoped dynamic context sources. These are attached
     /// only after the provider has resolved the exact persisted Session; a
     /// Plugin manifest or model payload cannot construct one.
@@ -1591,10 +1566,10 @@ impl NomiPluginToolSession {
         self.context_contributors = Arc::from(contributors);
         Ok(self)
     }
-    pub fn model_middleware(&self) -> Result<Vec<Arc<dyn nomi_agent::model_middleware::ModelRequestMiddleware>>, NomiPluginToolError> {
+    pub fn model_middleware(&self) -> Result<Vec<Arc<dyn crate::runtime_model_middleware_contract::ModelRequestMiddleware>>, NomiPluginToolError> {
         self.model_middleware.iter().map(model_middleware::Binding::consumer).collect()
     }
-    pub fn tool_middleware(&self) -> Result<Vec<Arc<dyn nomi_agent::tool_middleware::ToolCallMiddleware>>, NomiPluginToolError> {
+    pub fn tool_middleware(&self) -> Result<Vec<Arc<dyn crate::runtime_tool_middleware_contract::ToolCallMiddleware>>, NomiPluginToolError> {
         self.tool_middleware.iter().map(tool_middleware::Binding::consumer).collect()
     }
 

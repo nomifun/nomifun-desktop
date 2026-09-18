@@ -2006,22 +2006,6 @@ impl CompanionService {
     }
 }
 
-/// The factory-facing persona prompt provider: Channel Agent sessions
-/// carry `companion_session` but no persisted `system_prompt`, so the nomi factory
-/// asks the bound companion for a fresh persona (with current memory snapshot) at
-/// every agent build. The persona is built **only** for an explicitly-bound, live
-/// companion; `companion_id: None` or a dead id yields no persona — an unbound
-/// channel is hosted by no companion (no default-companion fallback; 历史债
-/// 「渠道与远程连接默认由默认伙伴接待」已废除，连接由用户为每个伙伴显式配置).
-#[async_trait::async_trait]
-impl nomifun_ai_agent::CompanionPromptProvider for CompanionService {
-    async fn build_system_prompt(&self, companion_id: Option<&str>, channel_platform: Option<&str>) -> Option<String> {
-        self.build_bound_system_prompt(companion_id?, channel_platform)
-            .await
-            .ok()
-    }
-}
-
 /// Display suffix for one profile Provider slot in the deletion-blocking usage
 /// report. Empty = the companion's own chat model, which needs no suffix.
 fn slot_display_label(slot: &str) -> &'static str {
@@ -3284,27 +3268,6 @@ mod tests {
         assert!(svc.add_memory("bogus", "x", &[], Some(&a)).await.is_err());
         assert!(svc.add_memory("task", "   ", &[], Some(&a)).await.is_err());
         assert!(svc.add_memory("task", "无主人", &[], Some(MALFORMED_COMPANION_ID)).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn companion_prompt_provider_builds_only_for_bound_companion() {
-        use nomifun_ai_agent::CompanionPromptProvider;
-        let dir = tempfile::tempdir().unwrap();
-        let svc = service(dir.path()).await;
-
-        // No companions: no persona.
-        assert!(svc.build_system_prompt(None, None).await.is_none());
-
-        let a = svc.create_companion("毛球", "ink").await.unwrap();
-        let b = svc.create_companion("墨墨", "boo").await.unwrap();
-        // No companion_id → NO persona (历史债「渠道默认由默认伙伴接待」已废除；不再回落默认伙伴).
-        assert!(svc.build_system_prompt(None, None).await.is_none());
-        // Explicit, live companion → its persona.
-        let b_prompt = svc.build_system_prompt(Some(&b.companion_id), None).await.unwrap();
-        assert!(b_prompt.contains("你是 墨墨"));
-        // Dead explicit id → NO persona (no default fallback).
-        assert!(svc.build_system_prompt(Some(MALFORMED_COMPANION_ID), None).await.is_none());
-        let _ = a;
     }
 
     // ----- custom-figure library: in-use figures must not be deletable -----

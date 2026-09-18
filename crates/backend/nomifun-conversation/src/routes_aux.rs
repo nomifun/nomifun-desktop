@@ -71,7 +71,7 @@ async fn clear_messages(
         .clear_messages(
             &user.id,
             conversation_id.as_str(),
-            &state.runtime_registry,
+            &state.runtime_sessions,
         )
         .await?;
     Ok(Json(ApiResponse::success()))

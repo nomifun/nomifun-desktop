@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use nomifun_ai_agent::runtime_handle::{AgentRuntimeHandle, AgentRuntimeControl};
 use nomifun_ai_agent::protocol::events::FinishEventData;
 use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
-use nomifun_ai_agent::{AgentSendError, AgentStreamEvent, MockAgentRuntime, AgentRuntimeRegistry};
+use nomifun_ai_agent::{AgentSendError, AgentStreamEvent, MockAgentRuntime, AgentRuntimeSessions};
 use nomifun_api_types::{ConversationRuntimeStateKind, ListMessagesQuery, WebSocketMessage};
 use nomifun_channel::action::{ActionExecutor, MessageResult};
 use nomifun_channel::channel_settings::ChannelSettingsService;
@@ -267,11 +267,11 @@ impl AgentRuntimeControl for ScriptedAgent {
 
 impl MockAgentRuntime for ScriptedAgent {}
 
-struct RecordingAgentRuntimeRegistry {
+struct RecordingAgentRuntimeSessions {
     agents: Mutex<std::collections::HashMap<String, AgentRuntimeHandle>>,
 }
 
-impl RecordingAgentRuntimeRegistry {
+impl RecordingAgentRuntimeSessions {
     fn new() -> Self {
         Self {
             agents: Mutex::new(std::collections::HashMap::new()),
@@ -280,7 +280,7 @@ impl RecordingAgentRuntimeRegistry {
 }
 
 #[async_trait]
-impl AgentRuntimeRegistry for RecordingAgentRuntimeRegistry {
+impl AgentRuntimeSessions for RecordingAgentRuntimeSessions {
     fn get_runtime(&self, conversation_id: &str) -> Option<AgentRuntimeHandle> {
         self.agents.lock().unwrap().get(conversation_id).cloned()
     }
@@ -425,7 +425,7 @@ async fn build_harness() -> Harness {
         .await
         .unwrap();
 
-    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(RecordingAgentRuntimeRegistry::new());
+    let runtime_sessions: Arc<dyn AgentRuntimeSessions> = Arc::new(RecordingAgentRuntimeSessions::new());
     let runtime = Arc::new(ConversationRuntimeStateService::default());
     let conversation_svc = Arc::new(
         ConversationService::new(
@@ -433,7 +433,7 @@ async fn build_harness() -> Harness {
             std::env::temp_dir(),
             Arc::new(TestBroadcaster),
             Arc::new(NoopSkillResolver),
-            Arc::clone(&runtime_registry),
+            Arc::clone(&runtime_sessions),
             Arc::new(SqliteConversationRepository::new(pool.clone())),
             Arc::new(SqliteAgentMetadataRepository::new(pool.clone())),
             Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
@@ -443,7 +443,7 @@ async fn build_harness() -> Harness {
     let message_svc = Arc::new(ChannelMessageService::new(
         channel_session_port::conversation_channel_session_port(
             Arc::clone(&conversation_svc),
-            Arc::clone(&runtime_registry),
+            Arc::clone(&runtime_sessions),
         ),
         settings,
         channel_repo.clone(),

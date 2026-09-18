@@ -10,9 +10,9 @@ describe('single Nomi Runtime authoring boundary', () => {
     const editor = source('AgentPresetEditor.tsx');
     const template = source('OfficialTemplateOverview.tsx');
     const controller = source('useAgentSettingsController.ts');
-    expect(editor).not.toMatch(/RuntimeEngineSelector|runtime_engine|runtimeEngines/);
-    expect(template).not.toMatch(/RuntimeEngineSelector|runtime_engine|runtimeEngines/);
-    expect(controller).not.toMatch(/withoutRuntimeSelection|runtime_engine|runtimeEngines/);
+    expect(editor).not.toMatch(/RuntimeEngineSelector|runtime_build|runtimeEngines/);
+    expect(template).not.toMatch(/RuntimeEngineSelector|runtime_build|runtimeEngines/);
+    expect(controller).not.toMatch(/withoutRuntimeSelection|runtime_build|runtimeEngines/);
     const contracts = readFileSync(new URL('../../../common/types/agentPlatform/contracts.ts', import.meta.url), 'utf8');
     expect(contracts).not.toContain('RuntimeEngineSelection');
   });

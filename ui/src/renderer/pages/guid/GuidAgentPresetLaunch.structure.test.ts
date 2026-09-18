@@ -53,9 +53,9 @@ describe('Guid workbench Agent launch behavior', () => {
     const send = readSource(new URL('./hooks/useGuidSend.ts', import.meta.url));
     const editor = readSource(new URL('../agentSettings/AgentPresetEditor.tsx', import.meta.url));
     expect(page).not.toContain('RuntimeEngineSelector');
-    expect(send).not.toContain('runtime_engine');
+    expect(send).not.toContain('runtime_build');
     expect(editor).not.toContain('AgentRuntimeEngineSelector');
-    expect(editor).not.toContain('runtime_engine');
+    expect(editor).not.toContain('runtime_build');
   });
   test('uses only official-template or personal-preset selection identities', () => {
     const configKeys = readSource(

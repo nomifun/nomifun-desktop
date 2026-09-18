@@ -40,7 +40,7 @@ pub struct ContextModifier {
     /// Override reasoning effort for subsequent LLM requests.
     pub effort: Option<EffortLevel>,
 
-    /// Legacy metadata projection. Runtime engines must ignore this field; Skill
+    /// Legacy metadata projection. Runtime builds must ignore this field; Skill
     /// tool lists may only narrow a forked invocation's exact tool set.
     pub allowed_tools: Vec<String>,
 

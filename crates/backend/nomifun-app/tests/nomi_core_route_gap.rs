@@ -156,7 +156,12 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
         let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
             .await
             .unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap())
+        let body = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, body)
     }
 
     let upstream = wiremock::MockServer::start().await;

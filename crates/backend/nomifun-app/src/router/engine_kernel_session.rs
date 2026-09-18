@@ -13,7 +13,7 @@ use nomifun_agent_kernel::{
     SessionCapabilityState,
 };
 use nomifun_ai_agent::engine_effect_scope::guard_effect_settlement;
-use nomifun_api_types::{ExecutionConstraints, RuntimeEngineBinding};
+use nomifun_api_types::{ExecutionConstraints, RuntimeBuildBinding};
 use nomifun_common::{AgentToolPolicy, AppError};
 use nomifun_engine_core::{EngineToolExposure, EngineToolPlan, KernelEngineToolInvoker};
 
@@ -122,7 +122,7 @@ pub struct EngineKernelSession {
     source: Arc<()>,
     session_id: AgentSessionId,
     principal: nomifun_agent_contracts::PrincipalRef,
-    binding: RuntimeEngineBinding,
+    binding: RuntimeBuildBinding,
     constraints: ExecutionConstraints,
     workspace: String,
     git_root: Option<std::path::PathBuf>,
@@ -758,7 +758,7 @@ impl EngineKernelSession {
             resource_operations: Default::default(),
         });
         if self.process_selected {
-            self.wave2.open_coding_turn(
+            self.wave2.open_runtime_turn(
                 &self.principal.principal_id,
                 self.session_id.as_ref(),
                 receipt.operation_id(),
@@ -773,7 +773,7 @@ impl EngineKernelSession {
     /// unread outcomes before capability transitions or terminal publication.
     pub async fn processes_quiescent(&self) -> Result<bool, AppError> {
         self.wave2
-            .coding_processes_quiescent(&self.principal.principal_id, self.session_id.as_ref())
+            .runtime_processes_quiescent(&self.principal.principal_id, self.session_id.as_ref())
             .await
     }
 
@@ -783,7 +783,7 @@ impl EngineKernelSession {
         // preserve failure, but an unwind would skip all subsequent owners.
         let processes = guard_effect_settlement(|| {
             self.wave2
-                .cleanup_coding_session(&self.principal.principal_id, self.session_id.as_ref())
+                .cleanup_runtime_session(&self.principal.principal_id, self.session_id.as_ref())
         })
         .await;
         let tasks = guard_effect_settlement(|| tools.join()).await;

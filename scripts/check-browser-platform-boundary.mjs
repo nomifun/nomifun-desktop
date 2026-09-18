@@ -15,7 +15,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const BOOTSTRAP = 'crates/agent/nomi-agent/src/bootstrap.rs';
+const BOOTSTRAP = 'crates/backend/nomifun-app/src/router/unified_runtime_host.rs';
 const BROWSER_TOOL = 'crates/agent/nomi-browser/src/tool.rs';
 const ENGINE_BACKEND = 'crates/agent/nomi-browser-engine/src/backend/cdp.rs';
 const PLATFORM_ADAPTER = 'crates/agent/nomi-browser/src/platform_adapter.rs';
@@ -28,7 +28,6 @@ const FRESH_V4_COMPOSITION =
 
 const OWNERSHIP_BOUNDARY_PREFIXES = [
   'apps/desktop/src/',
-  'crates/agent/nomi-agent/src/',
   'crates/backend/nomifun-app/src/',
   'crates/backend/nomifun-gateway/src/',
   'crates/backend/nomifun-ai-agent/src/',

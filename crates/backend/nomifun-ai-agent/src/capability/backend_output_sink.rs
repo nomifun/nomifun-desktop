@@ -4,7 +4,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use nomi_agent::output::{
+use crate::runtime_output::{
     ArtifactContract, ArtifactExpectation, ArtifactRequirement, OutputSink, ToolMediaDelivery,
     ToolCallExecutionContext, ToolCallRetryContext, artifact_contract,
     artifact_contract_with_input, is_context_only_image_tool,

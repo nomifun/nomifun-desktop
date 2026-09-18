@@ -21,9 +21,6 @@ pub enum OrphanProofRequirement {
     /// effect-bearing child: proof = boot-lock authority + no surviving
     /// durable registry entry for the Conversation.
     LocalContainedAuthority,
-    /// Effect-bearing child registered durably at spawn: proof = verified
-    /// reaping of the Conversation's registry entries (absence is proof).
-    RegisteredLocalProcessTree,
 }
 
 /// Outcome of one terminal-proof evaluation.
@@ -51,19 +48,6 @@ pub enum TerminalProofDecision {
 ///   never a liveness heuristic.  When in doubt return `Unproven`.
 #[async_trait]
 pub trait TurnTerminalProofProvider: Send + Sync {
-    /// An engine-specific persisted recovery transaction. Default is deny;
-    /// sharing a process host or a family name is not recovery authority.
-    async fn prepare_registered_engine_recovery(
-        &self,
-        _binding: &nomifun_api_types::RuntimeEngineBinding,
-        _user_id: &str,
-        _conversation_id: &str,
-        _admission_epoch: i64,
-        _operation_id: &str,
-    ) -> TerminalProofDecision {
-        TerminalProofDecision::Unproven { reason: "no registered engine restart recovery provider".into() }
-    }
-
     async fn prove_orphan_generation_terminal(
         &self,
         user_id: &str,
@@ -73,20 +57,3 @@ pub trait TurnTerminalProofProvider: Send + Sync {
         active_operation_id: Option<&str>,
     ) -> TerminalProofDecision;
 }
-
-/// Compiled host extension, invoked only behind the exact boot-generation
-/// fence. May durably close engine history; must never re-execute effects.
-#[async_trait]
-pub trait RegisteredEngineRestartRecovery: Send + Sync {
-    async fn prepare_interrupted_turn(
-        &self,
-        binding: &nomifun_api_types::RuntimeEngineBinding,
-        user_id: &str,
-        conversation_id: &str,
-        admission_epoch: i64,
-        operation_id: &str,
-    ) -> TerminalProofDecision;
-}
-
-pub type RegisteredEngineRecoveryMap = std::collections::HashMap<
-    (String, String, String), std::sync::Arc<dyn RegisteredEngineRestartRecovery>>;

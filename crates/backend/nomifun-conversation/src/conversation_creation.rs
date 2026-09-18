@@ -43,10 +43,10 @@ fn required_creation_action(operation: &str) -> Result<&'static str, AppError> {
 }
 
 fn validate_next_turn_runtime_binding(current: &Value, incoming: &Value) -> Result<(), AppError> {
-    let key = nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY;
-    let parse = |extra: &Value| -> Result<Option<nomifun_api_types::RuntimeEngineBinding>, AppError> {
+    let key = nomifun_api_types::RUNTIME_BUILD_BINDING_KEY;
+    let parse = |extra: &Value| -> Result<Option<nomifun_api_types::RuntimeBuildBinding>, AppError> {
         extra.get(key).map(|raw| {
-            let binding: nomifun_api_types::RuntimeEngineBinding = serde_json::from_value(raw.clone())
+            let binding: nomifun_api_types::RuntimeBuildBinding = serde_json::from_value(raw.clone())
                 .map_err(|error| AppError::BadRequest(format!("Invalid runtime binding: {error}")))?;
             binding.validate()?;
             Ok(binding)
@@ -55,7 +55,7 @@ fn validate_next_turn_runtime_binding(current: &Value, incoming: &Value) -> Resu
     let current = parse(current)?;
     if let Some(target) = parse(incoming)? {
         if current.as_ref() != Some(&target) {
-            return Err(AppError::Conflict("This Agent uses a different runtime engine; start a new conversation with it from the Agent workbench".into()));
+            return Err(AppError::Conflict("This Agent uses a different runtime build; start a new conversation with it from the Agent workbench".into()));
         }
     }
     Ok(())
@@ -110,7 +110,7 @@ impl ConversationService {
         }
         lease.ensure_active()?;
         Self::terminate_runtime_with_proof(
-            &self.runtime_registry,
+            &self.runtime_sessions,
             &row.conversation_id,
             AgentKillReason::ConfigurationChanged,
             "next turn Agent selection",
@@ -149,7 +149,7 @@ impl ConversationService {
         if let Some(runtime) = resolution.runtime_extra.as_object() {
             // Keep the exact saved JSON value, even if an equal typed binding
             // arrives with another key order. SQLite protects that value.
-            object.extend(runtime.iter().filter(|(key, _)| key.as_str() != nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY)
+            object.extend(runtime.iter().filter(|(key, _)| key.as_str() != nomifun_api_types::RUNTIME_BUILD_BINDING_KEY)
                 .map(|(key, value)| (key.clone(), value.clone())));
         }
         let auto_inject = if object.get("product_agent_target_kind").is_none()

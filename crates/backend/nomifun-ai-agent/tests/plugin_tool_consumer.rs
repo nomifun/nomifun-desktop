@@ -5,14 +5,12 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use nomi_agent::tool_execution::{ProviderToolAuthority, execute_tool_calls_scoped};
 use nomi_protocol::events::ToolCategory;
 use nomi_tools::{
     Tool, ToolExecutionContext,
     registry::ToolRegistry,
 };
 use nomi_types::tool::{JsonSchema, ToolResult};
-use nomi_types::message::ContentBlock;
 use nomifun_agent_contracts::{
     ActionId, AgentPresetId, AgentPresetRevision, ArtifactId,
     AgentPresetRevisionPayload, AgentSessionId, ArtifactEnvelope,
@@ -84,20 +82,11 @@ const CONTEXT_CAPABILITY: &str = "example.dynamic.context";
 #[path = "plugin_tool_consumer/skills.rs"]
 mod skill_consumer;
 
-#[path = "plugin_tool_consumer/context.rs"]
-mod turn_context_consumer;
-
 #[path = "plugin_tool_consumer/dependencies.rs"]
 mod dependency_consumer;
 
 #[path = "plugin_tool_consumer/discovery.rs"]
 mod discovery_consumer;
-
-#[path = "plugin_tool_consumer/model_middleware.rs"]
-mod model_middleware_consumer;
-
-#[path = "plugin_tool_consumer/hosted_hidden.rs"]
-mod hosted_hidden_consumer;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct InvocationEvidence {
@@ -890,12 +879,12 @@ async fn dynamic_schema_registers_and_kernel_invoke_preserves_native_tools() {
         format!("{AGENT_TOOL} {AGENT_ACTION}")
     );
     assert!(
-        nomi_agent::output::artifact_contract(action.artifact_identity())
+        nomifun_ai_agent::runtime_output::artifact_contract(action.artifact_identity())
             .is_none(),
         "ordinary Plugin Tools must not inherit artifact obligations from provenance JSON"
     );
     assert!(
-        nomi_agent::output::artifact_contract(action.activation_identity())
+        nomifun_ai_agent::runtime_output::artifact_contract(action.activation_identity())
             .is_some(),
         "regression fixture must demonstrate why canonical activation JSON is unsafe for artifact classification"
     );
@@ -946,83 +935,6 @@ async fn dynamic_schema_registers_and_kernel_invoke_preserves_native_tools() {
     assert_eq!(evidence[0].operation_id, evidence[0].idempotency_key);
     assert_eq!(evidence[0].operation_id, evidence[0].correlation_id);
     assert!(evidence[0].operation_id.starts_with("nomi-plugin:tool-call-v1-"));
-}
-
-#[tokio::test]
-async fn invalid_host_dynamic_payload_is_rejected_before_invoker_dispatch() {
-    let kernel_calls = Arc::new(AtomicUsize::new(0));
-    let (registration, schemas) = registration(
-        'a',
-        "base:",
-        Arc::clone(&kernel_calls),
-        Arc::new(Mutex::new(Vec::new())),
-    );
-    let kernel = Arc::new(
-        KernelRegistry::new(
-            policy(),
-            Arc::new(InMemoryPluginStatePersistence::new()),
-        )
-        .unwrap(),
-    );
-    let materialized = kernel.replace_all(vec![registration]).unwrap();
-    let base = session(kernel, compile(&materialized), schemas).await;
-    let dynamic_invoker = Arc::new(CountingHostDynamicInvoker::default());
-    let dynamic_name = "robot_dynamic_schema_guard";
-    let scope = Arc::new(nomifun_ai_agent::engine_effect_scope::EngineEffectScope::new(Vec::new()).unwrap());
-    scope.begin_turn().unwrap();
-    let session = base
-        .bind_hosted_execution(nomifun_ai_agent::NomiHostedSessionBindings {
-            dynamic: Some((
-            vec![NomiHostDynamicToolDescriptor {
-                capability_id: CapabilityId::from("robot.display"),
-                provider_name: dynamic_name.to_owned(),
-                description: "Schema-guarded host dynamic Tool".to_owned(),
-                input_schema: StrictJsonValue(json!({
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                        "expression": {"type": "string", "minLength": 1}
-                    },
-                    "required": ["expression"]
-                })),
-                effect_class: EffectClass::Physical,
-                deferred: false,
-            }],
-            dynamic_invoker.clone(),
-            )),
-            ..nomifun_ai_agent::NomiHostedSessionBindings::new(scope)
-        })
-        .unwrap();
-    let mut registry = ToolRegistry::new();
-    session.register_into(&mut registry).unwrap();
-    let authority = ProviderToolAuthority::from_request_tools(&registry.to_tool_defs());
-
-    let outcome = execute_tool_calls_scoped(
-        &registry,
-        &[ContentBlock::ToolUse {
-            id: "invalid-dynamic-call".to_owned(),
-            name: dynamic_name.to_owned(),
-            input: json!({"expression": 7, "credential": "sk-must-not-dispatch"}),
-            extra: None,
-        }],
-        &authority,
-        "invalid-dynamic-turn",
-        None,
-        Default::default(),
-        false,
-        &[],
-    )
-    .await
-    .unwrap();
-
-    assert!(matches!(
-        &outcome.results[0],
-        ContentBlock::ToolResult { is_error: true, content, .. }
-            if content.contains("the tool was not executed")
-                && !content.contains("sk-must-not-dispatch")
-    ));
-    assert_eq!(dynamic_invoker.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(kernel_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -1706,7 +1618,7 @@ async fn plugin_product_active_release_action_joins_the_same_nomi_tool_session()
         "plugin.fixture.echo plugin.fixture.echo.invoke"
     );
     assert!(
-        nomi_agent::output::artifact_contract(action.artifact_identity())
+        nomifun_ai_agent::runtime_output::artifact_contract(action.artifact_identity())
             .is_none(),
         "ordinary Plugin Product Tools must not inherit artifact obligations from release provenance"
     );

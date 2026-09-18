@@ -43,9 +43,9 @@ const WORKSPACE_VCS: &str = nomifun_agent_domain_wave2::WORKSPACE_VCS_MODULE_ID;
 const WORKSPACE_PROCESS: &str = nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID;
 const WORKSPACE_ARTIFACTS: &str = nomifun_agent_domain_wave2::WORKSPACE_ARTIFACTS_MODULE_ID;
 
-/// Platform-owned workspace operations usable by the Coding host. Nomi's native
+/// Platform-owned workspace operations usable by the Runtime host. Nomi's native
 /// tool admission below remains unchanged, so tools are never registered twice.
-pub(crate) fn coding_capability_ids() -> BTreeSet<CapabilityId> {
+pub(crate) fn runtime_capability_ids() -> BTreeSet<CapabilityId> {
     [WORKSPACE_FILES, WORKSPACE_VCS, WORKSPACE_PROCESS, WORKSPACE_ARTIFACTS]
         .into_iter().map(CapabilityId::from).collect()
 }
@@ -301,7 +301,7 @@ impl NomiCoreWave2Host {
             None => Ok(None),
         }
     }
-    pub(crate) async fn coding_processes_quiescent(&self, user: &str, session: &str) -> Result<bool, AppError> {
+    pub(crate) async fn runtime_processes_quiescent(&self, user: &str, session: &str) -> Result<bool, AppError> {
         let scopes = self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?
             .iter().filter(|((owner, id, _), _)| owner == user && id == session)
             .map(|(_, scope)| scope.clone()).collect::<Vec<_>>();
@@ -311,7 +311,7 @@ impl NomiCoreWave2Host {
         Ok(true)
     }
 
-    pub(crate) fn open_coding_turn(&self, user: &str, session: &str, operation: &str, root: &str, journal: super::engine_journal::EngineTurnJournal) -> Result<(), AppError> {
+    pub(crate) fn open_runtime_turn(&self, user: &str, session: &str, operation: &str, root: &str, journal: super::engine_journal::EngineTurnJournal) -> Result<(), AppError> {
         let key = (user.to_owned(), session.to_owned(), operation.to_owned());
         let root = canonical_workspace_root(Path::new(root))?;
         let mut scopes = self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?;
@@ -321,7 +321,7 @@ impl NomiCoreWave2Host {
         Ok(())
     }
 
-    pub(crate) async fn cleanup_coding_session(&self, user: &str, session: &str) -> Result<(), AppError> {
+    pub(crate) async fn cleanup_runtime_session(&self, user: &str, session: &str) -> Result<(), AppError> {
         let scopes = self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?
             .iter().filter(|((owner, id, _), _)| owner == user && id == session)
             .map(|(key, scope)| (key.clone(), scope.clone())).collect::<Vec<_>>();
@@ -482,7 +482,7 @@ impl NomiCoreWave2Host {
         &self,
         context: &Wave2HostContext,
     ) -> Result<Arc<Wave2ApplicationHost>, Wave2HostPortError> {
-        if !coding_capability_ids().contains(&context.capability_id) {
+        if !runtime_capability_ids().contains(&context.capability_id) {
             return Err(Wave2HostPortError::unavailable(format!(
                 "{} is not owned by the Nomi-core Wave 2 workspace adapter",
                 context.capability_id.as_ref()
@@ -598,7 +598,7 @@ impl Wave2HostPort for NomiCoreWave2Host {
                 let root = exact_session_process_root(&request.context)?;
                 let key = (request.context.principal.principal_id.clone(), request.context.agent_session_id.as_ref().to_owned(), request.context.correlation_id.as_ref().to_owned());
                 let scope = self.processes.lock().map_err(|_| Wave2HostPortError::unavailable("process scopes poisoned"))?.get(&key).cloned()
-                    .ok_or_else(|| Wave2HostPortError::unavailable("no admitted Coding process turn for this exact authority"))?;
+                    .ok_or_else(|| Wave2HostPortError::unavailable("no admitted Runtime process turn for this exact authority"))?;
                 // The process runtime uses native canonical paths (including
                 // Windows extended prefixes); compare like representations.
                 let native_root = std::fs::canonicalize(&root).map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?;
@@ -685,12 +685,12 @@ pub(crate) fn session_process_binding(
         || !authority.operations.contains("execute")
         || server_workspace.trim().is_empty()
     {
-        return Err(AppError::Conflict("Coding requires an owned process execute grant".into()));
+        return Err(AppError::Conflict("Agent Runtime requires an owned process execute grant".into()));
     }
     let root = canonical_workspace_root(Path::new(server_workspace))?;
     let root = root.to_str().ok_or_else(|| AppError::Conflict("process root is not UTF-8".into()))?;
     let mut binding = authority.clone();
-    binding.binding_id = ResourceBindingId::from(format!("coding-session-process:{}", session_id.as_ref()));
+    binding.binding_id = ResourceBindingId::from(format!("agent-session-process:{}", session_id.as_ref()));
     binding.typed_parameters = BTreeMap::from([(WORKSPACE_ROOT_PARAMETER.into(), root.into())]);
     Ok(binding)
 }
@@ -699,7 +699,7 @@ fn exact_session_process_root(context: &Wave2HostContext) -> Result<PathBuf, Wav
     let [binding] = context.resource_bindings.as_slice() else {
         return Err(Wave2HostPortError::unavailable("process execution requires one Session process binding"));
     };
-    if binding.binding_id.as_ref() != format!("coding-session-process:{}", context.agent_session_id.as_ref())
+    if binding.binding_id.as_ref() != format!("agent-session-process:{}", context.agent_session_id.as_ref())
         || binding.resource_kind.as_ref() != "process_session"
         || binding.owner_id != context.principal.principal_id
         || context.principal.principal_kind != "user"

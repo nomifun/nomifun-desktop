@@ -533,58 +533,27 @@ fn command_adapters_delegate_to_the_process_supervisor() {
 }
 
 #[test]
-fn bootstrap_creates_one_supervisor_and_shares_it_with_all_command_tools() {
-    let bootstrap = without_whitespace(&production_source(
-        "crates/agent/nomi-agent/src/bootstrap.rs",
+fn unified_process_owner_creates_one_supervisor() {
+    let process_owner = without_whitespace(&production_source(
+        "crates/backend/nomifun-engine-core/src/process.rs",
     ));
     assert_eq!(
         count(
-            &bootstrap,
-            "nomi_process_runtime::ProcessSupervisor::new("
+            &process_owner,
+            "ProcessSupervisor::new("
         ),
         1,
-        "bootstrap must create exactly one ProcessSupervisor"
+        "the unified process owner must create exactly one ProcessSupervisor"
     );
-    for consumer in [
-        "nomi_tools::bash::BashTool::new(Arc::clone(&process_supervisor),",
-        "nomi_tools::exec_command::ExecCommandTool::new(Arc::clone(&process_supervisor),",
-        "nomi_tools::write_stdin::WriteStdinTool::new(Arc::clone(&process_supervisor),",
-        "engine.set_process_supervisor(Arc::clone(&process_supervisor))",
-    ] {
-        assert!(
-            bootstrap.contains(consumer),
-            "bootstrap must share process_supervisor with {consumer}"
-        );
-    }
-    assert_eq!(
-        count(
-            &bootstrap,
-            "nomi_tools::process_store::ProcessStore::new("
-        ),
-        1,
-        "bootstrap must create one numeric ProcessStore adapter"
-    );
-    for consumer in [
-        "ExecCommandTool::new(Arc::clone(&process_supervisor),Arc::clone(&process_store),",
-        "WriteStdinTool::new(Arc::clone(&process_supervisor),Arc::clone(&process_store),",
-    ] {
-        assert!(
-            bootstrap.contains(consumer),
-            "exec_command and write_stdin must share the numeric adapter: {consumer}"
-        );
-    }
+    let host = without_whitespace(&production_source(
+        "crates/backend/nomifun-app/src/router/engine_process_host.rs",
+    ));
+    assert!(host.contains("owner:ManagedEngineProcessOwner"));
+    assert!(host.contains(".write_stdin("));
 }
 
 #[test]
 fn mcp_routing_uses_origin_stable_reserved_names_without_a_collision_snapshot() {
-    let bootstrap = without_whitespace(&production_source(
-        "crates/agent/nomi-agent/src/bootstrap.rs",
-    ));
-    assert!(
-        !bootstrap.contains("letbuiltin_names:Vec<String>=registry.tool_names();"),
-        "MCP routing must not depend on a registration-order name snapshot"
-    );
-
     let proxy = without_whitespace(&production_source(
         "crates/agent/nomi-mcp/src/tool_proxy.rs",
     ));

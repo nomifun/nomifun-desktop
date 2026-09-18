@@ -81,7 +81,7 @@ test('official template preserves exact server-seeded actions and never exposes 
   fireEvent.click(screen.getByRole('checkbox', { name: 'Allow Write in Knowledge' }));
   fireEvent.click(screen.getByRole('button', { name: en.workbench.saveAsMine }));
   expect(screen.saves[0].enabled_capabilities[0].action_allowlist).toEqual(['knowledge/search']);
-  expect(screen.saves[0]).not.toHaveProperty('runtime_engine');
+  expect(screen.saves[0]).not.toHaveProperty('runtime_build');
 });
 
 test('template reset restores the exact server-seeded Module actions', async () => {

@@ -8,7 +8,7 @@ use tower::ServiceExt;
 use wiremock::MockServer;
 
 use nomifun_ai_agent::{
-    AgentRuntimeControl, AgentRuntimeHandle, InMemoryAgentRuntimeRegistry, MockAgentRuntime,
+    AgentRuntimeControl, AgentRuntimeHandle, InMemoryAgentRuntimeSessions, MockAgentRuntime,
 };
 use nomifun_app::AppConfig;
 use nomifun_app::compatibility::{
@@ -261,12 +261,12 @@ async fn build_app_with_mock_agents_config(config: AppConfig) -> (axum::Router, 
             )))
         })
     });
-    let runtime_registry: std::sync::Arc<dyn nomifun_ai_agent::AgentRuntimeRegistry> =
-        std::sync::Arc::new(InMemoryAgentRuntimeRegistry::new(factory));
+    let runtime_sessions: std::sync::Arc<dyn nomifun_ai_agent::AgentRuntimeSessions> =
+        std::sync::Arc::new(InMemoryAgentRuntimeSessions::new(factory));
     let services = AppServices::from_config(db, &config)
         .await
         .unwrap()
-        .with_agent_runtime_registry(runtime_registry);
+        .with_agent_runtime_sessions(runtime_sessions);
     let router = create_router(&services).await;
     (router, services)
 }

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use nomi_agent::host_skills::{HostSkill, HostSkillAccess};
+use crate::host_skills::{HostSkill, HostSkillAccess};
 use nomifun_agent_contracts::ResolvedSkillLock;
 use nomifun_agent_kernel::{CompiledSnapshot, KernelRegistry, SessionCapabilityState};
 

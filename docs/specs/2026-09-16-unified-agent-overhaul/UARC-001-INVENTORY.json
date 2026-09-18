@@ -27,8 +27,8 @@
     },
     {
       "id": "runtime.preset_selector",
-      "description": "Preset and Session metadata still select or persist a Runtime engine.",
-      "owner_tasks": ["UARC-014", "UARC-050", "UARC-052"],
+      "description": "Preset and Session metadata still select or persist a Runtime engine; after cutover only the immutable applied migration remains until baseline squash.",
+      "owner_tasks": ["UARC-014", "UARC-050", "UARC-052", "UARC-054"],
       "completion_requirement": "zero_production_references",
       "matcher": { "kind": "regex", "pattern": "\\bruntime_engine(?:_binding)?\\b", "flags": "" },
       "baseline": { "match_count": 45, "file_count": 24, "files_digest": "36bc60b561ea32172b67d0421d4b4e94a3abaca9385b7ba6f0fc553ebf953846" }

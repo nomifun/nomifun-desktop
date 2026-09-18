@@ -268,7 +268,7 @@ describe('useGuidSend HTTP behavior', () => {
     }));
     await act(async () => { await hook.result.current.handleSend(); });
     expect(calls[0].body).toMatchObject({ preset_id: PRESET_ID });
-    expect(calls[0].body).not.toHaveProperty('runtime_engine');
+    expect(calls[0].body).not.toHaveProperty('runtime_build');
   });
 
   test('official selection prepares its configuration only on send and launches a normal frozen session', async () => {

@@ -3,14 +3,14 @@
 //! 底座选型（Task 3 Step 1 探索结论）：复用本 crate 既有的 provider 直连路径
 //! （`resolve_provider_config` + `nomi_providers::create_provider`，与
 //! `one_shot_completion`/IDMM sidecar/companion learner 同族），在其上补一个
-//! 最小 tool-loop，而不是复用完整 nomi 引擎会话（`nomi_agent::session`）。
+//! 最小 tool-loop，而不是复用完整 nomi 引擎会话（统一 Runtime Session）。
 //! 理由：完整引擎的会话构造会注册内建 OS/文件/浏览器工具、技能与 MCP 面，
 //! "再剔除"属于运行时钳制（fail-open 风险正是本设计要消灭的）；而 provider
 //! 直连路径发给模型的工具表 **只能** 来自 `OneShotTurnRequest::tools`——安全
 //! 边界由构造保证：未传入的工具在注册表中根本不存在，也没有任何 handler 可被
 //! 调用。该入口不含任何客服（cs）概念，可被任意域复用。
 //!
-//! 无状态：每回合新建请求、跑完丢弃；不触碰 AgentRuntimeRegistry / workspace
+//! 无状态：每回合新建请求、跑完丢弃；不触碰 AgentRuntimeSessions / workspace
 //! lease / 会话持久化。
 
 use std::path::PathBuf;

@@ -9,12 +9,12 @@ use nomifun_agent_contracts::{
 };
 use nomifun_agent_control_plane::{AgentControlPlane, AuthenticatedOwner};
 use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
-use nomifun_api_types::{ConversationResponse, RuntimeEngineBinding};
+use nomifun_api_types::{ConversationResponse, RuntimeBuildBinding};
 use nomifun_common::AppError;
 use nomifun_db::SqlitePool;
 
 use super::nomi_core_session::{NomiCoreSessionOwner, session_metadata};
-use super::runtime_engines::{RuntimeEngineHost, binding_from_extra};
+use super::official_runtime::{OfficialRuntimeHost, binding_from_extra};
 
 /// Constructed by application assembly only. The sole official Driver receives
 /// this typed port owner from the composition root; there is no runtime
@@ -23,7 +23,7 @@ pub struct EngineSessionHost {
     skill_artifacts: Arc<nomifun_plugin_platform::application::FsPluginArtifactStore>,
     owner: Weak<NomiCoreSessionOwner>,
     control_plane: Arc<AgentControlPlane>,
-    engines: Weak<RuntimeEngineHost>,
+    engines: Weak<OfficialRuntimeHost>,
     pool: SqlitePool,
     broker: super::chat_broker_host::ChatBrokerHostComposition,
     http: reqwest::Client,
@@ -43,7 +43,7 @@ pub struct EngineSessionHost {
 pub struct AdmittedEngineSession {
     source: Arc<()>,
     response: ConversationResponse,
-    engine_binding: RuntimeEngineBinding,
+    engine_binding: RuntimeBuildBinding,
     agent_binding: AgentBindingValue,
     revision: AgentPresetRevision,
     snapshot: ResolvedSnapshotEnvelope,
@@ -86,7 +86,7 @@ impl AdmittedEngineSession {
     pub fn session(&self) -> &ConversationResponse {
         &self.response
     }
-    pub fn engine_binding(&self) -> &RuntimeEngineBinding {
+    pub fn engine_binding(&self) -> &RuntimeBuildBinding {
         &self.engine_binding
     }
     pub fn agent_binding(&self) -> &AgentBindingValue {
@@ -212,7 +212,7 @@ impl EngineSessionHost {
     }
 
     /// Trusted application adapters can add their own live state fences over
-    /// the same journal gate (Coding also fences capability activation).
+    /// the same journal gate (the Runtime also fences capability activation).
     pub(super) fn compose_model_port(
         &self,
         gate: Arc<dyn nomifun_chat_model_broker::ChatCausalityGate>,
@@ -323,7 +323,7 @@ impl EngineSessionHost {
     pub(crate) fn new(
         owner: &Arc<NomiCoreSessionOwner>,
         control_plane: Arc<AgentControlPlane>,
-        engines: &Arc<RuntimeEngineHost>,
+        engines: &Arc<OfficialRuntimeHost>,
         pool: SqlitePool,
         encryption_key: [u8; 32],
         resources: super::engine_kernel_session::EngineKernelAssembly,
@@ -400,7 +400,7 @@ impl EngineSessionHost {
     pub async fn read_turn_receipt(
         &self,
         options: &AgentRuntimeBuildOptions,
-        binding: &RuntimeEngineBinding,
+        binding: &RuntimeBuildBinding,
         expected_snapshot: &nomifun_agent_contracts::ResolvedSnapshotRef,
         message: &SendMessageData,
     ) -> Result<EngineTurnReceipt, AppError> {
@@ -478,8 +478,8 @@ impl EngineSessionHost {
         self.engines
             .upgrade()
             .ok_or_else(|| conflict("engine host has shut down"))?
-            .catalog()?
-            .validate_session_extra(binding, &session.response.extra)?;
+            .provider()?
+            .validate_session_extra(&session.response.extra)?;
         Ok(EngineTurnReceipt {
             source: self.source.clone(),
             session,
@@ -494,7 +494,7 @@ impl EngineSessionHost {
     pub async fn resolve(
         &self,
         options: &AgentRuntimeBuildOptions,
-        binding: &RuntimeEngineBinding,
+        binding: &RuntimeBuildBinding,
     ) -> Result<AdmittedEngineSession, AppError> {
         let conflict =
             |message: &str| AppError::Conflict(format!("Engine Session admission: {message}"));
@@ -533,8 +533,9 @@ impl EngineSessionHost {
                 "durable Session engine binding differs from runtime request",
             ));
         }
-        let catalog = engines.catalog()?;
-        catalog.validate_session_extra(binding, &response.extra)?;
+        let provider = engines.provider()?;
+        provider.validate_binding(binding)?;
+        provider.validate_session_extra(&response.extra)?;
         let authenticated = AuthenticatedOwner(nomifun_agent_contracts::UserId::from(
             options.user_id.clone(),
         ));
@@ -563,7 +564,7 @@ impl EngineSessionHost {
                 "Agent revision/Snapshot/owner identity chain differs",
             ));
         }
-        catalog.validate_snapshot(binding, &snapshot)?;
+        provider.validate_snapshot(&snapshot)?;
         Ok(AdmittedEngineSession {
             source: self.source.clone(),
             response,

@@ -3,7 +3,7 @@
 //! A [`SshConnectionHandle`] owns one live SSH connection: a persistent shell for
 //! commands and cwd/env state, plus an SFTP session for file ops. The trait is
 //! reached through the `nomifun-ai-agent` re-export — this crate has no
-//! `nomi-agent`/`nomi-tools` dependency, only `nomi-ssh` (transport) and the seam.
+//! legacy Agent-loop dependency, only `nomi-ssh` (transport) and the seam.
 //!
 //! Connection identity and credentials are baked in at `connect`; the model never
 //! sees them. This mirrors the Sink pattern (`nomifun-requirement`).

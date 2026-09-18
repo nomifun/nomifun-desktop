@@ -1,7 +1,7 @@
 //! Phase 3 模型故障转移 seam(plan D3/D5/D6)的会话服务侧实现。
 //!
 //! 纯逻辑(挑选器 / 配置读写 / 故障分类)在 [`crate::model_failover`];本模块只放
-//! 需要 `&ConversationService`(仓库 + runtime_registry)的有副作用步骤。生产切换只由
+//! 需要 `&ConversationService`(仓库 + runtime_sessions)的有副作用步骤。生产切换只由
 //! 持有精确 turn generation 的 send-loop 发起;IDMM 仅验证观察结果,不会越权换模型或
 //! 重建 runtime。
 //!
@@ -16,7 +16,7 @@ use nomifun_common::{
     AgentKillReason, AgentType, ErrorChain, ProviderWithModel, now_ms,
 };
 use nomifun_db::ConversationRowUpdate;
-use nomifun_ai_agent::{AgentRuntimeHandle, AgentRuntimeRegistry};
+use nomifun_ai_agent::{AgentRuntimeHandle, AgentRuntimeSessions};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -111,7 +111,7 @@ impl ConversationService {
         config: &nomifun_api_types::ModelFailoverConfig,
         tried: &[ProviderWithModel],
         expected_authority: Option<&FailoverAuthoritySnapshot>,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
         runtime_generation: u64,
         cancellation: &CancellationToken,
         transient_options: Option<&nomifun_ai_agent::types::AgentRuntimeBuildOptions>,
@@ -293,7 +293,7 @@ impl ConversationService {
                 );
             }
             let teardown = Self::terminate_runtime_with_proof(
-                runtime_registry,
+                runtime_sessions,
                 conversation_id,
                 AgentKillReason::ConfigurationChanged,
                 "model failover",
@@ -366,7 +366,7 @@ impl ConversationService {
             if let Some(extra) = options.extra.as_object_mut() {
                 extra.remove("chat_config_revision_digest");
             }
-            let agent = match runtime_registry.get_or_create_runtime_for_turn(
+            let agent = match runtime_sessions.get_or_create_runtime_for_turn(
                 conversation_id, runtime_generation, cancellation.clone(), options,
             ).await {
                 Ok(agent) => agent,
@@ -422,7 +422,7 @@ impl ConversationService {
         let (runtime_options, knowledge_signature) = match self
             .prepare_runtime_options_for_execution(
                 &refreshed,
-                runtime_registry,
+                runtime_sessions,
                 Some(cancellation),
             )
             .await
@@ -433,7 +433,7 @@ impl ConversationService {
                 return None;
             }
         };
-        let agent = match runtime_registry
+        let agent = match runtime_sessions
             .get_or_create_runtime_for_turn(
                 conversation_id,
                 runtime_generation,
@@ -449,7 +449,7 @@ impl ConversationService {
             }
         };
         if cancellation.is_cancelled() {
-            if let Err(error) = runtime_registry.cancel_runtime_turn(
+            if let Err(error) = runtime_sessions.cancel_runtime_turn(
                 conversation_id,
                 runtime_generation,
                 Some(AgentKillReason::UserCancelled),
@@ -461,7 +461,7 @@ impl ConversationService {
                 );
             }
             Self::terminate_runtime_until_confirmed(
-                runtime_registry,
+                runtime_sessions,
                 conversation_id,
                 AgentKillReason::UserCancelled,
                 "cancelled failover rebuild",
@@ -484,7 +484,7 @@ impl ConversationService {
     pub(crate) async fn strip_images_and_rebuild(
         &self,
         conversation_id: &str,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
         turn_generation: u64,
         cancellation: &CancellationToken,
     ) -> Option<AgentRuntimeHandle> {
@@ -528,7 +528,7 @@ impl ConversationService {
         }
 
         Self::terminate_runtime_until_confirmed(
-            runtime_registry,
+            runtime_sessions,
             conversation_id,
             AgentKillReason::ConfigurationChanged,
             "image fallback rebuild",
@@ -539,7 +539,7 @@ impl ConversationService {
         }
 
         let (runtime_options, knowledge_signature) = match self
-            .prepare_runtime_options_for_execution(&row, runtime_registry, Some(cancellation))
+            .prepare_runtime_options_for_execution(&row, runtime_sessions, Some(cancellation))
             .await
         {
             Ok(prepared) => prepared,
@@ -548,7 +548,7 @@ impl ConversationService {
                 return None;
             }
         };
-        match runtime_registry
+        match runtime_sessions
             .get_or_create_runtime_for_turn(
                 conversation_id,
                 turn_generation,
@@ -563,7 +563,7 @@ impl ConversationService {
             }
             Ok(agent) => {
                 let _ = agent;
-                if let Err(error) = runtime_registry.cancel_runtime_turn(
+                if let Err(error) = runtime_sessions.cancel_runtime_turn(
                     conversation_id,
                     turn_generation,
                     Some(AgentKillReason::UserCancelled),
@@ -575,7 +575,7 @@ impl ConversationService {
                     );
                 }
                 Self::terminate_runtime_until_confirmed(
-                    runtime_registry,
+                    runtime_sessions,
                     conversation_id,
                     AgentKillReason::UserCancelled,
                     "cancelled image fallback rebuild",
@@ -619,7 +619,7 @@ impl ConversationService {
         tried: &[ProviderWithModel],
         failed_turn_authority: &FailoverAuthoritySnapshot,
         extra_json: &str,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
         turn_generation: u64,
         cancellation: &CancellationToken,
         transient_options: Option<&nomifun_ai_agent::types::AgentRuntimeBuildOptions>,
@@ -677,7 +677,7 @@ impl ConversationService {
             &config,
             tried,
             Some(failed_turn_authority),
-            runtime_registry,
+            runtime_sessions,
             turn_generation,
             cancellation,
             transient_options,

@@ -31,7 +31,7 @@ use nomi_process_runtime::{
 };
 use tracing::{error, info, warn};
 
-use crate::manager::process_registry::{
+use crate::process_registry::{
     ProcessRegistry, RegisteredAgentProcess, agent_process_registry_path, read_registry_file,
     with_registry_lock, write_registry_file,
 };

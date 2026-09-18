@@ -27,7 +27,7 @@ use nomifun_chat_model_broker::{
     ChatCausality, ChatCausalityGate, ChatModelError, ChatModelErrorCode,
     ChatRetryDirective,
 };
-use nomifun_coding_engine::CodingEngineEvent;
+use nomifun_agent_runtime::AgentEngineEvent;
 use nomifun_common::AppError;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Semaphore};
@@ -513,10 +513,10 @@ impl EngineTurnJournal {
     async fn append_terminal(
         journal: &Journal,
         cursor: &Cursor,
-        event: &CodingEngineEvent,
+        event: &AgentEngineEvent,
     ) -> Result<(), AppError> {
         match event {
-            CodingEngineEvent::TurnCancelled { .. } => {
+            AgentEngineEvent::TurnCancelled { .. } => {
                 let receipt = journal
                     .store
                     .read_turn_receipt(&journal.session, &journal.operation)
@@ -539,7 +539,7 @@ impl EngineTurnJournal {
                 }
                 Ok(())
             }
-            CodingEngineEvent::TurnCompleted { .. } | CodingEngineEvent::TurnFailed { .. } => {
+            AgentEngineEvent::TurnCompleted { .. } | AgentEngineEvent::TurnFailed { .. } => {
                 let assistant_message_id = cursor
                     .assistant_message_id
                     .clone()
@@ -574,14 +574,14 @@ impl EngineTurnJournal {
                     },
                 };
                 let (kind, payload) = match event {
-                    CodingEngineEvent::TurnCompleted { model_steps, finish_reason } => (
+                    AgentEngineEvent::TurnCompleted { model_steps, finish_reason } => (
                         "turn/completed",
                         json!({
                             "model_steps": model_steps,
                             "finish_reason": finish_reason,
                         }),
                     ),
-                    CodingEngineEvent::TurnFailed { model_steps, message } => (
+                    AgentEngineEvent::TurnFailed { model_steps, message } => (
                         "turn/failed",
                         json!({
                             "model_steps": model_steps,
@@ -617,7 +617,7 @@ impl EngineTurnJournal {
                     .map_err(failure)?;
                 Ok(())
             }
-            _ => Err(failure("terminal write did not contain a terminal Coding event")),
+            _ => Err(failure("terminal write did not contain a terminal Runtime event")),
         }
     }
 
@@ -638,9 +638,9 @@ impl EngineTurnJournal {
             return Err(failure("invalid model-operation admission"));
         }
         let event_value: Value = serde_json::from_str(&payload).map_err(failure)?;
-        let coding_event = serde_json::from_value::<CodingEngineEvent>(event_value.clone()).ok();
-        if kind == EngineJournalWrite::Terminal && coding_event.is_none() {
-            return Err(failure("terminal write did not contain a terminal Coding event"));
+        let runtime_event = serde_json::from_value::<AgentEngineEvent>(event_value.clone()).ok();
+        if kind == EngineJournalWrite::Terminal && runtime_event.is_none() {
+            return Err(failure("terminal write did not contain a terminal Runtime event"));
         }
         let permit = self
             .0
@@ -685,14 +685,14 @@ impl EngineTurnJournal {
             cursor.uncertain = true;
             Self::append_progress(&journal, &cursor, &event_value).await?;
             Self::append_tool_projection(&journal, &mut cursor, &event_value).await?;
-            if let Some(CodingEngineEvent::OutputTextDelta { text, .. }) = &coding_event {
+            if let Some(AgentEngineEvent::OutputTextDelta { text, .. }) = &runtime_event {
                 Self::append_assistant_part(&journal, &mut cursor, text).await?;
             }
             if kind == EngineJournalWrite::Terminal {
                 Self::append_terminal(
                     &journal,
                     &cursor,
-                    coding_event.as_ref().expect("terminal Coding event checked above"),
+                    runtime_event.as_ref().expect("terminal Runtime event checked above"),
                 )
                 .await?;
             }

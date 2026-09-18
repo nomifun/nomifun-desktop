@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use nomifun_ai_agent::AgentRuntimeRegistry;
+use nomifun_ai_agent::AgentRuntimeSessions;
 use nomifun_api_types::{
     AgentResolvedSnapshot, CreateConversationRequest, ExecutionModelPool, ExecutionModelRef,
     ListConversationsQuery, UpdateConversationRequest, WebSocketMessage,
@@ -43,10 +43,10 @@ impl UserEventSink for TestBroadcaster {
     }
 }
 
-struct NoopAgentRuntimeRegistry;
+struct NoopAgentRuntimeSessions;
 
 #[async_trait::async_trait]
-impl AgentRuntimeRegistry for NoopAgentRuntimeRegistry {
+impl AgentRuntimeSessions for NoopAgentRuntimeSessions {
     fn get_runtime(&self, _: &str) -> Option<nomifun_ai_agent::AgentRuntimeHandle> {
         None
     }
@@ -82,7 +82,7 @@ struct DeviceRuntimeCapture {
 }
 
 #[async_trait::async_trait]
-impl AgentRuntimeRegistry for DeviceRuntimeCapture {
+impl AgentRuntimeSessions for DeviceRuntimeCapture {
     fn get_runtime(&self, _: &str) -> Option<nomifun_ai_agent::AgentRuntimeHandle> { None }
     async fn get_or_create_runtime(
         &self,
@@ -129,13 +129,13 @@ impl SkillResolver for EmptySkillResolver {
     }
 }
 
-async fn setup() -> (ConversationService, Arc<TestBroadcaster>, Arc<dyn AgentRuntimeRegistry>) {
+async fn setup() -> (ConversationService, Arc<TestBroadcaster>, Arc<dyn AgentRuntimeSessions>) {
     setup_with_workspace_root(std::env::temp_dir()).await
 }
 
 async fn setup_with_workspace_root(
     workspace_root: PathBuf,
-) -> (ConversationService, Arc<TestBroadcaster>, Arc<dyn AgentRuntimeRegistry>) {
+) -> (ConversationService, Arc<TestBroadcaster>, Arc<dyn AgentRuntimeSessions>) {
     let db = init_database_memory().await.unwrap();
     let repo = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
     let provider_repo = nomifun_db::SqliteProviderRepository::new(db.pool().clone());
@@ -210,18 +210,18 @@ async fn setup_with_workspace_root(
     let broadcaster = Arc::new(TestBroadcaster::new());
     let agent_metadata_repo: Arc<dyn nomifun_db::IAgentMetadataRepository> =
         Arc::new(nomifun_db::SqliteAgentMetadataRepository::new(db.pool().clone()));
-    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(NoopAgentRuntimeRegistry);
+    let runtime_sessions: Arc<dyn AgentRuntimeSessions> = Arc::new(NoopAgentRuntimeSessions);
     let svc = ConversationService::new(
         Arc::<str>::from(USER_ID),
         workspace_root,
         broadcaster.clone(),
         Arc::new(EmptySkillResolver),
-        runtime_registry.clone(),
+        runtime_sessions.clone(),
         repo,
         agent_metadata_repo,
         Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
     );
-    (svc, broadcaster, runtime_registry)
+    (svc, broadcaster, runtime_sessions)
 }
 
 const USER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
@@ -290,7 +290,7 @@ async fn companion_device_turn_keeps_model_and_endpoint_context_off_the_conversa
     let conversation = svc.create(USER_ID, create).await.unwrap();
     broadcaster.take_events();
     let capture = Arc::new(DeviceRuntimeCapture::default());
-    let registry: Arc<dyn AgentRuntimeRegistry> = capture.clone();
+    let registry: Arc<dyn AgentRuntimeSessions> = capture.clone();
     let context = nomifun_conversation::companion_interaction::CompanionDeviceTurn {
         from_desktop: false, resources: None,
         companion_id: companion_id.to_owned(),
@@ -351,7 +351,7 @@ async fn companion_device_turn_keeps_model_and_endpoint_context_off_the_conversa
 
 #[tokio::test]
 async fn t1_1_create_with_defaults() {
-    let (svc, broadcaster, _runtime_registry) = setup().await;
+    let (svc, broadcaster, _runtime_sessions) = setup().await;
 
     let resp = svc.create(USER_ID, make_create_req()).await.unwrap();
 
@@ -445,7 +445,7 @@ async fn delete_removes_managed_auto_workspace() {
 
 #[tokio::test]
 async fn t1_2_create_each_agent_type() {
-    let (svc, _, _runtime_registry) = setup().await;
+    let (svc, _, _runtime_sessions) = setup().await;
 
     let types = vec![("nomi", AgentType::Nomi)];
 
@@ -475,7 +475,7 @@ async fn t1_2_create_each_agent_type() {
 
 #[tokio::test]
 async fn t1_3_create_with_optional_fields() {
-    let (svc, _, _runtime_registry) = setup().await;
+    let (svc, _, _runtime_sessions) = setup().await;
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "nomi",
@@ -497,7 +497,7 @@ async fn t1_3_create_with_optional_fields() {
 
 #[tokio::test]
 async fn t2_1_list_empty() {
-    let (svc, _, _runtime_registry) = setup().await;
+    let (svc, _, _runtime_sessions) = setup().await;
     let result = svc.list(USER_ID, ListConversationsQuery::default(), false).await.unwrap();
     assert!(result.items.is_empty());
     assert_eq!(result.total, 0);
@@ -506,7 +506,7 @@ async fn t2_1_list_empty() {
 
 #[tokio::test]
 async fn t2_2_list_basic() {
-    let (svc, _, _runtime_registry) = setup().await;
+    let (svc, _, _runtime_sessions) = setup().await;
     for _ in 0..3 {
         svc.create(USER_ID, make_create_req()).await.unwrap();
     }
@@ -518,7 +518,7 @@ async fn t2_2_list_basic() {
 
 #[tokio::test]
 async fn t2_3_cursor_pagination() {
-    let (svc, _, _runtime_registry) = setup().await;
+    let (svc, _, _runtime_sessions) = setup().await;
     for _ in 0..5 {
         svc.create(USER_ID, make_create_req()).await.unwrap();
     }
@@ -569,7 +569,7 @@ async fn t2_3_cursor_pagination() {
 
 #[tokio::test]
 async fn t2_4_source_filter() {
-    let (svc, _, _runtime_registry) = setup().await;
+    let (svc, _, _runtime_sessions) = setup().await;
 
     // 2 nomifun + 1 telegram
     svc.create(USER_ID, make_create_req()).await.unwrap();
@@ -595,14 +595,14 @@ async fn t2_4_source_filter() {
 
 #[tokio::test]
 async fn t2_5_pinned_filter() {
-    let (svc, _, runtime_registry) = setup().await;
+    let (svc, _, runtime_sessions) = setup().await;
 
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
     svc.create(USER_ID, make_create_req()).await.unwrap();
 
     // Pin one
     let pin_req: UpdateConversationRequest = serde_json::from_value(json!({ "pinned": true })).unwrap();
-    svc.update(USER_ID, &conv.conversation_id.to_string(), pin_req, &runtime_registry).await.unwrap();
+    svc.update(USER_ID, &conv.conversation_id.to_string(), pin_req, &runtime_sessions).await.unwrap();
 
     let query = ListConversationsQuery {
         pinned: Some(true),
@@ -617,7 +617,7 @@ async fn t2_5_pinned_filter() {
 
 #[tokio::test]
 async fn t3_1_get_existing() {
-    let (svc, _, _runtime_registry) = setup().await;
+    let (svc, _, _runtime_sessions) = setup().await;
     let created = svc.create(USER_ID, make_create_req()).await.unwrap();
 
     let fetched = svc.get(USER_ID, &created.conversation_id.to_string()).await.unwrap();
@@ -629,7 +629,7 @@ async fn t3_1_get_existing() {
 
 #[tokio::test]
 async fn t3_2_get_not_found() {
-    let (svc, _, _runtime_registry) = setup().await;
+    let (svc, _, _runtime_sessions) = setup().await;
     let missing = nomifun_common::ConversationId::new();
     let err = svc.get(USER_ID, missing.as_str()).await.unwrap_err();
     assert!(matches!(err, nomifun_common::AppError::NotFound(_)));
@@ -639,12 +639,12 @@ async fn t3_2_get_not_found() {
 
 #[tokio::test]
 async fn t4_1_update_name() {
-    let (svc, broadcaster, runtime_registry) = setup().await;
+    let (svc, broadcaster, runtime_sessions) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
     broadcaster.take_events();
 
     let req: UpdateConversationRequest = serde_json::from_value(json!({ "name": "New Name" })).unwrap();
-    let updated = svc.update(USER_ID, &conv.conversation_id.to_string(), req, &runtime_registry).await.unwrap();
+    let updated = svc.update(USER_ID, &conv.conversation_id.to_string(), req, &runtime_sessions).await.unwrap();
 
     assert_eq!(updated.name, "New Name");
     assert!(updated.modified_at >= conv.modified_at);
@@ -656,11 +656,11 @@ async fn t4_1_update_name() {
 
 #[tokio::test]
 async fn t4_2_pin_conversation() {
-    let (svc, _, runtime_registry) = setup().await;
+    let (svc, _, runtime_sessions) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
 
     let req: UpdateConversationRequest = serde_json::from_value(json!({ "pinned": true })).unwrap();
-    let updated = svc.update(USER_ID, &conv.conversation_id.to_string(), req, &runtime_registry).await.unwrap();
+    let updated = svc.update(USER_ID, &conv.conversation_id.to_string(), req, &runtime_sessions).await.unwrap();
 
     assert!(updated.pinned);
     assert!(updated.pinned_at.is_some());
@@ -668,24 +668,24 @@ async fn t4_2_pin_conversation() {
 
 #[tokio::test]
 async fn t4_3_unpin_clears_pinned_at() {
-    let (svc, _, runtime_registry) = setup().await;
+    let (svc, _, runtime_sessions) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
 
     // Pin
     let pin: UpdateConversationRequest = serde_json::from_value(json!({ "pinned": true })).unwrap();
-    let pinned = svc.update(USER_ID, &conv.conversation_id.to_string(), pin, &runtime_registry).await.unwrap();
+    let pinned = svc.update(USER_ID, &conv.conversation_id.to_string(), pin, &runtime_sessions).await.unwrap();
     assert!(pinned.pinned_at.is_some());
 
     // Unpin
     let unpin: UpdateConversationRequest = serde_json::from_value(json!({ "pinned": false })).unwrap();
-    let unpinned = svc.update(USER_ID, &conv.conversation_id.to_string(), unpin, &runtime_registry).await.unwrap();
+    let unpinned = svc.update(USER_ID, &conv.conversation_id.to_string(), unpin, &runtime_sessions).await.unwrap();
     assert!(!unpinned.pinned);
     assert!(unpinned.pinned_at.is_none());
 }
 
 #[tokio::test]
 async fn t4_4_extra_merge_preserves_existing_keys() {
-    let (svc, _, runtime_registry) = setup().await;
+    let (svc, _, runtime_sessions) = setup().await;
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "nomi",
@@ -698,7 +698,7 @@ async fn t4_4_extra_merge_preserves_existing_keys() {
     // Update only workspace
     let update_req: UpdateConversationRequest =
         serde_json::from_value(json!({ "extra": { "workspace": "/new" } })).unwrap();
-    let updated = svc.update(USER_ID, &conv.conversation_id.to_string(), update_req, &runtime_registry).await.unwrap();
+    let updated = svc.update(USER_ID, &conv.conversation_id.to_string(), update_req, &runtime_sessions).await.unwrap();
 
     assert_eq!(updated.extra["workspace"], "/new");
     assert_eq!(updated.extra["contextFileName"], "ctx.md");
@@ -706,7 +706,7 @@ async fn t4_4_extra_merge_preserves_existing_keys() {
 
 #[tokio::test]
 async fn t4_5_update_model() {
-    let (svc, _, runtime_registry) = setup().await;
+    let (svc, _, runtime_sessions) = setup().await;
 
     // Top-level model updates are only valid on nomi conversations
     // (Task 8 enforces the nomi-only rule in update).
@@ -722,7 +722,7 @@ async fn t4_5_update_model() {
         "model": { "provider_id": "0190f5fe-7c00-7a00-8000-000000000001", "model": "new-model" }
     }))
     .unwrap();
-    let updated = svc.update(USER_ID, &conv.conversation_id.to_string(), req, &runtime_registry).await.unwrap();
+    let updated = svc.update(USER_ID, &conv.conversation_id.to_string(), req, &runtime_sessions).await.unwrap();
 
     let model = updated.model.unwrap();
     assert_eq!(model.provider_id, "0190f5fe-7c00-7a00-8000-000000000001");
@@ -731,10 +731,10 @@ async fn t4_5_update_model() {
 
 #[tokio::test]
 async fn t4_6_update_not_found() {
-    let (svc, _, runtime_registry) = setup().await;
+    let (svc, _, runtime_sessions) = setup().await;
     let req: UpdateConversationRequest = serde_json::from_value(json!({ "name": "x" })).unwrap();
     let missing = nomifun_common::ConversationId::new();
-    let err = svc.update(USER_ID, missing.as_str(), req, &runtime_registry).await.unwrap_err();
+    let err = svc.update(USER_ID, missing.as_str(), req, &runtime_sessions).await.unwrap_err();
     assert!(matches!(err, nomifun_common::AppError::NotFound(_)));
 }
 
@@ -742,7 +742,7 @@ async fn t4_6_update_not_found() {
 
 #[tokio::test]
 async fn t5_1_delete_conversation() {
-    let (svc, broadcaster, _runtime_registry) = setup().await;
+    let (svc, broadcaster, _runtime_sessions) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
     broadcaster.take_events();
 
@@ -761,7 +761,7 @@ async fn t5_1_delete_conversation() {
 
 #[tokio::test]
 async fn t5_2_delete_then_get_returns_404() {
-    let (svc, _, _runtime_registry) = setup().await;
+    let (svc, _, _runtime_sessions) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
 
     svc.delete(USER_ID, &conv.conversation_id.to_string()).await.unwrap();
@@ -771,7 +771,7 @@ async fn t5_2_delete_then_get_returns_404() {
 
 #[tokio::test]
 async fn t5_3_delete_not_found() {
-    let (svc, _, _runtime_registry) = setup().await;
+    let (svc, _, _runtime_sessions) = setup().await;
     let missing = nomifun_common::ConversationId::new();
     let err = svc.delete(USER_ID, missing.as_str()).await.unwrap_err();
     assert!(matches!(err, nomifun_common::AppError::NotFound(_)));
@@ -781,7 +781,7 @@ async fn t5_3_delete_not_found() {
 
 #[tokio::test]
 async fn t11_1_create_broadcasts_created() {
-    let (svc, broadcaster, _runtime_registry) = setup().await;
+    let (svc, broadcaster, _runtime_sessions) = setup().await;
     let resp = svc.create(USER_ID, make_create_req()).await.unwrap();
 
     let events = broadcaster.take_events();
@@ -793,12 +793,12 @@ async fn t11_1_create_broadcasts_created() {
 
 #[tokio::test]
 async fn t11_2_update_broadcasts_updated() {
-    let (svc, broadcaster, runtime_registry) = setup().await;
+    let (svc, broadcaster, runtime_sessions) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
     broadcaster.take_events();
 
     let req: UpdateConversationRequest = serde_json::from_value(json!({ "name": "x" })).unwrap();
-    svc.update(USER_ID, &conv.conversation_id.to_string(), req, &runtime_registry).await.unwrap();
+    svc.update(USER_ID, &conv.conversation_id.to_string(), req, &runtime_sessions).await.unwrap();
 
     let events = broadcaster.take_events();
     assert_eq!(events[0].data["action"], "updated");
@@ -806,7 +806,7 @@ async fn t11_2_update_broadcasts_updated() {
 
 #[tokio::test]
 async fn t11_3_delete_broadcasts_deleted() {
-    let (svc, broadcaster, _runtime_registry) = setup().await;
+    let (svc, broadcaster, _runtime_sessions) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
     broadcaster.take_events();
 
@@ -820,7 +820,7 @@ async fn t11_3_delete_broadcasts_deleted() {
 
 #[tokio::test]
 async fn t12_1_long_name() {
-    let (svc, _, _runtime_registry) = setup().await;
+    let (svc, _, _runtime_sessions) = setup().await;
     let long_name = "x".repeat(1000);
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
@@ -836,7 +836,7 @@ async fn t12_1_long_name() {
 
 #[tokio::test]
 async fn t12_2_large_extra_json() {
-    let (svc, _, _runtime_registry) = setup().await;
+    let (svc, _, _runtime_sessions) = setup().await;
 
     let large_extra = json!({
         "workspace": "/project",
@@ -863,7 +863,7 @@ async fn t12_2_large_extra_json() {
 
 #[tokio::test]
 async fn t12_3_concurrent_creates() {
-    let (svc, _, _runtime_registry) = setup().await;
+    let (svc, _, _runtime_sessions) = setup().await;
 
     let mut handles = vec![];
     for _ in 0..10 {
@@ -888,7 +888,7 @@ async fn t12_3_concurrent_creates() {
 
 #[tokio::test]
 async fn full_lifecycle_create_get_update_delete() {
-    let (svc, broadcaster, runtime_registry) = setup().await;
+    let (svc, broadcaster, runtime_sessions) = setup().await;
 
     // Create
     let created = svc.create(USER_ID, make_create_req()).await.unwrap();
@@ -905,7 +905,7 @@ async fn full_lifecycle_create_get_update_delete() {
         "extra": { "workspace": "/updated" }
     }))
     .unwrap();
-    let updated = svc.update(USER_ID, &created.conversation_id.to_string(), update_req, &runtime_registry).await.unwrap();
+    let updated = svc.update(USER_ID, &created.conversation_id.to_string(), update_req, &runtime_sessions).await.unwrap();
     assert_eq!(updated.name, "Updated");
     assert!(updated.pinned);
     assert_eq!(updated.extra["workspace"], "/updated");
@@ -926,7 +926,7 @@ async fn full_lifecycle_create_get_update_delete() {
 
 #[tokio::test]
 async fn create_accepts_top_level_model_for_nomi() {
-    let (svc, _, _runtime_registry) = setup().await;
+    let (svc, _, _runtime_sessions) = setup().await;
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "nomi",
@@ -944,7 +944,7 @@ async fn create_accepts_top_level_model_for_nomi() {
 
 #[tokio::test]
 async fn create_nomi_rejects_extra_model_field() {
-    let (svc, _, _runtime_registry) = setup().await;
+    let (svc, _, _runtime_sessions) = setup().await;
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "nomi",
@@ -962,7 +962,7 @@ async fn create_nomi_rejects_extra_model_field() {
 
 #[tokio::test]
 async fn update_accepts_top_level_model_for_nomi() {
-    let (svc, _, runtime_registry) = setup().await;
+    let (svc, _, runtime_sessions) = setup().await;
 
     let create_req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "nomi",
@@ -976,13 +976,13 @@ async fn update_accepts_top_level_model_for_nomi() {
         "model": { "provider_id": "0190f5fe-7c00-7a00-8000-000000000001", "model": "gpt-4o-mini" }
     }))
     .unwrap();
-    let updated = svc.update(USER_ID, &conv.conversation_id.to_string(), req, &runtime_registry).await.unwrap();
+    let updated = svc.update(USER_ID, &conv.conversation_id.to_string(), req, &runtime_sessions).await.unwrap();
     assert_eq!(updated.model.unwrap().model, "gpt-4o-mini");
 }
 
 #[tokio::test]
 async fn update_switches_preset_conversation_model_without_rewriting_snapshot() {
-    let (svc, _, runtime_registry) = setup().await;
+    let (svc, _, runtime_sessions) = setup().await;
     let snapshot = make_preset_snapshot("gpt-4o");
     let preset_id = snapshot.preset_id.clone();
     let conv = svc
@@ -1002,7 +1002,7 @@ async fn update_switches_preset_conversation_model_without_rewriting_snapshot() 
     }))
     .unwrap();
     let updated = svc
-        .update(USER_ID, &conv.conversation_id, req, &runtime_registry)
+        .update(USER_ID, &conv.conversation_id, req, &runtime_sessions)
         .await
         .unwrap();
     assert_eq!(updated.model.as_ref().unwrap().model, "gpt-4o-mini");
@@ -1016,7 +1016,7 @@ async fn update_switches_preset_conversation_model_without_rewriting_snapshot() 
 
 #[tokio::test]
 async fn replace_agent_preset_snapshot_keeps_conversation_identity_model_and_workspace() {
-    let (svc, _, _runtime_registry) = setup().await;
+    let (svc, _, _runtime_sessions) = setup().await;
     let original = make_preset_snapshot("gpt-4o");
     let conv = svc
         .create_from_agent_snapshot(USER_ID, make_create_req(), original)
@@ -1126,7 +1126,7 @@ async fn session_skill_override_is_consumed_without_mutating_the_preset_snapshot
 
 #[tokio::test]
 async fn update_preset_nomi_allows_conversation_collaboration_and_resource_changes() {
-    let (svc, _, runtime_registry) = setup().await;
+    let (svc, _, runtime_sessions) = setup().await;
     let snapshot = make_preset_snapshot("gpt-4o");
     let preset_id = snapshot.preset_id.clone();
     let conv = svc
@@ -1154,7 +1154,7 @@ async fn update_preset_nomi_allows_conversation_collaboration_and_resource_chang
     }))
     .unwrap();
     let updated = svc
-        .update(USER_ID, &conv.conversation_id, req, &runtime_registry)
+        .update(USER_ID, &conv.conversation_id, req, &runtime_sessions)
         .await
         .unwrap();
 
@@ -1181,7 +1181,7 @@ async fn update_preset_nomi_allows_conversation_collaboration_and_resource_chang
 
 #[tokio::test]
 async fn update_nomi_rejects_extra_model_from_patch() {
-    let (svc, _, runtime_registry) = setup().await;
+    let (svc, _, runtime_sessions) = setup().await;
 
     let create_req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "nomi",
@@ -1197,7 +1197,7 @@ async fn update_nomi_rejects_extra_model_from_patch() {
     }))
     .unwrap();
     let error = svc
-        .update(USER_ID, &conv.conversation_id.to_string(), req, &runtime_registry)
+        .update(USER_ID, &conv.conversation_id.to_string(), req, &runtime_sessions)
         .await
         .unwrap_err();
     assert!(matches!(error, AppError::BadRequest(message) if message.contains("extra.model")));

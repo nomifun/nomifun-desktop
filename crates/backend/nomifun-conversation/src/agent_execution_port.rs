@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use nomifun_ai_agent::AgentRuntimeRegistry;
+use nomifun_ai_agent::AgentRuntimeSessions;
 use nomifun_api_types::SendMessageRequest;
 use nomifun_common::AppError;
 use nomifun_db::AgentExecutionTurnAuthority;
@@ -18,17 +18,17 @@ use crate::{ConversationService, IdempotentMessageDelivery};
 #[derive(Clone)]
 pub struct AgentExecutionConversationPort {
     service: ConversationService,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    runtime_sessions: Arc<dyn AgentRuntimeSessions>,
 }
 
 impl AgentExecutionConversationPort {
     pub(crate) fn new(
         service: ConversationService,
-        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: Arc<dyn AgentRuntimeSessions>,
     ) -> Self {
         Self {
             service,
-            runtime_registry,
+            runtime_sessions,
         }
     }
 
@@ -49,7 +49,7 @@ impl AgentExecutionConversationPort {
                 operation_id,
                 authority,
                 request,
-                &self.runtime_registry,
+                &self.runtime_sessions,
             )
             .await
     }
@@ -80,7 +80,7 @@ impl AgentExecutionConversationPort {
                 conversation_id,
                 operation_id,
                 request,
-                &self.runtime_registry,
+                &self.runtime_sessions,
             )
             .await
     }
@@ -92,8 +92,8 @@ impl ConversationService {
     /// public request DTO and ordinary Conversation method.
     pub fn agent_execution_port(
         &self,
-        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: Arc<dyn AgentRuntimeSessions>,
     ) -> AgentExecutionConversationPort {
-        AgentExecutionConversationPort::new(self.clone(), runtime_registry)
+        AgentExecutionConversationPort::new(self.clone(), runtime_sessions)
     }
 }

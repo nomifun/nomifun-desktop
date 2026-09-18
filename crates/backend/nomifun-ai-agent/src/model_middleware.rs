@@ -1,6 +1,6 @@
 //! Product middleware uses the original Service invoker and frozen identity.
 use super::*;
-use nomi_agent::model_middleware::{BeforeModelInput, ModelRequestMiddleware, ModelRequestPatch};
+use crate::runtime_model_middleware_contract::{BeforeModelInput, ModelRequestMiddleware, ModelRequestPatch};
 pub use nomifun_agent_contracts::model_middleware::{ACTION_ID, action, schemas};
 
 #[derive(Clone)]
@@ -144,7 +144,7 @@ impl ModelRequestMiddleware for ProductMiddleware {
         if canonical_json_bytes(&value)
             .map_err(|e| e.to_string())?
             .len()
-            > nomi_agent::model_middleware::MAX_PATCH_BYTES
+            > crate::runtime_model_middleware_contract::MAX_PATCH_BYTES
         {
             return Err("before_model patch exceeds 64 KiB".into());
         }

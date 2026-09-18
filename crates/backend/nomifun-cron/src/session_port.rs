@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use nomifun_agent_contracts::AgentSessionId;
 #[cfg(test)]
-use nomifun_ai_agent::AgentRuntimeRegistry;
+use nomifun_ai_agent::AgentRuntimeSessions;
 #[cfg(test)]
 use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
 use nomifun_api_types::{AgentResolvedSnapshot, ConversationResponse, CreateConversationRequest};
@@ -328,7 +328,7 @@ pub trait CronSessionPort: Send + Sync {
 #[cfg(test)]
 struct TestCronSessionPort {
     service: Arc<ConversationService>,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    runtime_sessions: Arc<dyn AgentRuntimeSessions>,
 }
 
 #[cfg(test)]
@@ -425,7 +425,7 @@ impl CronSessionPort for TestCronSessionPort {
                 &request.owner_id,
                 request.agent_session_id.as_ref(),
                 &request.idempotency_key,
-                &self.runtime_registry,
+                &self.runtime_sessions,
             )
             .await?))
     }
@@ -498,7 +498,7 @@ impl CronSessionPort for TestCronSessionPort {
                 agent_session_id.as_ref(),
                 &idempotency_key,
                 send_message_request(message),
-                &self.runtime_registry,
+                &self.runtime_sessions,
                 build_lease,
                 BackgroundTurnRuntimePreparation {
                     companion_device_turn: None,
@@ -751,11 +751,11 @@ fn append_requested_skills(
 #[cfg(test)]
 pub(crate) fn test_cron_session_port(
     service: Arc<ConversationService>,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    runtime_sessions: Arc<dyn AgentRuntimeSessions>,
 ) -> Arc<dyn CronSessionPort> {
     Arc::new(TestCronSessionPort {
         service,
-        runtime_registry,
+        runtime_sessions,
     })
 }
 

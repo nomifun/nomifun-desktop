@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use nomifun_ai_agent::runtime_handle::{AgentRuntimeHandle, AgentRuntimeControl};
 use nomifun_ai_agent::protocol::events::FinishEventData;
 use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
-use nomifun_ai_agent::{AgentSendError, AgentStreamEvent, MockAgentRuntime, AgentRuntimeRegistry};
+use nomifun_ai_agent::{AgentSendError, AgentStreamEvent, MockAgentRuntime, AgentRuntimeSessions};
 use nomifun_api_types::WebSocketMessage;
 use nomifun_channel::channel_settings::ChannelSettingsService;
 use nomifun_channel::message_service::ChannelMessageService;
@@ -141,11 +141,11 @@ impl AgentRuntimeControl for ScriptedAgent {
 
 impl MockAgentRuntime for ScriptedAgent {}
 
-struct RecordingAgentRuntimeRegistry {
+struct RecordingAgentRuntimeSessions {
     agents: Mutex<std::collections::HashMap<String, AgentRuntimeHandle>>,
 }
 
-impl RecordingAgentRuntimeRegistry {
+impl RecordingAgentRuntimeSessions {
     fn new() -> Self {
         Self {
             agents: Mutex::new(std::collections::HashMap::new()),
@@ -154,7 +154,7 @@ impl RecordingAgentRuntimeRegistry {
 }
 
 #[async_trait]
-impl AgentRuntimeRegistry for RecordingAgentRuntimeRegistry {
+impl AgentRuntimeSessions for RecordingAgentRuntimeSessions {
     fn get_runtime(&self, conversation_id: &str) -> Option<AgentRuntimeHandle> {
         self.agents.lock().unwrap().get(conversation_id).cloned()
     }
@@ -274,13 +274,13 @@ async fn send_to_agent_warms_cold_task_before_returning_stream_subscription() {
     let pool = db.pool().clone();
     seed_channel_models(&pool).await;
 
-    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(RecordingAgentRuntimeRegistry::new());
+    let runtime_sessions: Arc<dyn AgentRuntimeSessions> = Arc::new(RecordingAgentRuntimeSessions::new());
     let conversation_svc = Arc::new(ConversationService::new(
         Arc::<str>::from(installation_owner.as_str()),
         std::env::temp_dir(),
         Arc::new(TestBroadcaster::new()),
         Arc::new(NoopSkillResolver),
-        Arc::clone(&runtime_registry),
+        Arc::clone(&runtime_sessions),
         Arc::new(SqliteConversationRepository::new(pool.clone())),
         Arc::new(SqliteAgentMetadataRepository::new(pool.clone())),
         Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
@@ -292,7 +292,7 @@ async fn send_to_agent_warms_cold_task_before_returning_stream_subscription() {
     let message_svc = ChannelMessageService::new(
         channel_session_port::conversation_channel_session_port(
             Arc::clone(&conversation_svc),
-            Arc::clone(&runtime_registry),
+            Arc::clone(&runtime_sessions),
         ),
         settings,
         Arc::new(SqliteChannelRepository::new(pool)),
@@ -328,7 +328,7 @@ async fn send_to_agent_warms_cold_task_before_returning_stream_subscription() {
             result.stream_rx.is_some(),
             "channel relay must have an agent stream receiver after cold start for {platform:?}"
         );
-        assert!(runtime_registry.get_runtime(&result.conversation_id).is_some());
+        assert!(runtime_sessions.get_runtime(&result.conversation_id).is_some());
         wait_until_idle(&conversation_svc, &result.conversation_id).await;
     }
 }
@@ -346,7 +346,7 @@ struct TestStack {
 async fn build_stack(pool: nomifun_db::SqlitePool) -> TestStack {
     let installation_owner = nomifun_db::installation_owner_id(&pool).await.unwrap();
     seed_channel_models(&pool).await;
-    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(RecordingAgentRuntimeRegistry::new());
+    let runtime_sessions: Arc<dyn AgentRuntimeSessions> = Arc::new(RecordingAgentRuntimeSessions::new());
     let runtime = Arc::new(nomifun_conversation::runtime_state::ConversationRuntimeStateService::default());
     let conversation_svc = Arc::new(
         ConversationService::new(
@@ -354,7 +354,7 @@ async fn build_stack(pool: nomifun_db::SqlitePool) -> TestStack {
             std::env::temp_dir(),
             Arc::new(TestBroadcaster::new()),
             Arc::new(NoopSkillResolver),
-            Arc::clone(&runtime_registry),
+            Arc::clone(&runtime_sessions),
             Arc::new(SqliteConversationRepository::new(pool.clone())),
             Arc::new(SqliteAgentMetadataRepository::new(pool.clone())),
             Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
@@ -369,7 +369,7 @@ async fn build_stack(pool: nomifun_db::SqlitePool) -> TestStack {
     let message_svc = ChannelMessageService::new(
         channel_session_port::conversation_channel_session_port(
             Arc::clone(&conversation_svc),
-            Arc::clone(&runtime_registry),
+            Arc::clone(&runtime_sessions),
         ),
         settings,
         channel_repo.clone(),

@@ -16,7 +16,96 @@ use nomifun_model_invoke::{
 
 use crate::types::NomiCompatOverrides;
 
-use super::nomi::resolve_bedrock_config;
+fn resolve_bedrock_config(
+    json: Option<&str>,
+    credentials: &serde_json::Value,
+) -> Option<nomi_config::config::BedrockConfig> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct BedrockMetadata {
+        auth_method: nomifun_api_types::BedrockAuthMethod,
+        region: String,
+        profile: Option<String>,
+    }
+
+    let metadata: BedrockMetadata = serde_json::from_str(json?).ok()?;
+    let region = metadata.region.trim();
+    if region.is_empty() {
+        return None;
+    }
+    let credentials = credentials.as_object()?;
+    match metadata.auth_method {
+        nomifun_api_types::BedrockAuthMethod::AccessKey => {
+            if metadata.profile.is_some() {
+                return None;
+            }
+            let access_key_id = credentials
+                .get("access_key_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            let secret_access_key = credentials
+                .get("secret_access_key")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            let session_token = match credentials.get("session_token") {
+                Some(value) => Some(
+                    value
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())?
+                        .to_owned(),
+                ),
+                None => None,
+            };
+            if credentials.keys().any(|field| {
+                !matches!(
+                    field.as_str(),
+                    "access_key_id" | "secret_access_key" | "session_token"
+                )
+            }) {
+                return None;
+            }
+            Some(nomi_config::config::BedrockConfig {
+                region: Some(region.to_owned()),
+                access_key_id: Some(access_key_id.to_owned()),
+                secret_access_key: Some(secret_access_key.to_owned()),
+                session_token,
+                profile: None,
+            })
+        }
+        nomifun_api_types::BedrockAuthMethod::Profile => {
+            if !credentials.is_empty() {
+                return None;
+            }
+            let profile = metadata
+                .profile
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            Some(nomi_config::config::BedrockConfig {
+                region: Some(region.to_owned()),
+                access_key_id: None,
+                secret_access_key: None,
+                session_token: None,
+                profile: Some(profile.to_owned()),
+            })
+        }
+        nomifun_api_types::BedrockAuthMethod::DefaultChain => {
+            if !credentials.is_empty() || metadata.profile.is_some() {
+                return None;
+            }
+            Some(nomi_config::config::BedrockConfig {
+                region: Some(region.to_owned()),
+                access_key_id: None,
+                secret_access_key: None,
+                session_token: None,
+                profile: None,
+            })
+        }
+    }
+}
 
 /// Image input is opt-in on the exact Chat capability. Runtime observations
 /// may downgrade a declared vision model after an explicit upstream rejection,

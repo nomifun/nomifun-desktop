@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 
 use nomifun_common::{AgentType, ConversationId, DelegationPolicy, ProviderWithModel, UserId};
@@ -112,70 +109,6 @@ pub struct NomiCompatOverrides {
     /// Provider-native request body fields after local Agent controls have
     /// been removed. Typed serializer fields overwrite conflicts at send time.
     pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
-}
-
-/// Fully resolved Nomi configuration passed to the agent manager.
-#[derive(Debug, Clone)]
-pub struct NomiResolvedConfig {
-    /// LLM provider name (anthropic, openai, bedrock, vertex).
-    pub provider: String,
-    /// Decrypted API key.
-    pub api_key: String,
-    /// Model identifier.
-    pub model: String,
-    /// Provider base URL.
-    pub base_url: Option<String>,
-    /// System prompt override.
-    pub system_prompt: Option<String>,
-    /// Capability-declared output ceiling. `None` means omit it where the
-    /// protocol permits; required protocols fail before a turn starts.
-    pub output_ceiling: Option<u32>,
-    /// Max agentic turns.
-    pub max_turns: Option<usize>,
-    /// Provider's declared context window (tokens), if configured. Drives the
-    /// engine's compaction window and the context-usage gauge denominator.
-    pub context_limit: Option<u64>,
-    /// Provider-specific compat overrides.
-    pub compat_overrides: NomiCompatOverrides,
-    /// Directory for nomi session persistence files.
-    pub session_directory: PathBuf,
-    /// Session-scoped MCP servers to inject.
-    pub extra_mcp_servers: HashMap<String, nomi_config::config::McpServerConfig>,
-    /// Process-local guards for renewable loopback MCP capabilities. These are
-    /// never serialized; the Nomi manager holds them until runtime teardown.
-    pub loopback_capability_leases: nomifun_common::LoopbackCapabilityLeaseSet,
-    /// AWS Bedrock credentials (region + access key or profile).
-    pub bedrock_config: Option<nomi_config::config::BedrockConfig>,
-    /// Enable the Computer tool (screen/mouse/keyboard control).
-    pub computer_use: bool,
-    /// Opt-in goal-driven continuation (objective + auto-continuation cap).
-    /// `None` (default) = normal one-shot turn behavior.
-    pub goal: Option<nomi_agent::goal::runtime::GoalSpec>,
-    /// Stable identity of the owning conversation instance (the conversation
-    /// row's `created_at`, stringified). Persisted Nomi runtimes always provide
-    /// it; probe-only runtimes may leave it absent because they do not resume a
-    /// conversation session.
-    pub owner_token: Option<String>,
-    /// Backend-authoritative host composition switch. Platform Gateway and
-    /// secondary-user sessions leave embedded AgentExecution uninstalled;
-    /// trusted no-gateway standalone sessions install it. This is
-    /// internal runtime state and is never serialized as user configuration.
-    pub install_embedded_agent_execution: bool,
-    /// Per-session 工具白名单（空 = 不限制），源自 `NomiBuildExtra.allowed_tools`，
-    /// 由 manager 灌进 `config.tools.builtin_allowlist`。
-    pub allowed_tools: Vec<String>,
-    pub enforce_tool_allowlist: bool,
-    pub companion_memory_enabled: bool,
-    pub companion_skills_enabled: bool,
-    /// Allowed tools whose full schema is activated on demand through the
-    /// Nomi session's ToolSearch boundary.
-    pub deferred_tools: Vec<String>,
-    /// 原生文件工具（Write/Edit/ApplyPatch）的写根钳制，按会话**信任面**解析：
-    /// 本地桌面（`Private` 且非渠道）= `None`（OS 用户全权，不钳制，今日行为）；
-    /// 渠道 / 远程 / 对外 = `Some(workspace)`（收窄到会话工作区，堵住对外面过度开放）。
-    /// manager 灌进 `config.tools.write_root`。与 gateway file-service 的
-    /// `PathAuthority` 同一信任模型（见 file-access-authority spec）。
-    pub write_root: Option<String>,
 }
 
 #[cfg(test)]

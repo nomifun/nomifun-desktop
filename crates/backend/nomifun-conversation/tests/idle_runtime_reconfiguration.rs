@@ -1,5 +1,5 @@
 use std::{path::PathBuf,sync::{Arc,Mutex,atomic::{AtomicBool,Ordering}}};
-use nomifun_ai_agent::{AgentRuntimeRegistry,AgentRuntimeHandle,types::AgentRuntimeBuildOptions};
+use nomifun_ai_agent::{AgentRuntimeSessions,AgentRuntimeHandle,types::AgentRuntimeBuildOptions};
 use nomifun_common::{AgentKillReason,AppError};
 use nomifun_conversation::{ConversationService,skill_resolver::SkillResolver};
 use nomifun_api_types::WebSocketMessage;
@@ -15,7 +15,7 @@ struct Registry {
     release:Arc<Notify>,
 }
 #[async_trait::async_trait]
-impl AgentRuntimeRegistry for Registry {
+impl AgentRuntimeSessions for Registry {
     fn get_runtime(&self,_:&str)->Option<AgentRuntimeHandle> {None}
     async fn get_or_create_runtime(&self,_:&str,_:AgentRuntimeBuildOptions)->Result<AgentRuntimeHandle,AppError> {Err(AppError::Internal("unused fixture".into()))}
     fn terminate(&self,_:&str,_:Option<AgentKillReason>)->Result<(),AppError> {panic!("must use result-bearing retirement")}
