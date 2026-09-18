@@ -16,6 +16,7 @@ nomi-a11y.workspace     = true
 tracing.workspace     = true
 tokio.workspace       = true
 serde_json.workspace  = true
+serde.workspace       = true
 async-trait.workspace = true
 
 xcap.workspace   = true

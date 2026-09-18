@@ -1,3 +1,4 @@
+pub mod capability;
 pub mod fallback_backend;
 pub mod input;
 pub mod keys;

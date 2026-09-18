@@ -420,6 +420,33 @@ async fn session_resource_bindings_are_frozen_with_the_session_and_cannot_change
 }
 
 #[tokio::test]
+async fn the_same_product_resource_binding_can_be_frozen_into_distinct_sessions() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let binding = TypedResourceBinding {
+        binding_id: ResourceBindingId("workspace:default-workspace".to_owned()),
+        resource_kind: ResourceKind("workspace".to_owned()),
+        resource_id: ResourceId("default-workspace".to_owned()),
+        owner_id: owner().principal_id,
+        operations: BTreeSet::from(["read".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    };
+    let mut first = live_session(session_id());
+    first.agent_binding.typed_resource_bindings = vec![binding.clone()];
+    let mut second = live_session(session_id());
+    second.agent_binding.typed_resource_bindings = vec![binding.clone()];
+
+    let first = store.create_session(create_request(first, "shared-resource-first"))
+        .await.unwrap().session;
+    let second = store.create_session(create_request(second, "shared-resource-second"))
+        .await.unwrap().session;
+
+    assert_ne!(first.agent_session_id, second.agent_session_id);
+    assert_eq!(store.session_resources(&first.agent_session_id).await.unwrap(), vec![binding.clone()]);
+    assert_eq!(store.session_resources(&second.agent_session_id).await.unwrap(), vec![binding]);
+}
+
+#[tokio::test]
 async fn opening_remote_session_listing_is_exact_and_excludes_ready_or_local_sessions() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();
 

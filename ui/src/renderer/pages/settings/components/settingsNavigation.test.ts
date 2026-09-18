@@ -10,7 +10,7 @@ import { describe, expect, test } from 'bun:test';
 const readSource = (url: URL) => readFileSync(url, 'utf8');
 
 describe('settings navigation', () => {
-  test('exposes execution engines as a first-level settings page', () => {
+  test('exposes Nomi Runtime diagnostics and JavaScript Runtime as separate settings destinations', () => {
     const siderSource = readSource(new URL('./SettingsSider.tsx', import.meta.url));
     for (const id of ['system', 'execution-engines', 'javascript-runtime', 'computer-use', 'about']) {
       expect(siderSource.includes(`'${id}'`)).toBe(true);
@@ -23,7 +23,7 @@ describe('settings navigation', () => {
     expect(siderSource.indexOf("'computer-use'")).toBeLessThan(siderSource.indexOf("'about'"));
   });
 
-  test('routes execution engines directly without an Agent authoring entry', () => {
+  test('routes one Nomi Runtime diagnostics page without an Agent Runtime selector', () => {
     const routerSource = readSource(new URL('../../../components/layout/Router.tsx', import.meta.url));
     const enginePageSource = readSource(new URL('../ExecutionEngines/index.tsx', import.meta.url));
     const javascriptPageSource = readSource(new URL('../JavaScriptRuntimeSettings.tsx', import.meta.url));
@@ -43,7 +43,11 @@ describe('settings navigation', () => {
     expect(enginePageSource.includes('AgentModalContent')).toBe(false);
     expect(enginePageSource.includes('<RuntimeManager />')).toBe(false);
     expect(enginePageSource.includes('agentPlatform.runtimeEngines.list.invoke')).toBe(true);
+    expect(enginePageSource.includes("const NOMI_FAMILY = 'nomifun.nomi'")).toBe(true);
+    expect(enginePageSource.includes('nomifun.coding')).toBe(false);
+    expect(enginePageSource.includes('<Select')).toBe(false);
     expect(javascriptPageSource.includes('<RuntimeManager />')).toBe(true);
+    expect(javascriptPageSource.includes('separateHint')).toBe(true);
     expect(routerSource.includes("path='/settings/browser-use'")).toBe(false);
     expect(routerSource.includes("path='/browser'")).toBe(false);
     expect(routerSource.includes("path='/settings/computer-use' element={<Navigate to='/settings/system'")).toBe(false);

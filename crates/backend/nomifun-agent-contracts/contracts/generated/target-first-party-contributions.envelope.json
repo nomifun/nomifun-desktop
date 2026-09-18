@@ -264,31 +264,10 @@
         "capabilities": [
           {
             "capability": {
-              "id": "computer.observe",
-              "version": "1.0.0"
-            },
-            "kind": "context_contributor"
-          },
-          {
-            "capability": {
-              "id": "computer.input",
+              "id": "computer",
               "version": "1.0.0"
             },
             "kind": "tool"
-          },
-          {
-            "capability": {
-              "id": "computer.launch",
-              "version": "1.0.0"
-            },
-            "kind": "tool"
-          },
-          {
-            "capability": {
-              "id": "a11y.observe",
-              "version": "1.0.0"
-            },
-            "kind": "context_contributor"
           }
         ],
         "skills": [],
@@ -302,35 +281,11 @@
             "members": [
               {
                 "capability": {
-                  "id": "computer.observe",
+                  "id": "computer",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "145f8e942a8f7219419b59545c87f12b670ac2efa6ec377a39cc14db871ed5fa",
+                "capability_manifest_digest": "eb64bcce44bb06c259b01865d68597eef4ce98f4af35c9da9049a2aabdadb950",
                 "requirement": "required"
-              },
-              {
-                "capability": {
-                  "id": "computer.input",
-                  "version": "1.0.0"
-                },
-                "capability_manifest_digest": "e18fde32f5ca1b9ac815d1a9e06b34a94763b3249ae3c520cd336cb528985226",
-                "requirement": "required"
-              },
-              {
-                "capability": {
-                  "id": "computer.launch",
-                  "version": "1.0.0"
-                },
-                "capability_manifest_digest": "a07084534c8ab198a0ff06128a31be3671091382a42a407d72b3031bef47f14f",
-                "requirement": "optional"
-              },
-              {
-                "capability": {
-                  "id": "a11y.observe",
-                  "version": "1.0.0"
-                },
-                "capability_manifest_digest": "2b2dca84ad6826bbda712d32131e09177d5507877788e182637b03d2e3affa1d",
-                "requirement": "optional"
               }
             ],
             "serialized_target_resource_kind": "computer"
@@ -343,68 +298,14 @@
                 "role_id": "system.computer_use",
                 "contract_version": "1.0.0"
               },
-              "contract_digest": "cdcf498b24f7e42aea80a945485a37174a47b7b68063789711f2210834d859d1"
+              "contract_digest": "c656c82c253d21b9baea10a39e2bbc1a3e1ce7ae2f1878d1f915ed8ee5ab459b"
             },
             "display": {
               "name": "Computer Use",
               "description": "Bundled first-party execution-role provider."
             },
             "members": {
-              "a11y.observe": {
-                "supported_platforms": [
-                  {
-                    "constraint": "targets",
-                    "host_targets": [
-                      "aarch64-apple-darwin",
-                      "x86_64-apple-darwin",
-                      "x86_64-pc-windows-msvc"
-                    ],
-                    "host_surfaces": [
-                      "desktop"
-                    ]
-                  }
-                ],
-                "required_resource_kinds": [
-                  "computer"
-                ]
-              },
-              "computer.input": {
-                "supported_platforms": [
-                  {
-                    "constraint": "targets",
-                    "host_targets": [
-                      "aarch64-apple-darwin",
-                      "x86_64-apple-darwin",
-                      "x86_64-pc-windows-msvc"
-                    ],
-                    "host_surfaces": [
-                      "desktop"
-                    ]
-                  }
-                ],
-                "required_resource_kinds": [
-                  "computer"
-                ]
-              },
-              "computer.launch": {
-                "supported_platforms": [
-                  {
-                    "constraint": "targets",
-                    "host_targets": [
-                      "aarch64-apple-darwin",
-                      "x86_64-apple-darwin",
-                      "x86_64-pc-windows-msvc"
-                    ],
-                    "host_surfaces": [
-                      "desktop"
-                    ]
-                  }
-                ],
-                "required_resource_kinds": [
-                  "computer"
-                ]
-              },
-              "computer.observe": {
+              "computer": {
                 "supported_platforms": [
                   {
                     "constraint": "targets",
@@ -543,42 +444,7 @@
         "capabilities": [
           {
             "capability": {
-              "id": "robot.link",
-              "version": "1.0.0"
-            },
-            "kind": "resource_provider"
-          },
-          {
-            "capability": {
-              "id": "robot.audio",
-              "version": "1.0.0"
-            },
-            "kind": "background_service"
-          },
-          {
-            "capability": {
-              "id": "robot.vision",
-              "version": "1.0.0"
-            },
-            "kind": "context_contributor"
-          },
-          {
-            "capability": {
-              "id": "robot.display",
-              "version": "1.0.0"
-            },
-            "kind": "tool"
-          },
-          {
-            "capability": {
-              "id": "robot.motion",
-              "version": "1.0.0"
-            },
-            "kind": "tool"
-          },
-          {
-            "capability": {
-              "id": "robot.device_tools",
+              "id": "robot",
               "version": "1.0.0"
             },
             "kind": "tool"
@@ -699,5 +565,5 @@
       }
     ]
   },
-  "payload_digest": "dbcf73265a89a1133c2683124cf387202eec0888baf31ac4c922d3e94baea33d"
+  "payload_digest": "d7cc44b88b30a66b92f755996602284942f0e664bffb66e38dfce188c82d6568"
 }

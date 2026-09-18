@@ -41,11 +41,8 @@ use nomifun_agent_contracts::{
     capability_module_surface_declarations, capability_surface_declarations, digest_payload,
 };
 use nomifun_agent_kernel::{
-    CapabilityContextContributionFactory, CapabilityContextContributionRequest,
-    CapabilityHandler, CapabilityInvocationContext, CapabilityResourceProviderFactory,
-    CapabilityResourceProviderRequest, ContextContributionFactory, ContextContributionRequest,
-    ContextContributionResult, HostPluginStateApi, KernelError, PluginRegistration,
-    PluginStateError, PluginStateHandle, ResourceProviderResult, ResolvedRoleMemberContext,
+    CapabilityHandler, CapabilityInvocationContext, HostPluginStateApi, KernelError,
+    PluginRegistration, PluginStateError, PluginStateHandle,
 };
 
 pub const CONTRACT_VERSION: &str = "1.0.0";
@@ -79,6 +76,7 @@ pub const WORKSPACE_PROCESS_MODULE_ID: &str = "workspace.process";
 pub const WORKSPACE_ARTIFACTS_MODULE_ID: &str = "workspace.artifacts";
 pub const SSH_MODULE_ID: &str = "ssh";
 pub const BROWSER_MODULE_ID: &str = "browser";
+pub const COMPUTER_MODULE_ID: &str = "computer";
 pub const WORKSPACE_FILES_CHANGED_EVENT_SCHEMA_ID: &str = "workspace.files/changed";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,26 +187,24 @@ pub const BROWSER_ACTION_IDS: &[&str] = &[
 ];
 pub const BROWSER_CAPABILITY_IDS: &[&str] = &[BROWSER_MODULE_ID];
 
-pub const COMPUTER_A11Y_CAPABILITY_IDS: &[&str] = &[
-    "computer.observe",
-    "computer.input",
-    "computer.launch",
-    "a11y.observe",
+pub const COMPUTER_ACTION_IDS: &[&str] = &[
+    "computer/observe",
+    "computer/a11y.observe",
+    "computer/input",
+    "computer/launch",
 ];
+pub const COMPUTER_A11Y_CAPABILITY_IDS: &[&str] = &[COMPUTER_MODULE_ID];
 
-pub const ALL_CAPABILITY_IDS: [&str; 10] = [
+pub const ALL_CAPABILITY_IDS: [&str; 7] = [
     WORKSPACE_FILES_MODULE_ID,
     WORKSPACE_VCS_MODULE_ID,
     WORKSPACE_PROCESS_MODULE_ID,
     WORKSPACE_ARTIFACTS_MODULE_ID,
     SSH_MODULE_ID,
     BROWSER_MODULE_ID,
-    "computer.observe",
-    "computer.input",
-    "computer.launch",
-    "a11y.observe",
+    COMPUTER_MODULE_ID,
 ];
-pub const TARGET_CAPABILITY_IDS: [&str; 10] = ALL_CAPABILITY_IDS;
+pub const TARGET_CAPABILITY_IDS: [&str; 7] = ALL_CAPABILITY_IDS;
 
 pub const TARGET_CAPABILITY_FAMILIES: [&str; 10] = [
     "browser",
@@ -414,6 +410,8 @@ pub enum Wave2TypedCapabilityOperation {
     BrowserDownload { input: StrictJsonValue },
     BrowserUpload { input: StrictJsonValue },
     BrowserEvaluate { input: StrictJsonValue },
+    ComputerObserve { input: StrictJsonValue },
+    ComputerA11yObserve { input: StrictJsonValue },
     ComputerInput { input: StrictJsonValue },
     ComputerLaunch { input: StrictJsonValue },
 }
@@ -451,8 +449,10 @@ impl Wave2TypedCapabilityOperation {
             | Self::BrowserDownload { .. }
             | Self::BrowserUpload { .. }
             | Self::BrowserEvaluate { .. } => BROWSER_MODULE_ID,
-            Self::ComputerInput { .. } => "computer.input",
-            Self::ComputerLaunch { .. } => "computer.launch",
+            Self::ComputerObserve { .. }
+            | Self::ComputerA11yObserve { .. }
+            | Self::ComputerInput { .. }
+            | Self::ComputerLaunch { .. } => COMPUTER_MODULE_ID,
         }
     }
 
@@ -488,8 +488,10 @@ impl Wave2TypedCapabilityOperation {
             Self::BrowserDownload { .. } => "browser/download",
             Self::BrowserUpload { .. } => "browser/upload",
             Self::BrowserEvaluate { .. } => "browser/evaluate",
-            Self::ComputerInput { .. } => "computer.input.invoke",
-            Self::ComputerLaunch { .. } => "computer.launch.invoke",
+            Self::ComputerObserve { .. } => "computer/observe",
+            Self::ComputerA11yObserve { .. } => "computer/a11y.observe",
+            Self::ComputerInput { .. } => "computer/input",
+            Self::ComputerLaunch { .. } => "computer/launch",
         }
     }
 
@@ -529,7 +531,10 @@ impl Wave2TypedCapabilityOperation {
             | Self::BrowserEvaluate { input } => {
                 Wave2CapabilityOperation::Browser { input: input.clone() }
             }
-            Self::ComputerInput { input } | Self::ComputerLaunch { input } => {
+            Self::ComputerObserve { input }
+            | Self::ComputerA11yObserve { input }
+            | Self::ComputerInput { input }
+            | Self::ComputerLaunch { input } => {
                 Wave2CapabilityOperation::ComputerA11y { input: input.clone() }
             }
         }
@@ -650,60 +655,6 @@ pub trait Wave2HostPort: Send + Sync {
         request: Wave2HostRequest,
     ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave2HostPortError>> + Send + 'a>>;
 }
-
-/// Trusted facts projected to non-action Role members.
-#[derive(Clone)]
-pub struct Wave2RoleMemberContext {
-    pub principal: PrincipalRef,
-    pub agent_session_id: AgentSessionId,
-    pub operation_id: OperationId,
-    pub correlation_id: CorrelationId,
-    pub resolved_snapshot_ref: ResolvedSnapshotRef,
-    pub registry_generation: u64,
-    pub capability_id: CapabilityId,
-    pub role_provider: ExactRoleProviderRef,
-    pub state_scope_key: ScopeKey,
-    pub state: Wave2StateHandle,
-    pub resource_bindings: TypedResourceBindings,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum Wave2ContextCapabilityOperation {
-    ComputerObserve,
-    A11yObserve,
-}
-
-impl Wave2ContextCapabilityOperation {
-    pub fn capability_id(&self) -> &'static str {
-        match self {
-            Self::ComputerObserve => "computer.observe",
-            Self::A11yObserve => "a11y.observe",
-        }
-    }
-}
-
-
-#[derive(Clone)]
-pub struct Wave2ContextHostRequest {
-    pub context: Wave2RoleMemberContext,
-    pub operation: Wave2ContextCapabilityOperation,
-    pub schema_ref: CanonicalSchemaRef,
-}
-
-
-pub trait Wave2ContextHostPort: Send + Sync {
-    fn contribute<'a>(
-        &'a self,
-        request: Wave2ContextHostRequest,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<ContextContributionResult, Wave2HostPortError>>
-                + Send
-                + 'a,
-        >,
-    >;
-}
-
 
 /// An exact-operation adapter used by [`Wave2HostPortDispatcher`].
 pub trait Wave2TypedOperationAdapter: Send + Sync {
@@ -833,41 +784,11 @@ pub fn unconfigured_host_port() -> Arc<dyn Wave2HostPort> {
     Arc::new(UnconfiguredWave2HostPort)
 }
 
-struct UnconfiguredWave2ContextHostPort;
-
-impl Wave2ContextHostPort for UnconfiguredWave2ContextHostPort {
-    fn contribute<'a>(
-        &'a self,
-        request: Wave2ContextHostRequest,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<ContextContributionResult, Wave2HostPortError>>
-                + Send
-                + 'a,
-        >,
-    >
-    {
-        Box::pin(async move {
-            Err(Wave2HostPortError::unavailable(format!(
-                "no production context owner is bound for {}",
-                request.context.capability_id.as_ref()
-            )))
-        })
-    }
-}
-
-
-pub fn unconfigured_context_host_port() -> Arc<dyn Wave2ContextHostPort> {
-    Arc::new(UnconfiguredWave2ContextHostPort)
-}
-
-
 #[derive(Clone)]
 pub struct Wave2RoleHostPorts {
     pub actions: Arc<dyn Wave2HostPort>,
     pub browser_actions: Arc<dyn Wave2HostPort>,
     pub computer_actions: Arc<dyn Wave2HostPort>,
-    pub computer_contexts: Arc<dyn Wave2ContextHostPort>,
 }
 
 impl Wave2RoleHostPorts {
@@ -876,7 +797,6 @@ impl Wave2RoleHostPorts {
             browser_actions: Arc::clone(&actions),
             computer_actions: Arc::clone(&actions),
             actions,
-            computer_contexts: unconfigured_context_host_port(),
         }
     }
 
@@ -888,124 +808,6 @@ impl Wave2RoleHostPorts {
         }
     }
 
-    fn context_port(
-        &self,
-        role_id: &ExecutionRoleId,
-    ) -> Arc<dyn Wave2ContextHostPort> {
-        match role_id.as_ref() {
-            COMPUTER_EXECUTION_ROLE_ID => Arc::clone(&self.computer_contexts),
-            _ => unconfigured_context_host_port(),
-        }
-    }
-
-}
-
-struct Wave2ContextFactory {
-    role_id: ExecutionRoleId,
-    capability_id: CapabilityId,
-    host_port: Arc<dyn Wave2ContextHostPort>,
-}
-
-struct Wave2UnavailableCapabilityContextFactory {
-    capability_id: CapabilityId,
-}
-
-#[async_trait::async_trait]
-impl CapabilityContextContributionFactory for Wave2UnavailableCapabilityContextFactory {
-    async fn contribute(
-        &self,
-        _request: CapabilityContextContributionRequest,
-    ) -> Result<ContextContributionResult, KernelError> {
-        Err(KernelError::CapabilityExecution {
-            reason: format!(
-                "Wave 2 Context capability {} has no configured context owner",
-                self.capability_id.as_ref()
-            ),
-        })
-    }
-}
-
-struct Wave2UnavailableCapabilityResourceFactory {
-    capability_id: CapabilityId,
-}
-
-#[async_trait::async_trait]
-impl CapabilityResourceProviderFactory for Wave2UnavailableCapabilityResourceFactory {
-    async fn acquire(
-        &self,
-        _request: CapabilityResourceProviderRequest,
-    ) -> Result<ResourceProviderResult, KernelError> {
-        Err(KernelError::CapabilityExecution {
-            reason: format!(
-                "Wave 2 Resource capability {} has no configured resource owner",
-                self.capability_id.as_ref()
-            ),
-        })
-    }
-}
-
-#[async_trait::async_trait]
-impl ContextContributionFactory for Wave2ContextFactory {
-    async fn contribute(
-        &self,
-        request: ContextContributionRequest,
-    ) -> Result<ContextContributionResult, KernelError> {
-        if request.context.provider_lock.provider.role.key.role_id != self.role_id
-            || request.context.member_id != self.capability_id
-        {
-            return Err(KernelError::RoleProviderMemberUnavailable {
-                role_id: self.role_id.clone(),
-                capability_id: self.capability_id.clone(),
-            });
-        }
-        let operation = match self.capability_id.as_ref() {
-            "computer.observe" => Wave2ContextCapabilityOperation::ComputerObserve,
-            "a11y.observe" => Wave2ContextCapabilityOperation::A11yObserve,
-            _ => {
-                return Err(KernelError::RoleProviderMemberUnavailable {
-                    role_id: self.role_id.clone(),
-                    capability_id: self.capability_id.clone(),
-                });
-            }
-        };
-        self.host_port
-            .contribute(Wave2ContextHostRequest {
-                context: role_member_context(request.context)?,
-                operation,
-                schema_ref: request.schema_ref,
-            })
-            .await
-            .map_err(wave2_host_error_to_kernel)
-    }
-}
-
-
-fn role_member_context(
-    context: ResolvedRoleMemberContext,
-) -> Result<Wave2RoleMemberContext, KernelError> {
-    let agent_session_id = context
-        .agent_session_id
-        .ok_or_else(|| KernelError::CapabilityExecution {
-            reason: "role member context requires an AgentSession".to_owned(),
-        })?;
-    let resolved_snapshot_ref = context
-        .resolved_snapshot_ref
-        .ok_or_else(|| KernelError::CapabilityExecution {
-            reason: "role member context requires a frozen Snapshot".to_owned(),
-        })?;
-    Ok(Wave2RoleMemberContext {
-        principal: context.principal,
-        agent_session_id,
-        operation_id: context.operation_id,
-        correlation_id: context.correlation_id,
-        resolved_snapshot_ref,
-        registry_generation: context.registry_generation,
-        capability_id: context.member_id,
-        role_provider: context.provider_lock.provider,
-        state_scope_key: context.state_scope_key,
-        state: Wave2StateHandle::new(context.mount.state),
-        resource_bindings: context.resource_bindings,
-    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1032,13 +834,10 @@ impl ActionDefinition {
     }
 }
 
-const NO_ACTIONS: &[ActionDefinition] = &[];
-
 #[derive(Clone, Copy)]
 struct CapabilityDefinition {
     id: &'static str,
     kind: CapabilityKind,
-    effect_class: Option<EffectClass>,
     module_actions: &'static [ActionDefinition],
     publishes_event: bool,
     resource_kinds: &'static [&'static str],
@@ -1065,7 +864,6 @@ impl CapabilityDefinition {
         Self {
             id,
             kind: CapabilityKind::Tool,
-            effect_class: None,
             module_actions: actions,
             publishes_event,
             resource_kinds,
@@ -1073,24 +871,8 @@ impl CapabilityDefinition {
         }
     }
 
-    const fn context(
-        id: &'static str,
-        resource_kinds: &'static [&'static str],
-        platform_scope: PlatformScope,
-    ) -> Self {
-        Self {
-            id,
-            kind: CapabilityKind::ContextContributor,
-            effect_class: None,
-            module_actions: NO_ACTIONS,
-            publishes_event: false,
-            resource_kinds,
-            platform_scope,
-        }
-    }
-
     const fn is_tool(self) -> bool {
-        self.effect_class.is_some() || !self.module_actions.is_empty()
+        !self.module_actions.is_empty()
     }
 }
 
@@ -1193,34 +975,21 @@ const BROWSER_CAPABILITIES: &[CapabilityDefinition] = &[CapabilityDefinition::mo
     PlatformScope::BrowserDesktop,
 )];
 
-const COMPUTER_A11Y_CAPABILITIES: &[CapabilityDefinition] = &[
-    CapabilityDefinition::context(
-        "computer.observe",
-        COMPUTER_RESOURCE,
-        PlatformScope::ComputerDesktop,
-    ),
-    CapabilityDefinition::computer_tool("computer.input", EffectClass::Physical),
-    CapabilityDefinition::computer_tool("computer.launch", EffectClass::ExecuteLocal),
-    CapabilityDefinition::context(
-        "a11y.observe",
-        COMPUTER_RESOURCE,
-        PlatformScope::ComputerDesktop,
-    ),
+const COMPUTER_ACTIONS: &[ActionDefinition] = &[
+    ActionDefinition::function("computer/observe", EffectClass::ReadSensitive),
+    ActionDefinition::function("computer/a11y.observe", EffectClass::ReadSensitive),
+    ActionDefinition::function("computer/input", EffectClass::Physical),
+    ActionDefinition::function("computer/launch", EffectClass::ExecuteLocal),
 ];
 
-impl CapabilityDefinition {
-    const fn computer_tool(id: &'static str, effect_class: EffectClass) -> Self {
-        Self {
-            id,
-            kind: CapabilityKind::Tool,
-            effect_class: Some(effect_class),
-            module_actions: NO_ACTIONS,
-            publishes_event: false,
-            resource_kinds: COMPUTER_RESOURCE,
-            platform_scope: PlatformScope::ComputerDesktop,
-        }
-    }
-}
+const COMPUTER_A11Y_CAPABILITIES: &[CapabilityDefinition] =
+    &[CapabilityDefinition::module_on(
+        COMPUTER_MODULE_ID,
+        COMPUTER_ACTIONS,
+        false,
+        COMPUTER_RESOURCE,
+        PlatformScope::ComputerDesktop,
+    )];
 
 const PACKAGE_DEFINITIONS: &[PackageDefinition] = &[
     PackageDefinition {
@@ -1489,55 +1258,6 @@ fn build_registration(
             )
             .map_err(|error| format!("register {} role handler: {error}", package.id))?;
     }
-    for definition in package.capabilities {
-        if role_id_for_capability(definition.id).is_some() {
-            continue;
-        }
-        let capability_id = CapabilityId::from(definition.id);
-        match definition.kind {
-            CapabilityKind::ContextContributor => registration
-                .add_capability_context_factory(
-                    capability_id.clone(),
-                    Arc::new(Wave2UnavailableCapabilityContextFactory { capability_id }),
-                )
-                .map_err(|error| {
-                    format!("register {} direct context factory: {error}", package.id)
-                })?,
-            CapabilityKind::ResourceProvider => registration
-                .add_capability_resource_factory(
-                    capability_id.clone(),
-                    Arc::new(Wave2UnavailableCapabilityResourceFactory { capability_id }),
-                )
-                .map_err(|error| {
-                    format!("register {} direct resource factory: {error}", package.id)
-                })?,
-            _ => {}
-        }
-    }
-    for definition in package.capabilities {
-        let Some(role_id) = role_id_for_capability(definition.id) else {
-            continue;
-        };
-        let capability_id = CapabilityId::from(definition.id);
-        match definition.kind {
-            CapabilityKind::ContextContributor => {
-                registration
-                    .add_role_context_factory(
-                        role_id.clone(),
-                        capability_id.clone(),
-                        Arc::new(Wave2ContextFactory {
-                            host_port: role_host_ports.context_port(&role_id),
-                            role_id,
-                            capability_id,
-                        }),
-                    )
-                    .map_err(|error| {
-                        format!("register {} context factory: {error}", package.id)
-                    })?;
-            }
-            _ => {}
-        }
-    }
     Ok(registration)
 }
 
@@ -1545,36 +1265,20 @@ fn build_capability(
     package: &PackageRef,
     definition: CapabilityDefinition,
 ) -> Result<CapabilityManifest, String> {
-    let actions = if !definition.module_actions.is_empty() {
-        definition
-            .module_actions
-            .iter()
-            .map(|action| {
-                Ok(CapabilityActionDescriptor {
-                    action_id: ActionId::from(action.id),
-                    input_schema: schema_ref(action.id, "input")?,
-                    output_schema: schema_ref(action.id, "output")?,
-                    effect_class: action.effect_class,
-                    presentation: action.presentation,
-                })
+    let actions = definition
+        .module_actions
+        .iter()
+        .map(|action| {
+            Ok(CapabilityActionDescriptor {
+                action_id: ActionId::from(action.id),
+                input_schema: schema_ref(action.id, "input")?,
+                output_schema: schema_ref(action.id, "output")?,
+                effect_class: action.effect_class,
+                presentation: action.presentation,
             })
-            .collect::<Result<Vec<_>, String>>()?
-    } else if let Some(effect_class) = definition.effect_class {
-        vec![CapabilityActionDescriptor {
-            action_id: ActionId::from(format!("{}.invoke", definition.id)),
-            input_schema: schema_ref(definition.id, "input")?,
-            output_schema: schema_ref(definition.id, "output")?,
-            effect_class,
-            presentation: ToolPresentationKind::FunctionTool,
-        }]
-    } else {
-        Vec::new()
-    };
-    let context_schema_refs = (definition.kind == CapabilityKind::ContextContributor)
-        .then(|| schema_ref(definition.id, "context"))
-        .transpose()?
-        .into_iter()
-        .collect();
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let context_schema_refs = Vec::new();
     let event_schema_refs = definition
         .publishes_event
         .then(|| schema_ref(definition.id, "event"))
@@ -1658,6 +1362,9 @@ fn action_input_schema(action_id: &str) -> StrictJsonValue {
         return schema;
     }
     if let Some(schema) = process_schema::process_action_input_schema(action_id) {
+        return schema;
+    }
+    if let Some(schema) = computer_action_input_schema(action_id) {
         return schema;
     }
     match action_id {
@@ -1759,6 +1466,49 @@ fn action_input_schema(action_id: &str) -> StrictJsonValue {
         ),
         _ => open_object_schema(),
     }
+}
+
+fn computer_action_input_schema(action_id: &str) -> Option<StrictJsonValue> {
+    let schema = match action_id {
+        "computer/observe" => strict_object_schema(
+            serde_json::json!({
+                "action":{"type":"string","enum":["screenshot","cursor_position","list_windows","wait"]},
+                "display":{"type":"integer","minimum":0},
+                "seconds":{"type":"number","minimum":0,"maximum":5}
+            }),
+            &["action"],
+        ),
+        "computer/a11y.observe" => strict_object_schema(
+            serde_json::json!({"action":{"const":"observe"}}),
+            &["action"],
+        ),
+        "computer/input" => strict_object_schema(
+            serde_json::json!({
+                "action":{"type":"string","enum":["click_element","set_element_value","right_click_element","double_click_element","left_click","right_click","middle_click","double_click","triple_click","mouse_move","left_click_drag","type","key","scroll","focus_window"]},
+                "ref":{"type":"integer","minimum":0},
+                "x":{"type":"integer"},"y":{"type":"integer"},
+                "start_x":{"type":"integer"},"start_y":{"type":"integer"},
+                "end_x":{"type":"integer"},"end_y":{"type":"integer"},
+                "text":{"type":"string","maxLength":65536},
+                "key":{"type":"string","minLength":1,"maxLength":256},
+                "direction":{"type":"string","enum":["up","down","left","right"]},
+                "amount":{"type":"integer","minimum":1,"maximum":100},
+                "window_id":{"type":"integer","minimum":0},
+                "expected_generation":{"type":"integer","minimum":1}
+            }),
+            &["action","expected_generation"],
+        ),
+        "computer/launch" => strict_object_schema(
+            serde_json::json!({
+                "action":{"const":"launch"},
+                "target":{"type":"string","minLength":1,"maxLength":4096},
+                "app":{"type":"string","minLength":1,"maxLength":1024}
+            }),
+            &["action","target"],
+        ),
+        _ => return None,
+    };
+    Some(schema)
 }
 
 fn canonical_schema(schema_owner: &str, role: &str) -> StrictJsonValue {
@@ -1930,7 +1680,9 @@ impl CapabilityHandler for Wave2CapabilityHandler {
                     action_id: context.action_id,
                 });
             }
-            if self.capability_id.as_ref().starts_with("workspace.") {
+            if self.capability_id.as_ref().starts_with("workspace.")
+                || self.capability_id.as_ref() == COMPUTER_MODULE_ID
+            {
                 // These actions publish strict schemas; every Kernel host must
                 // enforce them before dispatch, not only the Nomi wrapper.
                 validate_module_action_input(
@@ -2091,8 +1843,18 @@ pub fn typed_operation_for(
         (BROWSER_MODULE_ID, "browser/download") => Wave2TypedCapabilityOperation::BrowserDownload { input },
         (BROWSER_MODULE_ID, "browser/upload") => Wave2TypedCapabilityOperation::BrowserUpload { input },
         (BROWSER_MODULE_ID, "browser/evaluate") => Wave2TypedCapabilityOperation::BrowserEvaluate { input },
-        ("computer.input", "computer.input.invoke") => Wave2TypedCapabilityOperation::ComputerInput { input },
-        ("computer.launch", "computer.launch.invoke") => Wave2TypedCapabilityOperation::ComputerLaunch { input },
+        (COMPUTER_MODULE_ID, "computer/observe") => {
+            Wave2TypedCapabilityOperation::ComputerObserve { input }
+        }
+        (COMPUTER_MODULE_ID, "computer/a11y.observe") => {
+            Wave2TypedCapabilityOperation::ComputerA11yObserve { input }
+        }
+        (COMPUTER_MODULE_ID, "computer/input") => {
+            Wave2TypedCapabilityOperation::ComputerInput { input }
+        }
+        (COMPUTER_MODULE_ID, "computer/launch") => {
+            Wave2TypedCapabilityOperation::ComputerLaunch { input }
+        }
         _ => {
             return Err(KernelError::CapabilityExecution {
                 reason: format!(
@@ -2168,8 +1930,9 @@ pub fn required_action_resource_operation(
         (BROWSER_MODULE_ID, "browser/download") => Some("download"),
         (BROWSER_MODULE_ID, "browser/upload") => Some("upload"),
         (BROWSER_MODULE_ID, "browser/evaluate") => Some("evaluate"),
-        ("computer.input", "computer.input.invoke") => Some("input"),
-        ("computer.launch", "computer.launch.invoke") => Some("launch"),
+        (COMPUTER_MODULE_ID, "computer/observe" | "computer/a11y.observe") => Some("observe"),
+        (COMPUTER_MODULE_ID, "computer/input") => Some("input"),
+        (COMPUTER_MODULE_ID, "computer/launch") => Some("launch"),
         _ => None,
     }
 }
@@ -2401,7 +2164,7 @@ pub fn computer_a11y_registration() -> Result<PluginRegistration, String> {
 fn role_id_for_capability(capability_id: &str) -> Option<ExecutionRoleId> {
     if capability_id == BROWSER_MODULE_ID {
         Some(ExecutionRoleId::from(BROWSER_EXECUTION_ROLE_ID))
-    } else if capability_id.starts_with("computer.") || capability_id == "a11y.observe" {
+    } else if capability_id == COMPUTER_MODULE_ID {
         Some(ExecutionRoleId::from(COMPUTER_EXECUTION_ROLE_ID))
     } else {
         None
@@ -2421,13 +2184,9 @@ fn role_contracts_for_package(
         BROWSER_EXECUTION_ROLE_ID => {
             [(BROWSER_MODULE_ID, RoleMemberRequirement::Required)].as_slice()
         }
-        COMPUTER_EXECUTION_ROLE_ID => [
-            ("computer.observe", RoleMemberRequirement::Required),
-            ("computer.input", RoleMemberRequirement::Required),
-            ("computer.launch", RoleMemberRequirement::Optional),
-            ("a11y.observe", RoleMemberRequirement::Optional),
-        ]
-        .as_slice(),
+        COMPUTER_EXECUTION_ROLE_ID => {
+            [(COMPUTER_MODULE_ID, RoleMemberRequirement::Required)].as_slice()
+        }
         _ => &[],
     };
     let mut by_id = capabilities
@@ -3405,7 +3164,7 @@ mod tests {
         )
         .expect("Wave 2 metadata materializes");
         assert_eq!(materialized.packages.len(), 4);
-        assert_eq!(materialized.capabilities.len(), 10);
+        assert_eq!(materialized.capabilities.len(), ALL_CAPABILITY_IDS.len());
         assert_eq!(materialized.role_contracts.len(), 2);
         assert_eq!(materialized.role_providers.len(), 2);
         let browser_role = materialized.role_contract(&ExecutionRoleId::from(BROWSER_EXECUTION_ROLE_ID))
@@ -4026,6 +3785,7 @@ mod tests {
             assert_eq!(
                 capability.manifest.supported_surfaces,
                 BTreeSet::from([
+                    "authoring:direct".to_owned(),
                     "consumer:agent".to_owned(),
                     "desktop".to_owned(),
                 ])

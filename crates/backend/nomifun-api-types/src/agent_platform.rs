@@ -155,7 +155,7 @@ pub struct AgentBindingValueDto {
     pub binding_version: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilitySelectionDto {
     pub capability: ExactCatalogRefDto,
@@ -308,7 +308,7 @@ pub struct AgentPresetSummaryDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OfficialPresetSeedDto {
-    pub enabled_capabilities: Vec<ExactCatalogRefDto>,
+    pub enabled_capabilities: Vec<CapabilitySelectionDto>,
     pub skill_bindings: Vec<ExactCatalogRefDto>,
     pub required_resource_kinds: BTreeSet<String>,
     pub required_runtime_features: BTreeSet<String>,
@@ -475,6 +475,10 @@ pub struct RoleCatalogItemDto {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentCatalogResponse {
+    /// Canonical Module/Action authoring projection. The legacy-shaped
+    /// capability summary remains a materialization/availability index; UI
+    /// authoring must take exact Actions and dependencies from this field.
+    pub modules: Vec<CapabilityModuleCatalogItemDto>,
     pub capabilities: Vec<CapabilityCatalogItemDto>,
     pub skills: Vec<SkillCatalogItemDto>,
     pub mcp_tools: Vec<McpToolCatalogItemDto>,

@@ -1,5 +1,4 @@
 import type { AgentCatalogResponse, AgentPresetDocument } from '@/common/types/agentPlatform';
-import { Select } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
 import { providerSelectionKey, relevantRoleIds, selectRoleProvider } from './roleProviders';
 import styles from './AgentSettingsPage.module.css';
@@ -33,19 +32,20 @@ export default function AgentRoleProviderPicker({ document, catalog, disabled, o
         const label = names?.join(' / ') || roleId;
         return <div key={roleId} className={styles.field}>
           <span>{label}</span>
-          <Select aria-label={label} value={value} disabled={disabled} onChange={(key: string) => {
+          <select className={styles.nativeSelect} aria-label={label} value={value} disabled={disabled} onChange={(event) => {
+            const key = event.currentTarget.value;
             if (key === '') onChange(selectRoleProvider(document, roleId));
             else {
               const candidate = providers.find(item => providerSelectionKey(item.selection) === key);
               if (candidate) onChange(selectRoleProvider(document, roleId, candidate.selection));
             }
           }}>
-            <Select.Option value=''>{t('agentSettings.providers.inherit')}</Select.Option>
-            {missing && <Select.Option value={value} disabled>{t('agentSettings.providers.missing')}</Select.Option>}
-            {providers.map(item => <Select.Option key={providerSelectionKey(item.selection)} value={providerSelectionKey(item.selection)}>
+            <option value=''>{t('agentSettings.providers.inherit')}</option>
+            {missing && <option value={value} disabled>{t('agentSettings.providers.missing')}</option>}
+            {providers.map(item => <option key={providerSelectionKey(item.selection)} value={providerSelectionKey(item.selection)}>
               {item.display_name} — {item.source_package.id}@{item.source_package.version}
-            </Select.Option>)}
-          </Select>
+            </option>)}
+          </select>
           {selected && <span className={styles.fieldHint}>{selected.description}</span>}
           {missing && <span role='alert' className={styles.fieldHint}>{t('agentSettings.providers.missingHint')}</span>}
         </div>;

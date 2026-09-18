@@ -66,7 +66,7 @@ pub(crate) struct EngineKernelAssembly {
     pub environment: CompilerEnvironment,
     pub wave2: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
     pub plugin_product: super::engine_plugin_product_tools::PluginProductOwner,
-    pub robot: Option<Arc<super::nomi_core_robot::NomiCoreRobotWave4Owner>>,
+    pub robot: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
 }
 
 fn constraints_allow_action(
@@ -134,7 +134,7 @@ pub struct EngineKernelSession {
     wave2: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
     plugin_product: super::engine_plugin_product_tools::PluginProductOwner,
     plugin_product_plan: tokio::sync::OnceCell<EngineToolPlan>,
-    robot: Option<Arc<super::nomi_core_robot::NomiCoreRobotWave4Owner>>,
+    robot: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
     robot_tools: tokio::sync::OnceCell<Option<Arc<super::engine_robot_tools::FrozenTools>>>,
     state: Mutex<State>,
 }
@@ -467,8 +467,7 @@ impl EngineKernelSession {
     /// Latest existing Robot vision observation, not a camera capture or a
     /// second model call. Read at model boundaries; expired data is not reused.
     pub async fn robot_vision_context(&self, generation: u64) -> Result<Option<String>, AppError> {
-        use nomifun_agent_domain_wave4::{Wave4ContextHostPort, Wave4ContextHostRequest};
-        let id = nomifun_agent_contracts::CapabilityId::from("robot.vision");
+        let id = super::nomi_core_robot::module_capability_id();
         if !self.allows_capability(&id) {
             return Ok(None);
         }
@@ -503,11 +502,19 @@ impl EngineKernelSession {
             .iter()
 
             .find(|item| item.capability.id == id)
-            .ok_or_else(|| failure("Robot vision not selected"))?;
+            .ok_or_else(|| failure("Robot Module not selected"))?;
         let policy = self
             .compiled
             .policy(&id)
-            .ok_or_else(|| failure("Robot vision policy missing"))?;
+            .ok_or_else(|| failure("Robot Module policy missing"))?;
+        if !policy
+            .allowed_actions
+            .contains(&nomifun_agent_contracts::ActionId::from(
+                nomifun_robot::capability::ROBOT_VISION_ACTION_ID,
+            ))
+        {
+            return Ok(None);
+        }
         let resources = self
             .compiled
             .target_resource_bindings
@@ -524,20 +531,8 @@ impl EngineKernelSession {
             || !resources[0].operations.contains("vision")
         {
             return Err(failure(
-                "Robot vision requires the exact bundled resource grant",
+                "Robot vision requires the exact bundled Module and resource grant",
             ));
-        }
-        let registry = self.registry_snapshot()?;
-        let materialized = registry
-            .capability(&id)
-            .ok_or_else(|| failure("Robot vision unavailable"))?;
-        let schemas = &materialized.manifest.contributions.context_schema_refs;
-        if registry.generation != self.compiled.registry_generation
-            || registry.registry_digest != self.compiled.registry_digest
-            || materialized.schema_digest != selected.schema_digest
-            || schemas.len() != 1
-        {
-            return Err(failure("Robot vision context contract changed"));
         }
         let owner = self
             .robot
@@ -545,19 +540,11 @@ impl EngineKernelSession {
             .ok_or_else(|| failure("Robot owner unavailable"))?;
         let context = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            owner.contribute(Wave4ContextHostRequest {
-                principal: self.principal.clone(),
-                agent_session_id: self.session_id.clone(),
-                operation_id: format!("{operation}:robot-context").into(),
-                correlation_id: operation.clone().into(),
-                resolved_snapshot_ref: self.compiled.snapshot_ref().clone(),
-                registry_generation: registry.generation,
-                registry_digest: registry.registry_digest.clone(),
-                capability_id: id,
-                state_scope_key: format!("session:{}", self.session_id.as_ref()).into(),
-                resource_bindings: resources,
-                schema_ref: schemas[0].clone(),
-            }),
+            owner.vision_context(
+                &self.principal.principal_id,
+                &resources[0],
+                &policy.allowed_actions,
+            ),
         )
         .await
         .map_err(|_| failure("Robot context read timed out"))?
@@ -648,7 +635,7 @@ impl EngineKernelSession {
             let binding = plan
                 .binding(&definition.name)
                 .expect("plan definition has binding");
-            if super::nomi_core_robot::tool_capability_ids().contains(&binding.capability_id)
+            if super::engine_robot_tools::supported_ids().contains(&binding.capability_id)
                 && self
                     .robot_tools
                     .get()

@@ -3,7 +3,7 @@ import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 import { AGENT_SIDER_TOGGLE_EVENT, dispatchAgentSiderStateEvent } from '@/renderer/utils/workspace/agentSiderEvents';
 import type { AgentPresetSummary } from '@/common/types/agentPlatform';
 import { Alert, Button, Modal, Spin } from '@arco-design/web-react';
-import { Refresh } from '@icon-park/react';
+import { AddOne, Refresh } from '@icon-park/react';
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -37,6 +37,8 @@ const AgentSettingsPage: React.FC = () => {
   const resize = useResizableSplit({ unit: 'px', defaultWidth: 300, minWidth: 240, maxWidth: 480, storageKey: 'nomifun:agent-sider-width' });
   const [narrow, setNarrow] = useState(() => typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 1250px)').matches);
   const [narrowSiderOpen, setNarrowSiderOpen] = useState(false);
+  const narrowOverlay = useRef<HTMLDivElement>(null);
+  const narrowReturnFocus = useRef<HTMLElement | null>(null);
   const collapsed = narrow ? !narrowSiderOpen : desktopSider.collapsed;
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;
@@ -48,11 +50,47 @@ const AgentSettingsPage: React.FC = () => {
   }, []);
   useEffect(() => { dispatchAgentSiderStateEvent(collapsed); }, [collapsed]);
   useEffect(() => {
-    const toggle = () => narrow ? setNarrowSiderOpen(open => !open) : desktopSider.toggle();
+    if (!narrow || !narrowSiderOpen) return;
+    const frame = requestAnimationFrame(() => {
+      narrowOverlay.current?.querySelector<HTMLElement>('input, button, [tabindex="0"]')?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [narrow, narrowSiderOpen]);
+  const closeNarrowSider = () => {
+    setNarrowSiderOpen(false);
+    requestAnimationFrame(() => narrowReturnFocus.current?.focus());
+  };
+  useEffect(() => {
+    const toggle = () => {
+      if (!narrow) { desktopSider.toggle(); return; }
+      setNarrowSiderOpen((open) => {
+        if (!open) narrowReturnFocus.current = document.activeElement as HTMLElement | null;
+        else requestAnimationFrame(() => narrowReturnFocus.current?.focus());
+        return !open;
+      });
+    };
     window.addEventListener(AGENT_SIDER_TOGGLE_EVENT, toggle);
     return () => window.removeEventListener(AGENT_SIDER_TOGGLE_EVENT, toggle);
   }, [narrow, desktopSider.toggle]);
-  const collapse = () => narrow ? setNarrowSiderOpen(false) : desktopSider.setCollapsed(true);
+  const collapse = () => narrow ? closeNarrowSider() : desktopSider.setCollapsed(true);
+  const trapNarrowOverlay = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeNarrowSider();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = [...(narrowOverlay.current?.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), input:not(:disabled), [href], [tabindex]:not([tabindex="-1"])'
+    ) ?? [])];
+    if (!focusable.length) return;
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault(); last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault(); first.focus();
+    }
+  };
   const controller = useAgentSettingsController();
   const [templateDirty, setTemplateDirty] = useState(false);
   const [pendingSwitch, setPendingSwitch] = useState<(() => void) | null>(null);
@@ -166,6 +204,11 @@ const AgentSettingsPage: React.FC = () => {
           content={
             <div className={styles.errorBody}>
               <span>{controller.error}</span>
+              {controller.errorSubjects.length > 0 && (
+                <span>{t('agentSettings.errors.diagnosticSubjects', {
+                  subjects: controller.errorSubjects.join(', '),
+                })}</span>
+              )}
               {controller.modelConfigurationMissing && <div>
                 <Button size='small' type='primary' disabled={controller.busyAction !== null}
                   onClick={() => void openKeepingEdits('/models')}>{t('agentSettings.workbench.configureChatModel')}</Button>
@@ -192,7 +235,7 @@ const AgentSettingsPage: React.FC = () => {
         </div>
       ) : controller.library ? (
         <div className={styles.workspace}>
-          {!collapsed && (narrow ? <div className={styles.siderOverlay}><button className={styles.siderBackdrop} aria-label={t('agentSettings.workbench.hideList')} onClick={collapse} />{libraryPanel}</div> : libraryPanel)}
+          {!collapsed && (narrow ? <div ref={narrowOverlay} className={styles.siderOverlay} role='dialog' aria-modal='true' aria-label={t('agentSettings.library.ariaLabel')} onKeyDown={trapNarrowOverlay}><button className={styles.siderBackdrop} aria-label={t('agentSettings.workbench.hideList')} onClick={collapse} />{libraryPanel}</div> : libraryPanel)}
           <div className={styles.mainArea}>
           <div className={styles.defaultsToolbar}><AgentRoleDefaults catalog={controller.catalog} /></div>
 
@@ -224,9 +267,18 @@ const AgentSettingsPage: React.FC = () => {
               onStartConversation={startConversation}
             />
           ) : (
-            <div className={styles.loading}>
-              <Spin size={20} />
-              <span>{t('agentSettings.loadingEditor')}</span>
+            <div className={styles.workbenchEmpty} role='status'>
+              <span className={styles.workbenchEmptyIcon}><AddOne theme='outline' size={24} /></span>
+              <h2>{t('agentSettings.workbench.emptyWorkbenchTitle')}</h2>
+              <p>{t('agentSettings.workbench.emptyWorkbenchHint')}</p>
+              <Button
+                type='primary'
+                disabled={controller.busyAction !== null}
+                loading={controller.busyAction === 'create'}
+                onClick={() => void controller.createPreset(t('agentSettings.defaults.untitledName'))}
+              >
+                {t('agentSettings.workbench.startCustom')}
+              </Button>
             </div>
           )}
           </div>

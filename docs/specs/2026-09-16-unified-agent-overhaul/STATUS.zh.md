@@ -1,8 +1,8 @@
 # UARC 状态台账
 
 > 唯一状态 owner：Integration
-> 更新时间：2026-09-17
-> 当前阶段：Wave 4 / UARC-033 + UARC-034 + UARC-040 active
+> 更新时间：2026-09-18
+> 当前阶段：Wave 5 integrated / Wave 6 UARC-051 ready
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
@@ -14,8 +14,9 @@
 > Wave 1 gate 修复提交：`8afc40c7a`
 > Wave 2 实现提交：`efe80298f`
 > Wave 3 实现提交：`8454133b124a3d38636f882b098de80ce17028c0`
+> Wave 4 barrier：`c5d64b943a7862bb9837686214e413899a47efc2`
 > 当前主机：Windows
-> Initiative 状态：`active / Wave 4 feature implementation`
+> Initiative 状态：`active / Wave 5 gate complete`
 
 ## 1. 当前事实
 
@@ -23,9 +24,10 @@
   `2147863da396835240296ec0a9b865200050b438`；详见
   [UARC-000 工作树冻结清单](UARC-000-WORKTREE-INVENTORY.zh.md)。
 - 已完成三份目标设计和 Browser 历史文档纠正；这些是实施输入，不是生产完成证据。
-- 先前实现的“执行引擎设置页”仍按 Nomi/Coding 双 Runtime 展示，与最新单 Runtime 决定不完全一致；
-  归属 `UARC-050`，不能作为最终 UI 直接交付，也不能未经检查删除。
-- 当前 Browser 仍是 Conversation-scoped BrowserWorkspace，Guid 仍会创建浏览器专属空 Session。
+- Agent Workbench 已只展示一个 Nomi Runtime 诊断面；JavaScript Runtime 保持独立设置目的地，旧 Runtime
+  selector 与兼容路由已物理删除。
+- Browser 已是任意 AgentSession 可授权的 `browser` Module；Guid 不再创建 Browser 专属空 Session，
+  Windows managed provider 使用 WebView2，attached provider 使用安装级 Chrome 连接。
 - 当前源码已经包含 macOS 独立 CEF host、原生 fixture 与部分底层验证；生产注入、产品会话闭环和
   UARC 新 Browser Resource 模型适配仍未完成。UARC-061 必须复用这套基线，不得回退到 WKWebView。
 - 产品组合只安装一个 `nomifun.nomi` provider/factory，旧 Nomi factory 与 `nomifun.coding` family
@@ -41,8 +43,8 @@
 - Wave 3 的 UARC-030/031/032 已统一集成：Web/Knowledge/Memory、Channel/Companion/Customer Service、
   Creation/Workshop/Office/Plugin Development 均只暴露产品 Module 与 exact Actions；scene Context 从 binding
   派生，provider/model transport 细节不再成为 Agent grant。
-- App 的 Wave 2 gate 为 499/499；过滤的 10 个 Robot unified fixture 明确归 `UARC-042`，另 1 个
-  Bootstrap SQLite WAL 字节比较不稳定项保留到 Windows 回归闭合，不构成 UARC authority fallback。
+- Wave 5 已把 Computer/Robot 收敛为单一 Module + slash Action，旧 generic Robot proxy/fixture 已删除；
+  Bootstrap WAL 测试也已改为稳定的逻辑持久状态证据。App 全量 gate 为 522/522。
 - 当前没有本轮源码重构的 macOS 编译、原生或打包证据。
 
 ## 2. 已确认产品决定
@@ -80,9 +82,13 @@
 | `UARC-030` | integrated | Integration | verified | pending | Web、Knowledge、Memory Module 与 sensitive Action authority |
 | `UARC-031` | integrated | Integration | verified | pending | scene-derived Context；Channel/Companion/Customer Actions |
 | `UARC-032` | integrated | Integration | verified | pending | Creation/Workshop/Office/Plugin Modules 与 Creative UI |
-| `UARC-033` | active | Feature Automation Core | pending | pending | Requirements/AutoWork/AgentExecution/IDMM 收敛 |
-| `UARC-034` | active | Feature Platform Services | pending | pending | Schedule/Notification/Remote/SSH Modules |
-| `UARC-040` | active | Feature Browser Shared | pending | pending | Browser product model、Resource 与 Provider contract |
+| `UARC-033` | integrated | Integration | verified | pending | AutoWork 复用 AgentExecution；Agent-path IDMM 已删除 |
+| `UARC-034` | integrated | Integration | verified | pending | Schedule/Notification/Remote/SSH exact Actions 与 typed ingress |
+| `UARC-040` | integrated | Integration | verified | pending | Browser Module、Resource 与 provider-neutral contract |
+| `UARC-041` | integrated | Integration | verified | n/a | Windows WebView2 Browser capability UI；无 Browser-only Session |
+| `UARC-042` | integrated | Integration | verified | pending | Computer/Robot 单 Module、slash Actions 与真实 availability |
+| `UARC-050` | integrated | Integration | verified | pending | Official Agents、Workbench 与单 Nomi Runtime 诊断 UI |
+| `UARC-051` | planned | Integration | pending | pending | 新 Agent Store/API/projection 串行切换 |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -143,6 +149,14 @@
 | UARC-032 Domain/App/UI | Wave3 13 + Office 89 + App slash 2 + UI 23 passed | product actions、Office owner、two-authority slash discovery |
 | Wave 3 compile/contract/UI boundary | Browser feature + live smoke no-run + generator/inventory/typecheck passed | 1,931 renderer sources；880×600 boundary |
 | Wave 3 full App transition probe | 491 passed / 11 known future-owned failures | 10 UARC-042 Robot + 1 final Windows WAL anomaly |
+| Wave 4 barrier | `c5d64b943a7862bb9837686214e413899a47efc2` | UARC-033/034/040 统一 gate 后的干净施工源 |
+| UARC-041 Browser | Platform 55 + App 15 + UI 79 passed；native smoke passed | WebView2、exact Action controls、managed/attached 状态与无 Browser-only Session |
+| UARC-042 Computer/Robot | Computer 103 passed / 7 explicit ignores；Robot 150 + fake-device 4；Domain 17 + 6 | 单 Module/slash Actions、typed observations、effect receipt、真实设备状态 |
+| UARC-050 Workbench | focused UI 280 passed；最终 affected 30 passed；880×600 visual passed | official exact defaults、Server catalog、single Runtime、键盘/焦点/完整状态 |
+| Wave 5 Contracts/Control Plane/Session | 108 + 48 + 35 passed | exact catalog/defaults、session-scoped resource binding 与 frozen selections |
+| Wave 5 App | lib 522 + route-gap 28 + official preset 3 passed | App composition、canonical admission 与完整 transition regression |
+| Wave 5 DB | Agent Store reset/schema 3 passed | 迁移后 schema 与 clean baseline 相等；跨 Session binding 可复用 |
+| Wave 5 UI/build/contract boundary | `bun run check` + `build:ui` + generator write/check + UARC boundary passed | 880×600 boundary、i18n、typecheck、生成物与删除边界一致 |
 | Commercial selected-model probe | StepFun Coding Plan `step-3.7-flash` direct HTTP 200 | canonical turn dispatch pending UARC-051/052；未记作 integrated smoke pass |
 | Windows UARC full gate | not run | 否 |
 | macOS UARC shared compile | not run | 否 |
@@ -163,21 +177,17 @@
 
 - UARC 实施无产品决定 blocker。
 - macOS 任务需要可用 Mac 主机；在主机可用前状态保持 `pending`，不能标完成。
-- Wave 3 barrier 已收口；`UARC-033/034/040` 已从同一 barrier 启动，Integration 继续独占共享合同、
-  根配置、生成物、状态台账和最终合并。
-- App 当前只保留 10 个 `UARC-042` Robot device-MCP transition fixture；旧 proxy 已物理删除，后续必须
-  通过 materialized Robot Actions 修复。
-- Bootstrap 的 `v3_validation_failures_preserve_data_with_or_without_prior_retirement` 在 Windows 对 SQLite
-  WAL checkpoint 后的主文件做字节级比较，单测可通过也可复现失败；不涉及 UARC 数据丢失，须在
-  `UARC-060/064` Windows gate 前改为稳定的持久状态证据并全量复跑。
+- Wave 5 Windows/shared gate 已收口；`UARC-051` 是下一项串行 Integration 任务。
+- Remote open 当前仍创建旧 Conversation，而 canonical DELETE 只操作 generation 5 Store；该已知切换缺口
+  归 `UARC-051`，不得以接受 404 或兼容回退掩盖，须在 canonical Remote cutover 后恢复删除回归覆盖。
 - canonical `/api/agent-sessions` 已只写 generation 5；Cron/Channel/AutoWork/Companion/IDMM/
   AgentExecution/Remote 的旧 Conversation writers/readers 仍由 `UARC-033/034/051/054` 迁移删除。
   Fresh-v4 root coordinator aliases 仅为 `UARC-054` 保留。
 
 ## 8. Next ready tasks
 
-1. `UARC-033/034/040` 已从同一 Wave 3 barrier 并行执行；Integration 等待有界交付。
-2. Wave 4 合并前没有其他 ready task；共享合同、生成物、根配置和状态台账仍由 Integration 独占。
+1. `UARC-051`：串行切换所有新 Agent operations 到 generation 5 Store、canonical API 与 projection。
+2. `UARC-061/062`：依赖外部 Mac 真机，在 Windows 串行主线完成且 handoff 就绪后执行。
 
 ## 9. 状态更新模板
 
@@ -667,3 +677,38 @@
 - Windows: renderer implementation complete pending integrated native/visual gate.
 - macOS: shared copy only; CEF native evidence remains `UARC-061`.
 - Remaining/blocker: write-set gap resolved; no user decision is required.
+
+### 2026-09-18 UARC-041/042/050 integrated and Wave 5 gate complete
+
+- Barrier/source: Wave 4 closeout `c5d64b943a7862bb9837686214e413899a47efc2`; Wave 5 start
+  `90ba8f95f`; implementation candidate prepared from current `c27c40856850220edf218f0912ac63903cecad23`.
+- Owner/write set: Integration merged the three bounded Feature lanes and alone reconciled shared contracts,
+  generated artifacts, App composition, Store schema/migration, root Cargo files, status and all unified gates.
+- Changed: Browser is a generic current-Session capability with exact controls and WebView2/attached-Chrome status;
+  Computer and Robot each expose one Module with slash Actions, typed observations/resources and effect receipts;
+  Workbench consumes the server Module catalog and exact official defaults, shows complete resource/permission states,
+  and exposes one Nomi Runtime diagnostics surface. Product Agent binding now freezes required typed resources, while
+  Agent resource binding identity is scoped by Session so two Sessions can safely bind the same product resource.
+- Deleted: Guid Browser-only launch/session paths, `BrowserWorkspacePanel`, the Runtime selector and compatibility
+  route, generic Robot proxy/legacy transition fixture, fragmented Robot/Computer grants and client-inferred template
+  expansion. No WKWebView implementation was added or restored.
+- Retained + reason: Windows WebView2 and attached Chrome owners, existing independent macOS CEF child NSView,
+  native Computer/Robot physical owners, canonical Store/Session/compiler and JavaScript Runtime's separate settings
+  destination remain production inputs with explicit later platform owners.
+- Tests: Browser Platform 55, App Browser 15 and Browser UI 79 passed; Windows native Browser smoke emitted
+  `BROWSER_WORKSPACE_SMOKE_PASS`. Computer 103 passed with 7 explicit real-environment ignores whose cursor/screenshot
+  cases were run separately; Robot 150 plus fake-device 4 and Domain Wave2/Wave4 17 + 6 passed. Focused Workbench/UI
+  was 280/280, then 30/30 after final visual fixes. Contracts 108, Control Plane 48, Session 35, DB reset/schema 3,
+  App lib 522, route-gap 28 and official preset 3 passed. Contract generator write/check, UARC boundary,
+  `bun run check`, `bun run build:ui` and `git diff --check` passed.
+- Windows: verified for Browser native/resource lifecycle, Computer/Robot shared/native contracts, Workbench behavior,
+  keyboard/focus states and a real 880×600 Desktop-class viewport. Normal-width visual inspection also passed.
+- macOS: `UARC-041` is not applicable; shared sources for `UARC-042/050` remain pending. `UARC-061/062` still require
+  a Mac for CEF child-NSView production injection, native interaction/TCC/lifecycle, visual QA, arm64 app/DMG and
+  signing-structure evidence.
+- Commercial-model evidence: only the commercial StepFun Coding Plan `step-3.7-flash` selection was used for the
+  provider reachability probe, which returned HTTP 200. Canonical integrated turn dispatch remains pending
+  `UARC-051/052` and is not reported as a smoke pass. No credential was persisted, printed or committed.
+- Remaining/blocker: none for Wave 5. The known Remote open/delete Store split is a required `UARC-051` cutover item,
+  not an accepted compatibility state. External Mac hardware remains the later cross-platform blocker.
+- Next ready task: `UARC-051`, serial Integration only; no Feature lane is released until its completion gate passes.

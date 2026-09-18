@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::Request;
 use http_body_util::BodyExt;
@@ -20,13 +21,15 @@ use nomifun_agent_contracts::{
     EffectClass, ExactVersionRef, JAVASCRIPT_HOST_PROTOCOL_VERSION,
     JAVASCRIPT_SDK_CONTRACT_VERSION, JavaScriptBuildProfile,
     JavaScriptEntrypointMetadata, LocalizedMetadata, MINIMUM_NODE_MAJOR,
+    OfficialPresetKey,
     PLUGIN_N1_SCHEMA_VERSION, PLUGIN_PACKAGE_PROFILE_VERSION, PackageContributions,
     PackageId, PackageManifest, PlatformConstraint, PluginPackageArtifactV1,
     PluginPackageV1Manifest, RuntimeTarget, StrictJsonValue, ToolPresentationKind,
     VersionString, canonical_json_bytes, capability_surface_declarations,
+    official_preset_seed_manifest_payload,
 };
 use nomifun_api_types::{
-    AgentPresetEditorResponse, AgentPresetLibraryResponse, ApiResponse,
+    AgentCatalogResponse, AgentPresetEditorResponse, AgentPresetLibraryResponse, ApiResponse,
     ApplyPluginCandidateRequest, ApplyPluginTargetDto, CapabilityCatalogItemDto,
     AgentChatModelSelectionDto, CatalogMaterializationStateDto,
     CreateAgentPresetFromTemplateRequest, ExactCatalogRefDto, ImportPluginRequest,
@@ -36,6 +39,10 @@ use nomifun_app::compatibility::{
     AppServices, build_module_states, create_router_with_states,
 };
 use nomifun_app::{AppConfig, AuthPolicy};
+use nomifun_browser_platform::runtime::{
+    BrowserRuntime, BrowserRuntimeFactory, CreateBrowserRuntime, WorkspaceError,
+};
+use nomifun_browser_platform::workspace::BrowserResourceService;
 use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -45,13 +52,83 @@ const LOCAL_TRUST_SECRET: &str = "official-preset-catalog-integrity";
 #[path = "official_preset_catalog_integrity/skill_discovery.rs"]
 mod skill_discovery;
 
+struct CatalogGateBrowserFactory;
+
+#[async_trait]
+impl BrowserRuntimeFactory for CatalogGateBrowserFactory {
+    async fn create(
+        &self,
+        _request: CreateBrowserRuntime,
+    ) -> Result<Arc<dyn BrowserRuntime>, WorkspaceError> {
+        Err(WorkspaceError::NativeUnavailable)
+    }
+}
+
+#[test]
+fn official_preset_action_safety_matrix_is_exact() {
+    fn actions(
+        entries: &[(&'static str, &[&'static str])],
+    ) -> BTreeMap<String, BTreeSet<String>> {
+        entries.iter().map(|(module, actions)| (
+            (*module).to_owned(),
+            actions.iter().map(|action| (*action).to_owned()).collect(),
+        )).collect()
+    }
+
+    let expected = BTreeMap::from([
+        (OfficialPresetKey::ChatMinimal, actions(&[])),
+        (OfficialPresetKey::AssistantGeneral, actions(&[
+            ("knowledge", &["knowledge/autogen", "knowledge/read", "knowledge/search", "knowledge/write"]),
+            ("project.memory", &["project.memory/read", "project.memory/write"]),
+            ("web.research", &["web.research/fetch", "web.research/search"]),
+            ("automation.schedule", &["automation.schedule/list"]),
+            ("browser", &["browser/navigate", "browser/observe", "browser/render_content"]),
+            ("computer", &["computer/a11y.observe", "computer/observe"]),
+        ])),
+        (OfficialPresetKey::CodingCodex, actions(&[
+            ("workspace.files", &["workspace.files/patch", "workspace.files/read", "workspace.files/search", "workspace.files/write"]),
+            ("workspace.vcs", &["workspace.vcs/commit", "workspace.vcs/diff", "workspace.vcs/stage", "workspace.vcs/status"]),
+            ("workspace.process", &["workspace.process/cancel", "workspace.process/close_stdin", "workspace.process/exec", "workspace.process/input", "workspace.process/poll", "workspace.process/resize", "workspace.process/start"]),
+            ("web.research", &["web.research/fetch", "web.research/search"]),
+        ])),
+        (OfficialPresetKey::CompanionDefault, actions(&[
+            ("companion", &["companion/evolve", "companion/learn"]),
+            ("companion.memory", &["companion.memory/recall", "companion.memory/write"]),
+            ("channel.messaging", &["channel.messaging/reply"]),
+            ("robot", &["robot/vision"]),
+        ])),
+        (OfficialPresetKey::CustomerServiceDefault, actions(&[
+            ("customer.service", &["customer.service/handoff", "customer.service/notes.read"]),
+            ("knowledge", &["knowledge/read", "knowledge/search"]),
+            ("channel.messaging", &["channel.messaging/reply"]),
+        ])),
+        (OfficialPresetKey::CreativeStudioDefault, actions(&[
+            ("creation.media", &["creation.media/audio", "creation.media/image", "creation.media/image_edit", "creation.media/music", "creation.media/text", "creation.media/video"]),
+            ("creative.workshop", &["creative.workshop/asset.read", "creative.workshop/asset.write", "creative.workshop/canvas.edit", "creative.workshop/canvas.read", "creative.workshop/template.run"]),
+            ("office", &["office/preview"]),
+        ])),
+    ]);
+    let manifest = official_preset_seed_manifest_payload();
+    for key in OfficialPresetKey::ALL {
+        let actual = manifest.templates[&key].enabled_capabilities.iter()
+            .map(|selection| (
+                selection.capability.id.as_ref().to_owned(),
+                selection.action_allowlist.iter()
+                    .map(|action| action.as_ref().to_owned())
+                    .collect::<BTreeSet<_>>(),
+            ))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(actual, expected[&key], "{} default Action matrix changed", key.as_str());
+    }
+}
+
 #[tokio::test]
 async fn every_published_official_preset_stays_available_after_plugin_catalog_refresh() {
     let root = tempfile::tempdir().expect("allocate isolated product root");
     let database = nomifun_db::init_database_memory()
         .await
         .expect("initialize product database");
-    let services = AppServices::from_config(
+    let mut services = AppServices::from_config(
         database,
         &AppConfig {
             data_dir: root.path().join("data"),
@@ -63,6 +140,13 @@ async fn every_published_official_preset_stays_available_after_plugin_catalog_re
     )
     .await
     .expect("compose product services");
+    // This gate validates the desktop release graph, not the headless server
+    // graph. The runtime itself is never opened; presence of the host-owned
+    // Browser Resource Service is the exact boot fact that selects the native
+    // Browser execution-role provider during compilation.
+    services.browser_resources = Some(Arc::new(BrowserResourceService::new(Arc::new(
+        CatalogGateBrowserFactory,
+    ))));
     let exact_model = seed_search_and_vision_ready_chat_route(
         &services.database,
         &services.encryption_key,
@@ -216,6 +300,7 @@ async fn assert_official_preset_catalog_integrity(
     .await;
     let capabilities: Vec<CapabilityCatalogItemDto> =
         get_data(router, "/api/capabilities").await;
+    let catalog: AgentCatalogResponse = get_data(router, "/api/agent-catalog").await;
     let skills: Vec<SkillCatalogItemDto> =
         get_data(router, "/api/agent-catalog/skills").await;
 
@@ -251,6 +336,13 @@ async fn assert_official_preset_catalog_integrity(
             )
         })
         .collect::<BTreeMap<_, _>>();
+    let module_by_ref = catalog
+        .modules
+        .iter()
+        .map(|module| {
+            ((module.module.id.clone(), module.module.version.clone()), module)
+        })
+        .collect::<BTreeMap<_, _>>();
 
     let mut missing = Vec::new();
     let mut unavailable = Vec::new();
@@ -260,15 +352,42 @@ async fn assert_official_preset_catalog_integrity(
             .seed
             .enabled_capabilities
             .iter();
-        for reference in direct_capabilities {
+        for selection in direct_capabilities {
             require_available_exact_capability(
                 phase,
                 &template_key,
-                reference,
+                &selection.capability,
                 &capability_by_ref,
                 &mut missing,
                 &mut unavailable,
             );
+            match module_by_ref.get(&(
+                selection.capability.id.clone(),
+                selection.capability.version.clone(),
+            )) {
+                None => missing.push(format!(
+                    "{template_key}: exact Module catalog entry is missing for {}@{}",
+                    selection.capability.id, selection.capability.version,
+                )),
+                Some(module) => {
+                    let declared = module
+                        .actions
+                        .iter()
+                        .map(|action| action.action_id.as_str())
+                        .collect::<BTreeSet<_>>();
+                    if selection.action_allowlist.is_empty()
+                        || !selection
+                            .action_allowlist
+                            .iter()
+                            .all(|action| declared.contains(action.as_str()))
+                    {
+                        unavailable.push(format!(
+                            "{template_key}: {} contains an empty or undeclared exact Action grant",
+                            selection.capability.id,
+                        ));
+                    }
+                }
+            }
         }
 
         for capability_id in &template.role_coverage.required_capability_ids {

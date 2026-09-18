@@ -41,13 +41,28 @@ describe('Agent Settings locale contract', () => {
     expect(Object.hasOwn(zh.navigation, 'open')).toBe(false);
   });
 
-  test('describes capability modes and target-owned resource selection', () => {
+  test('describes Module grants, exact actions and target-owned resource selection', () => {
     expect(en.capabilities.enabled).toBe('Enabled');
     expect(zh.capabilities.enabled).toBe('已启用');
     expect(zh.capabilities.notSelected).toBe('未启用');
     expect(Object.hasOwn(en.capabilities, 'onDemand')).toBe(false);
     expect(en.resources.bindingPolicyBody.includes('conversation')).toBe(true);
     expect(zh.resources.bindingPolicyBody.includes('具体会话')).toBe(true);
+    expect(en.workbench.capabilityTab).toBe('Modules & actions');
+    expect(zh.workbench.capabilityTab).toBe('模块与操作');
+    expect(en.workbench.previewCompileHint.includes('server compile')).toBe(true);
+    expect(zh.workbench.previewCompileHint.includes('服务端权威编译')).toBe(true);
+  });
+
+  test('contains no Agent Runtime selector or transfer-workbench copy', () => {
+    for (const locale of [en, zh]) {
+      expect(Object.hasOwn(locale, 'runtimeEngine')).toBe(false);
+      expect(Object.hasOwn(locale.workbench, 'moveIn')).toBe(false);
+      expect(Object.hasOwn(locale.workbench, 'moveOut')).toBe(false);
+      expect(Object.hasOwn(locale.workbench, 'enabledCapabilities')).toBe(false);
+      expect(locale.modules.browser.name.length).toBeGreaterThan(0);
+      expect(locale.effects.destructive.length).toBeGreaterThan(0);
+    }
   });
 
   test('does not expose the removed Typed resources product term', () => {

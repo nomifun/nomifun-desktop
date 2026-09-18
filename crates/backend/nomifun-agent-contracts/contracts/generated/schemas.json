@@ -4337,6 +4337,27 @@
   },
   "official_preset_seed": {
     "$defs": {
+      "CapabilitySelection": {
+        "additionalProperties": false,
+        "properties": {
+          "action_allowlist": {
+            "description": "Exact granted Action IDs. Empty means no Action authority, never all\nactions declared by the Module.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "capability": {
+            "$ref": "#/$defs/ExactVersionRef",
+            "description": "Exact Capability Module revision. The historical field name remains on\nthe v1 wire until AgentPreset vNext switches the outer document."
+          }
+        },
+        "required": [
+          "capability"
+        ],
+        "type": "object"
+      },
       "ExactVersionRef": {
         "additionalProperties": false,
         "properties": {
@@ -4398,7 +4419,7 @@
         "properties": {
           "enabled_capabilities": {
             "items": {
-              "$ref": "#/$defs/ExactVersionRef"
+              "$ref": "#/$defs/CapabilitySelection"
             },
             "type": "array"
           },

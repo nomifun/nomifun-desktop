@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
-import BrowserWorkspacePanel from './BrowserWorkspacePanel';
+import BrowserPanel, { browserFailure } from './BrowserPanel';
 import { navigationUrl, newerSnapshot, type BrowserClient, type BrowserCommand, type BrowserDialog, type BrowserSnapshot, type BrowserViewEvent, type BrowserShortcut } from './client';
 import words from '../../../services/i18n/locales/en-US/browserWorkspace.json';
 import type { BrowserLinkRequest } from './BrowserLinkContext';
@@ -12,7 +12,7 @@ import { BackendHttpError } from '@/common/adapter/httpBridge';
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'en-US', interpolation: { escapeValue: false }, resources: { 'en-US': { translation: { browserWorkspace: words } } } });
 const target = { tab_id: 'browser-1', runtime_generation: 1, document_generation: 1 };
-const initial: BrowserSnapshot = { conversation_id: 'conversation-1', run: { revision: 1, input_state: 'user_ready', input_gate_failed: false }, runtime: { runtime_generation: 1, revision: 1, active_tab_id: 'browser-1', downloads: [], tabs: [{ target, title: 'Fixture', url: 'http://localhost:3000/', lifecycle: 'ready', can_go_back: false, can_go_forward: false }] } };
+const initial: BrowserSnapshot = { agent_session_id: 'session-1', resource_binding_id: 'browser-binding-1', provider_id: 'managed', provider_kind: 'managed', allowed_actions: ['browser/observe', 'browser/navigate', 'browser/act', 'browser/render_content', 'browser/download', 'browser/upload', 'browser/evaluate'], run: { revision: 1, input_state: 'user_ready', input_gate_failed: false }, runtime: { runtime_generation: 1, revision: 1, active_tab_id: 'browser-1', downloads: [], tabs: [{ target, title: 'Fixture', url: 'http://localhost:3000/', lifecycle: 'ready', can_go_back: false, can_go_forward: false }] } };
 const originalRect = HTMLElement.prototype.getBoundingClientRect;
 const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
 const originalSecureContext = Object.getOwnPropertyDescriptor(window, 'isSecureContext');
@@ -32,29 +32,31 @@ function clipboardFixture(write: (text: string) => Promise<void> = async () => {
   return copied;
 }
 
-function fixture(overrides: Partial<BrowserClient> = {}, linkRequest?: BrowserLinkRequest) {
+function fixture(overrides: Partial<BrowserClient> = {}, linkRequest?: BrowserLinkRequest, onClose: () => void = () => {}, hostSurfaceAvailable = true) {
   const commands: BrowserCommand[] = [], detached: number[] = [];
+  const consumedLinks: Array<[number, boolean]> = [];
   let emit: (event: BrowserViewEvent) => void = () => {};
   let attached = false;
   let shortcut: (event: BrowserShortcut) => void = () => {};
   const client: BrowserClient = {
     async listenShortcuts(_id, listener) { shortcut = listener; return () => { shortcut = () => {}; }; },
-    async closeWorkspace() {},
+    async closeResource() {},
     async ensure() { return initial; },
+    async attachedProvider() { return { incarnation: 'attached-1', state: 'connected', chromium_major: 140 }; },
     async command(_id, command) { commands.push(command); return initial; },
     async attach(_id, _bounds, onEvent) { emit = onEvent; attached = true; return 1; },
     async update() {}, async detach(id) { detached.push(id); }, async scaleFactor() { return 1; },
     ...overrides,
   };
-  const screen = render(<I18nextProvider i18n={i18n}><BrowserWorkspacePanel conversationId='conversation-1' onClose={() => {}} client={client} linkRequest={linkRequest} /></I18nextProvider>);
-  return { ...screen, client, commands, detached, shortcut: (event: BrowserShortcut) => shortcut(event), emit: (event: BrowserViewEvent) => emit(event), ready: () => waitFor(() => expect(attached).toBe(true)) };
+  const screen = render(<I18nextProvider i18n={i18n}><BrowserPanel agentSessionId='session-1' onClose={onClose} client={client} linkRequest={linkRequest} onLinkConsumed={(id, handled) => consumedLinks.push([id, handled])} hostSurfaceAvailable={hostSurfaceAvailable} /></I18nextProvider>);
+  return { ...screen, client, commands, consumedLinks, detached, shortcut: (event: BrowserShortcut) => shortcut(event), emit: (event: BrowserViewEvent) => emit(event), ready: () => waitFor(() => expect(attached).toBe(true)) };
 }
 
 const websitePrompt: BrowserDialog = { target, request_id: 'website-dialog-1', kind: 'prompt', message: 'Enter a project name', default_text: '默认项目', origin: 'http://localhost:3000', text_truncated: false };
 test('opening does not claim manual input is ready before the host responds', async () => {
   let finish!: (value: BrowserSnapshot) => void;
   const screen = fixture({ ensure: () => new Promise(resolve => { finish = resolve; }) });
-  expect(screen.getByText(words.opening)).toBeTruthy();
+  expect(screen.getAllByText(words.opening).length).toBeGreaterThan(0);
   expect(screen.queryByText(words.userReady)).toBeNull();
   expect(screen.queryByText(words.startHint)).toBeNull();
   await act(async () => finish(initial));
@@ -67,18 +69,115 @@ test('unsupported hosts show a useful explanation without raw backend data or fu
   const screen = fixture({
     async ensure() {
       ensures++;
-      throw new BackendHttpError({ method: 'POST', path: '/api/conversations/private-id/browser', status: 501,
+      throw new BackendHttpError({ method: 'POST', path: '/api/agent-sessions/private-id/browser', status: 501,
         body: { code: 'BROWSER_NATIVE_SURFACE_UNAVAILABLE', error: 'native implementation detail' } });
     },
     async attach() { attaches++; return 1; },
   });
-  expect(await screen.findByText(words.hostUnavailableHint)).toBeTruthy();
+  expect(await screen.findByText(words.surfaceUnavailableHint)).toBeTruthy();
   expect(screen.getByText(words.notReady)).toBeTruthy();
   expect(screen.queryByText(words.userReady)).toBeNull();
   expect(screen.queryByRole('button', { name: words.retry })).toBeNull();
   expect(screen.getByRole('alert').textContent).not.toMatch(/BackendHttpError|501|private-id|implementation detail/);
   expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(true);
   expect(ensures).toBe(1); expect(attaches).toBe(0); expect(screen.commands).toEqual([]);
+});
+
+test('desktop WebUI reports the missing native surface without probing or retrying it', async () => {
+  let ensures = 0, attaches = 0;
+  const screen = fixture({
+    async ensure() { ensures++; return initial; },
+    async attach() { attaches++; return 1; },
+  }, undefined, () => {}, false);
+  expect(await screen.findByText(words.surfaceUnavailableHint)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: words.retry })).toBeNull();
+  expect(ensures).toBe(0);
+  expect(attaches).toBe(0);
+});
+
+test('a missing Browser grant explains how to enable the capability without retrying or creating a surface', async () => {
+  let attaches = 0;
+  const screen = fixture({
+    async ensure() {
+      throw new BackendHttpError({ method: 'POST', path: '/api/agent-sessions/private-id/browser', status: 403,
+        body: { code: 'FORBIDDEN', error: 'private authority details' } });
+    },
+    async attach() { attaches++; return 1; },
+  });
+  expect(await screen.findByText(words.capabilityUnavailableHint)).toBeTruthy();
+  expect(screen.getByText(words.capabilityUnavailableTitle)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: words.retry })).toBeNull();
+  expect(screen.getByRole('alert').textContent).not.toContain('private authority details');
+  expect(attaches).toBe(0);
+});
+
+test('a missing bound provider has distinct guidance and an explicit retry', async () => {
+  const screen = fixture({
+    async ensure() {
+      throw new BackendHttpError({ method: 'POST', path: '/api/agent-sessions/session-1/browser', status: 422,
+        body: { code: 'UNPROCESSABLE_ENTITY', error: 'private binding details' } });
+    },
+  });
+  expect(await screen.findByText(words.providerUnavailableHint)).toBeTruthy();
+  expect(screen.getByText(words.providerUnavailableTitle)).toBeTruthy();
+  expect(screen.getByRole('button', { name: words.retry })).toBeTruthy();
+  expect(screen.getByRole('alert').textContent).not.toContain('private binding details');
+});
+
+test('attached Chrome reports its provider without trying to mount a WebView2 surface', async () => {
+  let attaches = 0;
+  const attached: BrowserSnapshot = { ...initial, provider_id: 'attached-chrome', provider_kind: 'attached_chrome', runtime: null };
+  const screen = fixture({
+    async ensure() { return attached; },
+    async attach() { attaches++; return 1; },
+  });
+  expect(await screen.findAllByText(words.provider.attachedChrome)).toHaveLength(2);
+  expect(screen.getByText(words.attachedChromeHint)).toBeTruthy();
+  expect(screen.getByText(words.attachedChromeStatus)).toBeTruthy();
+  expect(screen.queryByText(words.userReady)).toBeNull();
+  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(true);
+  expect((screen.getByRole('button', { name: words.newTab }) as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => screen.shortcut({ agent_session_id: 'session-1', target, action: 'new_tab' }));
+  expect(screen.commands).toEqual([]);
+  expect(attaches).toBe(0);
+});
+
+test('attached Chrome connection loss is provider-unavailable and never claims connection', async () => {
+  const attached: BrowserSnapshot = { ...initial, provider_id: 'attached-chrome', provider_kind: 'attached_chrome', runtime: null };
+  const screen = fixture({
+    async ensure() { return attached; },
+    async attachedProvider() { return { incarnation: 'attached-1', state: 'connection_lost', chromium_major: 140 }; },
+  });
+  expect(await screen.findByText(words.providerUnavailableHint)).toBeTruthy();
+  expect(screen.queryByText(words.attachedChromeStatus)).toBeNull();
+  expect(screen.getByRole('button', { name: words.retry })).toBeTruthy();
+});
+
+test('exact Action grants disable unsupported controls before dispatch', async () => {
+  const navigateOnly: BrowserSnapshot = {
+    ...initial,
+    allowed_actions: ['browser/navigate'],
+  };
+  const screen = fixture({ async ensure() { return navigateOnly; } });
+  await screen.ready();
+  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(false);
+  expect((screen.getByRole('button', { name: words.newTab }) as HTMLButtonElement).disabled).toBe(false);
+  for (const tab of screen.getAllByRole('tab')) expect((tab as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole('button', { name: words.closePage.replace('{{title}}', 'Fixture') }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.change(screen.getByRole('textbox', { name: words.address }), { target: { value: 'https://example.test' } });
+  fireEvent.submit(screen.getByRole('textbox', { name: words.address }).closest('form')!);
+  await waitFor(() => expect(screen.commands.some(command => command.command === 'navigate')).toBe(true));
+  expect(screen.commands.every(command => command.command === 'navigate')).toBe(true);
+});
+
+test('backend Action denial is terminal capability guidance, not a retryable panel failure', () => {
+  const failure = browserFailure(new BackendHttpError({
+    method: 'POST',
+    path: '/api/agent-sessions/session-1/browser/commands',
+    status: 403,
+    body: { code: 'BROWSER_ACTION_DENIED', error: 'private authority details' },
+  }));
+  expect(failure).toMatchObject({ kind: 'capability', retryable: false });
 });
 
 test('transient host failures have a safe message and explicit retry can restore readiness', async () => {
@@ -100,7 +199,7 @@ test('a native unavailable event hides the existing surface and clears the ready
   await screen.ready();
   await waitFor(() => expect(visibility.at(-1)).toBe(true));
   await act(async () => screen.emit({ kind: 'unavailable', code: 'BROWSER_NATIVE_SURFACE_UNAVAILABLE' }));
-  expect(screen.getByText(words.hostUnavailableHint)).toBeTruthy();
+  expect(screen.getByText(words.surfaceUnavailableHint)).toBeTruthy();
   expect(screen.queryByText(words.userReady)).toBeNull();
   await waitFor(() => expect(visibility.at(-1)).toBe(false));
 });
@@ -112,7 +211,7 @@ test('native address shortcut focuses and selects the chrome address; new-tab dr
   // Otherwise act() may flush that pre-existing effect after select(), moving
   // the caret to the end and turning this into a scheduler race.
   await waitFor(() => expect(address.value).toBe(initial.runtime!.tabs[0]!.url));
-  await act(async () => screen.shortcut({conversation_id:'conversation-1',target,action:'address'}));
+  await act(async () => screen.shortcut({agent_session_id:'session-1',target,action:'address'}));
   expect(document.activeElement).toBe(address);
   expect(address.selectionStart).toBe(0); expect(address.selectionEnd).toBe(address.value.length);
   fireEvent.keyDown(address,{key:'t',ctrlKey:true});
@@ -122,16 +221,51 @@ test('native address shortcut focuses and selects the chrome address; new-tab dr
   expect(screen.commands).toEqual([]);
 });
 
-test('native shortcut rejects other conversations, stale documents and events received after Agent starts', async () => {
+test('native shortcut rejects other AgentSessions, stale documents and events received after Agent starts', async () => {
   const screen = fixture(); await screen.ready();
   await act(async () => {
-    screen.shortcut({conversation_id:'another',target,action:'reload'});
-    screen.shortcut({conversation_id:'conversation-1',target:{...target,document_generation:0},action:'reload'});
+    screen.shortcut({agent_session_id:'another',target,action:'reload'});
+    screen.shortcut({agent_session_id:'session-1',target:{...target,document_generation:0},action:'reload'});
   });
   expect(screen.commands).toEqual([]);
   await act(async () => screen.emit({kind:'snapshot',snapshot:{...initial,run:{...initial.run,revision:2,input_state:'agent_running'}}}));
-  await act(async () => screen.shortcut({conversation_id:'conversation-1',target,action:'close_tab'}));
+  expect(screen.getAllByText(words.agentRunning).length).toBeGreaterThan(0);
+  expect(screen.getByText(words.stopHint)).toBeTruthy();
+  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(true);
+  await act(async () => screen.shortcut({agent_session_id:'session-1',target,action:'close_tab'}));
   expect(screen.commands).toEqual([]);
+});
+
+test('Escape closes the panel and tab arrows move focus through the accessible tablist', async () => {
+  let closes = 0;
+  const secondTarget = { ...target, tab_id: 'browser-2' };
+  const twoTabs: BrowserSnapshot = { ...initial, runtime: { ...initial.runtime!, tabs: [
+    initial.runtime!.tabs[0]!,
+    { ...initial.runtime!.tabs[0]!, target: secondTarget, title: 'Second' },
+  ] } };
+  const screen = fixture({ async ensure() { return twoTabs; } }, undefined, () => { closes++; });
+  await screen.ready();
+  const tabs = screen.getAllByRole('tab');
+  tabs[0]!.focus();
+  fireEvent.keyDown(tabs[0]!, { key: 'ArrowRight' });
+  expect(document.activeElement).toBe(tabs[1]);
+  await waitFor(() => expect(screen.commands).toEqual([{ command: 'activate', target: secondTarget }]));
+  fireEvent.keyDown(screen.getByRole('region', { name: 'Browser' }), { key: 'Escape' });
+  expect(closes).toBe(1);
+});
+
+test('the Browser menu exposes keyboard focus, disabled semantics and Escape restoration', async () => {
+  const screen = fixture();
+  await screen.ready();
+  const trigger = screen.getByRole('button', { name: words.menu });
+  expect(trigger.getAttribute('aria-expanded')).toBe('false');
+  fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+  const popup = await screen.findByRole('menu', { name: words.menu });
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: words.copyAddress })));
+  expect(trigger.getAttribute('aria-expanded')).toBe('true');
+  fireEvent.keyDown(popup, { key: 'Escape' });
+  expect(screen.queryByRole('menu', { name: words.menu })).toBeNull();
+  expect(document.activeElement).toBe(trigger);
 });
 
 test('reload shortcut uses the existing exact-target command and ignores repeats', async () => {
@@ -236,13 +370,13 @@ test('a new-tab draft cannot copy the previous page address', async () => {
   expect(copied).toEqual([]);
 });
 
-test('a delayed clipboard failure from the previous conversation cannot appear in the new one', async () => {
+test('a delayed clipboard failure from the previous AgentSession cannot appear in the new one', async () => {
   let fail!: (reason: Error) => void;
   clipboardFixture(() => new Promise((_resolve, reject) => { fail = reject; }));
   const screen = fixture(); await screen.ready();
   fireEvent.click(screen.getByRole('button', { name: words.menu }));
   fireEvent.click(await screen.findByText(words.copyAddress));
-  screen.rerender(<I18nextProvider i18n={i18n}><BrowserWorkspacePanel conversationId='conversation-2' onClose={() => {}} client={screen.client} /></I18nextProvider>);
+  screen.rerender(<I18nextProvider i18n={i18n}><BrowserPanel agentSessionId='session-2' onClose={() => {}} client={screen.client} /></I18nextProvider>);
   await act(async () => fail(new Error('clipboard denied')));
   expect(screen.queryByText(words.addressCopyFailed)).toBeNull();
   expect(screen.queryByText(words.unavailable)).toBeNull();
@@ -426,7 +560,7 @@ test('close all sends the current runtime generation and preserves the attached 
   const next: BrowserSnapshot = { ...initial, runtime: { ...initial.runtime!, runtime_generation: 7, revision: 3, active_tab_id: null, tabs: [] } };
   const screen = fixture({
     async command(_id, command) { commands.push(command); return next; },
-    async closeWorkspace() { workspaceCloses++; },
+    async closeResource() { workspaceCloses++; },
   }); await screen.ready();
   await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...initial, runtime: { ...initial.runtime!, runtime_generation: 7, tabs: initial.runtime!.tabs.map(tab => ({ ...tab, target: { ...tab.target, runtime_generation: 7 } })) } } }));
   fireEvent.click(screen.getByRole('button', { name: words.newTab }));
@@ -437,7 +571,7 @@ test('close all sends the current runtime generation and preserves the attached 
   await waitFor(() => expect(screen.queryAllByRole('tab')).toHaveLength(0));
   expect(screen.getByText(words.start)).toBeTruthy();
   await waitFor(() => expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).value).toBe(''));
-  expect(screen.getByRole('region', { name: words.title })).toBeTruthy();
+  expect(screen.getByRole('region', { name: 'Browser' })).toBeTruthy();
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(screen.detached).toEqual([]);
   expect(workspaceCloses).toBe(0);
@@ -480,7 +614,7 @@ test('failed close all hides the surface without retrying or closing the workspa
   const screen = fixture({
     async command() { calls++; throw new Error('close all failed'); },
     async update(_id, _sequence, _bounds, visible) { visibility.push(visible); },
-    async closeWorkspace() { workspaceCloses++; },
+    async closeResource() { workspaceCloses++; },
   }); await screen.ready();
   await waitFor(() => expect(visibility.at(-1)).toBe(true));
   fireEvent.click(screen.getByRole('button', { name: words.menu }));
@@ -492,15 +626,15 @@ test('failed close all hides the surface without retrying or closing the workspa
   expect(screen.detached).toEqual([]);
 });
 
-test('a late close all response cannot clear tabs or a draft in a different conversation', async () => {
+test('a late close all response cannot clear tabs or a draft in a different AgentSession', async () => {
   let finish!: (snapshot: BrowserSnapshot) => void;
   const screen = fixture({
-    async ensure(id) { return { ...initial, conversation_id: id }; },
+    async ensure(id) { return { ...initial, agent_session_id: id }; },
     async command() { return new Promise(resolve => { finish = resolve; }); },
   }); await screen.ready();
   fireEvent.click(screen.getByRole('button', { name: words.menu }));
   fireEvent.click(await screen.findByText(words.closeAllPages));
-  screen.rerender(<I18nextProvider i18n={i18n}><BrowserWorkspacePanel conversationId='conversation-2' onClose={() => {}} client={screen.client} /></I18nextProvider>);
+  screen.rerender(<I18nextProvider i18n={i18n}><BrowserPanel agentSessionId='session-2' onClose={() => {}} client={screen.client} /></I18nextProvider>);
   await waitFor(() => expect((screen.getByRole('button', { name: words.newTab }) as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(screen.getByRole('button', { name: words.newTab }));
   fireEvent.change(screen.getByRole('textbox', { name: words.address }), { target: { value: 'https://new-conversation-draft.example/' } });
@@ -512,7 +646,7 @@ test('a late close all response cannot clear tabs or a draft in a different conv
 
 test('browser rebuild requires explicit confirmation and cancel leaves pages untouched', async () => {
   const closed: number[] = [];
-  const screen = fixture({ async closeWorkspace(_id, generation) { closed.push(generation); } }); await screen.ready();
+  const screen = fixture({ async closeResource(_id, generation) { closed.push(generation); } }); await screen.ready();
   fireEvent.click(screen.getByRole('button', { name: words.menu }));
   fireEvent.click(await screen.findByText(words.rebuild));
   expect(await screen.findByText(words.rebuildWarning)).toBeTruthy();
@@ -580,7 +714,7 @@ test('site data confirmation cannot follow a conversation switch or a new runtim
   await waitFor(()=>expect(screen.queryByText(words.clearSiteDataWarning)).toBeNull());
   fireEvent.click(screen.getByRole('button',{name:words.menu}));
   fireEvent.click(await screen.findByText(words.clearSiteDataTitle));
-  screen.rerender(<I18nextProvider i18n={i18n}><BrowserWorkspacePanel conversationId='conversation-2' onClose={()=>{}} client={screen.client}/></I18nextProvider>);
+  screen.rerender(<I18nextProvider i18n={i18n}><BrowserPanel agentSessionId='session-2' onClose={()=>{}} client={screen.client}/></I18nextProvider>);
   await waitFor(()=>expect(screen.queryByText(words.clearSiteDataWarning)).toBeNull());
   expect(screen.commands).toEqual([]);
 });
@@ -589,18 +723,18 @@ test('confirmed rebuild closes the captured generation then attaches fresh state
   const closed: unknown[] = []; let loads = 0;
   const screen = fixture({
     async ensure() { return ++loads === 1 ? initial : { ...initial, runtime: { ...initial.runtime!, runtime_generation: 2, active_tab_id: null, tabs: [] } }; },
-    async closeWorkspace(id, generation) { closed.push([id, generation]); },
+    async closeResource(id, generation) { closed.push([id, generation]); },
   }); await screen.ready();
   fireEvent.click(screen.getByRole('button', { name: words.menu }));
   fireEvent.click(await screen.findByText(words.rebuild));
   fireEvent.click(await screen.findByRole('button', { name: words.rebuildConfirm }));
-  await waitFor(() => expect(closed).toEqual([['conversation-1', 1]]));
+  await waitFor(() => expect(closed).toEqual([['session-1', 1]]));
   await waitFor(() => expect(loads).toBe(2));
   expect(await screen.findByText(words.start)).toBeTruthy();
 });
 
 test('a rejected rebuild preserves the current page and reports failure without stopping Agent', async () => {
-  const screen = fixture({ async closeWorkspace() { throw new Error('Agent running'); } }); await screen.ready();
+  const screen = fixture({ async closeResource() { throw new Error('Agent running'); } }); await screen.ready();
   fireEvent.click(screen.getByRole('button', { name: words.menu }));
   fireEvent.click(await screen.findByText(words.rebuild));
   fireEvent.click(await screen.findByRole('button', { name: words.rebuildConfirm }));
@@ -609,13 +743,13 @@ test('a rejected rebuild preserves the current page and reports failure without 
   expect(screen.commands).toEqual([]);
 });
 
-test('switching conversation dismisses an unconfirmed browser rebuild', async () => {
+test('switching AgentSession dismisses an unconfirmed browser rebuild', async () => {
   const closed: unknown[] = [];
-  const screen = fixture({ async closeWorkspace(id, generation) { closed.push([id, generation]); } }); await screen.ready();
+  const screen = fixture({ async closeResource(id, generation) { closed.push([id, generation]); } }); await screen.ready();
   fireEvent.click(screen.getByRole('button', { name: words.menu }));
   fireEvent.click(await screen.findByText(words.rebuild));
   expect(await screen.findByText(words.rebuildWarning)).toBeTruthy();
-  screen.rerender(<I18nextProvider i18n={i18n}><BrowserWorkspacePanel conversationId='conversation-2' onClose={() => {}} client={screen.client} /></I18nextProvider>);
+  screen.rerender(<I18nextProvider i18n={i18n}><BrowserPanel agentSessionId='session-2' onClose={() => {}} client={screen.client} /></I18nextProvider>);
   await waitFor(() => expect(screen.queryByText(words.rebuildWarning)).toBeNull());
   expect(closed).toEqual([]);
 });
@@ -680,6 +814,7 @@ test('a clicked local link opens a new native tab, once, without replacing the c
   const request = { id: 1, url: 'http://127.0.0.1:5173/test', mappedFrom: '0.0.0.0' };
   const screen = fixture({}, request); await screen.ready();
   await waitFor(() => expect(screen.commands).toEqual([{ command: 'create', url: request.url }]));
+  expect(screen.consumedLinks).toEqual([[1, true]]);
   expect(screen.getByText(/0\.0\.0\.0/)).toBeTruthy();
   await act(async () => screen.emit({ kind: 'snapshot', snapshot: initial }));
   expect(screen.commands).toHaveLength(1);
@@ -690,16 +825,14 @@ test('a clicked URL that already exists activates the exact tab without reloadin
   await waitFor(() => expect(screen.commands).toEqual([{ command: 'activate', target }]));
 });
 
-test('a link clicked during an Agent run is rejected and never replayed after unlock', async () => {
+test('a stale queued link during an Agent run is returned for external fallback and never replayed', async () => {
   const running: BrowserSnapshot = { ...initial, run: { ...initial.run, input_state: 'agent_running' } };
   const screen = fixture({ async ensure() { return running; } }, { id: 1, url: 'http://localhost:5173/' });
   await screen.ready();
-  expect(screen.getByText(words.linkLocked)).toBeTruthy();
+  expect(screen.consumedLinks).toEqual([[1, false]]);
   expect(screen.commands).toEqual([]);
   await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...initial, run: { ...initial.run, revision: 2 } } }));
   expect(screen.commands).toEqual([]);
-  screen.rerender(<I18nextProvider i18n={i18n}><BrowserWorkspacePanel conversationId='conversation-1' onClose={() => {}} client={screen.client} linkRequest={{ id: 2, url: 'http://localhost:5173/' }} /></I18nextProvider>);
-  await waitFor(() => expect(screen.commands).toEqual([{ command: 'create', url: 'http://localhost:5173/' }]));
 });
 
 test('a server rejection of a link leaves the existing surface usable and does not retry', async () => {
@@ -716,9 +849,10 @@ test('input gate failure disables commands even when the run projection says use
   const screen = fixture({ async ensure() { return { ...initial, run: { ...initial.run, input_gate_failed: true } }; } }, { id: 1, url: 'http://localhost:5173/' });
   await screen.ready();
   expect(screen.commands).toEqual([]);
+  expect(screen.consumedLinks).toEqual([[1, false]]);
   expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(true);
   expect(screen.queryByText(words.userReady)).toBeNull();
-  expect(screen.getByText(words.notReady)).toBeTruthy();
+  expect(screen.getAllByText(words.notReady).length).toBeGreaterThan(0);
 });
 
 test.each(['dialog', 'menu', 'tooltip'])('a %s hide preempts an unsettled resize and ignores its late error', async role => {
@@ -776,16 +910,16 @@ test('an attachment completed after unmount is detached without a visible update
   expect(updates).toEqual([]);
 });
 
-test('a command from the previous conversation cannot overwrite the new page state', async () => {
+test('a command from the previous AgentSession cannot overwrite the new page state', async () => {
   let finish!: (snapshot: BrowserSnapshot) => void;
   const screen = fixture({
-    async ensure(id) { return { ...initial, conversation_id: id, runtime: { ...initial.runtime!, tabs: [{ ...initial.runtime!.tabs[0]!, url: `http://localhost/${id}` }] } }; },
+    async ensure(id) { return { ...initial, agent_session_id: id, runtime: { ...initial.runtime!, tabs: [{ ...initial.runtime!.tabs[0]!, url: `http://localhost/${id}` }] } }; },
     async command() { return new Promise<BrowserSnapshot>(resolve => { finish = resolve; }); },
   });
   await screen.ready();
   fireEvent.click(screen.getByRole('button', { name: words.reload }));
-  screen.rerender(<I18nextProvider i18n={i18n}><BrowserWorkspacePanel conversationId='conversation-2' onClose={() => {}} client={screen.client} /></I18nextProvider>);
-  await waitFor(() => expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).value).toBe('http://localhost/conversation-2'));
+  screen.rerender(<I18nextProvider i18n={i18n}><BrowserPanel agentSessionId='session-2' onClose={() => {}} client={screen.client} /></I18nextProvider>);
+  await waitFor(() => expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).value).toBe('http://localhost/session-2'));
   await act(async () => finish(initial));
-  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).value).toBe('http://localhost/conversation-2');
+  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).value).toBe('http://localhost/session-2');
 });

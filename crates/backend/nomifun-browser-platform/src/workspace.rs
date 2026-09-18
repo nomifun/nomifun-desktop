@@ -106,6 +106,7 @@ pub struct BrowserResourceSnapshot {
     pub resource_binding_id: String,
     pub provider_id: String,
     pub provider_kind: BrowserProviderKind,
+    pub allowed_actions: BTreeSet<String>,
     pub run: BrowserRunSnapshot,
     pub runtime: Option<BrowserRuntimeSnapshot>,
 }
@@ -294,6 +295,11 @@ impl BrowserResource {
                 .provider_id()
                 .to_owned(),
             provider_kind: self.authority.resource().provider().kind(),
+            allowed_actions: BrowserCapabilityAction::all()
+                .into_iter()
+                .filter(|action| self.authority.authorize(*action).is_ok())
+                .map(|action| action.action_id().to_owned())
+                .collect(),
             run: self.coordinator.snapshot().await,
             runtime,
         })

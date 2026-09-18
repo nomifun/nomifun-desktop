@@ -33,7 +33,7 @@ use nomifun_ai_agent::{
 };
 use nomifun_agent_contracts::{
     AgentBindingValue, AgentSessionId, ArtifactId, ContributionSourceKind,
-    DeleteAgentSessionCommand, OperationId, PrincipalRef, RemoteBindingProvenance,
+    DeleteAgentSessionCommand, EffectClass, OperationId, PrincipalRef, RemoteBindingProvenance,
     ResolvedCapability, ScopeKey, StrictJsonValue, UserId,
 };
 use nomifun_agent_control_plane::{
@@ -261,6 +261,35 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
                 && record.agent_binding.resolved_snapshot_ref == binding.resolved_snapshot_ref) {
                 existing.unwrap().agent_binding
             } else {
+                if let Some(previous) = existing.as_ref()
+                    && !previous.agent_binding.typed_resource_bindings.is_empty()
+                {
+                    let (_, _, next_snapshot) = self.control_plane
+                        .saved_binding_artifacts(&owner, &binding)
+                        .await
+                        .map_err(control_plane_error_to_app)?;
+                    let selections = previous.agent_binding.typed_resource_bindings.iter()
+                        .filter(|resource| next_snapshot.content.required_resource_kinds.iter()
+                            .any(|kind| kind.as_ref() == resource.resource_kind))
+                        .map(|resource| AgentResourceSelectionDto {
+                            resource_kind: resource.resource_kind.clone(),
+                            resource_id: resource.resource_id.clone(),
+                        })
+                        .collect::<Vec<_>>();
+                    binding = self.resource_bindings
+                        .resolve_for_saved_binding(
+                            &self.control_plane,
+                            &owner,
+                            binding,
+                            &selections,
+                        )
+                        .await
+                        .map_err(|error| AppError::UnprocessableEntity(format!(
+                            "{}: {}",
+                            error.code(),
+                            error.message(),
+                        )))?;
+                }
                 let previous = existing.as_ref().map(|record| record.agent_binding.binding_version);
                 binding.binding_version = previous.unwrap_or(0) + 1;
                 self.control_plane.put_agent_binding(&owner, target.target_kind.clone(), target.target_id.clone(),
@@ -733,7 +762,7 @@ pub(crate) struct NomiCorePluginToolSessionProvider {
         Arc<NomiPlatformBuiltinContextAdmission>,
     platform_builtin_lifecycle_admission:
         Arc<NomiPlatformBuiltinLifecycleAdmission>,
-    robot_owner: Option<Arc<super::nomi_core_robot::NomiCoreRobotWave4Owner>>,
+    robot_owner: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
     plugin_runtime:
         Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
 }
@@ -754,7 +783,7 @@ impl NomiCorePluginToolSessionProvider {
         platform_builtin_lifecycle_admission: Arc<
             NomiPlatformBuiltinLifecycleAdmission,
         >,
-        robot_owner: Option<Arc<super::nomi_core_robot::NomiCoreRobotWave4Owner>>,
+        robot_owner: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
         plugin_runtime: Arc<
             nomifun_plugin_platform::runtime::PluginRuntimeApplicationService,
         >,
@@ -1099,47 +1128,99 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
                 Arc::clone(&self.kernel), Arc::clone(&compiled), skills.commands,
             ).map_err(|error| AppError::Conflict(format!("Nomi Skill command materialization failed: {error}")))?
         };
-        let robot_capability_ids = super::nomi_core_robot::tool_capability_ids();
-        let enabled_robot_ids = compiled
-            .content()
-            .enabled_capabilities
-            .iter()
-            .map(|capability| capability.capability.id.clone())
-            .filter(|capability_id| robot_capability_ids.contains(capability_id))
-            .filter(|capability_id| constraints.allows_capability(capability_id.as_ref()))
-            .collect::<BTreeSet<_>>();
-        let dynamic = if enabled_robot_ids.is_empty()
+        let robot_module_id = super::nomi_core_robot::module_capability_id();
+        let robot_selected = compiled.resolved_capability(&robot_module_id);
+        let dynamic = if robot_selected.is_none()
+            || !constraints.allows_capability(robot_module_id.as_ref())
         {
             None
         } else {
+            let selected = robot_selected.expect("checked above");
+            let policy = compiled.policy(&robot_module_id).ok_or_else(|| {
+                AppError::Conflict(
+                    "Nomi Robot Module has no compiled Action/resource policy".to_owned(),
+                )
+            })?;
+            let declared_actions = super::nomi_core_robot::action_ids();
+            if selected.contribution_lock.source_kind != ContributionSourceKind::PlatformBuiltin
+                || policy.allowed_actions.is_empty()
+                || policy
+                    .allowed_actions
+                    .iter()
+                    .any(|action| !declared_actions.contains(action))
+            {
+                return Err(AppError::Conflict(
+                    "Nomi Robot Module requires its bundled owner and exact Action grants"
+                        .to_owned(),
+                ));
+            }
             let owner = self.robot_owner.as_ref().ok_or_else(|| {
                 AppError::Conflict(
-                    "Nomi Robot Tool owner is unavailable for this Session".to_owned(),
+                    "Nomi Robot Module owner is unavailable for this Session".to_owned(),
                 )
             })?;
             let robot_bindings = compiled
                 .target_resource_bindings
                 .iter()
-                .filter(|binding| binding.resource_kind.as_ref() == "robot")
+                .filter(|binding| {
+                    binding.resource_kind.as_ref() == "robot"
+                        && policy.resource_binding_ids.contains(&binding.binding_id)
+                })
                 .collect::<Vec<_>>();
             let [robot_binding] = robot_bindings.as_slice() else {
                 return Err(AppError::Conflict(
-                    "Nomi Robot Tools require one exact server-resolved Robot binding"
+                    "Nomi Robot Module requires one exact server-resolved Robot binding"
                         .to_owned(),
                 ));
             };
-            let (descriptors, invoker) = owner
+            let resolved = owner
                 .resolve_session_tools(
                     &principal,
                     &session_id,
                     robot_binding,
-                    &enabled_robot_ids,
+                    &policy.allowed_actions,
                 )
                 .await
-                .map_err(AppError::Conflict)?;
+                .map_err(|error| AppError::Conflict(error.to_string()))?;
+            let mut provider_actions = BTreeMap::new();
+            let descriptors = resolved
+                .descriptors
+                .iter()
+                .map(|descriptor| {
+                    if provider_actions
+                        .insert(
+                            descriptor.provider_name.clone(),
+                            descriptor.action_id.clone(),
+                        )
+                        .is_some()
+                    {
+                        return Err(AppError::Conflict(format!(
+                            "Nomi Robot Module published duplicate provider tool {}",
+                            descriptor.provider_name
+                        )));
+                    }
+                    Ok(nomifun_ai_agent::NomiHostDynamicToolDescriptor {
+                        capability_id: robot_module_id.clone(),
+                        provider_name: descriptor.provider_name.clone(),
+                        description: descriptor.description.clone(),
+                        input_schema: descriptor.input_schema.clone(),
+                        effect_class: if descriptor.action_id.as_ref()
+                            == nomifun_robot::capability::ROBOT_VISION_ACTION_ID
+                        {
+                            EffectClass::ReadSensitive
+                        } else {
+                            EffectClass::Physical
+                        },
+                        deferred: false,
+                    })
+                })
+                .collect::<Result<Vec<_>, AppError>>()?;
+            let provider_actions = Arc::new(provider_actions);
             Some((descriptors, Arc::new(super::hosted_effect_receipts::RobotReceiptInvoker {
                     receipts: self.hosted_effects.clone(), user: principal.principal_id.clone(),
-                    session: session_id.as_ref().to_owned(), delegate: invoker,
+                    session: session_id.as_ref().to_owned(),
+                    provider_actions,
+                    delegate: Arc::clone(&resolved.invoker),
                 }) as Arc<dyn nomifun_ai_agent::NomiHostDynamicToolInvoker>))
         };
         let plugin_product_actions = if constraints.restricted() { Vec::new() } else {
@@ -4165,6 +4246,8 @@ struct SelectProductAgentBindingRequest {
     #[serde(default)]
     model: Option<AgentChatModelSelectionDto>,
     #[serde(default)]
+    resource_selections: Option<Vec<AgentResourceSelectionDto>>,
+    #[serde(default)]
     conversation_id: Option<String>,
 }
 
@@ -4283,6 +4366,7 @@ async fn select_product_agent_binding(
     };
     let _guard = state.product_agent_resolver.default_binding_lock.lock().await;
     let mut model = request.model;
+    let resource_selections = request.resource_selections;
     if let Some(id) = request.conversation_id.as_deref() {
         let current = state.session_owner.get_session(owner.as_ref(), id).await?;
         let belongs = (current.extra["product_agent_target_kind"] == target_kind && current.extra["product_agent_target_id"] == target_id)
@@ -4300,6 +4384,42 @@ async fn select_product_agent_binding(
     let mut response = json!({ "selection": selection, "needs_model": model.is_none() });
     if model.is_some() {
         let mut binding = state.product_agent_resolver.materialize(&owner, &selection, model.as_ref()).await?;
+        let existing = state.control_plane
+            .get_agent_binding(&owner, target_kind.clone(), target_id.clone())
+            .await?;
+        let inherit_existing_resources = resource_selections.is_none()
+            && existing.as_ref().is_some_and(|record|
+                !record.agent_binding.typed_resource_bindings.is_empty());
+        let inherited_selections;
+        let selections = if let Some(selections) = resource_selections.as_deref() {
+            Some(selections)
+        } else if inherit_existing_resources {
+            let (_, _, next_snapshot) = state.control_plane
+                .saved_binding_artifacts(&owner, &binding)
+                .await?;
+            inherited_selections = existing.as_ref().into_iter()
+                .flat_map(|record| record.agent_binding.typed_resource_bindings.iter())
+                .filter(|resource| next_snapshot.content.required_resource_kinds.iter()
+                    .any(|kind| kind.as_ref() == resource.resource_kind))
+                .map(|resource| AgentResourceSelectionDto {
+                    resource_kind: resource.resource_kind.clone(),
+                    resource_id: resource.resource_id.clone(),
+                })
+                .collect::<Vec<_>>();
+            Some(inherited_selections.as_slice())
+        } else {
+            None
+        };
+        if let Some(selections) = selections {
+            binding = state.product_agent_resolver.resource_bindings
+                .resolve_for_saved_binding(
+                    &state.control_plane,
+                    &owner,
+                    binding,
+                    selections,
+                )
+                .await?;
+        }
         if let Some(id) = request.conversation_id.as_deref() {
             let (value, revision, snapshot) = state.control_plane.saved_binding_artifacts(&owner, &binding).await?;
             let name = state.control_plane.editor(&owner, &binding.preset_revision_ref.preset_id, None).await?.preset.display_name;
@@ -4308,7 +4428,6 @@ async fn select_product_agent_binding(
                 &ProductAgentTarget { target_kind: target_kind.clone(), target_id: target_id.clone(), default_template_key: default.to_owned() },
                 ProductAgentResolution { snapshot: projected.projection.snapshot, runtime_extra: projected.projection.request.extra }).await?;
         }
-        let existing = state.control_plane.get_agent_binding(&owner, target_kind.clone(), target_id.clone()).await?;
         let previous = existing.as_ref().map(|record| record.agent_binding.binding_version);
         binding.binding_version = previous.unwrap_or(0) + 1;
         let stored = state.control_plane.put_agent_binding(&owner, target_kind.clone(), target_id.clone(),

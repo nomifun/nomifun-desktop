@@ -1,134 +1,561 @@
-import type { AgentPresetDocument, CapabilityCatalogItem } from '@/common/types/agentPlatform';
-import { Button, Checkbox, Message, Modal } from '@arco-design/web-react';
-import { ArrowLeft, ArrowRight, Book, Code, Connection, Earth, Info, Lightning, Magic, Search, User, Check } from '@icon-park/react';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import type {
+  AgentCatalogResponse,
+  AgentPresetDocument,
+  CapabilityModuleAction,
+  CapabilityModuleCatalogItem,
+} from '@/common/types/agentPlatform';
+import { Button, Checkbox, Modal, Tag } from '@arco-design/web-react';
+import {
+  Book,
+  Check,
+  Code,
+  Connection,
+  Down,
+  Earth,
+  Info,
+  Lightning,
+  Magic,
+  Refresh,
+  Search,
+  User,
+} from '@icon-park/react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
-import { CAPABILITY_CATEGORIES, capabilityCategory, capabilityIsAvailable, isBuiltinCapability, selectedCapabilityReferences, type CapabilityCategory, type CapabilityReference } from './capabilityGroups';
-import { capabilityMatchesSearch, capabilityProductCopy, capabilityProductName, capabilityReferenceKey, humanizeResourceKind, RESOURCE_KIND_I18N_KEYS } from './model';
-import { planCapabilityChange } from './capabilityChanges';
+import {
+  MODULE_CATEGORIES,
+  isBuiltinModule,
+  moduleAvailability,
+  moduleCategory,
+  moduleIsAvailable,
+  moduleIsSelectable,
+  selectedModuleReferences,
+  type ModuleCategory,
+  type ModuleReference,
+} from './capabilityGroups';
+import {
+  actionFallbackName,
+  capabilityReferenceKey,
+  humanizeResourceKind,
+  moduleI18nKey,
+  moduleMatchesSearch,
+  RESOURCE_KIND_I18N_KEYS,
+} from './model';
+import { planModuleChange, setModuleActions } from './capabilityChanges';
 import styles from './AgentCapabilityWorkspace.module.css';
 
-const categoryIcons = { knowledge: Book, development: Code, web: Earth, collaboration: User, creation: Magic, automation: Lightning, models: Connection, integrations: Connection };
-export const CapabilityCategoryIcon: React.FC<{ category: CapabilityCategory; size?: number }> = ({ category, size = 16 }) => {
+const categoryIcons = {
+  knowledge: Book,
+  development: Code,
+  web: Earth,
+  collaboration: User,
+  creation: Magic,
+  automation: Lightning,
+  devices: Connection,
+  integrations: Connection,
+};
+
+export const ModuleCategoryIcon: React.FC<{ category: ModuleCategory; size?: number }> = ({
+  category,
+  size = 16,
+}) => {
   const Icon = categoryIcons[category];
   return <Icon theme='outline' size={size} />;
 };
-type Entry = { reference: CapabilityReference; item?: CapabilityCatalogItem; name: string; description: string };
-type PaneProps = {
-  side: 'enabled' | 'catalog'; entries: Entry[]; selectedKeys: Set<string>;
-  checked: Set<string>; onChecked: (checked: Set<string>) => void; disabled: boolean;
-  onDetails: (reference: CapabilityReference) => void; pluginSearch?: string;
+
+type MissingModule = {
+  module: ModuleReference;
+  display_name: string;
+  description: string;
+  missing: true;
+  savedActions: string[];
 };
 
-const CapabilityPane: React.FC<PaneProps> = ({ side, entries, selectedKeys, checked, onChecked, disabled, onDetails, pluginSearch }) => {
-  const { t, i18n } = useTranslation();
-  const left = side === 'enabled';
-  const [category, setCategory] = useState<CapabilityCategory | 'all'>('all');
-  const [search, setSearch] = useState('');
-  const [onlyDisabled, setOnlyDisabled] = useState(false);
-  const [pluginsOnly, setPluginsOnly] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (pluginSearch === undefined) return;
-    setSearch(pluginSearch); setCategory('all'); setPluginsOnly(true); setOnlyDisabled(false);
-  }, [pluginSearch]);
-  const filtered = entries.filter(entry =>
-    (category === 'all' || capabilityCategory(entry.reference) === category) &&
-    (!onlyDisabled || !selectedKeys.has(capabilityReferenceKey(entry.reference))) &&
-    (!pluginsOnly || (entry.item && !isBuiltinCapability(entry.item))) &&
-    (entry.item ? capabilityMatchesSearch(entry.item, search, i18n.language) : `${entry.name} ${entry.reference.id}`.toLowerCase().includes(search.trim().toLowerCase())),
-  );
-  const selectable = filtered.filter(entry => left || (!selectedKeys.has(capabilityReferenceKey(entry.reference)) && capabilityIsAvailable(entry.item)));
-  const allChecked = selectable.length > 0 && selectable.every(entry => checked.has(capabilityReferenceKey(entry.reference)));
-  const someChecked = selectable.some(entry => checked.has(capabilityReferenceKey(entry.reference)));
-  const filter = (action: () => void) => { action(); onChecked(new Set()); scrollRef.current?.scrollTo?.(0, 0); };
-  const clearFilters = () => filter(() => { setSearch(''); setCategory('all'); setOnlyDisabled(false); setPluginsOnly(false); });
-  return <section className={styles.pane} aria-label={t(left ? 'agentSettings.workbench.enabledCapabilities' : 'agentSettings.workbench.allCapabilities')}>
-    <div className={styles.paneHeading}><h3>{t(left ? 'agentSettings.workbench.enabledCapabilities' : 'agentSettings.workbench.allCapabilities')}<span className={left ? styles.enabledCount : styles.count}>{entries.length}</span></h3><span>{t(left ? 'agentSettings.workbench.enabledHint' : 'agentSettings.workbench.catalogHint')}</span></div>
-    <label className={styles.searchField}><Search theme='outline' size={15} /><input type='search' value={search} placeholder={t(left ? 'agentSettings.workbench.searchEnabled' : 'agentSettings.workbench.searchLibrary')} aria-label={t(left ? 'agentSettings.workbench.searchEnabled' : 'agentSettings.workbench.searchLibrary')} onInput={event => filter(() => setSearch(event.currentTarget.value))} /></label>
-    {pluginsOnly && <div className={styles.sourceFilter}>{t('agentSettings.workbench.plugin')}<button type='button' onClick={() => filter(() => setPluginsOnly(false))}>{t('agentSettings.workbench.allSources')}</button></div>}
-    <div className={styles.paneBody}>
-      <nav className={styles.categories} aria-label={t(left ? 'agentSettings.workbench.enabledCategories' : 'agentSettings.workbench.libraryCategories')}>
-        <span className={styles.categoryLabel}>{t('agentSettings.workbench.category')}</span>
-        <button type='button' aria-pressed={category === 'all'} onClick={() => filter(() => setCategory('all'))}><Connection theme='outline' size={14} /><span>{t('agentSettings.workbench.allCategories')}</span><small>{entries.length}</small></button>
-        {CAPABILITY_CATEGORIES.map(key => <button type='button' key={key} aria-pressed={category === key} onClick={() => filter(() => setCategory(key))}><CapabilityCategoryIcon category={key} size={14} /><span>{t(`agentSettings.workbench.categories.${key}`)}</span><small>{entries.filter(entry => capabilityCategory(entry.reference) === key).length}</small></button>)}
-      </nav>
-      <div className={styles.resultColumn}>
-        <div className={styles.resultToolbar}><Checkbox checked={allChecked} indeterminate={!allChecked && someChecked} disabled={disabled || selectable.length === 0} aria-label={t(left ? 'agentSettings.workbench.selectEnabledResults' : 'agentSettings.workbench.selectAvailableResults')} onChange={() => onChecked(allChecked ? new Set() : new Set(selectable.map(entry => capabilityReferenceKey(entry.reference))))}>{t('agentSettings.workbench.selectResults')}</Checkbox>{!left && <Checkbox checked={onlyDisabled} onChange={value => filter(() => setOnlyDisabled(value))}>{t('agentSettings.workbench.onlyDisabled')}</Checkbox>}<span>{t('agentSettings.workbench.results', { count: filtered.length })}</span></div>
-        <div className={styles.rows} ref={scrollRef}>
-          {filtered.map(entry => {
-            const key = capabilityReferenceKey(entry.reference), enabled = selectedKeys.has(key), available = capabilityIsAvailable(entry.item);
-            const cannotSelect = disabled || (!left && (enabled || !available));
-            return <div key={key} className={`${styles.row} ${checked.has(key) ? styles.rowChecked : ''}`}>
-              <button type='button' className={styles.rowCopy} onClick={() => onDetails(entry.reference)} aria-label={t('agentSettings.workbench.detailsAria', { name: entry.name })}><strong>{entry.name}</strong><span>{entry.description}</span>{!available && <small className={styles.unavailable}>{t('agentSettings.workbench.unavailableDetails')}</small>}</button>
-              <div className={styles.rowActions}>{!left && enabled ? <span className={styles.enabledState}><Check theme='outline' size={12} />{t('agentSettings.capabilities.enabled')}</span> : <>
-                {!left && <span className={styles.disabledState}>{t('agentSettings.capabilities.notSelected')}</span>}
-                <Checkbox className={styles.rowCheckbox} checked={checked.has(key)} disabled={cannotSelect} aria-label={t(left ? 'agentSettings.workbench.selectCapability' : 'agentSettings.workbench.addCapability', { name: entry.name })} onChange={value => { const next = new Set(checked); if (value) next.add(key); else next.delete(key); onChecked(next); }} />
-              </>}</div>
-            </div>;
-          })}
-          {!filtered.length && <div className={styles.empty} role='status'><Connection theme='outline' size={28} /><h3>{t(entries.length ? 'agentSettings.workbench.noResults' : 'agentSettings.workbench.emptyTitle')}</h3><p>{t(entries.length ? 'agentSettings.workbench.noResultsHint' : 'agentSettings.workbench.emptyHint')}</p>{entries.length > 0 && <Button size='small' onClick={clearFilters}>{t('agentSettings.workbench.clearFilters')}</Button>}</div>}
-        </div>
-      </div>
-    </div>
-    <div className={styles.paneFooter}><span>{t(checked.size ? 'agentSettings.workbench.selectedCount' : 'agentSettings.workbench.selectionHint', { count: checked.size })}</span>{checked.size > 0 && <button type='button' onClick={() => onChecked(new Set())}>{t('agentSettings.workbench.clearSelection')}</button>}</div>
-  </section>;
+type ModuleEntry =
+  | { module: CapabilityModuleCatalogItem; missing: false; savedActions: string[] }
+  | MissingModule;
+
+type Props = {
+  document: AgentPresetDocument;
+  catalog: AgentCatalogResponse;
+  disabled?: boolean;
+  onChange: (document: AgentPresetDocument) => void;
 };
 
-type Props = { document: AgentPresetDocument; catalog: readonly CapabilityCatalogItem[]; disabled?: boolean; onChange: (document: AgentPresetDocument) => void };
-const AgentCapabilityWorkspace: React.FC<Props> = ({ document, catalog, disabled = false, onChange }) => {
-  const { t, i18n } = useTranslation();
+const actionTranslationKey = (actionId: string): string =>
+  actionId.slice(actionId.indexOf('/') + 1).replace(/[^a-zA-Z0-9]+/g, '_');
+
+const effectTone = (effectClass: string): 'critical' | 'caution' | 'normal' => {
+  if (['destructive', 'irreversible', 'physical'].includes(effectClass)) return 'critical';
+  if (['external_transmit', 'execute_local', 'write_durable'].includes(effectClass)) return 'caution';
+  return 'normal';
+};
+
+const AgentCapabilityWorkspace: React.FC<Props> = ({
+  document,
+  catalog,
+  disabled = false,
+  onChange,
+}) => {
+  const { t } = useTranslation();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [leftChecked, setLeftChecked] = useState(new Set<string>());
-  const [rightChecked, setRightChecked] = useState(new Set<string>());
-  const [details, setDetails] = useState<CapabilityReference | null>(null);
+  const [query, setQuery] = useState('');
+  const [category, setCategory] = useState<ModuleCategory | 'all'>('all');
+  const [status, setStatus] = useState<'all' | 'enabled' | 'attention'>('all');
+  const [pluginsOnly, setPluginsOnly] = useState(false);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [undo, setUndo] = useState<AgentPresetDocument | null>(null);
-  const [pluginSearch, setPluginSearch] = useState<string>();
-  const byKey = useMemo(() => new Map(catalog.map(item => [capabilityReferenceKey(item.capability), item])), [catalog]);
-  const selected = useMemo(() => selectedCapabilityReferences(document), [document]);
-  const selectedKeys = useMemo(() => new Set(selected.map(capabilityReferenceKey)), [selected]);
-  const entryOf = (reference: CapabilityReference): Entry => {
-    const item = byKey.get(capabilityReferenceKey(reference));
-    return { reference, item, ...(item ? capabilityProductCopy(item, i18n.language) : { name: capabilityProductName(reference.id, i18n.language), description: t('agentSettings.workbench.missingReason') }) };
-  };
-  const sort = (a: Entry, b: Entry) => CAPABILITY_CATEGORIES.indexOf(capabilityCategory(a.reference)) - CAPABILITY_CATEGORIES.indexOf(capabilityCategory(b.reference));
-  const enabledEntries = selected.map(entryOf).sort(sort);
-  const catalogEntries = catalog.map(item => entryOf(item.capability)).sort((a, b) => sort(a, b) || Number(capabilityIsAvailable(b.item)) - Number(capabilityIsAvailable(a.item)));
-  const unavailable = enabledEntries.filter(entry => !capabilityIsAvailable(entry.item));
-  useEffect(() => {
-    setLeftChecked(current => new Set([...current].filter(key => selectedKeys.has(key))));
-    setRightChecked(current => new Set([...current].filter(key => !selectedKeys.has(key) && capabilityIsAvailable(byKey.get(key)))));
-  }, [selectedKeys, byKey]);
+
+  const moduleByKey = useMemo(
+    () => new Map(catalog.modules.map((module) => [capabilityReferenceKey(module.module), module])),
+    [catalog.modules]
+  );
+  const selectionByKey = useMemo(
+    () => new Map(document.enabled_capabilities.map((selection) => [
+      capabilityReferenceKey(selection.capability),
+      selection,
+    ])),
+    [document.enabled_capabilities]
+  );
+  const selectedReferences = useMemo(() => selectedModuleReferences(document), [document]);
+  const selectedKeys = useMemo(
+    () => new Set(selectedReferences.map(capabilityReferenceKey)),
+    [selectedReferences]
+  );
+
+  const entries = useMemo<ModuleEntry[]>(() => {
+    const direct: ModuleEntry[] = catalog.modules
+      .filter((module) => module.authoring_policy === 'direct')
+      .map((module) => ({
+        module,
+        missing: false,
+        savedActions: selectionByKey.get(capabilityReferenceKey(module.module))?.action_allowlist ?? [],
+      }));
+    const visible = new Set(
+      catalog.modules
+        .filter((module) => module.authoring_policy === 'direct')
+        .map((module) => capabilityReferenceKey(module.module))
+    );
+    for (const selection of document.enabled_capabilities) {
+      const key = capabilityReferenceKey(selection.capability);
+      if (visible.has(key)) continue;
+      const catalogModule = moduleByKey.get(key);
+      if (catalogModule) {
+        direct.push({
+          module: catalogModule,
+          missing: false,
+          savedActions: selection.action_allowlist ?? [],
+        });
+      } else {
+        direct.push({
+          module: selection.capability,
+          display_name: String(selection.capability.id),
+          description: t('agentSettings.workbench.missingReason'),
+          missing: true,
+          savedActions: selection.action_allowlist ?? [],
+        });
+      }
+    }
+    return direct.sort((left, right) => {
+      const leftRef = left.missing ? left.module : left.module.module;
+      const rightRef = right.missing ? right.module : right.module.module;
+      return MODULE_CATEGORIES.indexOf(moduleCategory(leftRef)) -
+        MODULE_CATEGORIES.indexOf(moduleCategory(rightRef)) ||
+        String(leftRef.id).localeCompare(String(rightRef.id));
+    });
+  }, [catalog.modules, document.enabled_capabilities, moduleByKey, selectionByKey, t]);
+
   useEffect(() => {
     if (searchParams.get('source') !== 'plugin') return;
-    setPluginSearch(searchParams.get('capability') ?? '');
-    const next = new URLSearchParams(searchParams); next.delete('source'); next.delete('capability');
+    setQuery(searchParams.get('capability') ?? '');
+    setCategory('all');
+    setPluginsOnly(true);
+    const next = new URLSearchParams(searchParams);
+    next.delete('source');
+    next.delete('capability');
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
-  const change = (references: CapabilityReference[], enable: boolean) => {
-    if (disabled) return;
-    const plan = planCapabilityChange(document, catalog, references, enable);
-    const names = (items: CapabilityReference[]) => items.map(reference => entryOf(reference).name).join('、');
-    if (plan.blocked.length) { Modal.error({ title: t('agentSettings.workbench.changeBlocked'), content: t('agentSettings.workbench.changeBlockedBody', { names: names(plan.blocked) }) }); return; }
-    const apply = () => { setUndo(document); onChange(plan.document); setLeftChecked(new Set()); setRightChecked(new Set()); Message.success(t(enable ? 'agentSettings.workbench.enabledToast' : 'agentSettings.workbench.disabledToast', { count: plan.affected.length })); };
-    if (!plan.affected.length) return;
-    if (plan.additional.length) Modal.confirm({ title: t('agentSettings.workbench.relatedChanges'), content: t(enable ? 'agentSettings.workbench.enableDependencies' : 'agentSettings.workbench.disableDependents', { names: names(plan.additional) }), okText: t('common.confirm'), cancelText: t('common.cancel'), onOk: apply });
-    else apply();
+
+  const referenceOf = (entry: ModuleEntry): ModuleReference =>
+    entry.missing ? entry.module : entry.module.module;
+  const copyOf = (entry: ModuleEntry): { name: string; description: string } => {
+    if (entry.missing) return { name: entry.display_name, description: entry.description };
+    const key = moduleI18nKey(String(entry.module.module.id));
+    if (!key) return { name: entry.module.display_name, description: entry.module.description };
+    return {
+      name: t(`agentSettings.modules.${key}.name`, { defaultValue: entry.module.display_name }),
+      description: t(`agentSettings.modules.${key}.description`, {
+        defaultValue: entry.module.description,
+      }),
+    };
   };
-  const resourceName = (value: string) => { const key = RESOURCE_KIND_I18N_KEYS[value]; return key ? t(`agentSettings.resources.kinds.${key}`) : humanizeResourceKind(value); };
-  const detail = details ? entryOf(details) : null;
-  return <div className={styles.workspace}>
-    <div className={styles.overview}><div className={styles.metrics}><span><i />{t('agentSettings.capabilities.enabled')}<strong>{selected.length}</strong></span><span>{t('agentSettings.capabilities.notSelected')}<strong>{catalogEntries.filter(entry => !selectedKeys.has(capabilityReferenceKey(entry.reference))).length}</strong></span></div><span className={styles.guide}>{t('agentSettings.workbench.transferHint')}</span>{undo && <Button type='text' size='mini' disabled={disabled} onClick={() => { onChange(undo); setUndo(null); setLeftChecked(new Set()); setRightChecked(new Set()); }}>{t('agentSettings.workbench.undo')}</Button>}</div>
-    {unavailable.length > 0 && <div className={styles.notice} role='status'><Info theme='outline' size={16} /><span>{t('agentSettings.workbench.unavailableSummary', { count: unavailable.length })}</span><Button size='mini' type='text' disabled={disabled} onClick={() => change(unavailable.map(entry => entry.reference), false)}>{t('agentSettings.workbench.removeUnavailable')}</Button></div>}
-    <div className={styles.transfer}>
-      <CapabilityPane side='enabled' entries={enabledEntries} selectedKeys={selectedKeys} checked={leftChecked} onChecked={setLeftChecked} disabled={disabled} onDetails={setDetails} />
-      <div className={styles.transferActions}><button type='button' className={styles.moveIn} disabled={disabled || !rightChecked.size} onClick={() => change(catalogEntries.filter(entry => rightChecked.has(capabilityReferenceKey(entry.reference))).map(entry => entry.reference), true)}><ArrowLeft theme='outline' size={15} /><span>{t('agentSettings.workbench.moveIn')}{rightChecked.size > 0 && ` (${rightChecked.size})`}</span></button><button type='button' disabled={disabled || !leftChecked.size} onClick={() => change(selected.filter(reference => leftChecked.has(capabilityReferenceKey(reference))), false)}><ArrowRight theme='outline' size={15} /><span>{t('agentSettings.workbench.moveOut')}{leftChecked.size > 0 && ` (${leftChecked.size})`}</span></button><small>{t('agentSettings.workbench.multiSelect')}</small></div>
-      <CapabilityPane side='catalog' entries={catalogEntries} selectedKeys={selectedKeys} checked={rightChecked} onChecked={setRightChecked} disabled={disabled} onDetails={setDetails} pluginSearch={pluginSearch} />
+  const materialized = (entry: ModuleEntry): boolean =>
+    !entry.missing && moduleIsAvailable(entry.module, catalog.capabilities);
+  const selectable = (entry: ModuleEntry): boolean =>
+    !entry.missing && moduleIsSelectable(entry.module, catalog.capabilities);
+  const hasUnknownActions = (entry: ModuleEntry): boolean => {
+    if (entry.missing) return entry.savedActions.length > 0;
+    const actions = new Set(entry.module.actions.map((action) => action.action_id));
+    return entry.savedActions.some((action) => !actions.has(action));
+  };
+  const hasEmptyActionGrant = (entry: ModuleEntry): boolean =>
+    !entry.missing && entry.module.actions.length > 0 && entry.savedActions.length === 0;
+  const needsAttention = (entry: ModuleEntry): boolean => {
+    const key = capabilityReferenceKey(referenceOf(entry));
+    return selectedKeys.has(key) && (
+      !materialized(entry) || hasUnknownActions(entry) || hasEmptyActionGrant(entry)
+    );
+  };
+  const localizedActionName = (actionId: string): string => t(
+    `agentSettings.actionLabels.${actionTranslationKey(actionId)}`,
+    { defaultValue: actionFallbackName(actionId) }
+  );
+  const resourceName = (value: string): string => {
+    const key = RESOURCE_KIND_I18N_KEYS[value];
+    return key ? t(`agentSettings.resources.kinds.${key}`) : humanizeResourceKind(value);
+  };
+  const unavailableGuidance = (code: string | undefined): string => {
+    const normalized = (code ?? 'unknown').toLocaleLowerCase();
+    return t(`agentSettings.availability.${normalized}`, {
+      defaultValue: t('agentSettings.workbench.moduleUnavailable'),
+    });
+  };
+
+  const visibleEntries = entries.filter((entry) => {
+    const reference = referenceOf(entry);
+    const key = capabilityReferenceKey(reference);
+    const copy = copyOf(entry);
+    const matchesQuery = entry.missing
+      ? `${copy.name} ${copy.description} ${reference.id} ${entry.savedActions.join(' ')}`
+        .toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
+      : moduleMatchesSearch(entry.module, query, copy.name, copy.description);
+    return (category === 'all' || moduleCategory(reference) === category) &&
+      (!pluginsOnly || (!entry.missing && !isBuiltinModule(entry.module, catalog.capabilities))) &&
+      (status === 'all' || (status === 'enabled' && selectedKeys.has(key)) ||
+        (status === 'attention' && needsAttention(entry))) && matchesQuery;
+  });
+
+  const changeModule = (entry: ModuleEntry, enable: boolean) => {
+    if (disabled) return;
+    const reference = referenceOf(entry);
+    const plan = planModuleChange(document, catalog, [reference], enable);
+    const names = (references: ModuleReference[]) => references.map((candidate) => {
+      const found = entries.find((value) =>
+        capabilityReferenceKey(referenceOf(value)) === capabilityReferenceKey(candidate)
+      );
+      return found ? copyOf(found).name : String(candidate.id);
+    }).join('、');
+    if (plan.blocked.length) {
+      Modal.error({
+        title: t('agentSettings.workbench.changeBlocked'),
+        content: t('agentSettings.workbench.changeBlockedBody', { names: names(plan.blocked) }),
+      });
+      return;
+    }
+    const apply = () => {
+      setUndo(document);
+      onChange(plan.document);
+      if (enable) {
+        setExpanded((current) => new Set(current).add(capabilityReferenceKey(reference)));
+      }
+    };
+    if (plan.additional.length) {
+      Modal.confirm({
+        title: t('agentSettings.workbench.relatedChanges'),
+        content: t(
+          enable ? 'agentSettings.workbench.enableDependencies' : 'agentSettings.workbench.disableDependents',
+          { names: names(plan.additional) }
+        ),
+        okText: t('common.confirm'),
+        cancelText: t('common.cancel'),
+        onOk: apply,
+      });
+    } else apply();
+  };
+
+  const toggleAction = (entry: ModuleEntry, actionId: string) => {
+    const reference = referenceOf(entry);
+    const current = new Set(entry.savedActions);
+    if (current.has(actionId)) current.delete(actionId);
+    else current.add(actionId);
+    setUndo(document);
+    onChange(setModuleActions(document, reference, [...current]));
+  };
+
+  const selectedCount = selectedKeys.size;
+  const attentionCount = entries.filter(needsAttention).length;
+  const resourceModuleCount = entries.filter((entry) => {
+    const key = capabilityReferenceKey(referenceOf(entry));
+    return selectedKeys.has(key) && !entry.missing && entry.module.required_resource_kinds.length > 0;
+  }).length;
+
+  return (
+    <div className={styles.workspace}>
+      <div className={styles.overview}>
+        <div className={styles.metrics} aria-live='polite'>
+          <span><i />{t('agentSettings.workbench.enabledModules')}<strong>{selectedCount}</strong></span>
+          <span>{t('agentSettings.workbench.resourceModules')}<strong>{resourceModuleCount}</strong></span>
+          {attentionCount > 0 && <span className={styles.attentionMetric}>
+            {t('agentSettings.workbench.needsAttention')}<strong>{attentionCount}</strong>
+          </span>}
+        </div>
+        <span className={styles.guide}>{t('agentSettings.workbench.moduleGuide')}</span>
+        {undo && <Button type='text' size='mini' disabled={disabled} onClick={() => {
+          onChange(undo);
+          setUndo(null);
+        }}>{t('agentSettings.workbench.undo')}</Button>}
+      </div>
+
+      {attentionCount > 0 && (
+        <div className={styles.notice} role='status'>
+          <Info theme='outline' size={16} />
+          <span>{t('agentSettings.workbench.moduleUnavailableSummary', { count: attentionCount })}</span>
+        </div>
+      )}
+
+      <div className={styles.toolbar}>
+        <label className={styles.searchField}>
+          <Search theme='outline' size={15} />
+          <input
+            type='search'
+            value={query}
+            placeholder={t('agentSettings.workbench.searchModules')}
+            aria-label={t('agentSettings.workbench.searchModules')}
+            onInput={(event) => setQuery(event.currentTarget.value)}
+          />
+        </label>
+        <div className={styles.statusFilters} role='group' aria-label={t('agentSettings.workbench.filterStatus')}>
+          {(['all', 'enabled', 'attention'] as const).map((value) => (
+            <button
+              type='button'
+              key={value}
+              aria-pressed={status === value}
+              onClick={() => setStatus(value)}
+            >
+              {t(`agentSettings.workbench.moduleStatus.${value}`)}
+            </button>
+          ))}
+        </div>
+        {pluginsOnly && <button type='button' className={styles.sourceChip} onClick={() => setPluginsOnly(false)}>
+          {t('agentSettings.workbench.plugin')} · {t('agentSettings.workbench.clearFilters')}
+        </button>}
+      </div>
+
+      <div className={styles.catalogLayout}>
+        <nav className={styles.categories} aria-label={t('agentSettings.workbench.moduleCategories')}>
+          <button type='button' aria-pressed={category === 'all'} onClick={() => setCategory('all')}>
+            <Connection theme='outline' size={15} />
+            <span>{t('agentSettings.workbench.allCategories')}</span>
+            <small>{entries.length}</small>
+          </button>
+          {MODULE_CATEGORIES.map((value) => (
+            <button
+              type='button'
+              key={value}
+              aria-pressed={category === value}
+              onClick={() => setCategory(value)}
+            >
+              <ModuleCategoryIcon category={value} size={15} />
+              <span>{t(`agentSettings.workbench.categories.${value}`)}</span>
+              <small>{entries.filter((entry) => moduleCategory(referenceOf(entry)) === value).length}</small>
+            </button>
+          ))}
+        </nav>
+
+        <section className={styles.moduleResults} aria-label={t('agentSettings.workbench.moduleCatalog')}>
+          <div className={styles.resultHeading}>
+            <span>{t('agentSettings.workbench.results', { count: visibleEntries.length })}</span>
+            {(query || category !== 'all' || status !== 'all' || pluginsOnly) && (
+              <button type='button' onClick={() => {
+                setQuery('');
+                setCategory('all');
+                setStatus('all');
+                setPluginsOnly(false);
+              }}>{t('agentSettings.workbench.clearFilters')}</button>
+            )}
+          </div>
+
+          <div className={styles.moduleGrid}>
+            {visibleEntries.map((entry) => {
+              const reference = referenceOf(entry);
+              const key = capabilityReferenceKey(reference);
+              const selected = selectedKeys.has(key);
+              const canEnable = selectable(entry);
+              const isMaterialized = materialized(entry);
+              const copy = copyOf(entry);
+              const open = expanded.has(key);
+              const availability = entry.missing ? undefined : moduleAvailability(entry.module, catalog.capabilities);
+              const knownActions: CapabilityModuleAction[] = entry.missing ? [] : entry.module.actions;
+              const knownActionIds = new Set(knownActions.map((action) => action.action_id));
+              const missingActions = entry.savedActions.filter((action) => !knownActionIds.has(action));
+              const resources = entry.missing ? [] : entry.module.required_resource_kinds;
+              return (
+                <article
+                  key={key}
+                  className={`${styles.moduleCard} ${selected ? styles.moduleCardEnabled : ''} ${needsAttention(entry) ? styles.moduleCardAttention : ''}`}
+                >
+                  <div className={styles.moduleHeader}>
+                    <span className={styles.moduleIcon}>
+                      <ModuleCategoryIcon category={moduleCategory(reference)} size={18} />
+                    </span>
+                    <div className={styles.moduleCopy}>
+                      <div className={styles.moduleTitleLine}>
+                        <h3>{copy.name}</h3>
+                        {!entry.missing && !isBuiltinModule(entry.module, catalog.capabilities) && <Tag size='small'>{t('agentSettings.workbench.plugin')}</Tag>}
+                      </div>
+                      <p>{copy.description}</p>
+                    </div>
+                    <button
+                      type='button'
+                      role='switch'
+                      aria-checked={selected}
+                      aria-label={t(selected ? 'agentSettings.workbench.disableModule' : 'agentSettings.workbench.enableModule', { name: copy.name })}
+                      className={styles.moduleSwitch}
+                      disabled={disabled || (!selected && !canEnable)}
+                      onClick={() => changeModule(entry, !selected)}
+                    >
+                      <span />
+                    </button>
+                  </div>
+
+                  <div className={styles.moduleMeta}>
+                    <span className={selected ? styles.enabledState : styles.disabledState}>
+                      {selected && <Check theme='outline' size={12} />}
+                      {t(selected ? 'agentSettings.capabilities.enabled' : 'agentSettings.capabilities.notSelected')}
+                    </span>
+                    {!isMaterialized && !selected && <span className={styles.unavailableState}>
+                      {t('agentSettings.common.unavailable')}
+                    </span>}
+                    {resources.length > 0 ? (
+                      <span className={styles.resourceState}>
+                        {t('agentSettings.resources.requiredCount', { count: resources.length })}
+                      </span>
+                    ) : (
+                      <span className={styles.resourceState}>{t('agentSettings.resources.noneRequired')}</span>
+                    )}
+                  </div>
+
+                  {needsAttention(entry) && (
+                    <div className={styles.cardWarning} role='status'>
+                      <Info theme='outline' size={14} />
+                      <span>{entry.missing
+                        ? t('agentSettings.workbench.missingReason')
+                        : missingActions.length
+                          ? t('agentSettings.workbench.actionMissing')
+                          : hasEmptyActionGrant(entry)
+                            ? t('agentSettings.workbench.actionRequired')
+                          : unavailableGuidance(availability?.unavailable_code)}</span>
+                    </div>
+                  )}
+
+                  <button
+                    type='button'
+                    className={styles.disclosure}
+                    aria-expanded={open}
+                    aria-controls={`module-detail-${key.replace(/[^a-zA-Z0-9]/g, '-')}`}
+                    onClick={() => setExpanded((current) => {
+                      const next = new Set(current);
+                      if (next.has(key)) next.delete(key);
+                      else next.add(key);
+                      return next;
+                    })}
+                  >
+                    <span>{t('agentSettings.workbench.actionCount', { count: knownActions.length + missingActions.length })}</span>
+                    <Down theme='outline' size={14} className={open ? styles.disclosureOpen : ''} />
+                  </button>
+
+                  {open && (
+                    <div className={styles.moduleDetail} id={`module-detail-${key.replace(/[^a-zA-Z0-9]/g, '-')}`}>
+                      {resources.length > 0 && (
+                        <div className={styles.resourcePanel}>
+                          <strong>{t('agentSettings.resources.bindingStatus')}</strong>
+                          <p>{t('agentSettings.resources.bindingStatusHint')}</p>
+                          <div>{resources.map((resource) => <Tag key={resource}>{resourceName(resource)}</Tag>)}</div>
+                        </div>
+                      )}
+                      <fieldset className={styles.actionList} disabled={disabled || !selected}>
+                        <legend>{t('agentSettings.workbench.actionPermissions')}</legend>
+                        {knownActions.map((action) => {
+                          const actionName = localizedActionName(action.action_id);
+                          return (
+                            <div key={action.action_id} className={styles.actionRow}>
+                              <Checkbox
+                                checked={entry.savedActions.includes(action.action_id)}
+                                onChange={() => toggleAction(entry, action.action_id)}
+                                aria-label={t('agentSettings.workbench.toggleAction', { action: actionName, module: copy.name })}
+                              />
+                              <span className={styles.actionCopy}>
+                                <strong>{actionName}</strong>
+                                <small className={styles[`effect_${effectTone(action.effect_class)}`]}>
+                                  {t(`agentSettings.effects.${action.effect_class}`, { defaultValue: action.effect_class })}
+                                </small>
+                              </span>
+                              <details className={styles.actionTechnical}>
+                                <summary>{t('common.technical_details')}</summary>
+                                <dl>
+                                  <dt>{t('agentSettings.workbench.actionId')}</dt><dd><code>{action.action_id}</code></dd>
+                                  <dt>{t('agentSettings.workbench.inputContract')}</dt><dd><code>{action.input_schema}</code></dd>
+                                  <dt>{t('agentSettings.workbench.outputContract')}</dt><dd><code>{action.output_schema}</code></dd>
+                                </dl>
+                              </details>
+                            </div>
+                          );
+                        })}
+                        {missingActions.map((actionId) => (
+                          <div key={actionId} className={`${styles.actionRow} ${styles.actionMissing}`}>
+                            <Checkbox
+                              checked
+                              onChange={() => toggleAction(entry, actionId)}
+                              aria-label={t('agentSettings.workbench.removeMissingAction', { action: actionId })}
+                            />
+                            <span className={styles.actionCopy}>
+                              <strong>{actionFallbackName(actionId)}</strong>
+                              <small>{t('agentSettings.workbench.actionUnavailable')}</small>
+                            </span>
+                            <code>{actionId}</code>
+                          </div>
+                        ))}
+                        {knownActions.length === 0 && missingActions.length === 0 && (
+                          <p className={styles.noActions}>{t('agentSettings.workbench.contextOnlyModule')}</p>
+                        )}
+                      </fieldset>
+                      <details className={styles.technicalDetail}>
+                        <summary>{t('agentSettings.workbench.moduleTechnicalDetails')}</summary>
+                        <dl>
+                          <dt>ID</dt><dd>{reference.id}</dd>
+                          <dt>{t('agentSettings.workbench.version')}</dt><dd>{reference.version}</dd>
+                          <dt>{t('agentSettings.capabilities.source')}</dt>
+                          <dd>{entry.missing ? '—' : entry.module.source_package.id}</dd>
+                          {availability?.unavailable_code && <>
+                            <dt>{t('agentSettings.workbench.availabilityCode')}</dt>
+                            <dd><code>{availability.unavailable_code}</code></dd>
+                          </>}
+                        </dl>
+                      </details>
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+
+          {visibleEntries.length === 0 && (
+            <div className={styles.empty} role='status'>
+              <Connection theme='outline' size={30} />
+              <h3>{t(entries.length ? 'agentSettings.workbench.noModuleResults' : 'agentSettings.workbench.noModules')}</h3>
+              <p>{t(entries.length ? 'agentSettings.workbench.noResultsHint' : 'agentSettings.workbench.noModulesHint')}</p>
+              {entries.length > 0 && <Button size='small' icon={<Refresh />} onClick={() => {
+                setQuery('');
+                setCategory('all');
+                setStatus('all');
+                setPluginsOnly(false);
+              }}>{t('agentSettings.workbench.clearFilters')}</Button>}
+            </div>
+          )}
+        </section>
+      </div>
     </div>
-    <Modal autoFocus focusLock title={detail?.name ?? ''} visible={detail !== null} style={{ width: 'min(440px, calc(100vw - 24px))' }} onCancel={() => setDetails(null)} unmountOnExit footer={detail && <Button type='primary' disabled={disabled || (!selectedKeys.has(capabilityReferenceKey(detail.reference)) && !capabilityIsAvailable(detail.item))} onClick={() => { change([detail.reference], !selectedKeys.has(capabilityReferenceKey(detail.reference))); setDetails(null); }}>{t(selectedKeys.has(capabilityReferenceKey(detail.reference)) ? 'agentSettings.workbench.moveOut' : 'agentSettings.workbench.moveIn')}</Button>}>
-      {detail && <div className={styles.detail}><span className={selectedKeys.has(capabilityReferenceKey(detail.reference)) ? styles.enabledState : styles.disabledState}>{t(selectedKeys.has(capabilityReferenceKey(detail.reference)) ? 'agentSettings.capabilities.enabled' : 'agentSettings.capabilities.notSelected')}</span><p>{detail.description}</p>{!capabilityIsAvailable(detail.item) && <div className={styles.notice}>{t(detail.item ? isBuiltinCapability(detail.item) ? 'agentSettings.workbench.builtinReason' : 'agentSettings.workbench.pluginReason' : 'agentSettings.workbench.missingReason')}</div>}<dl><dt>{t('agentSettings.workbench.category')}</dt><dd>{t(`agentSettings.workbench.categories.${capabilityCategory(detail.reference)}`)}</dd><dt>{t('agentSettings.capabilities.source')}</dt><dd>{t(detail.item && isBuiltinCapability(detail.item) ? 'agentSettings.workbench.builtin' : 'agentSettings.workbench.plugin')}</dd><dt>{t('agentSettings.resources.requiredAtUse')}</dt><dd>{detail.item?.required_resource_kinds.length ? detail.item.required_resource_kinds.map(resourceName).join('、') : t('agentSettings.resources.noneRequired')}</dd></dl><details><summary>{t('common.technical_details')}</summary><dl><dt>ID</dt><dd>{detail.reference.id}</dd><dt>{t('agentSettings.workbench.version')}</dt><dd>{detail.reference.version}</dd><dt>{t('agentSettings.capabilities.source')}</dt><dd>{detail.item?.source_package.id ?? '—'}</dd>{detail.item?.unavailable_code && <><dt>{t('agentSettings.workbench.unavailableCode')}</dt><dd>{detail.item.unavailable_code}</dd></>}</dl></details></div>}
-    </Modal>
-  </div>;
+  );
 };
+
 export default AgentCapabilityWorkspace;

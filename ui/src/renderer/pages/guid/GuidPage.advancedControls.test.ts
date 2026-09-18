@@ -12,6 +12,7 @@ const readSource = (url: URL) => readFileSync(url, 'utf8');
 describe('GuidPage advanced controls', () => {
   test('keeps only the supported session-specific draft controls', () => {
     const source = readSource(new URL('./GuidPage.tsx', import.meta.url));
+    const send = readSource(new URL('./hooks/useGuidSend.ts', import.meta.url));
 
     expect(source.includes('<AutoWorkControl')).toBe(true);
     expect(source.includes('IdmmControl')).toBe(false);
@@ -21,6 +22,11 @@ describe('GuidPage advanced controls', () => {
     expect(source.indexOf('<KnowledgeControl')).toBeLessThan(
       source.indexOf('<AutoWorkControl')
     );
+    expect(source.includes('openBrowserHandler')).toBe(false);
+    expect(source.includes('isBrowserButtonDisabled')).toBe(false);
+    expect(send.includes("launch('browser')")).toBe(false);
+    expect(send.includes('initial-browser-open')).toBe(false);
+    expect(send.includes("'message' | 'browser'")).toBe(false);
   });
 
   test('keeps the remaining draft API focused on session behavior', () => {
@@ -43,8 +49,9 @@ describe('GuidPage advanced controls', () => {
     expect(page.includes("presetResourceKinds.has('knowledge_base')")).toBe(true);
     expect(page.includes("filter((kind) => kind !== 'knowledge_base')")).toBe(true);
     expect(
-      page.includes("requiredKinds={isCompanionAgent ? ['companion'] : resourcePickerKinds}")
+      page.includes('requiredKinds={resourcePickerKinds}')
     ).toBe(true);
+    expect(page.includes("optionalKinds={isCompanionAgent ? ['channel', 'robot', 'mcp_server'] : undefined}")).toBe(false);
     expect(page.includes('{workspaceEnabled && <GuidWorkspaceFootnote')).toBe(true);
     expect(page.includes('resourceSelections: resourceSelectionResolution.selections')).toBe(true);
     expect(page.includes('resourceSelectionResolution.missingKinds.length === 0')).toBe(true);

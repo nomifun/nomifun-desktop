@@ -65,6 +65,7 @@ pub const CHANNEL_MESSAGING_MODULE_ID: &str = "channel.messaging";
 pub const COMPANION_MODULE_ID: &str = "companion";
 pub const COMPANION_MEMORY_MODULE_ID: &str = "companion.memory";
 pub const CUSTOMER_SERVICE_MODULE_ID: &str = "customer.service";
+pub const ROBOT_MODULE_ID: &str = "robot";
 
 pub const CHANNEL_MESSAGING_REPLY_ACTION_ID: &str = "channel.messaging/reply";
 pub const CHANNEL_MESSAGING_SEND_ACTION_ID: &str = "channel.messaging/send";
@@ -75,6 +76,10 @@ pub const COMPANION_MEMORY_WRITE_ACTION_ID: &str = "companion.memory/write";
 pub const CUSTOMER_SERVICE_NOTES_READ_ACTION_ID: &str = "customer.service/notes.read";
 pub const CUSTOMER_SERVICE_NOTES_WRITE_ACTION_ID: &str = "customer.service/notes.write";
 pub const CUSTOMER_SERVICE_HANDOFF_ACTION_ID: &str = "customer.service/handoff";
+pub const ROBOT_VISION_ACTION_ID: &str = "robot/vision";
+pub const ROBOT_DISPLAY_ACTION_ID: &str = "robot/display";
+pub const ROBOT_MOTION_ACTION_ID: &str = "robot/motion";
+pub const ROBOT_DEVICE_ACTION_ID: &str = "robot/device";
 
 pub const CONVERSATION_MODULE_IDS: [&str; 3] = [
     CHANNEL_MESSAGING_MODULE_ID,
@@ -97,17 +102,6 @@ pub const CHANNEL_GROUP_POLICY: &str = "channel.group_policy";
 pub const COMPANION_PERSONA: &str = "companion.persona";
 pub const COMPANION_ROSTER: &str = "companion.roster";
 pub const CUSTOMER_SERVICE_DIALOGUE: &str = "customer_service.dialogue";
-pub const ROBOT_LINK: &str = "robot.link";
-pub const ROBOT_AUDIO: &str = "robot.audio";
-pub const ROBOT_DEVICE_TOOLS: &str = "robot.device_tools";
-pub const ROBOT_DISPLAY: &str = "robot.display";
-pub const ROBOT_MOTION: &str = "robot.motion";
-pub const ROBOT_VISION: &str = "robot.vision";
-
-pub const ROBOT_DEVICE_TOOLS_ACTION: &str = "robot.device_tools.invoke";
-pub const ROBOT_DISPLAY_ACTION: &str = "robot.display.invoke";
-pub const ROBOT_MOTION_ACTION: &str = "robot.motion.invoke";
-
 pub const PACKAGE_IDS: [&str; 5] = [
     CHANNEL_PACKAGE_ID,
     COMPANION_PACKAGE_ID,
@@ -122,35 +116,25 @@ pub const TARGET_PACKAGE_IDS: [&str; 5] = PACKAGE_IDS;
 /// The frozen first-party catalog spells the two multiword IDs with
 /// underscores.  [`canonical_capability_id`] makes that normalization
 /// explicit instead of creating duplicate aliases.
-pub const TARGET_CAPABILITY_FAMILIES: [&str; 9] = [
+pub const TARGET_CAPABILITY_FAMILIES: [&str; 4] = [
     CHANNEL_MESSAGING_MODULE_ID,
     COMPANION_MODULE_ID,
     CUSTOMER_SERVICE_MODULE_ID,
-    "robot.audio",
-    "robot.device-tools",
-    "robot.display",
-    "robot.motion",
-    "robot.vision",
-    "robot.link",
+    ROBOT_MODULE_ID,
 ];
 
 /// Exact canonical capability IDs contributed by the five target packages.
 ///
 /// This is intentionally the full checked-in target-package inventory, not
 /// only the deletion-contract family subset.
-pub const TARGET_CAPABILITY_IDS: [&str; 9] = [
+pub const TARGET_CAPABILITY_IDS: [&str; 4] = [
     CHANNEL_MESSAGING_MODULE_ID,
     COMPANION_MODULE_ID,
     CUSTOMER_SERVICE_MODULE_ID,
-    ROBOT_LINK,
-    ROBOT_AUDIO,
-    ROBOT_VISION,
-    ROBOT_DISPLAY,
-    ROBOT_MOTION,
-    ROBOT_DEVICE_TOOLS,
+    ROBOT_MODULE_ID,
 ];
-pub const CAPABILITY_IDS: [&str; 9] = TARGET_CAPABILITY_IDS;
-pub const ALL_CAPABILITY_IDS: [&str; 9] = TARGET_CAPABILITY_IDS;
+pub const CAPABILITY_IDS: [&str; 4] = TARGET_CAPABILITY_IDS;
+pub const ALL_CAPABILITY_IDS: [&str; 4] = TARGET_CAPABILITY_IDS;
 
 const AGENT_SURFACES: &[&str] = &["desktop", "headless", "remote", "web"];
 const CHANNEL_RESOURCE: &[&str] = &[CHANNEL_RESOURCE_KIND];
@@ -218,7 +202,7 @@ struct ConversationModuleSpec {
     display_name: &'static str,
     description: &'static str,
     actions: &'static [ModuleActionSpec],
-    scene: ConversationSceneSpec,
+    scene: Option<ConversationSceneSpec>,
 }
 
 #[derive(Clone, Copy)]
@@ -303,9 +287,10 @@ pub enum Wave4CapabilityOperation {
     CustomerServiceNotesRead { input: StrictJsonValue },
     CustomerServiceNotesWrite { input: StrictJsonValue },
     CustomerServiceHandoff { input: StrictJsonValue },
+    RobotVision { input: StrictJsonValue },
     RobotDisplay { input: StrictJsonValue },
     RobotMotion { input: StrictJsonValue },
-    RobotDeviceTools { input: StrictJsonValue },
+    RobotDevice { input: StrictJsonValue },
 }
 
 impl Wave4CapabilityOperation {
@@ -320,9 +305,10 @@ impl Wave4CapabilityOperation {
             Self::CustomerServiceNotesRead { .. }
             | Self::CustomerServiceNotesWrite { .. }
             | Self::CustomerServiceHandoff { .. } => CUSTOMER_SERVICE_MODULE_ID,
-            Self::RobotDisplay { .. } => ROBOT_DISPLAY,
-            Self::RobotMotion { .. } => ROBOT_MOTION,
-            Self::RobotDeviceTools { .. } => ROBOT_DEVICE_TOOLS,
+            Self::RobotVision { .. }
+            | Self::RobotDisplay { .. }
+            | Self::RobotMotion { .. }
+            | Self::RobotDevice { .. } => ROBOT_MODULE_ID,
         })
     }
 
@@ -338,9 +324,10 @@ impl Wave4CapabilityOperation {
             Self::CustomerServiceNotesRead { .. } => CUSTOMER_SERVICE_NOTES_READ_ACTION_ID,
             Self::CustomerServiceNotesWrite { .. } => CUSTOMER_SERVICE_NOTES_WRITE_ACTION_ID,
             Self::CustomerServiceHandoff { .. } => CUSTOMER_SERVICE_HANDOFF_ACTION_ID,
-            Self::RobotDisplay { .. } => ROBOT_DISPLAY_ACTION,
-            Self::RobotMotion { .. } => ROBOT_MOTION_ACTION,
-            Self::RobotDeviceTools { .. } => ROBOT_DEVICE_TOOLS_ACTION,
+            Self::RobotVision { .. } => ROBOT_VISION_ACTION_ID,
+            Self::RobotDisplay { .. } => ROBOT_DISPLAY_ACTION_ID,
+            Self::RobotMotion { .. } => ROBOT_MOTION_ACTION_ID,
+            Self::RobotDevice { .. } => ROBOT_DEVICE_ACTION_ID,
         })
     }
 
@@ -355,9 +342,10 @@ impl Wave4CapabilityOperation {
             Self::CustomerServiceNotesRead { .. }
             | Self::CustomerServiceNotesWrite { .. }
             | Self::CustomerServiceHandoff { .. } => Wave4OwnerDomain::CustomerService,
-            Self::RobotDisplay { .. }
+            Self::RobotVision { .. }
+            | Self::RobotDisplay { .. }
             | Self::RobotMotion { .. }
-            | Self::RobotDeviceTools { .. } => Wave4OwnerDomain::Robot,
+            | Self::RobotDevice { .. } => Wave4OwnerDomain::Robot,
         }
     }
 
@@ -372,9 +360,10 @@ impl Wave4CapabilityOperation {
             | Self::CustomerServiceNotesRead { input }
             | Self::CustomerServiceNotesWrite { input }
             | Self::CustomerServiceHandoff { input }
+            | Self::RobotVision { input }
             | Self::RobotDisplay { input }
             | Self::RobotMotion { input }
-            | Self::RobotDeviceTools { input } => input,
+            | Self::RobotDevice { input } => input,
         }
     }
 }
@@ -863,7 +852,6 @@ impl Wave4HostPort for ComposedWave4HostPort {
 #[derive(Default)]
 pub struct Wave4ContextOwnerBindings {
     pub companion: Option<Arc<dyn Wave4ContextHostPort>>,
-    pub robot: Option<Arc<dyn Wave4ContextHostPort>>,
 }
 
 impl Wave4ContextOwnerBindings {
@@ -872,10 +860,6 @@ impl Wave4ContextOwnerBindings {
         self
     }
 
-    pub fn with_robot(mut self, owner: Arc<dyn Wave4ContextHostPort>) -> Self {
-        self.robot = Some(owner);
-        self
-    }
 }
 
 pub fn composed_context_host_port(
@@ -904,7 +888,6 @@ impl Wave4ContextHostPort for ComposedWave4ContextHostPort {
         }
         let owner = match request.capability_id.as_ref() {
             COMPANION_PERSONA | COMPANION_ROSTER => self.bindings.companion.clone(),
-            ROBOT_VISION => self.bindings.robot.clone(),
             _ => None,
         };
         let capability_id = request.capability_id.clone();
@@ -997,11 +980,11 @@ const CHANNEL_MODULES: [ConversationModuleSpec; 1] = [ConversationModuleSpec {
     display_name: "Channel Messaging",
     description: "Reply and send through the selected Channel scene.",
     actions: &CHANNEL_MESSAGING_ACTIONS,
-    scene: ConversationSceneSpec {
+    scene: Some(ConversationSceneSpec {
         id: CHANNEL_GROUP_POLICY,
         requirements: CHANNEL_GROUP_POLICY_REQUIREMENTS,
         kind: ConversationSceneKind::TurnMiddleware,
-    },
+    }),
 }];
 const COMPANION_MODULES: [ConversationModuleSpec; 1] = [
     ConversationModuleSpec {
@@ -1009,11 +992,11 @@ const COMPANION_MODULES: [ConversationModuleSpec; 1] = [
         display_name: "Companion",
         description: "Learn and evolve the selected Companion.",
         actions: &COMPANION_ACTIONS,
-        scene: ConversationSceneSpec {
+        scene: Some(ConversationSceneSpec {
             id: COMPANION_PERSONA,
             requirements: COMPANION_SCENE_READ_REQUIREMENTS,
             kind: ConversationSceneKind::Context,
-        },
+        }),
     },
 ];
 const CUSTOMER_SERVICE_MODULES: [ConversationModuleSpec; 1] = [ConversationModuleSpec {
@@ -1021,90 +1004,59 @@ const CUSTOMER_SERVICE_MODULES: [ConversationModuleSpec; 1] = [ConversationModul
     display_name: "Customer Service",
     description: "Read notes, write notes, and hand off the selected customer conversation.",
     actions: &CUSTOMER_SERVICE_ACTIONS,
-    scene: ConversationSceneSpec {
+    scene: Some(ConversationSceneSpec {
         id: CUSTOMER_SERVICE_DIALOGUE,
         requirements: CUSTOMER_SCENE_READ_REQUIREMENTS,
         kind: ConversationSceneKind::TurnMiddleware,
-    },
+    }),
 }];
 
-const ROBOT_CAPABILITIES: [CapabilitySpec; 6] = [
-    CapabilitySpec {
-        id: ROBOT_LINK,
-        kind: CapabilityKind::ResourceProvider,
-        display_name: "Robot link",
-        description: "Expose the selected Robot device-link resource boundary.",
-        resource_kinds: ROBOT_RESOURCE,
-        requirements: &[ResourceRequirement {
-            resource_kind: ROBOT_RESOURCE_KIND,
-            operation: "link",
-        }],
-        effect_class: None,
-    },
-    CapabilitySpec {
-        id: ROBOT_AUDIO,
-        kind: CapabilityKind::BackgroundService,
-        display_name: "Robot audio",
-        description: "Provide the selected Robot audio service boundary.",
-        resource_kinds: ROBOT_RESOURCE,
-        requirements: &[ResourceRequirement {
-            resource_kind: ROBOT_RESOURCE_KIND,
-            operation: "audio",
-        }],
-        effect_class: None,
-    },
-    CapabilitySpec {
-        id: ROBOT_VISION,
-        kind: CapabilityKind::ContextContributor,
-        display_name: "Robot vision",
-        description: "Provide selected Robot observations as typed context.",
+const ROBOT_ACTIONS: [ModuleActionSpec; 4] = [
+    ModuleActionSpec {
+        id: ROBOT_VISION_ACTION_ID,
         resource_kinds: ROBOT_RESOURCE,
         requirements: &[ResourceRequirement {
             resource_kind: ROBOT_RESOURCE_KIND,
             operation: "vision",
         }],
-        effect_class: None,
+        effect_class: EffectClass::ReadSensitive,
     },
-    CapabilitySpec {
-        id: ROBOT_DISPLAY,
-        kind: CapabilityKind::Tool,
-        display_name: "Robot display",
-        description: "Submit a typed display command for the selected Robot.",
+    ModuleActionSpec {
+        id: ROBOT_DISPLAY_ACTION_ID,
         resource_kinds: ROBOT_RESOURCE,
         requirements: &[ResourceRequirement {
             resource_kind: ROBOT_RESOURCE_KIND,
             operation: "display",
         }],
-        effect_class: Some(EffectClass::Physical),
+        effect_class: EffectClass::Physical,
     },
-    CapabilitySpec {
-        id: ROBOT_MOTION,
-        kind: CapabilityKind::Tool,
-        display_name: "Robot motion",
-        description: "Submit a typed motion command for the selected Robot.",
+    ModuleActionSpec {
+        id: ROBOT_MOTION_ACTION_ID,
         resource_kinds: ROBOT_RESOURCE,
         requirements: &[ResourceRequirement {
             resource_kind: ROBOT_RESOURCE_KIND,
             operation: "motion",
         }],
-        effect_class: Some(EffectClass::Physical),
+        effect_class: EffectClass::Physical,
     },
-    CapabilitySpec {
-        id: ROBOT_DEVICE_TOOLS,
-        kind: CapabilityKind::Tool,
-        display_name: "Robot device tools",
-        description: "Submit a typed device-tool command for the selected Robot.",
+    ModuleActionSpec {
+        id: ROBOT_DEVICE_ACTION_ID,
         resource_kinds: ROBOT_RESOURCE,
         requirements: &[ResourceRequirement {
             resource_kind: ROBOT_RESOURCE_KIND,
-            // Device tools are discovered and dispatched through the selected
-            // device link.  The frozen Robot binding contract has no separate
-            // `device_tools` operation.
-            operation: "link",
+            operation: "device",
         }],
-        effect_class: Some(EffectClass::Physical),
+        effect_class: EffectClass::Physical,
     },
 ];
+
+const ROBOT_MODULES: [ConversationModuleSpec; 1] = [ConversationModuleSpec {
+    id: ROBOT_MODULE_ID,
+    display_name: "Robot",
+    description: "Observe and control one explicitly bound Robot device.",
+    actions: &ROBOT_ACTIONS,
+    scene: None,
+}];
 
 const CHANNEL_PORTS: PortSpec = PortSpec {
     command_ports: &["channel.agent-session-command", "channel.inbound-receipt"],
@@ -1160,7 +1112,7 @@ const PACKAGE_SPECS: [PackageSpec; 5] = [
         mount_id: "domain-robot",
         display_name: "Robot",
         description: "Bundled Robot media, display, motion, and device capabilities.",
-        capabilities: &ROBOT_CAPABILITIES,
+        capabilities: &[],
         ports: ROBOT_PORTS,
     },
     PackageSpec {
@@ -1233,7 +1185,7 @@ pub fn typed_resource_descriptors() -> Vec<TypedResourceDescriptor> {
             "robot",
             ROBOT_RESOURCE_KIND,
             true,
-            ["audio", "display", "link", "motion", "vision"],
+            ["device", "display", "motion", "vision"],
             "require_explicit_selection",
         ),
     ]
@@ -1289,7 +1241,7 @@ pub fn canonical_resource_bindings(owner_id: impl Into<String>) -> Vec<TypedReso
             ROBOT_RESOURCE_KIND,
             "robot",
             &owner_id,
-            ["audio", "display", "link", "motion", "vision"],
+            ["device", "display", "motion", "vision"],
         ),
     ]
 }
@@ -1329,6 +1281,7 @@ pub fn required_resource_kinds(capability_id: &str) -> Option<BTreeSet<ResourceK
         CHANNEL_MODULES.as_slice(),
         COMPANION_MODULES.as_slice(),
         CUSTOMER_SERVICE_MODULES.as_slice(),
+        ROBOT_MODULES.as_slice(),
     ]
     .into_iter()
     .flatten()
@@ -1374,6 +1327,7 @@ pub fn canonical_action_id(capability_id: &str) -> Option<ActionId> {
         CHANNEL_MODULES.as_slice(),
         COMPANION_MODULES.as_slice(),
         CUSTOMER_SERVICE_MODULES.as_slice(),
+        ROBOT_MODULES.as_slice(),
     ]
     .into_iter()
     .flatten()
@@ -1398,6 +1352,7 @@ pub fn resolve_capability_schema(
         CHANNEL_MODULES.as_slice(),
         COMPANION_MODULES.as_slice(),
         CUSTOMER_SERVICE_MODULES.as_slice(),
+        ROBOT_MODULES.as_slice(),
     ]
     .into_iter()
     .flatten()
@@ -1651,6 +1606,7 @@ fn conversation_modules_for_package(package_id: &str) -> Option<&'static [Conver
         CHANNEL_PACKAGE_ID => Some(&CHANNEL_MODULES),
         COMPANION_PACKAGE_ID => Some(&COMPANION_MODULES),
         CUSTOMER_SERVICE_PACKAGE_ID => Some(&CUSTOMER_SERVICE_MODULES),
+        ROBOT_PACKAGE_ID => Some(&ROBOT_MODULES),
         _ => None,
     }
 }
@@ -1663,6 +1619,7 @@ fn find_conversation_action(
         CHANNEL_MODULES.as_slice(),
         COMPANION_MODULES.as_slice(),
         CUSTOMER_SERVICE_MODULES.as_slice(),
+        ROBOT_MODULES.as_slice(),
     ]
     .into_iter()
     .flatten()
@@ -1963,9 +1920,12 @@ fn conversation_module_registration(
     let turn_middleware_port = host_port(WAVE4_TURN_MIDDLEWARE_HOST_PORT_ID);
     let has_context = modules
         .iter()
-        .any(|module| matches!(module.scene.kind, ConversationSceneKind::Context));
+        .any(|module| matches!(module.scene.map(|scene| scene.kind), Some(ConversationSceneKind::Context)));
     let has_turn_middleware = modules.iter().any(|module| {
-        matches!(module.scene.kind, ConversationSceneKind::TurnMiddleware)
+        matches!(
+            module.scene.map(|scene| scene.kind),
+            Some(ConversationSceneKind::TurnMiddleware)
+        )
     });
     let typed_command_ports = spec
         .ports
@@ -2064,13 +2024,16 @@ fn conversation_module_registration(
                 }),
             )
             .map_err(|error| error.to_string())?;
-        match module.scene.kind {
+        let Some(scene) = module.scene else {
+            continue;
+        };
+        match scene.kind {
             ConversationSceneKind::Context => registration
                 .add_capability_context_factory(
                     module_id,
                     Arc::new(Wave4CapabilityContextFactory {
-                        capability_id: CapabilityId::from(module.scene.id),
-                        requirements: module.scene.requirements,
+                        capability_id: CapabilityId::from(scene.id),
+                        requirements: scene.requirements,
                         host_port: Arc::clone(&context_host_port),
                     }),
                 )
@@ -2079,8 +2042,8 @@ fn conversation_module_registration(
                 .add_capability_context_factory(
                     module_id,
                     Arc::new(Wave4CapabilityTurnMiddlewareFactory {
-                        capability_id: CapabilityId::from(module.scene.id),
-                        requirements: module.scene.requirements,
+                        capability_id: CapabilityId::from(scene.id),
+                        requirements: scene.requirements,
                         host_port: Arc::clone(&turn_middleware_host_port),
                     }),
                 )
@@ -2109,25 +2072,25 @@ fn conversation_module_manifest(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let scene_schema = context_output_schema(module.scene.id);
-    let scene_schema_ref = schema_ref(module.scene.id, "context", &scene_schema)?;
-    let scene_host_port = match module.scene.kind {
-        ConversationSceneKind::Context => host_port(WAVE4_CONTEXT_HOST_PORT_ID),
-        ConversationSceneKind::TurnMiddleware => {
-            host_port(WAVE4_TURN_MIDDLEWARE_HOST_PORT_ID)
+    let (context_schema_refs, scene_host_port, scene_requirements) = match module.scene {
+        Some(scene) => {
+            let scene_schema = context_output_schema(scene.id);
+            let scene_schema_ref = schema_ref(scene.id, "context", &scene_schema)?;
+            let host_port = match scene.kind {
+                ConversationSceneKind::Context => host_port(WAVE4_CONTEXT_HOST_PORT_ID),
+                ConversationSceneKind::TurnMiddleware => {
+                    host_port(WAVE4_TURN_MIDDLEWARE_HOST_PORT_ID)
+                }
+            };
+            (vec![scene_schema_ref], Some(host_port), scene.requirements)
         }
+        None => (Vec::new(), None, &[][..]),
     };
     let resource_kinds = module
         .actions
         .iter()
         .flat_map(|action| action.resource_kinds.iter().copied())
-        .chain(
-            module
-                .scene
-                .requirements
-                .iter()
-                .map(|requirement| requirement.resource_kind),
-        )
+        .chain(scene_requirements.iter().map(|requirement| requirement.resource_kind))
         .map(ResourceKind::from)
         .collect();
     Ok(CapabilityManifest {
@@ -2152,12 +2115,18 @@ fn conversation_module_manifest(
         config_schema: object_schema(false),
         contributions: CapabilityContributions {
             actions,
-            context_schema_refs: vec![scene_schema_ref],
-            context_phase: nomifun_agent_contracts::ContextContributionPhase::BeforeTurn,
+            context_schema_refs,
+            context_phase: if module.scene.is_some() {
+                nomifun_agent_contracts::ContextContributionPhase::BeforeTurn
+            } else {
+                nomifun_agent_contracts::ContextContributionPhase::SessionStart
+            },
             ui_slot: None,
             event_schema_refs: Vec::new(),
             resource_kinds,
-            host_ports: vec![host_port(WAVE4_CAPABILITY_HOST_PORT_ID), scene_host_port],
+            host_ports: std::iter::once(host_port(WAVE4_CAPABILITY_HOST_PORT_ID))
+                .chain(scene_host_port)
+                .collect(),
         },
     })
 }
@@ -2256,17 +2225,8 @@ fn capability_manifest(
 }
 
 fn internal_capability_dependencies(capability_id: &str) -> Vec<CapabilityRef> {
-    let ids: &[&str] = match capability_id {
-        ROBOT_VISION => &[ROBOT_LINK],
-        ROBOT_DISPLAY | ROBOT_MOTION | ROBOT_DEVICE_TOOLS => &[ROBOT_LINK, ROBOT_AUDIO],
-        _ => &[],
-    };
-    ids.iter()
-        .map(|id| CapabilityRef {
-            id: CapabilityId::from(*id),
-            version: VersionString::from(CONTRACT_VERSION),
-        })
-        .collect()
+    let _ = capability_id;
+    Vec::new()
 }
 
 fn action_id_for(capability_id: &str) -> ActionId {
@@ -2325,13 +2285,12 @@ pub fn action_input_schema(capability_id: &str) -> StrictJsonValue {
             },
             "additionalProperties": false
         }),
-        ROBOT_DISPLAY | ROBOT_MOTION | ROBOT_DEVICE_TOOLS => serde_json::json!({
+        ROBOT_VISION_ACTION_ID
+        | ROBOT_DISPLAY_ACTION_ID
+        | ROBOT_MOTION_ACTION_ID
+        | ROBOT_DEVICE_ACTION_ID => serde_json::json!({
             "type": "object",
-            "properties": {
-                "tool_name": { "type": "string", "minLength": 1, "maxLength": 512 },
-                "arguments": { "type": "object" }
-            },
-            "required": ["tool_name", "arguments"],
+            "properties": {},
             "additionalProperties": false
         }),
         COMPANION_MEMORY_RECALL_ACTION_ID => serde_json::json!({
@@ -2437,19 +2396,6 @@ fn context_output_schema(capability_id: &str) -> StrictJsonValue {
                 }
             },
             "required": ["kind", "selected_companion_id", "companions"],
-            "additionalProperties": false
-        }),
-        ROBOT_VISION => serde_json::json!({
-            "type": "object",
-            "properties": {
-                "kind": { "const": "robot_vision" },
-                "robot_id": { "type": "string", "minLength": 1, "maxLength": 512 },
-                "companion_id": { "type": "string", "minLength": 1, "maxLength": 512 },
-                "question": { "type": "string", "minLength": 1, "maxLength": 4096 },
-                "answer": { "type": "string", "minLength": 1, "maxLength": 65536 },
-                "observed_at_ms": { "type": "integer", "minimum": 0 }
-            },
-            "required": ["kind", "robot_id", "companion_id", "question", "answer", "observed_at_ms"],
             "additionalProperties": false
         }),
         _ => return object_schema(true),
@@ -2849,10 +2795,17 @@ pub fn operation_from_action_input(
         (CUSTOMER_SERVICE_MODULE_ID, CUSTOMER_SERVICE_HANDOFF_ACTION_ID) => {
             Wave4CapabilityOperation::CustomerServiceHandoff { input }
         }
-        (ROBOT_DISPLAY, ROBOT_DISPLAY_ACTION) => Wave4CapabilityOperation::RobotDisplay { input },
-        (ROBOT_MOTION, ROBOT_MOTION_ACTION) => Wave4CapabilityOperation::RobotMotion { input },
-        (ROBOT_DEVICE_TOOLS, ROBOT_DEVICE_TOOLS_ACTION) => {
-            Wave4CapabilityOperation::RobotDeviceTools { input }
+        (ROBOT_MODULE_ID, ROBOT_VISION_ACTION_ID) => {
+            Wave4CapabilityOperation::RobotVision { input }
+        }
+        (ROBOT_MODULE_ID, ROBOT_DISPLAY_ACTION_ID) => {
+            Wave4CapabilityOperation::RobotDisplay { input }
+        }
+        (ROBOT_MODULE_ID, ROBOT_MOTION_ACTION_ID) => {
+            Wave4CapabilityOperation::RobotMotion { input }
+        }
+        (ROBOT_MODULE_ID, ROBOT_DEVICE_ACTION_ID) => {
+            Wave4CapabilityOperation::RobotDevice { input }
         }
         (capability_id, action_id) => {
             return Err(KernelError::CapabilityExecution {

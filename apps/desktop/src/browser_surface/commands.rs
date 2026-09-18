@@ -129,7 +129,7 @@ pub(crate) async fn browser_surface_attach(
     view: tauri::Webview,
     server: tauri::State<'_, Arc<nomifun_app::DesktopServer>>,
     state: tauri::State<'_, BrowserSurfaceState>,
-    conversation_id: String,
+    agent_session_id: String,
     bounds: BrowserSurfaceBounds,
     events: Channel<BrowserViewEvent>,
 ) -> Result<u64, String> {
@@ -137,7 +137,7 @@ pub(crate) async fn browser_surface_attach(
     validate_bounds(&view, bounds)?;
     let id = state.next.fetch_add(1, Ordering::AcqRel) + 1;
     let resource = server
-        .browser_resource_for_local_surface(&conversation_id)
+        .browser_resource_for_local_surface(&agent_session_id)
         .await
         .map_err(|error| error.to_string())?;
     let mut current = state.current.lock().await;

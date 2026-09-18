@@ -597,8 +597,14 @@ impl CodingRuntimeHost for ConversationCodingHost {
         if self.resources.mcp_resources_selected() {
             request = request.with_resource_port(self.capability_port.clone());
         }
-        if self.compiled.content().enabled_capabilities.iter()
-            .any(|item| item.capability.id.as_ref() == "robot.vision") {
+        if self.compiled.content().enabled_capabilities.iter().any(|item| {
+            item.capability.id.as_ref() == nomifun_agent_domain_wave4::ROBOT_MODULE_ID
+                && item.action_allowlist.contains(
+                    &nomifun_agent_contracts::ActionId::from(
+                        nomifun_agent_domain_wave4::ROBOT_VISION_ACTION_ID,
+                    ),
+                )
+        }) {
             request = request.with_live_context_port(self.capability_port.clone());
         }
         request = request.with_history_port(Arc::new(history_port::HistoryPort {

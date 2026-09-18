@@ -7,6 +7,17 @@ import {
 } from './agentResourceSelection';
 
 describe('Agent resource selection contract', () => {
+  test('resolves host-owned Browser, Computer and Scheduler identities without a picker', () => {
+    expect(resolveAgentResourceSelections(['browser', 'computer', 'scheduler'], {})).toEqual({
+      selections: [
+        { resource_kind: 'browser', resource_id: 'managed-browser' },
+        { resource_kind: 'computer', resource_id: 'local-desktop' },
+        { resource_kind: 'scheduler', resource_id: 'installation-scheduler' },
+      ],
+      missingKinds: [],
+    });
+  });
+
   test('uses the enabled capability model for frozen multi-server MCP resources', () => {
     const capabilities = selectedCapabilityIds([
       { capability: { id: `nomi.mcp.v1.${'a'.repeat(64)}` } },
@@ -67,11 +78,11 @@ describe('Agent resource selection contract', () => {
     });
   });
 
-  test('covers every resource kind used by the seven official Agents', () => {
+  test('covers every current first-party Agent resource kind', () => {
     const officialKinds = [
       'workspace', 'knowledge_base', 'project_memory', 'process_session', 'terminal',
       'mcp_server', 'companion', 'companion_memory', 'channel', 'robot', 'customer',
-      'canvas', 'asset_library', 'plugin',
+      'canvas', 'asset_library', 'plugin', 'browser', 'computer', 'scheduler',
     ];
     const value = {
       companion: 'companion-1',
@@ -90,6 +101,6 @@ describe('Agent resource selection contract', () => {
     ]);
     const resolution = resolveAgentResourceSelections(officialKinds, value);
     expect(resolution.missingKinds).toEqual([]);
-    expect(resolution.selections).toHaveLength(14);
+    expect(resolution.selections).toHaveLength(17);
   });
 });

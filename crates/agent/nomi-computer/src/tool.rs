@@ -138,6 +138,75 @@ impl ComputerTool {
         }
     }
 
+    /// Execute one native operation under an exact canonical `computer`
+    /// action grant. The caller supplies the Action ID frozen into the Agent
+    /// snapshot; a mismatched native operation is rejected before any OS API
+    /// is touched.
+    pub async fn execute_authorized(&self, action_id: &str, input: Value) -> ToolResult {
+        let Some(granted_action) = crate::capability::ComputerAction::parse(action_id) else {
+            return ToolResult::error(format!(
+                "COMPUTER_ACTION_NOT_DECLARED: {action_id:?} is not an action declared by the computer module"
+            ));
+        };
+        let Some(native_operation) = input
+            .get("action")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            return ToolResult::error(
+                "Missing required parameter `action`. See the tool description for the list of supported operations.",
+            );
+        };
+        let Some(required_action) =
+            crate::capability::ComputerAction::for_native_operation(&native_operation)
+        else {
+            return ToolResult::error(format!(
+                "Unknown Computer operation {native_operation:?}."
+            ));
+        };
+        if granted_action != required_action {
+            return ToolResult::error(format!(
+                "COMPUTER_ACTION_NOT_GRANTED: {native_operation:?} requires {}, not {}",
+                required_action.id(),
+                granted_action.id()
+            ));
+        }
+        self.execute_native(input, &native_operation).await
+    }
+
+    async fn execute_native(&self, input: Value, action: &str) -> ToolResult {
+        tracing::debug!(action = %action, "ComputerTool executing");
+
+        match action {
+            "observe" => self.do_observe().await,
+            "click_element" => self.do_click_element(&input).await,
+            "set_element_value" => self.do_set_element_value(&input).await,
+            "right_click_element" => {
+                self.do_element_gesture(&input, enigo::Button::Right, 1, "right-click").await
+            }
+            "double_click_element" => {
+                self.do_element_gesture(&input, enigo::Button::Left, 2, "double-click").await
+            }
+            "launch" => self.do_launch(&input).await,
+            "screenshot" => self.do_screenshot(&input).await,
+            "cursor_position" => self.do_cursor_position().await,
+            "list_windows" => self.do_list_windows().await,
+            "left_click" => self.do_click(&input, enigo::Button::Left, 1).await,
+            "right_click" => self.do_click(&input, enigo::Button::Right, 1).await,
+            "middle_click" => self.do_click(&input, enigo::Button::Middle, 1).await,
+            "double_click" => self.do_click(&input, enigo::Button::Left, 2).await,
+            "triple_click" => self.do_click(&input, enigo::Button::Left, 3).await,
+            "mouse_move" => self.do_mouse_move(&input).await,
+            "left_click_drag" => self.do_drag(&input).await,
+            "type" => self.do_type(&input).await,
+            "key" => self.do_key(&input).await,
+            "scroll" => self.do_scroll(&input).await,
+            "focus_window" => self.do_focus_window(&input).await,
+            "wait" => self.do_wait(&input).await,
+            other => ToolResult::error(format!("Unknown Computer operation {other:?}.")),
+        }
+    }
+
     /// Lazily construct (and cache) the accessibility engine. The error string
     /// is cached too, so an unavailable backend is reported without retrying.
     fn engine(&self) -> Result<Arc<dyn A11yEngine>, String> {
@@ -942,49 +1011,17 @@ impl Tool for ComputerTool {
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
-        let Some(action) = input.get("action").and_then(|v| v.as_str()) else {
+        let Some(action) = input
+            .get("action")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+        else {
             return ToolResult::error(
                 "Missing required parameter `action`. See the tool description for the \
                  list of supported actions.",
             );
         };
-
-        tracing::debug!(action = %action, "ComputerTool executing");
-
-        match action {
-            "observe" => self.do_observe().await,
-            "click_element" => self.do_click_element(&input).await,
-            "set_element_value" => self.do_set_element_value(&input).await,
-            "right_click_element" => {
-                self.do_element_gesture(&input, enigo::Button::Right, 1, "right-click").await
-            }
-            "double_click_element" => {
-                self.do_element_gesture(&input, enigo::Button::Left, 2, "double-click").await
-            }
-            "launch" => self.do_launch(&input).await,
-            "screenshot" => self.do_screenshot(&input).await,
-            "cursor_position" => self.do_cursor_position().await,
-            "list_windows" => self.do_list_windows().await,
-            "left_click" => self.do_click(&input, enigo::Button::Left, 1).await,
-            "right_click" => self.do_click(&input, enigo::Button::Right, 1).await,
-            "middle_click" => self.do_click(&input, enigo::Button::Middle, 1).await,
-            "double_click" => self.do_click(&input, enigo::Button::Left, 2).await,
-            "triple_click" => self.do_click(&input, enigo::Button::Left, 3).await,
-            "mouse_move" => self.do_mouse_move(&input).await,
-            "left_click_drag" => self.do_drag(&input).await,
-            "type" => self.do_type(&input).await,
-            "key" => self.do_key(&input).await,
-            "scroll" => self.do_scroll(&input).await,
-            "focus_window" => self.do_focus_window(&input).await,
-            "wait" => self.do_wait(&input).await,
-            other => ToolResult::error(format!(
-                "Unknown action {other:?}. Supported actions: observe, click_element, \
-                 set_element_value, right_click_element, double_click_element, launch, screenshot, \
-                 cursor_position, list_windows, left_click, right_click, middle_click, \
-                 double_click, triple_click, mouse_move, left_click_drag, type, key, scroll, \
-                 focus_window, wait."
-            )),
-        }
+        self.execute_native(input, &action).await
     }
 
     fn category(&self) -> ToolCategory {
@@ -1342,6 +1379,34 @@ mod tests {
         let result = tool().execute(json!({})).await;
         assert!(result.is_error);
         assert!(result.content.contains("action"), "{}", result.content);
+    }
+
+    #[tokio::test]
+    async fn canonical_action_grant_cannot_authorize_another_operation_group() {
+        let result = tool()
+            .execute_authorized(
+                crate::capability::COMPUTER_OBSERVE_ACTION_ID,
+                json!({"action":"launch","target":"notepad"}),
+            )
+            .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("COMPUTER_ACTION_NOT_GRANTED"));
+        assert!(
+            result
+                .content
+                .contains(crate::capability::COMPUTER_LAUNCH_ACTION_ID)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn canonical_action_grant_admits_only_its_native_operation_group() {
+        let result = tool()
+            .execute_authorized(
+                crate::capability::COMPUTER_OBSERVE_ACTION_ID,
+                json!({"action":"wait","seconds":0}),
+            )
+            .await;
+        assert!(!result.is_error, "{}", result.content);
     }
 
     #[tokio::test]

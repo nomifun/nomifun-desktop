@@ -8,7 +8,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import {
   asAgentPresetId, asCapabilityId, asPackageId, asDigestHex, createEmptyAgentPresetDocument,
-  type AgentCatalogResponse, type AgentPresetDocument, type AgentPresetDraft, type RoleProviderSelection,
+  type AgentCatalogResponse, type AgentPresetDocument, type AgentPresetDraft, type CapabilityModuleCatalogItem, type RoleProviderSelection,
 } from '@/common/types/agentPlatform';
 import en from '../../services/i18n/locales/en-US/agentSettings.json';
 import AgentRoleProviderPicker from './AgentRoleProviderPicker';
@@ -21,7 +21,15 @@ await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { tr
 const capability = { id: asCapabilityId('platform.search'), version: '1.0.0' };
 const role = { key: { role_id: 'search', contract_version: '1.0.0' }, contract_digest: asDigestHex('a'.repeat(64)) };
 const selection: RoleProviderSelection = { role, provider_mount_id: 'user-search' };
+const capabilityModule: CapabilityModuleCatalogItem = {
+  module: capability, display_name: 'Web search', description: '',
+  source_package: { id: asPackageId('platform'), version: '1.0.0' }, authoring_policy: 'direct', summary_kind: 'tool',
+  actions: [{ action_id: 'platform.search/search', input_schema: 'input', output_schema: 'output', effect_class: 'external_transmit', presentation: 'function_tool' }],
+  context_schema_refs: [], event_schema_refs: [], required_resource_kinds: [], required_host_ports: [],
+  required_modules: [], conflicting_modules: [], supported_surfaces: ['desktop'],
+};
 const catalog: AgentCatalogResponse = {
+  modules: [capabilityModule],
   capabilities: [{ capability, kind: 'tool', display_name: 'Web search', description: '',
     source_package: { id: asPackageId('platform'), version: '1.0.0' }, source_kind: 'bundled',
     materialization_state: 'materialized', supported_surfaces: ['desktop'], required_runtime_features: [],
@@ -30,7 +38,7 @@ const catalog: AgentCatalogResponse = {
   roles: [{ role, capabilities: [capability], providers: [{ selection, display_name: 'User search', description: 'Uses a local index',
     source_package: { id: asPackageId('acme.search'), version: '1.0.0' }, source_kind: 'managed_local', supported_capabilities: [capability] }] }],
 };
-const initial = (): AgentPresetDocument => ({ ...createEmptyAgentPresetDocument(), enabled_capabilities: [{ capability, action_allowlist: ['search'] }] });
+const initial = (): AgentPresetDocument => ({ ...createEmptyAgentPresetDocument(), enabled_capabilities: [{ capability, action_allowlist: ['platform.search/search'] }] });
 function mount(document = initial(), currentCatalog = catalog, disabled = false) {
   let current = document;
   let saved: AgentPresetDocument | undefined;
@@ -50,14 +58,13 @@ describe('component implementation selection', () => {
     const result = render(<I18nextProvider i18n={i18n}><MemoryRouter>
       <OfficialTemplateOverview busy={false} catalog={catalog} template={{
         template_key: 'chat.minimal', immutable: true, forkable: true,
-        seed: { enabled_capabilities: [capability], skill_bindings: [], required_resource_kinds: [], required_runtime_features: [] },
+        seed: { enabled_capabilities: [{ capability, action_allowlist: ['platform.search/search'] }], skill_bindings: [], required_resource_kinds: [], required_runtime_features: [] },
         role_coverage: { required_capability_categories: [], required_capability_ids: [], required_resource_kinds: [], required_runtime_features: [] },
       }} onSave={(_name, document) => { saved = document; }} />
     </MemoryRouter></I18nextProvider>);
     const view = within(result.container);
     fireEvent.click(view.getByRole('tab', { name: en.providers.title }));
-    fireEvent.click(view.getByRole('combobox', { name: 'Web search' }));
-    fireEvent.click(await within(document.body).findByText('User search — acme.search@1.0.0'));
+    fireEvent.change(view.getByRole('combobox', { name: 'Web search' }), { target: { value: providerSelectionKey(selection) } });
     fireEvent.click(view.getByRole('button', { name: en.workbench.saveAsMine }));
     expect(saved?.system_role_provider_overrides.search).toEqual(selection);
     expect(saved?.enabled_capabilities.map(item => item.capability)).toEqual([capability]);
@@ -65,8 +72,11 @@ describe('component implementation selection', () => {
 
   test('professional generation preset saves through the existing form without a chat model', () => {
     const original: AgentPresetDraft = { preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000001'), display_name: 'Creative', document: createEmptyAgentPresetDocument() };
-    original.document.enabled_capabilities = [{ capability: { id: asCapabilityId('creation.music'), version: '1.0.0' }, action_allowlist: [] }];
-    const mediaCatalog: AgentCatalogResponse = { ...catalog, capabilities: [{ ...catalog.capabilities[0], capability: original.document.enabled_capabilities[0].capability }] };
+    original.document.enabled_capabilities = [{ capability: { id: asCapabilityId('creation.media'), version: '1.0.0' }, action_allowlist: ['creation.media/music'] }];
+    const mediaModule: CapabilityModuleCatalogItem = { ...capabilityModule,
+      module: original.document.enabled_capabilities[0].capability, display_name: 'Media creation',
+      actions: [{ action_id: 'creation.media/music', input_schema: 'input', output_schema: 'output', effect_class: 'external_transmit', presentation: 'function_tool' }] };
+    const mediaCatalog: AgentCatalogResponse = { ...catalog, modules: [mediaModule], capabilities: [{ ...catalog.capabilities[0], capability: mediaModule.module }] };
     let saved = false;
     const result = render(<I18nextProvider i18n={i18n}><MemoryRouter>
       <AgentPresetEditor editor={{ preset: { preset_id: original.preset_id, display_name: original.display_name, source: 'user', bound_target_count: 0 }, draft: original }}
@@ -96,8 +106,7 @@ describe('component implementation selection', () => {
     const result = render(<I18nextProvider i18n={i18n}><MemoryRouter><Harness /></MemoryRouter></I18nextProvider>);
     const view = within(result.container);
     fireEvent.click(view.getByRole('tab', { name: en.providers.title }));
-    fireEvent.click(view.getByRole('combobox', { name: 'Web search' }));
-    fireEvent.click(await within(document.body).findByText('User search — acme.search@1.0.0'));
+    fireEvent.change(view.getByRole('combobox', { name: 'Web search' }), { target: { value: providerSelectionKey(selection) } });
     fireEvent.click(view.getByRole('button', { name: 'common.save' }));
     expect(saved?.document.system_role_provider_overrides.search).toEqual(selection);
     expect(saved?.document.enabled_capabilities).toEqual(original.document.enabled_capabilities);
@@ -107,8 +116,7 @@ describe('component implementation selection', () => {
   test('chooses an exact catalog Provider and preserves capability identity through save', async () => {
     const original = initial();
     const view = mount(original);
-    fireEvent.click(view.getByRole('combobox', { name: 'Web search' }));
-    fireEvent.click(await within(document.body).findByText('User search — acme.search@1.0.0'));
+    fireEvent.change(view.getByRole('combobox', { name: 'Web search' }), { target: { value: providerSelectionKey(selection) } });
     await waitFor(() => expect(view.state().system_role_provider_overrides.search).toEqual(selection));
     expect(view.state().enabled_capabilities).toEqual(original.enabled_capabilities);
     expect(original.system_role_provider_overrides).toEqual({});
@@ -124,9 +132,7 @@ describe('component implementation selection', () => {
     const view = mount(original);
     expect(within(view.container).getAllByRole('alert')).toHaveLength(2);
     expect(view.state().system_role_provider_overrides.search).toEqual(old);
-    fireEvent.click(view.getByRole('combobox', { name: 'Web search' }));
-    const options = await within(document.body).findAllByText(en.providers.inherit);
-    fireEvent.click(options[options.length - 1]);
+    fireEvent.change(view.getByRole('combobox', { name: 'Web search' }), { target: { value: '' } });
     await waitFor(() => expect(view.state().system_role_provider_overrides).toEqual({ other: unrelated }));
     expect(original.system_role_provider_overrides.search).toEqual(old);
   });

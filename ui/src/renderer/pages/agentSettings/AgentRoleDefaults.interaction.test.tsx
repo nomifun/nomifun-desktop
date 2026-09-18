@@ -8,6 +8,7 @@ import { agentPlatform } from '@/common/adapter/ipcBridge';
 import { asCapabilityId, asDigestHex, asPackageId, type AgentCatalogResponse, type RoleProviderSelection } from '@/common/types/agentPlatform';
 import en from '../../services/i18n/locales/en-US/agentSettings.json';
 import AgentRoleDefaults from './AgentRoleDefaults';
+import { providerSelectionKey } from './roleProviders';
 
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: { agentSettings: en } } }, interpolation: { escapeValue: false } });
@@ -15,7 +16,7 @@ const role = { key: { role_id: 'test.context', contract_version: '1.0.0' }, cont
 const a: RoleProviderSelection = { role, provider_mount_id: 'provider-a' };
 const b: RoleProviderSelection = { role, provider_mount_id: 'provider-b' };
 const capability = { id: asCapabilityId('test.context.facade'), version: '1.0.0' };
-const catalog: AgentCatalogResponse = { capabilities: [], skills: [], mcp_tools: [], roles: [{ role, capabilities: [capability],
+const catalog: AgentCatalogResponse = { modules: [], capabilities: [], skills: [], mcp_tools: [], roles: [{ role, capabilities: [capability],
   providers: [a, b].map((selection, index) => ({ selection, display_name: `Provider ${index}`, description: '',
     source_package: { id: asPackageId('test.plugin'), version: '1.0.0' }, source_kind: 'managed_local', supported_capabilities: [capability] })) }] };
 
@@ -31,8 +32,7 @@ test('default selection is explicit and saves the exact Catalog identity with cr
   spyOn(agentPlatform.roleDefaults, 'invoke').mockResolvedValue([]);
   const save = spyOn(agentPlatform.putRoleDefault, 'invoke').mockResolvedValue({ selection: b, binding_version: 1, updated_at_ms: 10 });
   const view = await open();
-  fireEvent.click(await view.findByRole('combobox', { name: capability.id }));
-  fireEvent.click(await view.findByText('Provider 1 — test.plugin@1.0.0'));
+  fireEvent.change(await view.findByRole('combobox', { name: capability.id }), { target: { value: providerSelectionKey(b) } });
   expect(save).not.toHaveBeenCalled();
   fireEvent.click(view.getByRole('button', { name: en.providers.defaultsSave }));
   await waitFor(() => expect(save).toHaveBeenCalledWith({ selection: b, expected_binding_version: 0 }));
@@ -43,8 +43,7 @@ test('a stale write reports failure and never overwrites with an automatic retry
   spyOn(agentPlatform.roleDefaults, 'invoke').mockResolvedValue([{ selection: a, binding_version: 7, updated_at_ms: 10 }]);
   const save = spyOn(agentPlatform.putRoleDefault, 'invoke').mockRejectedValue(new Error('ROLE_DEFAULT_VERSION_CONFLICT'));
   const view = await open();
-  fireEvent.click(await view.findByRole('combobox', { name: capability.id }));
-  fireEvent.click(await view.findByText('Provider 1 — test.plugin@1.0.0'));
+  fireEvent.change(await view.findByRole('combobox', { name: capability.id }), { target: { value: providerSelectionKey(b) } });
   fireEvent.click(view.getByRole('button', { name: en.providers.defaultsSave }));
   await view.findByText(en.providers.defaultsSaveError);
   expect(save).toHaveBeenCalledTimes(1);

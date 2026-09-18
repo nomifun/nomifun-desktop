@@ -1068,6 +1068,12 @@ mod tests {
                 let db = nomifun_db::init_database(&config.database_path())
                     .await
                     .unwrap();
+                sqlx::query(
+                    "UPDATE system_settings SET language = 'preserve-me', updated_at = 42 WHERE singleton_key = 'system'",
+                )
+                .execute(db.pool())
+                .await
+                .unwrap();
                 sqlx::query(corruption).execute(db.pool()).await.unwrap();
                 db.close().await;
                 let generation = uuid::Uuid::now_v7().to_string();
@@ -1075,7 +1081,6 @@ mod tests {
                 let media = data.path().join("workshop/assets/keep.bin");
                 std::fs::create_dir_all(media.parent().unwrap()).unwrap();
                 std::fs::write(&media, b"keep original media").unwrap();
-                let before = std::fs::read(config.database_path()).unwrap();
                 let receipt = data
                     .path()
                     .join(nomifun_common::factory_reset::V3_DATASET_RECEIPT_FILE);
@@ -1096,7 +1101,59 @@ mod tests {
                     "{error}"
                 );
                 assert!(!error.contains("already consumed"), "{error}");
-                assert_eq!(std::fs::read(config.database_path()).unwrap(), before);
+                // Opening and closing a SQLite database may legitimately
+                // update header/page bookkeeping even when no logical row is
+                // changed. Prove preservation through a read-only reopen and
+                // the exact corruption fence instead of comparing file bytes.
+                let pool = PoolOptions::<Sqlite>::new()
+                    .max_connections(1)
+                    .connect_with(
+                        SqliteConnectOptions::new()
+                            .filename(config.database_path())
+                            .read_only(true),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    sqlx::query_as::<_, (String, i64)>(
+                        "SELECT language, updated_at FROM system_settings WHERE singleton_key = 'system'",
+                    )
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap(),
+                    ("preserve-me".to_owned(), 42),
+                );
+                match expected {
+                    "migration 59" => assert_eq!(
+                        sqlx::query_scalar::<_, String>(
+                            "SELECT hex(checksum) FROM _sqlx_migrations WHERE version = 59",
+                        )
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap(),
+                        "00",
+                    ),
+                    "identity tables are missing" => assert_eq!(
+                        sqlx::query_scalar::<_, i64>(
+                            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'installation_identity'",
+                        )
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap(),
+                        0,
+                    ),
+                    "schema contract" => assert_eq!(
+                        sqlx::query_scalar::<_, i64>(
+                            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'restrict_template_run_deleted_assets_update'",
+                        )
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap(),
+                        0,
+                    ),
+                    _ => unreachable!("covered validation fixture"),
+                }
+                pool.close().await;
                 assert_eq!(std::fs::read(media).unwrap(), b"keep original media");
                 assert_eq!(std::fs::read(receipt).unwrap(), receipt_before);
                 assert_eq!(

@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { Alert, Button, Modal, Select, Spin } from '@arco-design/web-react';
+import { Alert, Button, Modal, Spin } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
 import { agentPlatform } from '@/common/adapter/ipcBridge';
 import type { AgentCatalogResponse, InstallationRoleBinding, RoleProviderSelection } from '@/common/types/agentPlatform';
@@ -58,17 +58,18 @@ export default function AgentRoleDefaults({ catalog }: { catalog: AgentCatalogRe
         const label = role?.capabilities.map(ref => catalog.capabilities.find(item => item.capability.id === ref.id)?.display_name ?? ref.id).join(' / ') || roleId;
         return <div key={roleId} className={styles.field}>
           <span>{label}</span>
-          <Select aria-label={label} value={key} disabled={saving !== null}
-            placeholder={t('agentSettings.providers.defaultsUnbound')}
-            onChange={(value: string) => {
+          <select className={styles.nativeSelect} aria-label={label} value={key ?? ''} disabled={saving !== null}
+            onChange={(event) => {
+              const value = event.currentTarget.value;
               const candidate = providers.find(item => providerSelectionKey(item.selection) === value);
               if (candidate) setChoices(previous => ({ ...previous, [roleId]: candidate.selection }));
             }}>
-            {missing && <Select.Option value={key!} disabled>{t('agentSettings.providers.missing')}</Select.Option>}
-            {providers.map(item => <Select.Option key={providerSelectionKey(item.selection)} value={providerSelectionKey(item.selection)}>
+            {!selection && <option value=''>{t('agentSettings.providers.defaultsUnbound')}</option>}
+            {missing && <option value={key!} disabled>{t('agentSettings.providers.missing')}</option>}
+            {providers.map(item => <option key={providerSelectionKey(item.selection)} value={providerSelectionKey(item.selection)}>
               {item.display_name} — {item.source_package.id}@{item.source_package.version}
-            </Select.Option>)}
-          </Select>
+            </option>)}
+          </select>
           {missing && <span role='alert'>{t('agentSettings.providers.defaultsMissingHint')}</span>}
           <Button disabled={saving !== null || !selection || !!missing || (current && providerSelectionKey(current.selection) === key)}
             loading={saving === roleId} onClick={() => void save(roleId)}>{t('agentSettings.providers.defaultsSave')}</Button>

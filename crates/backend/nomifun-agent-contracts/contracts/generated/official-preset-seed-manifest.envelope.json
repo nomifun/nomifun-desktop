@@ -2,7 +2,7 @@
   "digest_algorithm": "sorted-json-sha256-v1",
   "payload": {
     "manifest_version": "1.0.0",
-    "target_first_party_contribution_digest": "dbcf73265a89a1133c2683124cf387202eec0888baf31ac4c922d3e94baea33d",
+    "target_first_party_contribution_digest": "d7cc44b88b30a66b92f755996602284942f0e664bffb66e38dfce188c82d6568",
     "target_runtime_feature_inventory_digest": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
     "templates": {
       "chat.minimal": {
@@ -14,54 +14,128 @@
       "assistant.general": {
         "enabled_capabilities": [
           {
-            "id": "knowledge",
-            "version": "1.0.0"
+            "capability": {
+              "id": "knowledge",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "knowledge/autogen",
+              "knowledge/read",
+              "knowledge/search",
+              "knowledge/write"
+            ]
           },
           {
-            "id": "project.memory",
-            "version": "1.0.0"
+            "capability": {
+              "id": "project.memory",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "project.memory/read",
+              "project.memory/write"
+            ]
           },
           {
-            "id": "web.research",
-            "version": "1.0.0"
+            "capability": {
+              "id": "web.research",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "web.research/fetch",
+              "web.research/search"
+            ]
           },
           {
-            "id": "creation.media",
-            "version": "1.0.0"
+            "capability": {
+              "id": "automation.schedule",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "automation.schedule/list"
+            ]
+          },
+          {
+            "capability": {
+              "id": "browser",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "browser/navigate",
+              "browser/observe",
+              "browser/render_content"
+            ]
+          },
+          {
+            "capability": {
+              "id": "computer",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "computer/a11y.observe",
+              "computer/observe"
+            ]
           }
         ],
         "skill_bindings": [],
         "required_resource_kinds": [
+          "browser",
+          "computer",
           "knowledge_base",
-          "project_memory"
+          "project_memory",
+          "scheduler"
         ],
         "required_runtime_features": []
       },
       "coding.codex": {
         "enabled_capabilities": [
           {
-            "id": "agent.collaboration",
-            "version": "1.0.0"
+            "capability": {
+              "id": "workspace.files",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "workspace.files/patch",
+              "workspace.files/read",
+              "workspace.files/search",
+              "workspace.files/write"
+            ]
           },
           {
-            "id": "workspace.files",
-            "version": "1.0.0"
+            "capability": {
+              "id": "workspace.vcs",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "workspace.vcs/commit",
+              "workspace.vcs/diff",
+              "workspace.vcs/stage",
+              "workspace.vcs/status"
+            ]
           },
           {
-            "id": "workspace.vcs",
-            "version": "1.0.0"
+            "capability": {
+              "id": "workspace.process",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "workspace.process/cancel",
+              "workspace.process/close_stdin",
+              "workspace.process/exec",
+              "workspace.process/input",
+              "workspace.process/poll",
+              "workspace.process/resize",
+              "workspace.process/start"
+            ]
           },
           {
-            "id": "workspace.process",
-            "version": "1.0.0"
-          },
-          {
-            "id": "workspace.artifacts",
-            "version": "1.0.0"
-          },
-          {
-            "id": "web.research",
-            "version": "1.0.0"
+            "capability": {
+              "id": "web.research",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "web.research/fetch",
+              "web.research/search"
+            ]
           }
         ],
         "skill_bindings": [],
@@ -97,36 +171,42 @@
       "companion.default": {
         "enabled_capabilities": [
           {
-            "id": "companion",
-            "version": "1.0.0"
+            "capability": {
+              "id": "companion",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "companion/evolve",
+              "companion/learn"
+            ]
           },
           {
-            "id": "companion.memory",
-            "version": "1.0.0"
+            "capability": {
+              "id": "companion.memory",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "companion.memory/recall",
+              "companion.memory/write"
+            ]
           },
           {
-            "id": "knowledge",
-            "version": "1.0.0"
+            "capability": {
+              "id": "channel.messaging",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "channel.messaging/reply"
+            ]
           },
           {
-            "id": "channel.messaging",
-            "version": "1.0.0"
-          },
-          {
-            "id": "robot.display",
-            "version": "1.0.0"
-          },
-          {
-            "id": "robot.vision",
-            "version": "1.0.0"
-          },
-          {
-            "id": "robot.motion",
-            "version": "1.0.0"
-          },
-          {
-            "id": "robot.device_tools",
-            "version": "1.0.0"
+            "capability": {
+              "id": "robot",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "robot/vision"
+            ]
           }
         ],
         "skill_bindings": [],
@@ -134,7 +214,6 @@
           "channel",
           "companion",
           "companion_memory",
-          "knowledge_base",
           "robot"
         ],
         "required_runtime_features": []
@@ -142,16 +221,33 @@
       "customer-service.default": {
         "enabled_capabilities": [
           {
-            "id": "customer.service",
-            "version": "1.0.0"
+            "capability": {
+              "id": "customer.service",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "customer.service/handoff",
+              "customer.service/notes.read"
+            ]
           },
           {
-            "id": "knowledge",
-            "version": "1.0.0"
+            "capability": {
+              "id": "knowledge",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "knowledge/read",
+              "knowledge/search"
+            ]
           },
           {
-            "id": "channel.messaging",
-            "version": "1.0.0"
+            "capability": {
+              "id": "channel.messaging",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "channel.messaging/reply"
+            ]
           }
         ],
         "skill_bindings": [],
@@ -165,17 +261,46 @@
       "creative-studio.default": {
         "enabled_capabilities": [
           {
-            "id": "creation.media",
-            "version": "1.0.0"
+            "capability": {
+              "id": "creation.media",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "creation.media/audio",
+              "creation.media/image",
+              "creation.media/image_edit",
+              "creation.media/music",
+              "creation.media/text",
+              "creation.media/video"
+            ]
           },
           {
-            "id": "creative.workshop",
-            "version": "1.0.0"
+            "capability": {
+              "id": "creative.workshop",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "creative.workshop/asset.read",
+              "creative.workshop/asset.write",
+              "creative.workshop/canvas.edit",
+              "creative.workshop/canvas.read",
+              "creative.workshop/template.run"
+            ]
+          },
+          {
+            "capability": {
+              "id": "office",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "office/preview"
+            ]
           }
         ],
         "skill_bindings": [],
         "required_resource_kinds": [
-          "asset_library"
+          "asset_library",
+          "canvas"
         ],
         "required_runtime_features": []
       }
@@ -189,39 +314,41 @@
       },
       "assistant.general": {
         "required_capability_categories": [
-          "attachments",
-          "generation",
+          "automation",
+          "browser",
+          "computer",
           "knowledge",
           "project_memory",
           "web_research"
         ],
         "required_capability_ids": [
-          "creation.media",
+          "automation.schedule",
+          "browser",
+          "computer",
           "knowledge",
           "project.memory",
           "web.research"
         ],
         "required_runtime_features": [],
         "required_resource_kinds": [
+          "browser",
+          "computer",
           "knowledge_base",
-          "project_memory"
+          "project_memory",
+          "scheduler"
         ]
       },
       "coding.codex": {
         "required_capability_categories": [
           "file_operations",
           "native_responses",
-          "plan_goal",
           "shell_process_pty",
           "skills_plugins",
-          "subagent_multi_agent",
           "vcs_review",
           "workspace_repository"
         ],
         "required_capability_ids": [
-          "agent.collaboration",
           "web.research",
-          "workspace.artifacts",
           "workspace.files",
           "workspace.process",
           "workspace.vcs"
@@ -259,7 +386,6 @@
         "required_capability_categories": [
           "companion_memory",
           "im_channel",
-          "knowledge",
           "learning_evolution",
           "persona"
         ],
@@ -267,14 +393,13 @@
           "channel.messaging",
           "companion",
           "companion.memory",
-          "knowledge"
+          "robot"
         ],
         "required_runtime_features": [],
         "required_resource_kinds": [
           "channel",
           "companion",
           "companion_memory",
-          "knowledge_base",
           "robot"
         ]
       },
@@ -306,11 +431,13 @@
         ],
         "required_capability_ids": [
           "creation.media",
-          "creative.workshop"
+          "creative.workshop",
+          "office"
         ],
         "required_runtime_features": [],
         "required_resource_kinds": [
-          "asset_library"
+          "asset_library",
+          "canvas"
         ]
       }
     },
@@ -324,5 +451,5 @@
       "research.web"
     ]
   },
-  "payload_digest": "3e6e6db4b20c13bdfee5031602947d8a651195d4e675b72bd53e56a88c6dfbf3"
+  "payload_digest": "61e3b4f404c7296a560b51132630a9c5712dd3b9712c063a53f9b3878f8e3c68"
 }

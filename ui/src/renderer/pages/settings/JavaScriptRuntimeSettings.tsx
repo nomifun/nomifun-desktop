@@ -6,6 +6,7 @@
 
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import { Alert } from '@arco-design/web-react';
 import SettingsPageWrapper from './components/SettingsPageWrapper';
 import RuntimeManager from './RuntimeManager';
 
@@ -22,6 +23,7 @@ const JavaScriptRuntimeSettings: React.FC = () => {
           {t('settings.runtimeManager.subtitle')}
         </p>
       </header>
+      <Alert className='mb-16px' type='info' content={t('settings.runtimeManager.separateHint')} />
       <RuntimeManager />
     </SettingsPageWrapper>
   );

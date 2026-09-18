@@ -47,13 +47,16 @@ describe('Agent navigation', () => {
     expect(router.includes("path='/settings/agent'")).toBe(false);
   });
 
-  test('execution engines link to the public Agent workbench and keep Node.js separate', () => {
+  test('Nomi Runtime diagnostics link to Agent Workbench and keep Node.js separate', () => {
     const settingsPage = read(new URL('../settings/ExecutionEngines/index.tsx', import.meta.url));
     const javascriptPage = read(new URL('../settings/JavaScriptRuntimeSettings.tsx', import.meta.url));
 
     expect(settingsPage.includes('AgentModalContent')).toBe(false);
     expect(settingsPage.includes("to='/agent'")).toBe(true);
     expect(settingsPage.includes("to='/settings/javascript-runtime'")).toBe(true);
+    expect(settingsPage.includes("const NOMI_FAMILY = 'nomifun.nomi'")).toBe(true);
+    expect(settingsPage.includes('nomifun.coding')).toBe(false);
+    expect(settingsPage.includes('<Select')).toBe(false);
     expect(settingsPage.includes('<RuntimeManager />')).toBe(false);
     expect(javascriptPage.includes('<RuntimeManager />')).toBe(true);
     expect(settingsPage.includes('<LocalAgents />')).toBe(false);

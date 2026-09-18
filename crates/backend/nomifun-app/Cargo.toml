@@ -51,6 +51,7 @@ path = "tests/agent_provider_health_e2e.rs"
 [[test]]
 name = "official_preset_catalog_integrity"
 path = "tests/official_preset_catalog_integrity.rs"
+required-features = ["browser-use", "computer-use"]
 
 [[test]]
 name = "connection_test_e2e"

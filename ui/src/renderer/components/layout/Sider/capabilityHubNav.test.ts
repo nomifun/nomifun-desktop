@@ -80,7 +80,9 @@ describe('capability hub navigation', () => {
     expect(routerSource.includes("path='/settings/browser-use'")).toBe(false);
     expect(routerSource.includes("path='/browser'")).toBe(false);
     const conversationSource=readSource(new URL('../../../pages/conversation/components/ChatLayout/index.tsx', import.meta.url));
-    expect(conversationSource.includes('chat-browser-toggle')).toBe(true);
-    expect(conversationSource.includes('BrowserWorkspacePanel')).toBe(true);
+    expect(conversationSource.includes('chat-browser-toggle')).toBe(false);
+    expect(conversationSource.includes('BrowserWorkspacePanel')).toBe(false);
+    expect(conversationSource.includes('browser={conversation_id ? {')).toBe(true);
+    expect(conversationSource.includes('BrowserPanel')).toBe(true);
   });
 });

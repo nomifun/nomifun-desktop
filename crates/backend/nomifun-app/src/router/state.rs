@@ -970,6 +970,12 @@ async fn build_nomi_core_agent_api_state(
     )?;
     #[cfg(not(feature = "browser-use"))]
     let installation_role_bindings = Default::default();
+    #[cfg(feature = "computer-use")]
+    let installation_role_bindings = {
+        let mut bindings = installation_role_bindings;
+        bindings.extend(super::agent_role_host::installation_binding(&materialized)?);
+        bindings
+    };
     let environment = CompilerEnvironment {
         resolver_version: VersionString::from(CONTRACT_VERSION),
         required_runtime_protocol_version: VersionString::from(CONTRACT_VERSION),

@@ -35,7 +35,7 @@ pub(crate) struct NomiCoreBuiltinPlan {
     pub wave4_owners: Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
     pub wave5_owner: Arc<super::agent_wave5_host::NomiCoreWave5Host>,
     pub wave2_owner: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
-    pub robot_owner: Option<Arc<super::nomi_core_robot::NomiCoreRobotWave4Owner>>,
+    pub robot_owner: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
 }
 
 pub(crate) async fn build(
@@ -74,6 +74,18 @@ pub(crate) async fn build(
     let wave2_owner = super::nomi_core_wave2::action_host_port(services, effect_store.clone());
     let wave2_ports =
         nomifun_agent_domain_wave2::Wave2RoleHostPorts::with_actions(wave2_owner.clone());
+    #[cfg(feature = "computer-use")]
+    let wave2_ports = {
+        let mut wave2_ports = wave2_ports;
+        let computer = Arc::new(super::agent_role_host::ComputerRoleInvoker::new(
+            Arc::new(nomi_computer::tool::ComputerTool::new(&Default::default())),
+            effect_store.clone(),
+        ));
+        wave2_ports.computer_actions = Arc::new(
+            super::agent_role_host::RoleHostPortAdapter::new(computer),
+        );
+        wave2_ports
+    };
     let wave2 = nomifun_agent_domain_wave2::registrations_with_role_host_ports(wave2_ports)
         .map_err(anyhow::Error::msg)?;
     replace_package_registrations(&mut registrations, wave2);
@@ -150,35 +162,35 @@ pub(crate) async fn build(
             nomifun_agent_domain_wave4::CUSTOMER_SERVICE_MODULE_ID,
         )])
         .collect::<BTreeSet<_>>();
-    let mut wave4_context =
+    let wave4_context =
         super::nomi_core_wave4::nomi_core_wave4_context_capability_ids();
     let mut lifecycle_capability_ids =
         super::nomi_core_wave4::nomi_core_wave4_lifecycle_capability_ids()
             .into_iter()
             .collect::<BTreeSet<_>>();
     let robot_owner = services.robot.as_ref().map(|robot| {
-        Arc::new(super::nomi_core_robot::NomiCoreRobotWave4Owner::new(
+        Arc::new(super::nomi_core_robot::RobotModuleOwner::new(
             Arc::clone(&services.authoritative_user_id),
             Arc::clone(robot),
         ))
     });
-    if let Some(owner) = robot_owner.as_ref() {
+    if robot_owner.is_some() {
+        // The Robot execution owner is dynamic because its concrete tools are
+        // frozen from the selected device at Session admission. The canonical
+        // Module/Action manifest must still be installed in the Kernel so
+        // official presets and personal Agents can compile the `robot` grant.
         replace_package_registrations(
             &mut registrations,
-            vec![super::nomi_core_robot::NomiCoreRobotWave4Owner::registration(
-                Arc::clone(owner),
-            )
-            .map_err(anyhow::Error::msg)?],
+            vec![
+                nomifun_agent_domain_wave4::robot_registration()
+                    .map_err(anyhow::Error::msg)?,
+            ],
         );
-        wave4_context.extend(super::nomi_core_robot::context_capability_ids());
-        lifecycle_capability_ids
-            .extend(super::nomi_core_robot::lifecycle_capability_ids());
     }
     let lifecycle_invoker: Arc<dyn NomiPlatformBuiltinLifecycleInvoker> =
         Arc::new(NomiCoreLifecycleInvoker {
             wave4: Arc::clone(&wave4),
             customer_service: Arc::clone(&customer_service_owner),
-            robot: robot_owner.clone(),
         });
 
     // Notification and Remote remain platform packages with zero Agent
@@ -237,7 +249,7 @@ pub(crate) async fn build(
         .collect();
     let mut host_dynamic_tool_capability_ids = robot_owner
         .as_ref()
-        .map(|_| super::nomi_core_robot::tool_capability_ids())
+        .map(|_| BTreeSet::from([super::nomi_core_robot::module_capability_id()]))
         .unwrap_or_default();
     // Available through explicitly compatible engines, not Nomi's native
     // registry or its JavaScript Plugin tool path.
@@ -337,7 +349,6 @@ struct NomiCoreLifecycleInvoker {
     wave4: Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
     customer_service:
         Arc<nomifun_customer_service::CustomerServiceAgentCapabilityOwner>,
-    robot: Option<Arc<super::nomi_core_robot::NomiCoreRobotWave4Owner>>,
 }
 
 #[async_trait::async_trait]
@@ -377,13 +388,6 @@ impl NomiPlatformBuiltinLifecycleInvoker for NomiCoreLifecycleInvoker {
                     .await
                     .map_err(|error| error.to_string())
             }
-            nomifun_agent_domain_wave4::ROBOT_LINK
-            | nomifun_agent_domain_wave4::ROBOT_AUDIO => self
-                .robot
-                .as_ref()
-                .ok_or_else(|| "Nomi Robot lifecycle owner is unavailable".to_owned())?
-                .activate_lifecycle(request)
-                .await,
             "workspace.files" => Ok(StrictJsonValue(
                 serde_json::json!({
                     "capability_id": "workspace.files",
@@ -400,18 +404,6 @@ impl NomiPlatformBuiltinLifecycleInvoker for NomiCoreLifecycleInvoker {
         &self,
         request: NomiPlatformBuiltinLifecycleInvocation,
     ) -> Result<Option<Arc<dyn nomifun_ai_agent::ContextContributor>>, String> {
-        if matches!(
-            request.capability.capability.id.as_ref(),
-            nomifun_agent_domain_wave4::ROBOT_LINK
-                | nomifun_agent_domain_wave4::ROBOT_AUDIO
-        ) {
-            return self
-                .robot
-                .as_ref()
-                .ok_or_else(|| "Nomi Robot lifecycle owner is unavailable".to_owned())?
-                .lifecycle_context_contributor(&request)
-                .await;
-        }
         if request.capability.capability.id.as_ref() != "workspace.files" {
             return Ok(None);
         }

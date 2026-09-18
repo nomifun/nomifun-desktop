@@ -47,6 +47,8 @@ beforeEach(() => {
     const spy = spyOn(event, 'on').mockReturnValue(() => {});
     restores.push(() => spy.mockRestore());
   }
+  const robotStatus = spyOn(ipcBridge.robot.onStatus, 'on').mockReturnValue(() => {});
+  restores.push(() => robotStatus.mockRestore());
 });
 afterEach(() => { cleanup(); restores.splice(0).forEach((restore) => restore()); globalThis.fetch = realFetch; });
 
@@ -119,6 +121,99 @@ describe('Agent resource picker', () => {
     expect(inventory.options.plugin).toEqual([
       { value: plugin.plugin_id, label: plugin.display_name, description: plugin.description },
     ]);
+  });
+
+  test('joins live Robot status and exact Action permissions before offering a device', async () => {
+    const list = spyOn(ipcBridge.robot.list, 'invoke').mockResolvedValue([
+      {
+        robot_id: 'robot-ready', name: 'Mochi bot', companion_id: null,
+        board: 'esp32-s3', firmware_version: '1.0.0', last_seen: null,
+        created_at: '2026-09-18T00:00:00Z', supported_permissions: ['vision', 'motion'],
+        permissions: { vision: true, motion: true, display: false, device_tools: false, proactive_speech: false, continuous_vision: false },
+      },
+      {
+        robot_id: 'robot-blocked', name: 'Roux bot', companion_id: null,
+        board: 'esp32-s3', firmware_version: '1.0.0', last_seen: null,
+        created_at: '2026-09-18T00:00:00Z', supported_permissions: ['vision'],
+        permissions: { vision: true, motion: false, display: false, device_tools: false, proactive_speech: false, continuous_vision: false },
+      },
+    ]);
+    const statuses = spyOn(ipcBridge.robot.statuses, 'invoke').mockResolvedValue([
+      { robot_id: 'robot-ready', companion_id: null, phase: 'idle', changed_at: 1 },
+      { robot_id: 'robot-blocked', companion_id: null, phase: 'offline', changed_at: 1 },
+    ]);
+    restores.push(() => list.mockRestore(), () => statuses.mockRestore());
+
+    const loaded = await loadAgentResourceInventory(
+      ['robot'],
+      new Set(['robot']),
+      new Set(['robot/vision', 'robot/motion'])
+    );
+    expect(loaded.options.robot).toEqual([
+      expect.objectContaining({
+        value: 'robot-ready', selectable: true, robotPhase: 'idle',
+        robotRequiredPermissions: ['vision', 'motion'], robotDisabledPermissions: [],
+        robotUnsupportedPermissions: [],
+      }),
+      expect.objectContaining({
+        value: 'robot-blocked', selectable: false, robotPhase: 'offline',
+        robotUnsupportedPermissions: ['motion'], robotDisabledPermissions: [],
+      }),
+    ]);
+  });
+
+  test('shows unavailable Robot guidance and only accepts a connected permitted device', async () => {
+    const robotInventory: AgentResourceInventory = { options: { robot: [
+      { value: 'offline', label: 'Offline bot', description: 'esp32', selectable: false,
+        robotPhase: 'offline', robotRequiredPermissions: ['vision'], robotDisabledPermissions: [], robotUnsupportedPermissions: [] },
+      { value: 'ready', label: 'Ready bot', description: 'esp32', selectable: true,
+        robotPhase: 'idle', robotRequiredPermissions: ['vision'], robotDisabledPermissions: [], robotUnsupportedPermissions: [] },
+    ] }, errors: {} };
+    function Harness() {
+      const [value, setValue] = useState<AgentResourceSelectionValue>({});
+      return <><AgentResourcePicker requiredKinds={['robot']} capabilityIds={['robot']}
+        actionIds={['robot/vision']} value={value} onChange={setValue}
+        loadInventory={async () => robotInventory} />
+        <output data-testid='robot-selection'>{value.robot}</output></>;
+    }
+    const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><Harness /></MemoryRouter></I18nextProvider>);
+    const select = screen.getByRole('combobox', { name: 'Select Robot' });
+    await waitFor(() => expect(select.getAttribute('aria-disabled')).not.toBe('true'));
+    fireEvent.click(select);
+    const offline = await screen.findByText('Offline bot');
+    expect(offline.closest('.arco-select-option-disabled')).toBeTruthy();
+    expect(screen.getByText(/Offline — connect this device before starting/)).toBeTruthy();
+    fireEvent.click(screen.getByText('Ready bot'));
+    await waitFor(() => expect(screen.getByTestId('robot-selection').textContent).toBe('ready'));
+  });
+
+  test('retains a selected Robot that goes offline while reporting launch unavailable', async () => {
+    const states: boolean[] = [];
+    const robotInventory: AgentResourceInventory = { options: { robot: [
+      { value: 'offline', label: 'Offline bot', selectable: false, robotPhase: 'offline',
+        robotRequiredPermissions: ['vision'], robotDisabledPermissions: [], robotUnsupportedPermissions: [] },
+    ] }, errors: {} };
+    const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
+      requiredKinds={['robot']} capabilityIds={['robot']} actionIds={['robot/vision']}
+      value={{ robot: 'offline' }} onChange={() => { throw new Error('live status must not erase the binding'); }}
+      onAvailabilityChange={(ready) => states.push(ready)} loadInventory={async () => robotInventory}
+    /></MemoryRouter></I18nextProvider>);
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Select Robot' }).textContent).toContain('Offline bot'));
+    await waitFor(() => expect(states.at(-1)).toBe(false));
+  });
+
+  test('shows real Computer permission readiness for the automatic local desktop resource', async () => {
+    const permissions = spyOn(ipcBridge.computerPermissions.get, 'invoke').mockResolvedValue({
+      accessibility: null, screen_recording: null, platform: 'windows', app_label: 'NomiFun',
+    });
+    restores.push(() => permissions.mockRestore());
+    const states: boolean[] = [];
+    const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
+      requiredKinds={['computer']} capabilityIds={['computer']} actionIds={['computer/observe']}
+      value={{}} onChange={() => undefined} onAvailabilityChange={(ready) => states.push(ready)}
+    /></MemoryRouter></I18nextProvider>);
+    expect(await screen.findByText(en.resources.computerReady)).toBeTruthy();
+    await waitFor(() => expect(states.at(-1)).toBe(true));
   });
 
   test('filters dependent resources by the selected product owner', () => {

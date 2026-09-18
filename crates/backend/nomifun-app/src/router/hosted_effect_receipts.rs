@@ -6,7 +6,7 @@ use nomifun_common::AppError;
 use nomifun_db::{SqlitePool, sqlx};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone)]
 pub(crate) struct HostedEffectReceipts {
@@ -311,6 +311,7 @@ pub(crate) struct RobotReceiptInvoker {
     pub receipts: HostedEffectReceipts,
     pub user: String,
     pub session: String,
+    pub provider_actions: Arc<BTreeMap<String, nomifun_agent_contracts::ActionId>>,
     pub delegate: Arc<dyn nomifun_ai_agent::NomiHostDynamicToolInvoker>,
 }
 #[async_trait]
@@ -327,6 +328,16 @@ impl nomifun_ai_agent::NomiHostDynamicToolInvoker for RobotReceiptInvoker {
                 false,
             )
         };
+        let action_id = self
+            .provider_actions
+            .get(&request.provider_name)
+            .ok_or_else(|| {
+                nomifun_ai_agent::NomiHostDynamicToolError::new(
+                    "ROBOT_SESSION_TOOL_NOT_BOUND",
+                    "Robot provider tool was not frozen into this AgentSession",
+                    false,
+                )
+            })?;
         let receipt = self
             .receipts
             .begin(
@@ -334,7 +345,7 @@ impl nomifun_ai_agent::NomiHostDynamicToolInvoker for RobotReceiptInvoker {
                 &self.session,
                 request.operation_id.as_ref(),
                 request.capability_id.as_ref(),
-                &request.provider_name,
+                action_id.as_ref(),
                 &request.arguments.0,
                 Domain::Robot,
             )
@@ -364,8 +375,11 @@ impl nomifun_ai_agent::NomiHostDynamicToolInvoker for RobotReceiptInvoker {
                 if matches!(
                     error.code.as_ref(),
                     "INVALID_PAYLOAD"
+                        | "ACTION_NOT_GRANTED"
                         | "RESOURCE_OWNER_MISMATCH"
                         | "PRESET_RESOURCE_NOT_BOUND"
+                        | "ROBOT_PERMISSION_DENIED"
+                        | "ROBOT_SESSION_REVOKED"
                         | "ROBOT_SESSION_TOOL_NOT_BOUND"
                         | "ROBOT_OFFLINE"
                         | "ROBOT_NOT_FOUND"

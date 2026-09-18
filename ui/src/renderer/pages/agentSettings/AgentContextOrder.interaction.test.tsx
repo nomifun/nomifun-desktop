@@ -8,7 +8,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom';
 import { pluginRuntimeProduct, type PluginRuntimeDraft } from '@/common/adapter/pluginRuntimeProductBridge';
 import { SWRConfig } from 'swr';
-import { asCapabilityId, asPackageId, createEmptyAgentPresetDocument, placeCapability, type AgentPresetDocument, type CapabilityCatalogItem } from '@/common/types/agentPlatform';
+import { asCapabilityId, asPackageId, createEmptyAgentPresetDocument, placeCapability, type AgentPresetDocument, type CapabilityCatalogItem, type CapabilityModuleCatalogItem } from '@/common/types/agentPlatform';
 import en from '../../services/i18n/locales/en-US/agentSettings.json';
 import AgentContextOrder from './AgentContributionOrder';
 import AgentPresetEditor from './AgentPresetEditor';
@@ -23,6 +23,13 @@ const item = (id: string, kind = 'context_contributor'): CapabilityCatalogItem =
   required_resource_kinds: [], required_capabilities: [], conflicting_capabilities: [], action_count: 0, context_contributor_count: 1,
 });
 const catalog = [item('z'), item('tool', 'tool'), item('a')];
+const moduleOf = (value: CapabilityCatalogItem): CapabilityModuleCatalogItem => ({
+  module: value.capability, display_name: value.display_name, description: value.description,
+  source_package: value.source_package, authoring_policy: 'direct', summary_kind: value.kind,
+  actions: [], context_schema_refs: value.context_contributor_count ? [`schema://${value.capability.id}`] : [],
+  event_schema_refs: [], required_resource_kinds: [], required_host_ports: [],
+  required_modules: [], conflicting_modules: [], supported_surfaces: ['desktop'],
+});
 const initial = (): AgentPresetDocument => ({ ...createEmptyAgentPresetDocument(), enabled_capabilities: catalog.map(value => ({ capability: value.capability })) });
 function mount(document = initial(), currentCatalog = catalog, disabled = false, kind: 'context' | 'middleware' = 'context') {
   let current = document;
@@ -49,14 +56,14 @@ test('personal editor submits order through its existing save action', () => {
   const Harness = () => {
     const [draft, setDraft] = useState(original);
     return <AgentPresetEditor editor={{ preset: { preset_id: draft.preset_id, display_name: draft.display_name, source: 'user', bound_target_count: 0 }, draft: original }}
-      draft={draft} catalog={{ capabilities: [...catalog, ...middlewareCatalog], skills: [], roles: [], mcp_tools: [] }} busyAction={null} dirty={draft !== original}
+      draft={draft} catalog={{ modules: [...catalog, ...middlewareCatalog].map(moduleOf), capabilities: [...catalog, ...middlewareCatalog], skills: [], roles: [], mcp_tools: [] }} busyAction={null} dirty={draft !== original}
       onDraftChange={setDraft} onSave={() => { saved = draft; }} onStartConversation={() => {}} />;
   };
   const result = render(<I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), fallback: { providers: [] }, revalidateOnMount: false }}><MemoryRouter><Harness /></MemoryRouter></SWRConfig></I18nextProvider>);
   const view = within(result.container);
   fireEvent.click(view.getByRole('tab', { name: en.workbench.settingsTab }));
   expect(view.getByRole('textbox', { name: en.fields.name })).toBeTruthy();
-  expect(view.getByRole('combobox', { name: en.runtimeEngine.label })).toBeTruthy();
+  expect(view.getAllByRole('combobox')).toHaveLength(1);
   expect(view.queryByRole('region', { name: en.middlewareOrder.title }) === null).toBe(true);
   expect(view.queryByRole('region', { name: en.contextOrder.title }) === null).toBe(true);
   fireEvent.click(view.getByRole('tab', { name: en.workbench.skillsTab }));

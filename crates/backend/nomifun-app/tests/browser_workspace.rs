@@ -288,6 +288,13 @@ async fn canonical_route_binder_selects_managed_and_attached_without_fallback() 
         managed_snapshot.provider_kind,
         nomifun_browser_platform::product::BrowserProviderKind::Managed
     );
+    assert_eq!(
+        managed_snapshot.allowed_actions,
+        BTreeSet::from([
+            "browser/navigate".to_owned(),
+            "browser/observe".to_owned(),
+        ])
+    );
     assert!(matches!(managed, BoundBrowserProviderResource::Managed(_)));
     assert!(resources
         .get_for_agent_session(owner, managed_session)
@@ -320,6 +327,13 @@ async fn canonical_route_binder_selects_managed_and_attached_without_fallback() 
     assert_eq!(
         attached_snapshot.provider_kind,
         nomifun_browser_platform::product::BrowserProviderKind::AttachedChrome
+    );
+    assert_eq!(
+        attached_snapshot.allowed_actions,
+        BTreeSet::from([
+            "browser/navigate".to_owned(),
+            "browser/observe".to_owned(),
+        ])
     );
     assert!(attached_snapshot.runtime.is_none());
     assert!(matches!(

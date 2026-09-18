@@ -429,7 +429,7 @@ async fn a_device_reports_gets_claimed_talks_and_is_interrupted() {
 
 #[tokio::test]
 async fn authenticated_device_tools_are_scoped_and_called_through_the_live_link() {
-    use nomifun_robot::tool_registry::RobotToolCapability;
+    use nomifun_robot::capability::RobotAction;
 
     let h = boot().await;
     let robot_id = "aa:bb:cc:dd:ee:20";
@@ -524,9 +524,9 @@ async fn authenticated_device_tools_are_scoped_and_called_through_the_live_link(
         let tools = Arc::clone(&h.tools);
         async move {
             tools
-                .call_for_capability(
+                .call_for_action(
                     robot_id,
-                    RobotToolCapability::Motion,
+                    RobotAction::Motion,
                     "robot_head_look",
                     serde_json::json!({ "direction": "left" }),
                 )
@@ -549,15 +549,15 @@ async fn authenticated_device_tools_are_scoped_and_called_through_the_live_link(
 
     let error = h
         .tools
-        .call_for_capability(
+        .call_for_action(
             robot_id,
-            RobotToolCapability::Display,
+            RobotAction::Display,
             "robot_head_look",
             serde_json::json!({}),
         )
         .await
-        .expect_err("display capability cannot invoke a motion tool");
-    assert!(error.to_string().contains("robot.motion"));
+        .expect_err("display action cannot invoke a motion tool");
+    assert!(error.to_string().contains("robot/motion"));
 
     drop(socket);
     tokio::time::timeout(std::time::Duration::from_secs(2), async {

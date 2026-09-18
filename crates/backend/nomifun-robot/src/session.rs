@@ -43,7 +43,8 @@ pub struct SessionDeps {
     pub status: Arc<RobotStatusRegistry>,
     pub speech: Arc<dyn SpeechServices>,
     pub dispatcher: Arc<dyn CompanionTurnDispatcher>,
-    /// Where discovered device tools are published for the MCP proxy.
+    /// Where discovered device tools are published for the canonical Robot
+    /// Action owner.
     pub tools: Arc<crate::tool_registry::RobotToolRegistry>,
 }
 
@@ -684,7 +685,7 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                                                 );
                                                 // Publishing here is what makes the
                                                 // tools reachable from the model, via
-                                                // the loopback MCP proxy.
+                                                // the canonical Robot Action owner.
                                                 tool_registry
                                                     .attach(&discovering, client.clone(), tools)
                                                     .await;

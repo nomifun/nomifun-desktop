@@ -77,6 +77,15 @@ describe('workspace tool rail dimensions', () => {
     expect(label.includes('overflow: hidden;')).toBe(true);
   });
 
+  test('exposes Browser as an accessible AgentSession tool even without a workspace', () => {
+    expect(componentSource.includes('workspaceAvailable?: boolean;')).toBe(true);
+    expect(componentSource.includes('browser?: SessionBrowserTool;')).toBe(true);
+    expect(componentSource.includes('aria-controls={controls}')).toBe(true);
+    expect(componentSource.includes('aria-expanded={controls ? active : undefined}')).toBe(true);
+    expect(componentSource.includes("icon={<Earth size={18} />}")).toBe(true);
+    expect(componentSource.includes('{workspaceAvailable && <ToolRailItem')).toBe(true);
+  });
+
   test('uses a compact scoped tooltip and removes the active vertical bar', () => {
     // The rail still opts into Arco's `mini` tooltip and keeps its own scoping
     // class, so per-rail tweaks stay possible.

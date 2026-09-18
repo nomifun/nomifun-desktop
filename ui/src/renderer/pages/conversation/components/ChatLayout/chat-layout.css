@@ -1,15 +1,11 @@
 /* Chat layout header styles */
-.chat-browser-toggle { display:flex; align-items:center; gap:6px; flex-shrink:0; border:0; border-radius:6px; padding:5px 8px; background:transparent; color:var(--text-secondary); cursor:pointer; font-size:12px; }
-.chat-browser-toggle:hover, .chat-browser-toggle[aria-pressed=true] { background:var(--bg-3); color:var(--text-primary); }
-.chat-browser-toggle:focus-visible { outline:2px solid rgb(var(--primary-6)); outline-offset:2px; }
 .chat-focus-stop-host { display:flex; align-items:center; flex-shrink:0; }
 .chat-focus-stop-host:empty { display:none; }
 
 .chat-layout-header-host { container: conversation-header / inline-size; }
 .chat-layout-header-actions { display:flex; align-items:center; gap:12px; flex-shrink:0; }
 
-/* A narrow desktop pane must retain its browser entry after sidebars restore.
-   Wrap existing controls, rather than clipping them or adding a second menu. */
+/* A narrow desktop pane keeps the remaining header controls reachable. */
 @container conversation-header (max-width: 600px) {
   .chat-layout-header { flex-wrap:wrap; column-gap:8px; row-gap:6px; }
   .chat-layout-header-title { height:30px; }

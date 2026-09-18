@@ -1,18 +1,18 @@
 import { describe, expect, test } from 'bun:test';
 import type {
   AgentPresetDraft,
-  CapabilityCatalogItem,
+  CapabilityModuleCatalogItem,
   ChatRouteRecord,
 } from '@/common/types/agentPlatform';
+import { asCapabilityId, asPackageId } from '@/common/types/agentPlatform';
 import {
-  asCapabilityId,
-  asPackageId,
-} from '@/common/types/agentPlatform';
-import {
-  capabilityMatchesSearch,
-  capabilityProductCopy,
+  actionFallbackName,
+  agentUiErrorKey,
+  agentUiErrorSubjects,
   capabilityPlacement,
   classifyAgentUiError,
+  moduleI18nKey,
+  moduleMatchesSearch,
   placeCapability,
   selectChatRouteCandidate,
 } from './model';
@@ -25,7 +25,6 @@ const draft = (): AgentPresetDraft => ({
     model_route_refs: {},
     chat_route_records: {},
     enabled_capabilities: [],
-
     skill_bindings: [],
     system_role_provider_overrides: {},
     persona: '',
@@ -34,149 +33,79 @@ const draft = (): AgentPresetDraft => ({
   },
 });
 
-const capability = (
-  id: string,
-  requiredResourceKinds: string[] = []
-): CapabilityCatalogItem => ({
-  capability: {
-    id: asCapabilityId(id),
-    version: '1.0.0',
-  },
-  kind: 'tool',
-  display_name: id,
-  description: `${id} description`,
-  source_package: {
-    id: asPackageId('nomifun.test'),
-    version: '1.0.0',
-  },
-  source_kind: 'first_party',
-  materialization_state: 'materialized',
-  supported_surfaces: ['desktop'],
-  required_runtime_features: [],
-  required_resource_kinds: requiredResourceKinds,
-  required_capabilities: [],
-  conflicting_capabilities: [],
-  action_count: 1,
-  context_contributor_count: 0,
+const moduleItem = (id: string): CapabilityModuleCatalogItem => ({
+  module: { id: asCapabilityId(id), version: '1.0.0' },
+  display_name: 'Workspace files',
+  description: 'Read and change workspace files',
+  source_package: { id: asPackageId('nomifun.workspace'), version: '1.0.0' },
+  authoring_policy: 'direct',
+  summary_kind: 'tool',
+  actions: [{
+    action_id: `${id}/write`, input_schema: 'input', output_schema: 'output',
+    effect_class: 'write_durable', presentation: 'function_tool',
+  }],
+  context_schema_refs: [], event_schema_refs: [], required_resource_kinds: ['workspace'],
+  required_host_ports: [], required_modules: [], conflicting_modules: [], supported_surfaces: ['desktop'],
 });
 
-describe('Agent Settings capability authoring model', () => {
-  test('explains the provider-neutral Browser Module boundary', () => {
-    const copy = capabilityProductCopy(capability('browser', ['browser']), 'zh-CN');
-    expect(copy.name).toBe('浏览器');
-    expect(copy.description).toContain('AgentSession');
-    expect(copy.description).toContain('不会扩大');
-    expect(copy.description).toContain('已连接 Chrome');
-  });
-  test('turns placeholder catalog metadata into product-facing capability copy', () => {
-    const placeholder = {
-      ...capability('knowledge.search', ['knowledge_base']),
-      description: 'knowledge.search',
-    };
-
-    expect(capabilityProductCopy(placeholder, 'zh-CN')).toEqual({
-      name: '搜索知识库',
-      description: '搜索使用时由当前会话选择的知识库。',
-    });
-    expect(capabilityProductCopy(placeholder, 'en-US')).toEqual({
-      name: 'Search the knowledge base',
-      description: 'Search the knowledge base selected at use time.',
-    });
+describe('Agent Settings Module authoring model', () => {
+  test('maps only current Module identities to localized product copy', () => {
+    expect(moduleI18nKey('browser')).toBe('browser');
+    expect(moduleI18nKey('workspace.files')).toBe('workspaceFiles');
+    expect(moduleI18nKey('fs.read')).toBeUndefined();
+    expect(moduleI18nKey('nomi_system_browser')).toBeUndefined();
   });
 
-  test('preserves real capability metadata supplied by the owning package', () => {
-    const described = {
-      ...capability('knowledge.search', ['knowledge_base']),
-      source_kind: 'installed',
-      display_name: 'Knowledge search',
-      description: 'Search the knowledge base selected by this conversation.',
-    };
-
-    expect(capabilityProductCopy(described, 'zh-CN')).toEqual({
-      name: described.display_name,
-      description: described.description,
-    });
+  test('searches canonical action and resource metadata supplied by the server', () => {
+    const module = moduleItem('workspace.files');
+    expect(moduleMatchesSearch(module, 'workspace.files/write', 'Workspace files', 'Files')).toBe(true);
+    expect(moduleMatchesSearch(module, 'workspace', 'Workspace files', 'Files')).toBe(true);
+    expect(moduleMatchesSearch(module, 'browser', 'Workspace files', 'Files')).toBe(false);
+    expect(actionFallbackName('creative.workshop/canvas.read')).toBe('Canvas Read');
   });
 
-  test('searches by localized product copy as well as canonical identifiers', () => {
-    const item = capability('knowledge.search', ['knowledge_base']);
-
-    expect(capabilityMatchesSearch(item, '知识库', 'zh-CN')).toBe(true);
-    expect(capabilityMatchesSearch(item, 'knowledge.search', 'zh-CN')).toBe(true);
-    expect(capabilityMatchesSearch(item, 'workspace', 'zh-CN')).toBe(false);
-  });
-
-  test('enabling is idempotent and disabling removes the capability', () => {
-    const target = capability('process.exec').capability;
+  test('enabling is idempotent and disabling removes the exact Module', () => {
+    const target = moduleItem('workspace.process').module;
     const enabled = placeCapability(draft().document, target, 'enabled');
     expect(capabilityPlacement(enabled, target)).toBe('enabled');
     expect(placeCapability(enabled, target, 'enabled').enabled_capabilities).toHaveLength(1);
     expect(placeCapability(enabled, target, 'none').enabled_capabilities).toEqual([]);
   });
 
-  test('keeps concrete resource identities out of capability selections and documents', () => {
-    const target = capability('knowledge.search', ['knowledge_base']).capability;
-    const document = placeCapability(draft().document, target, 'enabled');
-
-    expect('resource_bindings' in document).toBe(false);
-    expect('resource_binding_refs' in document.enabled_capabilities[0]).toBe(false);
-  });
-
-  test('does not project a different catalog version onto a saved selection', () => {
-    const saved = capability('knowledge.search', ['knowledge_base']);
-    const newer = {
-      ...saved,
-      capability: {
-        ...saved.capability,
-        version: '2.0.0',
-      },
-      required_resource_kinds: ['workspace'],
-    };
-    const selected = placeCapability(draft().document, saved.capability, 'enabled');
-
-    expect(capabilityPlacement(selected, saved.capability)).toBe('enabled');
-    expect(capabilityPlacement(selected, newer.capability)).toBe('none');
-  });
-
-  test('reorders an exact route candidate without changing its internal contract', () => {
+  test('reorders an exact model route candidate without changing its contract', () => {
     const record = {
-      schema: 'nomifun.chat-route-record.v1',
-      task: 'agent_chat',
+      schema: 'nomifun.chat-route-record.v1', task: 'agent_chat',
       primary: {
-        model_route_id: 'route-primary',
-        model_route_revision: 1,
-        provider_id: 'provider-primary',
-        model: 'model-primary',
-        protocol: 'openai_chat',
-        connection_config_ref: 'connection-primary',
-        config_revision_digest: 'a'.repeat(64),
-        credential_ref: 'credential-primary',
-        features: ['text_input', 'text_output'],
+        model_route_id: 'route-primary', model_route_revision: 1, provider_id: 'provider-primary',
+        model: 'model-primary', protocol: 'openai_chat', connection_config_ref: 'connection-primary',
+        config_revision_digest: 'a'.repeat(64), credential_ref: 'credential-primary', features: ['text_input', 'text_output'],
       },
-      failovers: [
-        {
-          model_route_id: 'route-fallback',
-          model_route_revision: 2,
-          provider_id: 'provider-fallback',
-          model: 'model-fallback',
-          protocol: 'openai_responses',
-          connection_config_ref: 'connection-fallback',
-          config_revision_digest: 'b'.repeat(64),
-          credential_ref: 'credential-fallback',
-          features: ['text_input', 'text_output'],
-        },
-      ],
+      failovers: [{
+        model_route_id: 'route-fallback', model_route_revision: 2, provider_id: 'provider-fallback',
+        model: 'model-fallback', protocol: 'openai_responses', connection_config_ref: 'connection-fallback',
+        config_revision_digest: 'b'.repeat(64), credential_ref: 'credential-fallback', features: ['text_input', 'text_output'],
+      }],
     } as ChatRouteRecord;
-
     const selected = selectChatRouteCandidate(record, 'route-fallback@2');
-
     expect(selected?.primary).toEqual(record.failovers[0]);
     expect(selected?.failovers).toEqual([record.primary]);
   });
 
   test('distinguishes a preset that is already absent', () => {
-    expect(
-      classifyAgentUiError({ code: 'AGENT_PRESET_NOT_FOUND', status: 404 }, 'delete')
-    ).toBe('preset-not-found');
+    expect(classifyAgentUiError({ code: 'AGENT_PRESET_NOT_FOUND', status: 404 }, 'delete')).toBe('preset-not-found');
+  });
+
+  test('keeps capability diagnostics distinct from model configuration errors', () => {
+    const error = {
+      code: 'CAPABILITY_NOT_MATERIALIZED',
+      status: 422,
+      details: { diagnostics: [
+        { code: 'CAPABILITY_NOT_MATERIALIZED', subject: 'browser' },
+        { code: 'CAPABILITY_UNAVAILABLE', subject: 'computer' },
+      ] },
+    };
+    expect(classifyAgentUiError(error, 'save')).toBe('capability');
+    expect(agentUiErrorKey(error, 'save')).toBe('agentSettings.errors.capability');
+    expect(agentUiErrorSubjects(error)).toEqual(['browser', 'computer']);
   });
 });

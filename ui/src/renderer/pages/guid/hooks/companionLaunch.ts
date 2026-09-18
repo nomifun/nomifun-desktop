@@ -1,7 +1,7 @@
 import { ipcBridge } from '@/common';
 import type { TProviderWithModel } from '@/common/config/storage';
 import type { AgentResourceSelection } from '@/common/types/agentPlatform';
-import { conversationTarget, parseChannelPluginId, parseCompanionId, parseMcpServerId, type ConversationId } from '@/common/types/ids';
+import { conversationTarget, parseChannelPluginId, parseCompanionId, type ConversationId } from '@/common/types/ids';
 import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { persistCompanionTurnDelivery, completeCompanionTurnDelivery, readCompanionTurnDelivery } from '@/renderer/pages/companion/companionTurnDelivery';
 
@@ -14,13 +14,15 @@ export async function prepareCompanionConversation(
   if (!selected) throw new Error('RESOURCE_SELECTION_REQUIRED');
   const companion_id = parseCompanionId(selected.resource_id);
   const profile = await ipcBridge.companion.getCompanion.invoke({ companion_id });
+  let model = profile.model;
   if (!profile.model?.provider_id || !profile.model.model) {
     if (!fallbackModel) throw new Error('MODEL_REQUIRED');
+    model = { provider_id: fallbackModel.id, model: fallbackModel.use_model };
     await ipcBridge.companion.patchCompanion.invoke({ companion_id, patch: {
-      model: { provider_id: fallbackModel.id, model: fallbackModel.use_model },
+      model,
     } });
   }
-  const thread = await ipcBridge.companion.ensureCompanionSession.invoke({ companion_id });
+  if (!model?.provider_id || !model.model) throw new Error('MODEL_REQUIRED');
   const channelId = resources.find((item) => item.resource_kind === 'channel')?.resource_id;
   const robotId = resources.find((item) => item.resource_kind === 'robot')?.resource_id;
   let bindChannel = false;
@@ -41,9 +43,18 @@ export async function prepareCompanionConversation(
   }
   if (bindChannel && channelId) await ipcBridge.channel.setChannelCompanion.invoke({ plugin_id: parseChannelPluginId(channelId), companion_id });
   if (bindRobot && robotId) await ipcBridge.robot.update.invoke({ robot_id: robotId, updates: { companion_id } });
-  const mcpIds = resources.filter((item) => item.resource_kind === 'mcp_server').map((item) => parseMcpServerId(item.resource_id));
-  // No staged MCP choice means preserve the companion's existing selection.
-  if (mcpIds.length) await ipcBridge.agentPlatform.sessions.updateMcpSelection.invoke({ agent_session_id: thread.conversation_id, mcp_server_ids: mcpIds });
+  const active = await ipcBridge.companion.getCompanionSession.invoke({ companion_id });
+  await ipcBridge.agentPlatform.selectProductBinding.invoke({
+    target_kind: 'companion',
+    target_id: companion_id,
+    request: {
+      selection: { kind: 'template', template_key: 'companion.default' },
+      model,
+      resource_selections: resources,
+      ...(active.conversation_id ? { conversation_id: active.conversation_id } : {}),
+    },
+  });
+  const thread = await ipcBridge.companion.ensureCompanionSession.invoke({ companion_id });
   const conversation = await ipcBridge.conversation.get.invoke({ conversation_id: thread.conversation_id });
   if (!conversation?.id) throw new Error('Companion Conversation is unavailable');
   return conversation;

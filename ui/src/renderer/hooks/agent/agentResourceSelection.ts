@@ -6,6 +6,9 @@ export const AUTOMATIC_AGENT_RESOURCE_IDS: Readonly<Record<string, string>> = {
   process_session: 'managed-process-session',
   terminal: 'managed-terminal',
   asset_library: 'creative-studio-assets',
+  browser: 'managed-browser',
+  computer: 'local-desktop',
+  scheduler: 'installation-scheduler',
 };
 
 export const USER_AGENT_RESOURCE_KINDS = [
