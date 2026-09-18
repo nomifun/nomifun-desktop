@@ -1,8 +1,8 @@
 {
   "manifest_version": "1.0.0",
   "confirmed_decision_contract_digest": "d1cff555fcb33de6ffc654be651e60610d63be54fd41ab29a3df15355d594848",
-  "canonical_schema_manifest_digest": "3cce9d0fb295ffd741d2f97a0885932a3da7fc5aa57ebd88d458948179926f8d",
-  "cargo_lock_digest": "948f29f754ce5293255a3f4ae2e7020e1e6302b270db16a4b9d9f663a3902239",
+  "canonical_schema_manifest_digest": "d958b97376508e507513570d4c5150ea1592beeb24a9cefb4d14d9eebe2400de",
+  "cargo_lock_digest": "aa51bcc4ad5c8bdb595be98c0c889559fdef4bf368120e7bcf7c5aa3fb79c451",
   "official_preset_seed_manifest_digest": "61e3b4f404c7296a560b51132630a9c5712dd3b9712c063a53f9b3878f8e3c68",
   "capability_availability_manifest_digest": "70ab40f20452974594d897cbf32bcbcb3b030a77b9708534aa5e93c1b76eaa8c",
   "coding_codex_native_contract_digest": "940e7bd5d4fe74ef9afbb3a3a5f624d18c1dca735695917821f711834ece2d14",

@@ -49,7 +49,7 @@
   "retired_sources": [
     "nomifun-agent-platform",
     "nomifun-codex-runtime",
-    "CanonicalHost/FreshV4Application external Wrapper assembly",
+    "retired parallel Agent-root coordinator and external Wrapper assembly",
     "RuntimeStartTurnBrokerBridge",
     "external executor hello/command/release wire contracts"
   ],

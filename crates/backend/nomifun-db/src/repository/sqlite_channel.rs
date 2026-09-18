@@ -898,7 +898,7 @@ impl IChannelRepository for SqliteChannelRepository {
         )
         .await?;
 
-        // The binding is the durable authority for a chat scope. Migration 003
+        // The binding is the durable authority for a chat scope. The baseline
         // deterministically backfills the earliest legacy session when old
         // databases contain duplicate rows, without deleting any history.
         let bound_session_id: Option<String> = sqlx::query_scalar(

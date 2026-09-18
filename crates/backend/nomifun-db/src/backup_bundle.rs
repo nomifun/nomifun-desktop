@@ -1,9 +1,9 @@
-//! Offline v3 backup/restore and object-graph import primitives.
+//! Offline canonical-dataset backup and restore primitives.
 //!
 //! The bundle carries a WAL-safe SQLite snapshot plus every portable root from
 //! the canonical managed-dataset registry. Its manifest proves both included
 //! payload coverage and every intentional exclusion. Restore validates that
-//! exact v3 contract, rotates the storage generation, and installs a matching
+//! exact generation-5 contract, rotates the storage generation, and installs a matching
 //! dataset receipt before publishing the destination directory.
 
 use std::collections::BTreeSet;
@@ -22,24 +22,19 @@ use nomifun_common::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::sqlite::{SqliteArguments, SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{Arguments, Row, SqlitePool, TypeInfo, ValueRef};
 
 use crate::{
     Database, DbError, init_database,
-    id_schema_contract::{
-        JSON_LOGICAL_REFERENCES, LOGICAL_REFERENCES, PRODUCT_TABLES, RebuildPolicy,
-        validate_id_data_contract, validate_id_schema_contract,
-    },
+    id_schema_contract::{validate_id_data_contract, validate_id_schema_contract},
 };
 
 pub const BACKUP_FORMAT: &str = "nomifun-backup";
-/// Version 2 is the first complete v3 dataset bundle. Version 1 omitted most
-/// managed roots and is intentionally rejected rather than migrated.
-pub const BACKUP_FORMAT_VERSION: u32 = 2;
+/// Version 3 is the generation-5 UARC bundle. Earlier bundles can contain the
+/// retired Agent schema and are intentionally rejected rather than imported.
+pub const BACKUP_FORMAT_VERSION: u32 = 3;
 /// The backup wire contract is intentionally hard-cut.  A bundle using the
 /// previous prefixed-ID/v2 contract must be rejected rather than migrated.
-pub const BACKUP_SCHEMA: &str = "id-contract-v3";
+pub const BACKUP_SCHEMA: &str = "uarc-generation-5";
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const DATABASE_FILE: &str = "database.sqlite3";
 pub const ENCRYPTION_KEY_FILE: &str = "encryption_key";
@@ -47,15 +42,6 @@ pub const COMPANION_DIR: &str = "companion";
 pub const MANAGED_WORKSPACES_DIR: &str = "conversations";
 pub const STORAGE_GENERATION_FILE: &str = "storage-generation";
 pub const DATASET_RECEIPT_FILE: &str = "dataset-v3.json";
-
-const PRESERVE_BUSINESS_ID_REFERENCES: &[(&str, &str)] = &[
-    ("conversation_mcp_servers", "mcp_server_id"),
-    ("tag_settings", "webhook_id"),
-];
-
-const PRESERVE_BUSINESS_ID_JSON_REFERENCES: &[(&str, &str, &str)] = &[
-    ("workshop_assets", "origin", "$.creation_task_id"),
-];
 
 /// Bundle paths are deliberately independent of the source data/work roots.
 /// Restore always materializes them below the destination data directory.
@@ -798,203 +784,52 @@ pub async fn restore_backup_data_dir(
     })
 }
 
-#[derive(Debug, Clone)]
-enum RestorableValue {
-    Null,
-    Integer(i64),
-    Float(f64),
-    Text(String),
-    Blob(Vec<u8>),
-}
-
-impl RestorableValue {
-    fn bind<'q>(&'q self, arguments: &mut SqliteArguments<'q>) -> Result<(), BackupError> {
-        let result = match self {
-            Self::Null => arguments.add(Option::<String>::None),
-            Self::Integer(value) => arguments.add(*value),
-            Self::Float(value) => arguments.add(*value),
-            Self::Text(value) => arguments.add(value.clone()),
-            Self::Blob(value) => arguments.add(value.clone()),
-        };
-        result.map_err(|error| {
-            BackupError::Database(DbError::Init(format!(
-                "restore could not bind imported value: {error}"
-            )))
-        })
-    }
-}
-
 async fn rebuild_v3_database(source: &Path, destination: &Path) -> Result<(), BackupError> {
-    validate_preserve_business_id_rebuild_contract()?;
-    // Opening the snapshot through the normal backup validator proves the
-    // source is an exact v3 database before any row is copied. The destination
-    // starts as a fresh baseline, so SQLite allocates every technical id anew.
-    let inspection_pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(
-            SqliteConnectOptions::new()
-                .filename(source)
-                .create_if_missing(false)
-                .read_only(true),
-        )
-        .await
-        .map_err(DbError::Query)?;
-    let structural_validation = validate_id_schema_contract(&inspection_pool).await;
-    inspection_pool.close().await;
-    structural_validation?;
-
-    let source_database = crate::open_database_for_backup(source).await?;
-    let destination_database = match init_database(destination).await {
-        Ok(database) => database,
-        Err(error) => {
-            source_database.close().await;
-            return Err(error.into());
-        }
-    };
-
-    let result = rebuild_v3_database_contents(
-        source_database.pool(),
-        destination_database.pool(),
-    )
-    .await;
-    destination_database.close().await;
-    source_database.close().await;
-    remove_migration_lock_file(destination, result)
-}
-
-fn validate_preserve_business_id_rebuild_contract() -> Result<(), BackupError> {
-    for (child_table, child_column) in PRESERVE_BUSINESS_ID_REFERENCES {
-        let Some(reference) = LOGICAL_REFERENCES.iter().find(|reference| {
-            reference.child_table == *child_table && reference.child_column == *child_column
-        }) else {
-            return Err(BackupError::Database(DbError::Init(format!(
-                "backup contract is missing business-ID reference {child_table}.{child_column}"
-            ))));
-        };
-        if reference.kind != crate::id_schema_contract::LogicalReferenceKind::Text
-            || reference.value_contract
-                != crate::id_schema_contract::LogicalReferenceValueContract::CanonicalUuidV7
-            || reference.rebuild_policy != RebuildPolicy::PreserveBusinessId
-        {
-            return Err(BackupError::Database(DbError::Init(format!(
-                "backup contract must preserve bare UUIDv7 business reference {child_table}.{child_column}"
-            ))));
-        }
-    }
-    for (child_table, child_column, json_path) in PRESERVE_BUSINESS_ID_JSON_REFERENCES {
-        let Some(reference) = JSON_LOGICAL_REFERENCES.iter().find(|reference| {
-            reference.child_table == *child_table
-                && reference.child_column == *child_column
-                && reference.json_path == *json_path
-        }) else {
-            return Err(BackupError::Database(DbError::Init(format!(
-                "backup contract is missing business-ID JSON reference {child_table}.{child_column}:{json_path}"
-            ))));
-        };
-        if reference.kind != crate::id_schema_contract::LogicalReferenceKind::Text
-            || reference.value_contract
-                != crate::id_schema_contract::LogicalReferenceValueContract::CanonicalUuidV7
-            || reference.rebuild_policy != RebuildPolicy::PreserveBusinessId
-        {
-            return Err(BackupError::Database(DbError::Init(format!(
-                "backup contract must preserve bare UUIDv7 JSON reference {child_table}.{child_column}:{json_path}"
-            ))));
-        }
-    }
-    Ok(())
-}
-
-async fn rebuild_v3_database_contents(
-    source: &SqlitePool,
-    destination: &SqlitePool,
-) -> Result<(), BackupError> {
-    // init_database creates a valid baseline owner/settings row. Restore is a
-    // replacement of the whole dataset, not a merge, so remove every product
-    // row before importing the snapshot. No physical FK/trigger exists by v3
-    // contract, making this deterministic and safe.
-    for table in PRODUCT_TABLES {
-        sqlx::query(&format!("DELETE FROM {}", quote_sqlite_identifier(table)))
-            .execute(destination)
-            .await
-            .map_err(DbError::Query)?;
-    }
-    sqlx::query("DELETE FROM sqlite_sequence")
-        .execute(destination)
-        .await
-        .map_err(DbError::Query)?;
-
-    // Every durable inter-table reference is a business ID. Product-table
-    // order is therefore irrelevant to identity reconstruction: technical
-    // `id` values are regenerated and are never rewritten into another row.
-    for table in PRODUCT_TABLES {
-        let columns = sqlite_table_columns(source, table).await?;
-        let select = format!(
-            "SELECT * FROM {} ORDER BY {}",
-            quote_sqlite_identifier(table),
-            quote_sqlite_identifier("id")
-        );
-        let rows = sqlx::query(&select)
-            .fetch_all(source)
-            .await
-            .map_err(DbError::Query)?;
-        let insert_columns = columns
-            .iter()
-            .filter(|column| column.as_str() != "id")
-            .cloned()
-            .collect::<Vec<_>>();
-        let insert_sql = format!(
-            "INSERT INTO {} ({}) VALUES ({})",
-            quote_sqlite_identifier(table),
-            insert_columns
-                .iter()
-                .map(|column| quote_sqlite_identifier(column))
-                .collect::<Vec<_>>()
-                .join(", "),
-            std::iter::repeat_n("?", insert_columns.len())
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-
-        for row in rows {
-            let mut values = Vec::with_capacity(insert_columns.len());
-            for column in &insert_columns {
-                let index = columns
-                    .iter()
-                    .position(|candidate| candidate == column)
-                    .expect("insert column came from source columns");
-                values.push(sqlite_row_value(&row, index)?);
-            }
-
-            let mut arguments = SqliteArguments::default();
-            for value in &values {
-                value.bind(&mut arguments)?;
-            }
-            let result = sqlx::query_with(&insert_sql, arguments)
-                .execute(destination)
-                .await
-                .map_err(DbError::Query)?;
-            let new_id = result.last_insert_rowid();
-            if new_id <= 0 {
-                return Err(BackupError::Database(DbError::Init(format!(
-                    "restore insert into {table} did not allocate a technical id"
-                ))));
-            }
-        }
-    }
-
-    validate_id_schema_contract(destination).await?;
-    validate_id_data_contract(destination).await?;
-    let quick_check: Vec<String> = sqlx::query_scalar("PRAGMA quick_check")
-        .fetch_all(destination)
-        .await
-        .map_err(DbError::Query)?;
-    if quick_check != ["ok"] {
-        return Err(BackupError::Database(DbError::Init(format!(
-            "restore SQLite quick_check failed: {}",
-            quick_check.join("; ")
+    if destination.exists() {
+        return Err(BackupError::Database(DbError::Conflict(format!(
+            "restore destination database already exists: {}",
+            destination.display()
         ))));
     }
-    Ok(())
+
+    // The generation-5 backup contract accepts only an exact current baseline.
+    // Copy the already WAL-safe snapshot as one SQLite authority so canonical
+    // TEXT/composite keys, physical Agent Store foreign keys and every Agent
+    // Session/Event/Effect fact remain byte-for-byte coherent. Historical
+    // baselines fail validation before this copy and are never imported.
+    let source_database = crate::open_database_for_backup(source).await?;
+    source_database.close().await;
+    std::fs::copy(source, destination).map_err(|error| {
+        BackupError::Database(DbError::Init(format!(
+            "copy canonical backup database {} -> {}: {error}",
+            source.display(),
+            destination.display()
+        )))
+    })?;
+
+    let validation = async {
+        let database = init_database(destination).await?;
+        let result = async {
+            validate_id_schema_contract(database.pool()).await?;
+            validate_id_data_contract(database.pool()).await?;
+            let quick_check: Vec<String> = sqlx::query_scalar("PRAGMA quick_check")
+                .fetch_all(database.pool())
+                .await
+                .map_err(DbError::Query)?;
+            if quick_check != ["ok"] {
+                return Err(DbError::Init(format!(
+                    "restore SQLite quick_check failed: {}",
+                    quick_check.join("; ")
+                )));
+            }
+            Ok::<(), DbError>(())
+        }
+        .await;
+        database.close().await;
+        result.map_err(BackupError::from)
+    }
+    .await;
+    remove_migration_lock_file(destination, validation)
 }
 
 fn remove_migration_lock_file(
@@ -1040,49 +875,6 @@ fn remove_file_with_windows_retry(path: &Path) -> Result<(), std::io::Error> {
     {
         fs::remove_file(path)
     }
-}
-
-async fn sqlite_table_columns(
-    pool: &SqlitePool,
-    table: &str,
-) -> Result<Vec<String>, BackupError> {
-    let sql = format!("PRAGMA table_info({})", quote_sqlite_identifier(table));
-    let mut rows = sqlx::query(&sql)
-        .fetch_all(pool)
-        .await
-        .map_err(DbError::Query)?;
-    rows.sort_by_key(|row| row.try_get::<i64, _>("cid").unwrap_or(i64::MAX));
-    rows.into_iter()
-        .map(|row| row.try_get("name").map_err(DbError::Query).map_err(Into::into))
-        .collect()
-}
-
-fn sqlite_row_value(row: &sqlx::sqlite::SqliteRow, index: usize) -> Result<RestorableValue, BackupError> {
-    let raw = row.try_get_raw(index).map_err(DbError::Query)?;
-    if raw.is_null() {
-        return Ok(RestorableValue::Null);
-    }
-    match raw.type_info().name() {
-        "INTEGER" => Ok(RestorableValue::Integer(
-            row.try_get(index).map_err(DbError::Query)?,
-        )),
-        "REAL" => Ok(RestorableValue::Float(
-            row.try_get(index).map_err(DbError::Query)?,
-        )),
-        "TEXT" => Ok(RestorableValue::Text(
-            row.try_get(index).map_err(DbError::Query)?,
-        )),
-        "BLOB" => Ok(RestorableValue::Blob(
-            row.try_get(index).map_err(DbError::Query)?,
-        )),
-        type_name => Err(BackupError::Database(DbError::Init(format!(
-            "restore encountered unsupported SQLite value type {type_name}"
-        )))),
-    }
-}
-
-fn quote_sqlite_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 fn sibling_staging_path(destination: &Path) -> PathBuf {

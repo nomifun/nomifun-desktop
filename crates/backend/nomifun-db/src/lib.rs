@@ -28,7 +28,6 @@ pub use models::{
     AgentExecutionTemplateDetailRows, AgentExecutionTemplateParticipantRow,
     AgentExecutionTemplateRow,
     AgentMetadataRow,
-    ConversationArtifactRow,
     CreateKnowledgeTagParams, CreationTaskRow, CreativeStudioAgentProposalReceiptRow,
     CreativeStudioProjectRow, CreativeStudioTemplateRow, CreativeStudioTemplateRunRow, CronJobRunRow,
     CronRunReservationRow,

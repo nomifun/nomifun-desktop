@@ -5,13 +5,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ArtifactEnvelope, DigestHex, VersionString};
 
-pub type CanonicalV4SchemaManifest =
-    ArtifactEnvelope<CanonicalV4SchemaManifestPayload>;
+pub type CanonicalAgentStoreSchemaManifest =
+    ArtifactEnvelope<CanonicalAgentStoreSchemaManifestPayload>;
 pub type ContractDigestLedger = ArtifactEnvelope<ContractDigestLedgerPayload>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct CanonicalV4SchemaManifestPayload {
+pub struct CanonicalAgentStoreSchemaManifestPayload {
     pub manifest_version: VersionString,
     pub database_schema_digest: DigestHex,
     pub rust_contract_schema_digest: DigestHex,

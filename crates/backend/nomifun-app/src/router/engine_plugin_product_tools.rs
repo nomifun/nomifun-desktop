@@ -74,6 +74,111 @@ impl PluginProductOwner {
         input: StrictJsonValue,
         cancellation: PluginRuntimeCallCancellation,
     ) -> Result<StrictJsonValue, PluginProductCallError> {
+        self.invoke_with_turn(
+            user,
+            session,
+            None,
+            false,
+            None,
+            capability,
+            action,
+            operation,
+            input,
+            cancellation,
+        )
+        .await
+    }
+
+    /// Visible Engine Actions already have a committed tool/call-started
+    /// predecessor and immutable turn authority. Keep that exact turn through
+    /// effect admission instead of consulting the independently changing head.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn invoke_visible_action(
+        &self,
+        user: &str,
+        session: &str,
+        turn: &OperationId,
+        capability: &ResolvedCapability,
+        action: &nomifun_agent_contracts::ActionId,
+        operation: OperationId,
+        input: StrictJsonValue,
+        cancellation: PluginRuntimeCallCancellation,
+    ) -> Result<StrictJsonValue, PluginProductCallError> {
+        self.invoke_with_turn(
+            user,
+            session,
+            Some(turn),
+            false,
+            None,
+            capability,
+            action,
+            operation,
+            input,
+            cancellation,
+        )
+        .await
+    }
+
+    /// Hidden middleware is a real Product Action, but it has no model tool
+    /// dispatch. Record its canonical Action predecessor explicitly before
+    /// entering the shared Effect/Service owner path.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn invoke_hidden_action(
+        &self,
+        user: &str,
+        session: &str,
+        turn: &OperationId,
+        deadline: tokio::time::Instant,
+        capability: &ResolvedCapability,
+        action: &nomifun_agent_contracts::ActionId,
+        operation: OperationId,
+        input: StrictJsonValue,
+        cancellation: PluginRuntimeCallCancellation,
+    ) -> Result<StrictJsonValue, PluginProductCallError> {
+        let owner = self.clone();
+        let user = user.to_owned();
+        let session = session.to_owned();
+        let turn = turn.clone();
+        let capability = capability.clone();
+        let action = action.clone();
+        tokio::spawn(async move {
+            owner
+                .invoke_with_turn(
+                    &user,
+                    &session,
+                    Some(&turn),
+                    true,
+                    Some(deadline),
+                    &capability,
+                    &action,
+                    operation,
+                    input,
+                    cancellation,
+                )
+                .await
+        })
+        .await
+        .map_err(|_| {
+            PluginProductCallError::Unknown(
+                "Plugin Product hidden Action owner task did not complete".into(),
+            )
+        })?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn invoke_with_turn(
+        &self,
+        user: &str,
+        session: &str,
+        exact_turn: Option<&OperationId>,
+        hidden_action: bool,
+        middleware_deadline: Option<tokio::time::Instant>,
+        capability: &ResolvedCapability,
+        action: &nomifun_agent_contracts::ActionId,
+        operation: OperationId,
+        input: StrictJsonValue,
+        cancellation: PluginRuntimeCallCancellation,
+    ) -> Result<StrictJsonValue, PluginProductCallError> {
         validate_invocation(capability, action)
             .map_err(|error| {
                 // Validation reasons are host-authored and contain no payloads.
@@ -92,42 +197,90 @@ impl PluginProductOwner {
                 "Plugin Product capability is missing frozen release authority".into(),
             ));
         };
-        let receipt = self
-            .receipts
-            .begin(
-                user,
-                session,
-                operation.as_ref(),
-                capability.capability.id.as_ref(),
-                action.as_ref(),
-                &input.0,
-                Domain::PluginProduct,
-            )
-            .await
-            .map_err(|error| {
+        let receipt = if hidden_action {
+            let turn = exact_turn.ok_or_else(|| {
+                PluginProductCallError::Rejected(
+                    "Plugin Product hidden Action has no exact turn authority".into(),
+                )
+            })?;
+                self.receipts
+                    .begin_hidden_action(
+                        user,
+                        session,
+                        turn,
+                        &operation,
+                        capability.capability.id.as_ref(),
+                        action.as_ref(),
+                        &input.0,
+                        Domain::PluginProduct,
+                    )
+                    .await
+        } else if let Some(turn) = exact_turn {
+            self.receipts
+                .begin_for_turn(
+                    user,
+                    session,
+                    turn,
+                    operation.as_ref(),
+                    capability.capability.id.as_ref(),
+                    action.as_ref(),
+                    &input.0,
+                    Domain::PluginProduct,
+                )
+                .await
+        } else {
+                self.receipts
+                    .begin(
+                        user,
+                        session,
+                        operation.as_ref(),
+                        capability.capability.id.as_ref(),
+                        action.as_ref(),
+                        &input.0,
+                        Domain::PluginProduct,
+                    )
+                    .await
+        }
+        .map_err(|error| {
                 tracing::warn!(stage = "receipt_admission", "Product invocation has no live turn authority");
                 PluginProductCallError::Unknown(error.to_string())
             })?;
-        let result = self
-            .application
-            .invoke_agent_capability(PluginRuntimeAgentCapabilityInvocation {
-                cancellation,
-                owner_user_id: user.to_owned(),
-                plugin_product_id: product.clone(),
-                capability: capability.capability.clone(),
-                action_id: action.clone(),
-                action_allowlist: capability.action_allowlist.clone(),
-                active_release: release.clone(),
-                active_release_epoch: epoch,
-                catalog_digest: catalog.clone(),
-                // Retain the historical call identity alongside the receipt codec.
-                call_id: product_bridge_call_id(&operation),
-                operation_id: operation,
-                payload: input,
-            })
-            .await;
+        let timeout_cancellation = cancellation.clone();
+        let invocation = PluginRuntimeAgentCapabilityInvocation {
+            cancellation,
+            owner_user_id: user.to_owned(),
+            plugin_product_id: product.clone(),
+            capability: capability.capability.clone(),
+            action_id: action.clone(),
+            action_allowlist: capability.action_allowlist.clone(),
+            active_release: release.clone(),
+            active_release_epoch: epoch,
+            catalog_digest: catalog.clone(),
+            // Retain the historical call identity alongside the receipt codec.
+            call_id: product_bridge_call_id(&operation),
+            operation_id: operation,
+            payload: input,
+        };
+        let call = self.application.invoke_agent_capability(invocation);
+        // A Service deadline may stop dispatch, but once the Service returns a
+        // result its durable receipt must settle without being cancelled by
+        // that same deadline.
+        tokio::pin!(call);
+        let mut deadline_exceeded = false;
+        let result = if let Some(deadline) = middleware_deadline {
+            tokio::select! {
+                result = &mut call => result,
+                _ = tokio::time::sleep_until(deadline) => {
+                    deadline_exceeded = true;
+                    timeout_cancellation.cancel();
+                    call.await
+                }
+            }
+        } else {
+            call.await
+        };
         let written = match &result {
-            Ok(output) if nomifun_agent_contracts::tool_middleware::phase_for_actions(&capability.actions).is_some() => {
+            Ok(output) if hidden_action => {
                 self.receipts.returned_digest(receipt, &output.0).await
             }
             Ok(output) => self.receipts.returned(receipt, &output.0).await,
@@ -141,9 +294,19 @@ impl PluginProductOwner {
                     .rejected(receipt, "MINIAPP_REJECTED_BEFORE_DISPATCH")
                     .await
             }
+            Err(_) if hidden_action => {
+                self.receipts
+                    .rejected(receipt, "PLUGIN_PRODUCT_HIDDEN_ACTION_FAILED")
+                    .await
+            }
             Err(_) => Ok(()),
         };
         written.map_err(|error| PluginProductCallError::Unknown(error.to_string()))?;
+        if deadline_exceeded {
+            return Err(PluginProductCallError::Unknown(
+                "Plugin Product middleware exceeded the shared deadline".into(),
+            ));
+        }
         result.map_err(|error| match error {
             PluginRuntimeApplicationError::Invalid(_)
             | PluginRuntimeApplicationError::NotFound => {
@@ -171,6 +334,16 @@ impl PluginProductOwner {
         }
         for capability in capabilities {
             validate_capability(capability)?;
+            if !capability
+                .actions
+                .iter()
+                .any(|action| action.presentation == ToolPresentationKind::FunctionTool)
+            {
+                // Middleware and discovery are explicit hidden consumers. They
+                // remain executable through their owning host phase but never
+                // need (or receive) a model-visible function-tool exposure.
+                continue;
+            }
             let policy = snapshot
                 .policy(&capability.capability.id)
                 .ok_or_else(|| failure("missing Plugin Product authority policy"))?;
@@ -221,15 +394,7 @@ impl PluginProductOwner {
 }
 
 pub(crate) fn validate_capability(capability: &ResolvedCapability) -> Result<(), AppError> {
-    validate_capability_bounds(capability)?;
-    if !capability.actions.iter().any(|action| {
-        action.presentation == ToolPresentationKind::FunctionTool
-            && (capability.action_allowlist.is_empty()
-                || capability.action_allowlist.contains(&action.action_id))
-    }) {
-        return Err(failure("Plugin Product has no admitted function action"));
-    }
-    Ok(())
+    validate_capability_bounds(capability)
 }
 
 fn validate_invocation(
@@ -352,9 +517,10 @@ impl EngineToolInvoker for SessionTools {
         nomifun_engine_core::parse_completed_arguments(&invocation.call)?;
         let result = self
             .owner
-            .invoke(
+            .invoke_visible_action(
                 &self.principal.principal_id,
                 self.session.as_ref(),
+                &invocation.turn_operation_id,
                 capability,
                 &invocation.binding.action_id,
                 invocation.operation_id,

@@ -17,7 +17,7 @@ use nomifun_db::{
     MAX_PRODUCT_OPERATION_LOG_LINE_CHARS, MAX_PRODUCT_OPERATION_LOG_LINES,
 };
 use serde_json::json;
-use sqlx::migrate::{Migrate, Migrator};
+use sqlx::migrate::Migrator;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
@@ -29,15 +29,8 @@ fn digest(byte: char) -> String {
     byte.to_string().repeat(64)
 }
 
-async fn migrate_through(pool: &sqlx::SqlitePool, maximum_version: i64) {
-    let mut connection = pool.acquire().await.unwrap();
-    connection.ensure_migrations_table().await.unwrap();
-    for migration in MIGRATOR
-        .iter()
-        .filter(|migration| migration.version <= maximum_version)
-    {
-        connection.apply(migration).await.unwrap();
-    }
+async fn install_canonical_baseline(pool: &sqlx::SqlitePool) {
+    MIGRATOR.run(pool).await.unwrap();
 }
 
 async fn succeed_operation(
@@ -250,7 +243,7 @@ async fn add_managed_candidate(
 }
 
 #[tokio::test]
-async fn migrations_are_clean_start_without_retired_plugins_and_restart_at_schema_head() {
+async fn canonical_baseline_has_only_the_current_plugin_schema_and_restarts_cleanly() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("plugin-n1.db");
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -262,7 +255,7 @@ async fn migrations_are_clean_start_without_retired_plugins_and_restart_at_schem
         )
         .await
         .unwrap();
-    migrate_through(&pool, 69).await;
+    install_canonical_baseline(&pool).await;
     let owner_id = id();
     sqlx::query(
         "INSERT INTO users (user_id, username, password_hash, jwt_secret, created_at, updated_at)

@@ -73,8 +73,8 @@ bun run serve:web
 带 Rust 后端的开发入口（`dev`、`dev:web`、`build:fast`）统一使用 `dev`
 构建 channel，因此默认数据目录是 `NomiFun-dev`（stable 根的同级目录，
 永远不嵌套在其内部）。生产形态的 `serve:web` 和
-release 构建仍使用 stable 的 `NomiFun` 目录。开发环境需要复现 stable 状态时，
-可运行 `bun run seed:dev`。
+release 构建仍使用 stable 的 `NomiFun` 目录。需要隔离复现时显式设置
+`NOMIFUN_DATA_DIR` 或 `--data-dir`；开发启动不会导入 stable 的历史 Agent 状态。
 
 桌面循环已经不是旧 Electron 模型。Tauri shell 直接链接 `nomifun-app`，在进程内
 启动后端，选择一个空闲 localhost 端口，注入 `window.__backendPort` 与

@@ -53,7 +53,6 @@
     "gate:plugin-n1": "bun scripts/gate-plugin-n1.mjs",
     "gen:i18n": "bun scripts/generate-i18n-types.mjs",
     "clean": "bun scripts/prune-build.mjs --release",
-    "seed:dev": "bun scripts/seed-dev-from-prod.mjs",
     "bump": "bun scripts/bump-version.mjs",
     "help": "bun scripts/help.mjs"
   },

@@ -169,7 +169,6 @@ browser-conformance = ["browser-use", "computer-use", "nomi-browser-engine/confo
 
 [dependencies]
 nomifun-common.workspace = true
-nomifun-v4-root.workspace = true
 nomifun-agent-contracts.workspace = true
 nomifun-agent-control-plane.workspace = true
 nomifun-agent-domain-support.workspace = true

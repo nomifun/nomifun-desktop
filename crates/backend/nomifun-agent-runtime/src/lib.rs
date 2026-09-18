@@ -48,6 +48,7 @@ mod steering;
 pub use steering::{AgentInputPort, AgentSteeringInput};
 mod tool;
 mod tool_dispatch;
+mod tool_discovery;
 mod tool_archive;
 mod tool_context;
 mod turn;
@@ -78,5 +79,9 @@ pub use standard_tools::standard_agent_tool_exposures;
 pub use tool::{
     input_schema_digest, AgentEffectClass, AgentToolBinding, AgentToolInvocation,
     AgentToolInvoker, AgentToolPlan, AgentToolResult,
+};
+pub use tool_discovery::{
+    AgentToolDiscoveryCandidate, AgentToolDiscoveryPort,
+    MAX_MATCHES as MAX_TOOL_DISCOVERY_MATCHES,
 };
 pub use turn::{AgentTurnRequest, AgentTurnResult, AgentTurnTerminal};

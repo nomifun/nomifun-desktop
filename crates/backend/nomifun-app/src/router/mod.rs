@@ -37,6 +37,8 @@ pub mod engine_tool_host;
 pub mod engine_kernel_session;
 mod engine_git_lifecycle;
 mod engine_plugin_product_tools;
+mod engine_plugin_middleware;
+mod engine_tool_discovery;
 mod engine_robot_tools;
 mod workspace_file_read;
 mod engine_workspace_media;

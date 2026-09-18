@@ -1238,7 +1238,7 @@ impl IRequirementRepository for SqliteRequirementRepository {
             }
         }
 
-        // The INSERT is itself the one-transaction command. Migration 010's
+        // The INSERT is itself the one-transaction command. The baseline's
         // insert/update/consume trigger chain independently repeats every
         // predicate, performs the active->pending transition, and deletes the
         // command row before this statement can return.

@@ -30,7 +30,7 @@ NomiFun 把状态保存在三个地方：一个 SQLite 数据库（一切结构�
 
 ### 每个 channel 一个目录、一份状态
 
-同一 build channel 的宿主共用一个默认值是有意为之。已安装桌面应用与生产形态的 `bun run serve:web` 使用 stable 的 `NomiFun`；`bun run dev`、`dev:web` 与 `build:fast` 使用同级的 `NomiFun-dev`。这样既保留每个 channel 内的一份状态，也避免关闭鉴权或实验性的开发循环触碰已安装应用的状态。需要把 stable 快照带入开发环境时可运行 `bun run seed:dev`；需要显式选择目录时则使用 `NOMIFUN_DATA_DIR` 或 `--data-dir`。
+同一 build channel 的宿主共用一个默认值是有意为之。已安装桌面应用与生产形态的 `bun run serve:web` 使用 stable 的 `NomiFun`；`bun run dev`、`dev:web` 与 `build:fast` 使用同级的 `NomiFun-dev`。这样既保留每个 channel 内的一份状态，也避免关闭鉴权或实验性的开发循环触碰已安装应用的状态。需要显式选择目录时使用 `NOMIFUN_DATA_DIR` 或 `--data-dir`；开发启动不会从 stable 数据集导入历史 Agent 状态。
 
 让这种共享变得安全的是**排他服务器锁**：启动时（`bootstrap::init_environment`，早于数据库打开）后端对 `{data_dir}/server.lock` 取 OS 级排他 advisory 锁（`fs2`：Unix 上 `flock`，Windows 上 `LockFileEx`）。进程退出*或崩溃*时锁由 OS 释放，因此残留的 `server.lock` 文件无害，不需要任何过期启发式。同一目录上的第二个后端会快速失败，错误信息点名持有者（pid + exe）并给出两条出路：关掉另一个实例，或让这一个指向自己的独立目录。桌面外壳现在会把后端启动失败弹成原生错误对话框并退出（以前是静默白屏）。`nomicore doctor` 与 `mcp-*` stdio 子命令不受该锁影响（`doctor` 设计上就允许与运行中的服务器并存）。
 

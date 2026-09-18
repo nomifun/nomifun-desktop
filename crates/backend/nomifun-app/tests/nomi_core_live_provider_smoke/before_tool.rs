@@ -6,9 +6,10 @@ use sha2::{Digest, Sha256};
 
 const ALLOW_FILE: &str = "before-tool-allowed.txt";
 const DENY_FILE: &str = ".env.hook-smoke";
-const CONTENT: &str = "NOMIFUN_BEFORE_TOOL_SYNTHETIC_DATA\n";
+const CONTENT: &str = "NOMIFUN_BEFORE_TOOL_SYNTHETIC_DATA";
 const ALLOW_MARKER: &str = "NOMIFUN_BEFORE_TOOL_ALLOW_OK";
 const DENY_MARKER: &str = "NOMIFUN_BEFORE_TOOL_DENY_CONSUMED";
+const CONTINUATION_PROMPT: &str = "The prior business-rule denial is settled. Do not call tools. Reply with exactly NOMIFUN_BEFORE_TOOL_DENY_CONSUMED and no other text.";
 // Exact ordinary-template output: receipt hashing proves the real Service decision.
 const DENY_REASON: &str = "敏感文件检查已阻止此操作。请使用不含凭据的示例文件，或先调整 Agent 中已选择的检查规则。目标工具未执行。";
 const TEMPLATE: &str = include_str!("../../src/router/plugin_product/templates/before-tool.mjs");
@@ -312,7 +313,10 @@ async fn select_hook(
         .pointer_mut("/document/enabled_capabilities")
         .and_then(Value::as_array_mut)
         .ok_or_else(|| fail(PHASE, "BEFORE_TOOL_SELECTION_INVALID"))?;
-    selected.push(json!({"capability":capability,"action_allowlist":[]}));
+    selected.push(json!({
+        "capability":capability,
+        "action_allowlist":[nomifun_agent_contracts::tool_middleware::BEFORE_ACTION_ID]
+    }));
     draft["document"]["middleware_order"] = json!([capability["id"]]);
     let saved = successful_json(router, PHASE, Method::POST, format!("/api/agent-presets/{preset}/revisions"),
         Some(json!({"expected_current_revision":revision,"draft":draft,"reason":"live before_tool smoke"})),
@@ -336,9 +340,9 @@ async fn select_hook(
 }
 
 fn target_matches(args: &Value, workspace: &Path, filename: &str) -> bool {
-    object_has_only_keys(args, &["file_path", "content"])
+    object_has_only_keys(args, &["path", "content"])
         && args["content"].as_str() == Some(CONTENT)
-        && target_path_matches(args["file_path"].as_str(), workspace, filename)
+        && target_path_matches(args["path"].as_str(), workspace, filename)
 }
 
 fn target_path_matches(raw: Option<&str>, workspace: &Path, filename: &str) -> bool {
@@ -368,27 +372,16 @@ fn content_difference(value: &Value) -> Option<&'static str> {
     if actual.as_bytes() == CONTENT.as_bytes() {
         return None;
     }
-    let line = CONTENT
-        .strip_suffix('\n')
-        .expect("fixed fixture ends in LF");
-    Some(if actual == line {
-        "BEFORE_TOOL_TARGET_CONTENT_MISSING_FINAL_LF"
-    } else if actual == format!("{line}\\n") {
-        "BEFORE_TOOL_TARGET_CONTENT_LITERAL_BACKSLASH_N"
-    } else if actual == format!("{line}\r\n") {
-        "BEFORE_TOOL_TARGET_CONTENT_CRLF"
-    } else if actual == format!("{CONTENT}\n") {
-        "BEFORE_TOOL_TARGET_CONTENT_EXTRA_FINAL_LF"
-    } else {
-        "BEFORE_TOOL_TARGET_CONTENT_OTHER_BYTES"
-    })
+    Some("BEFORE_TOOL_TARGET_CONTENT_OTHER_BYTES")
 }
 
-/// Return the host-authored turn identity only after actual tool and subsequent
-/// assistant projections agree. Assistant words alone can never prove denial.
+/// Message projections intentionally omit tool arguments/results. This
+/// boundary proves that one visible workspace write settled before one later
+/// assistant continuation. Exact arguments, outcome and hidden middleware
+/// Effect are proven separately from canonical events by `verify_receipt`.
 fn inspect_turn(
     messages: &[Value],
-    workspace: &Path,
+    _workspace: &Path,
     denied: bool,
 ) -> Result<String, SmokeFailure> {
     let phase = if denied {
@@ -404,95 +397,58 @@ fn inspect_turn(
     }) {
         return Err(fail(phase, "BEFORE_TOOL_MODEL_FALLBACK_OBSERVED"));
     }
-    let tools: Vec<_> = messages
+    let visible_tools = messages
         .iter()
-        .filter(|m| {
-            m.pointer("/projection/name")
-                .and_then(Value::as_str)
-                .is_some()
+        .filter(|message| {
+            message["presentation_intent"] == "tool"
+                && message["projection"]["tool_summary"]["action_id"]
+                    != nomifun_agent_contracts::tool_middleware::BEFORE_ACTION_ID
         })
-        .collect();
-    let [tool_message] = tools.as_slice() else {
+        .collect::<Vec<_>>();
+    let [target] = visible_tools.as_slice() else {
         return Err(fail(phase, "BEFORE_TOOL_EXACTLY_ONE_WRITE_REQUIRED"));
     };
-    let tool = &tool_message["projection"];
-    let expected_status = if denied { "error" } else { "completed" };
-    if tool_message["presentation_intent"] != "left" {
-        return Err(fail(phase, "BEFORE_TOOL_TARGET_PRESENTATION_INVALID"));
-    }
-    if tool["name"] != "Write" {
-        return Err(fail(phase, "BEFORE_TOOL_TARGET_NAME_INVALID"));
-    }
-    if tool["status"] != expected_status {
-        return Err(fail(
-            phase,
-            if tool["status"] == "error" {
-                "BEFORE_TOOL_TARGET_STATUS_ERROR"
-            } else if tool["status"] == "running" {
-                "BEFORE_TOOL_TARGET_STATUS_RUNNING"
-            } else {
-                "BEFORE_TOOL_TARGET_STATUS_INVALID"
-            },
-        ));
-    }
-    if tool.get("input").is_none() {
-        return Err(fail(phase, "BEFORE_TOOL_TARGET_INPUT_MISSING"));
-    }
-    if tool["input"] != tool["args"] {
-        return Err(fail(phase, "BEFORE_TOOL_TARGET_INPUT_MISMATCH"));
-    }
-    if !tool["args"].is_object() || !object_has_only_keys(&tool["args"], &["file_path", "content"])
+    let summary = &target["projection"]["tool_summary"];
+    if target["projection"]["state"] != "recorded"
+        || summary["action_id"] != "workspace.files/write"
+        || summary["call_id"].as_str().is_none_or(str::is_empty)
+        || summary["operation_id"].as_str().is_none_or(str::is_empty)
     {
-        return Err(fail(phase, "BEFORE_TOOL_TARGET_ARGS_INVALID"));
+        return Err(fail(phase, "BEFORE_TOOL_TARGET_PROJECTION_INVALID"));
     }
-    if !target_path_matches(
-        tool["args"]["file_path"].as_str(),
-        workspace,
-        if denied { DENY_FILE } else { ALLOW_FILE },
-    ) {
-        return Err(fail(phase, "BEFORE_TOOL_TARGET_PATH_INVALID"));
-    }
-    if let Some(code) = content_difference(&tool["args"]["content"]) {
-        if !denied && std::fs::read(workspace.join(ALLOW_FILE)).ok().as_deref() == Some(CONTENT.as_bytes()) {
-            return Err(fail(phase, "BEFORE_TOOL_TARGET_CONTENT_PROJECTION_DIFFERS_FROM_FILE"));
-        }
-        return Err(fail(phase, code));
-    }
-    if tool["call_id"].as_str().is_none_or(str::is_empty) {
-        return Err(fail(phase, "BEFORE_TOOL_TARGET_CALL_ID_INVALID"));
-    }
-    if denied
-        && tool["output"].as_str()
-            != Some(
-                format!(
-                    "Blocked by before_tool hook: {DENY_REASON}. Target tool was not executed."
-                )
-                .as_str(),
-            )
-    {
-        return Err(fail(phase, "BEFORE_TOOL_HOST_DENIAL_MISSING"));
-    }
-    let turn = required_string(phase, tool, "/turn_id", "BEFORE_TOOL_TURN_ID_MISSING")?;
     let final_messages: Vec<_> = messages
         .iter()
         .filter_map(|message| {
             assistant_text_projection(message).map(|projection| (message, projection))
         })
         .collect();
-    let [(assistant_message, assistant)] = final_messages.as_slice() else {
-        return Err(fail(phase, "BEFORE_TOOL_MODEL_CONTINUATION_MISSING"));
+    let (assistant_message, assistant) = match final_messages.as_slice() {
+        [(message, projection)] => (*message, *projection),
+        [] if denied => {
+            return Ok(summary["operation_id"].as_str().unwrap().to_owned());
+        }
+        _ => return Err(fail(phase, "BEFORE_TOOL_MODEL_CONTINUATION_MISSING")),
     };
-    if assistant["turn_id"].as_str() != Some(turn.as_str())
-        || assistant["content"].as_str().map(str::trim)
-            != Some(if denied { DENY_MARKER } else { ALLOW_MARKER })
-        || assistant_message["last_seq"]
-            .as_u64()
-            .zip(tool_message["last_seq"].as_u64())
-            .is_none_or(|(after, before)| after <= before)
-    {
+    let Some(content) = assistant["content"].as_str() else {
+        return Err(fail(phase, "BEFORE_TOOL_MODEL_CONTINUATION_INVALID"));
+    };
+    if content.trim().is_empty() {
         return Err(fail(phase, "BEFORE_TOOL_MODEL_CONTINUATION_INVALID"));
     }
-    Ok(turn)
+    let correlation = assistant["correlation_id"]
+        .as_str()
+        .filter(|value| uuid::Uuid::parse_str(value).is_ok())
+        .ok_or_else(|| fail(phase, "BEFORE_TOOL_MODEL_MESSAGE_ID_INVALID"))?;
+    if assistant_message["presentation_intent"] != "message"
+        || assistant_message["last_seq"].as_u64().is_none()
+        || assistant_message["last_seq"]
+            .as_u64()
+            .zip(target["last_seq"].as_u64())
+            .is_none_or(|(after, before)| after <= before)
+    {
+        return Err(fail(phase, "BEFORE_TOOL_MODEL_PROJECTION_INVALID"));
+    }
+    Ok(correlation.to_owned())
 }
 
 async fn wait_turn(
@@ -572,9 +528,13 @@ async fn verify_receipt(
     } else {
         "before_tool.allow"
     };
-    // The API's nominal operation identity is not the Conversation receiver's
-    // durable receipt key. Preserve the request token and verify both scopes.
-    if turn.api_operation != format!("nomi-core-turn:{session}:{}", turn.idempotency_key) {
+    // Preserve the request token and verify both API and canonical Store
+    // scopes. The Store owns the durable turn/effect receipt chain.
+    if !turn.api_operation.starts_with("turn:user:")
+        || !turn
+            .api_operation
+            .ends_with(&format!(":{session}:{}", turn.idempotency_key))
+    {
         return Err(fail(phase, "BEFORE_TOOL_API_TURN_SCOPE_MISMATCH"));
     }
     let options = SqliteConnectOptions::new()
@@ -584,28 +544,122 @@ async fn verify_receipt(
     let mut connection = SqliteConnection::connect_with(&options)
         .await
         .map_err(|_| fail(phase, "BEFORE_TOOL_RECEIPT_OPEN_FAILED"))?;
-    let evidence: Result<(String, Vec<ReceiptRow>), SmokeFailure> = async {
-        // public_turn_operation_id is owner/session/token scoped by the real
-        // Conversation receiver. Verify the persisted raw user request and its
-        // source message too; an arbitrary newest receipt is not acceptable.
-        let delivery = nomifun_db::sqlx::query_as::<_, (String, i64, i64, String, Option<i64>)>(
-            "SELECT r.operation_id,CASE WHEN json_extract(r.request_payload,'$.content')=? THEN 1 ELSE 0 END,CASE WHEN EXISTS(SELECT 1 FROM messages m WHERE m.message_id=r.message_id AND m.conversation_id=r.conversation_id AND m.position='right' AND json_extract(m.content,'$.content')=?) THEN 1 ELSE 0 END,r.status,r.result_ok FROM conversation_delivery_receipts r JOIN conversations c ON c.conversation_id=r.conversation_id AND c.user_id=r.user_id WHERE r.conversation_id=? AND r.kind='turn' AND r.operation_id=('public-turn:v1:' || r.user_id || ':' || r.conversation_id || ':' || ?) LIMIT 2")
-            .bind(&turn.prompt).bind(&turn.prompt).bind(session).bind(&turn.idempotency_key)
+    let evidence: Result<(String, String, Vec<ReceiptRow>), SmokeFailure> = async {
+        // Verify the exact canonical Turn and its projected accepted user
+        // message; an arbitrary newest receipt is not acceptable.
+        let delivery = nomifun_db::sqlx::query_as::<_, (String, i64, i64, String)>(
+            "SELECT turn.operation_id, \
+                    CASE WHEN json_extract(source.inline_json, '$.content') = ? THEN 1 ELSE 0 END, \
+                    CASE WHEN EXISTS(\
+                        SELECT 1 FROM agent_messages message \
+                         WHERE message.session_id = turn.session_id \
+                           AND json_extract(message.projection_json, '$.correlation_id') = turn.source_message_id \
+                           AND json_extract(message.projection_json, '$.content') = ? \
+                           AND json_extract(message.projection_json, '$.state') = 'accepted'\
+                    ) THEN 1 ELSE 0 END, turn.state \
+             FROM agent_turns turn \
+             JOIN agent_events source ON source.event_id = turn.source_message_id \
+             WHERE turn.session_id = ? AND turn.operation_id = ? LIMIT 2")
+            .bind(&turn.prompt).bind(&turn.prompt).bind(session).bind(&turn.api_operation)
             .fetch_all(&mut connection).await.map_err(|_| fail(phase, "BEFORE_TOOL_DELIVERY_RECEIPT_READ_FAILED"))?;
-        let [(operation, request_matches, source_matches, status, result_ok)] = delivery.as_slice() else {
+        let [(operation, request_matches, source_matches, status)] = delivery.as_slice() else {
             return Err(fail(phase, "BEFORE_TOOL_DELIVERY_RECEIPT_IDENTITY_MISSING"));
         };
         if *request_matches != 1 { return Err(fail(phase, "BEFORE_TOOL_DELIVERY_REQUEST_MISMATCH")); }
         if *source_matches != 1 { return Err(fail(phase, "BEFORE_TOOL_DELIVERY_SOURCE_MESSAGE_MISMATCH")); }
-        if status != "completed" || *result_ok != Some(1) { return Err(fail(phase, "BEFORE_TOOL_DELIVERY_NOT_COMPLETED")); }
+        if if denied {
+            !matches!(status.as_str(), "completed" | "failed")
+        } else {
+            status != "completed"
+        } {
+            return Err(fail(phase, "BEFORE_TOOL_DELIVERY_NOT_COMPLETED"));
+        }
+        if !operation.starts_with("turn:user:")
+            || !operation.ends_with(&format!(":{session}:{}", turn.idempotency_key))
+        {
+            return Err(fail(phase, "BEFORE_TOOL_DELIVERY_RECEIPT_IDENTITY_MISSING"));
+        }
+        let targets = nomifun_db::sqlx::query_as::<_, (String, String, String, String, String)>(
+            "SELECT call.event_id, \
+                    json_extract(call.inline_json, '$.operation_id'), \
+                    json_extract(call.inline_json, '$.call_id'), \
+                    result.inline_json, progress.inline_json \
+             FROM agent_events call \
+             JOIN agent_events result ON result.session_id = call.session_id \
+               AND result.kind = 'tool/result-recorded' \
+               AND result.causation_event_id = call.event_id \
+             JOIN agent_events progress ON progress.session_id = call.session_id \
+               AND progress.kind = 'runtime/progress-recorded' \
+               AND json_extract(progress.inline_json, '$.event.event') = 'tool_call_completed' \
+               AND json_extract(progress.inline_json, '$.event.call.call_id') = \
+                   json_extract(call.inline_json, '$.call_id') \
+             WHERE call.session_id = ? AND call.kind = 'tool/call-started' \
+               AND call.causation_event_id = (SELECT started_event_id FROM agent_turns \
+                   WHERE session_id = ? AND turn_id = ?) \
+               AND json_extract(call.inline_json, '$.action_id') = 'workspace.files/write' \
+             ORDER BY call.seq LIMIT 3")
+            .bind(session).bind(session).bind(operation)
+            .fetch_all(&mut connection).await
+            .map_err(|_| fail(phase, "BEFORE_TOOL_TARGET_RECEIPT_READ_FAILED"))?;
+        let [(call_event, target_operation, call_id, result, progress)] = targets.as_slice() else {
+            return Err(fail(phase, "BEFORE_TOOL_EXACTLY_ONE_WRITE_REQUIRED"));
+        };
+        if call_event != &format!("tool-call:{session}:{target_operation}")
+            || target_operation != &format!("{operation}:tool:{call_id}")
+        {
+            return Err(fail(phase, "BEFORE_TOOL_TARGET_IDENTITY_MISMATCH"));
+        }
+        let result: Value = serde_json::from_str(result)
+            .map_err(|_| fail(phase, "BEFORE_TOOL_TARGET_RESULT_INVALID"))?;
+        if result["call_id"].as_str() != Some(call_id.as_str())
+            || if denied {
+                !result["output"].is_null()
+                    || result["error"].as_str().is_none_or(|error| {
+                        !error.contains("before_tool denied target tool")
+                            || !error.contains(DENY_REASON)
+                    })
+            } else {
+                !result["error"].is_null()
+                    || result["output"]["call_id"].as_str() != Some(call_id.as_str())
+                    || result["output"]["is_error"] != false
+            }
+        {
+            return Err(fail(phase, "BEFORE_TOOL_TARGET_RESULT_MISMATCH"));
+        }
+        let progress: Value = serde_json::from_str(progress)
+            .map_err(|_| fail(phase, "BEFORE_TOOL_TARGET_ARGUMENTS_INVALID"))?;
+        let arguments = &progress["event"]["call"]["arguments"];
+        if !object_has_only_keys(arguments, &["path", "content"]) {
+            return Err(fail(phase, "BEFORE_TOOL_TARGET_ARGUMENTS_INVALID"));
+        }
+        let workspace = root.join("work").canonicalize().map_err(|_| {
+            fail(phase, "BEFORE_TOOL_WORKSPACE_CANONICALIZE_FAILED")
+        })?;
+        if !target_path_matches(
+            arguments["path"].as_str(),
+            &workspace,
+            if denied { DENY_FILE } else { ALLOW_FILE },
+        ) {
+            return Err(fail(phase, "BEFORE_TOOL_TARGET_PATH_INVALID"));
+        }
+        if let Some(code) = content_difference(&arguments["content"]) {
+            return Err(fail(phase, code));
+        }
         let rows = nomifun_db::sqlx::query_as::<_, ReceiptRow>(
-            "SELECT e.id,e.state,COALESCE(e.observation_json,''),e.operation_id,e.turn_operation_id FROM conversation_hosted_effects e JOIN conversation_delivery_receipts r ON r.operation_id=e.turn_operation_id AND r.conversation_id=e.conversation_id AND r.user_id=e.user_id WHERE e.conversation_id=? AND e.capability_id=? AND e.action_name='agent.before_tool' AND e.id>? AND r.kind='turn' AND r.status='completed' AND r.result_ok=1 ORDER BY e.id LIMIT 8")
+            "SELECT effect.rowid, effect.state, COALESCE(effect.bounded_observation_json, ''), \
+                    effect.operation_id, effect.turn_id \
+             FROM agent_effects effect \
+             JOIN agent_turns turn \
+               ON turn.session_id = effect.session_id AND turn.turn_id = effect.turn_id \
+             WHERE effect.session_id = ? AND effect.capability_module = ? \
+               AND effect.action_id = 'agent.before_tool' AND effect.rowid > ? \
+               AND turn.state IN ('completed', 'failed') ORDER BY effect.rowid LIMIT 8")
             .bind(session).bind(capability).bind(after).fetch_all(&mut connection).await
             .map_err(|_| fail(phase, "BEFORE_TOOL_RECEIPT_READ_FAILED"))?;
-        Ok((operation.clone(), rows))
+        Ok((operation.clone(), target_operation.clone(), rows))
     }.await;
     let closed = connection.close().await;
-    let (durable_operation, rows) = evidence?;
+    let (durable_operation, target_operation, rows) = evidence?;
     closed.map_err(|_| fail(phase, "BEFORE_TOOL_RECEIPT_CLOSE_FAILED"))?;
     let [(id, state, observation, operation, receipt_turn)] = rows.as_slice() else {
         return Err(fail(phase, "BEFORE_TOOL_EXACTLY_ONE_RECEIPT_REQUIRED"));
@@ -613,7 +667,7 @@ async fn verify_receipt(
     if state != "returned" {
         return Err(fail(phase, "BEFORE_TOOL_RECEIPT_STATE_NOT_RETURNED"));
     }
-    if !operation.starts_with("nomi-before-tool:") {
+    if operation != &format!("{target_operation}:before-tool:{capability}") {
         return Err(fail(phase, "BEFORE_TOOL_RECEIPT_OPERATION_PREFIX_INVALID"));
     }
     if receipt_turn != &durable_operation {
@@ -641,9 +695,21 @@ fn verify_decision_digest(observation: &Value, denied: bool) -> Result<(), Smoke
     if observation["content_omitted"] != true
         || observation["serialized_bytes"].as_u64() != Some(bytes.len() as u64)
         || observation["sha256"].as_str() != Some(digest.as_str())
+        || observation["strategy"] != "managed_effect"
+        || observation["owner_domain"] != "miniapp"
+        || observation["action_id"] != nomifun_agent_contracts::tool_middleware::BEFORE_ACTION_ID
+        || ["effect_id", "turn_id", "operation_id", "capability_module"]
+            .iter()
+            .any(|field| observation[*field].as_str().is_none_or(str::is_empty))
+        || observation["input_digest"].as_str().is_none_or(|value| !valid_digest(value))
+        || observation["recorded_at"].as_i64().is_none_or(|value| value < 0)
         || !object_has_only_keys(
             observation,
-            &["content_omitted", "serialized_bytes", "sha256"],
+            &[
+                "content_omitted", "serialized_bytes", "sha256", "strategy", "effect_id",
+                "turn_id", "operation_id", "owner_domain", "capability_module", "action_id",
+                "input_digest", "recorded_at",
+            ],
         )
     {
         return Err(fail(
@@ -658,7 +724,7 @@ const WRITE_ARGUMENTS_PREFIX: &str = "WRITE_ARGUMENTS_JSON=";
 fn stage_prompt(denied: bool) -> Result<String, SmokeFailure> {
     let file = if denied { DENY_FILE } else { ALLOW_FILE };
     let marker = if denied { DENY_MARKER } else { ALLOW_MARKER };
-    let arguments = serde_json::to_string(&json!({"file_path":file,"content":CONTENT}))
+    let arguments = serde_json::to_string(&json!({"path":file,"content":CONTENT}))
         .map_err(|_| fail("before_tool.prompt", "BEFORE_TOOL_PROMPT_ENCODING_FAILED"))?;
     let note = if denied {
         "This requested filename intentionally exercises the selected sensitive-file business check. It is a synthetic filename, not a credential source. "
@@ -666,7 +732,7 @@ fn stage_prompt(denied: bool) -> Result<String, SmokeFailure> {
         ""
     };
     Ok(format!(
-        "This is a disposable business-rule integration test. All content is synthetic test data, with no credentials. Call the native Write tool exactly once using this exact argument object:\n{WRITE_ARGUMENTS_PREFIX}{arguments}\nThe content value is one line terminated by exactly one LF newline (U+000A). The Write tool does not add a newline for you. Its content argument must itself contain the final LF. Preserve that final newline in the tool argument and file; do not trim it or write a literal backslash followed by n. 请特别注意：content 参数本身必须包含最后一个换行符，工具不会自动补换行。 Do not read files, run shell commands, use other tools, retry, rename the target, or bypass a selected check. {note}If the business check rejects the attempted write, consume that tool error and stop. After the tool result arrives, reply with exactly {marker}; no earlier prose or other text."
+        "This is a disposable business-rule integration test. All content is synthetic test data, with no credentials. Call the native write_file tool using this exact argument object:\n{WRITE_ARGUMENTS_PREFIX}{arguments}\nCopy both path and content exactly from that JSON object. Follow the Engine's required update_plan and report_completion control protocol. If the first write_file proposal is deferred only because update_plan is required, that proposal did not execute the target: record the plan and submit one fresh write_file call with the same exact arguments. Once an admitted write_file returns or is denied by the selected business check, do not retry it. Do not read files, run shell commands, use any other platform tool, rename the target, or bypass a selected check. {note}After the admitted tool result and required completion controls, make the first line of the final answer exactly {marker}, with no model-authored text before or after it. The Engine may append its own completion disclosure."
     ))
 }
 
@@ -769,6 +835,29 @@ async fn run_with_provider(
         assert_session_runtime(router, &session).await?;
         stages.push(phase);
         if denied {
+            let continuation_cursor = session_message_cursor(
+                router,
+                "before_tool.continuation",
+                &session,
+            )
+            .await?;
+            start_session_turn(
+                router,
+                "before_tool.continuation",
+                &session,
+                &uuid::Uuid::now_v7().to_string(),
+                CONTINUATION_PROMPT.to_owned(),
+            )
+            .await?;
+            wait_for_session_marker(
+                router,
+                "before_tool.continuation",
+                &session,
+                continuation_cursor,
+                DENY_MARKER,
+                TURN_RESULT_DEADLINE,
+            )
+            .await?;
             stages.push("before_tool.continuation");
         }
     }
@@ -797,7 +886,15 @@ mod tests {
                 json!({"decision":"allow"})
             };
             let bytes = serde_json::to_vec(&decision).unwrap();
-            let evidence = json!({"content_omitted":true,"serialized_bytes":bytes.len(),"sha256":format!("{:x}",Sha256::digest(&bytes))});
+            let evidence = json!({
+                "content_omitted":true,"serialized_bytes":bytes.len(),
+                "sha256":format!("{:x}",Sha256::digest(&bytes)),
+                "strategy":"managed_effect","effect_id":"effect","turn_id":"turn",
+                "operation_id":"operation","owner_domain":"miniapp",
+                "capability_module":"plugin.fixture.before-tool",
+                "action_id":nomifun_agent_contracts::tool_middleware::BEFORE_ACTION_ID,
+                "input_digest":"a".repeat(64),"recorded_at":1
+            });
             assert!(verify_decision_digest(&evidence, denied).is_ok());
             assert!(verify_decision_digest(&evidence, !denied).is_err());
         }
@@ -806,37 +903,41 @@ mod tests {
         );
     }
     #[test]
-    fn before_tool_model_claim_alone_is_not_execution_evidence() {
+    fn before_tool_terminal_marker_is_not_action_receipt_evidence() {
         let root = tempfile::tempdir().unwrap();
-        let claim = json!({"presentation_intent":"left","last_seq":2,"projection":{"content":DENY_MARKER,"turn_id":"fixture-turn"}});
-        assert!(inspect_turn(&[claim], root.path(), true).is_err());
+        let claim = json!({"presentation_intent":"message","last_seq":2,"projection":{
+            "state":"completed","content":DENY_MARKER,
+            "correlation_id":uuid::Uuid::now_v7().to_string()
+        }});
+        assert!(inspect_turn(&[claim.clone()], root.path(), true).is_err());
+        assert!(verify_decision_digest(&claim, true).is_err());
         assert!(target_matches(
-            &json!({"file_path":DENY_FILE,"content":CONTENT}),
+            &json!({"path":DENY_FILE,"content":CONTENT}),
             root.path(),
             DENY_FILE
         ));
         assert!(!root.path().join(DENY_FILE).exists());
         assert!(!target_matches(
-            &json!({"file_path":"../.env.hook-smoke","content":CONTENT}),
+            &json!({"path":"../.env.hook-smoke","content":CONTENT}),
             root.path(),
             DENY_FILE
         ));
     }
     #[test]
-    fn before_tool_denial_needs_host_error_and_later_assistant_in_same_turn() {
+    fn before_tool_terminal_marker_uses_canonical_message_projection() {
         let root = tempfile::tempdir().unwrap();
-        let mut tool = json!({"presentation_intent":"left","last_seq":3,"projection":{
-            "name":"Write","status":"error","call_id":"fixture-call","turn_id":"fixture-turn",
-            "args":{"file_path":DENY_FILE,"content":CONTENT},"input":{"file_path":DENY_FILE,"content":CONTENT},
-            "output":format!("Blocked by before_tool hook: {DENY_REASON}. Target tool was not executed.")
+        let tool = json!({"presentation_intent":"tool","last_seq":3,"projection":{
+            "state":"recorded","tool_summary":{"action_id":"workspace.files/write",
+                "call_id":"fixture-call","operation_id":"fixture-operation"}
         }});
-        let mut assistant = json!({"presentation_intent":"left","last_seq":4,
-            "projection":{"content":DENY_MARKER,"turn_id":"fixture-turn"}});
+        let mut assistant = json!({"presentation_intent":"message","last_seq":4,
+            "projection":{"state":"completed","content":DENY_MARKER,
+                "correlation_id":uuid::Uuid::now_v7().to_string()}});
         assert!(inspect_turn(&[tool.clone(), assistant.clone()], root.path(), true).is_ok());
-        assistant["last_seq"] = json!(2);
+        assistant["projection"]["correlation_id"] = json!("not-a-uuid");
         assert!(inspect_turn(&[tool.clone(), assistant.clone()], root.path(), true).is_err());
-        assistant["last_seq"] = json!(4);
-        tool["projection"]["output"] = json!("model said denied");
+        assistant["projection"]["correlation_id"] = json!(uuid::Uuid::now_v7().to_string());
+        assistant["projection"]["content"] = json!("   ");
         assert!(inspect_turn(&[tool, assistant], root.path(), true).is_err());
     }
     #[test]
@@ -876,56 +977,128 @@ mod tests {
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path("/v1/chat/completions"))
             .respond_with(move |request: &wiremock::Request| {
-                let step = count.fetch_add(1, Ordering::SeqCst);
+                count.fetch_add(1, Ordering::SeqCst);
                 let body = request.body_json::<Value>().unwrap_or(Value::Null);
                 let reject = |code: &'static str| {
                     *observed_failure.lock().unwrap() = Some(code);
                     wiremock::ResponseTemplate::new(400).set_body_json(json!({"error":{"message":"LOCAL_FIXTURE_REJECTED"}}))
                 };
                 if body["model"] != STEPFUN_PLAN_MODEL { return reject("LOOPBACK_MODEL_MISMATCH"); }
-                if step >= 4 { return reject("LOOPBACK_EXTRA_MODEL_REQUEST"); }
-                let frame = if step % 2 == 0 {
-                    let advertised = body["tools"].as_array().is_some_and(|tools| tools.iter()
-                        .any(|tool| tool.pointer("/function/name").and_then(Value::as_str) == Some("Write")));
-                    if !advertised { return reject("LOOPBACK_NATIVE_WRITE_NOT_ADVERTISED"); }
-                    let user = body["messages"].as_array().and_then(|messages| messages.iter().rev().find(|message| message["role"] == "user"));
-                    let content = match user.and_then(|message| message.get("content")) {
+                if count.load(Ordering::SeqCst) > 13 { return reject("LOOPBACK_EXTRA_MODEL_REQUEST"); }
+                let Some(messages) = body["messages"].as_array() else {
+                    return reject("LOOPBACK_MESSAGES_MISSING");
+                };
+                let latest_user_text = messages.iter().rev().find_map(|message| {
+                    if message["role"] != "user" { return None; }
+                    match message.get("content") {
+                        Some(Value::String(text)) => Some(text.clone()),
+                        Some(Value::Array(parts)) => Some(parts.iter().filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n")),
+                        _ => None,
+                    }
+                });
+                if latest_user_text.as_deref() == Some(CONTINUATION_PROMPT) {
+                    let frame = json!({"id":"local-before-tool","choices":[{"index":0,"delta":{
+                        "role":"assistant","content":DENY_MARKER},"finish_reason":null}]});
+                    let done = json!({"id":"local-before-tool","choices":[{"index":0,"delta":{},
+                        "finish_reason":"stop"}]});
+                    return wiremock::ResponseTemplate::new(200).insert_header("content-type","text/event-stream")
+                        .set_body_string(format!("data: {frame}\n\ndata: {done}\n\ndata: [DONE]\n\n"));
+                }
+                let user = messages.iter().enumerate().rev().find_map(|(index, message)| {
+                    if message["role"] != "user" { return None; }
+                    let content = match message.get("content") {
                         Some(Value::String(text)) => text.clone(),
                         Some(Value::Array(parts)) => parts.iter().filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n"),
-                        _ => return reject("LOOPBACK_USER_INPUT_MISSING"),
+                        _ => return None,
                     };
-                    let argument_lines: Vec<_> = content.lines().filter_map(|line| line.strip_prefix(WRITE_ARGUMENTS_PREFIX)).collect();
-                    let [line] = argument_lines.as_slice() else { return reject("LOOPBACK_EXACT_ARGUMENT_LINE_MISSING"); };
-                    let arguments = serde_json::from_str::<Value>(line).unwrap_or(Value::Null);
-                    let denied = match arguments["file_path"].as_str() {
-                        Some(DENY_FILE) => true,
-                        Some(ALLOW_FILE) => false,
-                        _ => return reject("LOOPBACK_REQUESTED_TARGET_INVALID"),
-                    };
-                    if denied != (step == 2) || arguments["content"].as_str() != Some(CONTENT)
-                        || !object_has_only_keys(&arguments, &["file_path", "content"]) {
-                        return reject("LOOPBACK_REQUESTED_ARGUMENTS_INVALID");
-                    }
-                    let id = if denied { "loopback-native-deny" } else { "loopback-native-allow" };
-                    json!({"id":"local-before-tool","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{
-                        "index":0,"id":id,"type":"function","function":{"name":"Write",
-                        "arguments":arguments.to_string()}
-                    }]},"finish_reason":null}]})
-                } else {
-                    let denied = step == 3;
-                    let id = if denied { "loopback-native-deny" } else { "loopback-native-allow" };
-                    let result = body["messages"].as_array().and_then(|messages| messages.iter().rev()
-                        .find(|message| message["role"] == "tool"));
-                    if result.is_none_or(|message| message["tool_call_id"] != id || message["content"].as_str()
-                        .is_none_or(|text| text.contains(DENY_REASON) != denied)) {
+                    content.contains(WRITE_ARGUMENTS_PREFIX).then_some((index, content))
+                });
+                let Some((user_index, content)) = user else {
+                    return reject("LOOPBACK_USER_INPUT_MISSING");
+                };
+                let argument_lines: Vec<_> = content.lines().filter_map(|line| line.strip_prefix(WRITE_ARGUMENTS_PREFIX)).collect();
+                let [line] = argument_lines.as_slice() else { return reject("LOOPBACK_EXACT_ARGUMENT_LINE_MISSING"); };
+                let arguments = serde_json::from_str::<Value>(line).unwrap_or(Value::Null);
+                let denied = match arguments["path"].as_str() {
+                    Some(DENY_FILE) => true,
+                    Some(ALLOW_FILE) => false,
+                    _ => return reject("LOOPBACK_REQUESTED_TARGET_INVALID"),
+                };
+                if arguments["content"].as_str() != Some(CONTENT)
+                    || !object_has_only_keys(&arguments, &["path", "content"]) {
+                    return reject("LOOPBACK_REQUESTED_ARGUMENTS_INVALID");
+                }
+                let suffix = if denied { "deny" } else { "allow" };
+                let target_id = format!("loopback-native-{suffix}");
+                let target_retry = format!("{target_id}-retry");
+                let tool_results = messages[user_index + 1..].iter()
+                    .filter(|message| message["role"] == "tool")
+                    .collect::<Vec<_>>();
+                let result = |id: &str| tool_results.iter().find(|message|
+                    message["tool_call_id"].as_str() == Some(id));
+                let control_call = |id: String, name: &str, arguments: Value| json!({"id":"local-before-tool","choices":[{"index":0,
+                    "delta":{"role":"assistant","tool_calls":[{"index":0,"id":id,"type":"function","function":{
+                        "name":name,"arguments":arguments.to_string()
+                    }}]},"finish_reason":null}]});
+                let plan_start = format!("loopback-plan-start-{suffix}");
+                let plan_finish = format!("loopback-plan-finish-{suffix}");
+                let report = format!("loopback-report-{suffix}");
+                let requirement = format!("before-tool-{suffix}");
+                let (frame, finish_reason) = if result(&report).is_some() {
+                    (json!({"id":"local-before-tool","choices":[{"index":0,"delta":{"role":"assistant",
+                        "content":if denied { DENY_MARKER } else { ALLOW_MARKER }},"finish_reason":null}]}), "stop")
+                } else if result(&plan_finish).is_some() {
+                    (control_call(report, "report_completion", json!({
+                        "summary":"The exact before-tool fixture request reached its terminal outcome",
+                        "criteria":[{"step":"Attempt the exact native write_file request",
+                            "disposition":if denied { "unverified" } else { "supported" },
+                            "evidence_call_ids":if denied { Vec::<String>::new() } else { vec![target_retry.clone()] },
+                            "rationale":if denied { "The selected business rule rejected the target before execution" } else { "The native write_file owner returned successfully" },
+                            "requirement_ids":[requirement]
+                        }]
+                    })), "tool_calls")
+                } else if let Some(target) = result(&target_retry) {
+                    if target["is_error"].as_bool() != Some(denied)
+                        || denied && target["content"].as_str().is_none_or(|text| !text.contains(DENY_REASON)) {
                         return reject("LOOPBACK_MODEL_DID_NOT_CONSUME_TOOL_RESULT");
                     }
                     consumed.fetch_add(1, Ordering::SeqCst);
-                    json!({"id":"local-before-tool","choices":[{"index":0,"delta":{"role":"assistant",
-                        "content":if denied { DENY_MARKER } else { ALLOW_MARKER }},"finish_reason":null}]})
+                    (control_call(plan_finish, "update_plan", json!({
+                        "explanation":"Record the exact native write_file outcome",
+                        "plan":[{"step":"Attempt the exact native write_file request","status":"completed"}],
+                        "requirements":[{"id":requirement,"description":"Attempt the exact requested native write_file once",
+                            "source":{"input":0,"quote":if denied { DENY_FILE } else { ALLOW_FILE }}}]
+                    })), "tool_calls")
+                } else if result(&plan_start).is_some() {
+                    let advertised = body["tools"].as_array().is_some_and(|tools| tools.iter()
+                        .any(|tool| tool.pointer("/function/name").and_then(Value::as_str) == Some("write_file")));
+                    if !advertised { return reject("LOOPBACK_NATIVE_WRITE_NOT_ADVERTISED"); }
+                    (json!({"id":"local-before-tool","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{
+                        "index":0,"id":target_retry,"type":"function","function":{"name":"write_file",
+                        "arguments":arguments.to_string()}
+                    }]},"finish_reason":null}]}), "tool_calls")
+                } else if let Some(deferred) = result(&target_id) {
+                    if deferred["content"].as_str().is_none_or(|text|
+                        !text.contains("Call update_plan with an in_progress step")) {
+                        return reject("LOOPBACK_EFFECT_PLAN_GATE_MISSING");
+                    }
+                    (control_call(plan_start, "update_plan", json!({
+                        "explanation":"Record the exact requested native write_file before its effect",
+                        "plan":[{"step":"Attempt the exact native write_file request","status":"in_progress"}],
+                        "requirements":[{"id":requirement,"description":"Attempt the exact requested native write_file once",
+                            "source":{"input":0,"quote":if denied { DENY_FILE } else { ALLOW_FILE }}}]
+                    })), "tool_calls")
+                } else {
+                    let advertised = body["tools"].as_array().is_some_and(|tools| tools.iter()
+                        .any(|tool| tool.pointer("/function/name").and_then(Value::as_str) == Some("write_file")));
+                    if !advertised { return reject("LOOPBACK_NATIVE_WRITE_NOT_ADVERTISED"); }
+                    (json!({"id":"local-before-tool","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{
+                        "index":0,"id":target_id,"type":"function","function":{"name":"write_file",
+                        "arguments":arguments.to_string()}
+                    }]},"finish_reason":null}]}), "tool_calls")
                 };
                 let done = json!({"id":"local-before-tool","choices":[{"index":0,"delta":{},
-                    "finish_reason":if step % 2 == 0 { "tool_calls" } else { "stop" }}]});
+                    "finish_reason":finish_reason}]});
                 wiremock::ResponseTemplate::new(200).insert_header("content-type","text/event-stream")
                     .set_body_string(format!("data: {frame}\n\ndata: {done}\n\ndata: [DONE]\n\n"))
             }).mount(&upstream).await;
@@ -980,7 +1153,7 @@ mod tests {
         }
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            4,
+            13,
             "LOOPBACK_REQUEST_COUNT_INVALID"
         );
         assert_eq!(
@@ -1017,12 +1190,13 @@ mod tests {
                     let after = query.get("after_seq").and_then(|value| value.parse::<u64>().ok()).unwrap_or(0);
                     let tail = if ready { 3 } else { 1 };
                     let messages = if after == 0 {
-                        let tool = json!({"session_id":"fixture","presentation_intent":"left","last_seq":if ready {2} else {1},"projection":{
-                            "name":"Write","status":if ready {"error"} else {"running"},"call_id":"fixture-call","turn_id":"fixture-turn",
-                            "args":{"file_path":DENY_FILE,"content":CONTENT},"input":{"file_path":DENY_FILE,"content":CONTENT},
-                            "output":format!("Blocked by before_tool hook: {DENY_REASON}. Target tool was not executed.")}});
-                        if ready { vec![tool, json!({"session_id":"fixture","presentation_intent":"left","last_seq":3,
-                            "projection":{"content":DENY_MARKER,"turn_id":"fixture-turn"}})] } else { vec![tool] }
+                        let tool = json!({"session_id":"fixture","presentation_intent":"tool","last_seq":if ready {2} else {1},"projection":{
+                            "state":if ready {"recorded"} else {"started"},
+                            "tool_summary":{"action_id":"workspace.files/write","call_id":"fixture-call",
+                                "operation_id":"fixture-operation"}}});
+                        if ready { vec![tool, json!({"session_id":"fixture","presentation_intent":"message","last_seq":3,
+                            "projection":{"state":"completed","content":DENY_MARKER,
+                                "correlation_id":uuid::Uuid::now_v7().to_string()}})] } else { vec![tool] }
                     } else { vec![] };
                     axum::Json(json!({"success":true,"data":{"agent_session_id":"fixture","messages":messages,
                         "next_cursor":{"agent_session_id":"fixture","seq":tail}}}))
@@ -1035,7 +1209,7 @@ mod tests {
         let turn = wait_turn(&router, "fixture", 0, root.path(), true)
             .await
             .unwrap();
-        assert_eq!(turn, "fixture-turn");
+        assert!(uuid::Uuid::parse_str(&turn).is_ok());
         assert!(ready_seen.load(Ordering::SeqCst));
     }
     #[test]
@@ -1050,30 +1224,20 @@ mod tests {
             let arguments: Value = serde_json::from_str(lines[0]).unwrap();
             assert_eq!(
                 arguments,
-                json!({"file_path":if denied { DENY_FILE } else { ALLOW_FILE },"content":CONTENT})
+                json!({"path":if denied { DENY_FILE } else { ALLOW_FILE },"content":CONTENT})
             );
             assert!(!prompt.contains(if denied { ALLOW_FILE } else { DENY_FILE }));
         }
     }
     #[test]
     fn before_tool_content_evidence_classifies_without_accepting_byte_differences() {
-        let line = CONTENT.strip_suffix('\n').unwrap();
         assert_eq!(content_difference(&json!(CONTENT)), None);
         for (value, code) in [
             (Value::Null, "BEFORE_TOOL_TARGET_CONTENT_NOT_STRING"),
             (json!(42), "BEFORE_TOOL_TARGET_CONTENT_NOT_STRING"),
-            (json!(line), "BEFORE_TOOL_TARGET_CONTENT_MISSING_FINAL_LF"),
-            (
-                json!(format!("{line}\\n")),
-                "BEFORE_TOOL_TARGET_CONTENT_LITERAL_BACKSLASH_N",
-            ),
-            (
-                json!(format!("{line}\r\n")),
-                "BEFORE_TOOL_TARGET_CONTENT_CRLF",
-            ),
             (
                 json!(format!("{CONTENT}\n")),
-                "BEFORE_TOOL_TARGET_CONTENT_EXTRA_FINAL_LF",
+                "BEFORE_TOOL_TARGET_CONTENT_OTHER_BYTES",
             ),
             (
                 json!("different synthetic data"),

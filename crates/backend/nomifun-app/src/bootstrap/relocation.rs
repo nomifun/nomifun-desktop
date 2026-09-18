@@ -10,9 +10,6 @@
 //! * `knowledge_bases.root_path` — the knowledge purge guard checks
 //!   `starts_with({data_dir}/knowledge)`, so a stale prefix breaks both
 //!   mounting and managed-purge.
-//! * `conversations.extra` `$.workspace` — custom-workspace association used
-//!   for session grouping and workspace reuse (managed workspaces are
-//!   recomputed from their durable token and need no rewrite).
 //! * `terminal_sessions.cwd` — the directory a terminal session relaunches in.
 //! * `agent_executions.work_dir` / `agent_execution_templates.work_dir` —
 //!   execution working roots.
@@ -36,9 +33,8 @@
 //!   match a `C:\Users\...` root. The replacement side keeps the original
 //!   suffix bytes untouched (`?new || substr(col, length(?old) + 1)` — ASCII
 //!   case-folding preserves length, so the cut point is exact).
-//! * `conversations.extra` rows are guarded by `json_valid(...)` so a single
-//!   corrupt JSON blob cannot fail the whole rewrite, and all statements run
-//!   inside **one transaction** — the rewrite is all-or-nothing.
+//! * All statements run inside **one transaction** — the rewrite is
+//!   all-or-nothing.
 //! * A marker whose `old_root` is suspiciously shallow (a drive root or a
 //!   single top-level dir) is refused: such a prefix would rewrite half the
 //!   database. See [`old_root_is_specific`].
@@ -181,25 +177,6 @@ pub async fn rewrite_path_prefixes(
                 .rows_affected();
         }
 
-        // `conversations.extra` is a JSON object; only its `workspace` key
-        // holds an absolute path. `json_set` keeps every other key intact.
-        // The `CASE WHEN json_valid(...)` wrapper (NOT a plain `json_valid()
-        // AND ...` — SQLite may reorder AND operands, CASE branches are
-        // guaranteed lazy) turns corrupt blobs into NULL so a single bad row
-        // neither errors the UPDATE nor blocks the rewrite of valid rows.
-        affected += nomifun_db::sqlx::query(
-            "UPDATE conversations SET extra = json_set(extra, '$.workspace', \
-                 ?2 || substr(json_extract(extra, '$.workspace'), length(?1) + 1)) \
-             WHERE lower(json_extract(CASE WHEN json_valid(extra) THEN extra END, '$.workspace')) = lower(?1) \
-                OR lower(substr(json_extract(CASE WHEN json_valid(extra) THEN extra END, '$.workspace'), \
-                                1, length(?1) + 1)) \
-                       IN (lower(?1) || '\\', lower(?1) || '/')",
-        )
-        .bind(&old)
-        .bind(&new)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
     }
     tx.commit().await?;
     Ok(affected)
@@ -242,7 +219,7 @@ fn prefix_variants(old_root: &str, new_root: &str) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_common::{ConversationId, TerminalId};
+    use nomifun_common::TerminalId;
     use nomifun_db::sqlx;
 
     const OLD: &str = r"C:\Users\u\AppData\Local\NomiFun\Nomi";
@@ -302,25 +279,6 @@ mod tests {
         .unwrap();
     }
 
-    async fn insert_conversation(
-        pool: &nomifun_db::SqlitePool,
-        id: &ConversationId,
-        extra: &str,
-    ) {
-        let owner = nomifun_db::installation_owner_id(pool).await.unwrap();
-        sqlx::query(
-            "INSERT INTO conversations \
-                 (conversation_id, user_id, name, type, extra, created_at, updated_at) \
-             VALUES (?, ?, 'c', 'nomi', ?, 1, 1)",
-        )
-        .bind(id.as_str())
-        .bind(owner)
-        .bind(extra)
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-
     #[tokio::test]
     async fn rewrites_all_stored_spellings_and_preserves_suffixes() {
         let (_dir, database) = test_database().await;
@@ -341,25 +299,9 @@ mod tests {
         .await;
         let terminal = TerminalId::new();
         insert_terminal(pool, &terminal, &format!(r"{OLD}\conversations\ws-1")).await;
-        let conversation = ConversationId::new();
-        insert_conversation(
-            pool,
-            &conversation,
-            &format!(
-                r#"{{"workspace":"{}"}}"#,
-                format!(r"{OLD}\conversations\ws-2").replace('\\', "\\\\")
-            ),
-        )
-        .await;
-        // The v3 schema CHECK-constrains `extra` to valid JSON objects, so a
-        // corrupt blob cannot exist in a v3 database; the CASE WHEN
-        // json_valid(...) guard in the UPDATE stays purely defensive.
-        let untouched = ConversationId::new();
-        insert_conversation(pool, &untouched, r#"{"note":"no workspace"}"#).await;
-
         let affected = rewrite_path_prefixes(pool, OLD, NEW).await.unwrap();
 
-        assert!(affected >= 5, "expected >=5 rewritten rows, got {affected}");
+        assert!(affected >= 4, "expected >=4 rewritten rows, got {affected}");
         let roots: Vec<String> = sqlx::query_scalar(
             "SELECT root_path FROM knowledge_bases ORDER BY root_path",
         )
@@ -386,25 +328,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(cwd, format!(r"{NEW}\conversations\ws-1"));
-        let workspace: String = sqlx::query_scalar(
-            "SELECT json_extract(extra, '$.workspace') FROM conversations WHERE conversation_id = ?",
-        )
-        .bind(conversation.as_str())
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        assert_eq!(workspace, format!(r"{NEW}\conversations\ws-2"));
-        let untouched_extra: String = sqlx::query_scalar(
-            "SELECT extra FROM conversations WHERE conversation_id = ?",
-        )
-        .bind(untouched.as_str())
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            untouched_extra, r#"{"note":"no workspace"}"#,
-            "rows without a workspace stay untouched"
-        );
         database.close().await;
     }
 

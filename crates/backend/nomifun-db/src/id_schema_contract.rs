@@ -79,16 +79,7 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "channel_sessions",
     "channel_users",
     "client_preferences",
-    "conversation_artifacts",
-    "conversation_creation_keys",
-    "conversation_delivery_notify",
-    "conversation_delivery_receipts",
     "conversation_execution_links",
-    "conversation_hosted_effects",
-    "conversation_mcp_effects",
-    "conversation_mcp_servers",
-    "conversation_runtime_events",
-    "conversations",
     "creation_tasks",
     "creative_studio_agent_proposal_receipts",
     "creative_studio_agent_sessions",
@@ -106,8 +97,6 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "cs_handoffs",
     "cs_messages",
     "cs_notes",
-    "idmm_action_reservations",
-    "idmm_interventions",
     "installation_identity",
     "installation_role_bindings",
     "instance_access_token",
@@ -122,8 +111,6 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "knowledge_tags",
     "knowledge_tree_operations",
     "mcp_servers",
-    "message_correlations",
-    "messages",
     "plugin_build_operation_lineage",
     "plugin_catalog_publications",
     "plugin_credential_bindings",
@@ -143,10 +130,7 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "nomi_remote_sessions",
     "nomi_wave1_memory_action_receipts",
     "nomi_wave4_action_receipts",
-    "nomi_agent_bindings",
     "product_agent_selections",
-    "nomi_agent_preset_revisions",
-    "nomi_agent_presets",
     "oauth_tokens",
     "plugin_artifacts",
     "plugin_candidate_test_receipts",
@@ -178,7 +162,7 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "terminal_turn_admissions",
     "users",
     "webhooks",
-    "workshop_assets",
+    "workshop_assets"
 ];
 
 /// Business columns that carry a bare canonical UUIDv7 for every populated row.
@@ -198,8 +182,6 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("channel_pending_prompts", "prompt_id"),
     ("channel_sessions", "channel_session_id"),
     ("channel_users", "channel_user_id"),
-    ("conversation_artifacts", "conversation_artifact_id"),
-    ("conversations", "conversation_id"),
     ("creation_tasks", "creation_task_id"),
     ("creative_studio_agent_sessions", "session_id"),
     ("creative_studio_projects", "project_id"),
@@ -217,8 +199,6 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("cs_handoffs", "cs_handoff_id"),
     ("cs_messages", "cs_message_id"),
     ("cs_notes", "cs_note_id"),
-    ("idmm_action_reservations", "reservation_id"),
-    ("idmm_interventions", "intervention_id"),
     ("knowledge_bases", "knowledge_base_id"),
     ("knowledge_bindings", "knowledge_binding_id"),
     ("knowledge_entries", "knowledge_entry_id"),
@@ -226,7 +206,6 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("knowledge_sources", "knowledge_source_id"),
     ("knowledge_tree_operations", "operation_id"),
     ("mcp_servers", "mcp_server_id"),
-    ("messages", "message_id"),
     ("plugin_build_operation_lineage", "operation_id"),
     ("plugin_products", "plugin_product_id"),
     ("plugin_projects", "project_id"),
@@ -238,7 +217,6 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("plugin_surface_sessions", "surface_session_id"),
     ("nomi_remote_events", "event_id"),
     ("nomi_remote_sessions", "agent_session_id"),
-    ("nomi_agent_presets", "preset_id"),
     ("plugin_artifacts", "artifact_id"),
     ("plugin_candidate_test_receipts", "receipt_id"),
     ("plugin_dependency_mutation_intents", "intent_id"),
@@ -255,7 +233,7 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("terminal_turn_admissions", "turn_token"),
     ("users", "user_id"),
     ("webhooks", "webhook_id"),
-    ("workshop_assets", "asset_id"),
+    ("workshop_assets", "asset_id")
 ];
 
 /// Canonical UUIDv7 values owned by a managed side store rather than a
@@ -297,26 +275,6 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("channel_sessions", "chat_id"),
     ("channel_users", "channel_user_id"),
     ("channel_users", "platform_user_id"),
-    ("conversation_artifacts", "conversation_artifact_id"),
-    ("conversation_delivery_notify", "operation_id"),
-    ("conversation_delivery_receipts", "conversation_id"),
-    ("conversation_delivery_receipts", "message_id"),
-    ("conversation_delivery_receipts", "operation_id"),
-    // Immutable receipt identity survives deletion of the Conversation projection.
-    // MCP owner facts inherit their user/Conversation from the retained turn
-    // receipt below, not from a deletable Conversation projection.
-    ("conversation_mcp_effects", "user_id"),
-    ("conversation_mcp_effects", "conversation_id"),
-    ("conversation_mcp_effects", "operation_id"),
-    ("conversation_mcp_effects", "capability_id"),
-    ("conversation_hosted_effects", "user_id"),
-    ("conversation_hosted_effects", "conversation_id"),
-    ("conversation_hosted_effects", "operation_id"),
-    ("conversation_hosted_effects", "capability_id"),
-    ("conversation_runtime_events", "conversation_id"),
-    ("conversation_runtime_events", "model_operation_id"),
-    ("conversations", "conversation_id"),
-    ("conversations", "channel_chat_id"),
     ("cron_job_runs", "cron_job_run_id"),
     ("cron_run_reservations", "cron_job_run_id"),
     ("cron_jobs", "cron_job_id"),
@@ -346,8 +304,6 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("cs_handoffs", "updated_by"),
     ("cs_messages", "cs_message_id"),
     ("cs_notes", "cs_note_id"),
-    ("idmm_action_reservations", "reservation_id"),
-    ("idmm_interventions", "intervention_id"),
     ("knowledge_bases", "knowledge_base_id"),
     ("knowledge_bindings", "knowledge_binding_id"),
     ("knowledge_entries", "knowledge_entry_id"),
@@ -356,7 +312,6 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("knowledge_tree_operations", "operation_id"),
     ("knowledge_tree_operations", "request_id"),
     ("mcp_servers", "mcp_server_id"),
-    ("messages", "message_id"),
     ("plugin_build_operation_lineage", "operation_id"),
     ("plugin_products", "plugin_product_id"),
     ("plugin_projects", "project_id"),
@@ -370,11 +325,8 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("nomi_wave1_memory_action_receipts", "process_lease_id"),
     ("nomi_wave4_action_receipts", "capability_id"),
     ("nomi_wave4_action_receipts", "process_lease_id"),
-    ("nomi_agent_bindings", "target_id"),
     ("product_agent_selections", "target_id"),
     ("nomi_remote_events", "event_id"),
-    ("nomi_agent_preset_revisions", "revision_id"),
-    ("nomi_agent_presets", "preset_id"),
     ("plugin_artifacts", "artifact_id"),
     ("plugin_artifacts", "package_id"),
     ("plugin_candidate_test_receipts", "receipt_id"),
@@ -394,7 +346,7 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("terminal_turn_admissions", "turn_token"),
     ("users", "user_id"),
     ("webhooks", "webhook_id"),
-    ("workshop_assets", "asset_id"),
+    ("workshop_assets", "asset_id")
 ];
 
 const PARTIAL_UNIQUE_INDEXES: &[PartialUniqueIndexContract] = &[
@@ -502,10 +454,6 @@ pub(crate) enum DeletePolicy {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RebuildPolicy {
     PreserveBusinessId,
-    /// Preserve a canonical UUIDv7 token that scopes an internal protocol
-    /// owner, even though the token is not an entity identity and has no
-    /// parent row to remap.
-    PreserveProtocolToken,
     ExternalOwner,
 }
 
@@ -518,9 +466,6 @@ pub(crate) enum OrphanAuditPolicy {
     AllowMissingHistoricalParent,
     /// The parent belongs to another store and cannot be audited by SQLite.
     ExternalOwner,
-    /// There is deliberately no parent row. Validate only the value contract
-    /// (currently canonical UUIDv7) and do not report the token as an orphan.
-    ValidateValueOnly,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -584,7 +529,6 @@ pub(crate) struct JsonLogicalReference {
     pub value_sql: &'static str,
     pub parent_table: Option<&'static str>,
     pub parent_column: Option<&'static str>,
-    pub kind: LogicalReferenceKind,
     pub value_contract: LogicalReferenceValueContract,
     pub index_name: &'static str,
     pub delete_policy: DeletePolicy,
@@ -603,7 +547,6 @@ macro_rules! json_text_ref {
             value_sql: $sql,
             parent_table: Some($parent_table),
             parent_column: Some($parent_column),
-            kind: LogicalReferenceKind::Text,
             value_contract: LogicalReferenceValueContract::CanonicalUuidV7,
             index_name: $index,
             delete_policy: DeletePolicy::$delete,
@@ -623,7 +566,6 @@ macro_rules! json_external_ref {
             value_sql: $sql,
             parent_table: None,
             parent_column: None,
-            kind: LogicalReferenceKind::Text,
             // Cross-store ownership prevents a SQLite parent-existence check,
             // but the identifier itself is still a NomiFun business ID and
             // must remain a canonical bare UUIDv7.
@@ -714,47 +656,12 @@ macro_rules! external_ref {
     };
 }
 
-macro_rules! protocol_uuidv7_ref {
-    ($table:literal, $column:literal, $index:literal, $delete:ident) => {
-        LogicalReference {
-            child_table: $table,
-            child_column: $column,
-            parent_table: None,
-            parent_column: None,
-            kind: LogicalReferenceKind::Text,
-            value_contract: LogicalReferenceValueContract::CanonicalUuidV7,
-            nullable: false,
-            index_name: $index,
-            delete_policy: DeletePolicy::$delete,
-            rebuild_policy: RebuildPolicy::PreserveProtocolToken,
-            orphan_audit_policy: OrphanAuditPolicy::ValidateValueOnly,
-            child_predicate: None,
-            frozen_projection_authority: None,
-            parent_predicate: None,
-            aggregate_scope_predicate: None,
-        }
-    };
-}
-
 /// Database and cross-store links owned by the application. Every entry names
 /// its required index, delete policy and restore/clone policy. Parentless
 /// entries are deliberate cross-store references; the database audit reports
 /// them as externally owned instead of pretending SQLite can verify them.
 pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     external_ref!("installation_role_bindings", "provider_mount_id", Text, false, Opaque, "idx_installation_role_bindings_provider_mount", KeepHistory),
-    text_ref!("conversations", "user_id" => "users", "user_id", false, "idx_conversations_user_id", Cascade),
-    opaque_text_ref!("conversations", "active_turn_operation_id" => "conversation_delivery_receipts", "operation_id", true, "idx_conversations_active_turn_operation", Restrict)
-        .with_parent_predicate("parent.kind = 'turn' AND parent.status = 'accepted'")
-        .with_aggregate_scope(
-            "parent.conversation_id = child.conversation_id AND parent.user_id = child.user_id",
-        ),
-    text_ref!("conversations", "cron_job_id" => "cron_jobs", "cron_job_id", true, "idx_conversations_cron_job_id", SetNull),
-    text_ref!("conversations", "preset_id" => "nomi_agent_presets", "preset_id", true, "idx_conversations_preset_id", SetNull)
-        .with_frozen_projection_authority("child.agent_snapshot IS NOT NULL"),
-    text_ref!("conversations", "execution_template_id" => "agent_execution_templates", "execution_template_id", true, "idx_conversations_execution_template_id", SetNull),
-    text_ref!("messages", "conversation_id" => "conversations", "conversation_id", false, "idx_messages_conversation_id", Cascade),
-    text_ref!("messages", "msg_id" => "messages", "message_id", true, "idx_messages_msg_id", KeepHistory)
-        .with_aggregate_scope("parent.conversation_id = child.conversation_id"),
     text_ref!("terminal_sessions", "user_id" => "users", "user_id", false, "idx_terminal_sessions_user_id", Cascade),
     text_ref!("ssh_hosts", "user_id" => "users", "user_id", false, "idx_ssh_hosts_user_id", Cascade),
     text_ref!("plugin_product_documents", "owner_user_id" => "users", "user_id", false, "idx_plugin_product_documents_owner", Cascade),
@@ -820,8 +727,8 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
              AND parent.plugin_product_id = child.plugin_product_id",
         ),
     text_ref!("plugin_surface_sessions", "owner_user_id" => "users", "user_id", false, "idx_plugin_surface_sessions_owner_user_id", Cascade),
-    text_ref!("plugin_surface_sessions", "conversation_id" => "conversations", "conversation_id", true, "idx_plugin_surface_sessions_conversation_id", Cascade)
-        .with_aggregate_scope("parent.user_id = child.owner_user_id"),
+    text_ref!("plugin_surface_sessions", "conversation_id" => "agent_sessions", "agent_session_id", true, "idx_plugin_surface_sessions_conversation_id", Cascade)
+        .with_aggregate_scope("json_extract(parent.owner_ref_json, '$.principal_id') = child.owner_user_id"),
     text_ref!("plugin_surface_sessions", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_surface_sessions_plugin_product_id", Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
     text_ref!("plugin_surface_sessions", "active_release_id" => "plugin_releases", "release_id", false, "idx_plugin_surface_sessions_active_release_id", Restrict)
@@ -840,8 +747,8 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("attachments", "requirement_id" => "requirements", "requirement_id", false, "idx_attachments_requirement_id", Cascade),
     text_ref!("channel_inbound_receipts", "user_id" => "users", "user_id", true, "idx_channel_inbound_receipts_user_id", SetNull),
     text_ref!("channel_inbound_receipts", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", true, "idx_channel_inbound_receipts_channel_plugin_id", SetNull),
-    text_ref!("channel_inbound_receipts", "conversation_id" => "conversations", "conversation_id", true, "idx_channel_inbound_receipts_conversation_id", SetNull),
-    text_ref!("channel_inbound_receipts", "message_id" => "messages", "message_id", true, "idx_channel_inbound_receipts_message_id", SetNull),
+    text_ref!("channel_inbound_receipts", "conversation_id" => "agent_sessions", "agent_session_id", true, "idx_channel_inbound_receipts_conversation_id", KeepHistory),
+    text_ref!("channel_inbound_receipts", "message_id" => "agent_events", "event_id", true, "idx_channel_inbound_receipts_message_id", KeepHistory),
     text_ref!("channel_session_bindings", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", false, "idx_channel_session_bindings_plugin_id", Cascade),
     text_ref!("channel_session_bindings", "channel_user_id" => "channel_users", "channel_user_id", false, "idx_channel_session_bindings_user_id", Cascade),
     text_ref!("channel_session_bindings", "channel_session_id" => "channel_sessions", "channel_session_id", false, "idx_channel_session_bindings_session_id", Cascade),
@@ -850,16 +757,13 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     // session, or conversation is deleted.
     text_ref!("channel_pending_prompts", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", false, "idx_cpp_plugin_chat", KeepHistory),
     text_ref!("channel_pending_prompts", "channel_session_id" => "channel_sessions", "channel_session_id", false, "idx_cpp_session", KeepHistory),
-    text_ref!("channel_pending_prompts", "conversation_id" => "conversations", "conversation_id", false, "idx_cpp_conversation_state", KeepHistory),
-    // Delivery-notify registrations (spec D2) reference the requester
-    // conversation; a settled registration outlives requester deletion.
-    text_ref!("conversation_delivery_notify", "requester_conversation_id" => "conversations", "conversation_id", false, "idx_cdn_requester", KeepHistory),
+    text_ref!("channel_pending_prompts", "conversation_id" => "agent_sessions", "agent_session_id", false, "idx_cpp_conversation_state", KeepHistory),
     text_ref!("channel_sessions", "channel_user_id" => "channel_users", "channel_user_id", false, "idx_channel_sessions_channel_user_id", Cascade),
-    text_ref!("channel_sessions", "conversation_id" => "conversations", "conversation_id", true, "idx_channel_sessions_conversation_id", SetNull),
+    text_ref!("channel_sessions", "conversation_id" => "agent_sessions", "agent_session_id", true, "idx_channel_sessions_conversation_id", SetNull),
     text_ref!("channel_sessions", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", true, "idx_channel_sessions_channel_plugin_id", SetNull),
     text_ref!("agent_execution_participants", "execution_id" => "agent_executions", "execution_id", false, "idx_execution_participants_execution_id", Cascade),
     text_ref!("agent_execution_participants", "source_agent_id" => "agent_metadata", "agent_id", false, "idx_execution_participants_source_agent_id", KeepHistory),
-    text_ref!("agent_execution_participants", "preset_id" => "nomi_agent_presets", "preset_id", true, "idx_execution_participants_preset_id", KeepHistory)
+    text_ref!("agent_execution_participants", "preset_id" => "agent_presets", "preset_id", true, "idx_execution_participants_preset_id", KeepHistory)
         .with_orphan_audit_policy(OrphanAuditPolicy::RequireParent)
         .with_frozen_projection_authority("child.agent_snapshot IS NOT NULL"),
     text_ref!("agent_execution_participants", "provider_id" => "providers", "provider_id", true, "idx_execution_participants_provider_id", KeepHistory)
@@ -890,11 +794,11 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
         ),
     text_ref!("agent_execution_events", "actor_id" => "users", "user_id", true, "idx_execution_events_actor_user_id", KeepHistory)
         .with_child_predicate("child.actor_type = 'user'"),
-    text_ref!("agent_execution_events", "actor_id" => "conversations", "conversation_id", true, "idx_execution_events_actor_local_agent_id", KeepHistory)
+    text_ref!("agent_execution_events", "actor_id" => "agent_sessions", "agent_session_id", true, "idx_execution_events_actor_local_agent_id", KeepHistory)
         .with_child_predicate(
             "child.actor_type = 'agent' AND child.actor_conversation_id IS NOT NULL",
         )
-        .with_aggregate_scope("parent.conversation_id = child.actor_conversation_id"),
+        .with_aggregate_scope("parent.agent_session_id = child.actor_conversation_id"),
     external_ref!(
         "agent_execution_events",
         "actor_id",
@@ -909,18 +813,16 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
          AND child.actor_conversation_id IS NULL \
          AND child.actor_id IS NOT NULL",
     ),
-    text_ref!("agent_execution_events", "actor_conversation_id" => "conversations", "conversation_id", true, "idx_execution_events_actor_conversation_id", KeepHistory),
+    text_ref!("agent_execution_events", "actor_conversation_id" => "agent_sessions", "agent_session_id", true, "idx_execution_events_actor_conversation_id", KeepHistory),
     text_ref!("agent_execution_events", "actor_attempt_id" => "agent_execution_attempts", "attempt_id", true, "idx_execution_events_actor_attempt_id", KeepHistory)
         .with_aggregate_scope("parent.execution_id = child.execution_id"),
     text_ref!("agent_execution_events", "on_behalf_of_user_id" => "users", "user_id", false, "idx_execution_events_on_behalf_of_user_id", KeepHistory),
     text_ref!("agent_execution_template_participants", "template_id" => "agent_execution_templates", "execution_template_id", false, "idx_template_participants_template_id", Cascade),
     text_ref!("agent_execution_template_participants", "source_agent_id" => "agent_metadata", "agent_id", false, "idx_template_participants_source_agent_id", Restrict),
-    text_ref!("agent_execution_template_participants", "preset_id" => "nomi_agent_presets", "preset_id", true, "idx_template_participants_preset_id", SetNull)
+    text_ref!("agent_execution_template_participants", "preset_id" => "agent_presets", "preset_id", true, "idx_template_participants_preset_id", SetNull)
         .with_frozen_projection_authority("child.agent_snapshot IS NOT NULL"),
     text_ref!("agent_execution_template_participants", "provider_id" => "providers", "provider_id", true, "idx_template_participants_provider_id", Restrict),
-    text_ref!("conversation_artifacts", "conversation_id" => "conversations", "conversation_id", false, "idx_conversation_artifacts_conversation_id", Cascade),
-    text_ref!("conversation_artifacts", "cron_job_id" => "cron_jobs", "cron_job_id", true, "idx_conversation_artifacts_cron_job_id", SetNull),
-    text_ref!("conversation_execution_links", "conversation_id" => "conversations", "conversation_id", false, "idx_conversation_execution_links_conversation_id", KeepHistory),
+    text_ref!("conversation_execution_links", "conversation_id" => "agent_sessions", "agent_session_id", false, "idx_conversation_execution_links_conversation_id", KeepHistory),
     text_ref!("conversation_execution_links", "execution_id" => "agent_executions", "execution_id", false, "idx_conversation_execution_links_execution_id", Cascade),
     text_ref!("conversation_execution_links", "step_id" => "agent_execution_steps", "step_id", true, "idx_conversation_execution_links_step_id", KeepHistory)
         .with_aggregate_scope("parent.execution_id = child.execution_id"),
@@ -929,12 +831,12 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
             "parent.execution_id = child.execution_id AND parent.step_id = child.step_id",
         ),
     text_ref!("cron_jobs", "user_id" => "users", "user_id", false, "idx_cron_jobs_user_id", Cascade),
-    text_ref!("cron_jobs", "preset_id" => "nomi_agent_presets", "preset_id", true, "idx_cron_jobs_preset_id", SetNull)
+    text_ref!("cron_jobs", "preset_id" => "agent_presets", "preset_id", true, "idx_cron_jobs_preset_id", SetNull)
         .with_frozen_projection_authority("child.agent_snapshot IS NOT NULL"),
-    text_ref!("cron_jobs", "conversation_id" => "conversations", "conversation_id", true, "idx_cron_jobs_conversation_id", Cascade),
+    text_ref!("cron_jobs", "conversation_id" => "agent_sessions", "agent_session_id", true, "idx_cron_jobs_conversation_id", Cascade),
     text_ref!("cron_job_runs", "cron_job_id" => "cron_jobs", "cron_job_id", false, "idx_cron_job_runs_cron_job_id", Cascade),
     text_ref!("cron_run_reservations", "cron_job_id" => "cron_jobs", "cron_job_id", false, "idx_cron_run_reservations_cron_job_id", Cascade),
-    text_ref!("cron_run_reservations", "conversation_id" => "conversations", "conversation_id", true, "idx_cron_run_reservations_conversation_id", SetNull),
+    text_ref!("cron_run_reservations", "conversation_id" => "agent_sessions", "agent_session_id", true, "idx_cron_run_reservations_conversation_id", SetNull),
     external_ref!("channel_plugins", "companion_id", Text, true, CanonicalUuidV7, "idx_channel_plugins_companion_id", SetNull),
     text_ref!("channel_users", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", true, "idx_channel_users_channel_plugin_id", Cascade),
     // ── customer-service domain (015) ────────────────────────────────
@@ -962,51 +864,33 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     // Canonical Creative Studio task history survives project deletion, while
     // creation itself still locks and validates a live project row.
     text_ref!("creation_tasks", "project_id" => "creative_studio_projects", "project_id", true, "idx_creation_tasks_project_id", KeepHistory),
-    text_ref!("creation_tasks", "conversation_id" => "conversations", "conversation_id", true, "idx_creation_tasks_conversation", KeepHistory),
-    text_ref!("creation_tasks", "message_id" => "messages", "message_id", true, "idx_creation_tasks_message", KeepHistory)
-        .with_aggregate_scope("parent.conversation_id = child.conversation_id"),
+    text_ref!("creation_tasks", "conversation_id" => "agent_sessions", "agent_session_id", true, "idx_creation_tasks_conversation", KeepHistory),
+    text_ref!("creation_tasks", "message_id" => "agent_events", "event_id", true, "idx_creation_tasks_message", KeepHistory)
+        .with_aggregate_scope("parent.session_id = child.conversation_id"),
     text_ref!("creation_tasks", "template_id" => "creative_studio_templates", "template_id", true, "idx_creation_tasks_template_id", KeepHistory),
     text_ref!("creation_tasks", "template_run_id" => "creative_studio_template_runs", "template_run_id", true, "idx_creation_tasks_template_run_id", KeepHistory)
         .with_aggregate_scope("parent.template_id = child.template_id"),
     text_ref!("creation_tasks", "provider_id" => "providers", "provider_id", false, "idx_creation_tasks_provider_id", Restrict),
     text_ref!("creative_studio_template_runs", "template_id" => "creative_studio_templates", "template_id", false, "idx_creative_template_runs_template_id", KeepHistory),
     text_ref!("creative_studio_agent_proposal_receipts", "project_id" => "creative_studio_projects", "project_id", false, "idx_creative_agent_proposal_receipts_project", Cascade),
-    text_ref!("creative_studio_agent_proposal_receipts", "assistant_message_id" => "messages", "message_id", false, "idx_creative_agent_proposal_receipts_assistant_message", Restrict),
+    text_ref!("creative_studio_agent_proposal_receipts", "assistant_message_id" => "agent_events", "event_id", false, "idx_creative_agent_proposal_receipts_assistant_message", Restrict),
     text_ref!("creative_studio_agent_sessions", "owner_id" => "users", "user_id", false, "idx_creative_agent_sessions_owner", Restrict),
     text_ref!("creative_studio_agent_sessions", "project_id" => "creative_studio_projects", "project_id", false, "idx_creative_agent_sessions_project", Restrict),
-    text_ref!("creative_studio_agent_sessions", "conversation_id" => "conversations", "conversation_id", false, "idx_creative_agent_sessions_conversation", Restrict)
-        .with_aggregate_scope("parent.user_id = child.owner_id"),
-    text_ref!("idmm_action_reservations", "user_id" => "users", "user_id", false, "idx_idmm_action_reservations_user_id", Cascade),
-    text_ref!("idmm_action_reservations", "conversation_id" => "conversations", "conversation_id", false, "idx_idmm_action_reservations_conversation_id", Cascade)
-        .with_aggregate_scope("parent.user_id = child.user_id"),
-    // A reservation survives transcript reset, so the stable wire turn UUID is
-    // a protocol identity rather than a physical messages.message_id parent.
-    protocol_uuidv7_ref!(
-        "idmm_action_reservations",
-        "turn_id",
-        "idx_idmm_action_reservations_turn_id",
-        KeepHistory
-    ),
-    text_ref!("idmm_interventions", "user_id" => "users", "user_id", false, "idx_idmm_interventions_user_id", Cascade),
-    text_ref!("idmm_interventions", "target_id" => "conversations", "conversation_id", false, "idx_idmm_interventions_conversation_target_id", Cascade)
-        .with_child_predicate("child.target_kind = 'conversation'")
-        .with_aggregate_scope("parent.user_id = child.user_id"),
-    text_ref!("idmm_interventions", "target_id" => "terminal_sessions", "terminal_id", false, "idx_idmm_interventions_terminal_target_id", Cascade)
-        .with_child_predicate("child.target_kind = 'terminal'")
-        .with_aggregate_scope("parent.user_id = child.user_id"),
+    text_ref!("creative_studio_agent_sessions", "conversation_id" => "agent_sessions", "agent_session_id", false, "idx_creative_agent_sessions_conversation", Restrict)
+        .with_aggregate_scope("json_extract(parent.owner_ref_json, '$.principal_id') = child.owner_id"),
     // Inactive Requirements follow SET_NULL when their aggregate is deleted.
     // Active/NeedsReview rows deliberately retain the typed owner as immutable
     // execution-history evidence after the parent is gone, so the live-parent
     // orphan audit applies only to rows for which deletion must clear it.
-    text_ref!("requirements", "owner_conversation_id" => "conversations", "conversation_id", true, "idx_requirements_owner_conversation_id", SetNull)
+    text_ref!("requirements", "owner_conversation_id" => "agent_sessions", "agent_session_id", true, "idx_requirements_owner_conversation_id", SetNull)
         .with_child_predicate("child.status NOT IN ('in_progress', 'needs_review')"),
     text_ref!("requirements", "owner_terminal_id" => "terminal_sessions", "terminal_id", true, "idx_requirements_owner_terminal_id", SetNull)
         .with_child_predicate("child.status NOT IN ('in_progress', 'needs_review')"),
     text_ref!("requirement_pre_effect_abandon_guards", "requirement_id" => "requirements", "requirement_id", false, "idx_requirement_pre_effect_abandon_requirement_id", Restrict),
-    text_ref!("requirement_pre_effect_abandon_guards", "owner_conversation_id" => "conversations", "conversation_id", true, "idx_requirement_pre_effect_abandon_owner_conversation", Restrict),
+    text_ref!("requirement_pre_effect_abandon_guards", "owner_conversation_id" => "agent_sessions", "agent_session_id", true, "idx_requirement_pre_effect_abandon_owner_conversation", Restrict),
     text_ref!("requirement_pre_effect_abandon_guards", "owner_terminal_id" => "terminal_sessions", "terminal_id", true, "idx_requirement_pre_effect_abandon_owner_terminal", Restrict),
     external_ref!("knowledge_bindings", "target_workpath", Text, true, Opaque, "uq_knowledge_bindings_target_workpath", Cascade),
-    text_ref!("knowledge_bindings", "target_conversation_id" => "conversations", "conversation_id", true, "uq_knowledge_bindings_target_conversation_id", Cascade)
+    text_ref!("knowledge_bindings", "target_conversation_id" => "agent_sessions", "agent_session_id", true, "uq_knowledge_bindings_target_conversation_id", Cascade)
         .with_child_predicate("child.target_kind = 'conversation'"),
     text_ref!("knowledge_bindings", "target_terminal_id" => "terminal_sessions", "terminal_id", true, "uq_knowledge_bindings_target_terminal_id", Cascade)
         .with_child_predicate("child.target_kind = 'terminal'"),
@@ -1017,22 +901,6 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("agent_execution_step_dependencies", "blocked_step_id" => "agent_execution_steps", "step_id", false, "idx_execution_dependencies_blocked_step_id", Cascade)
         .with_aggregate_scope("parent.execution_id = child.execution_id"),
     text_ref!("channel_pairing_codes", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", true, "idx_channel_pairing_codes_channel_plugin_id", Cascade),
-    text_ref!("conversation_creation_keys", "user_id" => "users", "user_id", false, "idx_conversation_creation_keys_user_id", Cascade),
-    text_ref!("conversation_creation_keys", "conversation_id" => "conversations", "conversation_id", false, "idx_conversation_creation_keys_conversation_id", Cascade),
-    text_ref!("conversation_delivery_receipts", "projected_message_id" => "messages", "message_id", true, "idx_delivery_receipts_message_id", SetNull),
-    text_ref!("conversation_delivery_receipts", "projected_conversation_id" => "conversations", "conversation_id", true, "idx_delivery_receipts_conversation_id", SetNull),
-    text_ref!("conversation_delivery_receipts", "user_id" => "users", "user_id", false, "idx_delivery_receipts_user_id", KeepHistory),
-    opaque_text_ref!("conversation_runtime_events", "turn_operation_id" => "conversation_delivery_receipts", "operation_id", false, "idx_conversation_runtime_events_turn", Restrict)
-        .with_aggregate_scope("parent.conversation_id = child.conversation_id"),
-    opaque_text_ref!("conversation_mcp_effects", "turn_operation_id" => "conversation_delivery_receipts", "operation_id", false, "idx_conversation_mcp_turn", Restrict)
-        .with_parent_predicate("parent.kind = 'turn'")
-        .with_aggregate_scope("parent.conversation_id = child.conversation_id AND parent.user_id = child.user_id"),
-    opaque_text_ref!("conversation_hosted_effects", "turn_operation_id" => "conversation_delivery_receipts", "operation_id", false, "idx_conversation_hosted_turn", Restrict)
-        .with_parent_predicate("parent.kind = 'turn'")
-        .with_aggregate_scope("parent.conversation_id = child.conversation_id AND parent.user_id = child.user_id"),
-    text_ref!("conversation_mcp_servers", "conversation_id" => "conversations", "conversation_id", false, "idx_conversation_mcp_servers_conversation_id", Cascade),
-    text_ref!("conversation_mcp_servers", "mcp_server_id" => "mcp_servers", "mcp_server_id", false, "idx_conversation_mcp_servers_mcp_server_id", Cascade)
-        .with_parent_predicate("parent.deleted_at IS NULL"),
     text_ref!("knowledge_binding_bases", "knowledge_binding_id" => "knowledge_bindings", "knowledge_binding_id", false, "idx_knowledge_binding_bases_knowledge_binding_id", Cascade),
     text_ref!("knowledge_binding_bases", "knowledge_base_id" => "knowledge_bases", "knowledge_base_id", false, "idx_knowledge_binding_bases_knowledge_base_id", Cascade),
     text_ref!("knowledge_entries", "knowledge_base_id" => "knowledge_bases", "knowledge_base_id", false, "idx_knowledge_entries_knowledge_base_id", Cascade),
@@ -1049,23 +917,6 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("knowledge_entry_provenance", "knowledge_source_item_id" => "knowledge_source_items", "knowledge_source_item_id", false, "idx_knowledge_entry_provenance_source_item_id", Cascade),
     text_ref!("knowledge_entry_provenance", "derived_from_entry_id" => "knowledge_entries", "knowledge_entry_id", true, "idx_knowledge_entry_provenance_derived_from_entry_id", KeepHistory),
     text_ref!("knowledge_tree_operations", "knowledge_base_id" => "knowledge_bases", "knowledge_base_id", false, "idx_knowledge_tree_operations_knowledge_base_id", Cascade),
-    text_ref!("message_correlations", "conversation_id" => "conversations", "conversation_id", false, "idx_message_correlations_conversation_id", Cascade),
-    // `turn_message_id` is the wire-scoped owner token supplied by the
-    // streaming protocol. A continuation can reserve a correlation before
-    // its root/turn message is projected, and some continuations intentionally
-    // have no ordinary `messages.message_id` row at all. It is therefore a
-    // protocol UUIDv7 token, not a parent reference to `messages`.
-    protocol_uuidv7_ref!(
-        "message_correlations",
-        "turn_message_id",
-        "idx_message_correlations_turn_message_id",
-        KeepHistory
-    ),
-    // A correlation reserves message_id before the Message is projected. The
-    // missing parent is therefore intentional until projection completes; if
-    // the projection exists, it must remain inside the same Conversation.
-    text_ref!("message_correlations", "message_id" => "messages", "message_id", false, "idx_message_correlations_message_id", KeepHistory)
-        .with_aggregate_scope("parent.conversation_id = child.conversation_id"),
     text_ref!("provider_connections", "provider_id" => "providers", "provider_id", false, "idx_provider_connections_provider_id", Cascade),
     text_ref!("provider_model_capabilities", "provider_id" => "providers", "provider_id", false, "idx_provider_model_capabilities_provider_model", Cascade),
     text_ref!("provider_models", "provider_id" => "providers", "provider_id", false, "idx_provider_models_provider_id", Cascade),
@@ -1116,10 +967,7 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
         .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
     text_ref!("nomi_wave4_action_receipts", "agent_session_id" => "agent_sessions", "agent_session_id", false, "idx_nomi_wave4_receipts_agent_session_id", KeepHistory)
         .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
-    text_ref!("nomi_agent_presets", "owner_user_id" => "users", "user_id", false, "idx_nomi_agent_presets_owner_user_id", Cascade),
-    text_ref!("nomi_agent_preset_revisions", "preset_id" => "nomi_agent_presets", "preset_id", false, "idx_nomi_agent_preset_revisions_preset_id", Restrict),
-    text_ref!("nomi_agent_preset_revisions", "created_by" => "users", "user_id", false, "idx_nomi_agent_preset_revisions_created_by", KeepHistory),
-    text_ref!("nomi_agent_bindings", "owner_user_id" => "users", "user_id", false, "idx_nomi_agent_bindings_owner_user_id", Cascade),
+    opaque_text_ref!("agent_preset_revisions", "created_by" => "users", "user_id", false, "idx_agent_preset_revisions_created_by", KeepHistory),
     text_ref!("product_agent_selections", "owner_user_id" => "users", "user_id", false, "idx_product_agent_selections_owner_user_id", Cascade),
 ];
 
@@ -1130,34 +978,9 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
     // Keep a withdrawn/deleted page choice visible for explicit user repair.
     // It is not a live Surface grant and never authorizes a missing product.
     json_text_ref!(
-        "nomi_agent_presets", "ui_binding_json", "$.selection.plugin_id",
-        "SELECT json_extract(ui_binding_json, '$.selection.plugin_id') AS value FROM nomi_agent_presets" =>
-        "plugin_products", "plugin_product_id", "idx_nomi_agent_presets_ui_plugin", KeepHistory, AllowMissingHistoricalParent
-    ),
-    json_text_ref!(
-        "conversations", "model", "$.provider_id",
-        "SELECT json_extract(model, '$.provider_id') AS value FROM conversations WHERE model IS NOT NULL" =>
-        "providers", "provider_id", "idx_conversations_model_provider_id", Restrict, RequireParent
-    ),
-    json_text_ref!(
-        "conversations", "execution_model_pool", "$.model.provider_id",
-        "SELECT json_extract(execution_model_pool, '$.model.provider_id') AS value FROM conversations WHERE json_extract(execution_model_pool, '$.mode') = 'single'" =>
-        "providers", "provider_id", "idx_conversations_execution_model_pool_json", SetNull, RequireParent
-    ),
-    json_text_ref!(
-        "conversations", "execution_model_pool", "$.models[].provider_id",
-        "SELECT json_extract(item.value, '$.provider_id') AS value FROM conversations, json_each(conversations.execution_model_pool, '$.models') item WHERE json_extract(conversations.execution_model_pool, '$.mode') = 'range'" =>
-        "providers", "provider_id", "idx_conversations_execution_model_pool_json", SetNull, RequireParent
-    ),
-    json_text_ref!(
-        "conversations", "extra", "$.idmm.fault_watch.bypass_model.provider_id",
-        "SELECT json_extract(extra, '$.idmm.fault_watch.bypass_model.provider_id') AS value FROM conversations" =>
-        "providers", "provider_id", "idx_conversations_extra_idmm_fault_provider_id", SetNull, RequireParent
-    ),
-    json_text_ref!(
-        "conversations", "extra", "$.idmm.decision_watch.bypass_model.provider_id",
-        "SELECT json_extract(extra, '$.idmm.decision_watch.bypass_model.provider_id') AS value FROM conversations" =>
-        "providers", "provider_id", "idx_conversations_extra_idmm_decision_provider_id", SetNull, RequireParent
+        "agent_presets", "display_json", "$.ui_binding.selection.plugin_id",
+        "SELECT json_extract(display_json, '$.ui_binding.selection.plugin_id') AS value FROM agent_presets" =>
+        "plugin_products", "plugin_product_id", "idx_agent_presets_ui_plugin", KeepHistory, AllowMissingHistoricalParent
     ),
     json_text_ref!(
         "terminal_sessions", "idmm", "$.fault_watch.bypass_model.provider_id",
@@ -1194,12 +1017,12 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
     json_text_ref!(
         "workshop_assets", "origin", "$.conversation_id",
         "SELECT json_extract(origin, '$.conversation_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
-        "conversations", "conversation_id", "idx_workshop_assets_origin_conversation", KeepHistory, AllowMissingHistoricalParent
+        "agent_sessions", "agent_session_id", "idx_workshop_assets_origin_conversation", KeepHistory, AllowMissingHistoricalParent
     ),
     json_text_ref!(
         "workshop_assets", "origin", "$.message_id",
         "SELECT json_extract(origin, '$.message_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
-        "messages", "message_id", "idx_workshop_assets_origin_message", KeepHistory, AllowMissingHistoricalParent
+        "agent_events", "event_id", "idx_workshop_assets_origin_message", KeepHistory, AllowMissingHistoricalParent
     ),
     json_text_ref!(
         "workshop_assets", "origin", "$.template_id",
@@ -1261,33 +1084,13 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
         "SELECT json_extract(value, '$.rerank.provider_id') AS value FROM client_preferences WHERE key = 'knowledge.retrieval' AND json_valid(value) AND json_extract(value, '$.rerank.mode') = 'remote'" =>
         "providers", "provider_id", "idx_client_preferences_provider_key", SetNull, RequireParent
     ),
-    json_text_ref!(
-        "conversations", "extra", "$.ssh_host_id",
-        "SELECT json_extract(extra, '$.ssh_host_id') AS value FROM conversations" =>
-        "ssh_hosts", "ssh_host_id", "idx_conversations_extra_ssh_host_id", Restrict, RequireParent
-    ),
-    json_text_ref!(
-        "conversations", "extra", "$.agent_id",
-        "SELECT json_extract(extra, '$.agent_id') AS value FROM conversations" =>
-        "agent_metadata", "agent_id", "idx_conversations_extra_agent_id", Restrict, RequireParent
-    ),
-    json_text_ref!(
-        "conversations", "extra", "$.custom_agent_id",
-        "SELECT json_extract(extra, '$.custom_agent_id') AS value FROM conversations" =>
-        "agent_metadata", "agent_id", "idx_conversations_extra_custom_agent_id", Restrict, RequireParent
-    ),
-    json_external_ref!(
-        "conversations", "extra", "$.companion_id",
-        "SELECT json_extract(extra, '$.companion_id') AS value FROM conversations",
-        "idx_conversations_extra_companion_id", KeepHistory
-    ),
     // Customer-service agents mount knowledge bases by ID; a deleted base
     // simply stops contributing hits, so history is allowed to keep the value.
     json_text_ref!(
         "cs_agents", "knowledge_base_ids", "$[]",
         "SELECT item.value AS value FROM cs_agents, json_each(cs_agents.knowledge_base_ids) item" =>
         "knowledge_bases", "knowledge_base_id", "idx_cs_agents_knowledge_base_ids_json", KeepHistory, AllowMissingHistoricalParent
-    ),
+    )
 ];
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -1352,43 +1155,6 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
         "assistant_message_id",
     )
     .await?;
-    require_column(pool, "conversations", "admission_epoch", "INTEGER", true).await?;
-    require_column(
-        pool,
-        "conversation_delivery_receipts",
-        "result_error_code",
-        "TEXT",
-        false,
-    )
-    .await?;
-    require_column(
-        pool,
-        "conversation_delivery_receipts",
-        "result_error_retryable",
-        "INTEGER",
-        false,
-    )
-    .await?;
-    require_column(
-        pool,
-        "conversations",
-        "active_turn_operation_id",
-        "TEXT",
-        false,
-    )
-    .await?;
-    let admission_epoch_default: Option<String> = sqlx::query_scalar(
-        "SELECT dflt_value FROM pragma_table_info('conversations') \
-         WHERE name = 'admission_epoch'",
-    )
-    .fetch_optional(pool)
-    .await?
-    .flatten();
-    if admission_epoch_default.as_deref() != Some("0") {
-        return Err(DbError::Init(
-            "v3 schema conversations.admission_epoch must default to 0".to_owned(),
-        ));
-    }
     // Channel bot ownership domain (migration 020): every row names its owning
     // domain and defaults to the legacy companion pool.
     require_column(pool, "channel_plugins", "owner_domain", "TEXT", true).await?;
@@ -1458,6 +1224,14 @@ pub(crate) async fn validate_id_value_contract(pool: &SqlitePool) -> Result<(), 
     for (table, column) in UUIDV7_MANAGED_VALUE_COLUMNS {
         validate_uuidv7_column_values(pool, table, column, None).await?;
     }
+    for (table, column) in [
+        ("agent_sessions", "agent_session_id"),
+        ("agent_sessions", "parent_agent_session_id"),
+        ("agent_presets", "preset_id"),
+        ("agent_preset_revisions", "created_by"),
+    ] {
+        validate_uuidv7_column_values(pool, table, column, None).await?;
+    }
     for reference in LOGICAL_REFERENCES {
         if reference.value_contract == LogicalReferenceValueContract::CanonicalUuidV7 {
             validate_uuidv7_column_values(
@@ -1509,9 +1283,9 @@ pub async fn validate_id_data_contract(pool: &SqlitePool) -> Result<(), DbError>
 /// this aggregate check for restore/import scope validation.
 async fn validate_agent_ui_binding_scope(pool: &SqlitePool) -> Result<(), DbError> {
     let invalid: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM nomi_agent_presets preset JOIN plugin_products plugin
-         ON plugin.plugin_product_id = json_extract(preset.ui_binding_json, '$.selection.plugin_id')
-         WHERE preset.owner_user_id <> plugin.owner_user_id",
+        "SELECT COUNT(*) FROM agent_presets preset JOIN plugin_products plugin
+         ON plugin.plugin_product_id = json_extract(preset.display_json, '$.ui_binding.selection.plugin_id')
+         WHERE json_extract(preset.owner_ref_json, '$.user_id') <> plugin.owner_user_id",
     ).fetch_one(pool).await?;
     if invalid != 0 {
         return Err(DbError::Init(format!(
@@ -1573,7 +1347,7 @@ pub(crate) async fn audit_logical_reference_orphans(
     for reference in LOGICAL_REFERENCES {
         if matches!(
             reference.orphan_audit_policy,
-            OrphanAuditPolicy::ExternalOwner | OrphanAuditPolicy::ValidateValueOnly
+            OrphanAuditPolicy::ExternalOwner
         ) {
             audit_parentless_logical_reference_values(pool, reference, &mut findings).await?;
             continue;
@@ -1619,7 +1393,7 @@ pub(crate) async fn audit_logical_reference_orphans(
             OrphanAuditPolicy::AllowMissingHistoricalParent => {
                 format!("{parent_exists} AND NOT {valid_parent_exists}")
             }
-            OrphanAuditPolicy::ExternalOwner | OrphanAuditPolicy::ValidateValueOnly => {
+            OrphanAuditPolicy::ExternalOwner => {
                 unreachable!("handled above")
             }
         };
@@ -1679,7 +1453,6 @@ async fn audit_parentless_logical_reference_values(
             child_column: reference.child_column.to_owned(),
             parent_table: match reference.orphan_audit_policy {
                 OrphanAuditPolicy::ExternalOwner => "<external>",
-                OrphanAuditPolicy::ValidateValueOnly => "<protocol-token>",
                 OrphanAuditPolicy::RequireParent
                 | OrphanAuditPolicy::AllowMissingHistoricalParent => {
                     unreachable!("parentless audit requires a parentless policy")
@@ -1873,213 +1646,6 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
                 "BEFORE UPDATE OF OWNER_DOMAIN, COMPANION_ID ON CHANNEL_PLUGINS",
                 "NEW.OWNER_DOMAIN = 'CUSTOMER_SERVICE' AND NEW.COMPANION_ID IS NOT NULL",
                 "RAISE(ABORT, 'CUSTOMER-SERVICE CHANNEL BOTS CANNOT CARRY A COMPANION BINDING')",
-            ],
-        ),
-        (
-            "trg_conversation_delivery_receipts_identity_immutable",
-            &[
-                "BEFORE UPDATE OF OPERATION_ID, MESSAGE_ID, CONVERSATION_ID, USER_ID, KIND, REQUEST_PAYLOAD, CREATED_AT ON CONVERSATION_DELIVERY_RECEIPTS",
-                "OLD.OPERATION_ID IS NOT NEW.OPERATION_ID",
-                "OLD.MESSAGE_ID IS NOT NEW.MESSAGE_ID",
-                "OLD.CONVERSATION_ID IS NOT NEW.CONVERSATION_ID",
-                "OLD.USER_ID IS NOT NEW.USER_ID",
-                "OLD.KIND IS NOT NEW.KIND",
-                "OLD.REQUEST_PAYLOAD IS NOT NEW.REQUEST_PAYLOAD",
-                "OLD.CREATED_AT IS NOT NEW.CREATED_AT",
-                "RAISE( ABORT, 'CONVERSATION DELIVERY RECEIPT IDENTITY IS IMMUTABLE' )",
-            ],
-        ),
-        (
-            "trg_conversation_delivery_receipts_lifecycle_insert_guard",
-            &[
-                "BEFORE INSERT ON CONVERSATION_DELIVERY_RECEIPTS",
-                "NEW.STATUS = 'ACCEPTED'",
-                "NEW.RESULT_OK IS NOT NULL",
-                "NEW.RESULT_TEXT IS NOT NULL",
-                "NEW.RESULT_ERROR IS NOT NULL",
-                "NEW.RESULT_ERROR_CODE IS NOT NULL",
-                "NEW.RESULT_ERROR_RETRYABLE IS NOT NULL",
-                "NEW.COMPLETED_AT IS NOT NULL",
-                "NEW.STATUS = 'COMPLETED'",
-                "TYPEOF(NEW.COMPLETED_AT) <> 'INTEGER'",
-                "NEW.COMPLETED_AT < NEW.CREATED_AT",
-                "TYPEOF(NEW.RESULT_OK) <> 'INTEGER'",
-                "NEW.RESULT_OK NOT IN (0, 1)",
-                "RAISE( ABORT, 'CONVERSATION DELIVERY RECEIPT HAS AN INVALID LIFECYCLE SHAPE' )",
-            ],
-        ),
-        (
-            "trg_conversation_delivery_receipts_lifecycle_update_guard",
-            &[
-                "BEFORE UPDATE OF STATUS, RESULT_OK, RESULT_TEXT, RESULT_ERROR, RESULT_ERROR_CODE, RESULT_ERROR_RETRYABLE, COMPLETED_AT ON CONVERSATION_DELIVERY_RECEIPTS",
-                "OLD.STATUS = 'COMPLETED'",
-                "NEW.STATUS IS NOT OLD.STATUS",
-                "NEW.RESULT_OK IS NOT OLD.RESULT_OK",
-                "NEW.RESULT_TEXT IS NOT OLD.RESULT_TEXT",
-                "NEW.RESULT_ERROR IS NOT OLD.RESULT_ERROR",
-                "NEW.RESULT_ERROR_CODE IS NOT OLD.RESULT_ERROR_CODE",
-                "NEW.RESULT_ERROR_RETRYABLE IS NOT OLD.RESULT_ERROR_RETRYABLE",
-                "NEW.COMPLETED_AT IS NOT OLD.COMPLETED_AT",
-                "NEW.STATUS = 'ACCEPTED'",
-                "NEW.STATUS = 'COMPLETED'",
-                "TYPEOF(NEW.COMPLETED_AT) <> 'INTEGER'",
-                "TYPEOF(NEW.RESULT_OK) <> 'INTEGER'",
-                "NEW.RESULT_OK NOT IN (0, 1)",
-                "RAISE( ABORT, 'CONVERSATION DELIVERY RECEIPT LIFECYCLE IS ABSORBING AND TERMINAL OUTCOMES ARE IMMUTABLE' )",
-            ],
-        ),
-        (
-            "trg_conversation_delivery_receipts_no_delete",
-            &[
-                "BEFORE DELETE ON CONVERSATION_DELIVERY_RECEIPTS",
-                "RAISE( ABORT, 'CONVERSATION DELIVERY RECEIPTS ARE RETAINED INDEFINITELY' )",
-            ],
-        ),
-        (
-            "trg_conversation_runtime_build_immutable",
-            &[
-                "BEFORE UPDATE OF EXTRA ON CONVERSATIONS",
-                "JSON_EXTRACT(OLD.EXTRA, '$.RUNTIME_BUILD_BINDING') IS NOT JSON_EXTRACT(NEW.EXTRA, '$.RUNTIME_BUILD_BINDING')",
-                "RAISE(ABORT, 'CONVERSATION RUNTIME BUILD IS IMMUTABLE; FORK EXPLICITLY')",
-            ],
-        ),
-        (
-            "trg_conversation_runtime_event_owner",
-            &[
-                "BEFORE INSERT ON CONVERSATION_RUNTIME_EVENTS",
-                "R.OPERATION_ID = NEW.TURN_OPERATION_ID",
-                "R.CONVERSATION_ID = NEW.CONVERSATION_ID",
-                "R.KIND = 'TURN'",
-                "RAISE(ABORT, 'RUNTIME EVENT REQUIRES ITS CONVERSATION TURN RECEIPT')",
-            ],
-        ),
-        (
-            "trg_conversation_hosted_effect_admission",
-            &[
-                "BEFORE INSERT ON CONVERSATION_HOSTED_EFFECTS",
-                "NEW.STATE != 'PENDING'",
-                "C.CONVERSATION_ID = NEW.CONVERSATION_ID AND C.USER_ID = NEW.USER_ID",
-                "C.STATUS = 'RUNNING' AND C.ADMISSION_EPOCH = NEW.ADMISSION_EPOCH",
-                "C.ACTIVE_TURN_OPERATION_ID = NEW.TURN_OPERATION_ID",
-                "R.CONVERSATION_ID = C.CONVERSATION_ID AND R.USER_ID = C.USER_ID",
-                "R.KIND = 'TURN' AND R.STATUS = 'ACCEPTED'",
-                "RAISE(ABORT, 'HOSTED EFFECT REQUIRES AN EXACT LIVE CONVERSATION TURN')",
-            ],
-        ),
-        (
-            "trg_conversation_hosted_effect_update",
-            &[
-                "BEFORE UPDATE ON CONVERSATION_HOSTED_EFFECTS",
-                "NEW.ID IS NOT OLD.ID OR NEW.USER_ID IS NOT OLD.USER_ID",
-                "NEW.CONVERSATION_ID IS NOT OLD.CONVERSATION_ID OR NEW.OPERATION_ID IS NOT OLD.OPERATION_ID",
-                "NEW.TURN_OPERATION_ID IS NOT OLD.TURN_OPERATION_ID OR NEW.ADMISSION_EPOCH IS NOT OLD.ADMISSION_EPOCH",
-                "NEW.OWNER_DOMAIN IS NOT OLD.OWNER_DOMAIN OR NEW.CAPABILITY_ID IS NOT OLD.CAPABILITY_ID",
-                "NEW.ACTION_NAME IS NOT OLD.ACTION_NAME OR NEW.INPUT_SHA256 IS NOT OLD.INPUT_SHA256",
-                "NEW.RESOURCE_KEY IS NOT OLD.RESOURCE_KEY",
-                "NEW.CREATED_AT IS NOT OLD.CREATED_AT OR OLD.STATE != 'PENDING'",
-                "NEW.STATE NOT IN ('RETURNED', 'REJECTED') OR NEW.SETTLED_AT IS NULL",
-                "RAISE(ABORT, 'HOSTED EFFECT PERMITS ONLY EXACT PENDING TO TERMINAL TRANSITION')",
-            ],
-        ),
-        (
-            "trg_conversation_hosted_effect_no_delete",
-            &[
-                "BEFORE DELETE ON CONVERSATION_HOSTED_EFFECTS",
-                "RAISE(ABORT, 'HOSTED EFFECT RECEIPTS ARE RETAINED INDEFINITELY')",
-            ],
-        ),
-        (
-            "trg_conversation_mcp_effect_admission",
-            &[
-                "BEFORE INSERT ON CONVERSATION_MCP_EFFECTS",
-                "NEW.STATE != 'PENDING'",
-                "C.CONVERSATION_ID = NEW.CONVERSATION_ID AND C.USER_ID = NEW.USER_ID",
-                "C.STATUS = 'RUNNING' AND C.ADMISSION_EPOCH = NEW.ADMISSION_EPOCH",
-                "C.ACTIVE_TURN_OPERATION_ID = NEW.TURN_OPERATION_ID",
-                "R.CONVERSATION_ID = C.CONVERSATION_ID AND R.USER_ID = C.USER_ID",
-                "R.KIND = 'TURN' AND R.STATUS = 'ACCEPTED'",
-                "RAISE(ABORT, 'MCP EFFECT REQUIRES AN EXACT LIVE CONVERSATION TURN')",
-            ],
-        ),
-        (
-            "trg_conversation_mcp_effect_update",
-            &[
-                "BEFORE UPDATE ON CONVERSATION_MCP_EFFECTS",
-                "NEW.ID IS NOT OLD.ID OR NEW.USER_ID IS NOT OLD.USER_ID",
-                "NEW.CONVERSATION_ID IS NOT OLD.CONVERSATION_ID OR NEW.OPERATION_ID IS NOT OLD.OPERATION_ID",
-                "NEW.TURN_OPERATION_ID IS NOT OLD.TURN_OPERATION_ID OR NEW.ADMISSION_EPOCH IS NOT OLD.ADMISSION_EPOCH",
-                "NEW.CAPABILITY_ID IS NOT OLD.CAPABILITY_ID OR NEW.CREATED_AT IS NOT OLD.CREATED_AT",
-                "OLD.STATE != 'PENDING' OR NEW.STATE != 'SETTLED' OR NEW.SETTLED_AT IS NULL",
-                "RAISE(ABORT, 'MCP EFFECT PERMITS ONLY EXACT PENDING TO SETTLED TRANSITION')",
-            ],
-        ),
-        (
-            "trg_conversation_mcp_effect_no_delete",
-            &[
-                "BEFORE DELETE ON CONVERSATION_MCP_EFFECTS",
-                "RAISE(ABORT, 'MCP EFFECT RECEIPTS ARE RETAINED INDEFINITELY')",
-            ],
-        ),
-        (
-            "trg_conversations_running_admission_guard",
-            &[
-                "BEFORE UPDATE OF STATUS, ACTIVE_TURN_OPERATION_ID, ADMISSION_EPOCH ON CONVERSATIONS",
-                "OLD.STATUS IS NOT 'RUNNING'",
-                "NEW.STATUS = 'RUNNING'",
-                "NEW.ACTIVE_TURN_OPERATION_ID IS NULL",
-                "NEW.ADMISSION_EPOCH IS NOT OLD.ADMISSION_EPOCH + 1",
-                "RECEIPT.OPERATION_ID = NEW.ACTIVE_TURN_OPERATION_ID",
-                "RECEIPT.USER_ID = NEW.USER_ID",
-                "RECEIPT.CONVERSATION_ID = NEW.CONVERSATION_ID",
-                "RECEIPT.KIND = 'TURN'",
-                "RECEIPT.STATUS = 'ACCEPTED'",
-                "RAISE( ABORT, 'CONVERSATION RUNNING ADMISSION REQUIRES AN EXACT ACCEPTED TURN RECEIPT AND NEXT EPOCH' )",
-            ],
-        ),
-        (
-            "trg_conversations_running_delete_guard",
-            &[
-                "BEFORE DELETE ON CONVERSATIONS",
-                "OLD.STATUS = 'RUNNING'",
-                "RAISE( ABORT, 'CONVERSATION RUNNING AUTHORITY CANNOT BE DELETED' )",
-            ],
-        ),
-        (
-            "trg_conversations_running_exit_guard",
-            &[
-                "BEFORE UPDATE OF STATUS, ACTIVE_TURN_OPERATION_ID, ADMISSION_EPOCH ON CONVERSATIONS",
-                "OLD.STATUS = 'RUNNING'",
-                "NEW.STATUS IS NOT 'RUNNING'",
-                "NEW.STATUS IS NOT 'FINISHED'",
-                "NEW.ACTIVE_TURN_OPERATION_ID IS NOT NULL",
-                "NEW.ADMISSION_EPOCH IS NOT OLD.ADMISSION_EPOCH + 1",
-                "RECEIPT.USER_ID = OLD.USER_ID",
-                "RECEIPT.CONVERSATION_ID = OLD.CONVERSATION_ID",
-                "RECEIPT.KIND = 'TURN'",
-                "RECEIPT.STATUS = 'ACCEPTED'",
-                "OLD.ACTIVE_TURN_OPERATION_ID IS NOT NULL",
-                "RECEIPT.OPERATION_ID = OLD.ACTIVE_TURN_OPERATION_ID",
-                "RECEIPT.STATUS = 'COMPLETED'",
-                "RAISE( ABORT, 'CONVERSATION RUNNING EXIT REQUIRES COMPLETED TURN RECEIPTS, FINISHED STATE, CLEARED OWNER, AND NEXT EPOCH' )",
-            ],
-        ),
-        (
-            "trg_conversations_running_insert_guard",
-            &[
-                "BEFORE INSERT ON CONVERSATIONS",
-                "NEW.STATUS = 'RUNNING'",
-                "RAISE( ABORT, 'CONVERSATION CANNOT BE INSERTED RUNNING' )",
-            ],
-        ),
-        (
-            "trg_conversations_running_owner_immutable",
-            &[
-                "BEFORE UPDATE OF STATUS, ACTIVE_TURN_OPERATION_ID, ADMISSION_EPOCH ON CONVERSATIONS",
-                "OLD.STATUS = 'RUNNING'",
-                "NEW.STATUS = 'RUNNING'",
-                "NEW.ACTIVE_TURN_OPERATION_ID IS NOT OLD.ACTIVE_TURN_OPERATION_ID",
-                "NEW.ADMISSION_EPOCH IS NOT OLD.ADMISSION_EPOCH",
-                "RAISE( ABORT, 'CONVERSATION RUNNING OWNER AND EPOCH ARE IMMUTABLE' )",
             ],
         ),
         (
@@ -2570,17 +2136,16 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
                 "GUARD.REQUIREMENT_ID = OLD.REQUIREMENT_ID",
                 "GUARD.CLAIM_GENERATION = OLD.CLAIM_GENERATION",
                 "GUARD.CLAIM_TOKEN = OLD.CLAIM_TOKEN",
-                "FROM CONVERSATION_DELIVERY_RECEIPTS AS RECEIPT",
-                "'$.AUTOWORK_AUTHORITY.REQUIREMENT_ID' ) = OLD.REQUIREMENT_ID",
-                "'$.AUTOWORK_AUTHORITY.CLAIM_GENERATION' ) = OLD.CLAIM_GENERATION",
-                "CONVERSATION.ACTIVE_TURN_OPERATION_ID IS NOT NULL",
+                "FROM AGENT_EXECUTIONS AS EXECUTION",
+                "'$.SOURCE.REQUIREMENT_ID') = OLD.REQUIREMENT_ID",
+                "'$.SOURCE.CLAIM_GENERATION') = OLD.CLAIM_GENERATION",
                 "FROM TERMINAL_TURN_ADMISSIONS AS ADMISSION",
                 "ADMISSION.REQUIREMENT_ID = OLD.REQUIREMENT_ID",
                 "ADMISSION.CLAIM_GENERATION = OLD.CLAIM_GENERATION",
                 "NEW.CLAIM_GENERATION IS NOT OLD.CLAIM_GENERATION",
                 "NEW.CLAIM_TOKEN IS NOT NULL",
                 "NEW.ATTEMPT_COUNT IS NOT MAX(OLD.ATTEMPT_COUNT - 1, 0)",
-                "RAISE( ABORT, 'ACTIVE REQUIREMENT MAY BECOME PENDING ONLY THROUGH EXACT PRE-EFFECT ABANDON' )",
+                "RAISE(ABORT, 'ACTIVE REQUIREMENT MAY BECOME PENDING ONLY THROUGH EXACT PRE-EFFECT ABANDON')",
             ],
         ),
         (
@@ -2697,14 +2262,13 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
                 "REQUIREMENT.STATUS = 'IN_PROGRESS'",
                 "REQUIREMENT.CLAIM_GENERATION = NEW.CLAIM_GENERATION",
                 "REQUIREMENT.CLAIM_TOKEN = NEW.CLAIM_TOKEN",
-                "FROM CONVERSATION_DELIVERY_RECEIPTS AS RECEIPT",
-                "'$.AUTOWORK_AUTHORITY.REQUIREMENT_ID' ) = REQUIREMENT.REQUIREMENT_ID",
-                "'$.AUTOWORK_AUTHORITY.CLAIM_GENERATION' ) = REQUIREMENT.CLAIM_GENERATION",
-                "CONVERSATION.ACTIVE_TURN_OPERATION_ID IS NOT NULL",
+                "FROM AGENT_EXECUTIONS AS EXECUTION",
+                "'$.SOURCE.REQUIREMENT_ID') = REQUIREMENT.REQUIREMENT_ID",
+                "'$.SOURCE.CLAIM_GENERATION') = REQUIREMENT.CLAIM_GENERATION",
                 "FROM TERMINAL_TURN_ADMISSIONS AS ADMISSION",
                 "ADMISSION.REQUIREMENT_ID = REQUIREMENT.REQUIREMENT_ID",
                 "ADMISSION.CLAIM_GENERATION = REQUIREMENT.CLAIM_GENERATION",
-                "RAISE( ABORT, 'REQUIREMENT PRE-EFFECT ABANDON GUARD REQUIRES EXACT AUTHORITY AND RECEIVER-ADMISSION ABSENCE' )",
+                "RAISE(ABORT, 'REQUIREMENT PRE-EFFECT ABANDON GUARD REQUIRES EXACT AUTHORITY AND RECEIVER-ADMISSION ABSENCE')",
             ],
         ),
         (
@@ -2792,8 +2356,8 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
                 "RAISE(ABORT, 'INVALID CATALOG PROMPT LIBRARY ASSET ORIGIN')",
                 "RAISE(ABORT, 'INVALID PRESET PROMPT LIBRARY ASSET ORIGIN')",
             ],
-        ),
-    ];
+        )
+];
     let trigger_rows =
         sqlx::query("SELECT name, sql FROM sqlite_schema WHERE type = 'trigger' ORDER BY name")
             .fetch_all(pool)
@@ -3673,422 +3237,10 @@ fn delete_policy_name(policy: DeletePolicy) -> &'static str {
 fn rebuild_policy_name(policy: RebuildPolicy) -> &'static str {
     match policy {
         RebuildPolicy::PreserveBusinessId => "PRESERVE_BUSINESS_ID",
-        RebuildPolicy::PreserveProtocolToken => "PRESERVE_PROTOCOL_TOKEN",
         RebuildPolicy::ExternalOwner => "EXTERNAL_OWNER",
     }
 }
 
 fn quote_sqlite_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::init_database_memory;
-
-    #[tokio::test]
-    async fn clean_v3_baseline_satisfies_schema_contract() {
-        let database = init_database_memory().await.expect("database");
-        validate_id_schema_contract(database.pool()).await.expect("schema contract");
-        assert!(
-            audit_logical_reference_orphans(database.pool())
-                .await
-                .expect("orphan audit")
-                .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn delivery_receipt_structured_error_columns_are_nullable_and_guarded() {
-        let database = init_database_memory().await.expect("database");
-        let pool = database.pool();
-        for (column, expected_type) in [
-            ("result_error_code", "TEXT"),
-            ("result_error_retryable", "INTEGER"),
-        ] {
-            let row = sqlx::query(
-                "SELECT type, \"notnull\" FROM pragma_table_info('conversation_delivery_receipts') \
-                 WHERE name = ?",
-            )
-            .bind(column)
-            .fetch_one(pool)
-            .await
-            .unwrap_or_else(|_| {
-                panic!("conversation_delivery_receipts.{column} must exist")
-            });
-            assert_eq!(
-                row.get::<String, _>("type").to_ascii_uppercase(),
-                expected_type,
-                "conversation_delivery_receipts.{column} type"
-            );
-            assert_eq!(
-                row.get::<i64, _>("notnull"),
-                0,
-                "conversation_delivery_receipts.{column} must stay nullable"
-            );
-        }
-
-        // The rebuilt lifecycle update guard must treat the new columns as
-        // part of the immutable terminal outcome.
-        let update_guard: String = sqlx::query_scalar(
-            "SELECT sql FROM sqlite_schema WHERE type = 'trigger' \
-             AND name = 'trg_conversation_delivery_receipts_lifecycle_update_guard'",
-        )
-        .fetch_one(pool)
-        .await
-        .expect("lifecycle update guard");
-        let normalized = normalize_sql(&update_guard);
-        for fragment in [
-            "NEW.RESULT_ERROR_CODE IS NOT OLD.RESULT_ERROR_CODE",
-            "NEW.RESULT_ERROR_RETRYABLE IS NOT OLD.RESULT_ERROR_RETRYABLE",
-        ] {
-            assert!(
-                normalized.contains(fragment),
-                "update guard must cover structured error columns: missing {fragment}"
-            );
-        }
-    }
-
-    #[test]
-    fn external_agent_actor_is_registered_as_external_keep_history() {
-        let reference = LOGICAL_REFERENCES
-            .iter()
-            .find(|reference| {
-                reference.index_name == "idx_execution_events_actor_external_agent_id"
-            })
-            .expect("external-agent actor registry entry");
-        assert_eq!(reference.child_table, "agent_execution_events");
-        assert_eq!(reference.child_column, "actor_id");
-        assert_eq!(reference.parent_table, None);
-        assert_eq!(reference.parent_column, None);
-        assert_eq!(reference.delete_policy, DeletePolicy::KeepHistory);
-        assert_eq!(reference.rebuild_policy, RebuildPolicy::ExternalOwner);
-        assert_eq!(
-            reference.orphan_audit_policy,
-            OrphanAuditPolicy::ExternalOwner
-        );
-        assert_eq!(
-            reference.child_predicate,
-            Some(
-                "child.actor_type = 'agent' \
-                 AND child.actor_conversation_id IS NULL \
-                 AND child.actor_id IS NOT NULL"
-            )
-        );
-    }
-
-    #[test]
-    fn requirement_typed_owners_have_conditional_live_parent_audit() {
-        for (column, index) in [
-            (
-                "owner_conversation_id",
-                "idx_requirements_owner_conversation_id",
-            ),
-            ("owner_terminal_id", "idx_requirements_owner_terminal_id"),
-        ] {
-            let reference = LOGICAL_REFERENCES
-                .iter()
-                .find(|reference| reference.index_name == index)
-                .expect("Requirement typed-owner registry entry");
-            assert_eq!(reference.child_table, "requirements");
-            assert_eq!(reference.child_column, column);
-            assert_eq!(reference.delete_policy, DeletePolicy::SetNull);
-            assert_eq!(
-                reference.orphan_audit_policy,
-                OrphanAuditPolicy::RequireParent
-            );
-            assert_eq!(
-                reference.child_predicate,
-                Some("child.status NOT IN ('in_progress', 'needs_review')"),
-                "inactive owners require a live parent; ambiguous execution history is retained"
-            );
-        }
-    }
-
-    #[test]
-    fn message_correlation_turn_is_a_wire_protocol_owner_token() {
-        let reference = LOGICAL_REFERENCES
-            .iter()
-            .find(|reference| reference.index_name == "idx_message_correlations_turn_message_id")
-            .expect("message-correlation turn registry entry");
-        assert_eq!(reference.child_table, "message_correlations");
-        assert_eq!(reference.child_column, "turn_message_id");
-        assert_eq!(reference.parent_table, None);
-        assert_eq!(reference.parent_column, None);
-        assert_eq!(
-            reference.value_contract,
-            LogicalReferenceValueContract::CanonicalUuidV7
-        );
-        assert_eq!(
-            reference.rebuild_policy,
-            RebuildPolicy::PreserveProtocolToken
-        );
-        assert_eq!(
-            reference.orphan_audit_policy,
-            OrphanAuditPolicy::ValidateValueOnly
-        );
-    }
-
-    #[tokio::test]
-    async fn message_correlation_audit_allows_unprojected_owner_but_rejects_cross_conversation_projection(
-    ) {
-        let database = init_database_memory().await.expect("database");
-        let pool = database.pool();
-        let owner: String = sqlx::query_scalar("SELECT user_id FROM users ORDER BY id LIMIT 1")
-            .fetch_one(pool)
-            .await
-            .expect("owner");
-        let conversation_a = nomifun_common::ConversationId::new();
-        let conversation_b = nomifun_common::ConversationId::new();
-        for (conversation_id, name) in [
-            (&conversation_a, "correlation-a"),
-            (&conversation_b, "correlation-b"),
-        ] {
-            sqlx::query(
-                "INSERT INTO conversations \
-                 (conversation_id, user_id, name, type, created_at, updated_at) \
-                 VALUES (?, ?, ?, 'nomi', 1, 1)",
-            )
-            .bind(conversation_id.as_str())
-            .bind(&owner)
-            .bind(name)
-            .execute(pool)
-            .await
-            .expect("conversation");
-        }
-
-        let projected_message_id = nomifun_common::MessageId::new();
-        sqlx::query(
-            "INSERT INTO messages \
-             (message_id, conversation_id, type, content, created_at) \
-             VALUES (?, ?, 'tool_call', '{}', 1)",
-        )
-        .bind(projected_message_id.as_str())
-        .bind(conversation_b.as_str())
-        .execute(pool)
-        .await
-        .expect("projected message");
-        sqlx::query(
-            "INSERT INTO message_correlations \
-             (conversation_id, turn_message_id, message_type, correlation_key, message_id) \
-             VALUES (?, ?, 'tool_call', 'cross-conversation-projection', ?)",
-        )
-        .bind(conversation_a.as_str())
-        .bind(nomifun_common::MessageId::new().as_str())
-        .bind(projected_message_id.as_str())
-        .execute(pool)
-        .await
-        .expect("correlation fixture");
-
-        let findings = audit_logical_reference_orphans(pool)
-            .await
-            .expect("correlation audit");
-        assert!(findings.iter().any(|finding| {
-            finding.child_table == "message_correlations"
-                && finding.child_column == "message_id"
-                && finding.count == 1
-        }));
-        assert!(findings.iter().all(|finding| {
-            !(finding.child_table == "message_correlations"
-                && finding.child_column == "turn_message_id")
-        }));
-    }
-
-    #[tokio::test]
-    async fn orphan_audit_allows_missing_history_but_rejects_wrong_aggregate_scope() {
-        let database = init_database_memory().await.expect("database");
-        let pool = database.pool();
-        let execution_a = nomifun_common::AgentExecutionId::new();
-        let execution_b = nomifun_common::AgentExecutionId::new();
-        let owner: String = sqlx::query_scalar("SELECT user_id FROM users ORDER BY id LIMIT 1")
-            .fetch_one(pool)
-            .await
-            .expect("owner");
-
-        for execution_id in [&execution_a, &execution_b] {
-            sqlx::query(
-                "INSERT INTO agent_executions \
-                 (execution_id, user_id, goal, status, plan_gate, adaptation_policy, \
-                  decision_policy, delegation_policy, max_parallel, initial_plan_input, \
-                  created_at, updated_at) \
-                 VALUES (?, ?, 'scope audit', 'planning', 'automatic', 'fixed', \
-                         'automatic', 'automatic', 1, '{}', 1, 1)",
-            )
-            .bind(execution_id.as_str())
-            .bind(&owner)
-            .execute(pool)
-            .await
-            .expect("execution");
-        }
-
-        let step_id = nomifun_common::generate_id();
-        sqlx::query(
-            "INSERT INTO agent_execution_steps \
-             (step_id, execution_id, title, spec, kind, status, introduced_in_revision, created_at, updated_at) \
-             VALUES (?, ?, 'step', '{}', 'agent', 'pending', 0, 1, 1)",
-        )
-        .bind(&step_id)
-        .bind(execution_a.as_str())
-        .execute(pool)
-        .await
-        .expect("step");
-        sqlx::query(
-            "INSERT INTO agent_execution_events \
-             (execution_id, sequence, event_type, step_id, actor_type, \
-              on_behalf_of_user_id, payload, created_at) \
-             VALUES (?, 1, 'step_changed', ?, 'system', ?, '{}', 1)",
-        )
-        .bind(execution_b.as_str())
-        .bind(&step_id)
-        .bind(&owner)
-        .execute(pool)
-        .await
-        .expect("cross-aggregate event");
-        sqlx::query(
-            "INSERT INTO agent_execution_events \
-             (execution_id, sequence, event_type, actor_conversation_id, actor_type, \
-              on_behalf_of_user_id, payload, created_at) \
-             VALUES (?, 2, 'step_changed', ?, 'system', ?, '{}', 1)",
-        )
-        .bind(execution_b.as_str())
-        .bind(nomifun_common::ConversationId::new().as_str())
-        .bind(&owner)
-        .execute(pool)
-        .await
-        .expect("historical actor reference");
-
-        let findings = audit_logical_reference_orphans(pool).await.expect("orphan audit");
-        assert!(
-            findings.iter().any(|finding| {
-                finding.child_table == "agent_execution_events"
-                    && finding.child_column == "step_id"
-                    && finding.count == 1
-            }),
-            "same-id references must remain in the owning execution aggregate"
-        );
-        assert!(
-            findings.iter().all(|finding| {
-                !(finding.child_table == "agent_execution_events"
-                    && finding.child_column == "actor_conversation_id")
-            }),
-            "KEEP_HISTORY must not treat an intentionally absent parent as an orphan"
-        );
-    }
-
-    #[tokio::test]
-    async fn orphan_audit_treats_soft_deleted_parents_as_inactive() {
-        let database = init_database_memory().await.expect("database");
-        let pool = database.pool();
-        let conversation_id = nomifun_common::ConversationId::new();
-        let owner: String = sqlx::query_scalar("SELECT user_id FROM users ORDER BY id LIMIT 1")
-            .fetch_one(pool)
-            .await
-            .expect("owner");
-        sqlx::query(
-            "INSERT INTO conversations \
-             (conversation_id, user_id, name, type, created_at, updated_at) \
-             VALUES (?, ?, 'soft-delete audit', 'nomi', 1, 1)",
-        )
-        .bind(conversation_id.as_str())
-        .bind(owner)
-        .execute(pool)
-        .await
-        .expect("conversation");
-        let mcp_server_id = nomifun_common::generate_id();
-        sqlx::query(
-            "INSERT INTO mcp_servers \
-             (mcp_server_id, name, enabled, transport_type, transport_config, last_test_status, \
-              builtin, created_at, updated_at) \
-             VALUES (?, 'audit-mcp', 0, 'stdio', '{}', 'disconnected', 0, 1, 1)",
-        )
-        .bind(&mcp_server_id)
-        .execute(pool)
-        .await
-        .expect("MCP server");
-        sqlx::query(
-            "INSERT INTO conversation_mcp_servers \
-             (conversation_id, mcp_server_id, sort_order) VALUES (?, ?, 0)",
-        )
-        .bind(conversation_id.as_str())
-        .bind(&mcp_server_id)
-        .execute(pool)
-        .await
-        .expect("MCP binding");
-        sqlx::query("UPDATE mcp_servers SET deleted_at = 2 WHERE mcp_server_id = ?")
-            .bind(&mcp_server_id)
-            .execute(pool)
-            .await
-            .expect("soft delete");
-
-        let findings = audit_logical_reference_orphans(pool).await.expect("orphan audit");
-        assert!(findings.iter().any(|finding| {
-            finding.child_table == "conversation_mcp_servers"
-                && finding.child_column == "mcp_server_id"
-                && finding.count == 1
-        }));
-    }
-
-    #[tokio::test]
-    async fn data_contract_rejects_succeeded_creation_without_committed_assets() {
-        let database = init_database_memory().await.expect("database");
-        let pool = database.pool();
-        let provider_id = nomifun_common::ProviderId::new();
-        sqlx::query(
-            "INSERT INTO providers \
-             (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, created_at, updated_at) \
-             VALUES (?, 'contract', 'Creation audit provider', 'https://example.invalid', 'bearer', '', 1, 1)",
-        )
-        .bind(provider_id.as_str())
-        .execute(pool)
-        .await
-        .expect("provider");
-        let creation_task_id = nomifun_common::CreationTaskId::new();
-        let project_id = nomifun_common::CreativeStudioProjectId::new();
-        let node_id = nomifun_common::CreativeStudioNodeId::new();
-        let document = serde_json::json!({
-            "schema": "nomifun.creative-studio/v1",
-            "projectId": project_id.as_str(),
-            "nodes": []
-        });
-        sqlx::query(
-            "INSERT INTO creative_studio_projects \
-             (project_id, title, revision, node_count, connection_count, document_json, created_at, updated_at) \
-             VALUES (?, 'Creation Contract', 1, 0, 0, ?, 1, 1)",
-        )
-        .bind(project_id.as_str())
-        .bind(document.to_string())
-        .execute(pool)
-        .await
-        .expect("project");
-        sqlx::query(
-            "INSERT INTO creation_tasks \
-             (creation_task_id, project_id, node_id, provider_id, model, capability, params, status, \
-              result_asset_ids, submitted_at, finished_at, request_fingerprint) \
-             VALUES (?, ?, ?, ?, 'model', 't2i', '{}', 'succeeded', '[]', 1, 2, \
-              '{\"contract\":\"invalid-success\"}')",
-        )
-        .bind(creation_task_id.as_str())
-        .bind(project_id.as_str())
-        .bind(node_id.as_str())
-        .bind(provider_id.as_str())
-        .execute(pool)
-        .await
-        .expect("invalid current-lineage fixture");
-
-        let error = validate_id_data_contract(pool).await.unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("succeeded but has no result assets")
-        );
-        let unchanged: String = sqlx::query_scalar(
-            "SELECT status FROM creation_tasks WHERE creation_task_id = ?",
-        )
-        .bind(creation_task_id.as_str())
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        assert_eq!(unchanged, "succeeded");
-    }
 }

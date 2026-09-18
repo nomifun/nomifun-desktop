@@ -1,11 +1,8 @@
-//! SQLite-backed control-plane store for the current Nomi-core composition.
+//! SQLite-backed control-plane store for the canonical Agent Store.
 //!
-//! Fresh-v4 has its own normalized AgentPlatform store.  The current product
-//! still runs on the v3 Nomi Conversation graph, so it must not open the
-//! Fresh-v4 session database or reuse its Remote table shape.  This adapter
-//! persists the canonical preset/revision/snapshot/binding facts in the
-//! Nomi-core tables added by migration 060, while keeping the public
-//! `AgentControlPlane` contract unchanged.
+//! Presets, immutable revisions, normalized contribution locks, compiled
+//! snapshots and bindings all share the main product SQLite with AgentSession.
+//! There is no secondary root, legacy preset projection, or dual write.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -119,12 +116,51 @@ fn parse_owner(value: &str) -> Result<UserId, ControlPlaneError> {
 }
 
 fn parse_source(value: &str) -> Result<AgentPresetSource, ControlPlaneError> {
-    match value {
-        "user" => Ok(AgentPresetSource::User),
-        "official" => Ok(AgentPresetSource::Official),
-        other => Err(ControlPlaneError::Wire(format!(
-            "unsupported persisted AgentPreset source {other:?}"
-        ))),
+    decode(value, "AgentPreset source")
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedPresetOwner {
+    user_id: UserId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedPresetDisplay {
+    display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(default)]
+    session_only: bool,
+    #[serde(default = "empty_ui_binding")]
+    ui_binding: nomifun_api_types::AgentUiBindingDto,
+}
+
+fn empty_ui_binding() -> nomifun_api_types::AgentUiBindingDto {
+    nomifun_api_types::AgentUiBindingDto {
+        binding_version: 0,
+        selection: None,
+    }
+}
+
+fn parse_preset_owner(value: &str) -> Result<UserId, ControlPlaneError> {
+    let owner: PersistedPresetOwner = decode(value, "AgentPreset owner")?;
+    parse_owner(owner.user_id.as_ref())
+}
+
+fn preset_owner_json(owner: &UserId) -> Result<String, ControlPlaneError> {
+    wire(&PersistedPresetOwner {
+        user_id: owner.clone(),
+    })
+}
+
+fn preset_display(preset: &StoredPreset) -> PersistedPresetDisplay {
+    PersistedPresetDisplay {
+        display_name: preset.preset.display_name.clone(),
+        description: preset.preset.description.clone(),
+        session_only: preset.session_only,
+        ui_binding: empty_ui_binding(),
     }
 }
 
@@ -133,7 +169,7 @@ async fn current_revision_ref_tx(
     preset_id: &AgentPresetId,
 ) -> Result<Option<PresetRevisionRef>, ControlPlaneError> {
     let revision: Option<i64> = sqlx::query_scalar(
-        "SELECT current_revision FROM nomi_agent_presets \
+        "SELECT current_stable_revision FROM agent_presets \
          WHERE preset_id = ? AND retired_at_ms IS NULL",
     )
     .bind(preset_id.as_ref())
@@ -145,7 +181,7 @@ async fn current_revision_ref_tx(
         return Ok(None);
     };
     let digest: String = sqlx::query_scalar(
-        "SELECT revision_digest FROM nomi_agent_preset_revisions \
+        "SELECT revision_digest FROM agent_preset_revisions \
          WHERE preset_id = ? AND revision_no = ?",
     )
     .bind(preset_id.as_ref())
@@ -164,23 +200,24 @@ async fn load_preset(
     pool: &SqlitePool,
     preset_id: &AgentPresetId,
 ) -> Result<Option<StoredPreset>, ControlPlaneError> {
-    let row: Option<(String, String, String, String, Option<String>, Option<i64>, bool)> = sqlx::query_as(
-        "SELECT preset_id, owner_user_id, source_kind, display_name, description, current_revision, session_only \
-         FROM nomi_agent_presets \
+    let row: Option<(String, String, String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT preset_id, owner_ref_json, source_json, display_json, current_stable_revision \
+         FROM agent_presets \
          WHERE preset_id = ? AND retired_at_ms IS NULL",
     )
     .bind(preset_id.as_ref())
     .fetch_optional(pool)
     .await
     .map_err(sql)?;
-    let Some((id, owner, source, display_name, description, current_revision, session_only)) = row else {
+    let Some((id, owner, source, display, current_revision)) = row else {
         return Ok(None);
     };
+    let display: PersistedPresetDisplay = decode(&display, "AgentPreset display")?;
     let preset_id = AgentPresetId::from(id);
     let current_stable_revision = match current_revision {
         Some(revision) => {
             let digest: String = sqlx::query_scalar(
-                "SELECT revision_digest FROM nomi_agent_preset_revisions \
+                "SELECT revision_digest FROM agent_preset_revisions \
                  WHERE preset_id = ? AND revision_no = ?",
             )
             .bind(preset_id.as_ref())
@@ -197,13 +234,13 @@ async fn load_preset(
         None => None,
     };
     Ok(Some(StoredPreset {
-        session_only,
+        session_only: display.session_only,
         preset: AgentPreset {
             preset_id,
-            owner_user_id: Some(parse_owner(&owner)?),
+            owner_user_id: Some(parse_preset_owner(&owner)?),
             source: parse_source(&source)?,
-            display_name,
-            description,
+            display_name: display.display_name,
+            description: display.description,
             current_stable_revision,
         },
     }))
@@ -214,11 +251,11 @@ async fn load_revision(
     preset_id: &AgentPresetId,
     revision_no: u64,
 ) -> Result<Option<AgentPresetRevision>, ControlPlaneError> {
-    let row: Option<(String, i64, String, String, String, i64, String, String, String)> =
+    let row: Option<(String, i64, String, String, String, i64, Option<String>)> =
         sqlx::query_as(
             "SELECT revision_id, revision_no, payload_json, revision_digest, \
-                    created_by, created_at, reason, snapshot_json, contribution_locks_json \
-             FROM nomi_agent_preset_revisions \
+                    created_by, created_at, reason \
+             FROM agent_preset_revisions \
              WHERE preset_id = ? AND revision_no = ?",
         )
         .bind(preset_id.as_ref())
@@ -234,13 +271,22 @@ async fn load_revision(
         created_by,
         created_at,
         reason,
-        _snapshot,
-        contribution_locks_json,
     )) =
         row
     else {
         return Ok(None);
     };
+    let contribution_locks = sqlx::query_scalar::<_, String>(
+        "SELECT lock_json FROM agent_preset_contribution_locks \
+         WHERE revision_id = ? ORDER BY contribution_id",
+    )
+    .bind(format!("{}@{}", preset_id.as_ref(), persisted_no))
+    .fetch_all(pool)
+    .await
+    .map_err(sql)?
+    .into_iter()
+    .map(|value| decode(&value, "AgentPreset contribution lock"))
+    .collect::<Result<Vec<_>, _>>()?;
     let revision = AgentPresetRevision {
         reference: PresetRevisionRef {
             preset_id: preset_id.clone(),
@@ -248,13 +294,10 @@ async fn load_revision(
             revision_digest: digest.into(),
         },
         payload: decode(&payload_json, "AgentPreset revision payload")?,
-        contribution_locks: decode(
-            &contribution_locks_json,
-            "AgentPreset contribution locks",
-        )?,
+        contribution_locks,
         created_by: parse_owner(&created_by)?,
         created_at_ms: created_at,
-        reason: (!reason.is_empty()).then_some(reason),
+        reason,
     };
     revision.validate().map_err(|violation| {
         ControlPlaneError::canonical(
@@ -271,8 +314,10 @@ async fn load_snapshot(
     reference: &PresetRevisionRef,
 ) -> Result<Option<ResolvedSnapshotEnvelope>, ControlPlaneError> {
     let row: Option<String> = sqlx::query_scalar(
-        "SELECT snapshot_json FROM nomi_agent_preset_revisions \
-         WHERE preset_id = ? AND revision_no = ? AND revision_digest = ?",
+        "SELECT snapshot.envelope_json FROM agent_runtime_snapshots AS snapshot \
+         WHERE json_extract(snapshot.content_json, '$.preset_revision_ref.preset_id') = ? \
+           AND json_extract(snapshot.content_json, '$.preset_revision_ref.revision') = ? \
+           AND json_extract(snapshot.content_json, '$.preset_revision_ref.revision_digest') = ?",
     )
     .bind(reference.preset_id.as_ref())
     .bind(i64_from_u64(reference.revision, "revision")?)
@@ -359,14 +404,14 @@ async fn insert_preset_tx(
         ));
     }
     sqlx::query(
-        "INSERT INTO nomi_agent_presets \
-         (preset_id, owner_user_id, source_kind, display_name, description, current_revision, created_at, session_only) \
-         VALUES (?, ?, 'user', ?, ?, ?, ?, ?)",
+        "INSERT INTO agent_presets \
+         (preset_id, owner_ref_json, source_json, display_json, current_stable_revision, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(preset.preset.preset_id.as_ref())
-    .bind(owner.as_ref())
-    .bind(&preset.preset.display_name)
-    .bind(&preset.preset.description)
+    .bind(preset_owner_json(owner)?)
+    .bind(wire(&preset.preset.source)?)
+    .bind(wire(&preset_display(preset))?)
     .bind(
         preset
             .preset
@@ -376,7 +421,6 @@ async fn insert_preset_tx(
             .transpose()?,
     )
     .bind(created_at.max(0))
-    .bind(preset.session_only)
     .execute(&mut **tx)
     .await
     .map_err(sql)?;
@@ -390,12 +434,12 @@ async fn insert_revision_tx(
 ) -> Result<(), ControlPlaneError> {
     let revision_id = revision.reference.revision_id();
     sqlx::query(
-        "INSERT INTO nomi_agent_preset_revisions \
+        "INSERT INTO agent_preset_revisions \
          (revision_id, preset_id, revision_no, schema_version, payload_json, \
-          revision_digest, created_by, created_at, reason, snapshot_json, contribution_locks_json) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          revision_digest, created_by, created_at, reason) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(revision_id)
+    .bind(&revision_id)
     .bind(revision.reference.preset_id.as_ref())
     .bind(i64_from_u64(revision.reference.revision, "revision")?)
     .bind(revision.payload.schema_version.as_ref())
@@ -403,9 +447,30 @@ async fn insert_revision_tx(
     .bind(revision.reference.revision_digest.as_ref())
     .bind(revision.created_by.as_ref())
     .bind(revision.created_at_ms)
-    .bind(revision.reason.as_deref().unwrap_or_default())
+    .bind(revision.reason.as_deref())
+    .execute(&mut **tx)
+    .await
+    .map_err(sql)?;
+    for lock in &revision.contribution_locks {
+        sqlx::query(
+            "INSERT INTO agent_preset_contribution_locks \
+             (revision_id, contribution_id, lock_json) VALUES (?, ?, ?)",
+        )
+        .bind(&revision_id)
+        .bind(lock.contribution_id.as_ref())
+        .bind(wire(lock)?)
+        .execute(&mut **tx)
+        .await
+        .map_err(sql)?;
+    }
+    sqlx::query(
+        "INSERT INTO agent_runtime_snapshots \
+         (snapshot_id, snapshot_digest, content_json, envelope_json) VALUES (?, ?, ?, ?)",
+    )
+    .bind(snapshot.snapshot_ref.snapshot_id.as_ref())
+    .bind(snapshot.snapshot_ref.snapshot_digest.as_ref())
+    .bind(wire(&snapshot.content)?)
     .bind(wire(snapshot)?)
-    .bind(wire(&revision.contribution_locks)?)
     .execute(&mut **tx)
     .await
     .map_err(sql)?;
@@ -456,7 +521,10 @@ impl nomifun_agent_control_plane::AgentUiBindingStore for NomiCoreControlPlaneSt
     async fn load(&self, owner: &UserId, preset: &AgentPresetId)
         -> Result<nomifun_api_types::AgentUiBindingDto, ControlPlaneError> {
         let value: Option<String> = sqlx::query_scalar(
-            "SELECT ui_binding_json FROM nomi_agent_presets WHERE preset_id = ? AND owner_user_id = ? AND retired_at_ms IS NULL",
+            "SELECT json_extract(display_json, '$.ui_binding') FROM agent_presets \
+             WHERE preset_id = ? \
+               AND json_extract(owner_ref_json, '$.user_id') = ? \
+               AND retired_at_ms IS NULL",
         ).bind(preset.as_ref()).bind(owner.as_ref()).fetch_optional(&self.pool).await.map_err(sql)?;
         decode(&value.ok_or_else(|| not_found("AgentPreset"))?, "Agent UI binding")
     }
@@ -471,8 +539,11 @@ impl nomifun_agent_control_plane::AgentUiBindingStore for NomiCoreControlPlaneSt
         // The same statement checks live preset ownership, product ownership and
         // CAS. No snapshot, Session or execution revision is rewritten.
         let changed = sqlx::query(
-            "UPDATE nomi_agent_presets SET ui_binding_json = ? WHERE preset_id = ? AND owner_user_id = ?
-             AND retired_at_ms IS NULL AND json_extract(ui_binding_json, '$.binding_version') = ?
+            "UPDATE agent_presets \
+             SET display_json = json_set(display_json, '$.ui_binding', json(?)) \
+             WHERE preset_id = ? AND json_extract(owner_ref_json, '$.user_id') = ?
+             AND retired_at_ms IS NULL \
+             AND json_extract(display_json, '$.ui_binding.binding_version') = ?
              AND (? IS NULL OR EXISTS (SELECT 1 FROM plugin_products WHERE plugin_product_id = ? AND owner_user_id = ?))",
         ).bind(wire(&binding)?).bind(preset.as_ref()).bind(owner.as_ref()).bind(expected)
             .bind(plugin).bind(plugin).bind(owner.as_ref()).execute(&self.pool).await.map_err(sql)?;
@@ -488,8 +559,9 @@ impl nomifun_agent_control_plane::AgentUiBindingStore for NomiCoreControlPlaneSt
 impl ControlPlaneStore for NomiCoreControlPlaneStore {
     async fn list_presets(&self, owner: &UserId) -> Result<Vec<StoredPreset>, ControlPlaneError> {
         let ids: Vec<String> = sqlx::query_scalar(
-            "SELECT preset_id FROM nomi_agent_presets \
-             WHERE owner_user_id = ? AND retired_at_ms IS NULL \
+            "SELECT preset_id FROM agent_presets \
+             WHERE json_extract(owner_ref_json, '$.user_id') = ? \
+               AND retired_at_ms IS NULL \
              ORDER BY preset_id",
         )
         .bind(owner.as_ref())
@@ -535,17 +607,37 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
     async fn update_preset_metadata(&self, preset: &StoredPreset) -> Result<(), ControlPlaneError> {
         let owner = preset.preset.owner_user_id.as_ref()
             .ok_or_else(|| not_found("AgentPreset"))?;
-        let changed = sqlx::query(
-            "UPDATE nomi_agent_presets SET display_name = ?, description = ? \
-             WHERE preset_id = ? AND owner_user_id = ? AND retired_at_ms IS NULL \
-             AND current_revision IS ?",
+        let current_display: Option<String> = sqlx::query_scalar(
+            "SELECT display_json FROM agent_presets \
+             WHERE preset_id = ? AND json_extract(owner_ref_json, '$.user_id') = ? \
+               AND retired_at_ms IS NULL AND current_stable_revision IS ?",
         )
-        .bind(&preset.preset.display_name)
-        .bind(&preset.preset.description)
         .bind(preset.preset.preset_id.as_ref())
         .bind(owner.as_ref())
         .bind(preset.preset.current_stable_revision.as_ref()
             .map(|r| i64_from_u64(r.revision, "revision")).transpose()?)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(sql)?;
+        let Some(current_display) = current_display else {
+            return Err(conflict("Preset owner or current Revision changed"));
+        };
+        let mut display: PersistedPresetDisplay =
+            decode(&current_display, "AgentPreset display")?;
+        display.display_name.clone_from(&preset.preset.display_name);
+        display.description.clone_from(&preset.preset.description);
+        let changed = sqlx::query(
+            "UPDATE agent_presets SET display_json = ? \
+             WHERE preset_id = ? AND json_extract(owner_ref_json, '$.user_id') = ? \
+               AND retired_at_ms IS NULL AND current_stable_revision IS ? \
+               AND display_json = ?",
+        )
+        .bind(wire(&display)?)
+        .bind(preset.preset.preset_id.as_ref())
+        .bind(owner.as_ref())
+        .bind(preset.preset.current_stable_revision.as_ref()
+            .map(|r| i64_from_u64(r.revision, "revision")).transpose()?)
+        .bind(current_display)
         .execute(&self.pool).await.map_err(sql)?;
         if changed.rows_affected() != 1 {
             return Err(conflict("Preset owner or current Revision changed"));
@@ -560,25 +652,25 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
     ) -> Result<(), ControlPlaneError> {
         let mut tx = self.begin_write_transaction().await?;
         let row: Option<(String, String, Option<i64>)> = sqlx::query_as(
-            "SELECT owner_user_id, source_kind, retired_at_ms \
-             FROM nomi_agent_presets WHERE preset_id = ?",
+            "SELECT owner_ref_json, source_json, retired_at_ms \
+             FROM agent_presets WHERE preset_id = ?",
         )
         .bind(preset_id.as_ref())
         .fetch_optional(&mut *tx)
         .await
         .map_err(sql)?;
-        let Some((owner_user_id, source_kind, retired_at_ms)) = row else {
+        let Some((owner_ref_json, source_json, retired_at_ms)) = row else {
             return Err(not_found("AgentPreset"));
         };
         if retired_at_ms.is_some()
-            || owner_user_id != owner.as_ref()
-            || source_kind != "user"
+            || parse_preset_owner(&owner_ref_json)? != *owner
+            || parse_source(&source_json)? != AgentPresetSource::User
         {
             return Err(not_found("AgentPreset"));
         }
 
         sqlx::query(
-            "DELETE FROM nomi_agent_bindings \
+            "DELETE FROM agent_bindings \
              WHERE json_extract(agent_binding_json, '$.preset_revision_ref.preset_id') = ?",
         )
         .bind(preset_id.as_ref())
@@ -595,8 +687,10 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         .map_err(sql)?;
 
         let changed = sqlx::query(
-            "UPDATE nomi_agent_presets SET retired_at_ms = ? \
-             WHERE preset_id = ? AND owner_user_id = ? AND source_kind = 'user' \
+            "UPDATE agent_presets SET retired_at_ms = ? \
+             WHERE preset_id = ? \
+               AND json_extract(owner_ref_json, '$.user_id') = ? \
+               AND source_json = json_quote('user') \
                AND retired_at_ms IS NULL",
         )
         .bind(now_ms())
@@ -666,11 +760,15 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         }
         insert_revision_tx(&mut tx, &revision, &snapshot).await?;
         let changed = sqlx::query(
-            "UPDATE nomi_agent_presets SET display_name = ?, description = ?, current_revision = ? \
+            "UPDATE agent_presets \
+             SET display_json = json_set(display_json, \
+                    '$.display_name', ?, '$.description', json(?)), \
+                 current_stable_revision = ? \
              WHERE preset_id = ? AND retired_at_ms IS NULL",
         )
         .bind(display_name)
-        .bind(description)
+        .bind(serde_json::to_string(&description)
+            .map_err(|error| ControlPlaneError::Wire(error.to_string()))?)
         .bind(i64_from_u64(revision.reference.revision, "revision")?)
         .bind(revision.reference.preset_id.as_ref())
         .execute(&mut *tx)
@@ -682,7 +780,7 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         tx.commit().await.map_err(sql)?;
         load_preset(&self.pool, &revision.reference.preset_id)
             .await?
-            .ok_or_else(|| internal("updated Nomi-core AgentPreset disappeared"))
+            .ok_or_else(|| internal("updated canonical AgentPreset disappeared"))
     }
 
     async fn get_snapshot(
@@ -697,8 +795,14 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         owner: &UserId,
     ) -> Result<Vec<StoredAgentBinding>, ControlPlaneError> {
         let rows: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT target_kind, target_id, agent_binding_json FROM nomi_agent_bindings \
-             WHERE owner_user_id = ? ORDER BY target_kind, target_id",
+            "SELECT binding.target_kind, binding.target_id, binding.agent_binding_json \
+             FROM agent_bindings AS binding \
+             JOIN agent_presets AS preset \
+               ON preset.preset_id = json_extract( \
+                    binding.agent_binding_json, '$.preset_revision_ref.preset_id') \
+             WHERE json_extract(preset.owner_ref_json, '$.user_id') = ? \
+               AND preset.retired_at_ms IS NULL \
+             ORDER BY binding.target_kind, binding.target_id",
         )
         .bind(owner.as_ref())
         .fetch_all(&self.pool)
@@ -723,8 +827,13 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         target: &AgentBindingTarget,
     ) -> Result<Option<StoredAgentBinding>, ControlPlaneError> {
         let row: Option<(String, String)> = sqlx::query_as(
-            "SELECT owner_user_id, agent_binding_json FROM nomi_agent_bindings \
-             WHERE target_kind = ? AND target_id = ?",
+            "SELECT preset.owner_ref_json, binding.agent_binding_json \
+             FROM agent_bindings AS binding \
+             JOIN agent_presets AS preset \
+               ON preset.preset_id = json_extract( \
+                    binding.agent_binding_json, '$.preset_revision_ref.preset_id') \
+             WHERE binding.target_kind = ? AND binding.target_id = ? \
+               AND preset.retired_at_ms IS NULL",
         )
         .bind(&target.target_kind)
         .bind(&target.target_id)
@@ -734,7 +843,7 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         row.map(|(owner, value)| {
             Ok(StoredAgentBinding {
                 target: target.clone(),
-                owner_user_id: parse_owner(&owner)?,
+                owner_user_id: parse_preset_owner(&owner)?,
                 value: decode(&value, "AgentBinding")?,
             })
         })
@@ -748,8 +857,12 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
     ) -> Result<StoredAgentBinding, ControlPlaneError> {
         let mut tx = self.begin_write_transaction().await?;
         let existing: Option<(String, String)> = sqlx::query_as(
-            "SELECT owner_user_id, agent_binding_json FROM nomi_agent_bindings \
-             WHERE target_kind = ? AND target_id = ?",
+            "SELECT preset.owner_ref_json, binding.agent_binding_json \
+             FROM agent_bindings AS binding \
+             JOIN agent_presets AS preset \
+               ON preset.preset_id = json_extract( \
+                    binding.agent_binding_json, '$.preset_revision_ref.preset_id') \
+             WHERE binding.target_kind = ? AND binding.target_id = ?",
         )
         .bind(&binding.target.target_kind)
         .bind(&binding.target.target_id)
@@ -758,7 +871,7 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         .map_err(sql)?;
         if let Some((owner, value)) = existing {
             let current: AgentBindingValue = decode(&value, "AgentBinding")?;
-            if parse_owner(&owner)? != binding.owner_user_id {
+            if parse_preset_owner(&owner)? != binding.owner_user_id {
                 return Err(not_found("AgentBinding"));
             }
             if expected_binding_version != Some(current.binding_version) {
@@ -770,25 +883,30 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
             ));
         }
         let preset_owner: Option<String> = sqlx::query_scalar(
-            "SELECT owner_user_id FROM nomi_agent_presets \
+            "SELECT owner_ref_json FROM agent_presets \
              WHERE preset_id = ? AND retired_at_ms IS NULL",
         )
         .bind(binding.value.preset_revision_ref.preset_id.as_ref())
         .fetch_optional(&mut *tx)
         .await
         .map_err(sql)?;
-        if preset_owner.as_deref() != Some(binding.owner_user_id.as_ref()) {
+        if preset_owner
+            .as_deref()
+            .map(parse_preset_owner)
+            .transpose()?
+            .as_ref()
+            != Some(&binding.owner_user_id)
+        {
             return Err(not_found("AgentPreset"));
         }
         sqlx::query(
-            "INSERT INTO nomi_agent_bindings \
-             (target_kind, target_id, owner_user_id, agent_binding_json) VALUES (?, ?, ?, ?) \
+            "INSERT INTO agent_bindings \
+             (target_kind, target_id, agent_binding_json) VALUES (?, ?, ?) \
              ON CONFLICT (target_kind, target_id) DO UPDATE SET \
-               owner_user_id = excluded.owner_user_id, agent_binding_json = excluded.agent_binding_json",
+               agent_binding_json = excluded.agent_binding_json",
         )
         .bind(&binding.target.target_kind)
         .bind(&binding.target.target_id)
-        .bind(binding.owner_user_id.as_ref())
         .bind(wire(&binding.value)?)
         .execute(&mut *tx)
         .await
@@ -842,14 +960,20 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         let now = now_ms();
         let mut tx = self.begin_write_transaction().await?;
         let preset_owner: Option<String> = sqlx::query_scalar(
-            "SELECT owner_user_id FROM nomi_agent_presets \
+            "SELECT owner_ref_json FROM agent_presets \
              WHERE preset_id = ? AND retired_at_ms IS NULL",
         )
         .bind(binding.agent_binding.preset_revision_ref.preset_id.as_ref())
         .fetch_optional(&mut *tx)
         .await
         .map_err(sql)?;
-        if preset_owner.as_deref() != Some(binding.owner_user_id.as_ref()) {
+        if preset_owner
+            .as_deref()
+            .map(parse_preset_owner)
+            .transpose()?
+            .as_ref()
+            != Some(&binding.owner_user_id)
+        {
             return Err(not_found("AgentPreset"));
         }
         sqlx::query(
@@ -907,14 +1031,20 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
             .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
         let mut tx = self.begin_write_transaction().await?;
         let preset_owner: Option<String> = sqlx::query_scalar(
-            "SELECT owner_user_id FROM nomi_agent_presets \
+            "SELECT owner_ref_json FROM agent_presets \
              WHERE preset_id = ? AND retired_at_ms IS NULL",
         )
         .bind(binding.agent_binding.preset_revision_ref.preset_id.as_ref())
         .fetch_optional(&mut *tx)
         .await
         .map_err(sql)?;
-        if preset_owner.as_deref() != Some(binding.owner_user_id.as_ref()) {
+        if preset_owner
+            .as_deref()
+            .map(parse_preset_owner)
+            .transpose()?
+            .as_ref()
+            != Some(&binding.owner_user_id)
+        {
             return Err(not_found("AgentPreset"));
         }
         let changed = sqlx::query(
@@ -1037,12 +1167,19 @@ mod tests {
             created_at_ms: 1, resolver_run_id: SESSION_ID.into(), availability_evidence_revision: "test".into(),
         };
         snapshot.validate().unwrap();
-        sqlx::query("INSERT INTO nomi_agent_preset_revisions \
+        sqlx::query("INSERT INTO agent_preset_revisions \
             (revision_id, preset_id, revision_no, schema_version, payload_json, revision_digest, \
-             created_by, created_at, reason, snapshot_json, contribution_locks_json) \
-            VALUES (?, ?, 1, '1.0.0', '{}', ?, ?, 1, '', ?, '[]')")
+             created_by, created_at, reason) \
+            VALUES (?, ?, 1, '1.0.0', '{}', ?, ?, 1, NULL)")
             .bind(format!("{PRESET_ID}@1")).bind(PRESET_ID).bind(reference.revision_digest.as_ref())
-            .bind(OWNER_ID).bind(wire(&snapshot).unwrap()).execute(database.pool()).await.unwrap();
+            .bind(OWNER_ID).execute(database.pool()).await.unwrap();
+        sqlx::query("INSERT INTO agent_runtime_snapshots \
+            (snapshot_id, snapshot_digest, content_json, envelope_json) VALUES (?, ?, ?, ?)")
+            .bind(snapshot.snapshot_ref.snapshot_id.as_ref())
+            .bind(snapshot.snapshot_ref.snapshot_digest.as_ref())
+            .bind(wire(&snapshot.content).unwrap())
+            .bind(wire(&snapshot).unwrap())
+            .execute(database.pool()).await.unwrap();
         let original = RemoteBinding {
             remote_binding_id: REMOTE_BINDING_ID.into(), owner_user_id: owner.clone(), name: "Original".into(),
             agent_binding: AgentBindingValue {
@@ -1104,11 +1241,10 @@ mod tests {
             .await
             .unwrap();
         sqlx::query(
-            "INSERT INTO nomi_agent_preset_revisions \
+            "INSERT INTO agent_preset_revisions \
              (revision_id, preset_id, revision_no, schema_version, payload_json, \
-              revision_digest, created_by, created_at, reason, snapshot_json, \
-              contribution_locks_json) \
-             VALUES (?, ?, 1, '1.0.0', '{}', ?, ?, 1, '', '{}', '[]')",
+              revision_digest, created_by, created_at, reason) \
+             VALUES (?, ?, 1, '1.0.0', '{}', ?, ?, 1, NULL)",
         )
         .bind(format!("{PRESET_ID}@1"))
         .bind(PRESET_ID)
@@ -1156,7 +1292,7 @@ mod tests {
         assert!(store.get_preset(&preset_id).await.unwrap().is_none());
         assert!(store.list_presets(&owner).await.unwrap().is_empty());
         let retired_at_ms: Option<i64> = sqlx::query_scalar(
-            "SELECT retired_at_ms FROM nomi_agent_presets WHERE preset_id = ?",
+            "SELECT retired_at_ms FROM agent_presets WHERE preset_id = ?",
         )
         .bind(PRESET_ID)
         .fetch_one(database.pool())
@@ -1164,7 +1300,7 @@ mod tests {
         .unwrap();
         assert!(retired_at_ms.is_some());
         let revision_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM nomi_agent_preset_revisions WHERE preset_id = ?",
+            "SELECT COUNT(*) FROM agent_preset_revisions WHERE preset_id = ?",
         )
         .bind(PRESET_ID)
         .fetch_one(database.pool())
@@ -1191,11 +1327,10 @@ mod tests {
         })
         .to_string();
         sqlx::query(
-            "INSERT INTO nomi_agent_bindings \
-             (target_kind, target_id, owner_user_id, agent_binding_json) \
-             VALUES ('conversation', 'conversation-1', ?, ?)",
+            "INSERT INTO agent_bindings \
+             (target_kind, target_id, agent_binding_json) \
+             VALUES ('conversation', 'conversation-1', ?)",
         )
-        .bind(OWNER_ID)
         .bind(&binding)
         .execute(database.pool())
         .await
@@ -1233,7 +1368,7 @@ mod tests {
             .retire_preset(&owner, &AgentPresetId::from(BOUND_PRESET_ID))
             .await
             .unwrap();
-        let agent_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nomi_agent_bindings")
+        let agent_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_bindings")
             .fetch_one(database.pool())
             .await
             .unwrap();
@@ -1246,7 +1381,7 @@ mod tests {
             .await
             .unwrap();
         let retired_at_ms: Option<i64> = sqlx::query_scalar(
-            "SELECT retired_at_ms FROM nomi_agent_presets WHERE preset_id = ?",
+            "SELECT retired_at_ms FROM agent_presets WHERE preset_id = ?",
         )
         .bind(BOUND_PRESET_ID)
         .fetch_one(database.pool())

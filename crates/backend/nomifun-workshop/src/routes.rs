@@ -1775,17 +1775,14 @@ mod tests {
         .await
         .unwrap();
         nomifun_db::sqlx::query(
-            "INSERT INTO conversations \
-                (conversation_id, user_id, name, type, extra, model, status, source, created_at, updated_at) \
-             VALUES (?, ?, 'Creative Studio Agent', 'nomi', '{}', ?, 'finished', 'nomifun', 1, 1)",
+            "INSERT INTO agent_sessions \
+                (agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                 agent_binding_json, next_seq, created_at) \
+             VALUES (?, json_object('principal_kind', 'user', 'principal_id', ?), \
+                     'live', 'Creative Studio Agent', 0, 0, '{}', 1, 1)",
         )
         .bind(&conversation_id)
         .bind(&owner_id)
-        .bind(serde_json::json!({
-            "provider_id": provider_id,
-            "model": "chat-model",
-            "use_model": "chat-model"
-        }).to_string())
         .execute(database.pool())
         .await
         .unwrap();
@@ -1814,16 +1811,21 @@ mod tests {
                 )
             };
             nomifun_db::sqlx::query(
-                "INSERT INTO messages \
-                    (message_id, conversation_id, msg_id, type, content, position, status, hidden, created_at) \
-                 VALUES (?, ?, ?, 'text', ?, ?, 'finish', 0, ?)",
+                "INSERT INTO agent_messages \
+                    (session_id, projection_id, first_seq, last_seq, presentation_intent, \
+                     projection_json, semantic_digest) \
+                 VALUES (?, ?, ?, ?, 'message', \
+                         json_object('correlation_id', ?, 'state', 'completed', \
+                                     'position', ?, 'content', json(?)), ?)",
             )
-            .bind(message_id)
             .bind(&conversation_id)
             .bind(message_id)
-            .bind(content.to_string())
-            .bind(position)
             .bind(i64::try_from(index + 1).unwrap())
+            .bind(i64::try_from(index + 1).unwrap())
+            .bind(message_id)
+            .bind(position)
+            .bind(content.to_string())
+            .bind(format!("{:064x}", index + 1))
             .execute(database.pool())
             .await
             .unwrap();

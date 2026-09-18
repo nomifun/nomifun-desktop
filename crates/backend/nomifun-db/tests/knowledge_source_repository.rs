@@ -12,27 +12,6 @@ use nomifun_db::{
     UpdateKnowledgeSourceItemParams, UpdateKnowledgeSourceParams, UpsertKnowledgeEntryParams,
     init_database_memory, validate_id_data_contract,
 };
-use sqlx::migrate::{Migrate, Migrator};
-
-static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
-
-async fn migrate_through(pool: &sqlx::SqlitePool, maximum_version: i64) {
-    let mut connection = pool.acquire().await.unwrap();
-    connection.ensure_migrations_table().await.unwrap();
-    let applied: std::collections::BTreeSet<i64> = connection
-        .list_applied_migrations()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|migration| migration.version)
-        .collect();
-    for migration in MIGRATOR.iter() {
-        if migration.version <= maximum_version && !applied.contains(&migration.version) {
-            connection.apply(migration).await.unwrap();
-        }
-    }
-}
-
 fn base(knowledge_base_id: &KnowledgeBaseId, name: &str) -> KnowledgeBaseRow {
     KnowledgeBaseRow {
         id: 0,
@@ -118,88 +97,6 @@ fn item_params(
         removed_at: None,
         created_at: 10,
     }
-}
-
-#[tokio::test]
-async fn migration_adds_normalized_source_tables_without_rewriting_legacy_extra() {
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    migrate_through(&pool, 54).await;
-    let knowledge_base_id = KnowledgeBaseId::new();
-    let legacy_extra = serde_json::json!({
-        "tree_access": "editable",
-        "source": {
-            "kind": "url",
-            "mode": "snapshot",
-            "entries": [{"url": "https://example.test/docs"}]
-        }
-    })
-    .to_string();
-    sqlx::query(
-        "INSERT INTO knowledge_bases (\
-            knowledge_base_id, name, description, root_path, managed, extra, created_at, updated_at\
-         ) VALUES (?, 'legacy', '', '/tmp/legacy', 1, ?, 1, 1)",
-    )
-    .bind(knowledge_base_id.as_str())
-    .bind(&legacy_extra)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    migrate_through(&pool, 55).await;
-
-    for table in [
-        "knowledge_sources",
-        "knowledge_source_items",
-        "knowledge_entry_provenance",
-    ] {
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?)",
-        )
-        .bind(table)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert!(exists, "missing {table}");
-    }
-    let preserved: String =
-        sqlx::query_scalar("SELECT extra FROM knowledge_bases WHERE knowledge_base_id = ?")
-            .bind(knowledge_base_id.as_str())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(preserved, legacy_extra);
-    let foreign_keys: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_foreign_key_list('knowledge_sources')",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(foreign_keys, 0);
-    let pending_before: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_table_info('knowledge_source_items') \
-         WHERE name LIKE 'pending_%'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(pending_before, 0, "v55 is the immutable base source schema");
-
-    migrate_through(&pool, 56).await;
-    let pending_after: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_table_info('knowledge_source_items') \
-         WHERE name IN (\
-             'pending_published_hash', 'pending_final_url', \
-             'pending_title', 'pending_publication_at'\
-         )",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(pending_after, 4);
 }
 
 #[tokio::test]

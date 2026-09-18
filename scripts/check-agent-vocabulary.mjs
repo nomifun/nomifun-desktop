@@ -52,15 +52,9 @@ const PLUGIN_PERSISTED_LINES = new Map([
   ['crates/backend/nomifun-app/src/router/hosted_effect_receipts.rs', [
     'Self::PluginProduct => "miniapp",',
   ]],
-  ['crates/backend/nomifun-db/migrations/102_conversation_hosted_effects.sql', [
-    "owner_domain TEXT NOT NULL CHECK(owner_domain IN ('miniapp', 'robot')),",
-  ]],
-  ['crates/backend/nomifun-db/migrations/103_conversation_git_effects.sql', [
-    "owner_domain TEXT NOT NULL CHECK(owner_domain IN ('miniapp', 'robot', 'git')),",
-  ]],
-  ['crates/backend/nomifun-db/src/database/displaced_conversation_runtime_migration/tests.rs', [
-    "VALUES (23, ?, ?, 'hosted-once', 'runtime-turn', 1, 'miniapp', 'hosted-capability', " + String.fromCharCode(92),
-    'assert_eq!(row, (23, "miniapp".into(), "hosted-once".into(), "pending".into(), None));',
+  ['crates/backend/nomifun-app/tests/nomi_core_live_provider_smoke/before_tool.rs', [
+    '|| observation["owner_domain"] != "miniapp"',
+    '"operation_id":"operation","owner_domain":"miniapp",',
   ]],
 ]);
 
@@ -288,7 +282,7 @@ function sorted(values) {
 // on a long Rust test run, so concept/schema drift fails the ordinary fast
 // `check` command immediately.
 const canonicalMigration = readFileSync(
-  resolve(ROOT, 'crates/backend/nomifun-db/migrations/001_v3_baseline.sql'),
+  resolve(ROOT, 'crates/backend/nomifun-db/migrations/001_canonical_baseline.sql'),
   'utf8',
 );
 
@@ -297,7 +291,7 @@ const migrationDirectory = resolve(
   'crates/backend/nomifun-db/migrations',
 );
 const nonBaselineExecutionCreates = readdirSync(migrationDirectory)
-  .filter((name) => name.endsWith('.sql') && name !== '001_v3_baseline.sql')
+  .filter((name) => name.endsWith('.sql') && name !== '001_canonical_baseline.sql')
   .flatMap((name) => {
     const source = readFileSync(resolve(migrationDirectory, name), 'utf8');
     return [...source.matchAll(/CREATE TABLE\s+(?:IF NOT EXISTS\s+)?([a-z_]+)/gi)]

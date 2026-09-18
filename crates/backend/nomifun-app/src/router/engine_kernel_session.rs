@@ -377,6 +377,39 @@ impl EngineKernelSession {
         Ok(plan.clone())
     }
 
+    pub fn wrap_model_middleware(
+        &self,
+        inner: Arc<dyn nomifun_chat_model_broker::EngineModelPort>,
+    ) -> Result<Arc<dyn nomifun_chat_model_broker::EngineModelPort>, AppError> {
+        if self.constraints.restricted() {
+            return Ok(inner);
+        }
+        super::engine_plugin_middleware::model_port(
+            inner,
+            self.plugin_product.clone(),
+            self.compiled.clone(),
+            self.active.clone(),
+            self.principal.clone(),
+            self.session_id.clone(),
+        )
+    }
+
+    pub fn tool_discovery_port(
+        &self,
+    ) -> Result<Option<Arc<dyn nomifun_agent_runtime::AgentToolDiscoveryPort>>, AppError> {
+        if self.constraints.restricted() {
+            return Ok(None);
+        }
+        super::engine_tool_discovery::port(
+            self.kernel.clone(),
+            self.plugin_product.clone(),
+            self.compiled.clone(),
+            self.active.clone(),
+            self.principal.clone(),
+            self.session_id.clone(),
+        )
+    }
+
     /// Required external-state context, independent of transcript rollback.
     /// Engines decide presentation/compaction but must not reinterpret a reply
     /// as physical quiescence or repeat missing transcript effects.
@@ -701,8 +734,17 @@ impl EngineKernelSession {
         };
         // Check the exact frozen mapping BEFORE Robot/Plugin Product/media adapters;
         // none may dispatch using a caller-supplied capability/effect label.
+        let invoker: Arc<dyn nomifun_engine_core::EngineToolInvoker> =
+            super::engine_plugin_middleware::tool_invoker(
+                Arc::new(invoker),
+                self.plugin_product.clone(),
+                self.compiled.clone(),
+                self.active.clone(),
+                self.principal.clone(),
+                self.session_id.clone(),
+            )?;
         let invoker = ConstrainedTools {
-            inner: Arc::new(invoker),
+            inner: invoker,
             plan,
             constraints: self.constraints,
             wave2: self.wave2.clone(),

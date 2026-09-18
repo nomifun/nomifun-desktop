@@ -637,14 +637,6 @@ impl ICronRepository for SqliteCronRepository {
             )));
         }
 
-        sqlx::query(
-            "UPDATE conversation_artifacts \
-             SET cron_job_id = NULL \
-             WHERE cron_job_id = ?",
-        )
-        .bind(cron_job_id)
-        .execute(&mut *tx)
-        .await?;
         sqlx::query("DELETE FROM cron_run_reservations WHERE cron_job_id = ?")
             .bind(cron_job_id)
             .execute(&mut *tx)
@@ -772,18 +764,6 @@ impl ICronRepository for SqliteCronRepository {
             )));
         }
 
-        sqlx::query(
-            "UPDATE conversation_artifacts \
-             SET cron_job_id = NULL \
-             WHERE cron_job_id IN (\
-                 SELECT cron_job_id FROM cron_jobs \
-                 WHERE user_id = ? AND conversation_id = ?\
-             )",
-        )
-        .bind(user_id)
-        .bind(conversation_id)
-        .execute(&mut *tx)
-        .await?;
         sqlx::query(
             "DELETE FROM cron_run_reservations \
              WHERE cron_job_id IN (\
@@ -1980,17 +1960,6 @@ mod tests {
         let row = make_row(&owner);
         let cron_job_id = row.cron_job_id.clone();
         repo.insert(&row).await.unwrap();
-        sqlx::query(
-            "INSERT INTO conversation_artifacts \
-                (conversation_artifact_id, conversation_id, cron_job_id, kind, payload, created_at, updated_at) \
-             VALUES (?, ?, ?, 'cron_trigger', '{}', 0, 0)",
-        )
-        .bind(nomifun_common::generate_id())
-        .bind(CONVERSATION_ID)
-        .bind(&cron_job_id)
-        .execute(db.pool())
-        .await
-        .unwrap();
         repo.insert_run_pruned(&owner, &make_run(&cron_job_id, 1))
             .await
             .unwrap();
@@ -2001,20 +1970,12 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_none());
-        let artifact_job: Option<String> = sqlx::query_scalar(
-            "SELECT cron_job_id FROM conversation_artifacts WHERE conversation_id = ?",
-        )
-        .bind(CONVERSATION_ID)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
         let run_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM cron_job_runs WHERE cron_job_id = ?")
                 .bind(&cron_job_id)
                 .fetch_one(db.pool())
                 .await
                 .unwrap();
-        assert!(artifact_job.is_none());
         assert_eq!(run_count, 0);
     }
 

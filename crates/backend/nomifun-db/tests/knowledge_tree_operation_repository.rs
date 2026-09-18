@@ -7,27 +7,6 @@ use nomifun_db::{
     SqliteKnowledgeRepository, SqliteKnowledgeTreeOperationRepository, init_database_memory,
 };
 use serde_json::json;
-use sqlx::migrate::{Migrate, Migrator};
-
-static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
-
-async fn migrate_through(pool: &sqlx::SqlitePool, maximum_version: i64) {
-    let mut connection = pool.acquire().await.unwrap();
-    connection.ensure_migrations_table().await.unwrap();
-    let applied: std::collections::BTreeSet<i64> = connection
-        .list_applied_migrations()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|migration| migration.version)
-        .collect();
-    for migration in MIGRATOR.iter() {
-        if migration.version <= maximum_version && !applied.contains(&migration.version) {
-            connection.apply(migration).await.unwrap();
-        }
-    }
-}
-
 fn base(knowledge_base_id: &KnowledgeBaseId) -> KnowledgeBaseRow {
     KnowledgeBaseRow {
         id: 0,
@@ -57,61 +36,6 @@ fn prepare(
         source_fs_identity: Some("test-fs:1".into()),
         created_at: 10,
     }
-}
-
-#[tokio::test]
-async fn migration_adds_the_journal_without_rewriting_existing_bases() {
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    migrate_through(&pool, 53).await;
-    let knowledge_base_id = KnowledgeBaseId::new();
-    sqlx::query(
-        "INSERT INTO knowledge_bases \
-            (knowledge_base_id, name, description, root_path, managed, extra, created_at, updated_at) \
-         VALUES (?, 'existing', '', '/tmp/existing', 1, '{}', 1, 1)",
-    )
-    .bind(knowledge_base_id.as_str())
-    .execute(&pool)
-    .await
-    .unwrap();
-    let before: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_schema \
-         WHERE type = 'table' AND name = 'knowledge_tree_operations'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(before, 0);
-
-    migrate_through(&pool, 54).await;
-
-    let preserved: String = sqlx::query_scalar(
-        "SELECT name FROM knowledge_bases WHERE knowledge_base_id = ?",
-    )
-    .bind(knowledge_base_id.as_str())
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(preserved, "existing");
-    let after: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_schema \
-         WHERE type = 'table' AND name = 'knowledge_tree_operations'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(after, 1);
-    let identity_column: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_table_info('knowledge_tree_operations') \
-         WHERE name = 'source_fs_identity'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(identity_column, 1);
 }
 
 #[tokio::test]

@@ -40,6 +40,7 @@ pub struct AgentTurnRequest {
     pub input_port: Option<Arc<dyn crate::AgentInputPort>>,
     pub live_context_port: Option<Arc<dyn crate::AgentLiveContextPort>>,
     pub resource_port: Option<Arc<dyn nomifun_engine_core::EngineResourcePort>>,
+    pub tool_discovery_port: Option<Arc<dyn crate::AgentToolDiscoveryPort>>,
     pub history_port: Option<Arc<dyn crate::AgentHistoryPort>>,
     /// Canonical latest closed task, not a checkpoint or live execution state.
     pub prior_task: Option<crate::AgentPriorTask>,
@@ -66,6 +67,7 @@ impl AgentTurnRequest {
             input_port: None,
             live_context_port: None,
             resource_port: None,
+            tool_discovery_port: None,
             history_port: None,
             prior_task: None,
             patch_recovery: Default::default(),
@@ -109,6 +111,14 @@ impl AgentTurnRequest {
 
     pub fn with_resource_port(mut self, port: Arc<dyn nomifun_engine_core::EngineResourcePort>) -> Self {
         self.resource_port = Some(port);
+        self
+    }
+
+    pub fn with_tool_discovery_port(
+        mut self,
+        port: Arc<dyn crate::AgentToolDiscoveryPort>,
+    ) -> Self {
+        self.tool_discovery_port = Some(port);
         self
     }
 
@@ -246,6 +256,7 @@ pub(crate) async fn run_turn(
     let mut tool_archive = adaptive
         .tool_history()
         .then(|| crate::tool_archive::ToolArchive::new(tool_archive_scope.clone()));
+    let mut discovered_tools = std::collections::BTreeSet::new();
 
     // The host supplies canonical facts; the engine selects its model context.
     // Do this only at turn entry: trimming individual messages inside an active
@@ -278,6 +289,8 @@ pub(crate) async fn run_turn(
         request.prior_task.is_some(),
         request.resource_port.is_some(),
         request.history_port.is_some(),
+        request.tool_discovery_port.is_some(),
+        &discovered_tools,
         &mut adaptive_slots,
     )?;
     model_request
@@ -410,6 +423,8 @@ pub(crate) async fn run_turn(
             request.prior_task.is_some(),
             request.resource_port.is_some(),
             request.history_port.is_some(),
+            request.tool_discovery_port.is_some(),
+            &discovered_tools,
             &mut adaptive_slots,
         )?;
         context_lifecycle.prepare(&mut model_request, &retained_inputs, &binding, model.clone(), event_sink.as_ref(), cancellation.clone()).await?;
@@ -842,13 +857,21 @@ pub(crate) async fn run_turn(
                     explicit_plan = true;
                 }
             }
-            adaptive
-                .activate(
-                    crate::adaptive::TOOL_MODULES,
-                    crate::AgentRuntimeActivationReason::ToolCall,
-                    event_sink.as_ref(),
-                )
-                .await?;
+            let discovery_only = step.call_order.iter().all(|call_id| {
+                step.calls
+                    .get(call_id)
+                    .and_then(|pending| pending.completed.as_ref())
+                    .is_some_and(|call| call.name == crate::tool_discovery::TOOL_NAME)
+            });
+            if !discovery_only {
+                adaptive
+                    .activate(
+                        crate::adaptive::TOOL_MODULES,
+                        crate::AgentRuntimeActivationReason::ToolCall,
+                        event_sink.as_ref(),
+                    )
+                    .await?;
+            }
             let multi_step = adaptive.observe_external_batch(external_calls);
             if explicit_continuation {
                 adaptive
@@ -914,6 +937,8 @@ pub(crate) async fn run_turn(
                 request.input_port.as_deref(),
                 request.prior_task.as_ref(),
                 request.resource_port.as_deref(),
+                request.tool_discovery_port.as_deref(),
+                &mut discovered_tools,
                 archive,
                 request.history_port.as_deref(),
                 &binding,
@@ -1196,6 +1221,8 @@ fn synchronize_adaptive_context(
     prior_task: bool,
     remote_resources: bool,
     history: bool,
+    tool_discovery: bool,
+    discovered_tools: &std::collections::BTreeSet<String>,
     slots: &mut AdaptiveContextSlots,
 ) -> Result<(), AgentEngineError> {
     configure_tools(
@@ -1207,6 +1234,8 @@ fn synchronize_adaptive_context(
         history,
         adaptive.task_ledger(),
         adaptive.tool_history(),
+        tool_discovery,
+        discovered_tools,
     )?;
     request.input.tool_choice = if request.input.tools.is_empty() {
         ChatToolChoice::None
@@ -1289,14 +1318,19 @@ fn configure_tools(
     history: bool,
     task_ledger: bool,
     tool_history: bool,
+    tool_discovery: bool,
+    discovered_tools: &std::collections::BTreeSet<String>,
 ) -> Result<(), AgentEngineError> {
     // Retired capability-control names remain reserved so a host cannot
     // accidentally restore the old dynamic authority surface as ordinary tools.
-    if [crate::planning::TOOL_NAME, crate::completion::TOOL_NAME, crate::context_resources::TOOL_NAME, "search_capabilities", "activate_capability", crate::task_continuation::TOOL_NAME, crate::remote_resources::LIST, crate::remote_resources::READ, crate::remote_resources::TEMPLATES, crate::tool_archive::SEARCH, crate::tool_archive::READ, crate::tool_archive::LOAD]
+    if [crate::planning::TOOL_NAME, crate::completion::TOOL_NAME, crate::context_resources::TOOL_NAME, crate::tool_discovery::TOOL_NAME, "search_capabilities", "activate_capability", crate::task_continuation::TOOL_NAME, crate::remote_resources::LIST, crate::remote_resources::READ, crate::remote_resources::TEMPLATES, crate::tool_archive::SEARCH, crate::tool_archive::READ, crate::tool_archive::LOAD]
         .iter().any(|name| plan.binding(name).is_some()) {
         return Err(AgentEngineError::InvalidContract("engine control tool names cannot be shadowed".into()));
     }
-    request.input.tools = plan.model_definitions();
+    request.input.tools = crate::tool_discovery::definitions(plan, discovered_tools);
+    if tool_discovery {
+        request.input.tools.push(crate::tool_discovery::definition());
+    }
     if task_ledger {
         request.input.tools.push(crate::planning::definition());
         request.input.tools.push(crate::completion::definition());
@@ -1373,6 +1407,8 @@ async fn invoke_tool_calls(
     input_port: Option<&dyn crate::AgentInputPort>,
     prior_task: Option<&crate::AgentPriorTask>,
     resource_port: Option<&dyn nomifun_engine_core::EngineResourcePort>,
+    tool_discovery_port: Option<&dyn crate::AgentToolDiscoveryPort>,
+    discovered_tools: &mut std::collections::BTreeSet<String>,
     tool_archive: &mut crate::tool_archive::ToolArchive,
     history_port: Option<&dyn crate::AgentHistoryPort>,
     engine_binding: &EngineBinding,
@@ -1392,6 +1428,40 @@ async fn invoke_tool_calls(
             if plan.binding(&call.name).is_none() {
                 work_status.observe_deferred();
             }
+        }
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    if completed
+        .iter()
+        .any(|call| call.name == crate::tool_discovery::TOOL_NAME)
+    {
+        let mut results = Vec::with_capacity(completed.len());
+        for call in &completed {
+            let result = if call.name != crate::tool_discovery::TOOL_NAME || completed.len() != 1 {
+                AgentToolResult::text(
+                    call.call_id.clone(),
+                    "No tools executed: ToolSearch requires one isolated call.",
+                    true,
+                )
+            } else if let Some(port) = tool_discovery_port {
+                crate::tool_discovery::execute(
+                    call,
+                    plan,
+                    discovered_tools,
+                    port,
+                    &model_request.causality,
+                    *active_set_generation,
+                    cancellation.clone(),
+                )
+                .await?
+            } else {
+                AgentToolResult::text(
+                    call.call_id.clone(),
+                    "ToolSearch is unavailable for this frozen AgentSession.",
+                    true,
+                )
+            };
+            results.push((call.call_id.clone(), Ok(result)));
         }
         return finish_tool_results(results, event_sink, model_step, cancellation).await;
     }
@@ -1753,7 +1823,14 @@ async fn record_tool_result(
     let result = match result {
         Ok(result) => result,
         Err(AgentEngineError::Cancelled) => return Err(AgentEngineError::Cancelled),
-        Err(error) => AgentToolResult::text(call_id.clone(), error.to_string(), true),
+        // Only an ordinary owner invocation failure is a model-observable tool
+        // result. Structural/host contract failures must terminate the turn;
+        // allowing the model to continue would hide a failed enforcement layer.
+        Err(error @ AgentEngineError::ToolInvocation(_))
+        | Err(error @ AgentEngineError::CapabilityKernel { .. }) => {
+            AgentToolResult::text(call_id.clone(), error.to_string(), true)
+        }
+        Err(error) => return Err(error),
     };
     result.validate_for(&call_id)?;
     event_sink.emit(AgentEngineEvent::ToolCompleted {
@@ -2093,11 +2170,11 @@ mod tests {
     fn frozen_tool_surface_never_advertises_capability_activation() {
         let mut request = request();
         let plan = tool_plan();
-        configure_tools(&mut request, &plan, true, true, true, true, false, false).unwrap();
+        configure_tools(&mut request, &plan, true, true, true, true, false, false, false, &Default::default()).unwrap();
         assert!(request.input.tools.iter().any(|tool| tool.name == "read_file"));
         assert!(!request.input.tools.iter().any(|tool| tool.name == crate::planning::TOOL_NAME));
         assert!(!request.input.tools.iter().any(|tool| tool.name == crate::tool_archive::SEARCH));
-        configure_tools(&mut request, &plan, true, true, true, true, true, true).unwrap();
+        configure_tools(&mut request, &plan, true, true, true, true, true, true, false, &Default::default()).unwrap();
         assert!(request.input.tools.iter().any(|tool| tool.name == crate::planning::TOOL_NAME));
         assert!(request.input.tools.iter().any(|tool| tool.name == crate::completion::TOOL_NAME));
         assert!(request.input.tools.iter().any(|tool| tool.name == crate::tool_archive::SEARCH));
@@ -2116,7 +2193,7 @@ mod tests {
             let shadow = AgentToolPlan::new([tool_binding(
                 name, "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true,
             )]).unwrap();
-            assert!(configure_tools(&mut request, &shadow, false, false, false, false, false, false).is_err());
+            assert!(configure_tools(&mut request, &shadow, false, false, false, false, false, false, false, &Default::default()).is_err());
         }
     }
 

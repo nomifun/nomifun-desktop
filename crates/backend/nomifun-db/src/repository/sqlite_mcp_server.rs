@@ -223,11 +223,6 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
             return Err(DbError::NotFound(format!("MCP server '{mcp_server_id}' not found")));
         }
 
-        sqlx::query("DELETE FROM conversation_mcp_servers WHERE mcp_server_id = ?")
-            .bind(mcp_server_id)
-            .execute(&mut *transaction)
-            .await?;
-
         sqlx::query(
             "UPDATE mcp_servers SET enabled = 0, deleted_at = ?, updated_at = MAX(updated_at + 1, ?) \
              WHERE mcp_server_id = ? AND deleted_at IS NULL",

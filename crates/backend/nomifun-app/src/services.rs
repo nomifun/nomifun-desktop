@@ -1072,34 +1072,6 @@ impl std::error::Error for RetainedStartupCleanupError {
 }
 
 impl AppServices {
-    /// Reject Nomi-core composition once an isolated Fresh-v4 root is ready.
-    ///
-    /// `AppServices` is the current in-process Nomi-core graph. Fresh-v4 owns a
-    /// separate AgentPlatform, Session authority, and router; composing both
-    /// graphs against one root would create competing runtime authorities.
-    pub(crate) fn require_nomi_core_root(
-        &self,
-        consumer: &str,
-    ) -> anyhow::Result<()> {
-        let ready_marker = self
-            .data_dir
-            .join(nomifun_v4_root::FRESH_V4_READY_MARKER_FILE);
-        match std::fs::symlink_metadata(&ready_marker) {
-            Ok(metadata) if metadata.is_file() => anyhow::bail!(
-                "{consumer} cannot compose Nomi-core against a Fresh-v4 root: {}",
-                self.data_dir.display()
-            ),
-            Ok(_) => anyhow::bail!(
-                "Fresh-v4 ready marker is not a regular file; refusing Nomi-core composition: {}",
-                ready_marker.display()
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(anyhow::Error::new(error).context(format!(
-                "inspect Fresh-v4 ready marker for Nomi-core consumer {consumer}"
-            ))),
-        }
-    }
-
     /// Bind the process server-lock authority to these exact services.
     ///
     /// Both the configured data directory and SQLite's live `main` database

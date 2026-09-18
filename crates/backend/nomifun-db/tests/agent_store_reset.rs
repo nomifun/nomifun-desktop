@@ -132,6 +132,10 @@ async fn agent_only_reset_removes_canonical_agent_facts_and_preserves_configurat
 async fn main_database_reset_uses_the_same_agent_generation_without_touching_users() {
     let database = init_database_memory().await.unwrap();
     let pool = database.pool();
+    let session_id = "0190f5fe-7c00-7a00-8000-000000000101";
+    let binding_id = "0190f5fe-7c00-7a00-8000-000000000102";
+    let event_id = "0190f5fe-7c00-7a00-8000-000000000103";
+    let owner = nomifun_db::installation_owner_id(pool).await.unwrap();
     let users_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(pool)
         .await
@@ -140,14 +144,54 @@ async fn main_database_reset_uses_the_same_agent_generation_without_touching_use
         "INSERT INTO agent_sessions (\
             agent_session_id, owner_ref_json, state, title, archived, pinned, \
             agent_binding_json, next_seq, created_at\
-         ) VALUES ('main-session', '{}', 'live', 'Main', 0, 0, '{}', 1, 1)",
+         ) VALUES (?, '{}', 'live', 'Main', 0, 0, '{}', 1, 1)",
     )
+    .bind(session_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO remote_bindings (\
+            remote_binding_id, owner_user_id, name, agent_binding_json, \
+            nomi_snapshot_json, provenance_json, agent_binding_digest, \
+            binding_version, created_at, updated_at\
+         ) VALUES (?, ?, 'Reset remote', '{}', '{}', '{}', ?, 1, 1, 1)",
+    )
+    .bind(binding_id)
+    .bind(&owner)
+    .bind("a".repeat(64))
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO nomi_remote_sessions (\
+            agent_session_id, owner_user_id, remote_binding_id, open_idempotency_key, \
+            binding_version, agent_binding_digest, agent_binding_json, \
+            nomi_snapshot_json, provenance_json, state, created_at, updated_at\
+         ) VALUES (?, ?, ?, 'open', 1, ?, '{}', '{}', '{}', 'ready', 1, 1)",
+    )
+    .bind(session_id)
+    .bind(&owner)
+    .bind(binding_id)
+    .bind("a".repeat(64))
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO nomi_remote_events (\
+            event_id, agent_session_id, seq, event_type, payload_json, created_at\
+         ) VALUES (?, ?, 1, 'opened', '{}', 1)",
+    )
+    .bind(event_id)
+    .bind(session_id)
     .execute(pool)
     .await
     .unwrap();
 
     let report = reset_agent_data(pool).await.unwrap();
     assert_eq!(report.deleted_rows["agent_sessions"], 1);
+    assert_eq!(report.deleted_rows["nomi_remote_events"], 1);
+    assert_eq!(report.deleted_rows["nomi_remote_sessions"], 1);
     let users_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(pool)
         .await

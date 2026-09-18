@@ -6,7 +6,7 @@ boundaries. It is mandatory for new code and changes to existing code.
 
 The authority order is:
 
-1. [`001_v3_baseline.sql`](../../crates/backend/nomifun-db/migrations/001_v3_baseline.sql)
+1. [`001_canonical_baseline.sql`](../../crates/backend/nomifun-db/migrations/001_canonical_baseline.sql)
    and
    [`id_schema_contract.rs`](../../crates/backend/nomifun-db/src/id_schema_contract.rs)
    — executable schema and runtime registry;
@@ -30,9 +30,12 @@ primary key:
 id INTEGER PRIMARY KEY AUTOINCREMENT
 ```
 
-This applies to entity, relationship, value-object, singleton, cache,
-event/outbox, and dependent tables. SQLite internal tables, migration metadata,
-and temporary tables are not product tables.
+This applies to the non-Agent product tables in the runtime registry. The
+generation-5 Agent Store tables listed by `agent_store_schema_manifest_payload`
+are the deliberate exception: they use canonical TEXT/composite keys and
+physical foreign keys for the single Session/Event/Effect fact graph. SQLite
+internal tables, migration metadata, and temporary tables are not product
+tables.
 
 The technical `id` is local to one table and one active dataset. It is:
 
@@ -109,16 +112,14 @@ validating a field, classify it as one of these:
 | Operation token | Request ID, idempotency key, nonce, workspace token, or receipt token; purpose-specific and not an entity identity. |
 | Document identity | Canvas node/edge or similar document-local identity; not a database primary key. |
 
-Protocol-specific UUIDv7 values need the same explicit classification. For
-example, `message_correlations.turn_message_id` is a wire-scoped protocol
-owner token used before projection; it is not a parent reference to
-`messages.message_id`. Conversely, a field such as `messages.msg_id` must
-follow the logical-reference registry when it links to another message. Do not
-infer these rules from a column suffix alone.
+Protocol-specific UUIDv7 values need the same explicit classification. Do not
+infer identity or reference semantics from a column suffix alone.
 
 ## 4. Logical references replace physical foreign keys
 
-Product DDL must not contain:
+Non-Agent product DDL must not contain the following. Canonical Agent Store
+tables may use physical foreign keys and guard constraints exactly as frozen in
+the Agent Store schema; this exception does not extend to other domains.
 
 ```text
 FOREIGN KEY
@@ -219,9 +220,10 @@ boundaries:
 A database or identifier change must add or update focused tests for the
 affected contract. At minimum, cover the applicable items:
 
-- every product table has `id INTEGER PRIMARY KEY AUTOINCREMENT`;
-- no product DDL contains physical FKs, `REFERENCES`, triggers, database
-  cascades, or `*_row_id`;
+- every non-Agent product table has `id INTEGER PRIMARY KEY AUTOINCREMENT`, and
+  canonical Agent Store tables match their frozen TEXT/composite-key schema;
+- non-Agent product DDL contains no physical FKs, `REFERENCES`, database
+  cascades, or `*_row_id`; required guard triggers stay exact;
 - accepted business IDs are canonical UUIDv7 and old/prefixed/short formats
   are rejected;
 - logical-reference registry entries, indexes, scope checks, and delete
@@ -229,7 +231,7 @@ affected contract. At minimum, cover the applicable items:
 - repository parent validation and transaction behavior;
 - orphan audits, including JSON/side-store references;
 - dataset lineage detection, hard reset, generation, and reset receipt;
-- backup/restore/clone preservation and technical-ID rebuild.
+- backup/restore preservation of the exact generation-5 SQLite identity graph.
 
 Delete stale or misleading tests instead of preserving pseudo-coverage. Use
 the narrowest targeted test first; reserve expensive workspace-wide gates for

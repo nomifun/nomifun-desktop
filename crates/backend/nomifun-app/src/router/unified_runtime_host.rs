@@ -151,6 +151,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-engine-core/src/context_resource.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/context_resources.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/remote_resources.rs"),
+                    include_str!("../../../nomifun-agent-runtime/src/tool_discovery.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/media_context.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/context_tail.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/compacted_history.rs"),
@@ -162,15 +163,13 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("mcp_effect_receipts.rs"),
                     include_str!("hosted_effect_receipts.rs"),
                     include_str!("engine_plugin_product_tools.rs"),
+                    include_str!("engine_plugin_middleware.rs"),
+                    include_str!("engine_tool_discovery.rs"),
                     include_str!("engine_robot_tools.rs"),
                     include_str!("nomi_core_robot.rs"),
                     include_str!("../../../nomifun-robot/src/tool_registry.rs"),
                     include_str!("../../../nomifun-robot/src/vision.rs"),
                     include_str!("../../../nomifun-plugin-platform/src/runtime/m1_application.rs"),
-                    include_str!("../../../nomifun-db/migrations/102_conversation_hosted_effects.sql"),
-                    include_str!("../../../nomifun-db/migrations/103_conversation_git_effects.sql"),
-                    include_str!("../../../nomifun-db/migrations/100_conversation_mcp_effects.sql"),
-                    include_str!("../../../nomifun-db/migrations/101_mcp_effect_observations.sql"),
                     include_str!("nomi_core_mcp_catalog.rs"),
                     include_str!("plugin_platform.rs"),
                     include_str!("state.rs"),
@@ -300,9 +299,10 @@ pub(crate) fn factory(
                 active: tokio::sync::Mutex::new(None),
                 last_terminal_root: std::sync::Mutex::new(None),
                 tools: tools.clone(),
-                resources,
+                resources: resources.clone(),
             });
             let model = host.session_host.compose_model_port(host.clone())?;
+            let model = resources.wrap_model_middleware(model)?;
             let runtime =
                 UnifiedAgentRuntime::new(&options, engine, engine_binding, model, tools, host)?;
             Ok(Arc::new(runtime) as Arc<dyn nomifun_ai_agent::OfficialAgentRuntime>)
@@ -593,6 +593,9 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         if self.resources.mcp_resources_selected() {
             request = request.with_resource_port(self.capability_port.clone());
         }
+        if let Some(port) = self.resources.tool_discovery_port()? {
+            request = request.with_tool_discovery_port(port);
+        }
         if self.compiled.content().enabled_capabilities.iter().any(|item| {
             item.capability.id.as_ref() == nomifun_agent_domain_wave4::ROBOT_MODULE_ID
                 && item.action_allowlist.contains(
@@ -845,6 +848,9 @@ mod build_identity_tests {
             "../../../nomifun-agent-domain-wave2/src/lib.rs",
             "../../../nomifun-ai-agent/src/plugin_tools.rs",
             "../../../nomifun-ai-agent/src/tool_discovery.rs",
+            "engine_plugin_middleware.rs",
+            "engine_tool_discovery.rs",
+            "../../../nomifun-agent-runtime/src/tool_discovery.rs",
             "../../../nomifun-mcp/src/identity.rs",
             "../../../nomifun-file/src/artifact_store.rs",
             "../../../nomifun-file/src/vcs_stage.rs",

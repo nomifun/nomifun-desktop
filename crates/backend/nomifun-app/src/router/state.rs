@@ -18,7 +18,7 @@ use nomifun_agent_contracts::{
     CapabilityConsumer, CanonicalErrorCode, platform_feature_inventory_payload,
     PluginSourceKind, RuntimeProfileKind, RuntimeTarget, VersionString,
     digest_payload,
-    fresh_v4_schema_manifest_payload, official_preset_seed_manifest_payload,
+    agent_store_schema_manifest_payload, official_preset_seed_manifest_payload,
 };
 use nomifun_agent_control_plane::{
     AgentControlPlane, OfficialTemplateCatalog, PresetRevisionCompiler,
@@ -614,7 +614,7 @@ async fn build_nomi_core_agent_api_state(
     let plugin_runtime_participant =
         Arc::clone(&plugin.runtime_participant);
 
-    let schema_digest = digest_payload(&fresh_v4_schema_manifest_payload())?;
+    let schema_digest = digest_payload(&agent_store_schema_manifest_payload())?;
     let seed = official_preset_seed_manifest_payload();
     #[cfg(feature = "browser-use")]
     let installation_role_bindings = crate::browser_workspace_provider::installation_binding(

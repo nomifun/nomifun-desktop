@@ -63,8 +63,8 @@ state under `NomiFun`; `bun run dev`, `dev:web`, and `build:fast` use dev state
 under the `NomiFun-dev` sibling. This keeps unauthenticated and experimental
 development
 loops away from installed-app state while preserving one state per channel.
-Use `bun run seed:dev` to copy a stable snapshot into dev, or use
-`NOMIFUN_DATA_DIR` / `--data-dir` to select an explicit directory.
+Use `NOMIFUN_DATA_DIR` / `--data-dir` to select an explicit directory. Development
+startup does not import historical Agent state from the stable dataset.
 
 What makes the sharing safe is an **exclusive server lock**: at boot
 (`bootstrap::init_environment`, before the database is opened) the backend

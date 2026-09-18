@@ -250,14 +250,6 @@ pub struct ListMessagesQuery {
     pub day: Option<String>,
 }
 
-/// Body for
-/// `PATCH /api/conversations/:conversation_id/artifacts/:conversation_artifact_id`.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct UpdateConversationArtifactRequest {
-    pub status: ConversationArtifactStatus,
-}
-
 /// Query parameters for `GET /api/messages/search`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -378,48 +370,6 @@ pub type MessageListResponse = PaginatedResult<MessageResponse>;
 pub struct ActiveCountResponse {
     pub count: usize,
 }
-
-/// Artifact kind discriminant for conversation-bound UI artifacts.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ConversationArtifactKind {
-    CronTrigger,
-    SkillSuggest,
-}
-
-/// Durable artifact state exposed to the client.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ConversationArtifactStatus {
-    Active,
-    Pending,
-    Dismissed,
-    Saved,
-}
-
-/// Artifact object returned by conversation artifact APIs and websocket events.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct ConversationArtifactResponse {
-    /// Stable Conversation Artifact business identity.
-    #[serde(deserialize_with = "crate::serde_util::deserialize_uuidv7")]
-    pub conversation_artifact_id: String,
-    #[serde(deserialize_with = "crate::serde_util::deserialize_conversation_id")]
-    pub conversation_id: String,
-    #[serde(
-        default,
-        deserialize_with = "crate::serde_util::deserialize_optional_cron_job_id"
-    )]
-    pub cron_job_id: Option<String>,
-    pub kind: ConversationArtifactKind,
-    pub status: ConversationArtifactStatus,
-    pub payload: serde_json::Value,
-    pub created_at: TimestampMs,
-    pub updated_at: TimestampMs,
-}
-
-/// List of conversation artifacts for a single conversation.
-pub type ConversationArtifactListResponse = Vec<ConversationArtifactResponse>;
 
 /// A single item from cross-conversation message search.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -803,13 +753,6 @@ mod tests {
             automatic.execution_model_pool,
             Some(Some(crate::ExecutionModelPool::Automatic))
         );
-    }
-
-    #[test]
-    fn deserialize_update_artifact_request() {
-        let raw = json!({ "status": "dismissed" });
-        let req: UpdateConversationArtifactRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.status, ConversationArtifactStatus::Dismissed);
     }
 
     // ── CloneConversationRequest ────────────────────────────────────
@@ -1410,72 +1353,5 @@ mod tests {
         );
         assert_eq!(json["items"][0]["preview_text"], "matched");
         assert_eq!(json["total"], 1);
-    }
-
-    #[test]
-    fn serialize_conversation_artifact_response() {
-        let conversation_artifact_id = "0190f5fe-7c00-7a00-8abc-012345678951";
-        let artifact = ConversationArtifactResponse {
-            conversation_artifact_id: conversation_artifact_id.into(),
-            conversation_id: "0190f5fe-7c00-7a00-8abc-012345678901".into(),
-            cron_job_id: Some(CRON_JOB_ID.into()),
-            kind: ConversationArtifactKind::SkillSuggest,
-            status: ConversationArtifactStatus::Active,
-            payload: json!({
-                "cron_job_id": CRON_JOB_ID,
-                "name": "daily-report",
-                "description": "Daily report",
-                "skillContent": "---\nname: daily-report\n---\nUse it.",
-            }),
-            created_at: 1000,
-            updated_at: 2000,
-        };
-
-        let raw = serde_json::to_value(&artifact).unwrap();
-        assert_eq!(raw["conversation_artifact_id"], conversation_artifact_id);
-        assert!(raw.get("artifact_id").is_none());
-        assert!(raw.get("id").is_none());
-        assert_eq!(raw["kind"], "skill_suggest");
-        assert_eq!(raw["status"], "active");
-        assert_eq!(raw["payload"]["name"], "daily-report");
-
-        let decoded: ConversationArtifactResponse = serde_json::from_value(raw).unwrap();
-        assert_eq!(decoded.conversation_artifact_id, conversation_artifact_id);
-    }
-
-    #[test]
-    fn conversation_artifact_response_rejects_noncanonical_and_legacy_ids() {
-        let valid = json!({
-            "conversation_artifact_id": "0190f5fe-7c00-7a00-8abc-012345678951",
-            "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901",
-            "cron_job_id": CRON_JOB_ID,
-            "kind": "skill_suggest",
-            "status": "active",
-            "payload": {},
-            "created_at": 1000,
-            "updated_at": 2000
-        });
-
-        for invalid_id in [
-            json!(42),
-            json!("artifact_0190f5fe-7c00-7a00-8abc-012345678951"),
-            json!("0190F5FE-7C00-7A00-8ABC-012345678951"),
-            json!("550e8400-e29b-41d4-a716-446655440000"),
-        ] {
-            let mut raw = valid.clone();
-            raw["conversation_artifact_id"] = invalid_id;
-            assert!(serde_json::from_value::<ConversationArtifactResponse>(raw).is_err());
-        }
-
-        for legacy_field in ["artifact_id", "id"] {
-            let mut raw = valid.clone();
-            let value = raw
-                .as_object_mut()
-                .unwrap()
-                .remove("conversation_artifact_id")
-                .unwrap();
-            raw[legacy_field] = value;
-            assert!(serde_json::from_value::<ConversationArtifactResponse>(raw).is_err());
-        }
     }
 }

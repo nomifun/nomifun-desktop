@@ -117,7 +117,7 @@ $ bun run build
 
 ## 数据存储位置
 
-已安装桌面应用将 SQLite 数据库、agent 状态、日志和 Bun 运行时缓存持久化到 stable 的按用户应用数据目录下 —— Windows 上是 **`%LOCALAPPDATA%\NomiFun`**，macOS 上是 **`~/Library/Application Support/NomiFun`**，Linux 上是 **`$XDG_DATA_HOME/NomiFun`**（由 `nomifun_app::cli::default_data_dir()` 解析）。同一 build channel 的宿主共享默认目录；开发脚本改用隔离的同级目录 `NomiFun-dev`。开发环境需要 stable 状态副本时可运行 `bun run seed:dev`。
+已安装桌面应用将 SQLite 数据库、agent 状态、日志和 Bun 运行时缓存持久化到 stable 的按用户应用数据目录下 —— Windows 上是 **`%LOCALAPPDATA%\NomiFun`**，macOS 上是 **`~/Library/Application Support/NomiFun`**，Linux 上是 **`$XDG_DATA_HOME/NomiFun`**（由 `nomifun_app::cli::default_data_dir()` 解析）。同一 build channel 的宿主共享默认目录；开发脚本改用隔离的同级目录 `NomiFun-dev`，不会从 stable 数据集导入历史 Agent 状态。
 
 在启动应用前设置 `NOMIFUN_DATA_DIR=<absolute path>`，该路径**就是**数据目录——所有宿主都按字面值使用，不附加 `/Nomi` 后缀。后端启动时会对数据目录取排他的 `server.lock`；若启动失败 (例如该目录已被另一个实例占用)，桌面外壳会弹出原生错误对话框并退出。
 

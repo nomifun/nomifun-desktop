@@ -64,7 +64,7 @@ pub(crate) async fn validate_and_lock_agent_preset_lineage(
 
     let preset_id = preset_id.expect("live AgentPreset authority requires preset_id");
     let locked = sqlx::query(
-        "UPDATE nomi_agent_presets SET display_name = display_name WHERE preset_id = ?",
+        "UPDATE agent_presets SET display_json = display_json WHERE preset_id = ?",
     )
     .bind(preset_id)
     .execute(&mut **tx)

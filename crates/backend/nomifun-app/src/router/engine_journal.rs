@@ -63,7 +63,10 @@ pub(super) struct Journal {
     user: String,
     session: AgentSessionId,
     operation: OperationId,
+    /// Accepted user message used by model causality and runtime records.
     root: EventId,
+    /// Exact canonical turn/started predecessor for Action/Effect chains.
+    turn_started: EventId,
     generation: i64,
     snapshot: ResolvedSnapshotRef,
     route: Option<ChatRouteIdentity>,
@@ -186,6 +189,7 @@ impl EngineTurnJournal {
         if journal.user != receipt.session().principal().principal_id
             || journal.generation != receipt.admission_epoch()
             || journal.root.as_ref() != receipt.root_message_id()
+            || journal.turn_started.as_ref() != receipt.turn_started_event_id()
             || journal.snapshot != receipt.session().snapshot().snapshot_ref
         {
             return Err(failure("receipt changed for existing journal"));
@@ -206,6 +210,7 @@ impl EngineTurnJournal {
             ),
             operation: OperationId::from(receipt.operation_id().to_owned()),
             root: EventId::from(receipt.root_message_id().to_owned()),
+            turn_started: EventId::from(receipt.turn_started_event_id().to_owned()),
             generation: receipt.admission_epoch(),
             snapshot: receipt.session().snapshot().snapshot_ref.clone(),
             route: receipt
@@ -362,7 +367,7 @@ impl EngineTurnJournal {
                             kind: SessionEventKind("tool/call-started".to_owned()),
                             kind_version: 1,
                             correlation_id: CorrelationId::from(projection_id),
-                            causation_event_id: Some(journal.root.clone()),
+                            causation_event_id: Some(journal.turn_started.clone()),
                             payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
                                 "operation_id": operation,
                                 "call_id": call_id,
@@ -452,7 +457,7 @@ impl EngineTurnJournal {
                             kind: SessionEventKind("tool/call-started".to_owned()),
                             kind_version: 1,
                             correlation_id: CorrelationId::from(projection_id),
-                            causation_event_id: Some(journal.root.clone()),
+                            causation_event_id: Some(journal.turn_started.clone()),
                             payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
                                 "operation_id": operation,
                                 "call_id": call_id,
@@ -851,12 +856,14 @@ pub(super) async fn test_fixture() -> (EngineTurnJournal, nomifun_db::SqlitePool
         .await
         .unwrap();
     let root = message.record.unwrap().event_id;
+    let turn_started = turn.record.as_ref().unwrap().event_id.clone();
     let journal = EngineTurnJournal(Arc::new(Journal {
         store,
         user: owner.principal_id,
         session: session_id,
         operation: OperationId::from("turn"),
         root,
+        turn_started,
         generation: turn.cursor.seq as i64,
         snapshot: binding.resolved_snapshot_ref,
         route: None,

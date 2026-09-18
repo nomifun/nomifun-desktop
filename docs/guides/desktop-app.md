@@ -120,7 +120,7 @@ The shell ships `tauri-plugin-autostart` so the renderer can opt the app into "l
 
 ## Where data is stored
 
-The installed desktop app persists the SQLite database, agent state, logs, and the Bun runtime cache under the stable per-user application-data directory — **`%LOCALAPPDATA%\NomiFun`** on Windows, **`~/Library/Application Support/NomiFun`** on macOS, **`$XDG_DATA_HOME/NomiFun`** on Linux (resolved by `nomifun_app::cli::default_data_dir()`). Hosts on the same build channel share a default; development scripts use the isolated `NomiFun-dev` sibling instead. Use `bun run seed:dev` when dev needs a copy of stable state.
+The installed desktop app persists the SQLite database, agent state, logs, and the Bun runtime cache under the stable per-user application-data directory — **`%LOCALAPPDATA%\NomiFun`** on Windows, **`~/Library/Application Support/NomiFun`** on macOS, **`$XDG_DATA_HOME/NomiFun`** on Linux (resolved by `nomifun_app::cli::default_data_dir()`). Hosts on the same build channel share a default; development scripts use the isolated `NomiFun-dev` sibling instead and do not import historical Agent state from the stable dataset.
 
 Set `NOMIFUN_DATA_DIR=<absolute path>` before launching the app and that path **is** the data dir — the value is taken literally on every host, with no `/Nomi` suffix. The backend takes an exclusive `server.lock` on the data dir at startup; if it fails to start — for example because another instance already holds the directory — the desktop shell shows a native error dialog and exits.
 

@@ -6,7 +6,6 @@ mod channel;
 mod client_preference;
 mod instance_token;
 mod javascript_runtime_selection;
-mod conversation_artifact;
 mod cron_job;
 mod customer_service;
 mod cron_job_run;
@@ -53,7 +52,6 @@ pub use instance_token::InstanceApiTokenRow;
 pub use javascript_runtime_selection::{
     JavaScriptRuntimeSelectionRecord, JavaScriptRuntimeSelectionRow,
 };
-pub use conversation_artifact::ConversationArtifactRow;
 pub use cron_job::CronJobRow;
 pub use cron_job_run::{CronJobRunRow, CronRunReservationRow};
 pub use customer_service::{

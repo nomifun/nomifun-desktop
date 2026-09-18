@@ -21,16 +21,13 @@ fn main() -> Result<ExitCode> {
     // (so the bundled `bun` resolves through the same cache the server
     // uses) before falling through to PATH probing.
     //
-    // Server-shaped commands resolve the current Nomi-core data root. A
-    // ready Fresh-v4 experiment at the channel default remains isolated and
-    // is never opened or mutated by the in-process Nomi host.
+    // Server-shaped commands resolve the one canonical data root.
     let owns_data_root = matches!(
         cli.command,
         None | Some(Command::Doctor) | Some(Command::Backup { .. })
     );
     if owns_data_root {
-        cli.data_dir =
-            bootstrap::resolve_nomi_core_data_root(cli.data_dir.clone());
+        cli.data_dir = bootstrap::resolve_startup_data_root(cli.data_dir.clone());
     }
     let needs_runtime = matches!(cli.command, None | Some(Command::Doctor));
     if needs_runtime {

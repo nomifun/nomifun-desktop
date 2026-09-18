@@ -68,9 +68,9 @@ use nomifun_common::{
     normalize_keys_to_snake_case,
 };
 use nomifun_conversation::{
-    BackgroundTaskRegistrar, CanonicalAgentSessionOwner, IdempotentMessageDelivery,
-    PreparedAgentSessionDelete, ProductAgentResolution, ProductAgentSnapshotResolver,
-    ProductAgentTarget, PublicTurnDeliveryState,
+    AgentMutationReceipt, BackgroundTaskRegistrar, CanonicalAgentSessionOwner,
+    IdempotentMessageDelivery, PreparedAgentSessionDelete, ProductAgentResolution,
+    ProductAgentSnapshotResolver, ProductAgentTarget, PublicTurnDeliveryState,
 };
 use nomifun_conversation::{
     CreativeStudioAgentHistoryMessage, CreativeStudioAgentHistoryRole,
@@ -1609,26 +1609,50 @@ impl NomiCoreSessionOwner {
         if head.active_turn_id.is_none() {
             return Ok(());
         }
+        self.cancel_turn(
+            owner_id,
+            &session_id,
+            &format!("cancel:{}", Uuid::now_v7()),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn cancel_turn(
+        &self,
+        owner_id: &str,
+        session_id: &AgentSessionId,
+        idempotency_key: &str,
+    ) -> Result<AgentMutationReceipt, AppError> {
+        let head = self
+            .canonical
+            .store()
+            .head(session_id)
+            .await
+            .map_err(agent_session_store_error)?;
+        let active_turn_id = head
+            .active_turn_id
+            .ok_or_else(|| AppError::Conflict("AgentSession has no active turn".into()))?;
         let generation = self
             .canonical
             .store()
             .read_turn_receipt(
-                &session_id,
-                &OperationId::from(head.active_turn_id.clone().unwrap_or_default()),
+                session_id,
+                &OperationId::from(active_turn_id),
             )
             .await
             .map_err(agent_session_store_error)?
             .started_event
             .map(|event| event.seq)
             .unwrap_or(head.last_seq);
-        self.canonical
+        let receipt = self.canonical
             .cancel(
                 &PrincipalRef {
                     principal_kind: "user".to_owned(),
                     principal_id: owner_id.to_owned(),
                 },
-                &session_id,
-                &format!("cancel:{}", Uuid::now_v7()),
+                session_id,
+                idempotency_key,
             )
             .await?;
         if let Some(runtime) = self.runtime_sessions.get_runtime(session_id.as_ref()) {
@@ -1639,7 +1663,7 @@ impl NomiCoreSessionOwner {
             generation,
             Some(nomifun_common::AgentKillReason::UserCancelled),
         )?;
-        Ok(())
+        Ok(receipt)
     }
 
 }
@@ -9810,10 +9834,10 @@ async fn cancel_nomi_core_agent_session_turn(
 ) -> Result<Json<ApiResponse<AgentSessionTurnMutationResponseDto>>, NomiCoreApiError> {
     let session_id = parse_agent_session_id(&agent_session_id)?;
     let key = canonical_nonempty(&request.idempotency_key, "idempotency_key")?;
+    let principal = authenticated_principal(&owner);
     let receipt = state
         .session_owner
-        .canonical()
-        .cancel(&authenticated_principal(&owner), &session_id, &key)
+        .cancel_turn(&principal.principal_id, &session_id, &key)
         .await?;
     Ok(Json(ApiResponse::ok(AgentSessionTurnMutationResponseDto {
         agent_session_id: session_id.as_ref().to_owned(),
@@ -9881,7 +9905,14 @@ async fn get_nomi_core_agent_session_messages(
         .into_iter()
         .take(query.limit as usize)
         .collect::<Vec<_>>();
-    let next_seq = messages.last().map_or(query.after_seq, |message| message.last_seq);
+    // Projections are ordered by first_seq, while an earlier projection may
+    // receive a later terminal update. The page cursor must cover every row
+    // returned, not merely the last projection in first-seen order.
+    let next_seq = messages
+        .iter()
+        .map(|message| message.last_seq)
+        .max()
+        .unwrap_or(query.after_seq);
     Ok(Json(ApiResponse::ok(
         NomiCoreAgentSessionMessagePageResponse {
             agent_session_id: session_id.as_ref().to_owned(),

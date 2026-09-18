@@ -114,9 +114,8 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
   `NomiFun-beta` 等**同级目录**——channel 目录永远不嵌套在 stable 根
   之内。根脚本中的 `dev`、
   `dev:web`、`build:fast` 选择 dev；已安装应用、`serve:web` 与 release
-  构建保持 stable。需要把 stable 快照复制到开发目录时运行
-  `bun run seed:dev`；需要显式位置时则使用 `NOMIFUN_DATA_DIR` 或
-  `--data-dir`。
+  构建保持 stable。需要显式位置时使用 `NOMIFUN_DATA_DIR` 或 `--data-dir`；
+  开发启动不会从 stable 数据集导入历史 Agent 状态。
 - 后端启动时（早于打开数据库）会对 `{data_dir}/server.lock` 取一把
   OS 级**排他锁**。同一数据目录上的第二个后端进程会快速失败，错误
   信息会指出持有者（pid + 可执行文件名）并给出两条出路：关掉另一个
