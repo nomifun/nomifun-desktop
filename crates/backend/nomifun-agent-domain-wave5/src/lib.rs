@@ -80,20 +80,14 @@ pub const REMOTE_OPEN_ACTION: &str = "remote.open";
 pub const REMOTE_TURN_ACTION: &str = "remote.turn";
 pub const REMOTE_OBSERVE_ACTION: &str = "remote.observe";
 pub const REMOTE_CANCEL_ACTION: &str = "remote.cancel";
-pub const REMOTE_MCP: &str = "remote.mcp";
-pub const REMOTE_REST: &str = "remote.rest";
-pub const INGRESS_WEB: &str = "ingress.web";
-pub const INGRESS_MOBILE: &str = "ingress.mobile";
-pub const INGRESS_CHANNEL: &str = "ingress.channel";
+pub const REMOTE_MCP: &str = "remote.ingress/mcp";
+pub const REMOTE_REST: &str = "remote.ingress/rest";
+pub const INGRESS_WEB: &str = "remote.ingress/web";
+pub const INGRESS_MOBILE: &str = "remote.ingress/mobile";
+pub const INGRESS_CHANNEL: &str = "remote.ingress/channel";
 
 pub const SCHEDULER_RESOURCE_KIND: &str = "scheduler";
 const SCHEDULER_RESOURCES: &[&str] = &[SCHEDULER_RESOURCE_KIND];
-
-pub const TARGET_CAPABILITY_FAMILIES: [&str; 3] = [
-    AGENT_COLLABORATION_MODULE_ID,
-    AUTOMATION_SCHEDULE_MODULE_ID,
-    REQUIREMENTS_MODULE_ID,
-];
 
 pub const PACKAGE_IDS: [&str; 4] = [
     AGENT_EXECUTION_PACKAGE,
@@ -849,17 +843,6 @@ pub fn required_action_resource_operations(
             })
             .collect()
     })
-}
-
-/// Map an authoring family to its one canonical product Module.
-pub fn canonical_capability_ids_for_family(family: &str) -> BTreeSet<CapabilityId> {
-    let module = match family {
-        "agent.collaboration" => Some(AGENT_COLLABORATION_MODULE_ID),
-        "automation.schedule" => Some(AUTOMATION_SCHEDULE_MODULE_ID),
-        "requirements" => Some(REQUIREMENTS_MODULE_ID),
-        _ => None,
-    };
-    module.into_iter().map(CapabilityId::from).collect()
 }
 
 /// Resolve an exact Action ID to its product Module.

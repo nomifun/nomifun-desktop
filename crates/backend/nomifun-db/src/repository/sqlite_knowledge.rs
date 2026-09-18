@@ -43,14 +43,15 @@ async fn lock_binding_target(
                 ))
             })?;
             let parent = sqlx::query(
-                "UPDATE conversations SET updated_at = updated_at WHERE conversation_id = ?",
+                "UPDATE agent_sessions SET next_seq = next_seq \
+                 WHERE agent_session_id = ? AND state = 'live'",
             )
             .bind(target_id.as_str())
             .execute(&mut **tx)
             .await?;
             if parent.rows_affected() == 0 {
                 return Err(DbError::Conflict(format!(
-                    "knowledge conversation target '{}' does not exist",
+                    "knowledge AgentSession target '{}' does not exist",
                     target_id
                 )));
             }
@@ -653,13 +654,16 @@ mod tests {
         assert!(remaining.is_empty());
     }
 
-    /// Insert a conversation so the conversation-kind binding has a valid
+    /// Insert a canonical AgentSession so the session-kind binding has a valid
     /// logical target for the repository-level test.
-    async fn seed_conversation(pool: &SqlitePool, id: &str) {
+    async fn seed_agent_session(pool: &SqlitePool, id: &str) {
         let installation_owner = crate::installation_owner_id(pool).await.unwrap();
         sqlx::query(
-            "INSERT INTO conversations (conversation_id, user_id, name, type, status, created_at, updated_at) \
-             VALUES (?, ?, 'c', 'nomi', 'pending', 1, 1)",
+            "INSERT INTO agent_sessions (\
+                agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                agent_binding_json, next_seq, created_at\
+             ) VALUES (?, json_object('principal_kind','user','principal_id',?), \
+                       'live', 'Knowledge target', 0, 0, '{}', 1, 1)",
         )
         .bind(id)
         .bind(installation_owner)
@@ -672,7 +676,7 @@ mod tests {
     async fn binding_set_get_roundtrip() {
         let db = init_database_memory().await.unwrap();
         let repo = SqliteKnowledgeRepository::new(db.pool().clone());
-        seed_conversation(db.pool(), CONVERSATION_ID).await;
+        seed_agent_session(db.pool(), CONVERSATION_ID).await;
         repo.insert_base(&make_base(KB_A)).await.unwrap();
         repo.insert_base(&make_base(KB_B)).await.unwrap();
 
@@ -793,13 +797,13 @@ mod tests {
         assert!(repo.get_binding("workpath", "/other").await.unwrap().is_none());
     }
 
-    /// Raw conversation deletion leaves logically related rows unchanged.
-    /// Repository-owned cleanup removes the binding and its junction rows.
+    /// Raw AgentSession deletion leaves logically related rows unchanged.
+    /// The canonical delete saga must remove the binding and its junction rows.
     #[tokio::test]
-    async fn deleting_conversation_requires_explicit_binding_cleanup() {
+    async fn deleting_agent_session_requires_explicit_binding_cleanup() {
         let db = init_database_memory().await.unwrap();
         let repo = SqliteKnowledgeRepository::new(db.pool().clone());
-        seed_conversation(db.pool(), OTHER_CONVERSATION_ID).await;
+        seed_agent_session(db.pool(), OTHER_CONVERSATION_ID).await;
         repo.insert_base(&make_base(KB_A)).await.unwrap();
 
         let bid = repo
@@ -807,7 +811,7 @@ mod tests {
             .await
             .unwrap();
 
-        sqlx::query("DELETE FROM conversations WHERE conversation_id = ?")
+        sqlx::query("DELETE FROM agent_sessions WHERE agent_session_id = ?")
             .bind(OTHER_CONVERSATION_ID)
             .execute(db.pool())
             .await

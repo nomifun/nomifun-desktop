@@ -24,7 +24,7 @@ test.each([false, true])('management reads the shared MCP selection and retains 
   track(spyOn(ipcBridge.companion.getCompanionSession, 'invoke').mockResolvedValue({ conversation_id: conversationId }));
   track(spyOn(ipcBridge.companion.ensureCompanionSession, 'invoke').mockResolvedValue({ conversation_id: conversationId } as any));
   track(spyOn(ipcBridge.mcpService.listServers, 'invoke').mockResolvedValue([{ mcp_server_id: serverId, name: 'Shared MCP', enabled: true }] as any));
-  track(spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ id: conversationId, type: 'nomi', extra: { mcp_server_ids: [serverId] }, agent_snapshot: { enabled_capabilities: ['mcp.connect'] } } as any));
+  track(spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ id: conversationId, type: 'nomi', extra: { mcp_server_ids: [serverId] }, agent_snapshot: { enabled_capabilities: [`nomi.mcp.v1.${'a'.repeat(64)}`] } } as any));
   const save = track(spyOn(ipcBridge.agentPlatform.sessions.updateMcpSelection, 'invoke'));
   if (fail) save.mockRejectedValue(new Error('busy'));
   else save.mockResolvedValue({});

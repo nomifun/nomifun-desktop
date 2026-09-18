@@ -1196,13 +1196,6 @@ impl ITerminalRepository for SqliteTerminalRepository {
         .bind(id)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
-            "DELETE FROM idmm_interventions \
-             WHERE target_kind = 'terminal' AND target_id = ?",
-        )
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
         sqlx::query("DELETE FROM terminal_sessions WHERE terminal_id = ?")
             .bind(id)
             .execute(&mut *tx)
@@ -1278,11 +1271,6 @@ impl ITerminalRepository for SqliteTerminalRepository {
         )
         .bind(detail)
         .bind(now)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "DELETE FROM idmm_interventions WHERE target_kind = 'terminal'",
-        )
         .execute(&mut *tx)
         .await?;
         let result = sqlx::query("DELETE FROM terminal_sessions")

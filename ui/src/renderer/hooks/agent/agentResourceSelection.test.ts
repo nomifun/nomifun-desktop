@@ -21,11 +21,10 @@ describe('Agent resource selection contract', () => {
   test('uses the enabled capability model for frozen multi-server MCP resources', () => {
     const capabilities = selectedCapabilityIds([
       { capability: { id: `nomi.mcp.v1.${'a'.repeat(64)}` } },
-      { capability: { id: 'mcp.resource' } },
     ]);
     expect(allowsMultipleMcpServers(capabilities)).toBe(true);
-    expect(allowsMultipleMcpServers([...capabilities, 'mcp.tool_proxy'])).toBe(false);
-    expect(allowsMultipleMcpServers([...capabilities, 'connector.data.read'])).toBe(false);
+    expect(allowsMultipleMcpServers([])).toBe(false);
+    expect(allowsMultipleMcpServers(['knowledge'])).toBe(false);
     expect(resolveAgentResourceSelections(['mcp_server'], {
       mcp_servers: ['server-1', 'server-2', 'server-1'], mcp_server: 'legacy-server',
     })).toEqual({

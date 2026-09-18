@@ -13,7 +13,7 @@ import {
 } from './index';
 
 const capability = {
-  id: asCapabilityId('fs.read'),
+  id: asCapabilityId('workspace.files/read'),
   version: '1.0.0',
 };
 
@@ -33,9 +33,9 @@ describe('AgentPreset draft model', () => {
   });
   test('preserves a restricted action allowlist when enabling an existing capability', () => {
     const empty = createEmptyAgentPresetDocument();
-    const enabled = { ...empty, enabled_capabilities: [{ capability, action_allowlist: ['fs.read'] }] };
+    const enabled = { ...empty, enabled_capabilities: [{ capability, action_allowlist: ['workspace.files/read'] }] };
     expect(capabilityPlacement(enabled, capability)).toBe('enabled');
-    expect(placeCapability(enabled, capability, 'enabled').enabled_capabilities[0].action_allowlist).toEqual(['fs.read']);
+    expect(placeCapability(enabled, capability, 'enabled').enabled_capabilities[0].action_allowlist).toEqual(['workspace.files/read']);
     expect(placeCapability(enabled, capability, 'none').enabled_capabilities).toEqual([]);
   });
 

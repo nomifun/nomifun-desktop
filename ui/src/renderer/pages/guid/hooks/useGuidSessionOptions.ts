@@ -13,7 +13,7 @@ import { useTranslation } from 'react-i18next';
 import type { AutoWorkDraftValue } from '@/renderer/pages/conversation/components/AutoWorkControl';
 import { defaultKnowledgeBinding } from '@/renderer/pages/conversation/components/KnowledgeControl';
 
-export type GuidAdvancedConfig = {
+export type GuidSessionOptions = {
   knowledge: IKnowledgeBinding;
   setKnowledge: (next: IKnowledgeBinding) => void;
   autoWork: AutoWorkDraftValue;
@@ -29,7 +29,7 @@ export type GuidAdvancedConfig = {
  * Session-specific drafts for the Guid page. A selected AgentPreset freezes
  * reusable capabilities; plain Nomi keeps its own explicit model selection.
  */
-export const useGuidAdvancedConfig = (): GuidAdvancedConfig => {
+export const useGuidSessionOptions = (): GuidSessionOptions => {
   const { t } = useTranslation();
   const [knowledge, setKnowledge] = useState<IKnowledgeBinding>(
     defaultKnowledgeBinding
@@ -73,7 +73,7 @@ export const useGuidAdvancedConfig = (): GuidAdvancedConfig => {
         results.forEach((result, index) => {
           if (result.status !== 'rejected') return;
           console.error(
-            `[GuidAdvancedConfig] Failed to apply ${pendingTasks[index].label}:`,
+            `[GuidSessionOptions] Failed to apply ${pendingTasks[index].label}:`,
             result.reason
           );
           Message.warning(

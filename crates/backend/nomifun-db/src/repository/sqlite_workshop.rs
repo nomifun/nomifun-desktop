@@ -599,16 +599,14 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
                    JOIN installation_identity identity \
                      ON identity.singleton_key = 'installation' \
                     AND identity.owner_user_id = binding.owner_id \
-                   JOIN messages persisted \
-                     ON persisted.conversation_id = binding.conversation_id \
-                    AND persisted.message_id = receipt.assistant_message_id \
+                   JOIN agent_messages persisted \
+                     ON persisted.session_id = binding.conversation_id \
+                    AND json_extract(persisted.projection_json, '$.correlation_id') = receipt.assistant_message_id \
                    WHERE project.project_id = receipt.project_id \
                      AND CAST(message.key AS INTEGER) % 2 = 1 \
                      AND CAST(message.value AS TEXT) = receipt.assistant_message_id \
-                     AND persisted.position = 'left' \
-                     AND persisted.status = 'finish' \
-                     AND persisted.hidden = 0 \
-                     AND persisted.type = 'text' \
+                     AND persisted.presentation_intent = 'message' \
+                     AND json_extract(persisted.projection_json, '$.state') = 'completed' \
                )",
         )
         .bind(project_id)
@@ -657,7 +655,7 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
             ))
         })?;
         let contents = sqlx::query_scalar::<_, String>(
-            "SELECT persisted.content \
+            "SELECT CAST(json_extract(persisted.projection_json, '$.content') AS TEXT) \
              FROM creative_studio_projects project \
              CROSS JOIN json_each(project.document_json, '$.chatSessions') session \
              CROSS JOIN json_each(session.value, '$.messageIds') message \
@@ -668,16 +666,14 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
              JOIN installation_identity identity \
                ON identity.singleton_key = 'installation' \
               AND identity.owner_user_id = binding.owner_id \
-             JOIN messages persisted \
-               ON persisted.conversation_id = binding.conversation_id \
-              AND persisted.message_id = CAST(message.value AS TEXT) \
+             JOIN agent_messages persisted \
+               ON persisted.session_id = binding.conversation_id \
+              AND json_extract(persisted.projection_json, '$.correlation_id') = CAST(message.value AS TEXT) \
              WHERE project.project_id = ? \
                AND CAST(message.key AS INTEGER) % 2 = 1 \
                AND CAST(message.value AS TEXT) = ? \
-               AND persisted.position = 'left' \
-               AND persisted.status = 'finish' \
-               AND persisted.hidden = 0 \
-               AND persisted.type = 'text'",
+               AND persisted.presentation_intent = 'message' \
+               AND json_extract(persisted.projection_json, '$.state') = 'completed'",
         )
         .bind(owner_id)
         .bind(project_id)
@@ -774,18 +770,16 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
                  JOIN installation_identity identity \
                    ON identity.singleton_key = 'installation' \
                   AND identity.owner_user_id = binding.owner_id \
-                 JOIN messages persisted \
-                   ON persisted.conversation_id = binding.conversation_id \
-                  AND persisted.message_id = CAST(message.value AS TEXT) \
+                 JOIN agent_messages persisted \
+                   ON persisted.session_id = binding.conversation_id \
+                  AND json_extract(persisted.projection_json, '$.correlation_id') = CAST(message.value AS TEXT) \
                  WHERE project.project_id = ? \
                    AND binding.owner_id = ? \
                    AND CAST(message.key AS INTEGER) % 2 = 1 \
                    AND CAST(message.value AS TEXT) = ? \
-                   AND persisted.content = ? \
-                   AND persisted.position = 'left' \
-                   AND persisted.status = 'finish' \
-                   AND persisted.hidden = 0 \
-                   AND persisted.type = 'text' \
+                   AND json_extract(persisted.projection_json, '$.content') = ? \
+                   AND persisted.presentation_intent = 'message' \
+                   AND json_extract(persisted.projection_json, '$.state') = 'completed' \
              ) \
              RETURNING updated_at",
         )
@@ -825,7 +819,7 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
                 ));
             }
             let current_content = sqlx::query_scalar::<_, String>(
-                "SELECT persisted.content \
+                "SELECT CAST(json_extract(persisted.projection_json, '$.content') AS TEXT) \
                  FROM creative_studio_projects project \
                  CROSS JOIN json_each(project.document_json, '$.chatSessions') session \
                  CROSS JOIN json_each(session.value, '$.messageIds') message \
@@ -833,16 +827,14 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
                    ON binding.project_id = project.project_id \
                   AND binding.session_id = json_extract(session.value, '$.id') \
                   AND binding.owner_id = ? \
-                 JOIN messages persisted \
-                   ON persisted.conversation_id = binding.conversation_id \
-                  AND persisted.message_id = CAST(message.value AS TEXT) \
+                 JOIN agent_messages persisted \
+                   ON persisted.session_id = binding.conversation_id \
+                  AND json_extract(persisted.projection_json, '$.correlation_id') = CAST(message.value AS TEXT) \
                  WHERE project.project_id = ? \
                    AND CAST(message.key AS INTEGER) % 2 = 1 \
                    AND CAST(message.value AS TEXT) = ? \
-                   AND persisted.position = 'left' \
-                   AND persisted.status = 'finish' \
-                   AND persisted.hidden = 0 \
-                   AND persisted.type = 'text' \
+                   AND persisted.presentation_intent = 'message' \
+                   AND json_extract(persisted.projection_json, '$.state') = 'completed' \
                  LIMIT 1",
             )
             .bind(params.owner_id)
@@ -1474,7 +1466,13 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
             }
         }
         if let Some(conversation_id) = references.conversation_id.as_ref() {
-            let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages m JOIN conversations c ON c.conversation_id=m.conversation_id WHERE m.conversation_id=? AND m.message_id=?")
+            let exists: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM agent_messages message \
+                 JOIN agent_sessions session ON session.agent_session_id = message.session_id \
+                 WHERE message.session_id = ? \
+                   AND json_extract(message.projection_json, '$.correlation_id') = ? \
+                   AND session.state = 'live'",
+            )
                 .bind(conversation_id).bind(references.message_id.as_deref()).fetch_one(&mut *tx).await?;
             if exists != 1 { return Err(DbError::Conflict("workshop asset origin references a missing conversation turn".into())); }
         }
@@ -1903,11 +1901,63 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
 
 #[cfg(test)]
 mod tests {
+    async fn seed_agent_session(
+        db: &crate::Database,
+        agent_session_id: &str,
+        owner_id: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO agent_sessions (\
+                agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                agent_binding_json, next_seq, created_at\
+             ) VALUES (?, json_object('principal_kind','user','principal_id',?), \
+                       'live', 'Workshop source', 0, 0, '{}', 1, 1)",
+        )
+        .bind(agent_session_id)
+        .bind(owner_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
+    async fn seed_agent_message(
+        db: &crate::Database,
+        agent_session_id: &str,
+        message_id: &str,
+        content: &str,
+        sequence: i64,
+    ) {
+        let projection = serde_json::json!({
+            "correlation_id": message_id,
+            "content": content,
+            "state": "completed",
+        })
+        .to_string();
+        sqlx::query(
+            "INSERT INTO agent_messages (\
+                session_id, projection_id, first_seq, last_seq, presentation_intent, \
+                projection_json, semantic_digest\
+             ) VALUES (?, ?, ?, ?, 'message', ?, ?)",
+        )
+        .bind(agent_session_id)
+        .bind(message_id)
+        .bind(sequence)
+        .bind(sequence)
+        .bind(projection)
+        .bind("a".repeat(64))
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
     async fn seed_asset_conversation(db: &crate::Database, conversation_id: &str, message_id: &str) {
-        sqlx::query("INSERT INTO conversations(conversation_id,user_id,name,type,created_at,updated_at) VALUES (?,?,'source','nomi',1,1)")
-            .bind(conversation_id).bind(nomifun_common::generate_id()).execute(db.pool()).await.unwrap();
-        sqlx::query("INSERT INTO messages(message_id,conversation_id,type,content,position,status,hidden,created_at) VALUES (?,?,'text','{}','right','finish',0,1)")
-            .bind(message_id).bind(conversation_id).execute(db.pool()).await.unwrap();
+        seed_agent_session(
+            db,
+            conversation_id,
+            &nomifun_common::generate_id(),
+        )
+        .await;
+        seed_agent_message(db, conversation_id, message_id, "{}", 1).await;
     }
 
     use super::*;
@@ -1967,16 +2017,7 @@ mod tests {
         repo.create_creative_project(project_id, "Agent proposal", &initial_doc, 100)
             .await
             .unwrap();
-        sqlx::query(
-            "INSERT INTO conversations \
-                (conversation_id, user_id, name, type, extra, status, source, created_at, updated_at) \
-             VALUES (?, ?, 'Creative Studio Agent', 'nomi', '{}', 'finished', 'nomifun', 1, 1)",
-        )
-        .bind(&conversation_id)
-        .bind(&owner_id)
-        .execute(db.pool())
-        .await
-        .unwrap();
+        seed_agent_session(db, &conversation_id, &owner_id).await;
         sqlx::query(
             "INSERT INTO creative_studio_agent_sessions \
                 (owner_id, project_id, session_id, conversation_id, created_at, updated_at) \
@@ -1991,20 +2032,16 @@ mod tests {
         .unwrap();
         let artifact_text = "```json\n{\"kind\":\"nomifun.creative-studio.canvas-ops/v1\",\"summary\":\"Add durable text\",\"ops\":[{\"type\":\"add_node\",\"node_type\":\"text\",\"x\":0,\"y\":0,\"data\":{\"text\":\"durable\",\"format\":\"plain\",\"fontSize\":16,\"textAlign\":\"left\"}}]}\n```";
         let mut assistant_contents = Vec::with_capacity(assistant_message_ids.len());
-        for assistant_message_id in assistant_message_ids {
+        for (index, assistant_message_id) in assistant_message_ids.iter().enumerate() {
             let content_json = serde_json::json!({ "content": artifact_text }).to_string();
-            sqlx::query(
-                "INSERT INTO messages \
-                    (message_id, conversation_id, msg_id, type, content, position, status, hidden, created_at) \
-                 VALUES (?, ?, ?, 'text', ?, 'left', 'finish', 0, 1)",
+            seed_agent_message(
+                db,
+                &conversation_id,
+                assistant_message_id,
+                &content_json,
+                (index + 1) as i64,
             )
-            .bind(assistant_message_id)
-            .bind(&conversation_id)
-            .bind(assistant_message_id)
-            .bind(&content_json)
-            .execute(db.pool())
-            .await
-            .unwrap();
+            .await;
             assistant_contents.push(content_json);
         }
         (initial_doc, assistant_contents)
@@ -2170,7 +2207,11 @@ mod tests {
             .unwrap_err();
         assert!(matches!(mismatch, DbError::Conflict(message) if message.contains("payload mismatch")));
 
-        sqlx::query("UPDATE messages SET content = ? WHERE message_id = ?")
+        sqlx::query(
+            "UPDATE agent_messages \
+             SET projection_json = json_set(projection_json, '$.content', ?) \
+             WHERE json_extract(projection_json, '$.correlation_id') = ?",
+        )
             .bind(r#"{"content":"changed after provenance read"}"#)
             .bind(ASSISTANT_B)
             .execute(db.pool())
@@ -2703,12 +2744,15 @@ mod tests {
         generated.asset_id = nomifun_common::generate_id();
         generated.origin = Some(serde_json::json!({"conversation_id":conversation_id,"message_id":nomifun_common::generate_id(),"creation_task_id":conversation_task_id}).to_string());
         assert!(repo.create_asset(&generated).await.is_err());
-        // Deleting a settled source conversation must not invalidate a saved
+        // Deleting a settled source AgentSession must not invalidate a saved
         // result's provenance, while new writes still need a live source turn.
         sqlx::query("UPDATE creation_tasks SET status='canceled' WHERE creation_task_id=?")
             .bind(&conversation_task_id).execute(db.pool()).await.unwrap();
-        sqlx::query("DELETE FROM messages WHERE conversation_id=?").bind(&conversation_id).execute(db.pool()).await.unwrap();
-        sqlx::query("DELETE FROM conversations WHERE conversation_id=?").bind(&conversation_id).execute(db.pool()).await.unwrap();
+        sqlx::query("DELETE FROM agent_sessions WHERE agent_session_id=?")
+            .bind(&conversation_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
         assert!(repo.get_asset(&created.asset_id).await.unwrap().is_some());
         let edited = repo.update_asset(&created.asset_id, UpdateAssetParams {
             title: Some("saved after source deletion"), tags: Some(r#"["kept"]"#),

@@ -6,12 +6,12 @@
 
 import { describe, expect, test } from 'bun:test';
 import { featureRoute, groupUsagesByFeature, parseProviderInUseDetails, type ProviderUsage } from './providerInUse';
-import { parseCompanionId, parseConversationId, parseCsAgentId, parseExecutionId } from '@/common/types/ids';
+import { parseAgentPresetId, parseCompanionId, parseCsAgentId, parseExecutionId } from '@/common/types/ids';
 
 const COMPANION_1 = parseCompanionId('0190f5fe-7c00-7a00-8000-000000000001');
 const COMPANION_2 = parseCompanionId('0190f5fe-7c00-7a00-8000-000000000002');
 const CS_AGENT = parseCsAgentId('0190f5fe-7c00-7a00-8000-000000000001');
-const CONVERSATION = parseConversationId('0190f5fe-7c00-7a00-8000-000000000001');
+const AGENT = parseAgentPresetId('0190f5fe-7c00-7a00-8000-000000000001');
 const EXECUTION = parseExecutionId('0190f5fe-7c00-7a00-8000-000000000001');
 
 describe('providerInUse helpers', () => {
@@ -19,8 +19,8 @@ describe('providerInUse helpers', () => {
     expect(featureRoute('desktopCompanion')).toBe('/nomi');
     expect(featureRoute('customerService', CS_AGENT)).toBe(`/customer-service/`);
     expect(featureRoute('customerService')).toBe('/customer-service');
-    expect(featureRoute('conversation', CONVERSATION)).toBe(`/conversation/${CONVERSATION}`);
-    expect(featureRoute('conversation')).toBe('/guid');
+    expect(featureRoute('agent', AGENT)).toBe('/agent');
+    expect(featureRoute('agent')).toBe('/agent');
     expect(featureRoute('agentExecution')).toBe('/guid');
   });
 
@@ -28,12 +28,12 @@ describe('providerInUse helpers', () => {
     const usages: ProviderUsage[] = [
       { feature: 'desktopCompanion', label: '甲', targetId: COMPANION_1 },
       { feature: 'desktopCompanion', label: '乙', targetId: COMPANION_2 },
-      { feature: 'conversation', label: '主会话', targetId: CONVERSATION },
+      { feature: 'agent', label: 'Agent', targetId: AGENT },
       { feature: 'agentExecution', label: '协作任务', targetId: EXECUTION },
     ];
     const groups = groupUsagesByFeature(usages);
     expect(groups.find((g) => g.feature === 'desktopCompanion')?.labels).toEqual(['甲', '乙']);
-    expect(groups.find((g) => g.feature === 'conversation')?.targetId).toBe(CONVERSATION);
+    expect(groups.find((g) => g.feature === 'agent')?.targetId).toBe(AGENT);
     expect(groups.find((g) => g.feature === 'agentExecution')?.targetId).toBe(EXECUTION);
   });
 

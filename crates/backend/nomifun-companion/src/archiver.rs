@@ -48,7 +48,7 @@ pub struct WindowMessage {
 /// Seam over the conversation domain. The archiver only needs to (a) read a
 /// window's messages and (b) durably reset the live engine context. A trait
 /// keeps `nomifun-companion` from hard-depending on conversation internals and
-/// lets tests run without a live `ConversationService` (mirrors the
+/// lets tests run without a live AgentSession owner (mirrors the
 /// `IdmmHandle` seam in `nomifun-requirement`).
 #[async_trait::async_trait]
 pub trait ArchiveConversationPort: Send + Sync {

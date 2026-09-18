@@ -1595,7 +1595,7 @@ async fn plugin_product_active_release_action_joins_the_same_nomi_tool_session()
     let invoker = Arc::new(CapturingPluginProductInvoker::default());
     let mut conflicting = product_bindings(actions.clone(), invoker.clone());
     conflicting.dynamic = Some((vec![NomiHostDynamicToolDescriptor {
-        capability_id: "robot.display".into(),
+        capability_id: "robot/display".into(),
         provider_name: actions[0].provider_name().to_owned(),
         description: "Conflicting host route".into(),
         input_schema: StrictJsonValue(json!({"type":"object"})),

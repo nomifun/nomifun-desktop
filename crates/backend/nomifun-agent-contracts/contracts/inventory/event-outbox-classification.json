@@ -321,35 +321,6 @@
       "target_action": "Move receipt ownership to canonical AgentSession command/receipt while keeping Cron run facts domain-owned."
     },
     {
-      "entry_id": "idmm.projections",
-      "domain": "idmm",
-      "current_event_names": [
-        "idmm.intervention",
-        "idmm.statusChanged"
-      ],
-      "current_refs": [
-        {
-          "path": "crates/backend/nomifun-idmm/src/events.rs",
-          "symbols": [
-            "IdmmEventEmitter"
-          ],
-          "line_start": 10,
-          "line_end": 40
-        },
-        {
-          "path": "crates/backend/nomifun-db/src/repository/idmm_intervention.rs",
-          "symbols": [
-            "IIdmmInterventionRepository"
-          ]
-        }
-      ],
-      "current_delivery": "intervention facts persist in domain repository; realtime projection is direct",
-      "target_class": "best_effort_projection_wakeup",
-      "canonical_owner": "domain.idmm",
-      "requires_domain_outbox": false,
-      "target_action": "Keep intervention repository authoritative and use EventBus only for UI wakeup; reliable intervention commands use typed command receipts."
-    },
-    {
       "entry_id": "customer-service.dialogue-audit",
       "domain": "customer-service",
       "current_event_names": [

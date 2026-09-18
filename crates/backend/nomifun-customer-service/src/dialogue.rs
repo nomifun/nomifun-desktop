@@ -364,7 +364,7 @@ impl CsDialogueEngine {
         };
         // Dialogue policy belongs to the selected customer scene. It is not an
         // Agent grant and cannot be disabled by removing a synthetic
-        // `customer_service.dialogue` capability from the Action allowlist.
+        // `customer.service/context.dialogue` capability from the Action allowlist.
         let mut system_prompt = build_system_prompt_with_notes(&agent, &notes);
         if let Some(policy) = policy.as_ref()
             && !policy.instructions.trim().is_empty()

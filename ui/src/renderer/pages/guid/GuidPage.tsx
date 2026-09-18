@@ -54,7 +54,7 @@ import {
   autoWorkStartDisabled,
   isAutoWorkEntry,
 } from './hooks/autoWorkEntry';
-import { useGuidAdvancedConfig } from './hooks/useGuidAdvancedConfig';
+import { useGuidSessionOptions } from './hooks/useGuidSessionOptions';
 import { useGuidAgentSelection } from './hooks/useGuidAgentSelection';
 import CollaborationComposerControl from '@/renderer/components/collaboration/CollaborationComposerControl';
 import { useGuidCollaboration } from './hooks/useGuidCollaboration';
@@ -112,7 +112,7 @@ const GuidPage: React.FC = () => {
   const guidInput = useGuidInput({
     locationState: navigationState,
   });
-  const advancedConfig = useGuidAdvancedConfig();
+  const advancedConfig = useGuidSessionOptions();
   const clearSentInput = useCallback(() => {
     guidInput.setInput('');
     guidInput.setFiles([]);

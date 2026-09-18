@@ -722,7 +722,7 @@ export const agentPlatform = {
     ),
     cancel: httpPost<RemoteMutationResponse, RemoteCancelRequest>('/api/remote/cancel'),
   },
-  agentRuntime: {
+  runtime: {
     get: httpGet<RuntimeBuildDescriptor, void>('/api/agent-runtime'),
   },
   sessions: {
@@ -947,11 +947,11 @@ export const conversation = {
   remove: httpDelete<void, { conversation_id: ConversationId }>(
     (p) => `/api/agent-sessions/${p.conversation_id}`
   ),
-  // updates 额外允许顶层 `pinned`：对应 conversations 表真列（UpdateConversationRequest.pinned，
-  // 服务端置位时自动维护 pinned_at）；body 构造的 `...rest` 原样透传该字段。
+  // updates 额外允许顶层 `pinned`：对应 AgentSession metadata；body 构造的
+  // `...rest` 原样透传该字段。
   // 注意：不要往 body 里加任何 UpdateConversationRequest 之外的字段——该 DTO 是
   // `deny_unknown_fields`，多一个键整条 PATCH 直接 400。`extra` 恒为合并语义
-  // （见 nomifun-conversation/src/service.rs 的 update），无需任何开关字段。
+  // 由 canonical AgentSession update seam 执行合并，无需任何开关字段。
   //
   // `extra` 单独放宽为 Partial：它是合并语义，调用方本就只传要改的键，而
   // `Partial<TChatConversation>` 作用在联合类型上时仍要求 `extra` 整体符合某一
@@ -1704,7 +1704,7 @@ export const providerConnection = {
 };
 
 // ---------------------------------------------------------------------------
-// Agent Conversation — routed to /api/agents/* + conversation routes
+// Agent workbench — routed to canonical Agent and AgentSession APIs
 // ---------------------------------------------------------------------------
 
 export const agentConversation = {

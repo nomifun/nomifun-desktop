@@ -184,12 +184,14 @@ async fn cold_skill_commands_use_saved_binding_without_starting_runtime_or_conte
     .await;
     let session_id = session.agent_session_id.as_str();
     assert_eq!(services.agent_runtime_sessions.active_runtime_count(), 0);
-    assert!(services
-        .conversation_repo
-        .get(session_id)
-        .await
-        .unwrap()
-        .is_none(), "canonical command discovery must not create a legacy Conversation row");
+    let state: String = nomifun_db::sqlx::query_scalar(
+        "SELECT state FROM agent_sessions WHERE agent_session_id = ?",
+    )
+    .bind(session_id)
+    .fetch_one(services.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(state, "live");
     let path = format!("/api/agent-sessions/{session_id}/slash-commands");
     for _ in 0..2 {
         let commands: Vec<SlashCommandItem> = get_data(&router, &path).await;
@@ -202,12 +204,14 @@ async fn cold_skill_commands_use_saved_binding_without_starting_runtime_or_conte
         !marker.exists(),
         "neither the engine nor Plugin Context should activate during discovery"
     );
-    assert!(services
-        .conversation_repo
-        .get(session_id)
-        .await
-        .unwrap()
-        .is_none());
+    let session_count: i64 = nomifun_db::sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_sessions WHERE agent_session_id = ? AND state = 'live'",
+    )
+    .bind(session_id)
+    .fetch_one(services.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(session_count, 1);
 
     plugins
         .set_enabled(

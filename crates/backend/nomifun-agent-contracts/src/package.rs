@@ -860,12 +860,6 @@ impl CapabilityManifest {
     /// Events may coexist; `kind` is deliberately not used to make those
     /// contribution sets mutually exclusive.
     pub fn validate_module_contract(&self) -> Result<(), String> {
-        if crate::is_retired_extension_authoring_capability(self.id.as_ref()) {
-            return Err(format!(
-                "capability {} is a retired extension authoring identity",
-                self.id.as_ref()
-            ));
-        }
         let consumers = self.supported_consumers()?;
         let authoring = self.authoring_policy()?;
         if authoring == CapabilityAuthoringPolicy::Direct {
@@ -1448,13 +1442,6 @@ mod tests {
             module
                 .validate_module_contract()
                 .expect("display kind must not change explicit Module authority");
-        }
-        for retired in crate::RETIRED_EXTENSION_AUTHORING_CAPABILITY_IDS {
-            module.id = CapabilityId::from(retired);
-            module.contribution_id = ContributionId::from(format!("module:{retired}"));
-            module.package.id = PackageId::from("community.republisher");
-            let error = module.validate_module_contract().unwrap_err();
-            assert!(error.contains("retired extension authoring identity"));
         }
     }
 

@@ -6,7 +6,7 @@
 //! Session-scoped endpoints (mode / model / config / usage /
 //! agent-capabilities / slash-commands / side-question / workspace) now live
 //! in the `nomifun-conversation` crate, where they dispatch through
-//! `AgentRuntimeHandle` via `ConversationService`.
+//! `AgentRuntimeHandle` via the canonical AgentSession host.
 
 pub mod agent;
 pub mod state;

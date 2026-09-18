@@ -1269,7 +1269,7 @@ mod tests {
             .write_note_idempotent(
                 &owner,
                 &agent.cs_agent_id,
-                "customer_service.notes.write",
+                "customer.service/notes.write",
                 "lost-response",
                 &digest,
                 note("one fact"),
@@ -1284,7 +1284,7 @@ mod tests {
             .write_note_idempotent(
                 &owner,
                 &agent.cs_agent_id,
-                "customer_service.notes.write",
+                "customer.service/notes.write",
                 "lost-response",
                 &digest,
                 note("one fact"),
@@ -1307,7 +1307,7 @@ mod tests {
             .write_note_idempotent(
                 &owner,
                 &agent.cs_agent_id,
-                "customer_service.notes.write",
+                "customer.service/notes.write",
                 "lost-response",
                 &"b".repeat(64),
                 note("different fact"),

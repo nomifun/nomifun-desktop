@@ -2687,9 +2687,11 @@ mod tests {
     ) {
         let db = init_database_memory().await.unwrap();
         sqlx::query(
-            "INSERT INTO conversations \
-             (conversation_id, user_id, name, type, status, created_at, updated_at) \
-             VALUES (?, ?, 'test', 'nomi', 'pending', 0, 0)",
+            "INSERT INTO agent_sessions (\
+                 agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                 agent_binding_json, next_seq, created_at\
+             ) VALUES (?, json_object('principal_kind','user','principal_id',?), \
+                       'live', 'Requirement attachment test', 0, 0, '{}', 1, 0)",
         )
         .bind(CONVERSATION_1)
         .bind(USER_1)

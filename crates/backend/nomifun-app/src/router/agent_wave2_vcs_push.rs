@@ -1,4 +1,4 @@
-//! Standalone, fail-closed `vcs.push` production owner.
+//! Standalone, fail-closed `workspace.vcs/push` production owner.
 //!
 //! The Wave 2 host routes explicitly admitted push calls here; Conversation
 //! engines additionally require source-attributed receipts. The owner only pushes to an already configured
@@ -207,7 +207,7 @@ impl VcsPushOwner {
             return Err(VcsPushError::not_applied(
                 VcsPushErrorKind::InvalidPayload,
                 "INVALID_PAYLOAD",
-                "vcs.push timeout must be between 1 millisecond and 120 seconds",
+                "workspace.vcs/push timeout must be between 1 millisecond and 120 seconds",
             ));
         }
         let repository = exact_repository_identity(current_repository_root.as_ref())?;
@@ -241,7 +241,7 @@ impl VcsPushOwner {
         // therefore rejects before spawning rather than losing a running worker.
         let done = {
             let mut flight = self.flight.lock().map_err(|_| {
-                VcsPushError::outcome_unknown("vcs.push task ownership is poisoned")
+                VcsPushError::outcome_unknown("workspace.vcs/push task ownership is poisoned")
             })?;
             let authority = self.authority.clone();
             let worker_guard = UnobservedPush {
@@ -268,7 +268,7 @@ impl VcsPushOwner {
             let done = async move {
                 worker.await.unwrap_or_else(|_| {
                     Err(VcsPushError::outcome_unknown(
-                        "vcs.push worker terminated without a proven remote outcome",
+                        "workspace.vcs/push worker terminated without a proven remote outcome",
                     ))
                 })
             }
@@ -287,7 +287,7 @@ impl VcsPushOwner {
                 // this owner retains and joins the worker independently.
                 let _ = done.await;
                 Err(VcsPushError::outcome_unknown(format!(
-                    "vcs.push exceeded its {} ms deadline; worker exited but the outcome still requires reconciliation",
+                    "workspace.vcs/push exceeded its {} ms deadline; worker exited but the outcome still requires reconciliation",
                     timeout.as_millis()
                 )))
             }
@@ -299,7 +299,7 @@ impl VcsPushOwner {
     pub(crate) fn ensure_ready(&self) -> Result<(), VcsPushError> {
         if self.outcome_unknown.load(Ordering::Acquire) {
             return Err(VcsPushError::outcome_unknown(
-                "vcs.push has an unresolved outcome; no automatic replay or workspace continuation",
+                "workspace.vcs/push has an unresolved outcome; no automatic replay or workspace continuation",
             ));
         }
         Ok(())
@@ -320,7 +320,7 @@ impl VcsPushOwner {
         self.ensure_ready()?;
         if self.settlements.load(Ordering::Acquire) != 0 {
             return Err(VcsPushError::outcome_unknown(
-                "vcs.push durable settlement is still pending",
+                "workspace.vcs/push durable settlement is still pending",
             ));
         }
         Ok(())
@@ -331,7 +331,7 @@ impl VcsPushOwner {
         let done = self
             .flight
             .lock()
-            .map_err(|_| VcsPushError::outcome_unknown("vcs.push task ownership is poisoned"))?
+            .map_err(|_| VcsPushError::outcome_unknown("workspace.vcs/push task ownership is poisoned"))?
             .clone();
         if let Some(done) = done {
             let _ = done.await;
@@ -363,14 +363,14 @@ fn validate_request(
         return Err(VcsPushError::not_applied(
             VcsPushErrorKind::InvalidPayload,
             "INVALID_PAYLOAD",
-            "vcs.push requires a non-empty authenticated principal",
+            "workspace.vcs/push requires a non-empty authenticated principal",
         ));
     }
     if request.force {
         return Err(VcsPushError::not_applied(
             VcsPushErrorKind::InvalidPayload,
             "INVALID_PAYLOAD",
-            "vcs.push does not allow force pushes",
+            "workspace.vcs/push does not allow force pushes",
         ));
     }
 
@@ -379,7 +379,7 @@ fn validate_request(
         return Err(VcsPushError::not_applied(
             VcsPushErrorKind::PresetResourceNotBound,
             "PRESET_RESOURCE_NOT_BOUND",
-            "vcs.push workspace is not the repository owned by the current host binding",
+            "workspace.vcs/push workspace is not the repository owned by the current host binding",
         ));
     }
     validate_binding(&request.principal_id, authority, &request.binding)?;
@@ -394,7 +394,7 @@ fn validate_request(
         return Err(VcsPushError::not_applied(
             VcsPushErrorKind::InvalidPayload,
             "INVALID_PAYLOAD",
-            "vcs.push remote must be one configured Git remote name",
+            "workspace.vcs/push remote must be one configured Git remote name",
         ));
     }
 
@@ -403,7 +403,7 @@ fn validate_request(
         repository_error(
             VcsPushErrorKind::ResourceNotFound,
             "RESOURCE_NOT_FOUND",
-            "vcs.push could not open the bound repository",
+            "workspace.vcs/push could not open the bound repository",
             &error,
         )
     })?;
@@ -413,13 +413,13 @@ fn validate_request(
             VcsPushError::not_applied(
                 VcsPushErrorKind::ResourceNotFound,
                 "RESOURCE_NOT_FOUND",
-                "vcs.push remote is not configured in the bound repository",
+                "workspace.vcs/push remote is not configured in the bound repository",
             )
         } else {
             repository_error(
                 VcsPushErrorKind::CapabilityUnavailable,
                 "CAPABILITY_UNAVAILABLE",
-                "vcs.push could not load the configured remote",
+                "workspace.vcs/push could not load the configured remote",
                 &error,
             )
         }
@@ -429,7 +429,7 @@ fn validate_request(
         VcsPushError::not_applied(
             VcsPushErrorKind::CapabilityUnavailable,
             "CAPABILITY_UNAVAILABLE",
-            "vcs.push remote URL is not valid UTF-8",
+            "workspace.vcs/push remote URL is not valid UTF-8",
         )
     })?;
     let remote_repository_root = configured_local_remote(push_url)?;
@@ -454,28 +454,28 @@ fn validate_binding(
         return Err(VcsPushError::not_applied(
             VcsPushErrorKind::PresetResourceNotBound,
             "PRESET_RESOURCE_NOT_BOUND",
-            "vcs.push requires one identified workspace resource binding",
+            "workspace.vcs/push requires one identified workspace resource binding",
         ));
     }
     if binding.owner_id != principal_id {
         return Err(VcsPushError::not_applied(
             VcsPushErrorKind::ResourceOwnerMismatch,
             "RESOURCE_OWNER_MISMATCH",
-            "vcs.push workspace binding belongs to a different principal",
+            "workspace.vcs/push workspace binding belongs to a different principal",
         ));
     }
     if !binding.operations.contains(WORKSPACE_WRITE_OPERATION) {
         return Err(VcsPushError::not_applied(
             VcsPushErrorKind::PresetResourceNotBound,
             "PRESET_RESOURCE_NOT_BOUND",
-            "vcs.push workspace binding does not grant write",
+            "workspace.vcs/push workspace binding does not grant write",
         ));
     }
     if binding.connection_config_ref.is_some() {
         return Err(VcsPushError::not_applied(
             VcsPushErrorKind::CredentialAuthorityUnavailable,
             "CAPABILITY_UNAVAILABLE_ON_PLATFORM",
-            "vcs.push cannot consume a connection credential until a Git credential authority is wired",
+            "workspace.vcs/push cannot consume a connection credential until a Git credential authority is wired",
         ));
     }
     if binding
@@ -486,7 +486,7 @@ fn validate_binding(
         return Err(VcsPushError::not_applied(
             VcsPushErrorKind::InvalidPayload,
             "INVALID_PAYLOAD",
-            "vcs.push binding accepts only workspace_root; credentials and secret parameters are forbidden",
+            "workspace.vcs/push binding accepts only workspace_root; credentials and secret parameters are forbidden",
         ));
     }
     let binding_root = binding
@@ -497,18 +497,18 @@ fn validate_binding(
             VcsPushError::not_applied(
                 VcsPushErrorKind::PresetResourceNotBound,
                 "PRESET_RESOURCE_NOT_BOUND",
-                "vcs.push workspace binding has no host-resolved workspace_root",
+                "workspace.vcs/push workspace binding has no host-resolved workspace_root",
             )
         })?;
     let binding_root = canonical_absolute_directory(
         Path::new(binding_root),
-        "vcs.push binding workspace_root is unavailable",
+        "workspace.vcs/push binding workspace_root is unavailable",
     )?;
     if binding_root != authority.repository.worktree_root {
         return Err(VcsPushError::not_applied(
             VcsPushErrorKind::PresetResourceNotBound,
             "PRESET_RESOURCE_NOT_BOUND",
-            "vcs.push binding resolves to a different repository",
+            "workspace.vcs/push binding resolves to a different repository",
         ));
     }
     Ok(())
@@ -549,18 +549,18 @@ fn invalid_refspec() -> VcsPushError {
     VcsPushError::not_applied(
         VcsPushErrorKind::InvalidPayload,
         "INVALID_PAYLOAD",
-        "vcs.push requires one explicit non-force branch refspec source:destination",
+        "workspace.vcs/push requires one explicit non-force branch refspec source:destination",
     )
 }
 
 fn exact_repository_identity(root: &Path) -> Result<RepositoryIdentity, VcsPushError> {
     let worktree_root =
-        canonical_absolute_directory(root, "vcs.push workspace repository is unavailable")?;
+        canonical_absolute_directory(root, "workspace.vcs/push workspace repository is unavailable")?;
     let repository = Repository::discover(&worktree_root).map_err(|error| {
         repository_error(
             VcsPushErrorKind::ResourceNotFound,
             "RESOURCE_NOT_FOUND",
-            "vcs.push workspace is not a Git repository",
+            "workspace.vcs/push workspace is not a Git repository",
             &error,
         )
     })?;
@@ -569,7 +569,7 @@ fn exact_repository_identity(root: &Path) -> Result<RepositoryIdentity, VcsPushE
         return Err(VcsPushError::not_applied(
             VcsPushErrorKind::PresetResourceNotBound,
             "PRESET_RESOURCE_NOT_BOUND",
-            "vcs.push requires the binding to identify the exact repository root",
+            "workspace.vcs/push requires the binding to identify the exact repository root",
         ));
     }
     Ok(identity)
@@ -580,14 +580,14 @@ fn repository_identity(repository: &Repository) -> Result<RepositoryIdentity, Vc
         VcsPushError::not_applied(
             VcsPushErrorKind::ResourceNotFound,
             "RESOURCE_NOT_FOUND",
-            "vcs.push requires a non-bare bound workspace repository",
+            "workspace.vcs/push requires a non-bare bound workspace repository",
         )
     })?;
     let worktree_root =
-        canonical_absolute_directory(worktree, "vcs.push repository worktree is unavailable")?;
+        canonical_absolute_directory(worktree, "workspace.vcs/push repository worktree is unavailable")?;
     let git_dir = canonical_absolute_directory(
         repository.path(),
-        "vcs.push repository metadata directory is unavailable",
+        "workspace.vcs/push repository metadata directory is unavailable",
     )?;
     Ok(RepositoryIdentity {
         worktree_root,
@@ -603,7 +603,7 @@ fn ensure_repository_identity(
         return Err(VcsPushError::not_applied(
             VcsPushErrorKind::PresetResourceNotBound,
             "PRESET_RESOURCE_NOT_BOUND",
-            "vcs.push repository identity changed after authority resolution",
+            "workspace.vcs/push repository identity changed after authority resolution",
         ));
     }
     Ok(())
@@ -617,7 +617,7 @@ fn canonical_absolute_directory(
         return Err(VcsPushError::not_applied(
             VcsPushErrorKind::PresetResourceNotBound,
             "PRESET_RESOURCE_NOT_BOUND",
-            "vcs.push workspace paths must be absolute host-resolved paths",
+            "workspace.vcs/push workspace paths must be absolute host-resolved paths",
         ));
     }
     let canonical = std::fs::canonicalize(path).map_err(|_| {
@@ -642,7 +642,7 @@ fn configured_local_remote(push_url: &str) -> Result<PathBuf, VcsPushError> {
         return Err(VcsPushError::not_applied(
             VcsPushErrorKind::CapabilityUnavailable,
             "CAPABILITY_UNAVAILABLE",
-            "vcs.push remote has no usable push URL",
+            "workspace.vcs/push remote has no usable push URL",
         ));
     }
 
@@ -654,28 +654,28 @@ fn configured_local_remote(push_url: &str) -> Result<PathBuf, VcsPushError> {
             VcsPushError::not_applied(
                 VcsPushErrorKind::CapabilityUnavailable,
                 "CAPABILITY_UNAVAILABLE",
-                "vcs.push local remote path must be absolute",
+                "workspace.vcs/push local remote path must be absolute",
             )
         })?;
         if parsed.scheme() != "file" {
             return Err(VcsPushError::not_applied(
                 VcsPushErrorKind::CredentialAuthorityUnavailable,
                 "CAPABILITY_UNAVAILABLE_ON_PLATFORM",
-                "vcs.push SSH/HTTPS transports require an application-owned Git credential authority",
+                "workspace.vcs/push SSH/HTTPS transports require an application-owned Git credential authority",
             ));
         }
         if !parsed.username().is_empty() || parsed.password().is_some() {
             return Err(VcsPushError::not_applied(
                 VcsPushErrorKind::InvalidPayload,
                 "INVALID_PAYLOAD",
-                "vcs.push forbids credentials embedded in remote URLs",
+                "workspace.vcs/push forbids credentials embedded in remote URLs",
             ));
         }
         parsed.to_file_path().map_err(|_| {
             VcsPushError::not_applied(
                 VcsPushErrorKind::CapabilityUnavailable,
                 "CAPABILITY_UNAVAILABLE",
-                "vcs.push file remote URL cannot be resolved on this host",
+                "workspace.vcs/push file remote URL cannot be resolved on this host",
             )
         })?
     };
@@ -684,14 +684,14 @@ fn configured_local_remote(push_url: &str) -> Result<PathBuf, VcsPushError> {
         VcsPushError::not_applied(
             VcsPushErrorKind::ResourceNotFound,
             "RESOURCE_NOT_FOUND",
-            "vcs.push configured remote repository is unavailable",
+            "workspace.vcs/push configured remote repository is unavailable",
         )
     })?;
     Repository::open(&canonical).map_err(|error| {
         repository_error(
             VcsPushErrorKind::ResourceNotFound,
             "RESOURCE_NOT_FOUND",
-            "vcs.push configured local remote is not a Git repository",
+            "workspace.vcs/push configured local remote is not a Git repository",
             &error,
         )
     })?;
@@ -707,7 +707,7 @@ fn push_blocking(
         return Err(VcsPushError::not_applied(
             VcsPushErrorKind::CapabilityUnavailable,
             "CAPABILITY_UNAVAILABLE",
-            "vcs.push deadline elapsed before remote execution",
+            "workspace.vcs/push deadline elapsed before remote execution",
         ));
     }
 
@@ -715,7 +715,7 @@ fn push_blocking(
         repository_error(
             VcsPushErrorKind::ResourceNotFound,
             "RESOURCE_NOT_FOUND",
-            "vcs.push could not reopen the bound repository",
+            "workspace.vcs/push could not reopen the bound repository",
             &error,
         )
     })?;
@@ -727,7 +727,7 @@ fn push_blocking(
             repository_error(
                 VcsPushErrorKind::ResourceNotFound,
                 "RESOURCE_NOT_FOUND",
-                "vcs.push source branch does not resolve to a commit",
+                "workspace.vcs/push source branch does not resolve to a commit",
                 &error,
             )
         })?
@@ -737,7 +737,7 @@ fn push_blocking(
         repository_error(
             VcsPushErrorKind::ResourceNotFound,
             "RESOURCE_NOT_FOUND",
-            "vcs.push configured local remote is unavailable",
+            "workspace.vcs/push configured local remote is unavailable",
             &error,
         )
     })?;
@@ -752,7 +752,7 @@ fn push_blocking(
                     return Err(repository_error(
                         VcsPushErrorKind::CapabilityUnavailable,
                         "CAPABILITY_UNAVAILABLE",
-                        "vcs.push could not verify fast-forward ancestry",
+                        "workspace.vcs/push could not verify fast-forward ancestry",
                         &error,
                     ));
                 }
@@ -794,7 +794,7 @@ fn push_blocking(
         callbacks.push_negotiation(move |_updates| {
             if cancellation.load(Ordering::Acquire) || Instant::now() >= deadline {
                 Err(git2::Error::from_str(
-                    "vcs.push cancelled before the remote update",
+                    "workspace.vcs/push cancelled before the remote update",
                 ))
             } else {
                 Ok(())
@@ -816,14 +816,14 @@ fn push_blocking(
         VcsPushError::not_applied(
             VcsPushErrorKind::InvalidPayload,
             "INVALID_PAYLOAD",
-            "vcs.push local remote path must be UTF-8",
+            "workspace.vcs/push local remote path must be UTF-8",
         )
     })?;
     let mut remote = repository.remote_anonymous(remote_path).map_err(|error| {
         repository_error(
             VcsPushErrorKind::CapabilityUnavailable,
             "CAPABILITY_UNAVAILABLE",
-            "vcs.push could not open the admitted local remote",
+            "workspace.vcs/push could not open the admitted local remote",
             &error,
         )
     })?;
@@ -834,14 +834,14 @@ fn push_blocking(
         VcsPushError::not_applied(
             VcsPushErrorKind::InvalidPayload,
             "INVALID_PAYLOAD",
-            "vcs.push effective URL must be UTF-8",
+            "workspace.vcs/push effective URL must be UTF-8",
         )
     })?;
     if configured_local_remote(effective_url)? != request.remote_repository_root {
         return Err(VcsPushError::not_applied(
             VcsPushErrorKind::InvalidPayload,
             "INVALID_PAYLOAD",
-            "vcs.push URL rewrite changed the admitted destination",
+            "workspace.vcs/push URL rewrite changed the admitted destination",
         ));
     }
     let pinned_refspec = format!("{}:{}", source_commit, request.refspec.destination);
@@ -850,7 +850,7 @@ fn push_blocking(
             return Err(non_fast_forward());
         }
         return Err(VcsPushError::outcome_unknown(format!(
-            "vcs.push transport failed without a proven remote outcome ({:?}/{:?})",
+            "workspace.vcs/push transport failed without a proven remote outcome ({:?}/{:?})",
             error.class(),
             error.code()
         )));
@@ -868,32 +868,32 @@ fn push_blocking(
             PushRejection::Other => VcsPushError::not_applied(
                 VcsPushErrorKind::RemoteRejected,
                 "CAPABILITY_UNAVAILABLE",
-                "vcs.push was rejected by the configured remote",
+                "workspace.vcs/push was rejected by the configured remote",
             ),
         });
     }
     if !observation.destination_seen || observation.unexpected_reference {
         return Err(VcsPushError::outcome_unknown(
-            "vcs.push completed without one unambiguous destination acknowledgement",
+            "workspace.vcs/push completed without one unambiguous destination acknowledgement",
         ));
     }
 
     let remote_repository = Repository::open(&request.remote_repository_root).map_err(|_| {
         VcsPushError::outcome_unknown(
-            "vcs.push remote acknowledged the update but post-push verification is unavailable",
+            "workspace.vcs/push remote acknowledged the update but post-push verification is unavailable",
         )
     })?;
     let remote_after =
         remote_reference_commit(&remote_repository, &request.refspec.destination).map_err(
             |_| {
                 VcsPushError::outcome_unknown(
-                    "vcs.push remote acknowledged the update but its destination ref cannot be verified",
+                    "workspace.vcs/push remote acknowledged the update but its destination ref cannot be verified",
                 )
             },
         )?;
     if remote_after != Some(source_commit) {
         return Err(VcsPushError::outcome_unknown(
-            "vcs.push remote acknowledgement does not match the observed destination ref",
+            "workspace.vcs/push remote acknowledgement does not match the observed destination ref",
         ));
     }
 
@@ -949,7 +949,7 @@ fn remote_reference_commit(
                 repository_error(
                     VcsPushErrorKind::CapabilityUnavailable,
                     "CAPABILITY_UNAVAILABLE",
-                    "vcs.push destination ref is not a commit",
+                    "workspace.vcs/push destination ref is not a commit",
                     &error,
                 )
             }),
@@ -957,7 +957,7 @@ fn remote_reference_commit(
         Err(error) => Err(repository_error(
             VcsPushErrorKind::CapabilityUnavailable,
             "CAPABILITY_UNAVAILABLE",
-            "vcs.push could not inspect the destination ref",
+            "workspace.vcs/push could not inspect the destination ref",
             &error,
         )),
     }
@@ -967,7 +967,7 @@ fn non_fast_forward() -> VcsPushError {
     VcsPushError::not_applied(
         VcsPushErrorKind::NonFastForward,
         "CAPABILITY_UNAVAILABLE",
-        "vcs.push rejected a non-fast-forward update",
+        "workspace.vcs/push rejected a non-fast-forward update",
     )
 }
 

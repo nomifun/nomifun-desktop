@@ -238,7 +238,7 @@ async fn delete_file(deps: Arc<KnowledgeCapabilityDeps>, p: DeleteFileParams) ->
 
 async fn search(deps: Arc<KnowledgeCapabilityDeps>, p: SearchParams) -> Value {
     let capability = CapabilityRef {
-        id: CapabilityId::from("knowledge.search"),
+        id: CapabilityId::from("knowledge"),
         version: VersionString::from("1.0.0"),
     };
     if let Err(error) = deps

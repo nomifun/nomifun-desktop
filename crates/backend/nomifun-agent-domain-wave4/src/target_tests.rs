@@ -67,8 +67,8 @@ fn registrations_publish_product_modules_without_scene_or_transport_fragments() 
     assert_eq!(capabilities, target_capability_ids());
     for retired in [
         CHANNEL_RECEIVE,
-        "channel.reply",
-        "channel.send",
+        "channel.messaging/reply",
+        "channel.messaging/send",
         CHANNEL_PAIRING,
         CHANNEL_GROUP_POLICY,
         COMPANION_PERSONA,
@@ -77,7 +77,7 @@ fn registrations_publish_product_modules_without_scene_or_transport_fragments() 
         "companion.evolve",
         CUSTOMER_SERVICE_DIALOGUE,
         "customer_service.notes.read",
-        "customer_service.notes.write",
+        "customer.service/notes.write",
         "customer_service.handoff",
     ] {
         assert!(!capabilities.contains(&CapabilityId::from(retired)));

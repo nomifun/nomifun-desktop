@@ -33,13 +33,13 @@
       "group": "check",
       "desc": "校验 Renderer 仅支持 880x600 及以上桌面窗口，阻止手机分支、低宽度断点和移动浏览器兼容代码回流"
     },
-    "check:automation-session-boundary": {
+    "check:uarc-boundary": {
       "group": "check",
-      "desc": "审计 Cron、AutoWork、AgentExecution、Channel、Companion 的 Session/runtime 依赖与迁移边界"
+      "desc": "校验 UARC 单 Runtime、generation-5 Agent Store、Capability/Resource 和平台边界，阻止退役架构回流"
     },
     "check:nomi-core-live-provider": {
       "group": "check",
-      "desc": "Compile the credential-isolated Nomi-core live Provider product smoke without making a live request."
+      "desc": "Compile the credential-isolated canonical AgentSession live Provider smoke without making a live request."
     },
     "check:agent-vocabulary": {
       "group": "check",
@@ -73,7 +73,7 @@
     "test:browser":  { "group": "test",  "desc": "运行 browser-use 门控的 Rust 测试（browser-platform 全量 + gateway/ai-agent/app 开启 --features browser-use；crate/core 车道会静默跳过这些）" },
     "test:ui":       { "group": "test",  "desc": "运行前端单元测试（bun test，收集 ui/src 下全部 *.test.ts/tsx）" },
     "test:plugin-sdk": { "group": "test", "desc": "验证普通 Plugin Product SDK 的 Service/KV 接口及已移除会话页接口的拒绝行为" },
-    "test:nomi-core-live-provider": { "group": "test", "desc": "Run the credential-isolated Nomi-core Coding, Cron, and Remote product smoke against a configured live Provider." },
+    "test:nomi-core-live-provider": { "group": "test", "desc": "Run the credential-isolated canonical AgentSession selected-model smoke against StepFun Coding Plan." },
     "check":         { "group": "check", "desc": "聚合静态检查：typecheck + 桌面 UI 边界 + i18n + 主题/图标/dead-CSS + Windows 安装器 + 创意工坊退役 + 进程/浏览器边界 + Agent 词汇 + 脚本登记" },
     "typecheck":     { "group": "check", "desc": "前端 TypeScript 类型检查（tsc --noEmit）" },
     "check:i18n":    { "group": "check", "desc": "校验 i18n 类型与 locale 键是否一致" },

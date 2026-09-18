@@ -82,10 +82,6 @@ name = "cron_e2e"
 path = "tests/cron_e2e.rs"
 
 [[test]]
-name = "message_e2e"
-path = "tests/message_e2e.rs"
-
-[[test]]
 name = "auth_e2e"
 path = "tests/auth_e2e.rs"
 
@@ -120,10 +116,6 @@ path = "tests/system_settings_e2e.rs"
 [[test]]
 name = "system_version_e2e"
 path = "tests/system_version_e2e.rs"
-
-[[test]]
-name = "work_dir_e2e"
-path = "tests/work_dir_e2e.rs"
 
 [[test]]
 name = "mcp_crud_e2e"
@@ -312,9 +304,4 @@ required-features = ["browser-use"]
 [[test]]
 name = "browser_workspace"
 path = "tests/browser_workspace.rs"
-required-features = ["browser-use"]
-
-[[test]]
-name = "local_websearch_agent"
-path = "tests/local_websearch_agent.rs"
 required-features = ["browser-use"]

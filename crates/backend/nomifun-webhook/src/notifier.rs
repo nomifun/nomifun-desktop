@@ -2,8 +2,7 @@
 //! looking up the requirement's tag → bound webhook and sending a notification.
 //!
 //! Dependency direction: this crate depends on `nomifun-requirement` (for the
-//! trait); `nomifun-requirement` does NOT depend on this crate. Mirrors how
-//! `nomifun-idmm` implements `nomifun_requirement::IdmmHandle`.
+//! trait); `nomifun-requirement` does NOT depend on this crate.
 
 use std::sync::Arc;
 

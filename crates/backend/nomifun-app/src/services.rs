@@ -14,17 +14,12 @@ use nomifun_api_types::{GatewayMcpConfig, RequirementMcpConfig};
 use nomifun_auth::{
     AuthPolicy, CookieConfig, InstanceTokenValidator, JwtService, QrTokenStore, resolve_jwt_secret,
 };
-use nomifun_common::OnConversationDelete;
-use nomifun_conversation::runtime_state::ConversationRuntimeStateService;
-use nomifun_conversation::{
-    ExecutionConversationBoundary, RepositoryExecutionConversationBoundary,
-};
 use nomifun_db::{
     Database, IAgentMetadataRepository, IInstanceTokenRepository,
-    IConversationRepository, IProviderModelCapabilityRepository,
+    IProviderModelCapabilityRepository,
     IProviderModelRepository, IProviderRepository,
     IUserRepository, SqliteAgentMetadataRepository,
-    SqliteConversationRepository, SqliteInstanceTokenRepository,
+    SqliteInstanceTokenRepository,
     SqliteProviderModelCapabilityRepository, SqliteProviderModelRepository,
     SqliteProviderRepository,
     SqliteTerminalRepository, SqliteUserRepository,
@@ -706,21 +701,10 @@ pub struct AppServices {
     pub ws_manager: Arc<WebSocketManager>,
     pub event_bus: Arc<BroadcastEventBus>,
     pub agent_runtime_sessions: Arc<dyn AgentRuntimeSessions>,
-    pub conversation_runtime_state: Arc<ConversationRuntimeStateService>,
-    /// Same instance as `agent_runtime_sessions`, exposed through the
-    /// `OnConversationDelete` trait so `ConversationService::with_delete_hook`
-    /// can wire it up. Optional because tests construct `AppServices` with a
-    /// mock `agent_runtime_sessions` that does not implement the trait.
-    pub runtime_sessions_delete_hook: Option<Arc<dyn OnConversationDelete>>,
     pub agent_registry: Arc<AgentRegistry>,
-    pub conversation_repo: Arc<dyn IConversationRepository>,
-    /// One mandatory Conversation↔Execution authority shared by every
-    /// production ConversationService instance. Keeping it in AppServices
-    /// makes incomplete module-specific assembly impossible.
-    pub execution_conversation_boundary: Arc<dyn ExecutionConversationBoundary>,
     /// Singleton requirement service (shares its repo + WS emitter with the
-    /// nomi native-tool sink). The router state attaches a `ConversationService`
-    /// to a clone of this for AutoWork config persistence.
+    /// nomi native-tool sink). Router assembly attaches the canonical
+    /// AgentSession owner for AutoWork config persistence.
     pub requirement_service: Arc<nomifun_requirement::RequirementService>,
     /// Singleton terminal service: owns the live PTYs (one in-memory map). Shared
     /// so the AutoWork runner drives the SAME PTYs the terminal routes
@@ -735,8 +719,8 @@ pub struct AppServices {
     /// MCP front and the speech stack. `None` when the registry could not be
     /// loaded — every robot entry point is then simply absent, which is a better
     /// failure than refusing to boot the desktop over a robot file. The accept
-    /// loop is attached during router assembly, where the `ConversationService`
-    /// the sessions dispatch through exists.
+    /// loop is attached during router assembly, where the canonical
+    /// AgentSession command/query owner exists.
     pub robot: Option<Arc<crate::robot_wiring::RobotServices>>,
     /// Raw JWT secret string, used only for authentication/session signing.
     pub jwt_secret_raw: String,
@@ -751,8 +735,8 @@ pub struct AppServices {
     /// local client. Only `Some` under `AuthPolicy::TrustLocalToken`.
     pub local_trust_secret: Option<Arc<str>>,
     pub app_version: String,
-    /// Resolved skill paths. Shared with the `ConversationService` for
-    /// snapshot resolution at create time.
+    /// Resolved skill paths shared with the Agent compiler and Session host for
+    /// immutable snapshot resolution.
     pub skill_paths: Arc<nomifun_skill_library::SkillPaths>,
     /// Process-private Requirement MCP issuer (port, root secret, binary path).
     /// It is non-serializable; only per-session child capabilities leave the
@@ -802,7 +786,7 @@ pub struct AppServices {
     /// Shared by `/api/tts` today; later tasks (media/probe rewiring) reuse it.
     pub model_invoke_service: Arc<nomifun_model_invoke::ModelInvokeService>,
     /// Singleton knowledge service (knowledge base platform). Shared between
-    /// the `/api/knowledge/*` routes and the `ConversationService`, which
+    /// the `/api/knowledge/*` routes and the AgentSession runtime host, which
     /// mounts bound bases into session workspaces at task start.
     pub knowledge_service: Arc<nomifun_knowledge::KnowledgeService>,
     /// AgentSession-owned managed Browser Resources supplied by the desktop composition.
@@ -1509,7 +1493,7 @@ impl AppServices {
 
     /// Wire the dependency bundle into the Platform Gateway MCP server.
     /// Called from `create_router` after `build_module_states` (the
-    /// `ConversationService` / `CronService` instances live there).
+    /// canonical AgentSession/Cron adapters live there).
     pub(crate) async fn inject_gateway_deps(&self, deps: Arc<nomifun_gateway::CompatibilityCapabilityHost>) {
         if let Some(server) = &self._gateway_mcp_server {
             server.set_deps(deps).await;
@@ -1715,14 +1699,6 @@ impl AppServices {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to hydrate agent registry: {e}"))?;
 
-
-        let conversation_repo: Arc<dyn IConversationRepository> =
-            Arc::new(SqliteConversationRepository::new(database.pool().clone()));
-        let execution_conversation_boundary: Arc<dyn ExecutionConversationBoundary> = Arc::new(
-            RepositoryExecutionConversationBoundary::new(Arc::new(
-                nomifun_db::SqliteAgentExecutionRepository::new(database.pool().clone()),
-            )),
-        );
 
         // Skill paths need app resource dir (for builtin rules) + data dir
         // (for user skills + materialized views). AcpSkillManager uses these
@@ -2190,7 +2166,7 @@ impl AppServices {
         };
 
         // LAN robot gateway. Everything that does not need a
-        // `ConversationService` is built here so the device face and the OTA
+        // canonical AgentSession owner is built here so the device face and OTA
         // response are live the moment a listener comes up; the accept loop is
         // attached during router assembly. A failure is domain-local: the
         // desktop boots without robot support rather than not at all.
@@ -2224,8 +2200,7 @@ impl AppServices {
                 )),
         );
         let agent_runtime_sessions: Arc<dyn AgentRuntimeSessions> = runtime_sessions_concrete.clone();
-        let runtime_sessions_delete_hook: Arc<dyn OnConversationDelete> = runtime_sessions_concrete;
-        let conversation_runtime_state = Arc::new(ConversationRuntimeStateService::default());
+        let _runtime_sessions_owner = runtime_sessions_concrete;
 
         let background_shutdown = CancellationToken::new();
         let background_tasks = Arc::new(BackgroundTaskRegistry::new(background_shutdown.clone()));
@@ -2257,11 +2232,7 @@ impl AppServices {
             ws_manager: Arc::new(WebSocketManager::new()),
             event_bus,
             agent_runtime_sessions,
-            conversation_runtime_state,
-            runtime_sessions_delete_hook: Some(runtime_sessions_delete_hook),
             agent_registry,
-            conversation_repo,
-            execution_conversation_boundary,
             requirement_service,
             terminal_service,
             ssh_pool,

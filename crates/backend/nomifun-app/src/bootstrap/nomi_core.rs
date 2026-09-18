@@ -12,25 +12,6 @@ use crate::services::AppServices;
 use super::{ServerEnvironment, finalize_data_layer, init_data_layer};
 use super::composition_cleanup::cleanup_failed_composition;
 
-#[cfg(test)]
-mod registry_probe {
-    #[test]
-    fn declarative_catalog_materializes() {
-        let registrations = nomifun_agent_domain_support::registrations(
-            nomifun_agent_domain_support::c7_package_specs(),
-        )
-        .expect("declarative registrations");
-        let registry = nomifun_agent_kernel::Materializer::materialize(
-            &nomifun_agent_kernel::MaterializationPolicy::stable("1.0.0"),
-            &registrations,
-            1,
-        )
-        .expect("declarative catalog");
-        assert!(!registry.capabilities.is_empty());
-    }
-}
-
-
 /// The canonical Session owner wired to the one source-installed Runtime.
 /// An existing Conversation never changes runtime families in place.
 #[derive(Clone)]

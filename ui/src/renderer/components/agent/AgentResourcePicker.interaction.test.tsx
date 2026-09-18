@@ -245,7 +245,7 @@ describe('Agent resource picker', () => {
     const Location = () => <span data-testid='location'>{useLocation().pathname}</span>;
     const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter initialEntries={['/guid']}><AgentResourcePicker
       requiredKinds={['knowledge_base']}
-      capabilityIds={['knowledge.search']}
+      capabilityIds={['knowledge/search']}
       value={{}}
       onChange={() => undefined}
       loadInventory={async () => ({ options: { knowledge_base: [] }, errors: {} })}

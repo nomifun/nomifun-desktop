@@ -297,21 +297,6 @@ impl TeardownReceipts {
             .count()
     }
 
-    fn discard_proven_for_session(&self, agent_session_id: &str) {
-        let keys = self
-            .entries
-            .iter()
-            .filter(|entry| {
-                entry.key().link.conversation_id == agent_session_id
-                    && !matches!(entry.value(), SshTeardown::Lost { .. })
-            })
-            .map(|entry| entry.key().clone())
-            .collect::<Vec<_>>();
-        for key in keys {
-            self.entries.remove(&key);
-        }
-    }
-
     fn discard_proven(&self, key: &TeardownReceiptKey) {
         if self
             .entries
@@ -1012,29 +997,6 @@ impl SshConnectionPool {
     }
 }
 
-/// A deleted conversation takes its links with it. Registered on the conversation
-/// service so the pool never has to poll for rows that no longer exist.
-#[async_trait::async_trait]
-impl nomifun_common::OnConversationDelete for SshConnectionPool {
-    async fn on_conversation_deleted(&self, _user_id: &str, conversation_id: &str) {
-        let teardowns = self.close_conversation(conversation_id).await;
-        for teardown in teardowns {
-            if let SshTeardown::Lost { detail } = teardown {
-                warn!(
-                    conversation_id = %conversation_id,
-                    detail = %detail,
-                    "ssh link for a deleted conversation was let go of without proof"
-                );
-            }
-        }
-        // This legacy Conversation hook has no canonical AgentSession cleanup
-        // saga. Do not retain proven receipts forever; Lost receipts remain for
-        // diagnosis because no durable uncertainty acknowledgement occurred.
-        self.0
-            .discard_proven_teardown_receipts(conversation_id);
-    }
-}
-
 /// The pool *is* the agent's SSH provider. There is deliberately no second
 /// un-pooled path: a session that dialled on the side would be invisible to the
 /// status routes, to the delete cascade and to shutdown accounting.
@@ -1180,11 +1142,6 @@ impl PoolInner {
     fn acknowledge_persisted_teardowns(&self, agent_session_id: &str) -> usize {
         self.teardown_receipts
             .acknowledge_persisted_for_session(agent_session_id)
-    }
-
-    fn discard_proven_teardown_receipts(&self, agent_session_id: &str) {
-        self.teardown_receipts
-            .discard_proven_for_session(agent_session_id);
     }
 
     fn link_for(&self, key: &SshLinkKey, owner_id: &str, remote_cwd: &str) -> Arc<SshLink> {

@@ -43,7 +43,7 @@ describe('settings navigation', () => {
     expect(routerSource.includes("to='/models?section=agents'")).toBe(false);
     expect(enginePageSource.includes('AgentModalContent')).toBe(false);
     expect(enginePageSource.includes('<RuntimeManager />')).toBe(false);
-    expect(enginePageSource.includes('agentPlatform.agentRuntime.get.invoke')).toBe(true);
+    expect(enginePageSource.includes('agentPlatform.runtime.get.invoke')).toBe(true);
     expect(enginePageSource.includes('nomifun.coding')).toBe(false);
     expect(enginePageSource.includes('<Select')).toBe(false);
     expect(javascriptPageSource.includes('<RuntimeManager />')).toBe(true);

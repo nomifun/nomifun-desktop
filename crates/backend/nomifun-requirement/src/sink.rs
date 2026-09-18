@@ -226,15 +226,17 @@ mod tests {
             .expect("installation owner");
         let conversation_id = ConversationId::new().into_string();
         sqlx::query(
-            "INSERT INTO conversations \
-                 (conversation_id, user_id, name, type, created_at, updated_at) \
-             VALUES (?1, ?2, 'Requirement Sink Conversation', 'nomi', 0, 0)",
+            "INSERT INTO agent_sessions (\
+                 agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                 agent_binding_json, next_seq, created_at\
+             ) VALUES (?1, json_object('principal_kind','user','principal_id',?2), \
+                       'live', 'Requirement Sink AgentSession', 0, 0, '{}', 1, 0)",
         )
         .bind(&conversation_id)
         .bind(&installation_owner)
         .execute(db.pool())
         .await
-        .expect("conversation");
+        .expect("AgentSession");
         let repo: Arc<dyn IRequirementRepository> =
             Arc::new(SqliteRequirementRepository::new(pool.clone()));
         let emitter = RequirementEventEmitter::new(

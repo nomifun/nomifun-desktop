@@ -119,8 +119,10 @@ describe('conversation send idempotency wiring', () => {
     expect(nomiDeferredDispatch > nomiInitial).toBe(true);
   });
 
-  test('keeps edit replays behind authoritative reconciliation', () => {
-    const post = nomiSource.indexOf('editResubmit.invoke({');
+  test('keeps direct-send replays behind authoritative reconciliation', () => {
+    const post = nomiSource.lastIndexOf(
+      'const res = await ipcBridge.conversation.sendMessage.invoke({'
+    );
     const classification = nomiSource.indexOf(
       'const disposition = classifyPublicMessageDelivery(res);',
       post

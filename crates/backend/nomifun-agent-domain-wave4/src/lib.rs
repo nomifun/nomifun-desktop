@@ -96,12 +96,12 @@ pub const CONVERSATION_ACTION_IDS: [&str; 7] = [
     CUSTOMER_SERVICE_HANDOFF_ACTION_ID,
 ];
 
-pub const CHANNEL_RECEIVE: &str = "channel.receive";
-pub const CHANNEL_PAIRING: &str = "channel.pairing";
-pub const CHANNEL_GROUP_POLICY: &str = "channel.group_policy";
-pub const COMPANION_PERSONA: &str = "companion.persona";
-pub const COMPANION_ROSTER: &str = "companion.roster";
-pub const CUSTOMER_SERVICE_DIALOGUE: &str = "customer_service.dialogue";
+pub const CHANNEL_RECEIVE: &str = "channel.transport/receive";
+pub const CHANNEL_PAIRING: &str = "channel.transport/pairing";
+pub const CHANNEL_GROUP_POLICY: &str = "channel.transport/group_policy";
+pub const COMPANION_PERSONA: &str = "companion.context/persona";
+pub const COMPANION_ROSTER: &str = "companion.context/roster";
+pub const CUSTOMER_SERVICE_DIALOGUE: &str = "customer.service/context.dialogue";
 pub const PACKAGE_IDS: [&str; 5] = [
     CHANNEL_PACKAGE_ID,
     COMPANION_PACKAGE_ID,
@@ -110,18 +110,6 @@ pub const PACKAGE_IDS: [&str; 5] = [
     NOTIFICATION_PACKAGE_ID,
 ];
 pub const TARGET_PACKAGE_IDS: [&str; 5] = PACKAGE_IDS;
-
-/// Family spelling used by the C7 deletion contract.
-///
-/// The frozen first-party catalog spells the two multiword IDs with
-/// underscores.  [`canonical_capability_id`] makes that normalization
-/// explicit instead of creating duplicate aliases.
-pub const TARGET_CAPABILITY_FAMILIES: [&str; 4] = [
-    CHANNEL_MESSAGING_MODULE_ID,
-    COMPANION_MODULE_ID,
-    CUSTOMER_SERVICE_MODULE_ID,
-    ROBOT_MODULE_ID,
-];
 
 /// Exact canonical capability IDs contributed by the five target packages.
 ///
@@ -1124,15 +1112,6 @@ const PACKAGE_SPECS: [PackageSpec; 5] = [
         ports: NOTIFICATION_PORTS,
     },
 ];
-
-/// Resolve a deletion-contract family to its stable catalog ID.
-pub fn canonical_capability_id(family: &str) -> Option<CapabilityId> {
-    let normalized = family.replace('-', "_");
-    TARGET_CAPABILITY_IDS
-        .iter()
-        .find(|candidate| **candidate == family || **candidate == normalized)
-        .map(|candidate| CapabilityId::from(*candidate))
-}
 
 /// Return the exact target IDs as contract newtypes.
 pub fn target_capability_ids() -> BTreeSet<CapabilityId> {

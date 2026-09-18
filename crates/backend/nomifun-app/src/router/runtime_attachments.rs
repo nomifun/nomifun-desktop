@@ -106,7 +106,7 @@ pub(super) async fn prepare_images(
     }
     if has_images && !vision_active {
         return Err(error(
-            "image input requires llm.vision in the Agent's active Snapshot",
+            "image input requires ImageInput on the Agent's exact model route",
         ));
     }
     let root = match extra.get("write_root") {

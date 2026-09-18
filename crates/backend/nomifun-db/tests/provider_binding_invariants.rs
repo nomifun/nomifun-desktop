@@ -1,15 +1,14 @@
 use nomifun_common::{
     AdaptationPolicy, AgentExecutionActor, AgentExecutionEventKind, AgentExecutionStatus,
-    ConversationId, DecisionPolicy, DelegationPolicy,
+    DecisionPolicy, DelegationPolicy,
 };
-use nomifun_db::models::ConversationRow;
 use nomifun_db::{
     CreateAgentExecutionParams, CreateAgentExecutionTemplateParams,
-    DbError, IAgentExecutionRepository, IAgentExecutionTemplateRepository,
-    IClientPreferenceRepository, IConversationRepository, IProviderRepository,
+    IAgentExecutionRepository, IAgentExecutionTemplateRepository,
+    IClientPreferenceRepository, IProviderRepository,
     NewAgentExecutionEvent, NewAgentExecutionParticipant,
     NewAgentExecutionTemplateParticipant, SqliteAgentExecutionRepository,
-    SqliteAgentExecutionTemplateRepository, SqliteConversationRepository,
+    SqliteAgentExecutionTemplateRepository,
     SqliteClientPreferenceRepository, SqliteProviderRepository,
     UpdateAgentExecutionParams, init_database_memory,
 };
@@ -39,38 +38,6 @@ async fn insert_provider(database: &nomifun_db::Database, id: &str) {
     .execute(database.pool())
     .await
     .unwrap();
-}
-
-fn conversation(
-    installation_owner: &str,
-    name: &str,
-    model: Option<serde_json::Value>,
-    execution_model_pool: Option<serde_json::Value>,
-) -> ConversationRow {
-    ConversationRow {
-        id: 0,
-        conversation_id: ConversationId::new().into_string(),
-        user_id: installation_owner.to_owned(),
-        name: name.to_owned(),
-        r#type: "nomi".to_owned(),
-        extra: "{}".to_owned(),
-        delegation_policy: "automatic".to_owned(),
-        execution_model_pool: execution_model_pool.map(|value| value.to_string()),
-        decision_policy: "automatic".to_owned(),
-        execution_template_id: None,
-        model: model.map(|value| value.to_string()),
-        status: Some("pending".to_owned()),
-        source: Some("nomifun".to_owned()),
-        channel_chat_id: None,
-        pinned: false,
-        pinned_at: None,
-        cron_job_id: None,
-        preset_id: None,
-        preset_revision: None,
-        agent_snapshot: None,
-        created_at: 1,
-        updated_at: 1,
-    }
 }
 
 fn template_participant(provider_id: &str) -> NewAgentExecutionTemplateParticipant {
@@ -129,7 +96,6 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
     let owner = nomifun_db::installation_owner_id(database.pool()).await.unwrap();
     insert_provider(&database, "0190f5fe-7c00-7a00-8000-000000000002").await;
     insert_provider(&database, "0190f5fe-7c00-7a00-8000-000000000001").await;
-    let conversations = SqliteConversationRepository::new(database.pool().clone());
     let templates = SqliteAgentExecutionTemplateRepository::new(database.pool().clone());
     let executions = SqliteAgentExecutionRepository::new(database.pool().clone());
     let providers = SqliteProviderRepository::new(database.pool().clone());
@@ -146,42 +112,6 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
         "the authoritative preference repository requires an existing provider"
     );
 
-    assert!(
-        conversations
-            .create(&conversation(
-                &owner,
-                "missing lead",
-                Some(serde_json::json!({
-                    "provider_id": "0190f5fe-7c00-7a00-8000-000000000003",
-                    "model": "model"
-                })),
-                None,
-            ))
-            .await
-            .is_err(),
-        "new Conversation lead bindings require an existing provider"
-    );
-    assert!(
-        conversations
-            .create(&conversation(
-                &owner,
-                "missing collaborator",
-                Some(serde_json::json!({
-                    "provider_id": "0190f5fe-7c00-7a00-8000-000000000001",
-                    "model": "model"
-                })),
-                Some(serde_json::json!({
-                    "mode": "range",
-                    "models": [
-                        {"provider_id": "0190f5fe-7c00-7a00-8000-000000000001", "model": "model"},
-                        {"provider_id": "0190f5fe-7c00-7a00-8000-000000000003", "model": "model"}
-                    ]
-                })),
-            ))
-            .await
-            .is_err(),
-        "new Conversation model pools require every provider to exist"
-    );
     assert!(
         templates
             .create_template(
@@ -200,24 +130,6 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
         "new Template bindings require an existing provider"
     );
 
-    let soft_ref_conversation = conversations
-        .create(&conversation(
-            &owner,
-            "soft references",
-            Some(serde_json::json!({
-                "provider_id": "0190f5fe-7c00-7a00-8000-000000000001",
-                "model": "model"
-            })),
-            Some(serde_json::json!({
-                "mode": "range",
-                "models": [
-                    {"provider_id": "0190f5fe-7c00-7a00-8000-000000000001", "model": "model"},
-                    {"provider_id": "0190f5fe-7c00-7a00-8000-000000000002", "model": "model"}
-                ]
-            })),
-        ))
-        .await
-        .unwrap();
     nomifun_db::sqlx::query(
         "INSERT INTO client_preferences (key, value, updated_at) VALUES (\
             'agent.model_failover', \
@@ -250,24 +162,6 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
         .delete("0190f5fe-7c00-7a00-8000-000000000002")
         .await
         .unwrap();
-    let pool: serde_json::Value = serde_json::from_str(
-        &conversations
-            .get(&soft_ref_conversation)
-            .await
-            .unwrap()
-            .unwrap()
-            .execution_model_pool
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        pool,
-        serde_json::json!({
-            "mode": "range",
-            "models": [{"provider_id": "0190f5fe-7c00-7a00-8000-000000000001", "model": "model"}]
-        }),
-        "provider deletion prunes persisted collaboration candidates in the same transaction"
-    );
     let failover: String = nomifun_db::sqlx::query_scalar(
         "SELECT value FROM client_preferences WHERE key = 'agent.model_failover'",
     )
@@ -294,33 +188,6 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
     );
 
     insert_provider(&database, "0190f5fe-7c00-7a00-8000-000000000002").await;
-    let hard_conversation = conversations
-        .create(&conversation(
-            &owner,
-            "hard lead",
-            Some(serde_json::json!({
-                "provider_id": "0190f5fe-7c00-7a00-8000-000000000002",
-                "model": "model"
-            })),
-            None,
-        ))
-        .await
-        .unwrap();
-    let conflict = providers.delete("0190f5fe-7c00-7a00-8000-000000000002").await.unwrap_err();
-    assert!(
-        matches!(
-            conflict,
-            DbError::Conflict(ref message)
-                if message == "provider is still referenced by an executable Agent binding"
-        ),
-        "the repository must preserve the DB's race-authority conflict as a 409-class error; got {conflict:?}"
-    );
-    nomifun_db::sqlx::query("UPDATE conversations SET model = NULL WHERE conversation_id = ?")
-        .bind(&hard_conversation)
-        .execute(database.pool())
-        .await
-        .unwrap();
-
     let template = templates
         .create_template(
             &owner,
@@ -364,7 +231,7 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
                 delegation_policy: DelegationPolicy::Automatic,
                 max_parallel: 1,
                 work_dir: None,
-                lead_conversation_id: Some(hard_conversation.clone()),
+                lead_conversation_id: None,
                 initial_plan_input: r#"{"mode":"automatic"}"#.to_owned(),
             },
             &[execution_participant("0190f5fe-7c00-7a00-8000-000000000002")],

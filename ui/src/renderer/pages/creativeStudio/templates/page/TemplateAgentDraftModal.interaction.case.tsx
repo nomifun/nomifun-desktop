@@ -117,7 +117,7 @@ const run = async (): Promise<void> => {
     fireEvent.click(modal.getByRole('combobox', { name: 'Chat model' }));
 
     const option = await screen.findByRole('option', {
-      name: 'qa-template-chat openai.chat_text',
+      name: 'qa-template-chat',
     });
     assert.equal(dialog.contains(option), true, 'the popup must remain inside the FocusLock');
     fireEvent.click(option);

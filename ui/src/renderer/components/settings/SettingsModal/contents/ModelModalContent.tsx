@@ -578,7 +578,7 @@ const ModelModalContent: React.FC = () => {
           const featureName: Record<ProviderUsageFeature, string> = {
             desktopCompanion: t('settings.providerInUse.desktopCompanion'),
             customerService: t('settings.providerInUse.customerService'),
-            conversation: t('settings.providerInUse.conversation'),
+            agent: t('settings.providerInUse.agent'),
             agentExecution: t('settings.providerInUse.agentExecution'),
           };
           Modal.confirm({

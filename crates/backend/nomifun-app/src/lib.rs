@@ -51,8 +51,8 @@ pub use router::engine_tool_host::{EngineToolHost, EngineToolObservationPolicy, 
 /// this facade instead of reaching private modules.
 pub mod compatibility {
     pub use crate::router::{
-        ChannelMessageLoopComponents, ModuleStates, build_conversation_state,
-        build_module_states, build_skill_state, build_ws_state,
+        ChannelMessageLoopComponents, ModuleStates, build_module_states, build_skill_state,
+        build_ws_state,
         create_router, create_router_with_all_state, create_router_with_states,
         try_create_router,
     };

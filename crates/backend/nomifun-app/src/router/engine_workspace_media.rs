@@ -32,10 +32,9 @@ impl WorkspaceMediaTools {
         if !self.primary_image_input
             || active.generation != generation
             || active.resolved_snapshot_ref != *self.snapshot.snapshot_ref()
-            || !active.active.iter().any(|id| id.as_ref() == "llm.vision")
         {
             return Err(error(
-                "Workspace image read requires active llm.vision and the exact primary model route's ImageInput feature; no pixels returned",
+                "Workspace image read requires the exact primary model route's ImageInput feature; no pixels returned",
             ));
         }
         Ok(())
@@ -181,8 +180,8 @@ mod tests {
             Some("image")
         ));
         assert!(!is_workspace_image_read(
-            "fs.read",
-            "fs.read.invoke",
+            "foreign.files",
+            "foreign.files/read",
             Some("image")
         ));
         assert!(!is_workspace_image_read(

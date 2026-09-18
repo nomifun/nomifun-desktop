@@ -19,7 +19,7 @@ import guid from '../src/renderer/services/i18n/locales/zh-CN/guid.json';
 import settings from '../src/renderer/services/i18n/locales/zh-CN/settings.json';
 import GuidAgentSelectorPreview from './GuidAgentSelectorPreview';
 import catalogDefinitions from './fixtures/agent-workbench-catalog.json';
-import seed from '../../crates/backend/nomifun-agent-contracts/contracts/presets/official-preset-seed-manifest.payload.json';
+import seed from '../../crates/backend/nomifun-agent-contracts/contracts/presets/official-agent-seed-manifest.payload.json';
 
 const PREVIEW_KEY = 'nomifun.agent-workbench.visual-preview.v2';
 const OWNER = '0190f5fe-7c00-7a00-8000-000000000001';

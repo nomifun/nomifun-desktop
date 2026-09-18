@@ -1,8 +1,6 @@
 use nomifun_db::{
-    ChannelInboundClaim, IChannelRepository, IConversationRepository,
-    MigrationLineageStatus, SqliteChannelRepository, SqliteConversationRepository,
-    init_database, init_database_memory, init_database_memory_with_owner,
-    inspect_supported_migration_lineage,
+    MigrationLineageStatus, init_database, init_database_memory,
+    init_database_memory_with_owner, inspect_supported_migration_lineage,
 };
 use sha2::{Digest, Sha384};
 use sqlx::migrate::{Migrate, Migrator};
@@ -2116,110 +2114,6 @@ async fn published_baseline_database_upgrades_in_place_without_checksum_rewrite(
         legacy_session_a.as_str(),
         "the earliest technical legacy row must remain the stable canonical session"
     );
-}
-
-#[tokio::test]
-async fn retained_channel_receipt_survives_projection_deletes_and_database_reopen() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("channel-receipt.db");
-    let db = init_database(&path).await.unwrap();
-    let owner = owner_id(db.pool()).await;
-    let plugin_product_id = nomifun_common::ChannelPluginId::new();
-    let conversation_id = nomifun_common::ConversationId::new();
-    let message_id = nomifun_common::MessageId::new();
-    let operation_key = format!("channel-inbound:v1:{}", "a".repeat(64));
-    let payload_hash = "1".repeat(64);
-
-    sqlx::query(
-        "INSERT INTO channel_plugins \
-         (channel_plugin_id, type, name, enabled, config, created_at, updated_at) \
-         VALUES (?, 'telegram', 'temporary', 1, '{}', 1, 1)",
-    )
-    .bind(plugin_product_id.as_str())
-    .execute(db.pool())
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO conversations \
-         (conversation_id, user_id, name, type, extra, status, created_at, updated_at) \
-         VALUES (?, ?, 'temporary', 'nomi', '{}', 'finished', 1, 1)",
-    )
-    .bind(conversation_id.as_str())
-    .bind(&owner)
-    .execute(db.pool())
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO messages \
-         (message_id, conversation_id, type, content, hidden, created_at) \
-         VALUES (?, ?, 'text', '{\"content\":\"hello\"}', 0, 1)",
-    )
-    .bind(message_id.as_str())
-    .bind(conversation_id.as_str())
-    .execute(db.pool())
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO channel_inbound_receipts \
-            (operation_key, user_scope_id, user_id, channel_plugin_scope_id, \
-             channel_plugin_id, platform, chat_id, provider_event_id, payload_hash, \
-             status, phase, owner_generation, conversation_scope_id, message_scope_id, \
-             conversation_id, message_id, outcome_json, \
-             created_at, updated_at, completed_at) \
-         VALUES (?, ?, ?, ?, ?, 'telegram', 'chat-a', 'provider-event', ?, \
-                 'completed', 'settled', 1, ?, ?, ?, ?, \
-                 '{\"kind\":\"dispatched\"}', 1, 2, 2)",
-    )
-    .bind(&operation_key)
-    .bind(&owner)
-    .bind(&owner)
-    .bind(plugin_product_id.as_str())
-    .bind(plugin_product_id.as_str())
-    .bind(&payload_hash)
-    .bind(conversation_id.as_str())
-    .bind(message_id.as_str())
-    .bind(conversation_id.as_str())
-    .bind(message_id.as_str())
-    .execute(db.pool())
-    .await
-    .unwrap();
-
-    let channel_repo = SqliteChannelRepository::new(db.pool().clone());
-    let conversation_repo = SqliteConversationRepository::new(db.pool().clone());
-    channel_repo.delete_plugin(plugin_product_id.as_str()).await.unwrap();
-    conversation_repo
-        .delete(conversation_id.as_str())
-        .await
-        .unwrap();
-    db.close().await;
-
-    let reopened = init_database(&path)
-        .await
-        .expect("nullable receipt projections must not orphan startup validation");
-    let projections: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT channel_plugin_id, conversation_id, message_id \
-         FROM channel_inbound_receipts WHERE operation_key = ?",
-    )
-    .bind(&operation_key)
-    .fetch_one(reopened.pool())
-    .await
-    .unwrap();
-    assert_eq!(projections, (None, None, None));
-
-    let replay = SqliteChannelRepository::new(reopened.pool().clone())
-        .claim_inbound_receipt(&nomifun_db::models::NewChannelInboundReceiptRow {
-            operation_key,
-            user_id: owner,
-            channel_plugin_id: plugin_product_id.into_string(),
-            platform: "telegram".into(),
-            chat_id: "chat-a".into(),
-            provider_event_id: "provider-event".into(),
-            payload_hash,
-            created_at: i64::MAX - 1,
-        })
-        .await
-        .unwrap();
-    assert!(matches!(replay, ChannelInboundClaim::Replay(_)));
 }
 
 #[test]

@@ -98,7 +98,7 @@ fn canonical_surfaces_are_traceable_to_the_app_local_route_definitions() {
 
 #[test]
 fn current_nomi_core_projection_is_not_a_runtime_or_route_authority() {
-    let projection = repo_file("src/router/nomi_core_agent_projection.rs");
+    let projection = repo_file("src/router/agent_binding_projection.rs");
 
     assert!(
         projection.contains("pub fn project("),
@@ -120,7 +120,7 @@ fn current_nomi_core_projection_is_not_a_runtime_or_route_authority() {
 
 #[test]
 fn nomi_core_projection_does_not_reintroduce_preset_resource_fields() {
-    let projection = repo_file("src/router/nomi_core_agent_projection.rs");
+    let projection = repo_file("src/router/agent_binding_projection.rs");
     assert!(
         !projection.contains("payload.resource_bindings"),
         "Preset Revision projection must not own concrete resource bindings"
@@ -339,7 +339,7 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
 mod common;
 
 #[allow(dead_code)]
-#[path = "../src/router/nomi_core_agent_projection.rs"]
+#[path = "../src/router/agent_binding_projection.rs"]
 mod projection;
 
 #[tokio::test]

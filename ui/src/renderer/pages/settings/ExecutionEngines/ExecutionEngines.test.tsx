@@ -19,7 +19,7 @@ const engine = (family_id: string, build_id = 'build-42'): RuntimeBuildDescripto
   family_id, build_id, build_digest: 'a'.repeat(64), display_name: family_id,
   host_contract_version: 1, supported_profiles: ['default', 'review'],
 });
-let getRuntime: ReturnType<typeof spyOn<typeof ipcBridge.agentPlatform.agentRuntime.get, 'invoke'>>;
+let getRuntime: ReturnType<typeof spyOn<typeof ipcBridge.agentPlatform.runtime.get, 'invoke'>>;
 afterEach(() => { cleanup(); getRuntime?.mockRestore(); });
 
 const renderPage = () => render(
@@ -38,7 +38,7 @@ const renderPage = () => render(
 
 describe('Nomi Runtime diagnostics', () => {
   test('shows one official Runtime and never presents another family as a selector', async () => {
-    getRuntime = spyOn(ipcBridge.agentPlatform.agentRuntime.get, 'invoke')
+    getRuntime = spyOn(ipcBridge.agentPlatform.runtime.get, 'invoke')
       .mockResolvedValue(engine('nomifun.nomi'));
     const screen = renderPage();
     const runtime = within(await screen.findByRole('region', { name: 'Nomi Runtime' }));
@@ -53,7 +53,7 @@ describe('Nomi Runtime diagnostics', () => {
 
   test('shows loading and error states truthfully', async () => {
     let reject!: (reason: Error) => void;
-    getRuntime = spyOn(ipcBridge.agentPlatform.agentRuntime.get, 'invoke').mockImplementation(
+    getRuntime = spyOn(ipcBridge.agentPlatform.runtime.get, 'invoke').mockImplementation(
       () => new Promise((_resolve, fail) => { reject = fail; })
     );
     const screen = renderPage();
@@ -67,7 +67,7 @@ describe('Nomi Runtime diagnostics', () => {
   });
 
   test('marks cached diagnostics stale after a failed refresh and recovers on retry', async () => {
-    getRuntime = spyOn(ipcBridge.agentPlatform.agentRuntime.get, 'invoke')
+    getRuntime = spyOn(ipcBridge.agentPlatform.runtime.get, 'invoke')
       .mockResolvedValue(engine('nomifun.nomi'));
     const screen = renderPage();
     await screen.findByText(copy.healthy);

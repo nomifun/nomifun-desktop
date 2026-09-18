@@ -10,7 +10,7 @@ export default function ExecutionEngineSettings() {
   const { t } = useTranslation();
   const { data, error, isLoading, isValidating, mutate } = useSWR(
     'agent-runtime',
-    () => ipcBridge.agentPlatform.agentRuntime.get.invoke()
+    () => ipcBridge.agentPlatform.runtime.get.invoke()
   );
   const build = data;
   const stale = Boolean(error && data);

@@ -111,6 +111,25 @@ async fn insert_other_owner(pool: &nomifun_db::SqlitePool) -> String {
     owner
 }
 
+async fn insert_canonical_session(
+    pool: &nomifun_db::SqlitePool,
+    agent_session_id: &str,
+    owner_user_id: &str,
+) {
+    sqlx::query(
+        "INSERT INTO agent_sessions (\
+            agent_session_id, owner_ref_json, state, title, archived, pinned, \
+            agent_binding_json, next_seq, created_at\
+         ) VALUES (?, json_object('principal_kind','user','principal_id',?), \
+                   'live', 'Plugin Surface scope', 0, 0, '{}', 1, 1)",
+    )
+    .bind(agent_session_id)
+    .bind(owner_user_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 fn managed_source(
     path: &str,
     source_digest_char: char,
@@ -2639,15 +2658,13 @@ async fn surface_sessions_are_exact_revocable_and_disable_enable_aba_safe() {
         .unwrap()
         .is_none());
 
-    // Optional Session scope is one owner-checked logical reference, not a
-    // second execution identity. Exercise the actual repository and cleanup.
-    use nomifun_db::{IConversationRepository, SqliteConversationRepository};
+    // Optional AgentSession scope is one owner-checked logical reference, not
+    // a second execution identity.
     let conversation_id = Uuid::now_v7().to_string();
     let foreign_id = Uuid::now_v7().to_string();
     let other_owner = insert_other_owner(database.pool()).await;
     for (id, user) in [(&conversation_id, &owner), (&foreign_id, &other_owner)] {
-        sqlx::query("INSERT INTO conversations (conversation_id, user_id, name, type, created_at, updated_at) VALUES (?, ?, 'Surface scope', 'nomi', 1, 1)")
-            .bind(id).bind(user).execute(database.pool()).await.unwrap();
+        insert_canonical_session(database.pool(), id, user).await;
     }
     let mut grant = OpenPluginRuntimeSurfaceSessionParams {
         conversation_id: Some(conversation_id.clone()),
@@ -2662,7 +2679,11 @@ async fn surface_sessions_are_exact_revocable_and_disable_enable_aba_safe() {
         expected_active_release_epoch: 1,
         issued_at_ms: 35,
     };
-    for invalid in [foreign_id, Uuid::now_v7().to_string(), "invalid-session".into()] {
+    for invalid in [
+        foreign_id.clone(),
+        Uuid::now_v7().to_string(),
+        "invalid-session".into(),
+    ] {
         grant.conversation_id = Some(invalid);
         assert!(repository.open_surface_session_cas(&grant).await.is_err());
     }
@@ -2682,12 +2703,23 @@ async fn surface_sessions_are_exact_revocable_and_disable_enable_aba_safe() {
     repository.open_surface_session_cas(&grant).await.unwrap();
     nomifun_db::validate_id_schema_contract(database.pool()).await.unwrap();
     nomifun_db::validate_id_data_contract(database.pool()).await.unwrap();
-    SqliteConversationRepository::new(database.pool().clone())
-        .delete_with_cleanup(&conversation_id).await.unwrap();
-    assert!(repository.resolve_surface_session(&ResolvePluginRuntimeSurfaceSessionParams {
-        plugin_product_id: PLUGIN_ID.to_owned(), capability_digest: grant.capability_digest,
-        expected_active_release_digest: digest, expected_active_release_epoch: 1,
-    }).await.unwrap().is_none(), "deleting the Session must revoke its Surface authority");
+    assert!(
+        repository
+            .close_surface_session_cas(&ClosePluginRuntimeSurfaceSessionParams {
+                owner_user_id: owner.clone(),
+                plugin_product_id: PLUGIN_ID.to_owned(),
+                surface_session_id: grant.surface_session_id,
+                capability_digest: grant.capability_digest,
+            })
+            .await
+            .unwrap()
+    );
+    sqlx::query("DELETE FROM agent_sessions WHERE agent_session_id IN (?, ?)")
+        .bind(&conversation_id)
+        .bind(&foreign_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
     nomifun_db::validate_id_data_contract(database.pool()).await.unwrap();
 }
 

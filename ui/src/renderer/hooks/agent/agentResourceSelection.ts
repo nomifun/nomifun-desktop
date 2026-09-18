@@ -36,9 +36,7 @@ export const hasFrozenMcpTools = (capabilities: Iterable<string>): boolean =>
 
 /** Other unmapped consumers still require one exact server on the backend. */
 export const allowsMultipleMcpServers = (capabilities: Iterable<string>): boolean => {
-  const selected = new Set(capabilities);
-  return (hasFrozenMcpTools(selected) || selected.has('mcp.resource'))
-    && !['mcp.tool_proxy', 'connector.data.read', 'connector.data.write'].some((id) => selected.has(id));
+  return hasFrozenMcpTools(capabilities);
 };
 
 export type AgentResourceSelectionResolution = {

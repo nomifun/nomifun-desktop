@@ -1,6 +1,6 @@
 //! Parent-Session-scoped controls for background delegated Agents.
 //!
-//! `agent.delegate` remains the only spawn authority. A trusted host wraps that
+//! `agent.collaboration/delegate` remains the only spawn authority. A trusted host wraps that
 //! tool with [`DelegationHandleRecordingTool`] and records the durable child
 //! identities returned by the delegate owner. The model receives only opaque
 //! handles; owner, AgentSession, execution, and step identities never appear in
@@ -38,7 +38,7 @@ const SUBAGENT_SEND_ACK_TIMEOUT: Duration = Duration::from_millis(25);
 const DEFAULT_SUBAGENT_WAIT_MS: u64 = 10_000;
 const MAX_HANDLE_BYTES: usize = 128;
 
-/// One host-owned child discovered from a successful `agent.delegate` receipt.
+/// One host-owned child discovered from a successful `agent.collaboration/delegate` receipt.
 ///
 /// `child_id` is private host state. Only the generated opaque handle is ever
 /// projected back to the model.
@@ -772,7 +772,7 @@ impl Tool for SubagentWaitTool {
     }
 }
 
-/// Decorates the existing persistent `agent.delegate` owner. It never spawns a
+/// Decorates the existing persistent `agent.collaboration/delegate` owner. It never spawns a
 /// second execution; it records the returned execution into this Session's
 /// bounded registry and augments the receipt with opaque child handles.
 pub struct DelegationHandleRecordingTool {

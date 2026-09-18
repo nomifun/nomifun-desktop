@@ -3046,9 +3046,8 @@ mod tests {
     use nomifun_db::{
         CreateAgentExecutionParams, NewAgentExecutionParticipant, NewAgentExecutionStep,
         NewAgentExecutionStepDependency, ReconcileAgentExecutionPlanParams,
-        SqliteAgentExecutionRepository, SqliteConversationRepository, IConversationRepository,
+        SqliteAgentExecutionRepository, SqlitePool,
     };
-    use nomifun_db::models::ConversationRow;
     use nomifun_realtime::UserEventSink;
     use tempfile::{TempDir, tempdir};
     use tokio::sync::Barrier;
@@ -3613,7 +3612,7 @@ mod tests {
         completed_successes: Arc<AtomicUsize>,
         active: Arc<AtomicUsize>,
         max_active: Arc<AtomicUsize>,
-        conversation_repo: Arc<Mutex<Option<SqliteConversationRepository>>>,
+        pool: Arc<Mutex<Option<SqlitePool>>>,
         owner_id: Arc<Mutex<Option<String>>>,
     }
 
@@ -3629,7 +3628,7 @@ mod tests {
                 completed_successes: Arc::new(AtomicUsize::new(0)),
                 active: Arc::new(AtomicUsize::new(0)),
                 max_active: Arc::new(AtomicUsize::new(0)),
-                conversation_repo: Arc::new(Mutex::new(None)),
+                pool: Arc::new(Mutex::new(None)),
                 owner_id: Arc::new(Mutex::new(None)),
             }
         }
@@ -3644,7 +3643,7 @@ mod tests {
                 completed_successes: Arc::new(AtomicUsize::new(0)),
                 active: Arc::new(AtomicUsize::new(0)),
                 max_active: Arc::new(AtomicUsize::new(0)),
-                conversation_repo: Arc::new(Mutex::new(None)),
+                pool: Arc::new(Mutex::new(None)),
                 owner_id: Arc::new(Mutex::new(None)),
             }
         }
@@ -3659,16 +3658,16 @@ mod tests {
                 completed_successes: Arc::new(AtomicUsize::new(0)),
                 active: Arc::new(AtomicUsize::new(0)),
                 max_active: Arc::new(AtomicUsize::new(0)),
-                conversation_repo: Arc::new(Mutex::new(None)),
+                pool: Arc::new(Mutex::new(None)),
                 owner_id: Arc::new(Mutex::new(None)),
             }
         }
 
-        fn bind_conversation_repo(&self, repository: SqliteConversationRepository) {
+        fn bind_pool(&self, pool: SqlitePool) {
             *self
-                .conversation_repo
+                .pool
                 .lock()
-                .expect("harness conversation repository is not poisoned") = Some(repository);
+                .expect("harness database pool is not poisoned") = Some(pool);
         }
 
         fn bind_owner(&self, owner_id: String) {
@@ -3749,49 +3748,36 @@ mod tests {
                 .expect("harness workspace log is not poisoned")
                 .push(workspace_dir.map(str::to_owned));
             let conversation_id = nomifun_common::ConversationId::new().into_string();
-            let now = now_ms();
             let owner_id = self
                 .owner_id
                 .lock()
                 .expect("harness owner is not poisoned")
                 .clone()
                 .ok_or_else(|| AppError::Internal("scheduler harness owner is missing".into()))?;
-            let conversation = ConversationRow {
-                id: 0,
-                conversation_id: conversation_id.clone(),
-                user_id: owner_id,
-                name: format!("Scheduler harness · {step_title}"),
-                r#type: "nomi".to_owned(),
-                extra: "{}".to_owned(),
-                delegation_policy: "automatic".to_owned(),
-                execution_model_pool: None,
-                decision_policy: "automatic".to_owned(),
-                execution_template_id: None,
-                model: None,
-                status: Some("pending".to_owned()),
-                source: Some("nomifun".to_owned()),
-                channel_chat_id: None,
-                pinned: false,
-                pinned_at: None,
-                cron_job_id: None,
-                preset_id: None,
-                preset_revision: None,
-                agent_snapshot: None,
-                created_at: now,
-                updated_at: now,
-            };
-            let repository = self
-                .conversation_repo
+            let pool = self
+                .pool
                 .lock()
-                .expect("harness conversation repository is not poisoned")
+                .expect("harness database pool is not poisoned")
                 .clone()
                 .ok_or_else(|| {
-                    AppError::Internal("scheduler harness conversation repository is missing".into())
+                    AppError::Internal("scheduler harness database pool is missing".into())
                 })?;
-            repository
-                .create(&conversation)
-                .await
-                .map_err(|error| AppError::Internal(format!("create harness conversation: {error}")))?;
+            sqlx::query(
+                "INSERT INTO agent_sessions (\
+                    agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                    agent_binding_json, next_seq, created_at\
+                 ) VALUES (?, ?, 'live', ?, 0, 0, '{}', 1, ?)",
+            )
+            .bind(&conversation_id)
+            .bind(serde_json::json!({
+                "principal_kind": "user",
+                "principal_id": owner_id,
+            }).to_string())
+            .bind(format!("Scheduler harness · {step_title}"))
+            .bind(now_ms())
+            .execute(&pool)
+            .await
+            .map_err(|error| AppError::Internal(format!("create harness AgentSession: {error}")))?;
             on_started(conversation_id.clone()).await?;
 
             self.calls
@@ -3953,7 +3939,7 @@ mod tests {
         .expect("provider fixture");
 
         let repository = Arc::new(SqliteAgentExecutionRepository::new(database.pool().clone()));
-        runner.bind_conversation_repo(SqliteConversationRepository::new(database.pool().clone()));
+        runner.bind_pool(database.pool().clone());
         let participant_id = generate_id();
         let created = repository
             .create_execution_with_participants(
@@ -4053,8 +4039,15 @@ mod tests {
                 sqlx::sqlite::SqliteConnectOptions::new().filename(data_dir.path().join("harness.sqlite")),
             ).await.unwrap();
             let lead = generate_id();
-            sqlx::query("INSERT INTO conversations (conversation_id, user_id, name, type, created_at, updated_at) VALUES (?, ?, 'lead', 'nomi', 1, 1)")
-                .bind(&lead).bind(&owner).execute(&pool).await.unwrap();
+            sqlx::query(
+                "INSERT INTO agent_sessions (\
+                    agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                    agent_binding_json, next_seq, created_at\
+                 ) VALUES (?, ?, 'live', 'lead', 0, 0, '{}', 1, 1)",
+            )
+                .bind(&lead)
+                .bind(serde_json::json!({"principal_kind":"user","principal_id":owner}).to_string())
+                .execute(&pool).await.unwrap();
             let execution = repository.create_execution_with_participants(
                 &owner,
                 &CreateAgentExecutionParams {
@@ -4118,8 +4111,15 @@ mod tests {
             sqlx::sqlite::SqliteConnectOptions::new().filename(data_dir.path().join("harness.sqlite")),
         ).await.unwrap();
         let conversation_id = generate_id();
-        sqlx::query("INSERT INTO conversations (conversation_id, user_id, name, type, created_at, updated_at) VALUES (?, ?, 'effect', 'nomi', 1, 1)")
-            .bind(&conversation_id).bind(&owner).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO agent_sessions (\
+                agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                agent_binding_json, next_seq, created_at\
+             ) VALUES (?, ?, 'live', 'effect', 0, 0, '{}', 1, 1)",
+        )
+            .bind(&conversation_id)
+            .bind(serde_json::json!({"principal_kind":"user","principal_id":owner}).to_string())
+            .execute(&pool).await.unwrap();
         repository.start_attempt(
             &owner, &execution_id, &step.step_id, created.step.version,
             attempt_id, created.current_attempt.as_ref().unwrap().attempt.version,

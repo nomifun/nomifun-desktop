@@ -181,12 +181,12 @@ impl Drop for RemoteDetachedMutationLease {
 /// Sidecar-free task supervisor used by the Nomi-core Remote adapter.
 ///
 /// The current Nomi product owns its live runtime in
-/// `AgentRuntimeSessions`/`ConversationService`; Remote must therefore never
+/// the local Runtime registry/AgentSession owner; Remote must therefore never
 /// create a second process runtime merely to give `open` an asynchronous
 /// shape.  This supervisor only keeps a bounded, single-flight task alive while
 /// the Nomi service settles a real operation (usually the optional initial
 /// turn).  Durable state and idempotency remain owned by the injected
-/// projection store and `ConversationService`.
+/// projection store and canonical AgentSession owner.
 #[derive(Clone)]
 pub(crate) struct NomiCoreRemoteRuntimeCoordinator {
     tasks: Arc<StdMutex<NomiCoreRemoteTaskRegistry>>,
@@ -238,7 +238,7 @@ impl NomiCoreRemoteRuntimeCoordinator {
     /// Start one sidecar-free Nomi operation exactly once for `key`.
     ///
     /// The task is intentionally detached from the request that admitted it:
-    /// an HTTP timeout cannot cancel a ConversationService operation after its
+    /// an HTTP timeout cannot cancel a canonical AgentSession operation after its
     /// durable receipt may have been committed.  The returned error is only an
     /// admission verdict; the task itself must persist its own terminal result.
     pub(crate) fn start_once<F, Fut>(

@@ -242,11 +242,6 @@ impl IAgentMetadataRepository for SqliteAgentMetadataRepository {
                 OR EXISTS(\
                     SELECT 1 FROM agent_execution_template_participants \
                     WHERE source_agent_id = ?1\
-                ) \
-                OR EXISTS(\
-                    SELECT 1 FROM conversations \
-                    WHERE json_extract(extra, '$.agent_id') = ?1 \
-                       OR json_extract(extra, '$.custom_agent_id') = ?1\
                 )",
         )
         .bind(id)
@@ -254,7 +249,7 @@ impl IAgentMetadataRepository for SqliteAgentMetadataRepository {
         .await?;
         if retained_reference_exists {
             return Err(DbError::Conflict(format!(
-                "Agent '{id}' is still referenced by execution or conversation state"
+                "Agent '{id}' is still referenced by execution state"
             )));
         }
 

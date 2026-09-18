@@ -60,7 +60,7 @@ async fn migration_066_retires_old_resource_bound_presets_without_deleting_histo
         "model_route_refs": {},
         "chat_route_records": {},
         "enabled_capabilities": [{
-            "capability": {"id": "knowledge.search", "version": "1.0.0"},
+            "capability": {"id": "knowledge/search", "version": "1.0.0"},
             "action_allowlist": [],
             "resource_binding_refs": ["knowledge"]
         }],
@@ -206,7 +206,7 @@ async fn migration_066_preserves_resource_neutral_presets_and_bindings() {
         "model_route_refs": {},
         "chat_route_records": {},
         "enabled_capabilities": [{
-            "capability": {"id": "knowledge.search", "version": "1.0.0"},
+            "capability": {"id": "knowledge/search", "version": "1.0.0"},
             "action_allowlist": []
         }],
                 "skill_bindings": [],

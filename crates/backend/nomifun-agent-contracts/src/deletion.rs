@@ -419,7 +419,6 @@ pub enum CompositionRootKind {
     GatewayDeps,
     AgentFactoryDeps,
     NomiBuildExtra,
-    ConversationService,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

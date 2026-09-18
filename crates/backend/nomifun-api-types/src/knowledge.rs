@@ -322,7 +322,7 @@ pub struct KnowledgeSourceEntry {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Request canonical `browser.render_content` for JS-rendered pages instead
+    /// Request canonical `browser/render_content` for JS-rendered pages instead
     /// of the ordinary HTTP fetcher. Missing rendering capability fails closed;
     /// it does not silently substitute HTTP or launch a private browser.
     #[serde(default)]

@@ -165,7 +165,7 @@ pub struct ChannelMessageService {
     /// outbound media.
     /// `None` (default / tests) disables channel image sending gracefully.
     asset_resolver: Option<Arc<dyn AssetResolver>>,
-    /// Live EventSource routing installed by `channel.receive` for one exact
+    /// Live EventSource routing installed by `channel.transport/receive` for one exact
     /// Nomi AgentSession. The Channel message loop reads this map before the
     /// ordinary companion-session fallback. Entries are process-lifecycle
     /// leases: Session materialization recreates them after restart, and

@@ -33,16 +33,16 @@ const capability = (
 });
 
 const catalog = [
-  capability('knowledge.search', '1.0.0', ['knowledge_base']),
+  capability('knowledge/search', '1.0.0', ['knowledge_base']),
   capability('workspace.bind', '1.0.0', ['workspace']),
-  capability('knowledge.search', '2.0.0', ['different_resource']),
+  capability('knowledge/search', '2.0.0', ['different_resource']),
 ];
 
 describe('Agent capability resource projection', () => {
   test('matches exact capability references, including version', () => {
     expect(
       [...requiredResourceKindsForCapabilityReferences(
-        [{ id: asCapabilityId('knowledge.search'), version: '1.0.0' }],
+        [{ id: asCapabilityId('knowledge/search'), version: '1.0.0' }],
         catalog
       )]
     ).toEqual(['knowledge_base']);

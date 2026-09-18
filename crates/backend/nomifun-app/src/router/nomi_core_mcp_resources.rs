@@ -3,7 +3,7 @@
 //! fabricated here. The retained Nomi effect scope owns calls and turn closure.
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    AgentSessionId, CapabilityId, ContributionSourceKind, PluginSourceKind, PrincipalRef,
+    AgentSessionId, PrincipalRef,
     digest_payload,
 };
 use nomifun_agent_kernel::{
@@ -155,23 +155,11 @@ impl ResourceOwner {
     fn admit_image(&self, generation: Option<u64>) -> Result<(), AppError> {
         self.image_authority.ensure_active()?;
         let active = frozen_state(&self.compiled, &self.active)?;
-        let selected = self
-            .compiled
-            .content()
-            .enabled_capabilities
-            .iter()
-            .find(|entry| entry.capability.id.as_ref() == "llm.vision");
         if !self.primary_image_input
-            || !self.constraints.allows_capability("llm.vision")
-            || !active.active.contains(&CapabilityId::from("llm.vision"))
             || generation.is_some_and(|generation| active.generation != generation)
-            || !selected.is_some_and(|entry| {
-                entry.contribution_lock.source_kind == ContributionSourceKind::PlatformBuiltin
-                    && entry.resolved_source.source_kind == PluginSourceKind::Bundled
-            })
         {
             return Err(failure(
-                "image input differs from frozen vision selection, primary route or capability generation",
+                "image input differs from the frozen primary model route or capability generation",
             ));
         }
         // Host-bound image support and the frozen vision selection are both

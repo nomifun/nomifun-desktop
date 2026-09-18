@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("usage: target_inventory [check|write]".into());
     }
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../nomifun-agent-contracts/contracts/target-packages/target-first-party-contributions.v1.json");
+        .join("../nomifun-agent-contracts/contracts/target-packages/first-party-agent-modules.v1.json");
     let original: TargetPackageInventoryPayload = serde_json::from_slice(&std::fs::read(&path)?)?;
     let mut updated = original.clone();
     // Dynamic MCP tools now publish their own namespaced package/module

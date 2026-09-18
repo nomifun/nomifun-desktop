@@ -5390,7 +5390,10 @@ impl IPluginRuntimeRepository for SqlitePluginRuntimeRepository {
             lock_product_for_update(&mut tx, &params.owner_user_id, &params.plugin_product_id).await?;
         if let Some(id) = &params.conversation_id {
             let owned: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM conversations WHERE conversation_id = ? AND user_id = ?)",
+                "SELECT EXISTS(SELECT 1 FROM agent_sessions \
+                 WHERE agent_session_id = ? AND state = 'live' \
+                   AND json_extract(owner_ref_json, '$.principal_kind') = 'user' \
+                   AND json_extract(owner_ref_json, '$.principal_id') = ?)",
             ).bind(id).bind(&params.owner_user_id).fetch_one(&mut *tx).await?;
             if !owned {
                 return Err(conflict("Plugin Surface Session grant target is not owned"));
@@ -5537,6 +5540,25 @@ impl IPluginRuntimeRepository for SqlitePluginRuntimeRepository {
         .rows_affected();
         tx.commit().await?;
         Ok(deleted == 1)
+    }
+
+    async fn revoke_agent_session_surfaces(
+        &self,
+        owner_user_id: &str,
+        agent_session_id: &str,
+    ) -> Result<u64, DbError> {
+        validate_uuid(owner_user_id, "owner_user_id")?;
+        validate_uuid(agent_session_id, "agent_session_id")?;
+        sqlx::query(
+            "DELETE FROM plugin_surface_sessions \
+             WHERE owner_user_id = ? AND conversation_id = ?",
+        )
+        .bind(owner_user_id)
+        .bind(agent_session_id)
+        .execute(&self.pool)
+        .await
+        .map(|result| result.rows_affected())
+        .map_err(query_error)
     }
 
     async fn revoke_all_surface_sessions_on_startup(&self) -> Result<u64, DbError> {

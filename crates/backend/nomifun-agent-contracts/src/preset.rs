@@ -1098,7 +1098,7 @@ pub struct OfficialPresetSeedManifestPayload {
 pub type OfficialPresetSeedManifest = ArtifactEnvelope<OfficialPresetSeedManifestPayload>;
 
 pub const OFFICIAL_PRESET_SEED_MANIFEST_PAYLOAD_JSON: &str =
-    include_str!("../contracts/presets/official-preset-seed-manifest.payload.json");
+    include_str!("../contracts/presets/official-agent-seed-manifest.payload.json");
 
 pub fn official_preset_seed_manifest_payload() -> OfficialPresetSeedManifestPayload {
     serde_json::from_str(OFFICIAL_PRESET_SEED_MANIFEST_PAYLOAD_JSON)
@@ -1786,8 +1786,8 @@ mod tests {
         );
 
         let mut selection = serde_json::to_value(CapabilitySelection {
-            capability: capability("knowledge.search"),
-            action_allowlist: BTreeSet::new(),
+            capability: capability("knowledge"),
+            action_allowlist: BTreeSet::from([ActionId::from("knowledge/search")]),
         })
         .unwrap();
         selection["resource_binding_refs"] = serde_json::json!(["knowledge"]);
@@ -1809,8 +1809,8 @@ mod tests {
             serde_json::to_value(snapshot_content(Vec::new(), Vec::new()))
                 .unwrap();
         nested_snapshot["on_demand_activation_plans"] = serde_json::json!({
-            "knowledge.search": {
-                "root_capability_id": "knowledge.search",
+            "knowledge": {
+                "root_capability_id": "knowledge",
                 "capability_bundle": [],
                 "tool_schema_refs": [],
                 "context_schema_refs": [],
@@ -1980,12 +1980,12 @@ mod tests {
     fn enabled_capabilities_reject_duplicate_ids() {
         let error = validate_capability_selections(&[
             CapabilitySelection {
-                capability: capability("fs.read"),
-                action_allowlist: BTreeSet::from([ActionId::from("fs.read/read")]),
+                capability: capability("workspace.files"),
+                action_allowlist: BTreeSet::from([ActionId::from("workspace.files/read")]),
             },
             CapabilitySelection {
-                capability: capability("fs.read"),
-                action_allowlist: BTreeSet::from([ActionId::from("fs.read/read")]),
+                capability: capability("workspace.files"),
+                action_allowlist: BTreeSet::from([ActionId::from("workspace.files/read")]),
             },
         ])
         .unwrap_err();

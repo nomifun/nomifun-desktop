@@ -1,12 +1,12 @@
 //! SQLite database layer: init, migrations, repository traits, and implementations.
 pub mod backup_bundle;
 mod agent_store_reset;
-pub mod conversation_context;
 mod database;
 mod error;
 mod id_schema_contract;
 pub mod models;
 mod repository;
+mod session_projection;
 mod plugin_product_documents;
 mod installation_role_bindings;
 pub use installation_role_bindings::{load_installation_role_bindings, put_installation_role_binding};
@@ -20,6 +20,7 @@ pub use database::{
 pub use agent_store_reset::{AgentDataResetReport, reset_agent_data};
 pub use error::DbError;
 pub use id_schema_contract::{validate_id_data_contract, validate_id_schema_contract};
+pub use session_projection::MessageDayBucket;
 pub use models::{
     AgentExecutionAttemptDetailRow, AgentExecutionAttemptRow, AgentExecutionDetailRows,
     AgentExecutionEventRow, AgentExecutionParticipantRow, AgentExecutionRow,
@@ -27,7 +28,7 @@ pub use models::{
     AgentExecutionTemplateDetailRows, AgentExecutionTemplateParticipantRow,
     AgentExecutionTemplateRow,
     AgentMetadataRow,
-    ConversationArtifactRow, IdmmActionReservationRow,
+    ConversationArtifactRow,
     CreateKnowledgeTagParams, CreationTaskRow, CreativeStudioAgentProposalReceiptRow,
     CreativeStudioProjectRow, CreativeStudioTemplateRow, CreativeStudioTemplateRunRow, CronJobRunRow,
     CronRunReservationRow,
@@ -80,16 +81,6 @@ pub use repository::customer_service_search::{
     CsNoteSearchHit, NoteMatchChannel, backfill_note_search_text, fts_rebuild, note_search_text,
 };
 pub use repository::SqliteCustomerServiceRepository;
-pub use repository::conversation::{
-    ConversationDeliveryReceiptClaim, ConversationFilters, ConversationMessageProjection,
-    CreativeStudioConversationTurnAuthority,
-    ConversationTurnAdmissionState,
-    ConversationRowUpdate, MessageDayBucket, MessageRowUpdate, MessageSearchRow, SortOrder,
-    MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE,
-    RequirementConversationTurnAuthority,
-    TurnArtifactMessageCommit, TurnLifecycleTransition, TurnReceiptCompletion,
-    UnsettledConversationTurnAdmission,
-};
 pub use repository::cron::{
     AdvanceCronOccurrenceParams, CRON_RUN_HISTORY_LIMIT, FinalizeCronRunOutcome,
     FinalizeCronRunParams, ReserveCronRunParams,
@@ -121,7 +112,7 @@ pub use repository::{
     IChannelRepository, PENDING_PROMPT_EXPIRY_MS, PENDING_PROMPT_QUEUE_LIMIT,
     PairingApprovalOutcome, PendingPromptEnqueue, SettleChannelInboundReceiptParams,
     IClientPreferenceRepository, IInstanceTokenRepository, KNOWLEDGE_RETRIEVAL_KEY,
-    IConversationRepository, ICronRepository, IIdmmInterventionRepository,
+    ICronRepository,
     IJavaScriptRuntimeSelectionRepository,
     AbortPluginSourceMutationParams, BeginPluginRuntimeImportAsNewParams,
     BeginPluginRuntimeImportAsNewResult, BeginPluginSourceMutationParams,
@@ -151,8 +142,7 @@ pub use repository::{
     SqlitePluginRuntimeRepository, StartPluginRuntimeBuildOperationParams,
     StartPluginRuntimeExportOperationParams,
     UpdatePluginRuntimeProjectSourceParams,
-    IdmmActionReservationKey, IdmmActionReserveResult, IdmmActionSettleResult,
-    IdmmActionSettlement, IdmmActionTurnIdentity, IKnowledgeRepository,
+    IKnowledgeRepository,
     IKnowledgeEntryRepository, IKnowledgeSourceRepository, IKnowledgeTreeOperationRepository,
     KnowledgeEntryMutation,
     KnowledgeProjectionReplacement,
@@ -175,16 +165,13 @@ pub use repository::{
     IRequirementRepository, ISettingsRepository, ISkillTagRepository,
     ITagSettingRepository, ITerminalRepository, IUserRepository, IWebhookRepository,
     ListRequirementsParams, RequirementClaim, RequirementClaimResolution,
-    MAX_IDMM_ACTION_FAILURE_REASON_CHARS, PER_TARGET_CAP, PER_USER_ACTIVITY_CAP,
-    ReserveIdmmActionParams, ResolveCreativeStudioAgentSessionParams,
-    ResolvedCreativeStudioAgentSession,
     SqliteAgentMetadataRepository, SqliteAttachmentRepository,
     SqliteAgentExecutionRepository,
     SqliteAgentExecutionTemplateRepository,
     SaveJavaScriptRuntimeSelectionParams,
     SqliteChannelRepository, SqliteClientPreferenceRepository, SqliteInstanceTokenRepository,
-    SqliteConversationRepository, SqliteCronRepository,
-    SqliteIdmmInterventionRepository, SqliteKnowledgeRepository,
+    SqliteCronRepository,
+    SqliteKnowledgeRepository,
     SqliteJavaScriptRuntimeSelectionRepository,
     SqliteKnowledgeTreeOperationRepository, SqliteMcpServerRepository,
     SqliteOAuthTokenRepository,
@@ -196,7 +183,7 @@ pub use repository::{
     SqliteSkillTagRepository, SqliteTagSettingRepository, SqliteTerminalRepository,
     SqliteUserRepository, SqliteWebhookRepository, TerminalTurnAdmissionClaim,
     TerminalTurnAdmissionKey, TerminalTurnAdmissionScope, TerminalTurnEffectsStart,
-    TerminalTurnOutcome, TerminalTurnSettlement, TTL_MS,
+    TerminalTurnOutcome, TerminalTurnSettlement,
 };
 pub use repository::{
     AppendNomiRemoteEventParams, AppendNomiRemoteEventResult, CreateRemoteBindingParams,

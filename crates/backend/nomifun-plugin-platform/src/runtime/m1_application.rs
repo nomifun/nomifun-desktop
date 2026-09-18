@@ -5215,6 +5215,19 @@ impl PluginRuntimeApplicationService {
             .map_err(Into::into)
     }
 
+    pub async fn revoke_agent_session_surfaces(
+        &self,
+        owner_user_id: &str,
+        agent_session_id: &str,
+    ) -> Result<u64, PluginRuntimeApplicationError> {
+        validate_request_identity(owner_user_id, "owner_user_id")?;
+        validate_request_identity(agent_session_id, "agent_session_id")?;
+        self.repository
+            .revoke_agent_session_surfaces(owner_user_id, agent_session_id)
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn surface_asset(
         &self,
         plugin_product_id: &str,
@@ -6484,14 +6497,6 @@ fn build_plugin_catalog_publication(
 ) -> Result<PluginProductCapabilityCatalogPublication, PluginRuntimeApplicationError> {
     let mut capabilities = Vec::with_capacity(contributions.capabilities.len());
     for manifest in &contributions.capabilities {
-        if nomifun_agent_contracts::is_retired_extension_authoring_capability(
-            manifest.id.as_ref(),
-        ) {
-            return Err(PluginRuntimeApplicationError::Invalid(format!(
-                "capability {} is a retired extension authoring identity",
-                manifest.id.as_ref()
-            )));
-        }
         let consumers = manifest
             .supported_consumers()
             .map_err(PluginRuntimeApplicationError::Invalid)?;

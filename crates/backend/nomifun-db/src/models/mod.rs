@@ -6,17 +6,14 @@ mod channel;
 mod client_preference;
 mod instance_token;
 mod javascript_runtime_selection;
-mod conversation;
 mod conversation_artifact;
 mod cron_job;
 mod customer_service;
 mod cron_job_run;
-mod idmm_intervention;
 mod knowledge;
 mod knowledge_source;
 mod knowledge_tree_operation;
 mod mcp_server;
-mod message;
 mod plugin_runtime;
 mod oauth_token;
 mod plugin_n1;
@@ -56,10 +53,6 @@ pub use instance_token::InstanceApiTokenRow;
 pub use javascript_runtime_selection::{
     JavaScriptRuntimeSelectionRecord, JavaScriptRuntimeSelectionRow,
 };
-pub use conversation::{
-    ConversationDeliveryNotifyRow, ConversationDeliveryReceiptRow, ConversationRow,
-    CreativeStudioAgentSessionBindingRow,
-};
 pub use conversation_artifact::ConversationArtifactRow;
 pub use cron_job::CronJobRow;
 pub use cron_job_run::{CronJobRunRow, CronRunReservationRow};
@@ -67,9 +60,6 @@ pub use customer_service::{
     CS_HANDOFF_STATUS_CANCELLED, CS_HANDOFF_STATUS_CLAIMED, CS_HANDOFF_STATUS_PENDING,
     CS_HANDOFF_STATUS_RESOLVED, CsAgentCapabilityReceiptRow, CsAgentRow, CsAuditEventRow,
     CsChannelBindingRow, CsDialogueRow, CsHandoffRow, CsMessageRow, CsNoteRow, NewCsAgentRow,
-};
-pub use idmm_intervention::{
-    IdmmActionReservationRow, IdmmInterventionRow, NewIdmmInterventionRow,
 };
 pub use knowledge::{
     CreateKnowledgeTagParams, KNOWLEDGE_ENTRY_KIND_DIRECTORY, KNOWLEDGE_ENTRY_KIND_FILE,
@@ -90,7 +80,6 @@ pub use knowledge_tree_operation::{
     KnowledgeTreeEventStatus, KnowledgeTreeOperationRow, KnowledgeTreeOperationState,
 };
 pub use mcp_server::McpServerRow;
-pub use message::MessageRow;
 pub use plugin_runtime::{
     PluginRuntimeBuildOperationLineageRow, PluginRuntimeCatalogPublicationRow,
     PluginRuntimeCredentialBindingRow, PluginRuntimeLibraryStateRow, PluginRuntimeLibrarySnapshot,

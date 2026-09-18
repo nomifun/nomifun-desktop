@@ -37,10 +37,10 @@ enum VcsOperation {
 impl VcsOperation {
     const fn name(self) -> &'static str {
         match self {
-            Self::Status => "vcs.status",
-            Self::Diff => "vcs.diff",
-            Self::Stage => "vcs.stage",
-            Self::Commit => "vcs.commit",
+            Self::Status => "workspace.vcs/status",
+            Self::Diff => "workspace.vcs/diff",
+            Self::Stage => "workspace.vcs/stage",
+            Self::Commit => "workspace.vcs/commit",
             Self::ReviewStatus => "review.status",
         }
     }
@@ -551,7 +551,7 @@ fn vcs_stage(workspace: &Path, path: &str) -> Result<Value, VcsToolError> {
     if let Some(metadata) = target_metadata.as_ref() {
         if metadata.file_type().is_symlink() || metadata_is_windows_reparse_point(metadata) {
             return Err(VcsToolError::outside_workspace(
-                "vcs.stage refuses symlink or reparse-point targets",
+                "workspace.vcs/stage refuses symlink or reparse-point targets",
             ));
         }
         let canonical_target = std::fs::canonicalize(&resolved).map_err(|error| {
@@ -682,7 +682,7 @@ fn vcs_commit(workspace: &Path, message: &str) -> Result<Value, VcsToolError> {
         {
             let Some(relative) = path_relative_to_workspace(path, &workspace_prefix) else {
                 return Err(VcsToolError::outside_workspace(
-                    "vcs.commit refuses staged paths outside the session workspace",
+                    "workspace.vcs/commit refuses staged paths outside the session workspace",
                 ));
             };
             scoped_paths.push(relative);
@@ -901,7 +901,7 @@ fn collect_directory_stage_paths(
         })?;
         if metadata.file_type().is_symlink() || metadata_is_windows_reparse_point(&metadata) {
             return Err(VcsToolError::outside_workspace(format!(
-                "vcs.stage refuses symlink or reparse-point entry {}",
+                "workspace.vcs/stage refuses symlink or reparse-point entry {}",
                 entry.path().display()
             )));
         }

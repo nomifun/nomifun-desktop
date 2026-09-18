@@ -1,47 +1,28 @@
-//! Conversation and message CRUD with streaming relay and event emission.
-mod agent_execution_port;
+//! Canonical AgentSession product adapters and shared projection types.
 mod canonical_session_owner;
-pub mod companion_interaction;
-mod convert;
-mod execution_conversation_boundary;
-mod failover_seam;
-mod message_persistence;
-mod orphan_recovery;
+mod creation_ingress;
+mod creative_studio_session;
+mod product_agent;
+mod turn_delivery;
 pub mod model_failover;
-pub mod relay_error_code;
-pub mod response_middleware;
-pub mod routes;
-pub mod routes_aux;
-pub mod runtime_state;
-pub mod service;
-mod service_ops;
-pub mod skill_resolver;
-pub mod skill_snapshot;
-pub mod state;
-pub mod stream_relay;
-pub mod runtime_options;
-pub mod terminal_proof;
-
-pub use response_middleware::{
-    CronCommand, CronCommandResult, CronCreateParams, CronUpdateParams, ICronService, MessageMiddleware,
-    MiddlewareResult, detect_cron_commands, has_cron_commands, strip_cron_commands, strip_think_tags,
-};
-pub use failover_seam::FailoverSwitch;
-pub use agent_execution_port::AgentExecutionConversationPort;
 pub use canonical_session_owner::{
     AgentMutationReceipt, AgentTurnReceipt, CanonicalAgentSessionOwner, OpenAgentSession,
     PreparedAgentSessionDelete,
 };
-pub use execution_conversation_boundary::{
-    ConversationExecutionProjection, ExecutionConversationBoundary, NoExecutionConversationBoundary,
-    RepositoryExecutionConversationBoundary,
+pub use creation_ingress::{
+    ConversationCreationPage, ConversationCreationResponse, SubmitConversationCreation,
+    import_creation_files,
 };
-pub use routes::{conversation_routes, creative_studio_agent_session_routes};
-pub use routes_aux::conversation_ops_routes;
-pub use service::{
-    ConversationService, DELIVERY_NOTIFY_ORIGIN, DeliveryNotifyRegistration,
-    IdempotentMessageDelivery,
-    BackgroundTaskRegistrar, PublicTurnDeliveryState, TurnCompletionObserver,
+pub use creative_studio_session::{
+    CreativeStudioAgentHistoryMessage, CreativeStudioAgentHistoryRole,
+    CreativeStudioAgentHistoryStatus, CreativeStudioAgentModelRef,
+    CreativeStudioCanvasAgentSessionBindingResponse,
+    ResolveCreativeStudioCanvasAgentSessionRequest,
+    ResolveCreativeStudioCanvasAgentSessionResponse,
+};
+pub use product_agent::{
     ProductAgentResolution, ProductAgentSnapshotResolver, ProductAgentTarget,
 };
-pub use state::ConversationRouterState;
+pub use turn_delivery::{
+    BackgroundTaskRegistrar, IdempotentMessageDelivery, PublicTurnDeliveryState,
+};

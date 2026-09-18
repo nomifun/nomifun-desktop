@@ -959,45 +959,6 @@ pub fn check_platform_availability(
     Ok(())
 }
 
-/// The C7 target inventory, expressed as declarative registration specs.
-///
-/// This is intentionally kept in the shared support crate as a reviewable
-/// inventory table. Owning wave crates may expose narrower slices of it, while
-/// the application composition root can validate the complete set without
-/// learning domain implementation details.
-pub fn c7_package_specs() -> Vec<PackageSpec> {
-    vec![
-        PackageSpec {
-            id: "nomifun.notification",
-            display_name: "Notifications",
-            description: "Consume canonical Session and domain events.",
-            mount_id: "domain-notification",
-            capabilities: &NOTIFICATION_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
-            id: "nomifun.remote-ingress",
-            display_name: "Remote Ingress",
-            description: "Expose transport-only RemoteBinding ingress.",
-            mount_id: "domain-remote-ingress",
-            capabilities: &REMOTE_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-    ]
-}
-
-const NOTIFICATION_CAPABILITIES: [CapabilitySpec; 2] = [
-    CapabilitySpec::event_consumer("notification.webhook"),
-    CapabilitySpec::event_consumer("notification.desktop"),
-];
-const REMOTE_CAPABILITIES: [CapabilitySpec; 5] = [
-    CapabilitySpec::transport("remote.mcp"),
-    CapabilitySpec::transport("remote.rest"),
-    CapabilitySpec::transport("ingress.web"),
-    CapabilitySpec::transport("ingress.mobile"),
-    CapabilitySpec::transport("ingress.channel"),
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1030,37 +991,6 @@ mod tests {
                 .capabilities
                 .len(),
             2
-        );
-    }
-
-    #[test]
-    fn non_tool_contributions_never_publish_actions_or_handlers() {
-        let registrations = registrations(c7_package_specs()).unwrap();
-        let mut tool_count = 0;
-        for registration in &registrations {
-            for capability in &registration
-                .metadata
-                .manifest
-                .payload
-                .contributions
-                .capabilities
-            {
-                if capability.kind == CapabilityKind::Tool {
-                    tool_count += 1;
-                    assert_eq!(capability.contributions.actions.len(), 1);
-                    assert!(registration.handler_ids().contains(&capability.id));
-                } else {
-                    assert!(capability.contributions.actions.is_empty());
-                    assert!(!registration.handler_ids().contains(&capability.id));
-                }
-            }
-        }
-        assert_eq!(
-            registrations
-                .iter()
-                .flat_map(|registration| registration.handler_ids())
-                .count(),
-            tool_count
         );
     }
 
@@ -1108,62 +1038,6 @@ mod tests {
             Err(KernelError::CapabilityUnavailableOnSurface { .. })
         ));
         assert!(!capability_available_on_host("", "desktop", &surface_only));
-    }
-
-    #[test]
-    fn canonical_platform_inventory_contains_no_replaced_device_authoring_projection() {
-        let specs = c7_package_specs();
-        assert!(specs.iter().all(|spec| {
-            !matches!(spec.id, "nomifun.computer-a11y" | "nomifun.robot")
-                && spec.capabilities.iter().all(|capability| {
-                    !capability.id.starts_with("computer.")
-                        && !capability.id.starts_with("robot.")
-                        && capability.id != "a11y.observe"
-                })
-        }));
-    }
-
-    #[test]
-    fn support_inventory_has_unique_packages_and_capabilities() {
-        let specs = c7_package_specs();
-        let expected = specs.len();
-        let registrations = registrations(specs).unwrap();
-        assert_eq!(registrations.len(), expected);
-        validate_inventory(&registrations).unwrap();
-        let capability_ids = registrations
-            .iter()
-            .flat_map(|registration| {
-                registration
-                    .metadata
-                    .manifest
-                    .payload
-                    .contributions
-                    .capabilities
-                    .iter()
-                    .map(|capability| capability.id.clone())
-            })
-            .collect::<BTreeSet<_>>();
-        let expected_capability_ids = c7_package_specs()
-            .into_iter()
-            .flat_map(|package| package.capabilities)
-            .map(|capability| CapabilityId::from(capability.id))
-            .collect::<BTreeSet<_>>();
-        assert_eq!(capability_ids, expected_capability_ids);
-    }
-
-    #[test]
-    fn canonical_registration_metadata_is_repeatable() {
-        let first = registrations(c7_package_specs()).unwrap();
-        let second = registrations(c7_package_specs()).unwrap();
-        let first_metadata = first
-            .iter()
-            .map(|registration| registration.metadata.clone())
-            .collect::<Vec<_>>();
-        let second_metadata = second
-            .iter()
-            .map(|registration| registration.metadata.clone())
-            .collect::<Vec<_>>();
-        assert_eq!(first_metadata, second_metadata);
     }
 
     #[test]

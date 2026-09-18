@@ -14,10 +14,10 @@ mod conversation;
 mod cron;
 mod custom_agent;
 mod file;
-mod idmm;
 mod knowledge;
 mod lifecycle;
 mod managed_model;
+mod model_failover;
 mod mcp;
 mod mcp_bridge;
 mod model_capability;
@@ -120,12 +120,6 @@ pub use file::{
     SnapshotMode, SnapshotStageRequest, SnapshotWorkspaceRequest, WorkspaceFlatFileResponse,
     WorkspaceOfficeWatchRequest, WriteFileRequest, ZipFileEntry, ZipRequest,
 };
-pub use idmm::{
-    BlockedBehavior, BudgetConfig, BypassModelRef, CategoryMode, CategoryRules, DecisionStrategy,
-    DecisionWatchConfig, FaultWatchConfig, IdmmConfig, IdmmRunState, IdmmState, IdmmTargetKind,
-    InterventionRecord, ModelFailoverConfig, OpenQuestionRule, OptionRule, ScanScope,
-    SetIdmmRequest, Tendency, WakeStrategy, WatchBase, WatchTier,
-};
 pub use knowledge::{
     CreateKnowledgeTagRequest, KnowledgeEmbeddingConfig, KnowledgeEntry, KnowledgeEntryKind,
     KnowledgeEntryCapabilities, KnowledgeEntryOrigin, KnowledgeEntrySourceInfo,
@@ -145,6 +139,7 @@ pub use managed_model::{
     ManagedModelHealthResult, ManagedModelHealthStatus, ManagedModelServiceAvailability,
     ManagedModelServiceStatus, SetManagedModelEnabledRequest, SetManagedModelServiceEnabledRequest,
 };
+pub use model_failover::ModelFailoverConfig;
 pub use mcp::{
     BatchImportMcpServersRequest, CreateMcpServerRequest, DetectedMcpServerEntry,
     DetectedMcpServerResponse, ImportMcpServerRequest, McpAuthMethod, McpConnectionTestErrorCode,

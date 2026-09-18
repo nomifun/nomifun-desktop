@@ -880,9 +880,9 @@ impl NomiCoreChannelWave4Owner {
 
     /// Activate one non-Tool Channel contribution for an exact Nomi Session.
     ///
-    /// `channel.receive` proves the bound bot is live on the process message
-    /// loop; `channel.pairing` reads the real pairing owner; and
-    /// `channel.group_policy` reads under the same per-bot fence used by
+    /// `channel.transport/receive` proves the bound bot is live on the process message
+    /// loop; `channel.transport/pairing` reads the real pairing owner; and
+    /// `channel.transport/group_policy` reads under the same per-bot fence used by
     /// inbound admission and policy writes.
     pub(crate) async fn activate_lifecycle(
         &self,

@@ -20,7 +20,7 @@ afterEach(() => { cleanup(); restores.splice(0).reverse().forEach((restore) => r
 
 test.each([true, false])('MCP uses its own shared-session update and honors Agent capability (enabled=%s)', async (enabled) => {
   const id = '019b0000-0000-7000-8000-000000000003';
-  const conversation = { id: '019b0000-0000-7000-8000-000000000002', extra: { mcp_server_ids: [] }, agent_snapshot: { enabled_capabilities: enabled ? ['mcp.connect'] : [] } } as any;
+  const conversation = { id: '019b0000-0000-7000-8000-000000000002', extra: { mcp_server_ids: [] }, agent_snapshot: { enabled_capabilities: enabled ? [`nomi.mcp.v1.${'a'.repeat(64)}`] : [] } } as any;
   const available = spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue([]);
   const auto = spyOn(ipcBridge.fs.listBuiltinAutoSkills, 'invoke').mockResolvedValue([]);
   const mcp = spyOn(mcpCatalog, 'ensureBackendMcpCatalog').mockResolvedValue({ allServers: [{ mcp_server_id: id, name: 'Shared MCP', enabled: true, builtin: false, tools: [] }], enabledServers: [] } as any);
@@ -54,7 +54,7 @@ test('uses the shared popup and saves companion skill intent without session ove
     const [profile, setProfile] = useState({ companion_id: 'companion-rail', skills: { enabled: ['uninstalled-skill'], disabled_auto: [] as string[] } });
     const location = useLocation();
     return <><output>{location.pathname}{location.search}</output>
-      <SessionCapabilityComposerLayout picker={<CompanionCapabilityControls conversation={{ id: '019b0000-0000-7000-8000-000000000002', extra: {}, agent_snapshot: { enabled_capabilities: ['mcp.connect'] } } as any} companion={{ profile, patchCompanion: async (patch: any) => {
+      <SessionCapabilityComposerLayout picker={<CompanionCapabilityControls conversation={{ id: '019b0000-0000-7000-8000-000000000002', extra: {}, agent_snapshot: { enabled_capabilities: [`nomi.mcp.v1.${'a'.repeat(64)}`] } } as any} companion={{ profile, patchCompanion: async (patch: any) => {
         patches.push(patch); setProfile((previous) => ({ ...previous, ...patch }));
       } } as any} />}><textarea aria-label='Message' /></SessionCapabilityComposerLayout>
     </>;

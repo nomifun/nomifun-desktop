@@ -993,21 +993,6 @@ pub fn resolve_canonical_schema(
     ))
 }
 
-pub fn canonical_capability_ids_for_family(family: &str) -> BTreeSet<CapabilityId> {
-    let ids: &[&str] = match family {
-        "research.core" | "web.fetch" | "web.search" => &[WEB_RESEARCH_MODULE_ID],
-        "knowledge.read" | "knowledge.search" => &[KNOWLEDGE_MODULE_ID],
-        "memory.read" => &[PROJECT_MEMORY_MODULE_ID, COMPANION_MEMORY_MODULE_ID],
-        _ => &[],
-    };
-    ids.iter().map(|id| CapabilityId::from(*id)).collect()
-}
-
-pub fn canonical_capability_id(family: &str) -> Option<CapabilityId> {
-    let ids = canonical_capability_ids_for_family(family);
-    (ids.len() == 1).then(|| ids.into_iter().next().expect("length checked"))
-}
-
 pub fn typed_resource_descriptors() -> Vec<TypedResourceDescriptor> {
     vec![
         descriptor(
@@ -1566,19 +1551,6 @@ mod tests {
     #[test]
     fn target_inventory_contains_only_wave1_modules() {
         assert_eq!(capability_ids().len(), 4);
-        for retired in [
-            "web.search",
-            "web.fetch",
-            "citation.render",
-            "nomi_local_websearch",
-            "session.attachments.read",
-            "knowledge.embedding",
-            "knowledge.rerank",
-            "memory.project.distill",
-            "memory.companion.merge",
-        ] {
-            assert!(!capability_ids().contains(&CapabilityId::from(retired)));
-        }
         assert_eq!(action_ids(WEB_RESEARCH_MODULE_ID).len(), 2);
         assert_eq!(action_ids(KNOWLEDGE_MODULE_ID).len(), 4);
         assert_eq!(action_ids(PROJECT_MEMORY_MODULE_ID).len(), 2);
