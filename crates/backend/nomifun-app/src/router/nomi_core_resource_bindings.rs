@@ -33,6 +33,7 @@ pub(crate) const MANAGED_PROCESS_SESSION_RESOURCE_ID: &str = "managed-process-se
 pub(crate) const MANAGED_TERMINAL_RESOURCE_ID: &str = "managed-terminal";
 pub(crate) const MANAGED_BROWSER_RESOURCE_ID: &str = "managed-browser";
 pub(crate) const ATTACHED_CHROME_RESOURCE_ID: &str = "attached-chrome";
+pub(crate) const LOCAL_COMPUTER_RESOURCE_ID: &str = "local-desktop";
 pub(crate) const INSTALLATION_SCHEDULER_RESOURCE_ID: &str = "installation-scheduler";
 
 const MAX_RESOURCE_SELECTIONS: usize = 32;
@@ -505,7 +506,7 @@ fn validate_selection_field(
     Ok(())
 }
 
-const SUPPORTED_RESOURCE_KINDS: [&str; 17] = [
+const SUPPORTED_RESOURCE_KINDS: [&str; 18] = [
     "workspace",
     "knowledge_base",
     "project_memory",
@@ -522,6 +523,7 @@ const SUPPORTED_RESOURCE_KINDS: [&str; 17] = [
     "plugin",
     "ssh_host",
     "browser",
+    "computer",
     "scheduler",
 ];
 
@@ -541,6 +543,7 @@ fn required_operations(
             .contains(&capability.as_str())
             || capability == nomifun_agent_domain_wave2::SSH_MODULE_ID
             || capability == nomifun_agent_domain_wave2::BROWSER_MODULE_ID
+            || capability == nomifun_agent_domain_wave2::COMPUTER_MODULE_ID
         {
             let actions = action_allowlists.get(capability).ok_or_else(|| {
                 ResourceSelectionResolutionError::new(
@@ -678,6 +681,7 @@ fn required_operations(
             )
         } else if nomifun_agent_domain_wave4::CONVERSATION_MODULE_IDS
             .contains(&capability.as_str())
+            || capability == nomifun_agent_domain_wave4::ROBOT_MODULE_ID
         {
             match capability.as_str() {
                 nomifun_agent_domain_wave4::CHANNEL_MESSAGING_MODULE_ID => {
@@ -738,11 +742,6 @@ fn required_operations(
                 grant("mcp_server", "connect");
                 grant("mcp_server", "invoke");
             }
-            "robot.link" | "robot.device_tools" => grant("robot", "link"),
-            "robot.audio" => grant("robot", "audio"),
-            "robot.vision" => grant("robot", "vision"),
-            "robot.display" => grant("robot", "display"),
-            "robot.motion" => grant("robot", "motion"),
             _ => {}
         }
     }
@@ -789,6 +788,7 @@ impl NomiCoreResourceAuthority for ProductResourceAuthority {
             "project_memory" => self.resolve_project_memory(&request),
             "scheduler" => self.resolve_scheduler(&request),
             "browser" => self.resolve_browser(&request),
+            "computer" => self.resolve_computer(&request),
             "ssh_host" => self.resolve_ssh(request).await,
             "knowledge_base" => self.resolve_knowledge(request).await,
             "companion" | "companion_memory" => self.resolve_companion(request).await,
@@ -896,6 +896,18 @@ impl ProductResourceAuthority {
             INSTALLATION_SCHEDULER_RESOURCE_ID,
             &["read", "write", "delete"],
             BTreeMap::new(),
+        )
+    }
+
+    fn resolve_computer(
+        &self,
+        request: &ResourceAuthorityRequest,
+    ) -> Result<ServerResolvedResource, ResourceSelectionResolutionError> {
+        self.fixed(
+            request,
+            LOCAL_COMPUTER_RESOURCE_ID,
+            &["observe", "input", "launch"],
+            BTreeMap::from([("scope".to_owned(), "local_desktop".to_owned())]),
         )
     }
 
@@ -1252,9 +1264,8 @@ impl ProductResourceAuthority {
         Ok(ServerResolvedResource {
             resource_id: robot.robot_id,
             allowed_operations: BTreeSet::from([
-                "audio".to_owned(),
+                "device".to_owned(),
                 "display".to_owned(),
-                "link".to_owned(),
                 "motion".to_owned(),
                 "vision".to_owned(),
             ]),
@@ -1800,12 +1811,13 @@ mod tests {
             nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID.into(),
             nomifun_agent_domain_wave2::SSH_MODULE_ID.into(),
             nomifun_agent_domain_wave2::BROWSER_MODULE_ID.into(),
+            nomifun_agent_domain_wave2::COMPUTER_MODULE_ID.into(),
             nomifun_agent_domain_wave5::AUTOMATION_SCHEDULE_MODULE_ID.into(),
             mcp_tool,
             "companion".into(),
             "companion.memory".into(),
             "channel.messaging".into(),
-            "robot.link".into(),
+            nomifun_agent_domain_wave4::ROBOT_MODULE_ID.into(),
             "customer.service".into(),
             "creative.workshop".into(),
             "creation.media".into(),
@@ -1827,6 +1839,10 @@ mod tests {
             (
                 nomifun_agent_domain_wave2::BROWSER_MODULE_ID.into(),
                 BTreeSet::from([ActionId::from("browser/observe")]),
+            ),
+            (
+                nomifun_agent_domain_wave2::COMPUTER_MODULE_ID.into(),
+                BTreeSet::from([ActionId::from("computer/observe")]),
             ),
             (
                 nomifun_agent_domain_wave5::AUTOMATION_SCHEDULE_MODULE_ID.into(),
@@ -1853,6 +1869,12 @@ mod tests {
             (
                 "channel.messaging".into(),
                 BTreeSet::from([ActionId::from("channel.messaging/reply")]),
+            ),
+            (
+                nomifun_agent_domain_wave4::ROBOT_MODULE_ID.into(),
+                BTreeSet::from([ActionId::from(
+                    nomifun_agent_domain_wave4::ROBOT_VISION_ACTION_ID,
+                )]),
             ),
             (
                 "customer.service".into(),

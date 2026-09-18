@@ -18,20 +18,17 @@ const capability = {
 };
 
 describe('AgentPreset draft model', () => {
-  test('runtime choice is versioned Agent draft data and survives cloning', () => {
+  test('draft cloning preserves authoring data without a Runtime selector', () => {
     const saved: AgentPresetDraft = {
       preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000001'),
       display_name: 'My Agent', document: createEmptyAgentPresetDocument(),
     };
     const draft = cloneDraft(saved);
-    draft.document.runtime_engine = {
-      selector: { selection: 'exact', family_id: 'customer.runtime', build_id: 'v1', build_digest: 'a'.repeat(64) },
-      profile: 'workflow',
-    };
+    draft.document.persona = 'Careful collaborator';
     expect(isDraftDirty(saved, draft)).toBe(true);
-    expect(cloneDraft(draft).document.runtime_engine).toEqual(draft.document.runtime_engine);
-    expect(saved.document.runtime_engine).toBeUndefined();
-    delete draft.document.runtime_engine;
+    expect(cloneDraft(draft).document.persona).toBe('Careful collaborator');
+    expect('runtime_engine' in draft.document).toBe(false);
+    draft.document.persona = '';
     expect(isDraftDirty(saved, draft)).toBe(false);
   });
   test('preserves a restricted action allowlist when enabling an existing capability', () => {

@@ -968,22 +968,6 @@ pub fn check_platform_availability(
 pub fn c7_package_specs() -> Vec<PackageSpec> {
     vec![
         PackageSpec {
-            id: "nomifun.computer-a11y",
-            display_name: "Computer Accessibility",
-            description: "Use the process-wide desktop accessibility resource.",
-            mount_id: "domain-computer-a11y",
-            capabilities: &COMPUTER_CAPABILITIES,
-            supported_surfaces: &["desktop"],
-        },
-        PackageSpec {
-            id: "nomifun.robot",
-            display_name: "Robot",
-            description: "Connect to paired robot devices and media.",
-            mount_id: "domain-robot",
-            capabilities: &ROBOT_CAPABILITIES,
-            supported_surfaces: &["desktop", "headless"],
-        },
-        PackageSpec {
             id: "nomifun.notification",
             display_name: "Notifications",
             description: "Consume canonical Session and domain events.",
@@ -1002,22 +986,6 @@ pub fn c7_package_specs() -> Vec<PackageSpec> {
     ]
 }
 
-const COMPUTER: &[&str] = &["computer"];
-const ROBOT: &[&str] = &["robot"];
-const COMPUTER_CAPABILITIES: [CapabilitySpec; 4] = [
-    CapabilitySpec::context("computer.observe"),
-    CapabilitySpec::tool("computer.input", EffectClass::Physical, COMPUTER),
-    CapabilitySpec::tool("computer.launch", EffectClass::ExecuteLocal, COMPUTER),
-    CapabilitySpec::context("a11y.observe"),
-];
-const ROBOT_CAPABILITIES: [CapabilitySpec; 6] = [
-    CapabilitySpec::resource_provider("robot.link", ROBOT),
-    CapabilitySpec::background("robot.audio"),
-    CapabilitySpec::context("robot.vision"),
-    CapabilitySpec::tool("robot.display", EffectClass::Physical, ROBOT),
-    CapabilitySpec::tool("robot.motion", EffectClass::Physical, ROBOT),
-    CapabilitySpec::tool("robot.device_tools", EffectClass::Physical, ROBOT),
-];
 const NOTIFICATION_CAPABILITIES: [CapabilitySpec; 2] = [
     CapabilitySpec::event_consumer("notification.webhook"),
     CapabilitySpec::event_consumer("notification.desktop"),
@@ -1143,28 +1111,16 @@ mod tests {
     }
 
     #[test]
-    fn canonical_platform_inventory_matches_release_boundaries() {
+    fn canonical_platform_inventory_contains_no_replaced_device_authoring_projection() {
         let specs = c7_package_specs();
-        let computer = specs
-            .iter()
-            .find(|spec| spec.id == "nomifun.computer-a11y")
-            .unwrap();
-        let computer_capability = computer
-            .capabilities
-            .iter()
-            .find(|capability| capability.id == "computer.input")
-            .unwrap();
-        // Computer's canonical capability is also source-neutral. Its
-        // canonical surface boundary is carried by the package; concrete
-        // target availability belongs to the selected Provider.
-        assert_eq!(computer.supported_surfaces, &["desktop"]);
-        assert!(computer_capability.host_targets.is_empty());
-        assert!(computer_capability.host_surfaces.is_empty());
-        assert!(capability_available_on_host(
-            "x86_64-pc-windows-msvc",
-            "desktop",
-            computer_capability,
-        ));
+        assert!(specs.iter().all(|spec| {
+            !matches!(spec.id, "nomifun.computer-a11y" | "nomifun.robot")
+                && spec.capabilities.iter().all(|capability| {
+                    !capability.id.starts_with("computer.")
+                        && !capability.id.starts_with("robot.")
+                        && capability.id != "a11y.observe"
+                })
+        }));
     }
 
     #[test]

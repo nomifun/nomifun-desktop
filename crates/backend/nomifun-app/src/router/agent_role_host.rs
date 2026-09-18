@@ -20,14 +20,49 @@ use nomifun_agent_domain_wave2::{
     Wave2HostPort, Wave2HostPortError, Wave2HostRequest, Wave2TypedCapabilityOperation,
     Wave2TypedHostRequest,
 };
-#[cfg(feature = "computer-use")]
-use nomifun_agent_domain_wave2::{
-    Wave2ContextCapabilityOperation, Wave2ContextHostPort, Wave2ContextHostRequest,
-};
-#[cfg(feature = "computer-use")]
-use nomifun_agent_kernel::ContextContributionResult;
 pub(crate) const COMPUTER_ROLE_ID: &str = "system.computer_use";
 pub(crate) const COMPUTER_RESOURCE_KIND: &str = "computer";
+
+/// Select the exact bundled native Computer provider for this desktop boot.
+/// OS permission readiness is a separate live Resource fact and may narrow
+/// execution, but it must not remove the provider contract from compilation.
+#[cfg(feature = "computer-use")]
+pub(crate) fn installation_binding(
+    registry: &nomifun_agent_kernel::MaterializedRegistry,
+) -> anyhow::Result<
+    std::collections::BTreeMap<
+        nomifun_agent_contracts::ExecutionRoleId,
+        nomifun_agent_contracts::InstallationRoleBinding,
+    >,
+> {
+    use nomifun_agent_contracts::{
+        InstallationRoleBinding, PluginSourceKind, RoleProviderSelection,
+    };
+    let role_id = nomifun_agent_domain_wave2::COMPUTER_EXECUTION_ROLE_ID.into();
+    let mount_id = nomifun_agent_domain_wave2::COMPUTER_A11Y_MOUNT_ID.into();
+    let installed = registry.role_provider(&role_id, &mount_id).ok_or_else(|| {
+        anyhow::anyhow!("Native Computer Role Provider is missing from the host registry")
+    })?;
+    anyhow::ensure!(
+        installed.provider.role.key.role_id == role_id,
+        "Native Computer Provider has the wrong Role contract"
+    );
+    anyhow::ensure!(
+        installed.source.source_kind == PluginSourceKind::Bundled,
+        "Native Computer Provider must be bundled"
+    );
+    Ok(std::collections::BTreeMap::from([(
+        role_id,
+        InstallationRoleBinding {
+            selection: RoleProviderSelection {
+                role: installed.provider.role.clone(),
+                provider_mount_id: installed.provider.mount_id.clone(),
+            },
+            binding_version: 1,
+            updated_at_ms: 0,
+        },
+    )]))
+}
 
 #[async_trait::async_trait]
 #[cfg(feature = "computer-use")]
@@ -272,23 +307,42 @@ mod computer {
     use tokio::sync::Mutex;
 
     use nomi_computer::tool::ComputerTool;
-    use nomi_tools::Tool;
     use nomi_types::tool::ToolResult;
 
     #[async_trait::async_trait]
     pub(crate) trait ComputerToolPort: Send + Sync {
-        async fn execute(&self, input: serde_json::Value) -> ToolResult;
+        async fn execute_authorized(
+            &self,
+            action_id: &str,
+            input: serde_json::Value,
+        ) -> ToolResult;
     }
 
     #[async_trait::async_trait]
     impl ComputerToolPort for ComputerTool {
-        async fn execute(&self, input: serde_json::Value) -> ToolResult {
-            Tool::execute(self, input).await
+        async fn execute_authorized(
+            &self,
+            action_id: &str,
+            input: serde_json::Value,
+        ) -> ToolResult {
+            ComputerTool::execute_authorized(self, action_id, input).await
         }
     }
 
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub(crate) struct ComputerObserve;
+    #[derive(Clone, Debug, PartialEq)]
+    pub(crate) struct ComputerObserve {
+        pub action_id: &'static str,
+        pub input: serde_json::Value,
+    }
+
+    impl ComputerObserve {
+        pub(crate) fn accessibility() -> Self {
+            Self {
+                action_id: nomi_computer::capability::COMPUTER_A11Y_OBSERVE_ACTION_ID,
+                input: serde_json::json!({"action":"observe"}),
+            }
+        }
+    }
 
     #[derive(Clone, Debug, PartialEq)]
     pub(crate) struct ComputerInput {
@@ -308,6 +362,13 @@ mod computer {
         Observe(ComputerObserve),
         Input(ComputerInput),
         Launch(ComputerLaunch),
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ComputerObservationKind {
+        Screenshot,
+        Accessibility,
+        WindowList,
     }
 
     impl ComputerRoleOperation {
@@ -356,6 +417,7 @@ mod computer {
         expected_registry_generation: u64,
         target_lock: Mutex<()>,
         observation_generation: AtomicU64,
+        observation_kind: std::sync::Mutex<Option<ComputerObservationKind>>,
     }
 
     impl ComputerRoleHost {
@@ -390,7 +452,61 @@ mod computer {
                 expected_registry_generation,
                 target_lock: Mutex::new(()),
                 observation_generation: AtomicU64::new(0),
+                observation_kind: std::sync::Mutex::new(None),
             }
+        }
+
+        fn record_observation(&self, kind: ComputerObservationKind) -> u64 {
+            let generation = self
+                .observation_generation
+                .fetch_add(1, Ordering::AcqRel)
+                .saturating_add(1);
+            *self
+                .observation_kind
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(kind);
+            generation
+        }
+
+        fn invalidate_observation(&self) {
+            self.observation_generation.store(0, Ordering::Release);
+            *self
+                .observation_kind
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+
+        fn validate_input_observation(
+            &self,
+            action: &str,
+            parameters: &serde_json::Map<String, serde_json::Value>,
+            expected_generation: u64,
+        ) -> Result<(), RoleHostError> {
+            let current = self.observation_generation.load(Ordering::Acquire);
+            let kind = *self
+                .observation_kind
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if current == 0 || expected_generation != current {
+                return Err(RoleHostError::StaleObservationGeneration);
+            }
+            let compatible = match action {
+                "click_element" | "right_click_element" | "double_click_element"
+                | "set_element_value" => kind == Some(ComputerObservationKind::Accessibility),
+                "left_click" | "right_click" | "middle_click" | "double_click"
+                | "triple_click" | "mouse_move" | "left_click_drag" => {
+                    kind == Some(ComputerObservationKind::Screenshot)
+                }
+                "focus_window" => kind == Some(ComputerObservationKind::WindowList),
+                "scroll" if parameters.contains_key("x") || parameters.contains_key("y") => {
+                    kind == Some(ComputerObservationKind::Screenshot)
+                }
+                "type" | "key" | "scroll" => kind.is_some(),
+                _ => false,
+            };
+            compatible
+                .then_some(())
+                .ok_or(RoleHostError::StaleObservationGeneration)
         }
 
         pub(crate) async fn invoke(
@@ -418,15 +534,43 @@ mod computer {
 
             let _guard = self.target_lock.lock().await;
             match operation {
-                ComputerRoleOperation::Observe(_) => {
-                    let result = self.tool.execute(serde_json::json!({ "action": "observe" })).await;
+                ComputerRoleOperation::Observe(request) => {
+                    let input = require_object(request.input)?;
+                    reject_computer_control_fields(&input)?;
+                    let native_action = input
+                        .get("action")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or(RoleHostError::InvalidContext("computer observation action"))?;
+                    let observation_kind = match (request.action_id, native_action) {
+                        (nomi_computer::capability::COMPUTER_A11Y_OBSERVE_ACTION_ID, "observe") => {
+                            Some(ComputerObservationKind::Accessibility)
+                        }
+                        (nomi_computer::capability::COMPUTER_OBSERVE_ACTION_ID, "screenshot") => {
+                            Some(ComputerObservationKind::Screenshot)
+                        }
+                        (nomi_computer::capability::COMPUTER_OBSERVE_ACTION_ID, "list_windows") => {
+                            Some(ComputerObservationKind::WindowList)
+                        }
+                        (nomi_computer::capability::COMPUTER_OBSERVE_ACTION_ID, "cursor_position") => None,
+                        (nomi_computer::capability::COMPUTER_OBSERVE_ACTION_ID, "wait") => {
+                            self.invalidate_observation();
+                            None
+                        }
+                        _ => return Err(RoleHostError::InvalidContext("computer observation action")),
+                    };
+                    let result = self
+                        .tool
+                        .execute_authorized(
+                            request.action_id,
+                            serde_json::Value::Object(input),
+                        )
+                        .await;
                     if result.is_error {
                         return Err(RoleHostError::ProviderFailure(result.content));
                     }
-                    let generation = self
-                        .observation_generation
-                        .fetch_add(1, Ordering::AcqRel)
-                        .saturating_add(1);
+                    let generation = observation_kind
+                        .map(|kind| self.record_observation(kind))
+                        .unwrap_or(0);
                     Ok(ComputerRoleResult {
                         generation,
                         result: tool_result_value(result),
@@ -436,12 +580,13 @@ mod computer {
                     if request.action.trim().is_empty() {
                         return Err(RoleHostError::InvalidContext("computer action"));
                     }
-                    let current = self.observation_generation.load(Ordering::Acquire);
-                    if current == 0 || request.expected_generation != current {
-                        return Err(RoleHostError::StaleObservationGeneration);
-                    }
                     let mut input = require_object(request.parameters)?;
                     reject_computer_control_fields(&input)?;
+                    self.validate_input_observation(
+                        &request.action,
+                        &input,
+                        request.expected_generation,
+                    )?;
                     if !matches!(
                         request.action.as_str(),
                         "click_element"
@@ -459,29 +604,31 @@ mod computer {
                             | "key"
                             | "scroll"
                             | "focus_window"
-                            | "wait"
                     ) {
                         return Err(RoleHostError::InvalidContext(
-                            "unsupported computer.input action",
+                            "unsupported computer/input native operation",
                         ));
                     }
                     input.insert(
                         "action".to_owned(),
                         serde_json::Value::String(request.action),
                     );
+                    // Input may partially change the desktop even if the OS
+                    // reports an error. Re-observe before any subsequent
+                    // action; never mint authority from an effect result.
+                    self.invalidate_observation();
                     let result = self
                         .tool
-                        .execute(serde_json::Value::Object(input))
+                        .execute_authorized(
+                            nomi_computer::capability::COMPUTER_INPUT_ACTION_ID,
+                            serde_json::Value::Object(input),
+                        )
                         .await;
                     if result.is_error {
                         return Err(RoleHostError::ProviderFailure(result.content));
                     }
-                    let generation = self
-                        .observation_generation
-                        .fetch_add(1, Ordering::AcqRel)
-                        .saturating_add(1);
                     Ok(ComputerRoleResult {
-                        generation,
+                        generation: 0,
                         result: tool_result_value(result),
                     })
                 }
@@ -489,23 +636,23 @@ mod computer {
                     if request.target.trim().is_empty() {
                         return Err(RoleHostError::InvalidContext("computer launch target"));
                     }
+                    self.invalidate_observation();
                     let result = self
                         .tool
-                        .execute(serde_json::json!({
-                            "action": "launch",
-                            "target": request.target,
-                            "app": request.app,
-                        }))
+                        .execute_authorized(
+                            nomi_computer::capability::COMPUTER_LAUNCH_ACTION_ID,
+                            serde_json::json!({
+                                "action": "launch",
+                                "target": request.target,
+                                "app": request.app,
+                            }),
+                        )
                         .await;
                     if result.is_error {
                         return Err(RoleHostError::ProviderFailure(result.content));
                     }
-                    let generation = self
-                        .observation_generation
-                        .fetch_add(1, Ordering::AcqRel)
-                        .saturating_add(1);
                     Ok(ComputerRoleResult {
-                        generation,
+                        generation: 0,
                         result: tool_result_value(result),
                     })
                 }
@@ -524,14 +671,19 @@ pub(crate) use computer::{
 #[cfg(feature = "computer-use")]
 pub(crate) struct ComputerRoleInvoker {
     tool: Arc<nomi_computer::tool::ComputerTool>,
+    effect_store: nomifun_agent_session::AgentSessionStore,
     hosts: tokio::sync::Mutex<std::collections::HashMap<String, Arc<ComputerRoleHost>>>,
 }
 
 #[cfg(feature = "computer-use")]
 impl ComputerRoleInvoker {
-    pub(crate) fn new(tool: Arc<nomi_computer::tool::ComputerTool>) -> Self {
+    pub(crate) fn new(
+        tool: Arc<nomi_computer::tool::ComputerTool>,
+        effect_store: nomifun_agent_session::AgentSessionStore,
+    ) -> Self {
         Self {
             tool,
+            effect_store,
             hosts: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -598,7 +750,35 @@ impl RoleHostInvoker for ComputerRoleInvoker {
                 resource.resource_id.as_ref().to_owned(),
             )
             .await;
+        let effect_input = match &request.operation {
+            Wave2TypedCapabilityOperation::ComputerInput { input }
+            | Wave2TypedCapabilityOperation::ComputerLaunch { input } => Some(input.clone()),
+            _ => None,
+        };
+        let effect_strategy = match &request.operation {
+            Wave2TypedCapabilityOperation::ComputerInput { .. } => Some(
+                nomifun_agent_session::EffectStrategy::ExternalUncertainEffect,
+            ),
+            Wave2TypedCapabilityOperation::ComputerLaunch { .. } => {
+                Some(nomifun_agent_session::EffectStrategy::ManagedEffect)
+            }
+            _ => None,
+        };
+        let effect_context = request.context.clone();
+        let effect_binding = resource.clone();
         let operation = match request.operation {
+            Wave2TypedCapabilityOperation::ComputerObserve { input } => {
+                ComputerRoleOperation::Observe(ComputerObserve {
+                    action_id: nomi_computer::capability::COMPUTER_OBSERVE_ACTION_ID,
+                    input: input.0,
+                })
+            }
+            Wave2TypedCapabilityOperation::ComputerA11yObserve { input } => {
+                ComputerRoleOperation::Observe(ComputerObserve {
+                    action_id: nomi_computer::capability::COMPUTER_A11Y_OBSERVE_ACTION_ID,
+                    input: input.0,
+                })
+            }
             Wave2TypedCapabilityOperation::ComputerInput { input } => {
                 let mut object = require_object(input.0)?;
                 let action = object
@@ -617,6 +797,16 @@ impl RoleHostInvoker for ComputerRoleInvoker {
             }
             Wave2TypedCapabilityOperation::ComputerLaunch { input } => {
                 let mut object = require_object(input.0)?;
+                if object
+                    .remove("action")
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .as_deref()
+                    != Some("launch")
+                {
+                    return Err(RoleHostError::InvalidContext(
+                        "computer launch action",
+                    ));
+                }
                 let target = object
                     .remove("target")
                     .and_then(|value| value.as_str().map(str::to_owned))
@@ -632,7 +822,7 @@ impl RoleHostInvoker for ComputerRoleInvoker {
                 };
                 if !object.is_empty() {
                     return Err(RoleHostError::InvalidContext(
-                        "unsupported computer.launch field",
+                            "unsupported computer/launch field",
                     ));
                 }
                 ComputerRoleOperation::Launch(ComputerLaunch { target, app })
@@ -653,84 +843,56 @@ impl RoleHostInvoker for ComputerRoleInvoker {
             provider,
             resource_bindings: request.context.resource_bindings,
         };
-        let result = host.invoke(context, operation).await?;
-        Ok(StrictJsonValue(serde_json::json!({
+        let reservation = match (effect_input.as_ref(), effect_strategy) {
+            (Some(input), Some(strategy)) => match super::agent_wave2_host::begin_wave2_exclusive_effect(
+                &self.effect_store,
+                &effect_context,
+                &effect_binding,
+                input,
+                strategy,
+            )
+            .await
+            .map_err(|error| RoleHostError::ProviderFailure(error.to_string()))?
+            {
+                super::agent_wave2_host::Wave2EffectAdmission::Replay(result) => return Ok(result),
+                super::agent_wave2_host::Wave2EffectAdmission::Reserved(reservation) => {
+                    Some((reservation, strategy))
+                }
+            },
+            _ => None,
+        };
+        let result = match host.invoke(context, operation).await {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some((reservation, strategy)) = reservation.as_ref() {
+                    let effect_error = Wave2HostPortError::new(error.code(), error.to_string());
+                    let completion = if strategy.is_external_uncertain()
+                        && matches!(error, RoleHostError::ProviderFailure(_))
+                    {
+                        super::agent_wave2_host::Wave2EffectCompletion::Uncertain(&effect_error)
+                    } else {
+                        super::agent_wave2_host::Wave2EffectCompletion::Failed(&effect_error)
+                    };
+                    super::agent_wave2_host::finish_wave2_effect(reservation, completion)
+                        .await
+                        .map_err(|terminal| RoleHostError::ProviderFailure(terminal.to_string()))?;
+                }
+                return Err(error);
+            }
+        };
+        let output = StrictJsonValue(serde_json::json!({
             "generation": result.generation,
             "result": result.result
-        })))
-    }
-}
-
-#[cfg(feature = "computer-use")]
-impl Wave2ContextHostPort for ComputerRoleInvoker {
-    fn contribute<'a>(
-        &'a self,
-        request: Wave2ContextHostRequest,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<ContextContributionResult, Wave2HostPortError>,
-                > + Send
-                + 'a,
-        >,
-    > {
-        Box::pin(async move {
-            let context = request.context;
-            if context.role_provider.role.key.role_id.as_ref() != COMPUTER_ROLE_ID {
-                return Err(Wave2HostPortError::new(
-                    "ROLE_HOST_INVALID_CONTEXT",
-                    "computer context request has the wrong role",
-                ));
-            }
-            if !matches!(
-                request.operation,
-                Wave2ContextCapabilityOperation::ComputerObserve
-                    | Wave2ContextCapabilityOperation::A11yObserve
-            ) {
-                return Err(Wave2HostPortError::new(
-                    "ROLE_HOST_INVALID_CONTEXT",
-                    "computer provider received an unsupported context member",
-                ));
-            }
-            let binding = exact_resource(
-                &context.resource_bindings,
-                COMPUTER_RESOURCE_KIND,
-                &context.principal,
-                "observe",
+        }));
+        if let Some((reservation, _)) = reservation.as_ref() {
+            super::agent_wave2_host::finish_wave2_effect(
+                reservation,
+                super::agent_wave2_host::Wave2EffectCompletion::Succeeded(&output),
             )
-            .map_err(|error| Wave2HostPortError::new(error.code(), error.to_string()))?;
-            let host = self
-                .host_for(
-                    &context.agent_session_id,
-                    &context.resolved_snapshot_ref,
-                    context.registry_generation,
-                    context.role_provider.clone(),
-                    binding.resource_id.as_ref().to_owned(),
-                )
-                .await;
-            let role_context = RoleHostContext {
-                principal: context.principal,
-                runtime_instance_id: format!(
-                    "agent-session:{}",
-                    context.agent_session_id.as_ref()
-                ),
-                owner_lease_id: format!("agent-session:{}", context.agent_session_id.as_ref()),
-                snapshot: context.resolved_snapshot_ref,
-                registry_generation: context.registry_generation,
-                provider: context.role_provider,
-                resource_bindings: context.resource_bindings,
-            };
-            let result = host
-                .invoke(role_context, ComputerRoleOperation::Observe(ComputerObserve))
-                .await
-                .map_err(|error| Wave2HostPortError::new(error.code(), error.to_string()))?;
-            Ok(ContextContributionResult {
-                value: Some(StrictJsonValue(serde_json::json!({
-                    "generation": result.generation,
-                    "result": result.result
-                }))),
-            })
-        })
+            .await
+            .map_err(|error| RoleHostError::ProviderFailure(error.to_string()))?;
+        }
+        Ok(output)
     }
 }
 
@@ -752,8 +914,9 @@ mod tests {
     #[cfg(feature = "computer-use")]
     #[async_trait::async_trait]
     impl ComputerToolPort for FakeComputerToolPort {
-        async fn execute(
+        async fn execute_authorized(
             &self,
+            _action_id: &str,
             input: serde_json::Value,
         ) -> nomi_types::tool::ToolResult {
             use std::sync::atomic::Ordering;
@@ -844,6 +1007,11 @@ mod tests {
         (host, context)
     }
 
+    #[cfg(feature = "computer-use")]
+    fn computer_observe() -> ComputerObserve {
+        ComputerObserve::accessibility()
+    }
+
     #[test]
     fn exact_resource_requires_one_owned_granted_binding() {
         let context = context(
@@ -902,7 +1070,7 @@ mod tests {
             let start = Arc::clone(&start);
             tokio::spawn(async move {
                 start.wait().await;
-                host.invoke(context, ComputerRoleOperation::Observe(ComputerObserve))
+                host.invoke(context, ComputerRoleOperation::Observe(computer_observe()))
                     .await
                     .unwrap()
                     .generation
@@ -914,7 +1082,7 @@ mod tests {
             let start = Arc::clone(&start);
             tokio::spawn(async move {
                 start.wait().await;
-                host.invoke(context, ComputerRoleOperation::Observe(ComputerObserve))
+                host.invoke(context, ComputerRoleOperation::Observe(computer_observe()))
                     .await
                     .unwrap()
                     .generation
@@ -939,14 +1107,14 @@ mod tests {
         let first = host
             .invoke(
                 context.clone(),
-                ComputerRoleOperation::Observe(ComputerObserve),
+                ComputerRoleOperation::Observe(computer_observe()),
             )
             .await
             .unwrap();
         let current = host
             .invoke(
                 context.clone(),
-                ComputerRoleOperation::Observe(ComputerObserve),
+                ComputerRoleOperation::Observe(computer_observe()),
             )
             .await
             .unwrap();
@@ -966,6 +1134,89 @@ mod tests {
         assert_eq!(error, RoleHostError::StaleObservationGeneration);
         assert_eq!(error.code(), "ROLE_HOST_STALE_OBSERVATION_GENERATION");
         assert_eq!(tool.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[cfg(feature = "computer-use")]
+    #[tokio::test]
+    async fn computer_effect_invalidates_observation_and_never_mints_a_replacement_token() {
+        use std::sync::atomic::Ordering;
+
+        let tool = Arc::new(FakeComputerToolPort::default());
+        let (host, context) = computer_host(tool.clone());
+        let observed = host
+            .invoke(
+                context.clone(),
+                ComputerRoleOperation::Observe(computer_observe()),
+            )
+            .await
+            .unwrap();
+        let acted = host
+            .invoke(
+                context.clone(),
+                ComputerRoleOperation::Input(ComputerInput {
+                    action: "click_element".to_owned(),
+                    parameters: serde_json::json!({ "ref": 1 }),
+                    expected_generation: observed.generation,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(acted.generation, 0);
+
+        let error = host
+            .invoke(
+                context,
+                ComputerRoleOperation::Input(ComputerInput {
+                    action: "click_element".to_owned(),
+                    parameters: serde_json::json!({ "ref": 1 }),
+                    expected_generation: observed.generation,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error, RoleHostError::StaleObservationGeneration);
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[cfg(feature = "computer-use")]
+    #[tokio::test]
+    async fn computer_observation_tokens_are_native_surface_specific() {
+        let tool = Arc::new(FakeComputerToolPort::default());
+        let (host, context) = computer_host(tool);
+        let screenshot = host
+            .invoke(
+                context.clone(),
+                ComputerRoleOperation::Observe(ComputerObserve {
+                    action_id: nomi_computer::capability::COMPUTER_OBSERVE_ACTION_ID,
+                    input: serde_json::json!({ "action": "screenshot" }),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            host.invoke(
+                context.clone(),
+                ComputerRoleOperation::Input(ComputerInput {
+                    action: "click_element".to_owned(),
+                    parameters: serde_json::json!({ "ref": 1 }),
+                    expected_generation: screenshot.generation,
+                }),
+            )
+            .await
+            .unwrap_err(),
+            RoleHostError::StaleObservationGeneration,
+        );
+        let waited = host
+            .invoke(
+                context,
+                ComputerRoleOperation::Observe(ComputerObserve {
+                    action_id: nomi_computer::capability::COMPUTER_OBSERVE_ACTION_ID,
+                    input: serde_json::json!({ "action": "wait", "seconds": 0 }),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(waited.generation, 0);
     }
 
     #[test]

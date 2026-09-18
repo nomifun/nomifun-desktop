@@ -459,9 +459,10 @@ fn action_input(operation: &Wave4CapabilityOperation) -> &StrictJsonValue {
         | Wave4CapabilityOperation::CustomerServiceNotesRead { input }
         | Wave4CapabilityOperation::CustomerServiceNotesWrite { input }
         | Wave4CapabilityOperation::CustomerServiceHandoff { input }
+        | Wave4CapabilityOperation::RobotVision { input }
         | Wave4CapabilityOperation::RobotDisplay { input }
         | Wave4CapabilityOperation::RobotMotion { input }
-        | Wave4CapabilityOperation::RobotDeviceTools { input } => input,
+        | Wave4CapabilityOperation::RobotDevice { input } => input,
     }
 }
 

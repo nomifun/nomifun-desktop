@@ -1,7 +1,7 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { BrowserCommand, BrowserDialog } from './client';
-import styles from './BrowserWorkspacePanel.module.css';
+import styles from './BrowserPanel.module.css';
 
 type Props = { dialog: BrowserDialog; locked: boolean; busy: boolean; onReply: (command: BrowserCommand) => void };
 
@@ -14,14 +14,14 @@ export default function WebsiteDialog({ dialog, locked, busy, onReply }: Props) 
   const acceptButton = useRef<HTMLButtonElement>(null);
   // Omitted text preserves the browser's full default, even if its display was
   // truncated. Never silently replace that default with the visible prefix.
-  const [edited, setEdited] = useState<string | null>(null);
   useEffect(() => {
     if (!locked) (dialog.kind === 'prompt' ? input.current : acceptButton.current)?.focus();
   }, [dialog.request_id, dialog.kind, locked]);
   const reply = (accept: boolean) => {
     if (locked || busy) return;
+    const promptText = input.current?.value;
     onReply({ command: 'dialog', target: dialog.target, request_id: dialog.request_id, accept,
-      ...(accept && dialog.kind === 'prompt' && edited !== null ? { text: edited } : {}) });
+      ...(accept && dialog.kind === 'prompt' && promptText !== undefined && promptText !== dialog.default_text ? { text: promptText } : {}) });
   };
   return <div className={styles.websiteDialogBackdrop}>
     <form className={styles.websiteDialog} role='dialog' aria-labelledby={title} aria-describedby={message}
@@ -32,8 +32,7 @@ export default function WebsiteDialog({ dialog, locked, busy, onReply }: Props) 
       <p id={message}>{dialog.kind === 'before_unload' ? t('browserWorkspace.dialogLeaveWarning') : dialog.message}</p>
       {dialog.text_truncated && <p className={styles.dialogHint}>{t('browserWorkspace.dialogTruncated')}</p>}
       {dialog.kind === 'prompt' && <label>{t('browserWorkspace.dialogInput')}
-        <input ref={input} value={edited ?? dialog.default_text} maxLength={65536} disabled={locked || busy}
-          onChange={event => setEdited(event.target.value)} autoComplete='off' />
+        <input ref={input} defaultValue={dialog.default_text} maxLength={65536} disabled={locked || busy} autoComplete='off' />
       </label>}
       {locked ? <div className={styles.dialogHint} role='status'>{t('browserWorkspace.dialogAgentHandling')}</div>
         : <div className={styles.dialogActions}>

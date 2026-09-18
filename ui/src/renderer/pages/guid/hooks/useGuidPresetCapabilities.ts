@@ -14,6 +14,7 @@ import { useEffect, useState } from 'react';
 
 export type GuidPresetCapabilityState = {
   capabilityIds: ReadonlySet<string>;
+  actionIds: ReadonlySet<string>;
   requiredResourceKinds: ReadonlySet<string>;
   skillNames: ReadonlySet<string>;
   isLoading: boolean;
@@ -22,6 +23,7 @@ export type GuidPresetCapabilityState = {
 
 const emptyState = (): GuidPresetCapabilityState => ({
   capabilityIds: new Set<string>(),
+  actionIds: new Set<string>(),
   requiredResourceKinds: new Set<string>(),
   skillNames: new Set<string>(),
   isLoading: false,
@@ -59,6 +61,7 @@ export const useGuidPresetCapabilities = (
 
     setState({
       capabilityIds: new Set<string>(),
+      actionIds: new Set<string>(),
       requiredResourceKinds: new Set<string>(),
       skillNames: new Set<string>(),
       isLoading: true,
@@ -79,8 +82,14 @@ export const useGuidPresetCapabilities = (
 
           ].map((selection) => selection.capability.id)
         );
+        const actionIds = new Set(
+          document.enabled_capabilities.flatMap(
+            (selection) => selection.action_allowlist ?? []
+          )
+        );
         setState({
           capabilityIds,
+          actionIds,
           requiredResourceKinds: requiredResourceKindsForDocument(document, catalog),
           skillNames: new Set(document.skill_bindings.map((skill) => skill.id)),
           isLoading: false,
@@ -94,6 +103,7 @@ export const useGuidPresetCapabilities = (
         console.error('Failed to load selected Agent capabilities:', normalizedError);
         setState({
           capabilityIds: new Set<string>(),
+          actionIds: new Set<string>(),
           requiredResourceKinds: new Set<string>(),
           skillNames: new Set<string>(),
           isLoading: false,

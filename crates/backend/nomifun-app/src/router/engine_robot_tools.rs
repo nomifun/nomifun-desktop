@@ -1,208 +1,162 @@
-//! Frozen Robot device tools for source-integrated engines. Device discovery,
-//! physical effects and lifecycle authority remain application-owned.
+//! Frozen `robot` Module tools for source-integrated engines.
+//!
+//! Device discovery, permissions, resource identity, physical effects and
+//! revocation remain application-owned. The engine sees one Module and exact
+//! slash Action bindings; connection/audio lifecycle never enters its grant
+//! set.
+
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    AgentSessionId, CapabilityId, ContributionSourceKind, PrincipalRef, TypedResourceBinding,
+    ActionId, AgentSessionId, CapabilityId, ContributionSourceKind, PrincipalRef,
 };
 use nomifun_agent_kernel::{CompiledSnapshot, SessionCapabilityState};
-use nomifun_ai_agent::{
-    ContextContributor, NomiHostDynamicToolInvocation, NomiHostDynamicToolInvoker,
-};
+use nomifun_ai_agent::NomiHostDynamicToolInvocation;
 use nomifun_common::AppError;
 use nomifun_engine_core::{
     EngineToolError, EngineToolExposure, EngineToolInvocation, EngineToolInvoker, EngineToolPlan,
     EngineToolResult,
 };
+use nomifun_robot::capability::ROBOT_MODULE_ID;
 use tokio_util::sync::CancellationToken;
 
 use super::hosted_effect_receipts::{HostedEffectReceipts, RobotReceiptInvoker};
-use super::nomi_core_robot::{self, NomiCoreRobotWave4Owner};
+use super::nomi_core_robot::{
+    ResolvedRobotSessionTools, RobotModuleOwner, action_ids, bound_robot_resource,
+    module_capability_id,
+};
 
 pub(crate) fn supported_ids() -> BTreeSet<CapabilityId> {
-    nomi_core_robot::tool_capability_ids()
-        .into_iter()
-        .chain(nomi_core_robot::lifecycle_capability_ids())
-        .chain(nomi_core_robot::context_capability_ids())
-        .collect()
+    BTreeSet::from([module_capability_id()])
 }
 
 fn failure(message: impl std::fmt::Display) -> AppError {
     AppError::Conflict(format!("Engine Robot tools: {message}"))
 }
+
 fn rejected(message: impl std::fmt::Display) -> EngineToolError {
     EngineToolError::ToolInvocation(format!("Robot authority: {message}"))
 }
 
-#[derive(Default)]
-struct Leases {
-    closed: bool,
-    retained: BTreeMap<CapabilityId, Arc<dyn ContextContributor>>,
-}
-
 pub(crate) struct FrozenTools {
     pub plan: EngineToolPlan,
-    owner: Arc<NomiCoreRobotWave4Owner>,
-    delegate: Arc<dyn NomiHostDynamicToolInvoker>,
+    resolved: ResolvedRobotSessionTools,
+    delegate: Arc<dyn nomifun_ai_agent::NomiHostDynamicToolInvoker>,
     principal: PrincipalRef,
     session: AgentSessionId,
-    resource: TypedResourceBinding,
-    leases: Mutex<Leases>,
+    provider_actions: Arc<BTreeMap<String, ActionId>>,
 }
 
 impl FrozenTools {
-    /// Read-only catalog projection; no lease acquisition, device operation,
-    /// or automatic activation of link/audio during Session construction.
+    /// Read-only snapshot/resource projection followed by exact live device
+    /// discovery. No connection is created and no background service is
+    /// activated while the Session is constructed.
     pub(crate) async fn resolve(
-        owner: Arc<NomiCoreRobotWave4Owner>,
+        owner: Arc<RobotModuleOwner>,
         receipts: HostedEffectReceipts,
         principal: PrincipalRef,
         session: AgentSessionId,
         snapshot: &CompiledSnapshot,
         compile: impl FnOnce(Vec<EngineToolExposure>) -> Result<EngineToolPlan, AppError>,
     ) -> Result<Self, AppError> {
-        let resources = snapshot
-            .target_resource_bindings
-            .iter()
-            .filter(|binding| binding.resource_kind.as_ref() == "robot")
-            .collect::<Vec<_>>();
-        let [resource] = resources.as_slice() else {
-            return Err(failure(
-                "one exact server-resolved Robot binding is required",
-            ));
-        };
-        if principal.principal_kind != "user" || resource.owner_id != principal.principal_id {
-            return Err(failure("Robot binding belongs to a different principal"));
-        }
-        let supported = supported_ids();
-        let mut initial = BTreeSet::new();
-        for (items, ids) in [
-            (&snapshot.content().enabled_capabilities, &mut initial),
-        ] {
-            for selected in items {
-                if !supported.contains(&selected.capability.id) {
-                    continue;
-                }
-                let policy = snapshot
-                    .policy(&selected.capability.id)
-                    .ok_or_else(|| failure("Robot capability policy missing"))?;
-                if selected.contribution_lock.source_kind != ContributionSourceKind::PlatformBuiltin
-                    || !policy.resource_binding_ids.contains(&resource.binding_id)
-                {
-                    return Err(failure(
-                        "Robot requires the bundled owner and exact resource policy",
-                    ));
-                }
-                ids.insert(selected.capability.id.clone());
-            }
-        }
-        let tools = nomi_core_robot::tool_capability_ids();
-        if initial.iter().any(|id| tools.contains(id))
-            && !initial.contains(&CapabilityId::from("robot.link"))
+        let resource = bound_robot_resource(
+            snapshot.resource_bindings(),
+            &principal.principal_id,
+        )
+        .map_err(failure)?;
+        let module_id = module_capability_id();
+        let selected = snapshot
+            .resolved_capability(&module_id)
+            .ok_or_else(|| failure("robot Module is not present in the compiled Snapshot"))?;
+        let policy = snapshot
+            .policy(&module_id)
+            .ok_or_else(|| failure("robot Module policy is missing"))?;
+        if selected.contribution_lock.source_kind != ContributionSourceKind::PlatformBuiltin
+            || !policy.resource_binding_ids.contains(&resource.binding_id)
         {
             return Err(failure(
-                "Robot tools require explicitly selected robot.link",
+                "robot Module requires its bundled owner and exact resource policy",
             ));
         }
-        let (descriptors, delegate) = owner
-            .resolve_session_tools(&principal, &session, resource, &initial)
+        let declared = action_ids();
+        if policy.allowed_actions.is_empty()
+            || policy
+                .allowed_actions
+                .iter()
+                .any(|action| !declared.contains(action))
+        {
+            return Err(failure(
+                "robot Module contains an empty or undeclared Action grant",
+            ));
+        }
+
+        let resolved = owner
+            .resolve_session_tools(
+                &principal,
+                &session,
+                resource,
+                &policy.allowed_actions,
+            )
             .await
             .map_err(failure)?;
-        for selected in initial.iter().filter(|id| tools.contains(*id)) {
-            if !descriptors
-                .iter()
-                .any(|descriptor| &descriptor.capability_id == selected)
-            {
-                return Err(failure(
-                    "selected Robot capability has no frozen device tool",
-                ));
-            }
-        }
-        let exposures = descriptors.into_iter().map(|descriptor| EngineToolExposure {
-            definition: nomifun_chat_model_broker::ChatToolDefinition {
-                name: descriptor.provider_name,
-                description: format!("{}\nPhysical Robot tool. Requires active robot.link; audio tools also require active robot.audio. A reply is not proof of physical quiescence or reversibility.", descriptor.description),
-                input_schema: descriptor.input_schema,
-                deferred: false,
-            },
-            action_id: format!("{}.invoke", descriptor.capability_id.as_ref()).into(),
-            capability_id: descriptor.capability_id,
-        }).collect();
-        Ok(Self {
-            plan: compile(exposures)?,
-            owner,
-            delegate: Arc::new(RobotReceiptInvoker {
+        let mut provider_actions = BTreeMap::new();
+        let exposures = resolved
+            .descriptors
+            .iter()
+            .cloned()
+            .map(|descriptor| {
+                if provider_actions
+                    .insert(
+                        descriptor.provider_name.clone(),
+                        descriptor.action_id.clone(),
+                    )
+                    .is_some()
+                {
+                    return Err(failure(format!(
+                        "duplicate Robot provider tool {}",
+                        descriptor.provider_name
+                    )));
+                }
+                Ok(EngineToolExposure {
+                    definition: nomifun_chat_model_broker::ChatToolDefinition {
+                        name: descriptor.provider_name,
+                        description: format!(
+                            "{}\nPhysical Robot action. Device permission and the exact live binding are rechecked before dispatch; a reply is not proof of reversibility or physical quiescence.",
+                            descriptor.description
+                        ),
+                        input_schema: descriptor.input_schema,
+                        deferred: false,
+                    },
+                    action_id: descriptor.action_id,
+                    capability_id: module_id.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, AppError>>()?;
+        let provider_actions = Arc::new(provider_actions);
+        let delegate: Arc<dyn nomifun_ai_agent::NomiHostDynamicToolInvoker> =
+            Arc::new(RobotReceiptInvoker {
                 receipts,
                 user: principal.principal_id.clone(),
                 session: session.as_ref().to_owned(),
-                delegate,
-            }),
+                provider_actions: Arc::clone(&provider_actions),
+                delegate: Arc::clone(&resolved.invoker),
+            });
+        Ok(Self {
+            plan: compile(exposures)?,
+            resolved,
+            delegate,
             principal,
             session,
-            resource: (**resource).clone(),
-            leases: Mutex::new(Leases::default()),
+            provider_actions,
         })
     }
 
-    /// Revoke local authority even if callers retain an Arc to the tool host.
-    /// This does not disconnect shared hardware or claim physical shutdown.
+    /// Revoke this Session's local authority. The shared physical connection
+    /// remains owned by the Robot domain and is not disconnected here.
     pub(crate) fn close(&self) -> Result<(), AppError> {
-        let mut leases = self
-            .leases
-            .lock()
-            .map_err(|_| failure("lease state poisoned"))?;
-        leases.closed = true;
-        leases.retained.clear();
-        Ok(())
-    }
-
-    async fn retain_active_leases(
-        &self,
-        active: &BTreeSet<CapabilityId>,
-    ) -> Result<(), EngineToolError> {
-        if !active.contains(&CapabilityId::from("robot.link")) {
-            return Err(rejected(
-                "robot.link must be explicitly activated before device use",
-            ));
-        }
-        for id in nomi_core_robot::lifecycle_capability_ids() {
-            if !active.contains(&id) {
-                continue;
-            }
-            {
-                let leases = self
-                    .leases
-                    .lock()
-                    .map_err(|_| rejected("lease state poisoned"))?;
-                if leases.closed {
-                    return Err(rejected("Session resources closed"));
-                }
-                if leases.retained.contains_key(&id) {
-                    continue;
-                }
-            }
-            let lease = self
-                .owner
-                .lifecycle_context_contributor_for(
-                    &id,
-                    &self.principal,
-                    &self.session,
-                    std::slice::from_ref(&self.resource),
-                )
-                .await
-                .map_err(rejected)?
-                .ok_or_else(|| rejected("missing lifecycle owner"))?;
-            let mut leases = self
-                .leases
-                .lock()
-                .map_err(|_| rejected("lease state poisoned"))?;
-            if leases.closed {
-                return Err(rejected("Session resources closed"));
-            }
-            leases.retained.entry(id).or_insert(lease);
-        }
+        self.resolved.revoke();
         Ok(())
     }
 }
@@ -222,19 +176,25 @@ impl EngineToolInvoker for SessionTools {
         invocation: EngineToolInvocation,
         cancellation: CancellationToken,
     ) -> Result<EngineToolResult, EngineToolError> {
-        if !nomi_core_robot::tool_capability_ids().contains(&invocation.binding.capability_id) {
+        if invocation.binding.capability_id.as_ref() != ROBOT_MODULE_ID {
             return self.inner.invoke(invocation, cancellation).await;
         }
         if cancellation.is_cancelled() {
             return Err(EngineToolError::Cancelled);
         }
         let active = self.active.snapshot().map_err(rejected)?;
+        let expected_action = self
+            .frozen
+            .provider_actions
+            .get(&invocation.call.name)
+            .ok_or_else(|| rejected("tool was not frozen into this AgentSession"))?;
         if invocation.principal != self.frozen.principal
             || invocation.agent_session_id != self.frozen.session
             || invocation.resolved_snapshot_ref != *self.snapshot.snapshot_ref()
             || active.resolved_snapshot_ref != invocation.resolved_snapshot_ref
             || active.generation != invocation.active_set_generation
-            || !active.active.contains(&invocation.binding.capability_id)
+            || !active.active.contains(&module_capability_id())
+            || invocation.binding.action_id != *expected_action
             || invocation.call.name != invocation.binding.model_name
             || self.frozen.plan.binding(&invocation.call.name) != Some(&invocation.binding)
         {
@@ -242,23 +202,11 @@ impl EngineToolInvoker for SessionTools {
         }
         invocation.binding.validate()?;
         nomifun_engine_core::parse_completed_arguments(&invocation.call)?;
-        if self
-            .frozen
-            .retain_active_leases(&active.active)
-            .await
-            .is_err()
-        {
-            return Ok(EngineToolResult::text(
-                invocation.call.call_id,
-                "ROBOT_LIFECYCLE_NOT_READY: no device call dispatched. Activate the selected robot.link (and robot.audio for audio tools), and check the exact device binding/connection before requesting a new operation.",
-                true,
-            ));
-        }
         let result = self
             .frozen
             .delegate
             .invoke(NomiHostDynamicToolInvocation {
-                capability_id: invocation.binding.capability_id,
+                capability_id: module_capability_id(),
                 provider_name: invocation.call.name,
                 operation_id: invocation.operation_id,
                 idempotency_key: invocation.idempotency_key,
@@ -275,6 +223,18 @@ impl EngineToolInvoker for SessionTools {
             Err(error) if error.code.as_ref() == "HOSTED_EFFECT_UNPROVEN" => Err(rejected(
                 "HOSTED_EFFECT_UNPROVEN: inspect owner/device state; do not retry",
             )),
+            Err(error) if error.code.as_ref() == "ROBOT_OFFLINE" => Ok(EngineToolResult::text(
+                invocation.call.call_id,
+                "ROBOT_OFFLINE: no device call was dispatched. Connect the bound robot to this desktop before requesting a new operation.",
+                true,
+            )),
+            Err(error) if error.code.as_ref() == "ROBOT_PERMISSION_DENIED" => {
+                Ok(EngineToolResult::text(
+                    invocation.call.call_id,
+                    format!("ROBOT_PERMISSION_DENIED: {}", error.internal_message),
+                    true,
+                ))
+            }
             Err(error) => Ok(EngineToolResult::text(
                 invocation.call.call_id,
                 format!(

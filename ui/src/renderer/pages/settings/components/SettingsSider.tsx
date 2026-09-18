@@ -30,6 +30,7 @@ export const BUILTIN_TAB_IDS = [
  */
 const GROUP_HEADER_BEFORE: Record<string, string> = {
   system: 'settings.groupApp',
+  'execution-engines': 'settings.groupRuntimes',
   about: 'settings.groupAbout',
 };
 

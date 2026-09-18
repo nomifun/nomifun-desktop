@@ -1,126 +1,145 @@
-//! Target-bound Nomi-core owner for the six bundled Robot capabilities.
+//! Canonical `robot` Module owner.
 //!
-//! The owner reuses the production Robot registry, authenticated device MCP
-//! links, ASR/TTS/vision pipeline, and durable physical-effect ledger. It never
-//! selects a default robot and never accepts a device/tool name outside the
-//! exact Session resource and capability ceiling.
+//! Agent authority is one Module plus an exact Action allowlist. Pairing and a
+//! live device connection are resource facts, while the voice/audio loop is a
+//! Robot domain service; neither is an authorable capability. Device tool
+//! discovery is frozen per AgentSession and every physical dispatch rechecks
+//! the mutable device permission and pairing boundaries.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::{Arc, Mutex, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
-use dashmap::DashMap;
+use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    AgentSessionId, CapabilityId, CorrelationId, EffectClass, IdempotencyKey,
-    OperationId, PrincipalRef, StrictJsonValue, TypedResourceBinding, digest_payload,
+    ActionId, AgentSessionId, CapabilityId, CorrelationId, IdempotencyKey, OperationId,
+    PrincipalRef, StrictJsonValue, TypedResourceBinding, digest_payload,
 };
 use nomifun_ai_agent::{
-    NomiHostDynamicToolDescriptor, NomiHostDynamicToolError, NomiHostDynamicToolInvocation,
-    NomiHostDynamicToolInvoker,
+    NomiHostDynamicToolError, NomiHostDynamicToolInvocation, NomiHostDynamicToolInvoker,
 };
-use nomifun_agent_domain_wave4::{
-    ROBOT_AUDIO, ROBOT_DEVICE_TOOLS, ROBOT_DISPLAY, ROBOT_LINK, ROBOT_MOTION,
-    ROBOT_RESOURCE_KIND, ROBOT_VISION, Wave4CapabilityOperation,
-    Wave4ContextHostPort, Wave4ContextHostRequest, Wave4HostPort,
-    Wave4HostPortError, Wave4HostRequest,
+use nomifun_robot::capability::{
+    ROBOT_ACTION_IDS, ROBOT_MODULE_ID, RobotAction, RobotModuleAvailability,
+    module_availability,
 };
 use nomifun_robot::effect_ledger::{
     RobotEffectAdmission, RobotEffectKey, RobotEffectLedger, RobotEffectRequest,
 };
 use nomifun_robot::mcp_bridge::ToolCallError;
 use nomifun_robot::registry::{RobotRecord, RobotRegistry};
-use nomifun_robot::status::RobotStatusRegistry;
-use nomifun_robot::tool_registry::{RobotToolCapability, RobotToolRegistry};
+use nomifun_robot::tool_registry::RobotToolRegistry;
 use nomifun_robot::vision::RobotVisionObservationRegistry;
 
+const ROBOT_RESOURCE_KIND: &str = "robot";
 const ROBOT_NOT_FOUND: &str = "ROBOT_NOT_FOUND";
 const ROBOT_NOT_PAIRED: &str = "ROBOT_NOT_PAIRED";
 const ROBOT_OFFLINE: &str = "ROBOT_OFFLINE";
+const ROBOT_PERMISSION_DENIED: &str = "ROBOT_PERMISSION_DENIED";
+const ROBOT_RESOURCE_NOT_BOUND: &str = "PRESET_RESOURCE_NOT_BOUND";
+const ROBOT_RESOURCE_OWNER_MISMATCH: &str = "RESOURCE_OWNER_MISMATCH";
+const ROBOT_INVALID_PAYLOAD: &str = "INVALID_PAYLOAD";
+const ROBOT_ACTION_NOT_GRANTED: &str = "ACTION_NOT_GRANTED";
 const ROBOT_DEVICE_REJECTED: &str = "ROBOT_DEVICE_REJECTED";
 const ROBOT_EFFECT_FAILED: &str = "ROBOT_EFFECT_FAILED";
 const ROBOT_EFFECT_OUTCOME_UNKNOWN: &str = "ROBOT_EFFECT_OUTCOME_UNKNOWN";
 const ROBOT_EFFECT_RECEIPT_FAILED: &str = "ROBOT_EFFECT_RECEIPT_FAILED";
-const MAX_TOOL_NAME_BYTES: usize = 512;
 const MAX_TOOL_RESULT_CHARS: usize = 65_536;
 const MAX_DEVICE_TOOL_SCHEMA_BYTES: usize = 64 * 1024;
 const MAX_DEVICE_TOOL_DESCRIPTION_BYTES: usize = 4 * 1024;
 
+pub(crate) fn module_capability_id() -> CapabilityId {
+    CapabilityId::from(ROBOT_MODULE_ID)
+}
+
+pub(crate) fn action_ids() -> BTreeSet<ActionId> {
+    ROBOT_ACTION_IDS.into_iter().map(ActionId::from).collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RobotModuleError {
+    pub code: String,
+    pub message: String,
+    pub retry_safe: bool,
+}
+
+impl RobotModuleError {
+    fn new(code: impl Into<String>, message: impl Into<String>, retry_safe: bool) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            retry_safe,
+        }
+    }
+
+    fn invalid(message: impl Into<String>) -> Self {
+        Self::new(ROBOT_INVALID_PAYLOAD, message, false)
+    }
+
+    fn not_bound(message: impl Into<String>) -> Self {
+        Self::new(ROBOT_RESOURCE_NOT_BOUND, message, false)
+    }
+
+    fn owner_mismatch(message: impl Into<String>) -> Self {
+        Self::new(ROBOT_RESOURCE_OWNER_MISMATCH, message, false)
+    }
+}
+
+impl std::fmt::Display for RobotModuleError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for RobotModuleError {}
+
 #[derive(Clone)]
 struct FrozenRobotDeviceTool {
-    capability: RobotToolCapability,
+    action: RobotAction,
     device_name: String,
     raw_input_schema: serde_json::Value,
     validator: Arc<jsonschema::Validator>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct RobotSessionToolDescriptor {
+    pub action_id: ActionId,
+    pub provider_name: String,
+    pub description: String,
+    pub input_schema: StrictJsonValue,
+}
+
+pub(crate) struct ResolvedRobotSessionTools {
+    pub descriptors: Vec<RobotSessionToolDescriptor>,
+    pub invoker: Arc<dyn NomiHostDynamicToolInvoker>,
+    revocation: Arc<AtomicBool>,
+}
+
+impl ResolvedRobotSessionTools {
+    pub(crate) fn revoke(&self) {
+        self.revocation.store(true, Ordering::Release);
+    }
+}
+
 struct BoundRobotSessionToolInvoker {
-    owner: Arc<NomiCoreRobotWave4Owner>,
+    owner: Arc<RobotModuleOwner>,
     principal: PrincipalRef,
     agent_session_id: AgentSessionId,
     binding: TypedResourceBinding,
-    robot_id: String,
-    tools: BTreeMap<(CapabilityId, String), FrozenRobotDeviceTool>,
+    connection_id: String,
+    tools: BTreeMap<String, FrozenRobotDeviceTool>,
+    revoked: Arc<AtomicBool>,
 }
 
-#[derive(Clone, Debug)]
-struct RobotLifecycleActivation {
-    principal_id: String,
-    agent_session_id: AgentSessionId,
-    capability_id: CapabilityId,
-    binding_id: String,
-    robot_id: String,
-    companion_id: String,
-    cancelled: Arc<AtomicBool>,
-}
-
-struct RobotLifecycleLease {
-    key: String,
-    activation: RobotLifecycleActivation,
-    activations: Arc<DashMap<String, RobotLifecycleActivation>>,
-    registry: Arc<RobotRegistry>,
-    status: Arc<RobotStatusRegistry>,
-}
-
-pub(crate) fn tool_capability_ids() -> BTreeSet<CapabilityId> {
-    [ROBOT_DISPLAY, ROBOT_MOTION, ROBOT_DEVICE_TOOLS]
-        .into_iter()
-        .map(CapabilityId::from)
-        .collect()
-}
-
-pub(crate) fn context_capability_ids() -> BTreeSet<CapabilityId> {
-    BTreeSet::from([CapabilityId::from(ROBOT_VISION)])
-}
-
-pub(crate) fn lifecycle_capability_ids() -> BTreeSet<CapabilityId> {
-    [ROBOT_LINK, ROBOT_AUDIO]
-        .into_iter()
-        .map(CapabilityId::from)
-        .collect()
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RobotToolInput {
-    tool_name: String,
-    arguments: serde_json::Value,
-}
-
-/// Real owner used by the bundled Robot registration and Nomi lifecycle lane.
-pub(crate) struct NomiCoreRobotWave4Owner {
+/// Real native owner used by unified Runtime and source-integrated engines.
+pub(crate) struct RobotModuleOwner {
     authoritative_user_id: Arc<str>,
     registry: Arc<RobotRegistry>,
-    status: Arc<RobotStatusRegistry>,
     tools: Arc<RobotToolRegistry>,
     effects: Arc<RobotEffectLedger>,
     observations: Arc<RobotVisionObservationRegistry>,
-    lifecycle_activations: Arc<DashMap<String, RobotLifecycleActivation>>,
-    lifecycle_leases: Mutex<BTreeMap<String, Weak<RobotLifecycleLease>>>,
 }
 
-impl NomiCoreRobotWave4Owner {
+impl RobotModuleOwner {
     pub(crate) fn new(
         authoritative_user_id: Arc<str>,
         robot: Arc<crate::robot_wiring::RobotServices>,
@@ -128,12 +147,9 @@ impl NomiCoreRobotWave4Owner {
         Self {
             authoritative_user_id,
             registry: Arc::clone(&robot.registry),
-            status: Arc::clone(&robot.status),
             tools: Arc::clone(&robot.tools),
             effects: Arc::clone(&robot.effect_ledger),
             observations: Arc::clone(&robot.vision_observations),
-            lifecycle_activations: Arc::new(DashMap::new()),
-            lifecycle_leases: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -141,7 +157,6 @@ impl NomiCoreRobotWave4Owner {
     fn from_parts(
         authoritative_user_id: Arc<str>,
         registry: Arc<RobotRegistry>,
-        status: Arc<RobotStatusRegistry>,
         tools: Arc<RobotToolRegistry>,
         effects: Arc<RobotEffectLedger>,
         observations: Arc<RobotVisionObservationRegistry>,
@@ -149,85 +164,98 @@ impl NomiCoreRobotWave4Owner {
         Self {
             authoritative_user_id,
             registry,
-            status,
             tools,
             effects,
             observations,
-            lifecycle_activations: Arc::new(DashMap::new()),
-            lifecycle_leases: Mutex::new(BTreeMap::new()),
         }
     }
 
-    /// Registration helper used by central bundled-owner composition.
-    pub(crate) fn registration(
-        owner: Arc<Self>,
-    ) -> Result<nomifun_agent_kernel::PluginRegistration, String> {
-        let action = Arc::clone(&owner) as Arc<dyn Wave4HostPort>;
-        let context = owner as Arc<dyn Wave4ContextHostPort>;
-        nomifun_agent_domain_wave4::robot_registration_with_host_ports(action, context)
-    }
-
-    /// Resolve exact live device tools for one already-authenticated and
-    /// persisted AgentSession binding.
-    ///
-    /// Capability placement comes only from the compiled Snapshot. Resource
-    /// identity and the device-side name are frozen here and retained by the
-    /// returned invoker; neither is accepted from model arguments.
+    /// Freeze the exact live device tools permitted by one Module Action
+    /// allowlist. No model-provided device identity or category is trusted.
     pub(crate) async fn resolve_session_tools(
         self: &Arc<Self>,
         principal: &PrincipalRef,
         agent_session_id: &AgentSessionId,
         binding: &TypedResourceBinding,
-        enabled_capability_ids: &BTreeSet<CapabilityId>,
-    ) -> Result<
-        (
-            Vec<NomiHostDynamicToolDescriptor>,
-            Arc<dyn NomiHostDynamicToolInvoker>,
-        ),
-        String,
-    > {
-        self.ensure_installation_owner(&principal.principal_id)
-            .map_err(|error| error.to_string())?;
-        let robot = self
-            .load_bound_robot(binding)
+        allowed_actions: &BTreeSet<ActionId>,
+    ) -> Result<ResolvedRobotSessionTools, RobotModuleError> {
+        self.ensure_installation_owner(&principal.principal_id)?;
+        if allowed_actions.is_empty() {
+            return Err(RobotModuleError::new(
+                ROBOT_ACTION_NOT_GRANTED,
+                "the robot Module has no explicit Action grants",
+                false,
+            ));
+        }
+        for action_id in allowed_actions {
+            if RobotAction::parse(action_id.as_ref()).is_none() {
+                return Err(RobotModuleError::new(
+                    ROBOT_ACTION_NOT_GRANTED,
+                    format!(
+                        "{} is not an Action declared by the robot Module",
+                        action_id.as_ref()
+                    ),
+                    false,
+                ));
+            }
+        }
+        self.validate_binding(binding, &principal.principal_id)?;
+        let robot = self.load_bound_robot(binding).await?;
+        let connection_id = self.tools.connection_id(&robot.robot_id).await.ok_or_else(|| {
+            RobotModuleError::new(
+                ROBOT_OFFLINE,
+                "The bound robot is offline. Connect it to this desktop before starting a new operation.",
+                true,
+            )
+        })?;
+        if !self
+            .registry
+            .connection_matches(&robot.robot_id, &connection_id)
             .await
-            .map_err(|error| error.to_string())?;
+        {
+            return Err(RobotModuleError::new(
+                ROBOT_OFFLINE,
+                "The bound robot connection changed while its Action surface was being resolved.",
+                true,
+            ));
+        }
 
         let mut descriptors = Vec::new();
         let mut frozen = BTreeMap::new();
-        for (capability_id, capability, required_operation) in [
-            (ROBOT_DISPLAY, RobotToolCapability::Display, "display"),
-            (ROBOT_MOTION, RobotToolCapability::Motion, "motion"),
-            (ROBOT_DEVICE_TOOLS, RobotToolCapability::DeviceTools, "link"),
-        ] {
-            let capability_ref = CapabilityId::from(capability_id);
-            if !enabled_capability_ids.contains(&capability_ref) {
+        for action in RobotAction::ALL {
+            let action_id = ActionId::from(action.id());
+            if !allowed_actions.contains(&action_id) {
                 continue;
             }
-            if !binding.operations.contains(required_operation) {
-                return Err(format!(
-                    "Robot binding does not grant {required_operation} for {capability_id}"
-                ));
+            if !binding.operations.contains(action.resource_operation()) {
+                return Err(RobotModuleError::owner_mismatch(format!(
+                    "Robot binding does not grant {} for {}",
+                    action.resource_operation(),
+                    action.id()
+                )));
             }
-            for tool in self
-                .tools
-                .tools_for_capability(&robot.robot_id, capability)
-                .await
-            {
+            if !robot.permissions.allows_action(action) {
+                continue;
+            }
+            for tool in self.tools.tools_for_action(&robot.robot_id, action).await {
                 validate_provider_tool_name(&tool.exposed_name)?;
                 if descriptors.len() >= 128 {
-                    return Err("Robot Session tool surface exceeds 128 actions".to_owned());
+                    return Err(RobotModuleError::invalid(
+                        "Robot Session tool surface exceeds 128 actions",
+                    ));
                 }
                 let input_schema = strict_device_input_schema(tool.input_schema.clone())?;
-                let validator = Arc::new(jsonschema::options().with_retriever(NoExternalDeviceSchema).build(&input_schema.0)
-                    .map_err(|_| "Robot device schema is invalid".to_owned())?);
-                let description = bounded_description(&tool.description);
-                let key = (capability_ref.clone(), tool.exposed_name.clone());
+                let validator = Arc::new(
+                    jsonschema::options()
+                        .with_retriever(NoExternalDeviceSchema)
+                        .build(&input_schema.0)
+                        .map_err(|_| RobotModuleError::invalid("Robot device schema is invalid"))?,
+                );
                 if frozen
                     .insert(
-                        key,
+                        tool.exposed_name.clone(),
                         FrozenRobotDeviceTool {
-                            capability,
+                            action,
                             device_name: tool.device_name,
                             raw_input_schema: tool.input_schema,
                             validator,
@@ -235,231 +263,144 @@ impl NomiCoreRobotWave4Owner {
                     )
                     .is_some()
                 {
-                    return Err(format!(
-                        "Robot published duplicate tool {} for {capability_id}",
+                    return Err(RobotModuleError::invalid(format!(
+                        "Robot published duplicate provider tool {}",
                         tool.exposed_name
-                    ));
+                    )));
                 }
-                if descriptors.iter().any(|descriptor: &NomiHostDynamicToolDescriptor| {
-                    descriptor.provider_name == tool.exposed_name
-                }) {
-                    return Err(format!(
-                        "Robot tool names collide after provider-safe projection: {}",
-                        tool.exposed_name
-                    ));
-                }
-                descriptors.push(NomiHostDynamicToolDescriptor {
-                    capability_id: capability_ref.clone(),
+                descriptors.push(RobotSessionToolDescriptor {
+                    action_id: action_id.clone(),
                     provider_name: tool.exposed_name,
-                    description,
+                    description: bounded_description(&tool.description),
                     input_schema,
-                    effect_class: EffectClass::Physical,
-                    deferred: false,
                 });
             }
         }
         descriptors.sort_by(|left, right| {
-            (&left.capability_id, &left.provider_name)
-                .cmp(&(&right.capability_id, &right.provider_name))
+            (&left.action_id, &left.provider_name).cmp(&(&right.action_id, &right.provider_name))
         });
-        let invoker: Arc<dyn NomiHostDynamicToolInvoker> = Arc::new(
-            BoundRobotSessionToolInvoker {
-                owner: Arc::clone(self),
-                principal: principal.clone(),
-                agent_session_id: agent_session_id.clone(),
-                binding: binding.clone(),
-                robot_id: robot.robot_id,
-                tools: frozen,
-            },
-        );
-        Ok((descriptors, invoker))
+        let revoked = Arc::new(AtomicBool::new(false));
+        let invoker: Arc<dyn NomiHostDynamicToolInvoker> = Arc::new(BoundRobotSessionToolInvoker {
+            owner: Arc::clone(self),
+            principal: principal.clone(),
+            agent_session_id: agent_session_id.clone(),
+            binding: binding.clone(),
+            connection_id,
+            tools: frozen,
+            revoked: Arc::clone(&revoked),
+        });
+        Ok(ResolvedRobotSessionTools {
+            descriptors,
+            invoker,
+            revocation: revoked,
+        })
     }
 
-    /// Activate the ResourceProvider/BackgroundService contributions for one
-    /// exact compiled Nomi Session.
-    pub(crate) async fn activate_lifecycle(
+    pub(crate) async fn availability(
         &self,
-        request: nomifun_ai_agent::NomiPlatformBuiltinLifecycleInvocation,
-    ) -> Result<StrictJsonValue, String> {
-        let capability_id = request.capability.capability.id;
-        self.activate_lifecycle_for(
-            &capability_id,
-            &request.principal.principal_id,
-            &request.agent_session_id,
-            &request.resource_bindings,
-        )
-        .await
-        .map_err(|error| error.to_string())
-    }
-
-    async fn activate_lifecycle_for(
-        &self,
-        capability_id: &CapabilityId,
         principal_id: &str,
-        agent_session_id: &AgentSessionId,
-        resource_bindings: &[TypedResourceBinding],
-    ) -> Result<StrictJsonValue, Wave4HostPortError> {
-        // Readiness only: authority is installed atomically with its owning
-        // lease below. Cancellation between bootstrap phases cannot leak a grant.
-        let activation = self.prepare_lifecycle(
-            capability_id, principal_id, agent_session_id, resource_bindings,
-        ).await?;
-        Ok(StrictJsonValue(serde_json::json!({
-            "kind": capability_id.as_ref(),
-            "robot_id": activation.robot_id,
-            "companion_id": activation.companion_id,
-            "state": "active",
-        })))
-    }
-
-    async fn prepare_lifecycle(
-        &self,
-        capability_id: &CapabilityId,
-        principal_id: &str,
-        agent_session_id: &AgentSessionId,
-        resource_bindings: &[TypedResourceBinding],
-    ) -> Result<RobotLifecycleActivation, Wave4HostPortError> {
-        if !lifecycle_capability_ids().contains(capability_id) {
-            return Err(Wave4HostPortError::action_operation_mismatch(format!(
-                "WAVE4_ACTION_OPERATION_MISMATCH: {} is not a Robot lifecycle capability",
-                capability_id.as_ref()
-            )));
-        }
+        binding: &TypedResourceBinding,
+    ) -> Result<RobotModuleAvailability, RobotModuleError> {
         self.ensure_installation_owner(principal_id)?;
-        let binding = exact_robot_binding(resource_bindings, principal_id)?;
-        let operation = if capability_id.as_ref() == ROBOT_LINK { "link" } else { "audio" };
-        if !binding.operations.contains(operation) {
-            return Err(Wave4HostPortError::resource_owner_mismatch(
-                "Robot lifecycle operation is outside the resource grant",
+        self.validate_binding(binding, principal_id)?;
+        let robot = self.load_bound_robot(binding).await?;
+        let advertised_actions = self
+            .tools
+            .tools(&robot.robot_id)
+            .await
+            .into_iter()
+            .map(|tool| nomifun_robot::tool_registry::tool_action(&tool.device_name))
+            .collect();
+        let connected = match self.tools.connection_id(&robot.robot_id).await {
+            Some(connection_id) => {
+                self.registry
+                    .connection_matches(&robot.robot_id, &connection_id)
+                    .await
+            }
+            None => false,
+        };
+        Ok(module_availability(
+            &robot,
+            connected,
+            &advertised_actions,
+        ))
+    }
+
+    /// Produce recent camera context only under the exact `robot/vision`
+    /// Action and bound device permission.
+    pub(crate) async fn vision_context(
+        &self,
+        principal_id: &str,
+        binding: &TypedResourceBinding,
+        allowed_actions: &BTreeSet<ActionId>,
+    ) -> Result<Option<StrictJsonValue>, RobotModuleError> {
+        self.ensure_installation_owner(principal_id)?;
+        self.validate_binding(binding, principal_id)?;
+        if !allowed_actions.contains(&ActionId::from(RobotAction::Vision.id())) {
+            return Err(RobotModuleError::new(
+                ROBOT_ACTION_NOT_GRANTED,
+                "robot/vision is not granted by this AgentSession Snapshot",
+                false,
+            ));
+        }
+        if !binding
+            .operations
+            .contains(RobotAction::Vision.resource_operation())
+        {
+            return Err(RobotModuleError::owner_mismatch(
+                "Robot binding does not grant vision",
             ));
         }
         let robot = self.load_bound_robot(binding).await?;
-        let online = self
-            .status
-            .snapshot()
-            .await
-            .into_iter()
-            .any(|status| status.robot_id == robot.robot_id && status.phase != "offline");
-        if !online {
-            return Err(Wave4HostPortError::new(
-                ROBOT_OFFLINE,
-                "the bound robot is not connected",
+        if !robot.permissions.allows_action(RobotAction::Vision) {
+            return Err(RobotModuleError::new(
+                ROBOT_PERMISSION_DENIED,
+                "Camera access is disabled for the bound robot; enable it in Device settings.",
+                false,
             ));
         }
         let companion_id = robot
             .companion_id
-            .clone()
-            .expect("load_bound_robot requires a paired Companion");
-        Ok(RobotLifecycleActivation {
-            principal_id: principal_id.to_owned(),
-            agent_session_id: agent_session_id.clone(),
-            capability_id: capability_id.clone(),
-            binding_id: binding.binding_id.as_ref().to_owned(),
-            robot_id: robot.robot_id.clone(),
-            companion_id,
-            cancelled: Arc::new(AtomicBool::new(false)),
-        })
-    }
-
-    /// Acquire the Session-retained lease for a Robot lifecycle capability.
-    /// This also supports deferred preparation before activation. Nomi stores it
-    /// as a context contributor so `Drop` is the runtime disposal boundary.
-    pub(crate) async fn lifecycle_context_contributor(
-        &self,
-        request: &nomifun_ai_agent::NomiPlatformBuiltinLifecycleInvocation,
-    ) -> Result<Option<Arc<dyn nomifun_ai_agent::ContextContributor>>, String> {
-        self.lifecycle_context_contributor_for(
-            &request.capability.capability.id,
-            &request.principal,
-            &request.agent_session_id,
-            &request.resource_bindings,
-        )
-        .await
-    }
-
-    pub(crate) async fn lifecycle_context_contributor_for(
-        &self,
-        capability_id: &CapabilityId,
-        principal: &PrincipalRef,
-        agent_session_id: &AgentSessionId,
-        resource_bindings: &[TypedResourceBinding],
-    ) -> Result<Option<Arc<dyn nomifun_ai_agent::ContextContributor>>, String> {
-        if !lifecycle_capability_ids().contains(capability_id) {
-            return Ok(None);
-        }
-        let activation = self
-            .prepare_lifecycle(capability_id, &principal.principal_id, agent_session_id, resource_bindings)
+            .as_deref()
+            .expect("load_bound_robot requires pairing");
+        Ok(self
+            .observations
+            .latest_recent(&robot.robot_id, companion_id, now_ms())
             .await
-            .map_err(|error| error.to_string())?;
-        let key = lifecycle_key(
-            &principal.principal_id,
-            agent_session_id,
-            capability_id,
-        );
-        // No await between grant installation and returning its owner. Weak
-        // caching shares one Drop boundary without retaining sessions forever.
-        let mut leases = self.lifecycle_leases.lock()
-            .map_err(|_| "Robot lifecycle lease lock poisoned".to_owned())?;
-        leases.retain(|_, lease| lease.strong_count() != 0);
-        if let Some(existing) = leases.get(&key).and_then(Weak::upgrade) {
-            if existing.activation.binding_id != activation.binding_id
-                || existing.activation.robot_id != activation.robot_id
-                || existing.activation.companion_id != activation.companion_id
-                || existing.activation.cancelled.load(Ordering::Acquire)
-            {
-                return Err("Robot lifecycle lease differs from current Session binding".to_owned());
-            }
-            return Ok(Some(existing));
-        }
-        let lease = Arc::new(RobotLifecycleLease {
-            key: key.clone(),
-            activation: activation.clone(),
-            activations: Arc::clone(&self.lifecycle_activations),
-            registry: Arc::clone(&self.registry),
-            status: Arc::clone(&self.status),
-        });
-        self.lifecycle_activations.insert(key.clone(), activation);
-        leases.insert(key, Arc::downgrade(&lease));
-        Ok(Some(lease))
+            .map(|observation| {
+                StrictJsonValue(serde_json::json!({
+                    "kind": "robot_vision",
+                    "robot_id": observation.robot_id,
+                    "companion_id": observation.companion_id,
+                    "question": observation.question,
+                    "answer": observation.answer,
+                    "observed_at_ms": observation.observed_at_ms,
+                }))
+            }))
     }
 
-    async fn ensure_lifecycle_active(
-        &self,
-        principal: &PrincipalRef,
-        agent_session_id: &AgentSessionId,
-        capability_id: &str,
-        binding: &TypedResourceBinding,
-        robot_id: &str,
-    ) -> Result<(), Wave4HostPortError> {
-        let capability_id = CapabilityId::from(capability_id);
-        let key = lifecycle_key(&principal.principal_id, agent_session_id, &capability_id);
-        let activation = self.lifecycle_activations.get(&key).ok_or_else(|| {
-            Wave4HostPortError::new(
-                ROBOT_OFFLINE,
-                format!("{} must be active before a Robot device tool is used", capability_id.as_ref()),
-            )
-        })?;
-        if activation.cancelled.load(Ordering::Acquire)
-            || activation.binding_id != binding.binding_id.as_ref()
-            || activation.robot_id != robot_id
-            || activation.principal_id != principal.principal_id
-            || activation.agent_session_id.as_ref() != agent_session_id.as_ref()
-            || activation.capability_id != capability_id
-        {
-            return Err(Wave4HostPortError::resource_owner_mismatch(
-                "Robot lifecycle lease does not match the current Session binding",
+    fn ensure_installation_owner(&self, principal_id: &str) -> Result<(), RobotModuleError> {
+        if principal_id != self.authoritative_user_id.as_ref() {
+            return Err(RobotModuleError::owner_mismatch(
+                "Robot request principal is not the installation owner",
             ));
         }
-        // Re-check the mutable pairing boundary. A Session compiled before a
-        // robot was rebound must lose use authority immediately.
-        self.load_bound_robot(binding).await?;
         Ok(())
     }
 
-    fn ensure_installation_owner(&self, principal_id: &str) -> Result<(), Wave4HostPortError> {
-        if principal_id != self.authoritative_user_id.as_ref() {
-            return Err(Wave4HostPortError::resource_owner_mismatch(
-                "Robot request principal is not the installation owner",
+    fn validate_binding(
+        &self,
+        binding: &TypedResourceBinding,
+        principal_id: &str,
+    ) -> Result<(), RobotModuleError> {
+        if binding.resource_kind.as_ref() != ROBOT_RESOURCE_KIND {
+            return Err(RobotModuleError::not_bound(
+                "Pair a robot and bind that device to this Agent before enabling Robot actions.",
+            ));
+        }
+        if binding.owner_id != principal_id {
+            return Err(RobotModuleError::owner_mismatch(
+                "Robot resource binding belongs to another principal",
             ));
         }
         Ok(())
@@ -468,74 +409,39 @@ impl NomiCoreRobotWave4Owner {
     async fn load_bound_robot(
         &self,
         binding: &TypedResourceBinding,
-    ) -> Result<RobotRecord, Wave4HostPortError> {
+    ) -> Result<RobotRecord, RobotModuleError> {
         let robot = self
             .registry
             .get(binding.resource_id.as_ref())
             .await
             .ok_or_else(|| {
-                Wave4HostPortError::new(
+                RobotModuleError::new(
                     ROBOT_NOT_FOUND,
-                    "the bound robot resource does not exist in this installation",
+                    "The bound robot is no longer registered. Pair a device and update this Agent binding.",
+                    false,
                 )
             })?;
         let companion_id = robot.companion_id.as_deref().ok_or_else(|| {
-            Wave4HostPortError::new(
+            RobotModuleError::new(
                 ROBOT_NOT_PAIRED,
-                "the bound robot is not paired with a Companion",
+                "The bound robot is not paired with a Companion. Pair it in Device settings first.",
+                false,
             )
         })?;
         let bound_companion = binding
             .typed_parameters
             .get("companion_id")
             .ok_or_else(|| {
-                Wave4HostPortError::resource_not_bound(
-                    "the Robot resource binding has no server-resolved companion_id",
+                RobotModuleError::not_bound(
+                    "Robot binding has no server-resolved companion identity",
                 )
             })?;
         if companion_id != bound_companion {
-            return Err(Wave4HostPortError::resource_owner_mismatch(
-                "the Robot resource is no longer paired with the bound Companion",
+            return Err(RobotModuleError::owner_mismatch(
+                "The robot was rebound to another Companion; update this Agent binding.",
             ));
         }
         Ok(robot)
-    }
-
-    async fn execute_tool(
-        &self,
-        request: &Wave4HostRequest,
-        input: &StrictJsonValue,
-        capability: RobotToolCapability,
-    ) -> Result<StrictJsonValue, Wave4HostPortError> {
-        let parsed: RobotToolInput = serde_json::from_value(input.0.clone())
-            .map_err(|error| Wave4HostPortError::invalid_request(error.to_string()))?;
-        if parsed.tool_name.trim().is_empty()
-            || parsed.tool_name != parsed.tool_name.trim()
-            || parsed.tool_name.len() > MAX_TOOL_NAME_BYTES
-            || !parsed.arguments.is_object()
-        {
-            return Err(Wave4HostPortError::invalid_request(
-                "tool_name must be trimmed and non-empty, and arguments must be an object",
-            ));
-        }
-        let binding = exact_robot_binding(
-            &request.context.resource_bindings,
-            &request.context.principal.principal_id,
-        )?;
-        self.execute_bound_device_tool(
-            &request.context.principal,
-            &request.context.agent_session_id,
-            &request.context.operation_id,
-            &request.context.idempotency_key,
-            &request.context.correlation_id,
-            binding,
-            capability,
-            &parsed.tool_name,
-            None,
-            None,
-            parsed.arguments,
-        )
-        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -547,37 +453,59 @@ impl NomiCoreRobotWave4Owner {
         idempotency_key: &IdempotencyKey,
         _correlation_id: &CorrelationId,
         binding: &TypedResourceBinding,
-        capability: RobotToolCapability,
+        action: RobotAction,
         exposed_name: &str,
-        expected_device_name: Option<&str>,
-        expected_input_schema: Option<&serde_json::Value>,
+        expected_device_name: &str,
+        expected_connection_id: &str,
+        expected_input_schema: &serde_json::Value,
         arguments: serde_json::Value,
-    ) -> Result<StrictJsonValue, Wave4HostPortError> {
+    ) -> Result<StrictJsonValue, RobotModuleError> {
         if !arguments.is_object() {
-            return Err(Wave4HostPortError::invalid_request(
+            return Err(RobotModuleError::invalid(
                 "Robot tool arguments must be an object",
             ));
         }
         self.ensure_installation_owner(&principal.principal_id)?;
-        if binding.owner_id != principal.principal_id
-            || binding.resource_kind.as_ref() != ROBOT_RESOURCE_KIND
-        {
-            return Err(Wave4HostPortError::resource_owner_mismatch(
-                "Robot Session tool binding does not belong to the authenticated principal",
-            ));
+        self.validate_binding(binding, &principal.principal_id)?;
+        if !binding.operations.contains(action.resource_operation()) {
+            return Err(RobotModuleError::owner_mismatch(format!(
+                "Robot resource does not grant {}",
+                action.resource_operation()
+            )));
         }
         let robot = self.load_bound_robot(binding).await?;
-        let device_name = self.tools.tools(&robot.robot_id).await.into_iter()
-            .find(|tool| tool.exposed_name == exposed_name).map(|tool| tool.device_name);
-        if !robot.permissions.allows(capability.capability_id())
-            || device_name.as_deref().is_some_and(|name| !robot.permissions.allows_tool(name))
+        let Some(_action_lease) = self
+            .registry
+            .hold_action_connection(&robot.robot_id, expected_connection_id)
+            .await
+        else {
+            return Err(RobotModuleError::new(
+                ROBOT_OFFLINE,
+                "The bound robot reconnected after this Session froze its Action surface. Start a new operation.",
+                true,
+            ));
+        };
+        // Re-read every mutable authority fact while the device operation
+        // lease is held. Permission, pairing, removal and reconnect all need
+        // the exclusive side of the same gate.
+        let robot = self.load_bound_robot(binding).await?;
+        if !robot.permissions.allows_action(action)
+            || !robot.permissions.allows_tool(expected_device_name)
         {
-            return Err(Wave4HostPortError::resource_owner_mismatch("device permissions do not allow this action"));
+            return Err(RobotModuleError::new(
+                ROBOT_PERMISSION_DENIED,
+                format!(
+                    "{} is disabled for the bound robot; enable it in Device settings.",
+                    action.display_name()
+                ),
+                false,
+            ));
         }
         if !self.tools.is_attached(&robot.robot_id).await {
-            return Err(Wave4HostPortError::new(
+            return Err(RobotModuleError::new(
                 ROBOT_OFFLINE,
-                "the bound robot is not connected",
+                "The bound robot is offline. Connect it to this desktop and try a new operation.",
+                true,
             ));
         }
 
@@ -586,12 +514,13 @@ impl NomiCoreRobotWave4Owner {
             "arguments": arguments,
         }));
         let input_digest = digest_payload(&canonical_input)
-            .map_err(|error| Wave4HostPortError::invalid_request(error.to_string()))?;
+            .map_err(|error| RobotModuleError::invalid(error.to_string()))?;
         let effect_request = RobotEffectRequest {
             key: RobotEffectKey {
                 principal_id: principal.principal_id.clone(),
                 agent_session_id: agent_session_id.as_ref().to_owned(),
-                capability_id: capability.capability_id().to_owned(),
+                module_id: ROBOT_MODULE_ID.to_owned(),
+                action_id: action.id().to_owned(),
                 idempotency_key: idempotency_key.as_ref().to_owned(),
             },
             input_digest: input_digest.as_ref().to_owned(),
@@ -599,27 +528,37 @@ impl NomiCoreRobotWave4Owner {
             tool_name: exposed_name.to_owned(),
             reserved_at_ms: now_ms(),
         };
-        let reservation = match self.effects.admit(effect_request).await.map_err(effect_ledger_error)? {
+        let reservation = match self
+            .effects
+            .admit(effect_request)
+            .await
+            .map_err(effect_ledger_error)?
+        {
             RobotEffectAdmission::Dispatch(reservation) => reservation,
             RobotEffectAdmission::Completed { output } => {
                 return Ok(tool_output(&robot.robot_id, exposed_name, output, true));
             }
             RobotEffectAdmission::Failed { code, message } => {
-                return Err(Wave4HostPortError::new(code, message));
+                return Err(RobotModuleError::new(code, message, false));
             }
             RobotEffectAdmission::OutcomeUnknown { reason } => {
-                return Err(Wave4HostPortError::new(ROBOT_EFFECT_OUTCOME_UNKNOWN, reason));
+                return Err(RobotModuleError::new(
+                    ROBOT_EFFECT_OUTCOME_UNKNOWN,
+                    reason,
+                    false,
+                ));
             }
         };
 
         let result = self
             .tools
-            .call_frozen_for_capability(
+            .call_frozen_for_action(
                 &robot.robot_id,
-                capability,
+                action,
                 exposed_name,
-                expected_device_name,
-                expected_input_schema,
+                Some(expected_device_name),
+                Some(expected_connection_id),
+                Some(expected_input_schema),
                 canonical_input.0["arguments"].clone(),
             )
             .await;
@@ -627,16 +566,15 @@ impl NomiCoreRobotWave4Owner {
             Ok(output) => {
                 let output = bounded_tool_result(output);
                 self.effects
-                    .complete(
-                        &reservation,
-                        output.clone(),
-                        now_ms(),
-                    )
+                    .complete(&reservation, output.clone(), now_ms())
                     .await
                     .map_err(|error| {
-                        Wave4HostPortError::new(
+                        RobotModuleError::new(
                             ROBOT_EFFECT_RECEIPT_FAILED,
-                            format!("physical effect completed but its receipt could not be persisted: {error}"),
+                            format!(
+                                "physical effect completed but its receipt could not be persisted: {error}"
+                            ),
+                            false,
                         )
                     })?;
                 Ok(tool_output(&robot.robot_id, exposed_name, output, false))
@@ -649,7 +587,11 @@ impl NomiCoreRobotWave4Owner {
                     &message,
                 )
                 .await?;
-                Err(Wave4HostPortError::new(ROBOT_DEVICE_REJECTED, message))
+                Err(RobotModuleError::new(
+                    ROBOT_DEVICE_REJECTED,
+                    message,
+                    false,
+                ))
             }
             Err(ToolCallError::Failed(message)) => {
                 settle_known_failure(
@@ -659,43 +601,53 @@ impl NomiCoreRobotWave4Owner {
                     &message,
                 )
                 .await?;
-                Err(Wave4HostPortError::new(ROBOT_EFFECT_FAILED, message))
+                Err(RobotModuleError::new(
+                    ROBOT_EFFECT_FAILED,
+                    message,
+                    false,
+                ))
             }
             Err(error @ (ToolCallError::Offline | ToolCallError::Timeout)) => {
                 let reason = error.to_string();
                 self.effects
-                    .mark_outcome_unknown(
-                        &reservation,
-                        reason.clone(),
-                        now_ms(),
-                    )
+                    .mark_outcome_unknown(&reservation, reason.clone(), now_ms())
                     .await
                     .map_err(effect_ledger_error)?;
-                Err(Wave4HostPortError::new(
+                Err(RobotModuleError::new(
                     ROBOT_EFFECT_OUTCOME_UNKNOWN,
                     reason,
+                    false,
                 ))
             }
         }
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl NomiHostDynamicToolInvoker for BoundRobotSessionToolInvoker {
     async fn invoke(
         &self,
         request: NomiHostDynamicToolInvocation,
     ) -> Result<StrictJsonValue, NomiHostDynamicToolError> {
-        let key = (
-            request.capability_id.clone(),
-            request.provider_name.clone(),
-        );
-        let frozen = self.tools.get(&key).ok_or_else(|| {
+        if self.revoked.load(Ordering::Acquire) {
+            return Err(NomiHostDynamicToolError::new(
+                "ROBOT_SESSION_REVOKED",
+                "Robot Session resources have been closed",
+                false,
+            ));
+        }
+        if request.capability_id.as_ref() != ROBOT_MODULE_ID {
+            return Err(NomiHostDynamicToolError::new(
+                ROBOT_ACTION_NOT_GRANTED,
+                "Robot tool invocation does not belong to the robot Module",
+                false,
+            ));
+        }
+        let frozen = self.tools.get(&request.provider_name).ok_or_else(|| {
             NomiHostDynamicToolError::new(
                 "ROBOT_SESSION_TOOL_NOT_BOUND",
                 format!(
-                    "Robot Session tool {}/{} was not frozen into this AgentSession",
-                    request.capability_id.as_ref(),
+                    "Robot Session tool {} was not frozen into this AgentSession",
                     request.provider_name
                 ),
                 false,
@@ -703,34 +655,10 @@ impl NomiHostDynamicToolInvoker for BoundRobotSessionToolInvoker {
         })?;
         if !request.arguments.0.is_object() || !frozen.validator.is_valid(&request.arguments.0) {
             return Err(NomiHostDynamicToolError::new(
-                "INVALID_PAYLOAD",
+                ROBOT_INVALID_PAYLOAD,
                 "Robot Session arguments do not match the frozen device schema",
                 false,
             ));
-        }
-        self.owner
-            .ensure_lifecycle_active(
-                &self.principal,
-                &self.agent_session_id,
-                ROBOT_LINK,
-                &self.binding,
-                &self.robot_id,
-            )
-            .await
-            .map_err(dynamic_tool_error)?;
-        if frozen.device_name.starts_with("self.audio")
-            || frozen.device_name.starts_with("audio")
-        {
-            self.owner
-                .ensure_lifecycle_active(
-                    &self.principal,
-                    &self.agent_session_id,
-                    ROBOT_AUDIO,
-                    &self.binding,
-                    &self.robot_id,
-                )
-                .await
-                .map_err(dynamic_tool_error)?;
         }
         self.owner
             .execute_bound_device_tool(
@@ -740,10 +668,11 @@ impl NomiHostDynamicToolInvoker for BoundRobotSessionToolInvoker {
                 &request.idempotency_key,
                 &request.correlation_id,
                 &self.binding,
-                frozen.capability,
+                frozen.action,
                 &request.provider_name,
-                Some(&frozen.device_name),
-                Some(&frozen.raw_input_schema),
+                &frozen.device_name,
+                &self.connection_id,
+                &frozen.raw_input_schema,
                 request.arguments.0,
             )
             .await
@@ -751,73 +680,43 @@ impl NomiHostDynamicToolInvoker for BoundRobotSessionToolInvoker {
     }
 }
 
-fn dynamic_tool_error(error: Wave4HostPortError) -> NomiHostDynamicToolError {
-    let canonical_code = match error.code.as_str() {
-        nomifun_agent_domain_wave4::WAVE4_INVALID_REQUEST => "INVALID_PAYLOAD",
-        nomifun_agent_domain_wave4::WAVE4_RESOURCE_OWNER_MISMATCH => {
-            "RESOURCE_OWNER_MISMATCH"
-        }
-        nomifun_agent_domain_wave4::WAVE4_RESOURCE_NOT_BOUND
-        | nomifun_agent_domain_wave4::WAVE4_RESOURCE_BINDING_INVALID => {
-            "PRESET_RESOURCE_NOT_BOUND"
-        }
-        other => other,
-    };
-    // Only an offline check performed before dispatch is safe to repeat. Every
-    // ambiguous or post-dispatch physical outcome stays explicitly unsafe.
-    let retry_safe = canonical_code == ROBOT_OFFLINE;
-    NomiHostDynamicToolError::new(canonical_code, error.message, retry_safe)
+fn dynamic_tool_error(error: RobotModuleError) -> NomiHostDynamicToolError {
+    NomiHostDynamicToolError::new(error.code, error.message, error.retry_safe)
 }
 
-#[async_trait::async_trait]
-impl nomifun_ai_agent::ContextContributor for RobotLifecycleLease {
-    async fn pre_turn_context(&self) -> Option<String> {
-        if self.activation.cancelled.load(Ordering::Acquire) {
-            return None;
-        }
-        let robot = self.registry.get(&self.activation.robot_id).await?;
-        if robot.companion_id.as_deref() != Some(self.activation.companion_id.as_str()) {
-            self.activation.cancelled.store(true, Ordering::Release);
-            return None;
-        }
-        let online = self.status.snapshot().await.into_iter().any(|status| {
-            status.robot_id == self.activation.robot_id && status.phase != "offline"
-        });
-        if !online {
-            return None;
-        }
-        // ResourceProvider/BackgroundService leases own authority and cleanup,
-        // not prompt data. Their health is enforced by the dynamic tool owner.
-        None
-    }
-
-    fn label(&self) -> &str {
-        "nomifun_robot_session_lifecycle"
-    }
-}
-
-impl Drop for RobotLifecycleLease {
-    fn drop(&mut self) {
-        self.activation.cancelled.store(true, Ordering::Release);
-        self.activations.remove_if(&self.key, |_, current| {
-            Arc::ptr_eq(&current.cancelled, &self.activation.cancelled)
-        });
-    }
-}
-
-fn lifecycle_key(
+fn exact_robot_binding<'a>(
+    bindings: &'a [TypedResourceBinding],
     principal_id: &str,
-    agent_session_id: &AgentSessionId,
-    capability_id: &CapabilityId,
-) -> String {
-    format!(
-        "{principal_id}\n{}\n{}",
-        agent_session_id.as_ref(),
-        capability_id.as_ref()
-    )
+) -> Result<&'a TypedResourceBinding, RobotModuleError> {
+    let mut matching = bindings
+        .iter()
+        .filter(|binding| binding.resource_kind.as_ref() == ROBOT_RESOURCE_KIND);
+    let binding = matching.next().ok_or_else(|| {
+        RobotModuleError::not_bound(
+            "Pair a robot and bind that device to this Agent before enabling Robot actions.",
+        )
+    })?;
+    if matching.next().is_some() {
+        return Err(RobotModuleError::not_bound(
+            "More than one Robot resource is bound; choose one exact device.",
+        ));
+    }
+    if binding.owner_id != principal_id {
+        return Err(RobotModuleError::owner_mismatch(
+            "Robot resource binding belongs to another principal",
+        ));
+    }
+    Ok(binding)
 }
 
-fn validate_provider_tool_name(name: &str) -> Result<(), String> {
+pub(crate) fn bound_robot_resource<'a>(
+    bindings: &'a [TypedResourceBinding],
+    principal_id: &str,
+) -> Result<&'a TypedResourceBinding, RobotModuleError> {
+    exact_robot_binding(bindings, principal_id)
+}
+
+fn validate_provider_tool_name(name: &str) -> Result<(), RobotModuleError> {
     if name.is_empty()
         || name.len() > 64
         || !name.starts_with("robot_")
@@ -825,9 +724,9 @@ fn validate_provider_tool_name(name: &str) -> Result<(), String> {
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || character == '_')
     {
-        return Err(format!(
+        return Err(RobotModuleError::invalid(format!(
             "Robot tool {name:?} cannot be represented as a provider-safe exact tool name"
-        ));
+        )));
     }
     Ok(())
 }
@@ -855,43 +754,53 @@ fn bounded_description(description: &str) -> String {
     }
 }
 
-fn strict_device_input_schema(mut schema: serde_json::Value) -> Result<StrictJsonValue, String> {
+fn strict_device_input_schema(
+    mut schema: serde_json::Value,
+) -> Result<StrictJsonValue, RobotModuleError> {
     if serde_json::to_vec(&schema)
-        .map_err(|error| format!("Robot tool schema cannot be encoded: {error}"))?
+        .map_err(|error| RobotModuleError::invalid(error.to_string()))?
         .len()
         > MAX_DEVICE_TOOL_SCHEMA_BYTES
     {
-        return Err(format!(
+        return Err(RobotModuleError::invalid(format!(
             "Robot tool schema exceeds the {MAX_DEVICE_TOOL_SCHEMA_BYTES}-byte Session limit"
-        ));
+        )));
     }
     harden_object_schemas(&mut schema, "$input")?;
     let root = schema
         .as_object()
-        .ok_or_else(|| "Robot tool input schema must be a JSON object".to_owned())?;
+        .ok_or_else(|| RobotModuleError::invalid("Robot tool input schema must be a JSON object"))?;
     if root.get("type").and_then(serde_json::Value::as_str) != Some("object") {
-        return Err("Robot tool input schema root type must be object".to_owned());
+        return Err(RobotModuleError::invalid(
+            "Robot tool input schema root type must be object",
+        ));
     }
     match root.get("properties") {
         Some(serde_json::Value::Object(_)) | None => {}
-        _ => return Err("Robot tool input schema properties must be an object".to_owned()),
+        _ => {
+            return Err(RobotModuleError::invalid(
+                "Robot tool input schema properties must be an object",
+            ));
+        }
     }
     Ok(StrictJsonValue(schema))
 }
 
 struct NoExternalDeviceSchema;
+
 impl jsonschema::Retrieve for NoExternalDeviceSchema {
-    fn retrieve(&self, _: &jsonschema::Uri<String>)
-        -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>>
-    {
+    fn retrieve(
+        &self,
+        _: &jsonschema::Uri<String>,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
         Err("Robot schemas cannot retrieve external resources".into())
     }
 }
 
-/// Preserve the device-declared argument fields and types while ensuring no
-/// object layer accepts undeclared fields. Device schema prose is not an
-/// authority expansion for the host's physical-effect boundary.
-fn harden_object_schemas(value: &mut serde_json::Value, path: &str) -> Result<(), String> {
+fn harden_object_schemas(
+    value: &mut serde_json::Value,
+    path: &str,
+) -> Result<(), RobotModuleError> {
     match value {
         serde_json::Value::Array(items) => {
             for (index, item) in items.iter_mut().enumerate() {
@@ -900,20 +809,20 @@ fn harden_object_schemas(value: &mut serde_json::Value, path: &str) -> Result<()
         }
         serde_json::Value::Object(object) => {
             if object.contains_key("$ref") {
-                return Err(format!(
+                return Err(RobotModuleError::invalid(format!(
                     "Robot tool schema {path} contains an external schema reference"
-                ));
+                )));
             }
             let object_schema = object.get("type").and_then(serde_json::Value::as_str)
                 == Some("object")
                 || object.contains_key("properties");
             if object_schema {
-                if let Some(properties) = object.get("properties") {
-                    if !properties.is_object() {
-                        return Err(format!(
-                            "Robot tool schema {path}.properties must be an object"
-                        ));
-                    }
+                if let Some(properties) = object.get("properties")
+                    && !properties.is_object()
+                {
+                    return Err(RobotModuleError::invalid(format!(
+                        "Robot tool schema {path}.properties must be an object"
+                    )));
                 }
                 object.insert(
                     "additionalProperties".to_owned(),
@@ -931,115 +840,14 @@ fn harden_object_schemas(value: &mut serde_json::Value, path: &str) -> Result<()
     Ok(())
 }
 
-impl Wave4HostPort for NomiCoreRobotWave4Owner {
-    fn invoke<'a>(
-        &'a self,
-        request: Wave4HostRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave4HostPortError>> + Send + 'a>> {
-        Box::pin(async move {
-            request.validate()?;
-            match &request.operation {
-                Wave4CapabilityOperation::RobotDisplay { input } => {
-                    self.execute_tool(&request, input, RobotToolCapability::Display)
-                        .await
-                }
-                Wave4CapabilityOperation::RobotMotion { input } => {
-                    self.execute_tool(&request, input, RobotToolCapability::Motion)
-                        .await
-                }
-                Wave4CapabilityOperation::RobotDeviceTools { input } => {
-                    self.execute_tool(&request, input, RobotToolCapability::DeviceTools)
-                        .await
-                }
-                _ => Err(Wave4HostPortError::action_operation_mismatch(
-                    "Robot owner received a non-Robot action",
-                )),
-            }
-        })
-    }
-}
-
-impl Wave4ContextHostPort for NomiCoreRobotWave4Owner {
-    fn contribute<'a>(
-        &'a self,
-        request: Wave4ContextHostRequest,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Option<StrictJsonValue>, Wave4HostPortError>>
-                + Send
-                + 'a,
-        >,
-    > {
-        Box::pin(async move {
-            request.validate()?;
-            if request.capability_id.as_ref() != ROBOT_VISION {
-                return Err(Wave4HostPortError::action_operation_mismatch(
-                    "Robot Context owner received a non-vision contribution",
-                ));
-            }
-            self.ensure_installation_owner(&request.principal.principal_id)?;
-            let binding = exact_robot_binding(
-                &request.resource_bindings,
-                &request.principal.principal_id,
-            )?;
-            let robot = self.load_bound_robot(binding).await?;
-            let companion_id = robot
-                .companion_id
-                .as_deref()
-                .expect("load_bound_robot requires pairing");
-            Ok(self
-                .observations
-                .latest_recent(
-                    &robot.robot_id,
-                    companion_id,
-                    now_ms(),
-                )
-                .await
-                .map(|observation| {
-                    StrictJsonValue(serde_json::json!({
-                        "kind": "robot_vision",
-                        "robot_id": observation.robot_id,
-                        "companion_id": observation.companion_id,
-                        "question": observation.question,
-                        "answer": observation.answer,
-                        "observed_at_ms": observation.observed_at_ms,
-                    }))
-                }))
-        })
-    }
-}
-
-fn exact_robot_binding<'a>(
-    bindings: &'a [TypedResourceBinding],
-    principal_id: &str,
-) -> Result<&'a TypedResourceBinding, Wave4HostPortError> {
-    let mut matching = bindings
-        .iter()
-        .filter(|binding| binding.resource_kind.as_ref() == ROBOT_RESOURCE_KIND);
-    let binding = matching.next().ok_or_else(|| {
-        Wave4HostPortError::resource_not_bound("target Robot resource is not bound")
-    })?;
-    if matching.next().is_some() {
-        return Err(Wave4HostPortError::resource_binding_invalid(
-            "more than one Robot resource is bound",
-        ));
-    }
-    if binding.owner_id != principal_id {
-        return Err(Wave4HostPortError::resource_owner_mismatch(
-            "Robot resource binding belongs to another principal",
-        ));
-    }
-    Ok(binding)
-}
-
-fn effect_ledger_error(error: anyhow::Error) -> Wave4HostPortError {
+fn effect_ledger_error(error: anyhow::Error) -> RobotModuleError {
     let message = error.to_string();
     let code = if message.contains("reused with a different request") {
         "ROBOT_EFFECT_IDEMPOTENCY_CONFLICT"
     } else {
         ROBOT_EFFECT_RECEIPT_FAILED
     };
-    Wave4HostPortError::new(code, message)
+    RobotModuleError::new(code, message, false)
 }
 
 async fn settle_known_failure(
@@ -1047,7 +855,7 @@ async fn settle_known_failure(
     reservation: &nomifun_robot::effect_ledger::RobotEffectReservation,
     code: &str,
     message: &str,
-) -> Result<(), Wave4HostPortError> {
+) -> Result<(), RobotModuleError> {
     ledger
         .fail(
             reservation,
@@ -1093,23 +901,21 @@ fn tool_output(
 mod tests {
     use super::*;
     use nomifun_agent_contracts::{
-        ActionId, AgentSessionId, CanonicalSchemaRef, CorrelationId,
-        IdempotencyKey, OperationId, PrincipalRef, ResolvedSnapshotRef,
-        ResourceBindingId, ResourceId, ResourceKind, ScopeKey,
+        CorrelationId, ResourceBindingId, ResourceId, ResourceKind,
     };
     use nomifun_robot::link::Frame;
     use nomifun_robot::mcp_bridge::{RobotMcpClient, RobotToolDescriptor};
-    use nomifun_robot::registry::RobotReport;
-    use nomifun_robot::status::{RobotPhase, RobotStatusRegistry};
-    use nomifun_robot::vision::RobotVisionObservation;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use nomifun_robot::registry::{RobotPermissions, RobotReport};
     use tokio::sync::mpsc;
 
-    async fn fixture() -> (
-        Arc<NomiCoreRobotWave4Owner>,
-        tempfile::TempDir,
-        Arc<AtomicUsize>,
-    ) {
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        owner: Arc<RobotModuleOwner>,
+        binding: TypedResourceBinding,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    async fn fixture(permissions: RobotPermissions) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(RobotRegistry::load(dir.path()).await.unwrap());
         let (reported, _) = registry
@@ -1117,8 +923,8 @@ mod tests {
                 RobotReport {
                     robot_id: "robot-1".to_owned(),
                     client_id: "client-1".to_owned(),
-                    board: "fake-board".to_owned(),
-                    firmware_version: "1.0.0".to_owned(),
+                    board: "test".to_owned(),
+                    firmware_version: "1".to_owned(),
                 },
                 1,
             )
@@ -1131,488 +937,299 @@ mod tests {
             )
             .await
             .unwrap();
-
-        registry.set_permissions("robot-1", nomifun_robot::registry::RobotPermissions {
-            motion: true, vision: true, device_tools: true, ..Default::default()
-        }).await.unwrap();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let responder_calls = Arc::clone(&calls);
-        let (tx, mut rx) = mpsc::channel::<Frame>(8);
-        let client = Arc::new(RobotMcpClient::new(tx, "device-session".to_owned()));
+        registry
+            .set_permissions("robot-1", permissions)
+            .await
+            .unwrap();
+        registry
+            .connect("robot-1", "companion-1", "socket-1")
+            .await
+            .unwrap();
+        let tools = Arc::new(RobotToolRegistry::default());
+        let (tx, mut rx) = mpsc::channel(8);
+        let client = Arc::new(RobotMcpClient::new(tx, "socket-1".to_owned()));
         let responder = Arc::clone(&client);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recorded = Arc::clone(&calls);
         tokio::spawn(async move {
-            while let Some(Frame::Text(raw)) = rx.recv().await {
-                let envelope: serde_json::Value = serde_json::from_str(&raw).unwrap();
-                let payload = &envelope["payload"];
-                responder_calls.fetch_add(1, Ordering::SeqCst);
+            while let Some(Frame::Text(frame)) = rx.recv().await {
+                recorded.fetch_add(1, Ordering::SeqCst);
+                let value: serde_json::Value = serde_json::from_str(&frame).unwrap();
                 responder
                     .handle_incoming(serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": payload["id"],
-                        "result": {
-                            "content": [{ "type": "text", "text": "device-ok" }],
-                            "isError": false
-                        }
+                        "jsonrpc":"2.0",
+                        "id":value["payload"]["id"],
+                        "result":{"content":[{"type":"text","text":"ok"}],"isError":false}
                     }))
                     .await;
             }
         });
-        let tools = Arc::new(RobotToolRegistry::default());
         tools
             .attach(
                 "robot-1",
                 client,
                 vec![
-                    descriptor("self.emoji.set_expression"),
-                    descriptor("self.head.look"),
-                    descriptor("self.get_device_status"),
+                    RobotToolDescriptor {
+                        device_name: "self.gimbal.look".to_owned(),
+                        exposed_name: "robot_gimbal_look".to_owned(),
+                        description: "Look in a direction".to_owned(),
+                        input_schema: serde_json::json!({
+                            "type":"object",
+                            "properties":{"direction":{"type":"string"}},
+                            "required":["direction"]
+                        }),
+                    },
+                    RobotToolDescriptor {
+                        device_name: "self.display.text".to_owned(),
+                        exposed_name: "robot_display_text".to_owned(),
+                        description: "Show text".to_owned(),
+                        input_schema: serde_json::json!({"type":"object"}),
+                    },
+                    RobotToolDescriptor {
+                        device_name: "self.camera.take_photo".to_owned(),
+                        exposed_name: "robot_camera_take_photo".to_owned(),
+                        description: "Take a photo".to_owned(),
+                        input_schema: serde_json::json!({"type":"object"}),
+                    },
                 ],
             )
             .await;
-        let status = Arc::new(RobotStatusRegistry::new(
-            nomifun_robot::events::RobotEventEmitter::new(Arc::new(NullSink)),
-            "owner".to_owned(),
+        let owner = Arc::new(RobotModuleOwner::from_parts(
+            Arc::from("owner"),
+            Arc::clone(&registry),
+            tools,
+            Arc::new(RobotEffectLedger::load(dir.path()).await.unwrap()),
+            Arc::new(RobotVisionObservationRegistry::default()),
         ));
-        status
-            .publish("robot-1", Some("companion-1"), RobotPhase::Idle, 1)
-            .await;
-        let effects = Arc::new(RobotEffectLedger::load(dir.path()).await.unwrap());
-        let observations = Arc::new(RobotVisionObservationRegistry::default());
-        observations
-            .record(RobotVisionObservation {
-                source: nomifun_robot::vision::RobotVisionSource {
-                    companion_id: "companion-1".to_owned(), conversation_id: "conversation-1".to_owned(),
-                    connection_id: "socket-1".to_owned(), request_id: "request-1".to_owned(),
-                },
-                robot_id: "robot-1".to_owned(),
-                companion_id: "companion-1".to_owned(),
-                question: "what?".to_owned(),
-                answer: "a cup".to_owned(),
-                observed_at_ms: now_ms(),
-            })
-            .await;
-        (
-            Arc::new(NomiCoreRobotWave4Owner::from_parts(
-                Arc::from("owner"),
-                registry,
-                status,
-                tools,
-                effects,
-                observations,
-            )),
-            dir,
+        Fixture {
+            _dir: dir,
+            owner,
+            binding: binding(["vision", "display", "motion", "device"]),
             calls,
-        )
-    }
-
-    struct NullSink;
-
-    impl nomifun_realtime::UserEventSink for NullSink {
-        fn send_to_user(
-            &self,
-            _user_id: &str,
-            _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
-        ) {
         }
     }
 
-    fn descriptor(device_name: &str) -> RobotToolDescriptor {
-        RobotToolDescriptor {
-            device_name: device_name.to_owned(),
-            exposed_name: nomifun_robot::mcp_bridge::exposed_tool_name(device_name),
-            description: device_name.to_owned(),
-            input_schema: serde_json::json!({ "type": "object" }),
-        }
-    }
-
-    fn binding(operation: &str) -> TypedResourceBinding {
+    fn binding(operations: impl IntoIterator<Item = &'static str>) -> TypedResourceBinding {
         TypedResourceBinding {
-            binding_id: ResourceBindingId::from("robot:robot-1"),
+            binding_id: ResourceBindingId::from("robot-binding"),
             resource_kind: ResourceKind::from(ROBOT_RESOURCE_KIND),
             resource_id: ResourceId::from("robot-1"),
             owner_id: "owner".to_owned(),
-            operations: BTreeSet::from([operation.to_owned()]),
+            operations: operations.into_iter().map(str::to_owned).collect(),
             connection_config_ref: None,
-            typed_parameters: [("companion_id".to_owned(), "companion-1".to_owned())]
-                .into_iter()
-                .collect(),
+            typed_parameters: BTreeMap::from([(
+                "companion_id".to_owned(),
+                "companion-1".to_owned(),
+            )]),
         }
     }
 
-    fn all_tool_binding() -> TypedResourceBinding {
-        let mut binding = binding("link");
-        binding.operations.extend([
-            "audio".to_owned(),
-            "display".to_owned(),
-            "motion".to_owned(),
-        ]);
-        binding
-    }
-
-    fn action_request(
-        capability_id: &str,
-        operation: &str,
-        tool_name: &str,
-        idempotency_key: &str,
-    ) -> Wave4HostRequest {
-        let input = StrictJsonValue(serde_json::json!({
-            "tool_name": tool_name,
-            "arguments": {},
-        }));
-        let operation_value = match capability_id {
-            ROBOT_DISPLAY => Wave4CapabilityOperation::RobotDisplay { input },
-            ROBOT_MOTION => Wave4CapabilityOperation::RobotMotion { input },
-            ROBOT_DEVICE_TOOLS => Wave4CapabilityOperation::RobotDeviceTools { input },
-            _ => unreachable!(),
-        };
-        Wave4HostRequest {
-            context: nomifun_agent_domain_wave4::Wave4HostContext {
-                principal: PrincipalRef {
-                    principal_kind: "user".to_owned(),
-                    principal_id: "owner".to_owned(),
-                },
-                agent_session_id: AgentSessionId::from("session"),
-                operation_id: OperationId::from("operation"),
-                idempotency_key: IdempotencyKey::from(idempotency_key),
-                correlation_id: CorrelationId::from("correlation"),
-                resolved_snapshot_ref: ResolvedSnapshotRef {
-                    snapshot_id: "snapshot".into(),
-                    snapshot_digest: "digest".into(),
-                },
-                registry_generation: 1,
-                capability_id: CapabilityId::from(capability_id),
-                action_id: ActionId::from(format!("{capability_id}.invoke")),
-                state_scope_key: ScopeKey::from("session:session"),
-                resource_bindings: vec![binding(operation)],
-            },
-            operation: operation_value,
-        }
-    }
-
-    fn context_schema() -> CanonicalSchemaRef {
-        nomifun_agent_domain_wave4::robot_registration()
-            .unwrap()
-            .metadata
-            .manifest
-            .payload
-            .contributions
-            .capabilities
-            .into_iter()
-            .find(|capability| capability.id.as_ref() == ROBOT_VISION)
-            .unwrap()
-            .contributions
-            .context_schema_refs
-            .into_iter()
-            .next()
-            .unwrap()
-    }
-
-    #[tokio::test]
-    async fn physical_action_dispatches_once_and_replays_the_durable_receipt() {
-        let (owner, _dir, calls) = fixture().await;
-        let request = action_request(
-            ROBOT_MOTION,
-            "motion",
-            "robot_head_look",
-            "same-key",
-        );
-        let first = owner.invoke(request.clone()).await.unwrap();
-        assert_eq!(first.0["result"], "device-ok");
-        assert_eq!(first.0["replayed"], false);
-        let replay = owner.invoke(request).await.unwrap();
-        assert_eq!(replay.0["replayed"], true);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn device_tool_cannot_escape_its_selected_capability() {
-        let (owner, _dir, calls) = fixture().await;
-        let error = owner
-            .invoke(action_request(
-                ROBOT_DISPLAY,
-                "display",
-                "robot_head_look",
-                "display-key",
-            ))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, ROBOT_DEVICE_REJECTED);
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn vision_context_comes_from_the_real_bounded_observation_registry() {
-        let (owner, _dir, _calls) = fixture().await;
-        let value = owner
-            .contribute(Wave4ContextHostRequest {
-                principal: PrincipalRef {
-                    principal_kind: "user".to_owned(),
-                    principal_id: "owner".to_owned(),
-                },
-                agent_session_id: AgentSessionId::from("session"),
-                operation_id: OperationId::from("context-operation"),
-                correlation_id: CorrelationId::from("context-correlation"),
-                resolved_snapshot_ref: ResolvedSnapshotRef {
-                    snapshot_id: "snapshot".into(),
-                    snapshot_digest: "digest".into(),
-                },
-                registry_generation: 1,
-                registry_digest: nomifun_agent_contracts::DigestHex::from("registry"),
-                capability_id: CapabilityId::from(ROBOT_VISION),
-                state_scope_key: ScopeKey::from("session:session"),
-                resource_bindings: vec![binding("vision")],
-                schema_ref: context_schema(),
-            })
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(value.0["kind"], "robot_vision");
-        assert_eq!(value.0["answer"], "a cup");
-    }
-
-    #[tokio::test]
-    async fn link_and_audio_lifecycle_use_the_live_robot_session_not_the_mcp_toolset() {
-        let (owner, _dir, _calls) = fixture().await;
-        for capability_id in [ROBOT_LINK, ROBOT_AUDIO] {
-            let value = owner
-                .activate_lifecycle_for(
-                    &CapabilityId::from(capability_id),
-                    "owner",
-                    &AgentSessionId::from("session"),
-                    &[binding(if capability_id == ROBOT_LINK {
-                        "link"
-                    } else {
-                        "audio"
-                    })],
-                )
-                .await
-                .unwrap();
-            assert_eq!(value.0["kind"], capability_id);
-            assert_eq!(value.0["state"], "active");
-        }
-    }
-
-    #[tokio::test]
-    async fn exact_dynamic_tools_require_a_live_session_lease_and_drop_revokes_it() {
-        let (owner, _dir, calls) = fixture().await;
-        let principal = PrincipalRef {
+    fn principal() -> PrincipalRef {
+        PrincipalRef {
             principal_kind: "user".to_owned(),
             principal_id: "owner".to_owned(),
-        };
-        let session_id = AgentSessionId::from("dynamic-session");
-        let binding = all_tool_binding();
-        let initial = BTreeSet::from([
-            CapabilityId::from(ROBOT_DISPLAY),
-            CapabilityId::from(ROBOT_MOTION),
-            CapabilityId::from(ROBOT_DEVICE_TOOLS),
-        ]);
-        let resolved = owner
-            .resolve_session_tools(
-                &principal,
-                &session_id,
-                &binding,
-                &initial,
-            )
-            .await
-            .unwrap();
-        assert_eq!(resolved.0.len(), 3);
-        let display = resolved
-            .0
-            .iter()
-            .find(|descriptor| descriptor.provider_name == "robot_emoji_set_expression")
-            .unwrap();
-        assert_eq!(display.capability_id.as_ref(), ROBOT_DISPLAY);
-        assert!(!display.deferred);
-        assert_eq!(display.input_schema.0["type"], "object");
-        assert_eq!(display.input_schema.0["additionalProperties"], false);
-        assert!(!resolved
-            .0
-            .iter()
-            .find(|descriptor| descriptor.provider_name == "robot_head_look")
-            .unwrap()
-            .deferred);
+        }
+    }
 
-        let invocation = |key: &str| NomiHostDynamicToolInvocation {
-            capability_id: CapabilityId::from(ROBOT_DISPLAY),
-            provider_name: "robot_emoji_set_expression".to_owned(),
+    fn permissions() -> RobotPermissions {
+        RobotPermissions {
+            vision: true,
+            motion: true,
+            display: true,
+            device_tools: true,
+            proactive_speech: false,
+            continuous_vision: false,
+        }
+    }
+
+    fn invocation(name: &str, key: &str) -> NomiHostDynamicToolInvocation {
+        NomiHostDynamicToolInvocation {
+            capability_id: module_capability_id(),
+            provider_name: name.to_owned(),
             operation_id: OperationId::from(format!("operation-{key}")),
-            idempotency_key: IdempotencyKey::from(key.to_owned()),
+            idempotency_key: IdempotencyKey::from(key),
             correlation_id: CorrelationId::from(format!("correlation-{key}")),
-            arguments: StrictJsonValue(serde_json::json!({})),
-        };
-        let before_activation = resolved
-            .1
-            .invoke(invocation("before"))
-            .await
-            .unwrap_err();
-        assert!(before_activation.internal_message.contains("robot.link"));
-        assert!(before_activation.retry_safe);
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-
-        owner
-            .activate_lifecycle_for(
-                &CapabilityId::from(ROBOT_LINK),
-                "owner",
-                &session_id,
-                std::slice::from_ref(&binding),
-            )
-            .await
-            .unwrap();
-        let lease = owner
-            .lifecycle_context_contributor_for(
-                &CapabilityId::from(ROBOT_LINK),
-                &principal,
-                &session_id,
-                std::slice::from_ref(&binding),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        let output = resolved
-            .1
-            .invoke(invocation("active"))
-            .await
-            .unwrap();
-        assert_eq!(output.0["tool_name"], "robot_emoji_set_expression");
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-        drop(lease);
-        let after_drop = resolved
-            .1
-            .invoke(invocation("after-drop"))
-            .await
-            .unwrap_err();
-        assert!(after_drop.internal_message.contains("robot.link"));
-        assert!(after_drop.retry_safe);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+            arguments: StrictJsonValue(serde_json::json!({"direction":"left"})),
+        }
     }
 
     #[tokio::test]
-    async fn dynamic_tool_rechecks_the_robot_companion_binding() {
-        let (owner, _dir, calls) = fixture().await;
-        let principal = PrincipalRef {
-            principal_kind: "user".to_owned(),
-            principal_id: "owner".to_owned(),
-        };
-        let session_id = AgentSessionId::from("binding-session");
-        let binding = all_tool_binding();
-        let resolved = owner
+    async fn one_module_materializes_only_exact_granted_actions() {
+        let fixture = fixture(permissions()).await;
+        let tools = fixture
+            .owner
             .resolve_session_tools(
-                &principal,
-                &session_id,
-                &binding,
-                &BTreeSet::from([CapabilityId::from(ROBOT_DISPLAY)]),
+                &principal(),
+                &AgentSessionId::from("session-1"),
+                &fixture.binding,
+                &BTreeSet::from([
+                    ActionId::from(nomifun_robot::capability::ROBOT_VISION_ACTION_ID),
+                    ActionId::from(nomifun_robot::capability::ROBOT_MOTION_ACTION_ID),
+                ]),
             )
             .await
             .unwrap();
-        owner
-            .activate_lifecycle_for(
-                &CapabilityId::from(ROBOT_LINK),
-                "owner",
-                &session_id,
-                std::slice::from_ref(&binding),
+        assert_eq!(tools.descriptors.len(), 2);
+        assert!(tools.descriptors.iter().all(|descriptor| matches!(
+            descriptor.action_id.as_ref(),
+            nomifun_robot::capability::ROBOT_VISION_ACTION_ID
+                | nomifun_robot::capability::ROBOT_MOTION_ACTION_ID
+        )));
+        assert_eq!(module_capability_id().as_ref(), ROBOT_MODULE_ID);
+    }
+
+    #[tokio::test]
+    async fn physical_dispatch_replays_receipt_and_revocation_is_terminal() {
+        let fixture = fixture(permissions()).await;
+        let tools = fixture
+            .owner
+            .resolve_session_tools(
+                &principal(),
+                &AgentSessionId::from("session-1"),
+                &fixture.binding,
+                &BTreeSet::from([ActionId::from(
+                    nomifun_robot::capability::ROBOT_MOTION_ACTION_ID,
+                )]),
             )
             .await
             .unwrap();
-        let _lease = owner
-            .lifecycle_context_contributor_for(
-                &CapabilityId::from(ROBOT_LINK),
-                &principal,
-                &session_id,
-                std::slice::from_ref(&binding),
+        let first = tools
+            .invoker
+            .invoke(invocation("robot_gimbal_look", "same"))
+            .await
+            .unwrap();
+        assert_eq!(first.0["replayed"], false);
+        let replay = tools
+            .invoker
+            .invoke(invocation("robot_gimbal_look", "same"))
+            .await
+            .unwrap();
+        assert_eq!(replay.0["replayed"], true);
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        tools.revoke();
+        let error = tools
+            .invoker
+            .invoke(invocation("robot_gimbal_look", "after-close"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code.as_ref(), "ROBOT_SESSION_REVOKED");
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn mutable_device_permission_rechecks_before_dispatch() {
+        let fixture = fixture(permissions()).await;
+        let tools = fixture
+            .owner
+            .resolve_session_tools(
+                &principal(),
+                &AgentSessionId::from("session-1"),
+                &fixture.binding,
+                &BTreeSet::from([ActionId::from(
+                    nomifun_robot::capability::ROBOT_MOTION_ACTION_ID,
+                )]),
             )
             .await
-            .unwrap()
             .unwrap();
-        owner
+        let mut permissions = permissions();
+        permissions.motion = false;
+        fixture
+            .owner
             .registry
-            .patch(
-                "robot-1",
-                None,
-                Some(Some("different-companion".to_owned())),
-            )
+            .set_permissions("robot-1", permissions)
             .await
             .unwrap();
-
-        let error = resolved
-            .1
-            .invoke(NomiHostDynamicToolInvocation {
-                capability_id: CapabilityId::from(ROBOT_DISPLAY),
-                provider_name: "robot_emoji_set_expression".to_owned(),
-                operation_id: OperationId::from("binding-operation"),
-                idempotency_key: IdempotencyKey::from("binding-key"),
-                correlation_id: CorrelationId::from("binding-correlation"),
-                arguments: StrictJsonValue(serde_json::json!({})),
-            })
+        let error = tools
+            .invoker
+            .invoke(invocation("robot_gimbal_look", "revoked"))
             .await
             .unwrap_err();
-        assert!(error.internal_message.contains("no longer paired"));
-        assert!(!error.retry_safe);
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(error.code.as_ref(), ROBOT_PERMISSION_DENIED);
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn dynamic_tool_preserves_outcome_unknown_as_not_retry_safe() {
-        let (owner, _dir, _calls) = fixture().await;
-        let (tx, rx) = mpsc::channel::<Frame>(1);
-        drop(rx);
-        owner
-            .tools
-            .attach(
-                "robot-1",
-                Arc::new(RobotMcpClient::new(tx, "closed-device-session".to_owned())),
-                vec![descriptor("self.emoji.set_expression")],
-            )
-            .await;
-        let principal = PrincipalRef {
-            principal_kind: "user".to_owned(),
-            principal_id: "owner".to_owned(),
-        };
-        let session_id = AgentSessionId::from("unknown-session");
-        let binding = all_tool_binding();
-        let resolved = owner
+    async fn reconnect_does_not_redirect_a_frozen_session_action() {
+        let fixture = fixture(permissions()).await;
+        let tools = fixture
+            .owner
             .resolve_session_tools(
-                &principal,
-                &session_id,
-                &binding,
-                &BTreeSet::from([CapabilityId::from(ROBOT_DISPLAY)]),
+                &principal(),
+                &AgentSessionId::from("session-1"),
+                &fixture.binding,
+                &BTreeSet::from([ActionId::from(
+                    nomifun_robot::capability::ROBOT_MOTION_ACTION_ID,
+                )]),
             )
             .await
             .unwrap();
-        owner
-            .activate_lifecycle_for(
-                &CapabilityId::from(ROBOT_LINK),
-                "owner",
-                &session_id,
-                std::slice::from_ref(&binding),
-            )
+        fixture
+            .owner
+            .registry
+            .connect("robot-1", "companion-1", "socket-2")
             .await
             .unwrap();
-        let _lease = owner
-            .lifecycle_context_contributor_for(
-                &CapabilityId::from(ROBOT_LINK),
-                &principal,
-                &session_id,
-                std::slice::from_ref(&binding),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-
-        let error = resolved
-            .1
-            .invoke(NomiHostDynamicToolInvocation {
-                capability_id: CapabilityId::from(ROBOT_DISPLAY),
-                provider_name: "robot_emoji_set_expression".to_owned(),
-                operation_id: OperationId::from("unknown-operation"),
-                idempotency_key: IdempotencyKey::from("unknown-key"),
-                correlation_id: CorrelationId::from("unknown-correlation"),
-                arguments: StrictJsonValue(serde_json::json!({})),
-            })
+        let error = tools
+            .invoker
+            .invoke(invocation("robot_gimbal_look", "reconnected"))
             .await
             .unwrap_err();
-        assert_eq!(error.code.as_ref(), ROBOT_EFFECT_OUTCOME_UNKNOWN);
-        assert!(!error.retry_safe);
-        assert!(error.internal_message.contains("offline"));
+        assert_eq!(error.code.as_ref(), ROBOT_OFFLINE);
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn availability_is_truthful_for_permission_and_offline_state() {
+        let fixture = fixture(RobotPermissions::default()).await;
+        let available = fixture
+            .owner
+            .availability("owner", &fixture.binding)
+            .await
+            .unwrap();
+        assert_eq!(available.module_id, ROBOT_MODULE_ID);
+        assert_eq!(
+            available.action(RobotAction::Display).unwrap().state,
+            nomifun_robot::capability::RobotAvailabilityState::Available
+        );
+        assert_eq!(
+            available.action(RobotAction::Motion).unwrap().state,
+            nomifun_robot::capability::RobotAvailabilityState::PermissionDenied
+        );
+        fixture.owner.tools.detach("robot-1").await;
+        let offline = fixture
+            .owner
+            .availability("owner", &fixture.binding)
+            .await
+            .unwrap();
+        assert_eq!(
+            offline.action(RobotAction::Display).unwrap().state,
+            nomifun_robot::capability::RobotAvailabilityState::Offline
+        );
+        assert!(
+            offline
+                .action(RobotAction::Display)
+                .unwrap()
+                .guidance
+                .as_deref()
+                .unwrap()
+                .contains("Connect")
+        );
+    }
+
+    #[test]
+    fn schemas_fail_closed_without_external_refs_or_extra_fields() {
+        let hardened = strict_device_input_schema(serde_json::json!({
+            "type":"object",
+            "properties":{"direction":{"type":"string"}}
+        }))
+        .unwrap();
+        assert_eq!(hardened.0["additionalProperties"], false);
+        assert!(
+            strict_device_input_schema(serde_json::json!({
+                "type":"object",
+                "properties":{"payload":{"$ref":"https://example.invalid/schema"}}
+            }))
+            .is_err()
+        );
     }
 }

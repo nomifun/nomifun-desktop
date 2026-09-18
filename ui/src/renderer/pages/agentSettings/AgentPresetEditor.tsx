@@ -33,10 +33,9 @@ import { modelDisplayLabel } from '@/common/utils/modelPresentation';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import AgentCapabilityWorkspace from './AgentCapabilityWorkspace';
-import AgentRuntimeEngineSelector from './AgentRuntimeEngineSelector';
 import AgentRoleProviderPicker from './AgentRoleProviderPicker';
 import AgentContributionOrder from './AgentContributionOrder';
-import { unavailableCapabilityReferences } from './capabilityGroups';
+import { unavailableModuleReferences } from './capabilityGroups';
 import {
   TEMPLATE_I18N_PATH,
   capabilityPlacement,
@@ -47,6 +46,7 @@ import {
 } from './model';
 import styles from './AgentSettingsPage.module.css';
 import { AgentEditorActionBar, AgentEditorActionButton } from './AgentEditorActionBar';
+import AgentEditorTabs from './AgentEditorTabs';
 
 type AgentPresetEditorProps = {
   editor: AgentPresetEditorResponse;
@@ -144,12 +144,11 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState('capabilities');
   const busy = busyAction !== null;
-  const unavailableCount = unavailableCapabilityReferences(draft.document, catalog.capabilities).length;
+  const unavailableCount = unavailableModuleReferences(draft.document, catalog).length;
   const chatRouteRecord = draft.document.chat_route_records[AGENT_CHAT_MODEL_TASK];
-  const capabilityIds = draft.document.enabled_capabilities.map((selection) => String(selection.capability.id));
-  const mediaCapabilities = ['creation.image', 'creation.image_edit', 'creation.video', 'creation.music', 'creation.audio'];
-  const directCreation = capabilityIds.some((id) => mediaCapabilities.includes(id))
-    && capabilityIds.every((id) => [...mediaCapabilities, 'session.attachments.read', 'workshop.asset.read', 'workshop.asset.write'].includes(id));
+  const moduleIds = draft.document.enabled_capabilities.map((selection) => String(selection.capability.id));
+  const directCreation = moduleIds.includes('creation.media') &&
+    moduleIds.every((id) => ['creation.media', 'creative.workshop', 'office'].includes(id));
   const needsChatModel = !directCreation && !chatRouteRecord;
   const selectedSkills = new Set(draft.document.skill_bindings.map((skill) => skill.id));
   const catalogByReference = useMemo(() => new Map(catalog.capabilities.map((item) => [capabilityReferenceKey(item.capability), item])), [catalog.capabilities]);
@@ -178,12 +177,10 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
       </div>
       {sourceTemplate && <Tag size='small'>{t(`agentSettings.template.${TEMPLATE_I18N_PATH[sourceTemplate.template_key]}.name`)}</Tag>}
     </header>
-    <nav className={styles.editorTabs} role='tablist' aria-label={t('agentSettings.title')}>
-      {tabs.map((tab) => <button key={tab.key} type='button' role='tab' aria-selected={activeTab === tab.key} aria-controls={`agent-panel-${tab.key}`} id={`agent-tab-${tab.key}`} className={activeTab === tab.key ? styles.activeTab : ''} onClick={() => setActiveTab(tab.key)}>{tab.label}</button>)}
-    </nav>
+    <AgentEditorTabs tabs={tabs} active={activeTab} onChange={setActiveTab} idPrefix='agent' label={t('agentSettings.title')} />
     <div className={`${styles.editorBody} ${activeTab === 'capabilities' ? styles.capabilityBody : ''}`}>
       {activeTab === 'capabilities' && <div className={styles.capabilityPanel} role='tabpanel' id='agent-panel-capabilities' aria-labelledby='agent-tab-capabilities'>
-        <AgentCapabilityWorkspace document={draft.document} catalog={catalog.capabilities} disabled={busy} onChange={(document) => onDraftChange({ ...draft, document })} />
+        <AgentCapabilityWorkspace document={draft.document} catalog={catalog} disabled={busy} onChange={(document) => onDraftChange({ ...draft, document })} />
       </div>}
       {activeTab === 'providers' && <div role='tabpanel' id='agent-panel-providers' aria-labelledby='agent-tab-providers'>
         <AgentRoleProviderPicker document={draft.document} catalog={catalog} disabled={busy} onChange={(document) => onDraftChange({ ...draft, document })} />
@@ -205,6 +202,9 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
               disabled={busy}
               onChange={(displayName: string) =>
                 onDraftChange({ ...draft, display_name: displayName })
+              }
+              onInput={(event) =>
+                onDraftChange({ ...draft, display_name: (event.target as HTMLInputElement).value })
               }
             />
           </label>
@@ -230,14 +230,6 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
               }
             />
           </label>
-          <div className={`${styles.field} ${styles.fieldWide}`}>
-            <span>{t('agentSettings.runtimeEngine.label')}</span>
-            <AgentRuntimeEngineSelector
-              value={draft.document.runtime_engine}
-              disabled={busy}
-              onChange={(runtime_engine) => patchDocument((document) => ({ ...document, runtime_engine }))}
-            />
-          </div>
           <label className={`${styles.field} ${styles.fieldWide}`}>
             <span>{t('agentSettings.fields.persona')}</span>
             <Input.TextArea
@@ -366,7 +358,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
       </section></div>}
     </div>
     <AgentEditorActionBar>
-      <div className={styles.saveStatus}><span className={dirty || unavailableCount ? styles.statusWarningDot : styles.statusReadyDot} /><div><strong>{t(dirty ? 'agentSettings.workbench.pendingChanges' : 'agentSettings.workbench.savedHint')}</strong><span>{t(unavailableCount ? 'agentSettings.workbench.disabledSave' : needsChatModel ? 'agentSettings.workbench.modelNeeded' : 'agentSettings.workbench.saveHint')}</span></div></div>
+      <div className={styles.saveStatus}><span className={dirty || unavailableCount ? styles.statusWarningDot : styles.statusReadyDot} /><div><strong>{t(dirty ? 'agentSettings.workbench.pendingChanges' : 'agentSettings.workbench.savedHint')}</strong><span>{t(unavailableCount ? 'agentSettings.workbench.disabledSave' : needsChatModel ? 'agentSettings.workbench.modelNeeded' : dirty ? 'agentSettings.workbench.previewCompileHint' : 'agentSettings.workbench.saveHint')}</span></div></div>
       <div className={styles.actionButtons}>
         {dirty && onDiscard && <Button type='text' disabled={busy} onClick={onDiscard}>{t('agentSettings.workbench.resetChanges')}</Button>}
         {dirty || !editor.preset.current_stable_revision ? <AgentEditorActionButton icon={<Save theme='outline' size={15} fill='currentColor' />} loading={busyAction === 'save'} disabled={busy || unavailableCount > 0 || !draft.display_name.trim() || needsChatModel} onClick={onSave}>{t('common.save')}</AgentEditorActionButton> :

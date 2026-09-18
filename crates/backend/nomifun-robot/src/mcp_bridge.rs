@@ -224,7 +224,7 @@ impl RobotMcpClient {
 
     /// MCP handshake. `vision_url` is the **only** way to configure the
     /// firmware's photo-explain endpoint; when the transport has no reachable
-    /// HTTP base we simply omit the capability rather than send a dead URL.
+    /// HTTP base we simply omit the transport feature rather than send a dead URL.
     pub async fn initialize(
         &self,
         vision_url: Option<&str>,

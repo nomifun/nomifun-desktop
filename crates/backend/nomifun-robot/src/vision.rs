@@ -1,7 +1,7 @@
 //! Bounded, text-only observations produced by the real robot vision endpoint.
 //!
 //! JPEG bytes remain request-local. Only the latest model answer is retained so
-//! `robot.vision` can contribute actual device context without storing camera
+//! `robot/vision` can contribute actual device context without storing camera
 //! images or introducing a second vision-model path.
 
 use std::collections::BTreeMap;

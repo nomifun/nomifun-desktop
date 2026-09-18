@@ -1,4 +1,4 @@
-//! Native user accelerators, routed to the existing conversation browser chrome.
+//! Native user accelerators, routed to the current AgentSession Browser panel.
 use nomifun_browser_platform::runtime::{BrowserTabSnapshot, BrowserTabTarget};
 use std::{cell::RefCell, collections::HashMap, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}};
 use tauri::{Emitter, Manager};
@@ -21,7 +21,7 @@ fn action(key:u32, ctrl:bool, alt:bool, shift:bool)->Option<Action> {
     }
 }
 #[derive(Clone, serde::Serialize)]
-struct Shortcut { conversation_id:String, target:BrowserTabTarget, action:Action }
+struct Shortcut { agent_session_id:String, target:BrowserTabTarget, action:Action }
 struct Registration { controller:ICoreWebView2Controller, token:i64 }
 impl Drop for Registration {
     fn drop(&mut self) { let _=unsafe{self.controller.remove_AcceleratorKeyPressed(self.token)}; }
@@ -29,7 +29,7 @@ impl Drop for Registration {
 thread_local! {static REGISTERED:RefCell<HashMap<String,Registration>>=RefCell::default();}
 pub(super) fn close_view(label:&str) { REGISTERED.with(|all|all.borrow_mut().remove(label)); }
 
-pub(crate) async fn install(view:&tauri::Webview, conversation_id:String, metadata:Arc<Mutex<BrowserTabSnapshot>>, locked:Arc<AtomicBool>)->Result<(),String> {
+pub(crate) async fn install(view:&tauri::Webview, agent_session_id:String, metadata:Arc<Mutex<BrowserTabSnapshot>>, locked:Arc<AtomicBool>)->Result<(),String> {
     let label=view.label().to_owned();
     let app=view.app_handle().clone();
     let (tx,rx)=tokio::sync::oneshot::channel();
@@ -50,7 +50,7 @@ pub(crate) async fn install(view:&tauri::Webview, conversation_id:String, metada
                 args.SetHandled(true)?;
                 if locked.load(Ordering::Acquire) || lparam & (1 << 30) != 0 {return Ok(());}
                 let target=metadata.lock().unwrap_or_else(|e|e.into_inner()).target.clone();
-                let (app,locked,metadata,conversation_id)=(app.clone(),locked.clone(),metadata.clone(),conversation_id.clone());
+                let (app,locked,metadata,agent_session_id)=(app.clone(),locked.clone(),metadata.clone(),agent_session_id.clone());
                 tauri::async_runtime::spawn(async move {
                     let dispatch_app=app.clone();
                     let _=app.run_on_main_thread(move || {
@@ -58,7 +58,7 @@ pub(crate) async fn install(view:&tauri::Webview, conversation_id:String, metada
                             || metadata.lock().unwrap_or_else(|e|e.into_inner()).target!=target {return;}
                         let Some(main)=dispatch_app.get_webview("main") else {return;};
                         if matches!(action,Action::Address|Action::NewTab) && main.set_focus().is_err() {return;}
-                        let _=dispatch_app.emit_to("main","browser-workspace-shortcut",Shortcut{conversation_id,target,action});
+                        let _=dispatch_app.emit_to("main","browser-capability-shortcut",Shortcut{agent_session_id,target,action});
                     });
                 });
                 Ok(())

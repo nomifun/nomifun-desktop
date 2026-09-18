@@ -1,25 +1,51 @@
 import { expect, test } from 'bun:test';
-import { asCapabilityId, asPackageId, type CapabilityCatalogItem } from '@/common/types/agentPlatform';
-import { capabilityCategory } from './capabilityGroups';
-import { capabilityProductCopy } from './model';
+import {
+  asCapabilityId,
+  asPackageId,
+  createEmptyAgentPresetDocument,
+  type AgentCatalogResponse,
+  type CapabilityModuleCatalogItem,
+} from '@/common/types/agentPlatform';
+import { moduleCategory, unavailableModuleReferences } from './capabilityGroups';
 
-test('browser is one provider-neutral web module', () => {
-  const capability = { id: asCapabilityId('browser'), version: '1.0.0' };
-  expect(capabilityCategory(capability)).toBe('web');
-  const item = { capability, display_name: 'browser', description: 'browser', source_package: { id: asPackageId('nomifun.browser'), version: '1.0.0' }, source_kind: 'bundled' } as CapabilityCatalogItem;
-  expect(capabilityProductCopy(item, 'zh-CN').name).toBe('浏览器');
-  expect(capabilityProductCopy(item, 'zh-CN').description).toContain('不会扩大');
-  expect(capabilityProductCopy(item, 'en-US').name).toBe('Browser');
+const moduleItem = (id: string): CapabilityModuleCatalogItem => ({
+  module: { id: asCapabilityId(id), version: '1.0.0' },
+  display_name: id,
+  description: id,
+  source_package: { id: asPackageId('nomifun.test'), version: '1.0.0' },
+  authoring_policy: 'direct',
+  summary_kind: 'tool',
+  actions: [{ action_id: `${id}/read`, input_schema: 'input', output_schema: 'output', effect_class: 'read_local', presentation: 'function_tool' }],
+  context_schema_refs: [], event_schema_refs: [], required_resource_kinds: [], required_host_ports: [],
+  required_modules: [], conflicting_modules: [], supported_surfaces: ['desktop'],
 });
 
-test('local browser search has its own web-category identity and product copy', () => {
-  const capability = { id: asCapabilityId('nomi_local_websearch'), version: '1.0.0' };
-  expect(capabilityCategory(capability)).toBe('web');
-  expect(capabilityCategory({ id: asCapabilityId('web.search'), version: '1.0.0' })).toBe('web');
-  const item = { capability, source_package: { id: asPackageId('nomifun.local-websearch'), version: '1.0.0' }, source_kind: 'bundled' } as CapabilityCatalogItem;
-  const copy = capabilityProductCopy(item, 'zh-CN');
-  expect(copy.name).toBe('Nomi 本地网页搜索');
-  expect(copy.description).toContain('公开网页');
-  expect(copy.description).toContain('可引用来源');
-  expect(copy.description).toContain('不读取会话登录态');
+test('groups provider-neutral Browser and device Modules by product category', () => {
+  expect(moduleCategory(moduleItem('browser').module)).toBe('web');
+  expect(moduleCategory(moduleItem('web.research').module)).toBe('web');
+  expect(moduleCategory(moduleItem('computer').module)).toBe('devices');
+  expect(moduleCategory(moduleItem('robot').module)).toBe('devices');
+});
+
+test('marks missing exact actions as unavailable without dropping the saved grant', () => {
+  const module = moduleItem('workspace.files');
+  const catalog: AgentCatalogResponse = {
+    modules: [module],
+    capabilities: [{
+      capability: module.module, kind: 'tool', display_name: 'Files', description: '',
+      source_package: module.source_package, source_kind: 'bundled', materialization_state: 'materialized',
+      supported_surfaces: ['desktop'], required_runtime_features: [], required_resource_kinds: [],
+      required_capabilities: [], conflicting_capabilities: [], action_count: 1, context_contributor_count: 0,
+    }],
+    skills: [], mcp_tools: [], roles: [],
+  };
+  const document = {
+    ...createEmptyAgentPresetDocument(),
+    enabled_capabilities: [{
+      capability: module.module,
+      action_allowlist: ['workspace.files/read', 'workspace.files/retired'],
+    }],
+  };
+  expect(unavailableModuleReferences(document, catalog)).toEqual([module.module]);
+  expect(document.enabled_capabilities[0].action_allowlist).toContain('workspace.files/retired');
 });

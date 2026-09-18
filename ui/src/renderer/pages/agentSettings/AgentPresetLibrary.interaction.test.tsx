@@ -8,7 +8,9 @@ import '../../../../test/setup-dom.ts';
 
 import {
   cleanup,
+  fireEvent,
   render,
+  waitFor,
   within,
 } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -40,12 +42,17 @@ await testI18n.use(initReactI18next).init({
           defaults: {
             untitledName: 'Untitled Agent',
           },
+          workbench: {
+            hideList: 'Hide Agent list', librarySearch: 'Search Agents', mine: 'My Agents', official: 'Official presets',
+            firstRunTitle: 'Choose your starting point', firstRunHint: 'Start minimal or custom.', startMinimal: 'Start minimal',
+            startCustom: 'Blank custom', officialHint: 'Official starting points', myHint: 'My setups', noAgents: 'No matching Agents',
+          },
           library: {
             ariaLabel: 'Agent library',
             official: 'Official templates',
             mine: 'My Agents',
             empty: 'No custom Agents yet.',
-            capabilityCount: '{{count}} capabilities',
+            moduleCount: '{{count}} modules',
             deleteConfirmTitle: 'Delete “{{name}}”?',
             deleteConfirmBody: 'Existing conversation history is preserved.',
             deleteAria: 'Delete Agent “{{name}}”',
@@ -53,7 +60,7 @@ await testI18n.use(initReactI18next).init({
           template: {
             chat: {
               minimal: {
-                name: 'Minimal Chat',
+                name: 'Minimal Agent',
               },
             },
           },
@@ -106,6 +113,60 @@ const library: AgentPresetLibraryResponse = {
 afterEach(() => cleanup());
 
 describe('AgentPreset library deletion', () => {
+  test('library tabs use one roving focus stop and support Arrow, Home and End', async () => {
+    const result = render(
+      <I18nextProvider i18n={testI18n}>
+        <AgentPresetLibrary
+          library={library} selection={null} busy={false} creating={false}
+          openingPresetId={null} deletingPresetId={null} onSelectTemplate={() => {}}
+          onSelectPreset={() => {}} onCreatePreset={() => {}} onDeletePreset={() => {}}
+        />
+      </I18nextProvider>
+    );
+    const tabs = within(result.container).getAllByRole('tab') as HTMLButtonElement[];
+    expect(tabs.map((tab) => tab.tabIndex)).toEqual([-1, 0]);
+    tabs[1].focus();
+    fireEvent.keyDown(tabs[1], { key: 'ArrowLeft' });
+    expect(tabs[0].getAttribute('aria-selected')).toBe('true');
+    await waitFor(() => expect(document.activeElement === tabs[0]).toBe(true));
+    fireEvent.keyDown(tabs[0], { key: 'End' });
+    expect(tabs[1].getAttribute('aria-selected')).toBe('true');
+    await waitFor(() => expect(document.activeElement === tabs[1]).toBe(true));
+    expect(tabs[1].getAttribute('aria-controls')).toBe('agent-library-panel');
+    expect(within(result.container).getByRole('tabpanel').getAttribute('aria-labelledby')).toBe('agent-library-tab-official');
+  });
+  test('offers explicit Minimal and blank custom choices on first run', () => {
+    let selected = '';
+    let created = '';
+    const fresh = {
+      ...library,
+      user_presets: [],
+      fresh_start: { ...library.fresh_start, user_preset_count: 0 },
+    };
+    const result = render(
+      <I18nextProvider i18n={testI18n}>
+        <AgentPresetLibrary
+          library={fresh}
+          selection={null}
+          busy={false}
+          creating={false}
+          openingPresetId={null}
+          deletingPresetId={null}
+          onSelectTemplate={(template) => { selected = template.template_key; }}
+          onSelectPreset={() => {}}
+          onCreatePreset={(name) => { created = name; }}
+          onDeletePreset={() => {}}
+        />
+      </I18nextProvider>
+    );
+    const page = within(result.container);
+    expect(page.getByRole('region', { name: 'Choose your starting point' })).toBeTruthy();
+    fireEvent.click(page.getByRole('button', { name: 'Start minimal' }));
+    expect(selected).toBe('chat.minimal');
+    fireEvent.click(page.getByRole('button', { name: 'Blank custom' }));
+    expect(created).toBe('Untitled Agent');
+  });
+
   test('offers a confirmed delete trigger only for a user preset', () => {
     let selected = 0;
     const result = render(
@@ -135,7 +196,7 @@ describe('AgentPreset library deletion', () => {
     expect(deleteTriggers).toHaveLength(1);
     expect(selected).toBe(0);
     expect(deleteTriggers[0].getAttribute('title')).toBe('Delete');
-    expect(body.queryAllByRole('button', { name: 'Delete Agent “Minimal Chat”' })).toHaveLength(0);
+    expect(body.queryAllByRole('button', { name: 'Delete Agent “Minimal Agent”' })).toHaveLength(0);
   });
 
   test('shows the deleting state on the matching row', () => {

@@ -57,7 +57,7 @@ export const draftFromOfficialTemplate = (
   source_template_key: template.template_key,
   document: {
     ...createEmptyAgentPresetDocument(),
-    enabled_capabilities: template.seed.enabled_capabilities.map(selection),
+    enabled_capabilities: structuredClone(template.seed.enabled_capabilities),
 
     skill_bindings: template.seed.skill_bindings,
   },

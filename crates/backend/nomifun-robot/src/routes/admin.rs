@@ -78,11 +78,11 @@ async fn list(State(state): State<RobotAdminState>) -> Response {
     for record in state.registry.list().await {
         let mut robot = RobotDto::from(&record);
         for tool in state.tools.tools(&record.robot_id).await {
-            let permission = match crate::tool_registry::tool_capability(&tool.device_name) {
-                crate::tool_registry::RobotToolCapability::Display => "display",
-                crate::tool_registry::RobotToolCapability::Motion => "motion",
-                crate::tool_registry::RobotToolCapability::Vision => "vision",
-                crate::tool_registry::RobotToolCapability::DeviceTools => "device_tools",
+            let permission = match crate::tool_registry::tool_action(&tool.device_name) {
+                crate::capability::RobotAction::Display => "display",
+                crate::capability::RobotAction::Motion => "motion",
+                crate::capability::RobotAction::Vision => "vision",
+                crate::capability::RobotAction::Device => "device_tools",
             };
             if !robot.supported_permissions.iter().any(|value| value == permission) { robot.supported_permissions.push(permission.to_owned()); }
             if crate::tool_registry::requires_continuous_vision(&tool.device_name)
@@ -144,6 +144,10 @@ async fn claim(State(state): State<RobotAdminState>, Json(body): Json<ClaimBody>
             Json(json!({ "message": "这台机器人已绑定其他伙伴", "companion_id": companion_id })),
         )
             .into_response(),
+        Err(ClaimError::Persistence(error)) => {
+            tracing::error!(%error, "robot claim could not persist its authority change");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
 
@@ -175,6 +179,10 @@ async fn patch_robot(
             Json(json!({ "message": "这台机器人已绑定其他伙伴", "companion_id": companion_id })),
         )
             .into_response(),
+        Err(ClaimError::Persistence(error)) => {
+            tracing::error!(%error, robot_id, "robot update could not persist its authority change");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
 

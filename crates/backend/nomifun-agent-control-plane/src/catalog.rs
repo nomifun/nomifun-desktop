@@ -17,10 +17,11 @@ use nomifun_agent_kernel::{
     MaterializedRoleContract, MaterializedRoleProvider,
 };
 use nomifun_api_types::{
-    AgentCatalogResponse, CapabilityCatalogItemDto, CatalogMaterializationStateDto,
-    ExactCatalogRefDto, McpToolCatalogItemDto, OfficialPresetRoleCoverageDto,
-    OfficialPresetSeedDto, OfficialPresetTemplateDto, SkillCatalogItemDto,
-    RoleCatalogItemDto, RoleProviderCatalogItemDto, RoleProviderSelectionDto,
+    AgentCatalogResponse, CapabilityCatalogItemDto, CapabilityModuleActionDto,
+    CapabilityModuleCatalogItemDto, CatalogMaterializationStateDto, ExactCatalogRefDto,
+    McpToolCatalogItemDto, OfficialPresetRoleCoverageDto, OfficialPresetSeedDto,
+    OfficialPresetTemplateDto, RoleCatalogItemDto, RoleProviderCatalogItemDto,
+    RoleProviderSelectionDto, SkillCatalogItemDto,
 };
 
 use crate::error::ControlPlaneError;
@@ -466,6 +467,20 @@ impl CatalogSnapshot {
             })
             .collect::<Result<Vec<_>, ControlPlaneError>>()?;
         let mut capabilities = capabilities;
+        let modules = self
+            .capabilities
+            .iter()
+            .filter(|capability| {
+                capability
+                    .manifest
+                    .supports_consumer(CapabilityConsumer::Agent)
+                    && capability.source.source_kind != PluginSourceKind::TestFixture
+                    && capability.manifest.contributions.ui_slot
+                        != Some(nomifun_agent_contracts::UiContributionSlot::AgentSession)
+            })
+            .map(|capability| capability_module_catalog_item(&capability.manifest))
+            .collect::<Result<Vec<_>, ControlPlaneError>>()?;
+        let mut modules = modules;
         for publication in self.plugin_product_publications.values() {
             for capability in &publication.capabilities {
                 if capability
@@ -478,6 +493,7 @@ impl CatalogSnapshot {
                         &capability.entry,
                         wire_name(&capability.entry.provenance.source_kind)?,
                     )?);
+                    modules.push(capability_module_catalog_item(&capability.manifest)?);
                 }
             }
         }
@@ -486,6 +502,12 @@ impl CatalogSnapshot {
                 .id
                 .cmp(&right.capability.id)
                 .then_with(|| left.capability.version.cmp(&right.capability.version))
+        });
+        modules.sort_by(|left, right| {
+            left.module
+                .id
+                .cmp(&right.module.id)
+                .then_with(|| left.module.version.cmp(&right.module.version))
         });
 
         let skills = self
@@ -532,6 +554,7 @@ impl CatalogSnapshot {
 
         Ok(AgentCatalogResponse {
             roles: self.roles_api(&capabilities)?,
+            modules,
             capabilities,
             skills,
             mcp_tools,
@@ -607,6 +630,87 @@ impl CatalogSnapshot {
         roles.sort_by(|a, b| a.role.key.role_id.cmp(&b.role.key.role_id));
         Ok(roles)
     }
+}
+
+fn capability_module_catalog_item(
+    manifest: &nomifun_agent_contracts::CapabilityManifest,
+) -> Result<CapabilityModuleCatalogItemDto, ControlPlaneError> {
+    Ok(CapabilityModuleCatalogItemDto {
+        module: ExactCatalogRefDto {
+            id: manifest.id.as_ref().to_owned(),
+            version: manifest.version.as_ref().to_owned(),
+        },
+        display_name: manifest.display.name.clone(),
+        description: manifest.display.description.clone(),
+        source_package: ExactCatalogRefDto {
+            id: manifest.package.id.as_ref().to_owned(),
+            version: manifest.package.version.as_ref().to_owned(),
+        },
+        authoring_policy: wire_cast(&manifest.authoring_policy().map_err(catalog_invalid)?)?,
+        summary_kind: wire_name(&manifest.kind)?,
+        actions: manifest
+            .contributions
+            .actions
+            .iter()
+            .map(|action| {
+                Ok(CapabilityModuleActionDto {
+                    action_id: action.action_id.as_ref().to_owned(),
+                    input_schema: action.input_schema.as_ref().to_owned(),
+                    output_schema: action.output_schema.as_ref().to_owned(),
+                    effect_class: wire_name(&action.effect_class)?,
+                    presentation: wire_name(&action.presentation)?,
+                })
+            })
+            .collect::<Result<Vec<_>, ControlPlaneError>>()?,
+        context_schema_refs: manifest
+            .contributions
+            .context_schema_refs
+            .iter()
+            .map(|reference| reference.as_ref().to_owned())
+            .collect(),
+        event_schema_refs: manifest
+            .contributions
+            .event_schema_refs
+            .iter()
+            .map(|reference| reference.as_ref().to_owned())
+            .collect(),
+        required_resource_kinds: manifest
+            .contributions
+            .resource_kinds
+            .iter()
+            .map(|kind| kind.as_ref().to_owned())
+            .collect(),
+        required_host_ports: manifest
+            .contributions
+            .host_ports
+            .iter()
+            .map(|port| ExactCatalogRefDto {
+                id: port.id.as_ref().to_owned(),
+                version: port.version.as_ref().to_owned(),
+            })
+            .collect(),
+        required_modules: manifest
+            .requires
+            .iter()
+            .map(|reference| ExactCatalogRefDto {
+                id: reference.id.as_ref().to_owned(),
+                version: reference.version.as_ref().to_owned(),
+            })
+            .collect(),
+        conflicting_modules: manifest
+            .conflicts
+            .iter()
+            .map(|conflict| ExactCatalogRefDto {
+                id: conflict.capability.id.as_ref().to_owned(),
+                version: conflict.capability.version.as_ref().to_owned(),
+            })
+            .collect(),
+        supported_surfaces: manifest
+            .host_surfaces()
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+    })
 }
 
 fn capability_catalog_item(

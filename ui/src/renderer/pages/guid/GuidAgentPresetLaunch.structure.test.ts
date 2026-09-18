@@ -48,15 +48,14 @@ const topLevelKeys = (objectBody: string): string[] => {
 };
 
 describe('Guid workbench Agent launch behavior', () => {
-  test('runtime configuration belongs only to the Agent workbench', () => {
+  test('Nomi Runtime is singular and cannot be selected by Guid or Agent drafts', () => {
     const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
     const send = readSource(new URL('./hooks/useGuidSend.ts', import.meta.url));
     const editor = readSource(new URL('../agentSettings/AgentPresetEditor.tsx', import.meta.url));
     expect(page).not.toContain('RuntimeEngineSelector');
     expect(send).not.toContain('runtime_engine');
-    expect(editor).toContain('<AgentRuntimeEngineSelector');
-    expect(editor).toContain('value={draft.document.runtime_engine}');
-    expect(editor).toContain('patchDocument((document) => ({ ...document, runtime_engine }))');
+    expect(editor).not.toContain('AgentRuntimeEngineSelector');
+    expect(editor).not.toContain('runtime_engine');
   });
   test('uses only official-template or personal-preset selection identities', () => {
     const configKeys = readSource(

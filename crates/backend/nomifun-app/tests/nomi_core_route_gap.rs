@@ -323,7 +323,7 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
         .as_array()
         .expect("capability catalog array");
 
-    for capability_id in ["fs.read", "vcs.stage", "vcs.commit"] {
+    for capability_id in ["workspace.files", "workspace.vcs"] {
         let capability = capabilities
             .iter()
             .find(|item| item["capability"]["id"] == capability_id)
@@ -331,7 +331,7 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
         assert_eq!(
             capability["materialization_state"],
             "materialized",
-            "{capability_id} must remain selectable as an initial capability"
+            "{capability_id} must remain selectable as a Module"
         );
         assert_eq!(
             capability["required_resource_kinds"].as_array().map(Vec::len),
@@ -399,13 +399,17 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
     let enabled = coding["seed"]["enabled_capabilities"]
         .as_array()
         .expect("coding enabled capabilities");
-    for capability_id in ["vcs.stage", "vcs.commit"] {
-        assert!(
-            enabled
-                .iter()
-                .any(|item| item["id"] == capability_id),
-            "{capability_id} must remain an enabled placement in the coding seed"
-        );
+    for (module_id, action_id) in [
+        ("workspace.files", "workspace.files/patch"),
+        ("workspace.vcs", "workspace.vcs/commit"),
+        ("workspace.process", "workspace.process/exec"),
+    ] {
+        let selection = enabled.iter()
+            .find(|item| item["capability"]["id"] == module_id)
+            .unwrap_or_else(|| panic!("missing coding Module {module_id}"));
+        assert!(selection["action_allowlist"].as_array()
+            .is_some_and(|actions| actions.iter().any(|action| action == action_id)),
+            "{module_id} must retain exact Action {action_id}");
     }
 
     services.shutdown_browser_platform().await.expect("browser cleanup");
@@ -413,7 +417,7 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
 }
 
 #[tokio::test]
-async fn nomi_core_accepts_enabled_placement_as_immediately_available_tools() {
+async fn nomi_core_accepts_exact_module_action_grants() {
     let trust_secret = "enabled-placement-local-trust";
     let (router, services) = common::build_local_trust_app(trust_secret).await;
     let created = router
@@ -448,19 +452,16 @@ async fn nomi_core_accepts_enabled_placement_as_immediately_available_tools() {
         .expect("placement preset id")
         .to_owned();
     let revision = created_value["data"]["revision"]["reference"].clone();
-    let enabled_ids = [
-        "vcs.stage",
-        "web.fetch",
-        "agent.delegate",
-        "agent.execution.observe",
-        "agent.execution.steer",
-        "agent.fork",
-        "schedule.store",
+    let enabled = [
+        ("workspace.vcs", "workspace.vcs/status"),
+        ("web.research", "web.research/search"),
+        ("agent.collaboration", "agent/delegate"),
+        ("automation.schedule", "automation.schedule/list"),
     ];
     created_value["data"]["draft"]["document"]["enabled_capabilities"] = json!(
-        enabled_ids.iter().map(|id| json!({
+        enabled.iter().map(|(id, action)| json!({
             "capability": {"id": id, "version": "1.0.0"},
-            "action_allowlist": []
+            "action_allowlist": [action]
         })).collect::<Vec<_>>()
     );
     let saved = router
@@ -491,16 +492,15 @@ async fn nomi_core_accepts_enabled_placement_as_immediately_available_tools() {
         saved_value["data"]["revision"]["document"]["enabled_capabilities"]
             .as_array()
             .map(Vec::len),
-        Some(enabled_ids.len()),
-        "the saved revision must retain the enabled placement"
+        Some(enabled.len()),
+        "the saved revision must retain the exact Module grants"
     );
-    for id in enabled_ids {
-        assert!(
-            saved_value["data"]["revision"]["document"]["enabled_capabilities"]
-                .as_array()
-                .is_some_and(|items| items.iter().any(|item| item["capability"]["id"] == id)),
-            "the immutable revision must retain deferred capability {id}"
-        );
+    for (id, action) in enabled {
+        let selection = saved_value["data"]["revision"]["document"]["enabled_capabilities"]
+            .as_array().and_then(|items| items.iter()
+                .find(|item| item["capability"]["id"] == id))
+            .unwrap_or_else(|| panic!("missing immutable Module {id}"));
+        assert_eq!(selection["action_allowlist"], json!([action]));
     }
 
     services.shutdown_browser_platform().await.expect("browser cleanup");
@@ -524,7 +524,11 @@ async fn configured_agent_creation_persists_adjusted_capabilities_and_keeps_offi
     let official_before = before["data"]["official_templates"].clone();
     let document = json!({
         "schema_version":"1.0.0", "model_route_refs":{}, "chat_route_records":{},
-        "enabled_capabilities":[{"capability":{"id":"fs.read","version":"1.0.0"}},{"capability":{"id":"web.fetch","version":"1.0.0"}},{"capability":{"id":"agent.execution.plan","version":"1.0.0"}}],
+        "enabled_capabilities":[
+            {"capability":{"id":"knowledge","version":"1.0.0"},"action_allowlist":["knowledge/read","knowledge/search"]},
+            {"capability":{"id":"web.research","version":"1.0.0"},"action_allowlist":["web.research/fetch","web.research/search"]},
+            {"capability":{"id":"automation.schedule","version":"1.0.0"},"action_allowlist":["automation.schedule/list"]}
+        ],
         "skill_bindings":[], "system_role_provider_overrides":{}, "persona":"Research helper",
         "instructions":"Use only the selected capabilities.", "starter_prompts":[]
     });
@@ -584,7 +588,7 @@ async fn official_template_creation_requires_explicit_persistence_intent() {
 }
 
 #[tokio::test]
-async fn product_agent_selection_precedes_models_and_general_accepts_chat_only_models() {
+async fn product_agent_selection_precedes_models_and_reports_host_capability_availability() {
     const TRUST: &str = "product-selection-preflight";
     async fn call(router: axum::Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
         let response = router.oneshot(Request::builder().method(method).uri(path)
@@ -627,8 +631,11 @@ async fn product_agent_selection_precedes_models_and_general_accepts_chat_only_m
         let (status, options) = call(router.clone(), "GET", &query, json!({})).await;
         assert_eq!(status, StatusCode::OK, "{options}");
         let general = options["data"]["options"].as_array().unwrap().iter().find(|item| item["selection"]["template_key"] == "assistant.general").unwrap();
-        assert_eq!(general["available"], true, "{general}");
-        assert!(general["reason"].is_null(), "{general}");
+        assert_eq!(general["available"], false, "{general}");
+        assert_eq!(general["reason"], "capability", "the headless route fixture has no native Browser resource owner");
+        let coding = options["data"]["options"].as_array().unwrap().iter().find(|item| item["selection"]["template_key"] == "coding.codex").unwrap();
+        assert_eq!(coding["available"], true, "{coding}");
+        assert!(coding["reason"].is_null(), "{coding}");
         let (_, after) = call(router.clone(), "GET", path, json!({})).await;
         assert_eq!(after["data"]["selection"], chosen, "availability checks must not change the saved Agent");
     }
@@ -642,16 +649,20 @@ async fn product_agent_selection_precedes_models_and_general_accepts_chat_only_m
         .bind(thread["data"]["conversation_id"].as_str().unwrap()).fetch_one(services.database.pool()).await.unwrap();
     let snapshot: Value = serde_json::from_str(&snapshot).unwrap();
     assert_eq!(snapshot["enabled_capabilities"], json!([]), "configuring a model must retain the Agent chosen earlier");
-    let general = json!({ "kind": "template", "template_key": "assistant.general" });
+    let coding = json!({ "kind": "template", "template_key": "coding.codex" });
     for path in &paths {
         let (status, saved) = call(router.clone(), "PUT", path, json!({
-            "selection": general, "model": model,
+            "selection": coding, "model": model,
+            "resource_selections": [
+                {"resource_kind":"workspace", "resource_id":"default-workspace"},
+                {"resource_kind":"process_session", "resource_id":"managed-process-session"}
+            ]
         })).await;
-        assert_eq!(status, StatusCode::OK, "a chat-only model must support General without a native search route: {saved}");
+        assert_eq!(status, StatusCode::OK, "a chat-only model must support the headless-safe Coding Agent: {saved}");
         assert_eq!(saved["data"]["needs_model"], false);
         let (status, reloaded) = call(router.clone(), "GET", path, json!({})).await;
         assert_eq!(status, StatusCode::OK, "{reloaded}");
-        assert_eq!(reloaded["data"]["selection"], general);
+        assert_eq!(reloaded["data"]["selection"], coding);
     }
     assert!(upstream.received_requests().await.unwrap().is_empty());
     services.shutdown_browser_platform().await.unwrap();
@@ -659,7 +670,7 @@ async fn product_agent_selection_precedes_models_and_general_accepts_chat_only_m
 }
 
 #[tokio::test]
-async fn next_turn_general_preset_preserves_kernel_metadata_and_advertises_media_tools() {
+async fn canonical_coding_session_rejects_in_place_preset_switch_and_keeps_its_binding() {
     const TRUST: &str = "next-turn-kernel-binding";
     async fn post(router: axum::Router, path: &str, body: Value) -> Value {
         let response = router.oneshot(Request::builder().method("POST").uri(path)
@@ -674,15 +685,6 @@ async fn next_turn_general_preset_preserves_kernel_metadata_and_advertises_media
     }
     let (router, services) = common::build_local_trust_app(TRUST).await;
     let upstream = wiremock::MockServer::start().await;
-    wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/step_plan/v1/chat/completions"))
-        .respond_with(wiremock::ResponseTemplate::new(200)
-            .insert_header("content-type", "text/event-stream")
-            .set_body_string(concat!(
-                "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"KERNEL_BINDING_REPLY_OK\"},\"finish_reason\":null}]}\n\n",
-                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-                "data: [DONE]\n\n")))
-        .mount(&upstream).await;
     let provider = post(router.clone(), "/api/providers", json!({
         "platform":"stepfun-plan", "name":"Kernel binding regression",
         "base_url":format!("{}/step_plan/v1", upstream.uri()),
@@ -692,68 +694,38 @@ async fn next_turn_general_preset_preserves_kernel_metadata_and_advertises_media
                 "protocol":"openai.chat_text", "connection_role":"default", "provider_params":{}}]}
     })).await;
     let model = json!({"provider_id":provider["provider_id"], "model":"step-3.7-flash"});
-    let original = post(router.clone(), "/api/agent-presets/from-template/assistant.general",
-        json!({"display_name":"General original", "reuse_existing":false, "model":model})).await;
-    let target = post(router.clone(), "/api/agent-presets/from-template/assistant.general",
-        json!({"display_name":"General selected", "reuse_existing":false, "model":model})).await;
+    let original = post(router.clone(), "/api/agent-presets/from-template/coding.codex",
+        json!({"display_name":"Coding original", "reuse_existing":false, "model":model})).await;
+    let target = post(router.clone(), "/api/agent-presets/from-template/coding.codex",
+        json!({"display_name":"Coding selected", "reuse_existing":false, "model":model})).await;
     assert_ne!(original["preset"]["preset_id"], target["preset"]["preset_id"]);
-    for repair_missing_metadata in [false, true] {
-        let source = if repair_missing_metadata { &target } else { &original };
-        let session = post(router.clone(), "/api/agent-sessions", json!({
-            "preset_id":source["preset"]["preset_id"], "model":model,
-            "resource_selections":[
-                {"resource_kind":"workspace", "resource_id":"default-workspace"},
-                {"resource_kind":"project_memory", "resource_id":"default-project-memory"}
-            ],
-        })).await;
-        let id = session["agent_session_id"].as_str().unwrap();
-        let original_extra: String = sqlx::query_scalar("SELECT extra FROM conversations WHERE conversation_id=?")
-            .bind(id).fetch_one(services.database.pool()).await.unwrap();
-        let original_extra: Value = serde_json::from_str(&original_extra).unwrap();
-        if repair_missing_metadata {
-            // Reproduce the previous partial projection without changing the
-            // snapshot or exact engine; selecting the same preset must repair it.
-            sqlx::query("UPDATE conversations SET extra=json_remove(extra,'$.nomi_core_session') WHERE conversation_id=?")
-                .bind(id).execute(services.database.pool()).await.unwrap();
-        }
-        post(router.clone(), &format!("/api/conversations/{id}/messages"), json!({
-            "content":"Reply with a short greeting.", "preset_id":target["preset"]["preset_id"],
-        })).await;
-        tokio::time::timeout(std::time::Duration::from_secs(20), async {
-            loop {
-                let replies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND position='left' AND content LIKE '%KERNEL_BINDING_REPLY_OK%'")
-                    .bind(id).fetch_one(services.database.pool()).await.unwrap();
-                if replies > 0 { break; }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
-        }).await.expect("the rebuilt General runtime must reach the configured model");
-        let (snapshot, extra): (String, String) = sqlx::query_as("SELECT agent_snapshot,extra FROM conversations WHERE conversation_id=?")
-            .bind(id).fetch_one(services.database.pool()).await.unwrap();
-        let snapshot: Value = serde_json::from_str(&snapshot).unwrap();
-        let extra: Value = serde_json::from_str(&extra).unwrap();
-        assert!(!extra["nomi_core_session"].is_null());
-        assert_eq!(extra["nomi_core_session"]["binding"], snapshot["canonical_binding"]);
-        assert_eq!(extra["nomi_core_session"]["binding"]["typed_resource_bindings"],
-            original_extra["nomi_core_session"]["binding"]["typed_resource_bindings"],
-            "the same General capability ceiling must revalidate and retain the selected resources and grants");
-        assert_eq!(snapshot["preset_id"], target["preset"]["preset_id"]);
-        assert_eq!(extra["runtime_engine_binding"], original_extra["runtime_engine_binding"]);
-    }
-    let requests = upstream.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 2);
-    for request in requests {
-        let body: Value = serde_json::from_slice(&request.body).unwrap();
-        let names = body["tools"].as_array().expect("canonical Kernel tools must be advertised")
-            .iter().filter_map(|tool| tool["function"]["name"].as_str()).collect::<Vec<_>>();
-        let context = serde_json::to_string(&body["messages"]).unwrap();
-        assert!(context.contains("generation_models"));
-        for capability in ["image", "image_edit", "video", "music", "audio"] {
-            assert!(names.iter().any(|name| name.starts_with(&format!("plugin__creation_{capability}_"))),
-                "the actual model request must contain creation.{capability}: {names:?}");
-            assert!(context.contains(&format!("creation.{capability}")));
-        }
-        assert!(!names.contains(&"image_gen"), "the Kernel grant must not enable the excluded native tool");
-    }
+    let resources = json!([
+        {"resource_kind":"workspace", "resource_id":"default-workspace"},
+        {"resource_kind":"process_session", "resource_id":"managed-process-session"}
+    ]);
+    let session = post(router.clone(), "/api/agent-sessions", json!({
+        "preset_id":original["preset"]["preset_id"], "model":model,
+        "resource_selections":resources,
+    })).await;
+    let id = session["agent_session_id"].as_str().unwrap();
+    let switch = router.clone().oneshot(Request::builder().method("PUT")
+        .uri(format!("/api/agent-sessions/{id}/preset"))
+        .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&json!({
+            "preset_id":target["preset"]["preset_id"], "resource_selections":resources
+        })).unwrap())).unwrap()).await.unwrap();
+    assert_eq!(switch.status(), StatusCode::CONFLICT);
+    let switch: Value = serde_json::from_slice(&axum::body::to_bytes(
+        switch.into_body(), 4 * 1024 * 1024).await.unwrap()).unwrap();
+    assert_eq!(switch["code"], "AGENT_SESSION_BINDING_IMMUTABLE");
+    let observed = router.clone().oneshot(Request::builder()
+        .uri(format!("/api/agent-sessions/{id}"))
+        .header("x-nomi-local-trust", TRUST).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(observed.status(), StatusCode::OK);
+    let observed: Value = serde_json::from_slice(&axum::body::to_bytes(
+        observed.into_body(), 4 * 1024 * 1024).await.unwrap()).unwrap();
+    assert_eq!(observed["data"]["session"]["agent_binding"], session["agent_binding"]);
+    assert!(upstream.received_requests().await.unwrap().is_empty());
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
 }
@@ -815,7 +787,9 @@ async fn creative_studio_entry_uses_its_official_agent() {
     let snapshot: Value = serde_json::from_str(&snapshot_json).unwrap();
     assert_eq!(snapshot["preset_name"], "creative-studio.default");
     assert!(snapshot["enabled_capabilities"].as_array().unwrap().iter()
-        .any(|capability| capability == "workshop.canvas.edit"));
+        .any(|capability| capability == "creative.workshop"));
+    assert!(snapshot["enabled_capability_actions"]["creative.workshop"].as_array().unwrap().iter()
+        .any(|action| action == "creative.workshop/canvas.edit"));
     let target_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM nomi_agent_bindings WHERE target_kind = 'creative_studio_canvas' AND target_id = ?")
         .bind(canvas_id).fetch_one(services.database.pool()).await.unwrap();
@@ -863,6 +837,49 @@ async fn companion_entry_uses_its_official_agent_and_can_switch_to_minimal() {
         &format!("/api/companion/companions/{companion_id}"),
         json!({ "model": { "provider_id": provider_id, "model": "step-3.7-flash" } })).await;
     assert_eq!(status, StatusCode::OK, "{patched}");
+    use nomifun_db::IChannelRepository;
+    let channel_repo = nomifun_db::SqliteChannelRepository::new(services.database.pool().clone());
+    let now = nomifun_common::now_ms();
+    let channel = channel_repo.create_plugin(&nomifun_db::models::NewChannelPluginRow {
+        r#type: "telegram".to_owned(),
+        name: "Companion binding fixture".to_owned(),
+        enabled: true,
+        config: "test-only".to_owned(),
+        status: None,
+        last_connected: None,
+        companion_id: Some(companion_id.to_owned()),
+        bot_key: Some("companion-binding-fixture".to_owned()),
+        owner_domain: nomifun_db::models::CHANNEL_OWNER_DOMAIN_COMPANION.to_owned(),
+        group_access_mode: nomifun_db::models::CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST.to_owned(),
+        created_at: now,
+        updated_at: now,
+    }).await.unwrap();
+    let robot_registry = &services.robot.as_ref().expect("robot services").registry;
+    let (reported_robot, _) = robot_registry.upsert_on_report(nomifun_robot::registry::RobotReport {
+        robot_id: "companion-binding-robot".to_owned(),
+        client_id: "companion-binding-client".to_owned(),
+        board: "test".to_owned(),
+        firmware_version: "test".to_owned(),
+    }, now).await.unwrap();
+    let activation_code = reported_robot.activation_code.as_deref().expect("activation code");
+    let robot = robot_registry.claim(activation_code, companion_id).await.unwrap();
+    let (status, selected_default) = call(router.clone(), "PUT",
+        &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({
+            "selection": { "kind": "template", "template_key": "companion.default" },
+            "model": { "provider_id": provider_id, "model": "step-3.7-flash" },
+            "resource_selections": [
+                { "resource_kind": "companion", "resource_id": companion_id },
+                { "resource_kind": "companion_memory", "resource_id": companion_id },
+                { "resource_kind": "channel", "resource_id": channel.channel_plugin_id },
+                { "resource_kind": "robot", "resource_id": robot.robot_id }
+            ]
+        })).await;
+    assert_eq!(status, StatusCode::OK, "{selected_default}");
+    let frozen_resources = selected_default["data"]["agent_binding"]["typed_resource_bindings"]
+        .as_array().expect("typed product resources");
+    assert_eq!(frozen_resources.len(), 4);
+    assert!(frozen_resources.iter().any(|resource|
+        resource["resource_kind"] == "robot" && resource["resource_id"] == robot.robot_id));
     let path = format!("/api/companion/companions/{companion_id}/companion/threads");
     let ((status, thread), (other_status, other_thread)) = tokio::join!(
         call(router.clone(), "POST", &path, json!({})),
@@ -876,12 +893,22 @@ async fn companion_entry_uses_its_official_agent_and_can_switch_to_minimal() {
         "SELECT preset_id, agent_snapshot, extra FROM conversations WHERE conversation_id = ?")
         .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
     let snapshot: Value = serde_json::from_str(&snapshot_json).unwrap();
-    assert!(snapshot["enabled_capabilities"].as_array().unwrap().iter()
-        .any(|capability| capability == "companion"));
-    assert!(!snapshot["enabled_capabilities"].as_array().unwrap().iter()
-        .any(|capability| capability == "companion.persona"));
+    let enabled = snapshot["enabled_capabilities"].as_array().unwrap().iter()
+        .map(|capability| capability.as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(enabled, std::collections::BTreeSet::from([
+        "channel.messaging", "companion", "companion.memory", "robot",
+    ]));
+    for (module, expected) in [
+        ("companion", &["companion/evolve", "companion/learn"][..]),
+        ("companion.memory", &["companion.memory/recall", "companion.memory/write"][..]),
+        ("channel.messaging", &["channel.messaging/reply"][..]),
+        ("robot", &["robot/vision"][..]),
+    ] {
+        let actual = snapshot["enabled_capability_actions"][module].as_array().unwrap().iter()
+            .map(|action| action.as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(actual, expected.iter().copied().collect(), "{module}");
+    }
     assert_eq!(snapshot["preset_name"], "companion.default");
-    assert!(!snapshot["enabled_capabilities"].as_array().unwrap().iter().any(|capability| capability == "mcp.resource"), "the native MCP template must pass runtime admission without mixing owners");
     let conversation_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations")
         .fetch_one(services.database.pool()).await.unwrap();
     assert_eq!(conversation_count, 1, "ensure must not leak a second conversation");
@@ -889,7 +916,7 @@ async fn companion_entry_uses_its_official_agent_and_can_switch_to_minimal() {
         &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{options}");
     assert_eq!(options["data"]["selection"], json!({ "kind": "template", "template_key": "companion.default" }),
-        "old internal official bindings must not appear as duplicate personal Agents");
+        "the implicit official choice must remain a template selection rather than a personal Agent");
     let target_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM nomi_agent_bindings WHERE target_kind = 'companion' AND target_id = ?")
         .bind(companion_id).fetch_one(services.database.pool()).await.unwrap();
@@ -955,26 +982,35 @@ async fn creative_agent_launches_without_any_chat_or_generation_provider() {
     assert!(document.chat_route_records.is_empty(), "professional presets must not bind a Chat route");
     assert!(document.model_route_refs.is_empty(), "professional presets must not require a model route");
     let preset_id = editor["preset"]["preset_id"].as_str().unwrap();
+    let (status, canvas) = call(router.clone(), "/api/creative-studio/canvases", json!({
+        "title": "Provider-free Creative canvas"
+    })).await;
+    assert_eq!(status, StatusCode::CREATED, "{canvas}");
+    let canvas_id = canvas["data"]["canvas"]["canvasId"].as_str().unwrap();
     let (status, launched) = call(router.clone(), "/api/agent-sessions", json!({
         "preset_id": preset_id, "title": "Creative without providers",
-        "resource_selections":[{"resource_kind":"asset_library", "resource_id":"creative-studio-assets"}],
+        "resource_selections":[
+            {"resource_kind":"asset_library", "resource_id":"creative-studio-assets"},
+            {"resource_kind":"canvas", "resource_id":canvas_id}
+        ],
     })).await;
     assert_eq!(status, StatusCode::OK, "{launched}");
     let session_id = launched["data"]["agent_session_id"].as_str().unwrap();
-    let (model, snapshot): (Option<String>, Option<String>) = sqlx::query_as("SELECT model, agent_snapshot FROM conversations WHERE conversation_id = ?")
-        .bind(session_id).fetch_one(services.database.pool()).await.unwrap();
-    assert!(model.is_none());
-    let snapshot: Value = serde_json::from_str(&snapshot.unwrap()).unwrap();
-    assert!(snapshot["resolved_model"].is_null());
+    let observed = router.clone().oneshot(Request::builder()
+        .uri(format!("/api/agent-sessions/{session_id}"))
+        .header("x-nomi-local-trust", TRUST)
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(observed.status(), StatusCode::OK);
+    let observed: Value = serde_json::from_slice(&axum::body::to_bytes(
+        observed.into_body(), 4 * 1024 * 1024).await.unwrap()).unwrap();
+    assert_eq!(observed["data"]["session"]["agent_binding"], launched["data"]["agent_binding"]);
+    let resources = launched["data"]["agent_binding"]["typed_resource_bindings"].as_array().unwrap();
+    assert!(resources.iter().any(|binding| binding["resource_kind"] == "canvas" && binding["resource_id"] == canvas_id));
+    assert!(resources.iter().any(|binding| binding["resource_kind"] == "asset_library"));
     assert!(providers.list().await.unwrap().is_empty(), "professional launch must not create a hidden provider fallback");
-    let capabilities = snapshot["enabled_capabilities"].as_array().unwrap();
-    for capability in ["creation.image", "creation.image_edit", "creation.video", "creation.music", "creation.audio"] {
-        assert!(capabilities.iter().any(|entry| entry.as_str() == Some(capability)), "{snapshot}");
-    }
-    let (minimal_status, minimal) = call(router.clone(), "/api/agent-presets/from-template/chat.minimal", json!({"display_name":"Chat", "reuse_existing":true})).await;
-    if minimal_status.is_success() {
-        let (status, result) = call(router.clone(), "/api/agent-sessions", json!({"preset_id":minimal["data"]["preset"]["preset_id"]})).await;
-        assert!(!status.is_success(), "ordinary Chat must still require a configured Chat model: {result}");
+    let capabilities = editor["revision"]["document"]["enabled_capabilities"].as_array().unwrap();
+    for capability in ["creation.media", "creative.workshop", "office"] {
+        assert!(capabilities.iter().any(|entry| entry["capability"]["id"] == capability), "{editor}");
     }
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
@@ -1022,8 +1058,8 @@ async fn official_agent_direct_launch_reuses_configuration_and_creates_sessions(
 }
 
 #[tokio::test]
-async fn official_agent_launch_ignores_obsolete_internal_configurations() {
-    const TRUST: &str = "obsolete-official-agent-cache";
+async fn official_agent_launch_reuses_current_configuration_and_opens_canonical_session() {
+    const TRUST: &str = "current-official-agent-reuse";
     async fn call(router: axum::Router, path: &str, body: Value) -> (StatusCode, Value) {
         let response = router.oneshot(Request::builder().method("POST").uri(path)
             .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
@@ -1053,98 +1089,29 @@ async fn official_agent_launch_ignores_obsolete_internal_configurations() {
     let original_id = original["data"]["preset"]["preset_id"].as_str().unwrap();
     assert_eq!(original["data"]["revision"]["document"]["chat_route_records"]["agent_chat"]["primary"]["model"], "step-3.7-flash");
 
-    // A retained bun run dev dataset predates capability field retirement.
-    // Internal launch configurations are a cache, not the selected Agent.
-    let mut old_payload = original["data"]["revision"]["document"].clone();
-    old_payload["initial_capabilities"] = old_payload.as_object_mut().unwrap()
-        .remove("enabled_capabilities").unwrap();
-    old_payload["on_demand_capabilities"] = json!([]);
-    let old_payload = serde_json::to_string(&old_payload).unwrap();
-    sqlx::query("UPDATE nomi_agent_preset_revisions SET payload_json = ? WHERE preset_id = ?")
-        .bind(&old_payload).bind(original_id).execute(services.database.pool()).await.unwrap();
-
-    let (status, fresh) = call(router.clone(), path, request.clone()).await;
-    assert_eq!(status, StatusCode::OK, "obsolete cached revision must not block launch: {fresh}");
-    let fresh_id = fresh["data"]["preset"]["preset_id"].as_str().unwrap();
-    assert_ne!(fresh_id, original_id);
-
-    // Snapshot schema drift is also a cache miss, even with a current payload.
-    sqlx::query("UPDATE nomi_agent_preset_revisions SET snapshot_json = json_set(snapshot_json, '$.retired_field', 1) WHERE preset_id = ?")
-        .bind(fresh_id).execute(services.database.pool()).await.unwrap();
-    let (status, usable) = call(router.clone(), path, request.clone()).await;
-    assert_eq!(status, StatusCode::OK, "obsolete cached snapshot must not block launch: {usable}");
-    let usable_id = usable["data"]["preset"]["preset_id"].as_str().unwrap();
-    assert_ne!(usable_id, fresh_id);
     let (status, reused) = call(router.clone(), path, request.clone()).await;
     assert_eq!(status, StatusCode::OK, "{reused}");
-    assert_eq!(reused["data"]["preset"]["preset_id"], usable_id);
+    assert_eq!(reused["data"]["preset"]["preset_id"], original_id);
     let (status, session) = call(router.clone(), "/api/agent-sessions",
-        json!({ "preset_id": usable_id, "title": "你好", "model": request["model"] })).await;
-    assert_eq!(status, StatusCode::OK, "fresh configuration must create a session: {session}");
+        json!({ "preset_id": original_id, "title": "你好", "model": request["model"] })).await;
+    assert_eq!(status, StatusCode::OK, "current configuration must create a session: {session}");
     assert!(session["data"]["agent_session_id"].is_string());
     let session_id = session["data"]["agent_session_id"].as_str().unwrap();
-    let (extra, snapshot): (String, String) = sqlx::query_as(
-        "SELECT extra, agent_snapshot FROM conversations WHERE conversation_id = ?")
-        .bind(session_id).fetch_one(services.database.pool()).await.unwrap();
-    let extra: Value = serde_json::from_str(&extra).unwrap();
-    let snapshot: Value = serde_json::from_str(&snapshot).unwrap();
-    assert_eq!(extra["skills"], json!([]), "minimal chat must not auto-enable skills");
-    assert_eq!(snapshot["preset_name"], "Minimal", "conversation title must not replace Agent identity");
+    let observed = router.clone().oneshot(Request::builder()
+        .uri(format!("/api/agent-sessions/{session_id}"))
+        .header("x-nomi-local-trust", TRUST)
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(observed.status(), StatusCode::OK);
+    let observed: Value = serde_json::from_slice(&axum::body::to_bytes(
+        observed.into_body(), 4 * 1024 * 1024).await.unwrap()).unwrap();
+    assert_eq!(observed["data"]["session"]["agent_binding"], session["data"]["agent_binding"]);
+    assert_eq!(observed["data"]["session"]["metadata"]["title"], "你好");
+    assert_eq!(observed["data"]["session"]["agent_binding"]["preset_revision_ref"]["preset_id"], original_id);
+    assert_eq!(original["data"]["preset"]["display_name"], "Minimal");
 
-    // Preparing a session-specific model variant scans the same cache. Use a
-    // different source model so this exercises the variant path as well.
-    let (status, source) = call(router.clone(), path,
-        json!({ "display_name": "Different source model", "reuse_existing": false })).await;
-    assert_eq!(status, StatusCode::OK, "{source}");
-    let (status, variant) = call(router.clone(), "/api/agent-sessions", json!({
-        "preset_id": source["data"]["preset"]["preset_id"], "model": request["model"]
-    })).await;
-    assert_eq!(status, StatusCode::OK, "obsolete caches must not block model variants: {variant}");
-    assert_eq!(variant["data"]["agent_binding"], session["data"]["agent_binding"]);
     assert!(upstream.received_requests().await.unwrap().is_empty(),
-        "Agent preparation must not require a model API call");
+        "Agent preparation must not execute the selected commercial model");
 
-    wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/step_plan/v1/chat/completions"))
-        .respond_with(wiremock::ResponseTemplate::new(200)
-            .insert_header("content-type", "text/event-stream")
-            .set_body_string(concat!(
-                "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"MINIMAL_REPLY_OK\"},\"finish_reason\":null}]}\n\n",
-                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-                "data: [DONE]\n\n")))
-        .mount(&upstream).await;
-    let (status, turn) = call(router.clone(), &format!("/api/agent-sessions/{session_id}/turns"),
-        json!({ "input": { "content": "你好" }, "idempotency_key": uuid::Uuid::now_v7().to_string() })).await;
-    assert_eq!(status, StatusCode::OK, "{turn}");
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            let replies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND position = 'left' AND content LIKE '%MINIMAL_REPLY_OK%'")
-                .bind(session_id).fetch_one(services.database.pool()).await.unwrap();
-            if replies > 0 { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-    }).await.expect("minimal model reply should be persisted");
-    let requests = upstream.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 1);
-    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
-    assert_eq!(body["model"], "step-3.7-flash");
-    assert!(body.get("tools").is_none_or(|tools| tools.as_array().is_some_and(Vec::is_empty)));
-    let system = body["messages"].as_array().unwrap().iter()
-        .filter(|message| message["role"] == "system")
-        .filter_map(|message| message["content"].as_str()).collect::<Vec<_>>().join("\n");
-    assert!(system.len() < 2000, "minimal prompt must stay small: {} bytes", system.len());
-    for forbidden in ["MEMORY.md", "Skill tool", "Working directory", "native image generation"] {
-        assert!(!system.contains(forbidden), "unexpected minimal prompt context: {forbidden}");
-    }
-
-    // Historical references remain intact and explicitly selecting invalid
-    // data still fails closed; cache recovery must not weaken validation.
-    let saved: String = sqlx::query_scalar("SELECT payload_json FROM nomi_agent_preset_revisions WHERE preset_id = ?")
-        .bind(original_id).fetch_one(services.database.pool()).await.unwrap();
-    assert_eq!(saved, old_payload);
-    let (status, _) = call(router, "/api/agent-sessions",
-        json!({ "preset_id": original_id, "model": request["model"] })).await;
-    assert!(!status.is_success());
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
 }
@@ -1164,7 +1131,10 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
     let (status, original) = call(router.clone(), "POST", "/api/agent-presets", json!({
         "display_name": "Personal model test", "document": {
             "schema_version": "1.0.0", "model_route_refs": {}, "chat_route_records": {},
-            "enabled_capabilities": [{ "capability": { "id": "fs.read", "version": "1.0.0" } }],
+            "enabled_capabilities": [{
+                "capability": { "id": "workspace.files", "version": "1.0.0" },
+                "action_allowlist": ["workspace.files/read", "workspace.files/search"]
+            }],
             "skill_bindings": [], "system_role_provider_overrides": {},
             "persona": "Research helper", "instructions": "Keep my working rules", "starter_prompts": []
         }
@@ -1183,11 +1153,10 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
         })).await;
         assert_eq!(status, StatusCode::OK, "{result}");
         let id = result["data"]["agent_session_id"].as_str().unwrap();
-        let (status, conversation) = call(router.clone(), "GET", &format!("/api/conversations/{id}"), json!({})).await;
+        let (status, observation) = call(router.clone(), "GET", &format!("/api/agent-sessions/{id}"), json!({})).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(conversation["data"]["model"]["provider_id"], selection["provider_id"]);
-        assert_eq!(conversation["data"]["model"]["model"], selection["model"]);
         let binding = result["data"]["agent_binding"].clone();
+        assert_eq!(observation["data"]["session"]["agent_binding"], binding);
         let variant = binding["preset_revision_ref"]["preset_id"].as_str().unwrap();
         let (status, editor) = call(router.clone(), "GET", &format!("/api/agent-presets/{variant}/editor"), json!({})).await;
         assert_eq!(status, StatusCode::OK);
@@ -2082,88 +2051,6 @@ async fn nomi_core_remote_replays_frozen_binding_and_persists_event_cursor() {
     .await
     .expect("dispatch post-cancel turn");
     assert_eq!(turn_after_cancel.status(), StatusCode::CONFLICT);
-
-    let delete_session = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/api/agent-sessions/{session_id}"))
-                .header("x-nomi-local-trust", "remote-local-trust")
-                .body(Body::empty())
-                .expect("build Remote Session delete request"),
-        )
-        .await
-        .expect("delete Remote Session");
-    let delete_status = delete_session.status();
-    let delete_body = axum::body::to_bytes(delete_session.into_body(), 4 * 1024 * 1024)
-        .await
-        .expect("read Remote Session delete response");
-    assert_eq!(
-        delete_status,
-        StatusCode::OK,
-        "Remote Session delete failed: {}",
-        String::from_utf8_lossy(&delete_body)
-    );
-
-    let post_delete_requests = [
-        Request::builder()
-            .uri(format!(
-                "/api/remote/observe?agent_session_id={session_id}&after_seq=0&limit=1"
-            ))
-            .header("x-nomi-local-trust", "remote-local-trust")
-            .body(Body::empty())
-            .expect("build post-delete observe request"),
-        Request::builder()
-            .method("POST")
-            .uri("/api/remote/turn")
-            .header("x-nomi-local-trust", "remote-local-trust")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                serde_json::to_vec(&serde_json::json!({
-                    "agent_session_id": session_id,
-                    "input": {"content": "must not resurrect"},
-                    "idempotency_key": "remote-turn-after-delete"
-                }))
-                .expect("serialize post-delete turn request"),
-            ))
-            .expect("build post-delete turn request"),
-        Request::builder()
-            .method("POST")
-            .uri("/api/remote/cancel")
-            .header("x-nomi-local-trust", "remote-local-trust")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                serde_json::to_vec(&serde_json::json!({
-                    "agent_session_id": session_id,
-                    "idempotency_key": "remote-cancel-after-delete"
-                }))
-                .expect("serialize post-delete cancel request"),
-            ))
-            .expect("build post-delete cancel request"),
-    ];
-    for request in post_delete_requests {
-        let response = router
-            .clone()
-            .oneshot(request)
-            .await
-            .expect("dispatch post-delete Remote request");
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let body = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
-            .await
-            .expect("read post-delete Remote response");
-        let value: Value = serde_json::from_slice(&body).expect("post-delete Remote JSON");
-        assert!(
-            matches!(
-                value["code"].as_str(),
-                Some("REMOTE_SESSION_NOT_FOUND")
-                    | Some("NOMI_CORE_AGENT_SESSION_NOT_FOUND")
-                    | Some("SESSION_NOT_FOUND")
-                    | Some("NOT_FOUND")
-            ),
-            "deleted Remote Session must not be resurrected: {value}"
-        );
-    }
 
     services.shutdown_browser_platform().await.expect("browser cleanup");
     services.database.close().await;

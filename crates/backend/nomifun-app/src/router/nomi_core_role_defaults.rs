@@ -65,7 +65,12 @@ impl InstallationRoleBindingStore for NomiCoreRoleBindingStore {
             .map_err(db_error)?;
         // A stored choice cannot invent native ownership on a host without a
         // BrowserResourceService, nor override the current native contract.
-        bindings.remove(&nomifun_agent_domain_wave2::BROWSER_EXECUTION_ROLE_ID.into());
+        for native_role in [
+            nomifun_agent_domain_wave2::BROWSER_EXECUTION_ROLE_ID,
+            nomifun_agent_domain_wave2::COMPUTER_EXECUTION_ROLE_ID,
+        ] {
+            bindings.remove(&native_role.into());
+        }
         bindings.extend(self.host_bindings.clone());
         Ok(bindings)
     }
@@ -77,7 +82,11 @@ impl InstallationRoleBindingStore for NomiCoreRoleBindingStore {
         expected_version: u64,
     ) -> Result<InstallationRoleBinding, ControlPlaneError> {
         self.require_owner(owner).await?;
-        if selection.role.key.role_id.as_ref() == nomifun_agent_domain_wave2::BROWSER_EXECUTION_ROLE_ID
+        if matches!(
+            selection.role.key.role_id.as_ref(),
+            nomifun_agent_domain_wave2::BROWSER_EXECUTION_ROLE_ID
+                | nomifun_agent_domain_wave2::COMPUTER_EXECUTION_ROLE_ID
+        )
             || self.host_bindings.contains_key(&selection.role.key.role_id)
         {
             return Err(ControlPlaneError::canonical(
@@ -140,14 +149,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_native_host_omits_browser_and_keeps_user_defaults_editable() {
+    async fn non_native_host_omits_native_roles_and_keeps_user_defaults_editable() {
         let database = nomifun_db::init_database_memory().await.unwrap();
         let owner = nomifun_db::installation_owner_id(database.pool()).await.unwrap().into();
         let store = NomiCoreRoleBindingStore::new(database.pool().clone());
         let browser = selection(nomifun_agent_domain_wave2::BROWSER_EXECUTION_ROLE_ID, "stale-browser");
+        let computer = selection(nomifun_agent_domain_wave2::COMPUTER_EXECUTION_ROLE_ID, "stale-computer");
         nomifun_db::put_installation_role_binding(database.pool(), browser.clone(), 0, 1).await.unwrap();
+        nomifun_db::put_installation_role_binding(database.pool(), computer.clone(), 0, 1).await.unwrap();
         assert!(store.load(&owner).await.unwrap().is_empty());
         assert_eq!(store.put(&owner, browser, 1).await.unwrap_err().code().as_ref(), "ROLE_DEFAULT_HOST_OWNED");
+        assert_eq!(store.put(&owner, computer, 1).await.unwrap_err().code().as_ref(), "ROLE_DEFAULT_HOST_OWNED");
 
         let first = store.put(&owner, selection("test.user_role", "provider-one"), 0).await.unwrap();
         let second = store.put(&owner, selection("test.user_role", "provider-two"), first.binding_version).await.unwrap();

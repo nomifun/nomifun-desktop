@@ -5785,6 +5785,7 @@ dependencies = [
  "nomi-tools",
  "nomi-types",
  "open",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

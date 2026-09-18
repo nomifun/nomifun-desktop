@@ -466,7 +466,7 @@ CREATE TABLE agent_turns (
 ) STRICT;
 
 CREATE TABLE agent_session_resources (
-    binding_id TEXT PRIMARY KEY CHECK (trim(binding_id) <> ''),
+    binding_id TEXT NOT NULL CHECK (trim(binding_id) <> ''),
     session_id TEXT NOT NULL,
     resource_kind TEXT NOT NULL CHECK (trim(resource_kind) <> ''),
     resource_id TEXT NOT NULL CHECK (trim(resource_id) <> ''),
@@ -479,7 +479,7 @@ CREATE TABLE agent_session_resources (
         json_valid(typed_parameters_json) AND json_type(typed_parameters_json) = 'object'
     ),
     binding_digest TEXT NOT NULL CHECK (length(binding_digest) = 64),
-    UNIQUE (session_id, binding_id),
+    PRIMARY KEY (session_id, binding_id),
     FOREIGN KEY (session_id) REFERENCES agent_sessions (agent_session_id)
         ON UPDATE RESTRICT ON DELETE CASCADE
 ) STRICT;

@@ -453,7 +453,7 @@ impl AgentControlPlane {
         let required_chat_features = required_chat_features(
             seed.enabled_capabilities
                 .iter()
-                .map(|capability| capability.id.as_ref()),
+                .map(|selection| selection.capability.id.as_ref()),
         );
         let mut model_route_refs = request.model_route_refs;
         let mut chat_route_records = request.chat_route_records;
@@ -464,7 +464,7 @@ impl AgentControlPlane {
                 "select a model or provide an explicit route, not both"));
         }
         if uses_default_route
-            && !nomifun_agent_contracts::is_direct_creation_agent(seed.enabled_capabilities.iter().map(|capability| capability.id.as_ref()))
+            && !nomifun_agent_contracts::is_direct_creation_agent(seed.enabled_capabilities.iter().map(|selection| selection.capability.id.as_ref()))
             && let Some(record) =
                 match request.model.as_ref() {
                     Some(model) => Some(
@@ -1663,36 +1663,46 @@ fn binding_record_api(
 }
 
 fn template_selection(
-    reference: &nomifun_agent_contracts::CapabilityRef,
+    selection: &CapabilitySelection,
     catalog: &CatalogSnapshot,
 ) -> Result<CapabilitySelection, ControlPlaneError> {
-    let manifest = catalog.find_capability(reference).ok_or_else(|| {
+    let manifest = catalog.find_capability(&selection.capability).ok_or_else(|| {
         ControlPlaneError::canonical(
             "CAPABILITY_NOT_MATERIALIZED",
             axum::http::StatusCode::UNPROCESSABLE_ENTITY,
             format!(
                 "official template capability {}@{} is unavailable",
-                reference.id.as_ref(),
-                reference.version.as_ref()
+                selection.capability.id.as_ref(),
+                selection.capability.version.as_ref()
             ),
         )
     })?;
-    Ok(CapabilitySelection {
-        capability: reference.clone(),
-        action_allowlist: manifest
-            .contributions
-            .actions
-            .iter()
-            .map(|action| action.action_id.clone())
-            .collect(),
-    })
+    let declared = manifest
+        .contributions
+        .actions
+        .iter()
+        .map(|action| action.action_id.clone())
+        .collect::<BTreeSet<_>>();
+    if selection.action_allowlist.is_empty()
+        || !selection.action_allowlist.is_subset(&declared)
+    {
+        return Err(ControlPlaneError::canonical(
+            "CAPABILITY_ACTION_NOT_MATERIALIZED",
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "official template capability {} contains an empty or undeclared Action grant",
+                selection.capability.id.as_ref()
+            ),
+        ));
+    }
+    Ok(selection.clone())
 }
 
 fn template_selection_api(
-    reference: &nomifun_agent_contracts::CapabilityRef,
+    selection: &CapabilitySelection,
     catalog: &CatalogSnapshot,
 ) -> Result<nomifun_api_types::CapabilitySelectionDto, ControlPlaneError> {
-    wire_cast(&template_selection(reference, catalog)?)
+    wire_cast(&template_selection(selection, catalog)?)
 }
 
 fn exact_ref_api<T>(reference: &ExactVersionRef<T>) -> ExactCatalogRefDto
@@ -2010,6 +2020,20 @@ mod tests {
         consumers: impl IntoIterator<Item = CapabilityConsumer>,
         schema: serde_json::Value,
     ) -> (MaterializedCapability, CapabilityCatalogEntry) {
+        catalog_capability_with_actions_schema(
+            id,
+            consumers,
+            std::iter::empty::<ActionId>(),
+            schema,
+        )
+    }
+
+    fn catalog_capability_with_actions_schema(
+        id: &str,
+        consumers: impl IntoIterator<Item = CapabilityConsumer>,
+        actions: impl IntoIterator<Item = ActionId>,
+        schema: serde_json::Value,
+    ) -> (MaterializedCapability, CapabilityCatalogEntry) {
         let package = PackageRef {
             id: PackageId::from(format!("test.{id}")),
             version: VersionString::from("1.0.0"),
@@ -2032,7 +2056,19 @@ mod tests {
             requires_runtime_features: Vec::new(),
             supported_platforms: vec![PlatformConstraint::Any],
             config_schema: StrictJsonValue(schema),
-            contributions: CapabilityContributions::default(),
+            contributions: CapabilityContributions {
+                actions: actions
+                    .into_iter()
+                    .map(|action_id| CapabilityActionDescriptor {
+                        input_schema: format!("schema://{}/input", action_id.as_ref()).into(),
+                        output_schema: format!("schema://{}/output", action_id.as_ref()).into(),
+                        action_id,
+                        effect_class: EffectClass::ReadLocal,
+                        presentation: ToolPresentationKind::FunctionTool,
+                    })
+                    .collect(),
+                ..CapabilityContributions::default()
+            },
         };
         let contract_digest = digest_payload(&manifest).unwrap();
         let artifact_digest = DigestHex::from("a".repeat(64));
@@ -2099,18 +2135,16 @@ mod tests {
     }
 
     #[test]
-    fn official_template_selection_freezes_exact_catalog_actions() {
-        let (mut capability, entry) = catalog_capability("workspace.files", [CapabilityConsumer::Agent]);
-        capability.manifest.contributions.actions = ["read", "write"]
-            .into_iter()
-            .map(|action| CapabilityActionDescriptor {
-                action_id: ActionId::from(format!("workspace.files/{action}")),
-                input_schema: format!("schema://workspace.files/{action}/input").into(),
-                output_schema: format!("schema://workspace.files/{action}/output").into(),
-                effect_class: EffectClass::ReadLocal,
-                presentation: ToolPresentationKind::FunctionTool,
-            })
-            .collect();
+    fn official_template_selection_preserves_the_seed_exact_action_subset() {
+        let (capability, entry) = catalog_capability_with_actions_schema(
+            "workspace.files",
+            [CapabilityConsumer::Agent],
+            [
+                ActionId::from("workspace.files/read"),
+                ActionId::from("workspace.files/write"),
+            ],
+            json!({"type":"object", "additionalProperties":false}),
+        );
         let reference = CapabilityRef {
             id: capability.manifest.id.clone(),
             version: capability.manifest.version.clone(),
@@ -2120,13 +2154,17 @@ mod tests {
             formal_capability_entries: BTreeMap::from([(entry.capability.clone(), entry)]),
             ..Default::default()
         };
-        let selection = template_selection(&reference, &catalog).unwrap();
+        let selection = template_selection(
+            &CapabilitySelection {
+                capability: reference,
+                action_allowlist: BTreeSet::from([ActionId::from("workspace.files/read")]),
+            },
+            &catalog,
+        )
+        .unwrap();
         assert_eq!(
             selection.action_allowlist,
-            BTreeSet::from([
-                ActionId::from("workspace.files/read"),
-                ActionId::from("workspace.files/write"),
-            ])
+            BTreeSet::from([ActionId::from("workspace.files/read")])
         );
     }
 
@@ -2223,14 +2261,25 @@ mod tests {
         assert!(repeated.draft.document.model_route_refs.is_empty());
         let reference: PresetRevisionRef = wire_cast(&binding.preset_revision_ref).unwrap();
         let snapshot = store.get_snapshot(&reference).await.unwrap().unwrap();
-        assert_eq!(snapshot.content.enabled_capabilities.len(), 2);
+        assert_eq!(snapshot.content.enabled_capabilities.len(), 3);
         let creation = snapshot
             .content
             .enabled_capabilities
             .iter()
             .find(|capability| capability.capability.id.as_ref() == "creation.media")
             .unwrap();
-        assert!(creation.action_allowlist.is_empty(), "this isolated catalog fixture declares no actions");
+        assert_eq!(
+            creation.action_allowlist,
+            BTreeSet::from([
+                ActionId::from("creation.media/audio"),
+                ActionId::from("creation.media/image"),
+                ActionId::from("creation.media/image_edit"),
+                ActionId::from("creation.media/music"),
+                ActionId::from("creation.media/text"),
+                ActionId::from("creation.media/video"),
+            ]),
+            "official template Action grants must survive creation and compilation exactly"
+        );
     }
 
     #[tokio::test]
@@ -2433,11 +2482,16 @@ mod tests {
         let mut registry = MaterializedRegistry::empty();
         let mut catalog = CatalogSnapshot::default();
         for selected in &templates.seed(key).unwrap().enabled_capabilities {
-            let schema = if selected.id.as_ref() == "creation.media" && updated_schema {
+            let schema = if matches!(selected.capability.id.as_ref(), "creation.media" | "knowledge") && updated_schema {
                 json!({"type":"object", "additionalProperties":false, "properties":{"model_selection":{"type":"object"}}})
             } else { json!({"type":"object", "additionalProperties":false}) };
-            let (capability, entry) = catalog_capability_with_schema(selected.id.as_ref(), [CapabilityConsumer::Agent], schema);
-            registry.capabilities.insert(selected.id.clone(), capability.clone());
+            let (capability, entry) = catalog_capability_with_actions_schema(
+                selected.capability.id.as_ref(),
+                [CapabilityConsumer::Agent],
+                selected.action_allowlist.iter().cloned(),
+                schema,
+            );
+            registry.capabilities.insert(selected.capability.id.clone(), capability.clone());
             catalog.capabilities.push(capability);
             catalog.formal_capability_entries.insert(entry.capability.clone(), entry);
         }

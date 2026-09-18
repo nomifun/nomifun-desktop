@@ -3,11 +3,11 @@
   "payload": {
     "manifest_version": "1.0.0",
     "confirmed_decision_contract_digest": "d1cff555fcb33de6ffc654be651e60610d63be54fd41ab29a3df15355d594848",
-    "canonical_schema_manifest_digest": "108b85b87492617b2d5497d784490f39537aec335c50dd0daa5076d7a1f0c8e9",
-    "cargo_lock_digest": "c64a2845591cf3204c72e0be90c67720d032fa2835bd0d9e71180076f72fa5a6",
-    "official_preset_seed_manifest_digest": "3e6e6db4b20c13bdfee5031602947d8a651195d4e675b72bd53e56a88c6dfbf3",
+    "canonical_schema_manifest_digest": "c4abb80c2b29ef8be9478d2cb278c95d7cfe57fa00c23c7cf2bb9b21626ce6b4",
+    "cargo_lock_digest": "cc38ebdf4809962915c8f971f449f2fa740bffd5d9d21606cbfd6da3b6e44e4a",
+    "official_preset_seed_manifest_digest": "61e3b4f404c7296a560b51132630a9c5712dd3b9712c063a53f9b3878f8e3c68",
     "capability_availability_manifest_digest": "70ab40f20452974594d897cbf32bcbcb3b030a77b9708534aa5e93c1b76eaa8c",
-    "coding_codex_native_contract_digest": "ce1194ffc5e53524fcfe6d8c552f538b8686b1b9095108d39c4eb0eb603417bb",
+    "coding_codex_native_contract_digest": "940e7bd5d4fe74ef9afbb3a3a5f624d18c1dca735695917821f711834ece2d14",
     "platform_matrix": {
       "target_cells": {
         "windows_desktop_x64": {
@@ -160,5 +160,5 @@
       }
     }
   },
-  "payload_digest": "a075888862e2a300caf57d8b3c86d8256033fbe8e366ad9a45f7a1620d28061e"
+  "payload_digest": "46457abcb41931e32413da632e6cd06137ec42202820c738a0928115c2dfcc44"
 }

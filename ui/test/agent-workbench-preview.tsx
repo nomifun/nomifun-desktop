@@ -18,7 +18,7 @@ import common from '../src/renderer/services/i18n/locales/zh-CN/common.json';
 import guid from '../src/renderer/services/i18n/locales/zh-CN/guid.json';
 import settings from '../src/renderer/services/i18n/locales/zh-CN/settings.json';
 import GuidAgentSelectorPreview from './GuidAgentSelectorPreview';
-import catalog from './fixtures/agent-workbench-catalog.json';
+import catalogDefinitions from './fixtures/agent-workbench-catalog.json';
 import seed from '../../crates/backend/nomifun-agent-contracts/contracts/presets/official-preset-seed-manifest.payload.json';
 
 const PREVIEW_KEY = 'nomifun.agent-workbench.visual-preview.v2';
@@ -31,7 +31,24 @@ const route = {
     credential_ref: 'preview-only-no-credential', features: ['text_input', 'text_output', 'tool_calls'] }, failovers: [],
 };
 const emptyDocument = () => ({ schema_version: '1.0.0', model_route_refs: { agent_chat: route.primary.model_route_id }, chat_route_records: { agent_chat: route }, enabled_capabilities: [], skill_bindings: [], system_role_provider_overrides: {}, persona: '', instructions: '', starter_prompts: [] });
-const selection = (id: string) => ({ capability: { id, version: '1.0.0' }, action_allowlist: [] });
+const definitions = catalogDefinitions as Array<{ id: string; name: string; description: string; resources: string[]; actions: Array<[string, string]> }>;
+const modules = definitions.map((definition) => ({
+  module: { id: definition.id, version: '1.0.0' }, display_name: definition.name,
+  description: definition.description, source_package: { id: `nomifun.${definition.id}`, version: '1.0.0' },
+  authoring_policy: 'direct', summary_kind: 'tool',
+  actions: definition.actions.map(([action_id, effect_class]) => ({ action_id,
+    input_schema: `schema://${action_id}/input`, output_schema: `schema://${action_id}/output`,
+    effect_class, presentation: 'function_tool' })),
+  context_schema_refs: [], event_schema_refs: [], required_resource_kinds: definition.resources,
+  required_host_ports: [], required_modules: [], conflicting_modules: [], supported_surfaces: ['desktop'],
+}));
+const catalog = { modules, capabilities: modules.map((module) => ({
+  capability: module.module, kind: 'tool', display_name: module.display_name, description: module.description,
+  source_package: module.source_package, source_kind: 'bundled', materialization_state: 'materialized',
+  supported_surfaces: ['desktop'], required_runtime_features: [], required_resource_kinds: module.required_resource_kinds,
+  required_capabilities: [], conflicting_capabilities: [], action_count: module.actions.length, context_contributor_count: 0,
+})), skills: [], mcp_tools: [], roles: [] };
+const selection = (id: string, action_allowlist: string[]) => ({ capability: { id, version: '1.0.0' }, action_allowlist });
 const makeEditor = (id: string, name: string, document: any, revisionNumber = 1, description = '') => {
   document = { ...emptyDocument(), ...document, model_route_refs: { agent_chat: route.primary.model_route_id, ...document.model_route_refs }, chat_route_records: { agent_chat: route, ...document.chat_route_records } };
   const reference = { preset_id: id, revision: revisionNumber, revision_digest: 'a'.repeat(64) };
@@ -39,16 +56,24 @@ const makeEditor = (id: string, name: string, document: any, revisionNumber = 1,
   return { preset, revision: { reference, document, created_by: OWNER, created_at_ms: Date.now() }, draft: { preset_id: id, display_name: name, description, current_revision: reference, document } };
 };
 const initialEditors = () => [
-  makeEditor('0190f5fe-7c00-7a00-8000-000000000101', '研究助理', { enabled_capabilities: ['knowledge.search', 'knowledge.read', 'memory.project.read', 'web.fetch', 'fs.read'].map(selection) }, 1, '查阅资料、整理信息，形成有据可查的结论'),
-  makeEditor('0190f5fe-7c00-7a00-8000-000000000102', '开发搭档', { enabled_capabilities: ['fs.read', 'fs.search', 'agent.execution.plan', 'fs.write', 'fs.patch', 'process.exec', 'vcs.diff', 'vcs.status'].map(selection) }, 1, '理解项目、修改代码，并检查改动结果'),
+  makeEditor('0190f5fe-7c00-7a00-8000-000000000101', '研究助理', { enabled_capabilities: [
+    selection('knowledge', ['knowledge/search', 'knowledge/read']),
+    selection('project.memory', ['project.memory/read']),
+    selection('web.research', ['web.research/search', 'web.research/fetch']),
+  ] }, 1, '查阅资料、整理信息，形成有据可查的结论'),
+  makeEditor('0190f5fe-7c00-7a00-8000-000000000102', '开发搭档', { enabled_capabilities: [
+    selection('workspace.files', ['workspace.files/read', 'workspace.files/search', 'workspace.files/write', 'workspace.files/patch']),
+    selection('workspace.process', ['workspace.process/exec', 'workspace.process/poll']),
+    selection('workspace.vcs', ['workspace.vcs/diff', 'workspace.vcs/status']),
+  ] }, 1, '理解项目、修改代码，并检查改动结果'),
 ];
 let editors: any[];
 try { editors = JSON.parse(localStorage.getItem(PREVIEW_KEY) || 'null') || initialEditors(); } catch { editors = initialEditors(); }
 const persist = () => localStorage.setItem(PREVIEW_KEY, JSON.stringify(editors));
-const library = () => ({ official_templates: Object.entries(seed.templates).map(([key, value]) => ({ template_key: key, seed: value, role_coverage: { required_capability_categories: [], required_capability_ids: [], required_runtime_features: [], required_resource_kinds: [] }, immutable: true, forkable: true })), user_presets: editors.map((entry) => entry.preset), active_bindings: [], fresh_start: { data_generation: 4, legacy_data_imported: false, official_template_count: 7, user_preset_count: editors.length } });
+const library = () => ({ official_templates: Object.entries(seed.templates).map(([key, value]) => ({ template_key: key, seed: value, role_coverage: seed.role_coverage[key as keyof typeof seed.role_coverage], immutable: true, forkable: true })), user_presets: editors.map((entry) => entry.preset), active_bindings: [], fresh_start: { data_generation: 4, legacy_data_imported: false, official_template_count: Object.keys(seed.templates).length, user_preset_count: editors.length } });
 const response = (data: unknown, status = 200) => new Response(JSON.stringify(status < 400 ? { success: true, data } : { success: false, error: data }), { status, headers: { 'Content-Type': 'application/json' } });
 const hasUnavailableCapability = (document: any) => document.enabled_capabilities.some(
-  ({ capability }: any) => catalog.find((row) => row.capability.id === capability.id)?.materialization_state !== 'materialized'
+  ({ capability }: any) => catalog.capabilities.find((row) => row.capability.id === capability.id)?.materialization_state !== 'materialized'
 );
 
 // This transport serves fixed preview data only. Unrecognized calls fail; no
@@ -57,7 +82,8 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, location.origin);
   const path = url.pathname; const method = init?.method || 'GET'; const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
   if (path === '/api/agent-preset-templates') return response(library());
-  if (path === '/api/capabilities') return response(catalog);
+  if (path === '/api/agent-catalog') return response(catalog);
+  if (path === '/api/capabilities') return response(catalog.capabilities);
   if (path === '/api/agent-catalog/skills' || path === '/api/mcp-tool-mappings' || path.includes('providers')) return response([]);
   if (path === '/api/webui/access-token') return response({ configured: false });
   if (path === '/api/settings/client') return response({ language: 'zh-CN' });
@@ -89,6 +115,6 @@ const { default: ModelAliasEditorPreview } = await import('./ModelAliasEditorPre
 document.body.setAttribute('data-theme', 'light');
 if (!location.hash) location.hash = '/agent';
 const style = document.createElement('style');
-style.textContent = 'html,body,#root{margin:0;min-height:100%;font-family:Inter,"Microsoft YaHei",system-ui,sans-serif}body{background:var(--color-bg-1)}.preview-note{height:30px;display:flex;align-items:center;justify-content:center;background:var(--color-fill-2);color:var(--color-text-3);font-size:11px}.preview-frame{max-width:1220px;margin:auto}.preview-destination{padding:50px;font-size:16px}';
+style.textContent = 'html,body,#root{margin:0;height:100%;min-height:0;font-family:Inter,"Microsoft YaHei",system-ui,sans-serif}body{background:var(--color-bg-1)}.preview-note{height:30px;display:flex;align-items:center;justify-content:center;background:var(--color-fill-2);color:var(--color-text-3);font-size:11px}.preview-frame{height:calc(100% - 30px);max-width:1220px;margin:auto}.preview-destination{padding:50px;font-size:16px}';
 document.head.appendChild(style);
 createRoot(document.getElementById('root')!).render(<I18nextProvider i18n={i18n}><ConfigProvider locale={zhCN} theme={{ primaryColor: '#ef2355' }}><HashRouter><div className='preview-note'>交互预览 · 仅使用测试数据，不连接后台或执行 Agent</div><div className='preview-frame'><Routes><Route path='/model-editor' element={<ModelAliasEditorPreview />} /><Route path='/selector' element={<GuidAgentSelectorPreview templates={library().official_templates as any} />} /><Route path='/agent' element={<AgentSettingsPage />} /><Route path='*' element={<div className='preview-destination'>此预览只验证工作台交互。<br /><Link to='/agent'>返回 Agent 工作台</Link></div>} /></Routes></div></HashRouter></ConfigProvider></I18nextProvider>);

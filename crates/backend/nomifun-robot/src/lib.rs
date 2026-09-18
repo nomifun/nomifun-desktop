@@ -6,6 +6,7 @@
 //! [`services`] trait seam so the pipeline is testable with mocks.
 
 pub mod audio;
+pub mod capability;
 pub mod dto;
 pub mod endpoint;
 pub mod effect_ledger;
@@ -13,7 +14,6 @@ pub mod events;
 pub mod lan_source;
 pub mod link;
 pub mod mcp_bridge;
-pub mod mcp_proxy;
 pub mod pipeline;
 pub mod protocol;
 pub mod registry;

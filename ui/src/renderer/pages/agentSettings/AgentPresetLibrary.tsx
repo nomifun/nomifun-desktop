@@ -1,9 +1,9 @@
 import type { AgentPresetLibraryResponse, AgentPresetSummary, OfficialPresetKey, OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import { Button, Popconfirm } from '@arco-design/web-react';
 import { AddOne, ExpandLeft, Code, Customer, Delete, Loading, Magic, MessageOne, Search, User } from '@icon-park/react';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { TEMPLATE_I18N_PATH, templateCapabilityCount } from './model';
+import { TEMPLATE_I18N_PATH, templateModuleCount } from './model';
 import styles from './AgentSettingsPage.module.css';
 import ContentSider from '@/renderer/components/layout/ContentSider';
 
@@ -32,6 +32,7 @@ const AgentPresetLibrary: React.FC<Props> = ({
   const { t } = useTranslation();
   const [query, setQuery] = useState('');
   const [mode, setMode] = useState<'mine' | 'official'>(selection?.kind === 'preset' ? 'mine' : 'official');
+  const tabRefs = useRef(new Map<'mine' | 'official', HTMLButtonElement>());
   useEffect(() => { setMode(selection?.kind === 'preset' ? 'mine' : 'official'); }, [selection?.kind]);
   const matches = (name: string, description = '') => `${name} ${description}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase());
   const templates = library.official_templates.filter((template) => {
@@ -39,6 +40,21 @@ const AgentPresetLibrary: React.FC<Props> = ({
     return matches(t(`agentSettings.template.${path}.name`), t(`agentSettings.template.${path}.description`));
   });
   const presets = library.user_presets.filter((preset) => matches(preset.display_name, preset.description));
+  const minimalTemplate = library.official_templates.find((template) => template.template_key === 'chat.minimal');
+  const activateTab = (next: 'mine' | 'official') => {
+    setMode(next);
+    requestAnimationFrame(() => tabRefs.current.get(next)?.focus());
+  };
+  const tabKey = (event: React.KeyboardEvent<HTMLButtonElement>, current: 'mine' | 'official') => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === 'Home' || (event.key === 'ArrowLeft' && current === 'official')
+      ? 'mine'
+      : event.key === 'End' || (event.key === 'ArrowRight' && current === 'mine')
+        ? 'official'
+        : current;
+    activateTab(next);
+  };
 
   return <ContentSider width={width} resizeHandle={resizeHandle} className={styles.library} ariaLabel={t('agentSettings.library.ariaLabel')} header={<>
     <div className={styles.libraryHeader}>
@@ -47,11 +63,25 @@ const AgentPresetLibrary: React.FC<Props> = ({
     </div>
     <label className={styles.librarySearch}><Search theme='outline' size={15} /><input type='search' value={query} placeholder={t('agentSettings.workbench.librarySearch')} aria-label={t('agentSettings.workbench.librarySearch')} onChange={(event) => setQuery(event.target.value)} /></label>
     <div className={styles.libraryTabs} role='tablist' aria-label={t('agentSettings.library.title')}>
-      <button type='button' role='tab' aria-selected={mode === 'mine'} onClick={() => setMode('mine')}>{t('agentSettings.workbench.mine')}<span>{library.user_presets.length}</span></button>
-      <button type='button' role='tab' aria-selected={mode === 'official'} onClick={() => setMode('official')}>{t('agentSettings.workbench.official')}<span>{library.official_templates.length}</span></button>
+      <button ref={node => { if (node) tabRefs.current.set('mine', node); else tabRefs.current.delete('mine'); }} id='agent-library-tab-mine' type='button' role='tab' tabIndex={mode === 'mine' ? 0 : -1} aria-controls='agent-library-panel' aria-selected={mode === 'mine'} onKeyDown={event => tabKey(event, 'mine')} onClick={() => setMode('mine')}>{t('agentSettings.workbench.mine')}<span>{library.user_presets.length}</span></button>
+      <button ref={node => { if (node) tabRefs.current.set('official', node); else tabRefs.current.delete('official'); }} id='agent-library-tab-official' type='button' role='tab' tabIndex={mode === 'official' ? 0 : -1} aria-controls='agent-library-panel' aria-selected={mode === 'official'} onKeyDown={event => tabKey(event, 'official')} onClick={() => setMode('official')}>{t('agentSettings.workbench.official')}<span>{library.official_templates.length}</span></button>
     </div>
     </>}>
-    <div className={styles.libraryBody}>
+    <div className={styles.libraryBody} id='agent-library-panel' role='tabpanel' aria-labelledby={`agent-library-tab-${mode}`}>
+      {library.fresh_start.user_preset_count === 0 && (
+        <section className={styles.firstRun} aria-label={t('agentSettings.workbench.firstRunTitle')}>
+          <strong>{t('agentSettings.workbench.firstRunTitle')}</strong>
+          <p>{t('agentSettings.workbench.firstRunHint')}</p>
+          <div>
+            <Button size='small' disabled={busy || !minimalTemplate} onClick={() => {
+              if (minimalTemplate) onSelectTemplate(minimalTemplate);
+            }}>{t('agentSettings.workbench.startMinimal')}</Button>
+            <Button size='small' type='text' disabled={busy} onClick={() => onCreatePreset(t('agentSettings.defaults.untitledName'))}>
+              {t('agentSettings.workbench.startCustom')}
+            </Button>
+          </div>
+        </section>
+      )}
       <p className={styles.libraryHint}>{t(mode === 'mine' ? 'agentSettings.workbench.myHint' : 'agentSettings.workbench.officialHint')}</p>
       {mode === 'official' ? <div className={styles.libraryList}>
         {templates.map((template) => {
@@ -60,7 +90,7 @@ const AgentPresetLibrary: React.FC<Props> = ({
           const selected = selection?.kind === 'template' && selection.template.template_key === template.template_key;
           return <button type='button' key={template.template_key} className={`${styles.libraryRow} ${selected ? styles.libraryRowActive : ''}`} aria-pressed={selected} disabled={busy} onClick={() => onSelectTemplate(template)}>
             <span className={styles.libraryIcon}><TemplateIcon templateKey={template.template_key} /></span>
-            <span className={styles.libraryCopy}><span className={styles.libraryName}>{name}</span><span className={styles.libraryMeta}>{t('agentSettings.library.capabilityCount', { count: templateCapabilityCount(template) })}</span></span>
+            <span className={styles.libraryCopy}><span className={styles.libraryName}>{name}</span><span className={styles.libraryMeta}>{template.template_key === 'assistant.general' && <em>{t('agentSettings.library.recommended')}</em>}{t('agentSettings.library.moduleCount', { count: templateModuleCount(template) })}</span></span>
           </button>;
         })}
       </div> : <div className={styles.libraryList}>

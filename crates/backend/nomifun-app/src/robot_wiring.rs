@@ -17,7 +17,6 @@ use nomifun_conversation::ConversationService;
 use nomifun_db::IClientPreferenceRepository;
 use nomifun_robot::endpoint::{EndpointAdvertiser, LanAdvertiser, LanEndpointSnapshot};
 use nomifun_robot::effect_ledger::RobotEffectLedger;
-use nomifun_robot::mcp_proxy::RobotMcpProxyServer;
 use nomifun_robot::registry::RobotRegistry;
 use nomifun_robot::services::{SpeechServices, TurnEvent};
 use nomifun_robot::status::RobotStatusRegistry;
@@ -106,9 +105,6 @@ pub struct RobotServices {
     /// Live view of the LAN listener. `desktop.rs` projects its `WebUiStatus`
     /// into this; nothing else may write it.
     pub endpoint_tx: watch::Sender<LanEndpointSnapshot>,
-    /// The loopback MCP front for device tools. `None` when it failed to bind —
-    /// robot tools are then simply unavailable to the model.
-    pub proxy: Option<Arc<RobotMcpProxyServer>>,
     /// Set once, during router assembly.
     gateway_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -134,13 +130,6 @@ impl RobotServices {
         let tools = Arc::new(RobotToolRegistry::default());
         let effect_ledger = Arc::new(RobotEffectLedger::load(data_dir).await?);
         let vision_observations = Arc::new(RobotVisionObservationRegistry::default());
-        let proxy = match RobotMcpProxyServer::spawn(tools.clone()).await {
-            Ok(server) => Some(Arc::new(server)),
-            Err(error) => {
-                tracing::error!(%error, "robot: MCP proxy failed to bind; device tools disabled");
-                None
-            }
-        };
         let (endpoint_tx, endpoint_rx) = watch::channel(LanEndpointSnapshot::default());
         let advertiser: Arc<dyn EndpointAdvertiser> = Arc::new(LanAdvertiser::new(endpoint_rx));
 
@@ -171,7 +160,6 @@ impl RobotServices {
             advertiser,
             speech,
             endpoint_tx,
-            proxy,
             gateway_task: Mutex::new(None),
         })
     }
@@ -190,8 +178,8 @@ impl RobotServices {
         }
     }
 
-    /// Stop the accept loop and the loopback MCP front. Sessions are owned by
-    /// their own tasks and end when their sockets close with the listener.
+    /// Stop the accept loop. Sessions are owned by their own tasks and end when
+    /// their sockets close with the listener.
     pub fn shutdown(&self) {
         if let Some(task) = self
             .gateway_task
@@ -200,9 +188,6 @@ impl RobotServices {
             .take()
         {
             task.abort();
-        }
-        if let Some(proxy) = &self.proxy {
-            proxy.stop();
         }
     }
 }
@@ -344,7 +329,7 @@ fn robot_body_prompt() -> &'static str {
      - 回复必须简短口语化：每句不超过 40 字，整体不超过 3 句，除非用户明确要求详细内容。\n\
      - 只输出要说出来的那句话本身。不要写任何方括号或【】里的标注（例如 [winking]、[开心]、【笑】），不要写动作描写或舞台提示，不要写旁白和括号里的补充说明。\n\
      - 不要输出 emoji、颜文字、markdown 记号（星号、井号、反引号），以及任何念不出声的符号。需要停顿就用逗号和句号。\n\
-     - 需要转头、看某个方向或调音量时，用 robot_ 开头的工具。"
+     - 只有本轮明确提供了设备工具时才能执行物理操作；没有工具时不要声称已经移动、拍摄或修改设备。"
 }
 
 /// Production device ingress shares the Companion's authoritative Conversation.
@@ -356,7 +341,6 @@ pub struct AppRobotBackend {
     pub owner_user_id: Arc<str>,
     pub registry: Arc<RobotRegistry>,
     pub vision_observations: Arc<RobotVisionObservationRegistry>,
-    pub mcp_proxy: Option<Arc<RobotMcpProxyServer>>,
     pending: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
     queues: Arc<Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>>,
 }
@@ -367,7 +351,7 @@ struct DeviceTurnAuthority {
     registry: Arc<RobotRegistry>,
     request: nomifun_robot::services::RobotTurnRequest,
     revision: u64,
-    capabilities: std::collections::BTreeSet<String>,
+    vision_authorized: bool,
     cancelled: tokio_util::sync::CancellationToken,
     conversations: ConversationService,
     owner_user_id: Arc<str>,
@@ -384,7 +368,18 @@ impl nomifun_robot::vision::RobotVisionRecorder for DeviceTurnAuthority {
         }
     }
     async fn authorize(&self) -> Result<(), String> {
-        nomifun_robot::mcp_proxy::RobotToolAuthority::validate(self, "robot.vision").await?;
+        if !self.vision_authorized {
+            return Err(
+                "robot/vision is not granted for this Agent and exact robot binding".to_owned(),
+            );
+        }
+        let record = self.validate_connection().await?;
+        if !record
+            .permissions
+            .allows_action(nomifun_robot::capability::RobotAction::Vision)
+        {
+            return Err("camera access is disabled for this robot".to_owned());
+        }
         let mut context = device_turn_context(&self.request);
         context.from_desktop = self.from_desktop;
         context.agent_revision = self.agent_revision.clone();
@@ -424,31 +419,41 @@ impl nomifun_conversation::service::BackgroundTurnPreSendHook for DeviceTurnAuth
     }
 }
 
-#[async_trait::async_trait]
-impl nomifun_robot::mcp_proxy::RobotToolAuthority for DeviceTurnAuthority {
-    fn robot_id(&self) -> &str { &self.request.robot_id }
-    fn connection_id(&self) -> &str { &self.request.connection_id }
-    async fn validate(&self, capability: &str) -> Result<(), String> {
-        let record = self.validate_connection().await?;
-        if !self.capabilities.contains(capability) || !record.permissions.allows(capability) {
-            return Err(format!("{capability} is outside the Companion and device capability ceiling"));
-        }
-        Ok(())
+fn snapshot_authorizes_robot_vision(
+    snapshot: Option<&nomifun_api_types::AgentResolvedSnapshot>,
+    owner_id: &str,
+    request: &nomifun_robot::services::RobotTurnRequest,
+) -> bool {
+    let Some(snapshot) = snapshot else {
+        return false;
+    };
+    if !snapshot
+        .enabled_capability_actions
+        .get(nomifun_robot::capability::ROBOT_MODULE_ID)
+        .is_some_and(|actions| {
+            actions.contains(nomifun_robot::capability::ROBOT_VISION_ACTION_ID)
+        })
+    {
+        return false;
     }
-    async fn validate_tool(&self, device_name: &str) -> Result<(), String> {
-        self.validate(nomifun_robot::tool_registry::tool_capability(device_name).capability_id()).await?;
-        if device_name.starts_with("self.audio") || device_name.starts_with("audio") {
-            self.validate("robot.audio").await?;
-        }
-        let record = self.validate_connection().await?;
-        if !record.permissions.allows_tool(device_name) { return Err("continuous observation is not allowed".to_owned()); }
-        let mut context = device_turn_context(&self.request);
-        context.from_desktop = self.from_desktop;
-        if !self.conversations.companion_device_turn_is_active(&self.owner_user_id, &self.request.conversation_id, &context) {
-            return Err("device tool no longer belongs to an active turn".to_owned());
-        }
-        Ok(())
-    }
+    let Some(binding_value) = snapshot.canonical_binding.as_ref() else {
+        return false;
+    };
+    let mut robot_bindings = binding_value
+        .typed_resource_bindings
+        .iter()
+        .filter(|binding| binding.resource_kind == "robot");
+    let Some(binding) = robot_bindings.next() else {
+        return false;
+    };
+    robot_bindings.next().is_none()
+        && binding.owner_id == owner_id
+        && binding.resource_id == request.robot_id
+        && binding.operations.contains("vision")
+        && binding
+            .typed_parameters
+            .get("companion_id")
+            .is_some_and(|companion| companion == &request.companion_id)
 }
 
 fn device_turn_context(request: &nomifun_robot::services::RobotTurnRequest)
@@ -507,13 +512,16 @@ impl AppRobotBackend {
                     .runtime_summary_for(&request.conversation_id).await.is_processing => continue,
                 Err(error) => return Err(error.into()),
             };
-            let capabilities = conversation.agent_snapshot.as_ref()
-                .map(|snapshot| snapshot.enabled_capabilities.iter().cloned().collect())
-                .unwrap_or_default();
+            let vision_authorized = snapshot_authorizes_robot_vision(
+                conversation.agent_snapshot.as_ref(),
+                &self.owner_user_id,
+                request,
+            );
             let authority = Arc::new(DeviceTurnAuthority {
                 from_desktop: false,
                 registry: self.registry.clone(), request: request.clone(),
-                revision: record.authorization_revision, capabilities, cancelled: cancelled.clone(),
+                revision: record.authorization_revision, cancelled: cancelled.clone(),
+                vision_authorized,
                 conversations: self.conversations.clone(), owner_user_id: self.owner_user_id.clone(),
                 agent_revision: conversation.preset_id.clone().zip(conversation.preset_revision),
             });
@@ -526,11 +534,9 @@ impl AppRobotBackend {
                 &*self.companions, Some(&request.companion_id), None).await.unwrap_or_default();
             context.system_prompt.push_str("\n\n");
             context.system_prompt.push_str(robot_body_prompt());
-            let tool_lease = if authority.capabilities.contains("robot.link") {
-                match &self.mcp_proxy { Some(proxy) => Some(proxy.issue(authority.clone()).await?), None => None }
-            } else { None };
-            if let Some(lease) = tool_lease.as_ref() { context.mcp_servers.push(lease.registration()); }
-            let resources = Arc::new(DeviceTurnResources { _tool_lease: tool_lease, vision_lease: Mutex::new(None) });
+            let resources = Arc::new(DeviceTurnResources {
+                vision_lease: Mutex::new(None),
+            });
             context.resources = Some(resources.clone());
             let prepare_hook = Arc::new(DeviceTurnPreparation { authority, resources, observations: self.vision_observations.clone() });
             let message = SendMessageRequest {
@@ -627,7 +633,6 @@ impl AppRobotBackend {
 }
 
 struct DeviceTurnResources {
-    _tool_lease: Option<Arc<nomifun_robot::mcp_proxy::RobotMcpLease>>,
     vision_lease: Mutex<Option<nomifun_robot::vision::RobotVisionTurnLease>>,
 }
 
@@ -675,7 +680,6 @@ impl nomifun_conversation::companion_interaction::CompanionDesktopTurnProvider f
     async fn prepare(&self, owner_id: &str, conversation_id: &str, request_id: &str)
         -> Result<Option<nomifun_conversation::companion_interaction::PreparedDesktopDeviceTurn>, nomifun_common::AppError>
     {
-        use nomifun_common::AppError;
         if owner_id != self.owner_user_id.as_ref() { return Ok(None); }
         let conversation = self.conversations.get(owner_id, conversation_id).await?;
         let Some(companion_id) = conversation.extra.get("companion_id").and_then(Value::as_str) else { return Ok(None); };
@@ -690,21 +694,22 @@ impl nomifun_conversation::companion_interaction::CompanionDesktopTurnProvider f
         };
         let Some(device) = selected else { return Ok(None); };
         let Some(connection_id) = self.registry.current_connection(&device.robot_id).await else { return Ok(None); };
-        let capabilities: std::collections::BTreeSet<String> = conversation.agent_snapshot.as_ref()
-            .map(|snapshot| snapshot.enabled_capabilities.iter().cloned().collect()).unwrap_or_default();
-        if !capabilities.contains("robot.link") { return Ok(None); }
-        let Some(proxy) = self.mcp_proxy.as_ref() else { return Ok(None); };
         let request = nomifun_robot::services::RobotTurnRequest {
             robot_id: device.robot_id.clone(), companion_id: companion_id.to_owned(),
             conversation_id: conversation_id.to_owned(), connection_id, request_id: request_id.to_owned(), text: String::new(),
         };
+        let vision_authorized = snapshot_authorizes_robot_vision(
+            conversation.agent_snapshot.as_ref(),
+            owner_id,
+            &request,
+        );
         let authority = Arc::new(DeviceTurnAuthority {
             from_desktop: true, registry: self.registry.clone(), request: request.clone(),
-            revision: device.authorization_revision, capabilities,
+            revision: device.authorization_revision,
+            vision_authorized,
             cancelled: tokio_util::sync::CancellationToken::new(), conversations: self.conversations.clone(),
             owner_user_id: self.owner_user_id.clone(), agent_revision: conversation.preset_id.zip(conversation.preset_revision),
         });
-        let tool_lease = proxy.issue(authority.clone()).await.map_err(|error| AppError::Forbidden(error.to_string()))?;
         let mut context = device_turn_context(&request);
         context.from_desktop = true;
         context.agent_revision = authority.agent_revision.clone();
@@ -712,9 +717,10 @@ impl nomifun_conversation::companion_interaction::CompanionDesktopTurnProvider f
         context.fallback_model = profile.fallback_model;
         context.system_prompt = nomifun_ai_agent::CompanionPromptProvider::build_system_prompt(
             &*self.companions, Some(companion_id), None).await.unwrap_or_default();
-        context.system_prompt.push_str("\n当前输入来自桌面，正常使用完整文字、Markdown 等形式回答；回复不会自动播报。已连接的物理机器人可通过本轮提供的 robot_ 工具操作，只操作用户当前选定的设备。\n");
-        context.mcp_servers.push(tool_lease.registration());
-        let resources = Arc::new(DeviceTurnResources { _tool_lease: Some(tool_lease), vision_lease: Mutex::new(None) });
+        context.system_prompt.push_str("\n当前输入来自桌面，正常使用完整文字、Markdown 等形式回答；回复不会自动播报。已连接的机器人只提供语音与视觉上下文；物理控制必须由显式启用 Robot 模块与对应 Action 的 Agent 会话执行。\n");
+        let resources = Arc::new(DeviceTurnResources {
+            vision_lease: Mutex::new(None),
+        });
         context.resources = Some(resources.clone());
         let hook = Arc::new(DeviceTurnPreparation { authority, resources, observations: self.vision_observations.clone() });
         Ok(Some(nomifun_conversation::companion_interaction::PreparedDesktopDeviceTurn { context, pre_send_hook: hook }))
@@ -1029,7 +1035,6 @@ pub fn mount(
         vision_observations: robot.vision_observations.clone(),
         pending: Arc::new(Mutex::new(HashMap::new())),
         queues: Arc::new(Mutex::new(HashMap::new())),
-        mcp_proxy: robot.proxy.clone(),
     });
     backend.conversations.with_companion_desktop_provider(backend.clone());
     #[cfg(test)]
@@ -1135,10 +1140,12 @@ mod tests {
             prompt.contains("念出声") || prompt.contains("念出来"),
             "the model is no longer told the text is spoken aloud"
         );
-        // The short-reply rules and the tool guidance are the parts that were
-        // working and are deliberately kept.
+        // The short-reply rules and authority guidance remain, but generic
+        // `robot_*` tool vocabulary must not be injected into this voice path.
         assert!(prompt.contains("不超过 40 字") && prompt.contains("不超过 3 句"));
-        assert!(prompt.contains("robot_"), "the tool guidance is still needed");
+        assert!(prompt.contains("本轮明确提供了设备工具"));
+        assert!(prompt.contains("不要声称已经移动、拍摄或修改设备"));
+        assert!(!prompt.contains("robot_"));
     }
 
 
@@ -1422,7 +1429,3 @@ mod tests {
         );
     }
 }
-
-#[cfg(test)]
-#[path = "robot_wiring/unified_tests.rs"]
-mod unified_tests;

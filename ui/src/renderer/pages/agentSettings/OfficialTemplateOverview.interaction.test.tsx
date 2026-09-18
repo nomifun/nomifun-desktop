@@ -5,82 +5,133 @@ import { afterEach, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
-import { SWRConfig } from 'swr';
-import type { AgentPresetDocument, OfficialPresetTemplate } from '@/common/types/agentPlatform';
+import type {
+  AgentCatalogResponse,
+  AgentPresetDocument,
+  CapabilityModuleCatalogItem,
+  OfficialPresetTemplate,
+} from '@/common/types/agentPlatform';
+import { asCapabilityId, asPackageId } from '@/common/types/agentPlatform';
 import OfficialTemplateOverview, { documentFromTemplate } from './OfficialTemplateOverview';
-import { runtimeEngineOptions } from './AgentRuntimeEngineSelector';
 import en from '../../services/i18n/locales/en-US/agentSettings.json';
 import common from '../../services/i18n/locales/en-US/common.json';
 
 const i18n = createInstance();
-await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: { agentSettings: en, common } } } });
+await i18n.use(initReactI18next).init({
+  lng: 'en-US', resources: { 'en-US': { translation: { agentSettings: en, common } } },
+});
 afterEach(cleanup);
 
-const template: OfficialPresetTemplate = {
-  template_key: 'chat.minimal', immutable: true, forkable: true,
-  seed: { enabled_capabilities: [], skill_bindings: [], required_resource_kinds: [], required_runtime_features: [] },
-  role_coverage: { required_capability_categories: [], required_capability_ids: [], required_runtime_features: [], required_resource_kinds: [] },
+const knowledge: CapabilityModuleCatalogItem = {
+  module: { id: asCapabilityId('knowledge'), version: '1.0.0' },
+  display_name: 'Knowledge', description: 'Knowledge module',
+  source_package: { id: asPackageId('nomifun.knowledge'), version: '1.0.0' },
+  authoring_policy: 'direct', summary_kind: 'tool',
+  actions: [
+    { action_id: 'knowledge/search', input_schema: 'input', output_schema: 'output', effect_class: 'read_sensitive', presentation: 'function_tool' },
+    { action_id: 'knowledge/write', input_schema: 'input', output_schema: 'output', effect_class: 'write_durable', presentation: 'function_tool' },
+  ],
+  context_schema_refs: [], event_schema_refs: [], required_resource_kinds: ['knowledge_base'],
+  required_host_ports: [], required_modules: [], conflicting_modules: [], supported_surfaces: ['desktop'],
 };
-const engines = ['nomi', 'coding'].map((name) => ({
-  family_id: `nomifun.${name}`, build_id: 'windows-test', build_digest: name === 'nomi' ? 'a'.repeat(64) : 'b'.repeat(64),
-  host_contract_version: 1, display_name: `${name} Engine`, supported_profiles: ['workflow'],
-}));
-const options = runtimeEngineOptions(engines);
+const catalog: AgentCatalogResponse = {
+  modules: [knowledge],
+  capabilities: [{
+    capability: knowledge.module, kind: 'tool', display_name: 'Knowledge', description: 'Knowledge module',
+    source_package: knowledge.source_package, source_kind: 'bundled', materialization_state: 'materialized',
+    supported_surfaces: ['desktop'], required_runtime_features: [], required_resource_kinds: ['knowledge_base'],
+    required_capabilities: [], conflicting_capabilities: [], action_count: 2, context_contributor_count: 0,
+  }],
+  skills: [], mcp_tools: [], roles: [],
+};
+const template: OfficialPresetTemplate = {
+  template_key: 'assistant.general', immutable: true, forkable: true,
+  seed: { enabled_capabilities: [{ capability: knowledge.module, action_allowlist: ['knowledge/search', 'knowledge/write'] }], skill_bindings: [], required_resource_kinds: ['knowledge_base'], required_runtime_features: [] },
+  role_coverage: { required_capability_categories: [], required_capability_ids: [knowledge.module.id], required_runtime_features: [], required_resource_kinds: ['knowledge_base'] },
+};
 
 function mount(busy = false) {
   const saves: AgentPresetDocument[] = [];
   let dirty = false;
-  const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><SWRConfig value={{
-    provider: () => new Map(), fallback: { 'runtime-engines': engines }, revalidateOnMount: false,
-  }}><OfficialTemplateOverview template={template} busy={busy} catalog={{ capabilities: [], skills: [], mcp_tools: [], roles: [] }}
-    onSave={(_name, document) => saves.push(structuredClone(document))}
-    onDirtyChange={(value) => { dirty = value; }}
-  /></SWRConfig></MemoryRouter></I18nextProvider>);
-  fireEvent.click(screen.getByRole('tab', { name: en.workbench.settingsTab }));
+  const screen = render(
+    <I18nextProvider i18n={i18n}>
+      <MemoryRouter>
+        <OfficialTemplateOverview
+          template={template}
+          busy={busy}
+          catalog={catalog}
+          onSave={(_name, document) => saves.push(structuredClone(document))}
+          onDirtyChange={(value) => { dirty = value; }}
+        />
+      </MemoryRouter>
+    </I18nextProvider>
+  );
   return { ...screen, saves, dirty: () => dirty };
 }
 
-test('official template can select either bundled engine before saving a personal Agent', async () => {
-  const original = structuredClone(template);
+test('official template preserves exact server-seeded actions and never exposes a Runtime selector', () => {
   const screen = mount();
-  for (const option of options) {
-    fireEvent.click(screen.getByRole('combobox', { name: en.runtimeEngine.label }));
-    fireEvent.click(await screen.findByText(option.label));
-    await waitFor(() => expect(screen.dirty()).toBe(true));
-    // Switching tabs must not discard the engine selection.
-    fireEvent.click(screen.getByRole('tab', { name: en.workbench.capabilityTab }));
-    fireEvent.click(screen.getByRole('tab', { name: en.workbench.settingsTab }));
-    fireEvent.click(screen.getByRole('button', { name: en.workbench.saveAsMine }));
-    expect(screen.saves.at(-1)).toEqual({ ...documentFromTemplate(template), runtime_engine: option.selection });
-  }
-  expect(screen.saves).toHaveLength(2);
-  expect(template).toEqual(original);
+  expect(documentFromTemplate(template, catalog).enabled_capabilities[0]).toEqual({
+    capability: knowledge.module,
+    action_allowlist: ['knowledge/search', 'knowledge/write'],
+  });
+  expect(screen.getByRole('switch', { name: 'Disable Knowledge' })).toBeTruthy();
+  expect(screen.queryByRole('combobox')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: /2 actions and contributions/ }));
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Allow Write in Knowledge' }));
+  fireEvent.click(screen.getByRole('button', { name: en.workbench.saveAsMine }));
+  expect(screen.saves[0].enabled_capabilities[0].action_allowlist).toEqual(['knowledge/search']);
+  expect(screen.saves[0]).not.toHaveProperty('runtime_engine');
 });
 
-test('template reset and default selection both restore the default engine', async () => {
+test('template reset restores the exact server-seeded Module actions', async () => {
   const screen = mount();
-  for (const resetTemplate of [false, true]) {
-    fireEvent.click(screen.getByRole('combobox', { name: en.runtimeEngine.label }));
-    fireEvent.click(await screen.findByText(options[1].label));
-    await waitFor(() => expect(screen.dirty()).toBe(true));
-    if (resetTemplate) fireEvent.click(screen.getByRole('button', { name: en.workbench.resetTemplate }));
-    else {
-      fireEvent.click(screen.getByRole('combobox', { name: en.runtimeEngine.label }));
-      fireEvent.click(await screen.findByText(en.runtimeEngine.default));
-    }
-    await waitFor(() => expect(screen.dirty()).toBe(false));
-    fireEvent.click(screen.getByRole('button', { name: en.workbench.saveAsMine }));
-    expect(screen.saves.at(-1)?.runtime_engine).toBeUndefined();
-  }
+  fireEvent.click(screen.getByRole('switch', { name: 'Disable Knowledge' }));
+  await waitFor(() => expect(screen.dirty()).toBe(true));
+  fireEvent.click(screen.getByRole('button', { name: en.workbench.resetTemplate }));
+  await waitFor(() => expect(screen.dirty()).toBe(false));
+  fireEvent.click(screen.getByRole('button', { name: en.workbench.saveAsMine }));
+  expect(screen.saves[0]).toEqual(documentFromTemplate(template, catalog));
 });
 
-test('busy official template cannot change engines or save', () => {
-  const screen = mount(true);
-  const select = screen.getByRole('combobox', { name: en.runtimeEngine.label });
-  expect(select.getAttribute('aria-disabled')).toBe('true');
+test('an action-bearing Module with no granted Action is visibly invalid and cannot save', () => {
+  const screen = mount();
+  fireEvent.click(screen.getByRole('button', { name: /2 actions and contributions/ }));
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Allow Search in Knowledge' }));
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Allow Write in Knowledge' }));
+  expect(screen.getByText(en.workbench.actionRequired)).toBeTruthy();
   expect((screen.getByRole('button', { name: en.workbench.saveAsMine }) as HTMLButtonElement).disabled).toBe(true);
-  fireEvent.click(select);
-  expect(screen.queryByRole('option')).toBeNull();
+});
+
+test('busy official template cannot change Modules or save', () => {
+  const screen = mount(true);
+  expect((screen.getByRole('switch', { name: 'Disable Knowledge' }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole('button', { name: en.workbench.saveAsMine }) as HTMLButtonElement).disabled).toBe(true);
   expect(screen.saves).toHaveLength(0);
-  expect(screen.dirty()).toBe(false);
+});
+
+test('an unavailable preselected Module remains visible and blocks save', () => {
+  const unavailableCatalog: AgentCatalogResponse = {
+    ...catalog,
+    capabilities: [{
+      ...catalog.capabilities[0],
+      materialization_state: 'unavailable',
+      unavailable_code: 'CAPABILITY_UNAVAILABLE_ON_PLATFORM',
+    }],
+  };
+  const screen = render(
+    <I18nextProvider i18n={i18n}>
+      <MemoryRouter>
+        <OfficialTemplateOverview
+          template={template}
+          busy={false}
+          catalog={unavailableCatalog}
+          onSave={() => { throw new Error('save must stay blocked'); }}
+        />
+      </MemoryRouter>
+    </I18nextProvider>
+  );
+  expect(screen.getByText(en.workbench.disabledSave)).toBeTruthy();
+  expect((screen.getByRole('button', { name: en.workbench.saveAsMine }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByRole('switch', { name: 'Disable Knowledge' })).toBeTruthy();
 });

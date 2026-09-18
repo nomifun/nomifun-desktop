@@ -399,6 +399,11 @@ fn inactive_snapshot(authority: &BrowserSessionAuthority) -> BrowserResourceSnap
         resource_binding_id: authority.resource().binding_id().to_owned(),
         provider_id: authority.resource().provider().provider_id().to_owned(),
         provider_kind: authority.resource().provider().kind(),
+        allowed_actions: nomifun_browser_platform::product::BrowserCapabilityAction::all()
+            .into_iter()
+            .filter(|action| authority.authorize(*action).is_ok())
+            .map(|action| action.action_id().to_owned())
+            .collect(),
         run: BrowserRunSnapshot {
             revision: 0,
             input_state: BrowserInputState::UserReady,

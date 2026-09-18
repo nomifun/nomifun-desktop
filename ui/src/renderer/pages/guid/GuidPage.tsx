@@ -10,8 +10,7 @@ import ComposerAttachments from '@/renderer/components/chat/ComposerAttachments'
 import FileAttachButton from '@/renderer/components/media/FileAttachButton';
 import { ComposerSceneHeader, SceneDiscoveryHint } from '@/renderer/creation/ComposerSceneSelector';
 import GuidWorkspaceFootnote from './components/GuidWorkspaceFootnote';
-import { Earth, Robot } from '@icon-park/react';
-import { isDesktopShell } from '@/renderer/utils/platform';
+import { Robot } from '@icon-park/react';
 import { useConfig } from '@/renderer/hooks/config/useConfig';
 import { isSubmitGesture } from '@/renderer/hooks/chat/useCompositionInput';
 import { appendSpeechTranscript } from '@/renderer/hooks/system/useSpeechInput';
@@ -87,6 +86,7 @@ const GuidPage: React.FC = () => {
   const guidContainerRef = useRef<HTMLDivElement>(null);
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
   const [resourceSelectionValue, setResourceSelectionValue] = useState<AgentResourceSelectionValue>({});
+  const [selectedResourcesAvailable, setSelectedResourcesAvailable] = useState(false);
   const [capabilityDraft, setCapabilityDraft] = useState<SessionCapabilityDraft>({
     skillNames: [],
     mcpServerIds: [],
@@ -139,11 +139,17 @@ const GuidPage: React.FC = () => {
     ? new Set(agentSelection.selectedTemplate.seed.required_resource_kinds)
     : presetCapabilities.requiredResourceKinds;
   const presetCapabilityIds = agentSelection.selectedTemplate
-    ? new Set([
+      ? new Set([
         ...agentSelection.selectedTemplate.seed.enabled_capabilities,
-
-      ].map((capability) => capability.id))
+      ].map((selection) => selection.capability.id))
     : presetCapabilities.capabilityIds;
+  const presetActionIds = agentSelection.selectedTemplate
+    ? new Set(
+        agentSelection.selectedTemplate.seed.enabled_capabilities.flatMap(
+          (selection) => selection.action_allowlist ?? []
+        )
+      )
+    : presetCapabilities.actionIds;
   // Knowledge is an optional, session-scoped mount. It keeps its compact
   // KnowledgeControl interaction and is applied after the conversation exists;
   // only resources that truly gate launch belong in the large resource picker.
@@ -161,9 +167,9 @@ const GuidPage: React.FC = () => {
   const advancedControlsEnabled = !isCompanionAgent && presetResourceResolutionReady && presetCapabilityIds.size > 0;
   const effectiveAutoWork = advancedControlsEnabled ? advancedConfig.autoWork : { enabled: false };
   const isAutoWorkMode = isAutoWorkEntry(effectiveAutoWork);
-  const resourceSelectionsReady = presetResourceResolutionReady && (isCompanionAgent
-    ? Boolean(resourceSelectionValue.companion)
-    : resourceSelectionResolution.missingKinds.length === 0);
+  const resourceSelectionsReady = presetResourceResolutionReady
+    && selectedResourcesAvailable
+    && resourceSelectionResolution.missingKinds.length === 0;
   // A workspace chosen before the Agent target (for example from a project
   // drawer's "new conversation" action) is explicit user intent. Keep that
   // project context visible and bind it on send even when the selected target
@@ -648,11 +654,6 @@ const GuidPage: React.FC = () => {
               }}
               attachments={<ComposerAttachments files={guidInput.files} onRemoveFile={guidInput.handleRemoveFile} />}
               tools={<div className='inline-flex items-center gap-6px'>
-                {isDesktopShell() && !creation.draft.mode && <Button type='text' size='small'
-                  disabled={guidInput.loading || creation.loading || send.isBrowserButtonDisabled}
-                  onClick={send.openBrowserHandler} icon={<Earth size={16} />} aria-label={t('browserWorkspace.title')}>
-                  {t('browserWorkspace.title')}
-                </Button>}
                 <FileAttachButton openFileSelector={openFileSelector} onLocalFilesAdded={guidInput.handleFilesPasted} showLoadedCapabilities={false} />
               </div>}
               creationTools={<CreationControls prompt={guidInput.input} onPromptChange={guidInput.setInput} files={guidInput.files} />}
@@ -676,12 +677,13 @@ const GuidPage: React.FC = () => {
             />
 
             {!creation.draft.mode && <AgentResourcePicker
-              requiredKinds={isCompanionAgent ? ['companion'] : resourcePickerKinds}
-              optionalKinds={isCompanionAgent ? ['channel', 'robot', 'mcp_server'] : undefined}
+              requiredKinds={resourcePickerKinds}
               companionBindings={isCompanionAgent}
               capabilityIds={presetCapabilityIds}
+              actionIds={presetActionIds}
               value={resourceSelectionValue}
               onChange={setResourceSelectionValue}
+              onAvailabilityChange={setSelectedResourcesAvailable}
               disabled={guidInput.loading || !presetResourceResolutionReady}
             />}
 

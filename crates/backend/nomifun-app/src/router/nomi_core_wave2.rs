@@ -55,7 +55,7 @@ const MAX_DEBOUNCE_IDENTITIES: usize = 1024;
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(200);
 
 pub(crate) fn tool_capability_ids() -> BTreeSet<CapabilityId> {
-    [
+    let capabilities = [
         WORKSPACE_FILES,
         WORKSPACE_VCS,
         WORKSPACE_PROCESS,
@@ -64,7 +64,16 @@ pub(crate) fn tool_capability_ids() -> BTreeSet<CapabilityId> {
     ]
         .into_iter()
         .map(CapabilityId::from)
-        .collect()
+        .collect::<BTreeSet<_>>();
+    #[cfg(feature = "computer-use")]
+    let capabilities = {
+        let mut capabilities = capabilities;
+        capabilities.insert(CapabilityId::from(
+            nomifun_agent_domain_wave2::COMPUTER_MODULE_ID,
+        ));
+        capabilities
+    };
+    capabilities
 }
 
 pub(crate) fn event_capability_ids() -> BTreeSet<CapabilityId> {

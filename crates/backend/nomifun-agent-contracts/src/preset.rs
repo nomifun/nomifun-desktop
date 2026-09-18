@@ -1068,7 +1068,7 @@ impl OfficialPresetKey {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OfficialPresetSeed {
-    pub enabled_capabilities: Vec<CapabilityRef>,
+    pub enabled_capabilities: Vec<CapabilitySelection>,
     pub skill_bindings: Vec<SkillRef>,
     pub required_resource_kinds: BTreeSet<ResourceKind>,
     pub required_runtime_features: BTreeSet<RuntimeFeatureId>,
@@ -1123,15 +1123,12 @@ impl OfficialPresetSeedManifestPayload {
         }
 
         for (key, seed) in &self.templates {
-            validate_exact_capability_refs(
-                &seed.enabled_capabilities,
-
-            )?;
+            validate_capability_selections(&seed.enabled_capabilities)?;
             let coverage = &self.role_coverage[key];
             let selected = seed
                 .enabled_capabilities
                 .iter()
-                .map(|capability| capability.id.clone())
+                .map(|selection| selection.capability.id.clone())
                 .collect::<BTreeSet<_>>();
             if !coverage.required_capability_ids.is_subset(&selected)
                 || !coverage
@@ -1169,8 +1166,8 @@ impl OfficialPresetSeedManifestPayload {
             .enabled_capabilities
             .iter()
             .any(|capability| {
-                capability.id.as_ref().starts_with("browser.")
-                    || capability.id.as_ref().starts_with("computer.")
+                capability.capability.id.as_ref() == "browser"
+                    || capability.capability.id.as_ref() == "computer"
             })
             || coding.required_resource_kinds.iter().any(|resource_kind| {
                 resource_kind.as_ref().starts_with("browser")
@@ -1189,13 +1186,13 @@ impl OfficialPresetSeedManifestPayload {
         let companion_union = companion
             .enabled_capabilities
             .iter()
-            .map(|capability| capability.id.as_ref())
+            .map(|selection| selection.capability.id.as_ref())
             .collect::<BTreeSet<_>>();
         for capability in [
             "companion",
             "companion.memory",
-            "knowledge",
             "channel.messaging",
+            "robot",
         ] {
             if !companion_union.contains(capability) {
                 return Err(PresetContractViolation {
@@ -1262,18 +1259,18 @@ impl OfficialPresetSeedManifestPayload {
             .cloned()
             .collect::<Vec<_>>();
         for (key, seed) in &self.templates {
-            for capability in seed
-                .enabled_capabilities
-                .iter()
-            {
-                if !available.iter().any(|available| available == capability) {
+            for selection in &seed.enabled_capabilities {
+                if !available
+                    .iter()
+                    .any(|available| available == &selection.capability)
+                {
                     return Err(PresetContractViolation {
                         code: CanonicalErrorCode::from(CAPABILITY_NOT_MATERIALIZED),
                         message: format!(
                             "{} references missing capability {}@{}",
                             key.as_str(),
-                            capability.id.as_ref(),
-                            capability.version.as_ref()
+                            selection.capability.id.as_ref(),
+                            selection.capability.version.as_ref()
                         ),
                     });
                 }
@@ -1511,14 +1508,6 @@ fn snapshot_capability_violation(
             reason.as_ref()
         ),
     }
-}
-
-fn validate_exact_capability_refs(
-    initial: &[CapabilityRef],
-) -> Result<(), PresetContractViolation> {
-    validate_capability_ids(
-        initial.iter().map(|selection| &selection.id),
-    )
 }
 
 fn validate_capability_ids<'a>(
@@ -1989,9 +1978,16 @@ mod tests {
 
     #[test]
     fn enabled_capabilities_reject_duplicate_ids() {
-        let error = validate_exact_capability_refs(
-            &[capability("fs.read"), capability("fs.read")],
-        )
+        let error = validate_capability_selections(&[
+            CapabilitySelection {
+                capability: capability("fs.read"),
+                action_allowlist: BTreeSet::from([ActionId::from("fs.read/read")]),
+            },
+            CapabilitySelection {
+                capability: capability("fs.read"),
+                action_allowlist: BTreeSet::from([ActionId::from("fs.read/read")]),
+            },
+        ])
         .unwrap_err();
         assert_eq!(error.code.as_ref(), PRESET_CAPABILITY_DUPLICATE);
     }

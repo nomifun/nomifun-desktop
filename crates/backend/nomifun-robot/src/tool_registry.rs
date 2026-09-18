@@ -1,8 +1,8 @@
 //! Which robots are connected and what tools they offer.
 //!
-//! Sessions attach on handshake and detach on disconnect; the MCP proxy reads
-//! from here. Tool descriptors are cached at attach time so `tools/list` never
-//! has to round-trip a sleeping device.
+//! Sessions attach on handshake and detach on disconnect; the canonical Robot
+//! Action owner reads from here. Tool descriptors are cached at attach time so
+//! action materialization never has to round-trip a sleeping device.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,33 +10,14 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio::sync::RwLock;
 
+use crate::capability::RobotAction;
 use crate::mcp_bridge::{RobotMcpClient, RobotToolDescriptor, ToolCallError};
-
-/// Disjoint device-tool authority granted by one Agent capability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RobotToolCapability {
-    Display,
-    Motion,
-    Vision,
-    DeviceTools,
-}
-
-impl RobotToolCapability {
-    pub fn capability_id(self) -> &'static str {
-        match self {
-            Self::Display => "robot.display",
-            Self::Motion => "robot.motion",
-            Self::Vision => "robot.vision",
-            Self::DeviceTools => "robot.device_tools",
-        }
-    }
-}
 
 /// Classify a firmware tool by its stable device-side namespace.
 ///
-/// Unknown extensions stay in `robot.device_tools`; descriptions are not used
+/// Unknown extensions stay in `robot/device`; descriptions are not used
 /// because they are device-supplied prose and therefore not an authority.
-pub fn tool_capability(device_name: &str) -> RobotToolCapability {
+pub fn tool_action(device_name: &str) -> RobotAction {
     let namespace = device_name
         .strip_prefix("self.")
         .unwrap_or(device_name)
@@ -44,15 +25,15 @@ pub fn tool_capability(device_name: &str) -> RobotToolCapability {
         .next()
         .unwrap_or_default();
     match namespace {
-        "display" | "screen" | "oled" | "emoji" | "face" | "led" => RobotToolCapability::Display,
-        "head" | "gimbal" | "motion" | "servo" => RobotToolCapability::Motion,
-        "camera" | "vision" => RobotToolCapability::Vision,
-        _ => RobotToolCapability::DeviceTools,
+        "display" | "screen" | "oled" | "emoji" | "face" | "led" => RobotAction::Display,
+        "head" | "gimbal" | "motion" | "servo" => RobotAction::Motion,
+        "camera" | "vision" => RobotAction::Vision,
+        _ => RobotAction::Device,
     }
 }
 
 pub fn requires_continuous_vision(device_name: &str) -> bool {
-    tool_capability(device_name) == RobotToolCapability::Vision
+    tool_action(device_name) == RobotAction::Vision
         && device_name.split(['.', '_']).any(|part| matches!(part, "stream" | "watch" | "continuous" | "monitor"))
 }
 
@@ -68,24 +49,6 @@ pub struct RobotToolRegistry {
 }
 
 impl RobotToolRegistry {
-    /// Capture the exact connection before invoking an action. Reconnecting
-    /// never redirects an older turn's command to a new socket.
-    pub async fn call_for_connection(
-        &self, robot_id: &str, connection_id: &str, capability: RobotToolCapability,
-        exposed_name: &str, args: Value,
-    ) -> Result<String, ToolCallError> {
-        let (client, device_name) = {
-            let map = self.inner.read().await;
-            let attached = map.get(robot_id).ok_or(ToolCallError::Offline)?;
-            if attached.client.connection_id() != connection_id { return Err(ToolCallError::Offline); }
-            let tool = attached.tools.iter().find(|tool| tool.exposed_name == exposed_name
-                && tool_capability(&tool.device_name) == capability)
-                .ok_or_else(|| ToolCallError::Rejected(format!("unknown or unauthorized tool {exposed_name}")))?;
-            (attached.client.clone(), tool.device_name.clone())
-        };
-        client.call_tool(&device_name, args).await
-    }
-
     /// Register a connected robot and its discovered tools.
     pub async fn attach(
         &self,
@@ -123,6 +86,15 @@ impl RobotToolRegistry {
         self.inner.read().await.contains_key(robot_id)
     }
 
+    /// Exact authenticated connection currently owning the cached toolset.
+    pub async fn connection_id(&self, robot_id: &str) -> Option<String> {
+        self.inner
+            .read()
+            .await
+            .get(robot_id)
+            .map(|attached| attached.client.connection_id().to_owned())
+    }
+
     /// Cached toolset, empty when the robot is not connected.
     pub async fn tools(&self, robot_id: &str) -> Vec<RobotToolDescriptor> {
         self.inner
@@ -133,11 +105,11 @@ impl RobotToolRegistry {
             .unwrap_or_default()
     }
 
-    /// Cached tools inside one selected Agent capability ceiling.
-    pub async fn tools_for_capability(
+    /// Cached tools inside one selected Agent Action ceiling.
+    pub async fn tools_for_action(
         &self,
         robot_id: &str,
-        capability: RobotToolCapability,
+        action: RobotAction,
     ) -> Vec<RobotToolDescriptor> {
         self.inner
             .read()
@@ -147,42 +119,22 @@ impl RobotToolRegistry {
                 attached
                     .tools
                     .iter()
-                    .filter(|tool| tool_capability(&tool.device_name) == capability)
+                    .filter(|tool| tool_action(&tool.device_name) == action)
                     .cloned()
                     .collect()
             })
             .unwrap_or_default()
     }
 
-    /// Invoke a tool by the name models see.
-    pub async fn call(
+    /// Invoke a tool only inside one selected Agent Action ceiling.
+    pub async fn call_for_action(
         &self,
         robot_id: &str,
+        action: RobotAction,
         exposed_name: &str,
         args: Value,
     ) -> Result<String, ToolCallError> {
-        let (client, device_name) = {
-            let map = self.inner.read().await;
-            let attached = map.get(robot_id).ok_or(ToolCallError::Offline)?;
-            let tool = attached
-                .tools
-                .iter()
-                .find(|t| t.exposed_name == exposed_name)
-                .ok_or_else(|| ToolCallError::Rejected(format!("unknown tool {exposed_name}")))?;
-            (attached.client.clone(), tool.device_name.clone())
-        };
-        client.call_tool(&device_name, args).await
-    }
-
-    /// Invoke a tool only inside one selected Agent capability ceiling.
-    pub async fn call_for_capability(
-        &self,
-        robot_id: &str,
-        capability: RobotToolCapability,
-        exposed_name: &str,
-        args: Value,
-    ) -> Result<String, ToolCallError> {
-        self.call_exact_for_capability(robot_id, capability, exposed_name, None, args)
+        self.call_exact_for_action(robot_id, action, exposed_name, None, args)
             .await
     }
 
@@ -192,19 +144,20 @@ impl RobotToolRegistry {
     /// name for a different device-side tool. Session projection therefore
     /// freezes both names and this method checks them together under the same
     /// registry read lock used to select the live client.
-    pub async fn call_exact_for_capability(
+    pub async fn call_exact_for_action(
         &self,
         robot_id: &str,
-        capability: RobotToolCapability,
+        action: RobotAction,
         exposed_name: &str,
         expected_device_name: Option<&str>,
         args: Value,
     ) -> Result<String, ToolCallError> {
-        self.call_frozen_for_capability(
+        self.call_frozen_for_action(
             robot_id,
-            capability,
+            action,
             exposed_name,
             expected_device_name,
+            None,
             None,
             args,
         )
@@ -215,29 +168,35 @@ impl RobotToolRegistry {
     /// Check identity and schema under the same lock that selects the client;
     /// a firmware reconnect cannot silently reinterpret a frozen invocation.
     #[allow(clippy::too_many_arguments)]
-    pub async fn call_frozen_for_capability(
+    pub async fn call_frozen_for_action(
         &self,
         robot_id: &str,
-        capability: RobotToolCapability,
+        action: RobotAction,
         exposed_name: &str,
         expected_device_name: Option<&str>,
+        expected_connection_id: Option<&str>,
         expected_input_schema: Option<&Value>,
         args: Value,
     ) -> Result<String, ToolCallError> {
         let (client, device_name) = {
             let map = self.inner.read().await;
             let attached = map.get(robot_id).ok_or(ToolCallError::Offline)?;
+            if expected_connection_id
+                .is_some_and(|expected| attached.client.connection_id() != expected)
+            {
+                return Err(ToolCallError::Offline);
+            }
             let tool = attached
                 .tools
                 .iter()
                 .find(|tool| tool.exposed_name == exposed_name)
                 .ok_or_else(|| ToolCallError::Rejected(format!("unknown tool {exposed_name}")))?;
-            let actual = tool_capability(&tool.device_name);
-            if actual != capability {
+            let actual = tool_action(&tool.device_name);
+            if actual != action {
                 return Err(ToolCallError::Rejected(format!(
                     "tool {exposed_name} belongs to {}, not {}",
-                    actual.capability_id(),
-                    capability.capability_id(),
+                    actual.id(),
+                    action.id(),
                 )));
             }
             if let Some(expected_device_name) = expected_device_name {
@@ -311,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn device_names_map_to_disjoint_capability_ceilings() {
+    fn device_names_map_to_disjoint_action_ceilings() {
         for name in [
             "self.display.draw",
             "self.screen.clear",
@@ -321,8 +280,8 @@ mod tests {
             "self.led.set",
         ] {
             assert_eq!(
-                tool_capability(name),
-                RobotToolCapability::Display,
+                tool_action(name),
+                RobotAction::Display,
                 "{name}"
             );
         }
@@ -332,42 +291,42 @@ mod tests {
             "self.motion.stop",
             "self.servo.calibrate",
         ] {
-            assert_eq!(tool_capability(name), RobotToolCapability::Motion, "{name}");
+            assert_eq!(tool_action(name), RobotAction::Motion, "{name}");
         }
         for name in ["self.camera.take_photo", "self.vision.describe"] {
-            assert_eq!(tool_capability(name), RobotToolCapability::Vision, "{name}");
+            assert_eq!(tool_action(name), RobotAction::Vision, "{name}");
         }
         for name in ["self.audio_speaker.set_volume", "get_device_status"] {
             assert_eq!(
-                tool_capability(name),
-                RobotToolCapability::DeviceTools,
+                tool_action(name),
+                RobotAction::Device,
                 "{name}"
             );
         }
     }
 
     #[tokio::test]
-    async fn discovery_and_dispatch_respect_the_selected_capability_ceiling() {
+    async fn discovery_and_dispatch_respect_the_selected_action_ceiling() {
         let registry = registry().await;
         assert!(registry.is_attached("robot-1").await);
         let display = registry
-            .tools_for_capability("robot-1", RobotToolCapability::Display)
+            .tools_for_action("robot-1", RobotAction::Display)
             .await;
         assert_eq!(display.len(), 1);
         assert_eq!(display[0].device_name, "self.emoji.set_expression");
 
         let error = registry
-            .call_for_capability(
+            .call_for_action(
                 "robot-1",
-                RobotToolCapability::Display,
+                RobotAction::Display,
                 "robot_head_look",
                 json!({}),
             )
             .await
             .expect_err("display authority must not dispatch a motion tool");
         assert!(matches!(error, ToolCallError::Rejected(_)));
-        assert!(error.to_string().contains("robot.motion"));
-        assert!(error.to_string().contains("robot.display"));
+        assert!(error.to_string().contains("robot/motion"));
+        assert!(error.to_string().contains("robot/display"));
     }
 
     #[tokio::test]
@@ -377,9 +336,9 @@ mod tests {
         assert!(!registry.is_attached("robot-1").await);
         assert!(
             registry
-                .call_for_capability(
+                .call_for_action(
                     "robot-1",
-                    RobotToolCapability::DeviceTools,
+                    RobotAction::Device,
                     "get_device_status",
                     json!({}),
                 )
@@ -406,9 +365,9 @@ mod tests {
             .await;
 
         let error = registry
-            .call_exact_for_capability(
+            .call_exact_for_action(
                 "robot-1",
-                RobotToolCapability::Display,
+                RobotAction::Display,
                 "robot_emoji_set_expression",
                 Some("self.emoji.set_expression"),
                 json!({}),

@@ -1,6 +1,6 @@
 import '../../../../test/setup-dom.ts';
 import '@arco-design/web-react/lib/_util/react-19-adapter';
-import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { useEffect } from 'react';
 import { createInstance } from 'i18next';
@@ -11,10 +11,9 @@ import { NavigationHistoryProvider, useNavigationHistory } from '@/renderer/hook
 import { agentPlatform } from '@/common/adapter/ipcBridge';
 import { pluginRuntimeProduct, type PluginRuntimeDraft } from '@/common/adapter/pluginRuntimeProductBridge';
 import { asAgentPresetId, asCapabilityId, asPackageId, asDigestHex, createEmptyAgentPresetDocument, type AgentPresetEditorResponse,
-  type AgentPresetLibraryResponse, type CapabilityCatalogItem, type OfficialPresetTemplate } from '@/common/types/agentPlatform';
+  type AgentPresetLibraryResponse, type CapabilityCatalogItem, type CapabilityModuleCatalogItem, type OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import * as roleDefaults from './AgentRoleDefaults';
 import * as libraryPanel from './AgentPresetLibrary';
-import { runtimeEngineOptions } from './AgentRuntimeEngineSelector';
 import { agentEditorReturn, editingDocument, isAgentModelConfigurationMissing } from './model';
 import AgentSettingsPage from './AgentSettingsPage';
 import en from '../../services/i18n/locales/en-US/agentSettings.json';
@@ -30,8 +29,13 @@ const capability: CapabilityCatalogItem = { capability: { id: asCapabilityId('bu
   display_name: 'Business check', description: 'Check business input', source_package: { id: asPackageId('test'), version: '1.0.0' },
   source_kind: 'plugin_product', materialization_state: 'materialized', supported_surfaces: ['desktop'], required_runtime_features: [],
   required_resource_kinds: [], required_capabilities: [], conflicting_capabilities: [], action_count: 1, context_contributor_count: 0 };
-const engine = { family_id: 'nomifun.nomi', build_id: 'test', build_digest: 'a'.repeat(64), host_contract_version: 1,
-  display_name: 'Nomi Engine', supported_profiles: ['workflow'] };
+const capabilityModule: CapabilityModuleCatalogItem = {
+  module: capability.capability, display_name: capability.display_name, description: capability.description,
+  source_package: capability.source_package, authoring_policy: 'direct', summary_kind: 'tool',
+  actions: [{ action_id: 'business.check/run', input_schema: 'input', output_schema: 'output', effect_class: 'pure', presentation: 'function_tool' }],
+  context_schema_refs: [], event_schema_refs: [], required_resource_kinds: [], required_host_ports: [],
+  required_modules: [], conflicting_modules: [], supported_surfaces: ['desktop'],
+};
 const presetId = asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000101');
 const revision = { preset_id: presetId, revision: 1, revision_digest: asDigestHex('b'.repeat(64)) };
 afterEach(() => { cleanup(); mock.restore(); });
@@ -46,7 +50,7 @@ async function mount(error: unknown = { code: 'MODEL_ROUTE_NOT_CONFIGURED' }, in
     official_templates: [template, otherTemplate], user_presets: editor ? [editor.preset] : [], active_bindings: [],
     fresh_start: { data_generation: 4, legacy_data_imported: false, official_template_count: 2, user_preset_count: editor ? 1 : 0 },
   } as AgentPresetLibraryResponse));
-  spyOn(agentPlatform.catalog, 'invoke').mockResolvedValue({ capabilities: [capability], skills: [], mcp_tools: [], roles: [] });
+  spyOn(agentPlatform.catalog, 'invoke').mockResolvedValue({ modules: [capabilityModule], capabilities: [capability], skills: [], mcp_tools: [], roles: [] });
   const create = spyOn(agentPlatform.createPreset, 'invoke').mockRejectedValueOnce(error).mockImplementation(async request => {
     editor = { preset: { preset_id: presetId, source: 'user', display_name: request.display_name, bound_target_count: 0, current_stable_revision: revision },
       draft: { preset_id: presetId, display_name: request.display_name, document: request.document!, current_revision: revision },
@@ -66,7 +70,7 @@ async function mount(error: unknown = { code: 'MODEL_ROUTE_NOT_CONFIGURED' }, in
   const Published = () => { const history = useNavigationHistory()!; return <div><h1>Published check</h1><button onClick={history.back}>Back to author</button></div>; };
   const HistoryControls = () => { const history = useNavigationHistory()!; return <button disabled={!history.canForward} onClick={history.forward}>App forward</button>; };
   const view = render(<I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), revalidateOnMount: false,
-    fallback: { 'runtime-engines': [engine], providers: [] } }}><MemoryRouter initialEntries={[initialEditor ? `/agent?preset=${presetId}` : '/agent?template=chat.minimal']}>
+    fallback: { providers: [] } }}><MemoryRouter initialEntries={[initialEditor ? `/agent?preset=${presetId}` : '/agent?template=chat.minimal']}>
     <NavigationHistoryProvider><Probe /><HistoryControls /><Routes><Route path='/agent' element={<AgentSettingsPage />} /><Route path='/models' element={<Models />} />
       <Route path='/plugins/create/:id' element={<Author />} /><Route path='/plugins/run/:id' element={<Published />} /></Routes></NavigationHistoryProvider>
   </MemoryRouter></SWRConfig></I18nextProvider>);
@@ -75,14 +79,10 @@ async function mount(error: unknown = { code: 'MODEL_ROUTE_NOT_CONFIGURED' }, in
   return { ...view, create, save, turn, states, library, getEditor };
 }
 
-test('missing-model CTA keeps the unsaved template name, capability and engine through model management and a single explicit save', async () => {
+test('missing-model CTA keeps the unsaved name and exact Module grant through model management and a single explicit save', async () => {
   const v = await mount();
   fireEvent.input(v.getByRole('textbox', { name: en.workbench.customName }), { target: { value: 'My inspection Agent' } });
-  fireEvent.click(v.getByRole('checkbox', { name: 'Add Business check' }));
-  fireEvent.click(v.getByRole('button', { name: 'Move in (1)' }));
-  fireEvent.click(v.getByRole('tab', { name: en.workbench.settingsTab }));
-  fireEvent.click(v.getByRole('combobox', { name: en.runtimeEngine.label }));
-  fireEvent.click(await v.findByText(runtimeEngineOptions([engine])[0].label));
+  fireEvent.click(v.getByRole('switch', { name: 'Enable Business check' }));
   fireEvent.click(v.getByRole('button', { name: en.workbench.saveAsMine }));
   await v.findByText(en.workbench.modelNeeded);
   const original = structuredClone(v.create.mock.calls[0][0]);
@@ -94,11 +94,11 @@ test('missing-model CTA keeps the unsaved template name, capability and engine t
   const snapshot = v.states.find(value => value && typeof value === 'object' && 'agentEditorReturn' in value) as { agentEditorReturn: { editing: { document: Record<string, unknown> } } };
   expect(snapshot.agentEditorReturn.editing.document.model_route_refs).toBeUndefined();
   expect(snapshot.agentEditorReturn.editing.document.chat_route_records).toBeUndefined();
-  expect(v.getByRole('tab', { name: en.workbench.settingsTab }).getAttribute('aria-selected')).toBe('true');
-  expect(v.getByText(runtimeEngineOptions([engine])[0].label)).toBeTruthy();
+  expect(v.getByRole('tab', { name: en.workbench.capabilityTab }).getAttribute('aria-selected')).toBe('true');
+  expect(v.queryByRole('combobox')).toBeNull();
   expect(v.create).toHaveBeenCalledTimes(1);
   fireEvent.click(v.getByRole('tab', { name: en.workbench.capabilityTab }));
-  expect(within(v.getByRole('region', { name: en.workbench.enabledCapabilities })).getByRole('button', { name: 'View Business check details' })).toBeTruthy();
+  expect(v.getByRole('switch', { name: 'Disable Business check' })).toBeTruthy();
   await act(async () => { fireEvent.click(v.getByRole('button', { name: en.workbench.saveAsMine })); });
   expect(v.create).toHaveBeenCalledTimes(2);
   expect(v.create.mock.calls[1][0]).toEqual(original);
@@ -147,12 +147,10 @@ test('creating a before-tool draft returns to the same unsaved Agent edits witho
   let finish!: (draft: PluginRuntimeDraft) => void;
   const createCheck = spyOn(pluginRuntimeProduct.beforeToolTemplate, 'invoke').mockImplementation(() => new Promise(resolve => { finish = resolve; }));
   const v = await mount(undefined, original);
-  fireEvent.click(v.getByRole('checkbox', { name: 'Add Business check' }));
-  fireEvent.click(v.getByRole('button', { name: 'Move in (1)' }));
+  fireEvent.click(v.getByRole('switch', { name: 'Enable Business check' }));
   fireEvent.click(v.getByRole('tab', { name: en.workbench.settingsTab }));
-  fireEvent.change(v.getByRole('textbox', { name: en.fields.name }), { target: { value: 'Unsaved Agent' } });
-  fireEvent.click(v.getByRole('combobox', { name: en.runtimeEngine.label }));
-  fireEvent.click(await v.findByText(runtimeEngineOptions([engine])[0].label));
+  fireEvent.input(v.getByRole('textbox', { name: en.fields.name }), { target: { value: 'Unsaved Agent' } });
+  await v.findByRole('heading', { name: 'Unsaved Agent' });
   fireEvent.click(v.getByRole('tab', { name: en.workbench.skillsTab }));
   fireEvent.click(v.getByRole('button', { name: en.middlewareOrder.createBeforeTool }));
   await act(async () => { finish({ id: 'check-draft' } as PluginRuntimeDraft); });
@@ -163,9 +161,9 @@ test('creating a before-tool draft returns to the same unsaved Agent edits witho
   await v.findByRole('heading', { name: 'Check authoring' });
   fireEvent.click(v.getByRole('button', { name: 'Back to Agent' }));
   await v.findByRole('heading', { name: 'Unsaved Agent' });
-  expect(within(v.getByRole('region', { name: en.workbench.enabledCapabilities })).getByRole('button', { name: 'View Business check details' })).toBeTruthy();
+  expect(v.getByRole('switch', { name: 'Disable Business check' })).toBeTruthy();
   fireEvent.click(v.getByRole('tab', { name: en.workbench.settingsTab }));
-  expect(v.getByText(runtimeEngineOptions([engine])[0].label)).toBeTruthy();
+  expect(v.getAllByRole('combobox')).toHaveLength(1);
   expect(createCheck).toHaveBeenCalledTimes(1);
   expect(v.save).not.toHaveBeenCalled();
   expect(v.create).not.toHaveBeenCalled();

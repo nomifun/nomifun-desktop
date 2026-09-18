@@ -1,39 +1,97 @@
-import type { AgentPresetDocument, CapabilityCatalogItem, ExactCatalogRef } from '@/common/types/agentPlatform';
+import type {
+  AgentCatalogResponse,
+  AgentPresetDocument,
+  CapabilityCatalogItem,
+  CapabilityModuleCatalogItem,
+  ExactCatalogRef,
+} from '@/common/types/agentPlatform';
 import { capabilityReferenceKey } from './model';
 
-export const CAPABILITY_CATEGORIES = [
-  'knowledge', 'development', 'web', 'collaboration', 'creation', 'automation', 'models', 'integrations',
+export const MODULE_CATEGORIES = [
+  'knowledge',
+  'development',
+  'web',
+  'collaboration',
+  'creation',
+  'automation',
+  'devices',
+  'integrations',
 ] as const;
-export type CapabilityCategory = (typeof CAPABILITY_CATEGORIES)[number];
-export type CapabilityReference = ExactCatalogRef<'capability'>;
 
-export function capabilityCategory(reference: CapabilityReference): CapabilityCategory {
-  if (reference.id === 'nomi_local_websearch') return 'web';
-  const family = reference.id.split('.')[0];
-  if (['knowledge', 'memory', 'session'].includes(family)) return 'knowledge';
-  if (['fs', 'vcs', 'process', 'terminal', 'workspace', 'ssh'].includes(family)) return 'development';
-  if (['web', 'browser', 'computer', 'a11y', 'citation'].includes(family)) return 'web';
-  if (['agent', 'companion', 'channel', 'customer_service', 'robot'].includes(family)) return 'collaboration';
-  if (['creation', 'workshop', 'office', 'plugin'].includes(family)) return 'creation';
-  if (['requirements', 'autowork', 'schedule', 'notification', 'remote', 'ingress'].includes(family)) return 'automation';
-  if (family === 'llm') return 'models';
+export type ModuleCategory = (typeof MODULE_CATEGORIES)[number];
+export type ModuleReference = ExactCatalogRef<'capability'>;
+
+export function moduleCategory(reference: ModuleReference): ModuleCategory {
+  const id = String(reference.id);
+  if (id === 'knowledge' || id.endsWith('.memory')) return 'knowledge';
+  if (id.startsWith('workspace.') || id === 'ssh' || id === 'plugin.development') {
+    return 'development';
+  }
+  if (id === 'web.research' || id === 'browser') return 'web';
+  if (
+    id === 'agent.collaboration' ||
+    id === 'channel.messaging' ||
+    id === 'companion' ||
+    id === 'customer.service'
+  ) {
+    return 'collaboration';
+  }
+  if (id === 'creation.media' || id === 'creative.workshop' || id === 'office') {
+    return 'creation';
+  }
+  if (id === 'requirements' || id === 'automation.schedule') return 'automation';
+  if (id === 'computer' || id === 'robot') return 'devices';
   return 'integrations';
 }
 
-export const selectedCapabilityReferences = (document: AgentPresetDocument): CapabilityReference[] =>
-  [...new Map(document.enabled_capabilities
-    .map(({ capability }) => [capabilityReferenceKey(capability), capability])).values()];
+export const selectedModuleReferences = (document: AgentPresetDocument): ModuleReference[] =>
+  [...new Map(
+    document.enabled_capabilities.map(({ capability }) => [
+      capabilityReferenceKey(capability),
+      capability,
+    ])
+  ).values()];
 
-export const isBuiltinCapability = (item: CapabilityCatalogItem): boolean =>
-  ['bundled', 'first_party', 'platform_builtin'].includes(item.source_kind);
+export const isBuiltinModule = (
+  module: CapabilityModuleCatalogItem,
+  capabilityCatalog: readonly CapabilityCatalogItem[]
+): boolean => moduleAvailability(module, capabilityCatalog)?.source_kind === 'bundled';
 
-export const capabilityIsAvailable = (item?: CapabilityCatalogItem): boolean =>
-  item?.materialization_state === 'materialized';
+export function moduleAvailability(
+  module: CapabilityModuleCatalogItem | undefined,
+  capabilityCatalog: readonly CapabilityCatalogItem[]
+): CapabilityCatalogItem | undefined {
+  if (!module) return undefined;
+  const key = capabilityReferenceKey(module.module);
+  return capabilityCatalog.find((item) => capabilityReferenceKey(item.capability) === key);
+}
 
-export function unavailableCapabilityReferences(
+export function moduleIsAvailable(
+  module: CapabilityModuleCatalogItem | undefined,
+  capabilityCatalog: readonly CapabilityCatalogItem[]
+): boolean {
+  return Boolean(module) &&
+    moduleAvailability(module, capabilityCatalog)?.materialization_state === 'materialized';
+}
+
+export const moduleIsSelectable = (
+  module: CapabilityModuleCatalogItem | undefined,
+  capabilityCatalog: readonly CapabilityCatalogItem[]
+): boolean => module?.authoring_policy === 'direct' && moduleIsAvailable(module, capabilityCatalog);
+
+export function unavailableModuleReferences(
   document: AgentPresetDocument,
-  catalog: readonly CapabilityCatalogItem[],
-): CapabilityReference[] {
-  const available = new Set(catalog.filter(capabilityIsAvailable).map((item) => capabilityReferenceKey(item.capability)));
-  return selectedCapabilityReferences(document).filter((reference) => !available.has(capabilityReferenceKey(reference)));
+  catalog: Pick<AgentCatalogResponse, 'modules' | 'capabilities'>
+): ModuleReference[] {
+  const byKey = new Map(catalog.modules.map((module) => [capabilityReferenceKey(module.module), module]));
+  return document.enabled_capabilities.flatMap((selection) => {
+    const module = byKey.get(capabilityReferenceKey(selection.capability));
+    const knownActions = new Set(module?.actions.map((action) => action.action_id) ?? []);
+    const actions = selection.action_allowlist ?? [];
+    const hasMissingAction = actions.some((action) => !knownActions.has(action));
+    const hasNoActionGrant = Boolean(module?.actions.length) && actions.length === 0;
+    return !moduleIsAvailable(module, catalog.capabilities) || hasMissingAction || hasNoActionGrant
+      ? [selection.capability]
+      : [];
+  });
 }

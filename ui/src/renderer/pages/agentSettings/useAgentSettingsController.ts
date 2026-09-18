@@ -15,7 +15,12 @@ import {
   cloneDraft,
   isDraftDirty,
 } from '@/common/types/agentPlatform';
-import { agentUiErrorMessage, isAgentModelConfigurationMissing, type AgentEditorReturn } from './model';
+import {
+  agentUiErrorKey,
+  agentUiErrorSubjects,
+  isAgentModelConfigurationMissing,
+  type AgentEditorReturn,
+} from './model';
 import { AGENT_PRESET_LIBRARY_SWR_KEY } from '@/renderer/hooks/agent/useAgentPresets';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSWRConfig } from 'swr';
@@ -29,6 +34,7 @@ type Selection =
 type BusyAction = 'save' | 'fork' | 'create' | 'open' | 'delete' | null;
 
 const emptyCatalog: AgentCatalogResponse = {
+  modules: [],
   capabilities: [],
   skills: [],
   mcp_tools: [],
@@ -49,11 +55,19 @@ export function useAgentSettingsController() {
   const [openingPresetId, setOpeningPresetId] = useState<string | null>(null);
   const [deletingPresetId, setDeletingPresetId] = useState<string | null>(null);
   const [error, setErrorState] = useState<string | null>(null);
+  const [errorSubjects, setErrorSubjects] = useState<string[]>([]);
   const [modelConfigurationMissing, setModelConfigurationMissing] = useState(false);
   const setError = useCallback((value: string | null) => {
     setErrorState(value);
-    if (value === null) setModelConfigurationMissing(false);
+    if (value === null) {
+      setModelConfigurationMissing(false);
+      setErrorSubjects([]);
+    }
   }, []);
+  const reportError = useCallback((value: unknown, operation: Parameters<typeof agentUiErrorKey>[1]) => {
+    setError(t(agentUiErrorKey(value, operation)));
+    setErrorSubjects(agentUiErrorSubjects(value));
+  }, [setError, t]);
 
   const clearEditorState = useCallback(() => {
     setEditor(null);
@@ -93,11 +107,11 @@ export function useAgentSettingsController() {
         return firstTemplate ? { kind: 'template', template: firstTemplate } : null;
       });
     } catch (loadError) {
-      setError(agentUiErrorMessage(loadError, 'load'));
+      reportError(loadError, 'load');
     } finally {
       setLoading(false);
     }
-  }, [mutate]);
+  }, [mutate, reportError]);
 
   useEffect(() => {
     void load();
@@ -118,7 +132,13 @@ export function useAgentSettingsController() {
 
   const applyEditor = useCallback((response: AgentPresetEditorResponse) => {
     const nextDraft = cloneDraft(response.draft);
-    setEditor(response);
+    setEditor({
+      ...response,
+      draft: nextDraft,
+      revision: response.revision
+        ? { ...response.revision, document: response.revision.document }
+        : undefined,
+    });
     setDraftState(nextDraft);
     setSavedDraft(response.revision ? cloneDraft(nextDraft) : null);
     setSelection({ kind: 'preset', preset: response.preset });
@@ -145,13 +165,13 @@ export function useAgentSettingsController() {
           setError(t('agentSettings.workbench.returnChanged'));
         }
       } catch (openError) {
-        setError(agentUiErrorMessage(openError, 'open'));
+        reportError(openError, 'open');
       } finally {
         setOpeningPresetId(null);
         setBusyAction(null);
       }
     },
-    [applyEditor, t]
+    [applyEditor, reportError, t]
   );
 
   const createPreset = useCallback(
@@ -166,12 +186,12 @@ export function useAgentSettingsController() {
         await refreshPresetLibraries();
         setSelection({ kind: 'preset', preset: response.preset });
       } catch (createError) {
-        setError(agentUiErrorMessage(createError, 'create'));
+        reportError(createError, 'create');
       } finally {
         setBusyAction(null);
       }
     },
-    [applyEditor, refreshPresetLibraries]
+    [applyEditor, refreshPresetLibraries, reportError]
   );
 
   const forkTemplate = useCallback(
@@ -197,32 +217,37 @@ export function useAgentSettingsController() {
         await refreshPresetLibraries();
         setSelection({ kind: 'preset', preset: response.preset });
       } catch (forkError) {
-        setError(agentUiErrorMessage(forkError, 'fork'));
+        reportError(forkError, 'fork');
       } finally {
         setBusyAction(null);
       }
     },
-    [applyEditor, refreshPresetLibraries]
+    [applyEditor, refreshPresetLibraries, reportError]
   );
 
   const createConfiguredPreset = useCallback(async (displayName: string, document: AgentPresetDocument, description?: string) => {
     setBusyAction('create');
     setError(null);
     try {
-      const response = await agentPlatform.createPreset.invoke({ display_name: displayName, description, document });
+      const response = await agentPlatform.createPreset.invoke({
+        display_name: displayName,
+        description,
+        document,
+      });
       applyEditor(response);
       await refreshPresetLibraries();
       setSelection({ kind: 'preset', preset: response.preset });
       return response;
     } catch (createError) {
       const missingModel = isAgentModelConfigurationMissing(createError);
-      setError(missingModel ? t('agentSettings.workbench.modelNeeded') : agentUiErrorMessage(createError, 'create'));
+      if (missingModel) setError(t('agentSettings.workbench.modelNeeded'));
+      else reportError(createError, 'create');
       setModelConfigurationMissing(missingModel);
       return null;
     } finally {
       setBusyAction(null);
     }
-  }, [applyEditor, refreshPresetLibraries, t]);
+  }, [applyEditor, refreshPresetLibraries, reportError, t]);
 
   const discardChanges = useCallback(() => {
     if (savedDraft) setDraftState(cloneDraft(savedDraft));
@@ -246,13 +271,13 @@ export function useAgentSettingsController() {
         }
         await refreshPresetLibraries();
       } catch (deleteError) {
-        setError(agentUiErrorMessage(deleteError, 'delete'));
+        reportError(deleteError, 'delete');
       } finally {
         setDeletingPresetId(null);
         setBusyAction(null);
       }
     },
-    [clearEditorState, refreshPresetLibraries, selection]
+    [clearEditorState, refreshPresetLibraries, reportError, selection]
   );
 
   const setDraft = useCallback((next: AgentPresetDraft) => {
@@ -273,6 +298,7 @@ export function useAgentSettingsController() {
       });
       const nextDraft: AgentPresetDraft = {
         ...draft,
+        document: draft.document,
         current_revision: saved.revision.reference,
       };
       setDraftState(nextDraft);
@@ -291,13 +317,14 @@ export function useAgentSettingsController() {
       return saved;
     } catch (saveError) {
       const missingModel = isAgentModelConfigurationMissing(saveError);
-      setError(missingModel ? t('agentSettings.workbench.modelNeeded') : agentUiErrorMessage(saveError, 'save'));
+      if (missingModel) setError(t('agentSettings.workbench.modelNeeded'));
+      else reportError(saveError, 'save');
       setModelConfigurationMissing(missingModel);
       return null;
     } finally {
       setBusyAction(null);
     }
-  }, [draft, refreshPresetLibraries, t]);
+  }, [draft, refreshPresetLibraries, reportError, t]);
 
   const dirty = useMemo(
     () => (draft ? isDraftDirty(savedDraft, draft) : false),
@@ -315,6 +342,7 @@ export function useAgentSettingsController() {
     openingPresetId,
     deletingPresetId,
     error,
+    errorSubjects,
     modelConfigurationMissing,
     dirty,
     load,

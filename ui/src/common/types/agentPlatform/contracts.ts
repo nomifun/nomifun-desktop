@@ -178,8 +178,6 @@ export interface PutAgentRoleDefaultRequest {
 }
 
 export interface AgentPresetDocument {
-  /** Versioned Agent configuration, resolved by the host when a session is created. */
-  runtime_engine?: RuntimeEngineSelection;
   /** Context order within each phase; omitted contributors follow canonical ID order. */
   context_order?: CapabilityId[];
   /** Request middleware composition order; omitted contributors follow ID order. */
@@ -216,7 +214,7 @@ export interface AgentPresetSummary {
 }
 
 export interface OfficialPresetSeed {
-  enabled_capabilities: ExactCatalogRef<'capability'>[];
+  enabled_capabilities: CapabilitySelection[];
   skill_bindings: ExactCatalogRef<'skill'>[];
   required_resource_kinds: string[];
   required_runtime_features: string[];
@@ -276,6 +274,37 @@ export interface CapabilityCatalogItem {
   context_contributor_count: number;
 }
 
+export type CapabilityModuleAuthoringPolicy =
+  | 'direct'
+  | 'dependency_only'
+  | 'platform_managed'
+  | 'internal';
+
+export interface CapabilityModuleAction {
+  action_id: string;
+  input_schema: string;
+  output_schema: string;
+  effect_class: string;
+  presentation: string;
+}
+
+export interface CapabilityModuleCatalogItem {
+  module: ExactCatalogRef<'capability'>;
+  display_name: string;
+  description: string;
+  source_package: ExactCatalogRef<'package'>;
+  authoring_policy: CapabilityModuleAuthoringPolicy;
+  summary_kind: string;
+  actions: CapabilityModuleAction[];
+  context_schema_refs: string[];
+  event_schema_refs: string[];
+  required_resource_kinds: string[];
+  required_host_ports: ExactCatalogRef<'host_port'>[];
+  required_modules: ExactCatalogRef<'capability'>[];
+  conflicting_modules: ExactCatalogRef<'capability'>[];
+  supported_surfaces: string[];
+}
+
 export interface SkillCatalogItem {
   skill: ExactCatalogRef<'skill'>;
   display_name: string;
@@ -312,6 +341,7 @@ export interface RoleCatalogItem {
 }
 
 export interface AgentCatalogResponse {
+  modules: CapabilityModuleCatalogItem[];
   capabilities: CapabilityCatalogItem[];
   skills: SkillCatalogItem[];
   mcp_tools: McpToolCatalogItem[];
@@ -380,6 +410,7 @@ export interface PutAgentBindingRequest {
 export interface SelectProductAgentBindingRequest {
   selection: ProductAgentSelection;
   model?: { provider_id: string; model: string };
+  resource_selections?: AgentResourceSelection[];
   conversation_id?: string;
 }
 
@@ -493,13 +524,6 @@ export interface RuntimeEngineBinding {
   build_id: string;
   build_digest: string;
   host_contract_version: number;
-  profile: string;
-}
-
-export interface RuntimeEngineSelection {
-  selector:
-    | { selection: 'exact'; family_id: string; build_id: string; build_digest: string }
-    | { selection: 'channel'; family_id: string; channel: string };
   profile: string;
 }
 
