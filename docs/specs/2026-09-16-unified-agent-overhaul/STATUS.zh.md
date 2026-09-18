@@ -15,6 +15,7 @@
 > Wave 2 实现提交：`efe80298f`
 > Wave 3 实现提交：`8454133b124a3d38636f882b098de80ce17028c0`
 > Wave 4 barrier：`c5d64b943a7862bb9837686214e413899a47efc2`
+> Wave 5 实现提交：`a72503995`
 > 当前主机：Windows
 > Initiative 状态：`active / Wave 5 gate complete`
 
@@ -681,7 +682,7 @@
 ### 2026-09-18 UARC-041/042/050 integrated and Wave 5 gate complete
 
 - Barrier/source: Wave 4 closeout `c5d64b943a7862bb9837686214e413899a47efc2`; Wave 5 start
-  `90ba8f95f`; implementation candidate prepared from current `c27c40856850220edf218f0912ac63903cecad23`.
+  `90ba8f95f`; unified implementation `a72503995`.
 - Owner/write set: Integration merged the three bounded Feature lanes and alone reconciled shared contracts,
   generated artifacts, App composition, Store schema/migration, root Cargo files, status and all unified gates.
 - Changed: Browser is a generic current-Session capability with exact controls and WebView2/attached-Chrome status;
