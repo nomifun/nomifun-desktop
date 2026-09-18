@@ -222,7 +222,7 @@ mod protocol_manifest_tests {
         .await
         .expect("manifest response");
         let data = response.data.expect("manifest data");
-        assert_eq!(data.tasks.len(), 9);
+        assert_eq!(data.tasks.len(), 10);
         assert_eq!(data.platform, "stepfun-plan");
         assert_eq!(data.protocols.len(), 1);
         assert_eq!(data.protocols[0].protocol_id, "stepfun.realtime_s2s");

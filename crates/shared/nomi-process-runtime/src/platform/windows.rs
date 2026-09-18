@@ -1268,10 +1268,13 @@ struct ChildProcessJobPoller {
 impl ChildProcessJobPoller {
     fn publish(&self, result: io::Result<()>) {
         let result = result.map_err(ChildProcessCleanupFailure::from_error);
+        // A completed cleanup receipt is the public terminal barrier. Retire
+        // the exact registry entry before publishing it so a waiter can never
+        // observe completion while stale lookup authority is still reachable.
+        remove_child_process_job(self.pid, &self.process);
         if self.process.completion.borrow().is_none() {
             self.process.completion.send_replace(Some(result));
         }
-        remove_child_process_job(self.pid, &self.process);
     }
 }
 
