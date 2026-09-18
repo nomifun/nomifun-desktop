@@ -448,7 +448,7 @@
       "id": "UARC-060",
       "title": "Windows integrated acceptance",
       "wave": "W7",
-      "status": "planned",
+      "status": "active",
       "depends_on": ["UARC-054"],
       "lane": "integration-windows",
       "write_set": ["scripts/validation/*windows*", "docs/specs/2026-09-16-unified-agent-overhaul/**"],

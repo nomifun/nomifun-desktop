@@ -900,3 +900,21 @@
 - Windows: verified. macOS: shared source pending; no CEF, TCC, native interaction, arm64 app, DMG or signing claim.
 - Remaining/blocker: none for `UARC-054`. External Mac hardware remains a later Wave 8 prerequisite.
 - Next ready task: `UARC-060`, serial Windows Integration acceptance.
+
+### 2026-09-19 UARC-060 started
+
+- Barrier/source: UARC-054 closeout `d14af94e611de1cef986287f72cb027cf770e4ef`.
+- Owner/write set: Windows Integration only; writes are limited to maintainable `*windows*` validation scripts and
+  UARC evidence/handoff documents. No Feature worker or overlapping Cargo, full-UI, native or packaging lease is active.
+- Changed: acceptance begins from the clean canonical baseline barrier. The candidate will be exercised as one product:
+  shared contracts, Store/Session/Runtime, all affected desktop surfaces, native Browser/Computer/Process and installer.
+- Deleted: only temporary Windows migration fixtures or obsolete smoke paths proven unnecessary by the candidate run;
+  production compatibility layers are not authorized.
+- Retained + reason: maintainable Windows candidate smoke and credential-isolated commercial-model validation remain
+  reproducible acceptance inputs.
+- Tests: pending `bun run check`, complete UI tests, core/desktop Rust gates, Windows native Browser/Computer/Process,
+  real `step-3.7-flash` flow and NSIS candidate install/uninstall evidence.
+- Windows: integrated acceptance active. macOS: pending; this task will publish the exact shared-source barrier and Mac
+  handoff without claiming CEF, TCC, native input, DMG or signing verification.
+- Remaining/blocker: none for Windows acceptance. An external Mac host remains the expected Wave 8 prerequisite.
+- Next ready tasks: none until UARC-060 records a green Windows candidate and shared-source macOS barrier.
