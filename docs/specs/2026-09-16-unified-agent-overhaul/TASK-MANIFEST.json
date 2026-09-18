@@ -400,7 +400,7 @@
       "id": "UARC-052",
       "title": "Remove old Nomi/Coding runtimes and multi-runtime infrastructure",
       "wave": "W6",
-      "status": "planned",
+      "status": "active",
       "depends_on": ["UARC-051"],
       "lane": "integration",
       "write_set": ["crates/backend/nomifun-ai-agent/**", "crates/agent/nomi-agent/**", "crates/backend/nomifun-coding-engine/**", "crates/backend/nomifun-app/src/router/runtime_engines.rs"],
