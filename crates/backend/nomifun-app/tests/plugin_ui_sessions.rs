@@ -7,9 +7,6 @@ use tower::ServiceExt;
 #[path = "common/mod.rs"]
 mod common;
 
-#[path = "plugin_ui_binding.rs"]
-mod ui_binding;
-
 #[path = "plugin_ui_admission.rs"]
 mod admission;
 

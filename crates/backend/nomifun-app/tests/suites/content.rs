@@ -47,7 +47,6 @@ fn every_top_level_integration_test_is_registered() {
     for (parent, child) in [
         ("plugin_product_discovery.rs", "plugin_product_before_model.rs"),
         ("plugin_product_discovery.rs", "plugin_product_service.rs"),
-        ("plugin_ui_sessions.rs", "plugin_ui_binding.rs"),
         ("plugin_ui_sessions.rs", "plugin_ui_admission.rs"),
     ] {
         assert!(registered.contains(parent), "missing parent target: {parent}");

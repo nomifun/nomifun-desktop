@@ -233,11 +233,11 @@ fn main() -> Result<ExitCode> {
     let mut cli = nomifun_app::cli::Cli::parse_from(["nomifun-web"]);
     cli.host = args.host.clone();
     cli.port = args.port;
-    // Resolve the current Nomi-core root. If a previous Fresh-v4 experiment
-    // owns the channel default, the resolver selects an isolated sibling so
-    // this host never opens or mutates that experimental dataset.
+    // Normalize only this application's published historical default
+    // locations to the one canonical channel root. Explicit Web deployments
+    // (for example /data) remain literal and no parallel Agent root is probed.
     cli.data_dir =
-        nomifun_app::bootstrap::resolve_nomi_core_data_root(args.data_dir.clone());
+        nomifun_app::bootstrap::resolve_startup_data_root(args.data_dir.clone());
     cli.local = insecure_no_auth;
 
     // Same ordering as the nomicore bin: runtime init + PATH enhancement BEFORE
