@@ -416,7 +416,7 @@
       "id": "UARC-053",
       "title": "Remove old capabilities, stores, IDMM and Browser entry",
       "wave": "W6",
-      "status": "planned",
+      "status": "active",
       "depends_on": ["UARC-052"],
       "lane": "integration",
       "write_set": ["crates/**", "ui/src/**", "scripts/**", "docs/**"],

@@ -2,7 +2,7 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-18
-> 当前阶段：Wave 6 / UARC-052 integrated
+> 当前阶段：Wave 6 / UARC-053 active
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
@@ -18,8 +18,9 @@
 > Wave 5 实现提交：`a72503995`
 > UARC-051 实现提交：`ab94f33f2b6201c2850803fefbfe72430ef89234`
 > UARC-052 实现提交：`48fbfb09c`
+> UARC-052 barrier：`e6aca70e4`
 > 当前主机：Windows
-> Initiative 状态：`active / UARC-052 integrated; UARC-053 next`
+> Initiative 状态：`active / UARC-053 physical legacy removal`
 
 ## 1. 当前事实
 
@@ -95,6 +96,7 @@
 | `UARC-050` | integrated | Integration | verified | pending | Official Agents、Workbench 与单 Nomi Runtime 诊断 UI |
 | `UARC-051` | integrated | Integration | verified | pending | generation 5 Store/API/projection 与领域入口完成切换 |
 | `UARC-052` | integrated | Integration | verified | pending | 唯一官方 Runtime；旧 Runtime/selector/compatibility 已物理删除 |
+| `UARC-053` | active | Integration | pending | pending | 删除旧 capability/store/IDMM/Browser entry 与 obsolete assets |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -196,7 +198,7 @@
 
 ## 8. Next ready tasks
 
-1. `UARC-053`：串行删除旧 capability/store/IDMM/Browser entry 及无 owner 的测试、脚本、文案与样式。
+1. `UARC-053`：active；串行删除旧 capability/store/IDMM/Browser entry 及无 owner 的测试、脚本、文案与样式。
 2. `UARC-061/062`：依赖外部 Mac 真机，在 Windows 串行主线完成且 handoff 就绪后执行。
 
 ## 9. 状态更新模板
@@ -808,3 +810,21 @@
   tests/scripts delete set and is not a second Runtime path.
 - Remaining/blocker: none for UARC-052. External Mac hardware remains a later Wave 8 prerequisite.
 - Next ready task: `UARC-053`, serial Integration only.
+
+### 2026-09-18 UARC-053 started
+
+- Barrier/source: UARC-052 closeout `e6aca70e4`.
+- Owner/write set: Integration only; the manifest grants the cross-repository delete pass over `crates/**`,
+  `ui/src/**`, `scripts/**` and `docs/**`. Shared contracts, root configuration, generated outputs and final gate remain
+  Integration-owned; no Feature worker or overlapping gate is active.
+- Changed: task state claimed from a clean barrier. Work begins from the machine inventory's remaining capability,
+  Store, automation/IDMM and Browser-entry groups, plus the known obsolete product-chain live fixture.
+- Deleted: pending old capability IDs/projections, legacy Agent tables/files, Agent IDMM, session-browser entry and
+  obsolete tests/scripts/docs/i18n/CSS; no compatibility alias or unreachable wrapper is authorized.
+- Retained + reason: only canonical Module/Action contracts, generation 5 Store, AgentExecution, generic Browser
+  Resource/Provider model and product-owned non-Agent stores may remain.
+- Tests: focused reachability/dead-asset checks will precede one serialized App/UI/UARC gate. Commercial provider
+  validation continues to use only the requested StepFun Coding Plan `step-3.7-flash` selected-model path.
+- Windows: implementation active. macOS: shared deletion source active; no Mac-native evidence claimed on this host.
+- Remaining/blocker: none. External Mac hardware remains a later Wave 8 prerequisite.
+- Next ready tasks: none until UARC-053 completes; UARC-054 depends on it.
