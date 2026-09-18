@@ -384,7 +384,7 @@
       "id": "UARC-051",
       "title": "Cut over new Agent Store, APIs and projections",
       "wave": "W6",
-      "status": "planned",
+      "status": "active",
       "depends_on": ["UARC-020", "UARC-021", "UARC-022", "UARC-030", "UARC-031", "UARC-032", "UARC-033", "UARC-034", "UARC-041", "UARC-042", "UARC-050"],
       "lane": "integration",
       "write_set": ["crates/backend/nomifun-app/src/**", "crates/backend/nomifun-db/**", "crates/backend/nomifun-conversation/**", "ui/src/common/adapter/**", "ui/src/renderer/pages/conversation/**"],

@@ -2,7 +2,7 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-18
-> 当前阶段：Wave 5 integrated / Wave 6 UARC-051 ready
+> 当前阶段：Wave 6 / UARC-051 active
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
@@ -17,7 +17,7 @@
 > Wave 4 barrier：`c5d64b943a7862bb9837686214e413899a47efc2`
 > Wave 5 实现提交：`a72503995`
 > 当前主机：Windows
-> Initiative 状态：`active / Wave 5 gate complete`
+> Initiative 状态：`active / UARC-051 Store and projection cutover`
 
 ## 1. 当前事实
 
@@ -89,7 +89,7 @@
 | `UARC-041` | integrated | Integration | verified | n/a | Windows WebView2 Browser capability UI；无 Browser-only Session |
 | `UARC-042` | integrated | Integration | verified | pending | Computer/Robot 单 Module、slash Actions 与真实 availability |
 | `UARC-050` | integrated | Integration | verified | pending | Official Agents、Workbench 与单 Nomi Runtime 诊断 UI |
-| `UARC-051` | planned | Integration | pending | pending | 新 Agent Store/API/projection 串行切换 |
+| `UARC-051` | active | Integration | pending | pending | 新 Agent Store/API/projection 串行切换 |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -187,7 +187,7 @@
 
 ## 8. Next ready tasks
 
-1. `UARC-051`：串行切换所有新 Agent operations 到 generation 5 Store、canonical API 与 projection。
+1. `UARC-051` 已串行启动：切换所有新 Agent operations 到 generation 5 Store、canonical API 与 projection。
 2. `UARC-061/062`：依赖外部 Mac 真机，在 Windows 串行主线完成且 handoff 就绪后执行。
 
 ## 9. 状态更新模板
@@ -713,3 +713,21 @@
 - Remaining/blocker: none for Wave 5. The known Remote open/delete Store split is a required `UARC-051` cutover item,
   not an accepted compatibility state. External Mac hardware remains the later cross-platform blocker.
 - Next ready task: `UARC-051`, serial Integration only; no Feature lane is released until its completion gate passes.
+
+### 2026-09-18 UARC-051 started
+
+- Barrier/source: Wave 5 closeout `d45c6f54d5e4da5ef39ca2d37a052b23469bc15e`.
+- Owner/write set: Integration only; App sources, DB, Conversation store boundary, renderer adapters and Conversation
+  surfaces exactly as declared by the manifest. No Feature worker or overlapping Cargo/full-UI lease is active.
+- Changed: task state claimed from the clean Wave 5 barrier; implementation begins with a writer/reader/projection
+  call-graph audit and the known Remote open/delete split.
+- Deleted: pending legacy Agent Store writers/readers, old API bridges and old Session projections; no compatibility
+  layer or accepted canonical DELETE 404 is authorized.
+- Retained + reason: non-Agent configuration tables and the generation 5 canonical Session API are the only retained
+  persistence/API foundations.
+- Tests: targeted Store/API/projection tests will precede one serialized Wave 6 gate. Commercial provider dispatch
+  will use the requested `step-3.7-flash` selection only after the canonical path is connected.
+- Windows: implementation active.
+- macOS: shared cutover source is active; no Mac-native evidence is claimed from this host.
+- Remaining/blocker: none at start. External Mac hardware remains a later platform prerequisite.
+- Next ready tasks: none until `UARC-051` completion; `UARC-052` depends on this cutover.
