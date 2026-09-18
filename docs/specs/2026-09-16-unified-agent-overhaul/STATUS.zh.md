@@ -857,3 +857,20 @@
 - Windows: verified. macOS: shared source pending; no CEF, TCC, native interaction, arm64 app, DMG or signing claim.
 - Remaining/blocker: none for `UARC-053`. External Mac hardware remains a later Wave 8 prerequisite.
 - Next ready task: `UARC-054`, serial Integration only.
+
+### 2026-09-18 UARC-054 started
+
+- Barrier/source: UARC-053 closeout `a770fa0ab`.
+- Owner/write set: Integration only; active migrations, canonical schema contract, `nomifun-v4-root` and the dev seed
+  importer exactly as declared by the manifest. No Feature worker or overlapping Cargo/full-UI lease is active.
+- Changed: task claimed from a clean barrier. Work begins by classifying every published migration and fresh-v4 path
+  against the canonical generation-5 baseline and the non-Agent configuration preservation set.
+- Deleted: pending historical Agent migrations, duplicate fresh-v4/root coordinator paths and legacy seed/import helpers;
+  no create-then-delete retired Agent schema is authorized in a fresh startup.
+- Retained + reason: non-Agent configuration schema, installed-data preservation and the Agent-only reset contract remain
+  the durable product boundary.
+- Tests: fresh empty initialization, preserved configuration inventory, old-root non-read and schema self-tests will run
+  under one serialized DB/App gate.
+- Windows: implementation active. macOS: shared schema source active; no Mac-native evidence claimed on this host.
+- Remaining/blocker: none. External Mac hardware remains a later Wave 8 prerequisite.
+- Next ready tasks: none until `UARC-054` completes; `UARC-060` depends on its baseline barrier.

@@ -432,7 +432,7 @@
       "id": "UARC-054",
       "title": "Squash new baseline and remove historical Agent migrations",
       "wave": "W6",
-      "status": "planned",
+      "status": "active",
       "depends_on": ["UARC-053"],
       "lane": "integration",
       "write_set": ["crates/backend/nomifun-db/migrations/**", "crates/backend/nomifun-agent-contracts/schema/**", "crates/backend/nomifun-v4-root/**", "scripts/seed-dev-from-prod.mjs"],
