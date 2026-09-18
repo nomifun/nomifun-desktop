@@ -2,7 +2,7 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-18
-> 当前阶段：Wave 6 / UARC-051 integrated；UARC-052 ready
+> 当前阶段：Wave 6 / UARC-052 active
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
@@ -18,7 +18,7 @@
 > Wave 5 实现提交：`a72503995`
 > UARC-051 实现提交：`ab94f33f2b6201c2850803fefbfe72430ef89234`
 > 当前主机：Windows
-> Initiative 状态：`active / UARC-052 single Runtime removal ready`
+> Initiative 状态：`active / UARC-052 single Runtime removal`
 
 ## 1. 当前事实
 
@@ -92,6 +92,7 @@
 | `UARC-042` | integrated | Integration | verified | pending | Computer/Robot 单 Module、slash Actions 与真实 availability |
 | `UARC-050` | integrated | Integration | verified | pending | Official Agents、Workbench 与单 Nomi Runtime 诊断 UI |
 | `UARC-051` | integrated | Integration | verified | pending | generation 5 Store/API/projection 与领域入口完成切换 |
+| `UARC-052` | active | Integration | pending | pending | 删除旧 Nomi/Coding Runtime 与多 Runtime 基础设施 |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -758,3 +759,18 @@
 - Windows: verified. macOS: shared source pending; no Mac-native, CEF, TCC, DMG or signing evidence claimed here.
 - Remaining/blocker: none for `UARC-051`. External Mac hardware remains a later Wave 8 prerequisite.
 - Next ready task: `UARC-052`, serial Integration only.
+
+### 2026-09-18 UARC-052 started
+
+- Barrier/source: UARC-051 closeout `9c338f5f67de37d3fffaff6f6397d6078e2667f9`.
+- Owner/write set: Integration only; `nomifun-ai-agent`, old `nomi-agent`, `nomifun-coding-engine` and
+  `runtime_engines.rs` exactly as declared by the manifest. No Feature worker or overlapping gate is active.
+- Changed: task claimed after canonical Store/API cutover; implementation begins from production reachability and
+  Cargo-graph evidence, extracting only reusable domain adapters required by the unified driver.
+- Deleted: pending old Nomi loop/factory/manager, `nomifun.coding` family, multi-Runtime catalog/selector,
+  `uses_nomi_session`/restart compatibility and duplicate Runtime tests.
+- Retained + reason: the unified Runtime crate, one internal official driver and reusable domain adapters only.
+- Tests: focused Runtime/Engine/AI checks precede a single serialized App/Cargo/reachability gate.
+- Windows: implementation active. macOS: shared source active; no Mac-native evidence claimed on this host.
+- Remaining/blocker: none. External Mac hardware remains a later Wave 8 prerequisite.
+- Next ready tasks: none until `UARC-052` completes; `UARC-053` depends on it.
