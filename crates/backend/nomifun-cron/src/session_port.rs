@@ -310,6 +310,19 @@ pub trait CronSessionPort: Send + Sync {
         &self,
         query: &CronTurnDeliveryQuery,
     ) -> Result<Option<CronTurnDelivery>, AppError>;
+
+    /// Append a durable owner-visible scheduler notice to the canonical
+    /// AgentSession projection. Implementations must not write legacy message
+    /// tables. Test adapters may ignore notices.
+    async fn append_notice(
+        &self,
+        _owner_id: &str,
+        _agent_session_id: &AgentSessionId,
+        _content: &str,
+        _notice_kind: &str,
+    ) -> Result<(), AppError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

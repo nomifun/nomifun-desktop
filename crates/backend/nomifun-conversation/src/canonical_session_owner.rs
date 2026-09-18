@@ -34,6 +34,7 @@ pub struct AgentTurnReceipt {
 #[derive(Clone, Debug)]
 pub struct AgentMutationReceipt {
     pub target_operation_id: OperationId,
+    pub event_id: EventId,
     pub cursor: SessionEventCursor,
     pub duplicate: bool,
 }
@@ -66,6 +67,28 @@ impl CanonicalAgentSessionOwner {
         idempotency_key: &str,
         created_at: i64,
     ) -> Result<OpenAgentSession, AppError> {
+        self.open_with_provenance(
+            owner,
+            binding,
+            title,
+            active_capability_ids,
+            None,
+            idempotency_key,
+            created_at,
+        )
+        .await
+    }
+
+    pub async fn open_with_provenance(
+        &self,
+        owner: PrincipalRef,
+        binding: AgentBindingValue,
+        title: Option<String>,
+        active_capability_ids: Vec<String>,
+        remote_binding_provenance: Option<nomifun_agent_contracts::RemoteBindingProvenance>,
+        idempotency_key: &str,
+        created_at: i64,
+    ) -> Result<OpenAgentSession, AppError> {
         let key = scoped_key(&owner, idempotency_key, "open")?;
         let producer = EventProducerId::from("session_api");
         let session_id = AgentSessionId::from(Uuid::now_v7().to_string());
@@ -78,7 +101,7 @@ impl CanonicalAgentSessionOwner {
                 pinned: false,
             },
             agent_binding: binding,
-            remote_binding_provenance: None,
+            remote_binding_provenance,
             parent_session_id: None,
             fork_base_payload_id: None,
             next_seq: 1,
@@ -236,8 +259,14 @@ impl CanonicalAgentSessionOwner {
             )
             .await
             .map_err(store_error)?;
+        let event_id = result
+            .record
+            .as_ref()
+            .map(|record| record.event_id.clone())
+            .ok_or_else(|| AppError::Conflict("canonical steer produced no durable event".to_owned()))?;
         Ok(AgentMutationReceipt {
             target_operation_id,
+            event_id,
             cursor: result.cursor,
             duplicate: result.duplicate,
         })
@@ -260,8 +289,14 @@ impl CanonicalAgentSessionOwner {
             )
             .await
             .map_err(store_error)?;
+        let event_id = result
+            .record
+            .as_ref()
+            .map(|record| record.event_id.clone())
+            .ok_or_else(|| AppError::Conflict("canonical cancel produced no durable event".to_owned()))?;
         Ok(AgentMutationReceipt {
             target_operation_id,
+            event_id,
             cursor: result.cursor,
             duplicate: result.duplicate,
         })
@@ -455,9 +490,10 @@ fn scoped_key(owner: &PrincipalRef, key: &str, scope: &str) -> Result<String, Ap
 
 fn store_error(error: SessionStoreError) -> AppError {
     match error {
-        SessionStoreError::NotFound(message) => AppError::NotFound(message),
-        SessionStoreError::Deleted(message)
-        | SessionStoreError::IdempotencyConflict(message)
+        SessionStoreError::NotFound(message) | SessionStoreError::Deleted(message) => {
+            AppError::NotFound(message)
+        }
+        SessionStoreError::IdempotencyConflict(message)
         | SessionStoreError::Conflict(message) => AppError::Conflict(message),
         SessionStoreError::InvalidEvent(message)
         | SessionStoreError::InvalidPayload(message)

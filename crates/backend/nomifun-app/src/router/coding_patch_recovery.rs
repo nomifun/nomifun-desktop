@@ -1,86 +1,113 @@
-//! Permanent Nomi patch-recovery obligations, not conversational replay. No tool
-//! execution, filesystem access, effect settlement or quarantine resolution.
-use super::engine_session_host::EngineTurnReceipt;
-use nomifun_agent_contracts::ResolvedSnapshotRef;
+//! Permanent Nomi patch-recovery obligations reconstructed from canonical
+//! AgentSession events. No old Conversation receipt/journal table is read.
+
+use super::engine_session_host::{EngineSessionHost, EngineTurnReceipt};
+use nomifun_agent_contracts::{AgentSessionId, OperationId, ResolvedSnapshotRef};
 use nomifun_coding_engine::{CodingEngineEvent, CodingPatchRecoveryState};
 use nomifun_common::AppError;
-use nomifun_db::{SqlitePool, sqlx};
+use serde_json::Value;
 
 fn failure(message: impl std::fmt::Display) -> AppError {
     AppError::Conflict(format!("Nomi patch recovery: {message}"))
 }
 
 pub(super) async fn load(
-    pool: &SqlitePool,
+    host: &EngineSessionHost,
     receipt: &EngineTurnReceipt,
     snapshot: &ResolvedSnapshotRef,
 ) -> Result<CodingPatchRecoveryState, AppError> {
-    let session = &receipt.session().session().conversation_id;
-    let user = &receipt.session().principal().principal_id;
-    let binding = receipt.session().engine_binding();
-    let mut tx = pool.begin().await.map_err(failure)?;
-    let (admitted,): (bool,) = sqlx::query_as(
-        "SELECT EXISTS(SELECT 1 FROM conversations c JOIN conversation_delivery_receipts r ON r.operation_id = c.active_turn_operation_id \
-         WHERE c.conversation_id = ? AND c.user_id = ? AND c.status = 'running' AND c.admission_epoch = ? \
-         AND r.operation_id = ? AND r.user_id = c.user_id AND r.conversation_id = c.conversation_id AND r.kind = 'turn' AND r.status = 'accepted')")
-        .bind(session).bind(user).bind(receipt.admission_epoch()).bind(receipt.operation_id())
-        .fetch_one(&mut *tx).await.map_err(failure)?;
-    if !admitted {
+    let session = AgentSessionId::from(receipt.session().session().conversation_id.clone());
+    let current = OperationId::from(receipt.operation_id().to_owned());
+    let store = host.canonical_store()?;
+    let facts = store
+        .chat_causality_facts(&session, &current)
+        .await
+        .map_err(failure)?;
+    if facts.head.status != "running"
+        || facts.head.active_turn_id.as_deref() != Some(current.as_ref())
+    {
         return Err(failure("current turn authority changed"));
     }
 
-    // No join to messages, hidden flags, a finite replay window, or summaries.
-    // Recovery events are written only when state changes. The latest prior
-    // state therefore remains authoritative until a later transition clears
-    // or replaces it. The owner has already joined/recovered earlier turns
-    // before admitting this one.
-    let head: Option<(i64, String, i64)> = sqlx::query_as(
-        "SELECT id, turn_operation_id, length(CAST(event_json AS BLOB)) FROM conversation_runtime_events \
-         WHERE conversation_id = ? AND turn_operation_id != ? AND json_extract(event_json, '$.event') = 'patch_recovery_updated' \
-         ORDER BY id DESC LIMIT 1")
-        .bind(session).bind(receipt.operation_id()).fetch_optional(&mut *tx).await.map_err(failure)?;
-    let state_id = head.as_ref().map_or(0, |(id, _, _)| *id);
-    let (latest_dispatch,): (i64,) = sqlx::query_as(
-        "SELECT COALESCE(MAX(id), 0) FROM conversation_runtime_events WHERE conversation_id = ? AND turn_operation_id != ? AND id > ? \
-         AND json_extract(event_json, '$.event') = 'host_tool_dispatch' AND json_extract(event_json, '$.dispatch.action_id') = 'workspace.files/patch'")
-        .bind(session).bind(receipt.operation_id()).bind(state_id).fetch_one(&mut *tx).await.map_err(failure)?;
-    let Some((id, operation, bytes)) = head else {
-        if latest_dispatch != 0 {
+    let mut progress = facts
+        .events
+        .iter()
+        .filter(|event| {
+            event.kind.0 == "runtime/progress-recorded"
+                && event.correlation_id.as_ref() != current.as_ref()
+        })
+        .filter_map(|event| {
+            facts
+                .event_payloads
+                .get(event.event_id.as_ref())
+                .and_then(|payload| payload.get("event"))
+                .map(|payload| (event, payload))
+        })
+        .collect::<Vec<_>>();
+    progress.sort_by_key(|(event, _)| event.seq);
+
+    let mut latest_state: Option<(u64, String, CodingPatchRecoveryState)> = None;
+    let mut latest_patch_dispatch = 0_u64;
+    for (event, value) in progress {
+        if value.get("event").and_then(Value::as_str) == Some("host_tool_dispatch")
+            && value
+                .get("dispatch")
+                .and_then(|dispatch| dispatch.get("action_id"))
+                .and_then(Value::as_str)
+                == Some("workspace.files/patch")
+        {
+            latest_patch_dispatch = event.seq;
+        }
+        if let Ok(CodingEngineEvent::PatchRecoveryUpdated { state }) =
+            serde_json::from_value::<CodingEngineEvent>(value.clone())
+        {
+            state.validate().map_err(failure)?;
+            latest_state = Some((
+                event.seq,
+                event.correlation_id.as_ref().to_owned(),
+                state,
+            ));
+        }
+    }
+
+    let Some((state_seq, source_operation, state)) = latest_state else {
+        if latest_patch_dispatch != 0 {
             return Err(failure(
                 "prior patch dispatch has no permanent recovery state",
             ));
         }
-        tx.commit().await.map_err(failure)?;
         return Ok(CodingPatchRecoveryState::default());
     };
-    if !(1..=128 * 1024).contains(&bytes) || operation.is_empty() || operation.len() > 1024 {
-        return Err(failure("invalid or oversized recovery event"));
+    let source_terminal = facts.events.iter().find(|event| {
+        event.correlation_id.as_ref() == source_operation
+            && event.kind.0 == "turn/completed"
+    });
+    if source_terminal.is_none() {
+        return Err(failure("recovery source is not a completed canonical Turn"));
     }
-    let source: Option<(String, i64)> = sqlx::query_as(
-        "SELECT r.status, length(CAST(e.event_json AS BLOB)) FROM conversation_delivery_receipts r \
-         JOIN conversation_runtime_events e ON e.turn_operation_id = r.operation_id AND e.conversation_id = r.conversation_id AND e.sequence = 1 \
-         WHERE r.user_id = ? AND r.conversation_id = ? AND r.operation_id = ? AND r.kind = 'turn'")
-        .bind(user).bind(session).bind(&operation).fetch_optional(&mut *tx).await.map_err(failure)?;
-    let Some((status, root_bytes)) = source else {
-        return Err(failure("recovery state has no permanent owner/turn root"));
-    };
-    if status != "completed" || !(1..=16 * 1024).contains(&root_bytes) {
-        return Err(failure(
-            "recovery source is unsettled or its binding is oversized",
-        ));
-    }
-    let (root,): (String,) = sqlx::query_as(
-        "SELECT event_json FROM conversation_runtime_events WHERE conversation_id = ? AND turn_operation_id = ? AND sequence = 1")
-        .bind(session).bind(&operation).fetch_one(&mut *tx).await.map_err(failure)?;
-    let CodingEngineEvent::TurnStarted {
-        binding: recorded,
-        turn_operation_id,
-    } = serde_json::from_str::<CodingEngineEvent>(&root).map_err(failure)?
-    else {
+    let source_start = facts.events.iter().find_map(|event| {
+        if event.kind.0 != "runtime/progress-recorded"
+            || event.correlation_id.as_ref() != source_operation
+        {
+            return None;
+        }
+        let payload = facts.event_payloads.get(event.event_id.as_ref())?.get("event")?;
+        serde_json::from_value::<CodingEngineEvent>(payload.clone())
+            .ok()
+            .and_then(|event| match event {
+                CodingEngineEvent::TurnStarted {
+                    binding,
+                    turn_operation_id,
+                } => Some((binding, turn_operation_id)),
+                _ => None,
+            })
+    });
+    let Some((recorded, turn_operation_id)) = source_start else {
         return Err(failure("recovery source has no engine binding"));
     };
-    if recorded.agent_session_id().as_ref() != session
-        || turn_operation_id.as_ref() != operation
+    let binding = receipt.session().engine_binding();
+    if recorded.agent_session_id() != &session
+        || turn_operation_id.as_ref() != source_operation
         || recorded.build_id().as_ref() != binding.build_id
         || recorded.build_digest().as_ref() != binding.build_digest
         || recorded.resolved_snapshot_ref() != snapshot
@@ -89,20 +116,10 @@ pub(super) async fn load(
             "recovery state differs from exact Session engine/snapshot",
         ));
     }
-    let (raw,): (String,) = sqlx::query_as(
-        "SELECT event_json FROM conversation_runtime_events WHERE id = ? AND conversation_id = ? AND turn_operation_id = ?")
-        .bind(id).bind(session).bind(&operation).fetch_one(&mut *tx).await.map_err(failure)?;
-    let CodingEngineEvent::PatchRecoveryUpdated { state } =
-        serde_json::from_str::<CodingEngineEvent>(&raw).map_err(failure)?
-    else {
-        return Err(failure("invalid recovery event kind"));
-    };
-    state.validate().map_err(failure)?;
-    if latest_dispatch > id && !state.has_pending() {
+    if latest_patch_dispatch > state_seq && !state.has_pending() {
         return Err(failure(
             "a later patch dispatch is not covered by recovery state",
         ));
     }
-    tx.commit().await.map_err(failure)?;
     Ok(state)
 }

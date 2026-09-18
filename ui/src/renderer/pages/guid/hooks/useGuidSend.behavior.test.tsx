@@ -101,7 +101,7 @@ const conversationProjection = (conversationId: string) => ({
   },
 });
 
-test('home collaboration settings are saved and reread before navigation and first-message handoff', async () => {
+test('home collaboration drafts do not mutate the frozen Session after creation', async () => {
   resetBrowserStorage();
   const calls = installFetchRecorder();
   const navigations: string[] = [];
@@ -118,25 +118,22 @@ test('home collaboration settings are saved and reread before navigation and fir
     collaboration,
   }));
   await act(async () => { await hook.result.current.handleSend(); });
-  const patchIndex = calls.findIndex(call => call.method === 'PATCH');
-  expect(patchIndex).toBeGreaterThan(0);
-  expect(calls[patchIndex].body).toEqual(collaboration);
-  expect(calls[patchIndex + 1]).toMatchObject({ method: 'GET', url: `/api/conversations/${PRESET_CONVERSATION_ID}` });
+  expect(calls.some(call => call.method === 'PATCH')).toBe(false);
+  expect(calls.at(-1)).toMatchObject({
+    method: 'GET',
+    url: `/api/agent-sessions/${PRESET_CONVERSATION_ID}/projection`,
+  });
   expect(navigations).toEqual([`/conversation/${PRESET_CONVERSATION_ID}`]);
   expect(readOnlyHandoff().input).toBe(INPUT);
 });
 
-test('a failed collaboration save never hands off an unconfigured first message', async () => {
+test('a failed advanced configuration step never hands off an unconfigured first message', async () => {
   resetBrowserStorage();
   installFetchRecorder();
-  const fetchConfigured = globalThis.fetch;
-  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => init?.method === 'PATCH'
-    ? new Response(JSON.stringify({ success: false, error: 'Cannot save collaboration' }), { status: 503 })
-    : fetchConfigured(url, init)) as typeof fetch;
   const navigations: string[] = [];
   const hook = renderHook(() => useGuidSend({
     ...createDeps({ selection: { kind: 'preset', presetId: PRESET_ID }, selectedPreset: PRESET, workspaceEnabled: false, navigations }),
-    collaboration: { execution_model_pool: { mode: 'single', model: { provider_id: PROVIDER_ID, model: MODEL.use_model } }, execution_template_id: null, delegation_policy: 'disabled', decision_policy: 'automatic' },
+    applyAdvancedConfig: async () => { throw new Error('Cannot apply advanced settings'); },
   }));
   await expect(hook.result.current.handleSend()).rejects.toThrow();
   expect(navigations).toEqual([]);
@@ -164,17 +161,10 @@ const installFetchRecorder = (): FetchCall[] => {
     }
     if (
       method === 'GET' &&
-      url.endsWith(`/api/conversations/${PRESET_CONVERSATION_ID}`)
+      url.endsWith(`/api/agent-sessions/${PRESET_CONVERSATION_ID}/projection`)
     ) {
       return jsonResponse(conversationProjection(PRESET_CONVERSATION_ID));
     }
-    if (
-      method === 'PATCH' &&
-      url.endsWith(`/api/conversations/${PRESET_CONVERSATION_ID}`)
-    ) {
-      return jsonResponse(conversationProjection(PRESET_CONVERSATION_ID));
-    }
-
     throw new Error(`Unexpected request: ${method} ${url}`);
   }) as typeof fetch;
   return calls;
@@ -372,7 +362,7 @@ describe('useGuidSend HTTP behavior', () => {
       await hook.result.current.handleSend();
     });
 
-    expect(calls).toHaveLength(4);
+    expect(calls).toHaveLength(2);
     expect(calls[0]).toEqual({
       method: 'POST',
       url: '/api/agent-sessions',
@@ -387,21 +377,7 @@ describe('useGuidSend HTTP behavior', () => {
     );
     expect(calls[1]).toEqual({
       method: 'GET',
-      url: `/api/conversations/${PRESET_CONVERSATION_ID}`,
-      body: undefined,
-    });
-    expect(calls[2]).toEqual({
-      method: 'PATCH',
-      url: `/api/conversations/${PRESET_CONVERSATION_ID}`,
-      body: {
-        extra: {
-          workspace: WORKSPACE,
-        },
-      },
-    });
-    expect(calls[3]).toEqual({
-      method: 'GET',
-      url: `/api/conversations/${PRESET_CONVERSATION_ID}`,
+      url: `/api/agent-sessions/${PRESET_CONVERSATION_ID}/projection`,
       body: undefined,
     });
     expect(readOnlyHandoff()).toMatchObject({
@@ -481,7 +457,7 @@ describe('useGuidSend HTTP behavior', () => {
 
     expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
       'POST /api/agent-sessions',
-      `GET /api/conversations/${PRESET_CONVERSATION_ID}`,
+      `GET /api/agent-sessions/${PRESET_CONVERSATION_ID}/projection`,
     ]);
     expect(calls.some((call) => call.method === 'PATCH')).toBe(false);
     expect(navigations).toEqual([

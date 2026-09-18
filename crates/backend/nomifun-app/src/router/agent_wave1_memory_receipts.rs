@@ -355,9 +355,11 @@ impl CompanionMemoryWriteLedger {
                  FROM nomi_wave1_memory_action_receipts receipt
                  WHERE receipt.updated_at < ?
                    AND NOT EXISTS (
-                       SELECT 1 FROM conversations conversation
-                       WHERE conversation.conversation_id = receipt.agent_session_id
-                         AND conversation.user_id = receipt.owner_user_id
+                       SELECT 1 FROM agent_sessions session
+                       WHERE session.agent_session_id = receipt.agent_session_id
+                         AND session.state = 'live'
+                         AND json_extract(session.owner_ref_json, '$.principal_kind') = 'user'
+                         AND json_extract(session.owner_ref_json, '$.principal_id') = receipt.owner_user_id
                    )
                  ORDER BY receipt.updated_at ASC
                  LIMIT ?

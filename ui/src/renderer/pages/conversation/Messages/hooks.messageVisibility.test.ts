@@ -190,7 +190,7 @@ describe('message visibility across batching and conversation switches', () => {
 
   test('cleanup cancels the timer before synchronously draining without re-arming it', () => {
     const hookStart = source.indexOf('export const useAddOrUpdateMessage');
-    const hookEnd = source.indexOf('export const useKnowledgeWritebackEvents', hookStart);
+    const hookEnd = source.indexOf('export const useRemoveMessageByMsgId', hookStart);
     const hookSource = source.slice(hookStart, hookEnd);
     const cleanupStart = hookSource.indexOf('useEffect(() =>');
     const cleanupEnd = hookSource.indexOf('return useCallback(', cleanupStart);

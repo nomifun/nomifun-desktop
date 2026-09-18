@@ -10,7 +10,6 @@ import { describe, expect, test } from 'bun:test';
 const markdownMessageFiles = [
   './components/MessageText.tsx',
   './components/MessageTips.tsx',
-  './components/SkillSuggestCard.tsx',
 ];
 
 describe('message markdown typography', () => {

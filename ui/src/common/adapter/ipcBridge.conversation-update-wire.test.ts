@@ -42,20 +42,14 @@ describe('conversation update wire contract', () => {
     expect(source.includes('merge_extra')).toBe(false);
   });
 
-  test('binds a workspace by sending exactly {extra:{workspace}}', async () => {
+  test('rejects mutable workspace binding after Session creation', async () => {
     const calls = recordPatch();
 
-    await conversation.update.invoke({
-      conversation_id: parseConversationId(CONVERSATION_ID),
-      updates: { extra: { workspace: '/home/me/project' } as TChatConversation['extra'] },
-    });
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0].method).toBe('PATCH');
-    expect(calls[0].url.endsWith(`/api/conversations/${CONVERSATION_ID}`)).toBe(true);
-    expect(JSON.parse(String(calls[0].body))).toEqual({
-      extra: { workspace: '/home/me/project' },
-    });
+    await expect(conversation.update.invoke({
+        conversation_id: parseConversationId(CONVERSATION_ID),
+        updates: { extra: { workspace: '/home/me/project' } as TChatConversation['extra'] },
+      })).rejects.toThrow('AgentSession binding is immutable');
+    expect(calls).toHaveLength(0);
   });
 
   test('still passes pinned/name through untouched', async () => {
@@ -67,5 +61,6 @@ describe('conversation update wire contract', () => {
     });
 
     expect(JSON.parse(String(calls[0].body))).toEqual({ name: 'renamed', pinned: true });
+    expect(calls[0].url.endsWith(`/api/agent-sessions/${CONVERSATION_ID}`)).toBe(true);
   });
 });

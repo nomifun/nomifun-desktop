@@ -14,10 +14,10 @@ const typeSource = readFileSync(
 );
 
 describe('agent metadata wire ID contract', () => {
-  test('keeps slash discovery on the authority that minted each session ID', () => {
+  test('routes slash discovery only through canonical AgentSession authority', () => {
     expect(bridgeSource.includes('/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/slash-commands')).toBe(true);
-    expect(bridgeSource.includes('/api/conversations/${p.conversation_id}/slash-commands')).toBe(true);
-    expect(bridgeSource.includes('/api/agent-sessions/${p.conversation_id}/slash-commands')).toBe(false);
+    expect(bridgeSource.includes('/api/conversations/${p.conversation_id}/slash-commands')).toBe(false);
+    expect(bridgeSource.includes('/api/agent-sessions/${p.conversation_id}/slash-commands')).toBe(true);
   });
 
   test('uses agent_id without a generic id compatibility path', () => {

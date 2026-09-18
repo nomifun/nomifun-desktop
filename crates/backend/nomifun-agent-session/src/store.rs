@@ -33,6 +33,7 @@ use crate::projector::{initial_head, payload_value, reduce_head, reduce_agent_me
 use crate::registry::EventRegistry;
 use crate::types::{
     AgentDeletionAuditRecord, AgentEffectDeleteBlocker, AgentEffectRecord, AgentEffectState,
+    AgentSessionListItem, AgentSessionListPage,
     AgentSessionAutomationConfig, AgentSessionDeleteBlockers, ChatCausalityFacts,
     ChatOperationClaimRequest, CheckpointAdmission, CommitAgentSessionAutomationConfig,
     CreateSessionRequest, DeleteResult, EffectEventRequest, EffectReconcileOutcome,
@@ -40,7 +41,7 @@ use crate::types::{
     ForkResult, MessageProjection, ResourceCleanupUncertainty, RuntimeAppendContext,
     RuntimeEventAppendResult, SessionCreateResult, SessionEventAppendResult, SessionEventPage,
     SessionHeadProjection, SessionObservation, SessionRehydrationInput, TurnReceipt,
-    TurnReceiptStatus,
+    TurnReceiptStatus, UpdateAgentSessionMetadata,
 };
 
 pub const MAX_INLINE_JSON_BYTES: usize = 64 * 1024;
@@ -454,10 +455,25 @@ impl AgentSessionStore {
             ));
         }
 
-        let message_event_id = EventId::from(format!("message:{}", idempotency_key.as_ref()));
         let message_key = IdempotencyKey::from(format!("{}:message", idempotency_key.as_ref()));
-        let turn_event_id = EventId::from(format!("turn-start:{}", idempotency_key.as_ref()));
         let turn_key = IdempotencyKey::from(format!("{}:turn", idempotency_key.as_ref()));
+        let admission = input.0.get("admission").cloned();
+        let turn_payload = |source_message_id: &EventId| {
+            let mut payload = json!({
+                "operation_id": operation_id,
+                "source_message_id": source_message_id,
+            });
+            if let Some(admission) = admission.as_ref() {
+                payload["admission"] = admission.clone();
+                if let Some(route_identity) = admission.get("route_identity") {
+                    payload["route_identity"] = route_identity.clone();
+                }
+                if let Some(snapshot) = admission.get("resolved_snapshot_ref") {
+                    payload["resolved_snapshot_ref"] = snapshot.clone();
+                }
+            }
+            payload
+        };
         let mut tx = self.begin_write_transaction().await?;
         require_live_session_tx(&mut tx, session_id.as_ref()).await?;
 
@@ -474,29 +490,24 @@ impl AgentSessionStore {
                 let message = event_from_row(message)?;
                 let turn = event_from_row(turn)?;
                 let expected_turn_payload = SessionEventPayloadRef::InlineJson(StrictJsonValue(
-                    json!({
-                        "operation_id": operation_id,
-                        "source_message_id": message_event_id,
-                    }),
+                    turn_payload(&message.event_id),
                 ));
                 if message.agent_session_id != *session_id
-                    || message.event_id != message_event_id
                     || message.producer_id != producer_id
                     || message.idempotency_key != message_key
                     || message.kind.0 != "message/user-accepted"
                     || message.kind_version != 1
-                    || message.correlation_id.as_ref() != message_event_id.as_ref()
+                    || message.correlation_id.as_ref() != message.event_id.as_ref()
                     || message.causation_event_id.is_none()
                     || message.payload
                         != SessionEventPayloadRef::InlineJson(input.clone())
                     || turn.agent_session_id != *session_id
-                    || turn.event_id != turn_event_id
                     || turn.producer_id != producer_id
                     || turn.idempotency_key != turn_key
                     || turn.kind.0 != "turn/started"
                     || turn.kind_version != 1
                     || turn.correlation_id.as_ref() != operation_id.as_ref()
-                    || turn.causation_event_id.as_ref() != Some(&message_event_id)
+                    || turn.causation_event_id.as_ref() != Some(&message.event_id)
                     || turn.payload != expected_turn_payload
                 {
                     return Err(SessionStoreError::IdempotencyConflict(
@@ -533,6 +544,8 @@ impl AgentSessionStore {
         }
 
         let boundary = latest_turn_boundary_event_tx(&mut tx, session_id.as_ref()).await?;
+        let message_event_id = new_event_id();
+        let turn_event_id = new_event_id();
         let message = SessionEventAppend {
             agent_session_id: session_id.clone(),
             event_id: message_event_id.clone(),
@@ -560,10 +573,9 @@ impl AgentSessionStore {
                 kind_version: 1,
                 correlation_id: CorrelationId::from(operation_id.as_ref().to_owned()),
                 causation_event_id: Some(message_event_id.clone()),
-                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-                    "operation_id": operation_id,
-                    "source_message_id": message_event_id,
-                }))),
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(turn_payload(
+                    &message_event_id,
+                ))),
             },
         };
         let message_result = self.append_event_tx(&mut tx, &message, None).await?;
@@ -1044,6 +1056,156 @@ impl AgentSessionStore {
         require_live_row(row)
     }
 
+    pub async fn session_created_at(
+        &self,
+        session_id: &AgentSessionId,
+    ) -> Result<i64, SessionStoreError> {
+        let row = session_row_by_id(&self.pool, session_id.as_ref()).await?;
+        if row.state != "live" {
+            return Err(SessionStoreError::Deleted(row.agent_session_id));
+        }
+        row.created_at.ok_or_else(|| {
+            SessionStoreError::InvalidSession(
+                "live AgentSession lost created_at".to_owned(),
+            )
+        })
+    }
+
+    /// List only live Sessions for one exact owner. Deleted and deleting rows
+    /// are never a history/archive fallback and therefore never surface here.
+    pub async fn list_live_sessions(
+        &self,
+        owner: &PrincipalRef,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<AgentSessionListPage, SessionStoreError> {
+        validate_principal(owner)?;
+        if limit == 0 || limit > 10_000 {
+            return Err(SessionStoreError::InvalidSession(format!(
+                "AgentSession list limit must be between 1 and 10000",
+            )));
+        }
+        if let Some(cursor) = cursor {
+            validate_uuidv7(cursor, "cursor")?;
+        }
+        let owner_json = serde_json::to_string(owner)?;
+        let mut tx = self.pool.begin().await?;
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_sessions WHERE owner_ref_json = ? AND state = 'live'",
+        )
+        .bind(&owner_json)
+        .fetch_one(&mut *tx)
+        .await?;
+        let fetch_limit = i64::from(limit) + 1;
+        let rows = match cursor {
+            Some(cursor) => {
+                sqlx::query_as::<_, StoredSessionRow>(
+                    "SELECT agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                            agent_binding_json, remote_binding_id, remote_binding_version, \
+                            parent_agent_session_id, fork_base_payload_id, next_seq, created_at, deleted_at \
+                     FROM agent_sessions WHERE owner_ref_json = ? AND state = 'live' \
+                       AND agent_session_id < ? \
+                     ORDER BY agent_session_id DESC LIMIT ?",
+                )
+                .bind(&owner_json)
+                .bind(cursor)
+                .bind(fetch_limit)
+                .fetch_all(&mut *tx)
+                .await?
+            }
+            None => {
+                sqlx::query_as::<_, StoredSessionRow>(
+                    "SELECT agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                            agent_binding_json, remote_binding_id, remote_binding_version, \
+                            parent_agent_session_id, fork_base_payload_id, next_seq, created_at, deleted_at \
+                     FROM agent_sessions WHERE owner_ref_json = ? AND state = 'live' \
+                     ORDER BY agent_session_id DESC LIMIT ?",
+                )
+                .bind(&owner_json)
+                .bind(fetch_limit)
+                .fetch_all(&mut *tx)
+                .await?
+            }
+        };
+        let has_more = rows.len() > limit as usize;
+        let mut items = Vec::with_capacity(rows.len().min(limit as usize));
+        for row in rows.into_iter().take(limit as usize) {
+            let created_at = row.created_at.ok_or_else(|| {
+                SessionStoreError::InvalidSession(
+                    "live AgentSession lost created_at".to_owned(),
+                )
+            })?;
+            let session = live_from_row(row)?;
+            let head = head_by_id_tx(&mut tx, session.agent_session_id.as_ref()).await?;
+            items.push(AgentSessionListItem {
+                session,
+                head,
+                created_at,
+            });
+        }
+        let next_cursor = has_more
+            .then(|| items.last().map(|item| item.session.agent_session_id.as_ref().to_owned()))
+            .flatten();
+        tx.commit().await?;
+        Ok(AgentSessionListPage {
+            items,
+            total: as_u64(total, "AgentSession list total")?,
+            has_more,
+            next_cursor,
+        })
+    }
+
+    pub async fn update_session_metadata(
+        &self,
+        owner: &PrincipalRef,
+        session_id: &AgentSessionId,
+        update: UpdateAgentSessionMetadata,
+    ) -> Result<AgentSessionLiveRecord, SessionStoreError> {
+        validate_principal(owner)?;
+        if update.title.is_none() && update.archived.is_none() && update.pinned.is_none() {
+            return Err(SessionStoreError::InvalidSession(
+                "AgentSession metadata update is empty".to_owned(),
+            ));
+        }
+        let title = update
+            .title
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_owned);
+        if title.as_ref().is_some_and(|title| title.is_empty() || title.len() > 200) {
+            return Err(SessionStoreError::InvalidSession(
+                "AgentSession title must contain 1-200 UTF-8 bytes".to_owned(),
+            ));
+        }
+        let mut tx = self.begin_write_transaction().await?;
+        let row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        require_owner(&row, owner)?;
+        if row.state != "live" {
+            return Err(SessionStoreError::Deleted(row.agent_session_id));
+        }
+        let result = sqlx::query(
+            "UPDATE agent_sessions SET \
+                title = COALESCE(?, title), \
+                archived = COALESCE(?, archived), \
+                pinned = COALESCE(?, pinned) \
+             WHERE agent_session_id = ? AND state = 'live'",
+        )
+        .bind(title)
+        .bind(update.archived.map(i64::from))
+        .bind(update.pinned.map(i64::from))
+        .bind(session_id.as_ref())
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(SessionStoreError::Conflict(
+                "AgentSession metadata update lost its live row".to_owned(),
+            ));
+        }
+        let updated = live_session_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
     pub async fn active_capability_ids(
         &self,
         session_id: &AgentSessionId,
@@ -1313,6 +1475,40 @@ impl AgentSessionStore {
         row.map(effect_from_row).transpose()
     }
 
+    pub async fn has_unsettled_effects(
+        &self,
+        session_id: &AgentSessionId,
+    ) -> Result<bool, SessionStoreError> {
+        require_live_session(&self.pool, session_id.as_ref()).await?;
+        let unsettled: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM agent_effects \
+             WHERE session_id = ? AND state IN ('pending', 'unknown'))",
+        )
+        .bind(session_id.as_ref())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(unsettled != 0)
+    }
+
+    pub async fn list_effects(
+        &self,
+        session_id: &AgentSessionId,
+    ) -> Result<Vec<AgentEffectRecord>, SessionStoreError> {
+        require_live_session(&self.pool, session_id.as_ref()).await?;
+        let rows = sqlx::query_as::<_, StoredEffectRow>(
+            "SELECT effect_id, session_id, turn_id, operation_id, owner_domain, \
+                    capability_module, action_id, resource_binding_id, resource_key, \
+                    input_digest, strategy, state, bounded_observation_json, \
+                    started_event_id, terminal_event_id, created_at, settled_at \
+             FROM agent_effects WHERE session_id = ? \
+             ORDER BY created_at DESC, effect_id DESC",
+        )
+        .bind(session_id.as_ref())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(effect_from_row).collect()
+    }
+
     pub async fn effect_causation_event_id(
         &self,
         session_id: &AgentSessionId,
@@ -1573,6 +1769,57 @@ impl AgentSessionStore {
         let messages = Self::messages_after_tx(&mut tx, session_id, after_seq, head.last_seq).await?;
         tx.commit().await?;
         Ok(messages)
+    }
+
+    pub async fn messages_before(
+        &self,
+        session_id: &AgentSessionId,
+        before_seq: Option<u64>,
+        limit: u32,
+    ) -> Result<(Vec<MessageProjection>, bool, u64), SessionStoreError> {
+        if limit == 0 || limit > MAX_EVENT_PAGE_SIZE {
+            return Err(SessionStoreError::InvalidEvent(format!(
+                "message projection page limit must be between 1 and {MAX_EVENT_PAGE_SIZE}",
+            )));
+        }
+        let mut tx = self.pool.begin().await?;
+        require_live_session_tx(&mut tx, session_id.as_ref()).await?;
+        let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        let boundary = before_seq.unwrap_or(head.last_seq.saturating_add(1));
+        if boundary > head.last_seq.saturating_add(1) {
+            return Err(SessionStoreError::InvalidEvent(
+                "message projection cursor is ahead of the committed AgentSession sequence"
+                    .to_owned(),
+            ));
+        }
+        let rows = sqlx::query_as::<_, StoredProjectionRow>(
+            "SELECT session_id, projection_id, first_seq, last_seq, presentation_intent, \
+                    projection_json, semantic_digest \
+             FROM agent_messages \
+             WHERE session_id = ? AND first_seq < ? \
+               AND presentation_intent IN ('message', 'tool') \
+             ORDER BY first_seq DESC, projection_id DESC LIMIT ?",
+        )
+        .bind(session_id.as_ref())
+        .bind(as_i64(boundary, "before_seq")?)
+        .bind(i64::from(limit) + 1)
+        .fetch_all(&mut *tx)
+        .await?;
+        let has_more = rows.len() > limit as usize;
+        let messages = rows
+            .into_iter()
+            .take(limit as usize)
+            .map(projection_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let total = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM agent_messages WHERE session_id = ? \
+               AND presentation_intent IN ('message', 'tool')",
+        )
+        .bind(session_id.as_ref())
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok((messages, has_more, as_u64(total, "message projection total")?))
     }
 
     async fn messages_after_tx(

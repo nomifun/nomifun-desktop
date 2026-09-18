@@ -1104,21 +1104,18 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("terminal_scrollback", "terminal_id" => "terminal_sessions", "terminal_id", false, "idx_terminal_scrollback_terminal_id", Cascade),
     text_ref!("remote_bindings", "owner_user_id" => "users", "user_id", false, "idx_remote_bindings_owner_user_id", Cascade),
     text_ref!("nomi_remote_sessions", "owner_user_id" => "users", "user_id", false, "idx_nomi_remote_sessions_owner_user_id", Cascade),
-    text_ref!("nomi_remote_sessions", "agent_session_id" => "conversations", "conversation_id", false, "idx_nomi_remote_sessions_agent_session_id", Cascade)
-        .with_aggregate_scope("parent.user_id = child.owner_user_id"),
+    text_ref!("nomi_remote_sessions", "agent_session_id" => "agent_sessions", "agent_session_id", false, "idx_nomi_remote_sessions_agent_session_id", Cascade),
     text_ref!("nomi_remote_sessions", "remote_binding_id" => "remote_bindings", "remote_binding_id", false, "idx_nomi_remote_sessions_remote_binding_id", KeepHistory)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
     text_ref!("nomi_remote_events", "agent_session_id" => "nomi_remote_sessions", "agent_session_id", false, "idx_nomi_remote_events_agent_session_id_seq", Cascade),
     text_ref!("nomi_wave1_memory_action_receipts", "owner_user_id" => "users", "user_id", false, "idx_nomi_wave1_memory_receipts_owner_user_id", KeepHistory)
         .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
-    text_ref!("nomi_wave1_memory_action_receipts", "agent_session_id" => "conversations", "conversation_id", false, "idx_nomi_wave1_memory_receipts_agent_session_id", KeepHistory)
-        .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent)
-        .with_aggregate_scope("parent.user_id = child.owner_user_id"),
+    text_ref!("nomi_wave1_memory_action_receipts", "agent_session_id" => "agent_sessions", "agent_session_id", false, "idx_nomi_wave1_memory_receipts_agent_session_id", KeepHistory)
+        .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
     text_ref!("nomi_wave4_action_receipts", "owner_user_id" => "users", "user_id", false, "idx_nomi_wave4_receipts_owner_user_id", KeepHistory)
         .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
-    text_ref!("nomi_wave4_action_receipts", "agent_session_id" => "conversations", "conversation_id", false, "idx_nomi_wave4_receipts_agent_session_id", KeepHistory)
-        .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent)
-        .with_aggregate_scope("parent.user_id = child.owner_user_id"),
+    text_ref!("nomi_wave4_action_receipts", "agent_session_id" => "agent_sessions", "agent_session_id", false, "idx_nomi_wave4_receipts_agent_session_id", KeepHistory)
+        .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
     text_ref!("nomi_agent_presets", "owner_user_id" => "users", "user_id", false, "idx_nomi_agent_presets_owner_user_id", Cascade),
     text_ref!("nomi_agent_preset_revisions", "preset_id" => "nomi_agent_presets", "preset_id", false, "idx_nomi_agent_preset_revisions_preset_id", Restrict),
     text_ref!("nomi_agent_preset_revisions", "created_by" => "users", "user_id", false, "idx_nomi_agent_preset_revisions_created_by", KeepHistory),

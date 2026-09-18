@@ -80,7 +80,7 @@ describe('conversation creation admission and draft behavior', () => {
         data = { agent_session_id: conversationId };
       }
       else if (path.endsWith('/creation-tasks')) data = { message_id: messageId, tasks: [{ creation_task_id: 'task', owner: { kind: 'conversation_turn', conversation_id: conversationId, message_id: messageId }, status: 'queued', result_asset_ids: [] }] };
-      else if (path.endsWith(`/api/conversations/${conversationId}`)) data = { conversation_id: conversationId, name: '一只橘猫', type: 'nomi', created_at: 1, modified_at: 2, extra: { workspace: '' } };
+      else if (path.endsWith(`/api/agent-sessions/${conversationId}/projection`)) data = { conversation_id: conversationId, name: '一只橘猫', type: 'nomi', created_at: 1, modified_at: 2, extra: { workspace: '' } };
       else throw new Error(`Unexpected request ${path}`);
       return new Response(JSON.stringify({ success: true, data }), { headers: { 'Content-Type': 'application/json' } });
     }) as typeof fetch;
@@ -102,10 +102,8 @@ describe('conversation creation admission and draft behavior', () => {
     for (const call of presetCalls) expect(call.body).not.toHaveProperty('model');
     expect(calls.find(call => call.url.endsWith('/creation-tasks'))?.body).toMatchObject({ preset_id: presetId, provider_id: providerId, model: 'image-exact', capability, params: { prompt: '一只橘猫' } });
     const collaborationIndex = calls.findIndex(call => call.body.execution_model_pool);
-    if (carryCollaboration) {
-      expect(calls[collaborationIndex].body).toMatchObject(collaboration);
-      expect(collaborationIndex).toBeLessThan(calls.findIndex(call => call.url.endsWith('/creation-tasks')));
-    } else expect(collaborationIndex).toBe(-1);
+    expect(collaborationIndex).toBe(-1);
+    if (carryCollaboration) expect(collaboration.execution_model_pool.mode).toBe('range');
     expect(calls.some(call => call.url.endsWith('/messages') || call.url.includes('switch-preset'))).toBe(false);
   });
 

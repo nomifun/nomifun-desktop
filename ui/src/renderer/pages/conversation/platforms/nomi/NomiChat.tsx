@@ -10,7 +10,6 @@ import type { ConversationContextValue } from '@/renderer/hooks/context/Conversa
 import { ConversationProvider } from '@/renderer/hooks/context/ConversationContext';
 import FlexFullContainer from '@renderer/components/layout/FlexFullContainer';
 import MessageList from '@renderer/pages/conversation/Messages/MessageList';
-import { ConversationArtifactProvider } from '@renderer/pages/conversation/Messages/artifacts';
 import {
   MessageListLoadingProvider,
   MessageListProvider,
@@ -104,8 +103,7 @@ const NomiChat: React.FC<{
 
   return (
     <ConversationProvider value={conversationValue}>
-      <ConversationArtifactProvider conversation_id={conversation_id}>
-        <ConversationCreationTasksProvider conversationId={conversation_id}>
+      <ConversationCreationTasksProvider conversationId={conversation_id}>
         <div data-conversation-layout className='flex-1 flex flex-col px-20px min-h-0'>
           <FlexFullContainer>
             <MessageList
@@ -131,8 +129,7 @@ const NomiChat: React.FC<{
             />
           )}
         </div>
-        </ConversationCreationTasksProvider>
-      </ConversationArtifactProvider>
+      </ConversationCreationTasksProvider>
     </ConversationProvider>
   );
 };

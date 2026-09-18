@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { parseConversationId, parseMessageId } from '@/common/types/ids';
+import { parseConversationId } from '@/common/types/ids';
 import { conversation } from './ipcBridge';
 
 const source = readFileSync(new URL('./ipcBridge.ts', import.meta.url), 'utf8');
@@ -16,7 +16,7 @@ const sendMessageSource = source.slice(sendStart, sendEnd);
 const realFetch = globalThis.fetch;
 
 describe('conversation send-message wire contract', () => {
-  test('keeps idempotency metadata out of the strict JSON DTO', () => {
+  test('uses the canonical AgentSession turn DTO', () => {
     expect(sendStart).toBeGreaterThan(-1);
     expect(sendEnd).toBeGreaterThan(sendStart);
     expect(sendMessageSource.includes('content: p.input')).toBe(true);
@@ -24,7 +24,9 @@ describe('conversation send-message wire contract', () => {
     expect(sendMessageSource.includes('inject_skills: p.inject_skills')).toBe(true);
     expect(sendMessageSource.includes('initial_only:')).toBe(false);
     expect(sendMessageSource.includes('loading_id:')).toBe(false);
-    expect(sendMessageSource.includes('idempotency_key:')).toBe(false);
+    expect(sendMessageSource.includes('idempotency_key: idempotencyKey')).toBe(true);
+    expect(sendMessageSource.includes('input: {')).toBe(true);
+    expect(sendMessageSource.includes('/api/agent-sessions/${p.conversation_id}/turns')).toBe(true);
   });
 
   test('requires idempotency_key and never falls back to a body or loading id', () => {
@@ -52,7 +54,7 @@ describe('conversation send-message wire contract', () => {
             JSON.stringify({
               success: true,
               data: {
-                msg_id: msgId,
+                message_id: msgId,
                 replayed: true,
                 completed: true,
                 result_ok: false,
@@ -87,16 +89,15 @@ describe('conversation send-message wire contract', () => {
     }
   });
 
-  test('preserves the same replay contract for steer and edit-resubmit', async () => {
+  test('maps the canonical steer receipt without a legacy edit mutation', async () => {
     const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000207');
-    const targetMessageId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000208');
     const canonicalMessageId = '0190f5fe-7c00-7a00-8000-000000000209';
     const expected = {
       msg_id: canonicalMessageId,
       replayed: true,
-      completed: true,
-      result_ok: true,
-      result_text: 'already delivered',
+      completed: false,
+      result_ok: null,
+      result_text: null,
       result_error: null,
       result_error_code: null,
       result_error_retryable: null,
@@ -107,7 +108,7 @@ describe('conversation send-message wire contract', () => {
           new Response(
             JSON.stringify({
               success: true,
-              data: expected,
+              data: { message_id: canonicalMessageId, duplicate: true },
             }),
             { status: 202, headers: { 'Content-Type': 'application/json' } }
           )
@@ -118,68 +119,8 @@ describe('conversation send-message wire contract', () => {
         conversation_id: conversationId,
         idempotency_key: '0190f5fe-7c00-7a00-8000-000000000210',
       });
-      const editResult = await conversation.editResubmit.invoke({
-        input: 'retry edit',
-        conversation_id: conversationId,
-        msg_id: targetMessageId,
-        idempotency_key: '0190f5fe-7c00-7a00-8000-000000000211',
-      });
-
       expect(steerResult).toEqual(expected);
-      expect(editResult).toEqual(expected);
-    } finally {
-      globalThis.fetch = realFetch;
-    }
-  });
-
-  test('continues a truncated source through its dedicated bodyless idempotent route', async () => {
-    const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000212');
-    const sourceMessageId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000213');
-    const idempotencyKey = '0190f5fe-7c00-7a00-8000-000000000214';
-    try {
-      globalThis.fetch = ((input: URL | RequestInfo, init?: RequestInit) => {
-        expect(
-          String(input).includes(
-            `/api/conversations/${conversationId}/messages/${sourceMessageId}/continue-truncated`
-          )
-        ).toBe(true);
-        expect(init?.method).toBe('POST');
-        expect(new Headers(init?.headers).get('Idempotency-Key')).toBe(idempotencyKey);
-        expect(init?.body).toBeUndefined();
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({
-              success: true,
-              data: {
-                msg_id: '0190f5fe-7c00-7a00-8000-000000000215',
-                replayed: false,
-                completed: false,
-                result_ok: null,
-                result_text: null,
-                result_error: null,
-              },
-            }),
-            { status: 202, headers: { 'Content-Type': 'application/json' } }
-          )
-        );
-      }) as unknown as typeof fetch;
-
-      const result = await conversation.continueTruncated.invoke({
-        conversation_id: conversationId,
-        source_message_id: sourceMessageId,
-        idempotency_key: idempotencyKey,
-      });
-
-      expect(result).toEqual({
-        msg_id: '0190f5fe-7c00-7a00-8000-000000000215',
-        replayed: false,
-        completed: false,
-        result_ok: null,
-        result_text: null,
-        result_error: null,
-        result_error_code: null,
-        result_error_retryable: null,
-      });
+      expect(source.includes('editResubmit:')).toBe(false);
     } finally {
       globalThis.fetch = realFetch;
     }
@@ -193,7 +134,7 @@ describe('conversation send-message wire contract', () => {
           new Response(
             JSON.stringify({
               success: true,
-              data: { msg_id: msgId },
+              data: { message_id: msgId, replayed: true, completed: false },
             }),
             { status: 202, headers: { 'Content-Type': 'application/json' } }
           )

@@ -1,30 +1,44 @@
-//! Bounded engine-neutral journal on the existing Conversation delivery owner.
-//! Event codecs belong to engines; this component owns durable sequencing,
-//! write lifetime and one-shot model-operation claims, not effect authority.
-use std::sync::{
+//! Engine-neutral journal backed exclusively by the canonical Agent Store.
+//!
+//! Runtime-private records are durable `runtime/progress-recorded` facts.
+//! User-visible assistant text and Turn terminals are projected from the same
+//! ordered event stream; no Conversation delivery/runtime table participates.
+
+use std::{
+    collections::BTreeMap,
+    sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
+    },
 };
 
 use async_trait::async_trait;
-use nomifun_agent_contracts::ResolvedSnapshotRef;
-use nomifun_chat_model_broker::{
-    ChatCausality, ChatCausalityGate, ChatModelError, ChatModelErrorCode, ChatRetryDirective,
+use nomifun_agent_contracts::{
+    AgentSessionId, ArtifactId, ChatRouteIdentity, CorrelationId, EventId,
+    EventProducerId, IdempotencyKey, OperationId, ResolvedSnapshotRef,
+    SemanticSessionEventDraft, SessionEventAppend, SessionEventKind,
+    SessionEventPayloadRef, SessionPayloadBody, SessionPayloadRecord,
+    StrictJsonValue, canonical_json_bytes, digest_bytes,
 };
+use nomifun_agent_session::{
+    AgentSessionStore, ChatOperationClaimRequest, TurnReceiptStatus,
+};
+use nomifun_chat_model_broker::{
+    ChatCausality, ChatCausalityGate, ChatModelError, ChatModelErrorCode,
+    ChatRetryDirective,
+};
+use nomifun_coding_engine::CodingEngineEvent;
 use nomifun_common::AppError;
-use nomifun_db::{SqlitePool, sqlx};
+use serde_json::{Value, json};
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use super::engine_session_host::EngineTurnReceipt;
 
-/// The trusted host classifies a write. Cleanup/Terminal reserve journal space
-/// but do NOT certify cleanup; only actual effect owners can supply that proof.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EngineJournalWrite {
     Progress,
-    /// A result of an already admitted operation. Does not reopen progress
-    /// after cancellation or itself assert that a process tree has exited.
     Settlement,
     Cleanup,
     Terminal,
@@ -32,22 +46,27 @@ pub enum EngineJournalWrite {
 
 #[derive(Default)]
 struct Cursor {
-    sequence: i64,
+    sequence: u64,
     bytes: usize,
     draining: bool,
     terminal: bool,
     uncertain: bool,
+    assistant_parts: u64,
+    assistant_text: Vec<u8>,
+    last_assistant_event_id: Option<EventId>,
+    assistant_message_id: Option<String>,
+    tool_message_ids: BTreeMap<String, String>,
 }
 
 pub(super) struct Journal {
-    pool: SqlitePool,
+    store: AgentSessionStore,
     user: String,
-    conversation: String,
-    operation: String,
-    root: String,
-    epoch: i64,
+    session: AgentSessionId,
+    operation: OperationId,
+    root: EventId,
+    generation: i64,
     snapshot: ResolvedSnapshotRef,
-    route: Option<nomifun_chat_model_broker::ChatRouteSelection>,
+    route: Option<ChatRouteIdentity>,
     cancellation: CancellationToken,
     cursor: Mutex<Cursor>,
     sequence: AtomicU64,
@@ -62,79 +81,132 @@ fn failure(message: impl std::fmt::Display) -> AppError {
     AppError::Conflict(format!("Engine journal: {message}"))
 }
 
+fn canonical_event_payload(
+    session_id: &AgentSessionId,
+    value: Value,
+) -> Result<(SessionEventPayloadRef, Option<SessionPayloadRecord>), AppError> {
+    let bytes = canonical_json_bytes(&value).map_err(failure)?;
+    if bytes.len() <= nomifun_agent_session::MAX_INLINE_JSON_BYTES {
+        return Ok((
+            SessionEventPayloadRef::InlineJson(StrictJsonValue(value)),
+            None,
+        ));
+    }
+    if bytes.len() > nomifun_agent_session::MAX_SINGLE_PAYLOAD_BYTES {
+        return Err(failure(format!(
+            "record exceeds canonical payload limit of {} bytes",
+            nomifun_agent_session::MAX_SINGLE_PAYLOAD_BYTES,
+        )));
+    }
+    let digest = digest_bytes(&bytes);
+    // `payload_id` is global while payload ownership is Session-scoped.
+    let payload_id = ArtifactId::from(format!(
+        "runtime-progress:{}:{}",
+        session_id.as_ref(),
+        digest.as_ref()
+    ));
+    let payload = SessionPayloadRecord {
+        payload_id: payload_id.clone(),
+        agent_session_id: session_id.clone(),
+        media_type: "application/json".to_owned(),
+        byte_len: bytes.len() as u64,
+        digest,
+        body: SessionPayloadBody::Json(StrictJsonValue(value)),
+    };
+    Ok((SessionEventPayloadRef::Stored(payload_id), Some(payload)))
+}
+
 impl EngineTurnJournal {
-    /// A resource read must follow a model operation already claimed by the
-    /// Broker. This does not claim it again or grant any resource capability.
-    pub(super) async fn require_claimed_model(&self, causality: &ChatCausality) -> Result<(), AppError> {
+    pub(super) async fn require_claimed_model(
+        &self,
+        causality: &ChatCausality,
+    ) -> Result<(), AppError> {
         let journal = &self.0;
         let cursor = journal.cursor.lock().await;
-        if cursor.uncertain || cursor.terminal || cursor.draining || journal.cancellation.is_cancelled()
-            || causality.agent_session_id.as_ref() != journal.conversation
-            || causality.turn_operation_id.as_ref() != journal.operation
-            || causality.causation_event_id.as_ref() != journal.root
+        if cursor.uncertain
+            || cursor.terminal
+            || cursor.draining
+            || journal.cancellation.is_cancelled()
+            || causality.agent_session_id != journal.session
+            || causality.turn_operation_id != journal.operation
+            || causality.causation_event_id != journal.root
             || causality.resolved_snapshot_ref != journal.snapshot
-            || Some(&causality.route_identity) != journal.route.as_ref() {
+            || Some(&causality.route_identity) != journal.route.as_ref()
+        {
             return Err(failure("resource request differs from the live model turn"));
         }
-        let (valid,): (i64,) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM conversations c JOIN conversation_delivery_receipts r ON r.operation_id = c.active_turn_operation_id \
-            WHERE c.conversation_id = ? AND c.user_id = ? AND c.admission_epoch = ? AND c.active_turn_operation_id = ? AND c.status = 'running' \
-            AND r.user_id = c.user_id AND r.conversation_id = c.conversation_id AND r.message_id = ? AND r.kind = 'turn' AND r.status = 'accepted' \
-            AND EXISTS(SELECT 1 FROM conversation_runtime_events e WHERE e.conversation_id = c.conversation_id AND e.turn_operation_id = r.operation_id AND e.model_operation_id = ? AND e.model_claimed = 1))")
-            .bind(&journal.conversation).bind(&journal.user).bind(journal.epoch).bind(&journal.operation).bind(&journal.root)
-            .bind(causality.operation_id.as_ref()).fetch_one(&journal.pool).await.map_err(|_| failure("resource model authority unavailable"))?;
-        if valid != 1 { return Err(failure("resource request has no claimed model operation")); }
+        drop(cursor);
+        let facts = journal
+            .store
+            .chat_causality_facts(&journal.session, &journal.operation)
+            .await
+            .map_err(failure)?;
+        if facts.head.status != "running"
+            || facts.head.active_turn_id.as_deref() != Some(journal.operation.as_ref())
+            || !facts.operation_ids.contains(causality.operation_id.as_ref())
+            || journal
+                .store
+                .has_unsettled_effects(&journal.session)
+                .await
+                .map_err(failure)?
+        {
+            return Err(failure("resource request has no claimed model operation"));
+        }
         Ok(())
     }
 
     pub(super) fn validate_receipt(&self, receipt: &EngineTurnReceipt) -> Result<(), AppError> {
-        if self.0.conversation != receipt.session().session().conversation_id
-            || self.0.operation != receipt.operation_id()
+        if self.0.session.as_ref() != receipt.session().session().conversation_id
+            || self.0.operation.as_ref() != receipt.operation_id()
         {
             return Err(failure("journal belongs to another resource turn"));
         }
         Self::from_existing(self.0.clone(), receipt).map(|_| ())
     }
-    /// Identity check only. The actual live-turn fence is the subsequent
-    /// Progress insert; Kernel still independently admits the capability.
+
     pub(super) fn matches_tool(
         &self,
         invocation: &nomifun_engine_core::EngineToolInvocation,
     ) -> bool {
-        invocation.agent_session_id.as_ref() == self.0.conversation
+        invocation.agent_session_id == self.0.session
             && invocation.principal.principal_kind == "user"
             && invocation.principal.principal_id == self.0.user
             && invocation.resolved_snapshot_ref == self.0.snapshot
-            && invocation.turn_operation_id.as_ref() == self.0.operation
+            && invocation.turn_operation_id == self.0.operation
     }
 
     pub(super) fn downgrade(&self) -> std::sync::Weak<Journal> {
         Arc::downgrade(&self.0)
     }
+
     pub(super) fn from_existing(
         journal: Arc<Journal>,
         receipt: &EngineTurnReceipt,
     ) -> Result<Self, AppError> {
         if journal.user != receipt.session().principal().principal_id
-            || journal.epoch != receipt.admission_epoch()
-            || journal.root != receipt.root_message_id()
+            || journal.generation != receipt.admission_epoch()
+            || journal.root.as_ref() != receipt.root_message_id()
             || journal.snapshot != receipt.session().snapshot().snapshot_ref
         {
             return Err(failure("receipt changed for existing journal"));
         }
         Ok(Self(journal))
     }
+
     pub(super) fn new(
-        pool: SqlitePool,
+        store: AgentSessionStore,
         receipt: &EngineTurnReceipt,
         cancellation: CancellationToken,
     ) -> Self {
         Self(Arc::new(Journal {
-            pool,
+            store,
             user: receipt.session().principal().principal_id.clone(),
-            conversation: receipt.session().session().conversation_id.clone(),
-            operation: receipt.operation_id().into(),
-            root: receipt.root_message_id().into(),
-            epoch: receipt.admission_epoch(),
+            session: AgentSessionId::from(
+                receipt.session().session().conversation_id.clone(),
+            ),
+            operation: OperationId::from(receipt.operation_id().to_owned()),
+            root: EventId::from(receipt.root_message_id().to_owned()),
+            generation: receipt.admission_epoch(),
             snapshot: receipt.session().snapshot().snapshot_ref.clone(),
             route: receipt
                 .session()
@@ -150,14 +222,405 @@ impl EngineTurnJournal {
         }))
     }
 
-    /// Last committed sequence. This observation alone grants no authority.
     pub fn sequence(&self) -> u64 {
         self.0.sequence.load(Ordering::Acquire)
     }
 
-    /// The write task survives a dropped waiter. SQL, sequence accounting and
-    /// phase updates complete together under the journal lock. Admission of an
-    /// effect must await success; starting this write is not sufficient.
+    async fn append_progress(
+        journal: &Journal,
+        cursor: &Cursor,
+        event: &Value,
+    ) -> Result<(), AppError> {
+        let next = cursor.sequence.saturating_add(1);
+        let value = json!({
+            "runtime_binding_id": format!("nomi:{}", journal.session.as_ref()),
+            "producer_seq": next,
+            "event": event,
+        });
+        let (payload_ref, payload) = canonical_event_payload(&journal.session, value)?;
+        let identity = format!(
+            "runtime-progress:{}:{}:{next}",
+            journal.session.as_ref(),
+            journal.operation.as_ref(),
+        );
+        let append = SessionEventAppend {
+            agent_session_id: journal.session.clone(),
+            event_id: EventId::from(identity.clone()),
+            producer_id: EventProducerId::from("runtime_supervisor"),
+            idempotency_key: IdempotencyKey::from(identity),
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: SemanticSessionEventDraft {
+                kind: SessionEventKind("runtime/progress-recorded".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(journal.operation.as_ref().to_owned()),
+                causation_event_id: Some(journal.root.clone()),
+                payload: payload_ref,
+            },
+        };
+        journal
+            .store
+            .append_event_with_payload(&append, payload.as_ref())
+            .await
+            .map_err(failure)?;
+        Ok(())
+    }
+
+    async fn append_assistant_part(
+        journal: &Journal,
+        cursor: &mut Cursor,
+        text: &str,
+    ) -> Result<(), AppError> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let part = cursor.assistant_parts.saturating_add(1);
+        let message_id = cursor
+            .assistant_message_id
+            .get_or_insert_with(|| Uuid::now_v7().to_string())
+            .clone();
+        let identity = format!(
+            "assistant-part:{}:{}:{part}",
+            journal.session.as_ref(),
+            journal.operation.as_ref(),
+        );
+        let event_id = EventId::from(identity.clone());
+        let append = SessionEventAppend {
+            agent_session_id: journal.session.clone(),
+            event_id: event_id.clone(),
+            producer_id: EventProducerId::from("runtime_supervisor"),
+            idempotency_key: IdempotencyKey::from(identity),
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: SemanticSessionEventDraft {
+                kind: SessionEventKind("message/content-part".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(message_id),
+                causation_event_id: Some(
+                    cursor
+                        .last_assistant_event_id
+                        .clone()
+                        .unwrap_or_else(|| journal.root.clone()),
+                ),
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "content": text,
+                }))),
+            },
+        };
+        journal.store.append_event(&append).await.map_err(failure)?;
+        cursor.assistant_parts = part;
+        cursor.assistant_text.extend_from_slice(text.as_bytes());
+        cursor.last_assistant_event_id = Some(event_id);
+        Ok(())
+    }
+
+    async fn append_tool_projection(
+        journal: &Journal,
+        cursor: &mut Cursor,
+        value: &Value,
+    ) -> Result<(), AppError> {
+        match value.get("event").and_then(Value::as_str) {
+            Some("host_tool_dispatch") => {
+                let dispatch = value.get("dispatch").and_then(Value::as_object).ok_or_else(|| {
+                    failure("host tool dispatch has no canonical payload")
+                })?;
+                let operation = dispatch
+                    .get("operation_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| failure("host tool dispatch has no operation_id"))?;
+                let call_id = dispatch
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| failure("host tool dispatch has no call_id"))?;
+                let capability_id = dispatch
+                    .get("capability_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| failure("host tool dispatch has no capability_id"))?;
+                let action_id = dispatch
+                    .get("action_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| failure("host tool dispatch has no action_id"))?;
+                let identity = format!(
+                    "tool-call:{}:{operation}",
+                    journal.session.as_ref(),
+                );
+                let projection_id = cursor
+                    .tool_message_ids
+                    .entry(operation.to_owned())
+                    .or_insert_with(|| Uuid::now_v7().to_string())
+                    .clone();
+                journal
+                    .store
+                    .append_event(&SessionEventAppend {
+                        agent_session_id: journal.session.clone(),
+                        event_id: EventId::from(identity.clone()),
+                        producer_id: EventProducerId::from("runtime_supervisor"),
+                        idempotency_key: IdempotencyKey::from(identity),
+                        runtime_binding_id: None,
+                        runtime_producer_seq: None,
+                        semantic_event: SemanticSessionEventDraft {
+                            kind: SessionEventKind("tool/call-started".to_owned()),
+                            kind_version: 1,
+                            correlation_id: CorrelationId::from(projection_id),
+                            causation_event_id: Some(journal.root.clone()),
+                            payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                                "operation_id": operation,
+                                "call_id": call_id,
+                                "capability_id": capability_id,
+                                "action_id": action_id,
+                                "name": dispatch.get("model_name").cloned().unwrap_or(Value::Null),
+                            }))),
+                        },
+                    })
+                    .await
+                    .map_err(failure)?;
+            }
+            Some("host_tool_settled") => {
+                let operation = value
+                    .get("operation_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| failure("host tool settlement has no operation_id"))?;
+                let call_id = value
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| failure("host tool settlement has no call_id"))?;
+                let identity = format!(
+                    "tool-result:{}:{operation}",
+                    journal.session.as_ref(),
+                );
+                let projection_id = cursor
+                    .tool_message_ids
+                    .get(operation)
+                    .cloned()
+                    .ok_or_else(|| failure("host tool settlement has no admitted projection"))?;
+                journal
+                    .store
+                    .append_event(&SessionEventAppend {
+                        agent_session_id: journal.session.clone(),
+                        event_id: EventId::from(identity.clone()),
+                        producer_id: EventProducerId::from("runtime_supervisor"),
+                        idempotency_key: IdempotencyKey::from(identity),
+                        runtime_binding_id: None,
+                        runtime_producer_seq: None,
+                        semantic_event: SemanticSessionEventDraft {
+                            kind: SessionEventKind("tool/result-recorded".to_owned()),
+                            kind_version: 1,
+                            correlation_id: CorrelationId::from(projection_id),
+                            causation_event_id: Some(EventId::from(format!(
+                                "tool-call:{}:{operation}",
+                                journal.session.as_ref(),
+                            ))),
+                            payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                                "operation_id": operation,
+                                "call_id": call_id,
+                                "output": value.get("result").cloned().unwrap_or(Value::Null),
+                                "error": value.get("error").cloned().unwrap_or(Value::Null),
+                            }))),
+                        },
+                    })
+                    .await
+                    .map_err(failure)?;
+            }
+            Some("host_resource_dispatch") => {
+                let operation = value
+                    .get("operation_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| failure("host resource dispatch has no operation_id"))?;
+                let call_id = value
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| failure("host resource dispatch has no call_id"))?;
+                let identity = format!(
+                    "tool-call:{}:{operation}",
+                    journal.session.as_ref(),
+                );
+                let projection_id = cursor
+                    .tool_message_ids
+                    .entry(operation.to_owned())
+                    .or_insert_with(|| Uuid::now_v7().to_string())
+                    .clone();
+                journal
+                    .store
+                    .append_event(&SessionEventAppend {
+                        agent_session_id: journal.session.clone(),
+                        event_id: EventId::from(identity.clone()),
+                        producer_id: EventProducerId::from("runtime_supervisor"),
+                        idempotency_key: IdempotencyKey::from(identity),
+                        runtime_binding_id: None,
+                        runtime_producer_seq: None,
+                        semantic_event: SemanticSessionEventDraft {
+                            kind: SessionEventKind("tool/call-started".to_owned()),
+                            kind_version: 1,
+                            correlation_id: CorrelationId::from(projection_id),
+                            causation_event_id: Some(journal.root.clone()),
+                            payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                                "operation_id": operation,
+                                "call_id": call_id,
+                                "capability_id": "mcp.server",
+                                "action_id": "mcp.resource/read",
+                                "name": "mcp_resource_read",
+                            }))),
+                        },
+                    })
+                    .await
+                    .map_err(failure)?;
+            }
+            Some("host_resource_settled") => {
+                let operation = value
+                    .get("operation_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| failure("host resource settlement has no operation_id"))?;
+                let identity = format!(
+                    "tool-result:{}:{operation}",
+                    journal.session.as_ref(),
+                );
+                let projection_id = cursor
+                    .tool_message_ids
+                    .get(operation)
+                    .cloned()
+                    .ok_or_else(|| failure("host resource settlement has no admitted projection"))?;
+                journal
+                    .store
+                    .append_event(&SessionEventAppend {
+                        agent_session_id: journal.session.clone(),
+                        event_id: EventId::from(identity.clone()),
+                        producer_id: EventProducerId::from("runtime_supervisor"),
+                        idempotency_key: IdempotencyKey::from(identity),
+                        runtime_binding_id: None,
+                        runtime_producer_seq: None,
+                        semantic_event: SemanticSessionEventDraft {
+                            kind: SessionEventKind("tool/result-recorded".to_owned()),
+                            kind_version: 1,
+                            correlation_id: CorrelationId::from(projection_id),
+                            causation_event_id: Some(EventId::from(format!(
+                                "tool-call:{}:{operation}",
+                                journal.session.as_ref(),
+                            ))),
+                            payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                                "operation_id": operation,
+                                "output": {"owner_returned": value.get("owner_returned").cloned().unwrap_or(Value::Null)},
+                            }))),
+                        },
+                    })
+                    .await
+                    .map_err(failure)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn append_terminal(
+        journal: &Journal,
+        cursor: &Cursor,
+        event: &CodingEngineEvent,
+    ) -> Result<(), AppError> {
+        match event {
+            CodingEngineEvent::TurnCancelled { .. } => {
+                let receipt = journal
+                    .store
+                    .read_turn_receipt(&journal.session, &journal.operation)
+                    .await
+                    .map_err(failure)?;
+                if receipt.status != TurnReceiptStatus::Cancelled {
+                    journal
+                        .store
+                        .cancel_active_turn(
+                            &journal.session,
+                            IdempotencyKey::from(format!(
+                                "runtime-cancel:{}:{}",
+                                journal.session.as_ref(),
+                                journal.operation.as_ref(),
+                            )),
+                            EventProducerId::from("runtime_supervisor"),
+                        )
+                        .await
+                        .map_err(failure)?;
+                }
+                Ok(())
+            }
+            CodingEngineEvent::TurnCompleted { .. } | CodingEngineEvent::TurnFailed { .. } => {
+                let assistant_message_id = cursor
+                    .assistant_message_id
+                    .clone()
+                    .unwrap_or_else(|| Uuid::now_v7().to_string());
+                let message_identity = format!(
+                    "assistant-complete:{}:{}",
+                    journal.session.as_ref(),
+                    journal.operation.as_ref(),
+                );
+                let message_event_id = EventId::from(message_identity.clone());
+                let message = SessionEventAppend {
+                    agent_session_id: journal.session.clone(),
+                    event_id: message_event_id.clone(),
+                    producer_id: EventProducerId::from("runtime_supervisor"),
+                    idempotency_key: IdempotencyKey::from(message_identity),
+                    runtime_binding_id: None,
+                    runtime_producer_seq: None,
+                    semantic_event: SemanticSessionEventDraft {
+                        kind: SessionEventKind("message/completed".to_owned()),
+                        kind_version: 1,
+                        correlation_id: CorrelationId::from(assistant_message_id),
+                        causation_event_id: Some(
+                            cursor
+                                .last_assistant_event_id
+                                .clone()
+                                .unwrap_or_else(|| journal.root.clone()),
+                        ),
+                        payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                            "part_count": cursor.assistant_parts,
+                            "content_digest": digest_bytes(&cursor.assistant_text),
+                        }))),
+                    },
+                };
+                let (kind, payload) = match event {
+                    CodingEngineEvent::TurnCompleted { model_steps, finish_reason } => (
+                        "turn/completed",
+                        json!({
+                            "model_steps": model_steps,
+                            "finish_reason": finish_reason,
+                        }),
+                    ),
+                    CodingEngineEvent::TurnFailed { model_steps, message } => (
+                        "turn/failed",
+                        json!({
+                            "model_steps": model_steps,
+                            "message": message,
+                        }),
+                    ),
+                    _ => unreachable!(),
+                };
+                let turn_identity = format!(
+                    "turn-terminal:{}:{}",
+                    journal.session.as_ref(),
+                    journal.operation.as_ref(),
+                );
+                let turn = SessionEventAppend {
+                    agent_session_id: journal.session.clone(),
+                    event_id: EventId::from(turn_identity.clone()),
+                    producer_id: EventProducerId::from("runtime_supervisor"),
+                    idempotency_key: IdempotencyKey::from(turn_identity),
+                    runtime_binding_id: None,
+                    runtime_producer_seq: None,
+                    semantic_event: SemanticSessionEventDraft {
+                        kind: SessionEventKind(kind.to_owned()),
+                        kind_version: 1,
+                        correlation_id: CorrelationId::from(journal.operation.as_ref().to_owned()),
+                        causation_event_id: Some(message_event_id),
+                        payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(payload)),
+                    },
+                };
+                journal
+                    .store
+                    .append_chat_completion(&message, &turn, &journal.operation)
+                    .await
+                    .map_err(failure)?;
+                Ok(())
+            }
+            _ => Err(failure("terminal write did not contain a terminal Coding event")),
+        }
+    }
+
     pub async fn append(
         &self,
         payload: String,
@@ -174,6 +637,11 @@ impl EngineTurnJournal {
         {
             return Err(failure("invalid model-operation admission"));
         }
+        let event_value: Value = serde_json::from_str(&payload).map_err(failure)?;
+        let coding_event = serde_json::from_value::<CodingEngineEvent>(event_value.clone()).ok();
+        if kind == EngineJournalWrite::Terminal && coding_event.is_none() {
+            return Err(failure("terminal write did not contain a terminal Coding event"));
+        }
         let permit = self
             .0
             .pending
@@ -186,45 +654,54 @@ impl EngineTurnJournal {
             .clone()
             .try_acquire_many_owned(payload.len() as u32)
             .map_err(|_| failure("pending write byte bound reached"))?;
-        serde_json::from_str::<serde_json::Value>(&payload).map_err(failure)?;
-        let executor = tokio::runtime::Handle::try_current().map_err(failure)?;
         let journal = self.0.clone();
-        let task = executor.spawn(async move {
+        let task = tokio::runtime::Handle::try_current().map_err(failure)?.spawn(async move {
             let _permit = permit;
             let _byte_permit = byte_permit;
             let mut cursor = journal.cursor.lock().await;
-            if cursor.uncertain || cursor.terminal { return Err(failure("journal is closed or uncertain")); }
-            if kind == EngineJournalWrite::Progress && (cursor.draining || journal.cancellation.is_cancelled()) {
+            if cursor.uncertain || cursor.terminal {
+                return Err(failure("journal is closed or uncertain"));
+            }
+            if kind == EngineJournalWrite::Progress
+                && (cursor.draining || journal.cancellation.is_cancelled())
+            {
                 return Err(failure("turn no longer admits progress"));
             }
             if kind == EngineJournalWrite::Terminal && !cursor.draining {
                 return Err(failure("terminal requires host cleanup phase"));
             }
             let reserved = matches!(kind, EngineJournalWrite::Cleanup | EngineJournalWrite::Terminal)
-                || (kind == EngineJournalWrite::Settlement && (cursor.draining || journal.cancellation.is_cancelled()));
-            let (records, bytes) = if reserved { (4095, 8 * 1024 * 1024) } else { (3200, 4 * 1024 * 1024) };
+                || (kind == EngineJournalWrite::Settlement
+                    && (cursor.draining || journal.cancellation.is_cancelled()));
+            let (records, bytes) = if reserved {
+                (4095_u64, 8 * 1024 * 1024)
+            } else {
+                (3200_u64, 4 * 1024 * 1024)
+            };
             let next_bytes = cursor.bytes.saturating_add(payload.len());
-            if cursor.sequence >= records || next_bytes > bytes { return Err(failure("bounded evidence journal exhausted")); }
-            // Uncertainty sticks if SQL errors or the task panics. Never reuse
-            // a possibly committed sequence or continue admitting effects.
+            if cursor.sequence >= records || next_bytes > bytes {
+                return Err(failure("bounded evidence journal exhausted"));
+            }
             cursor.uncertain = true;
-            let inserted = sqlx::query(
-                "INSERT INTO conversation_runtime_events (conversation_id, turn_operation_id, sequence, event_json, model_operation_id, created_at) \
-                 SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS(SELECT 1 FROM conversations c JOIN conversation_delivery_receipts r \
-                 ON r.conversation_id = c.conversation_id AND r.user_id = c.user_id \
-                 WHERE c.conversation_id = ? AND c.user_id = ? AND r.operation_id = ? AND r.kind = 'turn' AND r.message_id = ? \
-                 AND (? = 1 OR (c.status = 'running' AND c.admission_epoch = ? AND c.active_turn_operation_id = r.operation_id AND r.status = 'accepted')))")
-                .bind(&journal.conversation).bind(&journal.operation).bind(cursor.sequence + 1).bind(payload).bind(model_operation)
-                .bind(nomifun_common::now_ms()).bind(&journal.conversation).bind(&journal.user).bind(&journal.operation).bind(&journal.root)
-                .bind(i64::from(kind != EngineJournalWrite::Progress)).bind(journal.epoch)
-                .execute(&journal.pool).await.map_err(failure)?;
-            if inserted.rows_affected() != 1 { return Err(failure("Conversation owner fenced this write")); }
-            cursor.sequence += 1;
+            Self::append_progress(&journal, &cursor, &event_value).await?;
+            Self::append_tool_projection(&journal, &mut cursor, &event_value).await?;
+            if let Some(CodingEngineEvent::OutputTextDelta { text, .. }) = &coding_event {
+                Self::append_assistant_part(&journal, &mut cursor, text).await?;
+            }
+            if kind == EngineJournalWrite::Terminal {
+                Self::append_terminal(
+                    &journal,
+                    &cursor,
+                    coding_event.as_ref().expect("terminal Coding event checked above"),
+                )
+                .await?;
+            }
+            cursor.sequence = cursor.sequence.saturating_add(1);
             cursor.bytes = next_bytes;
             cursor.draining |= matches!(kind, EngineJournalWrite::Cleanup | EngineJournalWrite::Terminal);
             cursor.terminal = kind == EngineJournalWrite::Terminal;
             cursor.uncertain = false;
-            journal.sequence.store(cursor.sequence as u64, Ordering::Release);
+            journal.sequence.store(cursor.sequence, Ordering::Release);
             Ok(())
         });
         task.await.map_err(failure)?
@@ -247,67 +724,141 @@ impl ChatCausalityGate for EngineTurnJournal {
             || cursor.terminal
             || cursor.draining
             || journal.cancellation.is_cancelled()
-            || causality.agent_session_id.as_ref() != journal.conversation
-            || causality.turn_operation_id.as_ref() != journal.operation
-            || causality.causation_event_id.as_ref() != journal.root
+            || causality.agent_session_id != journal.session
+            || causality.turn_operation_id != journal.operation
+            || causality.causation_event_id != journal.root
             || causality.resolved_snapshot_ref != journal.snapshot
             || Some(&causality.route_identity) != journal.route.as_ref()
         {
             return Err(reject("model request differs from admitted live turn"));
         }
-        let claimed = sqlx::query("UPDATE conversation_runtime_events SET model_claimed = 1 \
-            WHERE conversation_id = ? AND turn_operation_id = ? AND model_operation_id = ? AND model_claimed = 0 \
-            AND EXISTS(SELECT 1 FROM conversations c JOIN conversation_delivery_receipts r ON r.operation_id = c.active_turn_operation_id \
-                WHERE c.conversation_id = ? AND c.user_id = ? AND c.status = 'running' AND c.admission_epoch = ? \
-                AND c.active_turn_operation_id = ? AND r.conversation_id = c.conversation_id AND r.user_id = c.user_id \
-                AND r.kind = 'turn' AND r.status = 'accepted' AND r.message_id = ? \
-                AND NOT EXISTS(SELECT 1 FROM conversation_hosted_effects h WHERE h.user_id = c.user_id \
-                    AND h.conversation_id = c.conversation_id AND h.state = 'pending') \
-                AND NOT EXISTS(SELECT 1 FROM conversation_mcp_effects m WHERE m.user_id = c.user_id \
-                    AND m.conversation_id = c.conversation_id AND m.state = 'pending'))")
-            .bind(&journal.conversation).bind(&journal.operation).bind(causality.operation_id.as_ref())
-            .bind(&journal.conversation).bind(&journal.user).bind(journal.epoch).bind(&journal.operation).bind(&journal.root)
-            .execute(&journal.pool).await.map_err(|_| reject("cannot establish durable model authority"))?;
-        if claimed.rows_affected() != 1 {
-            return Err(reject(
-                "model operation already claimed or generation fenced",
-            ));
+        drop(cursor);
+        if journal
+            .store
+            .has_unsettled_effects(&journal.session)
+            .await
+            .map_err(|_| reject("cannot establish durable effect fence"))?
+        {
+            return Err(reject("an earlier effect has no settled outcome"));
         }
+        journal
+            .store
+            .claim_chat_operation(ChatOperationClaimRequest {
+                agent_session_id: journal.session.clone(),
+                operation_id: causality.operation_id.clone(),
+                turn_operation_id: journal.operation.clone(),
+                causation_event_id: journal.root.clone(),
+                route_identity: causality.route_identity.clone(),
+                resolved_snapshot_ref: causality.resolved_snapshot_ref.clone(),
+            })
+            .await
+            .map_err(|_| reject("model operation already claimed or turn was fenced"))?;
         Ok(())
     }
 }
 
-// Existing tool-ownership tests use the actual journal SQL with a minimal
-// in-memory owner fixture. This constructor is absent from production builds.
 #[cfg(test)]
-pub(super) async fn test_fixture() -> (EngineTurnJournal, SqlitePool) {
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
+pub(super) async fn test_fixture() -> (EngineTurnJournal, nomifun_db::SqlitePool) {
+    use nomifun_agent_contracts::{
+        AgentBindingValue, AgentPresetId, AgentSessionLiveRecord, AgentSessionMetadata,
+        DigestHex, PresetRevisionRef, PrincipalRef, ResolvedSnapshotId,
+    };
+    use nomifun_agent_session::CreateSessionRequest;
+
+    let database = nomifun_db::init_database_memory().await.unwrap();
+    let pool = database.pool().clone();
+    let store = AgentSessionStore::from_pool(pool.clone()).await.unwrap();
+    let session_id = AgentSessionId::from("0190f5fe-7c00-7a00-8000-000000000002");
+    let owner = PrincipalRef {
+        principal_kind: "user".into(),
+        principal_id: "0190f5fe-7c00-7a00-8000-000000000001".into(),
+    };
+    let binding = AgentBindingValue {
+        preset_revision_ref: PresetRevisionRef {
+            preset_id: AgentPresetId::from("preset"),
+            revision: 1,
+            revision_digest: DigestHex::from("a".repeat(64)),
+        },
+        resolved_snapshot_ref: nomifun_agent_contracts::ResolvedSnapshotRef {
+            snapshot_id: ResolvedSnapshotId::from("snapshot"),
+            snapshot_digest: DigestHex::from("b".repeat(64)),
+        },
+        typed_resource_bindings: Vec::new(),
+        binding_version: 1,
+    };
+    let created = store
+        .create_session(CreateSessionRequest::new(
+            AgentSessionLiveRecord {
+                agent_session_id: session_id.clone(),
+                owner_ref: owner.clone(),
+                metadata: AgentSessionMetadata {
+                    title: Some("fixture".into()),
+                    archived: false,
+                    pinned: false,
+                },
+                agent_binding: binding.clone(),
+                remote_binding_provenance: None,
+                parent_session_id: None,
+                fork_base_payload_id: None,
+                next_seq: 1,
+            },
+            1,
+            "open",
+            EventProducerId::from("session_api"),
+            IdempotencyKey::from("open"),
+            CorrelationId::from("open"),
+        ))
         .await
         .unwrap();
-    for sql in [
-        "CREATE TABLE conversations (conversation_id TEXT, user_id TEXT, status TEXT, admission_epoch INTEGER, active_turn_operation_id TEXT)",
-        "CREATE TABLE conversation_delivery_receipts (conversation_id TEXT, user_id TEXT, operation_id TEXT, kind TEXT, message_id TEXT, status TEXT)",
-        "CREATE TABLE conversation_runtime_events (conversation_id TEXT, turn_operation_id TEXT, sequence INTEGER, event_json TEXT, model_operation_id TEXT UNIQUE, model_claimed INTEGER DEFAULT 0, created_at INTEGER, UNIQUE(conversation_id, turn_operation_id, sequence))",
-        "CREATE TABLE conversation_hosted_effects (user_id TEXT, conversation_id TEXT, state TEXT)",
-        "CREATE TABLE conversation_mcp_effects (user_id TEXT, conversation_id TEXT, state TEXT)",
-        "INSERT INTO conversations VALUES ('session', 'owner', 'running', 1, 'turn')",
-        "INSERT INTO conversation_delivery_receipts VALUES ('session', 'owner', 'turn', 'turn', 'root', 'accepted')",
-    ] {
-        sqlx::query(sql).execute(&pool).await.unwrap();
-    }
-    let journal = EngineTurnJournal(Arc::new(Journal {
-        pool: pool.clone(),
-        user: "owner".into(),
-        conversation: "session".into(),
-        operation: "turn".into(),
-        root: "root".into(),
-        epoch: 1,
-        snapshot: ResolvedSnapshotRef {
-            snapshot_id: "snapshot".into(),
-            snapshot_digest: "a".repeat(64).into(),
+    let ready = SessionEventAppend {
+        agent_session_id: session_id.clone(),
+        event_id: EventId::from("ready"),
+        producer_id: EventProducerId::from("runtime_supervisor"),
+        idempotency_key: IdempotencyKey::from("ready"),
+        runtime_binding_id: None,
+        runtime_producer_seq: None,
+        semantic_event: SemanticSessionEventDraft {
+            kind: SessionEventKind("session/ready".into()),
+            kind_version: 1,
+            correlation_id: CorrelationId::from("ready"),
+            causation_event_id: Some(created.opening_ack.event_id),
+            payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
         },
+    };
+    store.append_event(&ready).await.unwrap();
+    let input = StrictJsonValue(json!({
+        "content": "fixture",
+        "admission": {
+            "route_identity": {
+                "model_task": "chat",
+                "provider_id": "provider",
+                "model": "model",
+                "protocol": "openai_chat_completions",
+                "connection_role": "default",
+                "capability_revision": 1
+            },
+            "resolved_snapshot_ref": binding.resolved_snapshot_ref,
+        }
+    }));
+    let (message, turn) = store
+        .start_turn(
+            &session_id,
+            EventProducerId::from("session_api"),
+            IdempotencyKey::from("turn-key"),
+            OperationId::from("turn"),
+            input,
+        )
+        .await
+        .unwrap();
+    let root = message.record.unwrap().event_id;
+    let journal = EngineTurnJournal(Arc::new(Journal {
+        store,
+        user: owner.principal_id,
+        session: session_id,
+        operation: OperationId::from("turn"),
+        root,
+        generation: turn.cursor.seq as i64,
+        snapshot: binding.resolved_snapshot_ref,
         route: None,
         cancellation: CancellationToken::new(),
         cursor: Mutex::new(Cursor::default()),

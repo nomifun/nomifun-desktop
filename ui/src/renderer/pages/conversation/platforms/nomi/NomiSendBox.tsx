@@ -28,11 +28,9 @@ import { useSlashCommands } from '@/renderer/hooks/chat/useSlashCommands';
 import { useOpenFileSelector } from '@/renderer/hooks/file/useOpenFileSelector';
 import { useLatestRef } from '@/renderer/hooks/ui/useLatestRef';
 import {
-  snapshotEditSuffixLocalIds,
   useAddOrUpdateMessage,
   useMessageList,
   useRemoveMessageByMsgId,
-  useRemoveMessagesByLocalIds,
 } from '@/renderer/pages/conversation/Messages/hooks';
 import {
   shouldEnqueueConversationCommand,
@@ -366,7 +364,6 @@ const NomiSendBox: React.FC<{
   const removeMessageByMsgId = useRemoveMessageByMsgId();
   const messageList = useMessageList();
   const messageListRef = useLatestRef(messageList);
-  const removeMessagesByLocalIds = useRemoveMessagesByLocalIds();
   const { setSendBoxHandler } = usePreviewContext();
   const [isStopping, setIsStopping] = useState(false);
   const isBusy = running || isStopping;
@@ -662,31 +659,25 @@ const NomiSendBox: React.FC<{
     });
   };
 
-  // 编辑最近一条用户消息并截断重跑。请求成功前保留旧消息和附件；成功后只移除
-  // 请求发出时捕获的旧本地行，避免误删 HTTP 返回前已到达的 replacement stream。
+  // Canonical history is immutable. Editing a previous prompt explicitly
+  // submits the revised text as a new Turn; it never truncates or rewrites the
+  // accepted Session event chain.
   const handleEditResubmit = useCallback(
-    async (msgId: MessageId, createdAt: number, message: string) => {
+    async (_msgId: MessageId, _createdAt: number, message: string) => {
       const filesToSend = collectSelectedFiles(uploadFile, atPath);
       if (!canSendFiles(filesToSend)) return;
-      const oldSuffixLocalIds = snapshotEditSuffixLocalIds(
-        messageListRef.current,
-        msgId,
-        createdAt
-      );
       setWaitingResponse(true);
       const displayMessage = buildDisplayMessage(message, filesToSend, workspacePath);
       try {
         if (currentCapabilitySelection) {
           await applyCapabilitySelection(currentCapabilitySelection);
         }
-        const res = await ipcBridge.conversation.editResubmit.invoke({
+        const res = await ipcBridge.conversation.sendMessage.invoke({
           conversation_id,
-          msg_id: msgId,
           input: displayMessage,
           files: filesToSend,
           idempotency_key: uuidv7(),
         });
-        removeMessagesByLocalIds(oldSuffixLocalIds);
         clearFiles();
         emitter.emit('nomi.selected.file.clear');
         const disposition = classifyPublicMessageDelivery(res);
@@ -729,7 +720,6 @@ const NomiSendBox: React.FC<{
       canSendFiles,
       reconcilePublicDeliveryReplay,
       messageListRef,
-      removeMessagesByLocalIds,
       addOrUpdateMessage,
       setActiveMsgId,
       setWaitingResponse,

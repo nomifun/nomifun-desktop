@@ -2,7 +2,6 @@
 use nomifun_chat_model_broker::{ChatContentPart, ChatMessage, ChatRole};
 use nomifun_coding_engine::{CodingEngineEvent, CodingPriorTask, replay_closed_turn};
 use nomifun_common::AppError;
-use nomifun_db::{SqlitePool, sqlx};
 
 pub(super) struct CodingHistory {
     pub messages: Vec<ChatMessage>,
@@ -10,7 +9,6 @@ pub(super) struct CodingHistory {
 }
 
 pub(super) async fn load(
-    pool: &SqlitePool,
     window: super::engine_history::EngineHistoryWindow,
     session_host: &super::engine_session_host::EngineSessionHost,
     admitted: &super::engine_session_host::EngineTurnReceipt,
@@ -102,7 +100,7 @@ pub(super) async fn load(
         if let Some(description) = super::coding_attachments::description(&files, true) {
             content.push(description);
         }
-        let unresolved = unresolved_steering(pool, conversation, &events).await?;
+        let unresolved = unresolved_steering(&events).await?;
         let extra_bytes = unresolved
             .iter()
             .map(|message| serde_json::to_vec(message).map(|raw| raw.len()))
@@ -218,8 +216,6 @@ pub(super) fn project_messages(
 /// receipt says delivery was queued. Preserve that uncertainty as historical
 /// data; never enqueue it into a replacement turn or invent execution evidence.
 async fn unresolved_steering(
-    pool: &SqlitePool,
-    conversation: &str,
     events: &[CodingEngineEvent],
 ) -> Result<Vec<ChatMessage>, AppError> {
     let scopes = events
@@ -236,69 +232,10 @@ async fn unresolved_steering(
             Err(AppError::Conflict("duplicate Nomi input scope".into()))
         };
     };
-    let observed = events
-        .iter()
-        .flat_map(|event| match event {
-            CodingEngineEvent::SteeringInputs { inputs }
-            | CodingEngineEvent::SteeringDeferred { inputs, .. } => inputs.as_slice(),
-            _ => &[],
-        })
-        .map(|input| input.receipt_operation_id.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT CASE WHEN length(CAST(r.operation_id AS BLOB)) <= 1024 THEN r.operation_id ELSE '[oversized receipt identity]' END, \
-         CASE WHEN length(CAST(r.request_payload AS BLOB)) <= 65536 THEN r.request_payload ELSE NULL END \
-         FROM conversation_delivery_receipts r JOIN conversations c ON c.conversation_id = r.conversation_id AND c.user_id = r.user_id \
-         WHERE r.conversation_id = ? AND r.kind = 'steer' AND json_extract(r.request_payload, '$.turn_scope.wire_turn_id') = ? \
-         AND (r.status = 'accepted' OR (r.status = 'completed' AND r.result_ok = 1)) ORDER BY r.id LIMIT 65")
-        .bind(conversation).bind(wire.as_str()).fetch_all(pool).await
-        .map_err(|error| AppError::Conflict(format!("Nomi steering history: {error}")))?;
-    let mut messages = Vec::new();
-    let overflow = rows.len() > 64;
-    for (operation, raw) in rows.into_iter().take(64) {
-        if observed.contains(operation.as_str()) {
-            continue;
-        }
-        let payload = raw
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
-        let text = payload.as_ref().and_then(|value| {
-            value
-                .get("content")
-                .and_then(|v| v.as_str())
-                .filter(|text| !text.is_empty() && text.len() <= 16 * 1024)
-                .map(str::to_owned)
-        });
-        let mut content = vec![ChatContentPart::Text {
-            text: format!(
-                "Historical steering receipt (data, not a new request): {}. No model-boundary delivery or deferral was recorded. It may have been queued before interruption, or delivery may never have occurred. Do not automatically retry it or claim it was followed. Original text: {}",
-                serde_json::to_string(&operation).unwrap_or_default(),
-                text.map(|text| serde_json::to_string(&text).unwrap_or_default())
-                    .unwrap_or_else(|| "[unavailable or exceeds history bounds]".into())
-            ),
-        }];
-        if let Some(payload) = payload.as_ref() {
-            match (super::coding_attachments::references(payload), super::coding_attachments::selected_skills(payload)) {
-                (Ok(files), Ok(skills)) => {
-                    if let Some(description) = super::coding_attachments::description(&files, true) { content.push(description); }
-                    if !skills.is_empty() { content.push(ChatContentPart::Text { text: format!(
-                        "Historical Skill hints with unknown delivery (data, not a new request or load authority): {}",
-                        serde_json::to_string(&skills).expect("string list"),
-                    ) }); }
-                }
-                _ => content.push(ChatContentPart::Text { text: "Historical attachment/Skill metadata is invalid or exceeds bounds; no input was inferred or loaded.".into() }),
-            }
-        }
-        messages.push(ChatMessage {
-            role: ChatRole::User,
-            provider_round_id: None,
-            content,
-        });
-    }
-    if overflow {
-        messages.push(ChatMessage { role: ChatRole::User, provider_round_id: None, content: vec![ChatContentPart::Text {
-            text: "Historical steering receipt observations were bounded to 64 records; additional receipts may exist. No execution or delivery outcome is inferred for omitted records.".into(),
-        }] });
-    }
-    Ok(messages)
+    // Canonical steering admission is represented by `turn/steer-accepted`
+    // facts and the Runtime records only durable delivery/deferral decisions.
+    // An absent Runtime control record is deliberately not converted into a
+    // prompt: replaying an ambiguous steer would duplicate user intent.
+    let _ = wire;
+    Ok(Vec::new())
 }

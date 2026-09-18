@@ -1,19 +1,18 @@
-//! Concrete conversation/model access for the robot gateway.
+//! Canonical AgentSession/model access for the robot gateway.
 //!
-//! Lives here because only this crate holds a `ConversationService`, the agent
-//! runtime registry, the companion registry, the provider catalog and the
-//! installation owner id at once. `nomifun-robot` sees only its own traits, so
-//! the dependency direction stays one-way.
+//! `nomifun-robot` sees only its own traits; this app adapter keeps device
+//! ingress on the same immutable Session/Turn authority as every other Agent.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
-use nomifun_api_types::{AgentErrorOwnership, SendMessageRequest};
-use nomifun_ai_agent::AgentRuntimeRegistry;
+use nomifun_api_types::SendMessageRequest;
+#[cfg(test)]
+use nomifun_api_types::AgentErrorOwnership;
+#[cfg(test)]
 use nomifun_ai_agent::protocol::events::{AgentStreamEvent, TurnStopReason};
-use nomifun_conversation::ConversationService;
 use nomifun_db::IClientPreferenceRepository;
 use nomifun_robot::endpoint::{EndpointAdvertiser, LanAdvertiser, LanEndpointSnapshot};
 use nomifun_robot::effect_ledger::RobotEffectLedger;
@@ -28,6 +27,7 @@ use nomifun_robot::wiring::{
     VisionCompletionRequest,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 #[cfg(test)]
 use tokio::sync::broadcast;
@@ -89,9 +89,9 @@ impl VisionCompletionExecutor for AgentRobotVisionExecutor {
 /// Everything the host holds for the robot gateway.
 ///
 /// Split in two phases on purpose: everything here exists before the router,
-/// because the device face and the OTA response must be reachable the moment the
-/// listener comes up, while the gateway itself needs a `ConversationService`
-/// that only exists during router assembly.
+    /// because the device face and the OTA response must be reachable the moment the
+    /// listener comes up, while the gateway's canonical Session owner is attached
+    /// during router assembly.
 pub struct RobotServices {
     #[cfg(test)]
     backend: std::sync::OnceLock<Arc<AppRobotBackend>>,
@@ -110,7 +110,7 @@ pub struct RobotServices {
 }
 
 impl RobotServices {
-    /// Build everything that does not need a `ConversationService`.
+    /// Build everything that does not need the canonical Session owner.
     ///
     /// A failure to load the registry is fatal for the domain, not for the app:
     /// the caller degrades to "no robot support" rather than refusing to boot.
@@ -323,103 +323,18 @@ impl PreferenceReader for AppPreferences {
 /// Without saying so, models write for a display — emoji, markdown, parenthetical
 /// asides — none of which a TTS engine can voice, and some of which make it fail
 /// outright.
-fn robot_body_prompt() -> &'static str {
-    "你现在通过用户绑定的物理机器人和用户说话。摄像头、屏幕和动作以本轮实际提供的设备工具为准，不假设每台机器人都有相同硬件。\n\
-     - 你的回复会被语音合成念出声。所以只写能读出来的自然口语。\n\
-     - 回复必须简短口语化：每句不超过 40 字，整体不超过 3 句，除非用户明确要求详细内容。\n\
-     - 只输出要说出来的那句话本身。不要写任何方括号或【】里的标注（例如 [winking]、[开心]、【笑】），不要写动作描写或舞台提示，不要写旁白和括号里的补充说明。\n\
-     - 不要输出 emoji、颜文字、markdown 记号（星号、井号、反引号），以及任何念不出声的符号。需要停顿就用逗号和句号。\n\
-     - 只有本轮明确提供了设备工具时才能执行物理操作；没有工具时不要声称已经移动、拍摄或修改设备。"
-}
-
-/// Production device ingress shares the Companion's authoritative Conversation.
+/// Production device ingress shares the Companion's canonical AgentSession.
 #[derive(Clone)]
-pub struct AppRobotBackend {
-    pub conversations: ConversationService,
-    pub runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+pub(crate) struct AppRobotBackend {
+    pub sessions: Arc<crate::router::nomi_core_session::NomiCoreSessionOwner>,
     pub companions: Arc<nomifun_companion::CompanionService>,
     pub owner_user_id: Arc<str>,
     pub registry: Arc<RobotRegistry>,
-    pub vision_observations: Arc<RobotVisionObservationRegistry>,
     pending: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
     queues: Arc<Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>>,
 }
 
-#[derive(Clone)]
-struct DeviceTurnAuthority {
-    from_desktop: bool,
-    registry: Arc<RobotRegistry>,
-    request: nomifun_robot::services::RobotTurnRequest,
-    revision: u64,
-    vision_authorized: bool,
-    cancelled: tokio_util::sync::CancellationToken,
-    conversations: ConversationService,
-    owner_user_id: Arc<str>,
-    agent_revision: Option<(String, i64)>,
-}
-
-#[async_trait::async_trait]
-impl nomifun_robot::vision::RobotVisionRecorder for DeviceTurnAuthority {
-    fn robot_id(&self) -> &str { &self.request.robot_id }
-    fn source(&self) -> nomifun_robot::vision::RobotVisionSource {
-        nomifun_robot::vision::RobotVisionSource {
-            companion_id: self.request.companion_id.clone(), conversation_id: self.request.conversation_id.clone(),
-            connection_id: self.request.connection_id.clone(), request_id: self.request.request_id.clone(),
-        }
-    }
-    async fn authorize(&self) -> Result<(), String> {
-        if !self.vision_authorized {
-            return Err(
-                "robot/vision is not granted for this Agent and exact robot binding".to_owned(),
-            );
-        }
-        let record = self.validate_connection().await?;
-        if !record
-            .permissions
-            .allows_action(nomifun_robot::capability::RobotAction::Vision)
-        {
-            return Err("camera access is disabled for this robot".to_owned());
-        }
-        let mut context = device_turn_context(&self.request);
-        context.from_desktop = self.from_desktop;
-        context.agent_revision = self.agent_revision.clone();
-        if !self.conversations.companion_device_turn_is_active(&self.owner_user_id, &self.request.conversation_id, &context) {
-            return Err("camera upload does not belong to the active Companion turn".to_owned());
-        }
-        Ok(())
-    }
-    async fn record(&self, question: &str, answer: &str, jpeg: &[u8]) -> Result<(), String> {
-        self.authorize().await?;
-        let mut context = device_turn_context(&self.request);
-        context.from_desktop = self.from_desktop;
-        context.agent_revision = self.agent_revision.clone();
-        self.conversations.record_companion_device_observation(&self.owner_user_id,
-            &self.request.conversation_id, &context, question, answer,
-            &base64::engine::general_purpose::STANDARD.encode(jpeg),
-        ).await.map_err(|error| error.to_string())
-    }
-}
-
-impl DeviceTurnAuthority {
-    async fn validate_connection(&self) -> Result<nomifun_robot::registry::RobotRecord, String> {
-        if self.cancelled.is_cancelled() { return Err("device utterance was cancelled".to_owned()); }
-        let record = self.registry.get(&self.request.robot_id).await.ok_or("robot was removed")?;
-        if record.companion_id.as_deref() != Some(self.request.companion_id.as_str())
-            || record.authorization_revision != self.revision
-            || !self.registry.connection_matches(&self.request.robot_id, &self.request.connection_id).await
-        { return Err("robot binding, permissions or connection changed".to_owned()); }
-        Ok(record)
-    }
-}
-
-#[async_trait::async_trait]
-impl nomifun_conversation::service::BackgroundTurnPreSendHook for DeviceTurnAuthority {
-    async fn prepare(&self) -> Result<(), nomifun_common::AppError> {
-        self.validate_connection().await.map(|_| ()).map_err(nomifun_common::AppError::Forbidden)
-    }
-}
-
-fn snapshot_authorizes_robot_vision(
+fn snapshot_authorizes_robot_binding(
     snapshot: Option<&nomifun_api_types::AgentResolvedSnapshot>,
     owner_id: &str,
     request: &nomifun_robot::services::RobotTurnRequest,
@@ -449,23 +364,23 @@ fn snapshot_authorizes_robot_vision(
     robot_bindings.next().is_none()
         && binding.owner_id == owner_id
         && binding.resource_id == request.robot_id
-        && binding.operations.contains("vision")
         && binding
             .typed_parameters
             .get("companion_id")
             .is_some_and(|companion| companion == &request.companion_id)
 }
 
-fn device_turn_context(request: &nomifun_robot::services::RobotTurnRequest)
-    -> nomifun_conversation::companion_interaction::CompanionDeviceTurn
-{
-    nomifun_conversation::companion_interaction::CompanionDeviceTurn {
-        from_desktop: false, resources: None,
-        companion_id: request.companion_id.clone(), robot_id: request.robot_id.clone(),
-        connection_id: request.connection_id.clone(), request_id: request.request_id.clone(),
-        agent_revision: None,
-        model: None, fallback_model: None, mcp_servers: vec![], system_prompt: String::new(),
-    }
+fn robot_turn_idempotency_key(request: &nomifun_robot::services::RobotTurnRequest) -> String {
+    let identity = serde_json::json!([
+        request.companion_id,
+        request.robot_id,
+        request.connection_id,
+        request.request_id,
+    ]);
+    format!(
+        "companion-device:{:x}",
+        Sha256::digest(identity.to_string().as_bytes())
+    )
 }
 
 impl AppRobotBackend {
@@ -496,133 +411,101 @@ impl AppRobotBackend {
             if !self.registry.connection_matches(&request.robot_id, &request.connection_id).await {
                 anyhow::bail!("robot connection is no longer active");
             }
-            if self.conversations.runtime_summary_for(&request.conversation_id).await.is_processing {
+            let conversation = self
+                .sessions
+                .get_session(&self.owner_user_id, &request.conversation_id)
+                .await?;
+            if conversation.runtime.as_ref().is_some_and(|runtime| runtime.is_processing) {
                 tokio::select! {
                     _ = cancelled.cancelled() => return Ok(()),
                     _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {},
                 }
                 continue;
             }
-            let profile = self.companions.get_companion(&request.companion_id).await?;
-            let record = self.registry.get(&request.robot_id).await.ok_or_else(|| anyhow::anyhow!("robot was removed"))?;
-            let conversation = match self.conversations.refresh_product_agent_for_existing(
-                &self.owner_user_id, &request.conversation_id).await {
-                Ok(conversation) => conversation,
-                Err(nomifun_common::AppError::Conflict(_)) if self.conversations
-                    .runtime_summary_for(&request.conversation_id).await.is_processing => continue,
-                Err(error) => return Err(error.into()),
-            };
-            let vision_authorized = snapshot_authorizes_robot_vision(
+            if conversation.extra.get("companion_id").and_then(Value::as_str)
+                != Some(request.companion_id.as_str())
+                || conversation
+                    .extra
+                    .get("companion_session")
+                    .and_then(Value::as_bool)
+                    != Some(true)
+            {
+                anyhow::bail!("robot turn belongs to another Companion AgentSession");
+            }
+            let record = self
+                .registry
+                .get(&request.robot_id)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("robot was removed"))?;
+            if record.companion_id.as_deref() != Some(request.companion_id.as_str())
+                || !self
+                    .registry
+                    .connection_matches(&request.robot_id, &request.connection_id)
+                    .await
+            {
+                anyhow::bail!("robot binding or connection changed");
+            }
+            if !snapshot_authorizes_robot_binding(
                 conversation.agent_snapshot.as_ref(),
                 &self.owner_user_id,
                 request,
-            );
-            let authority = Arc::new(DeviceTurnAuthority {
-                from_desktop: false,
-                registry: self.registry.clone(), request: request.clone(),
-                revision: record.authorization_revision, cancelled: cancelled.clone(),
-                vision_authorized,
-                conversations: self.conversations.clone(), owner_user_id: self.owner_user_id.clone(),
-                agent_revision: conversation.preset_id.clone().zip(conversation.preset_revision),
-            });
-            authority.validate_connection().await.map_err(anyhow::Error::msg)?;
-            let mut context = device_turn_context(request);
-            context.agent_revision = conversation.preset_id.clone().zip(conversation.preset_revision);
-            context.model = profile.model;
-            context.fallback_model = profile.fallback_model;
-            context.system_prompt = nomifun_ai_agent::CompanionPromptProvider::build_system_prompt(
-                &*self.companions, Some(&request.companion_id), None).await.unwrap_or_default();
-            context.system_prompt.push_str("\n\n");
-            context.system_prompt.push_str(robot_body_prompt());
-            let resources = Arc::new(DeviceTurnResources {
-                vision_lease: Mutex::new(None),
-            });
-            context.resources = Some(resources.clone());
-            let prepare_hook = Arc::new(DeviceTurnPreparation { authority, resources, observations: self.vision_observations.clone() });
+            ) {
+                anyhow::bail!("the AgentSession has no exact owner-scoped robot resource binding");
+            }
+            let key = robot_turn_idempotency_key(request);
             let message = SendMessageRequest {
                 preset_id: None,
                 content: request.text.clone(), files: vec![], inject_skills: vec![],
-                hidden: false, origin: None, channel_platform: Some("robot".to_owned()),
+                hidden: false, origin: Some("robot".to_owned()), channel_platform: Some("robot".to_owned()),
             };
-            let observed = tokio::select! {
-                result = self.conversations.send_companion_device_message(
-                    &self.owner_user_id, &request.conversation_id, message, context.clone(), prepare_hook, &self.runtime_registry,
+            let delivery = tokio::select! {
+                result = self.sessions.send_session_message_idempotent(
+                    &self.owner_user_id, &request.conversation_id, &key, message,
                 ) => result,
                 _ = cancelled.cancelled() => {
-                    self.conversations.cancel_companion_device_message(&self.owner_user_id,
-                        &request.conversation_id, &context, &self.runtime_registry).await?;
+                    self.sessions.cancel_session(&self.owner_user_id, &request.conversation_id).await?;
                     return Ok(());
                 }
             };
-            let mut stream = match observed {
-                Ok(observed) => observed.events,
-                Err(error) => {
-                let receipt = self.conversations.companion_device_delivery_result(
-                    &self.owner_user_id, &request.conversation_id, &context).await?;
-                if receipt.is_none() {
-                    if matches!(error, nomifun_common::AppError::Conflict(_))
-                        && self.conversations.runtime_summary_for(&request.conversation_id).await.is_processing {
-                        continue;
-                    }
-                    return Err(error.into());
-                }
-                None
-                }
+            let mut delivery = match delivery {
+                Ok(delivery) => delivery,
+                Err(nomifun_common::AppError::Conflict(_)) => continue,
+                Err(error) => return Err(error.into()),
             };
-            let mut reducer = SpokenReplyReducer::default();
-            let mut spoken_answer: Option<String> = None;
-            // The durable result includes automatic continuations and final
-            // persistence. Never subscribe to whichever cached runtime happens
-            // to be current, and never speak an intermediate tool-pass Finish.
+            if delivery.completed {
+                for event in completed_robot_delivery_events(&delivery) {
+                    if tx.send(event).await.is_err() { break; }
+                }
+                return Ok(());
+            }
             loop {
-                if let Some(mut receipt) = self.conversations.companion_device_delivery_result(
-                    &self.owner_user_id, &request.conversation_id, &context).await?
-                    && receipt.completed {
-                    // A fast producer can commit its receipt while this
-                    // observer still has buffered tool/text events. Drain
-                    // those before selecting the final spoken segment.
-                    if let Some(receiver) = stream.as_mut() {
-                        'drain: while let Ok(event) = receiver.try_recv() {
-                            for reduced in reducer.push(event) {
-                                match reduced {
-                                    TurnEvent::Text(text) => spoken_answer = Some(text),
-                                    TurnEvent::Done => break 'drain,
-                                    TurnEvent::Failed { .. } => spoken_answer = None,
-                                }
-                            }
+                match self
+                    .sessions
+                    .session_turn_delivery_state(
+                        &self.owner_user_id,
+                        &request.conversation_id,
+                        &key,
+                    )
+                    .await?
+                {
+                    nomifun_conversation::PublicTurnDeliveryState::Completed(receipt) => {
+                        delivery = receipt;
+                        for event in completed_robot_delivery_events(&delivery) {
+                            if tx.send(event).await.is_err() { break; }
                         }
+                        return Ok(());
                     }
-                    if receipt.result_ok == Some(true) && let Some(answer) = spoken_answer.take() {
-                        receipt.result_text = Some(answer);
+                    nomifun_conversation::PublicTurnDeliveryState::Accepted { .. } => {}
+                    nomifun_conversation::PublicTurnDeliveryState::Missing => {
+                        anyhow::bail!("canonical robot Turn receipt disappeared");
                     }
-                    for event in completed_robot_delivery_events(&receipt) {
-                        if tx.send(event).await.is_err() { break; }
-                    }
-                    return Ok(());
+                }
+                if queued_at.elapsed() > std::time::Duration::from_secs(300) {
+                    anyhow::bail!("robot AgentSession turn timed out");
                 }
                 tokio::select! {
-                    event = async {
-                        match stream.as_mut() {
-                            Some(receiver) => receiver.recv().await,
-                            None => std::future::pending().await,
-                        }
-                    } => {
-                        match event {
-                            Ok(event) => {
-                                for reduced in reducer.push(event) {
-                                    match reduced {
-                                        TurnEvent::Text(text) => { spoken_answer = Some(text); }
-                                        TurnEvent::Done => { stream = None; }
-                                        TurnEvent::Failed { .. } => { spoken_answer = None; }
-                                    }
-                                }
-                            }
-                            Err(_) => { stream = None; spoken_answer = None; }
-                        }
-                    }
                     _ = cancelled.cancelled() => {
-                        self.conversations.cancel_companion_device_message(&self.owner_user_id,
-                            &request.conversation_id, &context, &self.runtime_registry).await?;
+                        self.sessions.cancel_session(&self.owner_user_id, &request.conversation_id).await?;
                         return Ok(());
                     }
                     _ = tokio::time::sleep(std::time::Duration::from_millis(30)) => {},
@@ -632,38 +515,21 @@ impl AppRobotBackend {
     }
 }
 
-struct DeviceTurnResources {
-    vision_lease: Mutex<Option<nomifun_robot::vision::RobotVisionTurnLease>>,
-}
-
-struct DeviceTurnPreparation {
-    authority: Arc<DeviceTurnAuthority>,
-    resources: Arc<DeviceTurnResources>,
-    observations: Arc<RobotVisionObservationRegistry>,
-}
-
-#[async_trait::async_trait]
-impl nomifun_conversation::service::BackgroundTurnPreSendHook for DeviceTurnPreparation {
-    async fn prepare(&self) -> Result<(), nomifun_common::AppError> {
-        self.authority.validate_connection().await.map_err(nomifun_common::AppError::Forbidden)?;
-        *self.resources.vision_lease.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(self.observations.register_turn(self.authority.clone()));
-        Ok(())
-    }
-}
-
 #[async_trait::async_trait]
 impl nomifun_robot::services::RobotPlaybackSource for AppRobotBackend {
     async fn response_text(&self, robot_id: &str, conversation_id: &str) -> Result<String, String> {
         let device = self.registry.get(robot_id).await.ok_or("device not found")?;
-        let conversation = self.conversations.get(&self.owner_user_id, conversation_id).await.map_err(|e| e.to_string())?;
+        let conversation = self.sessions.get_session(&self.owner_user_id, conversation_id).await.map_err(|e| e.to_string())?;
         if device.companion_id.is_none() || conversation.extra.get("companion_id").and_then(Value::as_str) != device.companion_id.as_deref() {
             return Err("conversation belongs to another Companion".to_owned());
         }
-        if self.conversations.runtime_summary_for(conversation_id).await.is_processing {
+        if conversation.runtime.as_ref().is_some_and(|runtime| runtime.is_processing) {
             return Err("wait for the current reply to finish".to_owned());
         }
-        let messages = self.conversations.list_messages(&self.owner_user_id, conversation_id,
+        let messages = nomifun_channel::ChannelSessionPort::list_messages(
+            self.sessions.as_ref(),
+            &self.owner_user_id,
+            conversation_id,
             serde_json::from_value(serde_json::json!({"page":1,"page_size":50,"order":"desc"})).map_err(|e| e.to_string())?,
         ).await.map_err(|e| e.to_string())?;
         messages.items.iter().filter(|message| !message.hidden
@@ -676,65 +542,13 @@ impl nomifun_robot::services::RobotPlaybackSource for AppRobotBackend {
 }
 
 #[async_trait::async_trait]
-impl nomifun_conversation::companion_interaction::CompanionDesktopTurnProvider for AppRobotBackend {
-    async fn prepare(&self, owner_id: &str, conversation_id: &str, request_id: &str)
-        -> Result<Option<nomifun_conversation::companion_interaction::PreparedDesktopDeviceTurn>, nomifun_common::AppError>
-    {
-        if owner_id != self.owner_user_id.as_ref() { return Ok(None); }
-        let conversation = self.conversations.get(owner_id, conversation_id).await?;
-        let Some(companion_id) = conversation.extra.get("companion_id").and_then(Value::as_str) else { return Ok(None); };
-        if conversation.extra.get("companion_session").and_then(Value::as_bool) != Some(true) { return Ok(None); }
-        let profile = self.companions.get_companion(companion_id).await?;
-        let devices = self.registry.list().await.into_iter()
-            .filter(|device| device.companion_id.as_deref() == Some(companion_id)).collect::<Vec<_>>();
-        let selected = match profile.control_robot_id.as_deref() {
-            Some(id) => devices.iter().find(|device| device.robot_id == id),
-            None if devices.len() == 1 => devices.first(),
-            None => None,
-        };
-        let Some(device) = selected else { return Ok(None); };
-        let Some(connection_id) = self.registry.current_connection(&device.robot_id).await else { return Ok(None); };
-        let request = nomifun_robot::services::RobotTurnRequest {
-            robot_id: device.robot_id.clone(), companion_id: companion_id.to_owned(),
-            conversation_id: conversation_id.to_owned(), connection_id, request_id: request_id.to_owned(), text: String::new(),
-        };
-        let vision_authorized = snapshot_authorizes_robot_vision(
-            conversation.agent_snapshot.as_ref(),
-            owner_id,
-            &request,
-        );
-        let authority = Arc::new(DeviceTurnAuthority {
-            from_desktop: true, registry: self.registry.clone(), request: request.clone(),
-            revision: device.authorization_revision,
-            vision_authorized,
-            cancelled: tokio_util::sync::CancellationToken::new(), conversations: self.conversations.clone(),
-            owner_user_id: self.owner_user_id.clone(), agent_revision: conversation.preset_id.zip(conversation.preset_revision),
-        });
-        let mut context = device_turn_context(&request);
-        context.from_desktop = true;
-        context.agent_revision = authority.agent_revision.clone();
-        context.model = profile.model;
-        context.fallback_model = profile.fallback_model;
-        context.system_prompt = nomifun_ai_agent::CompanionPromptProvider::build_system_prompt(
-            &*self.companions, Some(companion_id), None).await.unwrap_or_default();
-        context.system_prompt.push_str("\n当前输入来自桌面，正常使用完整文字、Markdown 等形式回答；回复不会自动播报。已连接的机器人只提供语音与视觉上下文；物理控制必须由显式启用 Robot 模块与对应 Action 的 Agent 会话执行。\n");
-        let resources = Arc::new(DeviceTurnResources {
-            vision_lease: Mutex::new(None),
-        });
-        context.resources = Some(resources.clone());
-        let hook = Arc::new(DeviceTurnPreparation { authority, resources, observations: self.vision_observations.clone() });
-        Ok(Some(nomifun_conversation::companion_interaction::PreparedDesktopDeviceTurn { context, pre_send_hook: hook }))
-    }
-}
-
-#[async_trait::async_trait]
 impl nomifun_robot::wiring::RobotConversationBackend for AppRobotBackend {
     async fn ensure_companion_session(&self, companion_id: &str) -> anyhow::Result<String> {
         Ok(self.companions.create_companion_thread(companion_id, None).await?.conversation_id)
     }
 
     async fn dispatch(&self, request: nomifun_robot::services::RobotTurnRequest) -> anyhow::Result<mpsc::Receiver<TurnEvent>> {
-        let key = device_turn_context(&request).idempotency_key();
+        let key = robot_turn_idempotency_key(&request);
         let cancelled = tokio_util::sync::CancellationToken::new();
         {
             let mut pending = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -754,7 +568,7 @@ impl nomifun_robot::wiring::RobotConversationBackend for AppRobotBackend {
     }
 
     async fn cancel(&self, request: &nomifun_robot::services::RobotTurnRequest) -> anyhow::Result<()> {
-        let key = device_turn_context(request).idempotency_key();
+        let key = robot_turn_idempotency_key(request);
         if let Some(token) = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
             token.cancel();
         }
@@ -880,12 +694,14 @@ async fn relay_robot_turn_stream(
 /// the robot should speak. A tool/thinking boundary invalidates text collected
 /// before it; only text produced after the last such boundary is released when
 /// the whole turn finishes.
+#[cfg(test)]
 #[derive(Default)]
 struct SpokenReplyReducer {
     candidate: String,
     output_checkpoint: Option<usize>,
 }
 
+#[cfg(test)]
 impl SpokenReplyReducer {
     fn push(&mut self, event: AgentStreamEvent) -> Vec<TurnEvent> {
         match event {
@@ -1016,27 +832,22 @@ pub struct RobotFaces {
 /// Build both HTTP faces and start the gateway's accept loop.
 ///
 /// Called during router assembly rather than in `AppServices`, because that is
-/// where the `ConversationService` the sessions dispatch through comes into
-/// existence.
-pub fn mount(
+/// where the canonical AgentSession owner is fully assembled.
+pub(crate) fn mount(
     robot: &Arc<RobotServices>,
-    conversations: ConversationService,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    sessions: Arc<crate::router::nomi_core_session::NomiCoreSessionOwner>,
     companions: Arc<nomifun_companion::CompanionService>,
     owner_user_id: Arc<str>,
     _data_dir: PathBuf,
 ) -> RobotFaces {
     let backend = Arc::new(AppRobotBackend {
-        conversations,
-        runtime_registry,
+        sessions,
         companions,
         owner_user_id,
         registry: robot.registry.clone(),
-        vision_observations: robot.vision_observations.clone(),
         pending: Arc::new(Mutex::new(HashMap::new())),
         queues: Arc::new(Mutex::new(HashMap::new())),
     });
-    backend.conversations.with_companion_desktop_provider(backend.clone());
     #[cfg(test)]
     let _ = robot.backend.set(backend.clone());
     let dispatcher = Arc::new(nomifun_robot::wiring::RobotDispatcher::new(backend.clone()));
@@ -1096,57 +907,6 @@ mod tests {
 
 
 
-
-    /// The prompt must PROHIBIT, not specify. It once specified a marker syntax
-    /// (`[emotion:名]` plus a 21-name vocabulary) and the model emitted
-    /// `[winking]` instead — a syntax contract with an LLM is not enforceable, so
-    /// the contract is deleted and only the prohibition remains. This test is the
-    /// guard against re-introducing one: no marker syntax, no vocabulary, and the
-    /// spoken-aloud rule and the bracket ban both intact.
-    #[test]
-    fn the_prompt_bans_brackets_and_offers_no_marker_syntax() {
-        let prompt = robot_body_prompt();
-
-        assert!(
-            !prompt.contains("[emotion:") && !prompt.contains("emotion:名"),
-            "the deleted marker syntax must not come back: {prompt}"
-        );
-        for name in ["neutral", "laughing", "embarrassed", "kissy", "confused"] {
-            assert!(
-                !prompt.contains(name),
-                "{name} is part of a vocabulary the model was told to emit; there is no vocabulary now"
-            );
-        }
-
-        assert!(
-            prompt.contains("方括号") && prompt.contains("【】"),
-            "both bracket shapes must be forbidden by name"
-        );
-        assert!(
-            prompt.contains("[winking]"),
-            "the ban names the exact form the model actually emitted, which is what makes it land"
-        );
-        assert!(
-            prompt.contains("动作描写") || prompt.contains("舞台提示"),
-            "stage directions and action annotations must be forbidden"
-        );
-        assert!(
-            prompt.contains("旁白") || prompt.contains("括号里的补充说明"),
-            "parenthetical asides must be forbidden"
-        );
-        assert!(prompt.contains("emoji"), "nothing tells the model to skip emoji");
-        assert!(prompt.contains("markdown"), "markdown must be forbidden");
-        assert!(
-            prompt.contains("念出声") || prompt.contains("念出来"),
-            "the model is no longer told the text is spoken aloud"
-        );
-        // The short-reply rules and authority guidance remain, but generic
-        // `robot_*` tool vocabulary must not be injected into this voice path.
-        assert!(prompt.contains("不超过 40 字") && prompt.contains("不超过 3 句"));
-        assert!(prompt.contains("本轮明确提供了设备工具"));
-        assert!(prompt.contains("不要声称已经移动、拍摄或修改设备"));
-        assert!(!prompt.contains("robot_"));
-    }
 
 
     #[test]

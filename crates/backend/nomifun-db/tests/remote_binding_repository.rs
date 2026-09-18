@@ -27,15 +27,17 @@ async fn remote_binding_cas_open_idempotency_and_cursor_events() {
         .expect("installation owner");
     let conversation_id = nomifun_common::ConversationId::new();
     sqlx::query(
-        "INSERT INTO conversations \
-         (conversation_id, user_id, name, type, created_at, updated_at) \
-         VALUES (?, ?, 'remote', 'nomi', 1, 1)",
+        "INSERT INTO agent_sessions \
+         (agent_session_id, owner_ref_json, state, title, archived, pinned, \
+          agent_binding_json, next_seq, created_at) \
+         VALUES (?, json_object('principal_kind','user','principal_id',?), \
+                 'live', 'remote', 0, 0, json_object('binding_version',1), 1, 1)",
     )
     .bind(conversation_id.as_str())
     .bind(&owner)
     .execute(pool)
     .await
-    .expect("conversation");
+    .expect("canonical AgentSession");
 
     let repository = SqliteRemoteBindingRepository::new(pool.clone());
     let remote_binding_id = nomifun_common::generate_id();

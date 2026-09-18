@@ -7,6 +7,7 @@ use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
 #[cfg(test)]
 use nomifun_ai_agent::types::SendMessageData;
 use nomifun_ai_agent::AgentRegistry;
+use nomifun_agent_contracts::AgentSessionId;
 #[cfg(test)]
 use nomifun_ai_agent::AgentStreamEvent;
 #[cfg(test)]
@@ -15,24 +16,22 @@ use nomifun_api_types::CreateConversationRequest;
 #[cfg(test)]
 use nomifun_api_types::SendMessageRequest;
 use nomifun_common::{
-    AgentType, AppError, ConversationId, ExecutionAuthority, MessageId, ProviderWithModel, UserId,
-    now_ms, workspace_path_has_edge_whitespace_segment,
+    AgentType, AppError, ConversationId, ExecutionAuthority, ProviderWithModel, UserId,
+    workspace_path_has_edge_whitespace_segment,
 };
 #[cfg(test)]
 use nomifun_conversation::ConversationService;
-use nomifun_db::models::MessageRow;
 use nomifun_db::IConversationRepository;
 use nomifun_realtime::UserEventSink;
 #[cfg(test)]
 use tokio::time::timeout;
 use tracing::{error, info, warn};
 
-use crate::artifacts::{build_cron_trigger_artifact, emit_artifact};
 use crate::busy_guard::CronBusyGuard;
 use crate::error::CronError;
 use crate::prompt::{
     build_existing_conversation_prompt, build_new_conversation_prompt,
-    build_new_conversation_prompt_with_skill_suggest, build_new_conversation_with_skill_prompt,
+    build_new_conversation_with_skill_prompt,
 };
 use crate::session_port::{
     CronRuntimePreparationRequest, CronScheduledSessionLookup,
@@ -45,7 +44,6 @@ use crate::session_port::{
 use crate::skill_file::{
     cron_skill_name, validate_skill_content, write_raw_skill_file,
 };
-use crate::skill_suggest::SkillSuggestDetector;
 use crate::types::{CronJob, ExecutionMode, cron_job_to_row};
 
 pub const RETRY_INTERVAL_MS: u64 = 30_000;
@@ -98,24 +96,17 @@ pub(crate) struct PreparedExecution {
 pub struct JobExecutor {
     authoritative_user_id: Arc<str>,
     sessions: Arc<dyn CronSessionPort>,
-    /// Minimal legacy persistence blocker.
-    ///
-    /// Cron still writes tips messages and Cron-owned artifact projections to
-    /// the shared conversation tables. It must not use this repository for
-    /// Session owner, model, workspace, runtime, receipt, or cron-relation
-    /// authority; those reads and mutations go through `sessions`.
+    #[cfg(test)]
     conversation_repo: Arc<dyn IConversationRepository>,
     busy_guard: Arc<CronBusyGuard>,
     _work_dir: PathBuf,
     data_dir: PathBuf,
-    user_events: Arc<dyn UserEventSink>,
     /// Retained only to keep the executor's injection contract stable for the
     /// application assembly; no cron code path reads the catalog any more. The
     /// agent-metadata lookups that used it existed to resolve a per-job
     /// external agent, and the native executor is the only agent type left.
     #[allow(dead_code)]
     agent_registry: Arc<AgentRegistry>,
-    skill_suggest_detector: SkillSuggestDetector,
 }
 
 impl JobExecutor {
@@ -127,23 +118,20 @@ impl JobExecutor {
         busy_guard: Arc<CronBusyGuard>,
         work_dir: PathBuf,
         data_dir: PathBuf,
-        user_events: Arc<dyn UserEventSink>,
+        _user_events: Arc<dyn UserEventSink>,
         agent_registry: Arc<AgentRegistry>,
     ) -> Self {
-        let skill_suggest_detector = SkillSuggestDetector::new(
-            Arc::clone(&user_events),
-            conversation_repo.clone(),
-        );
+        #[cfg(not(test))]
+        let _ = (&conversation_repo, &_user_events);
         Self {
             authoritative_user_id,
             sessions,
+            #[cfg(test)]
             conversation_repo,
             busy_guard,
             _work_dir: work_dir,
             data_dir,
-            user_events,
             agent_registry,
-            skill_suggest_detector,
         }
     }
 
@@ -308,29 +296,15 @@ impl JobExecutor {
             .await
             .map_err(CronError::from)?;
         debug_assert_eq!(row.owner_id, owner_id);
-        // Reuse the conversation service's canonical bare UUIDv7 message-ID
-        // minting boundary.
-        let row = MessageRow {
-            id: 0,
-            message_id: MessageId::new().into_string(),
-            conversation_id: parse_conversation_id(conversation_id)?.to_owned(),
-            msg_id: None,
-            r#type: "tips".into(),
-            content: serde_json::json!({
-                "content": content,
-                "type": tip_type,
-            })
-            .to_string(),
-            position: Some("center".into()),
-            status: Some("finish".into()),
-            hidden: false,
-            created_at: nomifun_common::now_ms(),
-        };
-
-        self.conversation_repo
-            .insert_message(&row)
+        self.sessions
+            .append_notice(
+                owner_id,
+                &AgentSessionId::from(conversation_id.to_owned()),
+                content,
+                tip_type,
+            )
             .await
-            .map_err(CronError::Database)
+            .map_err(CronError::App)
     }
 
     /// Bind a canonical Session to its owning Cron job.
@@ -708,7 +682,6 @@ impl JobExecutor {
                 return replayed_delivery_result(run_id, conversation_id, delivery);
             }
         };
-        let skill_suggest_workspace = observed.workspace;
         let delivery = observed.delivery;
         if delivery.replayed {
             info!(
@@ -777,28 +750,6 @@ impl JobExecutor {
             return terminal_result;
         }
 
-        if let Err(e) = self
-            .upsert_cron_trigger_artifact(conversation_id, job)
-            .await
-        {
-            warn!(
-                job_id = %job.cron_job_id,
-                conversation_id,
-                error = %e,
-                "Failed to persist/broadcast cron trigger artifact"
-            );
-        }
-        if self.controls_host(&job.user_id)
-            && saved_skill.is_none()
-            && matches!(job.execution_mode, ExecutionMode::NewConversation)
-        {
-            self.skill_suggest_detector.schedule_check(
-                job.user_id.clone(),
-                conversation_id.to_owned(),
-                job.cron_job_id.clone(),
-                skill_suggest_workspace,
-            );
-        }
         info!(
             job_id = %job.cron_job_id,
             conversation_id,
@@ -1086,45 +1037,6 @@ impl JobExecutor {
         Ok(())
     }
 
-    async fn upsert_cron_trigger_artifact(
-        &self,
-        conversation_id: &str,
-        job: &CronJob,
-    ) -> Result<(), CronError> {
-        let created_at = now_ms();
-        let row = build_cron_trigger_artifact(conversation_id, job, created_at)?;
-        let row = self
-            .conversation_repo
-            .upsert_artifact(&row)
-            .await
-            .map_err(CronError::Database)?;
-        emit_artifact(self.user_events.as_ref(), &job.user_id, &row)?;
-
-        Ok(())
-    }
-
-    pub async fn mark_skill_suggest_artifacts_saved(
-        &self,
-        owner_id: &str,
-        job_id: &str,
-    ) -> Result<(), CronError> {
-        UserId::try_from(owner_id)
-            .map_err(|error| CronError::Scheduler(format!("invalid cron owner id: {error}")))?;
-        nomifun_common::CronJobId::parse(job_id)
-            .map_err(|error| CronError::Scheduler(format!("invalid cron job id: {error}")))?;
-        let rows = self
-            .conversation_repo
-            .mark_skill_suggest_artifacts_saved(owner_id, job_id, now_ms())
-            .await
-            .map_err(CronError::Database)?;
-
-        for row in rows {
-            emit_artifact(self.user_events.as_ref(), owner_id, &row)?;
-        }
-
-        Ok(())
-    }
-
     async fn resolve_execution_workspace_raw(
         &self,
         job: &CronJob,
@@ -1256,13 +1168,8 @@ fn build_prompt(
         ExecutionMode::NewConversation => {
             if saved_skill.is_some() {
                 build_new_conversation_with_skill_prompt(&job.name, &job.message)
-            } else if allow_skill_suggest {
-                build_new_conversation_prompt_with_skill_suggest(
-                    &job.name,
-                    &schedule_desc,
-                    &job.message,
-                )
             } else {
+                let _ = allow_skill_suggest;
                 build_new_conversation_prompt(&job.name, &schedule_desc, &job.message)
             }
         }
@@ -1724,13 +1631,14 @@ mod tests {
     }
 
     #[test]
-    fn build_prompt_new_conv_no_skill() {
+    fn build_prompt_new_conv_no_skill_has_no_host_file_protocol() {
         let job = CronJob {
             execution_mode: ExecutionMode::NewConversation,
             ..sample_job()
         };
         let prompt = build_prompt(&job, None, true);
-        assert!(prompt.contains("create a file named \"SKILL_SUGGEST.md\""));
+        assert!(prompt.contains("[Scheduled Task Context]"));
+        assert!(!prompt.contains("SKILL_SUGGEST.md"));
     }
 
     #[test]
@@ -2683,7 +2591,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_inner_new_conversation_without_saved_skill_requests_skill_suggest() {
+    async fn execute_inner_new_conversation_without_saved_skill_uses_plain_prompt() {
         let agent = Arc::new(RecordingAgent::new(
             "0190f5fe-7c00-7a00-8abc-012345678901",
         ));
@@ -2707,11 +2615,7 @@ mod tests {
         wait_for_agent_send(&agent, 1).await;
         let sent_messages = agent.sent_messages().await;
         assert_eq!(sent_messages.len(), 1);
-        assert!(
-            sent_messages[0]
-                .content
-                .contains("create a file named \"SKILL_SUGGEST.md\"")
-        );
+        assert!(!sent_messages[0].content.contains("SKILL_SUGGEST.md"));
         assert!(sent_messages[0].inject_skills.is_empty());
 
         let options = runtime_registry
@@ -2994,77 +2898,7 @@ mod tests {
             .expect("cron execution should insert a right-side prompt message");
         assert_eq!(right_message.r#type, "text");
         assert!(right_message.hidden);
-        assert!(right_message.content.contains("SKILL_SUGGEST.md"));
-    }
-
-    #[tokio::test]
-    async fn execute_inner_upserts_cron_trigger_artifact_and_broadcasts_event() {
-        let agent = Arc::new(RecordingAgent::new(
-            "0190f5fe-7c00-7a00-8abc-012345678901",
-        ));
-        let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
-            agent.clone(),
-        )));
-        let workspace_dir =
-            tempfile::tempdir().expect("cron-trigger artifact workspace fixture");
-        let workspace_path = workspace_dir.path().to_string_lossy().into_owned();
-        let repo = Arc::new(MissingWorkspaceConversationRepo::new(
-            "0190f5fe-7c00-7a00-8abc-012345678901",
-            serde_json::json!({ "workspace": workspace_path }),
-        ));
-        let broadcaster = Arc::new(RecordingBroadcaster::new());
-        let executor = make_executor_with_runtime_registry_repo_and_broadcaster(
-            runtime_registry,
-            repo.clone(),
-            broadcaster.clone(),
-        );
-        let job = CronJob {
-            execution_mode: ExecutionMode::NewConversation,
-            ..sample_job()
-        };
-
-        let result = executor.execute_inner(&job, "0190f5fe-7c00-7a00-8abc-012345678901", None).await;
-
-        assert_eq!(
-            result,
-            ExecutionResult::Success {
-                conversation_id: "0190f5fe-7c00-7a00-8abc-012345678901".into()
-            }
-        );
-        wait_for_agent_send(&agent, 1).await;
-
-        let messages = repo.inserted_messages();
-        assert!(
-            messages
-                .iter()
-                .all(|message| message.r#type != "cron_trigger"),
-            "cron execution should no longer persist cron trigger as a message"
-        );
-
-        let events = broadcaster.events();
-        let trigger_event = events
-            .iter()
-            .find(|event| {
-                event["name"] == "conversation.artifact" && event["data"]["kind"] == "cron_trigger"
-            })
-            .expect("cron execution should broadcast cron trigger artifact");
-        assert_eq!(
-            trigger_event["data"]["conversation_id"],
-            "0190f5fe-7c00-7a00-8abc-012345678901"
-        );
-        assert_eq!(
-            trigger_event["data"]["payload"]["cron_job_id"],
-            JOB_ID
-        );
-        assert_eq!(
-            trigger_event["data"]["payload"]["cron_job_name"],
-            "Test Job"
-        );
-        assert!(
-            trigger_event["data"]["payload"]["triggered_at"]
-                .as_i64()
-                .is_some()
-        );
+        assert!(!right_message.content.contains("SKILL_SUGGEST.md"));
     }
 
     // -- helper ---------------------------------------------------------------
@@ -3925,34 +3759,6 @@ mod tests {
         }
     }
 
-    struct RecordingBroadcaster {
-        events: Mutex<Vec<serde_json::Value>>,
-    }
-
-    impl RecordingBroadcaster {
-        fn new() -> Self {
-            Self {
-                events: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn events(&self) -> Vec<serde_json::Value> {
-            self.events
-                .lock()
-                .map(|items| items.clone())
-                .unwrap_or_default()
-        }
-    }
-
-    impl nomifun_realtime::UserEventSink for RecordingBroadcaster {
-        fn send_to_user(&self, _: &str, event: WebSocketMessage<serde_json::Value>) {
-            self.events.lock().unwrap().push(serde_json::json!({
-                "name": event.name,
-                "data": event.data,
-            }));
-        }
-    }
-
     struct StubBroadcaster;
 
     impl nomifun_realtime::UserEventSink for StubBroadcaster {
@@ -4330,22 +4136,6 @@ mod tests {
             repo,
             broadcaster,
             work_dir,
-        )
-    }
-
-    fn make_executor_with_runtime_registry_repo_and_broadcaster<B>(
-        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
-        repo: Arc<dyn IConversationRepository>,
-        broadcaster: Arc<B>,
-    ) -> JobExecutor
-    where
-        B: nomifun_realtime::UserEventSink + 'static,
-    {
-        make_executor_with_runtime_registry_repo_broadcaster_and_work_dir(
-            runtime_registry,
-            repo,
-            broadcaster,
-            std::env::temp_dir(),
         )
     }
 

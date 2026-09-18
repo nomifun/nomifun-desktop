@@ -16,7 +16,6 @@ import {
   joinPath,
   mergeTextMessageContent,
   preferTextMessageVersion,
-  transformKnowledgeWritebackEvent,
   transformMessage,
   transformUserCreatedEvent,
 } from './chatLib';
@@ -517,25 +516,6 @@ describe('transformMessage runtime field normalization', () => {
     if (message?.type !== 'agent_status') throw new Error('expected agent_status message');
     expect(message.content.backend).toBe('{\n  "name": "codex"\n}');
     expect(message.content.status).toBe('disconnected');
-  });
-
-  test('converts knowledge writeback events into assistant message status updates', () => {
-    const message = transformKnowledgeWritebackEvent({
-      conversation_id: parseConversationId('0190f5fe-7c00-7a00-8000-000000000001'),
-      msg_id: MESSAGE_ID,
-      status: 'writing',
-      attempt_id: 'attempt-1',
-      started_at: 1000,
-      updated_at: 1200,
-      retryable: false,
-      candidates: 2,
-    });
-
-    expect(message?.type).toBe('text');
-    expect(message?.msg_id).toBe(MESSAGE_ID);
-    expect(message?.content.content).toBe('');
-    expect(message?.content.knowledge_writeback?.status).toBe('writing');
-    expect(message?.content.knowledge_writeback?.attempt_id).toBe('attempt-1');
   });
 
   test('preserves persisted knowledge writeback state when hydrating text messages', () => {

@@ -611,20 +611,23 @@ impl IRemoteBindingRepository for SqliteRemoteBindingRepository {
             if binding.agent_binding_digest != input.expected_agent_binding_digest {
                 return Err(DbError::Conflict("Remote binding digest changed".to_owned()));
             }
-            let conversation_owner: Option<String> = sqlx::query_scalar(
-                "SELECT user_id FROM conversations WHERE conversation_id = ?",
+            let session_owner: Option<String> = sqlx::query_scalar(
+                "SELECT json_extract(owner_ref_json, '$.principal_id') \
+                 FROM agent_sessions \
+                 WHERE agent_session_id = ? AND state = 'live' \
+                   AND json_extract(owner_ref_json, '$.principal_kind') = 'user'",
             )
             .bind(&input.agent_session_id)
             .fetch_optional(&mut *conn)
             .await?;
-            match conversation_owner {
+            match session_owner {
                 Some(owner) if owner == input.owner_user_id => {}
                 Some(_) => {
                     return Err(DbError::Conflict(
-                        "Conversation belongs to another owner".to_owned(),
+                        "AgentSession belongs to another owner".to_owned(),
                     ));
                 }
-                None => return Err(DbError::NotFound("Conversation for Remote session".to_owned())),
+                None => return Err(DbError::NotFound("AgentSession for Remote session".to_owned())),
             }
             if fetch_session(&mut conn, &input.owner_user_id, &input.agent_session_id)
                 .await?

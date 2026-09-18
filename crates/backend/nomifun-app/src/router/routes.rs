@@ -27,9 +27,6 @@ use nomifun_companion::{companion_public_routes, companion_routes};
 use nomifun_customer_service::customer_service_routes;
 use nomifun_workshop::{workshop_public_routes, workshop_routes};
 use nomifun_creation::creation_routes;
-use nomifun_conversation::{
-    conversation_ops_routes, conversation_routes, creative_studio_agent_session_routes,
-};
 use nomifun_cron::cron_routes;
 use nomifun_file::file_routes;
 use nomifun_knowledge::knowledge_routes;
@@ -320,10 +317,11 @@ pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router>
         capability_admission: Arc::new(GatewayCatalogAdmission {
             control_plane: states.nomi_core_agent_api.control_plane.clone(),
         }),
-        conversation: Arc::new(super::legacy_conversation_port::LegacyConversationCapabilityPort::new(
-            states.conversation.service.clone(),
-            services.agent_runtime_registry.clone(),
-        )),
+        conversation: Arc::new(
+            super::nomi_core_session::GatewayAgentSessionCapabilityPort::new(
+                states.nomi_core_agent_api.clone(),
+            ),
+        ),
         companion_service: services.companion_service.clone(),
         terminal_service: services.terminal_service.clone(),
         provider_repo: Arc::new(nomifun_db::SqliteProviderRepository::new(
@@ -384,7 +382,7 @@ pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router>
             .await;
     }));
     // Start the busy-time queue drain (spec D1): it consumes `turn.completed`
-    // envelopes from the same in-process bus the conversation service
+    // envelopes from the same in-process bus the canonical Session owner
     // publishes through, recovers persisted queued prompts on startup, and
     // expires stale ones.
     let channel_queue_drain = channel_components.queue_drain;
@@ -396,33 +394,6 @@ pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router>
             .await;
     }));
 
-    // Spec D2: register the delivery-notify observer on the conversation
-    // service instance that executes gateway `nomi_send_to_conversation`
-    // turns (the same instance wired into CompatibilityCapabilityHost above). When a watched
-    // turn completes, the observer injects a receipt message into the
-    // requester session; a channel-bound requester relays the companion's
-    // summary to its IM chat through the standard stream relay.
-    let delivery_notify_observer = Arc::new(
-        crate::delivery_notify::DeliveryNotifyObserver::new(
-            states.conversation.service.clone(),
-            services.agent_runtime_registry.clone(),
-            services.authoritative_user_id.clone(),
-            states.channel.repo.clone(),
-            channel_components.manager.clone()
-                as Arc<dyn nomifun_channel::stream_relay::ChannelSender>,
-            channel_components.message_service.stop_confirmations(),
-            channel_components.message_service.asset_resolver(),
-            services.background_shutdown.clone(),
-        )
-        .with_background_task_registrar(
-            services.background_tasks.clone()
-                as Arc<dyn nomifun_conversation::BackgroundTaskRegistrar>,
-        ),
-    );
-    states
-        .conversation
-        .service
-        .with_turn_completion_observer(delivery_notify_observer);
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: channel message loop spawned"
@@ -771,15 +742,13 @@ fn create_nomi_core_router_with_all_state(
         services.authoritative_user_id.clone(),
     );
 
-    // LAN robot gateway. Assembled here because this is where the
-    // `ConversationService` the robot sessions dispatch through exists; the two
+    // LAN robot gateway. Assembled here with the canonical Session owner; the two
     // faces are mounted separately below because they belong in different
     // middleware groups.
     let robot_faces = services.robot.as_ref().map(|robot| {
         crate::robot_wiring::mount(
             robot,
-            states.conversation.service.clone(),
-            services.agent_runtime_registry.clone(),
+            states.nomi_core_agent_api.session_owner.clone(),
             services.companion_service.clone(),
             services.authoritative_user_id.clone(),
             services.data_dir.clone(),
@@ -802,7 +771,8 @@ fn create_nomi_core_router_with_all_state(
         &instance_owner_state,
     );
 
-    // Conversation routes protected by auth middleware
+    // Canonical AgentSession and resource routes are mounted from the
+    // Nomi-core router. Retired `/api/conversations/*` routes stay unreachable.
     #[cfg(feature = "browser-use")]
     let browser_resource_authenticated = protect_instance_owner(
         crate::router::browser_workspace::routes(crate::router::browser_workspace::BrowserResourceApiState {
@@ -815,17 +785,6 @@ fn create_nomi_core_router_with_all_state(
         &auth_mw_state,
         &instance_owner_state,
     );
-    let conversation_authenticated = conversation_routes(states.conversation.clone())
-        .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
-    let creative_studio_agent_session_authenticated = protect_instance_owner(
-        creative_studio_agent_session_routes(states.conversation.clone()),
-        &auth_mw_state,
-        &instance_owner_state,
-    );
-
-    let conversation_ops_authenticated = conversation_ops_routes(states.conversation)
-        .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
-
     // SSH host book (owner-only): saved connection profiles + test-connection.
     let ssh_host_authenticated = protect_instance_owner(
         nomifun_ssh::ssh_host_routes(states.ssh_host),
@@ -1127,9 +1086,6 @@ fn create_nomi_core_router_with_all_state(
         .merge(computer_permissions_authenticated)
         .merge(knowledge_registration_read_authenticated)
         .merge(knowledge_registration_write_local)
-        .merge(conversation_authenticated)
-        .merge(creative_studio_agent_session_authenticated)
-        .merge(conversation_ops_authenticated)
         .merge(ssh_host_authenticated)
         .merge(plugin_runtime_read_authenticated)
         .merge(plugin_runtime_write_local)

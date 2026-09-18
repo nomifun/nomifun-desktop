@@ -139,6 +139,38 @@ pub struct SessionObservation {
     pub next_cursor: SessionEventCursor,
 }
 
+/// One owner-scoped row for the Session list projection.  The UI-facing
+/// adapter may enrich this with immutable Agent artifacts, but identity,
+/// metadata, lifecycle and ordering all come from the canonical Store.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionListItem {
+    pub session: AgentSessionLiveRecord,
+    pub head: SessionHeadProjection,
+    pub created_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionListPage {
+    pub items: Vec<AgentSessionListItem>,
+    pub total: u64,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateAgentSessionMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+}
+
 /// The durable outcome of a canonical turn.
 ///
 /// This status is derived only from the matching `turn/*` facts. In

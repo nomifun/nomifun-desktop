@@ -1,6 +1,5 @@
 //! Scheduled job engine: cron scheduler, executor, and lifecycle event emitter.
 pub mod agent_schedule;
-mod artifacts;
 pub mod busy_guard;
 pub mod error;
 pub mod events;
@@ -12,7 +11,6 @@ mod session_port;
 pub mod service;
 pub mod sink;
 pub mod skill_file;
-pub mod skill_suggest;
 pub mod state;
 pub mod types;
 
