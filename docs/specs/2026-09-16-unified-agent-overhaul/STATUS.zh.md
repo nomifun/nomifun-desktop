@@ -2,7 +2,7 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-18
-> 当前阶段：Wave 6 / UARC-051 active
+> 当前阶段：Wave 6 / UARC-051 integrated；UARC-052 ready
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
@@ -16,8 +16,9 @@
 > Wave 3 实现提交：`8454133b124a3d38636f882b098de80ce17028c0`
 > Wave 4 barrier：`c5d64b943a7862bb9837686214e413899a47efc2`
 > Wave 5 实现提交：`a72503995`
+> UARC-051 实现提交：`ab94f33f2b6201c2850803fefbfe72430ef89234`
 > 当前主机：Windows
-> Initiative 状态：`active / UARC-051 Store and projection cutover`
+> Initiative 状态：`active / UARC-052 single Runtime removal ready`
 
 ## 1. 当前事实
 
@@ -36,7 +37,8 @@
 - AgentPreset/API 已删除 Runtime selector；Kernel/Control Plane/App projection 按 contribution 编译，
   不再用 Runtime family 或 Capability ID 映射决定支持。136/136 旧 ID 已有机器可验退役路线，现存
   Domain/UI migration input 分别归 `UARC-020..053`，没有兼容翻译器。
-- canonical `/api/agent-sessions` 已切换 generation 5 Store；旧领域入口等待后续 wave/cutover 删除。
+- canonical `/api/agent-sessions`、领域 Session ports、Gateway、Robot、Remote、Creative Studio、Creation、
+  Cron 与 renderer 已统一切到 generation 5 Store；产品组合不再挂载 `/api/conversations/*`。
 - Wave 1 的 UARC-010/011/012/013/014 已集成；Windows 静态、UI、Desktop 与 debug native build
   milestone 已通过；当时的 `skill.hooks` Context factory transition 已由 `UARC-022` 闭合。
 - Wave 2 的 UARC-020/021/022 已统一集成：一个自适应 Runtime loop、四个 Workspace Module、exact
@@ -89,7 +91,7 @@
 | `UARC-041` | integrated | Integration | verified | n/a | Windows WebView2 Browser capability UI；无 Browser-only Session |
 | `UARC-042` | integrated | Integration | verified | pending | Computer/Robot 单 Module、slash Actions 与真实 availability |
 | `UARC-050` | integrated | Integration | verified | pending | Official Agents、Workbench 与单 Nomi Runtime 诊断 UI |
-| `UARC-051` | active | Integration | pending | pending | 新 Agent Store/API/projection 串行切换 |
+| `UARC-051` | integrated | Integration | verified | pending | generation 5 Store/API/projection 与领域入口完成切换 |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -158,7 +160,10 @@
 | Wave 5 App | lib 522 + route-gap 28 + official preset 3 passed | App composition、canonical admission 与完整 transition regression |
 | Wave 5 DB | Agent Store reset/schema 3 passed | 迁移后 schema 与 clean baseline 相等；跨 Session binding 可复用 |
 | Wave 5 UI/build/contract boundary | `bun run check` + `build:ui` + generator write/check + UARC boundary passed | 880×600 boundary、i18n、typecheck、生成物与删除边界一致 |
-| Commercial selected-model probe | StepFun Coding Plan `step-3.7-flash` direct HTTP 200 | canonical turn dispatch pending UARC-051/052；未记作 integrated smoke pass |
+| UARC-051 App/route | App lib 512 + route-gap 29 passed | canonical create/list/update/turn/rebuild/delete；retired routes 404 |
+| UARC-051 Store/domain/DB | AgentSession 35 + Cron 187 + reset 3 + ID schema 20 + Remote repo 1 passed | Session ports、projection rebuild、Agent-only reset 与 Remote owner |
+| UARC-051 UI | focused 112 passed；typecheck、production build、880×600 boundary passed | immutable edit retry、canonical history/search/creation、无 legacy artifact/writeback surface |
+| Commercial selected-model integration | StepFun Coding Plan `step-3.7-flash` canonical smoke passed | credential-isolated Session → Runtime → projection；未持久化、打印或提交密钥 |
 | Windows UARC full gate | not run | 否 |
 | macOS UARC shared compile | not run | 否 |
 | macOS native Browser/Computer/Process | not run | 否 |
@@ -178,16 +183,14 @@
 
 - UARC 实施无产品决定 blocker。
 - macOS 任务需要可用 Mac 主机；在主机可用前状态保持 `pending`，不能标完成。
-- Wave 5 Windows/shared gate 已收口；`UARC-051` 是下一项串行 Integration 任务。
-- Remote open 当前仍创建旧 Conversation，而 canonical DELETE 只操作 generation 5 Store；该已知切换缺口
-  归 `UARC-051`，不得以接受 404 或兼容回退掩盖，须在 canonical Remote cutover 后恢复删除回归覆盖。
-- canonical `/api/agent-sessions` 已只写 generation 5；Cron/Channel/AutoWork/Companion/IDMM/
-  AgentExecution/Remote 的旧 Conversation writers/readers 仍由 `UARC-033/034/051/054` 迁移删除。
-  Fresh-v4 root coordinator aliases 仅为 `UARC-054` 保留。
+- `UARC-051` Windows/shared cutover 已收口；Remote open/delete、领域 ports、Gateway、Robot 与 renderer
+  均使用 generation 5 Store，旧 Conversation HTTP/WS projection 不再可达。
+- 旧 Runtime 实现、多 Runtime catalog/selector 与其测试源码仍由下一串行任务 `UARC-052` 物理删除；
+  历史 Agent schema/migrations 与 Fresh-v4 root aliases 仅为 `UARC-053/054` 保留。
 
 ## 8. Next ready tasks
 
-1. `UARC-051` 已串行启动：切换所有新 Agent operations 到 generation 5 Store、canonical API 与 projection。
+1. `UARC-052`：串行删除旧 Nomi/Coding Runtime 与多 Runtime 基础设施，只保留统一 Runtime/driver。
 2. `UARC-061/062`：依赖外部 Mac 真机，在 Windows 串行主线完成且 handoff 就绪后执行。
 
 ## 9. 状态更新模板
@@ -707,12 +710,10 @@
 - macOS: `UARC-041` is not applicable; shared sources for `UARC-042/050` remain pending. `UARC-061/062` still require
   a Mac for CEF child-NSView production injection, native interaction/TCC/lifecycle, visual QA, arm64 app/DMG and
   signing-structure evidence.
-- Commercial-model evidence: only the commercial StepFun Coding Plan `step-3.7-flash` selection was used for the
-  provider reachability probe, which returned HTTP 200. Canonical integrated turn dispatch remains pending
-  `UARC-051/052` and is not reported as a smoke pass. No credential was persisted, printed or committed.
-- Remaining/blocker: none for Wave 5. The known Remote open/delete Store split is a required `UARC-051` cutover item,
-  not an accepted compatibility state. External Mac hardware remains the later cross-platform blocker.
-- Next ready task: `UARC-051`, serial Integration only; no Feature lane is released until its completion gate passes.
+- Commercial-model evidence at Wave 5 close: provider reachability only; the later canonical integration result is
+  recorded in the `UARC-051 integrated` entry below.
+- Remaining/blocker at Wave 5 close: Remote open/delete Store split assigned to `UARC-051`; it is closed below.
+- Next task at that barrier: `UARC-051`, serial Integration only.
 
 ### 2026-09-18 UARC-051 started
 
@@ -731,3 +732,29 @@
 - macOS: shared cutover source is active; no Mac-native evidence is claimed from this host.
 - Remaining/blocker: none at start. External Mac hardware remains a later platform prerequisite.
 - Next ready tasks: none until `UARC-051` completion; `UARC-052` depends on this cutover.
+
+### 2026-09-18 UARC-051 integrated
+
+- Barrier/source: Wave 5 closeout `d45c6f54d5e4da5ef39ca2d37a052b23469bc15e`; implementation
+  `ab94f33f2b6201c2850803fefbfe72430ef89234`.
+- Owner/write set: Integration only; manifest write set was expanded to the exact domain adapters, generated
+  contracts, UI history surface and credential-isolating runner required by the cutover. No Feature worker ran.
+- Changed: generation 5 Store now owns create/list/metadata/Turn/steer/cancel/history/search/rebuild/delete;
+  Remote, Cron, Channel, Companion, AgentExecution, Gateway, Robot, Creative Studio, Creation and Terminal bindings
+  all resolve the same canonical Session. Runtime progress, tool results and assistant text project from Session events.
+- Deleted: product mounting of `/api/conversations/*`; legacy Gateway port, boot Conversation reconciliation,
+  delivery-notify observer, Cron artifact/skill-suggest projections, renderer Conversation artifact cards and
+  knowledge-writeback retry/stream bridges. Edit/retry now creates a new immutable Turn.
+- Retained + reason: non-Agent Provider/model, Cron definition, product configuration and Creation task stores remain
+  their domain authorities. The old Agent schema/migrations and old Runtime source remain only for `UARC-052..054`
+  physical deletion and are not reachable through the product Session/API composition.
+- Tests: App lib 512/512; route-gap 29/29 including canonical create/list/update/Turn/projection rebuild/delete and
+  retired-route 404; AgentSession 35/35; Cron 187/187; DB Agent reset 3/3, ID schema 20/20, Remote repo 1/1;
+  focused UI 112/112; typecheck, production UI build, 880×600 boundary, rustfmt/diff check and contract generator
+  check passed. UARC boundary scanner passed with the remaining Runtime/schema matches assigned to `UARC-052..054`.
+- Commercial-model evidence: credential-isolated StepFun Coding Plan `step-3.7-flash` selected-model integration
+  passed through canonical Session → unified Runtime → durable assistant projection. The credential did not enter
+  argv, Cargo/build-script environments, repository files or logs, and the runner's plaintext audit passed.
+- Windows: verified. macOS: shared source pending; no Mac-native, CEF, TCC, DMG or signing evidence claimed here.
+- Remaining/blocker: none for `UARC-051`. External Mac hardware remains a later Wave 8 prerequisite.
+- Next ready task: `UARC-052`, serial Integration only.
