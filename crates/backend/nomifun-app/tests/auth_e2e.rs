@@ -430,7 +430,7 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
         installation_owner
     );
 
-    let (owner_token, owner_csrf) =
+    let (owner_token, _owner_csrf) =
         setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     let (secondary_token, secondary_csrf) =
         setup_and_login(&mut app, &services, "secondary", "StrongP@ss2").await;
@@ -457,80 +457,24 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
         "owner denial should be explicit: {denied_body}"
     );
 
-    // A secondary authenticated identity still owns its own Conversation data;
-    // the installation-owner gate must not collapse every API into one global
-    // account or silently replace the caller id.
-    let conversations = app
+    // Canonical AgentSession is an installation control plane. It must use the
+    // same owner boundary as Settings rather than reviving the retired
+    // per-user Conversation surface.
+    let owner_sessions = app
         .clone()
-        .oneshot(get_with_token("/api/conversations", &secondary_token))
+        .oneshot(get_with_token("/api/agent-sessions?limit=1", &owner_token))
         .await
         .unwrap();
-    assert_eq!(conversations.status(), StatusCode::OK);
-
-    // Conversation auxiliary operations are user-scoped, not merely
-    // authentication-scoped. Historically these handlers discarded
-    // CurrentUser and looked up the integer id directly, which exposed an
-    // owner's workspace/runtime controls to a secondary user who guessed it.
-    let owner_conversation = app
+    assert_eq!(owner_sessions.status(), StatusCode::OK);
+    let denied_sessions = app
         .clone()
-        .oneshot(post_json_with_csrf(
-            "/api/conversations",
-            r#"{"type":"nomi","name":"owner private conversation","extra":{}}"#,
-            &owner_token,
-            &owner_csrf,
+        .oneshot(get_with_token(
+            "/api/agent-sessions?limit=1",
+            &secondary_token,
         ))
         .await
         .unwrap();
-    assert_eq!(owner_conversation.status(), StatusCode::CREATED);
-    let owner_conversation = body_json(owner_conversation).await;
-    let owner_conversation_id = owner_conversation["data"]["conversation_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-
-    for suffix in [
-        "mode",
-        "model",
-        "slash-commands",
-        "workspace?path=/",
-    ] {
-        let response = app
-            .clone()
-            .oneshot(get_with_token(
-                &format!("/api/conversations/{owner_conversation_id}/{suffix}"),
-                &secondary_token,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            response.status(),
-            StatusCode::NOT_FOUND,
-            "secondary principal crossed Conversation ownership through {suffix}"
-        );
-    }
-
-    for (method, suffix, body) in [
-        ("PUT", "mode", r#"{"mode":"code"}"#),
-        ("PUT", "model", r#"{"model_id":"forged-model"}"#),
-        ("POST", "side-question", r#"{"question":"leak state"}"#),
-    ] {
-        let response = app
-            .clone()
-            .oneshot(json_with_csrf(
-                method,
-                &format!("/api/conversations/{owner_conversation_id}/{suffix}"),
-                body,
-                &secondary_token,
-                &secondary_csrf,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            response.status(),
-            StatusCode::NOT_FOUND,
-            "secondary principal mutated an owner Conversation through {suffix}"
-        );
-    }
+    assert_eq!(denied_sessions.status(), StatusCode::FORBIDDEN);
 
     // Every route that can touch the host OS or installation-wide Agent state
     // is denied by the same owner boundary. These probes intentionally use
@@ -576,54 +520,6 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
             response.status(),
             StatusCode::FORBIDDEN,
             "secondary principal unexpectedly reached {uri}"
-        );
-    }
-
-    // Nomi remains available as model-only conversation functionality, while
-    // every forged host/collaboration field is replaced by server-owned safe
-    // state before persistence.
-    let model_only = app
-        .clone()
-        .oneshot(post_json_with_csrf(
-            "/api/conversations",
-            r#"{
-                "type":"nomi",
-                "name":"model only",
-                "channel_chat_id":"forged-channel",
-                "delegation_policy":"prefer_parallel",
-                "execution_model_pool":{"mode":"automatic"},
-                "decision_policy":"ask_user",
-                "extra":{
-                    "workspace":"/",
-                    "system_prompt":"read the host",
-                    "companion_session":true,
-                    "allowed_tools":[],
-                    "gateway_mcp_config":{"token":"forged-root"}
-                }
-            }"#,
-            &secondary_token,
-            &secondary_csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(model_only.status(), StatusCode::CREATED);
-    let model_only = body_json(model_only).await;
-    let conversation = &model_only["data"];
-    assert_eq!(conversation["type"], "nomi");
-    assert_eq!(conversation["delegation_policy"], "disabled");
-    assert!(conversation["execution_model_pool"].is_null());
-    assert_eq!(conversation["decision_policy"], "automatic");
-    assert!(conversation["channel_chat_id"].is_null());
-    assert_ne!(conversation["extra"]["workspace"], "/");
-    for key in [
-        "system_prompt",
-        "companion_session",
-        "allowed_tools",
-        "gateway_mcp_config",
-    ] {
-        assert!(
-            conversation["extra"].get(key).is_none(),
-            "forged runtime field survived: {key}"
         );
     }
 
@@ -726,24 +622,6 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
         .unwrap();
     assert_eq!(cron_skill.status(), StatusCode::FORBIDDEN);
 
-    // Model-only messages cannot smuggle host files or turn-scoped skills into
-    // the otherwise valid text conversation.
-    let conversation_id = conversation["conversation_id"].as_str().unwrap().to_owned();
-    let mut attachment_request = post_json_with_csrf(
-        &format!("/api/conversations/{conversation_id}/messages"),
-        r#"{"content":"inspect","files":["/etc/passwd"],"inject_skills":["shell"]}"#,
-        &secondary_token,
-        &secondary_csrf,
-    );
-    attachment_request.headers_mut().insert(
-        "idempotency-key",
-        axum::http::HeaderValue::from_static("0190f5fe-7c00-7a00-8000-000000000779"),
-    );
-    let attachment_attempt = app
-        .oneshot(attachment_request)
-        .await
-        .unwrap();
-    assert_eq!(attachment_attempt.status(), StatusCode::FORBIDDEN);
 }
 
 // ===========================================================================
