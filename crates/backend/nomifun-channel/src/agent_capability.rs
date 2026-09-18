@@ -731,9 +731,4 @@ mod tests {
         assert!(bounded_text("", "text").is_err());
     }
 
-    #[test]
-    fn legacy_tool_ids_are_not_target_action_ids() {
-        assert_eq!(channel_action_resource_operation("channel.reply"), None);
-        assert_eq!(channel_action_resource_operation("channel.send"), None);
-    }
 }

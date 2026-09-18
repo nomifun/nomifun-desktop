@@ -46,7 +46,7 @@ export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..
 export const TARGET_ID = 'macos_desktop_arm64';
 export const EXPECTED_TARGET = 'aarch64-apple-darwin';
 export const CANONICAL_CAPABILITY_INVENTORY_RELATIVE_PATH =
-  'crates/backend/nomifun-agent-contracts/contracts/generated/target-first-party-contributions.envelope.json';
+  'crates/backend/nomifun-agent-contracts/contracts/generated/first-party-agent-modules.envelope.json';
 
 const RETIRED_EXECUTOR_OPTIONS = Object.freeze({
   sidecar: '--sidecar',

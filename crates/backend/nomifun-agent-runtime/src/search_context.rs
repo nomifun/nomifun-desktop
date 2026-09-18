@@ -1,4 +1,4 @@
-//! Only canonical fs.search envelopes can request instruction discovery.
+//! Only canonical workspace.files/search envelopes can request instruction discovery.
 use crate::{AgentEngineError, AgentToolResult};
 use nomifun_chat_model_broker::{ChatToolCall, ChatToolResultPart};
 use std::collections::BTreeSet;
@@ -34,7 +34,7 @@ pub(super) fn hit_paths(
     result: &AgentToolResult,
 ) -> Result<BTreeSet<String>, AgentEngineError> {
     let invalid =
-        || AgentEngineError::WorkspaceContext("invalid bounded fs.search response".into());
+        || AgentEngineError::WorkspaceContext("invalid bounded workspace.files/search response".into());
     // Do not discard media or join arbitrary parts into trusted search JSON.
     let [ChatToolResultPart::Text { text }] = result.output.as_slice() else {
         return Err(invalid());

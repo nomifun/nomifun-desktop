@@ -510,7 +510,7 @@ async fn wait_turn(
     hard_deadline(
         phase,
         "BEFORE_TOOL_TURN_DEADLINE_EXCEEDED",
-        CODING_STAGE_DEADLINE,
+        ENGINE_SMOKE_DEADLINE,
         async {
             loop {
                 let (messages, _) = session_messages_after(router, phase, session, cursor).await?;
@@ -716,20 +716,13 @@ async fn run_with_provider(
         json!([{"resource_kind":"workspace","resource_id":"default-workspace"}]),
     )
     .await?;
-    let workspace = root.join("before-tool-workspace");
-    std::fs::create_dir(&workspace).map_err(|_| {
-        fail(
-            "before_tool.workspace",
-            "BEFORE_TOOL_WORKSPACE_CREATE_FAILED",
-        )
-    })?;
+    let workspace = root.join("work");
     let workspace = workspace.canonicalize().map_err(|_| {
         fail(
             "before_tool.workspace",
             "BEFORE_TOOL_WORKSPACE_CANONICALIZE_FAILED",
         )
     })?;
-    bind_session_workspace(router, &session, &workspace).await?;
     assert_session_runtime(router, &session).await?;
     stages.push("before_tool.publish_select");
     let mut receipt_cursor = 0;

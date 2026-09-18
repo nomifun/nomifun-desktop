@@ -11,7 +11,7 @@ use nomifun_common::{
 };
 use nomifun_db::models::RequirementRowUpdate;
 use nomifun_db::{
-    IConversationRepository, IRequirementRepository, ListRequirementsParams, RequirementClaim,
+    IRequirementRepository, ListRequirementsParams, RequirementClaim,
     RequirementClaimResolution,
 };
 use tracing::warn;
@@ -108,8 +108,6 @@ pub struct RequirementService {
     /// Attached for AutoWork config persistence (`extra.autowork`
     /// merge-write) through the current Session owner.
     session_config: Option<Arc<dyn AutoWorkSessionConfigPort>>,
-    /// Attached for reading a conversation row when loading AutoWork config.
-    conversation_repo: Option<Arc<dyn IConversationRepository>>,
     /// Canonical host projection used for boot-resume/admin enumeration of
     /// persisted Conversation AutoWork schedules.
     scheduled_session_lookup: Option<Arc<dyn AutoWorkScheduledSessionLookup>>,
@@ -139,7 +137,6 @@ impl RequirementService {
             repo,
             emitter,
             session_config: None,
-            conversation_repo: None,
             scheduled_session_lookup: None,
             completion_notifier: None,
             autowork_waker: None,
@@ -148,29 +145,12 @@ impl RequirementService {
         }
     }
 
-    /// Attach the typed host-owned Session port + repository for AutoWork
-    /// configuration persistence and reads.
+    /// Attach the typed host-owned Session port for AutoWork configuration.
     pub fn with_session_config_port(
         mut self,
         session: Arc<dyn AutoWorkSessionConfigPort>,
-        conv_repo: Arc<dyn IConversationRepository>,
     ) -> Self {
         self.session_config = Some(session);
-        self.conversation_repo = Some(conv_repo);
-        self
-    }
-
-    /// Source-compatible composition name for callers that have not yet
-    /// renamed their local variable from `conversation` to `session`.
-    ///
-    /// The method no longer constructs or accepts a Conversation-backed
-    /// adapter; it stores the already-composed typed Session port.
-    #[doc(hidden)]
-    /// Attach only the conversation repo (without the full conversation service).
-    /// `with_session_config_port` also sets it; this is for callers/tests that
-    /// need just the read side (e.g. `tag_bindings`).
-    pub fn with_conversation_repo(mut self, repo: Arc<dyn IConversationRepository>) -> Self {
-        self.conversation_repo = Some(repo);
         self
     }
 
@@ -1530,7 +1510,7 @@ impl RequirementService {
                     ),
                 }
             }
-        } else if self.session_config.is_some() || self.conversation_repo.is_some() {
+        } else if self.session_config.is_some() {
             return Err(AppError::Conflict(
                 "AutoWork scheduled-session lookup is not wired by the canonical Session facade"
                     .to_owned(),
@@ -1612,29 +1592,8 @@ impl AutoWorkBindingLookup for RequirementService {
     }
 }
 
-/// Conversation-delete hook (spec §9.B): reconcile every Requirement owned by
-/// the deleted Conversation. Inactive rows detach; ambiguous execution
-/// evidence retains its typed owner and is parked for review. There is no FK
-/// cascade, so the deletion path drives this explicitly. Wired in
-/// `nomifun-app` via the host's existing delete hook.
-#[async_trait::async_trait]
-impl nomifun_common::OnConversationDelete for RequirementService {
-    async fn on_conversation_deleted(&self, _user_id: &str, conversation_id: &str) {
-        if let Err(e) = self
-            .clear_owner_for_session(conversation_id, AutoWorkTargetKind::Conversation)
-            .await
-        {
-            warn!(
-                conversation_id,
-                error = %nomifun_common::ErrorChain(&e),
-                "failed to reconcile Requirement owner on conversation delete"
-            );
-        }
-    }
-}
-
-/// Terminal-delete hook (spec §9.B): mirror of `OnConversationDelete` for the
-/// typed Terminal owner domain. Wired in `nomifun-app` via
+/// Terminal-delete hook (spec §9.B) for the typed Terminal owner domain.
+/// Wired in `nomifun-app` via
 /// `TerminalService::with_delete_hook`.
 #[async_trait::async_trait]
 impl nomifun_common::OnTerminalDelete for RequirementService {
@@ -1676,9 +1635,11 @@ mod tests {
         let owner_id = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
         let session_id = ConversationId::new().into_string();
         sqlx::query(
-            "INSERT INTO conversations \
-                (conversation_id, user_id, name, type, created_at, updated_at) \
-             VALUES (?1, ?2, 'Requirement AgentSession', 'nomi', 0, 0)",
+            "INSERT INTO agent_sessions (\
+                agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                agent_binding_json, next_seq, created_at\
+             ) VALUES (?1, json_object('principal_kind','user','principal_id',?2), \
+                       'live', 'Requirement AgentSession', 0, 0, '{}', 1, 0)",
         )
         .bind(&session_id)
         .bind(&owner_id)

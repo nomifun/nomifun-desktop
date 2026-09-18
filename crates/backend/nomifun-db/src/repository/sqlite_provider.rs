@@ -569,8 +569,10 @@ impl IProviderRepository for SqliteProviderRepository {
         let hard_binding_exists: bool = sqlx::query_scalar(
             "SELECT \
                 EXISTS(\
-                    SELECT 1 FROM conversations \
-                    WHERE json_extract(model, '$.provider_id') = ?1\
+                    SELECT 1 FROM agent_preset_revisions revision, \
+                         json_tree(revision.payload_json) route \
+                    WHERE route.type = 'object' \
+                      AND json_extract(route.value, '$.provider_id') = ?1\
                 ) \
                 OR EXISTS(\
                     SELECT 1 FROM agent_execution_template_participants \
@@ -642,74 +644,7 @@ impl IProviderRepository for SqliteProviderRepository {
             .execute(&mut *transaction)
             .await?;
 
-        // Soft logical references are repaired explicitly in the same
-        // transaction. SQLite owns no cascade or relation semantics.
-        sqlx::query(
-            "UPDATE conversations \
-             SET execution_model_pool = CASE \
-                    WHEN json_extract(execution_model_pool, '$.mode') = 'single' \
-                        THEN NULL \
-                    ELSE (\
-                        SELECT CASE \
-                            WHEN COUNT(*) = 0 THEN NULL \
-                            ELSE json_object(\
-                                'mode', 'range', \
-                                'models', json(json_group_array(json(item.value)))\
-                            ) \
-                        END \
-                        FROM json_each(conversations.execution_model_pool, '$.models') item \
-                        WHERE json_extract(item.value, '$.provider_id') <> ?1 \
-                          AND EXISTS (\
-                              SELECT 1 FROM providers provider \
-                              WHERE provider.provider_id = json_extract(item.value, '$.provider_id')\
-                          )\
-                    ) \
-                 END, \
-                 updated_at = MAX(updated_at, ?2) \
-             WHERE execution_model_pool IS NOT NULL \
-               AND (\
-                    (json_extract(execution_model_pool, '$.mode') = 'single' \
-                     AND json_extract(execution_model_pool, '$.model.provider_id') = ?1) \
-                    OR \
-                    (json_extract(execution_model_pool, '$.mode') = 'range' \
-                     AND EXISTS (\
-                         SELECT 1 FROM json_each(execution_model_pool, '$.models') target \
-                         WHERE json_extract(target.value, '$.provider_id') = ?1\
-                     ))\
-               )",
-        )
-        .bind(id)
-        .bind(nomifun_common::now_ms())
-        .execute(&mut *transaction)
-        .await?;
-
         let now = nomifun_common::now_ms();
-        sqlx::query(
-            "UPDATE conversations \
-             SET extra = json_remove(\
-                    extra, \
-                    CASE \
-                        WHEN json_extract(extra, '$.idmm.fault_watch.bypass_model.provider_id') = ?1 \
-                        THEN '$.idmm.fault_watch.bypass_model' \
-                        ELSE '$.__nomifun_noop_idmm_fault_bypass' \
-                    END, \
-                    CASE \
-                        WHEN json_extract(extra, '$.idmm.decision_watch.bypass_model.provider_id') = ?1 \
-                        THEN '$.idmm.decision_watch.bypass_model' \
-                        ELSE '$.__nomifun_noop_idmm_decision_bypass' \
-                    END\
-                 ), \
-                 updated_at = MAX(updated_at, ?2) \
-             WHERE json_valid(extra) \
-               AND (\
-                    json_extract(extra, '$.idmm.fault_watch.bypass_model.provider_id') = ?1 \
-                    OR json_extract(extra, '$.idmm.decision_watch.bypass_model.provider_id') = ?1\
-               )",
-        )
-        .bind(id)
-        .bind(now)
-        .execute(&mut *transaction)
-        .await?;
         sqlx::query(
             "UPDATE terminal_sessions \
              SET idmm = json_remove(\

@@ -18,7 +18,7 @@ pub(crate) mod nomi_core_wave4;
 pub(crate) mod chat_broker_host;
 pub mod instance_token_routes;
 pub(crate) mod remote_runtime;
-pub(crate) mod nomi_core_agent_projection;
+pub(crate) mod agent_binding_projection;
 pub(crate) mod nomi_core_builtins;
 pub(crate) mod nomi_core_tool_discovery;
 pub(crate) mod nomi_core_chat_route;
@@ -79,6 +79,6 @@ pub use routes::{
     create_router, create_router_with_all_state, create_router_with_states, try_create_router,
 };
 pub use state::{
-    ChannelMessageLoopComponents, ModuleStates, build_conversation_state,
-    build_module_states, build_skill_state, build_ws_state,
+    ChannelMessageLoopComponents, ModuleStates, build_module_states, build_skill_state,
+    build_ws_state,
 };

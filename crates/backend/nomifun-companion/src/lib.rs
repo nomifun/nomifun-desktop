@@ -64,8 +64,6 @@ pub use routes::{companion_public_routes, companion_routes};
 pub use session_port::{
     companion_ports_from_typed_host, CompanionHostPorts, CompanionSessionPort,
 };
-#[cfg(test)]
-pub use session_port::{companion_ports_with_session, conversation_companion_ports};
 pub use service::CompanionService;
 pub use state::CompanionRouterState;
 pub use store::CompanionStore;

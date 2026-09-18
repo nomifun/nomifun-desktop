@@ -27,7 +27,6 @@ import type { TurnDisclosureProcessState } from '../turnDisclosureModel';
 import type { MessageId } from '@/common/types/ids';
 import { getProcessItemState, mergeProcessStates } from '../turnProcessState';
 import MessageThinking from './MessageThinking';
-import LocalWebSearchResult from './LocalWebSearchResult';
 import {
   buildToolReceiptDetailRows,
   type ToolReceiptAction,
@@ -346,10 +345,6 @@ const ToolTraceDetail: React.FC<{ row: ToolReceiptDetailRow; workspaceRoots: str
   const command = row.action === 'run_commands' ? row.target : undefined;
   const input = row.input && row.input !== command ? row.input : undefined;
 
-  if (row.title === 'nomi_local_websearch' && !row.attempts?.length && !row.notExecutedReason && !row.skipped) {
-    return <LocalWebSearchResult input={row.input} output={row.output} state={row.state} />;
-  }
-
   if (row.attempts?.length) {
     return (
       <div className='turn-process-trace-detail'>
@@ -361,9 +356,7 @@ const ToolTraceDetail: React.FC<{ row: ToolReceiptDetailRow; workspaceRoots: str
                 defaultValue: 'Attempt {{number}}',
               })}
             </div>
-            {row.title === 'nomi_local_websearch' && !attempt.notExecutedReason ? (
-              <LocalWebSearchResult input={attempt.input} output={attempt.output} state={attempt.state} />
-            ) : <>
+            <>
               <ToolTraceDetailSection
                 label={t('messages.toolDetailInput', { defaultValue: 'Input' })}
                 value={attempt.input}
@@ -372,7 +365,7 @@ const ToolTraceDetail: React.FC<{ row: ToolReceiptDetailRow; workspaceRoots: str
                 label={t('messages.toolDetailOutput', { defaultValue: 'Output' })}
                 value={attempt.output}
               />
-            </>}
+            </>
             {attempt.truncated && (
               <div className='turn-process-trace-detail__label'>
                 {t('messages.toolDetailLoadFailed', { defaultValue: 'Full output was truncated' })}
@@ -429,10 +422,6 @@ const ToolTraceRow: React.FC<{
     'turn-process-trace-tool__toggle',
     `turn-process-trace__row--${row.state}`
   );
-
-  if (row.title === 'nomi_local_websearch' && !row.attempts?.length && !row.notExecutedReason && !row.skipped) {
-    return <LocalWebSearchResult input={row.input} output={row.output} state={row.state} />;
-  }
 
   if (!hasDetail) {
     return (

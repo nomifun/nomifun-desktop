@@ -1,10 +1,10 @@
 {
   "capability": {
-    "id": "knowledge.search",
+    "id": "knowledge",
     "version": "1.0.0"
   },
   "contract_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "contribution_id": "capability:knowledge.search",
+  "contribution_id": "module:knowledge",
   "provenance": {
     "owner": {
       "owner_kind": "package",

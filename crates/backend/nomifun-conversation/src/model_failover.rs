@@ -8,7 +8,7 @@
 //!    首个可用候选;跳过 provider 关停 / 模型禁用 / 健康检查标 Unhealthy / 失败本身;
 //!    队列耗尽返回 `None`(send-loop 见 `None` 即按现状 emit 原始错误,绝不无限切换)。
 //! 2. 配置读写 —— 全局存 `client_preferences` 键 `agent.model_failover`(整体 JSON,
-//!    形状抄 `nomifun-idmm/service.rs` 的多字段 pref 先例),会话级可在
+//!    作为一个带版本的多字段偏好),会话级可在
 //!    `conversations.extra.model_failover` 覆盖(存在则优先于全局)。
 //!
 //! 健康字段 fail-open:精确 Chat capability 的 `health` 是 TEXT JSON,解析失败时按
@@ -56,9 +56,7 @@ fn validate_failover_config(config: &ModelFailoverConfig) -> Result<(), AppError
 /// 判定一个 `AgentErrorCode` 是否为「provider 故障」——即换个备用模型可能绕过的
 /// 单厂商失败(限流 / 5xx / 网络 / 配置)。
 ///
-/// 这是全仓库唯一的权威副本:故障转移 seam 在 `nomifun-conversation`,而
-/// `nomifun-idmm` 在其之上,通过 `nomifun_idmm::config::is_provider_fault`
-/// re-export 复用本函数。
+/// 这是全仓库唯一的 provider 故障分类权威副本。
 pub fn is_provider_fault(code: AgentErrorCode) -> bool {
     use AgentErrorCode::*;
     matches!(

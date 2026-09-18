@@ -802,6 +802,14 @@ pub trait IPluginRuntimeRepository: Send + Sync {
         params: &ClosePluginRuntimeSurfaceSessionParams,
     ) -> Result<bool, DbError>;
 
+    /// Revoke every Plugin Surface authority scoped to one canonical
+    /// AgentSession before that Session's tombstone is finalized.
+    async fn revoke_agent_session_surfaces(
+        &self,
+        owner_user_id: &str,
+        agent_session_id: &str,
+    ) -> Result<u64, DbError>;
+
     async fn revoke_all_surface_sessions_on_startup(&self) -> Result<u64, DbError>;
 
     #[allow(clippy::too_many_arguments)]

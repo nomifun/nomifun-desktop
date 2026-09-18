@@ -98,18 +98,10 @@ async fn lock_requirement_owners(
                     owner
                 )));
             }
-            let legacy = sqlx::query(
-                "UPDATE conversations SET updated_at = updated_at WHERE conversation_id = ?",
-            )
-            .bind(owner.as_str())
-            .execute(&mut **tx)
-            .await?;
-            if legacy.rows_affected() == 0 {
-                return Err(DbError::Conflict(format!(
-                    "requirement AgentSession owner '{}' does not exist",
-                    owner
-                )));
-            }
+            return Err(DbError::Conflict(format!(
+                "requirement AgentSession owner '{}' does not exist",
+                owner
+            )));
         }
     }
     if let Some(owner) = owner_terminal_id {
@@ -1267,26 +1259,6 @@ impl IRequirementRepository for SqliteRequirementRepository {
                 AND requirement.owner_conversation_id IS ?5 \
                 AND requirement.owner_terminal_id IS ?6 \
                 AND NOT EXISTS (\
-                    SELECT 1 FROM conversation_delivery_receipts AS receipt \
-                     WHERE json_extract(\
-                               receipt.request_payload, \
-                               '$.autowork_authority.requirement_id'\
-                           ) = requirement.requirement_id \
-                       AND json_extract(\
-                               receipt.request_payload, \
-                               '$.autowork_authority.claim_generation'\
-                           ) = requirement.claim_generation\
-                ) \
-                AND NOT EXISTS (\
-                    SELECT 1 FROM conversations AS conversation \
-                     WHERE conversation.conversation_id = \
-                           requirement.owner_conversation_id \
-                       AND (\
-                           conversation.status = 'running' \
-                           OR conversation.active_turn_operation_id IS NOT NULL\
-                       )\
-                ) \
-                AND NOT EXISTS (\
                     SELECT 1 FROM terminal_turn_admissions AS admission \
                      WHERE admission.requirement_id = requirement.requirement_id \
                        AND admission.claim_generation = requirement.claim_generation\
@@ -1345,13 +1317,9 @@ impl IRequirementRepository for SqliteRequirementRepository {
 mod tests {
     use super::*;
     use crate::{
-        IConversationRepository, RequirementConversationTurnAuthority,
-        SqliteConversationRepository, init_database_memory,
+        init_database_memory,
     };
     use nomifun_common::{ConversationId, MessageId, TerminalId};
-    use sha2::{Digest, Sha256};
-    use std::sync::Arc;
-    use tokio::sync::Barrier;
 
     async fn setup_database(
         db: crate::Database,
@@ -1367,9 +1335,11 @@ mod tests {
         let terminal_id = TerminalId::new().into_string();
 
         sqlx::query(
-            "INSERT INTO conversations \
-                (conversation_id, user_id, name, type, created_at, updated_at) \
-             VALUES (?1, ?2, 'requirement-owner-conversation', 'nomi', 0, 0)",
+            "INSERT INTO agent_sessions (\
+                agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                agent_binding_json, next_seq, created_at\
+             ) VALUES (?1, json_object('principal_kind','user','principal_id',?2), \
+                       'live', 'Requirement owner AgentSession', 0, 0, '{}', 1, 0)",
         )
         .bind(&conversation_id)
         .bind(&installation_owner)
@@ -1448,50 +1418,6 @@ mod tests {
             .unwrap()
             .expect("pending Requirement must be claimable")
             .row
-    }
-
-    async fn insert_autowork_receipt(
-        db: &crate::Database,
-        installation_owner: &str,
-        conversation_id: &str,
-        requirement: &RequirementRow,
-        status: &str,
-    ) {
-        let operation_id = format!(
-            "autowork-test-{}-{}",
-            requirement.requirement_id, status
-        );
-        let message_id = MessageId::new().into_string();
-        let request_payload = serde_json::json!({
-            "autowork_authority": {
-                "requirement_id": requirement.requirement_id,
-                "claim_generation": requirement.claim_generation,
-                "claim_token_sha256": "receiver-evidence-does-not-expose-the-capability"
-            }
-        })
-        .to_string();
-        let (result_ok, completed_at) = if status == "completed" {
-            (Some(1_i64), Some(101_i64))
-        } else {
-            (None, None)
-        };
-        sqlx::query(
-            "INSERT INTO conversation_delivery_receipts (\
-                 operation_id, message_id, conversation_id, user_id, kind, \
-                 request_payload, status, result_ok, created_at, updated_at, completed_at\
-             ) VALUES (?1, ?2, ?3, ?4, 'turn', ?5, ?6, ?7, 100, 101, ?8)",
-        )
-        .bind(operation_id)
-        .bind(message_id)
-        .bind(conversation_id)
-        .bind(installation_owner)
-        .bind(request_payload)
-        .bind(status)
-        .bind(result_ok)
-        .bind(completed_at)
-        .execute(db.pool())
-        .await
-        .unwrap();
     }
 
     #[tokio::test]
@@ -2396,120 +2322,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_conversation_receipt_state_and_live_aggregate_authority_block_abandon() {
-        for (status, suffix) in [("accepted", "accepted"), ("completed", "completed")] {
-            let (repo, db, conversation_id, _terminal_id) = setup().await;
-            let installation_owner = crate::installation_owner_id(db.pool()).await.unwrap();
-            let tag = format!("receipt-{suffix}");
-            let requirement = repo.insert(&make_row(&tag, "1")).await.unwrap();
-            let claimed = claim_for_conversation(&repo, &tag, &conversation_id, 100).await;
-            let claim_token = claimed.claim_token.clone().unwrap();
-            insert_autowork_receipt(
-                &db,
-                &installation_owner,
-                &conversation_id,
-                &claimed,
-                status,
-            )
-            .await;
-
-            assert!(
-                repo.abandon_claim_before_admission_exact(
-                    &requirement.requirement_id,
-                    Some(&conversation_id),
-                    None,
-                    claimed.claim_generation,
-                    &claim_token,
-                    200,
-                )
-                .await
-                .unwrap()
-                .is_none(),
-                "{status} is permanent execution evidence"
-            );
-            let retained = repo
-                .get_by_requirement_id(&requirement.requirement_id)
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(retained.status, "in_progress");
-            assert_eq!(retained.claim_generation, claimed.claim_generation);
-            assert_eq!(retained.claim_token.as_deref(), Some(claim_token.as_str()));
-            assert_eq!(
-                retained.owner_conversation_id.as_deref(),
-                Some(conversation_id.as_str())
-            );
-        }
-
-        let (repo, db, conversation_id, _terminal_id) = setup().await;
-        let installation_owner = crate::installation_owner_id(db.pool()).await.unwrap();
-        let requirement = repo
-            .insert(&make_row("aggregate-authority", "1"))
-            .await
-            .unwrap();
-        let claimed =
-            claim_for_conversation(&repo, "aggregate-authority", &conversation_id, 100).await;
-        let claim_token = claimed.claim_token.clone().unwrap();
-        let operation_id = "ordinary-live-turn";
-        sqlx::query(
-            "INSERT INTO conversation_delivery_receipts (\
-                 operation_id, message_id, conversation_id, user_id, kind, \
-                 request_payload, status, created_at, updated_at\
-             ) VALUES (?1, ?2, ?3, ?4, 'turn', '{}', 'accepted', 100, 100)",
-        )
-        .bind(operation_id)
-        .bind(MessageId::new().into_string())
-        .bind(&conversation_id)
-        .bind(&installation_owner)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            "UPDATE conversations \
-                SET status = 'running', active_turn_operation_id = ?1, \
-                    admission_epoch = admission_epoch + 1 \
-              WHERE conversation_id = ?2",
-        )
-        .bind(operation_id)
-        .bind(&conversation_id)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        let claim_receipts: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM conversation_delivery_receipts \
-              WHERE json_extract(request_payload, '$.autowork_authority.requirement_id') = ?1 \
-                AND json_extract(request_payload, '$.autowork_authority.claim_generation') = ?2",
-        )
-        .bind(&requirement.requirement_id)
-        .bind(claimed.claim_generation)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-        assert_eq!(claim_receipts, 0, "this case exercises aggregate authority");
-        assert!(
-            repo.abandon_claim_before_admission_exact(
-                &requirement.requirement_id,
-                Some(&conversation_id),
-                None,
-                claimed.claim_generation,
-                &claim_token,
-                200,
-            )
-            .await
-            .unwrap()
-            .is_none(),
-            "a live receiver aggregate must fail closed even if its receipt is not AutoWork-shaped"
-        );
-        let retained = repo
-            .get_by_requirement_id(&requirement.requirement_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(retained.status, "in_progress");
-        assert_eq!(retained.claim_token.as_deref(), Some(claim_token.as_str()));
-    }
-
-    #[tokio::test]
     async fn terminal_admission_is_absorbing_even_with_wrong_capability_and_after_settlement() {
         let (repo, db, _conversation_id, terminal_id) = setup().await;
         let requirement = repo
@@ -2685,131 +2497,6 @@ mod tests {
         assert_eq!(authoritative.status, "in_progress");
         assert_eq!(authoritative.claim_generation, second.claim_generation);
         assert_eq!(authoritative.claim_token, second.claim_token);
-        let guard_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM requirement_pre_effect_abandon_guards")
-                .fetch_one(db.pool())
-                .await
-                .unwrap();
-        assert_eq!(guard_count, 0);
-    }
-
-    #[tokio::test]
-    async fn conversation_admission_and_pre_effect_abandon_have_one_cross_connection_winner() {
-        let database_root = tempfile::tempdir().unwrap();
-        let database_path = database_root.path().join("admission-abandon-race.db");
-        let database = crate::init_database(&database_path).await.unwrap();
-        let (repo, db, conversation_id, _terminal_id) = setup_database(database).await;
-        let installation_owner = crate::installation_owner_id(db.pool()).await.unwrap();
-        let new_requirement = make_row("admission-abandon-race", "1");
-        let requirement = repo.insert(&new_requirement).await.unwrap();
-        let claimed =
-            claim_for_conversation(&repo, "admission-abandon-race", &conversation_id, 100).await;
-        let claim_token = claimed.claim_token.clone().unwrap();
-        let authority = RequirementConversationTurnAuthority {
-            requirement_id: requirement.requirement_id.clone(),
-            claim_generation: claimed.claim_generation,
-            claim_token: claim_token.clone(),
-        };
-        let claim_token_sha256 = format!("{:x}", Sha256::digest(claim_token.as_bytes()));
-        let request_payload = serde_json::json!({
-            "autowork_authority": {
-                "requirement_id": requirement.requirement_id,
-                "claim_generation": claimed.claim_generation,
-                "claim_token_sha256": claim_token_sha256,
-            }
-        })
-        .to_string();
-        let operation_id = "autowork-admission-abandon-race".to_owned();
-        let candidate_message_id = MessageId::new().into_string();
-        let barrier = Arc::new(Barrier::new(3));
-
-        let admission_repo = SqliteConversationRepository::new(db.pool().clone());
-        let admission_barrier = barrier.clone();
-        let admission_user_id = installation_owner.clone();
-        let admission_conversation_id = conversation_id.clone();
-        let admission_operation_id = operation_id.clone();
-        let admission_message_id = candidate_message_id.clone();
-        let admission_payload = request_payload.clone();
-        let admission_task = tokio::spawn(async move {
-            admission_barrier.wait().await;
-            admission_repo
-                .claim_autowork_turn_delivery_receipt_and_admit_with_candidate(
-                    &admission_user_id,
-                    &admission_conversation_id,
-                    &admission_operation_id,
-                    &admission_message_id,
-                    &admission_payload,
-                    &authority,
-                    0,
-                    200,
-                )
-                .await
-        });
-
-        let abandon_repo = SqliteRequirementRepository::new(db.pool().clone());
-        let abandon_barrier = barrier.clone();
-        let abandon_requirement_id = requirement.requirement_id.clone();
-        let abandon_conversation_id = conversation_id.clone();
-        let abandon_claim_token = claim_token.clone();
-        let abandon_task = tokio::spawn(async move {
-            abandon_barrier.wait().await;
-            abandon_repo
-                .abandon_claim_before_admission_exact(
-                    &abandon_requirement_id,
-                    Some(&abandon_conversation_id),
-                    None,
-                    claimed.claim_generation,
-                    &abandon_claim_token,
-                    201,
-                )
-                .await
-        });
-
-        barrier.wait().await;
-        let admission_result = admission_task.await.unwrap();
-        let abandon_result = abandon_task.await.unwrap().unwrap();
-        let admission_won = admission_result.is_ok();
-        let abandon_won = abandon_result.is_some();
-        assert_ne!(
-            admission_won, abandon_won,
-            "serialized SQLite writers must allow exactly one authority transition"
-        );
-
-        let authoritative = repo
-            .get_by_requirement_id(&requirement.requirement_id)
-            .await
-            .unwrap()
-            .unwrap();
-        let receipt_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM conversation_delivery_receipts WHERE operation_id = ?1",
-        )
-        .bind(&operation_id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-        let (conversation_status, active_operation): (String, Option<String>) = sqlx::query_as(
-            "SELECT status, active_turn_operation_id FROM conversations \
-              WHERE conversation_id = ?1",
-        )
-        .bind(&conversation_id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-
-        if admission_won {
-            assert_eq!(authoritative.status, "in_progress");
-            assert_eq!(authoritative.claim_token.as_deref(), Some(claim_token.as_str()));
-            assert_eq!(receipt_count, 1);
-            assert_eq!(conversation_status, "running");
-            assert_eq!(active_operation.as_deref(), Some(operation_id.as_str()));
-        } else {
-            assert!(matches!(admission_result, Err(DbError::Conflict(_))));
-            assert_eq!(authoritative.status, "pending");
-            assert_eq!(authoritative.claim_token, None);
-            assert_eq!(receipt_count, 0);
-            assert_eq!(conversation_status, "pending");
-            assert_eq!(active_operation, None);
-        }
         let guard_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM requirement_pre_effect_abandon_guards")
                 .fetch_one(db.pool())

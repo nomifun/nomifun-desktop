@@ -44,7 +44,7 @@ pub(crate) fn definitions() -> Vec<ChatToolDefinition> {
     }).map(|mut definition| {
         definition.description.push_str(" A prepared resource request conservatively invalidates previous workspace/command evidence and failed-patch rereads because session initialization may start a local process. Host refusal does not prove that prior evidence is still current. Reobserve relevant files/instructions before later edits; do not run checks excluded by the user. This invalidation is not evidence that a mutation or remote request actually occurred.");
         if definition.name == READ {
-            definition.description.push_str(" Default format=page returns text and binary descriptors, never raw blobs. To inspect an image, call alone with format=image, content_index and expected_source_sha256 from the descriptor, identical server/query, and NO offset/limit/expected_sha256. Requires llm.vision enabled in the frozen Agent selection and a compatible model route; supports only PNG/JPEG/WebP blobs. Host checks the original decoded digest, bounds decoding, strips metadata and resizes; no text/base64 fallback. Every call is a new remote observation, not cached byte retrieval. Other binary formats are descriptor-only.");
+            definition.description.push_str(" Default format=page returns text and binary descriptors, never raw blobs. To inspect an image, call alone with format=image, content_index and expected_source_sha256 from the descriptor, identical server/query, and NO offset/limit/expected_sha256. Requires an image-capable exact model route; supports only PNG/JPEG/WebP blobs. Host checks the original decoded digest, bounds decoding, strips metadata and resizes; no text/base64 fallback. Every call is a new remote observation, not cached byte retrieval. Other binary formats are descriptor-only.");
         }
         definition
     }).collect()
@@ -147,7 +147,7 @@ pub(crate) fn prepare(
         if !image_input {
             return Err(AgentToolResult::text(
                 call.call_id.clone(),
-                "No resource read dispatched: explicit MCP images require available image input and active selected llm.vision. Binary descriptors do not grant vision.",
+                "No resource read dispatched: explicit MCP images require available image input from the exact model route. Binary descriptors do not grant vision.",
                 true,
             ));
         }

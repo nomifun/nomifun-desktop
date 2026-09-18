@@ -57,8 +57,6 @@ const ALLOWED_MODELS = new Set([DEFAULT_MODEL]);
 const MODEL_TEST_NAME = 'nomi_core_selected_model_reaches_live_stepfun';
 const BEFORE_TOOL_TEST_NAME = 'nomi_core_product_before_tool_reaches_live_stepfun';
 const BEFORE_TOOL_STAGE_PHASES = ['before_tool.publish_select', 'before_tool.allow', 'before_tool.deny', 'before_tool.continuation'];
-const COMPACTION_TEST_NAME = 'unified_runtime_compaction_reaches_live_stepfun_without_discarding_history';
-const PRODUCT_TEST_NAME = 'nomi_core_product_chain_reaches_live_stepfun_and_remote_binding';
 const GLOBAL_TIMEOUT_MS = 30 * 60 * 1000;
 const CARGO_OUTPUT_LIMIT_BYTES = 32 * 1024 * 1024;
 const TEST_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024;
@@ -67,7 +65,6 @@ const FAILURE_SENTINEL =
 const compileOnly = process.argv.includes('--compile-only');
 const selfTest = process.argv.includes('--self-test');
 const modelSmoke = process.argv.includes('--model-smoke');
-const compactionSmoke = process.argv.includes('--compaction-smoke');
 const beforeToolSmoke = process.argv.includes('--before-tool-smoke');
 const retainNativeFixture = process.argv.includes('--retain-native-fixture');
 const globalDeadline = Date.now() + GLOBAL_TIMEOUT_MS;
@@ -383,7 +380,7 @@ async function resolveToolchainEnvironment() {
 
 async function main() {
   const userArgs = process.argv.slice(2);
-  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--compaction-smoke', '--before-tool-smoke', '--retain-native-fixture'];
+  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--before-tool-smoke', '--retain-native-fixture'];
   if (userArgs.some((arg, index) => {
     if (arg === '--data-dir') return !browserGui || !userArgs[index + 1] || userArgs[index + 1].startsWith('--');
     if (index > 0 && userArgs[index - 1] === '--data-dir') return false;
@@ -393,7 +390,7 @@ async function main() {
     process.exitCode = 2;
     return;
   }
-  if (([browser, browserGui, modelSmoke, compactionSmoke, beforeToolSmoke].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke)) {
+  if (([browser, browserGui, modelSmoke, beforeToolSmoke].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke)) {
     emitFailure('live_smoke_status=not_run', 'RUNNER_MODE_SELECTION_INVALID', 400);
     process.exitCode = 2;
     return;
@@ -545,11 +542,11 @@ async function main() {
 
   let test;
   try {
-    console.log(`live_smoke_phase=execute mode=${browserGui ? 'browser_gui' : browser ? 'browser_frontend' : modelSmoke ? 'selected_model' : beforeToolSmoke ? 'before_tool' : compactionSmoke ? 'runtime_compaction' : 'product_chain'} model=${model}`);
+    console.log(`live_smoke_phase=execute mode=${browserGui ? 'browser_gui' : browser ? 'browser_frontend' : beforeToolSmoke ? 'before_tool' : 'selected_model'} model=${model}`);
     test = await runCaptured(
       executable,
       browserGui ? [guiDataDir, '--live-frontend'] : browser ? ['--live-agent-only'] : [
-        modelSmoke ? MODEL_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : compactionSmoke ? COMPACTION_TEST_NAME : PRODUCT_TEST_NAME,
+        beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : MODEL_TEST_NAME,
         '--exact',
         '--ignored',
         '--test-threads=1',
@@ -618,7 +615,7 @@ async function main() {
       return;
     }
     // libtest exits successfully even when an exact filter matches zero tests.
-    const selected = modelSmoke ? MODEL_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : compactionSmoke ? COMPACTION_TEST_NAME : PRODUCT_TEST_NAME;
+    const selected = beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : MODEL_TEST_NAME;
     if (!selectedTestPassed(test.stdout, selected)) {
       emitFailure('live_smoke_status=not_run', 'SELECTED_TEST_DID_NOT_PASS', 503);
       process.exitCode = 2;
@@ -646,7 +643,7 @@ async function main() {
       process.exitCode = 2;
       return;
     }
-    console.log(`live_smoke_mode=${modelSmoke ? 'selected_model' : beforeToolSmoke ? 'before_tool' : compactionSmoke ? 'runtime_compaction' : 'product_chain'} model=${model}`);
+    console.log(`live_smoke_mode=${beforeToolSmoke ? 'before_tool' : 'selected_model'} model=${model}`);
     console.log('live_smoke_status=pass code=OK status=200');
     process.exitCode = 0;
     return;
@@ -716,9 +713,8 @@ function runSelfTest() {
     throw new Error('before-tool evidence self-test failed');
   }
   if (!selectedTestPassed(`test ${MODEL_TEST_NAME} ... ok\r\n`, MODEL_TEST_NAME) ||
-      !selectedTestPassed(`test ${COMPACTION_TEST_NAME} ... ok\r\n`, COMPACTION_TEST_NAME) ||
       selectedTestPassed('running 0 tests\ntest result: ok. 0 passed;', MODEL_TEST_NAME) ||
-      selectedTestPassed(`test ${PRODUCT_TEST_NAME} ... ok`, MODEL_TEST_NAME)) {
+      selectedTestPassed(`test ${BEFORE_TOOL_TEST_NAME} ... ok`, MODEL_TEST_NAME)) {
     throw new Error('exact test execution proof self-test failed');
   }
   if (!ALLOWED_MODELS.has('step-3.7-flash') ||

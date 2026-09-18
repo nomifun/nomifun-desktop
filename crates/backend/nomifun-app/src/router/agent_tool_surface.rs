@@ -31,13 +31,6 @@ pub(super) async fn compile(
     {
         return Err(error("Nomi supports at most 128 selected capabilities"));
     }
-    reject_retired_extension_authority(
-        snapshot
-            .content()
-            .enabled_capabilities
-            .iter()
-            .map(|selected| &selected.capability.id),
-    )?;
     let allowed_platform_actions = snapshot
         .content()
         .enabled_capabilities
@@ -176,22 +169,6 @@ pub(super) async fn compile(
         ));
     }
     compile_agent_tool_plan(snapshot, active, registry, exposures).map_err(error)
-}
-
-fn reject_retired_extension_authority<'a>(
-    capability_ids: impl IntoIterator<Item = &'a CapabilityId>,
-) -> Result<(), AppError> {
-    if let Some(retired) = capability_ids.into_iter().find(|capability_id| {
-        nomifun_agent_contracts::is_retired_extension_authoring_capability(
-            capability_id.as_ref(),
-        )
-    }) {
-        return Err(error(format!(
-            "retired extension authority {} cannot enter a Runtime Session",
-            retired.as_ref()
-        )));
-    }
-    Ok(())
 }
 
 fn admitted_plugin_actions<'a>(
@@ -338,14 +315,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn retired_extension_authority_never_enters_the_runtime_surface() {
-        let safe = CapabilityId::from("mcp.server");
-        reject_retired_extension_authority([&safe]).unwrap();
-        for retired in nomifun_agent_contracts::RETIRED_EXTENSION_AUTHORING_CAPABILITY_IDS {
-            let retired = CapabilityId::from(retired);
-            let error = reject_retired_extension_authority([&retired]).unwrap_err();
-            assert!(error.to_string().contains("retired extension authority"));
-        }
-    }
 }

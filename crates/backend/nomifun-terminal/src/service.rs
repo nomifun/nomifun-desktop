@@ -198,16 +198,14 @@ enum RelaunchTarget {
     Shell,
 }
 
-/// Hook the IDMM layer registers so a user-driven terminal session (re)arms
-/// intelligent-decision supervision on activity. Defined here (the lower crate)
-/// so `nomifun-terminal` need not depend on `nomifun-idmm`; `IdmmManager`
-/// implements it and `nomifun-app` injects the impl via
-/// [`TerminalService::with_terminal_supervision_hook`]. Mirrors
-/// `nomifun_conversation::ConversationSupervisionHook`.
+/// Hook the terminal supervision owner registers so a user-driven terminal
+/// session (re)arms intelligent-decision supervision on activity. Defined in
+/// this lower crate; `nomifun-app` injects the product implementation via
+/// [`TerminalService::with_terminal_supervision_hook`].
 ///
 /// Fire-and-forget, called on create / relaunch / user input. Unlike a chat
 /// turn (one fire per turn), a terminal fires on every input chunk, so the impl
-/// MUST be a cheap no-op when IDMM is disabled for the terminal or already
+/// MUST be a cheap no-op when supervision is disabled for the terminal or already
 /// supervising it (e.g. guard on `is_supervising` before spawning).
 pub trait TerminalSupervisionHook: Send + Sync {
     fn on_terminal_activity(&self, terminal_id: &str);
@@ -230,7 +228,7 @@ pub struct TerminalService {
     repo: Arc<dyn ITerminalRepository>,
     emitter: TerminalEventEmitter,
     /// Backend-managed default work dir; responses derive `is_default_workpath`
-    /// from it (constructor-injected like `ConversationService`'s work_dir).
+    /// from the application-owned workspace root.
     work_dir: std::path::PathBuf,
     live: Arc<DashMap<String, Arc<PtyHandle>>>,
     /// Renewable loopback capability guards bound to the exact live PTY
@@ -248,19 +246,19 @@ pub struct TerminalService {
     shutdown_gate: Arc<tokio::sync::RwLock<()>>,
     shutting_down: Arc<std::sync::atomic::AtomicBool>,
     /// Late-wired knowledge service (assembly order: knowledge comes up after
-    /// the terminal singleton, mirroring `ConversationService`). `None` means
+    /// the terminal singleton). `None` means
     /// knowledge features are silently skipped (best-effort contract).
     knowledge: Arc<std::sync::RwLock<Option<Arc<nomifun_knowledge::KnowledgeService>>>>,
     /// Hooks notified after a terminal row is deleted (registration order),
-    /// mirroring `ConversationService::delete_hooks`. Used by `nomifun-app` to
+    /// Used by `nomifun-app` to
     /// wire `RequirementService::clear_owner_for_session` so a deleted terminal
     /// explicitly drops its requirements' dual-domain owner (spec §9.B).
     delete_hooks: Arc<std::sync::RwLock<Vec<Arc<dyn OnTerminalDelete>>>>,
-    /// Late-wired IDMM supervision hook (same slot pattern as `delete_hooks`).
+    /// Late-wired terminal supervision hook (same slot pattern as `delete_hooks`).
     /// Fired on create/relaunch/input so a user-driven terminal re-arms 智能决策
     /// even after a supervisor stood down (Halt) or the PTY was relaunched —
     /// the terminal analogue of `ConversationSupervisionHook`. `None` outside
-    /// IDMM-enabled hosts (tests, webui-only).
+    /// hosts without terminal supervision (tests, webui-only).
     supervision_hook: Arc<std::sync::RwLock<Option<Arc<dyn TerminalSupervisionHook>>>>,
     /// Monotonic PTY spawn generation. Every `spawn_pty` mints the next value
     /// and stamps it on the handle + its exit callback, so a relaunch's killed
@@ -374,8 +372,7 @@ impl TerminalService {
         }
     }
 
-    /// Late-wire the knowledge service (same pattern as
-    /// `ConversationService::with_knowledge_service`). Interior mutability so
+    /// Late-wire the knowledge service. Interior mutability ensures
     /// already-cloned handles (cron executor, AutoWork driver) see it too.
     pub fn with_knowledge_service(&self, service: Arc<nomifun_knowledge::KnowledgeService>) {
         if let Ok(mut guard) = self.knowledge.write() {
@@ -383,7 +380,7 @@ impl TerminalService {
         }
     }
 
-    /// Late-wire the IDMM supervision hook (interior mutable; already-cloned
+    /// Late-wire the terminal supervision hook (interior mutable; already-cloned
     /// router/driver handles see it too). Called by `nomifun-app` so a
     /// user-driven terminal arms 智能决策 supervision.
     pub fn with_terminal_supervision_hook(&self, hook: Arc<dyn TerminalSupervisionHook>) {
@@ -783,7 +780,7 @@ impl TerminalService {
         let resp = row_to_response(&row, None, &self.work_dir);
         self.emitter.emit_created(user_id.as_str(), &resp);
         info!(terminal_id = %id, "terminal session created");
-        // Arm IDMM supervision for the fresh PTY (no-op if disabled / already on).
+        // Arm terminal supervision for the fresh PTY (no-op if disabled / already on).
         self.arm_supervision(id.as_str());
         Ok(resp)
     }
@@ -1466,7 +1463,7 @@ impl TerminalService {
     /// no capability beyond the shell the user already runs there. The
     /// `..`-rejection + boundary/depth guards and the optional case-insensitive
     /// `search` filter live in [`nomifun_file::list_workspace_level`]. The exact
-    /// terminal analogue of `ConversationService::browse_workspace`.
+    /// terminal-scoped workspace browser.
     pub async fn browse_workspace(
         &self,
         id: &str,
@@ -1593,7 +1590,7 @@ impl TerminalService {
             .decode(data_b64)
             .map_err(|e| TerminalError::InvalidInput(format!("base64: {e}")))?;
         self.write_live_input(id, &bytes).await?;
-        // Re-arm IDMM supervision on user activity (no-op if disabled / already
+        // Re-arm terminal supervision on user activity (no-op if disabled / already
         // supervising) —covers re-arm after a prior supervisor stood down.
         self.arm_supervision(id);
         // Capture the first input line for auto-titling (cheap no-op once titled).
@@ -1605,7 +1602,7 @@ impl TerminalService {
     /// Resolves the target's agent family from its stored command/args/backend to
     /// choose the correct submit sequence (bracketed-paste + separated CR for
     /// agent TUIs, raw + CR for single lines / shells). Uses the raw PTY write
-    /// path —this is deliberate driving, so it does NOT arm IDMM supervision or
+    /// path —this is deliberate driving, so it does NOT arm terminal supervision or
     /// auto-title the way `input` (user typing) does. `Err(NotFound)` if not live.
     pub async fn submit_text(&self, id: &str, text: &str) -> Result<(), TerminalError> {
         let epoch = self.current_epoch(id)
@@ -2000,7 +1997,7 @@ impl TerminalService {
     /// Spawn the PTY for a deferred-create session at the given (real) size,
     /// reading its command/cwd/env from the persisted row and re-syncing
     /// knowledge mounts (mirrors `relaunch` —the documented moment a binding
-    /// takes effect). Persists the real size and arms IDMM supervision.
+    /// takes effect). Persists the real size and arms terminal supervision.
     async fn spawn_deferred(
         &self,
         id: &str,
@@ -2167,7 +2164,7 @@ impl TerminalService {
         let _ = std::fs::remove_dir_all(self.session_mcp_dir(&id));
         drop(shutdown_guard);
         // Snapshot the hook list under the read lock, then drop the guard before
-        // awaiting —`RwLockReadGuard` is not `Send` (mirrors ConversationService).
+        // awaiting —`RwLockReadGuard` is not `Send`.
         let hooks: Vec<Arc<dyn OnTerminalDelete>> = self
             .delete_hooks
             .read()
@@ -2409,7 +2406,7 @@ impl TerminalService {
                 );
             }
         }
-        // Re-arm IDMM supervision for the fresh PTY (the old supervisor stood
+        // Re-arm terminal supervision for the fresh PTY (the old supervisor stood
         // down when the previous PTY exited).
         self.arm_supervision(&id);
         Ok(resp)

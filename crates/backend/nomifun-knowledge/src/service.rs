@@ -9396,22 +9396,6 @@ fn relevance_score(score: f32) -> u32 {
         .round() as u32
 }
 
-/// Conversation-delete hook: drop the conversation's knowledge binding so
-/// rows don't accumulate as orphans. Failures are logged, never propagated
-/// (hook contract).
-#[async_trait::async_trait]
-impl nomifun_common::OnConversationDelete for KnowledgeService {
-    async fn on_conversation_deleted(&self, _user_id: &str, conversation_id: &str) {
-        if let Err(e) = self
-            .repo
-            .delete_binding("conversation", conversation_id)
-            .await
-        {
-            tracing::warn!(conversation_id, error = %e, "failed to delete knowledge binding");
-        }
-    }
-}
-
 impl KnowledgeService {
 
     async fn row_to_info(&self, row: KnowledgeBaseRow) -> Result<KnowledgeBaseInfo, AppError> {

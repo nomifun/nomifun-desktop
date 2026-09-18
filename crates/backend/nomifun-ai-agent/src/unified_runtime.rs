@@ -680,8 +680,8 @@ mod tests {
             .emit(AgentEngineEvent::ToolStarted {
                 step: 1,
                 call_id: call_id.clone(),
-                capability_id: CapabilityId::from("fs.read"),
-                action_id: ActionId::from("read"),
+                capability_id: CapabilityId::from("workspace.files"),
+                action_id: ActionId::from("workspace.files/read"),
             })
             .await
             .unwrap();

@@ -995,7 +995,7 @@
     "goto": "Go fix it",
     "desktopCompanion": "Desktop companion",
     "customerService": "Customer service",
-    "conversation": "Conversation lead model",
+    "agent": "Agent",
     "agentExecution": "Collaborative task"
   },
   "healthCheck": "Health Check",

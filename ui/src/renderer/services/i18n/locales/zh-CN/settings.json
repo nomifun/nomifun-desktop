@@ -995,7 +995,7 @@
     "goto": "前往处理",
     "desktopCompanion": "桌面伙伴",
     "customerService": "客服",
-    "conversation": "会话主模型",
+    "agent": "Agent",
     "agentExecution": "协作任务"
   },
   "healthCheck": "健康检测",

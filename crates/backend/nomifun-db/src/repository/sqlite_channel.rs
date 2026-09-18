@@ -68,14 +68,15 @@ async fn lock_conversation(
         ))
     })?;
     let parent = sqlx::query(
-        "UPDATE conversations SET updated_at = updated_at WHERE conversation_id = ?",
+        "UPDATE agent_sessions SET next_seq = next_seq \
+         WHERE agent_session_id = ? AND state = 'live'",
     )
     .bind(conversation_id.as_str())
     .execute(&mut **tx)
     .await?;
     if parent.rows_affected() == 0 {
         return Err(DbError::Conflict(format!(
-            "{context} conversation '{}' does not exist",
+            "{context} AgentSession '{}' does not exist",
             conversation_id
         )));
     }
@@ -1418,11 +1419,12 @@ impl IChannelRepository for SqliteChannelRepository {
                  conversation_scope_id = ?, message_scope_id = ?, \
                  conversation_id = CASE \
                      WHEN ? IS NOT NULL AND EXISTS(\
-                         SELECT 1 FROM conversations WHERE conversation_id = ?\
+                         SELECT 1 FROM agent_sessions \
+                          WHERE agent_session_id = ? AND state = 'live'\
                      ) THEN ? ELSE NULL END, \
                  message_id = CASE \
                      WHEN ? IS NOT NULL AND EXISTS(\
-                         SELECT 1 FROM messages WHERE message_id = ?\
+                         SELECT 1 FROM agent_messages WHERE projection_id = ?\
                      ) THEN ? ELSE NULL END, \
                  outcome_json = ?, error_text = ?, \
                  updated_at = ?, completed_at = ? \
@@ -2938,18 +2940,21 @@ mod tests {
         repo.delete_sessions_by_user(MISSING_ID).await.unwrap();
     }
 
-    /// Helper to create an installation-owned stub conversation for
-    /// channel-session logical-reference tests. Channel sessions may point at a
-    /// host-capable Conversation, so the fixture must use the one principal
+    /// Helper to create an installation-owned canonical AgentSession for
+    /// Channel logical-reference tests. Channel sessions may point at a
+    /// host-capable AgentSession, so the fixture must use the one principal
     /// that is allowed to own host execution.
-    async fn create_stub_conversation(pool: &SqlitePool, conv_id: &str) {
+    async fn create_stub_agent_session(pool: &SqlitePool, agent_session_id: &str) {
         let now = nomifun_common::now_ms();
         let installation_owner = crate::installation_owner_id(pool).await.unwrap();
         sqlx::query(
-            "INSERT INTO conversations (conversation_id, user_id, name, type, created_at, updated_at) \
-             VALUES (?1, ?2, 'Test Conv', 'nomi', ?3, ?3)",
+            "INSERT INTO agent_sessions (\
+                agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                agent_binding_json, next_seq, created_at\
+             ) VALUES (?1, json_object('principal_kind','user','principal_id',?2), \
+                       'live', 'Test AgentSession', 0, 0, '{}', 1, ?3)",
         )
-        .bind(conv_id)
+        .bind(agent_session_id)
         .bind(installation_owner)
         .bind(now)
         .execute(pool)
@@ -2970,7 +2975,7 @@ mod tests {
             .await
             .unwrap();
 
-        create_stub_conversation(db.pool(), &conversation_id).await;
+        create_stub_agent_session(db.pool(), &conversation_id).await;
 
         repo.update_session_conversation(&created.channel_session_id, &conversation_id)
             .await
@@ -2988,7 +2993,7 @@ mod tests {
     async fn update_session_conversation_not_found() {
         let (repo, db) = setup().await;
         let conversation_id = nomifun_common::ConversationId::new();
-        create_stub_conversation(db.pool(), conversation_id.as_str()).await;
+        create_stub_agent_session(db.pool(), conversation_id.as_str()).await;
         let err = repo
             .update_session_conversation("nope", conversation_id.as_str())
             .await

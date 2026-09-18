@@ -109,7 +109,7 @@ pub trait EngineResourcePort: Send + Sync + std::fmt::Debug {
     ) -> Result<serde_json::Value, crate::EngineToolError>;
 
     /// Optional explicit media port; never fall back to text/base64 on refusal.
-    /// Production additionally requires active llm.vision and primary ImageInput
+    /// Production additionally requires primary-model ImageInput
     /// before remote IO and before returning host-decoded/re-encoded pixels.
     /// The same retained task/receipt/settlement rules as read apply. Known
     /// remote rejections return is_error=true with no image. No client URL fetch.

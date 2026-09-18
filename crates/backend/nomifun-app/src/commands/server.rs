@@ -10,7 +10,7 @@ use crate::bootstrap::{NomiCoreApplication, ServerEnvironment};
 
 /// Start the current product server with the original in-process Nomi core.
 ///
-/// `NomiCoreApplication` owns the `ConversationService`/`AgentRuntimeSessions`
+/// `NomiCoreApplication` owns the canonical AgentSession/Runtime composition
 /// graph and the complete product router. Engines are registered at assembly,
 /// selected by Agent Revision, and frozen per Session; never switched per turn.
 pub async fn run_nomi_core_server(

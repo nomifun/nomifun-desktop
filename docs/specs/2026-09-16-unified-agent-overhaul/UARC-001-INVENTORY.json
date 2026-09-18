@@ -99,19 +99,23 @@
     },
     {
       "id": "capability.legacy_authoring_ids",
-      "description": "All 136 old first-party capability IDs are inventoried across active production sources.",
+      "description": "The 135 retired operation-level first-party capability IDs are inventoried across active production sources; workspace.artifacts is audited separately as an intentional canonical Module ID reuse.",
       "owner_tasks": ["UARC-010", "UARC-014", "UARC-021", "UARC-022", "UARC-030", "UARC-031", "UARC-032", "UARC-033", "UARC-034", "UARC-040", "UARC-042", "UARC-053"],
       "completion_requirement": "zero_production_references",
       "matcher": {
         "kind": "catalog_ids",
-        "catalog_path": "crates/backend/nomifun-agent-contracts/contracts/closure/legacy-first-party-contributions.v1.json"
+        "catalog_path": "docs/specs/2026-09-16-unified-agent-overhaul/UARC-053-RETIRED-CAPABILITY-IDS.json",
+        "exclude_paths": [
+          "crates/backend/nomifun-db/migrations/",
+          "ui/src/renderer/services/i18n/i18n-keys.d.ts"
+        ]
       },
       "baseline": { "match_count": 2595, "file_count": 166, "files_digest": "a9a32f16e11be780fb04c086a2f3a0a88ba7c8ac33602b985c4892eb33cd4d78", "catalog_item_count": 136 }
     },
     {
       "id": "store.legacy_agent_tables",
       "description": "Conversation, Message and split Runtime/effect tables remain the Agent fact chain.",
-      "owner_tasks": ["UARC-011", "UARC-012", "UARC-051", "UARC-054"],
+      "owner_tasks": ["UARC-011", "UARC-012", "UARC-051", "UARC-053", "UARC-054"],
       "completion_requirement": "zero_production_references",
       "matcher": {
         "kind": "regex",
@@ -121,6 +125,10 @@
           "crates/backend/nomifun-db/",
           "crates/backend/nomifun-conversation/",
           "crates/backend/nomifun-app/src/router/"
+        ],
+        "exclude_paths": [
+          "crates/backend/nomifun-db/migrations/",
+          "crates/backend/nomifun-db/src/id_schema_contract.rs"
         ]
       },
       "baseline": { "match_count": 548, "file_count": 51, "files_digest": "6c346c35075a2aea19fe0248c34f3fed2457b9e3d6ba2fc35b17e7be6885fc40" }

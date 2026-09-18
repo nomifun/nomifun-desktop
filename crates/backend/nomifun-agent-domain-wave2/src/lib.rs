@@ -3181,10 +3181,6 @@ mod tests {
             required_resource_kinds(WORKSPACE_PROCESS_MODULE_ID),
             Some(BTreeSet::from([ResourceKind::from("process_session")]))
         );
-        for retired in ["process.session", "terminal.pty", "workspace.bind"] {
-            assert!(required_resource_kinds(retired).is_none());
-        }
-
         let registry = KernelRegistry::new(
             MaterializationPolicy::stable(CONTRACT_VERSION),
             Arc::new(InMemoryPluginStatePersistence::new()),

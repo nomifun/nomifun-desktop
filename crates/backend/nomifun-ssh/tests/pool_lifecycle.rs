@@ -16,7 +16,6 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nomifun_common::OnConversationDelete;
 use nomifun_ai_agent::{SshBackendProvider, SshLeaseRelease};
 use nomifun_ssh::dto::CreateSshHostRequest;
 use nomifun_ssh::{PoolTuning, SshDialError, SshLinkKey, SshLinkPhase, SshTeardown};
@@ -645,25 +644,6 @@ async fn shutdown_all_refuses_new_acquires_and_counts_reaped() {
         .await
         .expect_err("a shut-down pool must not open new sockets");
     assert!(matches!(err, SshDialError::ShuttingDown), "{err:?}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn on_conversation_deleted_closes_the_link() {
-    const NAME: &str = "on_conversation_deleted_closes_the_link";
-    let sshd = sshd_or_skip!(NAME);
-    let harness = support::harness(sshd.known_hosts_path(), support::brisk_tuning()).await;
-    let id = harness.add_fixture_host(&sshd).await;
-
-    if harness.open_or_skip(NAME, "conv-1", &id, "/").await.is_none() {
-        return;
-    }
-    // Through the trait object, because that is how the conversation service will
-    // reach the pool.
-    let hook: Arc<dyn OnConversationDelete> = Arc::new(harness.pool.clone());
-    hook.on_conversation_deleted(&harness.user_id, "conv-1")
-        .await;
-
-    assert_eq!(harness.pool.active_link_count(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

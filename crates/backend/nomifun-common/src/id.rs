@@ -281,13 +281,6 @@ define_entity_id!(
     PreviewSnapshotId
 );
 define_entity_id!(
-    /// Globally unique IDMM intervention audit-record identifier.
-    ///
-    /// This is the product-facing business ID. The SQLite row `id` remains
-    /// an implementation-only autoincrement key for ordering and eviction.
-    IdmmInterventionId
-);
-define_entity_id!(
     /// Globally unique requirement identifier.
     RequirementId
 );

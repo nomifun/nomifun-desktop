@@ -52,7 +52,7 @@ describe('Agent Settings Module authoring model', () => {
   test('maps only current Module identities to localized product copy', () => {
     expect(moduleI18nKey('browser')).toBe('browser');
     expect(moduleI18nKey('workspace.files')).toBe('workspaceFiles');
-    expect(moduleI18nKey('fs.read')).toBeUndefined();
+    expect(moduleI18nKey('workspace.files/read')).toBeUndefined();
     expect(moduleI18nKey('nomi_system_browser')).toBeUndefined();
   });
 

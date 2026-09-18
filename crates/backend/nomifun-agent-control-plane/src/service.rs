@@ -2171,7 +2171,7 @@ mod tests {
     #[test]
     fn shared_catalog_resolves_agent_and_gateway_and_filters_agent_only_view() {
         let (shared, shared_entry) = catalog_capability(
-            "knowledge.search",
+            "knowledge",
             [CapabilityConsumer::Agent, CapabilityConsumer::Gateway],
         );
         let (knowledge_only, knowledge_only_entry) = catalog_capability(
@@ -2198,7 +2198,7 @@ mod tests {
             test_compiler(),
         );
         let shared_ref = CapabilityRef {
-            id: CapabilityId::from("knowledge.search"),
+            id: CapabilityId::from("knowledge"),
             version: VersionString::from("1.0.0"),
         };
         let knowledge_only_ref = CapabilityRef {
@@ -2230,7 +2230,7 @@ mod tests {
                     id.to_owned()
                 })
                 .collect::<Vec<String>>(),
-            vec!["knowledge.search"]
+            vec!["knowledge"]
         );
     }
 
@@ -2442,7 +2442,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retired_companion_capability_is_not_recognized_as_current_official_seed() {
+    async fn additional_module_is_not_recognized_as_current_official_seed() {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let control = template_control_plane(store.clone(), OfficialPresetKey::CompanionDefault, false);
         let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
@@ -2454,10 +2454,10 @@ mod tests {
         let reference: PresetRevisionRef = wire_cast(created.preset.current_stable_revision.as_ref().unwrap()).unwrap();
         let mut former = store.get_revision(&reference).await.unwrap().unwrap();
         let snapshot = store.get_snapshot(&reference).await.unwrap().unwrap();
-        // A historical broad MCP authority must not be accepted as the
-        // current official template merely because the remaining fields match.
+        // Any additional Module must prevent a personal revision from being
+        // classified as the exact current official template.
         former.payload.enabled_capabilities.push(serde_json::from_value(json!({
-            "capability": { "id": "mcp.resource", "version": "1.0.0" },
+            "capability": { "id": "community.extra", "version": "1.0.0" },
             "action_allowlist": []
         })).unwrap());
         former.reference.revision += 1;

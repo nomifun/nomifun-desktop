@@ -99,13 +99,11 @@ impl EngineKernelSession {
     fn admit_mcp_image(&self, generation: u64) -> Result<(), AppError> {
         let active = self.active.snapshot().map_err(failure)?;
         if !self.primary_image_input
-            || !self.constraints.allows_capability("llm.vision")
             || active.generation != generation
             || active.resolved_snapshot_ref != *self.compiled.snapshot_ref()
-            || !active.active.iter().any(|id| id.as_ref() == "llm.vision")
         {
             return Err(failure(
-                "resource image requires active llm.vision and primary model ImageInput in the exact generation",
+                "resource image requires primary model ImageInput in the exact generation",
             ));
         }
         Ok(())

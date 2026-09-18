@@ -449,9 +449,19 @@ async fn lock_canonical_owner(
 ) -> Result<(), DbError> {
     match owner {
         CanonicalTaskOwner::ConversationTurn { conversation_id, .. } => {
-            let found = sqlx::query("UPDATE conversations SET updated_at=updated_at WHERE conversation_id=?")
-                .bind(conversation_id).execute(&mut **tx).await?.rows_affected();
-            if found != 1 { return Err(DbError::NotFound(format!("Conversation {conversation_id} not found"))); }
+            let found = sqlx::query(
+                "UPDATE agent_sessions SET next_seq = next_seq \
+                 WHERE agent_session_id = ? AND state = 'live'",
+            )
+            .bind(conversation_id)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected();
+            if found != 1 {
+                return Err(DbError::NotFound(format!(
+                    "AgentSession {conversation_id} not found"
+                )));
+            }
         }
         CanonicalTaskOwner::CanvasNode { project_id, .. } => {
             lock_creative_project(tx, project_id).await?;
@@ -677,23 +687,6 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
             CanonicalTaskOwner::ConversationTurn { conversation_id, message_id } => (Some(conversation_id.as_str()), Some(message_id.as_str())),
             _ => (None, None),
         };
-        if let (Some(conversation_id), Some(message_id)) = (conversation_id, message_id) {
-            let request: Value = serde_json::from_str(params.params).map_err(|e| DbError::Conflict(e.to_string()))?;
-            let content = serde_json::json!({"content": request.get("prompt").and_then(Value::as_str).unwrap_or_default(), "creation": {"agent": request.get("_nomifun_creation_agent"), "creation_task_id": params.creation_task_id}}).to_string();
-            // A professional submission owns its new user message. Tool calls
-            // and batch siblings attach to that existing turn without replacing
-            // its original prompt or Agent snapshot.
-            if message_id == params.creation_task_id {
-                sqlx::query("INSERT INTO messages (message_id,conversation_id,msg_id,type,content,position,status,hidden,created_at) VALUES (?, ?, ?, 'text', ?, 'right', 'finish', 0, ?) ON CONFLICT(message_id) DO NOTHING")
-                    .bind(message_id).bind(conversation_id).bind(message_id).bind(&content).bind(params.submitted_at).execute(&mut *tx).await?;
-            }
-            let actual: Option<(String,String,String)> = sqlx::query_as("SELECT conversation_id,content,position FROM messages WHERE message_id=?")
-                .bind(message_id).fetch_optional(&mut *tx).await?;
-            if actual.is_none_or(|actual| actual.0 != conversation_id || actual.2 != "right" || (message_id == params.creation_task_id && actual.1 != content)) {
-                return Err(DbError::Conflict("Generation must belong to an existing user turn in this conversation".into()));
-            }
-            sqlx::query("UPDATE conversations SET updated_at=MAX(updated_at,?) WHERE conversation_id=?").bind(params.submitted_at).bind(conversation_id).execute(&mut *tx).await?;
-        }
         let inserted = sqlx::query(
             "INSERT INTO creation_tasks \
                 (creation_task_id, project_id, template_id, template_run_id, template_step_id, \
@@ -771,7 +764,9 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
         message_id: &str,
     ) -> Result<Option<Value>, DbError> {
         let content: Option<String> = sqlx::query_scalar(
-            "SELECT content FROM messages WHERE conversation_id = ? AND message_id = ? AND position = 'right' AND type = 'text'",
+            "SELECT projection_json FROM agent_messages \
+             WHERE session_id = ? AND projection_id = ? \
+               AND presentation_intent = 'message'",
         )
         .bind(conversation_id)
         .bind(message_id)

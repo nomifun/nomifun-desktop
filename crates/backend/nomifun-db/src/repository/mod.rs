@@ -6,12 +6,10 @@ mod bind;
 pub mod attachment;
 pub mod channel;
 mod client_preference;
-pub mod conversation;
 pub mod creation_task;
 pub mod cron;
 pub mod customer_service;
 pub mod customer_service_search;
-pub mod idmm_intervention;
 pub mod instance_token;
 pub mod javascript_runtime_selection;
 pub mod knowledge;
@@ -38,11 +36,9 @@ mod sqlite_agent_execution_template;
 mod sqlite_attachment;
 mod sqlite_channel;
 mod sqlite_client_preference;
-mod sqlite_conversation;
 mod sqlite_creation_task;
 mod sqlite_cron;
 mod sqlite_customer_service;
-mod sqlite_idmm_intervention;
 mod sqlite_instance_token;
 mod sqlite_javascript_runtime_selection;
 mod sqlite_knowledge;
@@ -86,21 +82,11 @@ pub use client_preference::{IClientPreferenceRepository, KNOWLEDGE_RETRIEVAL_KEY
 pub(crate) use client_preference::{
     provider_preference_delete_action, ProviderPreferenceDeleteAction,
 };
-pub use conversation::{
-    IConversationRepository, ResolveCreativeStudioAgentSessionParams,
-    ResolvedCreativeStudioAgentSession,
-};
 pub use creation_task::{
     CreateCreativeTaskParams, CreativeTaskOwnerRef,
     ICreationTaskRepository, IdempotentCreationTask, UpdateCreationTaskParams,
 };
 pub use cron::ICronRepository;
-pub use idmm_intervention::{
-    IIdmmInterventionRepository, IdmmActionReservationKey, IdmmActionReserveResult,
-    IdmmActionSettleResult, IdmmActionSettlement, IdmmActionTurnIdentity,
-    MAX_IDMM_ACTION_FAILURE_REASON_CHARS, PER_TARGET_CAP, PER_USER_ACTIVITY_CAP,
-    ReserveIdmmActionParams, TTL_MS,
-};
 pub use instance_token::IInstanceTokenRepository;
 pub use javascript_runtime_selection::{
     IJavaScriptRuntimeSelectionRepository, SaveJavaScriptRuntimeSelectionParams,
@@ -188,11 +174,9 @@ pub use sqlite_agent_execution_template::SqliteAgentExecutionTemplateRepository;
 pub use sqlite_attachment::SqliteAttachmentRepository;
 pub use sqlite_channel::SqliteChannelRepository;
 pub use sqlite_client_preference::SqliteClientPreferenceRepository;
-pub use sqlite_conversation::SqliteConversationRepository;
 pub use sqlite_creation_task::SqliteCreationTaskRepository;
 pub use sqlite_cron::SqliteCronRepository;
 pub use sqlite_customer_service::SqliteCustomerServiceRepository;
-pub use sqlite_idmm_intervention::SqliteIdmmInterventionRepository;
 pub use sqlite_instance_token::SqliteInstanceTokenRepository;
 pub use sqlite_javascript_runtime_selection::SqliteJavaScriptRuntimeSelectionRepository;
 pub use sqlite_plugin_runtime::SqlitePluginRuntimeRepository;

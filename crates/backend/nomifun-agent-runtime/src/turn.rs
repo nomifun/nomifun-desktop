@@ -1498,7 +1498,7 @@ async fn invoke_tool_calls(
             && call.arguments.0.get("format").and_then(|value| value.as_str()) == Some("image"));
     if workspace_image && (completed.len() != 1 || !*context_image_input) {
         let results = completed.into_iter().map(|call| (call.call_id.clone(), Ok(AgentToolResult::text(
-            call.call_id, "No tools executed: workspace image reads require llm.vision enabled in the frozen Agent selection, a compatible model route and a single-call batch. Use read_file format=image without offset/limit only when image input is available; this turn cannot enable capabilities.", true)))).collect();
+            call.call_id, "No tools executed: workspace image reads require a compatible exact model route and a single-call batch. Use read_file format=image without offset/limit only when image input is available; this turn cannot change model features.", true)))).collect();
         return finish_tool_results(results, event_sink, model_step, cancellation).await;
     }
     let gate = completed.iter().find_map(|call| {
@@ -2281,7 +2281,7 @@ mod tests {
 
     struct EchoTool;
 
-    // Internal instruction observations are real fs.read envelopes, not model
+    // Internal instruction observations are real workspace.files/read envelopes, not model
     // tool calls. Keep them out of dispatch/concurrency/cancellation counters.
     fn instruction_result(invocation: &AgentToolInvocation) -> Option<AgentToolResult> {
         if invocation.binding.action_id.as_ref() != "workspace.files/read" {

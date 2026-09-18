@@ -1549,7 +1549,7 @@ impl NomiPluginToolSession {
 
     pub(crate) fn with_context_image_policy(mut self, supports_image: bool) -> Result<Self, nomifun_common::AppError> {
         // The host has already intersected exact model support with the frozen
-        // enabled llm.vision selection. There is no runtime activation grant.
+        // exact primary-model ImageInput support. There is no runtime activation grant.
         if let Some(resources) = &self.mcp_resources { resources.bind_image_policy(supports_image)?; }
         if let Some(skills) = &mut self.selected_skills { skills.image_policy(supports_image); }
         Ok(self)
@@ -1724,9 +1724,7 @@ impl NomiPluginToolSession {
             .collect::<BTreeSet<_>>();
         let mut actions = Vec::with_capacity(descriptors.len());
         for descriptor in descriptors {
-            if self.execution_constraints.restricted()
-                || !self.execution_constraints.allows_capability(descriptor.capability_id.as_ref())
-            {
+            if self.execution_constraints.restricted() {
                 return Err(NomiPluginToolError::Contract("Dynamic tool exceeds the Session execution ceiling".into()));
             }
             if descriptor.provider_name.trim().is_empty()
@@ -2173,15 +2171,6 @@ impl KernelNomiPluginToolSession {
             &agent_session_id,
             &state_scope_key,
         )?;
-        if compiled.content().enabled_capabilities.iter().any(|capability| {
-            nomifun_agent_contracts::is_retired_extension_authoring_capability(
-                capability.capability.id.as_ref(),
-            )
-        }) {
-            return Err(NomiPluginToolError::Contract(
-                "retired Skill/MCP authoring capabilities cannot enter a Runtime Session".into(),
-            ));
-        }
         let registry = kernel.snapshot()?;
 
         let active = Arc::new(SessionCapabilityState::new(&compiled));
@@ -2278,12 +2267,10 @@ impl KernelNomiPluginToolSession {
             .content()
             .contributions()
         {
-            if (!constraints.restricted()
-                && !constraints.allows_capability(resolved.capability.id.as_ref()))
-                || (constraints.restricted()
-                    && (resolved.contribution_lock.source_kind
+            if constraints.restricted()
+                && (resolved.contribution_lock.source_kind
                         != ContributionSourceKind::PlatformBuiltin
-                        || resolved.resolved_source.source_kind != PluginSourceKind::Bundled))
+                    || resolved.resolved_source.source_kind != PluginSourceKind::Bundled)
             { continue; }
             let schema_source = match resolved.contribution_lock.source_kind {
                 ContributionSourceKind::PluginMount => {

@@ -124,9 +124,9 @@ for (const file of jsonFiles) {
 
 const canonicalPayloadFiles = [
   'crates/backend/nomifun-agent-contracts/contracts/closure/contract-closure.v1.json',
-  'crates/backend/nomifun-agent-contracts/contracts/target-packages/target-first-party-contributions.v1.json',
+  'crates/backend/nomifun-agent-contracts/contracts/target-packages/first-party-agent-modules.v1.json',
   'crates/backend/nomifun-agent-contracts/contracts/engine/platform-feature-inventory.payload.json',
-  'crates/backend/nomifun-agent-contracts/contracts/presets/official-preset-seed-manifest.payload.json',
+  'crates/backend/nomifun-agent-contracts/contracts/presets/official-agent-seed-manifest.payload.json',
   'crates/backend/nomifun-agent-contracts/contracts/events/session-event-registry.json',
   'crates/backend/nomifun-agent-contracts/contracts/events/error-registry.json',
   'crates/backend/nomifun-agent-contracts/contracts/validation/platform-validation-manifest.payload.json',

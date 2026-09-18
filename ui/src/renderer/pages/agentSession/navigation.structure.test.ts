@@ -54,7 +54,8 @@ describe('Agent navigation', () => {
     expect(settingsPage.includes('AgentModalContent')).toBe(false);
     expect(settingsPage.includes("to='/agent'")).toBe(true);
     expect(settingsPage.includes("to='/settings/javascript-runtime'")).toBe(true);
-    expect(settingsPage.includes("const NOMI_FAMILY = 'nomifun.nomi'")).toBe(true);
+    expect(settingsPage.includes('ipcBridge.agentPlatform.runtime.get.invoke()')).toBe(true);
+    expect(settingsPage.includes('NOMI_FAMILY')).toBe(false);
     expect(settingsPage.includes('nomifun.coding')).toBe(false);
     expect(settingsPage.includes('<Select')).toBe(false);
     expect(settingsPage.includes('<RuntimeManager />')).toBe(false);

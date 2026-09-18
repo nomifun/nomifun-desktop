@@ -110,10 +110,6 @@ const LEGACY_LINE_ALLOWLIST = new Map([
     [/smart_orchestration/],
   ],
   [
-    'crates/backend/nomifun-conversation/src/service.rs',
-    [/\bagent_cluster_mode\b/, /\borchestrator_(?:legacy_identity|role)\b/, /key\.starts_with\("orchestrator_"\)/],
-  ],
-  [
     'crates/backend/nomifun-gateway/src/registry/mod.rs',
     [
       /\/\/ vocabulary-guard: retired-name-deny(?:-fixture)?$/,

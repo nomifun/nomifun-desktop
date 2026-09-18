@@ -74,6 +74,9 @@ fn constraints_allow_action(
     capability_id: &str,
     action_id: &str,
 ) -> bool {
+    if constraints.exclude_delegation && capability_id == "agent.collaboration" {
+        return false;
+    }
     match capability_id {
         nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID => match constraints.tool_scope {
             AgentToolPolicy::Full => true,
@@ -91,7 +94,7 @@ fn constraints_allow_action(
         | nomifun_agent_domain_wave2::WORKSPACE_ARTIFACTS_MODULE_ID => {
             constraints.tool_scope == AgentToolPolicy::Full
         }
-        _ => constraints.allows_capability(capability_id),
+        _ => constraints.tool_scope == AgentToolPolicy::Full,
     }
 }
 
@@ -334,7 +337,7 @@ impl EngineKernelSession {
             return false;
         };
         let policy_allows = if selected.action_allowlist.is_empty() {
-            self.constraints.allows_capability(id.as_ref())
+            !self.constraints.restricted()
         } else {
             selected.action_allowlist.iter().any(|action_id| {
                 constraints_allow_action(self.constraints, id.as_ref(), action_id.as_ref())

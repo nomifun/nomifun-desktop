@@ -11,10 +11,7 @@ use crate::models::{
     AgentExecutionAttemptDetailRow, AgentExecutionDetailRows,
     AgentExecutionEventRow, AgentExecutionRow,
     AgentExecutionStepDetailRow, AgentExecutionStepRow,
-    ConversationDeliveryReceiptRow, ConversationExecutionLinkRow,
-};
-use crate::repository::conversation::{
-    ConversationDeliveryReceiptClaim, TurnLifecycleTransition,
+    ConversationExecutionLinkRow,
 };
 
 /// Validate the canonical JSON form shared by executable templates and
@@ -629,68 +626,6 @@ pub trait IAgentExecutionRepository: Send + Sync {
     /// Atomically validates one exact live Agent Execution invocation and
     /// claims its Conversation receipt. Existing accepted/completed receipts
     /// are absorbing; only `claimed_new` grants effect authority.
-    async fn claim_attempt_turn_delivery_receipt(
-        &self,
-        _user_id: &str,
-        _conversation_id: &str,
-        _operation_id: &str,
-        _candidate_message_id: &str,
-        _kind: &str,
-        _request_payload: &str,
-        _authority: &AgentExecutionTurnAuthority,
-        _expected_admission_epoch: i64,
-        _now: i64,
-    ) -> Result<ConversationDeliveryReceiptClaim, DbError> {
-        Err(DbError::Init(
-            "Agent Execution repository cannot atomically claim a turn receipt".to_owned(),
-        ))
-    }
-
-    /// Settle only the exact Agent Execution admission won by
-    /// `candidate_message_id`.
-    ///
-    /// The implementation must validate the immutable receipt identity, the
-    /// Conversation generation, and the scheduler/step/attempt authority in
-    /// one writer transaction. A claim loser or displaced generation returns
-    /// [`TurnLifecycleTransition::Stale`] without changing the winner.
-    async fn abandon_exact_attempt_turn_admission(
-        &self,
-        _user_id: &str,
-        _conversation_id: &str,
-        _operation_id: &str,
-        _candidate_message_id: &str,
-        _request_payload: &str,
-        _authority: &AgentExecutionTurnAuthority,
-        _expected_admitted_epoch: i64,
-        _reason: &str,
-        _completed_at: i64,
-    ) -> Result<TurnLifecycleTransition, DbError> {
-        Err(DbError::Init(
-            "Agent Execution repository cannot abandon an exact turn admission".to_owned(),
-        ))
-    }
-
-    /// Revalidates the same exact invocation after receipt claim and before
-    /// entering the process-local model/tool effect path.
-    async fn validate_attempt_turn_effect_authority(
-        &self,
-        _user_id: &str,
-        _conversation_id: &str,
-        _operation_id: &str,
-        _kind: &str,
-        _request_payload: &str,
-        _authority: &AgentExecutionTurnAuthority,
-        _now: i64,
-    ) -> Result<ConversationDeliveryReceiptRow, DbError> {
-        Err(DbError::Init(
-            "Agent Execution repository cannot validate turn effect authority".to_owned(),
-        ))
-    }
-
-    /// Recovery seam shared by boot recovery and lease-loss successors.
-    /// Running attempts never return to Pending: a completed initial-turn
-    /// receipt is adopted, while accepted, missing, malformed, or legacy
-    /// receipt state is parked for review.
     async fn reconcile_recovered_attempt(
         &self,
         _user_id: &str,

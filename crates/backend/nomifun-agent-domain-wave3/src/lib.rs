@@ -2692,16 +2692,7 @@ mod tests {
             capability_ids,
             TARGET_CAPABILITY_IDS.into_iter().collect::<BTreeSet<_>>()
         );
-        assert!(!capability_ids.contains("session.attachments.read"));
-        assert!(capability_ids.iter().all(|id| !id.starts_with("llm.")));
-        for retired in [
-            "creation.image",
-            "workshop.canvas.read",
-            "office.preview",
-            "plugin.read",
-        ] {
-            assert!(!capability_ids.contains(retired));
-        }
+        assert!(capability_ids.iter().all(|id| !id.starts_with("model.")));
     }
 
     #[test]

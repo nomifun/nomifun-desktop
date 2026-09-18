@@ -60,24 +60,6 @@ impl ExecutionConstraints {
         }
     }
 
-    /// Only exact built-in IDs, never an Engine alias or a plugin's effect label.
-    /// The caller must still authenticate the frozen contribution and action.
-    pub fn allows_capability(&self, id: &str) -> bool {
-        if self.exclude_delegation && id == "agent.delegate" {
-            return false;
-        }
-        match self.tool_scope {
-            AgentToolPolicy::Full => true,
-            AgentToolPolicy::ReadOnly => {
-                matches!(id, "fs.read" | "fs.search" | "llm.chat" | "llm.vision")
-            }
-            AgentToolPolicy::ReadShell => matches!(
-                id,
-                "fs.read" | "fs.search" | "process.exec" | "llm.chat" | "llm.vision"
-            ),
-        }
-    }
-
     /// Nomi's persistent native registration ceiling; never adds a grant.
     pub fn allows_nomi_tool(&self, name: &str) -> bool {
         if self.exclude_delegation

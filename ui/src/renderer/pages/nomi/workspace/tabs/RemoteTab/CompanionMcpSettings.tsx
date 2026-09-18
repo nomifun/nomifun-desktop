@@ -12,6 +12,7 @@ import { useTranslation } from 'react-i18next';
 import { NomiSettingSection } from '@/renderer/components/base/NomiSettingLayout';
 import { refreshConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
 import { getConversationCreateErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
+import { allowsMultipleMcpServers } from '@/renderer/hooks/agent/agentResourceSelection';
 
 /** The settings page edits the same MCP selection as the companion composer. */
 export default function CompanionMcpSettings({ companionId }: { companionId: CompanionId }) {
@@ -33,7 +34,9 @@ export default function CompanionMcpSettings({ companionId }: { companionId: Com
       if (!cancelled) setData({ companionId,
         ids: conversation?.extra?.mcp_server_ids ?? [],
         options: servers.map((server) => ({ value: server.mcp_server_id, label: server.name, disabled: !server.enabled })),
-        allowed: !conversation || conversation.agent_snapshot?.enabled_capabilities.includes('mcp.connect') === true,
+        allowed: !conversation || allowsMultipleMcpServers(
+          conversation.agent_snapshot?.enabled_capabilities ?? []
+        ),
       });
     }).catch(() => { if (!cancelled) setError(true); });
     return () => { cancelled = true; };

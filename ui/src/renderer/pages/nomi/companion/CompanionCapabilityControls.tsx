@@ -16,6 +16,7 @@ import { ipcBridge } from '@/common';
 import { refreshConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
 import { parseMcpServerId } from '@/common/types/ids';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
+import { allowsMultipleMcpServers } from '@/renderer/hooks/agent/agentResourceSelection';
 
 /** Same composer rail and interaction as work sessions; writes companion intent. */
 const CompanionCapabilityControls: React.FC<{ companion: ReturnType<typeof useCompanion>; conversation: Extract<TChatConversation, { type: 'nomi' }> }> = ({ companion, conversation }) => {
@@ -25,7 +26,9 @@ const CompanionCapabilityControls: React.FC<{ companion: ReturnType<typeof useCo
   const { profile, patchCompanion } = companion;
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
-  const mcpEnabled = conversation.agent_snapshot?.enabled_capabilities.includes('mcp.connect') === true;
+  const mcpEnabled = allowsMultipleMcpServers(
+    conversation.agent_snapshot?.enabled_capabilities ?? []
+  );
   const draft = useMemo(() => ({
     skillNames: profile ? catalog.skills.filter(({ name }) =>
       (catalog.autoSkillNames.has(name) || profile.skills.enabled.includes(name))

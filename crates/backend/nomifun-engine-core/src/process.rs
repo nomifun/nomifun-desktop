@@ -2,7 +2,7 @@
 //!
 //! This module does not expose a model Tool and is not called directly by the
 //! engine turn loop. The application-owned Wave2/Kernel host adapter may use
-//! it to implement `process.exec` and interactive process-session actions
+//! it to implement `workspace.process/exec` and interactive process-session actions
 //! without duplicating process ownership.
 
 use std::collections::BTreeMap;

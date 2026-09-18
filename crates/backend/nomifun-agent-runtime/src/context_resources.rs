@@ -122,7 +122,7 @@ pub(crate) fn read(
         } => {
             if !image_input {
                 return invalid(
-                    "Image resource unavailable: this turn requires active llm.vision and an image-capable exact model route. No pixels were provided.",
+                    "Image resource unavailable: this turn requires an image-capable exact model route. No pixels were provided.",
                 );
             }
             if !single_call

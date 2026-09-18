@@ -2962,7 +2962,7 @@ mod tests {
     #[tokio::test]
     async fn materialize_resolves_auto_inject_skill_by_name() {
         // Auto-inject skills are resolved only when the caller names
-        // them explicitly (see `ConversationService::create` snapshot).
+        // them explicitly (see canonical Agent snapshot materialization).
         let tmp = TempDir::new().unwrap();
         let paths = make_embedded_paths(tmp.path()).await;
 

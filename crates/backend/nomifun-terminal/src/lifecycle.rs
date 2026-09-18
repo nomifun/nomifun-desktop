@@ -2,7 +2,7 @@
 //! capability design. Native CLI hooks (claude --settings hooks / codex hooks)
 //! invoke `nomicore terminal-hook`, which POSTs the event here; this server
 //! broadcasts a normalized `TerminalLifecycleEvent` per terminal_id. Consumers
-//! (Plan 3 AutoWork completion, Plan 4 IDMM supervision) subscribe — replacing
+//! (AutoWork completion and terminal supervision) subscribe — replacing
 //! the byte-stream scraping that could never see real turn boundaries.
 
 use std::sync::Arc;

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use nomifun_common::{
     AgentExecutionActor, AgentExecutionEventKind, AgentExecutionStatus, ExecutionAttemptStatus,
-    ExecutionStepKind, ExecutionStepStatus, MessageId, MAX_AGENT_EXECUTION_PARALLELISM,
+    ExecutionStepKind, ExecutionStepStatus, MAX_AGENT_EXECUTION_PARALLELISM,
     MAX_AGENT_DELEGATION_DEPTH, MAX_AGENT_EXECUTION_PARTICIPANTS, MAX_AGENT_EXECUTION_STEPS,
     now_ms,
 };
@@ -13,13 +13,12 @@ use crate::models::{
     AgentExecutionAttemptDetailRow, AgentExecutionAttemptRow, AgentExecutionDetailRows,
     AgentExecutionEventRow, AgentExecutionParticipantRow, AgentExecutionRow,
     AgentExecutionStepDependencyRow, AgentExecutionStepDetailRow, AgentExecutionStepRow,
-    ConversationDeliveryReceiptRow, ConversationExecutionLinkRow,
+    ConversationExecutionLinkRow,
 };
 use crate::repository::agent_preset_lineage::validate_and_lock_agent_preset_lineage;
 use crate::repository::agent_execution::{
     AdoptAgentExecutionStepOutputParams, AgentExecutionLeaseToken,
     AgentExecutionAttemptRecoveryDisposition, AgentExecutionAttemptRecoveryResult,
-    AgentExecutionTurnAuthority,
     AppendAgentExecutionStepsFromAttemptParams, AppendAgentExecutionStepsFromAttemptResult,
     AppendAgentExecutionStepsParams,
     AttemptConversationEffectParams, AttemptConversationEffectResult,
@@ -29,9 +28,6 @@ use crate::repository::agent_execution::{
     NewAgentExecutionStepDependency, ReconcileAgentExecutionPlanParams,
     PendingConversationCleanup, RetryAgentExecutionStep, SettleAgentExecutionAttemptParams,
     UpdateAgentExecutionParams,
-};
-use crate::repository::conversation::{
-    ConversationDeliveryReceiptClaim, TurnLifecycleTransition,
 };
 
 #[derive(Clone, Debug)]
@@ -59,29 +55,12 @@ fn is_terminal_execution_status(status: &str) -> bool {
 }
 
 /// Acquire the transaction writer lock while proving that a lead Session is
-/// owned by the caller. Canonical Store-only Sessions and retained legacy
-/// Conversations are both valid lead identities during cutover. Only a live
-/// canonical row is eligible; deleting/tombstoned and foreign rows fail
-/// closed. Attempt Conversations continue to be validated by their dedicated
-/// legacy runtime paths.
+/// owned by the caller. Only a live canonical AgentSession is eligible.
 async fn lock_owned_lead_session_tx(
     tx: &mut Transaction<'_, Sqlite>,
     user_id: &str,
     agent_session_id: &str,
 ) -> Result<(), DbError> {
-    let legacy = sqlx::query(
-        "UPDATE conversations SET updated_at = updated_at \
-         WHERE conversation_id = ? AND user_id = ?",
-    )
-    .bind(agent_session_id)
-    .bind(user_id)
-    .execute(&mut **tx)
-    .await?
-    .rows_affected();
-    if legacy == 1 {
-        return Ok(());
-    }
-
     let canonical = sqlx::query(
         "UPDATE agent_sessions SET next_seq = next_seq \
          WHERE agent_session_id = ? AND state = 'live' \
@@ -269,10 +248,12 @@ async fn active_attempt_conversation_tx(
     let rows: Vec<String> = sqlx::query_scalar(
         "SELECT link.conversation_id FROM conversation_execution_links link \
          JOIN agent_executions execution ON execution.execution_id = link.execution_id \
-         JOIN conversations conversation ON conversation.conversation_id = link.conversation_id \
+         JOIN agent_sessions session ON session.agent_session_id = link.conversation_id \
          WHERE link.execution_id = ? AND link.step_id = ? AND link.attempt_id = ? \
            AND link.relation = 'attempt' AND link.active = 1 \
-           AND execution.user_id = ? AND conversation.user_id = ? \
+           AND execution.user_id = ? AND session.state = 'live' \
+           AND json_extract(session.owner_ref_json, '$.principal_kind') = 'user' \
+           AND json_extract(session.owner_ref_json, '$.principal_id') = ? \
            AND execution.deleted_at IS NULL \
          ORDER BY link.id LIMIT 2",
     )
@@ -292,76 +273,6 @@ async fn active_attempt_conversation_tx(
             "attempt has multiple active Agent conversations".to_owned(),
         )),
     }
-}
-
-/// Acquire SQLite's write lock and prove that one Conversation effect still
-/// belongs to the exact live scheduler/step/attempt generation.
-async fn fence_attempt_turn_authority_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    user_id: &str,
-    conversation_id: &str,
-    authority: &AgentExecutionTurnAuthority,
-    now: i64,
-) -> Result<(), DbError> {
-    if authority.lease_owner.trim().is_empty()
-        || authority.expected_step_version < 0
-        || authority.expected_attempt_version < 0
-    {
-        return Err(DbError::Conflict(
-            "invalid Agent Execution turn authority".to_owned(),
-        ));
-    }
-    let execution = sqlx::query(
-        "UPDATE agent_executions SET lease_owner = lease_owner \
-         WHERE execution_id = ? AND user_id = ? AND lease_owner = ? \
-           AND lease_expires_at > ? AND deleted_at IS NULL \
-           AND status IN ('running', 'waiting_input')",
-    )
-    .bind(&authority.execution_id)
-    .bind(user_id)
-    .bind(&authority.lease_owner)
-    .bind(now)
-    .execute(&mut **tx)
-    .await?;
-    if execution.rows_affected() != 1 {
-        return Err(DbError::Conflict(
-            "Agent Execution turn lease generation is no longer authoritative".to_owned(),
-        ));
-    }
-
-    let exact_invocation: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) \
-         FROM agent_execution_steps step \
-         JOIN agent_execution_attempts attempt \
-           ON attempt.execution_id = step.execution_id AND attempt.step_id = step.step_id \
-         JOIN conversation_execution_links link \
-           ON link.execution_id = attempt.execution_id \
-          AND link.step_id = attempt.step_id AND link.attempt_id = attempt.attempt_id \
-         JOIN conversations conversation ON conversation.conversation_id = link.conversation_id \
-         WHERE step.execution_id = ? AND step.step_id = ? \
-           AND step.version = ? AND step.status = 'running' \
-           AND step.superseded_in_revision IS NULL \
-           AND attempt.attempt_id = ? AND attempt.version = ? \
-           AND attempt.status = 'running' \
-           AND link.conversation_id = ? AND link.relation = 'attempt' AND link.active = 1 \
-           AND conversation.user_id = ?",
-    )
-    .bind(&authority.execution_id)
-    .bind(&authority.step_id)
-    .bind(authority.expected_step_version)
-    .bind(&authority.attempt_id)
-    .bind(authority.expected_attempt_version)
-    .bind(conversation_id)
-    .bind(user_id)
-    .fetch_one(&mut **tx)
-    .await?;
-    if exact_invocation != 1 {
-        return Err(DbError::Conflict(
-            "Agent Execution turn no longer owns the exact running attempt Conversation"
-                .to_owned(),
-        ));
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -387,122 +298,6 @@ fn review_block_runtime_state(
     .to_string()
 }
 
-async fn settle_recovered_attempt_conversation_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    user_id: &str,
-    conversation_id: Option<&str>,
-    operation_id: &str,
-    reason: &str,
-    settle_accepted_receipt: bool,
-    now: i64,
-) -> Result<(), DbError> {
-    let Some(conversation_id) = conversation_id else {
-        return Ok(());
-    };
-    let (status, active_operation_id): (String, Option<String>) = sqlx::query_as(
-        "SELECT status, active_turn_operation_id FROM conversations \
-         WHERE conversation_id = ? AND user_id = ?",
-    )
-    .bind(conversation_id)
-    .bind(user_id)
-    .fetch_one(&mut **tx)
-    .await?;
-    // A successor Conversation generation is never part of recovery for this
-    // old attempt. Its receipt and lifecycle remain byte-for-byte untouched.
-    if active_operation_id
-        .as_deref()
-        .is_some_and(|active| active != operation_id)
-    {
-        return Ok(());
-    }
-    if settle_accepted_receipt {
-        sqlx::query(
-            "UPDATE conversation_delivery_receipts \
-             SET status = 'completed', result_ok = 0, result_text = NULL, \
-                 result_error = ?, completed_at = MAX(created_at, updated_at, ?), \
-                 updated_at = MAX(created_at, updated_at, ?) \
-             WHERE operation_id = ? AND conversation_id = ? AND user_id = ? \
-               AND kind = 'turn' AND status = 'accepted'",
-        )
-        .bind(reason)
-        .bind(now)
-        .bind(now)
-        .bind(operation_id)
-        .bind(conversation_id)
-        .bind(user_id)
-        .execute(&mut **tx)
-        .await?;
-    }
-    if status == "running" {
-        let unresolved_turn_receipts: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM conversation_delivery_receipts \
-             WHERE conversation_id = ? AND user_id = ? \
-               AND kind = 'turn' AND status = 'accepted'",
-        )
-        .bind(conversation_id)
-        .bind(user_id)
-        .fetch_one(&mut **tx)
-        .await?;
-        if unresolved_turn_receipts != 0 {
-            return Err(DbError::Conflict(
-                "recovered Agent attempt Conversation still has accepted turn receipts; finalization is quarantined"
-                    .to_owned(),
-            ));
-        }
-        if active_operation_id.as_deref() == Some(operation_id) {
-            let exact_completed_receipt: bool = sqlx::query_scalar(
-                "SELECT EXISTS(\
-                     SELECT 1 FROM conversation_delivery_receipts \
-                      WHERE operation_id = ? AND conversation_id = ? AND user_id = ? \
-                        AND kind = 'turn' AND status = 'completed'\
-                 )",
-            )
-            .bind(operation_id)
-            .bind(conversation_id)
-            .bind(user_id)
-            .fetch_one(&mut **tx)
-            .await?;
-            if !exact_completed_receipt {
-                return Err(DbError::Conflict(
-                    "active recovered Agent attempt Conversation generation lost its exact completed receipt; finalization is quarantined"
-                        .to_owned(),
-                ));
-            }
-        }
-        let finalized = sqlx::query(
-            "UPDATE conversations \
-             SET status = 'finished', active_turn_operation_id = NULL, \
-                 extra = CASE \
-                     WHEN json_extract(extra, '$._edit_resubmit_fence.operation_id') = ? \
-                     THEN json_remove(extra, '$._edit_resubmit_fence') \
-                     ELSE extra END, \
-                 admission_epoch = admission_epoch + 1, \
-                 updated_at = MAX(updated_at, ?) \
-             WHERE conversation_id = ? AND user_id = ? AND status = 'running' \
-               AND (active_turn_operation_id IS NULL OR active_turn_operation_id = ?) \
-               AND admission_epoch < 9223372036854775807",
-        )
-        .bind(operation_id)
-        .bind(now)
-        .bind(conversation_id)
-        .bind(user_id)
-        .bind(operation_id)
-        .execute(&mut **tx)
-        .await?;
-        if finalized.rows_affected() != 1 {
-            return Err(DbError::Conflict(
-                "recovered Agent attempt Conversation generation changed".to_owned(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Reconcile one already-running attempt while the caller holds the SQLite
-/// transaction write lock. This helper is deliberately shared by pause and
-/// boot/lease-loss recovery. A missing receipt is *not* proof that the external
-/// effect never started (legacy code may have crossed that boundary first), so
-/// every non-terminal/unprovable case is parked instead of rescheduled.
 async fn reconcile_running_attempt_receipt_tx(
     tx: &mut Transaction<'_, Sqlite>,
     user_id: &str,
@@ -513,13 +308,16 @@ async fn reconcile_running_attempt_receipt_tx(
     expected_attempt_version: i64,
     now: i64,
 ) -> Result<RunningAttemptReceiptReconciliation, DbError> {
-    let active_conversations: Vec<String> = sqlx::query_scalar(
+    let active_sessions: Vec<String> = sqlx::query_scalar(
         "SELECT link.conversation_id \
          FROM conversation_execution_links link \
-         JOIN conversations conversation ON conversation.conversation_id = link.conversation_id \
+         JOIN agent_sessions session ON session.agent_session_id = link.conversation_id \
          WHERE link.execution_id = ? AND link.step_id = ? AND link.attempt_id = ? \
            AND link.relation = 'attempt' AND link.active = 1 \
-           AND conversation.user_id = ? ORDER BY link.id LIMIT 2",
+           AND session.state = 'live' \
+           AND json_extract(session.owner_ref_json, '$.principal_kind') = 'user' \
+           AND json_extract(session.owner_ref_json, '$.principal_id') = ? \
+         ORDER BY link.id LIMIT 2",
     )
     .bind(execution_id)
     .bind(step_id)
@@ -527,60 +325,23 @@ async fn reconcile_running_attempt_receipt_tx(
     .bind(user_id)
     .fetch_all(&mut **tx)
     .await?;
-    let conversation_id = match active_conversations.as_slice() {
-        [conversation_id] => Some(conversation_id.as_str()),
+    let operation_id = format!("{attempt_id}:initial-turn");
+    let receipt = match active_sessions.as_slice() {
+        [session_id] => sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<i64>)>(
+            "SELECT state, result_json, error_json, finished_at \
+             FROM agent_turns WHERE session_id = ? AND operation_id = ?",
+        )
+        .bind(session_id)
+        .bind(&operation_id)
+        .fetch_optional(&mut **tx)
+        .await?,
         _ => None,
     };
-    let operation_id = format!("{attempt_id}:initial-turn");
-    let receipt = sqlx::query_as::<_, ConversationDeliveryReceiptRow>(
-        "SELECT * FROM conversation_delivery_receipts WHERE operation_id = ?",
-    )
-    .bind(&operation_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let exact_receipt = receipt.as_ref().filter(|receipt| {
-        conversation_id.is_some_and(|conversation_id| {
-            receipt.user_id == user_id
-                && receipt.conversation_id == conversation_id
-                && receipt.kind == "turn"
-        })
-    });
-    let exact_conversation_generation = if let Some(conversation_id) = conversation_id {
-        let active_operation_id: Option<String> = sqlx::query_scalar(
-            "SELECT active_turn_operation_id FROM conversations \
-             WHERE conversation_id = ? AND user_id = ?",
-        )
-        .bind(conversation_id)
-        .bind(user_id)
-        .fetch_one(&mut **tx)
-        .await?;
-        active_operation_id
-            .as_deref()
-            .is_none_or(|active| active == operation_id)
-    } else {
-        false
-    };
-    let completed_receipt = exact_receipt
-        .filter(|receipt| {
-            exact_conversation_generation
-                && receipt.status == "completed"
-                && receipt.result_ok.is_some()
-        });
 
-    if let Some(receipt) = completed_receipt {
-        settle_recovered_attempt_conversation_tx(
-            tx,
-            user_id,
-            conversation_id,
-            &operation_id,
-            "Agent attempt adopted its completed initial-turn receipt",
-            false,
-            now,
-        )
-        .await?;
-        let succeeded = receipt.result_ok == Some(true);
-        let attempt_status = if succeeded { "completed" } else { "failed" };
-        let step_status = if succeeded { "completed" } else { "failed" };
+    if let Some((state, result, error, finished_at)) = receipt.as_ref()
+        && matches!(state.as_str(), "completed" | "failed" | "cancelled" | "interrupted")
+    {
+        let succeeded = state == "completed";
         let attempt = sqlx::query(
             "UPDATE agent_execution_attempts SET status = ?, question = NULL, error = ?, \
                 output_summary = ?, runtime_state = NULL, retry_after = NULL, \
@@ -588,14 +349,10 @@ async fn reconcile_running_attempt_receipt_tx(
              WHERE execution_id = ? AND step_id = ? AND attempt_id = ? AND version = ? \
                AND status = 'running'",
         )
-        .bind(attempt_status)
-        .bind(if succeeded {
-            None::<&str>
-        } else {
-            receipt.result_error.as_deref()
-        })
-        .bind(receipt.result_text.as_deref())
-        .bind(receipt.completed_at.unwrap_or(now))
+        .bind(if succeeded { "completed" } else { "failed" })
+        .bind(if succeeded { None } else { error.as_deref().or(Some(state.as_str())) })
+        .bind(result.as_deref())
+        .bind(finished_at.unwrap_or(now))
         .bind(now)
         .bind(execution_id)
         .bind(step_id)
@@ -612,7 +369,7 @@ async fn reconcile_running_attempt_receipt_tx(
              WHERE execution_id = ? AND step_id = ? AND version = ? \
                AND status = 'running' AND superseded_in_revision IS NULL",
         )
-        .bind(step_status)
+        .bind(if succeeded { "completed" } else { "failed" })
         .bind(now)
         .bind(execution_id)
         .bind(step_id)
@@ -636,44 +393,24 @@ async fn reconcile_running_attempt_receipt_tx(
         return Ok(RunningAttemptReceiptReconciliation::CompletedReceiptAdopted);
     }
 
-    let (receipt_state, reason) = match exact_receipt.map(|receipt| receipt.status.as_str()) {
-        Some("accepted") => (
-            "accepted",
-            "The initial Agent turn was durably accepted before interruption, but its terminal outcome is unknown. Automatic retry is blocked to prevent duplicate model or tool effects.",
-        ),
-        Some("completed") => (
-            "malformed_completed",
-            "The initial Agent turn has an incomplete terminal receipt. Automatic retry is blocked because its external effect outcome cannot be proven.",
+    let (receipt_state, reason) = match receipt.as_ref().map(|receipt| receipt.0.as_str()) {
+        Some("accepted" | "running") => (
+            "running",
+            "The canonical Agent Turn was durably admitted before interruption, but its terminal outcome is unknown. Automatic retry is blocked to prevent duplicate model or tool effects.",
         ),
         Some(_) => (
             "unsupported",
-            "The initial Agent turn has an unsupported receipt state. Automatic retry is blocked because its external effect outcome cannot be proven.",
+            "The canonical Agent Turn has an unsupported receipt state. Automatic retry is blocked because its external effect outcome cannot be proven.",
         ),
-        None if receipt.is_some() || conversation_id.is_none() => (
+        None if active_sessions.len() != 1 => (
             "identity_ambiguous",
-            "The interrupted Agent turn cannot be matched to one exact Conversation receipt. Automatic retry is blocked to prevent duplicate effects.",
+            "The interrupted Agent Turn cannot be matched to one exact AgentSession. Automatic retry is blocked to prevent duplicate effects.",
         ),
         None => (
             "missing",
-            "No terminal receipt exists for the interrupted Agent turn. This does not prove that legacy model or tool effects were never started, so automatic retry is blocked.",
+            "No terminal receipt exists for the interrupted canonical Agent Turn. This does not prove that model or tool effects were never started, so automatic retry is blocked.",
         ),
     };
-    settle_recovered_attempt_conversation_tx(
-        tx,
-        user_id,
-        conversation_id,
-        &operation_id,
-        reason,
-        exact_receipt.is_some_and(|receipt| receipt.status == "accepted"),
-        now,
-    )
-    .await?;
-    // A review-blocked attempt must never be scheduled again, but its
-    // process/runtime may still be alive after a pause, lease loss, or
-    // restart.  Retire only this exact attempt link so the durable cleanup
-    // outbox can cancel that Conversation/runtime.  Do not deactivate by
-    // conversation id: a replacement attempt may already own the same
-    // Conversation and must remain isolated from stale cleanup.
     sqlx::query(
         "UPDATE conversation_execution_links SET active = 0, updated_at = ? \
          WHERE execution_id = ? AND step_id = ? AND attempt_id = ? \
@@ -871,33 +608,7 @@ async fn append_event_tx(
                     ));
                 }
                 let (relation, linked_attempt_id) = &links[0];
-                if relation == "lead" {
-                    lock_owned_lead_session_tx(
-                        tx,
-                        &on_behalf_of_user_id,
-                        conversation_id,
-                    )
-                    .await?;
-                } else {
-                    // Attempt runtime identity is intentionally still backed
-                    // by the legacy Conversation aggregate until its later
-                    // runtime cutover. A canonical Store row must never be
-                    // accepted as an Attempt Conversation by this fallback.
-                    let actor_conversation = sqlx::query(
-                        "UPDATE conversations SET updated_at = updated_at \
-                         WHERE conversation_id = ? AND user_id = ?",
-                    )
-                    .bind(conversation_id)
-                    .bind(&on_behalf_of_user_id)
-                    .execute(&mut **tx)
-                    .await?;
-                    if actor_conversation.rows_affected() == 0 {
-                        return Err(DbError::Conflict(
-                            "Agent caller Conversation does not exist or belongs to another user"
-                                .to_owned(),
-                        ));
-                    }
-                }
+                lock_owned_lead_session_tx(tx, &on_behalf_of_user_id, conversation_id).await?;
                 if relation == "attempt" && linked_attempt_id != &actor_attempt_id {
                     return Err(DbError::Conflict(
                         "Agent caller attempt does not match its active execution link".to_owned(),
@@ -2848,14 +2559,17 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
              JOIN conversation_execution_links link \
                ON link.execution_id = attempt.execution_id \
               AND link.step_id = attempt.step_id AND link.attempt_id = attempt.attempt_id \
-             JOIN conversations conversation ON conversation.conversation_id = link.conversation_id \
+             JOIN agent_sessions session ON session.agent_session_id = link.conversation_id \
              JOIN agent_executions execution ON execution.execution_id = step.execution_id \
              WHERE step.execution_id = ? AND step.step_id = ? AND step.version = ? \
                AND step.superseded_in_revision IS NULL AND step.status = 'running' \
                AND step.kind = 'agent' \
                AND attempt.attempt_id = ? AND attempt.version = ? AND attempt.status = 'running' \
                AND link.conversation_id = ? AND link.relation = 'attempt' AND link.active = 1 \
-               AND conversation.user_id = ? AND execution.user_id = ? \
+               AND session.state = 'live' \
+               AND json_extract(session.owner_ref_json, '$.principal_kind') = 'user' \
+               AND json_extract(session.owner_ref_json, '$.principal_id') = ? \
+               AND execution.user_id = ? \
                AND execution.deleted_at IS NULL \
                AND execution.status IN ('running', 'waiting_input') \
                AND execution.delegation_policy <> 'disabled' \
@@ -4119,9 +3833,11 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
             "INSERT INTO conversation_execution_links (\
                 conversation_id, execution_id, relation, step_id, attempt_id, \
                 active, created_at, updated_at\
-             ) SELECT conversation.conversation_id, ?, 'attempt', ?, ?, 1, ?, ? \
-               FROM conversations conversation \
-              WHERE conversation.conversation_id = ? AND conversation.user_id = ?",
+             ) SELECT session.agent_session_id, ?, 'attempt', ?, ?, 1, ?, ? \
+               FROM agent_sessions session \
+              WHERE session.agent_session_id = ? AND session.state = 'live' \
+                AND json_extract(session.owner_ref_json, '$.principal_kind') = 'user' \
+                AND json_extract(session.owner_ref_json, '$.principal_id') = ?",
         )
         .bind(execution_id)
         .bind(step_id)
@@ -4155,376 +3871,6 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
             .ok_or_else(|| conflict("agent execution step"))?;
         tx.commit().await?;
         Ok(detail)
-    }
-
-    async fn claim_attempt_turn_delivery_receipt(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        operation_id: &str,
-        candidate_message_id: &str,
-        kind: &str,
-        request_payload: &str,
-        authority: &AgentExecutionTurnAuthority,
-        expected_admission_epoch: i64,
-        now: i64,
-    ) -> Result<ConversationDeliveryReceiptClaim, DbError> {
-        if expected_admission_epoch < 0
-            || operation_id.trim().is_empty()
-            || kind != "turn"
-        {
-            return Err(DbError::Conflict(
-                "Agent Execution turn admission identity is invalid".to_owned(),
-            ));
-        }
-        MessageId::parse(candidate_message_id).map_err(|error| {
-            DbError::Conflict(format!(
-                "Agent Execution turn candidate_message_id is invalid: {error}"
-            ))
-        })?;
-        let mut tx = self.pool.begin().await?;
-        let inserted = sqlx::query(
-            "INSERT INTO conversation_delivery_receipts (\
-                operation_id, message_id, conversation_id, projected_conversation_id, \
-                projected_message_id, user_id, kind, request_payload, status, created_at, updated_at\
-             ) SELECT ?, ?, conversation.conversation_id, conversation.conversation_id, \
-                      NULL, ?, ?, ?, 'accepted', ?, ? \
-               FROM conversations conversation \
-              WHERE conversation.conversation_id = ? AND conversation.user_id = ? \
-             ON CONFLICT(operation_id) DO NOTHING",
-        )
-        .bind(operation_id)
-        .bind(candidate_message_id)
-        .bind(user_id)
-        .bind(kind)
-        .bind(request_payload)
-        .bind(now)
-        .bind(now)
-        .bind(conversation_id)
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
-        if inserted.rows_affected() == 1 {
-            // Only the INSERT winner needs effect authority. A duplicate must
-            // remain an absorbing replay even if the original lease/version
-            // has since settled or been replaced.
-            fence_attempt_turn_authority_tx(
-                &mut tx,
-                user_id,
-                conversation_id,
-                authority,
-                now,
-            )
-            .await?;
-            let admitted = sqlx::query(
-                "UPDATE conversations SET status = 'running', \
-                    active_turn_operation_id = ?, admission_epoch = admission_epoch + 1, \
-                    updated_at = MAX(updated_at, ?) \
-                 WHERE conversation_id = ? AND user_id = ? \
-                   AND admission_epoch = ? AND admission_epoch < 9223372036854775806 \
-                   AND active_turn_operation_id IS NULL \
-                   AND status IN ('pending', 'finished') \
-                   AND json_type(extra, '$._edit_resubmit_fence') IS NULL \
-                   AND NOT EXISTS (\
-                       SELECT 1 FROM conversation_delivery_receipts other \
-                        WHERE other.conversation_id = conversations.conversation_id \
-                          AND other.user_id = conversations.user_id \
-                          AND other.kind = 'turn' AND other.status = 'accepted' \
-                          AND other.operation_id != ?\
-                   )",
-            )
-            .bind(operation_id)
-            .bind(now)
-            .bind(conversation_id)
-            .bind(user_id)
-            .bind(expected_admission_epoch)
-            .bind(operation_id)
-            .execute(&mut *tx)
-            .await?;
-            if admitted.rows_affected() != 1 {
-                return Err(DbError::Conflict(
-                    "Agent Execution Conversation lifecycle rejected turn admission".to_owned(),
-                ));
-            }
-        }
-        let receipt = sqlx::query_as::<_, ConversationDeliveryReceiptRow>(
-            "SELECT * FROM conversation_delivery_receipts WHERE operation_id = ?",
-        )
-        .bind(operation_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(|| DbError::NotFound("Agent Execution turn receipt".to_owned()))?;
-        if receipt.user_id != user_id
-            || receipt.conversation_id != conversation_id
-            || receipt.kind != kind
-            || receipt.request_payload != request_payload
-        {
-            return Err(DbError::Conflict(
-                "Agent Execution turn operation identity was reused".to_owned(),
-            ));
-        }
-        tx.commit().await?;
-        Ok(ConversationDeliveryReceiptClaim {
-            receipt,
-            claimed_new: inserted.rows_affected() == 1,
-        })
-    }
-
-    async fn abandon_exact_attempt_turn_admission(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        operation_id: &str,
-        candidate_message_id: &str,
-        request_payload: &str,
-        authority: &AgentExecutionTurnAuthority,
-        expected_admitted_epoch: i64,
-        reason: &str,
-        completed_at: i64,
-    ) -> Result<TurnLifecycleTransition, DbError> {
-        if operation_id.trim().is_empty()
-            || request_payload.trim().is_empty()
-            || expected_admitted_epoch < 0
-            || reason.trim().is_empty()
-        {
-            return Err(DbError::Conflict(
-                "abandoned Agent Execution turn requires an exact operation, payload, epoch and reason"
-                    .to_owned(),
-            ));
-        }
-        MessageId::parse(candidate_message_id).map_err(|error| {
-            DbError::Conflict(format!(
-                "abandoned Agent Execution turn candidate_message_id is invalid: {error}"
-            ))
-        })?;
-
-        let mut tx = self.pool.begin().await?;
-        // Serialize behind the possibly-cancelled claim transaction before
-        // reading its immutable candidate receipt. Once this no-op writer owns
-        // SQLite's lock, a missing receipt plus no exact active generation is
-        // durable proof that this candidate never committed.
-        let owned = sqlx::query(
-            "UPDATE conversations SET updated_at = updated_at \
-             WHERE conversation_id = ? AND user_id = ?",
-        )
-        .bind(conversation_id)
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
-        let aggregate: Option<(String, i64, Option<String>)> =
-            if owned.rows_affected() == 1 {
-                Some(
-                    sqlx::query_as(
-                        "SELECT status, admission_epoch, active_turn_operation_id \
-                         FROM conversations \
-                         WHERE conversation_id = ? AND user_id = ?",
-                    )
-                    .bind(conversation_id)
-                    .bind(user_id)
-                    .fetch_one(&mut *tx)
-                    .await?,
-                )
-            } else {
-                None
-            };
-        let receipt = sqlx::query_as::<_, ConversationDeliveryReceiptRow>(
-            "SELECT * FROM conversation_delivery_receipts WHERE operation_id = ?",
-        )
-        .bind(operation_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-        let generation_names_operation = aggregate.as_ref().is_some_and(
-            |(_, epoch, active_operation_id)| {
-                *epoch == expected_admitted_epoch
-                    && active_operation_id.as_deref() == Some(operation_id)
-            },
-        );
-        let Some(receipt) = receipt else {
-            if generation_names_operation {
-                return Err(DbError::Conflict(
-                    "active Agent Execution Conversation generation lost its exact turn receipt"
-                        .to_owned(),
-                ));
-            }
-            tx.rollback().await?;
-            return Ok(TurnLifecycleTransition::Stale);
-        };
-
-        // Candidate identity is checked first. A caller that lost the INSERT
-        // election has immutable proof that another request owns this
-        // operation and must not validate, settle, or otherwise inspect that
-        // winner as its own effect.
-        if receipt.message_id != candidate_message_id {
-            tx.rollback().await?;
-            return Ok(TurnLifecycleTransition::Stale);
-        }
-        if receipt.user_id != user_id
-            || receipt.conversation_id != conversation_id
-            || receipt.kind != "turn"
-            || receipt.request_payload != request_payload
-            || !matches!(receipt.status.as_str(), "accepted" | "completed")
-        {
-            return Err(DbError::Conflict(
-                "abandoned Agent Execution turn receipt identity is invalid".to_owned(),
-            ));
-        }
-
-        if let Some((status, _, active_operation_id)) = aggregate.as_ref()
-            && status == "finished"
-            && active_operation_id.is_none()
-            && receipt.status == "completed"
-        {
-            tx.rollback().await?;
-            return Ok(TurnLifecycleTransition::AlreadyApplied);
-        }
-
-        let exact_generation = aggregate.as_ref().is_some_and(
-            |(status, epoch, active_operation_id)| {
-                matches!(status.as_str(), "running" | "finished")
-                    && *epoch == expected_admitted_epoch
-                    && active_operation_id.as_deref() == Some(operation_id)
-            },
-        );
-        if !exact_generation {
-            // Reusing the same operation pointer at a different epoch is
-            // corruption, not displacement proof. Keep it quarantined.
-            if aggregate.as_ref().is_some_and(|(_, _, active_operation_id)| {
-                active_operation_id.as_deref() == Some(operation_id)
-            }) {
-                return Err(DbError::Conflict(
-                    "abandoned Agent Execution turn generation does not match its exact epoch"
-                        .to_owned(),
-                ));
-            }
-            tx.rollback().await?;
-            return Ok(TurnLifecycleTransition::Stale);
-        }
-
-        // Only the still-authoritative scheduler/step/attempt generation may
-        // settle this candidate. If lease ownership or an invocation version
-        // changed, leave the receipt and Conversation untouched for the
-        // successor's recovery protocol.
-        fence_attempt_turn_authority_tx(
-            &mut tx,
-            user_id,
-            conversation_id,
-            authority,
-            completed_at,
-        )
-        .await?;
-
-        if receipt.status == "accepted" {
-            let settled = sqlx::query(
-                "UPDATE conversation_delivery_receipts \
-                 SET status = 'completed', result_ok = 0, result_text = NULL, \
-                     result_error = ?, completed_at = MAX(created_at, updated_at, ?), \
-                     updated_at = MAX(created_at, updated_at, ?) \
-                 WHERE operation_id = ? AND message_id = ? \
-                   AND conversation_id = ? AND user_id = ? \
-                   AND kind = 'turn' AND request_payload = ? AND status = 'accepted'",
-            )
-            .bind(reason)
-            .bind(completed_at)
-            .bind(completed_at)
-            .bind(operation_id)
-            .bind(candidate_message_id)
-            .bind(conversation_id)
-            .bind(user_id)
-            .bind(request_payload)
-            .execute(&mut *tx)
-            .await?;
-            if settled.rows_affected() != 1 {
-                return Err(DbError::Conflict(
-                    "abandoned Agent Execution turn receipt changed while settling".to_owned(),
-                ));
-            }
-        }
-
-        let finalized = sqlx::query(
-            "UPDATE conversations \
-             SET status = 'finished', active_turn_operation_id = NULL, \
-                 extra = CASE \
-                     WHEN json_extract(extra, '$._edit_resubmit_fence.operation_id') = ? \
-                     THEN json_remove(extra, '$._edit_resubmit_fence') \
-                     ELSE extra END, \
-                 admission_epoch = admission_epoch + 1, \
-                 updated_at = MAX(updated_at, ?) \
-             WHERE conversation_id = ? AND user_id = ? \
-               AND status IN ('running', 'finished') \
-               AND admission_epoch = ? AND active_turn_operation_id = ? \
-               AND admission_epoch < 9223372036854775807",
-        )
-        .bind(operation_id)
-        .bind(completed_at)
-        .bind(conversation_id)
-        .bind(user_id)
-        .bind(expected_admitted_epoch)
-        .bind(operation_id)
-        .execute(&mut *tx)
-        .await?;
-        if finalized.rows_affected() != 1 {
-            return Err(DbError::Conflict(
-                "abandoned Agent Execution turn generation changed while finalizing".to_owned(),
-            ));
-        }
-        tx.commit().await?;
-        Ok(TurnLifecycleTransition::Committed)
-    }
-
-    async fn validate_attempt_turn_effect_authority(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        operation_id: &str,
-        kind: &str,
-        request_payload: &str,
-        authority: &AgentExecutionTurnAuthority,
-        now: i64,
-    ) -> Result<ConversationDeliveryReceiptRow, DbError> {
-        let mut tx = self.pool.begin().await?;
-        fence_attempt_turn_authority_tx(
-            &mut tx,
-            user_id,
-            conversation_id,
-            authority,
-            now,
-        )
-        .await?;
-        let conversation = sqlx::query(
-            "UPDATE conversations SET updated_at = updated_at \
-             WHERE conversation_id = ? AND user_id = ? AND status = 'running' \
-               AND active_turn_operation_id = ?",
-        )
-        .bind(conversation_id)
-        .bind(user_id)
-        .bind(operation_id)
-        .execute(&mut *tx)
-        .await?;
-        if conversation.rows_affected() != 1 {
-            return Err(DbError::Conflict(
-                "Agent Execution Conversation is no longer durably running".to_owned(),
-            ));
-        }
-        let receipt = sqlx::query_as::<_, ConversationDeliveryReceiptRow>(
-            "SELECT * FROM conversation_delivery_receipts WHERE operation_id = ?",
-        )
-        .bind(operation_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(|| DbError::NotFound("Agent Execution turn receipt".to_owned()))?;
-        if receipt.user_id != user_id
-            || receipt.conversation_id != conversation_id
-            || receipt.kind != kind
-            || receipt.request_payload != request_payload
-            || receipt.status != "accepted"
-        {
-            return Err(DbError::Conflict(
-                "Agent Execution turn receipt no longer grants effect authority".to_owned(),
-            ));
-        }
-        tx.commit().await?;
-        Ok(receipt)
     }
 
     async fn reconcile_recovered_attempt(
@@ -4887,9 +4233,11 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         Ok(sqlx::query_as::<_, ConversationExecutionLinkRow>(
             "SELECT link.* FROM conversation_execution_links link \
              JOIN agent_executions execution ON execution.execution_id = link.execution_id \
-             JOIN conversations conversation ON conversation.conversation_id = link.conversation_id \
+             JOIN agent_sessions session ON session.agent_session_id = link.conversation_id \
              WHERE link.conversation_id = ? \
-               AND execution.user_id = ? AND conversation.user_id = ? \
+               AND execution.user_id = ? AND session.state <> 'deleted' \
+               AND json_extract(session.owner_ref_json, '$.principal_kind') = 'user' \
+               AND json_extract(session.owner_ref_json, '$.principal_id') = ? \
              ORDER BY link.updated_at DESC, link.id",
         )
         .bind(conversation_id)
@@ -4908,9 +4256,11 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
             "SELECT EXISTS(\
                  SELECT 1 FROM conversation_execution_links link \
                  JOIN agent_executions execution ON execution.execution_id = link.execution_id \
-                 JOIN conversations conversation ON conversation.conversation_id = link.conversation_id \
+                 JOIN agent_sessions session ON session.agent_session_id = link.conversation_id \
                  WHERE link.conversation_id = ? AND link.relation = 'attempt' \
-                   AND execution.user_id = ? AND conversation.user_id = ?\
+                   AND execution.user_id = ? AND session.state <> 'deleted' \
+                   AND json_extract(session.owner_ref_json, '$.principal_kind') = 'user' \
+                   AND json_extract(session.owner_ref_json, '$.principal_id') = ?\
              )",
         )
         .bind(conversation_id)
@@ -4931,11 +4281,13 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
                  SELECT MIN(link.id) AS link_id, link.conversation_id \
                  FROM conversation_execution_links link \
                  JOIN agent_executions execution ON execution.execution_id = link.execution_id \
-                 JOIN conversations conversation ON conversation.conversation_id = link.conversation_id \
+                 JOIN agent_sessions session ON session.agent_session_id = link.conversation_id \
                  WHERE link.relation = 'attempt' AND link.active = 0 \
                    AND link.cleanup_completed_at IS NULL \
                    AND (? IS NULL OR link.execution_id = ?) \
-                   AND conversation.user_id = execution.user_id \
+                   AND session.state <> 'deleted' \
+                   AND json_extract(session.owner_ref_json, '$.principal_kind') = 'user' \
+                   AND json_extract(session.owner_ref_json, '$.principal_id') = execution.user_id \
                    AND NOT EXISTS(\
                        SELECT 1 FROM conversation_execution_links active_link \
                        WHERE active_link.conversation_id = link.conversation_id \
@@ -4983,10 +4335,12 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
                AND cleanup_completed_at IS NULL \
                AND EXISTS( \
                    SELECT 1 FROM agent_executions execution \
-                   JOIN conversations conversation \
-                     ON conversation.conversation_id = conversation_execution_links.conversation_id \
+                   JOIN agent_sessions session \
+                     ON session.agent_session_id = conversation_execution_links.conversation_id \
                    WHERE execution.execution_id = conversation_execution_links.execution_id \
-                     AND execution.user_id = ? AND conversation.user_id = ? \
+                     AND execution.user_id = ? AND session.state <> 'deleted' \
+                     AND json_extract(session.owner_ref_json, '$.principal_kind') = 'user' \
+                     AND json_extract(session.owner_ref_json, '$.principal_id') = ? \
                ) \
                AND NOT EXISTS( \
                    SELECT 1 FROM conversation_execution_links active_link \
@@ -5072,12 +4426,14 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         let exact: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM conversation_execution_links link \
              JOIN agent_executions execution ON execution.execution_id = link.execution_id \
-             JOIN conversations conversation ON conversation.conversation_id = link.conversation_id \
+             JOIN agent_sessions session ON session.agent_session_id = link.conversation_id \
              WHERE link.id = ? AND link.execution_id = ? AND link.step_id = ? \
                AND link.attempt_id = ? AND link.conversation_id = ? \
                AND link.relation = 'attempt' AND link.active = 0 \
                AND link.cleanup_completed_at IS NULL \
-               AND execution.user_id = ? AND conversation.user_id = ? \
+               AND execution.user_id = ? AND session.state <> 'deleted' \
+               AND json_extract(session.owner_ref_json, '$.principal_kind') = 'user' \
+               AND json_extract(session.owner_ref_json, '$.principal_id') = ? \
                AND NOT EXISTS( \
                    SELECT 1 FROM conversation_execution_links active_link \
                    WHERE active_link.conversation_id = link.conversation_id \

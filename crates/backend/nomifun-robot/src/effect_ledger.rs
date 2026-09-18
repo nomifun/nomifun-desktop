@@ -9,14 +9,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 const LEDGER_FILE: &str = "agent-module-effect-receipts-v2.json";
-const LEGACY_LEDGER_FILE: &str = "agent-effect-receipts.json";
-const MIGRATION_TEMP_FILE: &str = "agent-module-effect-receipts-v2.json.migrating";
-const LEGACY_ARCHIVE_PREFIX: &str = "agent-effect-receipts.v1.migrated-";
 const MAX_EFFECT_RECEIPTS: usize = 16_384;
 // A terminal receipt remains a replay fence for the complete retry horizon.
 // Once it is older than this window it may be discarded to keep the durable
@@ -84,37 +80,6 @@ struct LedgerFile {
     receipts: Vec<RobotEffectReceipt>,
 }
 
-// UARC-054: remove this one-time reader after the supported-install migration
-// window. It is deliberately private and maps persisted physical-effect fences
-// once; no runtime Capability alias reaches admission or dispatch.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyRobotEffectKey {
-    principal_id: String,
-    agent_session_id: String,
-    capability_id: String,
-    idempotency_key: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyRobotEffectReceipt {
-    key: LegacyRobotEffectKey,
-    input_digest: String,
-    robot_id: String,
-    tool_name: String,
-    reserved_at_ms: i64,
-    updated_at_ms: i64,
-    outcome: RobotEffectState,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyLedgerFile {
-    #[serde(default)]
-    receipts: Vec<LegacyRobotEffectReceipt>,
-}
-
 pub struct RobotEffectLedger {
     path: PathBuf,
     inner: Mutex<BTreeMap<RobotEffectKey, RobotEffectReceipt>>,
@@ -147,122 +112,7 @@ async fn read_v2_ledger(
     Ok((receipts, file.1))
 }
 
-async fn migrate_legacy_ledger(
-    dir: &Path,
-    v2_path: &Path,
-    receipts: &mut BTreeMap<RobotEffectKey, RobotEffectReceipt>,
-    had_v2: bool,
-) -> anyhow::Result<()> {
-    let legacy_path = dir.join(LEGACY_LEDGER_FILE);
-    let migration_temp = dir.join(MIGRATION_TEMP_FILE);
-    let legacy_bytes = match tokio::fs::read(&legacy_path).await {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
-    };
-
-    let Some(legacy_bytes) = legacy_bytes else {
-        if tokio::fs::try_exists(&migration_temp).await? {
-            tokio::fs::remove_file(&migration_temp).await?;
-        }
-        if !had_v2 {
-            let mut archives = tokio::fs::read_dir(dir).await?;
-            while let Some(entry) = archives.next_entry().await? {
-                if entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(LEGACY_ARCHIVE_PREFIX)
-                {
-                    anyhow::bail!(
-                        "robot effect ledger v2 is missing while a migrated v1 archive remains; refusing physical effects"
-                    );
-                }
-            }
-        }
-        return Ok(());
-    };
-
-    let legacy: LegacyLedgerFile = serde_json::from_slice(&legacy_bytes).map_err(|error| {
-        anyhow::anyhow!(
-            "legacy robot effect ledger {} is invalid: {error}",
-            legacy_path.display()
-        )
-    })?;
-    let converted = convert_legacy_receipts(legacy)?;
-    if had_v2 {
-        if *receipts != converted {
-            anyhow::bail!(
-                "robot effect ledger v1/v2 coexist after migration but their receipts differ; refusing physical effects"
-            );
-        }
-        if tokio::fs::try_exists(&migration_temp).await? {
-            tokio::fs::remove_file(&migration_temp).await?;
-        }
-    } else {
-        if tokio::fs::try_exists(&migration_temp).await? {
-            tokio::fs::remove_file(&migration_temp).await?;
-        }
-        write_migration_v2(&migration_temp, v2_path, &converted).await?;
-        *receipts = converted;
-    }
-
-    let digest = format!("{:x}", Sha256::digest(&legacy_bytes));
-    let archive_path = dir.join(format!("{LEGACY_ARCHIVE_PREFIX}{digest}.json"));
-    if tokio::fs::try_exists(&archive_path).await? {
-        let archived = tokio::fs::read(&archive_path).await?;
-        if archived != legacy_bytes {
-            anyhow::bail!(
-                "legacy robot effect archive {} differs from its digest identity",
-                archive_path.display()
-            );
-        }
-        tokio::fs::remove_file(&legacy_path).await?;
-    } else {
-        tokio::fs::rename(&legacy_path, &archive_path).await?;
-    }
-    Ok(())
-}
-
-fn convert_legacy_receipts(
-    legacy: LegacyLedgerFile,
-) -> anyhow::Result<BTreeMap<RobotEffectKey, RobotEffectReceipt>> {
-    let mut converted = BTreeMap::new();
-    for receipt in legacy.receipts {
-        let action_id = match receipt.key.capability_id.as_str() {
-            "robot.vision" => crate::capability::ROBOT_VISION_ACTION_ID,
-            "robot.display" => crate::capability::ROBOT_DISPLAY_ACTION_ID,
-            "robot.motion" => crate::capability::ROBOT_MOTION_ACTION_ID,
-            "robot.device_tools" => crate::capability::ROBOT_DEVICE_ACTION_ID,
-            other => anyhow::bail!(
-                "legacy robot effect ledger contains non-migratable capability {other:?}"
-            ),
-        };
-        let key = RobotEffectKey {
-            principal_id: receipt.key.principal_id,
-            agent_session_id: receipt.key.agent_session_id,
-            module_id: crate::capability::ROBOT_MODULE_ID.to_owned(),
-            action_id: action_id.to_owned(),
-            idempotency_key: receipt.key.idempotency_key,
-        };
-        let migrated = RobotEffectReceipt {
-            key: key.clone(),
-            input_digest: receipt.input_digest,
-            robot_id: receipt.robot_id,
-            tool_name: receipt.tool_name,
-            reserved_at_ms: receipt.reserved_at_ms,
-            updated_at_ms: receipt.updated_at_ms,
-            outcome: receipt.outcome,
-        };
-        if converted.insert(key, migrated).is_some() {
-            anyhow::bail!(
-                "legacy robot effect ledger collapses to duplicate Module/Action idempotency identities"
-            );
-        }
-    }
-    Ok(converted)
-}
-
-async fn write_migration_v2(
+async fn write_ledger(
     temporary: &Path,
     destination: &Path,
     receipts: &BTreeMap<RobotEffectKey, RobotEffectReceipt>,
@@ -289,8 +139,7 @@ impl RobotEffectLedger {
         let dir = data_dir.join(crate::registry::ROBOT_REL_DIR);
         tokio::fs::create_dir_all(&dir).await?;
         let path = dir.join(LEDGER_FILE);
-        let (mut receipts, had_v2) = read_v2_ledger(&path).await?;
-        migrate_legacy_ledger(&dir, &path, &mut receipts, had_v2).await?;
+        let (mut receipts, _) = read_v2_ledger(&path).await?;
         // A persisted reservation means dispatch may already have reached the
         // device. Reconcile it to an explicit sticky unknown outcome before
         // accepting any new effect; it must never become eligible for terminal
@@ -477,7 +326,7 @@ impl RobotEffectLedger {
         receipts: &BTreeMap<RobotEffectKey, RobotEffectReceipt>,
     ) -> anyhow::Result<()> {
         let temporary = self.path.with_extension("json.tmp");
-        write_migration_v2(&temporary, &self.path, receipts).await
+        write_ledger(&temporary, &self.path, receipts).await
     }
 }
 
@@ -562,85 +411,6 @@ mod tests {
             tool_name: "robot_head_look".to_owned(),
             reserved_at_ms: 1,
         }
-    }
-
-    #[tokio::test]
-    async fn legacy_reserved_effect_migrates_to_sticky_unknown_before_dispatch() {
-        let dir = tempfile::tempdir().unwrap();
-        let robot_dir = dir.path().join(crate::registry::ROBOT_REL_DIR);
-        tokio::fs::create_dir_all(&robot_dir).await.unwrap();
-        let legacy = robot_dir.join(LEGACY_LEDGER_FILE);
-        let legacy_bytes = br#"{"receipts":[{"key":{"principal_id":"owner","agent_session_id":"session","capability_id":"robot.motion","idempotency_key":"same"},"input_digest":"digest","robot_id":"robot-1","tool_name":"robot_head_look","reserved_at_ms":1,"updated_at_ms":1,"outcome":{"state":"reserved"}}]}"#;
-        tokio::fs::write(&legacy, legacy_bytes).await.unwrap();
-
-        let ledger = RobotEffectLedger::load(dir.path()).await.unwrap();
-        assert!(matches!(
-            ledger.admit(request("same", "digest")).await.unwrap(),
-            RobotEffectAdmission::OutcomeUnknown { .. }
-        ));
-        assert!(!legacy.exists());
-        assert!(robot_dir.join(LEDGER_FILE).exists());
-        let archives = std::fs::read_dir(&robot_dir)
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(LEGACY_ARCHIVE_PREFIX)
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(archives.len(), 1);
-        assert_eq!(std::fs::read(archives[0].path()).unwrap(), legacy_bytes);
-        drop(ledger);
-        let restarted = RobotEffectLedger::load(dir.path()).await.unwrap();
-        assert!(matches!(
-            restarted.admit(request("same", "digest")).await.unwrap(),
-            RobotEffectAdmission::OutcomeUnknown { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn migration_resumes_exact_v1_v2_coexistence_after_commit_crash() {
-        let dir = tempfile::tempdir().unwrap();
-        let robot_dir = dir.path().join(crate::registry::ROBOT_REL_DIR);
-        tokio::fs::create_dir_all(&robot_dir).await.unwrap();
-        let legacy_bytes = br#"{"receipts":[{"key":{"principal_id":"owner","agent_session_id":"session","capability_id":"robot.motion","idempotency_key":"same"},"input_digest":"digest","robot_id":"robot-1","tool_name":"robot_head_look","reserved_at_ms":1,"updated_at_ms":1,"outcome":{"state":"reserved"}}]}"#;
-        tokio::fs::write(robot_dir.join(LEGACY_LEDGER_FILE), legacy_bytes)
-            .await
-            .unwrap();
-        let legacy: LegacyLedgerFile = serde_json::from_slice(legacy_bytes).unwrap();
-        let converted = convert_legacy_receipts(legacy).unwrap();
-        tokio::fs::write(
-            robot_dir.join(LEDGER_FILE),
-            serde_json::to_vec_pretty(&LedgerFile {
-                receipts: converted.into_values().collect(),
-            })
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-
-        let ledger = RobotEffectLedger::load(dir.path()).await.unwrap();
-        assert!(matches!(
-            ledger.admit(request("same", "digest")).await.unwrap(),
-            RobotEffectAdmission::OutcomeUnknown { .. }
-        ));
-        assert!(!robot_dir.join(LEGACY_LEDGER_FILE).exists());
-    }
-
-    #[tokio::test]
-    async fn migration_fails_closed_for_unknown_legacy_authority() {
-        let dir = tempfile::tempdir().unwrap();
-        let robot_dir = dir.path().join(crate::registry::ROBOT_REL_DIR);
-        tokio::fs::create_dir_all(&robot_dir).await.unwrap();
-        let legacy = br#"{"receipts":[{"key":{"principal_id":"owner","agent_session_id":"session","capability_id":"robot.audio","idempotency_key":"same"},"input_digest":"digest","robot_id":"robot-1","tool_name":"audio","reserved_at_ms":1,"updated_at_ms":1,"outcome":{"state":"reserved"}}]}"#;
-        tokio::fs::write(robot_dir.join(LEGACY_LEDGER_FILE), legacy)
-            .await
-            .unwrap();
-        assert!(RobotEffectLedger::load(dir.path()).await.is_err());
-        assert!(robot_dir.join(LEGACY_LEDGER_FILE).exists());
-        assert!(!robot_dir.join(LEDGER_FILE).exists());
     }
 
     #[tokio::test]

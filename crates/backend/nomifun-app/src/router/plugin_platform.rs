@@ -2405,7 +2405,7 @@ impl NomiCorePluginRegistryPublisher {
                     .supports_consumer(CapabilityConsumer::Agent)
             })
             .filter_map(|capability| {
-                let native = super::nomi_core_agent_projection::native_capability_available(&capability.manifest);
+                let native = super::agent_binding_projection::native_capability_available(&capability.manifest);
                 let dynamic = capability.source.source_kind
                     == nomifun_agent_contracts::PluginSourceKind::ManagedLocal
                     && capability.contribution_lock.source_kind
@@ -2522,7 +2522,7 @@ fn agent_executor_available(id: &str, native: bool, builtin: bool, dynamic: bool
 mod tests {
     #[test]
     fn executor_availability_requires_one_real_execution_owner() {
-        assert!(super::agent_executor_available("fs.read", false, true, false, false));
+        assert!(super::agent_executor_available("workspace.files", false, true, false, false));
         assert!(super::agent_executor_available("plugin.tool", false, false, true, true));
         assert!(!super::agent_executor_available("plugin.tool", false, false, true, false));
     }

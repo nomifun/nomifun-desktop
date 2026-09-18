@@ -1,13 +1,9 @@
 //! Exact host-backed bundled capability composition for the current Nomi
 //! runtime.
 //!
-//! Domain-support declarative registrations remain useful as the complete C7
-//! inventory, but they are not execution owners. This module replaces only
-//! package registrations for which the Nomi application supplies real typed
-//! wave hosts, and publishes separate explicit Tool and Context admission
-//! sets. Event/Transport/Resource/Middleware capabilities need their own
-//! Session lifecycle owners and are never inferred ready from registration
-//! presence.
+//! Only packages backed by real typed wave hosts are registered. Platform
+//! services such as notification and remote ingress remain outside the Agent
+//! catalog and cannot become authority through registration presence.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -42,9 +38,7 @@ pub(crate) async fn build(
     services: &AppServices,
     effect_store: nomifun_agent_session::AgentSessionStore,
 ) -> anyhow::Result<NomiCoreBuiltinPlan> {
-    let mut registrations = nomifun_agent_domain_support::registrations(
-        nomifun_agent_domain_support::c7_package_specs(),
-    )?;
+    let mut registrations = Vec::new();
     registrations.push(super::nomi_core_tool_discovery::registration()?);
 
     #[cfg(feature = "browser-use")]
@@ -365,7 +359,7 @@ impl NomiPlatformBuiltinLifecycleInvoker for NomiCoreLifecycleInvoker {
             }
             nomifun_agent_domain_wave4::CUSTOMER_SERVICE_DIALOGUE => {
                 let schema_ref = request.schema_ref.ok_or_else(|| {
-                    "customer_service.dialogue has no canonical middleware schema"
+                    "customer.service/context.dialogue has no canonical middleware schema"
                         .to_owned()
                 })?;
                 self.customer_service

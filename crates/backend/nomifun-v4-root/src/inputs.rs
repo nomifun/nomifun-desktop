@@ -10,7 +10,7 @@ const CANONICAL_SCHEMA_MANIFEST_JSON: &str = include_str!(
     "../../nomifun-agent-contracts/contracts/generated/canonical-v4-schema-manifest.envelope.json"
 );
 const TARGET_FIRST_PARTY_INVENTORY_JSON: &str = include_str!(
-    "../../nomifun-agent-contracts/contracts/generated/target-first-party-contributions.envelope.json"
+    "../../nomifun-agent-contracts/contracts/generated/first-party-agent-modules.envelope.json"
 );
 
 pub(crate) struct FrozenRootInputs {

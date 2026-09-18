@@ -63,17 +63,16 @@ use nomifun_api_types::{
     CreateAgentPresetFromTemplateRequest, PutAgentBindingRequest,
 };
 use nomifun_common::{
-    AppError, ConversationStatus, MessagePosition, MessageStatus, MessageType,
+    AgentKillReason, AppError, ConversationStatus, MessagePosition, MessageStatus, MessageType,
     PaginatedResult,
     normalize_keys_to_snake_case,
 };
-use nomifun_conversation::service::{IdempotentMessageDelivery, PublicTurnDeliveryState};
 use nomifun_conversation::{
-    BackgroundTaskRegistrar, CanonicalAgentSessionOwner,
+    BackgroundTaskRegistrar, CanonicalAgentSessionOwner, IdempotentMessageDelivery,
     PreparedAgentSessionDelete, ProductAgentResolution, ProductAgentSnapshotResolver,
-    ProductAgentTarget,
+    ProductAgentTarget, PublicTurnDeliveryState,
 };
-use nomifun_conversation::service::creative_studio_agent_session::{
+use nomifun_conversation::{
     CreativeStudioAgentHistoryMessage, CreativeStudioAgentHistoryRole,
     CreativeStudioAgentHistoryStatus, CreativeStudioAgentModelRef,
     CreativeStudioCanvasAgentSessionBindingResponse,
@@ -349,7 +348,7 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
             .await.map_err(control_plane_error_to_app)?;
         let common_owner = nomifun_common::UserId::parse(owner_id.to_owned())
             .map_err(|error| AppError::Forbidden(format!("invalid Agent owner: {error}")))?;
-        let mut projected = super::nomi_core_agent_projection::project_saved_artifacts(
+        let mut projected = super::agent_binding_projection::project_saved_artifacts(
             &common_owner, binding, revision, snapshot, Some(&editor.preset.display_name),
         )?;
         if current_binding.is_some() {
@@ -559,7 +558,7 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
             .map_err(control_plane_error_to_app)?;
         let common_owner = nomifun_common::UserId::parse(owner_id.to_owned())
             .map_err(|error| AppError::Forbidden(format!("invalid product Agent owner: {error}")))?;
-        let mut projected = super::nomi_core_agent_projection::project_saved_artifacts(
+        let mut projected = super::agent_binding_projection::project_saved_artifacts(
             &common_owner,
             binding,
             revision,
@@ -726,7 +725,7 @@ impl NomiCoreSessionOwner {
                     .map_err(control_plane_error_to_app)?;
                 let common_owner = nomifun_common::UserId::parse(owner_id.to_owned())
                     .map_err(|error| AppError::Forbidden(error.to_string()))?;
-                let projected = super::nomi_core_agent_projection::project_saved_artifacts(
+                let projected = super::agent_binding_projection::project_saved_artifacts(
                     &common_owner,
                     binding,
                     revision,
@@ -800,7 +799,7 @@ impl NomiCoreSessionOwner {
                         .map_err(control_plane_error_to_app)?;
                     let common_owner = nomifun_common::UserId::parse(owner_id.to_owned())
                         .map_err(|error| AppError::Forbidden(error.to_string()))?;
-                    let mut projected = super::nomi_core_agent_projection::project_saved_artifacts(
+                    let mut projected = super::agent_binding_projection::project_saved_artifacts(
                         &common_owner,
                         binding,
                         revision,
@@ -877,7 +876,7 @@ impl NomiCoreSessionOwner {
         }
         let common_owner = nomifun_common::UserId::parse(owner_id.to_owned())
             .map_err(|error| AppError::Forbidden(error.to_string()))?;
-        let projected = super::nomi_core_agent_projection::project_saved_artifacts(
+        let projected = super::agent_binding_projection::project_saved_artifacts(
             &common_owner,
             saved_binding.clone(),
             revision,
@@ -1528,7 +1527,7 @@ impl NomiCoreSessionOwner {
             .map_err(control_plane_error_to_app)?
             .preset
             .display_name;
-        let mut projected = super::nomi_core_agent_projection::project_saved_artifacts(
+        let mut projected = super::agent_binding_projection::project_saved_artifacts(
             &common_owner,
             binding,
             revision,
@@ -2035,9 +2034,7 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
         };
         let robot_module_id = super::nomi_core_robot::module_capability_id();
         let robot_selected = compiled.resolved_capability(&robot_module_id);
-        let dynamic = if robot_selected.is_none()
-            || !constraints.allows_capability(robot_module_id.as_ref())
-        {
+        let dynamic = if robot_selected.is_none() || constraints.restricted() {
             None
         } else {
             let selected = robot_selected.expect("checked above");
@@ -3928,12 +3925,12 @@ fn has_attached_browser_binding(
 
 fn canonical_conversation_response(
     observed: SessionObservation,
-    projected: super::nomi_core_agent_projection::NomiCoreSavedBindingProjection,
+    projected: super::agent_binding_projection::SavedAgentBindingProjection,
     workspace: Option<String>,
     created_at: i64,
 ) -> Result<ConversationResponse, AppError> {
     let SessionObservation { session, head, events, .. } = observed;
-    let super::nomi_core_agent_projection::NomiCoreSavedBindingProjection {
+    let super::agent_binding_projection::SavedAgentBindingProjection {
         binding,
         projection,
         ..
@@ -4596,7 +4593,10 @@ mod session_boundary_tests {
             .0;
         let fence = handler
             .find(".fence_delete(")
-            .expect("canonical delete must fence Store admission first");
+            .expect("canonical delete must fence Store admission");
+        let runtime = handler
+            .find(".terminate_agent_session_runtime_before_delete_fence(")
+            .expect("canonical delete must prove Runtime teardown before fencing the Store");
         let cleanup = handler
             .find("cleanup_agent_session_resources_before_delete")
             .expect("canonical delete must run exact resource cleanup");
@@ -4609,6 +4609,7 @@ mod session_boundary_tests {
             .expect("canonical delete must write the Store tombstone");
         assert!(handler.contains("tokio::spawn(async move"));
         assert!(handler.contains("quiesce_agent_session_execution_before_delete"));
+        assert!(runtime < fence, "Runtime teardown must retain live Store effect authority");
         assert!(blockers.len() >= 2, "delete must check blockers before and after cleanup");
         assert!(blockers.iter().any(|index| fence < *index && *index < cleanup));
         assert!(
@@ -4630,6 +4631,8 @@ mod session_boundary_tests {
             ".retire_agent_session(agent_session_id)",
             ".delete_agent_session(owner_id, agent_session_id, &bindings)",
             ".close_agent_session(owner_id, agent_session_id)",
+            ".revoke_agent_session_surfaces(owner_id, agent_session_id)",
+            ".delete_binding(\"conversation\", agent_session_id)",
             ".delete_jobs_by_agent_session(owner_id, agent_session_id)",
             ".clear_owner_for_session(",
             ".record_resource_cleanup_started(&session_id, \"ssh\")",
@@ -4823,7 +4826,7 @@ const NOMI_CORE_REMOTE_CANCEL_COMMAND_TIMEOUT: Duration = Duration::from_secs(30
 ///
 /// `session_owner` is the same object that the desktop, Channel,
 /// Cron, AutoWork, Companion, and AgentExecution wiring receives.  The
-/// adapter never constructs an AgentRuntimeSessions or a ConversationService.
+/// adapter never constructs a second Runtime registry or Session Store.
 #[derive(Clone)]
 pub(crate) struct NomiCoreAgentApiState {
     authoritative_user_id: Arc<str>,
@@ -4839,6 +4842,9 @@ pub(crate) struct NomiCoreAgentApiState {
     pub(crate) wave4_owners: Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
     pub(crate) wave5_owner: Arc<super::agent_wave5_host::NomiCoreWave5Host>,
     ssh_pool: nomifun_ssh::SshConnectionPool,
+    knowledge_service: Arc<nomifun_knowledge::KnowledgeService>,
+    plugin_runtime:
+        Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
     cron_cleanup_owner:
         Arc<std::sync::OnceLock<Arc<nomifun_cron::service::CronService>>>,
     requirement_cleanup_owner:
@@ -4868,6 +4874,8 @@ impl NomiCoreAgentApiState {
         product_agent_resolver: Arc<NomiCoreProductAgentResolver>,
         skill_discovery: Arc<NomiCorePluginToolSessionProvider>,
         ssh_pool: nomifun_ssh::SshConnectionPool,
+        knowledge_service: Arc<nomifun_knowledge::KnowledgeService>,
+        plugin_runtime: Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
         #[cfg(feature = "browser-use")]
         browser_resources: Option<
             Arc<nomifun_browser_platform::workspace::BrowserResourceService>,
@@ -4888,6 +4896,8 @@ impl NomiCoreAgentApiState {
             wave4_owners,
             wave5_owner,
             ssh_pool,
+            knowledge_service,
+            plugin_runtime,
             cron_cleanup_owner: Arc::new(std::sync::OnceLock::new()),
             requirement_cleanup_owner: Arc::new(std::sync::OnceLock::new()),
             autowork_cleanup_owner: Arc::new(std::sync::OnceLock::new()),
@@ -4944,6 +4954,35 @@ impl NomiCoreAgentApiState {
                     ),
                 )
             })
+    }
+
+    async fn terminate_agent_session_runtime_before_delete_fence(
+        &self,
+        agent_session_id: &str,
+    ) -> Result<(), NomiCoreApiError> {
+        if self
+            .session_owner
+            .runtime_sessions
+            .has_owned_runtime(agent_session_id)
+        {
+            self.session_owner
+                .runtime_sessions
+                .terminate_and_wait_result(
+                    agent_session_id,
+                    Some(AgentKillReason::ConversationDeleted),
+                )
+                .await
+                .map_err(|error| {
+                    NomiCoreApiError::new(
+                        StatusCode::CONFLICT,
+                        "AGENT_SESSION_RUNTIME_CLEANUP_FAILED",
+                        format!(
+                            "Agent Runtime teardown failed before AgentSession deletion could be fenced: {error}"
+                        ),
+                    )
+                })?;
+        }
+        Ok(())
     }
 
     fn delete_cleanup_lock(
@@ -5077,6 +5116,31 @@ impl NomiCoreAgentApiState {
                 ));
             }
         }
+
+        self.plugin_runtime
+            .revoke_agent_session_surfaces(owner_id, agent_session_id)
+            .await
+            .map_err(|error| {
+                NomiCoreApiError::new(
+                    StatusCode::CONFLICT,
+                    "AGENT_SESSION_PLUGIN_SURFACE_CLEANUP_FAILED",
+                    format!(
+                        "Plugin Surface cleanup failed after AgentSession deletion was fenced: {error}"
+                    ),
+                )
+            })?;
+        self.knowledge_service
+            .delete_binding("conversation", agent_session_id)
+            .await
+            .map_err(|error| {
+                NomiCoreApiError::new(
+                    StatusCode::CONFLICT,
+                    "AGENT_SESSION_KNOWLEDGE_CLEANUP_FAILED",
+                    format!(
+                        "Knowledge binding cleanup failed after AgentSession deletion was fenced: {error}"
+                    ),
+                )
+            })?;
 
 
         let cron = self.cron_cleanup_owner.get().ok_or_else(|| {
@@ -9176,13 +9240,13 @@ async fn submit_canonical_creation_task(
     Path(agent_session_id): Path<String>,
     headers: HeaderMap,
     Json(mut request): Json<
-        nomifun_conversation::service::conversation_creation::SubmitConversationCreation,
+        nomifun_conversation::SubmitConversationCreation,
     >,
 ) -> Result<
     (
         StatusCode,
         Json<ApiResponse<
-            nomifun_conversation::service::conversation_creation::ConversationCreationResponse,
+            nomifun_conversation::ConversationCreationResponse,
         >>,
     ),
     NomiCoreApiError,
@@ -9217,7 +9281,7 @@ async fn submit_canonical_creation_task(
             return Ok((
                 StatusCode::ACCEPTED,
                 Json(ApiResponse::ok(
-                    nomifun_conversation::service::conversation_creation::ConversationCreationResponse {
+                    nomifun_conversation::ConversationCreationResponse {
                         message_id: key,
                         tasks,
                     },
@@ -9304,7 +9368,7 @@ async fn submit_canonical_creation_task(
         serde_json::to_value(&snapshot)
             .map_err(|error| AppError::Internal(error.to_string()))?,
     );
-    let references = nomifun_conversation::ConversationService::import_creation_files(
+    let references = nomifun_conversation::import_creation_files(
         &state.session_owner.creation_service,
         session_id.as_ref(),
         &request.files,
@@ -9343,7 +9407,7 @@ async fn submit_canonical_creation_task(
     Ok((
         StatusCode::ACCEPTED,
         Json(ApiResponse::ok(
-            nomifun_conversation::service::conversation_creation::ConversationCreationResponse {
+            nomifun_conversation::ConversationCreationResponse {
                 message_id: key,
                 tasks,
             },
@@ -9357,7 +9421,7 @@ async fn list_canonical_creation_tasks(
     Path(agent_session_id): Path<String>,
 ) -> Result<
     Json<ApiResponse<
-        nomifun_conversation::service::conversation_creation::ConversationCreationPage,
+        nomifun_conversation::ConversationCreationPage,
     >>,
     NomiCoreApiError,
 > {
@@ -9372,7 +9436,7 @@ async fn list_canonical_creation_tasks(
         .map(nomifun_creation::CreativeCreationTask::try_from)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(ApiResponse::ok(
-        nomifun_conversation::service::conversation_creation::ConversationCreationPage {
+        nomifun_conversation::ConversationCreationPage {
             items,
         },
     )))
@@ -9960,6 +10024,22 @@ async fn execute_nomi_core_agent_session_delete(
         .await;
     let deleted_at = now_ms();
     let principal = authenticated_principal(&owner);
+    match state
+        .session_owner
+        .canonical()
+        .get(&principal, &session_id)
+        .await
+    {
+        Ok(_) => {
+            state
+                .terminate_agent_session_runtime_before_delete_fence(session_id.as_ref())
+                .await?;
+        }
+        // A deleting/deleted Session is replayed by `fence_delete`; a truly
+        // missing Session receives the same authoritative error there.
+        Err(AppError::NotFound(_)) => {}
+        Err(error) => return Err(error.into()),
+    }
     let prepared = state
         .session_owner
         .canonical()
@@ -11039,14 +11119,14 @@ async fn resolve_saved_binding_projection(
     binding: &AgentBindingValueDto,
     title: Option<&str>,
 ) -> Result<
-    super::nomi_core_agent_projection::NomiCoreSavedBindingProjection,
+    super::agent_binding_projection::SavedAgentBindingProjection,
     NomiCoreApiError,
 > {
     let (binding, revision, snapshot) = state
         .control_plane
         .saved_binding_artifacts(&owner.0, binding)
         .await?;
-    super::nomi_core_agent_projection::project_saved_artifacts(
+    super::agent_binding_projection::project_saved_artifacts(
         &common_owner_id(owner)?,
         binding,
         revision,

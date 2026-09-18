@@ -1,38 +1,15 @@
 //! Cross-crate lifecycle hook traits.
 //!
-//! Hooks defined here let lower-layer crates (e.g. `nomifun-ai-agent`,
-//! `nomifun-cron`) react to events owned by higher-layer crates (e.g.
-//! `nomifun-conversation`) without forming a dependency cycle.
+//! Hooks defined here let lower-layer crates react to product-owned lifecycle
+//! events without forming dependency cycles.
 
 use async_trait::async_trait;
-
-/// Notified when a conversation row is deleted via
-/// `ConversationService::delete`.
-///
-/// Implementors are responsible for cleaning up their per-conversation state
-/// (kill agent processes, drop cron jobs, etc.). Hooks run sequentially in
-/// registration order; failures must be logged inside the hook and not
-/// propagated. `user_id` is the verified conversation owner captured before
-/// deletion, so cleanup code can emit owner-scoped lifecycle events even after
-/// the conversation row no longer exists.
-#[async_trait]
-pub trait OnConversationDelete: Send + Sync {
-    async fn on_conversation_deleted(&self, user_id: &str, conversation_id: &str);
-}
-
-/// Result-bearing resource cleanup after Agent quiescence and before row deletion.
-/// A failure preserves the conversation so its resource owner can retry cleanup.
-#[async_trait]
-pub trait BeforeConversationDelete: Send + Sync {
-    async fn before_conversation_delete(&self, user_id: &str, conversation_id: &str) -> Result<(), crate::AppError>;
-}
 
 /// Notified when a terminal session row is deleted via
 /// `TerminalService::delete`.
 ///
-/// Mirrors [`OnConversationDelete`] for the terminal domain. Lets lower-layer
-/// crates react to a terminal going away without `nomifun-terminal` depending
-/// on them (e.g. `nomifun-requirement` clears the dual-domain
+/// Lets lower-layer crates react to a terminal going away without
+/// `nomifun-terminal` depending on them (e.g. `nomifun-requirement` clears the dual-domain
 /// `owner_session_id`/`owner_kind` of requirements owned by a terminal UUIDv7,
 /// which has no physical FK to cascade — spec §9.B).
 ///

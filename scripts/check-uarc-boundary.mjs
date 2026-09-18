@@ -26,6 +26,173 @@ const normalizePath = (path) => path.replaceAll('\\', '/');
 const sortedUnique = (values) => [...new Set(values)].sort();
 const digestValues = (values) => createHash('sha256').update(values.join('\n')).digest('hex');
 
+function isRustIdent(byte) {
+  return (
+    (byte >= 48 && byte <= 57) ||
+    (byte >= 65 && byte <= 90) ||
+    (byte >= 97 && byte <= 122) ||
+    byte === 95
+  );
+}
+
+function replaceNonNewline(source, start, end) {
+  return source.slice(0, start) + source.slice(start, end).replace(/[^\r\n]/g, ' ') + source.slice(end);
+}
+
+function rustRawStringEnd(source, index) {
+  let cursor = index;
+  if (source[cursor] === 'b') cursor += 1;
+  if (source[cursor] !== 'r') return null;
+  cursor += 1;
+  let hashes = 0;
+  while (source[cursor] === '#') {
+    hashes += 1;
+    cursor += 1;
+  }
+  if (source[cursor] !== '"') return null;
+  const terminator = `"${'#'.repeat(hashes)}`;
+  const end = source.indexOf(terminator, cursor + 1);
+  return end === -1 ? source.length : end + terminator.length;
+}
+
+function rustQuotedEnd(source, index, quote) {
+  let cursor = index + 1;
+  while (cursor < source.length) {
+    if (source[cursor] === '\\') cursor += 2;
+    else if (source[cursor] === quote) return cursor + 1;
+    else cursor += 1;
+  }
+  return source.length;
+}
+
+function rustCharLiteralEnd(source, index) {
+  const end = rustQuotedEnd(source, index, "'");
+  if (end >= source.length || source[end - 1] !== "'") return null;
+  const body = source.slice(index + 1, end - 1);
+  return body.length === 1 || /^\\(?:[nrt0'"\\]|x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]+\})$/.test(body)
+    ? end
+    : null;
+}
+
+function rustLexicalMask(source) {
+  let output = source;
+  let index = 0;
+  while (index < source.length) {
+    if (source.startsWith('//', index)) {
+      const end = source.indexOf('\n', index + 2);
+      const stop = end === -1 ? source.length : end;
+      output = replaceNonNewline(output, index, stop);
+      index = stop;
+      continue;
+    }
+    if (source.startsWith('/*', index)) {
+      let cursor = index + 2;
+      let depth = 1;
+      while (cursor < source.length && depth > 0) {
+        if (source.startsWith('/*', cursor)) { depth += 1; cursor += 2; }
+        else if (source.startsWith('*/', cursor)) { depth -= 1; cursor += 2; }
+        else cursor += 1;
+      }
+      output = replaceNonNewline(output, index, cursor);
+      index = cursor;
+      continue;
+    }
+    const rawEnd = rustRawStringEnd(source, index);
+    if (rawEnd !== null) {
+      output = replaceNonNewline(output, index, rawEnd);
+      index = rawEnd;
+      continue;
+    }
+    if (source[index] === '"' || source.startsWith('b"', index)) {
+      const quote = source[index] === '"' ? index : index + 1;
+      const end = rustQuotedEnd(source, quote, '"');
+      output = replaceNonNewline(output, index, end);
+      index = end;
+      continue;
+    }
+    if (source[index] === "'" && (index === 0 || !isRustIdent(source.charCodeAt(index - 1)))) {
+      const end = rustCharLiteralEnd(source, index);
+      if (end !== null) {
+        output = replaceNonNewline(output, index, end);
+        index = end;
+        continue;
+      }
+    }
+    index += 1;
+  }
+  return output;
+}
+
+function skipRustSpace(source, index) {
+  while (index < source.length && /\s/.test(source[index])) index += 1;
+  return index;
+}
+
+function rustAttributeEnd(source, index) {
+  if (source[index] !== '#' || source[index + 1] !== '[') return null;
+  let depth = 1;
+  for (let cursor = index + 2; cursor < source.length; cursor += 1) {
+    if (source[cursor] === '[') depth += 1;
+    if (source[cursor] === ']' && --depth === 0) return cursor + 1;
+  }
+  return source.length;
+}
+
+function rustMatchingBrace(source, open) {
+  let depth = 1;
+  for (let cursor = open + 1; cursor < source.length; cursor += 1) {
+    if (source[cursor] === '{') depth += 1;
+    if (source[cursor] === '}' && --depth === 0) return cursor + 1;
+  }
+  return source.length;
+}
+
+function rustAttributedItemEnd(source, index) {
+  let cursor = skipRustSpace(source, index);
+  while (source[cursor] === '#') {
+    const end = rustAttributeEnd(source, cursor);
+    if (end === null) break;
+    cursor = skipRustSpace(source, end);
+  }
+  let paren = 0;
+  let bracket = 0;
+  for (; cursor < source.length; cursor += 1) {
+    const char = source[cursor];
+    if (char === '(') paren += 1;
+    if (char === ')') paren = Math.max(0, paren - 1);
+    if (char === '[') bracket += 1;
+    if (char === ']') bracket = Math.max(0, bracket - 1);
+    if (paren === 0 && bracket === 0) {
+      if (char === ';') return cursor + 1;
+      if (char === '{') return rustMatchingBrace(source, cursor);
+    }
+  }
+  return source.length;
+}
+
+function rustTestOnlyAttribute(attribute) {
+  const compact = attribute.replace(/\s/g, '');
+  return compact === '#[cfg(test)]' || (compact.startsWith('#[cfg(all(') && compact.endsWith('))]') &&
+    compact.slice(10, -3).split(',').includes('test'));
+}
+
+export function rustProductionText(source) {
+  const masked = rustLexicalMask(source);
+  let output = source;
+  let index = 0;
+  while (index < masked.length) {
+    if (masked[index] !== '#' || masked[index + 1] !== '[') { index += 1; continue; }
+    const end = rustAttributeEnd(masked, index);
+    if (end === null) break;
+    if (rustTestOnlyAttribute(masked.slice(index, end))) {
+      const itemEnd = rustAttributedItemEnd(masked, end);
+      output = replaceNonNewline(output, index, itemEnd);
+      index = itemEnd;
+    } else index = end;
+  }
+  return output;
+}
+
 function invariant(condition, message) {
   if (!condition) throw new Error(message);
 }
@@ -84,6 +251,25 @@ function collectLiteralMatches(source, terms) {
   return matches;
 }
 
+function collectIdentifierMatches(source, terms) {
+  const matches = [];
+  const identifierCharacter = /[A-Za-z0-9._\/:\-]/;
+  for (const term of terms) {
+    let cursor = 0;
+    while (cursor <= source.length - term.length) {
+      const index = source.indexOf(term, cursor);
+      if (index < 0) break;
+      const before = index > 0 ? source[index - 1] : '';
+      const after = index + term.length < source.length ? source[index + term.length] : '';
+      if ((!before || !identifierCharacter.test(before)) && (!after || !identifierCharacter.test(after))) {
+        matches.push({ term, line: lineNumber(source, index) });
+      }
+      cursor = index + Math.max(1, term.length);
+    }
+  }
+  return matches;
+}
+
 function collectRegexMatches(source, matcher) {
   const flags = matcher.flags?.includes('g') ? matcher.flags : `${matcher.flags ?? ''}g`;
   const pattern = new RegExp(matcher.pattern, flags);
@@ -95,6 +281,12 @@ function collectRegexMatches(source, matcher) {
 
 function extractCapabilityIds(catalogPath) {
   const catalog = readJson(catalogPath);
+  if (Array.isArray(catalog.retired_capability_ids)) {
+    invariant(catalog.inventory_kind === 'uarc-retired-capability-ids', `${catalogPath}: unexpected retirement inventory`);
+    invariant(catalog.canonical_module_id_reuse?.some((entry) => entry.id === 'workspace.artifacts'),
+      `${catalogPath}: canonical workspace.artifacts reuse must remain explicit`);
+    return sortedUnique(catalog.retired_capability_ids);
+  }
   invariant(Array.isArray(catalog.packages), `${catalogPath}: packages must be an array`);
   return sortedUnique(catalog.packages.flatMap((entry) =>
     (entry.capabilities ?? []).map((capability) => capability?.capability?.id).filter(Boolean)));
@@ -109,10 +301,13 @@ function scanTextGroup(group, paths) {
   for (const path of candidates) {
     const absolute = resolve(ROOT, path);
     if (!existsSync(absolute)) continue;
-    const source = readFileSync(absolute, 'utf8');
+    const rawSource = readFileSync(absolute, 'utf8');
+    const source = extname(path) === '.rs' ? rustProductionText(rawSource) : rawSource;
     const matches = group.matcher.kind === 'regex'
       ? collectRegexMatches(source, group.matcher)
-      : collectLiteralMatches(source, terms);
+      : group.matcher.kind === 'catalog_ids'
+        ? collectIdentifierMatches(source, terms)
+        : collectLiteralMatches(source, terms);
     if (matches.length > 0) records.push({ path, matches });
   }
   return {
@@ -127,8 +322,11 @@ function scanTextGroup(group, paths) {
 function scanPathGroup(group, paths) {
   const files = sortedUnique(group.matcher.paths.flatMap((entry) => {
     const normalized = normalizePath(entry);
-    if (normalized.endsWith('/')) return paths.filter((path) => path.startsWith(normalized));
-    return paths.filter((path) => path === normalized || path.startsWith(`${normalized}/`));
+    if (normalized.endsWith('/')) {
+      return paths.filter((path) => path.startsWith(normalized) && existsSync(resolve(ROOT, path)));
+    }
+    return paths.filter((path) =>
+      (path === normalized || path.startsWith(`${normalized}/`)) && existsSync(resolve(ROOT, path)));
   }));
   return {
     match_count: files.length,
@@ -262,6 +460,17 @@ export function assertSelfTest() {
   const sample = 'alpha\nbeta alpha\n';
   const literals = collectLiteralMatches(sample, ['alpha']);
   invariant(literals.length === 2 && literals[1].line === 2, 'literal scanner self-test failed');
+  const identifiers = collectIdentifierMatches(
+    'fs.read ssh.fs.read workspace.files/read fs.read.detail computer/a11y.observe a11y.observe',
+    ['fs.read', 'a11y.observe'],
+  );
+  invariant(identifiers.length === 2 && identifiers.map((match) => match.term).join(',') === 'fs.read,a11y.observe',
+    'identifier scanner self-test failed');
+  const rustProduction = rustProductionText(
+    '#[cfg(test)]\nmod tests { const SQL: &str = "FROM conversations"; }\nconst SQL: &str = "FROM agent_sessions";\n',
+  );
+  invariant(!rustProduction.includes('FROM conversations') && rustProduction.includes('FROM agent_sessions'),
+    'Rust production masking self-test failed');
   const regex = collectRegexMatches(sample, { pattern: 'a(?:lpha)?', flags: '' });
   invariant(regex.length === 3, 'regex scanner self-test failed');
   invariant(isProductionPath('crates/x/src/lib.rs', {

@@ -3,7 +3,7 @@
 //! Every endpoint resolves the Companion's existing Conversation. Utterances
 //! carry device and connection identity through the host's keyed turn boundary.
 //!
-//! The concrete backend lives in `nomifun-app`, where `ConversationService`, the
+//! The concrete backend lives in `nomifun-app`, where the canonical AgentSession owner, the
 //! runtime registry, the companion registry and the installation owner id are all
 //! in scope at once. Keeping only the narrow trait here means `nomifun-robot`
 //! never depends on the host crate, so the dependency direction stays one-way.

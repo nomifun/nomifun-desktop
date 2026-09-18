@@ -320,7 +320,7 @@ mod tests {
             binding: serde_json::from_value(serde_json::json!({
                 "model_name":"write_file", "definition":{"name":"write_file","description":"fixture","input_schema":{}},
                 "schema_digest":"a".repeat(64), "canonical_input_schema_ref":"fixture", "capability_contract_digest":"b".repeat(64),
-                "capability_id":"fs.write", "action_id":"write", "resource_binding_ids":[], "effect_class":"managed_effect", "parallel_safe":false
+                "capability_id":"workspace.files", "action_id":"workspace.files/write", "resource_binding_ids":[], "effect_class":"managed_effect", "parallel_safe":false
             })).unwrap(),
         };
         let cancellation = CancellationToken::new();

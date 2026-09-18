@@ -571,7 +571,7 @@ impl ScopedInstructions {
             return Ok(None);
         }
         if self.authority.tool_plan.binding("read_file").is_none() {
-            // No implicit fs.read grant. Process-only Agents may still execute
+            // No implicit workspace.files/read grant. Process-only Agents may still execute
             // under their own instructions; explicitly disclose missing rules.
             return Ok(None);
         }
@@ -712,7 +712,7 @@ impl ScopedInstructions {
                     "kind": "search_context_withheld",
                     "search_executed": true,
                     "snippets_withheld": true,
-                    "notice": "The search returned, but its hit envelope or required repository instruction scopes could not be accepted completely. No snippets from this result are supplied to the model. Narrow path/limit and resolve unreadable, changed, aliased or oversized instruction scopes. Reading instructions requires fs.read in the frozen Agent selection; this turn cannot enable capabilities. Reconsider the search with a new call identity. This is not proof of absent matches or a rollback."
+                    "notice": "The search returned, but its hit envelope or required repository instruction scopes could not be accepted completely. No snippets from this result are supplied to the model. Narrow path/limit and resolve unreadable, changed, aliased or oversized instruction scopes. Reading instructions requires workspace.files/read in the frozen Agent selection; this turn cannot enable capabilities. Reconsider the search with a new call identity. This is not proof of absent matches or a rollback."
                 }).to_string(), true), true)),
             Err(error) => Err(error),
         }

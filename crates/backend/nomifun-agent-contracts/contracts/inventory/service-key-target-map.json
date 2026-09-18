@@ -17,9 +17,15 @@
       "purpose": "Create, turn, cancel, fork and delete canonical AgentSessions.",
       "current_provider_refs": [
         {
-          "path": "crates/backend/nomifun-conversation/src/service.rs",
+          "path": "crates/backend/nomifun-conversation/src/canonical_session_owner.rs",
           "symbols": [
-            "ConversationService"
+            "CanonicalAgentSessionOwner"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-agent-session/src/store.rs",
+          "symbols": [
+            "AgentSessionStore"
           ]
         }
       ]
@@ -30,15 +36,15 @@
       "purpose": "Read canonical Session events, projections, lifecycle and ownership.",
       "current_provider_refs": [
         {
-          "path": "crates/backend/nomifun-conversation/src/service.rs",
+          "path": "crates/backend/nomifun-conversation/src/canonical_session_owner.rs",
           "symbols": [
-            "ConversationService"
+            "CanonicalAgentSessionOwner"
           ]
         },
         {
-          "path": "crates/backend/nomifun-db/src/repository/conversation.rs",
+          "path": "crates/backend/nomifun-agent-session/src/store.rs",
           "symbols": [
-            "IConversationRepository"
+            "AgentSessionStore"
           ]
         }
       ]
@@ -282,25 +288,6 @@
       ]
     },
     {
-      "service_key": "service.idmm-supervision.v1",
-      "provider_package_key": "domain.idmm",
-      "purpose": "Arm, observe and intervene in AgentSession or automation execution.",
-      "current_provider_refs": [
-        {
-          "path": "crates/backend/nomifun-idmm/src/service.rs",
-          "symbols": [
-            "IdmmService"
-          ]
-        },
-        {
-          "path": "crates/backend/nomifun-idmm/src/supervisor.rs",
-          "symbols": [
-            "IdmmManager"
-          ]
-        }
-      ]
-    },
-    {
       "service_key": "service.agent-execution.v1",
       "provider_package_key": "domain.agent-execution",
       "purpose": "Own collaboration DAG, attempts, receipts and domain outbox.",
@@ -395,7 +382,7 @@
         {
           "path": "crates/backend/nomifun-channel/src/message_service.rs",
           "symbols": [
-            "ConversationService"
+            "ChannelSessionPort"
           ]
         }
       ]
@@ -520,13 +507,13 @@
     },
     {
       "consumer_package_key": "domain.autowork",
-      "requires_service_key": "service.agent-session-command.v1",
+      "requires_service_key": "service.agent-execution.v1",
       "migration_wave": "wave5_automation_supervision_remote",
       "current_coupling_refs": [
         {
-          "path": "crates/backend/nomifun-requirement/src/auto_work_runner.rs",
+          "path": "crates/backend/nomifun-requirement/src/execution_port.rs",
           "symbols": [
-            "ConversationService"
+            "AutoWorkExecutionPort"
           ]
         }
       ]
@@ -545,32 +532,6 @@
       ]
     },
     {
-      "consumer_package_key": "domain.autowork",
-      "requires_service_key": "service.terminal-driver.v1",
-      "migration_wave": "wave5_automation_supervision_remote",
-      "current_coupling_refs": [
-        {
-          "path": "crates/backend/nomifun-requirement/src/auto_work_runner.rs",
-          "symbols": [
-            "TerminalDriver"
-          ]
-        }
-      ]
-    },
-    {
-      "consumer_package_key": "domain.autowork",
-      "requires_service_key": "service.idmm-supervision.v1",
-      "migration_wave": "wave5_automation_supervision_remote",
-      "current_coupling_refs": [
-        {
-          "path": "crates/backend/nomifun-requirement/src/auto_work_runner.rs",
-          "symbols": [
-            "IdmmHandle"
-          ]
-        }
-      ]
-    },
-    {
       "consumer_package_key": "domain.cron",
       "requires_service_key": "service.agent-session-command.v1",
       "migration_wave": "wave5_automation_supervision_remote",
@@ -578,46 +539,7 @@
         {
           "path": "crates/backend/nomifun-cron/src/executor.rs",
           "symbols": [
-            "ConversationService"
-          ]
-        }
-      ]
-    },
-    {
-      "consumer_package_key": "domain.idmm",
-      "requires_service_key": "service.agent-session-query.v1",
-      "migration_wave": "wave5_automation_supervision_remote",
-      "current_coupling_refs": [
-        {
-          "path": "crates/backend/nomifun-idmm/src/probe.rs",
-          "symbols": [
-            "ConversationService"
-          ]
-        }
-      ]
-    },
-    {
-      "consumer_package_key": "domain.idmm",
-      "requires_service_key": "service.terminal-driver.v1",
-      "migration_wave": "wave5_automation_supervision_remote",
-      "current_coupling_refs": [
-        {
-          "path": "crates/backend/nomifun-idmm/src/service.rs",
-          "symbols": [
-            "TerminalDriver"
-          ]
-        }
-      ]
-    },
-    {
-      "consumer_package_key": "domain.idmm",
-      "requires_service_key": "service.model-invoke.v1",
-      "migration_wave": "wave5_automation_supervision_remote",
-      "current_coupling_refs": [
-        {
-          "path": "crates/backend/nomifun-idmm/Cargo.toml",
-          "symbols": [
-            "nomifun-model-invoke"
+            "CronSessionPort"
           ]
         }
       ]
@@ -630,7 +552,7 @@
         {
           "path": "crates/backend/nomifun-agent-execution/src/production.rs",
           "symbols": [
-            "ConversationService"
+            "AgentExecutionSessionPort"
           ]
         }
       ]

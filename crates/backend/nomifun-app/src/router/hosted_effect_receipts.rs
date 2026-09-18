@@ -288,7 +288,10 @@ impl HostedEffectReceipts {
             .await
             .map_err(|_| failure())?
             .into_iter()
-            .filter(|effect| matches!(effect.owner_domain.as_str(), "miniapp" | "robot"))
+            .filter(|effect| {
+                effect.owner_domain == Domain::PluginProduct.as_str()
+                    || effect.owner_domain == Domain::Robot.as_str()
+            })
             .collect::<Vec<_>>();
         if effects.is_empty() {
             return Ok(None);

@@ -234,7 +234,7 @@ mod tests {
             &ActionId::from("workspace.process/exec"),
         ));
         assert!(!is_workspace_process_action(
-            &CapabilityId::from("process.exec"),
+            &CapabilityId::from("workspace.process/exec"),
             &ActionId::from("process.exec.invoke"),
         ));
         assert!(process_result_is_error(

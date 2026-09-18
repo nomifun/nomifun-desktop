@@ -44,7 +44,6 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-agent-contracts/src/engine_features.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/runtime.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/package.rs"),
-                    include_str!("../../../nomifun-agent-contracts/src/retirement.rs"),
                     include_str!("../../../nomifun-agent-contracts/contracts/engine/platform-feature-inventory.payload.json"),
                     include_str!("agent_wave1_host.rs"),
                     include_str!("../../../nomifun-agent-domain-wave1/src/lib.rs"),
@@ -63,14 +62,10 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-agent-kernel/src/session_capabilities.rs"),
                     include_str!("nomi_core_resource_bindings.rs"),
                     include_str!("nomi_core_session.rs"),
-                    include_str!("nomi_core_agent_projection.rs"),
+                    include_str!("agent_binding_projection.rs"),
                     include_str!("../../../nomifun-api-types/src/agent_platform.rs"),
                     include_str!("../../../nomifun-api-types/src/execution_constraints.rs"),
                     include_str!("../../../nomifun-agent-execution/src/attempt_runner.rs"),
-                    include_str!("../../../nomifun-conversation/src/service.rs"),
-                    include_str!("../../../nomifun-db/src/conversation_context.rs"),
-                    include_str!("../../../nomifun-db/src/repository/conversation.rs"),
-                    include_str!("../../../nomifun-db/src/repository/sqlite_conversation.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/context.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/context_lifecycle.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/output_limit.rs"),
@@ -499,10 +494,14 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         let capabilities = self.capability_state.snapshot().map_err(error)?;
         // Owner-projected authority, not a model assertion. Activation returns
         // an updated projection only after its generation is durably committed.
-        let context_image_input = capabilities.active.iter().any(|id| id.as_ref() == "llm.vision")
-            && self.primary_image_input;
-        let current_content = super::runtime_attachments::prepare(message, receipt, &response.extra,
-            capabilities.active.iter().any(|id| id.as_ref() == "llm.vision")).await?;
+        let context_image_input = self.primary_image_input;
+        let current_content = super::runtime_attachments::prepare(
+            message,
+            receipt,
+            &response.extra,
+            self.primary_image_input,
+        )
+        .await?;
         // Supply a bounded canonical candidate window, not a model-context
         // strategy. The runtime owns selection and per-call budgets. Host limits
         // bound DB/resource consumption independently of the engine algorithm.
@@ -841,7 +840,6 @@ mod build_identity_tests {
             "../../../nomifun-agent-runtime/src/lib.rs",
             "mod.rs",
             "../../../nomifun-agent-contracts/src/package.rs",
-            "../../../nomifun-agent-contracts/src/retirement.rs",
             "../../../nomifun-agent-kernel/src/plugin.rs",
             "../../../nomifun-agent-domain-wave1/src/lib.rs",
             "../../../nomifun-agent-domain-wave2/src/lib.rs",

@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use futures_util::future::BoxFuture;
 use nomifun_common::{
-    AgentKillReason, AppError, ErrorChain, OnConversationDelete, ProviderWithModel, now_ms,
+    AgentKillReason, AppError, ErrorChain, ProviderWithModel, now_ms,
 };
 use tokio::sync::{Mutex as AsyncMutex, OnceCell};
 use tokio_util::sync::CancellationToken;
@@ -1619,23 +1619,6 @@ impl AgentRuntimeSessions for InMemoryAgentRuntimeSessions {
             || self.teardown_quarantine.contains_key(conversation_id)
             || self.workspace_bindings.contains_key(conversation_id)
             || self.model_config_bindings.contains_key(conversation_id)
-    }
-}
-
-/// Wired up by `nomifun-app` so deleting a conversation tears down its
-/// agent process. Without this hook, agent subprocesses keep
-/// streaming events for a `conversation_id` whose DB row is already gone
-/// (Sentry ELECTRON-1BD).
-#[async_trait]
-impl OnConversationDelete for InMemoryAgentRuntimeSessions {
-    async fn on_conversation_deleted(&self, _user_id: &str, conversation_id: &str) {
-        if let Err(e) = self.terminate(conversation_id, Some(AgentKillReason::ConversationDeleted)) {
-            warn!(
-                conversation_id,
-                error = %ErrorChain(&e),
-                "Failed to terminate Agent runtime on conversation delete (non-fatal)",
-            );
-        }
     }
 }
 

@@ -17,12 +17,6 @@ pub struct SqliteCronRepository {
     pool: SqlitePool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SessionRelationStorage {
-    LegacyConversation,
-    CanonicalAgentSession,
-}
-
 impl SqliteCronRepository {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
@@ -56,7 +50,7 @@ impl SqliteCronRepository {
             "Cron job",
         )
         .await?;
-        let session_relation = validate_cron_authority(
+        validate_cron_authority(
             &mut tx,
             &row.user_id,
             row.enabled,
@@ -125,34 +119,6 @@ impl SqliteCronRepository {
         .bind(row.max_retries)
         .execute(&mut *tx)
         .await?;
-
-        if bind_session_relation
-            && session_relation == Some(SessionRelationStorage::LegacyConversation)
-        {
-            let conversation_id = row
-                .conversation_id
-                .as_deref()
-                .expect("atomic relation insertion validated conversation_id");
-            let bound = sqlx::query(
-                "UPDATE conversations \
-                 SET cron_job_id = ?, updated_at = ? \
-                 WHERE conversation_id = ? AND user_id = ? \
-                   AND (cron_job_id IS NULL OR cron_job_id = ?)",
-            )
-            .bind(&row.cron_job_id)
-            .bind(row.updated_at)
-            .bind(conversation_id)
-            .bind(&row.user_id)
-            .bind(&row.cron_job_id)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-            if bound != 1 {
-                return Err(DbError::Conflict(format!(
-                    "AgentSession '{conversation_id}' is already bound to another Cron job"
-                )));
-            }
-        }
 
         tx.commit().await?;
         Ok(())
@@ -263,13 +229,10 @@ async fn validate_cron_authority(
     preset_revision: Option<i64>,
     agent_snapshot: Option<&str>,
     skill_content: Option<&str>,
-) -> Result<Option<SessionRelationStorage>, DbError> {
-    let session_relation = match conversation_id {
-        Some(agent_session_id) => Some(
-            lock_owned_session_relation(tx, user_id, agent_session_id).await?,
-        ),
-        None => None,
-    };
+) -> Result<(), DbError> {
+    if let Some(agent_session_id) = conversation_id {
+        lock_owned_session_relation(tx, user_id, agent_session_id).await?;
+    }
 
     let owner: String = sqlx::query_scalar(
         "SELECT owner_user_id FROM installation_identity \
@@ -278,7 +241,7 @@ async fn validate_cron_authority(
     .fetch_one(&mut **tx)
     .await?;
     if user_id == owner {
-        return Ok(session_relation);
+        return Ok(());
     }
 
     let model_only_error = || {
@@ -297,30 +260,7 @@ async fn validate_cron_authority(
         if enabled && (execution_mode != "existing" || conversation_id.is_none()) {
             return Err(model_only_error());
         }
-        if enabled && execution_mode == "existing" {
-            let has_model: bool = sqlx::query_scalar(
-                "SELECT EXISTS(\
-                    SELECT 1 FROM conversations \
-                    WHERE conversation_id = ? \
-                      AND user_id = ? \
-                      AND type = 'nomi' \
-                      AND json_valid(model) \
-                      AND json_type(model) = 'object' \
-                      AND json_type(model, '$.provider_id') = 'text' \
-                      AND trim(json_extract(model, '$.provider_id')) <> '' \
-                      AND json_type(model, '$.model') = 'text' \
-                      AND trim(json_extract(model, '$.model')) <> ''\
-                )",
-            )
-            .bind(conversation_id.unwrap_or_default())
-            .bind(user_id)
-            .fetch_one(&mut **tx)
-            .await?;
-            if !has_model {
-                return Err(model_only_error());
-            }
-        }
-        return Ok(session_relation);
+        return Ok(());
     };
 
     let config: Value = serde_json::from_str(agent_config)
@@ -350,7 +290,7 @@ async fn validate_cron_authority(
     {
         return Err(model_only_error());
     }
-    Ok(session_relation)
+    Ok(())
 }
 
 /// Lock and authenticate the exact Session relation target inside the caller's
@@ -362,20 +302,7 @@ async fn lock_owned_session_relation(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     user_id: &str,
     agent_session_id: &str,
-) -> Result<SessionRelationStorage, DbError> {
-    let legacy = sqlx::query(
-        "UPDATE conversations SET updated_at = updated_at \
-         WHERE conversation_id = ? AND user_id = ?",
-    )
-    .bind(agent_session_id)
-    .bind(user_id)
-    .execute(&mut **tx)
-    .await?
-    .rows_affected();
-    if legacy == 1 {
-        return Ok(SessionRelationStorage::LegacyConversation);
-    }
-
+) -> Result<(), DbError> {
     let canonical = sqlx::query(
         "UPDATE agent_sessions SET next_seq = next_seq \
          WHERE agent_session_id = ? AND state = 'live' \
@@ -388,7 +315,7 @@ async fn lock_owned_session_relation(
     .await?
     .rows_affected();
     if canonical == 1 {
-        return Ok(SessionRelationStorage::CanonicalAgentSession);
+        return Ok(());
     }
 
     Err(DbError::Conflict(
@@ -710,10 +637,6 @@ impl ICronRepository for SqliteCronRepository {
             )));
         }
 
-        sqlx::query("UPDATE conversations SET cron_job_id = NULL WHERE cron_job_id = ?")
-            .bind(cron_job_id)
-            .execute(&mut *tx)
-            .await?;
         sqlx::query(
             "UPDATE conversation_artifacts \
              SET cron_job_id = NULL \
@@ -849,18 +772,6 @@ impl ICronRepository for SqliteCronRepository {
             )));
         }
 
-        sqlx::query(
-            "UPDATE conversations \
-             SET cron_job_id = NULL \
-             WHERE cron_job_id IN (\
-                 SELECT cron_job_id FROM cron_jobs \
-                 WHERE user_id = ? AND conversation_id = ?\
-             )",
-        )
-        .bind(user_id)
-        .bind(conversation_id)
-        .execute(&mut *tx)
-        .await?;
         sqlx::query(
             "UPDATE conversation_artifacts \
              SET cron_job_id = NULL \
@@ -1305,27 +1216,14 @@ impl ICronRepository for SqliteCronRepository {
                     "cron job is already bound to a different conversation".to_owned(),
                 ));
             }
-            let conversation_relation: Option<(Option<String>,)> = sqlx::query_as(
-                "SELECT cron_job_id FROM conversations \
-                 WHERE conversation_id = ? AND user_id = ?",
+            lock_owned_session_relation(&mut tx, user_id, requested_conversation_id).await?;
+            ensure_session_relation_available(
+                &mut tx,
+                user_id,
+                requested_conversation_id,
+                Some(&current.cron_job_id),
             )
-            .bind(requested_conversation_id)
-            .bind(user_id)
-            .fetch_optional(&mut *tx)
             .await?;
-            let Some((existing_cron_job_id,)) = conversation_relation else {
-                return Err(DbError::NotFound(format!(
-                    "AgentSession '{requested_conversation_id}'"
-                )));
-            };
-            if existing_cron_job_id
-                .as_deref()
-                .is_some_and(|existing| existing != current.cron_job_id)
-            {
-                return Err(DbError::Conflict(format!(
-                    "AgentSession '{requested_conversation_id}' is already bound to another Cron job"
-                )));
-            }
         }
 
         let settled = sqlx::query(
@@ -1389,31 +1287,6 @@ impl ICronRepository for SqliteCronRepository {
                 "cron job '{}'",
                 current.cron_job_id
             )));
-        }
-        if params.bind_job_conversation_if_unbound {
-            let conversation_id = params
-                .conversation_id
-                .as_deref()
-                .expect("validated exact run conversation");
-            let bound = sqlx::query(
-                "UPDATE conversations \
-                 SET cron_job_id = ?, updated_at = ? \
-                 WHERE conversation_id = ? AND user_id = ? \
-                   AND (cron_job_id IS NULL OR cron_job_id = ?)",
-            )
-            .bind(&current.cron_job_id)
-            .bind(params.now)
-            .bind(conversation_id)
-            .bind(user_id)
-            .bind(&current.cron_job_id)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-            if bound != 1 {
-                return Err(DbError::Conflict(format!(
-                    "AgentSession '{conversation_id}' relation changed during Cron run finalization"
-                )));
-            }
         }
 
         sqlx::query(
@@ -1587,17 +1460,8 @@ mod tests {
         let repo = SqliteCronRepository::new(db.pool().clone());
 
         // General Cron repository tests exercise the complete host-capable
-        // shape, so their aggregate and target Conversation explicitly belong
-        // to the installation owner seeded by the baseline migration.
-        sqlx::query(
-            "INSERT INTO conversations (conversation_id, user_id, name, type, created_at, updated_at) \
-             VALUES (?1, ?2, 'Test Conv', 'acp', 0, 0)",
-        )
-        .bind(CONVERSATION_ID)
-        .bind(&installation_owner)
-        .execute(db.pool())
-        .await
-        .unwrap();
+        // shape, so their target is a live installation-owned AgentSession.
+        insert_canonical_session(&db, CONVERSATION_ID, &installation_owner, "live").await;
 
         (repo, db, installation_owner)
     }
@@ -1702,14 +1566,6 @@ mod tests {
         let first_job_id = first.cron_job_id.clone();
         repo.insert_with_session_relation(&first).await.unwrap();
 
-        let legacy_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM conversations WHERE conversation_id = ?",
-        )
-        .bind(CANONICAL_SESSION_ID)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-        assert_eq!(legacy_count, 0, "canonical relation must not mint a Conversation");
         assert_eq!(
             repo.list_by_conversation(&owner, CANONICAL_SESSION_ID)
                 .await
@@ -1734,21 +1590,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn atomic_relation_preserves_legacy_backref_and_fails_closed_for_canonical_owner_state() {
+    async fn atomic_relation_fails_closed_for_wrong_or_deleted_canonical_owner_state() {
         let (repo, db, owner) = setup().await;
-        let legacy = make_row(&owner);
-        let legacy_job_id = legacy.cron_job_id.clone();
-        repo.insert_with_session_relation(&legacy).await.unwrap();
-        let legacy_backref: Option<String> = sqlx::query_scalar(
-            "SELECT cron_job_id FROM conversations WHERE conversation_id = ? AND user_id = ?",
-        )
-        .bind(CONVERSATION_ID)
-        .bind(&owner)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-        assert_eq!(legacy_backref.as_deref(), Some(legacy_job_id.as_str()));
-
         insert_canonical_session(&db, CANONICAL_SESSION_ID, &owner, "live").await;
         let mut wrong_owner = make_row(&owner);
         wrong_owner.user_id = "0190f5fe-7c00-7a00-8000-000000000099".into();
@@ -1998,15 +1841,7 @@ mod tests {
     #[tokio::test]
     async fn list_by_conversation_filters_correctly() {
         let (repo, db, owner) = setup().await;
-        sqlx::query(
-            "INSERT INTO conversations (conversation_id, user_id, name, type, created_at, updated_at) \
-             VALUES (?1, ?2, 'Other', 'acp', 0, 0)",
-        )
-        .bind(OTHER_CONVERSATION_ID)
-        .bind(&owner)
-        .execute(db.pool())
-        .await
-        .unwrap();
+        insert_canonical_session(&db, OTHER_CONVERSATION_ID, &owner, "live").await;
 
         let conv1_job = make_row(&owner);
         let conv1_job_id = conv1_job.cron_job_id.clone();
@@ -2146,14 +1981,6 @@ mod tests {
         let cron_job_id = row.cron_job_id.clone();
         repo.insert(&row).await.unwrap();
         sqlx::query(
-            "UPDATE conversations SET cron_job_id = ? WHERE conversation_id = ?",
-        )
-        .bind(&cron_job_id)
-        .bind(CONVERSATION_ID)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        sqlx::query(
             "INSERT INTO conversation_artifacts \
                 (conversation_artifact_id, conversation_id, cron_job_id, kind, payload, created_at, updated_at) \
              VALUES (?, ?, ?, 'cron_trigger', '{}', 0, 0)",
@@ -2174,12 +2001,6 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_none());
-        let conversation_job: Option<String> =
-            sqlx::query_scalar("SELECT cron_job_id FROM conversations WHERE conversation_id = ?")
-                .bind(CONVERSATION_ID)
-                .fetch_one(db.pool())
-                .await
-                .unwrap();
         let artifact_job: Option<String> = sqlx::query_scalar(
             "SELECT cron_job_id FROM conversation_artifacts WHERE conversation_id = ?",
         )
@@ -2193,7 +2014,6 @@ mod tests {
                 .fetch_one(db.pool())
                 .await
                 .unwrap();
-        assert!(conversation_job.is_none());
         assert!(artifact_job.is_none());
         assert_eq!(run_count, 0);
     }
@@ -2345,21 +2165,7 @@ mod tests {
         .execute(db.pool())
         .await
         .unwrap();
-        sqlx::query(
-            "INSERT INTO conversations \
-                (conversation_id, user_id, name, type, model, delegation_policy, created_at, updated_at) \
-             VALUES \
-                (?1, ?2, 'Model-only target', 'nomi', ?3, \
-                 'disabled', 0, 0)",
-        )
-        .bind(OTHER_CONVERSATION_ID)
-        .bind(SECONDARY_USER)
-        .bind(format!(
-            "{{\"provider_id\":\"{PROVIDER_ID}\",\"model\":\"model-test\"}}"
-        ))
-        .execute(db.pool())
-        .await
-        .unwrap();
+        insert_canonical_session(&db, OTHER_CONVERSATION_ID, SECONDARY_USER, "live").await;
 
         let mut allowed = make_row(&owner);
         allowed.user_id = SECONDARY_USER.into();

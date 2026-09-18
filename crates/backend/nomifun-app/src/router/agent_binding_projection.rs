@@ -29,16 +29,16 @@ pub struct ProjectionInput<'a> {
 }
 
 #[derive(Debug)]
-pub struct NomiCoreAgentProjection {
+pub struct AgentBindingProjection {
     pub snapshot: AgentResolvedSnapshot,
     pub request: CreateConversationRequest,
 }
 
 #[derive(Debug)]
-pub struct NomiCoreSavedBindingProjection {
+pub struct SavedAgentBindingProjection {
     pub binding: AgentBindingValue,
     pub snapshot: ResolvedSnapshotEnvelope,
-    pub projection: NomiCoreAgentProjection,
+    pub projection: AgentBindingProjection,
 }
 
 pub fn project_saved_artifacts(
@@ -47,7 +47,7 @@ pub fn project_saved_artifacts(
     revision: AgentPresetRevision,
     snapshot: ResolvedSnapshotEnvelope,
     title: Option<&str>,
-) -> Result<NomiCoreSavedBindingProjection, AppError> {
+) -> Result<SavedAgentBindingProjection, AppError> {
     let projection = project(ProjectionInput {
         owner,
         binding: &binding,
@@ -55,14 +55,14 @@ pub fn project_saved_artifacts(
         snapshot: &snapshot,
         title,
     })?;
-    Ok(NomiCoreSavedBindingProjection {
+    Ok(SavedAgentBindingProjection {
         binding,
         snapshot,
         projection,
     })
 }
 
-pub fn project(input: ProjectionInput<'_>) -> Result<NomiCoreAgentProjection, AppError> {
+pub fn project(input: ProjectionInput<'_>) -> Result<AgentBindingProjection, AppError> {
     validate_identity_chain(&input)?;
     let route = exact_chat_route(input.revision, input.snapshot)?;
     let instructions = merge_instructions(
@@ -162,7 +162,7 @@ pub fn project(input: ProjectionInput<'_>) -> Result<NomiCoreAgentProjection, Ap
         "enforce_tool_allowlist": true,
         "deferred_tools": [],
     });
-    Ok(NomiCoreAgentProjection {
+    Ok(AgentBindingProjection {
         snapshot,
         request: CreateConversationRequest {
             r#type: AgentType::Nomi,

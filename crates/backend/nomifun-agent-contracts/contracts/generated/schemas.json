@@ -2951,67 +2951,6 @@
     "title": "CapabilityCatalogEntry",
     "type": "object"
   },
-  "capability_retirement": {
-    "$defs": {
-      "CapabilityRetirementRoute": {
-        "additionalProperties": false,
-        "properties": {
-          "disposition": {
-            "type": "string"
-          },
-          "owner_tasks": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "source_capability_ids": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "source_package": {
-            "type": "string"
-          },
-          "target": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "source_package",
-          "source_capability_ids",
-          "disposition",
-          "target",
-          "owner_tasks"
-        ],
-        "type": "object"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "properties": {
-      "routes": {
-        "items": {
-          "$ref": "#/$defs/CapabilityRetirementRoute"
-        },
-        "type": "array"
-      },
-      "schema_version": {
-        "type": "string"
-      },
-      "source_inventory_digest": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "schema_version",
-      "source_inventory_digest",
-      "routes"
-    ],
-    "title": "CapabilityRetirementManifest",
-    "type": "object"
-  },
   "contribution_lock": {
     "$defs": {
       "ContributionSourceKind": {

@@ -30,7 +30,7 @@ describe('GuidPage advanced controls', () => {
   });
 
   test('keeps the remaining draft API focused on session behavior', () => {
-    const source = readSource(new URL('./hooks/useGuidAdvancedConfig.ts', import.meta.url));
+    const source = readSource(new URL('./hooks/useGuidSessionOptions.ts', import.meta.url));
 
     expect(source.includes('autoWork: AutoWorkDraftValue')).toBe(true);
     expect(source.includes('IIdmmConfig')).toBe(false);

@@ -9,7 +9,6 @@ import { toDisplayText } from '@/common/chat/displayText';
 import { normalizeToolCall } from '@/common/chat/normalizeToolCall';
 import type { NormalizedToolStatus } from '@/common/chat/normalizeToolCall';
 import KnowledgeSearchChip from './KnowledgeSearchChip';
-import LocalWebSearchResult from './LocalWebSearchResult';
 import FileChangesPanel from '@/renderer/components/base/FileChangesPanel';
 import LocalImageView from '@/renderer/components/media/LocalImageView';
 import { useDiffPreviewHandlers } from '@/renderer/hooks/file/useDiffPreviewHandlers';
@@ -73,11 +72,6 @@ const MessageToolCall: React.FC<{ message: IMessageToolCall }> = ({ message }) =
   const normalized = normalizeToolCall(message);
   if (!normalized) {
     return <div className='text-t-primary'>{toDisplayText(name)}</div>;
-  }
-
-  if (name === 'nomi_local_websearch' && !normalized.notExecutedReason && !normalized.skipped) {
-    const state = normalized.status === 'error' ? 'failed' : normalized.status === 'pending' ? 'running' : normalized.status;
-    return <LocalWebSearchResult input={normalized.input} output={normalized.output} state={state} />;
   }
 
   const visibleArtifacts = normalized.status === 'completed' ? artifacts : [];

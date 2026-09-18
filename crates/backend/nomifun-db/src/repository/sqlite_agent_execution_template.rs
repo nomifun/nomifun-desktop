@@ -494,33 +494,6 @@ impl IAgentExecutionTemplateRepository for SqliteAgentExecutionTemplateRepositor
         if update.rows_affected() != 1 {
             return Err(invalid("Agent Execution Template changed concurrently"));
         }
-        if replacement_ids.is_some() {
-            // A selected Template is valid only while it contains the
-            // Conversation's concrete lead. Replacing the participant set and
-            // healing affected selections are one authoring transaction, so a
-            // concurrent launcher never observes a stale selection.
-            sqlx::query(
-                "UPDATE conversations AS conversation \
-                 SET execution_template_id = NULL, updated_at = MAX(updated_at, ?) \
-                 WHERE execution_template_id = ? \
-                   AND NOT EXISTS ( \
-                       SELECT 1 \
-                       FROM agent_execution_template_participants participant \
-                       WHERE participant.template_id = ? \
-                         AND participant.provider_id = \
-                             json_extract(conversation.model, '$.provider_id') \
-                         AND participant.model = COALESCE( \
-                             json_extract(conversation.model, '$.use_model'), \
-                             json_extract(conversation.model, '$.model') \
-                         ) \
-                   )",
-            )
-            .bind(now)
-            .bind(template_id)
-            .bind(template_id)
-            .execute(&mut *tx)
-            .await?;
-        }
         let result = load_template_tx(&mut tx, user_id, template_id)
             .await?
             .ok_or_else(|| invalid("updated Agent Execution Template is not readable"))?;
@@ -550,13 +523,6 @@ impl IAgentExecutionTemplateRepository for SqliteAgentExecutionTemplateRepositor
         if current_version != expected_version {
             return Err(invalid("Agent Execution Template changed concurrently"));
         }
-        sqlx::query(
-            "UPDATE conversations SET execution_template_id = NULL \
-             WHERE execution_template_id = ?",
-        )
-        .bind(template_id)
-        .execute(&mut *tx)
-        .await?;
         sqlx::query(
             "DELETE FROM agent_execution_template_participants WHERE template_id = ?",
         )

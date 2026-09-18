@@ -50,11 +50,8 @@ export function workpathDisplayForKnowledgeTarget(
 /**
  * Which knowledge-binding row a session actually reads and writes.
  *
- * Mirrors the backend exactly — `knowledge_binding_target`
- * (crates/backend/nomifun-conversation/src/service.rs) picks the target kind,
- * then the mount dispatcher (same file, `prepare_mounts_for_session` vs
- * `prepare_mounts_for_target`) decides whether a conversation target collapses
- * to its workpath:
+ * Mirrors the product binding contract: Companion-owned AgentSessions use the
+ * Companion binding; ordinary AgentSessions keep their own binding identity.
  *
  * 1. `extra.companion_id` present     → ('companion', companion_id)
  * 2. otherwise                        → ('conversation', conversation_id)

@@ -734,10 +734,6 @@ fn required_operations(
             continue;
         }
         match capability.as_str() {
-            "agent.delegate" | "agent.execution.steer" => {
-                grant("process_session", "execute")
-            }
-            "agent.execution.observe" => grant("process_session", "observe"),
             id if super::nomi_core_mcp_catalog::is_product_tool(id) => {
                 grant("mcp_server", "connect");
                 grant("mcp_server", "invoke");
@@ -1761,34 +1757,7 @@ mod tests {
     }
 
     #[test]
-    fn retired_workspace_capability_ids_never_derive_resource_authority() {
-        let retired = BTreeSet::from(
-            [
-                "fs.read",
-                "fs.search",
-                "fs.watch",
-                "fs.snapshot",
-                "fs.write",
-                "fs.patch",
-                "fs.delete",
-                "vcs.status",
-                "vcs.diff",
-                "vcs.stage",
-                "vcs.commit",
-                "vcs.push",
-                "workspace.bind",
-                "process.exec",
-                "process.session",
-                "terminal.pty",
-            ]
-            .map(str::to_owned),
-        );
-        assert!(
-            required_operations(&retired, &FrozenActionAllowlists::new())
-                .unwrap()
-                .is_empty()
-        );
-
+    fn modules_without_action_grants_never_derive_resource_authority() {
         let error = required_operations(
             &BTreeSet::from([
                 nomifun_agent_domain_wave2::WORKSPACE_ARTIFACTS_MODULE_ID.to_owned(),

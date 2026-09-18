@@ -11,9 +11,14 @@
       "responsibility": "Compose the shared product host; accept source-integrated Engine registrations before assembly freezes."
     },
     {
-      "owner": "ConversationService",
-      "path": "crates/backend/nomifun-conversation/src/service.rs",
-      "responsibility": "Retain the original Conversation and Session facts, accepted input, lifecycle and effect settlement. Do not replace with a second Session store."
+      "owner": "CanonicalAgentSessionOwner",
+      "path": "crates/backend/nomifun-conversation/src/canonical_session_owner.rs",
+      "responsibility": "Expose the product-facing command/query facade over the sole generation-5 AgentSession Store; no Conversation rows, Message rows, or second Session authority remain."
+    },
+    {
+      "owner": "AgentSessionStore",
+      "path": "crates/backend/nomifun-agent-session/src/store.rs",
+      "responsibility": "Own canonical AgentSession facts, semantic events, projections, turn receipts, effects, resources, deletion fences and replay."
     },
     {
       "owner": "OfficialRuntimeHost",

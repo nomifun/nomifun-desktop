@@ -1,4 +1,4 @@
-//! Platform-owned fs.read projection. Only verified workspace bytes reach the
+//! Platform-owned workspace.files/read projection. Only verified workspace bytes reach the
 //! shared bounded image decoder; neither the model nor an engine opens paths.
 use nomifun_agent_contracts::StrictJsonValue;
 use nomifun_chat_model_broker::ChatToolResultPart;
@@ -38,7 +38,7 @@ pub(super) async fn read(
     let mut input = input.0;
     let object = input
         .as_object_mut()
-        .ok_or_else(|| AppError::BadRequest("fs.read requires an object".into()))?;
+        .ok_or_else(|| AppError::BadRequest("workspace.files/read requires an object".into()))?;
     let format = object.remove("format");
     match format.as_ref().and_then(|value| value.as_str()) {
         None if format.is_none() => {}
@@ -59,7 +59,7 @@ pub(super) async fn read(
         }
         _ => {
             return Err(AppError::BadRequest(
-                "fs.read format must be text, image or instruction_scope".into(),
+                "workspace.files/read format must be text, image or instruction_scope".into(),
             ));
         }
     }

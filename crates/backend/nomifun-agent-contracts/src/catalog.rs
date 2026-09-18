@@ -795,7 +795,7 @@ impl CapabilityCatalogResolveError {
 }
 
 pub const CAPABILITY_CATALOG_ENTRY_JSON: &str =
-    include_str!("../contracts/catalog/platform-capability-catalog-entry.v1.json");
+    include_str!("../contracts/catalog/platform-module-catalog-entry.v1.json");
 
 pub fn capability_catalog_entry_fixture() -> CapabilityCatalogEntry {
     serde_json::from_str(CAPABILITY_CATALOG_ENTRY_JSON)
@@ -937,7 +937,7 @@ mod tests {
         assert_eq!(agent_entries.len(), 1);
         assert_eq!(
             agent_entries[0].capability.id.as_ref(),
-            "knowledge.search"
+            "knowledge"
         );
         assert_eq!(
             CapabilityCatalogEntry::filter_available_for_consumer(
