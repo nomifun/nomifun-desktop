@@ -48,7 +48,6 @@ nomifun-app = { path = "crates/backend/nomifun-app" }
 nomifun-robot = { path = "crates/backend/nomifun-robot" }
 nomifun-browser-platform = { path = "crates/backend/nomifun-browser-platform" }
 nomifun-agent-contracts = { path = "crates/backend/nomifun-agent-contracts" }
-nomifun-v4-root = { path = "crates/backend/nomifun-v4-root" }
 nomifun-agent-session = { path = "crates/backend/nomifun-agent-session" }
 nomifun-agent-kernel = { path = "crates/backend/nomifun-agent-kernel" }
 nomifun-js-authoring = { path = "crates/backend/nomifun-js-authoring" }

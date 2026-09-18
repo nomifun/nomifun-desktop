@@ -14,7 +14,7 @@ use tower::ServiceExt;
 use nomifun_db::{ICronRepository, SqliteCronRepository};
 
 use common::{
-    nomi_extra_with_workspace, body_json, build_app, delete_with_token,
+    body_json, build_app, delete_with_token,
     get_request, get_with_token, json_with_token, setup_and_login,
 };
 
@@ -130,41 +130,130 @@ async fn seed_cron_provider(services: &nomifun_app::compatibility::AppServices) 
     common::seed_openai_chat_model(services.database.pool(), CRON_PROVIDER_ID, CRON_MODEL).await;
 }
 
-/// Seed a minimal conversation row so a cron job carrying this logical
-/// `conversation_id` can be resolved by the application. The owner is
-/// resolved by application bootstrap from the database's
-/// `installation_identity` singleton.
-///
-/// The row carries a canonical `model` because nomi is the only engine left:
-/// a cron job bound to an existing nomi conversation takes its model from that
-/// conversation at run time, and `add_job` refuses to schedule one that has
-/// none.
-async fn seed_conversation(services: &nomifun_app::compatibility::AppServices, id: &str) {
+/// Create a real compiled Agent configuration through the product API, then
+/// reuse its immutable binding for the deterministic AgentSession ID required
+/// by these Cron fixtures. No retired Conversation row is involved.
+async fn seed_conversation(
+    app: &mut axum::Router,
+    services: &nomifun_app::compatibility::AppServices,
+    token: &str,
+    csrf: &str,
+    id: &str,
+) {
     seed_cron_provider(services).await;
-    let workspace = services
-        .work_dir
-        .join("cron-fixtures")
-        .join(id);
-    std::fs::create_dir_all(&workspace).unwrap();
-    sqlx::query(
-        "INSERT INTO conversations \
-         (conversation_id, user_id, name, type, model, extra, created_at, updated_at) \
-         VALUES (?, ?, 'Seeded Conv', 'nomi', ?, ?, 0, 0)",
+    let preset_response = app
+        .clone()
+        .oneshot(json_with_token(
+            "POST",
+            "/api/agent-presets/from-template/coding.codex",
+            json!({
+                "display_name": format!("Cron fixture {id}"),
+                "reuse_existing": false,
+                "model": {
+                    "provider_id": CRON_PROVIDER_ID,
+                    "model": CRON_MODEL,
+                }
+            }),
+            token,
+            csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(preset_response.status(), StatusCode::OK);
+    let preset = body_json(preset_response).await;
+    let preset_id = preset["data"]["preset"]["preset_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let response = app
+        .clone()
+        .oneshot(json_with_token(
+            "POST",
+            "/api/agent-sessions",
+            json!({
+                "preset_id": preset_id,
+                "title": "Cron binding source",
+                "resource_selections": [{
+                    "resource_kind": "workspace",
+                    "resource_id": "default-workspace"
+                }, {
+                    "resource_kind": "process_session",
+                    "resource_id": "managed-process-session"
+                }]
+            }),
+            token,
+            csrf,
+        ))
+        .await
+        .unwrap();
+    let response_status = response.status();
+    let response_body = body_json(response).await;
+    assert_eq!(response_status, StatusCode::OK, "{response_body}");
+    let source_id = response_body["data"]["agent_session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let binding_json: String = sqlx::query_scalar(
+        "SELECT agent_binding_json FROM agent_sessions WHERE agent_session_id = ?",
     )
-    .bind(id)
-    .bind(services.authoritative_user_id.as_ref())
-    .bind(
-        json!({
-            "provider_id": CRON_PROVIDER_ID,
-            "model": CRON_MODEL,
-            "use_model": CRON_MODEL,
-        })
-        .to_string(),
-    )
-    .bind(nomi_extra_with_workspace(workspace.to_string_lossy().into_owned()).to_string())
-    .execute(services.database.pool())
+    .bind(&source_id)
+    .fetch_one(services.database.pool())
     .await
     .unwrap();
+    let binding: nomifun_agent_contracts::AgentBindingValue =
+        serde_json::from_str(&binding_json).unwrap();
+    let store = nomifun_agent_session::AgentSessionStore::from_pool(
+        services.database.pool().clone(),
+    )
+    .await
+    .unwrap();
+    let created = store
+        .create_session(nomifun_agent_session::CreateSessionRequest::new(
+            nomifun_agent_contracts::AgentSessionLiveRecord {
+                agent_session_id: id.to_owned().into(),
+                owner_ref: nomifun_agent_contracts::PrincipalRef {
+                    principal_kind: "user".to_owned(),
+                    principal_id: services.authoritative_user_id.to_string(),
+                },
+                metadata: nomifun_agent_contracts::AgentSessionMetadata {
+                    title: Some("Seeded Cron Session".to_owned()),
+                    archived: false,
+                    pinned: false,
+                },
+                agent_binding: binding,
+                remote_binding_provenance: None,
+                parent_session_id: None,
+                fork_base_payload_id: None,
+                next_seq: 1,
+            },
+            1,
+            nomifun_agent_contracts::OperationId::from(format!("cron-fixture:{id}:open")),
+            nomifun_agent_contracts::EventProducerId::from("session_api"),
+            nomifun_agent_contracts::IdempotencyKey::from(format!("cron-fixture:{id}:open")),
+            nomifun_agent_contracts::CorrelationId::from(format!("cron-fixture:{id}:open")),
+        ))
+        .await
+        .unwrap();
+    store
+        .append_event(&nomifun_agent_contracts::SessionEventAppend {
+            agent_session_id: id.to_owned().into(),
+            event_id: format!("cron-fixture:{id}:ready").into(),
+            producer_id: "runtime_supervisor".into(),
+            idempotency_key: format!("cron-fixture:{id}:ready").into(),
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                kind: nomifun_agent_contracts::SessionEventKind("session/ready".to_owned()),
+                kind_version: 1,
+                correlation_id: format!("cron-fixture:{id}:ready").into(),
+                causation_event_id: Some(created.opening_ack.event_id),
+                payload: nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(
+                    nomifun_agent_contracts::StrictJsonValue(json!({})),
+                ),
+            },
+        })
+        .await
+        .unwrap();
 }
 
 // ── AU-1/AU-2: Unauthenticated requests ─────────────────────────────
@@ -226,30 +315,15 @@ async fn au3_authenticated_users_cannot_observe_or_mutate_each_others_cron_jobs(
     let (mut app, services) = build_app().await;
     let (owner_token, owner_csrf) =
         setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    seed_cron_provider(&services).await;
-
-    let create_conversation = json_with_token(
-        "POST",
-        "/api/conversations",
-        json!({
-            "type": "nomi",
-            "name": "Owner Cron Conversation",
-            "model": {
-                "provider_id": CRON_PROVIDER_ID,
-                "model": CRON_MODEL,
-                "use_model": CRON_MODEL,
-            },
-            "extra": nomi_extra_with_workspace("/project")
-        }),
+    seed_conversation(
+        &mut app,
+        &services,
         &owner_token,
         &owner_csrf,
-    );
-    let response = app.clone().oneshot(create_conversation).await.unwrap();
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let conversation_id = body_json(response).await["data"]["conversation_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+        TEST_CONV_1,
+    )
+    .await;
+    let conversation_id = TEST_CONV_1.to_owned();
 
     let mut body = create_job_body("Private Owner Job");
     body["conversation_id"] = json!(conversation_id);
@@ -463,7 +537,7 @@ async fn cj1_create_cron_job() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, TEST_CONV_1).await;
+    seed_conversation(&mut app, &services, &token, &csrf, TEST_CONV_1).await;
     let data = create_job(&mut app, &token, &csrf, create_job_body("Daily Report")).await;
 
     assert!(nomifun_common::CronJobId::parse(
@@ -561,7 +635,7 @@ async fn cj2_create_three_schedule_types() {
     let now = nomifun_common::now_ms();
 
     for conversation_id in [TEST_CONV_1, TEST_CONV_2, TEST_CONV_3] {
-        seed_conversation(&services, conversation_id).await;
+        seed_conversation(&mut app, &services, &token, &csrf, conversation_id).await;
     }
 
     let at = create_job(
@@ -676,7 +750,7 @@ async fn cj4_get_single_job() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, TEST_CONV_1).await;
+    seed_conversation(&mut app, &services, &token, &csrf, TEST_CONV_1).await;
     let created = create_job(&mut app, &token, &csrf, create_job_body("Get Test")).await;
     let job_id = created["cron_job_id"].as_str().unwrap().to_owned();
 
@@ -782,7 +856,7 @@ async fn cj6_list_all_jobs() {
         .into_iter()
         .enumerate()
     {
-        seed_conversation(&services, conversation_id).await;
+        seed_conversation(&mut app, &services, &token, &csrf, conversation_id).await;
         let mut body = create_job_body(&format!("Job {i}"));
         body["conversation_id"] = json!(conversation_id);
         create_job(&mut app, &token, &csrf, body).await;
@@ -804,9 +878,9 @@ async fn cj7_list_by_conversation() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, TEST_CONV_1).await;
-    seed_conversation(&services, TEST_CONV_2).await;
-    seed_conversation(&services, TEST_CONV_3).await;
+    seed_conversation(&mut app, &services, &token, &csrf, TEST_CONV_1).await;
+    seed_conversation(&mut app, &services, &token, &csrf, TEST_CONV_2).await;
+    seed_conversation(&mut app, &services, &token, &csrf, TEST_CONV_3).await;
     let mut body_a = create_job_body("Job A");
     body_a["conversation_id"] = json!(TEST_CONV_1);
     create_job(&mut app, &token, &csrf, body_a).await;
@@ -837,7 +911,7 @@ async fn cj8_update_job() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, TEST_CONV_1).await;
+    seed_conversation(&mut app, &services, &token, &csrf, TEST_CONV_1).await;
     let created = create_job(&mut app, &token, &csrf, create_job_body("Original")).await;
     let job_id = created["cron_job_id"].as_str().unwrap().to_owned();
 
@@ -862,7 +936,7 @@ async fn cj9_update_schedule_type() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, TEST_CONV_1).await;
+    seed_conversation(&mut app, &services, &token, &csrf, TEST_CONV_1).await;
     let created = create_job(&mut app, &token, &csrf, create_job_body("Schedule Change")).await;
     let job_id = created["cron_job_id"].as_str().unwrap().to_owned();
 
@@ -881,7 +955,7 @@ async fn cj9b_update_schedule_preserves_existing_timezone_when_omitted() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, TEST_CONV_1).await;
+    seed_conversation(&mut app, &services, &token, &csrf, TEST_CONV_1).await;
     let created = create_job(
         &mut app,
         &token,
@@ -935,7 +1009,7 @@ async fn cj11_delete_job() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, TEST_CONV_1).await;
+    seed_conversation(&mut app, &services, &token, &csrf, TEST_CONV_1).await;
     let created = create_job(&mut app, &token, &csrf, create_job_body("To Delete")).await;
     let job_id = created["cron_job_id"].as_str().unwrap().to_owned();
 
@@ -991,35 +1065,8 @@ async fn rn0_run_now_requires_exactly_one_idempotency_key() {
 async fn rn1_run_now_returns_conversation_id_for_new_conversation_job() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    seed_cron_provider(&services).await;
-    let workspace = std::env::current_dir()
-        .expect("Cron E2E current directory")
-        .to_string_lossy()
-        .into_owned();
-
-    let create_conv_req = json_with_token(
-        "POST",
-        "/api/conversations",
-        json!({
-            "type": "nomi",
-            "name": "Run Now Source",
-            "model": {
-                "provider_id": CRON_PROVIDER_ID,
-                "model": CRON_MODEL,
-                "use_model": CRON_MODEL,
-            },
-            "extra": nomi_extra_with_workspace(workspace)
-        }),
-        &token,
-        &csrf,
-    );
-    let create_conv_resp = app.clone().oneshot(create_conv_req).await.unwrap();
-    assert_eq!(create_conv_resp.status(), StatusCode::CREATED);
-    let created_conv = body_json(create_conv_resp).await;
-    let conversation_id = created_conv["data"]["conversation_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    seed_conversation(&mut app, &services, &token, &csrf, TEST_CONV_1).await;
+    let conversation_id = TEST_CONV_1.to_owned();
 
     let mut body = create_job_body("Run Now Job");
     body["conversation_id"] = json!(conversation_id);
@@ -1058,7 +1105,7 @@ async fn sk1_save_skill() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, TEST_CONV_1).await;
+    seed_conversation(&mut app, &services, &token, &csrf, TEST_CONV_1).await;
     let created = create_job(&mut app, &token, &csrf, create_job_body("Skill Job")).await;
     let job_id = created["cron_job_id"].as_str().unwrap().to_owned();
 
@@ -1081,7 +1128,7 @@ async fn sk2_has_skill_true() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, TEST_CONV_1).await;
+    seed_conversation(&mut app, &services, &token, &csrf, TEST_CONV_1).await;
     let created = create_job(&mut app, &token, &csrf, create_job_body("Skill Check")).await;
     let job_id = created["cron_job_id"].as_str().unwrap().to_owned();
 
@@ -1110,7 +1157,7 @@ async fn sk3_has_skill_false() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, TEST_CONV_1).await;
+    seed_conversation(&mut app, &services, &token, &csrf, TEST_CONV_1).await;
     let created = create_job(&mut app, &token, &csrf, create_job_body("No Skill")).await;
     let job_id = created["cron_job_id"].as_str().unwrap().to_owned();
 
@@ -1129,7 +1176,7 @@ async fn sk4_save_empty_skill() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, TEST_CONV_1).await;
+    seed_conversation(&mut app, &services, &token, &csrf, TEST_CONV_1).await;
     let created = create_job(&mut app, &token, &csrf, create_job_body("Empty Skill")).await;
     let job_id = created["cron_job_id"].as_str().unwrap().to_owned();
 
@@ -1152,7 +1199,7 @@ async fn sk5_save_placeholder_skill() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, TEST_CONV_1).await;
+    seed_conversation(&mut app, &services, &token, &csrf, TEST_CONV_1).await;
     let created = create_job(&mut app, &token, &csrf, create_job_body("Placeholder Skill")).await;
     let job_id = created["cron_job_id"].as_str().unwrap().to_owned();
 
@@ -1194,7 +1241,7 @@ async fn sk7_delete_skill() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, TEST_CONV_1).await;
+    seed_conversation(&mut app, &services, &token, &csrf, TEST_CONV_1).await;
     let created = create_job(&mut app, &token, &csrf, create_job_body("Delete Skill Job")).await;
     let job_id = created["cron_job_id"].as_str().unwrap().to_owned();
 
@@ -1265,7 +1312,7 @@ async fn sc6_cron_with_timezone() {
         "created_by": "user"
     });
 
-    seed_conversation(&services, TEST_CONV_1).await;
+    seed_conversation(&mut app, &services, &token, &csrf, TEST_CONV_1).await;
     let data = create_job(&mut app, &token, &csrf, body).await;
     let now = nomifun_common::now_ms();
     assert!(data["state"]["next_run_at_ms"].as_i64().unwrap() > now);

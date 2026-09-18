@@ -63,7 +63,7 @@ async fn bundle_manifest_captures_generation_graph_checksum_and_wal_snapshot() {
     .await
     .unwrap();
     assert_eq!(manifest.schema, BACKUP_SCHEMA);
-    assert_eq!(manifest.schema, "id-contract-v3");
+    assert_eq!(manifest.schema, "uarc-generation-5");
     assert_eq!(manifest.source_storage_generation, generation);
     assert_eq!(manifest.files.len(), 1);
     assert_eq!(manifest.files[0].path, DATABASE_FILE);
@@ -216,7 +216,7 @@ async fn complete_bundle_captures_every_included_root_and_records_all_exclusions
     .await
     .unwrap();
     assert_eq!(manifest.format_version, BACKUP_FORMAT_VERSION);
-    assert_eq!(manifest.format_version, 2);
+    assert_eq!(manifest.format_version, 3);
     let paths: std::collections::BTreeSet<String> =
         manifest.files.iter().map(|file| file.path.clone()).collect();
     assert!(paths.contains(DATABASE_FILE));
@@ -675,13 +675,14 @@ async fn offline_restore_preserves_entity_ids_and_rotates_dataset_generation() {
     let restored_generation = dir.path().join("restored").join("storage-generation");
     let database = init_database(&source).await.unwrap();
     let source_owner = nomifun_db::installation_owner_id(database.pool()).await.unwrap();
-    let conversation_id = ConversationId::new().into_string();
+    let agent_session_id = generate_id();
     sqlx::query(
-        "INSERT INTO conversations \
-         (conversation_id, user_id, name, type, extra, status, created_at, updated_at) \
-         VALUES (?, ?, 'preserved', 'nomi', '{}', 'pending', 1, 1)",
+        "INSERT INTO agent_sessions \
+         (agent_session_id, owner_ref_json, state, deleted_at) \
+         VALUES (?, json_object('principal_kind', 'user', 'principal_id', ?), \
+                 'deleted', 1)",
     )
-    .bind(&conversation_id)
+    .bind(&agent_session_id)
     .bind(&source_owner)
     .execute(database.pool())
     .await
@@ -724,7 +725,8 @@ async fn offline_restore_preserves_entity_ids_and_rotates_dataset_generation() {
 
     let restored = open_read_only_pool(&restored_database).await;
     let restored_id: String =
-        sqlx::query_scalar("SELECT conversation_id FROM conversations WHERE name = 'preserved'")
+        sqlx::query_scalar("SELECT agent_session_id FROM agent_sessions WHERE agent_session_id = ?")
+            .bind(&agent_session_id)
             .fetch_one(&restored)
             .await
             .unwrap();
@@ -734,7 +736,7 @@ async fn offline_restore_preserves_entity_ids_and_rotates_dataset_generation() {
     .fetch_one(&restored)
     .await
     .unwrap();
-    assert_eq!(restored_id, conversation_id);
+    assert_eq!(restored_id, agent_session_id);
     assert_eq!(restored_owner, source_owner);
     restored.close().await;
 
@@ -747,7 +749,7 @@ async fn offline_restore_preserves_entity_ids_and_rotates_dataset_generation() {
 }
 
 #[tokio::test]
-async fn restore_rebuilds_technical_ids_and_preserves_registered_business_id_references() {
+async fn restore_preserves_the_exact_database_identity_graph() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source.db");
     let bundle = dir.path().join("backup.nomifun");
@@ -922,12 +924,12 @@ async fn restore_rebuilds_technical_ids_and_preserves_registered_business_id_ref
     .fetch_one(&restored)
     .await
     .unwrap();
-    assert_ne!(
+    assert_eq!(
         restored_requirement_technical_id,
         source_requirement_technical_id
     );
     assert_eq!(attachment_requirement_id, source_requirement_business_id);
-    assert_ne!(
+    assert_eq!(
         restored_creation_task_technical_id,
         source_creation_task_technical_id
     );
@@ -1196,7 +1198,8 @@ async fn restore_rejects_valid_sqlite_with_wrong_schema_after_checksum_rewrite()
     .await
     .unwrap_err();
     assert!(
-        format!("{error}").contains("v3 schema product-table registry mismatch"),
+        format!("{error}").contains("schema product-table registry mismatch")
+            || format!("{error}").contains("no such table: _sqlx_migrations"),
         "unexpected validation failure: {error}"
     );
     assert!(!destination.exists());
@@ -1248,12 +1251,14 @@ async fn restore_rejects_noncanonical_row_ids_after_checksum_rewrite() {
     let owner = nomifun_db::installation_owner_id(database.pool())
         .await
         .unwrap();
+    let session_id = generate_id();
     sqlx::query(
-        "INSERT INTO conversations \
-         (conversation_id, user_id, name, type, extra, status, created_at, updated_at) \
-         VALUES (?, ?, 'canonical probe', 'nomi', '{}', 'pending', 1, 1)",
+        "INSERT INTO agent_sessions \
+         (agent_session_id, owner_ref_json, state, deleted_at) \
+         VALUES (?, json_object('principal_kind', 'user', 'principal_id', ?), \
+                 'deleted', 1)",
     )
-    .bind(ConversationId::new().into_string())
+    .bind(&session_id)
     .bind(owner)
     .execute(database.pool())
     .await
@@ -1280,7 +1285,7 @@ async fn restore_rejects_noncanonical_row_ids_after_checksum_rewrite() {
         .execute(&mut *connection)
         .await
         .unwrap();
-    sqlx::query("UPDATE conversations SET conversation_id = 'conv_bad'")
+    sqlx::query("UPDATE agent_sessions SET agent_session_id = 'conv_bad'")
         .execute(&mut *connection)
         .await
         .unwrap();

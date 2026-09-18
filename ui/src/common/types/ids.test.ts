@@ -14,7 +14,6 @@ import {
   parseChannelPluginId,
   parseChannelUserId,
   parseConversationId,
-  parseConversationArtifactId,
   parseCreativeStudioConnectionId,
   parseCreativeStudioNodeId,
   parseCreativeStudioProjectId,
@@ -228,14 +227,6 @@ describe('entity ids', () => {
     expect(parseMcpServerId(mcpServerId)).toBe(mcpServerId);
     for (const value of invalidBusinessIdValues(mcpServerId, 'mcp')) {
       expectInvalidEntityId(() => parseMcpServerId(value));
-    }
-  });
-
-  test('conversation_artifact_id accepts only a bare canonical lowercase UUIDv7', () => {
-    const artifactId = '0190f5fe-7c00-7a00-8000-000000000014';
-    expect(parseConversationArtifactId(artifactId)).toBe(artifactId);
-    for (const value of invalidBusinessIdValues(artifactId, 'artifact')) {
-      expectInvalidEntityId(() => parseConversationArtifactId(value));
     }
   });
 

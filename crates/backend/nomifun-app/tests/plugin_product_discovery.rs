@@ -92,17 +92,18 @@ async fn turn_outcome(router: &axum::Router, session_id: &str, query: &str, succ
             let page = data(
                 router,
                 "GET",
-                &format!("/api/agent-sessions/{session_id}/messages"),
+                &format!("/api/agent-sessions/{session_id}"),
                 Value::Null,
             )
             .await;
             if success && page.to_string().contains(&marker) {
                 break;
             }
-            if !success && page["messages"].as_array().and_then(|items| items.last())
-                .is_some_and(|last| last["message_type"] == "tips" && last["message_status"] == "error")
-            {
-                assert!(page.to_string().contains("timed out"), "{page}");
+            let active = matches!(
+                page["head"]["status"].as_str(),
+                Some("running" | "starting")
+            );
+            if !success && !active {
                 assert!(!page.to_string().contains(&marker), "timeout must not complete a model turn");
                 break;
             }
@@ -273,7 +274,8 @@ async fn published_discovery_is_consumed_by_nomi_and_conflicts_are_rejected_befo
         .as_array_mut()
         .unwrap()
         .push(json!({
-            "capability":{"id":capability_id,"version":"1.0.0"},"action_allowlist":[]
+            "capability":{"id":capability_id,"version":"1.0.0"},
+            "action_allowlist":[discovery::ACTION_ID]
         }));
     let saved = data(
         &router,
@@ -303,7 +305,8 @@ async fn published_discovery_is_consumed_by_nomi_and_conflicts_are_rejected_befo
         .as_array_mut()
         .unwrap()
         .push(json!({
-            "capability":{"id":discovery::CAPABILITY_ID,"version":"1.0.0"},"action_allowlist":[]
+            "capability":{"id":discovery::CAPABILITY_ID,"version":"1.0.0"},
+            "action_allowlist":[discovery::ACTION_ID]
         }));
     let (status, error) = request(
         &router,

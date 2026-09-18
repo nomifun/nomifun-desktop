@@ -11,7 +11,7 @@ import {appendFile} from 'node:fs/promises';
 export async function start() {
   return {async invoke({method,payload}) {
     if (method !== 'fixture.before-tool.target') throw new Error('wrong target');
-    if (payload.value !== 7 || payload.api_key !== 'secret-fixture-value') throw new Error('gate mutated target arguments');
+    if (payload.value !== 7 || payload.password !== 'secret-fixture-value') throw new Error('gate mutated target arguments');
     await appendFile(TARGET_LOG, payload.mode + '\n');
     return {executed: payload.mode};
   }, async dispose() {}};
@@ -24,7 +24,7 @@ export async function start() {
     if (method !== 'agent.before_tool' || payload.phase !== 'before_tool') throw new Error('wrong phase');
     if (Object.keys(payload).sort().join(',') !== 'arguments,invocation_id,phase,redacted,tool_call_id,tool_name') throw new Error('unexpected authority');
     if (!payload.invocation_id || !payload.tool_call_id || !payload.tool_name) throw new Error('missing identity');
-    if (!payload.redacted || payload.arguments.api_key !== '[REDACTED]') throw new Error('secret not masked');
+    if (!payload.redacted || payload.arguments.password !== '[REDACTED]') throw new Error('secret not masked');
     const mode = payload.arguments.mode;
     await appendFile(HOOK_LOG, JSON.stringify({tag:HOOK_TAG,mode,invocation_id:payload.invocation_id,tool_call_id:payload.tool_call_id}) + '\n');
     if (mode === 'invalid') return {decision:'allow',patch:{value:999}};
@@ -48,8 +48,8 @@ fn schema_ref(name: &str, schema: &Value) -> CanonicalSchemaRef {
     .into()
 }
 fn target_schemas() -> BTreeMap<CanonicalSchemaRef, StrictJsonValue> {
-    let input = json!({"type":"object","additionalProperties":false,"required":["mode","value","api_key"],
-        "properties":{"mode":{"type":"string"},"value":{"type":"integer"},"api_key":{"type":"string"}}});
+    let input = json!({"type":"object","additionalProperties":false,"required":["mode","value","password"],
+        "properties":{"mode":{"type":"string"},"value":{"type":"integer"},"password":{"type":"string"}}});
     let output = json!({"type":"object","additionalProperties":false,"required":["executed"],"properties":{"executed":{"type":"string"}}});
     [
         (schema_ref("input", &input), StrictJsonValue(input)),
@@ -277,18 +277,76 @@ impl Fixture {
         wiremock::Mock::given(wiremock::matchers::method("POST")).respond_with(|request: &wiremock::Request| {
             let body = request.body_json::<Value>().unwrap();
             let messages = body["messages"].as_array().unwrap();
-            let user_index = messages.iter().rposition(|m| m["role"] == "user").unwrap();
-            let mode = messages[user_index]["content"].as_str().unwrap();
-            let frame = if let Some(result) = messages[user_index + 1..].iter().rev().find(|m| m["role"] == "tool") {
-                json!({"choices":[{"index":0,"delta":{"content":format!("BEFORE_TOOL_DONE_{mode}:{}", result["content"])},"finish_reason":"stop"}]})
-            } else {
+            let known_modes = ["allow", "deny", "baseline", "bad-schema", "order-original",
+                "order-new", "order-frozen", "invalid", "wait", "cancel", "disabled"];
+            let (user_index, mode) = messages.iter().enumerate().rev().find_map(|(index, message)| {
+                let content = message["content"].as_str()?;
+                known_modes.contains(&content).then_some((index, content))
+            }).expect("fixture input must remain in model context");
+            let tool_results = messages[user_index + 1..].iter()
+                .filter(|message| message["role"] == "tool").collect::<Vec<_>>();
+            let requirement_id = format!("fixture-{mode}");
+            let requirements = json!([{
+                "id":requirement_id,
+                "description":format!("Process the {mode} fixture request through the selected target"),
+                "source":{"input":0,"quote":mode}
+            }]);
+            let result_content = |prefix: &str| tool_results.iter().find(|message|
+                message["tool_call_id"].as_str().is_some_and(|id| id.starts_with(prefix)))
+                .and_then(|message| message["content"].as_str()).map(str::to_owned);
+            let control_call = |id: String, name: &str, arguments: Value| json!({"choices":[{"index":0,
+                "delta":{"role":"assistant","tool_calls":[{"index":0,"id":id,"type":"function","function":{
+                    "name":name,"arguments":arguments.to_string()
+                }}]},"finish_reason":"tool_calls"}]});
+            let frame = if tool_results.is_empty() {
                 let tools = body["tools"].as_array().expect("selected target must reach real model request");
                 assert!(tools.iter().all(|t| !t.to_string().contains("agent.before_tool")), "hidden check became a model tool");
                 let target = tools.iter().find(|t| t["function"]["description"].as_str().is_some_and(|s| s.contains("BEFORE_TOOL_TARGET_FIXTURE"))).expect("Product target tool absent");
                 let value = if mode == "bad-schema" { json!("invalid") } else { json!(7) };
                 json!({"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":format!("target-{mode}"),"type":"function","function":{
-                    "name":target["function"]["name"],"arguments":json!({"mode":mode,"value":value,"api_key":"secret-fixture-value"}).to_string()
+                    "name":target["function"]["name"],"arguments":json!({"mode":mode,"value":value,"password":"secret-fixture-value"}).to_string()
                 }}]},"finish_reason":"tool_calls"}]})
+            } else if result_content(&format!("report-{mode}")).is_some() {
+                let subject = result_content(&format!("target-{mode}-retry"))
+                    .or_else(|| result_content(&format!("target-{mode}"))).unwrap_or_default();
+                json!({"choices":[{"index":0,"delta":{"content":format!("BEFORE_TOOL_DONE_{mode}:{subject}")},"finish_reason":"stop"}]})
+            } else if result_content(&format!("plan-finish-{mode}")).is_some() {
+                let succeeded = result_content(&format!("target-{mode}-retry"))
+                    .is_some_and(|content| content.contains("executed"));
+                control_call(format!("report-{mode}"), "report_completion", json!({
+                    "summary":"Before-tool fixture reached a terminal outcome",
+                    "criteria":[{"step":"Process the selected fixture target",
+                        "disposition":if succeeded { "supported" } else { "unverified" },
+                        "evidence_call_ids":if succeeded { vec![format!("target-{mode}-retry")] } else { Vec::<String>::new() },
+                        "rationale":if succeeded { "The selected target returned successfully" } else { "The target was rejected before execution" },
+                        "requirement_ids":[requirement_id]
+                    }]
+                }))
+            } else if result_content(&format!("target-{mode}-retry")).is_some() {
+                control_call(format!("plan-finish-{mode}"), "update_plan", json!({
+                    "explanation":"Record the fixture target outcome",
+                    "plan":[{"step":"Process the selected fixture target","status":"completed"}],
+                    "requirements":requirements
+                }))
+            } else if result_content(&format!("plan-start-{mode}")).is_some() {
+                let tools = body["tools"].as_array().expect("planned target must remain exposed");
+                let target = tools.iter().find(|t| t["function"]["description"].as_str().is_some_and(|s| s.contains("BEFORE_TOOL_TARGET_FIXTURE"))).expect("planned Product target absent");
+                let value = if mode == "bad-schema" { json!("invalid") } else { json!(7) };
+                json!({"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":format!("target-{mode}-retry"),"type":"function","function":{
+                    "name":target["function"]["name"],"arguments":json!({"mode":mode,"value":value,"password":"secret-fixture-value"}).to_string()
+                }}]},"finish_reason":"tool_calls"}]})
+            } else {
+                let needs_effect_plan = tool_results.last().unwrap()["content"].as_str()
+                    .is_some_and(|content| content.contains("Call update_plan"));
+                control_call(
+                    if needs_effect_plan { format!("plan-start-{mode}") } else { format!("plan-finish-{mode}") },
+                    "update_plan",
+                    json!({
+                        "explanation":if needs_effect_plan { "Admit the selected fixture effect" } else { "Record the rejected fixture input" },
+                        "plan":[{"step":"Process the selected fixture target","status":if needs_effect_plan { "in_progress" } else { "completed" }}],
+                        "requirements":requirements
+                    }),
+                )
             };
             wiremock::ResponseTemplate::new(200).insert_header("content-type","text/event-stream")
                 .set_body_string(format!("data: {frame}\n\ndata: [DONE]\n\n"))
@@ -322,7 +380,8 @@ impl Fixture {
         .await;
         let mut draft = editor["draft"].clone();
         draft["document"]["enabled_capabilities"].as_array_mut().unwrap().push(json!({
-            "capability":{"id":target_capability(&target_id).id,"version":"1.0.0"},"action_allowlist":[]
+            "capability":{"id":target_capability(&target_id).id,"version":"1.0.0"},
+            "action_allowlist":[TARGET_ACTION]
         }));
         data(
             &router,
@@ -353,7 +412,10 @@ impl Fixture {
         for (id, _, _) in &self.hooks {
             if !enabled.iter().any(|item| item["capability"]["id"] == *id) {
                 enabled
-                    .push(json!({"capability":{"id":id,"version":"1.0.0"},"action_allowlist":[]}));
+                    .push(json!({
+                        "capability":{"id":id,"version":"1.0.0"},
+                        "action_allowlist":[middleware::BEFORE_ACTION_ID]
+                    }));
             }
         }
         draft["document"]["middleware_order"] = json!(order);
@@ -408,10 +470,7 @@ impl Fixture {
                         .to_string()
                         .contains(&format!("BEFORE_TOOL_DONE_{mode}"))
                 } else {
-                    latest["messages"]
-                        .as_array()
-                        .and_then(|items| items.last())
-                        .is_some_and(|last| last["message_status"] == "error")
+                    true
                 };
                 if !active && complete {
                     break;
@@ -465,9 +524,9 @@ async fn product_before_tool_publish_select_allow_deny_and_unselected_baseline()
         ["allow", "deny"]
     );
     assert_ne!(hooks[0]["invocation_id"], hooks[1]["invocation_id"]);
-    assert_eq!(hooks[0]["tool_call_id"], "target-allow");
+    assert_eq!(hooks[0]["tool_call_id"], "target-allow-retry");
     let observations: Vec<String> = nomifun_db::sqlx::query_scalar(
-        "SELECT observation_json FROM conversation_hosted_effects WHERE conversation_id = ? AND action_name = ? AND state = 'returned'"
+        "SELECT bounded_observation_json FROM agent_effects WHERE session_id = ? AND action_id = ? AND state = 'returned'"
     ).bind(&selected).bind(middleware::BEFORE_ACTION_ID).fetch_all(fixture.services.database.pool()).await.unwrap();
     assert_eq!(observations.len(), 2);
     assert!(
@@ -485,13 +544,12 @@ async fn product_before_tool_publish_select_allow_deny_and_unselected_baseline()
         "{failed}"
     );
     assert!(
-        failed["messages"]
+        failed["events"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|message| message["message_type"] == "tool_call"
-                && message["message_status"] == "error"
-                && message["projection"]["output"]
+            .any(|event| event["kind"] == "tool/result-recorded"
+                && event["payload"]["value"]["error"]
                     .as_str()
                     .is_some_and(|text| text.contains("tool was not executed")))
     );
@@ -573,8 +631,8 @@ async fn product_before_tool_invalid_timeout_cancel_and_disable_never_dispatch_t
     let (cancel_status, cancel_response) = request(
         &fixture.router,
         "POST",
-        &format!("/api/conversations/{cancel}/cancel"),
-        json!({}),
+        &format!("/api/agent-sessions/{cancel}/turns/cancel"),
+        json!({"idempotency_key":"cancel-running-before-tool"}),
     )
     .await;
     assert!(
@@ -651,14 +709,16 @@ async fn product_before_tool_invalid_timeout_cancel_and_disable_never_dispatch_t
     }
     assert_eq!(hook_log(&fixture.hook_log).len(), before_disable);
     assert!(lines(&fixture.target_log).is_empty());
-    // Each technical-failure mode had at most one model call: the proposed tool call.
+    // The mandatory effect plan may require proposal -> plan -> retry. A
+    // technical middleware failure must still end at that retry: it can never
+    // be converted into a tool result supplied to another model request.
     for mode in ["invalid", "wait", "cancel", "disabled"] {
         let calls = fixture
             .upstream
             .received_requests()
             .await
             .unwrap()
-            .iter()
+            .into_iter()
             .filter(|request| {
                 let body = request.body_json::<Value>().unwrap();
                 body["messages"]
@@ -670,8 +730,15 @@ async fn product_before_tool_invalid_timeout_cancel_and_disable_never_dispatch_t
                     .unwrap()["content"]
                     == mode
             })
-            .count();
-        assert!(calls <= 1, "{mode} continued model reasoning");
+            .collect::<Vec<_>>();
+        assert!(calls.len() <= 3, "{mode} continued model reasoning");
+        assert!(calls.iter().all(|request| {
+            let body = request.body_json::<Value>().unwrap();
+            !body["messages"].as_array().unwrap().iter().any(|message| {
+                message["role"] == "tool"
+                    && message["tool_call_id"] == format!("target-{mode}-retry")
+            })
+        }), "{mode} technical failure was supplied back to the model");
     }
     fixture.shutdown().await;
 }

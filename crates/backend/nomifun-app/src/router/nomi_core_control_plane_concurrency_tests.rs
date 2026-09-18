@@ -130,7 +130,7 @@ async fn write_admission_precedes_validation_reads_and_still_allows_readers() {
         }
         reserved
     };
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nomi_agent_presets")
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_presets")
         .fetch_one(&mut other)
         .await
         .unwrap();
@@ -161,7 +161,7 @@ async fn concurrent_revision_saves_have_one_winner_and_one_version_conflict() {
         store.append_revision(None, second, second_snapshot, "Second".into(), None),
     );
     let rows: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM nomi_agent_preset_revisions WHERE preset_id = ?")
+        sqlx::query_scalar("SELECT COUNT(*) FROM agent_preset_revisions WHERE preset_id = ?")
             .bind(PRESET)
             .fetch_one(database.pool())
             .await
@@ -185,7 +185,11 @@ async fn revision_save_waits_for_an_existing_writer_then_keeps_compare_and_swap(
     let store = NomiCoreControlPlaneStore::new(database.pool().clone());
     store.insert_preset(preset()).await.unwrap();
     let mut writer = database.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
-    sqlx::query("UPDATE nomi_agent_presets SET display_name = 'Other writer' WHERE preset_id = ?")
+    sqlx::query(
+        "UPDATE agent_presets \
+         SET display_json = json_set(display_json, '$.display_name', 'Other writer') \
+         WHERE preset_id = ?",
+    )
         .bind(PRESET)
         .execute(&mut *writer)
         .await
@@ -221,7 +225,7 @@ async fn revision_save_waits_for_an_existing_writer_then_keeps_compare_and_swap(
         .append_revision(None, stale_revision, stale_snapshot, "Stale".into(), None)
         .await;
     let rows: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM nomi_agent_preset_revisions WHERE preset_id = ?")
+        sqlx::query_scalar("SELECT COUNT(*) FROM agent_preset_revisions WHERE preset_id = ?")
             .bind(PRESET)
             .fetch_one(database.pool())
             .await

@@ -128,7 +128,8 @@
         ],
         "exclude_paths": [
           "crates/backend/nomifun-db/migrations/",
-          "crates/backend/nomifun-db/src/id_schema_contract.rs"
+          "crates/backend/nomifun-db/src/id_schema_contract.rs",
+          "crates/backend/nomifun-db/src/database/legacy_agent_cutover.rs"
         ]
       },
       "baseline": { "match_count": 548, "file_count": 51, "files_digest": "6c346c35075a2aea19fe0248c34f3fed2457b9e3d6ba2fc35b17e7be6885fc40" }

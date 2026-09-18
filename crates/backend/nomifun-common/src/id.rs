@@ -288,8 +288,8 @@ define_entity_id!(
     /// Globally unique receipt identifier for a durable tool artifact.
     ///
     /// This identifies a tool-output receipt embedded in a message and is
-    /// distinct from the UUIDv7 `conversation_artifact_id` of a row in
-    /// `conversation_artifacts`. Neither identity is a SQLite technical key.
+    /// distinct from any UUIDv7 business identity stored by a product domain.
+    /// Neither identity is a SQLite technical key.
     PersistedArtifactId
 );
 define_entity_id!(
@@ -437,10 +437,6 @@ define_entity_id!(
 define_entity_id!(
     /// Globally unique webhook configuration identifier.
     WebhookId
-);
-define_entity_id!(
-    /// Globally unique conversation-artifact identifier.
-    ConversationArtifactId
 );
 define_entity_id!(
     /// Globally unique preset-tag identifier.

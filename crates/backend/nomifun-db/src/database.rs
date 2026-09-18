@@ -12,12 +12,7 @@ use tracing::{info, warn};
 
 use crate::error::DbError;
 
-mod published_main_migrations;
-mod displaced_agent_preset_migration;
-mod displaced_conversation_runtime_migration;
-
-#[cfg(test)]
-mod plugin_ui_upgrade_tests;
+mod legacy_agent_cutover;
 
 /// Maximum number of connections in the pool.
 const MAX_CONNECTIONS: u32 = 5;
@@ -25,23 +20,13 @@ const MAX_CONNECTIONS: u32 = 5;
 /// SQLite busy timeout in milliseconds.
 const BUSY_TIMEOUT_MS: u64 = 5000;
 
-/// Migration 32 intentionally drops every legacy provider credential instead
-/// of retaining a second wire/storage format. SQLite must overwrite deleted
-/// cells and rebuild the file once when upgrading an existing pre-31 schema so
-/// ciphertext and the former plaintext Bedrock fields do not remain in free
-/// pages or the WAL.
-const LEGACY_PROVIDER_CREDENTIAL_COLUMN: &str = "api_key_encrypted";
-
 static DB_MIGRATOR: Migrator = sqlx::migrate!();
-const V3_BASELINE_MIGRATION_VERSION: i64 = 1;
+const CANONICAL_BASELINE_MIGRATION_VERSION: i64 = 1;
 
 /// Compatibility result for a persisted sqlx migration lineage.
 ///
-/// A strict prefix is safe to hand to the embedded migrator for an incremental
-/// upgrade. Exact, authenticated development/published branch lineages are also
-/// supported through atomic migration-number reconciliation. Anything else (a
-/// gap, unknown version, failed row, or checksum mismatch) is unsupported and
-/// must fail closed before writable startup.
+/// The single canonical baseline is current. The exact authenticated final
+/// pre-UARC lineage is upgradeable through the one-time Agent clean cut.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MigrationLineageStatus {
     Current,
@@ -212,23 +197,19 @@ pub async fn validate_current_migration_lineage(pool: &SqlitePool) -> Result<(),
     }
 }
 
-/// Validate that the applied migration rows are an exact, non-empty prefix of
-/// the migrations embedded in this binary.
-///
-/// This is intentionally less strict than the backup/restore contract:
-/// startup must admit an older supported prefix so [`init_database`] can apply
-/// the missing suffix. It still rejects every lineage that the migrator cannot
-/// authenticate, including unknown future versions and edited checksums.
+/// Validate the canonical one-row lineage or the exact authenticated cutover
+/// source. Unknown versions, edited checksums and schema drift fail closed.
 pub async fn inspect_supported_migration_lineage(
     pool: &SqlitePool,
 ) -> Result<MigrationLineageStatus, DbError> {
     let expected = DB_MIGRATOR.iter().collect::<Vec<_>>();
     if expected
         .first()
-        .is_none_or(|migration| migration.version != V3_BASELINE_MIGRATION_VERSION)
+        .is_none_or(|migration| migration.version != CANONICAL_BASELINE_MIGRATION_VERSION)
+        || expected.len() != 1
     {
         return Err(DbError::Init(
-            "v3 migration lineage must begin with the published baseline".into(),
+            "database lineage must contain exactly the canonical baseline".into(),
         ));
     }
 
@@ -240,8 +221,12 @@ pub async fn inspect_supported_migration_lineage(
     if rows.is_empty() {
         return Err(DbError::Init(format!(
             "database migration lineage must begin with embedded migration {}",
-            V3_BASELINE_MIGRATION_VERSION,
+            CANONICAL_BASELINE_MIGRATION_VERSION,
         )));
+    }
+    if legacy_agent_cutover::is_authenticated_lineage(&rows)? {
+        legacy_agent_cutover::validate_schema_on_pool(pool).await?;
+        return Ok(MigrationLineageStatus::UpgradeRequired);
     }
     if rows.len() > expected.len() {
         return Err(DbError::Init(format!(
@@ -249,16 +234,6 @@ pub async fn inspect_supported_migration_lineage(
             rows.len(),
             expected.len(),
         )));
-    }
-
-    if published_main_migrations::is_published_main_prefix(&rows, &DB_MIGRATOR)? {
-        return Ok(MigrationLineageStatus::UpgradeRequired);
-    }
-    if displaced_agent_preset_migration::is_displaced_prefix(&rows, &DB_MIGRATOR)? {
-        return Ok(MigrationLineageStatus::UpgradeRequired);
-    }
-    if displaced_conversation_runtime_migration::is_displaced_prefix(&rows, &DB_MIGRATOR)? {
-        return Ok(MigrationLineageStatus::UpgradeRequired);
     }
 
     for (row, expected) in rows.iter().zip(expected.iter()) {
@@ -421,8 +396,8 @@ fn migrate_lock_path(db_path: &Path) -> PathBuf {
 /// Populate `cs_notes.search_text` for any note whose folded text is stale, and
 /// rebuild the notes full-text index.
 ///
-/// Runs after migrations on every boot. Migration 035 adds `search_text` with a
-/// `''` default and cannot fill it itself: SQLite's `lower()` does not fold CJK
+/// Runs after baseline initialization on every boot. `search_text` has a `''`
+/// default and SQL cannot fill it itself: SQLite's `lower()` does not fold CJK
 /// full-width forms, so filling it in SQL would fork the normalization
 /// semantics away from the single Rust implementation the query path uses, and
 /// a mismatch there silently loses exactly the recall this change adds.
@@ -458,48 +433,12 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
             "SQLite secure_delete must be enabled before database migrations".into(),
         ));
     }
-    let must_purge_legacy_provider_credentials =
-        has_legacy_provider_credential_column(&mut conn).await?;
     run_migrations_with_retry(&mut conn).await?;
     // Always truncate committed migration WAL frames. Besides keeping startup
     // deterministic, this retries the only safety-critical step if a previous
     // post-032 startup was interrupted after the schema commit.
     truncate_wal(&mut conn).await?;
-    if must_purge_legacy_provider_credentials {
-        securely_rebuild_after_legacy_provider_credential_drop(&mut conn).await?;
-    }
     validate_quick_check_on_connection(&mut conn).await
-}
-
-async fn has_legacy_provider_credential_column(
-    conn: &mut sqlx::SqliteConnection,
-) -> Result<bool, DbError> {
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(\
-             SELECT 1 FROM pragma_table_info('providers') WHERE name = ?\
-         )",
-    )
-    .bind(LEGACY_PROVIDER_CREDENTIAL_COLUMN)
-    .fetch_one(conn)
-    .await
-    .map_err(DbError::Query)?;
-    Ok(exists)
-}
-
-async fn securely_rebuild_after_legacy_provider_credential_drop(
-    conn: &mut sqlx::SqliteConnection,
-) -> Result<(), DbError> {
-    // The migration transaction and its old WAL frames are committed and
-    // truncated at this point. Rebuild the main file, then truncate the WAL
-    // generated by VACUUM. The startup lock keeps another process from
-    // observing the database between these steps.
-    sqlx::query("VACUUM")
-        .execute(&mut *conn)
-        .await
-        .map_err(DbError::Query)?;
-    truncate_wal(conn).await?;
-    info!("Purged retired provider credential storage from SQLite free pages and WAL");
-    Ok(())
 }
 
 async fn truncate_wal(conn: &mut sqlx::SqliteConnection) -> Result<(), DbError> {
@@ -550,15 +489,7 @@ fn require_quick_check_ok(rows: Vec<String>) -> Result<(), DbError> {
 /// pass sees the row that the winner committed, checksum matches (same
 /// shipped binary), and the migration is treated as already applied.
 async fn run_migrations_with_retry(conn: &mut sqlx::SqliteConnection) -> Result<(), DbError> {
-    // Authenticate the displaced runtime ledger before any migrator can apply
-    // a suffix. Unknown 095 checksums and conflicting 099 rows fail closed.
-    if displaced_conversation_runtime_migration::adopt_and_migrate(conn, &DB_MIGRATOR).await? {
-        return Ok(());
-    }
-    if published_main_migrations::adopt_and_migrate(conn, &DB_MIGRATOR).await? {
-        return Ok(());
-    }
-    if displaced_agent_preset_migration::adopt_and_migrate(conn, &DB_MIGRATOR).await? {
+    if legacy_agent_cutover::adopt_and_cut_over(conn, &DB_MIGRATOR).await? {
         return Ok(());
     }
     let mut retried_unique_conflict = false;
@@ -711,8 +642,6 @@ async fn ensure_installation_owner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::Connection;
-    use sqlx::migrate::Migrate;
 
     #[tokio::test]
     async fn initialization_enables_secure_delete_on_every_database_connection() {
@@ -722,138 +651,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(secure_delete, 1);
-    }
-
-    #[tokio::test]
-    async fn legacy_provider_credential_column_is_the_one_time_purge_boundary() {
-        let options = SqliteConnectOptions::from_str("sqlite::memory:")
-            .unwrap()
-            .pragma("secure_delete", "ON");
-        let mut connection = sqlx::SqliteConnection::connect_with(&options)
-            .await
-            .unwrap();
-        assert!(
-            !has_legacy_provider_credential_column(&mut connection)
-                .await
-                .unwrap()
-        );
-        sqlx::query("CREATE TABLE providers (api_key_encrypted TEXT NOT NULL)")
-            .execute(&mut connection)
-            .await
-            .unwrap();
-        assert!(
-            has_legacy_provider_credential_column(&mut connection)
-                .await
-                .unwrap()
-        );
-    }
-
-    #[tokio::test]
-    async fn file_upgrade_drops_legacy_credentials_and_purges_their_pages() {
-        const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
-        const CONNECTION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678902";
-        const DEFAULT_CIPHER: &str = "retired-default-cipher-unique";
-        const NAMED_CIPHER: &str = "retired-named-cipher-unique";
-        const BEDROCK_SECRET: &str = "retired-bedrock-secret-unique";
-        const CONNECTION_EXTRA_SECRET: &str = "retired-extra-secret-unique";
-
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("upgrade.db");
-        let options = SqliteConnectOptions::new()
-            .filename(&path)
-            .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal)
-            .pragma("secure_delete", "ON");
-        let mut connection = sqlx::SqliteConnection::connect_with(&options)
-            .await
-            .unwrap();
-        connection.ensure_migrations_table().await.unwrap();
-        for migration in DB_MIGRATOR
-            .iter()
-            .filter(|migration| migration.version <= 30)
-        {
-            connection.apply(migration).await.unwrap();
-        }
-        sqlx::query(
-            "INSERT INTO providers \
-                (provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-                 bedrock_config, is_full_url, sort_order, created_at, updated_at) \
-             VALUES (?, 'bedrock', 'Legacy Bedrock', '', ?, 1, ?, 0, 0, 1, 1)",
-        )
-        .bind(PROVIDER_ID)
-        .bind(DEFAULT_CIPHER)
-        .bind(format!(
-            r#"{{"auth_method":"accessKey","region":"us-east-1","access_key_id":"AKIA-OLD","secret_access_key":"{BEDROCK_SECRET}"}}"#,
-        ))
-        .execute(&mut connection)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO provider_connections \
-                (connection_id, provider_id, role, base_url, auth_scheme, \
-                 credentials_encrypted, is_full_url, extra, created_at, updated_at) \
-             VALUES (?, ?, 'voice', 'https://voice.example.test', 'bearer', ?, 0, ?, 1, 1)",
-        )
-        .bind(CONNECTION_ID)
-        .bind(PROVIDER_ID)
-        .bind(NAMED_CIPHER)
-        .bind(format!(r#"{{"api_key":"{CONNECTION_EXTRA_SECRET}"}}"#))
-        .execute(&mut connection)
-        .await
-        .unwrap();
-        connection.close().await.unwrap();
-
-        let database = init_database(&path).await.unwrap();
-        let provider: (String, String) = sqlx::query_as(
-            "SELECT credentials_encrypted, bedrock_config FROM providers WHERE provider_id = ?",
-        )
-        .bind(PROVIDER_ID)
-        .fetch_one(database.pool())
-        .await
-        .unwrap();
-        assert_eq!(provider.0, "");
-        assert!(!provider.1.contains("access_key_id"));
-        assert!(!provider.1.contains("secret_access_key"));
-        let named_credentials: String = sqlx::query_scalar(
-            "SELECT credentials_encrypted FROM provider_connections WHERE connection_id = ?",
-        )
-        .bind(CONNECTION_ID)
-        .fetch_one(database.pool())
-        .await
-        .unwrap();
-        assert_eq!(named_credentials, "");
-        let named_extra: String =
-            sqlx::query_scalar("SELECT extra FROM provider_connections WHERE connection_id = ?")
-                .bind(CONNECTION_ID)
-                .fetch_one(database.pool())
-                .await
-                .unwrap();
-        assert_eq!(named_extra, "{}");
-        database.close().await;
-
-        for candidate in [
-            path.clone(),
-            PathBuf::from(format!("{}-wal", path.display())),
-        ] {
-            if !candidate.exists() {
-                continue;
-            }
-            let bytes = std::fs::read(&candidate).unwrap();
-            for retired in [
-                DEFAULT_CIPHER,
-                NAMED_CIPHER,
-                BEDROCK_SECRET,
-                CONNECTION_EXTRA_SECRET,
-            ] {
-                assert!(
-                    !bytes
-                        .windows(retired.len())
-                        .any(|window| window == retired.as_bytes()),
-                    "{} still contains retired credential material",
-                    candidate.display()
-                );
-            }
-        }
     }
 
     #[tokio::test]

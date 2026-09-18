@@ -12,6 +12,7 @@ Usage:
   powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -Setup
   powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1
   powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -Browser
+  powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -BeforeToolSmoke
   powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -BrowserGui -DataDir C:/new-disposable-gui-data
   powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -Delete
 #>
@@ -23,6 +24,7 @@ param(
   [switch]$Browser,
   [switch]$BrowserGui,
   [switch]$ModelSmoke,
+  [switch]$BeforeToolSmoke,
   [string]$DataDir,
   [string]$TargetName = 'NomiFun/StepFun/LiveProvider'
 )
@@ -32,7 +34,10 @@ $ErrorActionPreference = 'Stop'
 if ($Setup -and $Delete) {
   throw 'Setup and Delete cannot be used together.'
 }
-if ($BrowserGui -and ($Browser -or $ModelSmoke -or [string]::IsNullOrWhiteSpace($DataDir) -or -not [IO.Path]::IsPathRooted($DataDir) -or (Test-Path -LiteralPath $DataDir))) {
+if (@($Browser, $BrowserGui, $ModelSmoke, $BeforeToolSmoke).Where({ [bool]$_ }).Count -gt 1) {
+  throw 'Browser, BrowserGui, ModelSmoke, and BeforeToolSmoke are mutually exclusive.'
+}
+if ($BrowserGui -and ([string]::IsNullOrWhiteSpace($DataDir) -or -not [IO.Path]::IsPathRooted($DataDir) -or (Test-Path -LiteralPath $DataDir))) {
   throw 'BrowserGui requires a new absolute DataDir and cannot be combined with Browser.'
 }
 
@@ -207,6 +212,8 @@ try {
     & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --browser
   } elseif ($ModelSmoke) {
     & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --model-smoke
+  } elseif ($BeforeToolSmoke) {
+    & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --before-tool-smoke
   } else {
     & bun run test:nomi-core-live-provider
   }

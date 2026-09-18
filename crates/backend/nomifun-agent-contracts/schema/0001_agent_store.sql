@@ -11,13 +11,6 @@ CREATE TABLE schema_metadata (
     projection_schema_version INTEGER NOT NULL CHECK (projection_schema_version >= 1)
 ) STRICT;
 
-CREATE TABLE schema_migrations (
-    version INTEGER PRIMARY KEY CHECK (version >= 1),
-    name TEXT NOT NULL UNIQUE,
-    checksum TEXT NOT NULL CHECK (length(checksum) = 64),
-    applied_at INTEGER NOT NULL
-) STRICT;
-
 CREATE TABLE plugin_packages (
     package_id TEXT NOT NULL,
     package_version TEXT NOT NULL,
@@ -167,6 +160,15 @@ CREATE INDEX idx_agent_presets_active
     ON agent_presets(preset_id)
     WHERE retired_at_ms IS NULL;
 
+CREATE INDEX idx_agent_presets_owner_active
+    ON agent_presets(json_extract(owner_ref_json, '$.user_id'), preset_id)
+    WHERE retired_at_ms IS NULL;
+
+CREATE INDEX idx_agent_presets_ui_plugin
+    ON agent_presets(
+        json_extract(display_json, '$.ui_binding.selection.plugin_id')
+    );
+
 CREATE TABLE agent_preset_revisions (
     revision_id TEXT PRIMARY KEY,
     preset_id TEXT NOT NULL,
@@ -181,6 +183,9 @@ CREATE TABLE agent_preset_revisions (
     FOREIGN KEY (preset_id) REFERENCES agent_presets (preset_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT
 ) STRICT;
+
+CREATE INDEX idx_agent_preset_revisions_created_by
+    ON agent_preset_revisions(created_by);
 
 CREATE TABLE agent_preset_contribution_locks (
     revision_id TEXT NOT NULL,
@@ -197,6 +202,11 @@ CREATE TABLE agent_bindings (
     agent_binding_json TEXT NOT NULL CHECK (json_valid(agent_binding_json)),
     PRIMARY KEY (target_kind, target_id)
 ) STRICT;
+
+CREATE INDEX idx_agent_bindings_preset
+    ON agent_bindings(
+        json_extract(agent_binding_json, '$.preset_revision_ref.preset_id')
+    );
 
 CREATE TABLE remote_bindings (
     remote_binding_id TEXT PRIMARY KEY,
@@ -364,6 +374,13 @@ CREATE TABLE agent_runtime_snapshots (
     content_json TEXT NOT NULL CHECK (json_valid(content_json)),
     envelope_json TEXT NOT NULL CHECK (json_valid(envelope_json))
 ) STRICT;
+
+CREATE INDEX idx_agent_runtime_snapshots_revision
+    ON agent_runtime_snapshots(
+        json_extract(content_json, '$.preset_revision_ref.preset_id'),
+        json_extract(content_json, '$.preset_revision_ref.revision'),
+        json_extract(content_json, '$.preset_revision_ref.revision_digest')
+    );
 
 CREATE TABLE agent_sessions (
     agent_session_id TEXT PRIMARY KEY,

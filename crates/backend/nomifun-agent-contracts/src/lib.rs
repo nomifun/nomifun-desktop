@@ -23,7 +23,6 @@ pub mod plugin_n1;
 pub mod preset;
 pub mod primitives;
 pub mod remote;
-pub mod root;
 pub mod runtime;
 pub mod schema;
 pub mod session;
@@ -46,15 +45,12 @@ pub use plugin_n1::*;
 pub use preset::*;
 pub use primitives::*;
 pub use remote::*;
-pub use root::*;
 pub use runtime::*;
 pub use schema::{
     AGENT_STORE_BASELINE_SQL, AGENT_STORE_DATA_GENERATION, AGENT_STORE_MIGRATION_HEAD,
     AGENT_STORE_PROJECTION_SCHEMA_VERSION, AgentStoreSchemaManifestPayload,
-    CHAT_ROUTE_RECORD_JSON_SCHEMA, FRESH_V4_BASELINE_SQL, FRESH_V4_DATA_GENERATION,
-    FRESH_V4_MIGRATION_HEAD, FRESH_V4_PROJECTION_SCHEMA_VERSION, FreshV4SchemaManifestPayload,
-    SchemaResetScope, SchemaTableContract, agent_store_schema_manifest_payload,
-    fresh_v4_schema_manifest_payload,
+    CHAT_ROUTE_RECORD_JSON_SCHEMA, SchemaResetScope, SchemaTableContract,
+    agent_store_schema_manifest_payload,
 };
 pub use session::*;
 pub use validation::*;

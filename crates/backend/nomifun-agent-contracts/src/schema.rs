@@ -5,13 +5,6 @@ pub const AGENT_STORE_DATA_GENERATION: u32 = 5;
 pub const AGENT_STORE_MIGRATION_HEAD: u32 = 1;
 pub const AGENT_STORE_PROJECTION_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_STORE_BASELINE_SQL: &str = include_str!("../schema/0001_agent_store.sql");
-// UARC-054 removes the Fresh-v4 root coordinator. These aliases keep that
-// already-owned follow-up compiling while every new Store consumer uses the
-// canonical Agent Store identity.
-pub const FRESH_V4_DATA_GENERATION: u32 = AGENT_STORE_DATA_GENERATION;
-pub const FRESH_V4_MIGRATION_HEAD: u32 = AGENT_STORE_MIGRATION_HEAD;
-pub const FRESH_V4_PROJECTION_SCHEMA_VERSION: u32 = AGENT_STORE_PROJECTION_SCHEMA_VERSION;
-pub const FRESH_V4_BASELINE_SQL: &str = AGENT_STORE_BASELINE_SQL;
 pub const CHAT_ROUTE_RECORD_JSON_SCHEMA: &str =
     include_str!("../schema/chat-route-record.v1.json");
 
@@ -66,15 +59,8 @@ pub fn agent_store_schema_manifest_payload() -> AgentStoreSchemaManifestPayload 
             .collect(),
     }
 }
-pub type FreshV4SchemaManifestPayload = AgentStoreSchemaManifestPayload;
-
-pub fn fresh_v4_schema_manifest_payload() -> FreshV4SchemaManifestPayload {
-    agent_store_schema_manifest_payload()
-}
-
 const TABLES: &[(&str, &str, &str, SchemaResetScope)] = &[
     ("schema_metadata", "platform.schema", "fact", SchemaResetScope::Preserve),
-    ("schema_migrations", "platform.schema", "fact", SchemaResetScope::Preserve),
     ("plugin_packages", "platform.plugin-manager", "fact", SchemaResetScope::Preserve),
     ("plugin_mounts", "platform.plugin-manager", "fact", SchemaResetScope::Preserve),
     ("plugin_configs", "platform.plugin-manager", "fact", SchemaResetScope::Preserve),

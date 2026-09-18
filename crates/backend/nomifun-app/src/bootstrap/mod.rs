@@ -14,7 +14,6 @@ mod nomi_core;
 mod relocation;
 mod server_lock;
 mod tracing_init;
-mod v4_root;
 mod webui_dist;
 mod work_dir;
 
@@ -23,7 +22,7 @@ pub use boot_log::{BootNoteLevel, record_boot_note};
 pub use data_root::{
     LAYOUT_MIGRATION_PENDING_MARKER, RELOCATED_DONE_MARKER,
     RELOCATED_FROM_MARKER, RelocationMarker, is_known_default_location,
-    resolve_nomi_core_data_root, resolve_startup_data_root,
+    resolve_startup_data_root,
 };
 pub use environment::{
     ServerEnvironment, finalize_data_layer, init_data_layer, init_environment,

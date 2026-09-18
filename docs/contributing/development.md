@@ -80,7 +80,8 @@ The Rust-backed development loops (`dev`, `dev:web`, and `build:fast`) use the
 `dev` build channel and therefore default to the `NomiFun-dev` data directory
 (a sibling of the stable root, never nested inside it).
 Production-style `serve:web` and release builds remain on the stable `NomiFun`
-directory. Use `bun run seed:dev` when dev needs a snapshot of stable state.
+directory. Use `NOMIFUN_DATA_DIR` or `--data-dir` for an explicit isolated root;
+development startup does not import historical Agent state from stable.
 
 The desktop loop does **not** use the old Electron process model. The Tauri
 shell links `nomifun-app`, starts the backend in-process on a free localhost

@@ -15,9 +15,11 @@ use std::time::{Duration, Instant};
 
 use nomifun_agent_contracts::{
     AgentSessionId, CanonicalSchemaRef, CapabilityId, PrincipalRef,
-    ResolvedCapability, ResourceBindingId, ResourceKind, StrictJsonValue,
+    ResolvedCapability, ResourceKind, StrictJsonValue,
     TypedResourceBinding,
 };
+#[cfg(test)]
+use nomifun_agent_contracts::ResourceBindingId;
 use nomifun_agent_domain_wave2::{
     Wave2HostContext, Wave2HostPort, Wave2HostPortError, Wave2HostRequest,
     WorkspaceFileChangeKind, WorkspaceFileChangedEvent, WorkspaceFilesChangedBatch,
@@ -97,10 +99,6 @@ pub(crate) fn schema_resolver(
     Arc::new(NomiCoreWave2SchemaResolver)
 }
 
-fn session_workspace_binding_id(session_id: &AgentSessionId) -> ResourceBindingId {
-    ResourceBindingId::from(format!("nomi-session-workspace:{}", session_id.as_ref()))
-}
-
 /// Resolve the current Conversation's server-owned workspace to the one typed
 /// binding consumed by Wave 2. Absolute root, owner and Session identity are
 /// deliberately absent from every model-facing action schema.
@@ -112,6 +110,7 @@ pub(crate) fn session_workspace_binding(
 ) -> Result<TypedResourceBinding, AppError> {
     if owner.principal_kind != "user"
         || owner.principal_id.trim().is_empty()
+        || session_id.as_ref().trim().is_empty()
     {
         return Err(AppError::Conflict(
             "Nomi Wave 2 workspace binding requires the exact owned AgentSession"
@@ -144,7 +143,10 @@ pub(crate) fn session_workspace_binding(
                 .to_owned(),
         )
     })?;
-    let binding_id = session_workspace_binding_id(session_id);
+    // Preserve the canonical binding identity persisted with the Session.
+    // A runtime-only replacement cannot satisfy the Agent Effect ledger's
+    // `(session_id, resource_binding_id)` authority foreign key.
+    let binding_id = authority_binding.binding_id.clone();
     let resource_id = authority_binding.resource_id.clone();
     let mut operations = authority_binding.operations.clone();
     // Canonical Wave 2 treats deletion as a workspace write grant. FileService
@@ -678,6 +680,7 @@ pub(crate) fn session_process_binding(
     authority: &TypedResourceBinding,
 ) -> Result<TypedResourceBinding, AppError> {
     if owner.principal_kind != "user" || owner.principal_id.is_empty()
+        || session_id.as_ref().trim().is_empty()
         || authority.resource_kind.as_ref() != "process_session"
         || authority.owner_id != owner.principal_id
         || authority.resource_id.as_ref().is_empty()
@@ -690,7 +693,6 @@ pub(crate) fn session_process_binding(
     let root = canonical_workspace_root(Path::new(server_workspace))?;
     let root = root.to_str().ok_or_else(|| AppError::Conflict("process root is not UTF-8".into()))?;
     let mut binding = authority.clone();
-    binding.binding_id = ResourceBindingId::from(format!("agent-session-process:{}", session_id.as_ref()));
     binding.typed_parameters = BTreeMap::from([(WORKSPACE_ROOT_PARAMETER.into(), root.into())]);
     Ok(binding)
 }
@@ -699,7 +701,7 @@ fn exact_session_process_root(context: &Wave2HostContext) -> Result<PathBuf, Wav
     let [binding] = context.resource_bindings.as_slice() else {
         return Err(Wave2HostPortError::unavailable("process execution requires one Session process binding"));
     };
-    if binding.binding_id.as_ref() != format!("agent-session-process:{}", context.agent_session_id.as_ref())
+    if binding.binding_id.as_ref().trim().is_empty()
         || binding.resource_kind.as_ref() != "process_session"
         || binding.owner_id != context.principal.principal_id
         || context.principal.principal_kind != "user"
@@ -731,8 +733,9 @@ fn exact_session_workspace_root(
             "Nomi-core Wave 2 action requires one exact Session workspace binding",
         ));
     };
-    if binding.resource_kind.as_ref() != WORKSPACE_RESOURCE_KIND
-        || binding.binding_id != session_workspace_binding_id(agent_session_id)
+    if agent_session_id.as_ref().trim().is_empty()
+        || binding.resource_kind.as_ref() != WORKSPACE_RESOURCE_KIND
+        || binding.binding_id.as_ref().trim().is_empty()
         || binding.resource_id.as_ref().trim().is_empty()
     {
         return Err(Wave2HostPortError::new(
@@ -1147,7 +1150,9 @@ mod tests {
             &authority(&principal),
         )
         .unwrap();
-        binding.binding_id = ResourceBindingId::from("model-supplied");
+        binding
+            .typed_parameters
+            .insert(WORKSPACE_ROOT_PARAMETER.to_owned(), ".".to_owned());
         let error = exact_session_workspace_root(
             &session_id,
             &principal.principal_id,

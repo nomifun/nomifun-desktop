@@ -383,8 +383,7 @@ async fn set_autowork_requires_tag_when_enabled() {
     assert_eq!(enabled["data"]["enabled"], true);
     assert_eq!(enabled["data"]["running"], true);
     let legacy_rows: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE conversation_id = ?")
-            .bind(&conv)
+        sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'conversations'")
             .fetch_one(services.database.pool())
             .await
             .unwrap();

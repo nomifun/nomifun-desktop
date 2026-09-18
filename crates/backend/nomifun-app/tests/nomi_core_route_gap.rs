@@ -293,16 +293,12 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
     assert_eq!(status, StatusCode::OK, "{updated}");
     assert_eq!(updated["data"]["name"], "Canonical renamed");
     assert_eq!(updated["data"]["pinned"], true);
-    let legacy_conversations: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM conversations WHERE conversation_id = ?",
-    )
-    .bind(session_id)
+    let legacy_conversations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'conversations'")
     .fetch_one(services.database.pool())
     .await
     .unwrap();
     let legacy_messages: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id = ?")
-            .bind(session_id)
+        sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'messages'")
             .fetch_one(services.database.pool())
             .await
             .unwrap();
@@ -573,21 +569,12 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
         .iter()
         .find(|item| item["capability"]["id"] == "browser")
         .expect("browser capability remains visible in the shared catalog");
-    let expected_browser_state = if cfg!(feature = "browser-use") {
-        "materialized"
-    } else {
-        "unavailable"
-    };
     assert_eq!(
         browser["materialization_state"],
-        expected_browser_state,
-        "Browser availability must match whether this host compiled the Nomi Browser owner"
+        "materialized",
+        "Browser is a canonical Module; concrete Resource availability is resolved at binding time"
     );
-    if cfg!(feature = "browser-use") {
-        assert!(browser["unavailable_code"].is_null());
-    } else {
-        assert_eq!(browser["unavailable_code"], "CAPABILITY_UNAVAILABLE");
-    }
+    assert!(browser["unavailable_code"].is_null());
 
     let templates = router
         .clone()
@@ -798,7 +785,7 @@ async fn official_template_creation_requires_explicit_persistence_intent() {
     let library: Value = serde_json::from_slice(&axum::body::to_bytes(
         library_response.into_body(), 4 * 1024 * 1024).await.unwrap()).unwrap();
     assert_eq!(library["data"]["user_presets"], json!([]));
-    let persisted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nomi_agent_presets")
+    let persisted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_presets")
         .fetch_one(services.database.pool()).await.unwrap();
     assert_eq!(persisted, 0, "rejected ambiguous requests must not write hidden or visible configurations");
     services.shutdown_browser_platform().await.unwrap();
@@ -831,7 +818,7 @@ async fn product_agent_selection_precedes_models_and_reports_host_capability_ava
         assert_eq!(reloaded["data"]["selection"], chosen);
         paths.push(path);
     }
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nomi_agent_presets").fetch_one(services.database.pool()).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_presets").fetch_one(services.database.pool()).await.unwrap();
     assert_eq!(count, 0, "model-free selection must not allocate executable presets or select a default model");
     let upstream = wiremock::MockServer::start().await;
     let (status, provider) = call(router.clone(), "POST", "/api/providers", json!({
@@ -857,7 +844,7 @@ async fn product_agent_selection_precedes_models_and_reports_host_capability_ava
         let (_, after) = call(router.clone(), "GET", path, json!({})).await;
         assert_eq!(after["data"]["selection"], chosen, "availability checks must not change the saved Agent");
     }
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nomi_agent_presets").fetch_one(services.database.pool()).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_presets").fetch_one(services.database.pool()).await.unwrap();
     assert_eq!(count, 0, "availability checks must not allocate executable presets");
     let (status, patched) = call(router.clone(), "PATCH", &format!("/api/companion/companions/{companion_id}"), json!({ "model": model })).await;
     assert_eq!(status, StatusCode::OK, "{patched}");
@@ -874,10 +861,7 @@ async fn product_agent_selection_precedes_models_and_reports_host_capability_ava
     assert_eq!(status, StatusCode::OK, "{projected}");
     let snapshot = &projected["data"]["agent_snapshot"];
     assert_eq!(snapshot["enabled_capabilities"], json!([]), "configuring a model must retain the Agent chosen earlier");
-    let legacy_rows: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM conversations WHERE conversation_id = ?",
-    )
-    .bind(thread_id)
+    let legacy_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'conversations'")
     .fetch_one(services.database.pool())
     .await
     .unwrap();
@@ -1029,13 +1013,10 @@ async fn creative_studio_entry_uses_its_official_agent() {
     assert!(snapshot["enabled_capability_actions"]["creative.workshop"].as_array().unwrap().iter()
         .any(|action| action == "creative.workshop/canvas.edit"));
     let target_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM nomi_agent_bindings WHERE target_kind = 'creative_studio_canvas' AND target_id = ?")
+        "SELECT COUNT(*) FROM agent_bindings WHERE target_kind = 'creative_studio_canvas' AND target_id = ?")
         .bind(canvas_id).fetch_one(services.database.pool()).await.unwrap();
     assert_eq!(target_count, 1);
-    let legacy_rows: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM conversations WHERE conversation_id = ?",
-    )
-    .bind(conversation_id)
+    let legacy_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'conversations'")
     .fetch_one(services.database.pool())
     .await
     .unwrap();
@@ -1161,7 +1142,7 @@ async fn companion_entry_uses_its_official_agent_and_can_switch_to_minimal() {
         assert_eq!(actual, expected.iter().copied().collect(), "{module}");
     }
     assert_eq!(snapshot["preset_name"], "companion.default");
-    let conversation_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations")
+    let conversation_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'conversations'")
         .fetch_one(services.database.pool()).await.unwrap();
     assert_eq!(conversation_count, 0, "canonical Companion must not write the retired Conversation Store");
     let session_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_sessions WHERE state = 'live'")
@@ -1173,7 +1154,7 @@ async fn companion_entry_uses_its_official_agent_and_can_switch_to_minimal() {
     assert_eq!(options["data"]["selection"], json!({ "kind": "template", "template_key": "companion.default" }),
         "the implicit official choice must remain a template selection rather than a personal Agent");
     let target_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM nomi_agent_bindings WHERE target_kind = 'companion' AND target_id = ?")
+        "SELECT COUNT(*) FROM agent_bindings WHERE target_kind = 'companion' AND target_id = ?")
         .bind(companion_id).fetch_one(services.database.pool()).await.unwrap();
     assert_eq!(target_count, 1);
 
@@ -1296,7 +1277,7 @@ async fn official_agent_direct_launch_reuses_configuration_and_creates_sessions(
     assert_ne!(session_a["agent_session_id"], session_b["agent_session_id"]);
     assert_eq!(session_a["agent_binding"], session_b["agent_binding"]);
     assert_eq!(session_a["agent_binding"]["preset_revision_ref"], first["revision"]["reference"]);
-    let persisted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nomi_agent_preset_revisions WHERE preset_id = ?")
+    let persisted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_preset_revisions WHERE preset_id = ?")
         .bind(preset_id).fetch_one(services.database.pool()).await.unwrap();
     assert_eq!(persisted, 1);
     let library_response = router.oneshot(Request::builder()
@@ -1486,7 +1467,7 @@ async fn nomi_core_agent_settings_template_and_binding_surface_is_persistent() {
         .expect("template response preset id")
         .to_owned();
     let persisted_payload: String = sqlx::query_scalar(
-        "SELECT payload_json FROM nomi_agent_preset_revisions \
+        "SELECT payload_json FROM agent_preset_revisions \
          WHERE preset_id = ? AND revision_no = 1",
     )
     .bind(&preset_id)
@@ -1556,11 +1537,10 @@ async fn nomi_core_agent_settings_template_and_binding_surface_is_persistent() {
     })
     .to_string();
     sqlx::query(
-        "INSERT INTO nomi_agent_bindings \
-         (target_kind, target_id, owner_user_id, agent_binding_json) \
-         VALUES ('conversation', 'retirement-target', ?, ?)",
+        "INSERT INTO agent_bindings \
+         (target_kind, target_id, agent_binding_json) \
+         VALUES ('conversation', 'retirement-target', ?)",
     )
-    .bind(services.authoritative_user_id.as_ref())
     .bind(&binding_json)
     .execute(services.database.pool())
     .await
@@ -1593,7 +1573,7 @@ async fn nomi_core_agent_settings_template_and_binding_surface_is_persistent() {
         .expect("dispatch Preset retirement request");
     assert_eq!(retired.status(), StatusCode::OK);
     let retired_at_ms: Option<i64> = sqlx::query_scalar(
-        "SELECT retired_at_ms FROM nomi_agent_presets WHERE preset_id = ?",
+        "SELECT retired_at_ms FROM agent_presets WHERE preset_id = ?",
     )
     .bind(&preset_id)
     .fetch_one(services.database.pool())
@@ -1601,7 +1581,7 @@ async fn nomi_core_agent_settings_template_and_binding_surface_is_persistent() {
     .expect("retired AgentPreset row");
     assert!(retired_at_ms.is_some());
     let revision_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM nomi_agent_preset_revisions WHERE preset_id = ?",
+        "SELECT COUNT(*) FROM agent_preset_revisions WHERE preset_id = ?",
     )
     .bind(&preset_id)
     .fetch_one(services.database.pool())
@@ -1609,7 +1589,7 @@ async fn nomi_core_agent_settings_template_and_binding_surface_is_persistent() {
     .expect("retained AgentPreset revisions");
     assert_eq!(revision_count, 1);
     let agent_binding_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM nomi_agent_bindings")
+        sqlx::query_scalar("SELECT COUNT(*) FROM agent_bindings")
             .fetch_one(services.database.pool())
             .await
             .expect("count active AgentBindings");

@@ -84,7 +84,6 @@
     "gate:plugin-n1": { "group": "check", "desc": "运行 Plugin N1 / Plugin M1 canonical 合同与 Windows candidate/signed RC 门禁" },
     "gen:i18n":      { "group": "gen",   "desc": "由 locale 重新生成 i18n 类型声明" },
     "clean":         { "group": "maint", "desc": "深度回收构建空间（debug 产物 + flycheck + 旧安装包）" },
-    "seed:dev":      { "group": "maint", "desc": "用生产数据目录播种 dev 数据目录" },
     "bump":          { "group": "maint", "desc": "统一改版本号：根 Cargo.toml(真源) + package.json + ui + Cargo.lock，可选 --tag 提交并打 tag" },
     "help":          { "group": "maint", "desc": "打印脚本目录（--check 校验登记 / --readme 生成 README 表）" }
   }

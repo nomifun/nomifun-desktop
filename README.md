@@ -736,7 +736,6 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run gen:i18n` | 由 locale 重新生成 i18n 类型声明 |
 | **维护 / 工具** | |
 | `bun run clean` | 深度回收构建空间（debug 产物 + flycheck + 旧安装包） |
-| `bun run seed:dev` | 用生产数据目录播种 dev 数据目录 |
 | `bun run bump` | 统一改版本号：根 Cargo.toml(真源) + package.json + ui + Cargo.lock，可选 --tag 提交并打 tag |
 | `bun run help` | 打印脚本目录（--check 校验登记 / --readme 生成 README 表） |
 

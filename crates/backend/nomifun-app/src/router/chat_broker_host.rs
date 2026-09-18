@@ -25,10 +25,10 @@ use nomifun_chat_model_broker::{
     ProductionConnectionRepository as ProductionConnectionRepositoryPort,
     ProductionModelRepository as ProductionModelRepositoryPort,
     ProductionProviderRepository as ProductionProviderRepositoryPort,
-    ProductionRepositoryError, ProductionRepositorySet, ProviderCredentialRef, ProviderIdRef,
+    ProductionRepositoryError, ProviderCredentialRef, ProviderIdRef,
     ProviderRepositoryRecord, ConnectionRepositoryRecord, ResolvedChatRoute,
     ResolvedChatRouteSet, ProviderWireFrame, ProviderWireRequest, ProviderWireStream,
-    UnavailableChatModelInvokePort, build_production_chat_model_broker,
+    build_production_chat_model_broker,
 };
 use nomifun_db::SqlitePool;
 use nomifun_db::sqlx::{self, Row};
@@ -436,18 +436,12 @@ pub(crate) async fn provider_config_digest(
 /// DB-backed v4 route repository plus provider-model identity checks.
 #[derive(Clone)]
 pub struct ProductionModelRepository {
-    v4_pool: SqlitePool,
-    provider_pool: SqlitePool,
-    nomi_core: bool,
+    pool: SqlitePool,
 }
 
 impl ProductionModelRepository {
-    pub fn new(v4_pool: SqlitePool, provider_pool: SqlitePool) -> Self {
-        Self {
-            v4_pool,
-            provider_pool,
-            nomi_core: false,
-        }
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
     }
 
     async fn load_route_record(
@@ -468,14 +462,11 @@ impl ProductionModelRepository {
         &self,
         selection: &ChatRouteSelection,
     ) -> Result<Option<CanonicalChatRouteRecord>, ChatBrokerHostError> {
-        let query = if self.nomi_core {
-            "SELECT payload_json FROM nomi_agent_preset_revisions WHERE revision_id = ?"
-        } else {
-            "SELECT payload_json FROM agent_preset_revisions WHERE revision_id = ?"
-        };
-        let payload_json: Option<String> = sqlx::query_scalar(query)
+        let payload_json: Option<String> = sqlx::query_scalar(
+            "SELECT payload_json FROM agent_preset_revisions WHERE revision_id = ?",
+        )
         .bind(&selection.preset_revision_id)
-        .fetch_optional(&self.v4_pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|_| ChatBrokerHostError::RouteDatabaseUnavailable)?;
         let Some(payload_json) = payload_json else {
@@ -510,7 +501,7 @@ impl ProductionModelRepository {
             )
             .bind(route.provider_id.as_ref())
             .bind(&route.model)
-            .fetch_optional(&self.provider_pool)
+            .fetch_optional(&self.pool)
             .await
             .map_err(|_| ChatBrokerHostError::ProviderDatabaseUnavailable)?;
             if model_enabled != Some(1) {
@@ -524,7 +515,7 @@ impl ProductionModelRepository {
             .bind(route.provider_id.as_ref())
             .bind(&route.model)
             .bind(PROVIDER_CHAT_MODEL_TASK)
-            .fetch_optional(&self.provider_pool)
+            .fetch_optional(&self.pool)
             .await
             .map_err(|_| ChatBrokerHostError::ProviderDatabaseUnavailable)?;
             let Some(capability_protocol) = capability_protocol else {
@@ -586,7 +577,7 @@ impl ProductionModelRepository {
         .bind(route.provider_id.as_ref())
         .bind(&route.model)
         .bind(PROVIDER_CHAT_MODEL_TASK)
-        .fetch_optional(&self.provider_pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|_| ProductionRepositoryError::Unavailable)?
         .ok_or(ProductionRepositoryError::Missing)?;
@@ -630,7 +621,7 @@ impl ProductionModelRepository {
             "SELECT base_url, bedrock_config FROM providers WHERE provider_id = ?",
         )
         .bind(route.provider_id.as_ref())
-        .fetch_optional(&self.provider_pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|_| ProductionRepositoryError::Unavailable)?
         .ok_or(ProductionRepositoryError::Missing)?;
@@ -640,7 +631,7 @@ impl ProductionModelRepository {
         let bedrock_config: Option<String> = provider
             .try_get("bedrock_config")
             .map_err(|_| ProductionRepositoryError::InvalidData)?;
-        let current_digest = provider_config_digest(&self.provider_pool, &route.provider_id).await?;
+        let current_digest = provider_config_digest(&self.pool, &route.provider_id).await?;
         if current_digest != route.config_revision_digest {
             return Err(ProductionRepositoryError::InvalidData);
         }
@@ -655,7 +646,7 @@ impl ProductionModelRepository {
             )
             .bind(route.provider_id.as_ref())
             .bind(&connection_role)
-            .fetch_optional(&self.provider_pool)
+            .fetch_optional(&self.pool)
             .await
             .map_err(|_| ProductionRepositoryError::Unavailable)?
             .ok_or(ProductionRepositoryError::Missing)?;
@@ -1467,39 +1458,15 @@ pub struct ChatBrokerHostComposition {
 }
 
 impl ChatBrokerHostComposition {
-    /// Default product route storage, not the isolated Fresh-v4 database.
+    /// Default product route storage in the canonical main SQLite.
     pub fn for_nomi_core(pool: SqlitePool, encryption_key: [u8; 32]) -> Self {
         Self {
             provider_repository: Arc::new(ProductionProviderRepository::new(pool.clone())),
-            model_repository: Arc::new(ProductionModelRepository {
-                v4_pool: pool.clone(), provider_pool: pool.clone(), nomi_core: true,
-            }),
+            model_repository: Arc::new(ProductionModelRepository::new(pool.clone())),
             connection_repository: Arc::new(ProductionConnectionRepository::new(pool, ConnectionCredentialLeaseRegistry::default())),
             encryption_key,
         }
     }
-    pub fn new(
-        v4_pool: SqlitePool,
-        provider_pool: SqlitePool,
-        encryption_key: [u8; 32],
-        credentials: ConnectionCredentialLeaseRegistry,
-    ) -> Self {
-        Self {
-            provider_repository: Arc::new(ProductionProviderRepository::new(
-                provider_pool.clone(),
-            )),
-            model_repository: Arc::new(ProductionModelRepository::new(
-                v4_pool,
-                provider_pool.clone(),
-            )),
-            connection_repository: Arc::new(ProductionConnectionRepository::new(
-                provider_pool,
-                credentials,
-            )),
-            encryption_key,
-        }
-    }
-
     pub fn build_broker(
         &self,
         causality_gate: Arc<dyn ChatCausalityGate>,
@@ -1532,77 +1499,6 @@ impl ChatBrokerHostComposition {
             http,
         ))
     }
-}
-
-#[derive(Clone, Default)]
-struct UnconfiguredProviderRepository;
-
-#[async_trait]
-impl ProductionProviderRepositoryPort for UnconfiguredProviderRepository {
-    async fn find_provider(
-        &self,
-        _provider_id: &ProviderIdRef,
-    ) -> Result<Option<ProviderRepositoryRecord>, ProductionRepositoryError> {
-        Ok(None)
-    }
-}
-
-#[derive(Clone, Default)]
-struct UnconfiguredConnectionRepository;
-
-#[async_trait]
-impl ProductionConnectionRepositoryPort for UnconfiguredConnectionRepository {
-    async fn find_connection(
-        &self,
-        _route: &ResolvedChatRoute,
-    ) -> Result<Option<ConnectionRepositoryRecord>, ProductionRepositoryError> {
-        Ok(None)
-    }
-
-    async fn lease_credential(
-        &self,
-        _credential_ref: &ProviderCredentialRef,
-        _target: &CredentialTarget,
-        _encryption_key: &[u8; 32],
-    ) -> Result<Option<CredentialLease>, ProductionRepositoryError> {
-        Ok(None)
-    }
-}
-
-#[derive(Clone, Default)]
-struct UnconfiguredModelRepository;
-
-#[async_trait]
-impl ProductionModelRepositoryPort for UnconfiguredModelRepository {
-    async fn resolve_chat_route(
-        &self,
-        _selection: &ChatRouteSelection,
-    ) -> Result<Option<ResolvedChatRouteSet>, ProductionRepositoryError> {
-        Ok(None)
-    }
-}
-
-/// Build the canonical broker shape before provider-management storage is
-/// available in Fresh-v4. The six protocol adapters and retry boundary remain
-/// real; an attempted route simply fails as `RouteNotFound` rather than
-/// consulting a legacy provider database or fabricating output.
-pub(crate) fn build_unconfigured_broker(
-    causality_gate: Arc<dyn ChatCausalityGate>,
-    encryption_key: [u8; 32],
-    retry_policy: BrokerRetryPolicy,
-) -> Result<Arc<dyn ChatBrokerPort>, ProductionBrokerError> {
-    let dependencies = ProductionBrokerDependencies {
-        repositories: ProductionRepositorySet::new(
-            Arc::new(UnconfiguredProviderRepository),
-            Arc::new(UnconfiguredConnectionRepository),
-            Arc::new(UnconfiguredModelRepository),
-        ),
-        encryption_key,
-        causality_gate,
-        model_invoke: Arc::new(UnavailableChatModelInvokePort),
-        retry_policy,
-    };
-    build_production_chat_model_broker(dependencies)
 }
 
 #[cfg(test)]
@@ -1843,27 +1739,8 @@ mod tests {
 
     #[tokio::test]
     async fn route_lookup_uses_the_complete_preset_revision_identity() {
-        let directory = tempfile::tempdir().unwrap();
-        nomifun_v4_root::FreshV4Coordinator::default()
-            .bootstrap(
-                directory.path(),
-                concat!("nomifun-app@", env!("CARGO_PKG_VERSION")),
-                &[],
-            )
-            .await
-            .unwrap();
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(5)
-            .acquire_timeout(std::time::Duration::from_secs(5))
-            .connect_with(
-                sqlx::sqlite::SqliteConnectOptions::new()
-                    .filename(directory.path().join(nomifun_v4_root::FRESH_V4_DATABASE_FILE))
-                    .create_if_missing(false)
-                    .foreign_keys(true)
-                    .busy_timeout(std::time::Duration::from_secs(5)),
-            )
-            .await
-            .unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let pool = database.pool().clone();
 
         for (preset, revision, provider, model) in [
             ("preset-a", "preset-a@1", "provider-a", "model-a"),
@@ -1910,7 +1787,7 @@ mod tests {
             .unwrap();
         }
 
-        let repository = ProductionModelRepository::new(pool.clone(), pool.clone());
+        let repository = ProductionModelRepository::new(pool.clone());
         let resolved = repository
             .resolve_route_record(&ChatRouteIdentity::new(
                 "preset-b@1",

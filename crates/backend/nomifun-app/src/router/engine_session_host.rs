@@ -56,6 +56,7 @@ pub struct EngineTurnReceipt {
     source: Arc<()>,
     session: AdmittedEngineSession,
     root_message_id: String,
+    turn_started_event_id: String,
     operation_id: String,
     admission_epoch: i64,
     request_payload: serde_json::Value,
@@ -70,6 +71,9 @@ impl EngineTurnReceipt {
     }
     pub fn root_message_id(&self) -> &str {
         &self.root_message_id
+    }
+    pub fn turn_started_event_id(&self) -> &str {
+        &self.turn_started_event_id
     }
     pub fn operation_id(&self) -> &str {
         &self.operation_id
@@ -208,6 +212,9 @@ impl EngineSessionHost {
         }
         let journal = self.open_journal(receipt, cancellation)?;
         let model = self.compose_model_port(Arc::new(journal.clone()))?;
+        let model = self
+            .open_kernel_session(receipt.session())?
+            .wrap_model_middleware(model)?;
         Ok((journal, model))
     }
 
@@ -484,6 +491,7 @@ impl EngineSessionHost {
             source: self.source.clone(),
             session,
             root_message_id: source_message_id.to_owned(),
+            turn_started_event_id: started.event_id.as_ref().to_owned(),
             operation_id,
             admission_epoch: i64::try_from(started.seq)
                 .map_err(|_| conflict("turn sequence exceeds runtime generation range"))?,

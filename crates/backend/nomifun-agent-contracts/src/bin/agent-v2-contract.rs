@@ -8,14 +8,14 @@ use nomifun_agent_contracts::{
     AgentPresetRevisionPayload, AgentSessionAggregate, ArtifactEnvelope,
     AgentStoreSchemaManifestPayload,
     CandidateTestReceipt,
-    CanonicalApiInventoryPayload, CanonicalErrorRegistryPayload, CanonicalV4SchemaManifestPayload,
+    CanonicalAgentStoreSchemaManifestPayload, CanonicalApiInventoryPayload,
+    CanonicalErrorRegistryPayload,
     CapabilityCatalogEntry, PlatformFeatureInventoryPayload,
     ContractClosurePayload, ContractDigestLedgerPayload, ContributionLock,
     CredentialSlotBinding,
     D025FixtureContractReferencePayload, D025FixtureEnvelopeReference, D026OrderingOutcomeMatrix,
     D027TerminalSequenceMatrix, D028PlatformMatrix, DeletionManifest, DigestHex,
-    AGENT_STORE_BASELINE_SQL, FreshV4ParentOperationMarker, FreshV4ReadyMarker,
-    FreshV4SchemaMetadata, JavaScriptHostHello, N1CohortLock, N1PlatformValidationRecord,
+    AGENT_STORE_BASELINE_SQL, JavaScriptHostHello, N1CohortLock, N1PlatformValidationRecord,
     PluginBridgeRequest, PluginBridgeSession, PluginRuntimeContractManifest,
     PluginMigration, PluginProductLifecycleRecord, PluginPublishRequest,
     PluginReadyRelease, PluginReleaseArtifactV1, PluginReleasePointerState,
@@ -256,7 +256,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let database_schema_digest = digest_bytes(AGENT_STORE_BASELINE_SQL.as_bytes());
     let cargo_lock_digest = digest_bytes(&fs::read(root.join("../../../Cargo.lock"))?);
 
-    let canonical_manifest_payload = CanonicalV4SchemaManifestPayload {
+    let canonical_manifest_payload = CanonicalAgentStoreSchemaManifestPayload {
         manifest_version: VersionString("1.0.0".to_owned()),
         database_schema_digest: database_schema_digest.clone(),
         rust_contract_schema_digest: rust_contract_schema_digest.clone(),
@@ -358,7 +358,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             pretty_json(&schemas)?,
         ),
         (
-            "canonical-v4-schema-manifest.envelope.json".to_owned(),
+            "canonical-agent-store-schema-manifest.envelope.json".to_owned(),
             pretty_json(&canonical_manifest)?,
         ),
         (
@@ -680,9 +680,6 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
         &mut schemas,
         "runtime_feature_inventory",
     )?;
-    add_schema::<FreshV4ParentOperationMarker>(&mut schemas, "fresh_v4_parent_marker")?;
-    add_schema::<FreshV4SchemaMetadata>(&mut schemas, "fresh_v4_schema_metadata")?;
-    add_schema::<FreshV4ReadyMarker>(&mut schemas, "fresh_v4_ready_marker")?;
     add_schema::<DeletionManifest>(&mut schemas, "deletion_manifest")?;
     add_schema::<PlatformValidationManifestPayload>(
         &mut schemas,

@@ -3446,7 +3446,6 @@ impl AgentSessionStore {
                 duplicate: true,
             });
         }
-
         let head = head_by_id_tx(tx, append.agent_session_id.as_ref()).await?;
         validate_session_event_transition(&head, append)?;
         validate_turn_lifecycle_tx(tx, &head, append).await?;

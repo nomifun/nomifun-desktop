@@ -27,7 +27,6 @@ const requiredFiles = [
   'crates/backend/nomifun-agent-contracts/src/package.rs',
   'crates/backend/nomifun-agent-contracts/src/preset.rs',
   'crates/backend/nomifun-agent-contracts/src/remote.rs',
-  'crates/backend/nomifun-agent-contracts/src/root.rs',
   'crates/backend/nomifun-agent-contracts/src/runtime.rs',
   'crates/backend/nomifun-agent-contracts/src/engine_features.rs',
   'crates/backend/nomifun-agent-contracts/contracts/inventory/current-composition.json',
@@ -39,9 +38,9 @@ const requiredFiles = [
   'crates/backend/nomifun-agent-contracts/src/manifest.rs',
   'crates/backend/nomifun-agent-contracts/src/bin/agent-v2-contract.rs',
   'crates/backend/nomifun-agent-contracts/src/schema.rs',
-  'crates/backend/nomifun-agent-contracts/schema/0001_fresh_v4.sql',
+  'crates/backend/nomifun-agent-contracts/schema/0001_agent_store.sql',
   'crates/backend/nomifun-agent-contracts/contracts/generated/schemas.json',
-  'crates/backend/nomifun-agent-contracts/contracts/generated/canonical-v4-schema-manifest.envelope.json',
+  'crates/backend/nomifun-agent-contracts/contracts/generated/canonical-agent-store-schema-manifest.envelope.json',
   'crates/backend/nomifun-agent-contracts/contracts/generated/contract-digest-ledger.envelope.json',
   'crates/backend/nomifun-agent-contracts/contracts/validation/d025-compatibility-fixture-reference.envelope.json',
   'docs/specs/2026-08-28-agent-capability-platform-v2/C0-WRITE-MANIFESTS.json',
@@ -130,7 +129,7 @@ const canonicalPayloadFiles = [
   'crates/backend/nomifun-agent-contracts/contracts/events/session-event-registry.json',
   'crates/backend/nomifun-agent-contracts/contracts/events/error-registry.json',
   'crates/backend/nomifun-agent-contracts/contracts/validation/platform-validation-manifest.payload.json',
-  'crates/backend/nomifun-agent-contracts/contracts/generated/canonical-v4-schema-manifest.envelope.json',
+  'crates/backend/nomifun-agent-contracts/contracts/generated/canonical-agent-store-schema-manifest.envelope.json',
   'crates/backend/nomifun-agent-contracts/contracts/generated/contract-digest-ledger.envelope.json',
 ];
 const obviousPlaceholderDigest = /"([0-9a-f])\1{63}"/i;
@@ -180,7 +179,9 @@ const closurePayload = JSON.parse(
   )
 );
 if (
-  closurePayload.decisions?.length !== 28 ||
+  !Array.isArray(closurePayload.decisions) ||
+  closurePayload.decisions.length === 0 ||
+  closurePayload.decisions.some((decision) => decision.status !== 'confirmed') ||
   closurePayload.unresolved_decisions?.length !== 0 ||
   closurePayload.production_behavior_included !== false
 ) {

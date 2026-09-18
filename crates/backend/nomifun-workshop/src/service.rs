@@ -4099,9 +4099,11 @@ mod tests {
 
         let conversation_id = ConversationId::new().into_string();
         nomifun_db::sqlx::query(
-            "INSERT INTO conversations \
-                (conversation_id, user_id, name, type, extra, status, source, created_at, updated_at) \
-             VALUES (?, ?, 'Creative Studio Agent', 'nomi', '{}', 'finished', 'nomifun', 1, 1)",
+            "INSERT INTO agent_sessions \
+                (agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                 agent_binding_json, next_seq, created_at) \
+             VALUES (?, json_object('principal_kind', 'user', 'principal_id', ?), \
+                     'live', 'Creative Studio Agent', 0, 0, '{}', 1, 1)",
         )
         .bind(&conversation_id)
         .bind(&owner_id)
@@ -4142,14 +4144,18 @@ mod tests {
         let assistant_content_json =
             serde_json::json!({ "content": assistant_text }).to_string();
         nomifun_db::sqlx::query(
-            "INSERT INTO messages \
-                (message_id, conversation_id, msg_id, type, content, position, status, hidden, created_at) \
-             VALUES (?, ?, ?, 'text', ?, 'left', 'finish', 0, 2)",
+            "INSERT INTO agent_messages \
+                (session_id, projection_id, first_seq, last_seq, presentation_intent, \
+                 projection_json, semantic_digest) \
+             VALUES (?, ?, 1, 1, 'message', \
+                     json_object('correlation_id', ?, 'state', 'completed', \
+                                 'content', json(?)), ?)",
         )
-        .bind(&assistant_message_id)
         .bind(&conversation_id)
         .bind(&assistant_message_id)
+        .bind(&assistant_message_id)
         .bind(&assistant_content_json)
+        .bind("a".repeat(64))
         .execute(db.pool())
         .await
         .unwrap();

@@ -83,7 +83,6 @@ export type EntityKind =
 export type ConversationId = EntityId<'conversation'>;
 export type TerminalId = EntityId<'terminal'>;
 export type RequirementId = EntityId<'requirement'>;
-export type ConversationArtifactId = EntityId<'conversation-artifact'>;
 export type McpServerId = EntityId<'mcp-server'>;
 export type RemoteAgentId = EntityId<'remote-agent'>;
 export type SshHostId = EntityId<'ssh-host'>;
@@ -192,8 +191,6 @@ export const parseConversationId = (value: unknown): ConversationId =>
 export const parseTerminalId = (value: unknown): TerminalId => parseEntityId('terminal', value);
 export const parseRequirementId = (value: unknown): RequirementId =>
   parseEntityId('requirement', value);
-export const parseConversationArtifactId = (value: unknown): ConversationArtifactId =>
-  parseEntityId('conversation-artifact', value);
 export const parseMcpServerId = (value: unknown): McpServerId =>
   parseEntityId('mcp-server', value);
 export const parseRemoteAgentId = (value: unknown): RemoteAgentId =>

@@ -253,7 +253,6 @@ fn admit_headless_installation_owner(
 /// 2. CSRF protection (Double Submit Cookie)
 /// 3. Route handlers (auth routes + system routes + conversation routes + file routes + health check)
 pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router> {
-    services.require_nomi_core_root("try_create_router")?;
     let boot = Instant::now();
     tracing::info!("startup: Nomi-core router assembly started");
 
@@ -659,9 +658,6 @@ mod realtime_bridge_tests {
 /// Used for testing when specific service overrides are needed
 /// (e.g. injecting a mock HTTP server URL for version check).
 pub fn create_router_with_states(services: &AppServices, states: ModuleStates) -> Router {
-    services
-        .require_nomi_core_root("create_router_with_states")
-        .unwrap_or_else(|error| panic!("application router assembly failed: {error:#}"));
     let ws_state = build_ws_state(services);
     create_router_with_all_state(services, states, ws_state)
 }
@@ -675,9 +671,6 @@ pub fn create_router_with_all_state(
     states: ModuleStates,
     ws_state: WsHandlerState,
 ) -> Router {
-    services
-        .require_nomi_core_root("create_router_with_all_state")
-        .unwrap_or_else(|error| panic!("application router assembly failed: {error:#}"));
     create_nomi_core_router_with_all_state(
         services,
         states,

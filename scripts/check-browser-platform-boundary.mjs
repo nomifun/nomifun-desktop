@@ -23,7 +23,7 @@ const GATEWAY_REGISTRY = 'crates/backend/nomifun-gateway/src/browser_registry.rs
 const HUB_COMPOSITION = 'crates/backend/nomifun-app/src/services.rs';
 const KNOWLEDGE_BROWSER_COMPOSITION =
   'crates/backend/nomifun-app/src/router/state.rs';
-const FRESH_V4_COMPOSITION =
+const RETIRED_PARALLEL_COMPOSITION =
   'crates/backend/nomifun-app/src/router/agent_platform_host.rs';
 
 const OWNERSHIP_BOUNDARY_PREFIXES = [
@@ -1127,8 +1127,8 @@ function selfTest() {
       source: 'fn knowledge() { /* renderer uses only the typed headless service port */ }',
     },
     {
-      path: FRESH_V4_COMPOSITION,
-      source: 'fn fresh_v4() { /* no legacy Browser owner */ }',
+      path: RETIRED_PARALLEL_COMPOSITION,
+      source: 'fn parallel_root() { /* no legacy Browser owner */ }',
     },
   ];
   assertNoViolation(baseline, 'baseline unexpectedly violates the Browser Platform boundary');
@@ -1234,15 +1234,15 @@ function selfTest() {
   );
   assertViolation(
     baseline.concat({
-      path: FRESH_V4_COMPOSITION,
+      path: RETIRED_PARALLEL_COMPOSITION,
       source: `
-        fn fresh_v4() {
+        fn parallel_root() {
           BrowserSessionHub::new();
         }
       `,
     }),
     'hub-composition-contract',
-    'failed to reject any restored Fresh-v4 BrowserSessionHub constructor',
+    'failed to reject any restored parallel-root BrowserSessionHub constructor',
   );
   assertViolation(
     baseline.concat({

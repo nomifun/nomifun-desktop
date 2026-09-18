@@ -24,6 +24,38 @@ const RESET_ORDER: &[&str] = &[
     "remote_bindings",
 ];
 
+/// Product-owned facts whose lifetime is bounded by an Agent configuration,
+/// Session or Execution but whose schema remains owned by another domain.
+const SESSION_BOUND_RESET_ORDER: &[&str] = &[
+    "conversation_execution_links",
+    "agent_execution_events",
+    "agent_execution_attempts",
+    "agent_execution_step_dependencies",
+    "agent_execution_steps",
+    "agent_execution_participants",
+    "agent_executions",
+    "agent_execution_template_participants",
+    "agent_execution_templates",
+    "nomi_remote_events",
+    "nomi_remote_sessions",
+    "nomi_wave1_memory_action_receipts",
+    "nomi_wave4_action_receipts",
+    "plugin_surface_sessions",
+    "creative_studio_agent_proposal_receipts",
+    "creative_studio_agent_sessions",
+    "creation_tasks",
+    "channel_pending_prompts",
+    "cron_run_reservations",
+    "cron_job_runs",
+    "product_agent_selections",
+];
+
+const RESET_SUSPENDED_TRIGGERS: &[&str] = &[
+    "trg_nomi_remote_events_append_only_delete",
+    "trg_requirements_active_identity_exit_guard",
+    "trg_requirements_pre_effect_abandon_guard_delete_guard",
+];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentDataResetReport {
     pub deleted_rows: BTreeMap<String, u64>,
@@ -76,11 +108,105 @@ pub async fn reset_agent_data(pool: &SqlitePool) -> Result<AgentDataResetReport,
             "Agent-only reset requires the canonical Agent Store tables: {missing_reset:?}"
         )));
     }
+    let mut suspended_trigger_sql = Vec::new();
+    for trigger in RESET_SUSPENDED_TRIGGERS {
+        let sql: Option<String> = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?",
+        )
+        .bind(trigger)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(sql) = sql {
+            sqlx::query(&format!("DROP TRIGGER {trigger}"))
+                .execute(&mut *tx)
+                .await?;
+            suspended_trigger_sql.push(sql);
+        }
+    }
     let preserved_tables = preserved_tables
         .into_iter()
         .filter(|table| existing_tables.contains(table))
         .collect::<Vec<_>>();
     let preserved_before = table_counts(&mut tx, &preserved_tables).await?;
+    if existing_tables.contains("requirement_pre_effect_abandon_guards") {
+        sqlx::query("DELETE FROM requirement_pre_effect_abandon_guards")
+            .execute(&mut *tx)
+            .await?;
+    }
+    let requirements_released = if existing_tables.contains("requirements") {
+        sqlx::query(
+            "UPDATE requirements SET status = 'needs_review', \
+                completion_note = 'Agent history was cleared; review before retrying.', \
+                owner_conversation_id = NULL, active_turn_started_at = NULL, \
+                lease_expires_at = NULL, claim_token = NULL \
+             WHERE owner_conversation_id IS NOT NULL",
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+    } else {
+        0
+    };
+    let channel_sessions_detached = if existing_tables.contains("channel_sessions") {
+        sqlx::query(
+            "UPDATE channel_sessions SET conversation_id = NULL WHERE conversation_id IS NOT NULL",
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+    } else {
+        0
+    };
+    let cron_jobs_detached = if existing_tables.contains("cron_jobs") {
+        sqlx::query(
+            "UPDATE cron_jobs SET conversation_id = NULL, conversation_title = NULL, \
+                last_run_at = NULL, last_status = NULL, last_error = NULL, \
+                run_count = 0, retry_count = 0 \
+             WHERE conversation_id IS NOT NULL OR last_run_at IS NOT NULL \
+                OR last_status IS NOT NULL OR last_error IS NOT NULL \
+                OR run_count <> 0 OR retry_count <> 0",
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+    } else {
+        0
+    };
+    let knowledge_session_bindings = if existing_tables.contains("knowledge_bindings") {
+        sqlx::query("DELETE FROM knowledge_bindings WHERE target_kind = 'conversation'")
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+    } else {
+        0
+    };
+
+    let mut deleted_rows = BTreeMap::new();
+    deleted_rows.insert(
+        "requirements.agent_claims_released".to_owned(),
+        requirements_released,
+    );
+    deleted_rows.insert(
+        "channel_sessions.agent_links_cleared".to_owned(),
+        channel_sessions_detached,
+    );
+    deleted_rows.insert(
+        "cron_jobs.agent_runtime_cleared".to_owned(),
+        cron_jobs_detached,
+    );
+    deleted_rows.insert(
+        "knowledge_bindings.session_rows".to_owned(),
+        knowledge_session_bindings,
+    );
+    for table in SESSION_BOUND_RESET_ORDER {
+        if !existing_tables.contains(*table) {
+            continue;
+        }
+        let result = sqlx::query(&format!("DELETE FROM {table}"))
+            .execute(&mut *tx)
+            .await?;
+        deleted_rows.insert((*table).to_owned(), result.rows_affected());
+    }
     sqlx::query("UPDATE agent_events SET causation_event_id = NULL")
         .execute(&mut *tx)
         .await?;
@@ -88,12 +214,26 @@ pub async fn reset_agent_data(pool: &SqlitePool) -> Result<AgentDataResetReport,
         .execute(&mut *tx)
         .await?;
 
-    let mut deleted_rows = BTreeMap::new();
     for table in RESET_ORDER {
         let result = sqlx::query(&format!("DELETE FROM {table}"))
             .execute(&mut *tx)
             .await?;
         deleted_rows.insert((*table).to_owned(), result.rows_affected());
+    }
+    let removed_custom_agents = if existing_tables.contains("agent_metadata") {
+        sqlx::query(
+            "DELETE FROM agent_metadata WHERE source_key <> 'agent_builtin_nomi' \
+                OR agent_type <> 'nomi' OR agent_source <> 'internal'",
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+    } else {
+        0
+    };
+    deleted_rows.insert("agent_metadata.custom_rows".to_owned(), removed_custom_agents);
+    for trigger_sql in suspended_trigger_sql {
+        sqlx::query(&trigger_sql).execute(&mut *tx).await?;
     }
     let preserved_after = table_counts(&mut tx, &preserved_tables).await?;
     if preserved_before != preserved_after {

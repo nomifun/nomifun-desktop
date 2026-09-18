@@ -222,7 +222,7 @@ pub struct AgentPresetRevisionPayload {
     pub middleware_order: Vec<crate::CapabilityId>,
     pub schema_version: VersionString,
     pub model_route_refs: BTreeMap<String, ModelRouteId>,
-    /// Complete route facts used by the Fresh-v4 persistence writer. Legacy
+    /// Complete route facts used by the canonical Agent Store writer. Legacy
     /// opaque IDs are not sufficient to construct a provider request.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub chat_route_records: BTreeMap<String, ChatRouteRecord>,

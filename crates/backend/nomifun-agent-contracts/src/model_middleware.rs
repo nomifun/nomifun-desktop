@@ -10,8 +10,8 @@ fn input_schema() -> Value {
         "required":["phase","turn","system","tools"],"properties":{
         "phase":{"const":"before_model"},"system":{"type":"string"},
         "turn":{"type":"object","additionalProperties":false,
-            "required":["source_message_id","text","image_media_types","cs_dialogue_id"],"properties":{
-                "source_message_id":{"type":"string"},"text":{"type":"string"},
+            "required":["turn_id","source_message_id","text","image_media_types","cs_dialogue_id"],"properties":{
+                "turn_id":{"type":"string"},"source_message_id":{"type":"string"},"text":{"type":"string"},
                 "image_media_types":{"type":"array","items":{"type":"string"}},
                 "cs_dialogue_id":{"type":["string","null"]}}},
         "tools":{"type":"array","items":{"type":"object","additionalProperties":false,

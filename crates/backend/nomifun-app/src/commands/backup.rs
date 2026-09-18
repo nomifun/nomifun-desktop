@@ -609,7 +609,6 @@ mod tests {
     use super::{
         restore_staging_paths, restore_with_windows_atomic_install_retry,
     };
-    use nomifun_common::ConversationId;
     use nomifun_db::backup_bundle::verify_backup_bundle;
     #[cfg(windows)]
     use nomifun_db::backup_bundle::BackupError;
@@ -711,13 +710,14 @@ mod tests {
         let database = nomifun_db::init_database(&database_path).await.unwrap();
         let installation_owner =
             nomifun_db::installation_owner_id(database.pool()).await.unwrap();
-        let conversation_id = ConversationId::new().into_string();
+        let agent_session_id = uuid::Uuid::now_v7().to_string();
         nomifun_db::sqlx::query(
-            "INSERT INTO conversations \
-             (conversation_id, user_id, name, type, extra, status, created_at, updated_at) \
-             VALUES (?, ?, 'backup command', 'nomi', '{}', 'pending', 1, 1)",
+            "INSERT INTO agent_sessions \
+             (agent_session_id, owner_ref_json, state, deleted_at) \
+             VALUES (?, json_object('principal_kind', 'user', 'principal_id', ?), \
+                     'deleted', 1)",
         )
-        .bind(&conversation_id)
+        .bind(&agent_session_id)
         .bind(&installation_owner)
         .execute(database.pool())
         .await
@@ -770,12 +770,13 @@ mod tests {
             .await
             .unwrap();
         let restored_id: String = nomifun_db::sqlx::query_scalar(
-            "SELECT conversation_id FROM conversations WHERE name = 'backup command'",
+            "SELECT agent_session_id FROM agent_sessions WHERE agent_session_id = ?",
         )
+        .bind(&agent_session_id)
         .fetch_one(restored.pool())
         .await
         .unwrap();
-        assert_eq!(restored_id, conversation_id);
+        assert_eq!(restored_id, agent_session_id);
         restored.close().await;
         assert_eq!(
             fs::read_to_string(destination.join("encryption_key")).unwrap(),
