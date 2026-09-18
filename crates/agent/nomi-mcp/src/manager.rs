@@ -1165,6 +1165,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
 
     #[tokio::test]
     async fn silent_streamable_http_body_times_out_and_next_request_uses_a_clean_connection() {
+        const REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -1224,7 +1225,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         .unwrap();
         let manager = McpManager::new_for_test_with_request_timeout(
             vec![("silent-http", false, Box::new(transport))],
-            Duration::from_millis(60),
+            REQUEST_TIMEOUT,
         );
 
         let first = manager
@@ -1233,7 +1234,8 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
             .expect_err("the first HTTP body intentionally never completes");
         assert!(matches!(
             first,
-            McpError::RequestTimeout { timeout_ms: 60 }
+            McpError::RequestTimeout { timeout_ms }
+                if timeout_ms == REQUEST_TIMEOUT.as_millis() as u64
         ));
         let second = manager
             .call_tool("silent-http", "probe", json!({}))
