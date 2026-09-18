@@ -2,7 +2,7 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-18
-> 当前阶段：Wave 6 / UARC-052 active
+> 当前阶段：Wave 6 / UARC-052 integrated
 > 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
@@ -17,8 +17,9 @@
 > Wave 4 barrier：`c5d64b943a7862bb9837686214e413899a47efc2`
 > Wave 5 实现提交：`a72503995`
 > UARC-051 实现提交：`ab94f33f2b6201c2850803fefbfe72430ef89234`
+> UARC-052 实现提交：`48fbfb09c`
 > 当前主机：Windows
-> Initiative 状态：`active / UARC-052 single Runtime removal`
+> Initiative 状态：`active / UARC-052 integrated; UARC-053 next`
 
 ## 1. 当前事实
 
@@ -32,8 +33,9 @@
   Windows managed provider 使用 WebView2，attached provider 使用安装级 Chrome 连接。
 - 当前源码已经包含 macOS 独立 CEF host、原生 fixture 与部分底层验证；生产注入、产品会话闭环和
   UARC 新 Browser Resource 模型适配仍未完成。UARC-061 必须复用这套基线，不得回退到 WKWebView。
-- 产品组合只安装一个 `nomifun.nomi` provider/factory，旧 Nomi factory 与 `nomifun.coding` family
-  已不可达；旧实现源码等待 `UARC-020/052` 提取与物理删除。
+- 产品组合只安装一个 `nomifun.nomi` provider/factory；旧 Nomi loop/factory/manager、
+  `nomifun.coding` family、multi-Runtime catalog/selector 与 private transcript 已物理删除。统一实现位于
+  `nomifun-agent-runtime`，诊断 API 为 singular `/api/agent-runtime`。
 - AgentPreset/API 已删除 Runtime selector；Kernel/Control Plane/App projection 按 contribution 编译，
   不再用 Runtime family 或 Capability ID 映射决定支持。136/136 旧 ID 已有机器可验退役路线，现存
   Domain/UI migration input 分别归 `UARC-020..053`，没有兼容翻译器。
@@ -92,7 +94,7 @@
 | `UARC-042` | integrated | Integration | verified | pending | Computer/Robot 单 Module、slash Actions 与真实 availability |
 | `UARC-050` | integrated | Integration | verified | pending | Official Agents、Workbench 与单 Nomi Runtime 诊断 UI |
 | `UARC-051` | integrated | Integration | verified | pending | generation 5 Store/API/projection 与领域入口完成切换 |
-| `UARC-052` | active | Integration | pending | pending | 删除旧 Nomi/Coding Runtime 与多 Runtime 基础设施 |
+| `UARC-052` | integrated | Integration | verified | pending | 唯一官方 Runtime；旧 Runtime/selector/compatibility 已物理删除 |
 | 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
 
 ## 4. 当前 dirty worktree 归属
@@ -165,6 +167,9 @@
 | UARC-051 Store/domain/DB | AgentSession 35 + Cron 187 + reset 3 + ID schema 20 + Remote repo 1 passed | Session ports、projection rebuild、Agent-only reset 与 Remote owner |
 | UARC-051 UI | focused 112 passed；typecheck、production build、880×600 boundary passed | immutable edit retry、canonical history/search/creation、无 legacy artifact/writeback surface |
 | Commercial selected-model integration | StepFun Coding Plan `step-3.7-flash` canonical smoke passed | credential-isolated Session → Runtime → projection；未持久化、打印或提交密钥 |
+| UARC-052 Runtime/AI/Conversation | Runtime 40 + AI 452 + Plugin consumer 23 + Conversation 335 passed | 单一 Runtime loop、固定 factory、提取 adapters 与无 private transcript |
+| UARC-052 App/process | App lib 511 + route-gap 29 + Process architecture 16 passed | single-factory boot、canonical Session dispatch 与单 process owner |
+| UARC-052 UI/build/boundary | focused UI 7；typecheck、production build、880×600、Browser/Process/UARC scanners passed | Runtime selector/compatibility reachability为 0；migration 099 的 2 个 immutable 文本归 UARC-054 |
 | Windows UARC full gate | not run | 否 |
 | macOS UARC shared compile | not run | 否 |
 | macOS native Browser/Computer/Process | not run | 否 |
@@ -184,14 +189,14 @@
 
 - UARC 实施无产品决定 blocker。
 - macOS 任务需要可用 Mac 主机；在主机可用前状态保持 `pending`，不能标完成。
-- `UARC-051` Windows/shared cutover 已收口；Remote open/delete、领域 ports、Gateway、Robot 与 renderer
-  均使用 generation 5 Store，旧 Conversation HTTP/WS projection 不再可达。
-- 旧 Runtime 实现、多 Runtime catalog/selector 与其测试源码仍由下一串行任务 `UARC-052` 物理删除；
-  历史 Agent schema/migrations 与 Fresh-v4 root aliases 仅为 `UARC-053/054` 保留。
+- `UARC-051/052` Windows/shared cutover 已收口；产品入口均使用 generation 5 Store 与唯一官方 Runtime，
+  旧 Conversation projection、旧 Runtime 实现、multi-Runtime selector 与 private transcript 不再可达。
+- 历史 Agent schema/migrations、旧 capability projection、obsolete product smoke/IDMM/Browser-entry leftovers 与
+  Fresh-v4 root aliases 仅为接下来的 `UARC-053/054` 物理删除输入。
 
 ## 8. Next ready tasks
 
-1. `UARC-052`：串行删除旧 Nomi/Coding Runtime 与多 Runtime 基础设施，只保留统一 Runtime/driver。
+1. `UARC-053`：串行删除旧 capability/store/IDMM/Browser entry 及无 owner 的测试、脚本、文案与样式。
 2. `UARC-061/062`：依赖外部 Mac 真机，在 Windows 串行主线完成且 handoff 就绪后执行。
 
 ## 9. 状态更新模板
@@ -774,3 +779,32 @@
 - Windows: implementation active. macOS: shared source active; no Mac-native evidence claimed on this host.
 - Remaining/blocker: none. External Mac hardware remains a later Wave 8 prerequisite.
 - Next ready tasks: none until `UARC-052` completes; `UARC-053` depends on it.
+
+### 2026-09-18 UARC-052 integrated
+
+- Barrier/source: UARC-051 closeout `9c338f5f67de37d3fffaff6f6397d6078e2667f9`; implementation
+  `48fbfb09c`.
+- Owner/write set: Integration only. The manifest write set was expanded to the exact public lifecycle consumers,
+  migration fence, diagnostics API/UI, boundary scripts and tests required by physical deletion; no Feature worker ran.
+- Changed: `nomifun-coding-engine` became `nomifun-agent-runtime`; one `OfficialRuntimeProvider`, fixed factory,
+  `OfficialRuntimeHost` and singular `/api/agent-runtime` now form the only production execution composition. Public
+  types use Agent Runtime/build terminology, and Session lifecycle opens the official runtime directly.
+- Deleted: 63,887 lines including `nomi-agent`, `nomi-cli`, old Nomi factory/manager/private transcript,
+  `nomifun.coding`, multi-Runtime catalog/selector/registration, `uses_nomi_session` recovery branches, task-local
+  plugin runtime wrappers and duplicate legacy tests.
+- Retained + reason: reusable domain adapters, middleware/output contracts, process registry and the unified adaptive
+  Driver remain under owned crates. Published migration 099 is checksum-stable; migration 112 transitions installed
+  databases to `runtime_build_binding`, while UARC-054 owns baseline squash of its two historical selector literals.
+- Tests: Runtime 40/40; AI lib 452/452 with one explicit real-Chrome/network ignore; Plugin consumer 23/23;
+  Conversation 335/335; DB ID schema 20/20; App lib 511/511; route-gap 29/29; Process architecture 16/16; focused UI
+  7/7. Typecheck, production UI build, 880×600 boundary, UARC/Browser/Process scanners and self-tests, rustfmt and
+  diff check passed.
+- Commercial-model evidence: Windows Credential Manager-isolated StepFun Coding Plan `step-3.7-flash`
+  selected-model smoke passed through canonical Agent Session → unified Runtime → durable projection. The credential
+  did not enter argv, Cargo/build-script environments, repository files or logs.
+- Windows: verified. macOS: shared source pending; no CEF, TCC, native interaction, arm64 app, DMG or signing claim.
+- Not run/deferred: the ignored legacy product-chain live fixture still targets retired `/api/conversations/*` and was
+  confirmed stale at `guid.warmup`; its physical removal/replacement is explicitly owned by UARC-053's obsolete
+  tests/scripts delete set and is not a second Runtime path.
+- Remaining/blocker: none for UARC-052. External Mac hardware remains a later Wave 8 prerequisite.
+- Next ready task: `UARC-053`, serial Integration only.
