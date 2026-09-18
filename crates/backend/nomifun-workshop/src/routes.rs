@@ -1651,12 +1651,12 @@ mod tests {
 
     #[derive(Debug, PartialEq, Eq)]
     struct TemplateDraftPersistenceCounts {
-        conversations: i64,
-        messages: i64,
+        agent_sessions: i64,
+        agent_messages: i64,
         projects: i64,
         templates: i64,
         template_runs: i64,
-        agent_sessions: i64,
+        creative_studio_agent_sessions: i64,
         proposal_receipts: i64,
         creation_tasks: i64,
         assets: i64,
@@ -1673,12 +1673,12 @@ mod tests {
                 .unwrap()
         }
         TemplateDraftPersistenceCounts {
-            conversations: count(database, "conversations").await,
-            messages: count(database, "messages").await,
+            agent_sessions: count(database, "agent_sessions").await,
+            agent_messages: count(database, "agent_messages").await,
             projects: count(database, "creative_studio_projects").await,
             templates: count(database, "creative_studio_templates").await,
             template_runs: count(database, "creative_studio_template_runs").await,
-            agent_sessions: count(database, "creative_studio_agent_sessions").await,
+            creative_studio_agent_sessions: count(database, "creative_studio_agent_sessions").await,
             proposal_receipts: count(database, "creative_studio_agent_proposal_receipts").await,
             creation_tasks: count(database, "creation_tasks").await,
             assets: count(database, "workshop_assets").await,

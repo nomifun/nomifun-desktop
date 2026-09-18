@@ -576,11 +576,11 @@ async fn product_before_tool_order_is_frozen_and_first_deny_stops_later_hooks() 
     // target under the unchanged shared checking deadline.
     fixture.turn(&old, "allow", true).await;
     assert_eq!(lines(&fixture.target_log), ["allow"]);
-    fixture.turn(&old, "order-original", true).await;
+    fixture.turn(&old, "order-original", false).await;
     fixture.select_hooks(&[second.0.clone()]).await;
     let new = fixture.session("Changed order").await;
-    fixture.turn(&new, "order-new", true).await;
-    fixture.turn(&old, "order-frozen", true).await;
+    fixture.turn(&new, "order-new", false).await;
+    fixture.turn(&old, "order-frozen", false).await;
     let hooks = hook_log(&fixture.hook_log);
     assert_eq!(hooks.len(), 5, "two cold allows then one check per denied turn");
     assert_eq!(

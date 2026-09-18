@@ -7,9 +7,69 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use common::{
-    nomi_extra_with_workspace, body_json, build_app, delete_with_token, get_request,
-    get_with_token, json_with_token, setup_and_login,
+    body_json, build_app, delete_with_token, get_request, get_with_token, json_with_token,
+    setup_and_login,
 };
+
+async fn seed_canonical_agent_session(
+    services: &nomifun_app::compatibility::AppServices,
+    title: &str,
+) -> String {
+    use nomifun_agent_contracts::{
+        AgentBindingValue, AgentPresetId, AgentSessionId, AgentSessionLiveRecord,
+        AgentSessionMetadata, CorrelationId, DigestHex, EventProducerId, IdempotencyKey,
+        OperationId, PresetRevisionRef, PrincipalRef, ResolvedSnapshotId, ResolvedSnapshotRef,
+    };
+
+    let session_id = uuid::Uuid::now_v7().to_string();
+    let store = nomifun_agent_session::AgentSessionStore::from_pool(
+        services.database.pool().clone(),
+    )
+    .await
+    .unwrap();
+    let key = format!("webhook-e2e:{session_id}");
+    let created = store
+        .create_session(nomifun_agent_session::CreateSessionRequest::new(
+            AgentSessionLiveRecord {
+                agent_session_id: AgentSessionId::from(session_id.clone()),
+                owner_ref: PrincipalRef {
+                    principal_kind: "user".to_owned(),
+                    principal_id: services.authoritative_user_id.to_string(),
+                },
+                metadata: AgentSessionMetadata {
+                    title: Some(title.to_owned()),
+                    archived: false,
+                    pinned: false,
+                },
+                agent_binding: AgentBindingValue {
+                    preset_revision_ref: PresetRevisionRef {
+                        preset_id: AgentPresetId::from("webhook-e2e-preset"),
+                        revision: 1,
+                        revision_digest: DigestHex::from("a".repeat(64)),
+                    },
+                    resolved_snapshot_ref: ResolvedSnapshotRef {
+                        snapshot_id: ResolvedSnapshotId::from("webhook-e2e-snapshot"),
+                        snapshot_digest: DigestHex::from("b".repeat(64)),
+                    },
+                    typed_resource_bindings: Vec::new(),
+                    binding_version: 1,
+                },
+                remote_binding_provenance: None,
+                parent_session_id: None,
+                fork_base_payload_id: None,
+                next_seq: 1,
+            },
+            1,
+            OperationId::from(format!("{key}:open")),
+            EventProducerId::from("session_api"),
+            IdempotencyKey::from(format!("{key}:open")),
+            CorrelationId::from(format!("{key}:open")),
+        ))
+        .await
+        .unwrap();
+    assert!(!created.duplicate);
+    session_id
+}
 
 #[tokio::test]
 async fn unauthenticated_webhook_list_is_rejected() {
@@ -346,7 +406,7 @@ async fn tag_settings_get_default_and_upsert() {
 }
 
 #[tokio::test]
-async fn tag_bindings_lists_enabled_autowork_conversations() {
+async fn tag_bindings_lists_enabled_autowork_agent_sessions() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
@@ -359,35 +419,15 @@ async fn tag_bindings_lists_enabled_autowork_conversations() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(body_json(resp).await["data"].as_array().unwrap().len(), 0);
 
-    // create a conversation, then enable AutoWork on it for tag "x"
-    let resp = app
-        .clone()
-        .oneshot(json_with_token(
-            "POST",
-            "/api/conversations",
-            json!({
-                "type": "nomi",
-                "name": "Conv X",
-                "extra": nomi_extra_with_workspace("/project")
-            }),
-            &token,
-            &csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
-    let conv_id = body_json(resp).await["data"]["conversation_id"]
-        .as_str()
-        .unwrap()
-        .to_owned()
-        .to_string();
+    // Seed the canonical Store directly, then enable AutoWork on that Session.
+    let session_id = seed_canonical_agent_session(&services, "AgentSession X").await;
 
     let resp = app
         .clone()
         .oneshot(json_with_token(
             "POST",
             "/api/requirements/autowork",
-            json!({ "kind": "conversation", "target_id": conv_id, "enabled": true, "tag": "x" }),
+            json!({ "kind": "conversation", "target_id": &session_id, "enabled": true, "tag": "x" }),
             &token,
             &csrf,
         ))
@@ -395,7 +435,7 @@ async fn tag_bindings_lists_enabled_autowork_conversations() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // tag-bindings now groups the conversation under "x"
+    // tag-bindings now groups the canonical Session under "x".
     let resp = app
         .clone()
         .oneshot(get_with_token("/api/requirements/tag-bindings", &token))
@@ -406,7 +446,7 @@ async fn tag_bindings_lists_enabled_autowork_conversations() {
     let groups = json["data"].as_array().unwrap();
     let x = groups.iter().find(|g| g["tag"] == "x").expect("tag x present");
     assert_eq!(x["bindings"].as_array().unwrap().len(), 1);
-    assert_eq!(x["bindings"][0]["target_id"], conv_id);
+    assert_eq!(x["bindings"][0]["target_id"], session_id);
 }
 
 #[tokio::test]
@@ -417,26 +457,7 @@ async fn admin_disable_of_idle_target_is_allowed() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    let resp = app
-        .clone()
-        .oneshot(json_with_token(
-            "POST",
-            "/api/conversations",
-            json!({
-                "type": "nomi",
-                "name": "Conv Y",
-                "extra": nomi_extra_with_workspace("/project")
-            }),
-            &token,
-            &csrf,
-        ))
-        .await
-        .unwrap();
-    let conv_id = body_json(resp).await["data"]["conversation_id"]
-        .as_str()
-        .unwrap()
-        .to_owned()
-        .to_string();
+    let session_id = seed_canonical_agent_session(&services, "AgentSession Y").await;
 
     // enable then admin-disable (idle) → both OK
     for enabled in [true, false] {
@@ -445,7 +466,7 @@ async fn admin_disable_of_idle_target_is_allowed() {
             .oneshot(json_with_token(
                 "POST",
                 "/api/requirements/autowork",
-                json!({ "kind": "conversation", "target_id": conv_id, "enabled": enabled, "tag": "x", "from_admin": true }),
+                json!({ "kind": "conversation", "target_id": &session_id, "enabled": enabled, "tag": "x", "from_admin": true }),
                 &token,
                 &csrf,
             ))
