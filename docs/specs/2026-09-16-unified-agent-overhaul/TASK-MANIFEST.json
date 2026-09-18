@@ -451,7 +451,7 @@
       "status": "active",
       "depends_on": ["UARC-054"],
       "lane": "integration-windows",
-      "write_set": ["apps/web/src/main.rs", "crates/backend/nomifun-app/tests/auth_e2e.rs", "crates/backend/nomifun-app/tests/plugin_ui_sessions.rs", "crates/backend/nomifun-app/tests/suites/content.rs", "scripts/validation/*windows*", "docs/specs/2026-09-16-unified-agent-overhaul/**"],
+      "write_set": ["apps/web/src/main.rs", "crates/backend/nomifun-app/tests/auth_e2e.rs", "crates/backend/nomifun-app/tests/auxiliary_e2e.rs", "crates/backend/nomifun-app/tests/plugin_ui_sessions.rs", "crates/backend/nomifun-app/tests/suites/content.rs", "scripts/validation/*windows*", "docs/specs/2026-09-16-unified-agent-overhaul/**"],
       "delete_set": ["Temporary Windows migration fixtures and obsolete smoke paths"],
       "retained_set": ["Maintainable Windows candidate smoke"],
       "ui_surface": ["All affected desktop product surfaces"],
