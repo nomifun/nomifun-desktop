@@ -828,3 +828,32 @@
 - Windows: implementation active. macOS: shared deletion source active; no Mac-native evidence claimed on this host.
 - Remaining/blocker: none. External Mac hardware remains a later Wave 8 prerequisite.
 - Next ready tasks: none until UARC-053 completes; UARC-054 depends on it.
+
+### 2026-09-18 UARC-053 integrated
+
+- Barrier/source: UARC-052 closeout `e6aca70e4`; implementation
+  `55ea23d1035ee87bc3702bc23cae396e74511ff4`.
+- Owner/write set: Integration only. The manifest write set was expanded to `Cargo.lock` and `package.json` for the
+  dependency-graph cleanup and replacement root Gate; contracts, generated artifacts, status and final integration
+  remained single-owner, and no Feature worker ran.
+- Changed: canonical Module/Action contracts and generation-5 `AgentSessionStore` now back every reachable Agent
+  projection. Cross-domain Cron, Channel, Requirement, AgentExecution, Creation, Knowledge, Plugin Surface and
+  Workshop references use canonical Session/Message facts or typed ports. Session deletion proves Runtime exit before
+  fencing and closes Browser, Plugin, Knowledge, Cron, Requirement and SSH resources before its tombstone.
+- Deleted: 91,161 lines across 253 files, including old operation-level Capability retirement/projection contracts,
+  `ConversationService`, Conversation/Message repositories and models, private transcript/stream bridges, Agent IDMM,
+  Local Websearch renderer, obsolete integration fixtures and the transitional automation-session audit. The live
+  Provider runner no longer contains the retired product-chain or compaction modes.
+- Retained + reason: the canonical AgentSession façade, AgentExecution, product-owned non-Agent stores, terminal-only
+  supervision, generic Browser Resource/Provider ownership, Windows WebView2 and the existing macOS CEF child NSView
+  input remain. Published migrations/schema history stay checksum-stable for the immediately following `UARC-054`.
+- Tests: Contracts 105/105; AgentExecution 103/103; Conversation façade 21/21; Requirement 53/53; Cron 155/155;
+  Companion 271/271; DB lib 326/326; App lib 507/507; route inventory 29/29; Channel 451/451; Realtime 102/102;
+  UI 3541/3541. App all-target compile, contract generator write/check, production UI build, `bun run check`,
+  880×600 boundary, dead CSS/i18n/icon, UARC/Browser/Process scanners and self-tests, rustfmt and diff check passed.
+- Commercial-model evidence: Credential Manager-isolated StepFun Coding Plan `step-3.7-flash` selected-model smoke
+  passed through canonical AgentSession → official Runtime → durable projection; the secret did not enter argv,
+  Cargo/build-script environments, repository files or logs.
+- Windows: verified. macOS: shared source pending; no CEF, TCC, native interaction, arm64 app, DMG or signing claim.
+- Remaining/blocker: none for `UARC-053`. External Mac hardware remains a later Wave 8 prerequisite.
+- Next ready task: `UARC-054`, serial Integration only.
