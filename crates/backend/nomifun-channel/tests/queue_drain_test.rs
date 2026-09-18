@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use nomifun_ai_agent::protocol::events::{FinishEventData, TextEventData};
 use nomifun_ai_agent::runtime_handle::{AgentRuntimeControl, AgentRuntimeHandle};
 use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
-use nomifun_ai_agent::{AgentRuntimeRegistry, AgentSendError, AgentStreamEvent, MockAgentRuntime};
+use nomifun_ai_agent::{AgentRuntimeSessions, AgentSendError, AgentStreamEvent, MockAgentRuntime};
 use nomifun_channel::channel_settings::ChannelSettingsService;
 use nomifun_channel::error::ChannelError;
 use nomifun_channel::message_service::ChannelMessageService;
@@ -157,7 +157,7 @@ impl FlakyRegistry {
 }
 
 #[async_trait]
-impl AgentRuntimeRegistry for FlakyRegistry {
+impl AgentRuntimeSessions for FlakyRegistry {
     fn get_runtime(&self, conversation_id: &str) -> Option<AgentRuntimeHandle> {
         self.agents.lock().unwrap().get(conversation_id).cloned()
     }
@@ -302,7 +302,7 @@ async fn build_stack(pool: nomifun_db::SqlitePool, fail_first: u32) -> Stack {
     .await
     .unwrap();
 
-    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(FlakyRegistry::new(fail_first));
+    let runtime_sessions: Arc<dyn AgentRuntimeSessions> = Arc::new(FlakyRegistry::new(fail_first));
     let runtime =
         Arc::new(nomifun_conversation::runtime_state::ConversationRuntimeStateService::default());
     let event_bus = Arc::new(BroadcastEventBus::new(64));
@@ -312,7 +312,7 @@ async fn build_stack(pool: nomifun_db::SqlitePool, fail_first: u32) -> Stack {
             std::env::temp_dir(),
             Arc::clone(&event_bus) as Arc<dyn nomifun_realtime::UserEventSink>,
             Arc::new(NoopSkillResolver),
-            Arc::clone(&runtime_registry),
+            Arc::clone(&runtime_sessions),
             Arc::new(SqliteConversationRepository::new(pool.clone())),
             Arc::new(SqliteAgentMetadataRepository::new(pool.clone())),
             Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
@@ -327,7 +327,7 @@ async fn build_stack(pool: nomifun_db::SqlitePool, fail_first: u32) -> Stack {
     let message_svc = Arc::new(ChannelMessageService::new(
         channel_session_port::conversation_channel_session_port(
             Arc::clone(&conversation_svc),
-            Arc::clone(&runtime_registry),
+            Arc::clone(&runtime_sessions),
         ),
         settings,
         channel_repo.clone(),

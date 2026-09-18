@@ -1936,11 +1936,11 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             ],
         ),
         (
-            "trg_conversation_runtime_engine_immutable",
+            "trg_conversation_runtime_build_immutable",
             &[
                 "BEFORE UPDATE OF EXTRA ON CONVERSATIONS",
-                "JSON_EXTRACT(OLD.EXTRA, '$.RUNTIME_ENGINE_BINDING') IS NOT JSON_EXTRACT(NEW.EXTRA, '$.RUNTIME_ENGINE_BINDING')",
-                "RAISE(ABORT, 'CONVERSATION RUNTIME ENGINE IS IMMUTABLE; FORK EXPLICITLY')",
+                "JSON_EXTRACT(OLD.EXTRA, '$.RUNTIME_BUILD_BINDING') IS NOT JSON_EXTRACT(NEW.EXTRA, '$.RUNTIME_BUILD_BINDING')",
+                "RAISE(ABORT, 'CONVERSATION RUNTIME BUILD IS IMMUTABLE; FORK EXPLICITLY')",
             ],
         ),
         (

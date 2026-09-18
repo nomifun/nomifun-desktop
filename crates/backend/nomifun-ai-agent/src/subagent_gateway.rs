@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use nomi_agent::subagent_tools::{
+use crate::subagent_tools::{
     HostSubagentChild, HostSubagentResult, SubagentHost, SubagentRunState,
 };
 use nomi_mcp::manager::{McpCallOutput, McpManager};

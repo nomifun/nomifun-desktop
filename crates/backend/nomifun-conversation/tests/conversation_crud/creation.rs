@@ -81,7 +81,7 @@ async fn creation_fixture() -> (
         PathBuf::from("."),
         Arc::new(TestBroadcaster::new()),
         Arc::new(EmptySkillResolver),
-        Arc::new(NoopAgentRuntimeRegistry),
+        Arc::new(NoopAgentRuntimeSessions),
         Arc::new(SqliteConversationRepository::new(db.pool().clone())),
         Arc::new(nomifun_db::SqliteAgentMetadataRepository::new(
             db.pool().clone(),
@@ -132,28 +132,28 @@ async fn ordinary_preset_refresh_preserves_exact_runtime_binding_and_rejects_eng
         old_snapshot.preset_id = preset_id.clone();
         old_snapshot.resolved_model = None;
         let old_snapshot = serde_json::to_string(&old_snapshot).unwrap();
-        let extra = format!(r#"{{"runtime_engine_binding":{binding},"workspace":"kept"}}"#);
+        let extra = format!(r#"{{"runtime_build_binding":{binding},"workspace":"kept"}}"#);
         sqlx::query("INSERT INTO conversations (conversation_id,user_id,name,type,preset_id,preset_revision,agent_snapshot,extra,created_at,updated_at) VALUES (?,?,'Runtime identity','nomi',?,1,?,?,0,0)")
             .bind(&id).bind(USER_ID).bind(&preset_id).bind(&old_snapshot).bind(&extra).execute(db.pool()).await.unwrap();
         let mut incoming = json!({"system_prompt":"Refreshed Agent instructions"});
         if variant != "omitted" {
             // Equal fields deliberately arrive in the opposite JSON order.
-            incoming["runtime_engine_binding"] = serde_json::from_str(&format!(r#"{{"profile":"{}","host_contract_version":1,"build_digest":"{}","build_id":"test-build","family_id":"nomifun.nomi"}}"#,
+            incoming["runtime_build_binding"] = serde_json::from_str(&format!(r#"{{"profile":"{}","host_contract_version":1,"build_digest":"{}","build_id":"test-build","family_id":"nomifun.nomi"}}"#,
                 if variant == "different_profile" { "other" } else { "default" }, "a".repeat(64))).unwrap();
         }
         svc.with_product_agent_snapshot_resolver(Arc::new(CreationPresetResolver {
             revision: 2.into(), calls: 0.into(), runtime_extra: incoming,
         }));
-        let runtime: Arc<dyn AgentRuntimeRegistry> = Arc::new(NoopAgentRuntimeRegistry);
+        let runtime: Arc<dyn AgentRuntimeSessions> = Arc::new(NoopAgentRuntimeSessions);
         let result = svc.send_message_with_idempotency_key(USER_ID, &id, &format!("refresh-{variant}"), serde_json::from_value(json!({
             "content":"Generate another image", "preset_id":preset_id,
         })).unwrap(), &runtime).await;
         let (stored_binding, revision, snapshot, stored_extra): (String, i64, String, String) = sqlx::query_as(
-            "SELECT json_extract(extra,'$.runtime_engine_binding'),preset_revision,agent_snapshot,extra FROM conversations WHERE conversation_id=?")
+            "SELECT json_extract(extra,'$.runtime_build_binding'),preset_revision,agent_snapshot,extra FROM conversations WHERE conversation_id=?")
             .bind(&id).fetch_one(db.pool()).await.unwrap();
         assert_eq!(stored_binding, binding, "{variant}: immutable binding JSON must remain byte-identical");
         if variant == "different_profile" {
-            assert!(matches!(result, Err(AppError::Conflict(ref message)) if message.contains("different runtime engine")), "{result:?}");
+            assert!(matches!(result, Err(AppError::Conflict(ref message)) if message.contains("different runtime build")), "{result:?}");
             assert_eq!(revision, 1); assert_eq!(snapshot, old_snapshot); assert_eq!(stored_extra, extra);
             let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=?").bind(&id).fetch_one(db.pool()).await.unwrap();
             assert_eq!(count, 0, "cross-engine selection is rejected before turn admission");
@@ -310,7 +310,7 @@ async fn conversation_creation_agent_selection_cannot_replace_a_running_turn() {
         "preset_id": nomifun_common::generate_id(),
     }))
     .unwrap();
-    let runtime: Arc<dyn AgentRuntimeRegistry> = Arc::new(NoopAgentRuntimeRegistry);
+    let runtime: Arc<dyn AgentRuntimeSessions> = Arc::new(NoopAgentRuntimeSessions);
     let result = svc
         .send_message_with_idempotency_key(
             USER_ID,

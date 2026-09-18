@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 #[cfg(test)]
-use nomifun_ai_agent::AgentRuntimeRegistry;
+use nomifun_ai_agent::AgentRuntimeSessions;
 use nomifun_api_types::{ConversationResponse, CreateConversationRequest, UpdateConversationRequest};
 #[cfg(test)]
 use nomifun_api_types::{ListMessagesQuery, MessageResponse};
@@ -80,7 +80,7 @@ pub struct CompanionHostPorts {
 #[cfg(test)]
 struct ConversationCompanionSessionPort {
     service: Arc<ConversationService>,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    runtime_sessions: Arc<dyn AgentRuntimeSessions>,
 }
 
 /// Transitional host implementation for the archive-specific Session contract.
@@ -190,7 +190,7 @@ impl CompanionSessionPort for ConversationCompanionSessionPort {
                 owner_id,
                 session_id,
                 request,
-                &self.runtime_registry,
+                &self.runtime_sessions,
             )
             .await
     }
@@ -250,14 +250,14 @@ impl CompanionArchiveSessionPort for ConversationCompanionArchiveSessionPort {
 pub fn conversation_companion_ports(
     owner_id: Arc<str>,
     service: Arc<ConversationService>,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    runtime_sessions: Arc<dyn AgentRuntimeSessions>,
 ) -> CompanionHostPorts {
     companion_ports_with_session(
         owner_id,
         service.clone(),
         Arc::new(ConversationCompanionSessionPort {
             service,
-            runtime_registry,
+            runtime_sessions,
         }),
     )
 }

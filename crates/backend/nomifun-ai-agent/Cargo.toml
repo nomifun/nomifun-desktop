@@ -19,7 +19,7 @@ nomifun-agent-domain-wave4.workspace = true
 nomifun-agent-contracts.workspace = true
 nomifun-agent-kernel.workspace = true
 nomifun-model-invoke.workspace = true
-nomifun-coding-engine.workspace = true
+nomifun-agent-runtime.workspace = true
 nomifun-engine-core.workspace = true
 nomifun-chat-model-broker.workspace = true
 nomifun-net.workspace = true
@@ -48,15 +48,17 @@ thiserror.workspace = true
 tracing.workspace = true
 toml.workspace = true
 tempfile.workspace = true
-nomi-agent.workspace = true
 nomi-tools.workspace = true
 nomi-types.workspace = true
 nomi-protocol.workspace = true
 nomi-config.workspace = true
 nomi-mcp.workspace = true
+nomi-skills.workspace = true
 nomi-providers.workspace = true
 nomi-memory.workspace = true
 nomi-redact.workspace = true
+crossterm.workspace = true
+is-terminal.workspace = true
 # Native Workspace contracts and isolated local-search engine. Knowledge uses
 # its own typed port; the legacy BrowserTool/Hub adapter is not a dependency.
 nomifun-browser-platform = { workspace = true, optional = true }
@@ -78,11 +80,11 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 # Enables the `AgentRuntimeHandle::Mock` variant used by downstream test harnesses
 # (conversation/cron/team/app) to inject trait-object stubs without having to
 # spawn a real agent process. Production builds must NOT turn this on — it
-# retains test-only no-op lifecycle behavior. Production extensions implement
-# RegisteredAgentRuntime and must provide result-bearing proven teardown.
+# retains test-only no-op lifecycle behavior. The source-installed Runtime
+# implements OfficialAgentRuntime and must provide result-bearing teardown.
 test-support = []
 # Desktop control tools for the nomi engine (desktop host only).
-computer-use = ["nomi-agent/computer-use"]
+computer-use = []
 # Browser-automation tools for the nomi engine (desktop host only).
 browser-use = ["dep:nomifun-browser-platform", "dep:nomi-browser-engine"]
 
@@ -105,10 +107,3 @@ wiremock.workspace = true
 # Used by the acp_session_sync test setup to seed the conversations FK parent
 # directly on the in-memory pool (mirrors nomifun-db's own acp_session tests).
 sqlx = { workspace = true }
-
-# Integration tests under `tests/` need the `AgentRuntimeHandle::Mock` variant.
-# Unlike unit tests (which see `cfg(test)` on the library), integration
-# tests compile as separate binaries and must opt in via a feature.
-[[test]]
-name = "agent_types_integration"
-required-features = ["test-support"]

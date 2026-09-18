@@ -27,6 +27,7 @@ describe('settings navigation', () => {
     const routerSource = readSource(new URL('../../../components/layout/Router.tsx', import.meta.url));
     const enginePageSource = readSource(new URL('../ExecutionEngines/index.tsx', import.meta.url));
     const javascriptPageSource = readSource(new URL('../JavaScriptRuntimeSettings.tsx', import.meta.url));
+    const modelHubSource = readSource(new URL('../../modelHub/index.tsx', import.meta.url));
 
     for (const path of ['/settings/execution-engines', '/settings/javascript-runtime', '/settings/computer-use']) {
       expect(routerSource.includes(`path='${path}'`)).toBe(true);
@@ -38,12 +39,11 @@ describe('settings navigation', () => {
     expect(routerSource.includes('LegacyAgentAuthoringRedirect')).toBe(false);
     expect(routerSource.includes("path='/settings/agent'")).toBe(false);
     expect(routerSource.includes("path='/settings/agent-presets/*'")).toBe(false);
-    expect(routerSource.includes("to='/settings/execution-engines'")).toBe(true);
+    expect(modelHubSource.includes("to='/settings/execution-engines'")).toBe(true);
     expect(routerSource.includes("to='/models?section=agents'")).toBe(false);
     expect(enginePageSource.includes('AgentModalContent')).toBe(false);
     expect(enginePageSource.includes('<RuntimeManager />')).toBe(false);
-    expect(enginePageSource.includes('agentPlatform.runtimeEngines.list.invoke')).toBe(true);
-    expect(enginePageSource.includes("const NOMI_FAMILY = 'nomifun.nomi'")).toBe(true);
+    expect(enginePageSource.includes('agentPlatform.agentRuntime.get.invoke')).toBe(true);
     expect(enginePageSource.includes('nomifun.coding')).toBe(false);
     expect(enginePageSource.includes('<Select')).toBe(false);
     expect(javascriptPageSource.includes('<RuntimeManager />')).toBe(true);

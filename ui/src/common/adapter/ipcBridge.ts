@@ -140,7 +140,7 @@ import type {
 } from '../types/agentExecution/agentExecutionEvents';
 import type {
   AgentBindingRecord,
-  RuntimeEngineDescriptor,
+  RuntimeBuildDescriptor,
   AgentCatalogResponse,
   InstallationRoleBinding,
   PutAgentRoleDefaultRequest,
@@ -722,8 +722,8 @@ export const agentPlatform = {
     ),
     cancel: httpPost<RemoteMutationResponse, RemoteCancelRequest>('/api/remote/cancel'),
   },
-  runtimeEngines: {
-    list: httpGet<RuntimeEngineDescriptor[], void>('/api/runtime-engines'),
+  agentRuntime: {
+    get: httpGet<RuntimeBuildDescriptor, void>('/api/agent-runtime'),
   },
   sessions: {
     create: httpPost<CreateAgentSessionResponse, CreateAgentSessionRequest>(

@@ -278,7 +278,7 @@ async fn update(
             &user.id,
             conversation_id.as_str(),
             req,
-            &state.runtime_registry,
+            &state.runtime_sessions,
         )
         .await?;
     Ok(Json(ApiResponse::ok(conversation)))
@@ -371,7 +371,7 @@ async fn edit_resubmit(
             params.message_id.as_str(),
             &idempotency_key,
             req,
-            &state.runtime_registry,
+            &state.runtime_sessions,
         )
         .await?;
     Ok((
@@ -394,7 +394,7 @@ async fn continue_truncated(
             params.conversation_id.as_str(),
             params.message_id.as_str(),
             &idempotency_key,
-            &state.runtime_registry,
+            &state.runtime_sessions,
         )
         .await?;
     Ok((
@@ -503,7 +503,7 @@ async fn send_msg(
                 conversation_id.as_str(),
                 &idempotency_key,
                 req,
-                &state.runtime_registry,
+                &state.runtime_sessions,
             )
             .await?
     } else {
@@ -514,7 +514,7 @@ async fn send_msg(
                 conversation_id.as_str(),
                 &idempotency_key,
                 req,
-                &state.runtime_registry,
+                &state.runtime_sessions,
             )
             .await?
     };
@@ -540,7 +540,7 @@ async fn steer(
             conversation_id.as_str(),
             &idempotency_key,
             req,
-            &state.runtime_registry,
+            &state.runtime_sessions,
         )
         .await?;
     Ok((
@@ -596,7 +596,7 @@ async fn cancel(
         .cancel(
             &user.id,
             conversation_id.as_str(),
-            &state.runtime_registry,
+            &state.runtime_sessions,
         )
         .await?;
     Ok(Json(ApiResponse::success()))
@@ -612,7 +612,7 @@ async fn warmup(
         .warmup_for_view(
             &user.id,
             conversation_id.as_str(),
-            &state.runtime_registry,
+            &state.runtime_sessions,
         )
         .await?;
     Ok(Json(ApiResponse::success()))
@@ -631,7 +631,7 @@ async fn active_runtime_count(
     State(state): State<ConversationRouterState>,
     Extension(_user): Extension<CurrentUser>,
 ) -> Result<Json<ApiResponse<ActiveCountResponse>>, AppError> {
-    let count = state.runtime_registry.active_runtime_count();
+    let count = state.runtime_sessions.active_runtime_count();
     Ok(Json(ApiResponse::ok(ActiveCountResponse { count })))
 }
 

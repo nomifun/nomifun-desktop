@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use nomifun_ai_agent::{
-    AgentRouterState, AgentRuntimeRegistry, AgentService,
+    AgentRouterState, AgentRuntimeSessions, AgentService,
     NomiPlatformBuiltinContextAdmission,
     NomiPlatformBuiltinLifecycleAdmission,
     NomiPlatformBuiltinToolAdmission,
@@ -197,7 +197,7 @@ pub(crate) async fn try_build_module_states(
     .map_err(|error| anyhow::anyhow!("canonical AgentSession owner assembly failed: {error:#}"))?;
     let conversation_owner = Arc::new(NomiCoreSessionOwner::new(
         canonical_session_owner,
-        services.agent_runtime_registry.clone(),
+        services.agent_runtime_sessions.clone(),
         services.event_bus.clone(),
         services.background_tasks.clone()
             as Arc<dyn nomifun_conversation::BackgroundTaskRegistrar>,
@@ -676,7 +676,7 @@ async fn build_nomi_core_agent_api_state(
             Arc::clone(&control_plane),
             Arc::clone(&services.authoritative_user_id),
             services.database.pool().clone(),
-            Arc::clone(&services.runtime_engines),
+            Arc::clone(&services.official_runtime),
             resource_bindings.clone(),
         ),
     );
@@ -690,7 +690,7 @@ async fn build_nomi_core_agent_api_state(
             services.database.pool().clone(),
         ));
     let engine_sessions = Arc::new(super::engine_session_host::EngineSessionHost::new(
-        &conversation_owner, Arc::clone(&control_plane), &services.runtime_engines, services.database.pool().clone(), services.encryption_key,
+        &conversation_owner, Arc::clone(&control_plane), &services.official_runtime, services.database.pool().clone(), services.encryption_key,
         super::engine_kernel_session::EngineKernelAssembly {
             kernel: Arc::clone(&kernel), environment: environment.clone(), wave2: Arc::clone(&builtin_plan.wave2_owner),
             plugin_product: super::engine_plugin_product_tools::PluginProductOwner {
@@ -702,12 +702,12 @@ async fn build_nomi_core_agent_api_state(
         Arc::clone(&plugin.skill_artifacts),
     ));
     services
-        .runtime_engines
-        .install_official_driver(super::coding_runtime_host::factory(
+        .official_runtime
+        .install(super::unified_runtime_host::factory(
             engine_sessions,
             Arc::clone(&plugin.schema_resolver),
         ))?;
-    conversation_owner.install_runtime_engines(Arc::clone(&services.runtime_engines), Arc::downgrade(&control_plane))?;
+    conversation_owner.install_official_runtime(Arc::clone(&services.official_runtime), Arc::downgrade(&control_plane))?;
     let plugin_tool_sessions = Arc::new(NomiCorePluginToolSessionProvider::new(
         Arc::clone(&conversation_owner),
         Arc::clone(&control_plane),
@@ -723,9 +723,6 @@ async fn build_nomi_core_agent_api_state(
         Arc::clone(&plugin.skill_artifacts),
         services.database.pool().clone(),
     ));
-    services
-        .agent_runtime_registry
-        .install_nomi_plugin_tool_session_provider(plugin_tool_sessions.clone())?;
     let remote_repository: Arc<dyn IRemoteBindingRepository> = Arc::new(
         SqliteRemoteBindingRepository::new(services.database.pool().clone()),
     );
@@ -917,7 +914,7 @@ fn build_nomi_core_conversation_owner(services: &AppServices) -> ConversationSer
         services.work_dir.clone(),
         services.event_bus.clone(),
         skill_resolver,
-        services.agent_runtime_registry.clone(),
+        services.agent_runtime_sessions.clone(),
         conversation_repo,
         agent_metadata_repo,
         services.execution_conversation_boundary.clone(),
@@ -954,13 +951,7 @@ fn build_nomi_core_conversation_owner(services: &AppServices) -> ConversationSer
     conversation_service.with_delete_hook(
         Arc::new(services.ssh_pool.clone()) as Arc<dyn OnConversationDelete>,
     );
-    conversation_service.with_delete_hook(Arc::new(
-        nomifun_ai_agent::runtime_registry::NomiSessionFilesCascade {
-            data_dir: services.data_dir.clone(),
-            work_dir: services.work_dir.clone(),
-        },
-    ) as Arc<dyn OnConversationDelete>);
-    if let Some(hook) = services.runtime_registry_delete_hook.clone() {
+    if let Some(hook) = services.runtime_sessions_delete_hook.clone() {
         conversation_service.with_delete_hook(hook);
     }
     #[cfg(feature = "browser-use")]
@@ -989,7 +980,7 @@ pub fn build_conversation_state(
     let conversation_service = build_nomi_core_conversation_owner(services);
     ConversationRouterState {
         service: conversation_service,
-        runtime_registry: services.agent_runtime_registry.clone(),
+        runtime_sessions: services.agent_runtime_sessions.clone(),
     }
 }
 
@@ -1377,7 +1368,7 @@ pub fn build_terminal_state(services: &AppServices) -> TerminalRouterState {
         .terminal_service
         .with_delete_hook(services.requirement_service.clone() as Arc<dyn OnTerminalDelete>);
     let lifecycle_notice = Arc::new(AgentTerminalLifecycleNotice {
-        runtimes: services.agent_runtime_registry.clone(),
+        runtimes: services.agent_runtime_sessions.clone(),
     });
     // `terminal.exit` is emitted only after the PTY exit status and final
     // scrollback have been persisted. Observe the internal owner-scoped event
@@ -1502,7 +1493,7 @@ pub fn build_agent_execution_engine(
         nomifun_db::SqliteProviderModelRepository::new(services.database.pool().clone()),
     );
     // Transitional only: AgentExecution consumes the public typed Session port
-    // and no longer receives ConversationService/AgentRuntimeRegistry as
+    // and no longer receives ConversationService/AgentRuntimeSessions as
     // production configuration. The adapter is a pure delegate over the
     // existing owner while the canonical AgentSession implementation replaces
     // the remaining Conversation-backed operations.
@@ -1752,7 +1743,7 @@ fn terminal_exit_matches_current_state(
 /// the durable source of truth, while the trusted system-resource notice keeps
 /// a present runtime from relying on stale process state.
 struct AgentTerminalLifecycleNotice {
-    runtimes: Arc<dyn AgentRuntimeRegistry>,
+    runtimes: Arc<dyn AgentRuntimeSessions>,
 }
 
 impl AgentTerminalLifecycleNotice {
@@ -2216,7 +2207,7 @@ mod tests {
     /// nobody talks to while the live ones stay invisible — so pin the identity,
     /// not just the behaviour.
     #[tokio::test]
-    async fn ssh_pool_is_shared_between_routes_and_the_agent_factory() {
+    async fn ssh_pool_is_shared_between_routes_and_the_domain_adapter() {
         let tmp = tempfile::TempDir::new().unwrap();
         let data_dir = tmp.path().join("data");
         let db = nomifun_db::init_database_memory().await.unwrap();
@@ -2235,7 +2226,7 @@ mod tests {
             "build_ssh_host_state must reuse services.ssh_pool instead of building its own"
         );
 
-        // The handle the agent factory receives, erased to the seam. A link it
+        // The host-facing adapter uses the same pool. A link it
         // opens — including one that failed to dial, which is precisely what the
         // header pill has to show — must be visible through the routes' handle.
         let provider: Arc<dyn nomifun_ai_agent::SshBackendProvider> =
@@ -2259,17 +2250,7 @@ mod tests {
             "the routes must see the link the agent's provider just opened"
         );
 
-        // The factory's deps are sealed inside the factory closure, so the handover
-        // itself can only be pinned where it is written.
         let services_source = include_str!("../services.rs");
-        let deps_line = services_source
-            .lines()
-            .find(|line| line.trim_start().starts_with("ssh_provider:"))
-            .expect("the agent factory deps must wire an ssh provider");
-        assert!(
-            deps_line.contains("ssh_pool"),
-            "the agent factory must receive the one pool, not a provider of its own: {deps_line}"
-        );
         assert_eq!(
             services_source.matches("SshConnectionPool::new(").count(),
             1,

@@ -13,7 +13,7 @@ pub fn validate_completed_artifact_contract(data: &ToolCallEventData) -> Result<
         return Ok(());
     }
     validate_artifact_receipt_integrity(&data.name, &data.artifacts)?;
-    let contract = nomi_agent::output::artifact_contract_with_input(&data.name, &data.args)
+    let contract = crate::runtime_output::artifact_contract_with_input(&data.name, &data.args)
         .map_err(|error| format!("invalid artifact contract for tool '{}': {error}", data.name))?;
     let Some(contract) = contract else {
         return Ok(());

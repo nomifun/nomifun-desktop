@@ -1834,7 +1834,7 @@ mod tests {
         let payload: AgentPresetRevisionPayload = serde_json::from_value(legacy.clone()).unwrap();
         assert_eq!(serde_json::to_value(&payload).unwrap(), legacy);
         let mut selected = legacy;
-        selected["runtime_engine"] = serde_json::json!({
+        selected["runtime_build"] = serde_json::json!({
             "selector": {"selection":"exact","family_id":"customer.workflow","build_id":"v1","build_digest":"a".repeat(64)},
             "profile":"custom"
         });

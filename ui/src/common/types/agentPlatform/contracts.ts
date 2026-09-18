@@ -511,7 +511,7 @@ export interface SessionCursor {
 }
 
 /** Runtime identities are extension-owned strings, not a built-in engine enum. */
-export interface RuntimeEngineDescriptor {
+export interface RuntimeBuildDescriptor {
   family_id: string;
   build_id: string;
   build_digest: string;
@@ -520,7 +520,7 @@ export interface RuntimeEngineDescriptor {
   supported_profiles: string[];
 }
 
-export interface RuntimeEngineBinding {
+export interface RuntimeBuildBinding {
   family_id: string;
   build_id: string;
   build_digest: string;
@@ -552,7 +552,7 @@ export interface AgentResourceSelection {
 }
 
 export interface CreateAgentSessionResponse {
-  runtime_engine_binding?: RuntimeEngineBinding;
+  runtime_build_binding?: RuntimeBuildBinding;
   agent_session_id: AgentSessionId;
   agent_binding: AgentBindingValue;
   state: string;

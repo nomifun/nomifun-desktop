@@ -122,7 +122,7 @@ async fn initial_context_rejects_tool_dependencies_and_turn_contexts_use_distinc
             );
             let value = loaded.context_contributors()[0]
                 .pre_turn_context_for_turn_result(
-                    &nomi_agent::context_contributor::TurnContext {
+                    &nomifun_ai_agent::context_contributor::TurnContext {
                         turn_id: "turn-same-source".into(),
                         source_message_id: "same-source".into(),
                         text: "turn".into(),

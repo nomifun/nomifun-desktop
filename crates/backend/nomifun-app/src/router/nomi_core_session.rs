@@ -21,7 +21,7 @@ use dashmap::DashMap;
 use futures_util::FutureExt;
 use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
 use nomifun_ai_agent::{
-    AgentRuntimeRegistry, AgentStreamEvent, KernelNomiPluginToolSession,
+    AgentRuntimeSessions, AgentStreamEvent, KernelNomiPluginToolSession,
     NomiPluginProductToolInvocation, NomiPluginProductToolInvoker,
     NomiPluginProductToolSchemaResolver, NomiPluginToolError,
     NomiPluginToolSchemaResolver, NomiPluginToolSession,
@@ -106,12 +106,12 @@ use uuid::Uuid;
 /// The canonical owner is authoritative for AgentSession identity, Turn/Event
 /// receipts, resources, forks, runtime dispatch and deletion.
 pub(crate) struct NomiCoreSessionOwner {
-    runtime_engines: std::sync::OnceLock<Arc<super::runtime_engines::RuntimeEngineHost>>,
+    official_runtime: std::sync::OnceLock<Arc<super::official_runtime::OfficialRuntimeHost>>,
     runtime_control_plane: std::sync::OnceLock<std::sync::Weak<AgentControlPlane>>,
     product_agent_resolver:
         std::sync::OnceLock<std::sync::Weak<NomiCoreProductAgentResolver>>,
     canonical: CanonicalAgentSessionOwner,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    runtime_sessions: Arc<dyn AgentRuntimeSessions>,
     user_events: Arc<dyn UserEventSink>,
     background_tasks: Arc<dyn BackgroundTaskRegistrar>,
     fallback_workspace_root: std::path::PathBuf,
@@ -267,7 +267,7 @@ impl ProductAgentSelection {
 
 pub(crate) struct NomiCoreProductAgentResolver {
     control_plane: Arc<AgentControlPlane>,
-    runtime_engines: Arc<super::runtime_engines::RuntimeEngineHost>,
+    official_runtime: Arc<super::official_runtime::OfficialRuntimeHost>,
     resource_bindings: super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry,
     owner_id: Arc<str>,
     pool: nomifun_db::SqlitePool,
@@ -275,10 +275,10 @@ pub(crate) struct NomiCoreProductAgentResolver {
 }
 
 impl NomiCoreProductAgentResolver {
-    pub(crate) fn new(control_plane: Arc<AgentControlPlane>, owner_id: Arc<str>, pool: nomifun_db::SqlitePool, runtime_engines: Arc<super::runtime_engines::RuntimeEngineHost>, resource_bindings: super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry) -> Self {
+    pub(crate) fn new(control_plane: Arc<AgentControlPlane>, owner_id: Arc<str>, pool: nomifun_db::SqlitePool, official_runtime: Arc<super::official_runtime::OfficialRuntimeHost>, resource_bindings: super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry) -> Self {
         Self {
             control_plane,
-            runtime_engines,
+            official_runtime,
             resource_bindings,
             owner_id,
             pool,
@@ -344,7 +344,7 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
         }
         let (binding, revision, snapshot) = self.control_plane.saved_binding_artifacts(&owner, &binding)
             .await.map_err(control_plane_error_to_app)?;
-        let target_engine = self.runtime_engines.validate_agent(&snapshot)?;
+        let target_engine = self.official_runtime.validate_agent(&snapshot)?;
         let editor = self.control_plane.editor(&owner, revision.reference.preset_id.as_ref(), Some(revision.reference.revision))
             .await.map_err(control_plane_error_to_app)?;
         let common_owner = nomifun_common::UserId::parse(owner_id.to_owned())
@@ -364,9 +364,11 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
         // the projected snapshot; the UI snapshot alone cannot open a session.
         attach_session_metadata(&mut projected.projection.request.extra, &projected.binding, None)
             .map_err(|error| AppError::Conflict(error.message))?;
-        projected.projection.request.extra[nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY] = serde_json::to_value(&target_engine)
+        projected.projection.request.extra[nomifun_api_types::RUNTIME_BUILD_BINDING_KEY] = serde_json::to_value(&target_engine)
             .map_err(|error| AppError::Internal(error.to_string()))?;
-        self.runtime_engines.catalog()?.validate_session_extra(&target_engine, &projected.projection.request.extra)?;
+        self.official_runtime
+            .provider()?
+            .validate_session_extra(&projected.projection.request.extra)?;
         Ok(ProductAgentResolution { snapshot: projected.projection.snapshot, runtime_extra: projected.projection.request.extra })
     }
 
@@ -545,7 +547,7 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
             .saved_binding_artifacts(&owner, &binding)
             .await
             .map_err(control_plane_error_to_app)?;
-        let target_engine = self.runtime_engines.validate_agent(&snapshot)?;
+        let target_engine = self.official_runtime.validate_agent(&snapshot)?;
         let editor = self
             .control_plane
             .editor(
@@ -570,12 +572,12 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
             None,
         )
         .map_err(|error| AppError::Conflict(error.message))?;
-        projected.projection.request.extra[nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY] =
+        projected.projection.request.extra[nomifun_api_types::RUNTIME_BUILD_BINDING_KEY] =
             serde_json::to_value(&target_engine)
                 .map_err(|error| AppError::Internal(error.to_string()))?;
-        self.runtime_engines
-            .catalog()?
-            .validate_session_extra(&target_engine, &projected.projection.request.extra)?;
+        self.official_runtime
+            .provider()?
+            .validate_session_extra(&projected.projection.request.extra)?;
         Ok(ProductAgentResolution {
             snapshot: projected.projection.snapshot,
             runtime_extra: projected.projection.request.extra,
@@ -628,7 +630,7 @@ impl nomifun_customer_service::CustomerServiceAgentPolicyResolver
 impl NomiCoreSessionOwner {
     pub(crate) fn new(
         canonical: CanonicalAgentSessionOwner,
-        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: Arc<dyn AgentRuntimeSessions>,
         user_events: Arc<dyn UserEventSink>,
         background_tasks: Arc<dyn BackgroundTaskRegistrar>,
         fallback_workspace_root: std::path::PathBuf,
@@ -637,10 +639,10 @@ impl NomiCoreSessionOwner {
     ) -> Self {
         Self {
             canonical,
-            runtime_engines: std::sync::OnceLock::new(),
+            official_runtime: std::sync::OnceLock::new(),
             runtime_control_plane: std::sync::OnceLock::new(),
             product_agent_resolver: std::sync::OnceLock::new(),
-            runtime_registry,
+            runtime_sessions,
             user_events,
             background_tasks,
             fallback_workspace_root,
@@ -664,9 +666,9 @@ impl NomiCoreSessionOwner {
             .clone()
     }
 
-    pub(crate) fn install_runtime_engines(&self, host: Arc<super::runtime_engines::RuntimeEngineHost>, control_plane: std::sync::Weak<AgentControlPlane>) -> Result<(), AppError> {
+    pub(crate) fn install_official_runtime(&self, host: Arc<super::official_runtime::OfficialRuntimeHost>, control_plane: std::sync::Weak<AgentControlPlane>) -> Result<(), AppError> {
         self.runtime_control_plane.set(control_plane).map_err(|_| AppError::Conflict("Session control plane already installed".into()))?;
-        self.runtime_engines.set(host).map_err(|_| AppError::Conflict("Session runtime host already installed".into()))
+        self.official_runtime.set(host).map_err(|_| AppError::Conflict("Session runtime host already installed".into()))
     }
 
     pub(crate) fn install_product_agent_resolver(
@@ -895,11 +897,11 @@ impl NomiCoreSessionOwner {
                 ));
             }
         }
-        let host = self.runtime_engines.get().ok_or_else(|| {
+        let host = self.official_runtime.get().ok_or_else(|| {
             AppError::Conflict("Canonical Agent consumer requires the Runtime host".into())
         })?;
-        let engine = host.validate_agent(&resolved)?;
-        host.catalog()?.validate_session_extra(&engine, &request.extra)?;
+        host.validate_agent(&resolved)?;
+        host.provider()?.validate_session_extra(&request.extra)?;
         super::nomi_core_mcp_catalog::validate_product_session_selection(
             &resolved,
             &saved_binding.typed_resource_bindings,
@@ -1179,7 +1181,7 @@ impl NomiCoreSessionOwner {
         mut events: broadcast::Receiver<AgentStreamEvent>,
     ) {
         let sink = self.user_events.clone();
-        let runtimes = self.runtime_registry.clone();
+        let runtimes = self.runtime_sessions.clone();
         let relay_session_id = session_id.clone();
         let task = async move {
             while let Ok(event) = events.recv().await {
@@ -1322,7 +1324,7 @@ impl NomiCoreSessionOwner {
         let cancellation = tokio_util::sync::CancellationToken::new();
         let generation = receipt.cursor.seq;
         let runtime = match self
-            .runtime_registry
+            .runtime_sessions
             .get_or_create_runtime_for_turn(
                 session_id.as_ref(),
                 generation,
@@ -1533,14 +1535,14 @@ impl NomiCoreSessionOwner {
             snapshot,
             Some(&agent_name),
         )?;
-        let runtime_host = self.runtime_engines.get().ok_or_else(|| {
+        let runtime_host = self.official_runtime.get().ok_or_else(|| {
             AppError::Conflict(
                 "canonical AgentSession projection requires the assembled Runtime host"
                     .to_owned(),
             )
         })?;
         let engine = runtime_host.validate_agent(&projected.snapshot)?;
-        projected.projection.request.extra[nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY] =
+        projected.projection.request.extra[nomifun_api_types::RUNTIME_BUILD_BINDING_KEY] =
             serde_json::to_value(engine).map_err(|error| AppError::Internal(error.to_string()))?;
         let workspace = frozen_workspace_root(
             owner_id,
@@ -1630,10 +1632,10 @@ impl NomiCoreSessionOwner {
                 &format!("cancel:{}", Uuid::now_v7()),
             )
             .await?;
-        if let Some(runtime) = self.runtime_registry.get_runtime(session_id.as_ref()) {
+        if let Some(runtime) = self.runtime_sessions.get_runtime(session_id.as_ref()) {
             runtime.cancel().await?;
         }
-        self.runtime_registry.cancel_runtime_turn(
+        self.runtime_sessions.cancel_runtime_turn(
             session_id.as_ref(),
             generation,
             Some(nomifun_common::AgentKillReason::UserCancelled),
@@ -2693,7 +2695,7 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
                 nomifun_cron::CronTurnReconciliation::ReconciledOrTerminalReRead,
             ),
             PublicTurnDeliveryState::Accepted { .. }
-                if self.runtime_registry.get_runtime(request.agent_session_id.as_ref()).is_some() =>
+                if self.runtime_sessions.get_runtime(request.agent_session_id.as_ref()).is_some() =>
             {
                 Ok(nomifun_cron::CronTurnReconciliation::LiveExactOwnerWait)
             }
@@ -2965,7 +2967,7 @@ impl nomifun_channel::ChannelSessionPort for NomiCoreSessionOwner {
         let events = if delivery.completed {
             None
         } else {
-            wait_for_runtime_subscription(&self.runtime_registry, session_id).await
+            wait_for_runtime_subscription(&self.runtime_sessions, session_id).await
         };
         Ok(nomifun_channel::ChannelTurnDelivery {
             delivery: channel_delivery_from_conversation(delivery),
@@ -3247,7 +3249,7 @@ impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
             PreparedAgentSessionDelete::AlreadyDeleted(_) => return Ok(()),
             PreparedAgentSessionDelete::Fenced(command) => command,
         };
-        self.runtime_registry
+        self.runtime_sessions
             .terminate_and_wait_result(session_id.as_ref(), Some(nomifun_common::AgentKillReason::ConfigurationChanged))
             .await?;
         let blockers = self.canonical.store().delete_blockers(&session_id).await
@@ -3343,7 +3345,7 @@ impl nomifun_companion::CompanionArchiveSessionPort for NomiCoreSessionOwner {
         session_id: &str,
     ) -> Result<(), AppError> {
         self.get_session(owner_id, session_id).await?;
-        if let Some(runtime) = self.runtime_registry.get_runtime(session_id) {
+        if let Some(runtime) = self.runtime_sessions.get_runtime(session_id) {
             runtime.clear_context().await?;
         }
         Ok(())
@@ -3597,7 +3599,7 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
             .ok_or_else(|| AppError::Conflict(
                 "AgentExecution steer has no source message".to_owned(),
             ))?;
-            let runtime = self.runtime_registry.get_runtime(conversation_id).ok_or_else(|| {
+            let runtime = self.runtime_sessions.get_runtime(conversation_id).ok_or_else(|| {
                 AppError::Conflict("AgentExecution Runtime is not active".to_owned())
             })?;
             let queued = runtime
@@ -4779,12 +4781,12 @@ mod session_boundary_tests {
 }
 
 async fn wait_for_runtime_subscription(
-    runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+    runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     session_id: &str,
 ) -> Option<broadcast::Receiver<AgentStreamEvent>> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
-        if let Some(handle) = runtime_registry.get_runtime(session_id) {
+        if let Some(handle) = runtime_sessions.get_runtime(session_id) {
             return Some(handle.subscribe());
         }
         if tokio::time::Instant::now() >= deadline {
@@ -4821,7 +4823,7 @@ const NOMI_CORE_REMOTE_CANCEL_COMMAND_TIMEOUT: Duration = Duration::from_secs(30
 ///
 /// `session_owner` is the same object that the desktop, Channel,
 /// Cron, AutoWork, Companion, and AgentExecution wiring receives.  The
-/// adapter never constructs an AgentRuntimeRegistry or a ConversationService.
+/// adapter never constructs an AgentRuntimeSessions or a ConversationService.
 #[derive(Clone)]
 pub(crate) struct NomiCoreAgentApiState {
     authoritative_user_id: Arc<str>,
@@ -5990,7 +5992,7 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
             "/api/creative-studio/canvas-agent-sessions/resolve",
             post(resolve_canonical_creative_studio_canvas_agent_session),
         )
-        .route("/api/runtime-engines", get(list_runtime_engines))
+        .route("/api/agent-runtime", get(get_official_runtime))
         .route(
             "/api/agent-sessions/{agent_session_id}",
             get(get_nomi_core_agent_session)
@@ -8138,12 +8140,12 @@ fn schedule_remote_cancel_finalizer(
     }
 }
 
-async fn list_runtime_engines(
+async fn get_official_runtime(
     State(state): State<NomiCoreAgentApiState>,
-) -> Result<Json<ApiResponse<Vec<nomifun_api_types::RuntimeEngineDescriptor>>>, NomiCoreApiError> {
-    let host = state.session_owner.runtime_engines.get()
+) -> Result<Json<ApiResponse<nomifun_api_types::RuntimeBuildDescriptor>>, NomiCoreApiError> {
+    let host = state.session_owner.official_runtime.get()
         .ok_or_else(|| AppError::Conflict("Runtime host is not assembled".into()))?;
-    Ok(Json(ApiResponse::ok(host.catalog()?.list())))
+    Ok(Json(ApiResponse::ok(host.provider()?.descriptor().clone())))
 }
 
 async fn list_nomi_core_agent_sessions(
@@ -9430,7 +9432,7 @@ async fn warm_nomi_core_agent_session(
     let (options, _) = runtime_options_from_session(owner.as_ref(), projection, None)?;
     state
         .session_owner
-        .runtime_registry
+        .runtime_sessions
         .get_or_create_runtime_for_preparation(
             session_id.as_ref(),
             tokio_util::sync::CancellationToken::new(),
@@ -9460,7 +9462,7 @@ async fn clear_nomi_core_agent_session_context(
     }
     if let Some(runtime) = state
         .session_owner
-        .runtime_registry
+        .runtime_sessions
         .get_runtime(session_id.as_ref())
     {
         runtime.clear_context().await?;
@@ -9515,7 +9517,7 @@ async fn ask_nomi_core_agent_session_side_question(
         .await?;
     let runtime = state
         .session_owner
-        .runtime_registry
+        .runtime_sessions
         .get_runtime(session_id.as_ref())
         .ok_or_else(|| {
             NomiCoreApiError::new(
@@ -9699,7 +9701,7 @@ async fn steer_nomi_core_agent_session_turn(
         })?;
         let runtime = state
             .session_owner
-            .runtime_registry
+            .runtime_sessions
             .get_runtime(session_id.as_ref())
             .ok_or_else(|| {
                 NomiCoreApiError::new(

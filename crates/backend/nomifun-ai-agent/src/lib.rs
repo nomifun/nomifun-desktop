@@ -1,13 +1,26 @@
-//! Agent runtime lifecycle, per-conversation runtime registration, and skill management.
+//! The single official Agent Runtime, its lifecycle, and host-owned adapters.
 pub(crate) mod runtime_state;
 pub mod artifact_store;
 pub mod boot_process_reaper;
+mod process_registry;
 pub mod runtime_handle;
-pub mod runtime_extension;
-pub mod runtime_catalog;
+pub mod runtime_instance;
+pub mod runtime_provider;
 pub mod runtime_admission;
 pub mod runtime_driver;
-pub mod coding_runtime;
+pub mod unified_runtime;
+pub mod context_contributor;
+pub mod runtime_model_middleware_contract;
+pub mod runtime_tool_middleware_contract;
+pub mod companion_tools;
+pub mod cron_tools;
+pub mod host_skills;
+pub mod knowledge_tools;
+pub mod requirement_tools;
+pub mod runtime_output;
+pub mod session_control_tools;
+pub mod ssh_backend;
+pub mod subagent_tools;
 pub mod engine_sdk;
 mod engine_tasks;
 pub mod engine_effect_scope;
@@ -20,10 +33,6 @@ pub mod factory;
 pub mod image_generation;
 mod creation_context;
 pub mod knowledge_completer;
-pub mod knowledge_retrieval;
-pub mod knowledge_writeback;
-pub mod manager;
-pub mod nomi_session_persistence;
 pub mod one_shot;
 pub mod plugin_tools;
 pub mod tool_discovery;
@@ -35,7 +44,7 @@ pub mod protocol;
 pub mod registry;
 pub mod routes;
 pub(crate) mod services;
-pub mod runtime_registry;
+pub mod runtime_sessions;
 pub mod terminal_title_completer;
 pub mod types;
 mod subagent_gateway;
@@ -43,25 +52,22 @@ mod subagent_gateway;
 pub mod web_search;
 #[cfg(feature = "browser-use")]
 pub mod local_web_search;
-// ── Agent-layer re-exports (the seam) ──────────────────────────────────────
-// Backend crates reach the agent (nomi-*) layer ONLY through nomifun-ai-agent.
-// When the agent layer is later extracted into its own repo, these re-exports
-// become the single integration surface.
-pub use nomi_agent::companion_tools::CompanionMemorySink;
-pub use nomi_agent::companion_tools::{CompanionSkillSink, SkillListing};
-pub use nomi_agent::cron_tools::{CronJobSummary, CronSink};
-pub use nomi_agent::ssh_backend::{
+// Host/domain adapters extracted from the retired standalone Nomi loop. They
+// carry no model loop, Session store, or alternate Runtime authority.
+pub use companion_tools::{CompanionMemorySink, CompanionSkillSink, SkillListing};
+pub use cron_tools::{CronJobSummary, CronSink};
+pub use ssh_backend::{
     RemoteCommandOutput, RemoteFileStat, SshBackend, SshBackendProvider, SshLeaseRelease,
     SshSessionBinding, SshSessionLease,
 };
-pub use nomi_agent::requirement_tools::RequirementSink;
-pub use nomi_agent::context_contributor::{ContextContributor, TurnContext};
-pub use nomi_agent::session_control_tools::{
+pub use requirement_tools::RequirementSink;
+pub use context_contributor::{ContextContributor, TurnContext};
+pub use session_control_tools::{
     AGENT_EXECUTION_OBSERVE_TOOL_NAME, AGENT_EXECUTION_STEER_TOOL_NAME,
     AGENT_FORK_TOOL_NAME, AgentExecutionObserveTool, AgentExecutionSteerTool,
     AgentForkTool, SessionControlSink,
 };
-pub use nomi_agent::subagent_tools::{
+pub use subagent_tools::{
     SUBAGENT_SEND_OUTCOME_UNKNOWN_CODE, SUBAGENT_SEND_TOOL_NAME, SUBAGENT_WAIT_TOOL_NAME,
     DelegationHandleRecordingTool, HostSubagentChild, HostSubagentResult,
     ParentScopedSubagentRegistry, SubagentHandle, SubagentHost, SubagentRunState,
@@ -71,16 +77,16 @@ pub use nomi_config;
 pub use nomi_types;
 
 pub use runtime_state::AgentRuntimeState;
-pub use runtime_extension::{RegisteredAgentRuntime, RuntimeSteerDelivery, RuntimeTeardown};
-pub use runtime_admission::{RuntimeEngineAdmission, RuntimeEngineSupport};
+pub use runtime_instance::{OfficialAgentRuntime, RuntimeSteerDelivery, RuntimeTeardown};
+pub use runtime_admission::{RuntimeAdmission, RuntimeSupport};
 pub use runtime_driver::{
     HostedNomiRuntime, NomiRuntimeDriver, NomiRuntimeDriverFactory,
     NomiRuntimeTurnOutcome, NomiRuntimeTurnOutput, NomiRuntimeTurnTerminal,
     OFFICIAL_NOMI_RUNTIME_FAMILY_ID,
 };
-pub use runtime_catalog::{
-    NomiRuntimeProvider, RUNTIME_HOST_CONTRACT_VERSION, RuntimeEngineBinding,
-    RuntimeEngineDescriptor, RuntimeEngineFactory,
+pub use runtime_provider::{
+    OfficialRuntimeFactory, OfficialRuntimeProvider, RUNTIME_HOST_CONTRACT_VERSION,
+    RuntimeBuildBinding, RuntimeBuildDescriptor,
 };
 pub use boot_process_reaper::{
     AgentProcessReapReport, ConversationProcessReapVerdict, reap_orphan_agent_processes,
@@ -118,17 +124,9 @@ pub use plugin_tools::{
     NomiPluginProductToolInvocation, NomiPluginProductToolInvoker,
     NomiPluginProductToolSchemaResolver,
 };
-pub use factory::{
-    AgentFactoryDeps, CompanionPromptProvider,
-    build_agent_factory, build_agent_model_config_resolver,
-};
+pub use factory::build_agent_model_config_resolver;
 pub use knowledge_completer::LiveKnowledgeCompleter;
 pub use knowledge_completer::resolve_default_model;
-pub use knowledge_retrieval::LiveKnowledgeRetrievalSink;
-pub use knowledge_writeback::LiveKnowledgeWritebackSink;
-pub use nomi_session_persistence::{
-    NomiSessionPersistence, NomiSessionRecoveryRewindOutcome, NomiSessionResetOutcome,
-};
 pub use terminal_title_completer::LiveTerminalTitleCompleter;
 pub use nomifun_api_types::{NomiBuildExtra, SlashCommandItem};
 pub use protocol::events::{AgentStreamEvent, FinishEventData, TurnStopReason};
@@ -136,7 +134,7 @@ pub use protocol::send_error::AgentSendError;
 pub use registry::{AgentRegistry, UnavailableReason};
 pub use routes::{AgentRouterState, agent_routes};
 pub use services::AgentService;
-pub use runtime_registry::{
-    AgentRuntimeModelConfigResolver, AgentRuntimeRegistry, InMemoryAgentRuntimeRegistry,
+pub use runtime_sessions::{
+    RuntimeModelConfigResolver, AgentRuntimeSessions, InMemoryAgentRuntimeSessions,
     RuntimeModelConfigBinding,
 };

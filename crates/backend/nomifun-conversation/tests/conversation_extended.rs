@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use nomifun_ai_agent::AgentRuntimeRegistry;
+use nomifun_ai_agent::AgentRuntimeSessions;
 use nomifun_api_types::{
     CloneConversationRequest, CreateConversationRequest, ListMessagesQuery, SearchMessagesQuery, WebSocketMessage,
 };
@@ -37,10 +37,10 @@ impl UserEventSink for TestBroadcaster {
     }
 }
 
-struct NoopAgentRuntimeRegistry;
+struct NoopAgentRuntimeSessions;
 
 #[async_trait::async_trait]
-impl AgentRuntimeRegistry for NoopAgentRuntimeRegistry {
+impl AgentRuntimeSessions for NoopAgentRuntimeSessions {
     fn get_runtime(&self, _: &str) -> Option<nomifun_ai_agent::AgentRuntimeHandle> {
         None
     }
@@ -61,24 +61,6 @@ impl AgentRuntimeRegistry for NoopAgentRuntimeRegistry {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AppError>> + Send>> {
         // This registry never spawns a process, so teardown is trivially proven.
         Box::pin(std::future::ready(Ok(())))
-    }
-    /// Nomi is the only agent type, so reset/clear-context always reaches the
-    /// persisted-session seam. This registry never persisted a session, so the
-    /// exact generation is trivially already absent.
-    fn reset_persisted_nomi_session(
-        &self,
-        _: &str,
-        _: i64,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<nomifun_ai_agent::NomiSessionResetOutcome, AppError>,
-                > + Send,
-        >,
-    > {
-        Box::pin(std::future::ready(Ok(
-            nomifun_ai_agent::NomiSessionResetOutcome::AlreadyAbsent,
-        )))
     }
     fn terminate_all(&self) {}
     fn active_runtime_count(&self) -> usize {
@@ -187,13 +169,13 @@ async fn setup() -> (
     let broadcaster = Arc::new(TestBroadcaster::new());
     let agent_metadata_repo: Arc<dyn nomifun_db::IAgentMetadataRepository> =
         Arc::new(nomifun_db::SqliteAgentMetadataRepository::new(db.pool().clone()));
-    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(NoopAgentRuntimeRegistry);
+    let runtime_sessions: Arc<dyn AgentRuntimeSessions> = Arc::new(NoopAgentRuntimeSessions);
     let svc = ConversationService::new(
         Arc::<str>::from(USER_ID),
         std::env::temp_dir(),
         broadcaster.clone(),
         Arc::new(EmptySkillResolver),
-        runtime_registry,
+        runtime_sessions,
         repo.clone(),
         agent_metadata_repo,
         Arc::new(nomifun_conversation::NoExecutionConversationBoundary),

@@ -43,7 +43,6 @@ if (mode === 'crate') {
   run('cargo', ['test', '-p', 'nomifun-browser-platform', ...inputArgs]);
   run('cargo', ['test', '-p', 'nomifun-gateway', ...inputArgs]);
   run('cargo', ['test', '-p', 'nomifun-ai-agent', '--features', 'browser-use', '--lib', ...inputArgs]);
-  run('cargo', ['test', '-p', 'nomi-agent', '--lib', ...inputArgs]);
   run('cargo', ['test', '-p', 'nomifun-app', '--features', 'browser-use', '--lib', ...inputArgs]);
 } else if (mode === 'core') {
   run('cargo', ['test', '--workspace', '--exclude', 'nomifun-desktop', ...inputArgs]);

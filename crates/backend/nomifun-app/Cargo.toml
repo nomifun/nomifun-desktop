@@ -13,10 +13,6 @@ path = "src/main.rs"
 # shared filesystem state. The content suite includes a coverage guard so a new
 # top-level test file cannot be silently omitted while autotests is disabled.
 [[test]]
-name = "delivery_notify_integration"
-path = "tests/delivery_notify_integration.rs"
-
-[[test]]
 name = "webui_lan_smoke"
 path = "tests/webui_lan_smoke.rs"
 
@@ -212,7 +208,7 @@ nomifun-office.workspace = true
 nomifun-shell.workspace = true
 nomifun-model-invoke.workspace = true
 nomifun-ai-agent.workspace = true
-nomifun-coding-engine.workspace = true
+nomifun-agent-runtime.workspace = true
 nomifun-engine-core.workspace = true
 nomifun-ssh.workspace = true
 nomifun-mcp.workspace = true

@@ -181,7 +181,7 @@ impl Drop for RemoteDetachedMutationLease {
 /// Sidecar-free task supervisor used by the Nomi-core Remote adapter.
 ///
 /// The current Nomi product owns its live runtime in
-/// `AgentRuntimeRegistry`/`ConversationService`; Remote must therefore never
+/// `AgentRuntimeSessions`/`ConversationService`; Remote must therefore never
 /// create a second process runtime merely to give `open` an asynchronous
 /// shape.  This supervisor only keeps a bounded, single-flight task alive while
 /// the Nomi service settles a real operation (usually the optional initial

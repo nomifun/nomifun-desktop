@@ -11,7 +11,7 @@ use nomifun_agent_contracts::AgentSessionId;
 #[cfg(test)]
 use nomifun_ai_agent::AgentStreamEvent;
 #[cfg(test)]
-use nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry;
+use nomifun_ai_agent::runtime_sessions::AgentRuntimeSessions;
 use nomifun_api_types::CreateConversationRequest;
 #[cfg(test)]
 use nomifun_api_types::SendMessageRequest;
@@ -1897,7 +1897,7 @@ mod tests {
         const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
         const COMPLETED_RUN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000021";
         let agent = Arc::new(RecordingAgent::new(CONVERSATION_ID));
-        let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(
+        let runtime_sessions = Arc::new(RecordingAgentRuntimeSessions::new(
             AgentRuntimeHandle::Mock(agent.clone()),
         ));
         let mut job = sample_job();
@@ -1946,7 +1946,7 @@ mod tests {
             .with_delivery_receipt(receipt),
         );
         let executor =
-            make_executor_with_runtime_registry_and_repo(runtime_registry.clone(), repo.clone());
+            make_executor_with_runtime_sessions_and_repo(runtime_sessions.clone(), repo.clone());
 
         let result = executor
             .execute_inner_with_run_id(&job, COMPLETED_RUN_ID, CONVERSATION_ID, None)
@@ -1959,7 +1959,7 @@ mod tests {
             }
         );
         assert!(
-            runtime_registry.recorded_options().is_empty(),
+            runtime_sessions.recorded_options().is_empty(),
             "completed replay must not build a runtime or mount prepared knowledge"
         );
         assert_eq!(agent.send_calls(), 0, "completed replay must not redeliver");
@@ -1972,7 +1972,7 @@ mod tests {
         const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
         const RUN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000020";
         let agent = Arc::new(RecordingAgent::new(CONVERSATION_ID));
-        let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(
+        let runtime_sessions = Arc::new(RecordingAgentRuntimeSessions::new(
             AgentRuntimeHandle::Mock(agent.clone()),
         ));
         let job = sample_job();
@@ -2019,7 +2019,7 @@ mod tests {
             .with_delivery_receipt(receipt),
         );
         let executor =
-            make_executor_with_runtime_registry_and_repo(runtime_registry.clone(), repo.clone());
+            make_executor_with_runtime_sessions_and_repo(runtime_sessions.clone(), repo.clone());
 
         let result = executor
             .execute_inner_with_run_id(&job, RUN_ID, CONVERSATION_ID, None)
@@ -2033,7 +2033,7 @@ mod tests {
             ),
             "restart cannot prove local process-tree quiescence, so the exact receipt must stay quarantined"
         );
-        assert!(runtime_registry.recorded_options().is_empty());
+        assert!(runtime_sessions.recorded_options().is_empty());
         assert_eq!(agent.send_calls(), 0, "orphan recovery must never redeliver");
         assert!(repo.inserted_messages().is_empty());
         let settled = repo
@@ -2055,7 +2055,7 @@ mod tests {
         const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
         const RUN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000024";
         let agent = Arc::new(RecordingAgent::new(CONVERSATION_ID));
-        let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(
+        let runtime_sessions = Arc::new(RecordingAgentRuntimeSessions::new(
             AgentRuntimeHandle::Mock(agent.clone()),
         ));
         let job = sample_job();
@@ -2102,7 +2102,7 @@ mod tests {
             .with_delivery_receipt(receipt),
         );
         let executor =
-            make_executor_with_runtime_registry_and_repo(runtime_registry.clone(), repo.clone());
+            make_executor_with_runtime_sessions_and_repo(runtime_sessions.clone(), repo.clone());
 
         let result = executor
             .execute_inner_with_run_id(&job, RUN_ID, CONVERSATION_ID, None)
@@ -2116,7 +2116,7 @@ mod tests {
             ),
             "an unproven external owner must remain quarantined"
         );
-        assert!(runtime_registry.recorded_options().is_empty());
+        assert!(runtime_sessions.recorded_options().is_empty());
         assert_eq!(agent.send_calls(), 0);
         let receipt = repo
             .turn
@@ -2180,8 +2180,8 @@ mod tests {
         );
         repo.fail_next_receipt_probes(3);
         let agent = Arc::new(RecordingAgent::new(CONVERSATION_ID));
-        let executor = make_executor_with_runtime_registry_and_repo(
-            Arc::new(RecordingAgentRuntimeRegistry::new(
+        let executor = make_executor_with_runtime_sessions_and_repo(
+            Arc::new(RecordingAgentRuntimeSessions::new(
                 AgentRuntimeHandle::Mock(agent),
             )),
             repo.clone(),
@@ -2221,8 +2221,8 @@ mod tests {
             serde_json::json!({}),
         ));
         repo.fail_next_receipt_probes(usize::MAX);
-        let executor = make_executor_with_runtime_registry_and_repo(
-            Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
+        let executor = make_executor_with_runtime_sessions_and_repo(
+            Arc::new(RecordingAgentRuntimeSessions::new(AgentRuntimeHandle::Mock(
                 Arc::new(RecordingAgent::without_auto_finish(CONVERSATION_ID)),
             ))),
             repo,
@@ -2288,8 +2288,8 @@ mod tests {
         // A conversation projection becoming idle is not a turn terminal fact.
         repo.mark_conversation_idle_without_terminal_receipt();
         let agent = Arc::new(RecordingAgent::without_auto_finish(CONVERSATION_ID));
-        let executor = Arc::new(make_executor_with_runtime_registry_and_repo(
-            Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
+        let executor = Arc::new(make_executor_with_runtime_sessions_and_repo(
+            Arc::new(RecordingAgentRuntimeSessions::new(AgentRuntimeHandle::Mock(
                 agent.clone(),
             ))),
             repo.clone(),
@@ -2364,8 +2364,8 @@ mod tests {
             )
             .with_delivery_receipt(receipt),
         );
-        let executor = make_executor_with_runtime_registry_and_repo(
-            Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
+        let executor = make_executor_with_runtime_sessions_and_repo(
+            Arc::new(RecordingAgentRuntimeSessions::new(AgentRuntimeHandle::Mock(
                 Arc::new(RecordingAgent::without_auto_finish(CONVERSATION_ID)),
             ))),
             repo.clone(),
@@ -2432,8 +2432,8 @@ mod tests {
             )
             .with_delivery_receipt(receipt),
         );
-        let executor = make_executor_with_runtime_registry_and_repo(
-            Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
+        let executor = make_executor_with_runtime_sessions_and_repo(
+            Arc::new(RecordingAgentRuntimeSessions::new(AgentRuntimeHandle::Mock(
                 Arc::new(RecordingAgent::without_auto_finish(CONVERSATION_ID)),
             ))),
             repo,
@@ -2462,11 +2462,11 @@ mod tests {
         const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
         const RUN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000030";
         let agent = Arc::new(RecordingAgent::without_auto_finish(CONVERSATION_ID));
-        let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(
+        let runtime_sessions = Arc::new(RecordingAgentRuntimeSessions::new(
             AgentRuntimeHandle::Mock(agent.clone()),
         ));
-        let executor = Arc::new(make_executor_with_runtime_registry(
-            runtime_registry.clone(),
+        let executor = Arc::new(make_executor_with_runtime_sessions(
+            runtime_sessions.clone(),
         ));
         let job = Arc::new(sample_job());
 
@@ -2513,7 +2513,7 @@ mod tests {
         assert_eq!(second_result, expected);
         assert_eq!(agent.send_calls(), 1);
         assert_eq!(
-            runtime_registry.recorded_options().len(),
+            runtime_sessions.recorded_options().len(),
             1,
             "accepted replay must not build or mutate a second runtime"
         );
@@ -2524,13 +2524,13 @@ mod tests {
         const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
         const RUN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000031";
         let agent = Arc::new(RecordingAgent::without_auto_finish(CONVERSATION_ID));
-        let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(
+        let runtime_sessions = Arc::new(RecordingAgentRuntimeSessions::new(
             AgentRuntimeHandle::Mock(agent.clone()),
         ));
         let (executor, conversation_service) =
-            make_executor_and_service_with_runtime_registry(runtime_registry.clone());
+            make_executor_and_service_with_runtime_sessions(runtime_sessions.clone());
         let executor = Arc::new(executor);
-        let interactive_registry: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
+        let interactive_registry: Arc<dyn AgentRuntimeSessions> = runtime_sessions.clone();
         let barrier = Arc::new(Barrier::new(2));
         let job = Arc::new(sample_job());
 
@@ -2595,10 +2595,10 @@ mod tests {
         let agent = Arc::new(RecordingAgent::new(
             "0190f5fe-7c00-7a00-8abc-012345678901",
         ));
-        let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
+        let runtime_sessions = Arc::new(RecordingAgentRuntimeSessions::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
-        let executor = make_executor_with_runtime_registry(runtime_registry.clone());
+        let executor = make_executor_with_runtime_sessions(runtime_sessions.clone());
         let job = CronJob {
             execution_mode: ExecutionMode::NewConversation,
             ..sample_job()
@@ -2618,7 +2618,7 @@ mod tests {
         assert!(!sent_messages[0].content.contains("SKILL_SUGGEST.md"));
         assert!(sent_messages[0].inject_skills.is_empty());
 
-        let options = runtime_registry
+        let options = runtime_sessions
             .last_options()
             .expect("runtime registry should capture build options");
         assert!(
@@ -2635,10 +2635,10 @@ mod tests {
         let agent = Arc::new(RecordingAgent::new(
             "0190f5fe-7c00-7a00-8abc-012345678901",
         ));
-        let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
+        let runtime_sessions = Arc::new(RecordingAgentRuntimeSessions::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
-        let executor = make_executor_with_runtime_registry(runtime_registry.clone());
+        let executor = make_executor_with_runtime_sessions(runtime_sessions.clone());
         let job = CronJob {
             execution_mode: ExecutionMode::NewConversation,
             ..sample_job()
@@ -2669,7 +2669,7 @@ mod tests {
             vec![JOB_SKILL_NAME.to_owned()]
         );
 
-        let options = runtime_registry
+        let options = runtime_sessions
             .recorded_options()
             .into_iter()
             .next()
@@ -2743,13 +2743,13 @@ mod tests {
         let agent = Arc::new(RecordingAgent::new(
             "0190f5fe-7c00-7a00-8abc-012345678901",
         ));
-        let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
+        let runtime_sessions = Arc::new(RecordingAgentRuntimeSessions::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
         let repo = Arc::new(ExistingConversationRepo::new());
         let expected_workspace = repo.workspace_path();
         let executor =
-            make_executor_with_runtime_registry_and_repo(runtime_registry.clone(), repo);
+            make_executor_with_runtime_sessions_and_repo(runtime_sessions.clone(), repo);
         let mut job = CronJob {
             execution_mode: ExecutionMode::NewConversation,
             ..sample_job()
@@ -2765,7 +2765,7 @@ mod tests {
             }
         );
         wait_for_agent_send(&agent, 1).await;
-        let options = runtime_registry
+        let options = runtime_sessions
             .last_options()
             .expect("runtime registry should capture build options");
         assert_eq!(options.workspace, expected_workspace);
@@ -2776,14 +2776,14 @@ mod tests {
         let agent = Arc::new(RecordingAgent::new(
             "0190f5fe-7c00-7a00-8abc-012345678901",
         ));
-        let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
+        let runtime_sessions = Arc::new(RecordingAgentRuntimeSessions::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
         let repo = Arc::new(MissingWorkspaceConversationRepo::new(
             "0190f5fe-7c00-7a00-8abc-012345678901",
             serde_json::json!({}),
         ));
-        let executor = make_executor_with_runtime_registry_and_repo(runtime_registry.clone(), repo.clone());
+        let executor = make_executor_with_runtime_sessions_and_repo(runtime_sessions.clone(), repo.clone());
         let mut job = CronJob {
             execution_mode: ExecutionMode::NewConversation,
             ..sample_job()
@@ -2798,7 +2798,7 @@ mod tests {
                 if message.contains("has no canonical workspace")
         ));
         assert_eq!(agent.send_calls(), 0);
-        assert!(runtime_registry.last_options().is_none());
+        assert!(runtime_sessions.last_options().is_none());
         assert!(repo.last_update_with_extra().is_none());
     }
 
@@ -2813,7 +2813,7 @@ mod tests {
         let agent = Arc::new(RecordingAgent::new(
             "0190f5fe-7c00-7a00-8abc-012345678901",
         ));
-        let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(
+        let runtime_sessions = Arc::new(RecordingAgentRuntimeSessions::new(
             AgentRuntimeHandle::Mock(agent.clone()),
         ));
         let repo = Arc::new(MissingWorkspaceConversationRepo::new(
@@ -2823,8 +2823,8 @@ mod tests {
                 "workspace": "/source-install/conversations/0190f5fe-7c00-7a00-8abc-000000000000"
             }),
         ));
-        let executor = make_executor_with_runtime_registry_and_repo_with_work_dir(
-            runtime_registry.clone(),
+        let executor = make_executor_with_runtime_sessions_and_repo_with_work_dir(
+            runtime_sessions.clone(),
             repo,
             work_dir.path().to_path_buf(),
         );
@@ -2844,7 +2844,7 @@ mod tests {
 
         assert!(matches!(result, ExecutionResult::Success { .. }));
         wait_for_agent_send(&agent, 1).await;
-        let options = runtime_registry
+        let options = runtime_sessions
             .last_options()
             .expect("runtime registry should capture build options");
         let expected = expected_path.to_string_lossy().into_owned();
@@ -2861,7 +2861,7 @@ mod tests {
         let agent = Arc::new(RecordingAgent::new(
             "0190f5fe-7c00-7a00-8abc-012345678901",
         ));
-        let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
+        let runtime_sessions = Arc::new(RecordingAgentRuntimeSessions::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
         let workspace_dir =
@@ -2871,7 +2871,7 @@ mod tests {
             "0190f5fe-7c00-7a00-8abc-012345678901",
             serde_json::json!({ "workspace": workspace_path }),
         ));
-        let executor = make_executor_with_runtime_registry_and_repo(runtime_registry, repo.clone());
+        let executor = make_executor_with_runtime_sessions_and_repo(runtime_sessions, repo.clone());
         let job = CronJob {
             execution_mode: ExecutionMode::NewConversation,
             ..sample_job()
@@ -3004,12 +3004,12 @@ mod tests {
 
     impl MockAgentRuntime for RecordingAgent {}
 
-    struct FixedAgentRuntimeRegistry {
+    struct FixedAgentRuntimeSessions {
         agent: AgentRuntimeHandle,
     }
 
     #[async_trait::async_trait]
-    impl AgentRuntimeRegistry for FixedAgentRuntimeRegistry {
+    impl AgentRuntimeSessions for FixedAgentRuntimeSessions {
         fn get_runtime(&self, _conversation_id: &str) -> Option<AgentRuntimeHandle> {
             Some(self.agent.clone())
         }
@@ -3051,12 +3051,12 @@ mod tests {
         }
     }
 
-    struct RecordingAgentRuntimeRegistry {
+    struct RecordingAgentRuntimeSessions {
         agent: AgentRuntimeHandle,
         options: Mutex<Vec<AgentRuntimeBuildOptions>>,
     }
 
-    impl RecordingAgentRuntimeRegistry {
+    impl RecordingAgentRuntimeSessions {
         fn new(agent: AgentRuntimeHandle) -> Self {
             Self {
                 agent,
@@ -3080,7 +3080,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl AgentRuntimeRegistry for RecordingAgentRuntimeRegistry {
+    impl AgentRuntimeSessions for RecordingAgentRuntimeSessions {
         fn get_runtime(&self, _conversation_id: &str) -> Option<AgentRuntimeHandle> {
             Some(self.agent.clone())
         }
@@ -4089,58 +4089,58 @@ mod tests {
     }
 
     fn make_executor_with_agent(agent: AgentRuntimeHandle) -> JobExecutor {
-        make_executor_with_runtime_registry(Arc::new(FixedAgentRuntimeRegistry { agent }))
+        make_executor_with_runtime_sessions(Arc::new(FixedAgentRuntimeSessions { agent }))
     }
 
-    fn make_executor_with_runtime_registry(runtime_registry: Arc<dyn AgentRuntimeRegistry>) -> JobExecutor {
-        make_executor_and_service_with_runtime_registry(runtime_registry).0
+    fn make_executor_with_runtime_sessions(runtime_sessions: Arc<dyn AgentRuntimeSessions>) -> JobExecutor {
+        make_executor_and_service_with_runtime_sessions(runtime_sessions).0
     }
 
-    fn make_executor_and_service_with_runtime_registry(
-        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    fn make_executor_and_service_with_runtime_sessions(
+        runtime_sessions: Arc<dyn AgentRuntimeSessions>,
     ) -> (JobExecutor, Arc<ConversationService>) {
-        make_executor_with_runtime_registry_and_repo_and_service(
-            runtime_registry,
+        make_executor_with_runtime_sessions_and_repo_and_service(
+            runtime_sessions,
             Arc::new(ExistingConversationRepo::new()),
         )
     }
 
-    fn make_executor_with_runtime_registry_and_repo(
-        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    fn make_executor_with_runtime_sessions_and_repo(
+        runtime_sessions: Arc<dyn AgentRuntimeSessions>,
         repo: Arc<dyn IConversationRepository>,
     ) -> JobExecutor {
-        make_executor_with_runtime_registry_and_repo_and_service(runtime_registry, repo).0
+        make_executor_with_runtime_sessions_and_repo_and_service(runtime_sessions, repo).0
     }
 
-    fn make_executor_with_runtime_registry_and_repo_and_service(
-        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    fn make_executor_with_runtime_sessions_and_repo_and_service(
+        runtime_sessions: Arc<dyn AgentRuntimeSessions>,
         repo: Arc<dyn IConversationRepository>,
     ) -> (JobExecutor, Arc<ConversationService>) {
         let broadcaster = Arc::new(StubBroadcaster);
-        make_executor_with_runtime_registry_repo_broadcaster_and_work_dir_and_service(
-            runtime_registry,
+        make_executor_with_runtime_sessions_repo_broadcaster_and_work_dir_and_service(
+            runtime_sessions,
             repo,
             broadcaster,
             std::env::temp_dir(),
         )
     }
 
-    fn make_executor_with_runtime_registry_and_repo_with_work_dir(
-        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    fn make_executor_with_runtime_sessions_and_repo_with_work_dir(
+        runtime_sessions: Arc<dyn AgentRuntimeSessions>,
         repo: Arc<dyn IConversationRepository>,
         work_dir: PathBuf,
     ) -> JobExecutor {
         let broadcaster = Arc::new(StubBroadcaster);
-        make_executor_with_runtime_registry_repo_broadcaster_and_work_dir(
-            runtime_registry,
+        make_executor_with_runtime_sessions_repo_broadcaster_and_work_dir(
+            runtime_sessions,
             repo,
             broadcaster,
             work_dir,
         )
     }
 
-    fn make_executor_with_runtime_registry_repo_broadcaster_and_work_dir<B>(
-        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    fn make_executor_with_runtime_sessions_repo_broadcaster_and_work_dir<B>(
+        runtime_sessions: Arc<dyn AgentRuntimeSessions>,
         repo: Arc<dyn IConversationRepository>,
         broadcaster: Arc<B>,
         work_dir: PathBuf,
@@ -4148,8 +4148,8 @@ mod tests {
     where
         B: nomifun_realtime::UserEventSink + 'static,
     {
-        make_executor_with_runtime_registry_repo_broadcaster_and_work_dir_and_service(
-            runtime_registry,
+        make_executor_with_runtime_sessions_repo_broadcaster_and_work_dir_and_service(
+            runtime_sessions,
             repo,
             broadcaster,
             work_dir,
@@ -4157,8 +4157,8 @@ mod tests {
         .0
     }
 
-    fn make_executor_with_runtime_registry_repo_broadcaster_and_work_dir_and_service<B>(
-        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    fn make_executor_with_runtime_sessions_repo_broadcaster_and_work_dir_and_service<B>(
+        runtime_sessions: Arc<dyn AgentRuntimeSessions>,
         repo: Arc<dyn IConversationRepository>,
         broadcaster: Arc<B>,
         work_dir: PathBuf,
@@ -4198,7 +4198,7 @@ mod tests {
             work_dir.clone(),
             broadcaster.clone(),
             Arc::new(StubSkillResolver),
-            Arc::clone(&runtime_registry),
+            Arc::clone(&runtime_sessions),
             Arc::clone(&repo),
             Arc::clone(&agent_metadata_repo),
             Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
@@ -4208,7 +4208,7 @@ mod tests {
 
         let sessions = crate::session_port::test_cron_session_port(
             conversation_service.clone(),
-            runtime_registry,
+            runtime_sessions,
         );
         let executor = JobExecutor::new(
             Arc::<str>::from(USER_ID),

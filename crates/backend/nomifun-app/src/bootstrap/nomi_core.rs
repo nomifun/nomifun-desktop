@@ -31,7 +31,7 @@ mod registry_probe {
 }
 
 
-/// The existing Conversation owner with an open, host-registered runtime catalog.
+/// The canonical Session owner wired to the one source-installed Runtime.
 /// An existing Conversation never changes runtime families in place.
 #[derive(Clone)]
 pub struct NomiCoreApplication {

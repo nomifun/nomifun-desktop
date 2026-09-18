@@ -279,8 +279,8 @@ for (const activeSample of [
   );
 }
 invariant(
-  !RETIRED_EXACT_IDENTITY.test('AgentRuntimeRegistry'),
-  'retired config-key scanner must not reject the legitimate Agent runtime type family',
+  !RETIRED_EXACT_IDENTITY.test('AgentRuntimeSessions'),
+  'retired config-key scanner must not reject the official Runtime Session owner',
 );
 
 function sorted(values) {

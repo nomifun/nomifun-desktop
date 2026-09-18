@@ -4,7 +4,6 @@
 //! Action authority and the Browser Resource binding arrive independently
 //! from the frozen AgentSession Snapshot.
 
-use futures_util::FutureExt;
 use nomifun_browser_platform::{
     bound_resource::BoundBrowserProviderResource,
     product::{
@@ -18,7 +17,7 @@ use nomifun_browser_platform::{
     },
     workspace::BrowserResourceService,
 };
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 #[path = "browser_workspace_provider/attached_provider.rs"]
 pub mod attached_provider;
@@ -248,72 +247,6 @@ mod binding_tests {
             .insert("persistence".into(), "temporary-ish".into());
         assert!(browser_resource_ephemeral(&binding).is_err());
     }
-}
-
-pub(crate) fn resolver(
-    resources: Option<Arc<BrowserResourceService>>,
-    attached_chrome: Option<Arc<attached_provider::AttachedChromeProviderService>>,
-    data_dir: PathBuf,
-    owner: Arc<str>,
-) -> nomifun_ai_agent::factory::BrowserRuntimeResolver {
-    Arc::new(move |request| {
-        let (resources, attached_chrome, data_dir, owner) = (
-            resources.clone(),
-            attached_chrome.clone(),
-            data_dir.clone(),
-            owner.clone(),
-        );
-        async move {
-            let nomifun_ai_agent::factory::BrowserRuntimeRequest {
-                principal_id,
-                agent_session_id,
-                action_allowlist,
-                provider,
-                resource_binding,
-            } = request;
-            if principal_id != owner.as_ref() {
-                return Err(nomifun_common::AppError::NotFound(
-                    "AgentSession not found.".into(),
-                ));
-            }
-            if action_allowlist.is_empty() {
-                return Ok(None);
-            }
-            let provider = provider.ok_or_else(|| {
-                nomifun_common::AppError::UnprocessableEntity(
-                    "The Browser Module has no exact Provider binding.".into(),
-                )
-            })?;
-            validate_browser_provider(&provider)?;
-            let binding = resource_binding.ok_or_else(|| {
-                nomifun_common::AppError::UnprocessableEntity(
-                    "The Browser Module has no exact Browser Resource binding.".into(),
-                )
-            })?;
-            let ephemeral = browser_resource_ephemeral(&binding)?;
-            let provider = provider_descriptor(&provider, &binding)?;
-            let resource = browser_resource_binding(binding, provider)?;
-            let authority = BrowserSessionAuthority::from_action_ids(
-                principal_id,
-                agent_session_id,
-                action_allowlist.iter().map(|action| action.as_ref()),
-                resource,
-            )
-            .map_err(|error| {
-                nomifun_common::AppError::UnprocessableEntity(error.to_string())
-            })?;
-            bind_authorized_resource(
-                resources,
-                attached_chrome,
-                &data_dir,
-                authority,
-                ephemeral,
-            )
-            .await
-            .map(Some)
-        }
-        .boxed()
-    })
 }
 
 /// Materialize the exact provider selected by an already-authorized canonical

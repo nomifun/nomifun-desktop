@@ -590,7 +590,7 @@ function scanEntries(entries) {
       COMMAND_TOOL_FILES.has(path) ||
       path === 'crates/agent/nomi-tools/src/process_store.rs' ||
       path === 'crates/agent/nomi-tools/src/lib.rs' ||
-      path === 'crates/agent/nomi-agent/src/bootstrap.rs';
+      path === 'crates/backend/nomifun-app/src/router/engine_process_host.rs';
     if (!inToolSurface) continue;
 
     if (COMMAND_TOOL_FILES.has(path)) {

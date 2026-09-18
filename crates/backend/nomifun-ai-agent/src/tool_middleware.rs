@@ -1,6 +1,6 @@
 //! Tool-stage Product consumers share the existing frozen Service invoker.
 use super::*;
-use nomi_agent::tool_middleware::{BeforeToolInput, BeforeToolDecision, ToolCallMiddleware};
+use crate::runtime_tool_middleware_contract::{BeforeToolInput, BeforeToolDecision, ToolCallMiddleware};
 pub use nomifun_agent_contracts::tool_middleware::{BEFORE_ACTION_ID, before_action, schemas};
 
 #[derive(Clone)]
@@ -73,7 +73,7 @@ impl ToolCallMiddleware for ProductToolCheck {
             input: StrictJsonValue(serde_json::to_value(input).map_err(|_| "Invalid tool check input")?),
         }).await.map_err(|_| "Product before_tool invocation failed".to_owned())?;
         let bytes = canonical_json_bytes(&value).map_err(|_| "Invalid tool check output".to_owned())?;
-        nomi_agent::tool_middleware::decode_decision(&bytes)
+        crate::runtime_tool_middleware_contract::decode_decision(&bytes)
     }
     fn label(&self) -> &str { self.action.capability_id().as_ref() }
 }

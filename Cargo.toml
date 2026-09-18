@@ -57,7 +57,7 @@ nomifun-js-kernel-adapter = { path = "crates/backend/nomifun-js-kernel-adapter" 
 nomifun-js-runtime = { path = "crates/backend/nomifun-js-runtime" }
 nomifun-plugin-platform = { path = "crates/backend/nomifun-plugin-platform" }
 nomifun-chat-model-broker = { path = "crates/backend/nomifun-chat-model-broker" }
-nomifun-coding-engine = { path = "crates/backend/nomifun-coding-engine" }
+nomifun-agent-runtime = { path = "crates/backend/nomifun-agent-runtime" }
 nomifun-engine-core = { path = "crates/backend/nomifun-engine-core" }
 nomifun-agent-control-plane = { path = "crates/backend/nomifun-agent-control-plane" }
 nomifun-agent-domain-support = { path = "crates/backend/nomifun-agent-domain-support" }
@@ -84,7 +84,6 @@ nomi-tools = { path = "crates/agent/nomi-tools" }
 nomi-mcp = { path = "crates/agent/nomi-mcp" }
 nomi-skills = { path = "crates/agent/nomi-skills" }
 nomi-memory = { path = "crates/agent/nomi-memory" }
-nomi-agent = { path = "crates/agent/nomi-agent" }
 nomi-computer = { path = "crates/agent/nomi-computer" }
 nomi-a11y = { path = "crates/agent/nomi-a11y" }
 nomi-browser-engine = { path = "crates/agent/nomi-browser-engine" }

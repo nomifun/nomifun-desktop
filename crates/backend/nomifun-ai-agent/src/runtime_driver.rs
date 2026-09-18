@@ -29,7 +29,7 @@ mod tests {
     use super::*;
     use crate::engine_sdk::EngineTurnTerminal;
     use crate::types::{AgentRuntimeBuildOptions, SendMessageData};
-    use crate::{AgentRuntimeControl, RegisteredAgentRuntime};
+    use crate::{AgentRuntimeControl, OfficialAgentRuntime};
 
     const OWNER: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const SESSION: &str = "0190f5fe-7c00-7a00-8000-000000000002";

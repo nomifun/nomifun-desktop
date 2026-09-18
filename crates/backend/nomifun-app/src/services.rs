@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nomifun_ai_agent::{
-    AgentFactoryDeps, AgentRegistry, AgentRuntimeRegistry,
-    InMemoryAgentRuntimeRegistry, build_agent_factory, build_agent_model_config_resolver,
+    AgentRegistry, AgentRuntimeSessions, InMemoryAgentRuntimeSessions,
+    build_agent_model_config_resolver,
 };
 use nomifun_agent_execution::AgentExecutionLifecycle;
 use nomifun_api_types::{GatewayMcpConfig, RequirementMcpConfig};
@@ -645,7 +645,7 @@ async fn await_browser_shutdown_step(step: Option<BrowserShutdownStep>) -> Resul
 
 pub struct AppServices {
     /// Process-owned handle to the one immutable official Runtime provider.
-    pub(crate) runtime_engines: Arc<crate::router::runtime_engines::RuntimeEngineHost>,
+    pub(crate) official_runtime: Arc<crate::router::official_runtime::OfficialRuntimeHost>,
     pub database: Database,
     /// Process-lifetime cancellation shared by background domain tasks that
     /// must stop before the database is closed.
@@ -705,13 +705,13 @@ pub struct AppServices {
     pub qr_token_store: Arc<QrTokenStore>,
     pub ws_manager: Arc<WebSocketManager>,
     pub event_bus: Arc<BroadcastEventBus>,
-    pub agent_runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    pub agent_runtime_sessions: Arc<dyn AgentRuntimeSessions>,
     pub conversation_runtime_state: Arc<ConversationRuntimeStateService>,
-    /// Same instance as `agent_runtime_registry`, exposed through the
+    /// Same instance as `agent_runtime_sessions`, exposed through the
     /// `OnConversationDelete` trait so `ConversationService::with_delete_hook`
     /// can wire it up. Optional because tests construct `AppServices` with a
-    /// mock `agent_runtime_registry` that does not implement the trait.
-    pub runtime_registry_delete_hook: Option<Arc<dyn OnConversationDelete>>,
+    /// mock `agent_runtime_sessions` that does not implement the trait.
+    pub runtime_sessions_delete_hook: Option<Arc<dyn OnConversationDelete>>,
     pub agent_registry: Arc<AgentRegistry>,
     pub conversation_repo: Arc<dyn IConversationRepository>,
     /// One mandatory Conversation↔Execution authority shared by every
@@ -1233,8 +1233,8 @@ impl AppServices {
     /// Replace the process-local Agent runtime registry after construction.
     ///
     /// Primarily used by tests to inject mock implementations.
-    pub fn with_agent_runtime_registry(mut self, runtime_registry: Arc<dyn AgentRuntimeRegistry>) -> Self {
-        self.agent_runtime_registry = runtime_registry;
+    pub fn with_agent_runtime_sessions(mut self, runtime_sessions: Arc<dyn AgentRuntimeSessions>) -> Self {
+        self.agent_runtime_sessions = runtime_sessions;
         self
     }
 
@@ -1344,7 +1344,7 @@ impl AppServices {
         self.shutdown_cron_timers();
         // Fence runtime admission immediately, before awaiting any producer or
         // resource owner. Its owned flight runs while these owners wind down.
-        let engine_shutdown = self.agent_runtime_registry.shutdown_and_wait();
+        let engine_shutdown = self.agent_runtime_sessions.shutdown_and_wait();
         if let Err(error) = self
             .plugin_runtime
             .shutdown_service_runtime(self.authoritative_user_id.as_ref())
@@ -1793,9 +1793,6 @@ impl AppServices {
                 .with_completion_notifier(completion_notifier)
                 .with_attachment_store(attachment_store),
         );
-        let requirement_sink =
-            nomifun_requirement::RequirementServiceSink::into_arc(requirement_service.clone());
-
         // Requirement MCP server: gives ACP AutoWork sessions the
         // `requirement_complete` / `requirement_update_status` declaration tools
         // over a stdio bridge (claude/codex/gemini are stdio-only for MCP).
@@ -2216,112 +2213,24 @@ impl AppServices {
             }
         };
 
-        let provider_digest_pool = database.pool().clone();
-        let provider_config_digest_resolver: nomifun_ai_agent::factory::ProviderConfigDigestResolver =
-            Arc::new(move |provider_id: String| {
-                let pool = provider_digest_pool.clone();
-                Box::pin(async move {
-                    crate::router::chat_broker_host::provider_config_digest(
-                        &pool,
-                        &nomifun_chat_model_broker::ProviderIdRef::from(provider_id),
-                    )
-                    .await
-                    .map(|digest| digest.as_ref().to_owned())
-                    .map_err(|_| {
-                        nomifun_common::AppError::Conflict(
-                            "the canonical Chat provider configuration is unavailable".to_owned(),
-                        )
-                    })
-                })
-            });
-        let factory = build_agent_factory(AgentFactoryDeps {
-            authoritative_user_id: authoritative_user_id.clone(),
-            model_invoke: model_invoke_service.clone(),
-            model_invoke_service: Some(model_invoke_service.clone()),
-            creation_service: Some(creation_service.clone()),
-            provider_config_digest_resolver: Some(provider_config_digest_resolver),
-            data_dir: data_dir.clone(),
-            work_dir: work_dir.clone(),
-            gateway_mcp_config: gateway_mcp_config.clone(),
-            #[cfg(feature = "browser-use")]
-            browser_runtime_resolver: Some(crate::browser_workspace_provider::resolver(
-                    host_services.browser_resources.clone(), host_services.attached_chrome.clone(),
-                    data_dir.clone(), authoritative_user_id.clone(),
-                )),
-            client_prefs: Some(Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
-                database.pool().clone(),
-            ))
-                as Arc<dyn nomifun_db::IClientPreferenceRepository>),
-            // System settings repo: lets the nomi factory read the app UI language
-            // live per build so every nomi session thinks and replies in the app's
-            // language instead of the old hardcoded Chinese (mirrors client_prefs).
-            settings_repo: Some(Arc::new(nomifun_db::SqliteSettingsRepository::new(
-                database.pool().clone(),
-            )) as Arc<dyn nomifun_db::ISettingsRepository>),
-            requirement_sink: Some(requirement_sink),
-            // Schedule actions are materialized from the frozen
-            // `automation.schedule` Module. The legacy native Cron tool family
-            // must stay unreachable during the Store cutover.
-            cron_sink_factory: None,
-            companion_sink: Some(companion_service.memory_sink()),
-            // Companion self-evolved skill auto-use (`companion_skill` tool + per-turn
-            // when_to_use injection). Only registered for companion sessions (factory gates).
-            companion_skill_sink: Some(companion_service.skill_sink()),
-            // Live knowledge_search sink: registers the retrieval tool over the
-            // shared KnowledgeService. The field's declared type
-            // `Option<Arc<dyn KnowledgeRetrievalSink>>` drives the unsized
-            // coercion, so no explicit `dyn` annotation is needed here.
-            knowledge_retrieval: Some(Arc::new(nomifun_ai_agent::LiveKnowledgeRetrievalSink {
-                service: knowledge_service.clone(),
-            })),
-            // Live knowledge_write (回血) sink: registers the native write-back
-            // tool over the same KnowledgeService. Gated downstream on bound
-            // bases + write-back enabled, so a read-only session never sees it.
-            knowledge_writeback: Some(Arc::new(nomifun_ai_agent::LiveKnowledgeWritebackSink {
-                service: knowledge_service.clone(),
-            })),
-            companion_prompt: Some(
-                companion_service.clone() as Arc<dyn nomifun_ai_agent::CompanionPromptProvider>
-            ),
-            // SSH remote sessions: the factory dials through the one process pool,
-            // so a runtime rebuilt by a model switch rejoins the conversation's
-            // existing link instead of opening (and abandoning) a second one.
-            ssh_provider: Some(Arc::new(ssh_pool.clone())
-                as Arc<dyn nomifun_ai_agent::SshBackendProvider>),
-        });
-
-        // Agent factory is now wired. Future extension/custom agents
-        // that get written to `agent_metadata` will show up after the
-        // relevant service calls `AgentRegistry::hydrate`.
-        let runtime_engines = Arc::new(crate::router::runtime_engines::RuntimeEngineHost::default());
-        let factory = runtime_engines.dispatch(factory);
-        let engine_policy = Arc::downgrade(&runtime_engines);
-        let context_policy = Arc::downgrade(&runtime_engines);
-        let runtime_registry_concrete = Arc::new(
-            InMemoryAgentRuntimeRegistry::new(factory)
-                .with_context_policy_resolver(Arc::new(move |binding| {
-                    context_policy.upgrade()
-                        .ok_or_else(|| nomifun_common::AppError::Conflict("Runtime host has shut down".into()))?
-                        .catalog()?.uses_platform_history_context(binding)
-                }))
-                .with_nomi_session_resolver(Arc::new(move |binding| {
-                    engine_policy.upgrade()
-                        .ok_or_else(|| nomifun_common::AppError::Conflict("Runtime host has shut down".into()))?
-                        .catalog()?.uses_private_session_codec(binding)
-                }))
+        // AppServices owns the lifecycle registry before router assembly. Its
+        // sole factory resolves the source-installed provider lazily; typed
+        // Session/Broker/Kernel ports are installed later in router state.
+        let official_runtime = Arc::new(crate::router::official_runtime::OfficialRuntimeHost::default());
+        let runtime_sessions_concrete = Arc::new(
+            InMemoryAgentRuntimeSessions::new(official_runtime.factory())
                 .with_model_config_resolver(build_agent_model_config_resolver(
                     model_invoke_service.clone(),
-                ))
-                .with_nomi_session_directory(data_dir.join("nomi-sessions")),
+                )),
         );
-        let agent_runtime_registry: Arc<dyn AgentRuntimeRegistry> = runtime_registry_concrete.clone();
-        let runtime_registry_delete_hook: Arc<dyn OnConversationDelete> = runtime_registry_concrete;
+        let agent_runtime_sessions: Arc<dyn AgentRuntimeSessions> = runtime_sessions_concrete.clone();
+        let runtime_sessions_delete_hook: Arc<dyn OnConversationDelete> = runtime_sessions_concrete;
         let conversation_runtime_state = Arc::new(ConversationRuntimeStateService::default());
 
         let background_shutdown = CancellationToken::new();
         let background_tasks = Arc::new(BackgroundTaskRegistry::new(background_shutdown.clone()));
         let services = Self {
-            runtime_engines,
+            official_runtime,
             database,
             background_shutdown,
             background_tasks,
@@ -2347,9 +2256,9 @@ impl AppServices {
             qr_token_store: Arc::new(QrTokenStore::new()),
             ws_manager: Arc::new(WebSocketManager::new()),
             event_bus,
-            agent_runtime_registry,
+            agent_runtime_sessions,
             conversation_runtime_state,
-            runtime_registry_delete_hook: Some(runtime_registry_delete_hook),
+            runtime_sessions_delete_hook: Some(runtime_sessions_delete_hook),
             agent_registry,
             conversation_repo,
             execution_conversation_boundary,
@@ -2801,12 +2710,12 @@ mod tests {
     }
 
     struct ShutdownRegistryProbe {
-        inner: Arc<dyn AgentRuntimeRegistry>,
+        inner: Arc<dyn AgentRuntimeSessions>,
         allow: Arc<std::sync::atomic::AtomicBool>,
     }
 
     #[async_trait::async_trait]
-    impl AgentRuntimeRegistry for ShutdownRegistryProbe {
+    impl AgentRuntimeSessions for ShutdownRegistryProbe {
         fn get_runtime(&self, id:&str)->Option<nomifun_ai_agent::AgentRuntimeHandle> {self.inner.get_runtime(id)}
         async fn get_or_create_runtime(&self,id:&str,options:nomifun_ai_agent::types::AgentRuntimeBuildOptions)->Result<nomifun_ai_agent::AgentRuntimeHandle,nomifun_common::AppError> {self.inner.get_or_create_runtime(id,options).await}
         fn terminate(&self,id:&str,reason:Option<nomifun_common::AgentKillReason>)->Result<(),nomifun_common::AppError> {self.inner.terminate(id,reason)}
@@ -2824,7 +2733,7 @@ mod tests {
         let root=tempfile::tempdir().unwrap();
         let mut services=AppServices::from_config(db,&test_config(root.path())).await.unwrap();
         let allow=Arc::new(std::sync::atomic::AtomicBool::new(false));
-        services.agent_runtime_registry=Arc::new(ShutdownRegistryProbe {inner:services.agent_runtime_registry.clone(),allow:allow.clone()});
+        services.agent_runtime_sessions=Arc::new(ShutdownRegistryProbe {inner:services.agent_runtime_sessions.clone(),allow:allow.clone()});
         let browser_shutdowns=Arc::new(AtomicUsize::new(0));
         let original=services.browser_platform_shutdown.clone();
         let calls=browser_shutdowns.clone();
@@ -2855,19 +2764,6 @@ mod tests {
         assert!(!tmp.path().join("local-ai").exists());
         assert!(tmp.path().join("plugin-m1/source").is_dir());
         assert!(tmp.path().join("plugin-m1/release").is_dir());
-        assert_eq!(
-            services
-                .agent_runtime_registry
-                .reset_persisted_nomi_session(
-                    &nomifun_common::ConversationId::new().into_string(),
-                    nomifun_common::now_ms(),
-                )
-                .await
-                .unwrap(),
-            nomifun_ai_agent::NomiSessionResetOutcome::AlreadyAbsent,
-            "product composition must configure the exact Nomi session directory used by the factory"
-        );
-
         // JWT service should be functional
         let test_user_id = "0190f5fe-7c00-7a00-8000-000000000001";
         let token = services.jwt_service.sign(test_user_id, "testuser").unwrap();

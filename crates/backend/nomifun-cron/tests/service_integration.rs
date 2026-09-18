@@ -176,10 +176,10 @@ impl UserEventSink for MockBroadcaster {
     }
 }
 
-struct StubAgentRuntimeRegistry;
+struct StubAgentRuntimeSessions;
 
 #[async_trait::async_trait]
-impl nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry for StubAgentRuntimeRegistry {
+impl nomifun_ai_agent::runtime_sessions::AgentRuntimeSessions for StubAgentRuntimeSessions {
     fn get_runtime(&self, _: &str) -> Option<AgentRuntimeHandle> {
         None
     }
@@ -419,7 +419,7 @@ const fn test_turn_reconciliation_from_conversation(
 /// adapter from the production crate.
 struct TestCronSessionPort {
     service: Arc<ConversationService>,
-    runtime_registry: Arc<dyn nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry>,
+    runtime_sessions: Arc<dyn nomifun_ai_agent::runtime_sessions::AgentRuntimeSessions>,
     canonical_sessions: Arc<Mutex<HashMap<String, CronSessionProjection>>>,
 }
 
@@ -544,7 +544,7 @@ impl CronSessionPort for TestCronSessionPort {
                 &request.owner_id,
                 request.agent_session_id.as_ref(),
                 &request.idempotency_key,
-                &self.runtime_registry,
+                &self.runtime_sessions,
             )
             .await?))
     }
@@ -612,7 +612,7 @@ impl CronSessionPort for TestCronSessionPort {
                 agent_session_id.as_ref(),
                 &idempotency_key,
                 test_send_message_request(message),
-                &self.runtime_registry,
+                &self.runtime_sessions,
                 build_lease,
                 BackgroundTurnRuntimePreparation {
                     companion_device_turn: None,
@@ -1550,14 +1550,14 @@ async fn setup_with_canonical_sessions(
 
     let stub_conv_repo = Arc::new(StubConvRepo::new());
     let stub_conv_repo_trait: Arc<dyn IConversationRepository> = stub_conv_repo.clone();
-    let runtime_registry: Arc<dyn nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry> =
-        Arc::new(StubAgentRuntimeRegistry);
+    let runtime_sessions: Arc<dyn nomifun_ai_agent::runtime_sessions::AgentRuntimeSessions> =
+        Arc::new(StubAgentRuntimeSessions);
     let conv_service = Arc::new(ConversationService::new(
         Arc::<str>::from(TEST_USER_ID),
         std::env::temp_dir(),
         bc.clone() as Arc<dyn UserEventSink>,
         Arc::new(StubSkillResolver),
-        Arc::clone(&runtime_registry),
+        Arc::clone(&runtime_sessions),
         Arc::clone(&stub_conv_repo_trait),
         Arc::clone(&agent_metadata_repo),
         Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
@@ -1567,7 +1567,7 @@ async fn setup_with_canonical_sessions(
     let busy_guard = Arc::new(CronBusyGuard::new());
     let sessions: Arc<dyn CronSessionPort> = Arc::new(TestCronSessionPort {
         service: conv_service,
-        runtime_registry,
+        runtime_sessions,
         canonical_sessions,
     });
     let executor = Arc::new(JobExecutor::new(
@@ -4483,7 +4483,7 @@ async fn cd4_conversation_transaction_hands_captured_job_ids_to_post_commit_clea
         std::env::temp_dir(),
         bc.clone() as Arc<dyn UserEventSink>,
         Arc::new(EmptySkillResolver),
-        Arc::new(StubAgentRuntimeRegistry),
+        Arc::new(StubAgentRuntimeSessions),
         Arc::new(SqliteConversationRepository::new(pool.clone())),
         Arc::new(SqliteAgentMetadataRepository::new(pool.clone())),
         Arc::new(nomifun_conversation::NoExecutionConversationBoundary),

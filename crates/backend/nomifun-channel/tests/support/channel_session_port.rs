@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use nomifun_ai_agent::{AgentRuntimeRegistry, AgentStreamEvent};
+use nomifun_ai_agent::{AgentRuntimeSessions, AgentStreamEvent};
 use nomifun_api_types::{
     ConversationResponse, ConversationRuntimeStateKind, CreateConversationRequest,
     ListMessagesQuery, MessageListResponse, SendMessageRequest,
@@ -21,7 +21,7 @@ use tracing::warn;
 
 struct ConversationChannelSessionPort {
     service: Arc<ConversationService>,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    runtime_sessions: Arc<dyn AgentRuntimeSessions>,
 }
 
 #[async_trait]
@@ -48,7 +48,7 @@ impl nomifun_channel::ChannelSessionPort for ConversationChannelSessionPort {
 
     async fn cancel(&self, owner_id: &str, session_id: &str) -> Result<(), AppError> {
         self.service
-            .cancel(owner_id, session_id, &self.runtime_registry)
+            .cancel(owner_id, session_id, &self.runtime_sessions)
             .await
     }
 
@@ -77,13 +77,13 @@ impl nomifun_channel::ChannelSessionPort for ConversationChannelSessionPort {
                 session_id,
                 idempotency_key,
                 request,
-                &self.runtime_registry,
+                &self.runtime_sessions,
             )
             .await?;
         let events = if delivery.completed {
             None
         } else {
-            wait_for_runtime_subscription(&self.runtime_registry, session_id).await
+            wait_for_runtime_subscription(&self.runtime_sessions, session_id).await
         };
         Ok(nomifun_channel::ChannelTurnDelivery {
             delivery: channel_delivery_from_conversation(delivery),
@@ -114,21 +114,21 @@ impl nomifun_channel::ChannelSessionPort for ConversationChannelSessionPort {
 /// Build the test-only Conversation-backed Channel session port.
 pub fn conversation_channel_session_port(
     service: Arc<ConversationService>,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    runtime_sessions: Arc<dyn AgentRuntimeSessions>,
 ) -> Arc<dyn nomifun_channel::ChannelSessionPort> {
     Arc::new(ConversationChannelSessionPort {
         service,
-        runtime_registry,
+        runtime_sessions,
     })
 }
 
 async fn wait_for_runtime_subscription(
-    runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+    runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     session_id: &str,
 ) -> Option<broadcast::Receiver<AgentStreamEvent>> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
-        if let Some(handle) = runtime_registry.get_runtime(session_id) {
+        if let Some(handle) = runtime_sessions.get_runtime(session_id) {
             return Some(handle.subscribe());
         }
         if tokio::time::Instant::now() >= deadline {

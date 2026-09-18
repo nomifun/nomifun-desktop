@@ -120,8 +120,6 @@ const RELEASED_V1_MANAGED_ROOTS: &[(&str, ManagedRootKind)] = &[
     // Legacy root of the retired public-agent domain (cleanup only).
     ("public-agents", ManagedRootKind::Directory),
     ("preview-history", ManagedRootKind::Directory),
-    ("nomi-sessions", ManagedRootKind::Directory),
-    ("nomi-health-check-sessions", ManagedRootKind::Directory),
     ("browser-profile", ManagedRootKind::Directory),
     ("browser-profiles", ManagedRootKind::Directory),
     ("browser-data", ManagedRootKind::Directory),
@@ -198,8 +196,6 @@ const RELEASED_V2_MANAGED_ROOTS: &[(&str, ManagedRootKind)] = &[
     ("public-agents", ManagedRootKind::Directory),
     ("preview-history", ManagedRootKind::Directory),
     ("agent-process-registry.json", ManagedRootKind::File),
-    ("nomi-sessions", ManagedRootKind::Directory),
-    ("nomi-health-check-sessions", ManagedRootKind::Directory),
     ("browser-profile", ManagedRootKind::Directory),
     ("browser-profiles", ManagedRootKind::Directory),
     ("browser-data", ManagedRootKind::Directory),

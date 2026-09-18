@@ -8,7 +8,7 @@ use std::time::Duration;
 use nomifun_ai_agent::artifact_store::ArtifactStore;
 use nomifun_ai_agent::protocol::events::AgentStreamEvent;
 use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
-use nomifun_ai_agent::{AgentRuntimeHandle, AgentRuntimeRegistry, TurnStopReason};
+use nomifun_ai_agent::{AgentRuntimeHandle, AgentRuntimeSessions, TurnStopReason};
 use futures_util::FutureExt;
 use sha2::{Digest, Sha256};
 use std::panic::AssertUnwindSafe;
@@ -124,12 +124,6 @@ fn terminal_error_requires_runtime_retirement(
                 | nomifun_api_types::AgentErrorCode::NomifunAgentSessionInconsistent
         )
     )
-}
-
-fn terminal_error_requires_nomi_session_recovery(
-    code: Option<nomifun_api_types::AgentErrorCode>,
-) -> bool {
-    terminal_error_requires_runtime_retirement(code)
 }
 
 /// Product-owned persistence target used only by the Creative Studio session
@@ -624,7 +618,7 @@ impl Drop for ExecutionTurnAdmissionCustodian {
 /// be proven before the receipt/fence can be released.
 struct EditResubmitAdmissionCustodian {
     repo: Arc<dyn IConversationRepository>,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    runtime_sessions: Arc<dyn AgentRuntimeSessions>,
     runtime_state: Arc<ConversationRuntimeStateService>,
     user_id: String,
     conversation_id: String,
@@ -718,7 +712,7 @@ impl Drop for EditResubmitAdmissionCustodian {
         }
         ConversationService::continue_abandoned_edit_resubmit_admission(
             Arc::clone(&self.repo),
-            Arc::clone(&self.runtime_registry),
+            Arc::clone(&self.runtime_sessions),
             Arc::clone(&self.runtime_state),
             self.user_id.clone(),
             self.conversation_id.clone(),
@@ -1043,9 +1037,9 @@ pub struct ConversationService {
     workspace_root: PathBuf,
     user_events: Arc<dyn UserEventSink>,
     skill_resolver: Arc<dyn SkillResolver>,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    runtime_sessions: Arc<dyn AgentRuntimeSessions>,
     /// Hooks invoked at the end of `delete()` so other services
-    /// (`InMemoryAgentRuntimeRegistry`, `CronService`, …) can clean up their
+    /// (`InMemoryAgentRuntimeSessions`, `CronService`, …) can clean up their
     /// per-conversation state. Wrapped in `Arc<RwLock<…>>` so registration
     /// can happen post-construction without breaking the `Clone` impl —
     /// mirrors the `cron_service` slot pattern below.
@@ -1391,86 +1385,26 @@ impl ConversationService {
     }
 
     async fn quarantine_edit_runtime_until_confirmed(
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
         runtime_state: &Arc<ConversationRuntimeStateService>,
         conversation_id: &str,
-        conversation_created_at: i64,
     ) {
         Self::terminate_runtime_until_confirmed(
-            runtime_registry,
+            runtime_sessions,
             conversation_id,
             AgentKillReason::ConfigurationChanged,
             "failed edit/resubmit destructive preparation",
         )
         .await;
 
-        let mut retry_delay = Duration::from_millis(25);
-        loop {
-            match runtime_registry
-                .reset_persisted_nomi_session(conversation_id, conversation_created_at)
-                .await
-            {
-                Ok(_) => break,
-                Err(error) => {
-                    error!(
-                        conversation_id,
-                        error = %ErrorChain(&error),
-                        "Failed to erase persisted Nomi recovery authority after edit/resubmit mutation; retaining durable fence"
-                    );
-                }
-            }
-            tokio::time::sleep(retry_delay).await;
-            retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
-        }
         runtime_state.clear_knowledge_signature(conversation_id);
         runtime_state.clear_turn_tokens(conversation_id);
-    }
-
-    /// Keep the exact accepted-turn admission quarantined until live-runtime
-    /// retirement has either rewound this source's exact recovery root/current
-    /// checkpoint or proved the source never entered the session. The strict
-    /// API never consumes a mismatched prior pending host-terminal root.
-    async fn rewind_inconsistent_nomi_session_until_confirmed(
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
-        conversation_id: &str,
-        conversation_created_at: i64,
-        source_message_id: &str,
-    ) {
-        let mut retry_delay = Duration::from_millis(25);
-        loop {
-            match runtime_registry
-                .rewind_persisted_nomi_live_recovery(
-                    conversation_id,
-                    conversation_created_at,
-                    source_message_id,
-                )
-                .await
-            {
-                Ok(outcome) => {
-                    info!(
-                        conversation_id,
-                        ?outcome,
-                        "Quarantined inconsistent persisted Nomi accepted turn was rewound"
-                    );
-                    return;
-                }
-                Err(error) => {
-                    error!(
-                        conversation_id,
-                        error = %ErrorChain(&error),
-                        "Could not rewind inconsistent persisted Nomi accepted turn; retaining exact turn admission quarantine"
-                    );
-                }
-            }
-            tokio::time::sleep(retry_delay).await;
-            retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
-        }
     }
 
     #[allow(clippy::too_many_arguments)]
     fn continue_abandoned_edit_resubmit_admission(
         repo: Arc<dyn IConversationRepository>,
-        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: Arc<dyn AgentRuntimeSessions>,
         runtime_state: Arc<ConversationRuntimeStateService>,
         user_id: String,
         conversation_id: String,
@@ -1479,7 +1413,7 @@ impl ConversationService {
         request_payload: String,
         reserved_admission_epoch: i64,
         admitted_admission_epoch: i64,
-        conversation_created_at: i64,
+        _conversation_created_at: i64,
         phase: u8,
         operation_guard: (
             DurableOperationGuards,
@@ -1565,10 +1499,9 @@ impl ConversationService {
 
             if phase != EDIT_CUSTODIAN_RESERVED && phase != EDIT_CUSTODIAN_ADMITTED {
                 Self::quarantine_edit_runtime_until_confirmed(
-                    &runtime_registry,
+                    &runtime_sessions,
                     &runtime_state,
                     &conversation_id,
-                    conversation_created_at,
                 )
                 .await;
             }
@@ -2265,7 +2198,7 @@ impl ConversationService {
         workspace_root: PathBuf,
         user_events: Arc<dyn UserEventSink>,
         skill_resolver: Arc<dyn SkillResolver>,
-        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: Arc<dyn AgentRuntimeSessions>,
 
         conversation_repo: Arc<dyn IConversationRepository>,
         agent_metadata_repo: Arc<dyn IAgentMetadataRepository>,
@@ -2277,7 +2210,7 @@ impl ConversationService {
             workspace_root,
             user_events,
             skill_resolver,
-            runtime_registry,
+            runtime_sessions,
             delete_hooks: Arc::new(RwLock::new(Vec::new())),
             before_delete_hooks: Arc::new(RwLock::new(Vec::new())),
             cron_service: Arc::new(RwLock::new(None)),
@@ -3195,17 +3128,17 @@ impl ConversationService {
         conversation_id: &str,
     ) -> Result<Vec<nomifun_api_types::SlashCommandItem>, AppError> {
         self.require_owned_conversation(user_id, conversation_id).await?;
-        self.runtime_registry.get_slash_commands(user_id, conversation_id).await
+        self.runtime_sessions.get_slash_commands(user_id, conversation_id).await
     }
 
     pub(crate) fn runtime_handle(&self, conversation_id: &str) -> Result<AgentRuntimeHandle, AppError> {
-        self.runtime_registry
+        self.runtime_sessions
             .get_runtime(conversation_id)
             .ok_or_else(|| AppError::NotFound(format!("No active agent for conversation '{conversation_id}'")))
     }
 
     pub async fn runtime_summary_for(&self, conversation_id: &str) -> ConversationRuntimeSummary {
-        let agent = self.runtime_registry.get_runtime(conversation_id);
+        let agent = self.runtime_sessions.get_runtime(conversation_id);
         let has_runtime = agent.is_some();
         let runtime_status = agent.as_ref().and_then(|agent| agent.status());
 
@@ -3230,7 +3163,7 @@ impl ConversationService {
             let row=service.conversation_repo.get(&id).await?.filter(|row|row.user_id==user_id)
                 .ok_or_else(||AppError::NotFound("Conversation not found".into()))?;
             if !matches!(row.status.as_deref(),Some("pending"|"finished"))
-                || service.runtime_registry.get_runtime(&id).is_some_and(|runtime|runtime.status()==Some(ConversationStatus::Running)) {
+                || service.runtime_sessions.get_runtime(&id).is_some_and(|runtime|runtime.status()==Some(ConversationStatus::Running)) {
                 return Err(AppError::Conflict("Stop the Agent before rebuilding its browser".into()));
             }
             // Reject stale resources before advancing cancellation epochs or
@@ -3240,7 +3173,7 @@ impl ConversationService {
             let builds=fence.cancelled_build_ids().to_vec();
             service.await_cancelled_runtime_builds_quiesced(&id,&builds,"idle browser reconfiguration").await;
             service.runtime_state.forget_cancelled_runtime_builds(&id,&builds);
-            service.runtime_registry.terminate_and_wait_result(&id,Some(AgentKillReason::ConfigurationChanged)).await?;
+            service.runtime_sessions.terminate_and_wait_result(&id,Some(AgentKillReason::ConfigurationChanged)).await?;
             service.runtime_state.clear_knowledge_signature(&id);
             let result=work().await;
             drop(fence);
@@ -3302,7 +3235,7 @@ impl ConversationService {
     }
 
     fn final_completion_runtime(&self, conversation_id: &str) -> ConversationRuntimeSummary {
-        let agent = self.runtime_registry.get_runtime(conversation_id);
+        let agent = self.runtime_sessions.get_runtime(conversation_id);
         ConversationRuntimeSummary {
             state: nomifun_api_types::ConversationRuntimeStateKind::Idle,
             can_send_message: true,
@@ -3321,12 +3254,12 @@ impl ConversationService {
     /// mutate mounts/config-dependent runtime state, delete the slot, or build
     /// a replacement after an error.
     pub(crate) async fn terminate_runtime_with_proof(
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
         conversation_id: &str,
         reason: AgentKillReason,
         operation: &'static str,
     ) -> Result<(), AppError> {
-        match runtime_registry
+        match runtime_sessions
             .terminate_and_wait_result(conversation_id, Some(reason))
             .await
         {
@@ -3351,7 +3284,7 @@ impl ConversationService {
     /// that process may still execute would reopen the duplicate-execution
     /// window this lifecycle fence closes.
     pub(crate) async fn terminate_runtime_until_confirmed(
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
         conversation_id: &str,
         reason: AgentKillReason,
         operation: &'static str,
@@ -3359,7 +3292,7 @@ impl ConversationService {
         let mut retry_delay = Duration::from_millis(25);
         loop {
             match Self::terminate_runtime_with_proof(
-                runtime_registry,
+                runtime_sessions,
                 conversation_id,
                 reason,
                 operation,
@@ -3375,13 +3308,13 @@ impl ConversationService {
     }
 
     async fn release_runtime_turn_until_confirmed(
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
         conversation_id: &str,
         turn_generation: u64,
     ) {
         let mut retry_delay = Duration::from_millis(25);
         loop {
-            match runtime_registry
+            match runtime_sessions
                 .release_runtime_turn(conversation_id, turn_generation)
                 .await
             {
@@ -3446,9 +3379,8 @@ impl ConversationService {
         user_id: &str,
         row: &ConversationRow,
         admission: &ConversationTurnAdmissionState,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        _runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     ) -> Result<bool, AppError> {
-        let uses_nomi = row_uses_nomi_engine(row, runtime_registry.as_ref())?;
         let conversation_id = row.conversation_id.as_str();
         let Some(provider) = self.terminal_proof_provider() else {
             return Ok(false);
@@ -3458,7 +3390,7 @@ impl ConversationService {
                 OrphanProofRequirement::LocalContainedAuthority
             }
         };
-        let decision = if uses_nomi { provider
+        let decision = provider
             .prove_orphan_generation_terminal(
                 user_id,
                 conversation_id,
@@ -3466,15 +3398,7 @@ impl ConversationService {
                 admission.epoch,
                 admission.active_operation_id.as_deref(),
             )
-            .await } else {
-                let extra: serde_json::Value = serde_json::from_str(&row.extra).map_err(|error| AppError::Conflict(error.to_string()))?;
-                let binding: nomifun_api_types::RuntimeEngineBinding = serde_json::from_value(extra.get(nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY)
-                    .cloned().ok_or_else(|| AppError::Conflict("registered engine orphan has no binding".into()))?)
-                    .map_err(|error| AppError::Conflict(error.to_string()))?;
-                binding.validate()?;
-                let Some(operation) = admission.active_operation_id.as_deref() else { return Ok(false) };
-                provider.prepare_registered_engine_recovery(&binding, user_id, conversation_id, admission.epoch, operation).await
-            };
+            .await;
         let evidence = match decision {
             TerminalProofDecision::Proven { evidence } => evidence,
             TerminalProofDecision::Unproven { reason } => {
@@ -3519,14 +3443,6 @@ impl ConversationService {
                 "restart-orphan Nomi receipt identity or state is invalid".to_owned(),
             ));
         }
-        if uses_nomi { runtime_registry
-            .rewind_persisted_nomi_live_recovery(
-                conversation_id,
-                row.created_at,
-                &receipt.message_id,
-            )
-            .await?; }
-
         // The prior generation is provably terminal, so its detached
         // knowledge write-back workers are gone too: settle their durable
         // running states before the lifecycle CAS, mirroring the stop path.
@@ -3673,7 +3589,7 @@ impl ConversationService {
         user_id: &str,
         conversation_id: &str,
         idempotency_key: &str,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     ) -> Result<BackgroundTurnReconciliationDisposition, AppError> {
         let conversation_id = parse_conv_id(conversation_id)?;
         validate_public_idempotency_key(idempotency_key)?;
@@ -3758,7 +3674,7 @@ impl ConversationService {
                 user_id,
                 &row,
                 &admission,
-                runtime_registry,
+                runtime_sessions,
             )
             .await?
         {
@@ -3782,7 +3698,7 @@ impl ConversationService {
         &self,
         user_id: &str,
         conversation_id: &str,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     ) -> Result<QuiescentOrphanReconciliation, AppError> {
         let conversation_id = parse_conv_id(conversation_id)?;
         let lease = self.begin_public_runtime_preparation(conversation_id, user_id)?;
@@ -3831,7 +3747,7 @@ impl ConversationService {
                 user_id,
                 &row,
                 &admission,
-                runtime_registry,
+                runtime_sessions,
             )
             .await?
         {
@@ -3843,7 +3759,7 @@ impl ConversationService {
     async fn release_and_complete_turn(
         &self,
         turn_handle: &mut AgentTurnHandle,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
         user_id: &str,
         conversation_id: &str,
         turn_id: &str,
@@ -4035,7 +3951,7 @@ impl ConversationService {
                 let turn_generation = turn_handle.turn_id();
                 if turn_handle.release() {
                     Self::release_runtime_turn_until_confirmed(
-                        runtime_registry,
+                        runtime_sessions,
                         conversation_id,
                         turn_generation,
                     )
@@ -4105,7 +4021,7 @@ impl ConversationService {
             return;
         }
         Self::release_runtime_turn_until_confirmed(
-            runtime_registry,
+            runtime_sessions,
             conversation_id,
             turn_generation,
         )
@@ -4299,7 +4215,7 @@ impl ConversationService {
         let trusted_metadata = if trusted_snapshot.is_some() {
             let object = req.extra.as_object_mut();
             object.map(|object| {
-                ["runtime_engine_binding", "nomi_core_session", "execution_constraints"]
+                ["runtime_build_binding", "nomi_core_session", "execution_constraints"]
                     .into_iter()
                     .filter_map(|key| object.remove(key).map(|value| (key, value)))
                     .collect::<Vec<_>>()
@@ -4323,13 +4239,13 @@ impl ConversationService {
             let projected_binding = metadata.and_then(|value| value.get("binding")).cloned()
                 .and_then(|value| serde_json::from_value::<nomifun_api_types::AgentBindingValueDto>(value).ok());
             if projected_binding.as_ref() != Some(canonical)
-                || !trusted_metadata.iter().any(|(key, _)| *key == "runtime_engine_binding")
+                || !trusted_metadata.iter().any(|(key, _)| *key == "runtime_build_binding")
             {
                 return Err(AppError::Conflict("Canonical Agent snapshots must be admitted by the Engine-aware Session host".into()));
             }
         }
-        if let Some((_, value)) = trusted_metadata.iter().find(|(key, _)| *key == "runtime_engine_binding") {
-            let binding: nomifun_api_types::RuntimeEngineBinding = serde_json::from_value(value.clone())
+        if let Some((_, value)) = trusted_metadata.iter().find(|(key, _)| *key == "runtime_build_binding") {
+            let binding: nomifun_api_types::RuntimeBuildBinding = serde_json::from_value(value.clone())
                 .map_err(|error| AppError::BadRequest(format!("Invalid runtime binding: {error}")))?;
             binding.validate()?;
         }
@@ -4860,8 +4776,8 @@ impl ConversationService {
                 })?;
             let existing_extra: serde_json::Value = serde_json::from_str(&existing.extra)
                 .map_err(|error| AppError::Internal(error.to_string()))?;
-            if extra.get("runtime_engine_binding") != existing_extra.get("runtime_engine_binding") {
-                return Err(AppError::Conflict("Creation key is already bound to a different runtime engine".into()));
+            if extra.get("runtime_build_binding") != existing_extra.get("runtime_build_binding") {
+                return Err(AppError::Conflict("Creation key is already bound to a different runtime build".into()));
             }
             if extra.get("execution_constraints") != existing_extra.get("execution_constraints") {
                 return Err(AppError::Conflict("Creation key is already bound to different execution constraints".into()));
@@ -5067,7 +4983,7 @@ impl ConversationService {
         user_id: &str,
         id: &str,
         mut req: UpdateConversationRequest,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     ) -> Result<ConversationResponse, AppError> {
         let conversation_id = parse_conv_id(id)?;
         let mut existing = self
@@ -5356,7 +5272,7 @@ impl ConversationService {
                 "Conversation configuration update awaiting old runtime teardown before persistence"
             );
             Self::terminate_runtime_with_proof(
-                runtime_registry,
+                runtime_sessions,
                 id,
                 AgentKillReason::ConfigurationChanged,
                 "conversation configuration update",
@@ -5442,7 +5358,7 @@ impl ConversationService {
         self.ensure_not_retained_execution_attempt(user_id, &conversation_id)
             .await?;
         Self::terminate_runtime_with_proof(
-            &self.runtime_registry,
+            &self.runtime_sessions,
             id,
             AgentKillReason::ConfigurationChanged,
             "AgentPreset switch",
@@ -5707,7 +5623,7 @@ impl ConversationService {
             )
             .await?;
         Self::terminate_runtime_with_proof(
-            &self.runtime_registry,
+            &self.runtime_sessions,
             conversation_id,
             AgentKillReason::ConfigurationChanged,
             "companion skill snapshot update",
@@ -5779,8 +5695,8 @@ impl ConversationService {
             .conversation_repo
             .get_turn_admission_state(user_id, id)
             .await?;
-        let registered_runtime = self.runtime_registry.has_registered_runtime(id);
-        let runtime = self.runtime_registry.get_runtime(id);
+        let registered_runtime = self.runtime_sessions.has_owned_runtime(id);
+        let runtime = self.runtime_sessions.get_runtime(id);
         if existing.status.as_deref() == Some("running")
             || admission.active_operation_id.is_some()
             || self.runtime_state.has_active_turn(id)
@@ -5887,7 +5803,7 @@ impl ConversationService {
         }
 
         Self::terminate_runtime_with_proof(
-            &self.runtime_registry,
+            &self.runtime_sessions,
             id,
             AgentKillReason::ConfigurationChanged,
             "AgentSession capability selection update",
@@ -5953,7 +5869,7 @@ impl ConversationService {
             let stop_rx = service.spawn_turn_stop_cleanup(
                 user_id.clone(),
                 conversation_id.clone(),
-                Arc::clone(&service.runtime_registry),
+                Arc::clone(&service.runtime_sessions),
                 false,
                 true,
             );
@@ -5997,7 +5913,7 @@ impl ConversationService {
             // clear registry governor state even when the first stop was only
             // a follower.
             Self::terminate_runtime_until_confirmed(
-                &service.runtime_registry,
+                &service.runtime_sessions,
                 &conversation_id,
                 AgentKillReason::ConversationDeleted,
                 "conversation deletion",
@@ -6299,14 +6215,9 @@ impl ConversationService {
         // A successful reset must never leave an old process/session able to
         // emit or resume after admission reopens. The result-bearing barrier is
         // fail-closed: teardown errors leave durable history/status untouched.
-        self.runtime_registry
+        self.runtime_sessions
             .terminate_and_wait_result(id, Some(AgentKillReason::UserCancelled))
             .await?;
-        if row_uses_nomi_engine(&reset_row, self.runtime_registry.as_ref())? {
-            self.runtime_registry
-                .reset_persisted_nomi_session(id, reset_row.created_at)
-                .await?;
-        }
         self.runtime_state.clear_knowledge_signature(id);
         self.runtime_state.clear_turn_tokens(id);
 
@@ -6731,8 +6642,8 @@ impl ConversationService {
             .await?;
         preparation_lease.ensure_active()?;
         let registered_runtime =
-            self.runtime_registry.has_registered_runtime(conversation_id);
-        let runtime = self.runtime_registry.get_runtime(conversation_id);
+            self.runtime_sessions.has_owned_runtime(conversation_id);
+        let runtime = self.runtime_sessions.get_runtime(conversation_id);
         if conversation.status.as_deref() != Some("finished")
             || admission.active_operation_id.is_some()
             || self.runtime_state.has_active_turn(conversation_id)
@@ -6937,7 +6848,7 @@ impl ConversationService {
         self.apply_knowledge_mounts(
             &conversation,
             &mut runtime_options,
-            &self.runtime_registry,
+            &self.runtime_sessions,
             Some(&preparation_token),
         )
         .await?;
@@ -7191,7 +7102,7 @@ impl ConversationService {
         req: SendMessageRequest,
         context: crate::companion_interaction::CompanionDeviceTurn,
         pre_send_hook: Arc<dyn BackgroundTurnPreSendHook>,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     ) -> Result<ObservedIdempotentMessageDelivery, AppError> {
         validate_public_idempotency_key(&context.request_id)?;
         let expected_channel = if context.from_desktop { None } else { Some("robot") };
@@ -7224,7 +7135,7 @@ impl ConversationService {
         }
         let request_id = context.idempotency_key();
         self.send_observed_background_message_with_idempotency_key(
-            user_id, conversation_id, &request_id, req, runtime_registry, lease,
+            user_id, conversation_id, &request_id, req, runtime_sessions, lease,
             BackgroundTurnRuntimePreparation {
                 runtime_options,
                 clear_context: false,
@@ -7259,14 +7170,14 @@ impl ConversationService {
     pub async fn cancel_companion_device_message(
         &self, user_id: &str, conversation_id: &str,
         context: &crate::companion_interaction::CompanionDeviceTurn,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     ) -> Result<(), AppError> {
         let key = parse_conv_id(conversation_id)?;
         let operation = Self::public_turn_operation_id(user_id, key, &context.idempotency_key());
         let Some(guard) = self.runtime_state.begin_device_turn_stop(conversation_id, user_id, &operation)?
             else { return Ok(()); };
         self.spawn_admitted_turn_stop_cleanup(user_id.to_owned(), conversation_id.to_owned(),
-            Arc::clone(runtime_registry), true, false, Ok(Some(guard)))
+            Arc::clone(runtime_sessions), true, false, Ok(Some(guard)))
             .await.map_err(|_| AppError::Internal("device stop worker exited".to_owned()))?
     }
 
@@ -7340,7 +7251,7 @@ impl ConversationService {
         operation_id: &str,
         execution_authority: AgentExecutionTurnAuthority,
         req: SendMessageRequest,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     ) -> Result<IdempotentMessageDelivery, AppError> {
         let operation_id = operation_id.trim();
         if operation_id.is_empty() {
@@ -7357,7 +7268,7 @@ impl ConversationService {
             conversation_id,
             operation_id,
             req,
-            runtime_registry,
+            runtime_sessions,
             MessageSendAuthority::TrustedInternal,
             Some(execution_authority),
             None,
@@ -7385,7 +7296,7 @@ impl ConversationService {
         conversation_id: &str,
         idempotency_key: &str,
         req: SendMessageRequest,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     ) -> Result<IdempotentMessageDelivery, AppError> {
         validate_public_idempotency_key(idempotency_key)?;
         if req.content.trim().is_empty() {
@@ -7404,7 +7315,7 @@ impl ConversationService {
                 }
                 if let Some(prepared) = provider.prepare(user_id, conversation_id, idempotency_key).await? {
                     return self.send_companion_device_message(user_id, conversation_id, req,
-                        prepared.context, prepared.pre_send_hook, runtime_registry).await.map(|result| result.delivery);
+                        prepared.context, prepared.pre_send_hook, runtime_sessions).await.map(|result| result.delivery);
                 }
             }
         }
@@ -7435,7 +7346,7 @@ impl ConversationService {
             conversation_id,
             &operation_id,
             req,
-            runtime_registry,
+            runtime_sessions,
             MessageSendAuthority::OwnerInteractive,
             None,
             None,
@@ -7462,7 +7373,7 @@ impl ConversationService {
         conversation_id: &str,
         source_message_id: &str,
         idempotency_key: &str,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     ) -> Result<IdempotentMessageDelivery, AppError> {
         validate_public_idempotency_key(idempotency_key)?;
         MessageId::parse(source_message_id).map_err(|error| {
@@ -7620,7 +7531,7 @@ impl ConversationService {
             conversation_id,
             &operation_id,
             req,
-            runtime_registry,
+            runtime_sessions,
             MessageSendAuthority::OwnerInteractive,
             None,
             None,
@@ -7652,7 +7563,7 @@ impl ConversationService {
         conversation_id: &str,
         idempotency_key: &str,
         req: SendMessageRequest,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     ) -> Result<IdempotentMessageDelivery, AppError> {
         validate_public_idempotency_key(idempotency_key)?;
         if req.content.trim().is_empty() {
@@ -7681,7 +7592,7 @@ impl ConversationService {
             conversation_id,
             &operation_id,
             req,
-            runtime_registry,
+            runtime_sessions,
             MessageSendAuthority::OwnerInteractive,
             None,
             None,
@@ -7910,7 +7821,7 @@ impl ConversationService {
         conversation_id: &str,
         idempotency_key: &str,
         req: SendMessageRequest,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
         runtime_build_lease: RuntimeBuildLease,
         runtime_preparation: BackgroundTurnRuntimePreparation,
     ) -> Result<ObservedIdempotentMessageDelivery, AppError> {
@@ -7919,7 +7830,7 @@ impl ConversationService {
             conversation_id,
             idempotency_key,
             req,
-            runtime_registry,
+            runtime_sessions,
             runtime_build_lease,
             runtime_preparation,
             None,
@@ -7937,7 +7848,7 @@ impl ConversationService {
         conversation_id: &str,
         idempotency_key: &str,
         req: SendMessageRequest,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
         runtime_build_lease: RuntimeBuildLease,
         runtime_preparation: BackgroundTurnRuntimePreparation,
         authority: RequirementConversationTurnAuthority,
@@ -7947,7 +7858,7 @@ impl ConversationService {
             conversation_id,
             idempotency_key,
             req,
-            runtime_registry,
+            runtime_sessions,
             runtime_build_lease,
             runtime_preparation,
             Some(authority),
@@ -7962,7 +7873,7 @@ impl ConversationService {
         conversation_id: &str,
         idempotency_key: &str,
         req: SendMessageRequest,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
         runtime_build_lease: RuntimeBuildLease,
         runtime_preparation: BackgroundTurnRuntimePreparation,
         autowork_authority: Option<RequirementConversationTurnAuthority>,
@@ -7995,7 +7906,7 @@ impl ConversationService {
                 conversation_id,
                 &operation_id,
                 req,
-                runtime_registry,
+                runtime_sessions,
                 MessageSendAuthority::OwnerInteractive,
                 None,
                 autowork_authority,
@@ -8033,7 +7944,7 @@ impl ConversationService {
         conversation_id: &str,
         operation_id: &str,
         req: SendMessageRequest,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
         send_authority: MessageSendAuthority,
         execution_authority: Option<AgentExecutionTurnAuthority>,
         autowork_authority: Option<RequirementConversationTurnAuthority>,
@@ -8541,7 +8452,7 @@ impl ConversationService {
                 user_id,
                 conversation_id,
                 req,
-                runtime_registry,
+                runtime_sessions,
                 send_authority,
                 Some(delivery_lease.clone()),
                 Some(runtime_build_lease),
@@ -8787,7 +8698,7 @@ impl ConversationService {
         user_id: &str,
         conversation_id: &str,
         mut req: SendMessageRequest,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
         send_authority: MessageSendAuthority,
         durable_delivery: Option<DurableDeliveryLease>,
         mut runtime_build_lease: Option<RuntimeBuildLease>,
@@ -9164,7 +9075,7 @@ impl ConversationService {
             .apply_knowledge_mounts(
                 &row,
                 &mut runtime_options,
-                runtime_registry,
+                runtime_sessions,
                 Some(&preparation_token),
             )
             .await
@@ -9374,7 +9285,7 @@ impl ConversationService {
             );
             self.release_and_complete_turn(
                 &mut turn_handle,
-                runtime_registry,
+                runtime_sessions,
                 user_id,
                 conversation_id,
                 &first_turn_msg_id,
@@ -9437,7 +9348,7 @@ impl ConversationService {
             );
             self.release_and_complete_turn(
                 &mut turn_handle,
-                runtime_registry,
+                runtime_sessions,
                 user_id,
                 conversation_id,
                 &first_turn_msg_id,
@@ -9517,7 +9428,7 @@ impl ConversationService {
         let cron_service = self.current_cron_service();
         let user_id_owned = user_id.to_owned();
         let service = self.clone();
-        let runtime_registry = Arc::clone(runtime_registry);
+        let runtime_sessions = Arc::clone(runtime_sessions);
         let durable_operation_id = durable_operation_id.map(str::to_owned);
         let durable_kind = durable_kind.map(str::to_owned);
         // Only an active attempt relation needs per-turn token accounting. The
@@ -9574,7 +9485,7 @@ impl ConversationService {
             let panic_user_id = user_id_owned.clone();
             let panic_conversation_id = conv_id.clone();
             let panic_stable_turn_id = stable_turn_id.clone();
-            let panic_runtime_registry = Arc::clone(&runtime_registry);
+            let panic_runtime_sessions = Arc::clone(&runtime_sessions);
             let panic_wire_context = TurnWireContext {
                 companion,
                 companion_id: companion_id.clone(),
@@ -9589,7 +9500,7 @@ impl ConversationService {
                 .replace_companion_device_runtime_context(&conv_id, has_device_context);
             if rebuild_runtime_for_injected_skills || recycle_device_context {
                 Self::terminate_runtime_until_confirmed(
-                    &runtime_registry,
+                    &runtime_sessions,
                     &conv_id,
                     AgentKillReason::ConfigurationChanged,
                     "Turn-scoped Companion context or injected Skill refresh",
@@ -9602,7 +9513,7 @@ impl ConversationService {
                 .map(|authority| authority.model.clone());
             let mut failover_authority = initial_failover_authority;
             let device_runtime_options = has_device_context.then(|| runtime_options.clone());
-            let mut agent = match runtime_registry
+            let mut agent = match runtime_sessions
                 .get_or_create_runtime_for_turn(
                     &conv_id,
                     turn_cancellation.turn_id(),
@@ -9650,7 +9561,7 @@ impl ConversationService {
                     service
                         .release_and_complete_turn(
                             &mut turn_handle,
-                            &runtime_registry,
+                            &runtime_sessions,
                             &user_id_owned,
                             &conv_id,
                             &stable_turn_id,
@@ -9712,7 +9623,7 @@ impl ConversationService {
                 service
                     .release_and_complete_turn(
                         &mut turn_handle,
-                        &runtime_registry,
+                        &runtime_sessions,
                         &user_id_owned,
                         &conv_id,
                         &stable_turn_id,
@@ -9761,7 +9672,7 @@ impl ConversationService {
                 service
                     .release_and_complete_turn(
                         &mut turn_handle,
-                        &runtime_registry,
+                        &runtime_sessions,
                         &user_id_owned,
                         &conv_id,
                         &stable_turn_id,
@@ -9838,11 +9749,10 @@ impl ConversationService {
             // is swallowed at source (no WS error, no error tips row) — the user
             // sees only the backup model's turn. `enabled == false` / no deps →
             // `None` → relay never suppresses (current behaviour preserved).
-            let failover_config = if agent.uses_nomi_recovery() {
-                service.resolve_failover_config(&failover_extra_json).await.filter(|c| c.enabled)
-            } else {
-                None
-            };
+            let failover_config = service
+                .resolve_failover_config(&failover_extra_json)
+                .await
+                .filter(|config| config.enabled);
 
             while let Some((current_send, msg_id)) = pending_send.take() {
                 if turn_token.is_cancelled() {
@@ -9907,20 +9817,17 @@ impl ConversationService {
                 // provider fault(在切换上限内),也隐藏"将被同模型剔图重试"的
                 // image-unsupported 400(每轮一次)。被吞的错误进 outcome.suppressed_error,
                 // 若两种重试都未触发,则下方原样 re-surface。
-                if agent.uses_nomi_recovery() {
-                    let failover_within_bound = failover_config.as_ref().is_some_and(|c| {
-                        failover_switches_done < c.max_switches.min(c.queue.len() as u32)
-                    });
-                    let image_retry_available = image_strip_retries_done == 0;
-                    if failover_within_bound || image_retry_available {
-                        relay = relay.with_failover_suppressor(Arc::new(move |code| {
-                            (failover_within_bound
-                                && crate::model_failover::is_provider_fault(code))
-                                || (image_retry_available
-                                    && code
-                                        == nomifun_api_types::AgentErrorCode::UserLlmProviderImageUnsupported)
-                        }));
-                    }
+                let failover_within_bound = failover_config.as_ref().is_some_and(|c| {
+                    failover_switches_done < c.max_switches.min(c.queue.len() as u32)
+                });
+                let image_retry_available = image_strip_retries_done == 0;
+                if failover_within_bound || image_retry_available {
+                    relay = relay.with_failover_suppressor(Arc::new(move |code| {
+                        (failover_within_bound && crate::model_failover::is_provider_fault(code))
+                            || (image_retry_available
+                                && code
+                                    == nomifun_api_types::AgentErrorCode::UserLlmProviderImageUnsupported)
+                    }));
                 }
 
                 // Phase 3: keep a copy of this turn's send so a pre-response
@@ -9990,40 +9897,16 @@ impl ConversationService {
                     // runtime before releasing exact-turn admission; ordinary
                     // provider errors intentionally do not enter this branch.
                     Self::terminate_runtime_until_confirmed(
-                        &runtime_registry,
+                        &runtime_sessions,
                         &conv_id,
                         AgentKillReason::AgentErrorRecovery,
                         "non-reusable agent runtime recovery",
                     )
                     .await;
-                    if agent.uses_nomi_recovery()
-                        && terminal_error_requires_nomi_session_recovery(terminal_code)
-                    {
-                        // Runtime retirement alone is not enough for any
-                        // stream/state/session-integrity terminal: a sealed or
-                        // still-active recovery root could otherwise be loaded
-                        // as committed by the replacement factory.
-                        Self::rewind_inconsistent_nomi_session_until_confirmed(
-                            &runtime_registry,
-                            &conv_id,
-                            row.created_at,
-                            &source_user_message_id,
-                        )
-                        .await;
-                    }
                     durable_completion = Some((
                         false,
                         outcome.final_text.clone(),
-                        Some(
-                            if agent.uses_nomi_recovery()
-                                && terminal_error_requires_nomi_session_recovery(terminal_code)
-                            {
-                                "Agent session state could not be restored safely"
-                            } else {
-                                "Agent event stream integrity was lost"
-                            }
-                            .to_owned(),
-                        ),
+                        Some("Agent event stream integrity was lost".to_owned()),
                         relay_error_code::map_turn_failure(&outcome, committed_artifact_count),
                     ));
                     final_turn_writeback = None;
@@ -10051,7 +9934,7 @@ impl ConversationService {
                 // wrapped in the cancellable post-terminal side-effect budget:
                 // dropping it after quarantine would let the durable Running
                 // turn finalize while the old process might still execute.
-                let replay_safe = if agent.uses_nomi_recovery() && outcome.terminal.is_error() {
+                let replay_safe = if outcome.terminal.is_error() {
                     let source = resend_payload.source_message_id.as_deref().unwrap_or(&resend_payload.msg_id);
                     match agent.ensure_can_retry_turn(source).await {
                         Ok(()) => true,
@@ -10074,7 +9957,7 @@ impl ConversationService {
                             &failover_tried,
                             failed_turn_authority,
                             &failover_extra_json,
-                            &runtime_registry,
+                            &runtime_sessions,
                             turn_cancellation.turn_id(),
                             &turn_token,
                             device_runtime_options.as_ref(),
@@ -10155,7 +10038,6 @@ impl ConversationService {
                 // re-surface,把原始错误显示给用户。
                 if image_strip_retries_done == 0
                     && replay_safe
-                    && agent.uses_nomi_recovery()
                     && outcome.terminal.is_error()
                     && !outcome.emitted_response
                     && outcome.terminal.code()
@@ -10164,14 +10046,14 @@ impl ConversationService {
                     let rebuilt = service
                         .strip_images_and_rebuild(
                             &conv_id,
-                            &runtime_registry,
+                            &runtime_sessions,
                             turn_cancellation.turn_id(),
                             &turn_token,
                         )
                         .await;
                     if let Some(rebuilt) = rebuilt {
                         if turn_token.is_cancelled() {
-                            if let Err(error) = runtime_registry.cancel_runtime_turn(
+                            if let Err(error) = runtime_sessions.cancel_runtime_turn(
                                 &conv_id,
                                 turn_cancellation.turn_id(),
                                 Some(AgentKillReason::UserCancelled),
@@ -10438,7 +10320,7 @@ impl ConversationService {
             service
                 .release_and_complete_turn(
                     &mut turn_handle,
-                    &runtime_registry,
+                    &runtime_sessions,
                     &user_id_owned,
                     &conv_id,
                     &stable_turn_id,
@@ -10489,7 +10371,7 @@ impl ConversationService {
                 )
                 .with_origin(panic_wire_context.origin.clone())
                 .with_channel_platform(panic_wire_context.channel_platform.clone());
-                if let Err(error) = panic_runtime_registry.cancel_runtime_turn(
+                if let Err(error) = panic_runtime_sessions.cancel_runtime_turn(
                     &panic_conversation_id,
                     panic_cancellation.turn_id(),
                     Some(AgentKillReason::AgentErrorRecovery),
@@ -10502,7 +10384,7 @@ impl ConversationService {
                     );
                 }
                 Self::terminate_runtime_until_confirmed(
-                    &panic_runtime_registry,
+                    &panic_runtime_sessions,
                     &panic_conversation_id,
                     AgentKillReason::AgentErrorRecovery,
                     "panicked turn recovery",
@@ -10528,7 +10410,7 @@ impl ConversationService {
                 service
                     .release_and_complete_turn(
                         &mut turn_handle,
-                        &panic_runtime_registry,
+                        &panic_runtime_sessions,
                         &panic_user_id,
                         &panic_conversation_id,
                         &panic_stable_turn_id,
@@ -10576,7 +10458,7 @@ impl ConversationService {
         conversation_id: &str,
         operation_id: &str,
         req: SendMessageRequest,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     ) -> Result<String, AppError> {
         let operation_id = operation_id.trim();
         if operation_id.is_empty() {
@@ -10650,7 +10532,7 @@ impl ConversationService {
                 conv_id,
                 None,
                 ExactActiveTurnAccess::AgentExecution,
-                runtime_registry,
+                runtime_sessions,
             )
             .await?;
         Self::ensure_steer_context_supported(&req, &authority.runtime)?;
@@ -10683,7 +10565,7 @@ impl ConversationService {
                 &authority.scope,
                 ExactActiveTurnAccess::AgentExecution,
                 &authority._lease,
-                runtime_registry,
+                runtime_sessions,
             )
             .await?;
         if active_turn.is_cancelled() {
@@ -10807,7 +10689,7 @@ impl ConversationService {
         expected_scope: &ExactTurnScope,
         access: ExactActiveTurnAccess,
         lease: &RuntimeBuildLease,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     ) -> Result<(ConversationRow, AgentTurnCancellation, AgentRuntimeHandle), AppError> {
         lease.ensure_active()?;
         let row = self
@@ -10851,13 +10733,13 @@ impl ConversationService {
             ));
         }
         if active_turn.is_cancelled()
-            || !runtime_registry.has_registered_runtime(conversation_id)
+            || !runtime_sessions.has_owned_runtime(conversation_id)
         {
             return Err(AppError::Conflict(
                 "exact-turn action lost its active runtime authority".to_owned(),
             ));
         }
-        let runtime = runtime_registry
+        let runtime = runtime_sessions
             .get_runtime(conversation_id)
             .ok_or_else(|| {
                 AppError::Conflict(
@@ -10902,7 +10784,7 @@ impl ConversationService {
         conversation_id: &str,
         expected_scope: Option<&ExactTurnScope>,
         access: ExactActiveTurnAccess,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     ) -> Result<ExactActiveTurnAuthority, AppError> {
         let conv_id = parse_conv_id(conversation_id)?;
         let lease = self.begin_public_runtime_preparation(conv_id, user_id)?;
@@ -10965,13 +10847,13 @@ impl ConversationService {
             })?;
         lease.ensure_active()?;
         if active_turn.is_cancelled()
-            || !runtime_registry.has_registered_runtime(conv_id)
+            || !runtime_sessions.has_owned_runtime(conv_id)
         {
             return Err(AppError::Conflict(
                 "exact-turn action lost its active runtime authority".to_owned(),
             ));
         }
-        let runtime = runtime_registry.get_runtime(conv_id).ok_or_else(|| {
+        let runtime = runtime_sessions.get_runtime(conv_id).ok_or_else(|| {
             AppError::Conflict(
                 "exact-turn action requires a live non-quarantined runtime"
                     .to_owned(),
@@ -11021,7 +10903,7 @@ impl ConversationService {
         conversation_id: &str,
         idempotency_key: &str,
         req: SendMessageRequest,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     ) -> Result<IdempotentMessageDelivery, AppError> {
         validate_public_idempotency_key(idempotency_key)?;
 
@@ -11092,7 +10974,7 @@ impl ConversationService {
                 conv_id,
                 None,
                 ExactActiveTurnAccess::OrdinaryConversation,
-                runtime_registry,
+                runtime_sessions,
             )
             .await?;
         Self::ensure_steer_context_supported(&req, &authority.runtime)?;
@@ -11348,7 +11230,7 @@ impl ConversationService {
         message_id: &str,
         idempotency_key: &str,
         req: SendMessageRequest,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     ) -> Result<IdempotentMessageDelivery, AppError> {
         validate_public_idempotency_key(idempotency_key)?;
         if req.content.trim().is_empty() {
@@ -11479,13 +11361,13 @@ impl ConversationService {
         let (runtime_options, knowledge_signature) = self
             .prepare_runtime_options_for_execution(
                 &row,
-                runtime_registry,
+                runtime_sessions,
                 Some(&preparation_token),
             )
             .await?;
         runtime_build_lease.ensure_active()?;
         let stored_workspace = runtime_options.workspace.clone();
-        let agent = runtime_registry
+        let agent = runtime_sessions
             .get_or_create_runtime_for_preparation(
                 conv_id,
                 preparation_token.clone(),
@@ -11494,7 +11376,7 @@ impl ConversationService {
             .await?;
         if runtime_build_lease.is_cancelled() {
             Self::terminate_runtime_until_confirmed(
-                runtime_registry,
+                runtime_sessions,
                 conv_id,
                 AgentKillReason::UserCancelled,
                 "cancelled edit/resubmit runtime preparation",
@@ -11541,7 +11423,7 @@ impl ConversationService {
         let candidate_message_id = MessageId::new().into_string();
         let edit_admission_custodian = EditResubmitAdmissionCustodian {
             repo: Arc::clone(&self.conversation_repo),
-            runtime_registry: Arc::clone(runtime_registry),
+            runtime_sessions: Arc::clone(runtime_sessions),
             runtime_state: Arc::clone(&self.runtime_state),
             user_id: user_id.to_owned(),
             conversation_id: conv_id.to_owned(),
@@ -11707,10 +11589,9 @@ impl ConversationService {
         if let Err(error) = preparation_result {
             if edit_admission_custodian.destructive_runtime_mutation_started() {
                 Self::quarantine_edit_runtime_until_confirmed(
-                    runtime_registry,
+                    runtime_sessions,
                     &self.runtime_state,
                     conv_id,
-                    row.created_at,
                 )
                 .await;
             }
@@ -11737,7 +11618,7 @@ impl ConversationService {
                 user_id,
                 conversation_id,
                 req,
-                runtime_registry,
+                runtime_sessions,
                 MessageSendAuthority::EditResubmit,
                 Some(delivery.clone()),
                 Some(runtime_build_lease),
@@ -11760,11 +11641,10 @@ impl ConversationService {
             Err(error) => {
                 if edit_admission_custodian.destructive_runtime_mutation_started() {
                     Self::quarantine_edit_runtime_until_confirmed(
-                        runtime_registry,
-                        &self.runtime_state,
-                        conv_id,
-                        row.created_at,
-                    )
+                    runtime_sessions,
+                    &self.runtime_state,
+                    conv_id,
+                )
                     .await;
                 }
                 self.finalize_durable_admission_after_error(
@@ -11803,12 +11683,12 @@ impl ConversationService {
         &self,
         user_id: &str,
         conversation_id: &str,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     ) -> Result<(), AppError> {
         self.cancel_with_origin(
             user_id,
             conversation_id,
-            runtime_registry,
+            runtime_sessions,
             CancelOrigin::User,
         )
         .await
@@ -11820,12 +11700,12 @@ impl ConversationService {
         &self,
         user_id: &str,
         conversation_id: &str,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     ) -> Result<(), AppError> {
         self.cancel_with_origin(
             user_id,
             conversation_id,
-            runtime_registry,
+            runtime_sessions,
             CancelOrigin::AgentExecution,
         )
         .await
@@ -11844,7 +11724,7 @@ impl ConversationService {
         &self,
         user_id: String,
         conversation_id: String,
-        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: Arc<dyn AgentRuntimeSessions>,
         publish_completion: bool,
         deletion_owned: bool,
     ) -> oneshot::Receiver<Result<(), AppError>> {
@@ -11854,7 +11734,7 @@ impl ConversationService {
         } else {
             self.runtime_state.begin_conversation_stop(&conversation_id)
         };
-        self.spawn_admitted_turn_stop_cleanup(user_id, conversation_id, runtime_registry,
+        self.spawn_admitted_turn_stop_cleanup(user_id, conversation_id, runtime_sessions,
             publish_completion, deletion_owned, stop_admission)
     }
 
@@ -11862,7 +11742,7 @@ impl ConversationService {
         &self,
         user_id: String,
         conversation_id: String,
-        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: Arc<dyn AgentRuntimeSessions>,
         publish_completion: bool,
         deletion_owned: bool,
         stop_admission: Result<Option<crate::runtime_state::ConversationStopGuard>, AppError>,
@@ -11956,7 +11836,7 @@ impl ConversationService {
                     }
                 };
                 if let Some(cancellation) = turn_cancellation.as_ref() {
-                    if let Err(error) = runtime_registry.cancel_runtime_turn(
+                    if let Err(error) = runtime_sessions.cancel_runtime_turn(
                         &conversation_id,
                         cancellation.turn_id(),
                         Some(kill_reason),
@@ -12016,7 +11896,7 @@ impl ConversationService {
                 };
 
                 let teardown = Self::terminate_runtime_until_confirmed(
-                    &runtime_registry,
+                    &runtime_sessions,
                     &conversation_id,
                     kill_reason,
                     "conversation stop",
@@ -12213,7 +12093,7 @@ impl ConversationService {
         &self,
         user_id: &str,
         conversation_id: &str,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
         origin: CancelOrigin,
     ) -> Result<(), AppError> {
         let conversation_key = parse_conv_id(conversation_id)?;
@@ -12328,7 +12208,7 @@ impl ConversationService {
         let result_rx = self.spawn_turn_stop_cleanup(
             user_id.to_owned(),
             conversation_id.to_owned(),
-            Arc::clone(runtime_registry),
+            Arc::clone(runtime_sessions),
             true,
             false,
         );
@@ -12458,63 +12338,32 @@ impl ConversationService {
         self.runtime_state
             .forget_cancelled_runtime_builds(conversation_id, &cancelled_build_ids);
 
-        let extra: serde_json::Value = serde_json::from_str(&row.extra)
-            .map_err(|error| AppError::Conflict(error.to_string()))?;
-        let owner_history = match extra.get(nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY) {
-            Some(value) => {
-                let binding: nomifun_api_types::RuntimeEngineBinding = serde_json::from_value(value.clone())
-                    .map_err(|error| AppError::Conflict(error.to_string()))?;
-                self.runtime_registry.binding_uses_platform_history_context(&binding)?
-            }
-            None => false,
-        };
-        if owner_history {
-            self.cancel_and_wait_for_turn_writebacks(conv_id).await?;
-            // Drop neither the maintenance fences nor exact teardown proof
-            // before committing the boundary. No cold factory is constructed.
-            self.runtime_registry.terminate_and_wait_result(
-                conversation_id, Some(AgentKillReason::UserCancelled),
-            ).await?;
-            match self.conversation_repo.clear_terminal_engine_context(
-                user_id, conv_id, &row.extra, row.created_at, now_ms(),
-            ).await? {
-                TurnLifecycleTransition::Committed | TurnLifecycleTransition::AlreadyApplied => {}
-                TurnLifecycleTransition::Stale => return Err(AppError::Conflict(
+        self.cancel_and_wait_for_turn_writebacks(conv_id).await?;
+        // The unified Runtime reconstructs context from the canonical owner;
+        // no private transcript exists to clear or rewind.
+        self.runtime_sessions
+            .terminate_and_wait_result(
+                conversation_id,
+                Some(AgentKillReason::UserCancelled),
+            )
+            .await?;
+        match self
+            .conversation_repo
+            .clear_terminal_engine_context(user_id, conv_id, &row.extra, row.created_at, now_ms())
+            .await?
+        {
+            TurnLifecycleTransition::Committed | TurnLifecycleTransition::AlreadyApplied => {}
+            TurnLifecycleTransition::Stale => {
+                return Err(AppError::Conflict(
                     "Conversation changed while clearing Engine context".into(),
-                )),
+                ));
             }
-            self.runtime_state.clear_knowledge_signature(conversation_id);
-            self.runtime_state.clear_turn_tokens(conversation_id);
-            drop(reset_guard);
-            drop(preparation_guard);
-            info!(conversation_id, "Platform Engine context cleared; transcript and recovery evidence retained");
-            return Ok(());
         }
-
-        // Reset an existing idle runtime in place. A cold Nomi conversation
-        // instead uses the registry's factory-admission barrier and exact
-        // created_at owner token; manufacturing a runtime just to erase the
-        // transcript is expressly forbidden.
-        let had_runtime = if let Some(agent) = self.runtime_registry.get_runtime(conversation_id) {
-            agent.clear_context().await?;
-            true
-        } else {
-            info!("No active agent; clearing persisted state only");
-            false
-        };
-
-        if !had_runtime {
-            if !row_uses_nomi_engine(&row, self.runtime_registry.as_ref())? {
-                return Err(AppError::Conflict("Cold context reset is not provided by the bound runtime; fork explicitly".into()));
-            }
-            self.runtime_registry
-                .reset_persisted_nomi_session(conversation_id, row.created_at)
-                .await?;
-        }
-
+        self.runtime_state.clear_knowledge_signature(conversation_id);
+        self.runtime_state.clear_turn_tokens(conversation_id);
         drop(reset_guard);
         drop(preparation_guard);
-        info!("Conversation context cleared");
+        info!(conversation_id, "Unified Runtime context cleared from canonical history");
         Ok(())
     }
 
@@ -12534,7 +12383,7 @@ impl ConversationService {
         &self,
         user_id: &str,
         conversation_id: &str,
-        _runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        _runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     ) -> Result<(), AppError> {
         let conv_id = parse_conv_id(conversation_id)?;
         self.conversation_repo
@@ -12585,17 +12434,12 @@ impl ConversationService {
         self.runtime_state
             .forget_cancelled_runtime_builds(conversation_id, &cancelled_build_ids);
         self.cancel_and_wait_for_turn_writebacks(conv_id).await?;
-        self.runtime_registry
+        self.runtime_sessions
             .terminate_and_wait_result(
                 conversation_id,
                 Some(AgentKillReason::UserCancelled),
             )
             .await?;
-        if row_uses_nomi_engine(&clear_row, self.runtime_registry.as_ref())? {
-            self.runtime_registry
-                .reset_persisted_nomi_session(conversation_id, clear_row.created_at)
-                .await?;
-        }
         self.runtime_state.clear_knowledge_signature(conversation_id);
         self.runtime_state.clear_turn_tokens(conversation_id);
 
@@ -12626,9 +12470,9 @@ impl ConversationService {
         &self,
         user_id: &str,
         conversation_id: &str,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     ) -> Result<(), AppError> {
-        self.warmup_inner(user_id, conversation_id, runtime_registry)
+        self.warmup_inner(user_id, conversation_id, runtime_sessions)
             .await
     }
 
@@ -12636,7 +12480,7 @@ impl ConversationService {
         &self,
         user_id: &str,
         conversation_id: &str,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
     ) -> Result<(), AppError> {
         let lease = self.begin_public_runtime_preparation(conversation_id, user_id)?;
         let preparation_token = lease.cancellation_token();
@@ -12725,13 +12569,13 @@ impl ConversationService {
         let (runtime_options, knowledge_signature) = self
             .prepare_runtime_options_for_execution(
                 &row,
-                runtime_registry,
+                runtime_sessions,
                 Some(&preparation_token),
             )
             .await?;
         lease.ensure_active()?;
         let stored_workspace = runtime_options.workspace.clone();
-        let agent = runtime_registry
+        let agent = runtime_sessions
             .get_or_create_runtime_for_preparation(
                 conversation_id,
                 preparation_token.clone(),
@@ -12743,7 +12587,7 @@ impl ConversationService {
             // preparation slot with proof and cannot target a real turn by a
             // coincidentally equal build id.
             Self::terminate_runtime_with_proof(
-                runtime_registry,
+                runtime_sessions,
                 conversation_id,
                 AgentKillReason::UserCancelled,
                 "cancelled warmup",
@@ -12869,7 +12713,7 @@ fn apply_product_agent_resolution(
         AppError::Internal("resolved product Agent runtime policy must be an object".to_owned())
     })?;
     for key in [
-        "runtime_engine_binding",
+        "runtime_build_binding",
         "nomi_core_session",
         "execution_constraints",
         "chat_config_revision_digest",
@@ -13064,7 +12908,7 @@ impl ConversationService {
     pub(crate) async fn prepare_runtime_options_for_execution(
         &self,
         row: &ConversationRow,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
         cancellation: Option<&CancellationToken>,
     ) -> Result<(AgentRuntimeBuildOptions, Option<String>), AppError> {
         if cancellation.is_some_and(CancellationToken::is_cancelled) {
@@ -13083,7 +12927,7 @@ impl ConversationService {
             )));
         }
         let knowledge_signature = self
-            .apply_knowledge_mounts(row, &mut runtime_options, runtime_registry, cancellation)
+            .apply_knowledge_mounts(row, &mut runtime_options, runtime_sessions, cancellation)
             .await?;
         Ok((runtime_options, knowledge_signature))
     }
@@ -13329,7 +13173,7 @@ impl ConversationService {
         &self,
         row: &ConversationRow,
         runtime_options: &mut AgentRuntimeBuildOptions,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        runtime_sessions: &Arc<dyn AgentRuntimeSessions>,
         cancellation: Option<&CancellationToken>,
     ) -> Result<Option<String>, AppError> {
         if cancellation.is_some_and(CancellationToken::is_cancelled) {
@@ -13408,7 +13252,7 @@ impl ConversationService {
         // identity made a later view warmup recycle a completed conversation.
         let new_signature = plan.binding_signature().to_owned();
         let known_signature = self.runtime_state.knowledge_signature(&conversation_id);
-        let registered_runtime = runtime_registry.has_registered_runtime(&conversation_id);
+        let registered_runtime = runtime_sessions.has_owned_runtime(&conversation_id);
         let binding_is_unknown_or_changed =
             known_signature.as_deref() != Some(new_signature.as_str());
 
@@ -13416,7 +13260,7 @@ impl ConversationService {
             // The plan is still read-only at this point. Never mutate the
             // shared mount namespace while an old or unknown process could
             // observe it.
-            let runtime_is_running = runtime_registry
+            let runtime_is_running = runtime_sessions
                 .get_runtime(&conversation_id)
                 .is_some_and(|agent| agent.status() == Some(ConversationStatus::Running));
             if self.runtime_state.has_active_turn(&conversation_id) || runtime_is_running {
@@ -13435,7 +13279,7 @@ impl ConversationService {
                 "knowledge binding changed or is unknown; proving old runtime exit before mount reconciliation"
             );
             Self::terminate_runtime_with_proof(
-                runtime_registry,
+                runtime_sessions,
                 &conversation_id,
                 AgentKillReason::KnowledgeBindingChanged,
                 "knowledge binding recycle",
@@ -13460,7 +13304,7 @@ impl ConversationService {
         // Authority acquisition happens before sync. A conflicting active
         // conversation therefore fails without deleting or replacing a single
         // mount. The returned RAII lease is transferred into the exact runtime
-        // slot by AgentRuntimeRegistry before its factory starts.
+        // slot by AgentRuntimeSessions before its factory starts.
         let (outcome, workspace_binding_lease) = plan.activate(&conversation_id).await?;
         runtime_options.workspace_binding_lease = Some(workspace_binding_lease);
 
@@ -14177,29 +14021,13 @@ fn reject_execution_policy_extra_keys(extra: &serde_json::Value) -> Result<(), A
     }
 }
 
-/// Bound engines need an exact source policy for Nomi's private codec. Only
-/// unbound legacy Nomi rows retain the old compatibility-kind discriminator.
-fn row_uses_nomi_engine(row: &ConversationRow, registry: &dyn AgentRuntimeRegistry) -> Result<bool, AppError> {
-    let extra: serde_json::Value = serde_json::from_str(&row.extra)
-        .map_err(|error| AppError::Internal(error.to_string()))?;
-    match extra.get(nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY) {
-        Some(value) => {
-            let binding: nomifun_api_types::RuntimeEngineBinding = serde_json::from_value(value.clone())
-                .map_err(|error| AppError::Conflict(format!("Invalid runtime binding: {error}")))?;
-            binding.validate()?;
-            registry.binding_uses_nomi_session(&binding)
-        }
-        None => Ok(row.r#type == AgentType::Nomi.serde_name()),
-    }
-}
-
 /// Backend lifecycle authority never comes from the open `extra` bag.
 /// Reject these keys instead of making an injected fence indistinguishable
 /// from a backend reservation after restart.
 pub(crate) const BACKEND_OWNED_LIFECYCLE_EXTRA_KEYS: [&str; 14] = [
     nomifun_db::conversation_context::ENGINE_CONTEXT_AFTER_MESSAGE_ID,
     "execution_constraints",
-    "runtime_engine_binding",
+    "runtime_build_binding",
     "nomi_core_session",
     "_edit_resubmit_fence",
     "active_turn_operation_id",
@@ -15261,17 +15089,8 @@ mod tests {
         assert!(terminal_error_requires_runtime_retirement(Some(
             nomifun_api_types::AgentErrorCode::NomifunAgentSessionInconsistent,
         )));
-        assert!(terminal_error_requires_nomi_session_recovery(Some(
-            nomifun_api_types::AgentErrorCode::NomifunAgentSessionInconsistent,
-        )));
         assert!(terminal_error_requires_runtime_retirement(Some(
             nomifun_api_types::AgentErrorCode::NomifunStateInconsistent,
-        )));
-        assert!(terminal_error_requires_nomi_session_recovery(Some(
-            nomifun_api_types::AgentErrorCode::NomifunStateInconsistent,
-        )));
-        assert!(terminal_error_requires_nomi_session_recovery(Some(
-            nomifun_api_types::AgentErrorCode::NomifunStreamBroken,
         )));
         assert!(!terminal_error_requires_runtime_retirement(Some(
             nomifun_api_types::AgentErrorCode::UserLlmProviderUnbackedCompletion,

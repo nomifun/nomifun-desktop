@@ -16,29 +16,24 @@
       "responsibility": "Retain the original Conversation and Session facts, accepted input, lifecycle and effect settlement. Do not replace with a second Session store."
     },
     {
-      "owner": "RuntimeEngineHost",
-      "path": "crates/backend/nomifun-app/src/router/runtime_engines.rs",
-      "responsibility": "Register official nomifun.nomi and nomifun.coding plus explicit compiled extensions; resolve exact immutable build admission. No post-package mounting or silent fallback."
+      "owner": "OfficialRuntimeHost",
+      "path": "crates/backend/nomifun-app/src/router/official_runtime.rs",
+      "responsibility": "Install the one official nomifun.nomi factory and freeze its exact build identity. No runtime registration, selection, post-package mounting or fallback."
     },
     {
       "owner": "Agent revision and Session binding",
       "path": "crates/backend/nomifun-app/src/router/nomi_core_session.rs",
-      "responsibility": "Agent workbench chooses Engine; immutable revision resolves to exact Session build. Fork inherits; no conversation-level hot switching."
+      "responsibility": "Immutable Agent revision resolves to the current official Session build. Build identity is host-written recovery evidence, never a user or Preset selection."
     },
     {
       "owner": "EngineSessionHost",
       "path": "crates/backend/nomifun-app/src/router/engine_session_host.rs",
-      "responsibility": "Expose admitted platform model, tool, resource, journal and lifecycle ports to independently implemented loops."
+      "responsibility": "Expose admitted platform model, tool, resource, journal and lifecycle ports to the one source-integrated Driver."
     },
     {
-      "owner": "Nomi Engine",
-      "path": "crates/backend/nomifun-ai-agent/src/factory/nomi.rs",
-      "responsibility": "Official general-purpose execution strategy; retained, not scheduled for Codex replacement."
-    },
-    {
-      "owner": "Coding Engine",
-      "path": "crates/backend/nomifun-coding-engine/src/turn.rs",
-      "responsibility": "Independent coding task loop, planning and context strategy; invokes shared host ports without taking platform ownership."
+      "owner": "Unified Nomi Runtime",
+      "path": "crates/backend/nomifun-agent-runtime/src/turn.rs",
+      "responsibility": "The sole adaptive execution loop, including planning, bounded context, continuation and completion evidence; invokes shared host ports without taking platform ownership."
     },
     {
       "owner": "Shared Wave1 capabilities",

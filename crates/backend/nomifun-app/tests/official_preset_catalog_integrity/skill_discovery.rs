@@ -183,7 +183,7 @@ async fn cold_skill_commands_use_saved_binding_without_starting_runtime_or_conte
     )
     .await;
     let session_id = session.agent_session_id.as_str();
-    assert_eq!(services.agent_runtime_registry.active_runtime_count(), 0);
+    assert_eq!(services.agent_runtime_sessions.active_runtime_count(), 0);
     assert!(services
         .conversation_repo
         .get(session_id)
@@ -197,7 +197,7 @@ async fn cold_skill_commands_use_saved_binding_without_starting_runtime_or_conte
         assert_eq!(commands[0].command, format!("skill:{SKILL}"));
         assert_eq!(commands[0].description, "Exact package guide");
     }
-    assert_eq!(services.agent_runtime_registry.active_runtime_count(), 0);
+    assert_eq!(services.agent_runtime_sessions.active_runtime_count(), 0);
     assert!(
         !marker.exists(),
         "neither the engine nor Plugin Context should activate during discovery"
@@ -243,7 +243,7 @@ async fn cold_skill_commands_use_saved_binding_without_starting_runtime_or_conte
         axum::http::StatusCode::UNPROCESSABLE_ENTITY,
         "withdrawal must not return cached commands or a directory fallback"
     );
-    assert_eq!(services.agent_runtime_registry.active_runtime_count(), 0);
+    assert_eq!(services.agent_runtime_sessions.active_runtime_count(), 0);
     assert!(!marker.exists());
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;

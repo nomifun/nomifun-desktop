@@ -1,5 +1,4 @@
 import { ipcBridge } from '@/common';
-import type { RuntimeEngineDescriptor } from '@/common/types/agentPlatform';
 import { Alert, Button, Spin, Tag } from '@arco-design/web-react';
 import { CheckOne, Refresh, Shield } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
@@ -7,20 +6,13 @@ import { Link } from 'react-router-dom';
 import useSWR from 'swr';
 import SettingsPageWrapper from '../components/SettingsPageWrapper';
 
-const NOMI_FAMILY = 'nomifun.nomi';
-
-const currentNomiBuild = (engines: readonly RuntimeEngineDescriptor[]): RuntimeEngineDescriptor | undefined =>
-  engines
-    .filter((engine) => engine.family_id === NOMI_FAMILY)
-    .sort((left, right) => right.build_id.localeCompare(left.build_id))[0];
-
 export default function ExecutionEngineSettings() {
   const { t } = useTranslation();
   const { data, error, isLoading, isValidating, mutate } = useSWR(
-    'runtime-engines',
-    () => ipcBridge.agentPlatform.runtimeEngines.list.invoke()
+    'agent-runtime',
+    () => ipcBridge.agentPlatform.agentRuntime.get.invoke()
   );
-  const build = currentNomiBuild(data ?? []);
+  const build = data;
   const stale = Boolean(error && data);
 
   return (

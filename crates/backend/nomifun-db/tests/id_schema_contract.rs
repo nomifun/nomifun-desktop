@@ -573,7 +573,7 @@ async fn runtime_v3_schema_has_no_physical_foreign_keys_or_cascades_and_only_gua
             "trg_conversation_mcp_effect_admission",
             "trg_conversation_mcp_effect_no_delete",
             "trg_conversation_mcp_effect_update",
-            "trg_conversation_runtime_engine_immutable",
+            "trg_conversation_runtime_build_immutable",
             "trg_conversation_runtime_event_owner",
             "trg_conversations_running_admission_guard",
             "trg_conversations_running_delete_guard",

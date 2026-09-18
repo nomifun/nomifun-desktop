@@ -141,18 +141,6 @@ pub const MANAGED_DATASET_ROOTS: &[ManagedDatasetRoot] = &[
         backup: BackupPolicy::Exclude(RUNTIME_ONLY),
     },
     ManagedDatasetRoot {
-        path: "nomi-sessions",
-        kind: DatasetRootKind::Directory,
-        reset: ResetPolicy::Retire,
-        backup: BackupPolicy::Exclude(RUNTIME_ONLY),
-    },
-    ManagedDatasetRoot {
-        path: "nomi-health-check-sessions",
-        kind: DatasetRootKind::Directory,
-        reset: ResetPolicy::Retire,
-        backup: BackupPolicy::Exclude(RUNTIME_ONLY),
-    },
-    ManagedDatasetRoot {
         path: "browser-profile",
         kind: DatasetRootKind::Directory,
         reset: ResetPolicy::Retire,

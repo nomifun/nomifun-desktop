@@ -502,50 +502,6 @@ async fn product_before_tool_publish_select_allow_deny_and_unselected_baseline()
     );
     assert_eq!(lines(&fixture.target_log), ["allow", "baseline"]);
 
-    let engines = data(&fixture.router, "GET", "/api/runtime-engines", Value::Null).await;
-    let coding = engines
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|e| e["family_id"] == "nomifun.coding")
-        .unwrap();
-    let path = format!("/api/agent-presets/{}", fixture.preset);
-    let editor = data(
-        &fixture.router,
-        "GET",
-        &format!("{path}/editor"),
-        Value::Null,
-    )
-    .await;
-    let mut draft = editor["draft"].clone();
-    draft["document"]["runtime_engine"] = json!({"selector":{"selection":"exact","family_id":coding["family_id"],"build_id":coding["build_id"],"build_digest":coding["build_digest"]},"profile":"coding"});
-    let (status, error) = request(
-        &fixture.router,
-        "POST",
-        &format!("{path}/revisions"),
-        json!({"expected_current_revision":draft["current_revision"],"draft":draft}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
-    assert!(
-        error["details"]["diagnostics"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|diagnostic| diagnostic["code"] == "AGENT_RUNTIME_ENGINE_UNAVAILABLE"),
-        "{error}"
-    );
-    let unchanged = data(
-        &fixture.router,
-        "GET",
-        &format!("{path}/editor"),
-        Value::Null,
-    )
-    .await;
-    assert_eq!(
-        unchanged["draft"]["current_revision"], editor["draft"]["current_revision"],
-        "unsupported Engine must not save a new revision"
-    );
     fixture.shutdown().await;
 }
 
