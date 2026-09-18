@@ -10,7 +10,6 @@ use nomifun_coding_engine::{
     CodingEngineError, CodingEngineEvent, CodingInputPort, CodingSteeringInput,
 };
 use nomifun_common::AppError;
-use nomifun_db::sqlx;
 
 use super::{ActiveTurn, ConversationCodingHost, error};
 
@@ -171,27 +170,38 @@ impl ConversationCodingHost {
         {
             return Ok(false);
         }
-        let row: Option<(String, Option<String>)> = sqlx::query_as(
-            "SELECT r.message_id, CASE WHEN length(CAST(r.request_payload AS BLOB)) <= 65536 THEN r.request_payload ELSE NULL END FROM conversation_delivery_receipts r JOIN conversations c \
-             ON c.conversation_id = r.conversation_id AND c.user_id = r.user_id \
-             WHERE r.operation_id = ? AND r.kind = 'steer' AND r.user_id = ? AND r.conversation_id = ? \
-             AND (r.status = 'accepted' OR (r.status = 'completed' AND r.result_ok = 1)) \
-             AND c.status = 'running' AND c.admission_epoch = ? AND c.active_turn_operation_id = ?")
-            .bind(&delivery.receipt_operation_id).bind(&self.options.user_id).bind(&self.options.conversation_id)
-            .bind(turn.epoch).bind(&turn.operation).fetch_optional(&self.pool).await.map_err(error)?;
-        let (message_id, raw) =
-            row.ok_or_else(|| error("no admitted steering receipt for this turn"))?;
-        let raw = raw.ok_or_else(|| error("oversized steering receipt"))?;
-        let value: serde_json::Value = serde_json::from_str(&raw).map_err(error)?;
+        let store = self.session_host.canonical_store()?;
+        let facts = store
+            .chat_causality_facts(
+                &self.options.conversation_id.clone().into(),
+                &turn.operation.clone().into(),
+            )
+            .await
+            .map_err(error)?;
+        if facts.head.status != "running"
+            || facts.head.active_turn_id.as_deref() != Some(turn.operation.as_str())
+        {
+            return Ok(false);
+        }
+        let steering = facts
+            .events
+            .iter()
+            .find(|event| {
+                event.event_id.as_ref() == delivery.receipt_operation_id
+                    && event.kind.0 == "turn/steer-accepted"
+                    && event.correlation_id.as_ref() == turn.operation
+            })
+            .ok_or_else(|| error("no admitted steering receipt for this turn"))?;
+        let value = facts
+            .event_payloads
+            .get(steering.event_id.as_ref())
+            .and_then(|payload| payload.get("input"))
+            .cloned()
+            .ok_or_else(|| error("canonical steering receipt has no bounded input"))?;
+        let message_id = steering.event_id.as_ref().to_owned();
         if value.get("content").and_then(|v| v.as_str()) != Some(delivery.text.as_str())
-            || value
-                .pointer("/turn_scope/wire_turn_id")
-                .and_then(|v| v.as_str())
-                != Some(turn.wire_id.as_str())
-            || value
-                .pointer("/turn_scope/generation")
-                .and_then(|v| v.as_u64())
-                != Some(delivery.turn_generation)
+            || delivery.wire_turn_id != turn.wire_id
+            || delivery.turn_generation != turn.epoch as u64
             || turn
                 .steering
                 .generation
@@ -270,14 +280,14 @@ impl ConversationCodingHost {
         }
         // Attachment reads may outlive a database-side stop. Recheck the
         // durable receipt/turn authority before the in-memory acknowledgement.
-        let (still_admitted,): (i64,) = sqlx::query_as(
-            "SELECT EXISTS(SELECT 1 FROM conversation_delivery_receipts r JOIN conversations c ON c.conversation_id = r.conversation_id AND c.user_id = r.user_id \
-             WHERE r.operation_id = ? AND r.kind = 'steer' AND r.user_id = ? AND r.conversation_id = ? \
-             AND (r.status = 'accepted' OR (r.status = 'completed' AND r.result_ok = 1)) \
-             AND c.status = 'running' AND c.admission_epoch = ? AND c.active_turn_operation_id = ?)")
-            .bind(&input.receipt_operation_id).bind(&self.options.user_id).bind(&self.options.conversation_id)
-            .bind(turn.epoch).bind(&turn.operation).fetch_one(&self.pool).await.map_err(error)?;
-        if still_admitted != 1 {
+        let still_admitted = store
+            .read_turn_receipt(
+                &self.options.conversation_id.clone().into(),
+                &turn.operation.clone().into(),
+            )
+            .await
+            .map_err(error)?;
+        if still_admitted.status != nomifun_agent_session::TurnReceiptStatus::Running {
             return Ok(false);
         }
         if turn.cancellation.is_cancelled() {

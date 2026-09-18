@@ -23,7 +23,7 @@ fn repo_file(relative: &str) -> String {
 }
 
 #[test]
-fn default_nomi_core_router_keeps_legacy_and_execution_surfaces_explicit() {
+fn default_nomi_core_router_exposes_only_canonical_agent_sessions_and_execution() {
     let routes = repo_file("src/router/routes.rs");
 
     for required_merge in [
@@ -49,6 +49,17 @@ fn default_nomi_core_router_keeps_legacy_and_execution_surfaces_explicit() {
         !routes.contains("remote_rest::build("),
         "default Nomi-core router must not mount the Fresh-v4 Remote adapter"
     );
+    for retired in [
+        "conversation_routes(",
+        "conversation_ops_routes(",
+        "creative_studio_agent_session_routes(",
+        "legacy_conversation_port",
+    ] {
+        assert!(
+            !routes.contains(retired),
+            "retired Conversation route authority must be unreachable: {retired}"
+        );
+    }
 }
 
 #[test]
@@ -73,6 +84,9 @@ fn canonical_surfaces_are_traceable_to_the_app_local_route_definitions() {
         "/api/agent-sessions/{agent_session_id}",
         "/api/agent-sessions/{agent_session_id}/preset",
         "/api/agent-sessions/{agent_session_id}/capability-selection",
+        "/api/agent-session-messages/search",
+        "/api/agent-sessions/{agent_session_id}/creation-tasks",
+        "/api/creative-studio/canvas-agent-sessions/resolve",
         "/api/remote/open",
         "/api/remote/turn",
         "/api/remote/observe",
@@ -115,6 +129,205 @@ fn nomi_core_projection_does_not_reintroduce_preset_resource_fields() {
         !projection.contains("resource_binding_refs"),
         "Capability selections must not carry target resource references"
     );
+}
+
+#[tokio::test]
+async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
+    const TRUST: &str = "canonical-turn-dispatch";
+    async fn call(
+        router: axum::Router,
+        method: &str,
+        path: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("x-nomi-local-trust", TRUST)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    let upstream = wiremock::MockServer::start().await;
+    const REPLY: &str = "CANONICAL_STORE_ONLY_OK";
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(format!(
+                    "data: {{\"id\":\"canonical\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{REPLY}\"}},\"finish_reason\":null}}]}}\n\ndata: {{\"id\":\"canonical\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
+                )),
+        )
+        .mount(&upstream)
+        .await;
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let (status, provider) = call(
+        router.clone(),
+        "POST",
+        "/api/providers",
+        json!({
+            "platform": "stepfun-plan",
+            "name": "Canonical dispatch fixture",
+            "base_url": format!("{}/v1", upstream.uri()),
+            "auth_scheme": "bearer",
+            "credentials": { "api_keys": ["fixture-not-a-secret"] },
+            "enabled": true,
+            "initial_model": {
+                "model": "step-3.7-flash",
+                "enabled": true,
+                "capabilities": [{
+                    "task": "chat",
+                    "traits": ["function_calling", "streaming"],
+                    "protocol": "openai.chat_text",
+                    "connection_role": "default",
+                    "provider_params": {}
+                }]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{provider}");
+    let model = json!({
+        "provider_id": provider["data"]["provider_id"],
+        "model": "step-3.7-flash"
+    });
+    let (status, preset) = call(
+        router.clone(),
+        "POST",
+        "/api/agent-presets/from-template/chat.minimal",
+        json!({
+            "display_name": "Canonical dispatch",
+            "reuse_existing": true,
+            "model_route_refs": {},
+            "chat_route_records": {},
+            "model": model
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preset}");
+    let preset_id = preset["data"]["preset"]["preset_id"].as_str().unwrap();
+    let (status, session) = call(
+        router.clone(),
+        "POST",
+        "/api/agent-sessions",
+        json!({ "preset_id": preset_id, "model": model, "title": "Canonical" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    let session_id = session["data"]["agent_session_id"].as_str().unwrap();
+    let key = uuid::Uuid::now_v7().to_string();
+    let (status, turn) = call(
+        router.clone(),
+        "POST",
+        &format!("/api/agent-sessions/{session_id}/turns"),
+        json!({ "idempotency_key": key, "input": { "content": "reply once" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{turn}");
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let (status, history) = call(
+                router.clone(),
+                "GET",
+                &format!("/api/agent-sessions/{session_id}/message-history?page_size=50"),
+                json!({}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{history}");
+            if history["data"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["content"]["content"] == REPLY)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("canonical assistant projection did not become durable");
+    let canonical_store = nomifun_agent_session::AgentSessionStore::from_pool(
+        services.database.pool().clone(),
+    )
+    .await
+    .unwrap();
+    let session_key = nomifun_agent_contracts::AgentSessionId::from(session_id.to_owned());
+    let before_rebuild = canonical_store.head(&session_key).await.unwrap();
+    let rebuilt = canonical_store.rebuild_projections(&session_key).await.unwrap();
+    assert_eq!(rebuilt, before_rebuild, "projection rebuild must be deterministic");
+    let (status, listed) = call(
+        router.clone(),
+        "GET",
+        "/api/agent-sessions?limit=50",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert!(listed["data"]["items"].as_array().unwrap().iter()
+        .any(|item| item["conversation_id"] == session_id));
+    let (status, updated) = call(
+        router.clone(),
+        "PATCH",
+        &format!("/api/agent-sessions/{session_id}"),
+        json!({ "name": "Canonical renamed", "pinned": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["data"]["name"], "Canonical renamed");
+    assert_eq!(updated["data"]["pinned"], true);
+    let legacy_conversations: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM conversations WHERE conversation_id = ?",
+    )
+    .bind(session_id)
+    .fetch_one(services.database.pool())
+    .await
+    .unwrap();
+    let legacy_messages: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id = ?")
+            .bind(session_id)
+            .fetch_one(services.database.pool())
+            .await
+            .unwrap();
+    assert_eq!((legacy_conversations, legacy_messages), (0, 0));
+    let (status, deleted) = call(
+        router.clone(),
+        "DELETE",
+        &format!("/api/agent-sessions/{session_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    let (status, _) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    for (method, path) in [
+        ("GET", "/api/conversations"),
+        ("POST", "/api/conversations"),
+        ("GET", "/api/messages/search"),
+    ] {
+        let (status, _) = call(router.clone(), method, path, json!({})).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "retired route survived: {method} {path}");
+    }
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
 }
 
 #[path = "common/mod.rs"]
@@ -645,10 +858,25 @@ async fn product_agent_selection_precedes_models_and_reports_host_capability_ava
     assert_eq!(status, StatusCode::OK, "{patched}");
     let (status, thread) = call(router.clone(), "POST", &format!("/api/companion/companions/{companion_id}/companion/threads"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{thread}");
-    let snapshot: String = sqlx::query_scalar("SELECT agent_snapshot FROM conversations WHERE conversation_id = ?")
-        .bind(thread["data"]["conversation_id"].as_str().unwrap()).fetch_one(services.database.pool()).await.unwrap();
-    let snapshot: Value = serde_json::from_str(&snapshot).unwrap();
+    let thread_id = thread["data"]["conversation_id"].as_str().unwrap();
+    let (status, projected) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{thread_id}/projection"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{projected}");
+    let snapshot = &projected["data"]["agent_snapshot"];
     assert_eq!(snapshot["enabled_capabilities"], json!([]), "configuring a model must retain the Agent chosen earlier");
+    let legacy_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM conversations WHERE conversation_id = ?",
+    )
+    .bind(thread_id)
+    .fetch_one(services.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(legacy_rows, 0, "product sessions must not re-enter the legacy Agent store");
     let coding = json!({ "kind": "template", "template_key": "coding.codex" });
     for path in &paths {
         let (status, saved) = call(router.clone(), "PUT", path, json!({
@@ -733,8 +961,8 @@ async fn canonical_coding_session_rejects_in_place_preset_switch_and_keeps_its_b
 #[tokio::test]
 async fn creative_studio_entry_uses_its_official_agent() {
     const TRUST: &str = "creative-product-agent";
-    async fn call(router: axum::Router, path: &str, body: Value) -> (StatusCode, Value) {
-        let response = router.oneshot(Request::builder().method("POST").uri(path)
+    async fn call(router: axum::Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+        let response = router.oneshot(Request::builder().method(method).uri(path)
             .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
         let status = response.status();
@@ -743,7 +971,7 @@ async fn creative_studio_entry_uses_its_official_agent() {
     }
     let (router, services) = common::build_local_trust_app(TRUST).await;
     let upstream = wiremock::MockServer::start().await;
-    let (status, provider) = call(router.clone(), "/api/providers", json!({
+    let (status, provider) = call(router.clone(), "POST", "/api/providers", json!({
         "platform": "stepfun-plan", "name": "Creative Agent regression",
         "base_url": format!("{}/step_plan/v1", upstream.uri()),
         "auth_scheme": "bearer", "credentials": { "api_keys": ["test-only"] },
@@ -755,7 +983,7 @@ async fn creative_studio_entry_uses_its_official_agent() {
     })).await;
     assert_eq!(status, StatusCode::CREATED, "{provider}");
     let provider_id = provider["data"]["provider_id"].as_str().unwrap();
-    let (status, canvas) = call(router.clone(), "/api/creative-studio/canvases",
+    let (status, canvas) = call(router.clone(), "POST", "/api/creative-studio/canvases",
         json!({
             "title": "Agent-bound canvas",
             "agentKickoff": {
@@ -772,7 +1000,7 @@ async fn creative_studio_entry_uses_its_official_agent() {
     let session_id = document["chatSessions"][0]["id"].as_str().unwrap();
     let pending_key = document["chatSessions"][0]["pendingTurn"]["idempotencyKey"]
         .as_str().unwrap();
-    let (status, session) = call(router.clone(),
+    let (status, session) = call(router.clone(), "POST",
         "/api/creative-studio/canvas-agent-sessions/resolve", json!({
             "canvas_id": canvas_id,
             "session_id": session_id,
@@ -781,10 +1009,15 @@ async fn creative_studio_entry_uses_its_official_agent() {
         })).await;
     assert_eq!(status, StatusCode::CREATED, "{session}");
     let conversation_id = session["data"]["binding"]["conversation_id"].as_str().unwrap();
-    let snapshot_json: String = sqlx::query_scalar(
-        "SELECT agent_snapshot FROM conversations WHERE conversation_id = ?")
-        .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
-    let snapshot: Value = serde_json::from_str(&snapshot_json).unwrap();
+    let (status, projected) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{conversation_id}/projection"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{projected}");
+    let snapshot = &projected["data"]["agent_snapshot"];
     assert_eq!(snapshot["preset_name"], "creative-studio.default");
     assert!(snapshot["enabled_capabilities"].as_array().unwrap().iter()
         .any(|capability| capability == "creative.workshop"));
@@ -794,6 +1027,14 @@ async fn creative_studio_entry_uses_its_official_agent() {
         "SELECT COUNT(*) FROM nomi_agent_bindings WHERE target_kind = 'creative_studio_canvas' AND target_id = ?")
         .bind(canvas_id).fetch_one(services.database.pool()).await.unwrap();
     assert_eq!(target_count, 1);
+    let legacy_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM conversations WHERE conversation_id = ?",
+    )
+    .bind(conversation_id)
+    .fetch_one(services.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(legacy_rows, 0, "Creative Studio must bind only a canonical AgentSession");
     assert!(upstream.received_requests().await.unwrap().is_empty());
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
@@ -889,10 +1130,16 @@ async fn companion_entry_uses_its_official_agent_and_can_switch_to_minimal() {
     assert_eq!(other_status, StatusCode::OK, "{other_thread}");
     assert_eq!(thread["data"]["conversation_id"], other_thread["data"]["conversation_id"], "concurrent home/sidebar/device opens must share the first conversation");
     let conversation_id = thread["data"]["conversation_id"].as_str().unwrap();
-    let (preset_id, snapshot_json, _extra_json): (String, String, String) = sqlx::query_as(
-        "SELECT preset_id, agent_snapshot, extra FROM conversations WHERE conversation_id = ?")
-        .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
-    let snapshot: Value = serde_json::from_str(&snapshot_json).unwrap();
+    let (status, projected) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{conversation_id}/projection"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{projected}");
+    let snapshot = &projected["data"]["agent_snapshot"];
+    let preset_id = projected["data"]["preset_id"].as_str().unwrap().to_owned();
     let enabled = snapshot["enabled_capabilities"].as_array().unwrap().iter()
         .map(|capability| capability.as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
     assert_eq!(enabled, std::collections::BTreeSet::from([
@@ -911,7 +1158,10 @@ async fn companion_entry_uses_its_official_agent_and_can_switch_to_minimal() {
     assert_eq!(snapshot["preset_name"], "companion.default");
     let conversation_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations")
         .fetch_one(services.database.pool()).await.unwrap();
-    assert_eq!(conversation_count, 1, "ensure must not leak a second conversation");
+    assert_eq!(conversation_count, 0, "canonical Companion must not write the retired Conversation Store");
+    let session_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_sessions WHERE state = 'live'")
+        .fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(session_count, 1, "concurrent ensure must create one canonical AgentSession");
     let (status, options) = call(router.clone(), "GET",
         &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{options}");
@@ -934,18 +1184,18 @@ async fn companion_entry_uses_its_official_agent_and_can_switch_to_minimal() {
             "preset_id": minimal_id,
             "conversation_id": conversation_id
         })).await;
-    assert_eq!(status, StatusCode::OK, "{selected}");
-    let (new_preset_id, snapshot_json, extra_json): (String, String, String) = sqlx::query_as(
-        "SELECT preset_id, agent_snapshot, extra FROM conversations WHERE conversation_id = ?")
-        .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
-    assert_ne!(new_preset_id, preset_id);
-    let snapshot: Value = serde_json::from_str(&snapshot_json).unwrap();
-    let extra: Value = serde_json::from_str(&extra_json).unwrap();
-    assert_eq!(snapshot["enabled_capabilities"], json!([]));
-    assert_eq!(extra["companion_memory_enabled"], false);
-    assert_eq!(extra["companion_skills_enabled"], false);
-    assert!(extra.get("system_prompt").is_none());
-    assert_eq!(extra["product_agent_target_kind"], "companion");
+    assert_eq!(status, StatusCode::CONFLICT, "{selected}");
+    assert_eq!(selected["code"], "AGENT_SESSION_BINDING_IMMUTABLE");
+    let (status, unchanged) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{conversation_id}/projection"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{unchanged}");
+    assert_eq!(unchanged["data"]["preset_id"], preset_id);
+    assert_eq!(unchanged["data"]["agent_snapshot"]["enabled_capabilities"], snapshot["enabled_capabilities"]);
     assert!(upstream.received_requests().await.unwrap().is_empty());
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
@@ -1169,7 +1419,11 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
         }
         sessions.push(binding);
     }
-    assert_eq!(sessions[0], sessions[1], "same model reuses the frozen configuration");
+    assert_eq!(
+        sessions[0]["typed_resource_bindings"],
+        sessions[1]["typed_resource_bindings"],
+        "same model resolves the same owner-scoped resources"
+    );
     let (_, reloaded) = call(router.clone(), "GET", &format!("/api/agent-presets/{preset_id}/editor"), json!({})).await;
     assert_eq!(reloaded["data"]["revision"], original["revision"]);
     let (_, library) = call(router.clone(), "GET", "/api/agent-preset-templates", json!({})).await;
@@ -1885,11 +2139,12 @@ async fn nomi_core_remote_replays_frozen_binding_and_persists_event_cursor() {
             .expect("build remote open request")
     };
     let open = router.clone().oneshot(open_request()).await.expect("open remote");
-    assert_eq!(open.status(), StatusCode::OK);
+    let open_status = open.status();
     let open_body = axum::body::to_bytes(open.into_body(), 4 * 1024 * 1024)
         .await
         .expect("read remote open response");
     let opened: Value = serde_json::from_slice(&open_body).expect("remote open JSON");
+    assert_eq!(open_status, StatusCode::OK, "{opened}");
     assert_eq!(opened["open_state"], json!({ "state": "ready" }));
     assert_eq!(
         opened["cursor"]["seq"],
@@ -2051,6 +2306,35 @@ async fn nomi_core_remote_replays_frozen_binding_and_persists_event_cursor() {
     .await
     .expect("dispatch post-cancel turn");
     assert_eq!(turn_after_cancel.status(), StatusCode::CONFLICT);
+
+    let deleted = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/agent-sessions/{session_id}"))
+                .header("x-nomi-local-trust", "remote-local-trust")
+                .header("idempotency-key", "remote-session-delete-smoke")
+                .body(Body::empty())
+                .expect("build canonical Session delete request"),
+        )
+        .await
+        .expect("delete canonical Remote Session");
+    assert_eq!(deleted.status(), StatusCode::OK);
+    let post_delete = router
+        .clone()
+        .oneshot(open_request())
+        .await
+        .expect("replay Remote open after Session delete");
+    assert_ne!(post_delete.status(), StatusCode::OK, "deleted Session must not resurrect");
+    let live_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_sessions WHERE agent_session_id = ? AND state = 'live'",
+    )
+    .bind(&session_id)
+    .fetch_one(services.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(live_rows, 0);
 
     services.shutdown_browser_platform().await.expect("browser cleanup");
     services.database.close().await;

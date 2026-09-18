@@ -22,6 +22,7 @@ param(
   [switch]$Delete,
   [switch]$Browser,
   [switch]$BrowserGui,
+  [switch]$ModelSmoke,
   [string]$DataDir,
   [string]$TargetName = 'NomiFun/StepFun/LiveProvider'
 )
@@ -31,7 +32,7 @@ $ErrorActionPreference = 'Stop'
 if ($Setup -and $Delete) {
   throw 'Setup and Delete cannot be used together.'
 }
-if ($BrowserGui -and ($Browser -or [string]::IsNullOrWhiteSpace($DataDir) -or -not [IO.Path]::IsPathRooted($DataDir) -or (Test-Path -LiteralPath $DataDir))) {
+if ($BrowserGui -and ($Browser -or $ModelSmoke -or [string]::IsNullOrWhiteSpace($DataDir) -or -not [IO.Path]::IsPathRooted($DataDir) -or (Test-Path -LiteralPath $DataDir))) {
   throw 'BrowserGui requires a new absolute DataDir and cannot be combined with Browser.'
 }
 
@@ -204,6 +205,8 @@ try {
     & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --browser-gui --data-dir $DataDir
   } elseif ($Browser) {
     & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --browser
+  } elseif ($ModelSmoke) {
+    & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --model-smoke
   } else {
     & bun run test:nomi-core-live-provider
   }

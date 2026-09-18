@@ -1617,15 +1617,12 @@ fn validate_vcs_commit_args(args: &Value, _workspace: &Path) -> bool {
 }
 
 fn assistant_text_projection(message: &Value) -> Option<&Value> {
-    if message.get("presentation_intent").and_then(Value::as_str) != Some("left") {
+    if message.get("presentation_intent").and_then(Value::as_str) != Some("message") {
         return None;
     }
     let projection = message.get("projection")?;
     let object = projection.as_object()?;
-    (object.get("name").is_none()
-        && object.get("status").is_none()
-        && object.get("type").is_none()
-        && object.get("error").is_none()
+    (object.get("state").and_then(Value::as_str) == Some("completed")
         && object.get("content").and_then(Value::as_str).is_some())
     .then_some(projection)
 }
@@ -2132,10 +2129,7 @@ async fn wait_for_session_marker(
             ));
         }
         let unexpected_tools = messages.iter().any(|message| {
-            message
-                .pointer("/projection/name")
-                .and_then(Value::as_str)
-                .is_some()
+            message.get("presentation_intent").and_then(Value::as_str) == Some("tool")
         });
         let assistant_text = messages
             .iter()
@@ -2145,9 +2139,10 @@ async fn wait_for_session_marker(
         let exact_marker = assistant_text.len() == 1
             && latest_marker_count == 1
             && assistant_text[0]
-                .get("turn_id")
+                .get("correlation_id")
                 .and_then(Value::as_str)
-                .is_some_and(|turn_id| !turn_id.is_empty());
+                .is_some_and(|message_id| uuid::Uuid::parse_str(message_id)
+                    .is_ok_and(|value| value.get_version_num() == 7));
         let response = successful_json(
             router,
             phase,

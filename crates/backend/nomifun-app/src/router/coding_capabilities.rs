@@ -6,7 +6,6 @@ use std::sync::{Arc, Weak, atomic::Ordering};
 use async_trait::async_trait;
 use nomifun_chat_model_broker::ChatCausality;
 use nomifun_coding_engine::CodingEngineError;
-use nomifun_db::sqlx;
 
 use super::{ActiveTurn, ConversationCodingHost};
 
@@ -59,25 +58,13 @@ fn validate_turn(
 }
 
 async fn fence(
-    host: &ConversationCodingHost,
     turn: &ActiveTurn,
     causality: &ChatCausality,
 ) -> Result<(), CodingEngineError> {
-    let admitted: (i64,) = sqlx::query_as(
-        "SELECT EXISTS(SELECT 1 FROM conversations c JOIN conversation_delivery_receipts r ON r.operation_id = c.active_turn_operation_id \
-         WHERE c.conversation_id = ? AND c.user_id = ? AND c.status = 'running' AND c.admission_epoch = ? \
-         AND c.active_turn_operation_id = ? AND r.conversation_id = c.conversation_id AND r.user_id = c.user_id \
-         AND r.kind = 'turn' AND r.status = 'accepted' AND r.message_id = ? \
-         AND EXISTS(SELECT 1 FROM conversation_runtime_events e WHERE e.conversation_id = c.conversation_id \
-         AND e.turn_operation_id = r.operation_id AND e.model_operation_id = ? AND e.model_claimed = 1))")
-        .bind(&host.options.conversation_id).bind(&host.options.user_id).bind(turn.epoch).bind(&turn.operation)
-        .bind(&turn.root).bind(causality.operation_id.as_ref()).fetch_one(&host.pool).await.map_err(engine_error)?;
-    if admitted.0 != 1 {
-        return Err(engine_error(
-            "Conversation generation/model operation is no longer admitted",
-        ));
-    }
-    Ok(())
+    turn.journal
+        .require_claimed_model(causality)
+        .await
+        .map_err(engine_error)
 }
 
 
@@ -93,14 +80,17 @@ impl nomifun_coding_engine::CodingLiveContextPort for HostPort {
         validate_turn(&host, turn, causality, generation)?;
         // Context reads precede ModelStepStarted (including compaction), so
         // require the accepted turn, not an already-claimed model operation.
-        let (admitted,): (i64,) = sqlx::query_as(
-            "SELECT EXISTS(SELECT 1 FROM conversations c JOIN conversation_delivery_receipts r ON r.operation_id = c.active_turn_operation_id \
-             WHERE c.conversation_id = ? AND c.user_id = ? AND c.status = 'running' AND c.admission_epoch = ? \
-             AND c.active_turn_operation_id = ? AND r.conversation_id = c.conversation_id AND r.user_id = c.user_id \
-             AND r.kind = 'turn' AND r.status = 'accepted' AND r.message_id = ?)")
-            .bind(&host.options.conversation_id).bind(&host.options.user_id).bind(turn.epoch)
-            .bind(&turn.operation).bind(&turn.root).fetch_one(&host.pool).await.map_err(engine_error)?;
-        if admitted != 1 { return Err(engine_error("context turn is no longer admitted")); }
+        let store = host.session_host.canonical_store().map_err(engine_error)?;
+        let receipt = store
+            .read_turn_receipt(
+                &host.options.conversation_id.clone().into(),
+                &turn.operation.clone().into(),
+            )
+            .await
+            .map_err(engine_error)?;
+        if receipt.status != nomifun_agent_session::TurnReceiptStatus::Running {
+            return Err(engine_error("context turn is no longer admitted"));
+        }
         host.resources.ensure_hosted_effects_settled().await.map_err(engine_error)?;
         host.resources.robot_vision_context(generation).await.map_err(engine_error)
     }
@@ -117,7 +107,7 @@ impl nomifun_engine_core::EngineResourcePort for HostPort {
             let active = host.active.lock().await;
             let turn = active.as_ref().ok_or_else(|| fail("No active resource turn".into()))?;
             validate_turn(&host, turn, causality, generation).map_err(|error| fail(error.to_string()))?;
-            fence(&host, turn, causality).await.map_err(|error| fail(error.to_string()))?;
+            fence(turn, causality).await.map_err(|error| fail(error.to_string()))?;
             if !turn.steering.permits_resource_dispatch() {
                 return Err(fail("Resource dispatch paused for queued user input or closed turn".into()));
             }
@@ -137,7 +127,7 @@ impl nomifun_engine_core::EngineResourcePort for HostPort {
             let active = host.active.lock().await;
             let turn = active.as_ref().ok_or_else(|| fail("No active resource turn".into()))?;
             validate_turn(&host, turn, causality, generation).map_err(|error| fail(error.to_string()))?;
-            fence(&host, turn, causality).await.map_err(|error| fail(error.to_string()))?;
+            fence(turn, causality).await.map_err(|error| fail(error.to_string()))?;
             if !turn.steering.permits_resource_dispatch() {
                 return Err(fail("Resource dispatch paused for queued user input or closed turn".into()));
             }

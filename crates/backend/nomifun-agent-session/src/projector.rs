@@ -172,6 +172,12 @@ pub(crate) fn payload_value(event: &SessionEventRecord, stored_body: Option<Valu
 }
 
 fn projection_identity(event: &SessionEventRecord) -> (String, String) {
+    if event.kind.0 == "turn/steer-accepted" {
+        return (
+            format!("message:{}", event.event_id.0),
+            "message".to_owned(),
+        );
+    }
     let prefix = event.kind.0.split('/').next().unwrap_or("event");
     let intent = match prefix {
         "session" => "session_status",
@@ -204,6 +210,16 @@ fn apply_projection_semantics(
         "turn/completed" => document.state = Some("completed".to_owned()),
         "turn/failed" => document.state = Some("failed".to_owned()),
         "turn/cancelled" => document.state = Some("cancelled".to_owned()),
+        "turn/steer-accepted" => {
+            document.state = Some("accepted".to_owned());
+            if let Some(content) = payload
+                .get("input")
+                .and_then(|input| input.get("content"))
+                .and_then(Value::as_str)
+            {
+                document.content = Some(content.to_owned());
+            }
+        }
         "message/user-accepted" => {
             document.state = Some("accepted".to_owned());
             if let Some(content) = payload.get("content").and_then(Value::as_str) {
@@ -258,6 +274,18 @@ fn apply_projection_semantics(
             document.content_digest = Some(content_digest);
             document.part_count = Some(part_count);
         }
+        "message/assistant-projected" => {
+            document.state = Some("completed".to_owned());
+            document.content = payload
+                .get("content")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            document.content_digest = document
+                .content
+                .as_deref()
+                .map(|content| digest_bytes(content.as_bytes()).0);
+            document.part_count = Some(1);
+        }
         "tool/call-started" => document.state = Some("started".to_owned()),
         "tool/result-recorded" => document.state = Some("recorded".to_owned()),
         "effect/started" => document.state = Some("started".to_owned()),
@@ -302,6 +330,7 @@ fn apply_projection_summaries(
             let summary = object_slot(&mut document.tool_summary);
             for key in [
                 "operation_id",
+                "call_id",
                 "capability_id",
                 "action_id",
                 "name",

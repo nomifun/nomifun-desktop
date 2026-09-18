@@ -6,7 +6,6 @@
 mod config;
 // Spec D2 delivery-notify observer (public so integration tests can drive
 // the full receipt loop without the whole app harness).
-pub mod delivery_notify;
 #[cfg(feature = "browser-use")]
 mod browser_workspace_provider;
 #[cfg(feature = "browser-use")]

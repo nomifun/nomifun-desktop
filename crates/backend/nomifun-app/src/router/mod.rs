@@ -16,7 +16,6 @@ pub(crate) mod agent_wave3_workshop_host;
 pub(crate) mod agent_wave5_host;
 pub(crate) mod nomi_core_wave4;
 pub(crate) mod chat_broker_host;
-pub(crate) mod legacy_conversation_port;
 pub mod instance_token_routes;
 pub(crate) mod remote_runtime;
 pub(crate) mod nomi_core_agent_projection;
@@ -64,7 +63,6 @@ pub(crate) mod plugin_platform;
 mod plugin_runtime_host;
 #[cfg(feature = "browser-use")]
 pub(crate) mod browser_workspace;
-mod boot_terminal_proof;
 mod computer_permissions;
 mod health;
 mod javascript_runtime;

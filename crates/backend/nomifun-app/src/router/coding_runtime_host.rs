@@ -13,7 +13,6 @@ use nomifun_api_types::RuntimeEngineBinding;
 use nomifun_chat_model_broker::*;
 use nomifun_coding_engine::*;
 use nomifun_common::AppError;
-use nomifun_db::SqlitePool;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
@@ -175,7 +174,6 @@ pub(crate) fn descriptor() -> RuntimeEngineDescriptor {
                     include_str!("../../../nomifun-plugin-platform/src/runtime/m1_application.rs"),
                     include_str!("../../../nomifun-db/migrations/102_conversation_hosted_effects.sql"),
                     include_str!("../../../nomifun-db/migrations/103_conversation_git_effects.sql"),
-                    include_str!("boot_terminal_proof.rs"),
                     include_str!("../../../nomifun-db/migrations/100_conversation_mcp_effects.sql"),
                     include_str!("../../../nomifun-db/migrations/101_mcp_effect_observations.sql"),
                     include_str!("nomi_core_mcp_catalog.rs"),
@@ -237,15 +235,11 @@ pub(crate) fn descriptor() -> RuntimeEngineDescriptor {
 
 pub(crate) fn factory(
     session_host: Arc<super::engine_session_host::EngineSessionHost>,
-    pool: SqlitePool,
     plugin_schemas: Arc<dyn nomifun_ai_agent::NomiPluginToolSchemaResolver>,
 ) -> RuntimeEngineFactory {
     Arc::new(move |options, binding| {
         let plugin_schemas = plugin_schemas.clone();
-        let (session_host, pool) = (
-            session_host.clone(),
-            pool.clone(),
-        );
+        let session_host = session_host.clone();
         Box::pin(async move {
             let admitted = session_host.resolve(&options, &binding).await?;
             super::coding_tool_surface::validate_session_mcp(admitted.snapshot(), &admitted.agent_binding().typed_resource_bindings, &admitted.session().extra)?;
@@ -293,7 +287,6 @@ pub(crate) fn factory(
             .map_err(error)?;
             let host = Arc::new_cyclic(|weak| ConversationCodingHost {
                 session_host,
-                pool,
                 options: options.clone(),
                 binding: binding.clone(),
                 engine_binding: engine_binding.clone(),
@@ -337,7 +330,6 @@ struct ActiveTurn {
 
 struct ConversationCodingHost {
     session_host: Arc<super::engine_session_host::EngineSessionHost>,
-    pool: SqlitePool,
     options: AgentRuntimeBuildOptions,
     binding: RuntimeEngineBinding,
     engine_binding: EngineBinding,
@@ -483,7 +475,12 @@ impl CodingRuntimeHost for ConversationCodingHost {
             .as_deref()
             .unwrap_or(&message.msg_id);
         let admitted = self.admit_preparation(message, cancellation.clone()).await?;
-        let patch_recovery = super::coding_patch_recovery::load(&self.pool, &admitted, &self.snapshot_ref).await?;
+        let patch_recovery = super::coding_patch_recovery::load(
+            self.session_host.as_ref(),
+            &admitted,
+            &self.snapshot_ref,
+        )
+        .await?;
         // Refresh platform facts each turn. Unknown-limit fallback and output
         // reservation are explicit runtime policies, not platform defaults.
         let facts = self.session_host.read_model_facts(admitted.session()).await?;
@@ -515,7 +512,7 @@ impl CodingRuntimeHost for ConversationCodingHost {
             return Err(error("current message exceeds the host history projection budget"));
         }
         let replayed = super::coding_runtime_history::load(
-            &self.pool, self.session_host.read_history(&admitted, 32).await?,
+            self.session_host.read_history(&admitted, 32).await?,
             self.session_host.as_ref(), &admitted,
         ).await?;
         let rows = if replayed.is_none() && bytes < 8 * 1024 * 1024 {

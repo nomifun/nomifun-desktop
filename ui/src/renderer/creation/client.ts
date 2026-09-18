@@ -3,7 +3,7 @@ import type { ConversationId } from '@/common/types/ids';
 import { parseMessageId } from '@/common/types/ids';
 import type { ConversationCreationTask, CreationReceipt, SubmitCreationRequest } from './types';
 
-export const creationTasksKey = (id: ConversationId) => `/api/conversations/${encodeURIComponent(id)}/creation-tasks`;
+export const creationTasksKey = (id: ConversationId) => `/api/agent-sessions/${encodeURIComponent(id)}/creation-tasks`;
 
 export function validateCreationTasks(value: unknown, conversationId: ConversationId): ConversationCreationTask[] {
   if (!Array.isArray(value)) throw new TypeError('Invalid creation task response');

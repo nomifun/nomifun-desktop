@@ -431,7 +431,10 @@ impl ConversationService {
         })
     }
 
-    async fn import_creation_files(
+    /// Shared file-ingress utility for the canonical AgentSession creation
+    /// adapter. It owns no Conversation state and only imports bounded,
+    /// authority-checked files into the Creation asset store.
+    pub async fn import_creation_files(
         engine: &Arc<nomifun_creation::CreationService>,
         id: &str,
         files: &[String],

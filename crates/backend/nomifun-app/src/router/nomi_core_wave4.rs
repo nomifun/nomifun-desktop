@@ -395,9 +395,11 @@ impl Wave4DurableActionLedger {
         Ok(sqlx::query(
             "DELETE FROM nomi_wave4_action_receipts
              WHERE NOT EXISTS (
-                 SELECT 1 FROM conversations c
-                 WHERE c.conversation_id = nomi_wave4_action_receipts.agent_session_id
-                   AND c.user_id = nomi_wave4_action_receipts.owner_user_id
+                 SELECT 1 FROM agent_sessions session
+                 WHERE session.agent_session_id = nomi_wave4_action_receipts.agent_session_id
+                   AND session.state = 'live'
+                   AND json_extract(session.owner_ref_json, '$.principal_kind') = 'user'
+                   AND json_extract(session.owner_ref_json, '$.principal_id') = nomi_wave4_action_receipts.owner_user_id
              )",
         )
         .execute(&self.pool)

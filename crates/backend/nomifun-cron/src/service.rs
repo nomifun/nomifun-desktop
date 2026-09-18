@@ -2525,10 +2525,6 @@ impl CronService {
                 "skill metadata saved, but generated SKILL.md could not be written: {err}"
             )));
         }
-        self.executor
-            .mark_skill_suggest_artifacts_saved(user_id, &job_id)
-            .await?;
-
         info!(job_id, "Skill content saved");
         Ok(())
     }

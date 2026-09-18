@@ -4,7 +4,6 @@
 //! `build_*_state` constructs one `*RouterState` from `AppServices`.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -37,7 +36,6 @@ use nomifun_plugin_platform::runtime::PluginRuntimeServiceRuntimeBinding;
 use nomifun_auth::extract_token_from_ws_headers;
 use nomifun_channel::ChannelRouterState;
 use nomifun_common::{AppError, OnConversationDelete, OnTerminalDelete};
-use nomifun_conversation::service::QuiescentOrphanReconciliation;
 use nomifun_conversation::{ConversationRouterState, ConversationService};
 use nomifun_cron::{CronEventEmitter, CronRouterState};
 use nomifun_db::{
@@ -48,7 +46,6 @@ use nomifun_db::{
     SqliteAgentMetadataRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
     SqliteProviderRepository, SqliteRemoteBindingRepository,
     SqliteSettingsRepository,
-    MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE,
 };
 use nomifun_file::{FileRouterState, FileService, FileWatchService, SnapshotService};
 use nomifun_knowledge::KnowledgeRouterState;
@@ -91,7 +88,6 @@ use super::nomi_core_session::{
 /// tests to override individual modules.
 pub struct ModuleStates {
     pub system: SystemRouterState,
-    pub conversation: ConversationRouterState,
     pub ssh_host: nomifun_ssh::SshHostRouterState,
     pub agent: AgentRouterState,
 
@@ -171,337 +167,6 @@ pub struct ChannelMessageLoopComponents {
     pub message_service: Arc<nomifun_channel::message_service::ChannelMessageService>,
 }
 
-#[derive(Debug, Default)]
-struct BootConversationReconciliationSummary {
-    reconciled: u64,
-    already_terminal: u64,
-    retained_execution_skipped: u64,
-    quarantined: u64,
-}
-
-#[derive(Debug, Clone)]
-struct BootConversationReconciliationCandidate {
-    user_id: String,
-    conversation_id: String,
-    agent_type: String,
-    status: Option<String>,
-    admission_epoch: i64,
-    operation_id: Option<String>,
-}
-
-fn boot_reconciliation_error_is_retryable(error: &AppError) -> bool {
-    matches!(
-        error,
-        AppError::Internal(_)
-            | AppError::BadGateway(_)
-            | AppError::Timeout(_)
-            | AppError::RateLimited
-            | AppError::ProviderUnavailable(_)
-    )
-}
-
-async fn reconcile_unsettled_conversation_turn_pages<
-    ListPage,
-    ListPageFuture,
-    Reconcile,
-    ReconcileFuture,
->(
-    mut list_page: ListPage,
-    mut reconcile: Reconcile,
-) -> BootConversationReconciliationSummary
-where
-    ListPage: FnMut(Option<String>, u32) -> ListPageFuture,
-    ListPageFuture:
-        Future<Output = Result<Vec<BootConversationReconciliationCandidate>, AppError>>,
-    Reconcile: FnMut(String, String) -> ReconcileFuture,
-    ReconcileFuture:
-        Future<Output = Result<QuiescentOrphanReconciliation, AppError>>,
-{
-    let mut summary = BootConversationReconciliationSummary::default();
-    let mut after_conversation_id: Option<String> = None;
-    loop {
-        let mut retry_delay = Duration::from_millis(25);
-        let page = loop {
-            match list_page(
-                after_conversation_id.clone(),
-                MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE,
-            )
-            .await
-            {
-                Ok(page) => break page,
-                Err(error) => {
-                    tracing::error!(
-                        after_conversation_id = after_conversation_id.as_deref(),
-                        error = %error,
-                        "startup Conversation orphan enumeration failed; background work remains fenced"
-                    );
-                    tokio::time::sleep(retry_delay).await;
-                    retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
-                }
-            }
-        };
-        if page.is_empty() {
-            break;
-        }
-
-        for candidate in page {
-            let BootConversationReconciliationCandidate {
-                user_id,
-                conversation_id,
-                agent_type,
-                status,
-                admission_epoch,
-                operation_id,
-            } = candidate;
-            let mut retry_delay = Duration::from_millis(25);
-            loop {
-                match reconcile(user_id.clone(), conversation_id.clone()).await {
-                    Ok(QuiescentOrphanReconciliation::Reconciled) => {
-                        summary.reconciled += 1;
-                        tracing::info!(
-                            user_id,
-                            conversation_id,
-                            agent_type,
-                            admission_epoch,
-                            operation_id,
-                            "startup reconciled a terminal-proof-backed Conversation turn without re-execution"
-                        );
-                        break;
-                    }
-                    Ok(QuiescentOrphanReconciliation::AlreadyTerminal) => {
-                        summary.already_terminal += 1;
-                        break;
-                    }
-                    Ok(QuiescentOrphanReconciliation::RetainedExecutionSkipped) => {
-                        summary.retained_execution_skipped += 1;
-                        tracing::warn!(
-                            user_id,
-                            conversation_id,
-                            agent_type,
-                            admission_epoch,
-                            operation_id,
-                            "startup left retained Agent Execution Conversation authority to its owning engine"
-                        );
-                        break;
-                    }
-                    Err(error) if boot_reconciliation_error_is_retryable(&error) => {
-                        tracing::error!(
-                            user_id,
-                            conversation_id,
-                            agent_type,
-                            admission_epoch,
-                            operation_id,
-                            error = %error,
-                            "startup Conversation orphan reconciliation failed transiently; background work remains fenced"
-                        );
-                        tokio::time::sleep(retry_delay).await;
-                        retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
-                    }
-                    Err(error) => {
-                        summary.quarantined += 1;
-                        tracing::warn!(
-                            user_id,
-                            conversation_id,
-                            agent_type,
-                            status,
-                            admission_epoch,
-                            operation_id,
-                            error = %error,
-                            "startup quarantined unresolved Conversation turn authority; no runtime was built"
-                        );
-                        break;
-                    }
-                }
-            }
-            after_conversation_id = Some(conversation_id);
-        }
-    }
-    summary
-}
-
-/// Freeze the exact set of unsettled turn generations before any work
-/// producer starts. Only generations in this snapshot may ever be proven
-/// terminal by [`crate::router::boot_terminal_proof::BootTerminalProofProvider`]:
-/// everything admitted later belongs to the current process.
-///
-/// Transient enumeration errors retry with the same classification/backoff as
-/// the sweep below; giving up on one flaky page would silently disable the
-/// terminal-proof provider for the entire boot.
-async fn snapshot_boot_frozen_orphan_generations(
-    conversation_repo: &Arc<dyn nomifun_db::IConversationRepository>,
-) -> Result<
-    std::collections::HashMap<
-        String,
-        crate::router::boot_terminal_proof::FrozenOrphanGeneration,
-    >,
-    AppError,
-> {
-    let mut frozen = std::collections::HashMap::new();
-    let mut after_conversation_id: Option<String> = None;
-    let mut retry_delay = Duration::from_millis(25);
-    loop {
-        let page = match conversation_repo
-            .list_unsettled_turn_admissions(
-                after_conversation_id.as_deref(),
-                MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE,
-            )
-            .await
-            .map_err(AppError::from)
-        {
-            Ok(page) => page,
-            Err(error) if boot_reconciliation_error_is_retryable(&error) => {
-                tracing::error!(
-                    after_conversation_id = after_conversation_id.as_deref(),
-                    error = %error,
-                    "startup terminal-proof snapshot enumeration failed transiently; retrying"
-                );
-                tokio::time::sleep(retry_delay).await;
-                retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        if page.is_empty() {
-            break;
-        }
-        for admission in page {
-            after_conversation_id = Some(admission.conversation.conversation_id.clone());
-            frozen.insert(
-                admission.conversation.conversation_id,
-                crate::router::boot_terminal_proof::FrozenOrphanGeneration {
-                    user_id: admission.conversation.user_id,
-                    admission_epoch: admission.admission_epoch,
-                    active_operation_id: admission.active_operation_id,
-                },
-            );
-        }
-    }
-    Ok(frozen)
-}
-
-/// Reconcile every durable Conversation turn authority before any subsystem
-/// capable of producing work is started.
-///
-/// The repository enumeration is only a hint. `ConversationService` re-reads
-/// the exact row/receipt/admission under its preparation gate. A backend
-/// whose generation is covered by the boot terminal-proof provider (frozen
-/// unsettled snapshot + reaped durable process registry, under the retained
-/// server-lock authority) is healed as an `interrupted_by_restart` failure;
-/// everything else stays quarantined. Retained Agent Execution transcripts
-/// stay with their owning engine, while already-terminal rows are harmless
-/// no-ops.
-async fn reconcile_unsettled_conversation_turns_before_background_work(
-    services: &AppServices,
-    conversation_service: &ConversationService,
-) -> BootConversationReconciliationSummary {
-    match services.has_valid_boot_reconciliation_authority().await {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::warn!(
-                "startup Conversation orphan reconciliation skipped: no matching retained server-lock authority"
-            );
-            return BootConversationReconciliationSummary::default();
-        }
-        Err(error) => {
-            tracing::error!(
-                error = %error,
-                "startup Conversation orphan reconciliation skipped: retained server-lock authority could not be revalidated"
-            );
-            return BootConversationReconciliationSummary::default();
-        }
-    }
-
-    // Persisted exact terminal-proof protocol, boot side. Ordering matters:
-    // (1) reap the durable agent-process registry (verify-by-identity, kill
-    // survivors with proof); (2) freeze the unsettled-generation snapshot;
-    // (3) only then install the proof provider consulted by the sweep below.
-    // The lock authority above guarantees no other backend owns this data
-    // dir, and nothing that produces work has started yet, so the snapshot
-    // exactly names the dead process's generations.
-    let reap_report =
-        nomifun_ai_agent::reap_orphan_agent_processes(&services.data_dir).await;
-    match snapshot_boot_frozen_orphan_generations(&services.conversation_repo).await {
-        Ok(frozen) => {
-            conversation_service.with_terminal_proof_provider(
-                crate::router::boot_terminal_proof::BootTerminalProofProvider::with_registered(
-                    frozen,
-                    reap_report,
-                    services.runtime_engines.restart_recovery_hooks().unwrap_or_else(|error| {
-                        tracing::error!(%error, "engine restart hooks unavailable; registered engines remain quarantined");
-                        Default::default()
-                    }),
-                    services.database.pool().clone(),
-                ),
-            );
-        }
-        Err(error) => {
-            // Without the frozen snapshot no generation can prove; the sweep
-            // then quarantines exactly as before this protocol existed.
-            tracing::error!(
-                error = %error,
-                "startup terminal-proof snapshot failed; restart orphans stay quarantined"
-            );
-        }
-    }
-
-    let conversation_repo = services.conversation_repo.clone();
-    let conversation_service = conversation_service.clone();
-    let runtime_registry = services.agent_runtime_registry.clone();
-    let summary = reconcile_unsettled_conversation_turn_pages(
-        move |after_conversation_id, limit| {
-            let conversation_repo = conversation_repo.clone();
-            async move {
-                conversation_repo
-                    .list_unsettled_turn_admissions(
-                        after_conversation_id.as_deref(),
-                        limit,
-                    )
-                    .await
-                    .map(|admissions| {
-                        admissions
-                            .into_iter()
-                            .map(|admission| {
-                                BootConversationReconciliationCandidate {
-                                    user_id: admission.conversation.user_id,
-                                    conversation_id:
-                                        admission.conversation.conversation_id,
-                                    agent_type: admission.conversation.r#type,
-                                    status: admission.conversation.status,
-                                    admission_epoch: admission.admission_epoch,
-                                    operation_id: admission.active_operation_id,
-                                }
-                            })
-                            .collect()
-                    })
-                    .map_err(AppError::from)
-            }
-        },
-        move |user_id, conversation_id| {
-            let conversation_service = conversation_service.clone();
-            let runtime_registry = runtime_registry.clone();
-            async move {
-                conversation_service
-                    .reconcile_locally_quiescent_orphan_on_boot(
-                        &user_id,
-                        &conversation_id,
-                        &runtime_registry,
-                    )
-                    .await
-            }
-        },
-    )
-    .await;
-
-    tracing::info!(
-        reconciled = summary.reconciled,
-        already_terminal = summary.already_terminal,
-        retained_execution_skipped = summary.retained_execution_skipped,
-        quarantined = summary.quarantined,
-        "startup Conversation turn reconciliation completed before background work"
-    );
-    summary
-}
-
 /// Build all default `ModuleStates` from application services.
 /// Compatibility entry point; production composition must use the fallible
 /// builder so its resource owner can perform startup-failure cleanup.
@@ -525,16 +190,20 @@ pub(crate) async fn try_build_module_states(
         "startup: skill state built"
     );
 
-    let conversation_service = build_nomi_core_conversation_owner(services);
     let canonical_session_owner = nomifun_conversation::CanonicalAgentSessionOwner::from_pool(
         services.database.pool().clone(),
     )
     .await
     .map_err(|error| anyhow::anyhow!("canonical AgentSession owner assembly failed: {error:#}"))?;
     let conversation_owner = Arc::new(NomiCoreSessionOwner::new(
-        conversation_service,
         canonical_session_owner,
         services.agent_runtime_registry.clone(),
+        services.event_bus.clone(),
+        services.background_tasks.clone()
+            as Arc<dyn nomifun_conversation::BackgroundTaskRegistrar>,
+        services.work_dir.join("agent-sessions"),
+        services.database.pool().clone(),
+        services.creation_service.clone(),
     ));
     let javascript_runtime_foundation =
         super::javascript_runtime::build_javascript_runtime_foundation(
@@ -657,22 +326,8 @@ pub(crate) async fn try_build_module_states(
         },
     ));
 
-    // Construct the route ConversationService before any producer starts, then
-    // synchronously classify every unsettled generation while the exact
-    // database-ownership lock is retained. The lock authorizes this sweep but
-    // is not process-tree terminal proof, so unresolved current backends remain
-    // quarantined. This awaited boundary must stay above cron.init, AutoWork
-    // persisted resume, channel/plugin receive loops, and router publication.
-    attach_cron_service(conversation_owner.service(), cron.cron_service.clone());
-    let conversation = ConversationRouterState {
-        service: conversation_owner.service().clone(),
-        runtime_registry: services.agent_runtime_registry.clone(),
-    };
-    reconcile_unsettled_conversation_turns_before_background_work(
-        services,
-        &conversation.service,
-    )
-    .await;
+    // Generation-5 Store recovery is owned by NomiCoreSessionOwner. The
+    // retired Conversation orphan sweep is intentionally not part of startup.
 
     // The agent catalog already hydrated at startup (see `lib.rs`).
     // Extension-contributed rows will land in `agent_metadata` in a
@@ -752,7 +407,6 @@ pub(crate) async fn try_build_module_states(
         .with_knowledge_service(services.knowledge_service.clone());
     let states = ModuleStates {
         system: build_system_state(services),
-        conversation,
         ssh_host: build_ssh_host_state(services),
         agent: AgentRouterState {
             agent_registry: services.agent_registry.clone(),
@@ -1027,8 +681,7 @@ async fn build_nomi_core_agent_api_state(
         ),
     );
     conversation_owner
-        .service()
-        .with_product_agent_snapshot_resolver(product_agent_resolver.clone());
+        .install_product_agent_resolver(Arc::downgrade(&product_agent_resolver))?;
     services
         .cs_dialogue_engine
         .with_agent_policy_resolver(product_agent_resolver.clone());
@@ -1052,7 +705,6 @@ async fn build_nomi_core_agent_api_state(
         .runtime_engines
         .install_official_driver(super::coding_runtime_host::factory(
             engine_sessions,
-            services.database.pool().clone(),
             Arc::clone(&plugin.schema_resolver),
         ))?;
     conversation_owner.install_runtime_engines(Arc::clone(&services.runtime_engines), Arc::downgrade(&control_plane))?;
@@ -1323,28 +975,6 @@ fn build_nomi_core_conversation_owner(services: &AppServices) -> ConversationSer
     conversation_service
 }
 
-fn attach_cron_service(
-    conversation_service: &ConversationService,
-    cron_service: Arc<nomifun_cron::service::CronService>,
-) {
-    conversation_service.with_delete_hook(Arc::new(CronConversationDeleteAdapter {
-        service: cron_service,
-    }));
-}
-
-struct CronConversationDeleteAdapter {
-    service: Arc<nomifun_cron::service::CronService>,
-}
-
-#[async_trait::async_trait]
-impl OnConversationDelete for CronConversationDeleteAdapter {
-    async fn on_conversation_deleted(&self, user_id: &str, _conversation_id: &str) {
-        let job_ids = nomifun_conversation::service::current_deleted_cron_job_ids()
-            .expect("Conversation deletion must publish the exact Cron row set");
-        self.service.cleanup_deleted_jobs(user_id, &job_ids).await;
-    }
-}
-
 impl nomifun_cron::CronBackgroundTaskRegistrar for BackgroundTaskRegistry {
     fn register(&self, task: tokio::task::JoinHandle<()>) {
         BackgroundTaskRegistry::register(self, task);
@@ -1354,12 +984,9 @@ impl nomifun_cron::CronBackgroundTaskRegistrar for BackgroundTaskRegistry {
 /// Build the default `ConversationRouterState` from application services.
 pub fn build_conversation_state(
     services: &AppServices,
-    cron_service: Option<Arc<nomifun_cron::service::CronService>>,
+    _cron_service: Option<Arc<nomifun_cron::service::CronService>>,
 ) -> ConversationRouterState {
     let conversation_service = build_nomi_core_conversation_owner(services);
-    if let Some(cron_service) = cron_service {
-        attach_cron_service(&conversation_service, cron_service);
-    }
     ConversationRouterState {
         service: conversation_service,
         runtime_registry: services.agent_runtime_registry.clone(),
@@ -1775,8 +1402,9 @@ pub fn build_requirement_state(
     conversation_owner: Arc<NomiCoreSessionOwner>,
     agent_execution: Arc<AgentExecutionEngine>,
 ) -> RequirementRouterState {
-    let conversation_service = conversation_owner.service().clone();
-    let conv_repo = conversation_service.conversation_repo().clone();
+    let conv_repo: Arc<dyn nomifun_db::IConversationRepository> = Arc::new(
+        SqliteConversationRepository::new(services.database.pool().clone()),
+    );
     let autowork_waker = Arc::new(tokio::sync::Notify::new());
     let session_config: Arc<dyn nomifun_requirement::AutoWorkSessionConfigPort> =
         conversation_owner.clone();
@@ -1899,17 +1527,12 @@ pub fn build_agent_execution_engine(
 /// collection, scheduled learning, memories, companion chat). Reuses the
 /// singleton `services.companion_service` (constructed in `AppServices::from_config`
 /// before the agent factory, which holds its memory sink) and late-wires the
-/// companion thread manager with a `ConversationService` so companion chats
-/// run as real nomi conversations.
+/// companion thread manager with the canonical AgentSession owner.
 pub fn build_companion_state(
     services: &AppServices,
     channel_manager: Arc<nomifun_channel::manager::ChannelManager>,
     conversation_owner: Arc<NomiCoreSessionOwner>,
 ) -> CompanionRouterState {
-    let conv_service = conversation_owner.service().clone();
-
-    let conv_service = Arc::new(conv_service);
-
     // Deleting a companion must also drop its ('companion', id) knowledge-binding row so
     // bindings don't orphan (T3.3). Switching a companion's chat model (single source
     // of truth) clears bound IM sessions. Physical endpoints share the same
@@ -1928,8 +1551,9 @@ pub fn build_companion_state(
 
 
     let transcript: Arc<dyn nomifun_companion::evolution::TranscriptSource> =
-        Arc::new(nomifun_companion::evolution::ConversationTranscriptSource::new(
-            conv_service.conversation_repo().clone(),
+        Arc::new(super::nomi_core_session::CanonicalAgentTranscriptSource::new(
+            conversation_owner.clone(),
+            services.authoritative_user_id.clone(),
         ));
     let companion_ports = nomifun_companion::companion_ports_from_typed_host(
         services.authoritative_user_id.clone(),
@@ -2252,7 +1876,6 @@ pub fn build_cron_state(
     services: &AppServices,
     conversation_owner: Arc<NomiCoreSessionOwner>,
 ) -> CronRouterState {
-    let conversation_service = conversation_owner.service().clone();
     let pool = services.database.pool().clone();
     let cron_repo: Arc<dyn nomifun_db::ICronRepository> = Arc::new(nomifun_db::SqliteCronRepository::new(pool.clone()));
 
@@ -2261,7 +1884,7 @@ pub fn build_cron_state(
     let executor = Arc::new(nomifun_cron::executor::JobExecutor::new(
         services.authoritative_user_id.clone(),
         cron_sessions,
-        conversation_service.conversation_repo().clone(),
+        Arc::new(SqliteConversationRepository::new(pool.clone())),
         busy_guard,
         services.work_dir.clone(),
         services.data_dir.clone(),
@@ -2585,162 +2208,6 @@ mod tests {
         );
         assert!(
             !production_source.contains("CronEventEmitter::new(services.ws_manager.clone())")
-        );
-    }
-
-    #[test]
-    fn boot_orphan_sweep_is_a_structural_barrier_before_every_work_producer() {
-        let source = include_str!("state.rs");
-        let build = source
-            .split_once("pub(crate) async fn try_build_module_states")
-            .expect("module-state builder must exist")
-            .1
-            .split_once("/// Build the process-wide preset catalog")
-            .expect("module-state builder must have a stable end marker")
-            .0;
-
-        let conversation = build
-            .find("build_nomi_core_conversation_owner(services)")
-            .expect("Nomi-core Conversation owner must be constructed for the sweep");
-        let sweep = build
-            .find("reconcile_unsettled_conversation_turns_before_background_work(")
-            .expect("boot orphan sweep must be awaited");
-        let cron = build
-            .find("cron.cron_service.init().await")
-            .expect("cron startup must remain explicit");
-        let channel = build
-            .find("build_channel_state(")
-            .expect("channel state startup must remain explicit");
-        let autowork = build
-            .find("build_requirement_state(")
-            .expect("AutoWork state startup must remain explicit");
-
-        assert!(
-            conversation < sweep,
-            "the sweep needs the Nomi-core Conversation owner"
-        );
-        assert!(sweep < cron, "cron must not initialize before orphan reconciliation");
-        assert!(sweep < channel, "channel/plugin assembly must not precede reconciliation");
-        assert!(sweep < autowork, "AutoWork persisted resume must not precede reconciliation");
-        assert!(
-            build[sweep..cron].contains(".await;"),
-            "the sweep must be a synchronous startup barrier, not a spawned task"
-        );
-
-        let routes = include_str!("routes.rs");
-        let module_build = routes
-            .find("try_build_module_states(services).await")
-            .expect("router must await module-state construction");
-        let channel_loop = routes
-            .find(".message_loop")
-            .expect("router must start the channel receive loop");
-        let plugin_restore = routes
-            .find("restore enabled channel")
-            .or_else(|| routes.find("Restore enabled channel"))
-            .expect("router must restore channel plugins");
-        assert!(module_build < channel_loop);
-        assert!(module_build < plugin_restore);
-
-        let requirement_builder = source
-            .split_once("pub fn build_requirement_state")
-            .expect("requirement builder must exist")
-            .1;
-        assert!(
-            requirement_builder.contains("auto_work_runner.resume_persisted_bindings();"),
-            "the structural barrier must continue to cover persisted AutoWork resume"
-        );
-    }
-
-    #[tokio::test]
-    async fn boot_orphan_sweep_paginates_past_quarantined_and_retained_rows() {
-        fn candidate(
-            conversation_id: &str,
-            agent_type: &str,
-        ) -> BootConversationReconciliationCandidate {
-            BootConversationReconciliationCandidate {
-                user_id: format!("owner-{conversation_id}"),
-                conversation_id: conversation_id.to_owned(),
-                agent_type: agent_type.to_owned(),
-                status: Some("running".to_owned()),
-                admission_epoch: 7,
-                operation_id: Some(format!("operation-{conversation_id}")),
-            }
-        }
-
-        let observed_pages =
-            Arc::new(std::sync::Mutex::new(Vec::<(Option<String>, u32)>::new()));
-        let observed_reconciliations =
-            Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let page_observer = observed_pages.clone();
-        let reconcile_observer = observed_reconciliations.clone();
-        let summary = reconcile_unsettled_conversation_turn_pages(
-            move |after, limit| {
-                let page_observer = page_observer.clone();
-                async move {
-                    page_observer.lock().unwrap().push((after.clone(), limit));
-                    let page = match after.as_deref() {
-                        None => vec![candidate("a", "nomi"), candidate("b", "remote")],
-                        Some("b") => {
-                            vec![candidate("c", "nomi"), candidate("d", "nomi")]
-                        }
-                        Some("d") => Vec::new(),
-                        unexpected => panic!("unexpected keyset cursor {unexpected:?}"),
-                    };
-                    Ok::<_, AppError>(page)
-                }
-            },
-            move |_user_id, conversation_id| {
-                let reconcile_observer = reconcile_observer.clone();
-                async move {
-                    reconcile_observer
-                        .lock()
-                        .unwrap()
-                        .push(conversation_id.clone());
-                    match conversation_id.as_str() {
-                        "a" => Err(AppError::Conflict(
-                            "local parent-death teardown is not queryable terminal proof"
-                                .to_owned(),
-                        )),
-                        "b" => Err(AppError::Conflict(
-                            "external terminal proof is unavailable".to_owned(),
-                        )),
-                        "c" => Ok(
-                            QuiescentOrphanReconciliation::RetainedExecutionSkipped,
-                        ),
-                        "d" => Ok(QuiescentOrphanReconciliation::AlreadyTerminal),
-                        unexpected => panic!(
-                            "unexpected reconciliation candidate {unexpected}"
-                        ),
-                    }
-                }
-            },
-        )
-        .await;
-
-        assert_eq!(
-            summary.reconciled, 0,
-            "no current backend has restart-safe process-tree termination proof"
-        );
-        assert_eq!(summary.quarantined, 2);
-        assert_eq!(summary.retained_execution_skipped, 1);
-        assert_eq!(summary.already_terminal, 1);
-        assert_eq!(
-            *observed_reconciliations.lock().unwrap(),
-            ["a", "b", "c", "d"]
-        );
-        assert_eq!(
-            *observed_pages.lock().unwrap(),
-            [
-                (None, MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE),
-                (
-                    Some("b".to_owned()),
-                    MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE
-                ),
-                (
-                    Some("d".to_owned()),
-                    MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE
-                ),
-            ]
         );
     }
 

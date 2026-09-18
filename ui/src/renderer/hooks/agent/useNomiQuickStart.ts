@@ -15,9 +15,20 @@ import { emitter } from '@/renderer/utils/emitter';
 import { seedConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
 import { getConversationCreateErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
 import { useGuidModelSelection } from '@/renderer/pages/guid/hooks/useGuidModelSelection';
-import { conversationTarget } from '@/common/types/ids';
+import { conversationTarget, parseConversationId } from '@/common/types/ids';
 import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { uuidv7 } from '@/common/utils/uuidv7';
+import { prepareOfficialAgent } from '@/renderer/pages/guid/hooks/officialAgentLaunch';
+
+const FIXED_RESOURCE_IDS: Record<string, string> = {
+  workspace: 'default-workspace',
+  process_session: 'managed-process-session',
+  terminal: 'managed-terminal',
+  scheduler: 'installation-scheduler',
+  browser: 'managed-browser',
+  computer: 'local-desktop',
+  project_memory: 'default-project-memory',
+};
 
 /**
  * Additions merged onto the create call's `extra` bag.
@@ -65,16 +76,27 @@ export const useNomiQuickStart = () => {
         return false;
       }
       try {
-        const conversation = await ipcBridge.conversation.create.invoke({
-          type: 'nomi',
-          name,
-          model: effectiveModel,
-          extra: {
-            workspace: '',
-            custom_workspace: false,
-            default_files: [],
-            ...extra,
-          } as ICreateConversationParams['extra'],
+        if (extra && Object.keys(extra).length > 0) {
+          throw new Error('Quick start resources must be selected through the Agent binding');
+        }
+        const library = await ipcBridge.agentPlatform.library.invoke();
+        const template = library.official_templates.find(
+          (candidate) => candidate.template_key === 'assistant.general'
+        );
+        if (!template) throw new Error('AGENT_PRESET_REQUIRED');
+        const preset = await prepareOfficialAgent(template, name, effectiveModel);
+        const resourceSelections = template.seed.required_resource_kinds.flatMap((resource_kind) => {
+          const resource_id = FIXED_RESOURCE_IDS[resource_kind];
+          return resource_id ? [{ resource_kind, resource_id }] : [];
+        });
+        const session = await ipcBridge.agentPlatform.sessions.create.invoke({
+          preset_id: preset.preset_id,
+          title: name,
+          model: { provider_id: effectiveModel.id, model: effectiveModel.use_model },
+          ...(resourceSelections.length ? { resource_selections: resourceSelections } : {}),
+        });
+        const conversation = await ipcBridge.conversation.get.invoke({
+          conversation_id: parseConversationId(session.agent_session_id),
         });
         if (!conversation || !conversation.id) {
           Message.error(t('conversation.createFailed'));

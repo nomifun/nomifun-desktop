@@ -157,7 +157,7 @@ describe('NomiSendBox blocking wiring', () => {
     );
     expect(edit.indexOf('if (!canSendFiles(filesToSend)) return;')).toBeGreaterThan(-1);
     expect(edit.indexOf('if (!canSendFiles(filesToSend)) return;')).toBeLessThan(
-      edit.indexOf('ipcBridge.conversation.editResubmit.invoke')
+      edit.indexOf('ipcBridge.conversation.sendMessage.invoke')
     );
 
     const steer = source.slice(

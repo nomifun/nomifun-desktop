@@ -6273,6 +6273,7 @@ dependencies = [
  "nomi-computer",
  "nomi-config",
  "nomi-process-runtime",
+ "nomi-redact",
  "nomi-tools",
  "nomi-types",
  "nomifun-agent-contracts",

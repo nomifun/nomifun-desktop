@@ -95,7 +95,7 @@ describe('compact message errors', () => {
     expect(page.getByText('Needs configuration')).toBeDefined();
   });
 
-  test('truncation keeps its dedicated continuation action disabled while processing', () => {
+  test('truncation exposes no history-mutating continuation while processing', () => {
     const { page } = mount({
       ...error,
       content: {
@@ -105,7 +105,7 @@ describe('compact message errors', () => {
       },
     }, { isProcessing: true });
     expect(page.queryByRole('button', { name: 'Retry' })).toBeNull();
-    expect(page.getByRole('button', { name: 'Continue execution' }).hasAttribute('disabled')).toBe(true);
+    expect(page.queryByRole('button', { name: 'Continue execution' })).toBeNull();
   });
 
   test.each(['Legacy diagnostic text', '{"error":"Legacy JSON diagnostic"}'])('keeps legacy details recoverable: %s', (content) => {

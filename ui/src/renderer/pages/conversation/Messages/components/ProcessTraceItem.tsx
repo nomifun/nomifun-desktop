@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { IConversationArtifact } from '@/common/adapter/ipcBridge';
 import type { IMessageToolCall, IMessageToolGroup, TMessage } from '@/common/chat/chatLib';
 import { toDisplayText } from '@/common/chat/displayText';
 import { normalizeToolMessages } from '@/common/chat/normalizeToolCall';
@@ -53,12 +52,6 @@ export type ProcessTraceRenderableItem =
       msg_id?: MessageId;
       messages: ToolProcessMessage[];
       sourceMessageIds: string[];
-      created_at: number;
-    }
-  | {
-      type: 'artifact';
-      id: string;
-      artifact: IConversationArtifact;
       created_at: number;
     };
 
@@ -655,22 +648,6 @@ const ProcessTraceItem: React.FC<{
           : [],
     [conversationContext?.workspace, workspaceRoots]
   );
-
-  if ('type' in item && item.type === 'artifact') {
-    const target =
-      item.artifact.kind === 'cron_trigger' ? item.artifact.payload.cron_job_name : item.artifact.payload.name;
-    return (
-      <ProcessTraceRows
-        rows={[
-          {
-            key: item.id,
-            state,
-            label: t('messages.processReceipt.status', { target, defaultValue: '{{target}}' }),
-          },
-        ]}
-      />
-    );
-  }
 
   if ('type' in item && item.type === 'file_summary') {
     return <FileProcessTraceRows diffs={item.diffs} workspaceRoots={resolvedWorkspaceRoots} />;

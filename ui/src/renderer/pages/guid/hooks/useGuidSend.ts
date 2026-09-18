@@ -83,7 +83,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     setInput,
     files,
     setFiles,
-    dir,
     setDir,
     setLoading,
     loading,
@@ -93,11 +92,9 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     current_model,
     applyAdvancedConfig,
     autoWork,
-    workspaceEnabled,
     resourceResolutionReady,
     resourceSelections,
     capabilitySelection,
-    collaboration,
     setMentionOpen,
     setMentionQuery,
     setMentionSelectorOpen,
@@ -108,7 +105,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     endPending,
   } = deps;
   const sendingRef = useRef(false);
-  const selectedWorkspace = workspaceEnabled ? dir : '';
   const isCompanion = selection.kind === 'template' && selection.templateKey === 'companion.default';
 
   const handleSend = useCallback(async () => {
@@ -167,27 +163,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         'AgentSession was created without a Conversation projection'
       );
     }
-    if (selectedWorkspace || collaboration) {
-      const updated = await ipcBridge.conversation.update.invoke({
-        conversation_id: conversationId,
-        updates: {
-          ...(selectedWorkspace ? { extra: { workspace: selectedWorkspace } } : {}),
-          ...collaboration,
-        },
-      });
-      if (!updated) {
-        throw new Error('AgentSession draft configuration was not saved');
-      }
-      conversation = await ipcBridge.conversation.get.invoke({
-        conversation_id: conversationId,
-      });
-      if (!conversation?.id) {
-        throw new Error(
-          'AgentSession draft configuration lost its Conversation projection'
-        );
-      }
-    }
-
     await applyAdvancedConfig?.(conversationId);
     emitter.emit('chat.history.refresh');
 
@@ -229,14 +204,12 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     files,
     input,
     navigate,
-    selectedWorkspace,
     selection,
     selectedPreset,
     selectedTemplate,
     resourceResolutionReady,
     resourceSelections,
     capabilitySelection,
-    collaboration,
     t,
   ]);
 

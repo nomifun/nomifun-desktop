@@ -8,7 +8,7 @@ import type {
   PlanUpdate,
   PersistedToolArtifact,
 } from '@/common/types/platform/toolCallTypes';
-import type { IKnowledgeWritebackEvent, IResponseMessage, IUserMessageCreatedEvent } from '../adapter/ipcBridge';
+import type { IResponseMessage, IUserMessageCreatedEvent } from '../adapter/ipcBridge';
 import {
   parseConversationId,
   parseCronJobId,
@@ -1096,32 +1096,6 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
       return undefined;
     }
   }
-};
-
-export const transformKnowledgeWritebackEvent = (event: IKnowledgeWritebackEvent): IMessageText | undefined => {
-  if (!event.msg_id) return undefined;
-  return {
-    id: uuid(),
-    type: 'text',
-    msg_id: event.msg_id,
-    position: 'left',
-    conversation_id: event.conversation_id,
-    content: {
-      content: '',
-      knowledge_writeback: {
-        status: event.status,
-        attempt_id: event.attempt_id,
-        attempt_generation: event.attempt_generation,
-        started_at: event.started_at,
-        updated_at: event.updated_at,
-        finished_at: event.finished_at,
-        retryable: event.retryable,
-        candidates: event.candidates,
-        written: event.written,
-        failures: event.failures,
-      },
-    },
-  };
 };
 
 const normalizeMessageStatus = (value: string | undefined): TMessage['status'] => {

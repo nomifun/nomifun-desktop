@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { IConversationArtifact } from '@/common/adapter/ipcBridge';
 import { ConversationCreationTaskCards } from '@/renderer/creation/ConversationCreationTasks';
 import type {
   IMessageText,
@@ -29,15 +28,12 @@ import { useConversationColumnRef } from '../components/useConversationColumnRef
 import HOC from '@renderer/utils/ui/HOC';
 import type { FileChangeInfo } from './MessageFileChanges';
 import { parseDiff } from './MessageFileChanges';
-import { useConversationArtifacts } from './artifacts';
-import { useKnowledgeWritebackEvents, useMessageList, useMessageListLoading } from './hooks';
+import { useMessageList, useMessageListLoading } from './hooks';
 import MessageAgentStatus from './components/MessageAgentStatus';
 import MessageTips from './components/MessageTips';
 import MessageToolCall from './components/MessageToolCall';
 import MessageToolGroup from './components/MessageToolGroup';
 import { isSuccessfulWriteFileResult } from './components/toolGroupArtifactVisibility';
-import MessageCronTrigger from './components/MessageCronTrigger';
-import MessageSkillSuggest from './components/MessageSkillSuggest';
 import MessageText from './components/MessageText';
 import MessageThinking from './components/MessageThinking';
 import MessageListSkeleton from './components/MessageListSkeleton';
@@ -100,8 +96,7 @@ type IMessageVO =
       created_at: number;
     };
 type ToolSummaryVO = Extract<IMessageVO, { type: 'tool_summary' }>;
-type IArtifactVO = { type: 'artifact'; id: string; artifact: IConversationArtifact; created_at: number };
-type IRenderableItem = IMessageVO | IArtifactVO;
+type IRenderableItem = IMessageVO;
 type ITurnProcessDisclosureVO = {
   type: 'turn_process_disclosure';
   id: string;
@@ -179,7 +174,6 @@ const getProcessedItemSourceMessageIds = (item: IProcessedItem): SourceMessageId
   ) {
     return item.sourceMessageIds;
   }
-  if ('type' in item && item.type === 'artifact') return [];
   if ('type' in item && item.type === 'tool_summary') {
     return item.sourceMessageIds;
   }
@@ -211,7 +205,6 @@ const getProcessedItemCreatedAt = (item: IProcessedItem): number => {
     [
       'file_summary',
       'tool_summary',
-      'artifact',
       'turn_process_disclosure',
       'process_receipt',
       'turn_deliverables',
@@ -247,14 +240,10 @@ const getProcessedItemMsgId = (item: IRenderableItem): MessageId | undefined => 
   if ('type' in item && (item.type === 'file_summary' || item.type === 'tool_summary')) {
     return item.msg_id;
   }
-  if ('type' in item && item.type === 'artifact') {
-    return undefined;
-  }
   return item.msg_id;
 };
 
 const getProcessedItemTurnId = (item: IRenderableItem): MessageId | undefined => {
-  if ('type' in item && item.type === 'artifact') return undefined;
   return item.turn_id;
 };
 
@@ -262,10 +251,6 @@ const getProcessedItemRole = (item: IRenderableItem): TurnDisclosureInputItem['r
   if ('type' in item && (item.type === 'file_summary' || item.type === 'tool_summary')) {
     return 'process';
   }
-  if ('type' in item && item.type === 'artifact') {
-    return 'other';
-  }
-
   switch (item.type) {
     case 'text':
       return item.position === 'right' ? 'user' : 'assistant';
@@ -506,17 +491,6 @@ const buildProcessReceiptSummary = (
     };
   }
 
-  if ('type' in item && item.type === 'artifact') {
-    const target =
-      item.artifact.kind === 'cron_trigger' ? item.artifact.payload.cron_job_name : item.artifact.payload.name;
-    return {
-      label: t('messages.processReceipt.status', { target, defaultValue: '{{target}}' }),
-      icon: 'status',
-      defaultExpanded: false,
-      hasDetail: false,
-    };
-  }
-
   switch (item.type) {
     case 'agent_status':
       return {
@@ -626,7 +600,7 @@ const getProcessItemLayoutKind = (item: IRenderableItem): string => {
   ) {
     return 'tool';
   }
-  if ('type' in item && (item.type === 'agent_status' || item.type === 'tips' || item.type === 'artifact')) return 'status';
+  if ('type' in item && (item.type === 'agent_status' || item.type === 'tips')) return 'status';
   return 'other';
 };
 
@@ -703,9 +677,7 @@ const MessageList: React.FC<{
 }> = ({ emptySlot, onLoadOlder, hasMoreOlder, loadingOlder }) => {
   const list = useMessageList();
   const isMessageListLoading = useMessageListLoading();
-  const artifacts = useConversationArtifacts();
   const conversationContext = useConversationContextSafe();
-  useKnowledgeWritebackEvents(conversationContext?.conversation_id);
   useAutoPreviewOfficeFiles(conversationContext);
   const workspaceRoots = useMemo(
     () => (conversationContext?.workspace ? [conversationContext.workspace] : []),
@@ -876,29 +848,8 @@ const MessageList: React.FC<{
       diffsTurnId = undefined;
       result.push(message);
     }
-    const visibleArtifacts = artifacts
-      .filter((artifact) => {
-        if (artifact.kind === 'cron_trigger') return artifact.status === 'active';
-        if (artifact.kind === 'skill_suggest') return artifact.status === 'pending';
-        return false;
-      })
-      .map<IArtifactVO>((artifact) => ({
-        type: 'artifact',
-        id: `conversation-artifact:${artifact.conversation_artifact_id}`,
-        artifact,
-        created_at: artifact.created_at,
-      }));
-
-    if (visibleArtifacts.length === 0) {
-      // Common streaming case: nothing to interleave, and `result` is already in
-      // arrival (created_at) order — skip the O(n log n) re-sort that otherwise
-      // runs on every streamed token and janks long conversations.
-      return result;
-    }
-    return [...result, ...visibleArtifacts].toSorted(
-      (a, b) => getProcessedItemCreatedAt(a) - getProcessedItemCreatedAt(b)
-    );
-  }, [artifacts, list]);
+    return result;
+  }, [list]);
 
   const displayList = useMemo<IProcessedItem[]>(() => {
     const itemById = new Map<string, IRenderableItem>();
@@ -1148,7 +1099,7 @@ const MessageList: React.FC<{
       displayList.findLastIndex(
         (item) =>
           !('type' in item &&
-            ['turn_process_disclosure', 'process_receipt', 'artifact', 'turn_live_step'].includes(item.type)) &&
+            ['turn_process_disclosure', 'process_receipt', 'turn_live_step'].includes(item.type)) &&
           (item as TMessage).type === 'text' &&
           (item as TMessage).position === 'right'
       ),
@@ -1160,7 +1111,7 @@ const MessageList: React.FC<{
       conversationContext?.isProcessing === true &&
       index > lastUserTextIndex &&
       !('type' in item &&
-        ['turn_process_disclosure', 'process_receipt', 'artifact', 'turn_live_step'].includes(item.type)) &&
+        ['turn_process_disclosure', 'process_receipt', 'turn_live_step'].includes(item.type)) &&
       (item as TMessage).type === 'text' &&
       (item as TMessage).position === 'left',
     [conversationContext?.isProcessing, lastUserTextIndex]
@@ -1377,24 +1328,6 @@ const MessageList: React.FC<{
           style={highlighted ? highlightStyle : undefined}
         >
           {renderProcessReceipt(item, highlighted)}
-        </div>
-      );
-    }
-    if ('type' in item && item.type === 'artifact') {
-      return (
-        <div
-          key={item.id}
-          id={`message-${getProcessedItemAnchorId(item)}`}
-          data-conversation-artifact-kind={item.artifact.kind}
-          data-testid={`conversation-artifact-${item.artifact.kind}`}
-          className='min-w-0 message-item m-t-10px'
-          style={highlighted ? highlightStyle : undefined}
-        >
-          {item.artifact.kind === 'cron_trigger' ? (
-            <MessageCronTrigger artifact={item.artifact} />
-          ) : (
-            <MessageSkillSuggest artifact={item.artifact} />
-          )}
         </div>
       );
     }

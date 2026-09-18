@@ -88,7 +88,7 @@ describe('MessageList turn completion disclosure structure', () => {
     const toolSummaryCase =
       buildSummarySource.match(/if \('type' in item && item\.type === 'tool_summary'\) \{[\s\S]*?if \('type' in item && item\.type === 'file_summary'\)/)?.[0] ?? '';
     const fileSummaryCase =
-      buildSummarySource.match(/if \('type' in item && item\.type === 'file_summary'\) \{[\s\S]*?if \('type' in item && item\.type === 'artifact'\)/)?.[0] ?? '';
+      buildSummarySource.match(/if \('type' in item && item\.type === 'file_summary'\) \{[\s\S]*?switch \(item\.type\)/)?.[0] ?? '';
     expect(toolSummaryCase.includes('hasDetail: true')).toBe(true);
     expect(fileSummaryCase.includes('hasDetail: item.diffs.length > 1')).toBe(true);
   });

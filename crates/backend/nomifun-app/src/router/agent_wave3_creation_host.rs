@@ -140,10 +140,50 @@ impl Wave3CreationHost {
             if conversation_id != context.agent_session_id.as_ref() {
                 return Err(Wave3HostPortError::invalid_request("generation target must be the current conversation"));
             }
-            let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversation_delivery_receipts r JOIN messages m ON m.message_id = r.projected_message_id WHERE r.conversation_id = ? AND r.user_id = ? AND r.message_id = ? AND r.kind = 'turn' AND r.status = 'accepted' AND m.conversation_id = r.conversation_id AND m.position = 'right')")
-                .bind(conversation_id).bind(context.principal.principal_id.as_str()).bind(message_id)
-                .fetch_one(&self.pool).await.map_err(|error| Wave3HostPortError::invalid_request(error.to_string()))?;
-            if !exists { return Err(Wave3HostPortError::invalid_request("generation target must reference the admitted current user turn")); }
+            let store = nomifun_agent_session::AgentSessionStore::from_pool(self.pool.clone())
+                .await
+                .map_err(|error| Wave3HostPortError::invalid_request(error.to_string()))?;
+            let session_id = nomifun_agent_contracts::AgentSessionId::from(conversation_id.clone());
+            let session = store
+                .get_live_session(&session_id)
+                .await
+                .map_err(|error| Wave3HostPortError::invalid_request(error.to_string()))?;
+            if session.owner_ref != context.principal {
+                return Err(Wave3HostPortError::invalid_request(
+                    "generation target belongs to another owner",
+                ));
+            }
+            let head = store
+                .head(&session_id)
+                .await
+                .map_err(|error| Wave3HostPortError::invalid_request(error.to_string()))?;
+            let operation = head.active_turn_id.ok_or_else(|| {
+                Wave3HostPortError::invalid_request(
+                    "generation target has no active canonical Turn",
+                )
+            })?;
+            let receipt = store
+                .read_turn_receipt(
+                    &session_id,
+                    &nomifun_agent_contracts::OperationId::from(operation),
+                )
+                .await
+                .map_err(|error| Wave3HostPortError::invalid_request(error.to_string()))?;
+            let admitted_message = receipt.started_event.and_then(|event| match event.payload {
+                nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload) => payload
+                    .0
+                    .get("source_message_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                _ => None,
+            });
+            if receipt.status != nomifun_agent_session::TurnReceiptStatus::Running
+                || admitted_message.as_deref() != Some(message_id.as_str())
+            {
+                return Err(Wave3HostPortError::invalid_request(
+                    "generation target must reference the admitted current user turn",
+                ));
+            }
         }
         Ok(())
     }

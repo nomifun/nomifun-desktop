@@ -2,6 +2,7 @@ import type {
   AgentId,
   AgentPresetId,
   AgentSessionId,
+  MessageId,
   ProviderId,
   RemoteBindingId,
   ResolvedSnapshotId,
@@ -588,8 +589,16 @@ export interface CreateAgentSessionTurnRequest {
 export interface CreateAgentSessionTurnResponse {
   agent_session_id: AgentSessionId;
   operation_id: string;
+  message_id: MessageId;
   cursor: SessionCursor;
   status: string;
+  replayed: boolean;
+  completed: boolean;
+  result_ok?: boolean;
+  result_text?: string;
+  result_error?: string;
+  result_error_code?: string;
+  result_error_retryable?: boolean;
 }
 
 export interface AgentSessionEventsResponse {

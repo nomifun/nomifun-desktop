@@ -11,7 +11,7 @@ use nomifun_agent_control_plane::{AgentControlPlane, AuthenticatedOwner};
 use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
 use nomifun_api_types::{ConversationResponse, RuntimeEngineBinding};
 use nomifun_common::AppError;
-use nomifun_db::{SqlitePool, sqlx};
+use nomifun_db::SqlitePool;
 
 use super::nomi_core_session::{NomiCoreSessionOwner, session_metadata};
 use super::runtime_engines::{RuntimeEngineHost, binding_from_extra};
@@ -107,6 +107,15 @@ impl AdmittedEngineSession {
 }
 
 impl EngineSessionHost {
+    pub(super) fn canonical_store(
+        &self,
+    ) -> Result<nomifun_agent_session::AgentSessionStore, AppError> {
+        self.owner
+            .upgrade()
+            .map(|owner| owner.canonical().store().clone())
+            .ok_or_else(|| AppError::Conflict("Session owner has shut down".into()))
+    }
+
     /// Exact revision-selected Skill bytes, with inventory/hash verification.
     /// This supplies data only; each engine owns its context/media policy.
     /// No library path, activation, frontmatter execution or latest-version lookup.
@@ -232,7 +241,10 @@ impl EngineSessionHost {
                 "Receipt belongs to another Session host".into(),
             ));
         }
-        super::engine_history::load(&self.pool, receipt, limit).await
+        let owner = self.owner.upgrade().ok_or_else(|| {
+            AppError::Conflict("Session owner has shut down".into())
+        })?;
+        super::engine_history::load(owner.canonical().store(), receipt, limit).await
     }
 
     pub async fn read_message_history(
@@ -246,7 +258,16 @@ impl EngineSessionHost {
                 "Receipt belongs to another Session host".into(),
             ));
         }
-        super::engine_history::load_messages(&self.pool, receipt, limit, byte_limit).await
+        let owner = self.owner.upgrade().ok_or_else(|| {
+            AppError::Conflict("Session owner has shut down".into())
+        })?;
+        super::engine_history::load_messages(
+            owner.canonical().store(),
+            receipt,
+            limit,
+            byte_limit,
+        )
+        .await
     }
 
     /// Data-only messages strictly before a historical turn. Engines can seed
@@ -265,8 +286,11 @@ impl EngineSessionHost {
         if !Arc::ptr_eq(&self.source, &receipt.source) {
             return Err(AppError::Conflict("Receipt belongs to another Session host".into()));
         }
+        let owner = self.owner.upgrade().ok_or_else(|| {
+            AppError::Conflict("Session owner has shut down".into())
+        })?;
         super::engine_history::load_messages_before(
-            &self.pool, receipt, limit, byte_limit, Some(before_operation),
+            owner.canonical().store(), receipt, limit, byte_limit, Some(before_operation),
         ).await
     }
 
@@ -284,7 +308,16 @@ impl EngineSessionHost {
                 "Receipt belongs to another Session host".into(),
             ));
         }
-        super::engine_history::load_before(&self.pool, receipt, limit, before_operation).await
+        let owner = self.owner.upgrade().ok_or_else(|| {
+            AppError::Conflict("Session owner has shut down".into())
+        })?;
+        super::engine_history::load_before(
+            owner.canonical().store(),
+            receipt,
+            limit,
+            before_operation,
+        )
+        .await
     }
 
     pub(crate) fn new(
@@ -348,7 +381,15 @@ impl EngineSessionHost {
                 "Live engine journal bound reached".into(),
             ));
         }
-        let journal = EngineTurnJournal::new(self.pool.clone(), receipt, cancellation);
+        let owner = self
+            .owner
+            .upgrade()
+            .ok_or_else(|| AppError::Conflict("Session owner has shut down".into()))?;
+        let journal = EngineTurnJournal::new(
+            owner.canonical().store().clone(),
+            receipt,
+            cancellation,
+        );
         journals.insert(key, journal.downgrade());
         Ok(journal)
     }
@@ -365,7 +406,7 @@ impl EngineSessionHost {
     ) -> Result<EngineTurnReceipt, AppError> {
         let conflict =
             |message: &str| AppError::Conflict(format!("Engine turn receipt: {message}"));
-        let mut session = self.resolve(options, binding).await?;
+        let session = self.resolve(options, binding).await?;
         if &session.snapshot.snapshot_ref != expected_snapshot {
             return Err(conflict("Snapshot differs from the open engine Session"));
         }
@@ -373,60 +414,80 @@ impl EngineSessionHost {
             .source_message_id
             .as_deref()
             .unwrap_or(&message.msg_id);
-        let row: Option<(String, i64, String, String, String)> = sqlx::query_as(
-            "SELECT r.operation_id, c.admission_epoch, m.content, r.request_payload, c.extra FROM conversations c \
-             JOIN conversation_delivery_receipts r ON r.operation_id = c.active_turn_operation_id \
-             JOIN messages m ON m.message_id = r.message_id AND m.conversation_id = c.conversation_id \
-             WHERE c.conversation_id = ? AND c.user_id = ? AND c.status = 'running' \
-             AND r.user_id = c.user_id AND r.conversation_id = c.conversation_id \
-             AND r.message_id = ? AND r.kind = 'turn' AND r.status = 'accepted'")
-            .bind(&options.conversation_id).bind(&options.user_id).bind(root)
-            .fetch_optional(&self.pool).await.map_err(|error| conflict(&error.to_string()))?;
-        let (operation_id, admission_epoch, content, payload, extra) =
-            row.ok_or_else(|| conflict("no committed active root-message authority"))?;
-        let parse = |raw: &str| {
-            serde_json::from_str::<serde_json::Value>(raw)
-                .map_err(|error| conflict(&error.to_string()))
-        };
-        // Conversation responses may rebase a managed workspace path. Compare
-        // canonical bindings, not the whole UI projection against raw DB JSON.
-        let mut current_response = session.response.clone();
-        current_response.extra = parse(&extra)?;
-        if nomifun_api_types::ExecutionConstraints::from_extra(&current_response.extra)? != session.execution_constraints()? {
-            return Err(AppError::Conflict("Execution constraints changed after Session admission".into()));
-        }
-        let authenticated = AuthenticatedOwner(nomifun_agent_contracts::UserId::from(
-            options.user_id.clone(),
-        ));
-        let metadata = session_metadata(&current_response, &authenticated)
-            .map_err(|error| conflict(&error.message))?;
-        if metadata.binding != session.agent_binding
-            || binding_from_extra(&current_response.extra)?.as_ref() != Some(binding)
-        {
-            return Err(conflict(
-                "Session binding changed while reading the receipt",
-            ));
-        }
-        self.engines
+        let session_id = nomifun_agent_contracts::AgentSessionId::from(
+            options.conversation_id.clone(),
+        );
+        let owner = self
+            .owner
             .upgrade()
-            .ok_or_else(|| conflict("engine host has shut down"))?
-            .catalog()?
-            .validate_session_extra(binding, &current_response.extra)?;
-        session.response = current_response;
-        if parse(&content)?
+            .ok_or_else(|| conflict("Session owner has shut down"))?;
+        let head = owner
+            .canonical()
+            .store()
+            .head(&session_id)
+            .await
+            .map_err(|error| conflict(&error.to_string()))?;
+        let operation_id = head
+            .active_turn_id
+            .clone()
+            .ok_or_else(|| conflict("no committed active turn authority"))?;
+        let operation = nomifun_agent_contracts::OperationId::from(operation_id.clone());
+        let receipt = owner
+            .canonical()
+            .store()
+            .read_turn_receipt(&session_id, &operation)
+            .await
+            .map_err(|error| conflict(&error.to_string()))?;
+        if receipt.status != nomifun_agent_session::TurnReceiptStatus::Running {
+            return Err(conflict("active turn is already terminal"));
+        }
+        let started = receipt
+            .started_event
+            .ok_or_else(|| conflict("active turn has no started event"))?;
+        let facts = owner
+            .canonical()
+            .store()
+            .chat_causality_facts(&session_id, &operation)
+            .await
+            .map_err(|error| conflict(&error.to_string()))?;
+        let started_payload = facts
+            .event_payloads
+            .get(started.event_id.as_ref())
+            .ok_or_else(|| conflict("active turn payload is unavailable"))?;
+        let source_message_id = started_payload
+            .get("source_message_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| conflict("active turn has no source message identity"))?;
+        if source_message_id != root {
+            return Err(conflict("runtime root differs from the accepted source message"));
+        }
+        let source_payload = facts
+            .event_payloads
+            .get(source_message_id)
+            .ok_or_else(|| conflict("accepted source message payload is unavailable"))?;
+        if source_payload
             .get("content")
             .and_then(serde_json::Value::as_str)
             != Some(message.content.as_str())
         {
             return Err(conflict("message text differs from its durable root"));
         }
+        if binding_from_extra(&session.response.extra)?.as_ref() != Some(binding) {
+            return Err(conflict("Session binding changed while reading the receipt"));
+        }
+        self.engines
+            .upgrade()
+            .ok_or_else(|| conflict("engine host has shut down"))?
+            .catalog()?
+            .validate_session_extra(binding, &session.response.extra)?;
         Ok(EngineTurnReceipt {
             source: self.source.clone(),
             session,
-            root_message_id: root.into(),
+            root_message_id: source_message_id.to_owned(),
             operation_id,
-            admission_epoch,
-            request_payload: parse(&payload)?,
+            admission_epoch: i64::try_from(started.seq)
+                .map_err(|_| conflict("turn sequence exceeds runtime generation range"))?,
+            request_payload: source_payload.clone(),
         })
     }
 
@@ -452,9 +513,13 @@ impl EngineSessionHost {
             .engines
             .upgrade()
             .ok_or_else(|| conflict("engine host has shut down"))?;
+        let session_id = nomifun_agent_contracts::AgentSessionId::from(
+            options.conversation_id.clone(),
+        );
         let response = owner
-            .get_session(&options.user_id, &options.conversation_id)
-            .await?;
+            .canonical_conversation_projection(&options.user_id, &session_id)
+            .await?
+            .ok_or_else(|| conflict("canonical AgentSession was not found"))?;
         let persisted_binding = binding_from_extra(&response.extra)?;
         if response.conversation_id != options.conversation_id
             || persisted_binding.as_ref() != Some(binding)

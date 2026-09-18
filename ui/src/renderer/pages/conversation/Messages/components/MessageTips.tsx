@@ -5,14 +5,12 @@
  */
 
 import type { IMessageTips } from '@/common/chat/chatLib';
-import { ipcBridge } from '@/common';
-import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { toDisplayText } from '@/common/chat/displayText';
-import { Message, Tooltip } from '@arco-design/web-react';
+import { Tooltip } from '@arco-design/web-react';
 import { Attention, CheckOne, Down, Refresh } from '@icon-park/react';
 import { theme } from '@/platform';
 import classNames from 'classnames';
-import React, { useCallback, useId, useMemo, useState } from 'react';
+import React, { useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import MarkdownView from '@renderer/components/Markdown';
 import FeedbackButton from '@renderer/components/base/FeedbackButton';
@@ -61,8 +59,9 @@ const useFormatContent = (content: string) => {
 
 /**
  * Retry entry for a failed turn: recalls the originating user request into
- * the composer via the shared `sendbox.edit` channel (edit mode: submitting
- * truncates and reruns). Only offered on the nomi surface, for errors that
+ * the composer via the shared `sendbox.edit` channel. Submitting the recalled
+ * request creates a new canonical Turn and never mutates history. Only offered
+ * on the nomi surface, for errors that
  * answer the latest user request, once the turn has settled.
  */
 const useErrorRetry = (message: IMessageTips): (() => void) | null => {
@@ -88,73 +87,6 @@ const useErrorRetry = (message: IMessageTips): (() => void) | null => {
   }, [conversationContext, message.content, message.created_at, messageList]);
 };
 
-type ContinueState = 'idle' | 'pending' | 'accepted' | 'stale';
-
-const useTruncatedContinuation = (message: IMessageTips) => {
-  const { t } = useTranslation();
-  const conversationContext = useConversationContextSafe();
-  const [state, setState] = useState<ContinueState>('idle');
-  const recovery = message.content.recovery;
-  const expectedUiErrorCode =
-    recovery?.failure_code === 'output_truncated'
-      ? 'OUTPUT_TRUNCATED'
-      : recovery?.failure_code === 'turn_requests_exhausted'
-        ? 'TURN_REQUESTS_EXHAUSTED'
-        : undefined;
-  const visible = Boolean(
-    message.content.type === 'error' &&
-      message.content.error?.retryable === true &&
-      recovery &&
-      message.content.error.code === expectedUiErrorCode &&
-      conversationContext?.type === 'nomi' &&
-      conversationContext.readOnly !== true
-  );
-  const disabled =
-    !visible || conversationContext?.isProcessing === true || state === 'pending' || state === 'accepted' || state === 'stale';
-
-  const continueTurn = useCallback(async () => {
-    if (!recovery || !conversationContext || disabled) return;
-    setState('pending');
-    try {
-      await ipcBridge.conversation.continueTruncated.invoke({
-        conversation_id: conversationContext.conversation_id,
-        source_message_id: recovery.source_message_id,
-        // One source failure owns exactly one continuation operation. The
-        // stable key absorbs double-clicks, transport retries, and remounts.
-        idempotency_key: recovery.source_message_id,
-      });
-      setState('accepted');
-    } catch (error) {
-      if (isBackendHttpError(error) && error.status === 409) {
-        setState('stale');
-        Message.warning(
-          t('conversation.truncation.stale', {
-            defaultValue: 'This interrupted turn has already been superseded.',
-          })
-        );
-        return;
-      }
-      setState('idle');
-      Message.error(
-        t('conversation.truncation.failed', {
-          defaultValue: 'Could not continue the interrupted turn.',
-        })
-      );
-    }
-  }, [conversationContext, disabled, recovery, t]);
-
-  const label =
-    state === 'pending'
-      ? t('conversation.truncation.continuing', { defaultValue: 'Continuing…' })
-      : state === 'accepted'
-        ? t('conversation.truncation.accepted', { defaultValue: 'Continuation started' })
-        : state === 'stale'
-          ? t('conversation.truncation.superseded', { defaultValue: 'Already superseded' })
-          : t('conversation.truncation.continue', { defaultValue: 'Continue execution' });
-
-  return { visible, disabled, label, continueTurn };
-};
-
 const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
   const { t } = useTranslation();
   const { type } = message.content;
@@ -162,7 +94,6 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
   const structuredError = type === 'error' ? message.content.error : undefined;
   const { json, data } = useFormatContent(content);
   const retry = useErrorRetry(message);
-  const continuation = useTruncatedContinuation(message);
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const detailsId = useId();
   const detailsLabel = t(
@@ -174,18 +105,7 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
       {t('common.retry', { defaultValue: 'Retry' })}
     </button>
   ) : null;
-  const continueButton = continuation.visible ? (
-    <button
-      type='button'
-      className='message-error-note__retry'
-      data-testid='message-error-continue-truncated'
-      disabled={continuation.disabled}
-      onClick={() => void continuation.continueTurn()}
-    >
-      {continuation.label}
-    </button>
-  ) : null;
-  const recoveryButton = continueButton ?? retryButton;
+  const recoveryButton = retryButton;
 
   const displayContent = json ? '' : content;
   if (type === 'error') {

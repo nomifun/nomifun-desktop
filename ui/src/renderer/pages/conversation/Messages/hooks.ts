@@ -30,7 +30,6 @@ import {
   normalizeAgentStreamError,
   normalizeTruncatedTurnRecovery,
   preferTextMessageVersion,
-  transformKnowledgeWritebackEvent,
 } from '@/common/chat/chatLib';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createContext } from '@renderer/utils/ui/createContext';
@@ -480,20 +479,6 @@ export const useAddOrUpdateMessage = () => {
     },
     [flush]
   );
-};
-
-export const useKnowledgeWritebackEvents = (conversationId: ConversationId | undefined) => {
-  const addOrUpdateMessage = useAddOrUpdateMessage();
-
-  useEffect(() => {
-    if (!conversationId) return;
-    return ipcBridge.conversation.knowledgeWriteback.on((event) => {
-      if (conversationId !== event.conversation_id) {
-        return;
-      }
-      addOrUpdateMessage(transformKnowledgeWritebackEvent(event));
-    });
-  }, [conversationId, addOrUpdateMessage]);
 };
 
 export const useRemoveMessageByMsgId = () => {

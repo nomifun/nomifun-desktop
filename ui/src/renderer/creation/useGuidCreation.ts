@@ -20,6 +20,11 @@ import { creativeAssetClient } from '@/renderer/pages/creativeStudio/assets/clie
 import { browserStorageGenerationKey } from '@/common/utils/browserStorageKey';
 
 export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>, input: string, files: string[], workspace: string, onAccepted?: () => void, sessionCollaboration?: { config?: GuidCollaborationConfig; model?: TProviderWithModel; ready: boolean }) {
+  // Generation admission is fully frozen by the Creative Studio Agent and its
+  // asset-library resource. Workspace/collaboration drafts belong to chat
+  // Sessions and must never mutate this immutable Session after creation.
+  void workspace;
+  void sessionCollaboration;
   const creation = useCreationDraft('guid');
   const model = useGenerationModel(creation, files);
   const location = useLocation();
@@ -75,7 +80,7 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
     }).catch(error => Message.warning(`旧草稿保留，导入失败：${error instanceof Error ? error.message : String(error)}`)).finally(() => { importing.current = null; });
   }, [creation.draft.mode]);
   const send = useCallback(async () => {
-    if (sending.current || sessionCollaboration?.ready === false) return;
+    if (sending.current) return;
     if (!model.ready) { Message.error('请选择可用的生成模型'); return; }
     sending.current = true;
     setLoading(true);
@@ -97,14 +102,6 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
         sessionStorage.setItem(pendingSessionKey, pendingSession.current);
       }
       const id = pendingSession.current;
-      if (sessionCollaboration?.config && sessionCollaboration.model) {
-        const saved = await ipcBridge.conversation.update.invoke({
-          conversation_id: id,
-          updates: { model: sessionCollaboration.model, ...sessionCollaboration.config },
-        });
-        if (!saved) throw new Error('协作配置保存失败，请重试');
-      }
-      if (workspace.trim()) await ipcBridge.conversation.update.invoke({ conversation_id: id, updates: { extra: { workspace: workspace.trim() } } });
       const key = creationAttempt(id, request);
       await submitCreation(id, request, key);
       acknowledgeCreationAttempt(id, key);
@@ -121,6 +118,6 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
       await navigate(`/conversation/${id}`);
     } catch (error) { Message.error(error instanceof Error ? error.message : String(error)); }
     finally { sending.current = false; setLoading(false); }
-  }, [agent.officialTemplates, creation.draft, creation.update, files, input, model.ready, model.selected, navigate, workspace, onAccepted, sessionCollaboration]);
-  return { ...creation, selectMode, exit, send, loading, ready: model.ready && sessionCollaboration?.ready !== false };
+  }, [agent.officialTemplates, creation.draft, creation.update, files, input, model.ready, model.selected, navigate, onAccepted]);
+  return { ...creation, selectMode, exit, send, loading, ready: model.ready };
 }

@@ -951,8 +951,21 @@ pub struct CreateAgentSessionTurnRequestDto {
 pub struct CreateAgentSessionTurnResponseDto {
     pub agent_session_id: String,
     pub operation_id: String,
+    pub message_id: String,
     pub cursor: SessionCursorDto,
     pub status: String,
+    pub replayed: bool,
+    pub completed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_ok: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_error_retryable: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -967,6 +980,7 @@ pub struct SteerAgentSessionTurnRequestDto {
 pub struct AgentSessionTurnMutationResponseDto {
     pub agent_session_id: String,
     pub target_operation_id: String,
+    pub message_id: String,
     pub cursor: SessionCursorDto,
     pub status: String,
     pub duplicate: bool,

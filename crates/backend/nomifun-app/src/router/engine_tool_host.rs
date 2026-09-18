@@ -313,8 +313,8 @@ mod tests {
             release: release.clone(),
         })));
         let invocation = EngineToolInvocation {
-            agent_session_id: "session".into(), principal: PrincipalRef { principal_kind: "user".into(), principal_id: "owner".into() },
-            resolved_snapshot_ref: ResolvedSnapshotRef { snapshot_id: "snapshot".into(), snapshot_digest: "a".repeat(64).into() },
+            agent_session_id: "0190f5fe-7c00-7a00-8000-000000000002".into(), principal: PrincipalRef { principal_kind: "user".into(), principal_id: "0190f5fe-7c00-7a00-8000-000000000001".into() },
+            resolved_snapshot_ref: ResolvedSnapshotRef { snapshot_id: "snapshot".into(), snapshot_digest: "b".repeat(64).into() },
             active_set_generation: 1, turn_operation_id: "turn".into(), operation_id: "tool-operation".into(), idempotency_key: "key".into(), correlation_id: "correlation".into(),
             call: ChatToolCall { call_id: "call".into(), name: "write_file".into(), arguments: StrictJsonValue(serde_json::json!({})), provider_metadata: Default::default() },
             binding: serde_json::from_value(serde_json::json!({
@@ -345,12 +345,13 @@ mod tests {
         release.cancel();
         owner.join().await.unwrap();
         let settled: Vec<(String,)> =
-            sqlx::query_as("SELECT event_json FROM conversation_runtime_events ORDER BY sequence")
+            sqlx::query_as("SELECT inline_json FROM agent_events WHERE kind = 'runtime/progress-recorded' ORDER BY seq")
                 .fetch_all(&journal_pool)
                 .await
                 .unwrap();
         assert_eq!(settled.len(), 2);
         let event: Value = serde_json::from_str(&settled[1].0).unwrap();
+        let event = &event["event"];
         assert_eq!(event["operation_id"], "tool-operation");
         assert_eq!(event["result"]["is_error"], false);
         assert!(event.to_string().contains("effect committed"));

@@ -202,11 +202,11 @@ import type {
   UpdateCheckResult,
   UpdateReleaseInfo,
 } from '../update/updateTypes';
+import { uuidv7 } from '../utils/uuidv7';
 import {
   fromApiConversation,
   fromApiPaginatedConversations,
   fromApiAgentSnapshot,
-  toApiModelOptional,
 } from './apiModelMapper';
 import {
   parseAgentId,
@@ -300,10 +300,6 @@ import {
   wsMappedEmitter,
 } from './httpBridge';
 
-import {
-  parseConversationArtifactId,
-  type ConversationArtifactId,
-} from '../types/conversationArtifact';
 import { fromApiSearchResult, type ApiMessageSearchItem } from './searchMapper';
 import { fromBackendCompareResult, type RawCompareResult } from './fileSnapshotMapper';
 import {
@@ -866,53 +862,6 @@ const requireConversationIdempotencyKey = (value: unknown): string => {
   return value;
 };
 
-type ConversationArtifactResponseFor<T extends IConversationArtifact> = T extends IConversationArtifact
-  ? Omit<T, 'conversation_artifact_id'> & {
-      conversation_artifact_id: unknown;
-      artifact_id?: never;
-      id?: never;
-    }
-  : never;
-
-type ConversationArtifactResponse = ConversationArtifactResponseFor<IConversationArtifact>;
-
-const fromApiConversationArtifact = (
-  artifact: ConversationArtifactResponse
-): IConversationArtifact => {
-  if (
-    Object.prototype.hasOwnProperty.call(artifact, 'id') ||
-    Object.prototype.hasOwnProperty.call(artifact, 'artifact_id')
-  ) {
-    throw new TypeError(
-      'conversation artifact wire payload must use conversation_artifact_id, not id or artifact_id'
-    );
-  }
-  const common = {
-    ...artifact,
-    conversation_artifact_id: parseConversationArtifactId(artifact.conversation_artifact_id),
-    conversation_id: parseConversationId(artifact.conversation_id),
-    cron_job_id: artifact.cron_job_id == null ? undefined : parseCronJobId(artifact.cron_job_id),
-  };
-  if (artifact.kind === 'cron_trigger') {
-    return {
-      ...common,
-      kind: artifact.kind,
-      payload: {
-        ...artifact.payload,
-        cron_job_id: parseCronJobId(artifact.payload.cron_job_id),
-      },
-    };
-  }
-  return {
-    ...common,
-    kind: artifact.kind,
-    payload: {
-      ...artifact.payload,
-      cron_job_id: parseCronJobId(artifact.payload.cron_job_id),
-    },
-  };
-};
-
 const fromApiResponseMessage = (message: IResponseMessage): IResponseMessage => ({
   ...message,
   msg_id: parseMessageId(message.msg_id),
@@ -922,22 +871,6 @@ const fromApiResponseMessage = (message: IResponseMessage): IResponseMessage => 
   conversation_id: parseConversationId(message.conversation_id),
   companion_id:
     message.companion_id == null ? message.companion_id : parseCompanionId(message.companion_id),
-});
-
-const fromApiKnowledgeWritebackEvent = (
-  event: IKnowledgeWritebackEvent
-): IKnowledgeWritebackEvent => ({
-  ...event,
-  conversation_id: parseConversationId(event.conversation_id),
-  msg_id: parseMessageId(event.msg_id),
-  written: event.written?.map((item) => ({
-    ...item,
-    kb_id: item.kb_id == null ? item.kb_id : parseKnowledgeBaseId(item.kb_id),
-  })),
-  failures: event.failures?.map((item) => ({
-    ...item,
-    kb_id: item.kb_id == null ? item.kb_id : parseKnowledgeBaseId(item.kb_id),
-  })),
 });
 
 const fromApiUserMessageCreatedEvent = (
@@ -1004,50 +937,15 @@ export const fromApiTurnCompletedEvent = (raw: unknown): IConversationTurnComple
 };
 
 export const conversation = {
-  create: withResponseMap(
-    httpPost<unknown, ICreateConversationParams>('/api/conversations', (p) => {
-      // Top-level `model` is nomi-only on the backend (spec 2026-05-12).
-      // Other agent types carry model info via `extra`.
-      const isNomi = p.type === 'nomi';
-      // Conversations are minted by the backend; never send a client-supplied
-      // entity ID.
-      const body: Record<string, unknown> = {
-        type: p.type,
-        name: p.name,
-        preset_id: p.preset_id,
-        extra: p.extra,
-      };
-      if (isNomi) {
-        const model = toApiModelOptional(p.model);
-        if (model) body.model = model;
-        if (p.delegation_policy) body.delegation_policy = p.delegation_policy;
-        if (p.execution_model_pool) body.execution_model_pool = p.execution_model_pool;
-        if (p.decision_policy) body.decision_policy = p.decision_policy;
-        if (p.execution_template_id) body.execution_template_id = p.execution_template_id;
-      }
-      return body;
-    }),
-    fromApiConversation
-  ),
   get: withResponseMap(
     httpGet<unknown, { conversation_id: ConversationId }>(
-      (p) => `/api/conversations/${p.conversation_id}`,
+      (p) => `/api/agent-sessions/${p.conversation_id}/projection`,
       { silentStatuses: [404] }
     ),
     fromApiConversation
   ),
-  getAssociateConversation: withResponseMap(
-    httpGet<unknown[], { conversation_id: ConversationId }>(
-      (p) => `/api/conversations/${p.conversation_id}/associated`
-    ),
-    (list) => list.map(fromApiConversation)
-  ),
-  listByCronJob: withResponseMap(
-    httpGet<unknown[], { cron_job_id: CronJobId }>((p) => `/api/cron/jobs/${p.cron_job_id}/conversations`),
-    (list) => list.map(fromApiConversation)
-  ),
   remove: httpDelete<void, { conversation_id: ConversationId }>(
-    (p) => `/api/conversations/${p.conversation_id}`
+    (p) => `/api/agent-sessions/${p.conversation_id}`
   ),
   // updates 额外允许顶层 `pinned`：对应 conversations 表真列（UpdateConversationRequest.pinned，
   // 服务端置位时自动维护 pinned_at）；body 构造的 `...rest` 原样透传该字段。
@@ -1058,150 +956,116 @@ export const conversation = {
   // `extra` 单独放宽为 Partial：它是合并语义，调用方本就只传要改的键，而
   // `Partial<TChatConversation>` 作用在联合类型上时仍要求 `extra` 整体符合某一
   // 分支。此前有一个全可选的分支意外充当了逃逸口，该分支随引擎删除后消失。
-  update: httpPatch<
-    boolean,
-    {
+  update: {
+    provider: () => {},
+    invoke: async (p: {
       conversation_id: ConversationId;
       updates: (Partial<TChatConversation> | { extra: Partial<TChatConversation['extra']> }) & {
         pinned?: boolean;
+        archived?: boolean;
       };
-    }
-  >(
-    (p) => `/api/conversations/${p.conversation_id}`,
-    (p) => {
+    }): Promise<boolean> => {
       const updates = p.updates as Record<string, unknown>;
-      const { model: rawModel, ...rest } = updates;
-      const model = toApiModelOptional(rawModel as TProviderWithModel | undefined);
-      return {
-        ...rest,
-        ...(model ? { model } : {}),
-      };
-    }
+      const unsupported = Object.keys(updates).filter(
+        (key) => !['name', 'pinned', 'archived'].includes(key)
+      );
+      if (unsupported.length) {
+        throw new Error(
+          `AgentSession binding is immutable; create or fork a Session instead of updating ${unsupported.join(', ')}`
+        );
+      }
+      await httpRequest(
+        'PATCH',
+        `/api/agent-sessions/${p.conversation_id}`,
+        updates
+      );
+      return true;
+    },
+  },
+  warmup: httpPost<void, { conversation_id: ConversationId }>(
+    (p) => `/api/agent-sessions/${p.conversation_id}/warmup`
   ),
-  reset: httpPost<void, IResetConversationParams>((p) => `/api/conversations/${p.conversation_id}/reset`),
-  warmup: httpPost<void, { conversation_id: ConversationId }>((p) => `/api/conversations/${p.conversation_id}/warmup`),
-  stop: httpPost<void, { conversation_id: ConversationId }>((p) => `/api/conversations/${p.conversation_id}/cancel`),
+  stop: {
+    provider: () => {},
+    invoke: async (p: { conversation_id: ConversationId }): Promise<void> => {
+      await httpRequest(
+        'POST',
+        `/api/agent-sessions/${p.conversation_id}/turns/cancel`,
+        { idempotency_key: uuidv7() }
+      );
+    },
+  },
   clearContext: httpPost<void, { conversation_id: ConversationId }>(
-    (p) => `/api/conversations/${p.conversation_id}/clear-context`
+    (p) => `/api/agent-sessions/${p.conversation_id}/clear-context`
   ),
-  /** 清空一条会话的全部消息（保留会话行，不触碰 companion_memories 记忆库）。
-   *  伙伴专属会话「清空上下文」按钮调用。 */
-  clearMessages: httpPost<boolean, { conversation_id: ConversationId }>(
-    (p) => `/api/conversations/${p.conversation_id}/clear-messages`
-  ),
-  retryKnowledgeWriteback: httpPost<
-    void,
-    { conversation_id: ConversationId; message_id: MessageId; attempt_id: string }
-  >(
-    (p) =>
-      `/api/conversations/${p.conversation_id}/messages/${p.message_id}/knowledge-writeback/retry`,
-    (p) => ({ attempt_id: p.attempt_id })
-  ),
-  activeCount: httpGet<{ count: number }>('/api/conversations/active-count'),
   sendMessage: {
     provider: () => {},
     invoke: async (p: ISendMessageParams): Promise<ISendMessageResult> => {
       const idempotencyKey = requireConversationIdempotencyKey(p.idempotency_key);
-      const result = await httpRequest<ISendMessageResult>(
+      const result = await httpRequest<CreateAgentSessionTurnResponse>(
         'POST',
-        `/api/conversations/${p.conversation_id}/messages`,
+        `/api/agent-sessions/${p.conversation_id}/turns`,
         {
-          content: p.input,
-          files: p.files,
-          inject_skills: p.inject_skills,
-          preset_id: p.preset_id,
+          idempotency_key: idempotencyKey,
+          input: {
+            content: p.input,
+            files: p.files,
+            inject_skills: p.inject_skills,
+            preset_id: p.preset_id,
+          },
         },
         { idempotencyKey, initialOnly: p.initial_only === true }
       );
-      return fromApiSendMessageResult(result);
+      return fromApiSendMessageResult({
+        msg_id: parseMessageId(result.message_id),
+        replayed: result.replayed,
+        completed: result.completed,
+        result_ok: result.result_ok ?? null,
+        result_text: result.result_text ?? null,
+        result_error: result.result_error ?? null,
+        result_error_code: result.result_error_code ?? null,
+        result_error_retryable: result.result_error_retryable ?? null,
+      });
     },
   },
   steer: {
     provider: () => {},
     invoke: async (p: ISendMessageParams): Promise<ISendMessageResult> => {
       const idempotencyKey = requireConversationIdempotencyKey(p.idempotency_key);
-      const result = await httpRequest<ISendMessageResult>(
+      const result = await httpRequest<{
+        message_id: string;
+        duplicate: boolean;
+      }>(
         'POST',
-        `/api/conversations/${p.conversation_id}/steer`,
+        `/api/agent-sessions/${p.conversation_id}/turns/steer`,
         {
-        content: p.input,
-        files: p.files,
-        inject_skills: p.inject_skills,
+          idempotency_key: idempotencyKey,
+          input: {
+            content: p.input,
+            files: p.files,
+            inject_skills: p.inject_skills,
+          },
         },
         { idempotencyKey }
       );
-      return fromApiSendMessageResult(result);
-    },
-  },
-  editResubmit: {
-    provider: () => {},
-    invoke: async (p: {
-      conversation_id: ConversationId;
-      msg_id: MessageId;
-      input: string;
-      files?: string[];
-      idempotency_key: string;
-    }): Promise<ISendMessageResult> => {
-      const idempotencyKey = requireConversationIdempotencyKey(p.idempotency_key);
-      const result = await httpRequest<ISendMessageResult>(
-        'POST',
-        `/api/conversations/${p.conversation_id}/messages/${p.msg_id}/edit-resubmit`,
-        {
-        content: p.input,
-        files: p.files,
-        },
-        { idempotencyKey }
-      );
-      return fromApiSendMessageResult(result);
-    },
-  },
-  continueTruncated: {
-    provider: () => {},
-    invoke: async (p: {
-      conversation_id: ConversationId;
-      source_message_id: MessageId;
-      idempotency_key: string;
-    }): Promise<ISendMessageResult> => {
-      const idempotencyKey = requireConversationIdempotencyKey(p.idempotency_key);
-      const result = await httpRequest<ISendMessageResult>(
-        'POST',
-        `/api/conversations/${p.conversation_id}/messages/${p.source_message_id}/continue-truncated`,
-        undefined,
-        { idempotencyKey }
-      );
-      return fromApiSendMessageResult(result);
+      return fromApiSendMessageResult({
+        msg_id: parseMessageId(result.message_id),
+        replayed: result.duplicate,
+        completed: false,
+        result_ok: null,
+        result_text: null,
+        result_error: null,
+        result_error_code: null,
+        result_error_retryable: null,
+      });
     },
   },
   getSlashCommands: httpGet<Array<{ command: string; description: string }>, { conversation_id: ConversationId }>(
-    // UARC-051 owns the Conversation-to-AgentSession cutover. Until then the
-    // renderer is displaying Conversation-owned IDs, which must stay on the
-    // Conversation authority instead of being reinterpreted as Store IDs.
-    (p) => `/api/conversations/${p.conversation_id}/slash-commands`
+    (p) => `/api/agent-sessions/${p.conversation_id}/slash-commands`
   ),
   askSideQuestion: httpPost<ConversationSideQuestionResult, { conversation_id: ConversationId; question: string }>(
-    (p) => `/api/conversations/${p.conversation_id}/side-question`,
+    (p) => `/api/agent-sessions/${p.conversation_id}/side-question`,
     (p) => ({ question: p.question })
-  ),
-  listArtifacts: withResponseMap(
-    httpGet<ConversationArtifactResponse[], { conversation_id: ConversationId }>(
-      (p) => `/api/conversations/${p.conversation_id}/artifacts`
-    ),
-    (artifacts) => artifacts.map(fromApiConversationArtifact)
-  ),
-  updateArtifact: withResponseMap(
-    httpPatch<
-      ConversationArtifactResponse,
-      {
-        conversation_id: ConversationId;
-        conversation_artifact_id: ConversationArtifactId;
-        status: IConversationArtifactStatus;
-      }
-    >(
-      (p) =>
-        `/api/conversations/${p.conversation_id}/artifacts/${p.conversation_artifact_id}`,
-      (p) => ({ status: p.status })
-    ),
-    fromApiConversationArtifact
   ),
   responseStream: wsMappedEmitter<IResponseMessage>('message.stream', (raw) =>
     fromApiResponseMessage(raw as IResponseMessage)
@@ -1216,13 +1080,6 @@ export const conversation = {
       const event = raw as { conversation_id: string; message_id: string };
       return { conversation_id: parseConversationId(event.conversation_id), message_id: parseMessageId(event.message_id) };
     },
-  ),
-  artifactStream: wsMappedEmitter<IConversationArtifact, ConversationArtifactResponse>(
-    'conversation.artifact',
-    fromApiConversationArtifact
-  ),
-  knowledgeWriteback: wsMappedEmitter<IKnowledgeWritebackEvent>('knowledge.writeback', (raw) =>
-    fromApiKnowledgeWritebackEvent(raw as IKnowledgeWritebackEvent)
   ),
   /** The server does not replay WebSocket frames. Consumers with durable
    * projections must reload them after a successful reconnect. */
@@ -1271,7 +1128,7 @@ export const conversation = {
     provider: () => {},
     invoke: (async (p: { conversation_id: ConversationId; workspace: string; path: string; search?: string }) => {
       const rel = absoluteToRelativePath(p.path, p.workspace);
-      const url = `/api/conversations/${p.conversation_id}/workspace?path=${encodeURIComponent(rel)}${p.search ? `&search=${encodeURIComponent(p.search)}` : ''}`;
+      const url = `/api/agent-sessions/${p.conversation_id}/workspace?path=${encodeURIComponent(rel)}${p.search ? `&search=${encodeURIComponent(p.search)}` : ''}`;
       const raw = await httpRequest<Array<{ name: string; type: string }>>('GET', url);
       return fromBackendWorkspaceList(raw, p.workspace, rel);
     }) as (p: { conversation_id: ConversationId; workspace: string; path: string; search?: string }) => Promise<IDirOrFile[]>,
@@ -2613,7 +2470,7 @@ export const database = {
       // omitting it, which selects offset pagination.
       if (p.cursor !== undefined) params.set('cursor', p.cursor);
       if (p.day) params.set('day', p.day);
-      return `/api/conversations/${p.conversation_id}/messages?${params.toString()}`;
+      return `/api/agent-sessions/${p.conversation_id}/message-history?${params.toString()}`;
     }),
     (page) => ({ ...page, items: page.items.map(fromApiStoredMessage) })
   ),
@@ -2621,7 +2478,7 @@ export const database = {
     httpGet<
       StoredMessageResponse,
       { conversation_id: ConversationId; message_id: MessageId }
-    >((p) => `/api/conversations/${p.conversation_id}/messages/${encodeURIComponent(p.message_id)}`),
+    >((p) => `/api/agent-sessions/${p.conversation_id}/message-history/${encodeURIComponent(p.message_id)}`),
     fromApiStoredMessage
   ),
   getUserConversations: withResponseMap(
@@ -2631,7 +2488,7 @@ export const database = {
         if (p.cursor) params.set('cursor', p.cursor);
         if (p.limit) params.set('limit', String(p.limit));
         const qs = params.toString();
-        return `/api/conversations${qs ? `?${qs}` : ''}`;
+        return `/api/agent-sessions${qs ? `?${qs}` : ''}`;
       }
     ),
     fromApiPaginatedConversations
@@ -2639,7 +2496,7 @@ export const database = {
   searchConversationMessages: withResponseMap(
     httpGet<PaginatedResult<ApiMessageSearchItem>, { keyword: string; page?: number; page_size?: number }>(
       (p) =>
-        `/api/messages/search?keyword=${encodeURIComponent(p.keyword)}&page=${p.page ?? 1}&page_size=${p.page_size ?? 50}`
+        `/api/agent-session-messages/search?keyword=${encodeURIComponent(p.keyword)}&page=${p.page ?? 0}&page_size=${p.page_size ?? 50}`
     ),
     fromApiSearchResult
   ),
@@ -3306,7 +3163,7 @@ export const terminal = {
   ),
   listConversation: withResponseMap(
     httpGet<ApiTerminalSession[], { conversation_id: ConversationId }>(
-      (p) => `/api/conversations/${p.conversation_id}/terminals`,
+      (p) => `/api/agent-sessions/${p.conversation_id}/terminals`,
     ),
     (items) => items.map(fromApiTerminalSession),
   ),
@@ -3513,10 +3370,6 @@ export interface ICreateConversationParams {
   };
 }
 
-interface IResetConversationParams {
-  conversation_id: ConversationId;
-}
-
 export interface IDirOrFile {
   name: string;
   fullPath: string;
@@ -3579,38 +3432,6 @@ export interface IResponseMessage {
   origin?: string | null;
 }
 
-export interface IKnowledgeWritebackEvent {
-  conversation_id: ConversationId;
-  msg_id: MessageId;
-  status:
-    | 'started'
-    | 'extracting'
-    | 'writing'
-    | 'written'
-    | 'partial'
-    | 'failed'
-    | 'no_candidate'
-    | 'no_completer'
-  | 'disabled'
-  | 'interrupted';
-  attempt_id?: string;
-  attempt_generation?: number;
-  started_at?: number;
-  updated_at?: number;
-  finished_at?: number | null;
-  retryable?: boolean;
-  candidates?: number;
-  written?: Array<{
-    kb_id?: KnowledgeBaseId | null;
-    rel_path?: string | null;
-  }>;
-  failures?: Array<{
-    kb_id?: KnowledgeBaseId | null;
-    rel_path?: string | null;
-    error?: string;
-  }>;
-}
-
 /** `message.userCreated` broadcast: a user message was persisted (covers IM
  *  channel inbound messages — the companion window renders those as incoming
  *  bubble headers). Same companion wire markers as IResponseMessage. */
@@ -3628,47 +3449,6 @@ export interface IUserMessageCreatedEvent {
   channel_platform?: string | null;
   created_at: number;
 }
-
-export type IConversationArtifactKind = 'cron_trigger' | 'skill_suggest';
-export type IConversationArtifactStatus = 'active' | 'pending' | 'dismissed' | 'saved';
-
-export interface IConversationArtifactBase<
-  Kind extends IConversationArtifactKind,
-  Payload extends Record<string, unknown>,
-> {
-  conversation_artifact_id: ConversationArtifactId;
-  /** Owning canonical Conversation entity id. */
-  conversation_id: ConversationId;
-  /** Stable cron job business identity. */
-  cron_job_id?: CronJobId;
-  kind: Kind;
-  status: IConversationArtifactStatus;
-  payload: Payload;
-  created_at: number;
-  updated_at: number;
-}
-
-export type ICronTriggerArtifact = IConversationArtifactBase<
-  'cron_trigger',
-  {
-    cron_job_id: CronJobId;
-    cron_job_name: string;
-    triggered_at: number;
-  }
->;
-
-export type ISkillSuggestArtifact = IConversationArtifactBase<
-  'skill_suggest',
-  {
-    cron_job_id: CronJobId;
-    name: string;
-    description: string;
-    skillContent?: string;
-    skill_content?: string;
-  }
->;
-
-export type IConversationArtifact = ICronTriggerArtifact | ISkillSuggestArtifact;
 
 export interface IConversationTurnStartedEvent {
   conversation_id: ConversationId;

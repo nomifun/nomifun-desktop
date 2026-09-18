@@ -4,20 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  preferKnowledgeWritebackState,
-  type IMessageText,
-  type KnowledgeWritebackState,
-  type KnowledgeWritebackStatus,
-} from '@/common/chat/chatLib';
-import { ipcBridge } from '@/common';
+import type { IMessageText } from '@/common/chat/chatLib';
 import { toDisplayText } from '@/common/chat/displayText';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 import { iconColors } from '@/renderer/styles/colors';
 import { Alert, Message, Tooltip } from '@arco-design/web-react';
-import { CheckOne, CloseOne, Copy, Edit, Info, Loading } from '@icon-park/react';
+import { Copy, Edit } from '@icon-park/react';
 import classNames from 'classnames';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { copyText } from '@/renderer/utils/ui/clipboard';
 import { emitter } from '@/renderer/utils/emitter';
@@ -58,235 +52,6 @@ import { getAgentLogo } from '@/renderer/utils/model/agentLogo';
 import AgentMessageAvatar from './AgentMessageAvatar';
 
 const CODE_STYLE = { marginTop: 4, marginBlock: 4 };
-
-const RUNNING_WRITEBACK_STATUSES = new Set<KnowledgeWritebackStatus>(['started', 'extracting', 'writing']);
-const SUCCESS_WRITEBACK_STATUSES = new Set<KnowledgeWritebackStatus>(['written']);
-const WARNING_WRITEBACK_STATUSES = new Set<KnowledgeWritebackStatus>(['partial', 'interrupted']);
-const FAILURE_WRITEBACK_STATUSES = new Set<KnowledgeWritebackStatus>(['failed']);
-
-const compactWritebackFiles = (state: KnowledgeWritebackState): string | undefined => {
-  const paths = (state.written ?? [])
-    .map((file) => file.rel_path)
-    .filter((path): path is string => Boolean(path));
-  if (!paths.length) return undefined;
-  const visible = paths.slice(0, 2).join(', ');
-  return paths.length > 2 ? `${visible} +${paths.length - 2}` : visible;
-};
-
-const getWritebackTextKey = (status: KnowledgeWritebackStatus): string => {
-  switch (status) {
-    case 'started':
-      return 'messages.knowledgeWriteback.started';
-    case 'extracting':
-      return 'messages.knowledgeWriteback.extracting';
-    case 'writing':
-      return 'messages.knowledgeWriteback.writing';
-    case 'written':
-      return 'messages.knowledgeWriteback.written';
-    case 'partial':
-      return 'messages.knowledgeWriteback.partial';
-    case 'failed':
-      return 'messages.knowledgeWriteback.failed';
-    case 'no_candidate':
-      return 'messages.knowledgeWriteback.noCandidate';
-    case 'no_completer':
-      return 'messages.knowledgeWriteback.noCompleter';
-    case 'disabled':
-      return 'messages.knowledgeWriteback.disabled';
-    case 'interrupted':
-      return 'messages.knowledgeWriteback.interrupted';
-  }
-};
-
-const MessageKnowledgeWriteback: React.FC<{
-  state: KnowledgeWritebackState;
-  conversationId: IMessageText['conversation_id'];
-  messageId?: IMessageText['message_id'];
-}> = ({ state, conversationId, messageId }) => {
-  const { t } = useTranslation();
-  const [retrying, setRetrying] = useState(false);
-  const [watchingRetry, setWatchingRetry] = useState(false);
-  const [polledState, setPolledState] = useState<KnowledgeWritebackState>();
-  const retryFromAttemptRef = useRef<string | undefined>(undefined);
-  const displayState = useMemo(
-    () => preferKnowledgeWritebackState(state, polledState) ?? state,
-    [polledState, state]
-  );
-  const failureCount = displayState.failures?.length ?? 0;
-  const writtenCount = displayState.written?.length ?? 0;
-  const firstFailure = displayState.failures?.find((failure) => failure.error)?.error;
-  const fileSummary = compactWritebackFiles(displayState);
-  const detail = firstFailure ?? fileSummary;
-  const canRetry =
-    displayState.retryable === true &&
-    !RUNNING_WRITEBACK_STATUSES.has(displayState.status) &&
-    Boolean(messageId);
-
-  useEffect(() => {
-    if (
-      retrying &&
-      (RUNNING_WRITEBACK_STATUSES.has(displayState.status) ||
-        displayState.attempt_id !== retryFromAttemptRef.current)
-    ) {
-      setRetrying(false);
-    }
-    if (
-      watchingRetry &&
-      displayState.attempt_id !== retryFromAttemptRef.current &&
-      !RUNNING_WRITEBACK_STATUSES.has(displayState.status)
-    ) {
-      setWatchingRetry(false);
-    }
-  }, [
-    displayState.attempt_id,
-    displayState.status,
-    retrying,
-    watchingRetry,
-  ]);
-
-  // Realtime fan-out is bounded and may drop a frame without disconnecting.
-  // Poll this exact durable owner row while it is running (or while a manual
-  // retry is crossing the HTTP/event gap), including old messages outside the
-  // newest keyset-history window.
-  useEffect(() => {
-    if (
-      !messageId ||
-      (!watchingRetry &&
-        !RUNNING_WRITEBACK_STATUSES.has(displayState.status))
-    ) {
-      return;
-    }
-    let stopped = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const poll = async () => {
-      try {
-        const message =
-          await ipcBridge.database.getConversationMessage.invoke({
-            conversation_id: conversationId,
-            message_id: messageId,
-          });
-        if (
-          message.type === 'text' &&
-          typeof message.content === 'object' &&
-          message.content !== null
-        ) {
-          const incoming = (message.content as IMessageText['content'])
-            .knowledge_writeback;
-          if (incoming && !stopped) {
-            setPolledState((existing) =>
-              preferKnowledgeWritebackState(existing, incoming)
-            );
-          }
-        }
-      } catch (error) {
-        if (!stopped) {
-          console.warn(
-            '[MessageKnowledgeWriteback] Failed to refresh durable write-back state:',
-            error
-          );
-        }
-      } finally {
-        if (!stopped) timer = setTimeout(poll, 1_000);
-      }
-    };
-    timer = setTimeout(poll, 250);
-    return () => {
-      stopped = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [
-    conversationId,
-    displayState.status,
-    messageId,
-    watchingRetry,
-  ]);
-
-  const handleRetry = async () => {
-    if (!messageId || retrying) return;
-    retryFromAttemptRef.current = displayState.attempt_id;
-    setRetrying(true);
-    setWatchingRetry(true);
-    try {
-      await ipcBridge.conversation.retryKnowledgeWriteback.invoke({
-        conversation_id: conversationId,
-        message_id: messageId,
-        attempt_id: displayState.attempt_id ?? '',
-      });
-      Message.success(t('messages.knowledgeWriteback.retryStarted'));
-      // Keep the action disabled until the fresh attempt arrives. This closes
-      // the response/event gap without inventing a frontend job state.
-    } catch (error) {
-      setRetrying(false);
-      setWatchingRetry(false);
-      Message.error(
-        error instanceof Error && error.message
-          ? error.message
-          : t('messages.knowledgeWriteback.retryFailed')
-      );
-    }
-  };
-
-  // 只有 running/未知这两支用的 `border-line` 是死类名（theme 无 line 键），改成
-  // border-arco-2；四支共用的 border-style 由容器统一补，见下面的 border-solid。
-  // `border-line` names no colour; the shared style lives on the container.
-  const toneClass = RUNNING_WRITEBACK_STATUSES.has(displayState.status)
-    ? 'border-arco-2 bg-fill-1 text-t-secondary'
-    : SUCCESS_WRITEBACK_STATUSES.has(displayState.status)
-      ? 'border-success-4 bg-success-light-1 text-success-6'
-      : WARNING_WRITEBACK_STATUSES.has(displayState.status)
-        ? 'border-warning-3 bg-warning-1 text-warning-7'
-        : FAILURE_WRITEBACK_STATUSES.has(displayState.status)
-          ? 'border-danger-4 bg-danger-light-1 text-danger-6'
-          : 'border-arco-2 bg-fill-1 text-t-secondary';
-
-  const icon = RUNNING_WRITEBACK_STATUSES.has(displayState.status) ? (
-    <Loading theme='outline' size='13' className='block shrink-0 animate-spin' />
-  ) : SUCCESS_WRITEBACK_STATUSES.has(displayState.status) ? (
-    <CheckOne theme='filled' size='13' className='block shrink-0' />
-  ) : FAILURE_WRITEBACK_STATUSES.has(displayState.status) ? (
-    <CloseOne theme='filled' size='13' className='block shrink-0' />
-  ) : (
-    <Info theme='outline' size='13' className='block shrink-0' />
-  );
-
-  return (
-    <div
-      className={classNames(
-        // border-solid 不能省：本仓库唯一的 preflight 是 `color: inherit`，没有全局
-        // border reset，border-style 停在初始值 none —— 四种状态的边框此前全都没画出来。
-        // Without an explicit style the badge border never painted in any tone.
-        'mt-6px inline-flex max-w-full items-center gap-6px rd-6px border border-solid px-8px py-4px text-12px leading-18px',
-        toneClass
-      )}
-      title={detail}
-    >
-      <span className='flex h-14px w-14px shrink-0 items-center justify-center self-center leading-none'>{icon}</span>
-      <span className='min-w-0 truncate'>
-        {t(getWritebackTextKey(displayState.status), {
-          count: writtenCount,
-          failures: failureCount,
-        })}
-      </span>
-      {detail && <span className='min-w-0 truncate opacity-75'>{detail}</span>}
-      {canRetry && (
-        <button
-          type='button'
-          className='ml-2px shrink-0 rd-4px border-0 bg-transparent px-4px py-0 text-inherit font-medium hover:bg-fill-2 disabled:cursor-wait disabled:opacity-60'
-          disabled={retrying}
-          aria-label={t('messages.knowledgeWriteback.retry')}
-          onClick={(event) => {
-            event.stopPropagation();
-            void handleRetry();
-          }}
-        >
-          {retrying
-            ? t('messages.knowledgeWriteback.retrying')
-            : t('messages.knowledgeWriteback.retry')}
-        </button>
-      )}
-    </div>
-  );
-};
 
 const isAbsoluteMessageFilePath = (file_path: string): boolean =>
   file_path.startsWith('/') || /^[A-Za-z]:/.test(file_path);
@@ -341,7 +106,6 @@ const MessageText: React.FC<{
   const [showCopyAlert, setShowCopyAlert] = useState(false);
   const isUserMessage = message.position === 'right';
   const isAgentMessage = message.position === 'left' && message.content.agentMessage === true;
-  const writebackState = !isUserMessage ? message.content.knowledge_writeback : undefined;
   const shouldRenderPlainText = isUserMessage;
   const conversationContext = useConversationContextSafe();
   const shouldShowActions = !hideActions;
@@ -362,7 +126,7 @@ const MessageText: React.FC<{
   // 过滤空内容，避免渲染空DOM
   const hasRenderableContent = contentToRender.trim().length > 0;
 
-  if (!hasRenderableContent && !writebackState) {
+  if (!hasRenderableContent) {
     return null;
   }
 
@@ -549,13 +313,6 @@ const MessageText: React.FC<{
             <span className='text-13px whitespace-pre-wrap break-words'>{observation.answer}</span>
           </div>
         ))}
-        {writebackState && (
-          <MessageKnowledgeWriteback
-            state={writebackState}
-            conversationId={message.conversation_id}
-            messageId={message.message_id ?? message.msg_id}
-          />
-        )}
         {actionsRow}
       </div>
       {copyAlert}
