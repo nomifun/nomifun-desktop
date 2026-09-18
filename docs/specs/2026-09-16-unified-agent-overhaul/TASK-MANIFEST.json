@@ -432,7 +432,7 @@
       "id": "UARC-054",
       "title": "Squash new baseline and remove historical Agent migrations",
       "wave": "W6",
-      "status": "active",
+      "status": "integrated",
       "depends_on": ["UARC-053"],
       "lane": "integration",
       "write_set": ["Cargo.toml", "Cargo.lock", "package.json", "README.md", "README.zh-CN.md", "crates/backend/nomifun-common/src/id.rs", "crates/backend/nomifun-common/src/lib.rs", "crates/backend/nomifun-api-types/src/conversation.rs", "crates/backend/nomifun-api-types/src/lib.rs", "crates/backend/nomifun-db/**", "crates/backend/nomifun-agent-contracts/src/**", "crates/backend/nomifun-agent-contracts/schema/**", "crates/backend/nomifun-agent-contracts/contracts/generated/**", "crates/backend/nomifun-agent-contracts/contracts/inventory/current-composition.json", "crates/backend/nomifun-agent-contracts/contracts/validation/platform-validation-manifest.payload.json", "crates/backend/nomifun-agent-session/src/store.rs", "crates/backend/nomifun-agent-runtime/src/**", "crates/backend/nomifun-ai-agent/src/creation_context.rs", "crates/backend/nomifun-ai-agent/src/lib.rs", "crates/backend/nomifun-workshop/src/service.rs", "crates/backend/nomifun-workshop/src/routes.rs", "crates/backend/nomifun-app/Cargo.toml", "crates/backend/nomifun-app/src/**", "crates/backend/nomifun-app/tests/**", "crates/backend/nomifun-v4-root/**", "ui/src/common/types/conversationArtifact.ts", "ui/src/common/types/conversationArtifact.test.ts", "ui/src/common/types/ids.ts", "ui/src/common/types/ids.test.ts", "scripts/check-agent-vocabulary.mjs", "scripts/check-browser-platform-boundary.mjs", "scripts/gate-agent-v2.mjs", "scripts/scripts.json", "scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1", "scripts/seed-dev-from-prod.mjs", "docs/architecture/data-and-storage.md", "docs/architecture/data-and-storage.zh.md", "docs/contributing/data-and-identifier-standards.md", "docs/contributing/data-and-identifier-standards.zh.md", "docs/contributing/development.md", "docs/contributing/development.zh.md", "docs/guides/desktop-app.md", "docs/guides/desktop-app.zh.md", "docs/reference/configuration.md", "docs/reference/configuration.zh.md", "docs/specs/2026-09-16-unified-agent-overhaul/**"],
@@ -440,7 +440,7 @@
       "retained_set": ["Non-Agent configuration schema and Agent-only reset contract"],
       "ui_surface": [],
       "interaction_spec": [],
-      "platforms": { "windows": "pending", "macos": "pending" },
+      "platforms": { "windows": "verified", "macos": "pending" },
       "validation": ["fresh baseline initialization", "non-Agent configuration preservation", "old-root non-read", "schema self-test"],
       "completion_gate": "Fresh startup does not create then delete any retired Agent schema"
     },
