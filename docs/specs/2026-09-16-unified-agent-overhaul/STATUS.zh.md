@@ -874,3 +874,29 @@
 - Windows: implementation active. macOS: shared schema source active; no Mac-native evidence claimed on this host.
 - Remaining/blocker: none. External Mac hardware remains a later Wave 8 prerequisite.
 - Next ready tasks: none until `UARC-054` completes; `UARC-060` depends on its baseline barrier.
+
+### 2026-09-19 UARC-054 integrated
+
+- Barrier/source: UARC-053 closeout `a770fa0ab`; implementation
+  `5d250dc3ab097b29898f5800ec299af4d10a2f7a`.
+- Owner/write set: Integration only. The manifest write set was expanded to the exact generated inventory/validation,
+  documentation registry and credential-isolating runner inputs required by the squash; no Feature worker ran.
+- Changed: one `001_canonical_baseline.sql` now creates generation-5 Agent Store directly; authenticated legacy-lineage
+  cutover preserves non-Agent configuration. Reset, backup, relocation and startup schema/index probes use the same
+  canonical Store. Unified Runtime gained hidden middleware, ToolSearch, exact Turn authority/cancellation and durable
+  hidden Action/Event/Effect receipts discovered while proving the new baseline end to end.
+- Deleted: 112 historical migrations, `nomifun-v4-root`, displaced/published migration adapters and tests, legacy
+  seed/import tooling, Conversation artifact remnants and their documentation. Fresh startup has no create-then-delete
+  retired Agent schema path.
+- Retained + reason: non-Agent configuration, Agent-only reset, product-domain stores and one authenticated installed-
+  data cutover remain. Windows WebView2 and the existing independent macOS CEF child NSView are unchanged.
+- Tests: Contracts 100/100; Runtime 43/43; AgentSession 35/35; DB lib 305/305 plus all migration/reset/backup/schema
+  suites; App lib 486/486; route-gap 29/29; startup 4/4; plugin discovery 8/8; local before-tool 8/8; UI 3538/3538.
+  Contract generator/check, 55-payload closure, `bun run check`, production UI build, 880×600 boundary,
+  UARC/Browser/Process scanners, rustfmt and diff check passed.
+- Commercial-model evidence: Credential Manager-isolated StepFun Coding Plan `step-3.7-flash` passed real
+  `before_tool.publish_select`, allow, deny and same-Session continuation stages through canonical durable receipts;
+  the credential did not enter argv, Cargo/build-script environments, repository files or logs.
+- Windows: verified. macOS: shared source pending; no CEF, TCC, native interaction, arm64 app, DMG or signing claim.
+- Remaining/blocker: none for `UARC-054`. External Mac hardware remains a later Wave 8 prerequisite.
+- Next ready task: `UARC-060`, serial Windows Integration acceptance.
