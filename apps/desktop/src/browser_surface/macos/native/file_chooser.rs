@@ -50,13 +50,28 @@ impl FileChooser {
     }
     pub(crate) fn arm(&self) { self.armed.store(true, Ordering::Release); }
     pub(crate) async fn next(&mut self, cancel: &CancellationToken) -> Result<Choice, WorkspaceError> {
-        let choice = tokio::select! {
+        self.next_or_idle(cancel)
+            .await?
+            .ok_or(WorkspaceError::ActionInterrupted)
+    }
+    pub(crate) async fn next_or_idle(&mut self, cancel: &CancellationToken) -> Result<Option<Choice>, WorkspaceError> {
+        let received = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(RunAdmissionError::Cancelled.into()),
             value = tokio::time::timeout(std::time::Duration::from_secs(3), self.receiver.recv()) => value,
-        }.map_err(|_| WorkspaceError::ActionInterrupted)?.ok_or(WorkspaceError::ActionInterrupted)??;
+        };
+        // An idle HTML file chooser is the normal steady state. Keep the
+        // worker bounded and responsive without poisoning it merely because
+        // no page requested a file during this interval.
+        let Some(choice) = (match received {
+            Ok(choice) => choice,
+            Err(_) => return Ok(None),
+        }) else {
+            return Err(WorkspaceError::ActionInterrupted);
+        };
         if self.subscription.failed.load(Ordering::Acquire) { return Err(WorkspaceError::ActionInterrupted); }
+        let choice = choice?;
         choice.require_current()?;
-        Ok(choice)
+        Ok(Some(choice))
     }
 }

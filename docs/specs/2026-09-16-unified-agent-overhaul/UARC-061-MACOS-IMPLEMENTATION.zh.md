@@ -3,10 +3,9 @@
 ## 1. 交付状态
 
 UARC-061 主实现已在真实 Apple Silicon Mac 上完成生产接线和工程验证，但任务仍保持 `active`，不提前写成
-`macOS verified`。以下三个外部步骤尚未闭合：
+`macOS verified`。以下两个外部步骤尚未闭合：
 
 - Keychain service `NomiFun/StepFun/LiveProvider` 不存在，真实 `step-3.7-flash` gate 为 `blocked`；
-- 当前 macOS 会话被锁定，Computer Use 明确要求用户手动解锁，因此 Command-Q 事件路径为 `blocked`；
 - Google Chrome 已安装，但默认 profile 没有 `DevToolsActivePort`，因此真实产品连接前置条件不成立；需要用户在
   `chrome://inspect/#remote-debugging` 显式开启 Remote Debugging 后才能执行安装级 attached Chrome gate。
 
@@ -24,6 +23,9 @@ UARC-061 主实现已在真实 Apple Silicon Mac 上完成生产接线和工程�
   校验/发布以及 storage clear。
 - CEF download 正确处理 `OnDownloadUpdated` 可早于 `OnBeforeDownload` 的原生顺序；首个 native item 绑定
   一次显式 Agent click，其他 item 立即取消，terminal proof 后才发布到授权 workspace。
+- 修复真实 Command-Q 暴露的 file-chooser lifecycle race：长驻用户 chooser 的三秒无事件窗口现在表示 idle，
+  不再提前把 worker poison 为 `ActionInterrupted`；Agent upload 和 native conformance 仍保留严格三秒 event gate。
+  若 AppKit 已先销毁 page protocol，chooser close 只在该可证明 terminal 状态吸收 listener error。
 - attached Chrome 的 macOS discovery 使用 Chrome 默认 user-data root 下的 `DevToolsActivePort`，只连接，
   不启动、不接管 profile、不静默扩权。
 - `browser_gui_fixture` 已适配 UARC-060 的 hashed `platform__*` exact Action Tool、engine-owned
@@ -68,6 +70,8 @@ artifacts:
   build.noindex/uarc061-cef-final/run-AemOgK/artifact.json
   build.noindex/uarc061-cef-final/run-AemOgK/stdout.log
   build.noindex/uarc061-cef-final/run-AemOgK/stderr.log
+  build.noindex/uarc061-cef-commandq-fix-v2/run-oAyKhT/native-result.json
+  build.noindex/uarc061-cef-commandq-fix-v2/run-oAyKhT/artifact.json
 known_limitations: fixture receipt is explicitly productAcceptance=false; product evidence is separate below
 ```
 
@@ -109,9 +113,9 @@ observed: host/framework/five helpers arm64; codesign --verify --deep --strict p
           TeamIdentifier D3TDA9B335; hardened runtime enabled; runtime.json and CREDITS.html present
 result: pass
 artifact: target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app
-host sha256: a15507b5593d0620819e37fbf553d422688553a7b07d4225e1a8edbedc6eee56
-framework sha256: ff6bc94f3be51d647c1cfc19a2467e2beaf000b4557a304c012b040662558890
-main helper sha256: a4345cae5f32826e3cf05fe319f2350c3a26400289c72800c075b535187573d1
+host sha256: bf16ff136b621cc37cc556fb7875afdbf7306f41f3f0cdb06b495f2ff5173feb
+framework sha256: 7b26c48d2ba2809b5c652cb7761859e6fd5f66c67bbeb8dfd236d0d35548210c
+main helper sha256: 7e55783f97ed14ca004b814d75d4f3d1a1ecc9d88f89077b8f769e17e75e6faa
 known_limitations: DMG/release lock/notarization are UARC-063 gates, not claimed here
 ```
 
@@ -132,9 +136,18 @@ reason: Chrome 144+ requires the user to enable Remote Debugging explicitly in c
 ```text
 task_id: UARC-061
 scenario: Command-Q cleanup
-result: blocked
-reason: macOS is locked and Computer Use requires manual unlock; verified SIGTERM cleanup is retained only as
-        additional lifecycle evidence and is not relabeled Command-Q
+steps: launch the exact signed app with a completed canonical Agent/Kernel/CEF turn and five live CEF helpers;
+       bind the NomiFun AppKit window through Computer Use; press Command-Q; verify UI termination, logs and process tree
+expected: app quits through the real menu accelerator; no host/helper remains; no Browser/native cleanup error
+observed: Computer Use returned App quit; host=0, helpers=0 immediately after; cleanup_error_count=0;
+          native_error_count=0; ChannelMessageLoop and Terminal cleanup both stopped normally
+result: pass
+artifacts:
+  build.noindex/uarc061-command-q-evidence-v5/command-q-result.json
+  build.noindex/uarc061-command-q-evidence-v5/fixture-status.json
+  build.noindex/uarc061-command-q-evidence-v5/events.json
+  build.noindex/uarc061-command-q-evidence-v5/messages.json
+  build.noindex/uarc061-command-q-evidence-v5/stdout.log
 
 task_id: UARC-061
 scenario: live StepFun Coding Plan step-3.7-flash Browser turn
@@ -157,9 +170,10 @@ reason: Keychain service NomiFun/StepFun/LiveProvider is absent; no alternative 
 | production UI + arm64 release `.app` build | passed；7,677 modules |
 | final signed CEF native smoke | passed；33/33 + shutdown |
 | packaged product Agent/Kernel/CEF smoke | passed；terminal + cleanup receipt |
+| real AppKit Command-Q with active CEF | passed；host/helper=0；0 native/cleanup errors |
 
 ## 6. 未完成项
 
-UARC-061 只有在用户安全录入 Keychain commercial credential、解锁 Mac 完成 Command-Q、并显式开启 Chrome
-Remote Debugging 后，才能把三项 blocker 重新运行并将任务从 `active` 更新为 `integrated / macOS verified`。
+UARC-061 只有在用户安全录入 Keychain commercial credential，并显式开启 Chrome Remote Debugging 后，才能把
+两个 blocker 重新运行并将任务从 `active` 更新为 `integrated / macOS verified`。
 UARC-064 与 UARC-070 仍不得提前标记完成。
