@@ -7,6 +7,16 @@ export const SessionComposerToolsContext = createContext<{
   setOpenTool: React.Dispatch<React.SetStateAction<ComposerTool | undefined>>;
 } | null>(null);
 
+/** Shared rail for composer-owned tools that do not edit the frozen Agent binding. */
+export const ComposerToolRail: React.FC<{
+  children: React.ReactNode;
+  ariaLabel: string;
+}> = ({ children, ariaLabel }) => (
+  <aside className={styles.rail} data-composer-tools aria-label={ariaLabel}>
+    {children}
+  </aside>
+);
+
 /** Place inside the input surface so the tools share its border and focus ring. */
 export const SessionCapabilityComposerLayout: React.FC<{
   children: React.ReactNode;

@@ -3,7 +3,7 @@ import type { ConversationCommandQueueItem } from '../useConversationCommandQueu
 type SteerPayload = Pick<ConversationCommandQueueItem, 'input' | 'files'>;
 type SteerCommand = Pick<
   ConversationCommandQueueItem,
-  'input' | 'files' | 'capability_selection' | 'requires_review'
+  'input' | 'files' | 'requires_review'
 >;
 
 /** Preserve failures for review. A lost response is not permission for a new turn. */
