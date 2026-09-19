@@ -200,6 +200,7 @@ fn main() {
                 verify_user_downloads(&engine, &handle, parent.clone(), &format!("http://{address}/user-downloads"), &mut checks).await?;
                 verify_permissions(&engine, &handle, parent.clone(), &format!("http://{address}/popup-source"), &mut checks).await?;
                 verify_runtime(&engine, &handle, &format!("http://{address}"), &mut checks).await?;
+                verify_renderer_crash(&engine, parent.clone(), &format!("http://{address}/popup-source"), &mut checks).await?;
                 verify_storage(&engine, parent, &data, &format!("http://{address}"), &mut checks).await?;
                 Ok::<_, String>(serde_json::json!({"checks":checks,"page":state,"passed":checks.as_object().unwrap().values().all(|v|v==true)}))
             }.await;
@@ -479,6 +480,63 @@ async fn navigate_fixture(page: &nomifun_browser_macos::engine::Page, url: &str)
             changes.changed().await.map_err(|_| "Storage fixture navigation closed".to_owned())?;
         }
     }).await.map_err(|_| "Storage fixture navigation timed out".to_owned())?
+}
+
+#[cfg(target_os = "macos")]
+async fn verify_renderer_crash(
+    engine: &std::sync::Arc<nomifun_browser_macos::engine::Engine>,
+    parent: std::sync::Arc<nomifun_browser_macos::engine::ParentView>,
+    url: &str,
+    checks: &mut serde_json::Value,
+) -> Result<(), String> {
+    use nomifun_browser_platform::runtime::{BrowserSurfaceBounds, BrowserTabLifecycle};
+
+    let context = engine.create_context(None).await?;
+    let page = engine.create_page(parent, context).await?;
+    page.set_surface(
+        BrowserSurfaceBounds {
+            x: 20.,
+            y: 60.,
+            width: 1060.,
+            height: 620.,
+        },
+        true,
+        Default::default(),
+    )
+    .await?;
+    navigate_fixture(&page, url).await?;
+    let mut changes = page.subscribe();
+    let protocol = page.protocol.clone();
+    let crash_call = tokio::spawn(async move {
+        protocol.call(None, "Page.crash", serde_json::json!({})).await
+    });
+    let crashed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let state = changes.borrow_and_update().clone();
+            if state.lifecycle == BrowserTabLifecycle::Crashed {
+                return Ok::<_, String>(state);
+            }
+            changes
+                .changed()
+                .await
+                .map_err(|_| "CEF crash state subscription closed".to_owned())?;
+        }
+    })
+    .await
+    .map_err(|_| "CEF renderer crash was not projected".to_owned())??;
+    let command_failed_closed = tokio::time::timeout(std::time::Duration::from_secs(2), crash_call)
+        .await
+        .map_err(|_| "CEF crash command did not settle".to_owned())?
+        .map_err(|_| "CEF crash command task failed".to_owned())?
+        .is_err();
+    checks["native_renderer_crash_projection"] = (crashed.lifecycle == BrowserTabLifecycle::Crashed
+        && page.input_locked()
+        && page.protocol.is_closed()
+        && command_failed_closed)
+        .into();
+    page.force_close().await?;
+    eprintln!("CEF_SMOKE_PHASE renderer_crash_settled");
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]

@@ -2,14 +2,10 @@
 
 ## 1. 交付状态
 
-UARC-061 主实现已在真实 Apple Silicon Mac 上完成生产接线和工程验证，但任务仍保持 `active`，不提前写成
-`macOS verified`。以下两个外部步骤尚未闭合：
-
-- Keychain service `NomiFun/StepFun/LiveProvider` 不存在，真实 `step-3.7-flash` gate 为 `blocked`；
-- Google Chrome 已安装，但默认 profile 没有 `DevToolsActivePort`，因此真实产品连接前置条件不成立；需要用户在
-  `chrome://inspect/#remote-debugging` 显式开启 Remote Debugging 后才能执行安装级 attached Chrome gate。
-
-这些 blocker 没有被 mock、免费模型、SIGTERM 或独立 fixture 冒充为通过。
+UARC-061 已在真实 Apple Silicon Mac 上完成生产接线和核心原生验证，状态为
+`integrated / macOS verified`。真实 `step-3.7-flash` 已通过隔离 stdin 执行 managed CEF/Workspace 功能链路；
+Keychain 持久化与 attached Chrome Remote Debugging 按用户产品决定记为 `not_run`，不删除已有能力，也不使用
+mock、免费模型、SIGTERM 或独立 fixture 冒充通过。
 
 ## 2. 实现摘要
 
@@ -48,9 +44,9 @@ Tauri CLI: 2.11.2
 CEF crate: 152.3.0+152.0.6
 CEF archive: cef_binary_152.0.6+g708dc14+chromium-152.0.7977.83_macosarm64_minimal.tar.bz2
 Chromium: 152.0.7977.83
-StepFun Keychain credential: absent
+StepFun credential: user-provided / isolated stdin；Keychain persistence not required
 Developer ID Application identity: available
-notarization credential: available；submission/stapling owned by UARC-063
+notarization: completed by UARC-063
 ```
 
 ## 4. 原生证据
@@ -63,7 +59,8 @@ scenario: signed native CEF child surface and Browser runtime conformance
 steps: build fixture + helper; stage pinned framework and five helpers; Developer ID sign; launch real AppKit/Tauri
        window; execute input/frame/upload/picker/download/popup/dialog/permission/storage matrix; shutdown CEF
 expected: every check true, arm64 helpers, shutdown_complete=true, no owned process remains
-observed: 33/33 checks true; shutdown_complete=true; user and Agent downloads use real CEF callbacks
+observed: 34/34 checks true, including native_renderer_crash_projection; shutdown_complete=true;
+          user and Agent downloads use real CEF callbacks
 result: pass
 artifacts:
   build.noindex/uarc061-cef-final/run-AemOgK/native-result.json
@@ -72,10 +69,12 @@ artifacts:
   build.noindex/uarc061-cef-final/run-AemOgK/stderr.log
   build.noindex/uarc061-cef-commandq-fix-v2/run-oAyKhT/native-result.json
   build.noindex/uarc061-cef-commandq-fix-v2/run-oAyKhT/artifact.json
+  build.noindex/uarc063-cef-crash/run-A0upQe/native-result.json
+  build.noindex/uarc063-cef-crash/run-A0upQe/artifact.json
 known_limitations: fixture receipt is explicitly productAcceptance=false; product evidence is separate below
 ```
 
-覆盖项包括真实 trusted click、Unicode 输入、frame/OOPIF 几何、upload、AppKit file picker hide-cancel、
+覆盖项包括真实 trusted click、Unicode 输入、renderer crash→Crashed/input lock/channel close、frame/OOPIF 几何、upload、AppKit file picker hide-cancel、
 用户 download/cancel、Agent private download publication、permission deny/Agent fail-closed、真实 popup opener/profile、
 dialog drain、conversation storage isolation/clear 和 CEF shutdown。
 
@@ -151,8 +150,17 @@ artifacts:
 
 task_id: UARC-061
 scenario: live StepFun Coding Plan step-3.7-flash Browser turn
-result: blocked
-reason: Keychain service NomiFun/StepFun/LiveProvider is absent; no alternative model was used
+steps: pass the user-provided credential only through the isolated fixture stdin; launch the exact signed product;
+       navigate/observe/click the managed CEF page; reproduce count=2; patch workspace app.js; reload and click again
+observed: real_provider=true; trusted witnesses=[2,1]; changed_source_served=true; fixture failure=null;
+          host_cleanup_proven=true; credential artifact scan found zero matches
+result: pass for the native Browser/Workspace workflow and cleanup
+known_limitation: after functional completion, the model retried report_completion until compaction reached
+                  MaxOutputTokens; this turn is not claimed as turn/completed
+artifacts:
+  build.noindex/uarc-live-model-scope/browser-live-product-v5/fixture-status.json
+  build.noindex/uarc-live-model-scope/browser-live-product-v5/events.json
+  build.noindex/uarc-live-model-scope/browser-live-product-v5/cleanup.json
 ```
 
 ## 5. 工程 gate
@@ -168,12 +176,12 @@ reason: Keychain service NomiFun/StepFun/LiveProvider is absent; no alternative 
 | `bun run check:desktop-ui-boundary` | passed；1,916 renderer sources / minimum 880×600 |
 | `bun run build:mac --check arm` | passed |
 | production UI + arm64 release `.app` build | passed；7,677 modules |
-| final signed CEF native smoke | passed；33/33 + shutdown |
+| final signed CEF native smoke | passed；34/34 + renderer crash projection + shutdown |
 | packaged product Agent/Kernel/CEF smoke | passed；terminal + cleanup receipt |
 | real AppKit Command-Q with active CEF | passed；host/helper=0；0 native/cleanup errors |
 
-## 6. 未完成项
+## 6. 完成状态与 `not_run`
 
-UARC-061 只有在用户安全录入 Keychain commercial credential，并显式开启 Chrome Remote Debugging 后，才能把
-两个 blocker 重新运行并将任务从 `active` 更新为 `integrated / macOS verified`。
-UARC-064 与 UARC-070 仍不得提前标记完成。
+UARC-061 已按 managed CEF 核心范围更新为 `integrated / macOS verified`。用户明确决定 Keychain 持久化和
+attached Chrome Remote Debugging 不属于本轮必要门槛：credential 通过隔离 stdin 使用，attached Chrome
+实连记为 `not_run`；不删除现有 attached provider 能力。UARC-064 与 UARC-070 仍不得提前标记完成。
