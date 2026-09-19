@@ -951,3 +951,18 @@
 - Remaining/blocker: Windows acceptance has no remaining blocker. UARC-061/062 require an external Mac host; UARC-063
   follows only after both are integrated, then UARC-064 Windows regression and UARC-070 final audit remain mandatory.
 - Next ready tasks: `UARC-061` and `UARC-062`, on a real Mac and under their disjoint manifest write sets.
+
+### 2026-09-19 original refactor branch synchronized
+
+- Integration: merge commit `a19b0be82912e2612fe73fe07db8e3da5c894a28` joins the UARC handoff envelope
+  `f3e9bfa4b533cc14870d736b050634a93c594362` with the three concurrent UI commits ending at
+  `d27bf4a718f369cdaafd369272ffa6a3db9c5fab` on the original `rf/agent-capability-platform-v2` branch.
+- Conflict ownership: the only content conflict was `GuidPage.tsx`. Resolution retains canonical Agent/Resource selection,
+  exact Action availability and the UARC removal of the old direct Browser button while adopting the compact Composer and
+  project selector placement. The shared modal contract now owns CreateStudio padding; its stale local assertion was
+  updated rather than restoring duplicate CSS.
+- Gate: typecheck passed; complete UI passed 3538/3538; `bun run check` passed with 1,916 renderer sources at the 880×600
+  boundary and all Browser/Process/UARC scanners green; production UI build passed with 7,561 transformed modules.
+- Scope: the frozen Windows installer remains the UARC-060 candidate built from `b09c680bb`; this UI-only branch sync does
+  not replace its package hash or claim new native evidence. Mac must fetch the original refactor branch and verify both
+  `71fd47fbb` and `a19b0be82` as ancestors before starting UARC-061/062.

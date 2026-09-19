@@ -7,20 +7,26 @@ source branch:                 rf/agent-capability-platform-v2
 UARC-054 input barrier:        d14af94e611de1cef986287f72cb027cf770e4ef
 Windows implementation source: b09c680bbedd939a3dd9c5a05d9432a6ae79bdee
 UARC-060 acceptance barrier:   71fd47fbb0a49073b8e736ee6d279f331c34f9e3
+validated branch integration:  a19b0be82912e2612fe73fe07db8e3da5c894a28
 Windows candidate SHA-256:     ab572e619fb85b511488e25a94c76cf62f4ba7eace4c13751c43b1a6b6bb6dda
 ```
 
-Mac implementation branch/worktree must be created from the exact UARC-060 acceptance barrier above. This handoff file
-is delivered by its immediate documentation-only child; it does not change the tested production source. Before work:
+`a19b0be82912e2612fe73fe07db8e3da5c894a28` preserves the UARC handoff history and merges the three concurrent UI
+commits already published on the original refactor branch. Its conflict resolution keeps the canonical Agent/Resource
+launch path while accepting the compact Composer, shared modal contract and Creative Asset changes. Mac implementation
+must fetch the original `rf/agent-capability-platform-v2` branch and verify that its checkout contains both the exact
+acceptance barrier and this validated integration commit. Before work:
 
 ```bash
+git fetch origin rf/agent-capability-platform-v2
 git rev-parse HEAD
-git merge-base --is-ancestor b09c680bbedd939a3dd9c5a05d9432a6ae79bdee \
-  71fd47fbb0a49073b8e736ee6d279f331c34f9e3
+git merge-base --is-ancestor 71fd47fbb0a49073b8e736ee6d279f331c34f9e3 HEAD
+git merge-base --is-ancestor a19b0be82912e2612fe73fe07db8e3da5c894a28 HEAD
 git status --short
 ```
 
-The ancestor check must exit 0 and the new Mac worktree must be clean. Do not rebuild the plan from a moving branch tip.
+Both ancestor checks must exit 0 and the new Mac worktree must be clean. Do not substitute another branch or an older
+same-named ref.
 
 ## 1. 状态声明
 
@@ -38,7 +44,7 @@ macOS Worker 只在以下条件成立后开始：
 - `TASK-MANIFEST.json` 中目标任务已 ready；
 - shared contract barrier commit 已记录在 `STATUS.zh.md`；
 - Windows Integration worktree 干净或已有明确 dirty ownership；
-- Mac 分支从该 barrier 创建；
+- Mac 分支从已发布的原重构分支创建，且 ancestry 同时包含 acceptance barrier 与 validated branch integration；
 - write set 与活动 Windows tasks 不重叠；
 - 交付目标、测试和 delete set 明确。
 
@@ -245,7 +251,8 @@ known limitations
 
 ## 9. 回合并
 
-1. 从 `71fd47fbb0a49073b8e736ee6d279f331c34f9e3` 创建 clean Mac branch/worktree；
+1. fetch 原 `rf/agent-capability-platform-v2`，验证其包含 `a19b0be82912e2612fe73fe07db8e3da5c894a28`
+   和 UARC-060 barrier，再创建 clean Mac branch/worktree；
 2. UARC-061 与 UARC-062 各提交一个主实现 commit 和最多一个修复 commit；
 3. 各自提交 delivery summary 和逐项 native evidence；
 4. Integration 检查依赖、write/delete/retained set、物理删除范围和无 WKWebView/旧 Runtime 回流；
@@ -260,6 +267,7 @@ known limitations
 | 项目 | 状态 |
 | --- | --- |
 | UARC-060 shared-source barrier | ready: `71fd47fbb0a49073b8e736ee6d279f331c34f9e3` |
+| 原重构分支 UI integration | verified: `a19b0be82912e2612fe73fe07db8e3da5c894a28` |
 | 当前 UARC source 在 Mac 编译 | pending real-Mac evidence |
 | Browser managed Provider | shared owner implemented; CEF production binding pending |
 | Attached Chrome Provider | Windows verified; macOS pending investigation/implementation |
