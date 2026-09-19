@@ -284,7 +284,14 @@ impl UserFileChooser {
         let mut done = self.done.subscribe();
         loop {
             if let Some(result) = done.borrow().clone() {
-                return result;
+                return match result {
+                    // AppKit may destroy the CEF protocol before the backend
+                    // receives Command-Q. A closed page proves no chooser can
+                    // outlive this shutdown, so its terminal listener error is
+                    // cleanup success. Live-page worker failures still escape.
+                    Err(_) if self.view.page.protocol.is_closed() => Ok(()),
+                    result => result,
+                };
             }
             done.changed()
                 .await
@@ -297,13 +304,24 @@ impl UserFileChooser {
             if self.closed.is_cancelled() {
                 return Ok(());
             }
-            let mut listener = native::file_chooser::FileChooser::listen(&self.view)
-                .await
-                .map_err(|error| error.to_string())?;
+            let mut listener = match native::file_chooser::FileChooser::listen(&self.view).await {
+                Ok(listener) => listener,
+                // Command-Q can tear down the native protocol immediately
+                // before Browser Resource shutdown reaches this worker. Once
+                // close owns the cancellation token, a closed protocol is the
+                // expected terminal state rather than a failed file chooser.
+                Err(_) if self.closed.is_cancelled() || self.view.page.protocol.is_closed() => {
+                    return Ok(())
+                }
+                Err(error) => return Err(error.to_string()),
+            };
             listener.arm();
-            let choice = match listener.next(&self.closed).await {
-                Ok(choice) => choice,
-                Err(_) if self.closed.is_cancelled() => return Ok(()),
+            let choice = match listener.next_or_idle(&self.closed).await {
+                Ok(Some(choice)) => choice,
+                Ok(None) => continue,
+                Err(_) if self.closed.is_cancelled() || self.view.page.protocol.is_closed() => {
+                    return Ok(())
+                }
                 Err(error) => return Err(error.to_string()),
             };
             if !self.permitted() {

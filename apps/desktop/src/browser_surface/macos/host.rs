@@ -311,11 +311,22 @@ impl DesktopBrowserRuntime {
         let _close = tab.close_gate.lock().await;
         tab.popup_stop.cancel();
         if let Some(chooser) = tab.user_files.lock().await.take() {
-            chooser.close().await.map_err(native_error)?;
+            chooser
+                .close()
+                .await
+                .map_err(|error| native_error(format!("user file chooser close failed: {error}")))?;
         }
         tab.view.page.cancel_user_downloads();
-        tab.view.page.cancel_agent_download().await.map_err(native_error)?;
-        tab.view.page.force_close().await.map_err(native_error)?;
+        tab.view
+            .page
+            .cancel_agent_download()
+            .await
+            .map_err(|error| native_error(format!("Agent download cancellation failed: {error}")))?;
+        tab.view
+            .page
+            .force_close()
+            .await
+            .map_err(|error| native_error(format!("CEF page close failed: {error}")))?;
         let _ = tab.popup_work.lock().await;
         let id = tab.metadata.lock().unwrap().target.tab_id.clone();
         let mut state = self.state.lock().await;
