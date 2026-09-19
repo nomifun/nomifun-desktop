@@ -1115,3 +1115,24 @@
 - Windows: regression active. macOS: frozen verified evidence is retained at the Mac closeout commits; Windows will not
   reinterpret or replace native CEF/TCC/App/DMG results.
 - Remaining/blocker: none. UARC-070 remains dependency-locked until UARC-064 is integrated and Windows verified.
+
+### 2026-09-19 UARC-064 integrated
+
+- Barrier/source: macOS closeout `5fd6c6f0643206283aec17be83b8de8d5853f10e`; Windows regression candidate
+  `2a426e7af3367ba47101fa3e676a71c89bc57af6`.
+- Changed: registered the exact reviewed macOS human-only Browser/Downloads OS handoff in the Process boundary and added
+  a self-test that keeps every arbitrary handoff path rejected. No Runtime, Capability, Store or Browser authority widened.
+- Rust/native gates: Browser Platform 56；Gateway 107 + bypass audit；AI Agent 449/1 ignored；App 488；Wave 2 18；
+  Computer 103/7 ignored plus six safe real cases；Process 217；Terminal 135；Desktop 144/3 ignored；native Browser
+  stability 8。WebView2 default and unified Agent production smokes passed.
+- Commercial model: Credential Manager-isolated StepFun Coding Plan `step-3.7-flash` passed selected-model and live
+  Browser gates；native click、observed value 2、canonical action shape、evidence cancellation and terminal unlock passed.
+- UI/static: UI 3538/3538；production renderer 7561 modules；`bun run check` and 1,916-source 880×600 boundary passed。
+  UARC retired families remain 0，baseline anomaly remains 1，macOS gaps are 0。
+- Candidate: current clean source produced `NomiFun_0.7.6_x64-setup.exe`, 64,094,527 bytes, SHA-256
+  `8f7b0fdc3d33b8cbd69f78de6cdbd2be2ec0c9e89ce6fcf06eb341801ca83a57`; all 14 install/launch/health/CDP/
+  cleanup/uninstall checks passed.
+- Toolchain note: the first release build hit rustc/LTO `STATUS_ACCESS_VIOLATION` in `nomifun-gateway`; an exact clean
+  rerun passed release build, NSIS and candidate smoke. No gate was waived.
+- Windows: verified. macOS: previously verified evidence retained without relabeling explicit `not_run` items.
+- Remaining/blocker: none for UARC-064. Next ready task is UARC-070 final cross-platform completion audit.
