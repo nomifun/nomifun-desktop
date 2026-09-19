@@ -5682,6 +5682,7 @@ dependencies = [
  "nomi-protocol",
  "nomi-tools",
  "nomi-types",
+ "objc2",
  "open",
  "serde",
  "serde_json",

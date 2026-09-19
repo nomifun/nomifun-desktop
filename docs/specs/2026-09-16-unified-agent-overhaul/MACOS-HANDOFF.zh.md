@@ -8,6 +8,7 @@ UARC-054 input barrier:        d14af94e611de1cef986287f72cb027cf770e4ef
 Windows implementation source: b09c680bbedd939a3dd9c5a05d9432a6ae79bdee
 UARC-060 acceptance barrier:   71fd47fbb0a49073b8e736ee6d279f331c34f9e3
 validated branch integration:  a19b0be82912e2612fe73fe07db8e3da5c894a28
+UARC-061 implementation:       a39e2bfee807ec1fe1cea0cea957663a66c03558
 Windows candidate SHA-256:     ab572e619fb85b511488e25a94c76cf62f4ba7eace4c13751c43b1a6b6bb6dda
 ```
 
@@ -271,11 +272,11 @@ known limitations
 | 当前 UARC source 在 Mac 编译 | UARC-061 arm64 debug/release/app checks passed |
 | Browser managed Provider | production CEF binding implemented；native 33/33 + packaged Agent/Kernel/CEF passed |
 | Attached Chrome Provider | macOS default profile discovery implemented；Chrome installed，Remote Debugging 未开启，真实连接 blocked |
-| Process/PTY | existing code, UARC revalidation pending |
-| Computer/TCC | existing code, UARC revalidation pending |
+| Process/PTY | UARC-062 real Mac gates passed：Process 240/240；Terminal 146/146；parent-death/group cleanup passed |
+| Computer/TCC | Accessibility=true + real Agent a11y observe passed；Screen Recording=false + canonical denied path passed；granted physical matrix blocked |
 | Agent Workbench visual | pending |
 | New Agent Store clean cut | pending |
-| `.app`/DMG | Developer ID arm64 `.app` checkpoint passed；DMG/release lock 归 UARC-063 pending |
+| `.app`/DMG | UARC-062 exact-source Developer ID arm64 `.app` checkpoint passed；DMG/release lock 归 UARC-063 pending |
 | Developer ID/notarization | Developer ID + notarization credential available；nested seal passed，submission/stapling pending UARC-063 |
 
 ## 11. Windows 移交证据
@@ -297,12 +298,15 @@ NSIS 14-check install smoke 均通过。候选安装、启动、`/health` 200、
 
 ## 12. 当前 blocker 与恢复点
 
-当前主机已经是 Apple M4 arm64 真机。UARC-061 主实现与工程 gate 已闭合，详细证据见
-`UARC-061-MACOS-IMPLEMENTATION.zh.md`；仍有三个需要用户动作的外部 blocker：
+当前主机已经是 Apple M4 arm64 真机。UARC-061 与 UARC-062 主实现及无需额外授权的工程 gate 已闭合，详细证据见
+`UARC-061-MACOS-IMPLEMENTATION.zh.md` 和 `UARC-062-MACOS-IMPLEMENTATION.zh.md`；仍有以下需要用户动作的
+外部 blocker：
 
 1. Keychain service `NomiFun/StepFun/LiveProvider` absent：用户需用安全方式录入商业 StepFun credential；
 2. macOS 会话 locked：用户需手动解锁后重跑 Command-Q 和后续 UARC-062 TCC/物理输入矩阵；
 3. Chrome `DevToolsActivePort` absent：用户需在 `chrome://inspect/#remote-debugging` 显式开启 Remote Debugging。
+4. signed NomiFun 当前 Screen Recording=false：用户需在系统设置中授权并重新启动 app，才能执行 granted
+   screenshot、Retina、物理 input/modifier 和 Terminal focus/IME 矩阵。
 
-UARC-062 可继续进行不依赖用户授权的源码与 denied/read-only gate；UARC-063 仍必须等待 UARC-061/062 正式
-integrated。上述 blocker 闭合前不得把 UARC-061 写成 `macOS verified`，也不得提前执行 UARC-064/070。
+UARC-061/062 均保持 `active / engineering verified / external gates blocked`；UARC-063 仍必须等待二者正式
+integrated。上述 blocker 闭合前不得把任何一个任务写成 `macOS verified`，也不得提前执行 UARC-064/070。
